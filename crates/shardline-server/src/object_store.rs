@@ -608,6 +608,7 @@ mod tests {
             content_hash: "aa".repeat(32),
             total_bytes: data.len() as u64,
             chunk_size: data.len() as u64, // nonzero => StoredChunks layout
+            storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
             repository_scope: None,
             chunks: vec![FileChunkRecord {
                 hash,
@@ -640,6 +641,7 @@ mod tests {
             content_hash: "bb".repeat(32),
             total_bytes: 4,
             chunk_size: 0,
+            storage_repr: shardline_index::StorageRepresentation::WholeFileV1,
             repository_scope: None,
             chunks: vec![FileChunkRecord {
                 hash: "cc".repeat(32),
@@ -885,6 +887,7 @@ mod tests {
             content_hash: "aa".repeat(32),
             total_bytes: 10,
             chunk_size: 0, // ReferencedObjectTerms layout
+            storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
             repository_scope: None,
             chunks: vec![shardline_index::FileChunkRecord {
                 hash: "cc".repeat(32),
@@ -1096,6 +1099,7 @@ mod tests {
             content_hash: "cc".repeat(32),
             total_bytes: 99, // capacity doesn't match actual output
             chunk_size: 0,
+            storage_repr: shardline_index::StorageRepresentation::WholeFileV1,
             repository_scope: None,
             chunks: vec![shardline_index::FileChunkRecord {
                 hash: "dd".repeat(32),
@@ -1365,6 +1369,7 @@ mod tests {
             content_hash: "dd".repeat(32),
             total_bytes: 99,
             chunk_size: 0,
+            storage_repr: shardline_index::StorageRepresentation::WholeFileV1,
             repository_scope: None,
             chunks: vec![shardline_index::FileChunkRecord {
                 hash: "ee".repeat(32),

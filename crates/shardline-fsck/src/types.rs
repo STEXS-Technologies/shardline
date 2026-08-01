@@ -73,6 +73,12 @@ pub enum FsckIssueDetail {
         /// Invalid xorb hash.
         xorb_hash: String,
     },
+    /// A stored xorb container did not match the declared xorb hash.
+    #[error("stored xorb content did not match expected xorb hash {expected_hash}")]
+    XorbHashMismatch {
+        /// Declared xorb hash.
+        expected_hash: String,
+    },
     /// An object was referenced by a record.
     #[error("referenced by record {record_location}")]
     ReferencedByRecord {

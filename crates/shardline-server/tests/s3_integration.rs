@@ -827,7 +827,11 @@ async fn test_s3_streaming_content_addressed_via_backend() {
     let chunk_key = shardline_server_core::chunk_object_key(&chunk_hash_hex).unwrap();
     assert!(store.contains(&chunk_key).unwrap());
     let meta = store.metadata(&chunk_key).unwrap().unwrap();
-    assert_eq!(meta.length(), content.len() as u64);
+    // The shared chunk is stored as a packed xorb container (LZ4-compressed
+    // payload plus container header) under XorbCdcV1, not as raw content
+    // bytes, so the object length is the packed single-chunk length (46 for
+    // this 40-byte content), not the raw content length.
+    assert_eq!(meta.length(), 46);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

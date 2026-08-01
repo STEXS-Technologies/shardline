@@ -1,6 +1,6 @@
-use prometheus::{IntCounter, IntGauge, Registry};
+use prometheus::{IntCounter, IntCounterVec, IntGauge, Registry};
 
-use crate::{must_counter, must_gauge};
+use crate::{must_counter, must_counter_vec, must_gauge};
 
 pub struct StorageMetrics {
     pub objects_total: IntGauge,
@@ -11,6 +11,8 @@ pub struct StorageMetrics {
     pub xorbs_bytes_total: IntCounter,
     pub shards_total: IntGauge,
     pub dedup_saves_bytes_total: IntCounter,
+    pub compression_saved_bytes_total: IntCounter,
+    pub objects_by_repr: IntCounterVec,
 }
 
 impl StorageMetrics {
@@ -32,6 +34,17 @@ impl StorageMetrics {
             "shardline_dedup_saves_bytes_total",
             "Bytes saved by deduplication",
         );
+        let compression_saved_bytes_total = must_counter(
+            "shardline_compression_saved_bytes_total",
+            "Bytes saved by LZ4 compression",
+        );
+        let objects_by_repr = must_counter_vec(
+            prometheus::opts!(
+                "shardline_objects_by_repr_total",
+                "Objects stored by representation"
+            ),
+            &["representation"],
+        );
 
         registry.register(Box::new(objects_total.clone())).ok();
         registry
@@ -45,6 +58,10 @@ impl StorageMetrics {
         registry
             .register(Box::new(dedup_saves_bytes_total.clone()))
             .ok();
+        registry
+            .register(Box::new(compression_saved_bytes_total.clone()))
+            .ok();
+        registry.register(Box::new(objects_by_repr.clone())).ok();
 
         Self {
             objects_total,
@@ -55,7 +72,17 @@ impl StorageMetrics {
             xorbs_bytes_total,
             shards_total,
             dedup_saves_bytes_total,
+            compression_saved_bytes_total,
+            objects_by_repr,
         }
+    }
+
+    pub fn record_object_stored_by_repr(&self, representation: &str, bytes: u64) {
+        self.objects_total.inc();
+        self.objects_bytes_total.inc_by(bytes);
+        self.objects_by_repr
+            .with_label_values(&[representation])
+            .inc();
     }
 
     pub fn record_object_stored(&self, bytes: u64) {
@@ -79,6 +106,10 @@ impl StorageMetrics {
 
     pub fn record_dedup_saves(&self, bytes: u64) {
         self.dedup_saves_bytes_total.inc_by(bytes);
+    }
+
+    pub fn record_compression_saved(&self, bytes: u64) {
+        self.compression_saved_bytes_total.inc_by(bytes);
     }
 }
 
@@ -157,5 +188,19 @@ mod tests {
 
         metrics.record_dedup_saves(300);
         assert_eq!(metrics.dedup_saves_bytes_total.get(), 800);
+    }
+
+    #[test]
+    fn storage_metrics_record_compression_saved() {
+        let registry = Registry::new();
+        let metrics = StorageMetrics::new(&registry);
+
+        assert_eq!(metrics.compression_saved_bytes_total.get(), 0);
+
+        metrics.record_compression_saved(1000);
+        assert_eq!(metrics.compression_saved_bytes_total.get(), 1000);
+
+        metrics.record_compression_saved(500);
+        assert_eq!(metrics.compression_saved_bytes_total.get(), 1500);
     }
 }

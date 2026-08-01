@@ -93,6 +93,7 @@ where
     IndexAdapter: AsyncIndexStore + Sync,
     IndexAdapter::Error: Into<GcError>,
 {
+    let mark_start = std::time::Instant::now();
     let mut reachability = ReachabilityAccumulator::default();
     let now_unix_seconds = unix_now_seconds_lossy();
 
@@ -107,6 +108,7 @@ where
     )
     .await?;
     validate_gc_index_integrity(index_store, object_store, now_unix_seconds).await?;
+    shardline_metrics::record_gc_mark_duration(mark_start.elapsed());
 
     let prune_expired_retention_holds = options.mark || options.sweep;
     let active_retention_hold_object_keys = read_active_retention_hold_object_keys(
@@ -154,6 +156,7 @@ where
     }
 
     if options.sweep {
+        let sweep_start = std::time::Instant::now();
         sweep_quarantine_entries(
             object_store,
             index_store,
@@ -163,6 +166,7 @@ where
             &mut report,
         )
         .await?;
+        shardline_metrics::record_gc_sweep_duration(sweep_start.elapsed());
     }
 
     report.active_quarantine_candidates = u64::try_from(quarantine_entries.len())?;

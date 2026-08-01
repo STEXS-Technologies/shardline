@@ -493,6 +493,7 @@ fn build_file_records_from_infos(
             content_hash: content_hash(offset, 0, &chunks),
             total_bytes: offset,
             chunk_size: 0,
+            storage_repr: shardline_index::StorageRepresentation::WholeFileV1,
             repository_scope: repository_scope.cloned(),
             chunks,
         });

@@ -234,5 +234,17 @@ path = "fuzz_targets/shardline/protocol_lfs_operation.rs"
 test = false
 doc = false
 
+[[bin]]
+name = "shardline_cdc_chunking"
+path = "fuzz_targets/shardline/cdc_chunking.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "shardline_xorb_packer_roundtrip"
+path = "fuzz_targets/shardline/xorb_packer_roundtrip.rs"
+test = false
+doc = false
+
 [lints]
 workspace = true

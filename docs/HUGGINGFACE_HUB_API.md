@@ -72,7 +72,7 @@ file is auto-generated when LFS files are present.
 ## Supported Endpoints
 
 | Endpoint | Method | Description |
-|----------|--------|-------------|
+| --- | --- | --- |
 | `/health` | GET | Health check |
 | `/api/whoami-v2` | GET | Current user identity |
 | `/api/repos/create` | POST | Create a repository |
@@ -95,31 +95,34 @@ file is auto-generated when LFS files are present.
 | `/lfs/objects/{oid}` | PUT | Upload an LFS object |
 | `/lfs/objects/{oid}` | GET | Download an LFS object |
 
-Git Smart HTTP supports safe branch and tag deletion through the normal Git
-zero-SHA receive-pack update. Deletion is compare-and-delete atomic, so stale
-pushes cannot remove a ref that has advanced; the default `main` branch is
-protected. Removing a ref does not remove the immutable commit history.
+Git Smart HTTP supports safe branch and tag deletion through the normal Git zero-SHA
+receive-pack update.
+Deletion is compare-and-delete atomic, so stale pushes cannot remove a ref that has
+advanced; the default `main` branch is protected.
+Removing a ref does not remove the immutable commit history.
 
 ## Architecture
 
 Hub metadata is persisted to the configured index store:
 
-- **SQLite** (local): `{root_dir}/hub/` directory — 4 tables for repos, revisions,
-  file entries, and LFS objects
+- **SQLite** (local): `{root_dir}/hub/` directory — 4 tables for repos, revisions, file
+  entries, and LFS objects
 - **Postgres** (production): same connection as the main index — 7th migration in the
   bundled set
 
-The `HubStore` trait in `shardline-index` defines the storage contract. `BoxedHubStore`
-provides type-erased access. When an auth provider is configured, Hub API routes use
-`HubAuth` (wrapping `Arc<dyn AuthProvider>`) for bearer token validation.
+The `HubStore` trait in `shardline-index` defines the storage contract.
+`BoxedHubStore` provides type-erased access.
+When an auth provider is configured, Hub API routes use `HubAuth` (wrapping
+`Arc<dyn AuthProvider>`) for bearer token validation.
 
 The Hub API merges into the main Axum router at startup, sharing the same bind address
 and TLS configuration as all other frontends.
 
 ## Limitations
 
-Shardline implements the repository-storage workflows in the table above, not the
-entire Hugging Face SaaS product. Collections, user profiles, discussions, jobs,
-inference endpoints, Spaces runtime management, and advanced Hub administration APIs
-are outside this frontend's current contract. Webhooks, model cards, basic repository
-search, and dataset preview routes are implemented.
+Shardline implements the repository-storage workflows in the table above, not the entire
+Hugging Face SaaS product.
+Collections, user profiles, discussions, jobs, inference endpoints, Spaces runtime
+management, and advanced Hub administration APIs are outside this frontend's current
+contract. Webhooks, model cards, basic repository search, and dataset preview routes are
+implemented.

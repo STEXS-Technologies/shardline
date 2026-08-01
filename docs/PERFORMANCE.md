@@ -377,12 +377,12 @@ shardline bench \
   --json > benchmark-configured.json
 ```
 
-Each invocation allocates a fresh `run-NNNN` namespace below `--storage-dir`.
-Repeating either command therefore creates another isolated run; it does not turn the
-second invocation into a warm-cache measurement.
+Each invocation allocates a fresh `run-NNNN` namespace below `--storage-dir`. Repeating
+either command therefore creates another isolated run; it does not turn the second
+invocation into a warm-cache measurement.
 
-The `cached-latest-reconstruction` scenario measures a cold cache fill followed by a
-hot in-memory cache hit within each iteration:
+The `cached-latest-reconstruction` scenario measures a cold cache fill followed by a hot
+in-memory cache hit within each iteration:
 
 ```bash
 shardline bench \
@@ -401,10 +401,10 @@ jq '.latency.initial_upload_micros' benchmark-isolated-local.json
 jq '[.iterations_detail[].latency.initial_upload_micros]' benchmark-isolated-local.json
 ```
 
-The benchmark command does not calculate percentiles or peak memory. Derive percentiles
-from `iterations_detail` with a documented analysis tool. Measure peak resident memory
-outside the process, for example with `/usr/bin/time -v`, and preserve that output beside
-the JSON artifact.
+The benchmark command does not calculate percentiles or peak memory.
+Derive percentiles from `iterations_detail` with a documented analysis tool.
+Measure peak resident memory outside the process, for example with `/usr/bin/time -v`,
+and preserve that output beside the JSON artifact.
 
 ## Seamless Git Experience
 

@@ -1057,6 +1057,7 @@ fn record_path_latest_returns_latest_record_locator() {
         content_hash: "a".repeat(64),
         total_bytes: 0,
         chunk_size: 0,
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         repository_scope: None,
         chunks: Vec::new(),
     };
@@ -1076,6 +1077,7 @@ fn record_path_version_returns_version_record_locator() {
         content_hash: "b".repeat(64),
         total_bytes: 0,
         chunk_size: 0,
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         repository_scope: None,
         chunks: Vec::new(),
     };
@@ -1469,6 +1471,7 @@ async fn run_fsck_with_dedupe_shard_added_to_reachability() {
     let chunk_size = 4096_u64;
     let content_hash_val = content_hash(total_bytes, chunk_size, &chunks);
     let record = FileRecord {
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         file_id: "reachable-file".to_owned(),
         content_hash: content_hash_val,
         total_bytes,
@@ -1562,6 +1565,7 @@ async fn run_fsck_with_seeded_valid_records_returns_clean() {
         ),
         total_bytes: chunk_data.len() as u64,
         chunk_size: 4096,
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         repository_scope: None,
         chunks: vec![FileChunkRecord {
             hash: chunk_hash_hex,
@@ -1641,6 +1645,7 @@ async fn run_fsck_with_corrupted_chunk_data_detects_hash_mismatch() {
         content_hash: "a".repeat(64),
         total_bytes: chunk_data.len() as u64,
         chunk_size: 4096,
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         repository_scope: None,
         chunks: vec![FileChunkRecord {
             hash: chunk_hash_hex,

@@ -69,8 +69,8 @@ TOKEN="$(docker compose -f docker-compose.yml exec -T shardline \
 curl -H "Authorization: Bearer ${TOKEN}" http://127.0.0.1:18080/v1/stats
 ```
 
-For deployments using a `shardline.toml` config file, mount it and use the
-`--config` flag:
+For deployments using a `shardline.toml` config file, mount it and use the `--config`
+flag:
 
 ```bash
 docker run -v /path/to/shardline.toml:/etc/shardline/shardline.toml:ro \
@@ -78,8 +78,8 @@ docker run -v /path/to/shardline.toml:/etc/shardline/shardline.toml:ro \
   --config /etc/shardline/shardline.toml serve
 ```
 
-For Docker Compose, bind-mount the config file and add `--config` to the
-command in your `docker-compose.yml`:
+For Docker Compose, bind-mount the config file and add `--config` to the command in your
+`docker-compose.yml`:
 
 ```yaml
 services:
@@ -263,13 +263,13 @@ cargo run -p shardline --bin shardline -- health --server http://127.0.0.1:18080
 ## Configuration
 
 Configuration supports a TOML file with environment variable overrides.
-Secrets and credentials belong in a `.env` file, not in the TOML config
-or in environment variables.
+Secrets and credentials belong in a `.env` file, not in the TOML config or in
+environment variables.
 
 ### Configuration file (shardline.toml)
 
-Server settings can be declared in a `shardline.toml` file. The file is
-auto-detected from these locations (first found wins):
+Server settings can be declared in a `shardline.toml` file.
+The file is auto-detected from these locations (first found wins):
 
 1. `./shardline.toml` (current directory)
 2. `~/.config/shardline/shardline.toml` (user config)
@@ -281,8 +281,8 @@ Use the `--config` flag to point at a specific path:
 shardline serve --config /etc/shardline/shardline.toml
 ```
 
-Values with `${VAR}` syntax are resolved from the process environment
-or from a `.env` file loaded with `--env-file`:
+Values with `${VAR}` syntax are resolved from the process environment or from a `.env`
+file loaded with `--env-file`:
 
 ```toml
 [server]
@@ -329,14 +329,14 @@ Load both together:
 shardline serve --env-file .env.production --config shardline.toml
 ```
 
-Environment variables already set in the shell take precedence over values
-in `shardline.toml`. The `.env` file is loaded before the TOML file is
-parsed, so `${VAR}` references resolve correctly.
+Environment variables already set in the shell take precedence over values in
+`shardline.toml`. The `.env` file is loaded before the TOML file is parsed, so `${VAR}`
+references resolve correctly.
 
 ### Environment variables
 
-Configuration through environment variables remains fully supported and
-always takes precedence over TOML file values.
+Configuration through environment variables remains fully supported and always takes
+precedence over TOML file values.
 
 Initial environment variables:
 
@@ -667,8 +667,8 @@ In a split deployment behind a reverse proxy, route ownership is:
 
 ## Hub API
 
-The Hub API provides HuggingFace Hub compatibility. Enable it by adding `hub` to the
-frontend set:
+The Hub API provides HuggingFace Hub compatibility.
+Enable it by adding `hub` to the frontend set:
 
 ```text
 SHARDLINE_SERVER_FRONTENDS=xet,hub
@@ -717,14 +717,14 @@ git remote add hub http://127.0.0.1:8080/models/my-org/my-model
 git push hub main
 ```
 
-Pack files are generated from stored file entries. LFS pointer blobs are created for
-files with LFS metadata. The `.gitattributes` file is auto-generated when LFS files
-are present.
+Pack files are generated from stored file entries.
+LFS pointer blobs are created for files with LFS metadata.
+The `.gitattributes` file is auto-generated when LFS files are present.
 
 ### Hub API Metadata Storage
 
-Hub metadata (repos, revisions, file entries, LFS objects) is stored separately from
-the main CAS index:
+Hub metadata (repos, revisions, file entries, LFS objects) is stored separately from the
+main CAS index:
 
 - **SQLite**: `{root_dir}/hub/` directory (default for local deployments)
 - **Postgres**: same connection as the main index (`SHARDLINE_INDEX_POSTGRES_URL`)
@@ -749,9 +749,9 @@ huggingface-cli download my-org/my-model
 
 ### Hub API Authentication
 
-Hub API routes use the same `AuthProvider` trait as CAS routes. When an auth provider
-is configured (Ed25519, OIDC, JWKS, or Local HMAC), Hub API bearer tokens are validated
-against it.
+Hub API routes use the same `AuthProvider` trait as CAS routes.
+When an auth provider is configured (Ed25519, OIDC, JWKS, or Local HMAC), Hub API bearer
+tokens are validated against it.
 
 When no auth provider is configured (providerless mode), Hub API routes accept all
 requests anonymously.
@@ -770,7 +770,8 @@ SHARDLINE_AUTH_PROVIDER=passthrough    # Trust upstream proxy
 
 ### Local (HMAC)
 
-Default for providerless deployments. Tokens are signed with a local HMAC-SHA256 signing key.
+Default for providerless deployments.
+Tokens are signed with a local HMAC-SHA256 signing key.
 
 ```text
 SHARDLINE_TOKEN_SIGNING_KEY=change-me-for-local-only
@@ -789,10 +790,9 @@ SHARDLINE_ED25519_PRIVATE_KEY_FILE=/run/secrets/shardline-ed25519-private-key
 
 For verification-only operation, use
 `SHARDLINE_ED25519_PUBLIC_KEY_FILE=/run/secrets/shardline-ed25519-public-key` instead.
-TOML deployments can set `auth.provider = "ed25519"` and
-`auth.ed25519.private_key_path` or `auth.ed25519.public_key_path`.
-See [Authentication](AUTHENTICATION.md#ed25519) for supported key formats, token-format
-limitations, and minting behavior.
+TOML deployments can set `auth.provider = "ed25519"` and `auth.ed25519.private_key_path`
+or `auth.ed25519.public_key_path`. See [Authentication](AUTHENTICATION.md#ed25519) for
+supported key formats, token-format limitations, and minting behavior.
 
 ### OIDC
 
@@ -814,8 +814,8 @@ SHARDLINE_AUTH_JWKS_URL=https://example.com/.well-known/jwks.json
 
 ### Passthrough
 
-Trust an upstream reverse proxy that handles authentication. The server reads the
-`Authorization` header directly without validation:
+Trust an upstream reverse proxy that handles authentication.
+The server reads the `Authorization` header directly without validation:
 
 ```text
 SHARDLINE_AUTH_PROVIDER=passthrough

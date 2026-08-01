@@ -66,6 +66,10 @@ path = "native_huggingface_cli_e2e.rs"
 name = "mixed_protocol_soak"
 path = "mixed_protocol_soak.rs"
 
+[[bin]]
+name = "xet_dedup_test"
+path = "xet_dedup_test.rs"
+
 [dependencies]
 shardline-server = { path = "../crates/shardline-server", features = ["test-utils"] }
 shardline-hub-api = { path = "../crates/shardline-hub-api" }

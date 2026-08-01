@@ -223,7 +223,8 @@ async fn exercise_repository_deleted_creates_holds_for_matching_repository_versi
         file_id: "asset.bin".to_owned(),
         content_hash: "a".repeat(64),
         total_bytes: 8,
-        chunk_size: 4,
+        chunk_size: 128,
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         repository_scope: Some(matching_scope),
         chunks: vec![
             FileChunkRecord {
@@ -250,7 +251,8 @@ async fn exercise_repository_deleted_creates_holds_for_matching_repository_versi
         file_id: "asset-release.bin".to_owned(),
         content_hash: "f".repeat(64),
         total_bytes: 4,
-        chunk_size: 4,
+        chunk_size: 128,
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         repository_scope: Some(matching_release_scope),
         chunks: vec![FileChunkRecord {
             hash: "1".repeat(64),
@@ -266,7 +268,8 @@ async fn exercise_repository_deleted_creates_holds_for_matching_repository_versi
         file_id: "asset.bin".to_owned(),
         content_hash: "d".repeat(64),
         total_bytes: 4,
-        chunk_size: 4,
+        chunk_size: 128,
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         repository_scope: Some(other_scope),
         chunks: vec![FileChunkRecord {
             hash: "e".repeat(64),
@@ -359,7 +362,8 @@ async fn exercise_repository_deleted_removes_stale_latest_without_version_record
         file_id: "stale.bin".to_owned(),
         content_hash: "e".repeat(64),
         total_bytes: 4,
-        chunk_size: 4,
+        chunk_size: 128,
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         repository_scope: Some(scope.clone()),
         chunks: vec![FileChunkRecord {
             hash: "f".repeat(64),
@@ -375,7 +379,8 @@ async fn exercise_repository_deleted_removes_stale_latest_without_version_record
         file_id: "asset.bin".to_owned(),
         content_hash: "a".repeat(64),
         total_bytes: 4,
-        chunk_size: 4,
+        chunk_size: 128,
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         repository_scope: Some(scope),
         chunks: vec![FileChunkRecord {
             hash: "b".repeat(64),
@@ -454,6 +459,7 @@ async fn exercise_repository_deleted_holds_native_xet_xorb_and_unpacked_chunks()
         content_hash: "a".repeat(64),
         total_bytes: validated.unpacked_length(),
         chunk_size: 0,
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         repository_scope: Some(scope),
         chunks: vec![FileChunkRecord {
             hash: xorb_hash.clone(),
@@ -518,7 +524,8 @@ async fn exercise_access_changed_records_provider_repository_state_without_mutat
         file_id: "asset.bin".to_owned(),
         content_hash: "a".repeat(64),
         total_bytes: 4,
-        chunk_size: 4,
+        chunk_size: 128,
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         repository_scope: Some(scope),
         chunks: vec![FileChunkRecord {
             hash: "b".repeat(64),
@@ -592,7 +599,8 @@ async fn exercise_revision_pushed_records_provider_repository_state_without_muta
         file_id: "asset.bin".to_owned(),
         content_hash: "a".repeat(64),
         total_bytes: 4,
-        chunk_size: 4,
+        chunk_size: 128,
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         repository_scope: Some(scope),
         chunks: vec![FileChunkRecord {
             hash: "b".repeat(64),
@@ -739,7 +747,8 @@ async fn exercise_duplicate_webhook_delivery_is_ignored_after_first_application(
         file_id: "asset.bin".to_owned(),
         content_hash: "a".repeat(64),
         total_bytes: 4,
-        chunk_size: 4,
+        chunk_size: 128,
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         repository_scope: Some(scope),
         chunks: vec![FileChunkRecord {
             hash: "b".repeat(64),
@@ -862,7 +871,8 @@ async fn exercise_failed_webhook_application_can_retry_same_delivery() -> Result
         file_id: "asset.bin".to_owned(),
         content_hash: "a".repeat(64),
         total_bytes: 4,
-        chunk_size: 4,
+        chunk_size: 128,
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         repository_scope: Some(scope),
         chunks: vec![FileChunkRecord {
             hash: "b".repeat(64),
@@ -936,7 +946,8 @@ async fn exercise_repository_rename_migrates_records_to_new_scope() -> Result<()
         file_id: "asset.bin".to_owned(),
         content_hash: "a".repeat(64),
         total_bytes: 4,
-        chunk_size: 4,
+        chunk_size: 128,
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         repository_scope: Some(main_scope.clone()),
         chunks: vec![FileChunkRecord {
             hash: "b".repeat(64),
@@ -952,7 +963,8 @@ async fn exercise_repository_rename_migrates_records_to_new_scope() -> Result<()
         file_id: "asset.bin".to_owned(),
         content_hash: "c".repeat(64),
         total_bytes: 4,
-        chunk_size: 4,
+        chunk_size: 128,
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         repository_scope: Some(release_scope.clone()),
         chunks: vec![FileChunkRecord {
             hash: "d".repeat(64),
@@ -1034,7 +1046,8 @@ async fn exercise_previously_recorded_webhook_delivery_is_a_no_op() -> Result<()
         file_id: "asset.bin".to_owned(),
         content_hash: "a".repeat(64),
         total_bytes: 4,
-        chunk_size: 4,
+        chunk_size: 128,
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         repository_scope: Some(scope),
         chunks: vec![FileChunkRecord {
             hash: "b".repeat(64),
@@ -1105,7 +1118,8 @@ async fn exercise_repository_rename_removes_old_scope_latest_without_version_rec
         file_id: "stale.bin".to_owned(),
         content_hash: "e".repeat(64),
         total_bytes: 4,
-        chunk_size: 4,
+        chunk_size: 128,
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         repository_scope: Some(main_scope.clone()),
         chunks: vec![FileChunkRecord {
             hash: "f".repeat(64),
@@ -1121,7 +1135,8 @@ async fn exercise_repository_rename_removes_old_scope_latest_without_version_rec
         file_id: "asset.bin".to_owned(),
         content_hash: "a".repeat(64),
         total_bytes: 4,
-        chunk_size: 4,
+        chunk_size: 128,
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         repository_scope: Some(main_scope),
         chunks: vec![FileChunkRecord {
             hash: "b".repeat(64),
@@ -1191,7 +1206,8 @@ async fn exercise_repository_rename_rejects_conflicting_target_metadata()
         file_id: "asset.bin".to_owned(),
         content_hash: "a".repeat(64),
         total_bytes: 4,
-        chunk_size: 4,
+        chunk_size: 128,
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         repository_scope: Some(source_scope),
         chunks: vec![FileChunkRecord {
             hash: "b".repeat(64),
@@ -1207,7 +1223,8 @@ async fn exercise_repository_rename_rejects_conflicting_target_metadata()
         file_id: "asset.bin".to_owned(),
         content_hash: "c".repeat(64),
         total_bytes: 4,
-        chunk_size: 4,
+        chunk_size: 128,
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         repository_scope: Some(target_scope),
         chunks: vec![FileChunkRecord {
             hash: "d".repeat(64),

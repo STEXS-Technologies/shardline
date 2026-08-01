@@ -699,6 +699,7 @@ mod tests {
             content_hash: "a".repeat(64),
             total_bytes: 100,
             chunk_size: 50,
+            storage_repr: crate::StorageRepresentation::FixedChunkV1,
             repository_scope: repo_scope,
             chunks: vec![FileChunkRecord {
                 hash: "b".repeat(64),

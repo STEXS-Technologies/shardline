@@ -1,6 +1,8 @@
 use std::sync::LazyLock;
 
-use prometheus::{Histogram, HistogramOpts, IntCounter, IntGauge, Registry, TextEncoder};
+use prometheus::{
+    Histogram, HistogramOpts, IntCounter, IntCounterVec, IntGauge, Registry, TextEncoder,
+};
 
 use crate::{
     backend::StorageBackendMetrics, fsck::FsckMetrics, gc::GcMetrics, protocol::ProtocolMetrics,
@@ -26,6 +28,12 @@ pub fn must_gauge(name: &str, help: &str) -> IntGauge {
 #[must_use]
 pub fn must_histogram(opts: HistogramOpts) -> Histogram {
     Histogram::with_opts(opts).unwrap_or_else(|_| std::process::abort())
+}
+
+/// Creates an `IntCounterVec` from options, aborting if the metric name is invalid.
+#[must_use]
+pub fn must_counter_vec(opts: prometheus::Opts, label_names: &[&str]) -> IntCounterVec {
+    IntCounterVec::new(opts, label_names).unwrap_or_else(|_| std::process::abort())
 }
 
 /// Central metrics registry for the entire Shardline CAS backend.
@@ -134,6 +142,14 @@ pub fn record_gc_run(duration: std::time::Duration, objects_collected: u64, byte
     metrics()
         .gc
         .record_run(duration, objects_collected, bytes_collected);
+}
+
+pub fn record_gc_mark_duration(duration: std::time::Duration) {
+    metrics().gc.record_mark_duration(duration);
+}
+
+pub fn record_gc_sweep_duration(duration: std::time::Duration) {
+    metrics().gc.record_sweep_duration(duration);
 }
 
 pub fn record_fsck_run(duration: std::time::Duration, errors_found: u64) {

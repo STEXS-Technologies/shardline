@@ -1130,6 +1130,7 @@ mod tests {
             content_hash: "abc".to_owned(),
             total_bytes: 0,
             chunk_size: 0,
+            storage_repr: shardline_index::StorageRepresentation::WholeFileV1,
             repository_scope: None,
             chunks: vec![],
         };
@@ -1180,6 +1181,7 @@ mod tests {
             content_hash: "aa".repeat(32),
             total_bytes: 10,
             chunk_size: 10,
+            storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
             repository_scope: None,
             chunks: vec![FileChunkRecord {
                 hash: "bb".repeat(32),
@@ -1206,6 +1208,7 @@ mod tests {
             content_hash: "aa".repeat(32),
             total_bytes: 10,
             chunk_size: 10,
+            storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
             repository_scope: None,
             chunks: vec![FileChunkRecord {
                 hash: "bb".repeat(32),
@@ -1232,6 +1235,7 @@ mod tests {
             content_hash: "aa".repeat(32),
             total_bytes: 10,
             chunk_size: 10,
+            storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
             repository_scope: None,
             chunks: vec![FileChunkRecord {
                 hash: "bb".repeat(32),

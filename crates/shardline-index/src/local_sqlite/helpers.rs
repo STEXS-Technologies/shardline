@@ -1548,6 +1548,7 @@ mod tests {
             content_hash: "c".repeat(64),
             total_bytes: 4,
             chunk_size: 4,
+            storage_repr: crate::StorageRepresentation::FixedChunkV1,
             repository_scope: scope,
             chunks: vec![],
         }

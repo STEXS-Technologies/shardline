@@ -30,6 +30,7 @@ pub struct ServerSection {
     pub frontends: Option<Vec<String>>,
     pub root_dir: Option<String>,
     pub max_request_body_bytes: Option<u64>,
+    pub chunk_size: Option<String>,
     pub chunk_size_bytes: Option<u64>,
     pub upload_max_in_flight_chunks: Option<u64>,
     pub transfer_max_in_flight_chunks: Option<u64>,

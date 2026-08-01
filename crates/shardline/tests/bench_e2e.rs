@@ -46,11 +46,11 @@ async fn exercise_bench() -> Result<(), Box<dyn Error>> {
             "--iterations",
             "1",
             "--chunk-size-bytes",
-            "4",
+            "1024",
             "--base-bytes",
-            "12",
+            "8192",
             "--mutated-bytes",
-            "4",
+            "1024",
         ])
         .output()?;
     if !output.status.success() {
@@ -102,12 +102,12 @@ async fn exercise_bench() -> Result<(), Box<dyn Error>> {
     if !stdout.contains("concurrency: 4") {
         return Err(CliE2eInvariantError::new("bench did not report default concurrency").into());
     }
-    if !stdout.contains("total_initial_inserted_chunks: 3") {
+    if !stdout.contains("total_initial_inserted_chunks: 4") {
         return Err(
             CliE2eInvariantError::new("bench did not report initial inserted chunks").into(),
         );
     }
-    if !stdout.contains("total_sparse_update_inserted_chunks: 1") {
+    if !stdout.contains("total_sparse_update_inserted_chunks: 2") {
         return Err(CliE2eInvariantError::new(
             "bench did not report sparse update inserted chunks",
         )
@@ -118,18 +118,18 @@ async fn exercise_bench() -> Result<(), Box<dyn Error>> {
             CliE2eInvariantError::new("bench did not report sparse update reused chunks").into(),
         );
     }
-    if !stdout.contains("total_newly_stored_bytes: 48") {
+    if !stdout.contains("total_newly_stored_bytes: 29696") {
         return Err(
             CliE2eInvariantError::new("bench did not report total newly stored bytes").into(),
         );
     }
-    if !stdout.contains("total_concurrent_upload_inserted_chunks: 4") {
+    if !stdout.contains("total_concurrent_upload_inserted_chunks: 10") {
         return Err(CliE2eInvariantError::new(
             "bench did not report concurrent upload inserted chunks",
         )
         .into());
     }
-    if !stdout.contains("total_concurrent_uploaded_bytes: 48") {
+    if !stdout.contains("total_concurrent_uploaded_bytes: 32768") {
         return Err(
             CliE2eInvariantError::new("bench did not report concurrent uploaded bytes").into(),
         );
@@ -140,13 +140,13 @@ async fn exercise_bench() -> Result<(), Box<dyn Error>> {
         )
         .into());
     }
-    if !stdout.contains("total_cross_repository_reused_chunks: 2") {
+    if !stdout.contains("total_cross_repository_reused_chunks: 1") {
         return Err(CliE2eInvariantError::new(
             "bench did not report cross-repository reused chunks",
         )
         .into());
     }
-    if !stdout.contains("total_cross_repository_newly_stored_bytes: 4") {
+    if !stdout.contains("total_cross_repository_newly_stored_bytes: 2048") {
         return Err(CliE2eInvariantError::new(
             "bench did not report cross-repository newly stored bytes",
         )
@@ -172,11 +172,11 @@ async fn exercise_configured_bench() -> Result<(), Box<dyn Error>> {
             "--iterations",
             "1",
             "--chunk-size-bytes",
-            "4",
+            "1024",
             "--base-bytes",
-            "12",
+            "8192",
             "--mutated-bytes",
-            "4",
+            "1024",
         ])
         .output()?;
     if !output.status.success() {
@@ -226,11 +226,11 @@ async fn exercise_cached_bench() -> Result<(), Box<dyn Error>> {
             "--iterations",
             "1",
             "--chunk-size-bytes",
-            "4",
+            "1024",
             "--base-bytes",
-            "12",
+            "8192",
             "--mutated-bytes",
-            "4",
+            "1024",
         ])
         .output()?;
     if !output.status.success() {
@@ -281,11 +281,11 @@ async fn exercise_focused_bench() -> Result<(), Box<dyn Error>> {
             "--iterations",
             "1",
             "--chunk-size-bytes",
-            "4",
+            "1024",
             "--base-bytes",
-            "12",
+            "8192",
             "--mutated-bytes",
-            "4",
+            "1024",
         ])
         .output()?;
     if !output.status.success() {
@@ -302,7 +302,7 @@ async fn exercise_focused_bench() -> Result<(), Box<dyn Error>> {
             CliE2eInvariantError::new("focused bench did not report selected scenario").into(),
         );
     }
-    if !stdout.contains("total_cross_repository_reused_chunks: 2") {
+    if !stdout.contains("total_cross_repository_reused_chunks: 1") {
         return Err(CliE2eInvariantError::new(
             "focused bench did not report cross-repository reuse",
         )

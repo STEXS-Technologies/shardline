@@ -97,6 +97,43 @@ const fn default_packed_end() -> u64 {
     0
 }
 
+/// Storage representation used for a file's physical data.
+///
+/// Each variant maps to a unique decoder path.  The field is persisted in
+/// the `FileRecord` and defaulted for older records that predate the field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StorageRepresentation {
+    /// Single-object whole-file storage (pre-chunking, term-referenced).
+    #[serde(rename = "whole_file_v1")]
+    WholeFileV1,
+    /// Fixed-size chunking, no compression.
+    #[serde(rename = "fixed_chunk_v1")]
+    FixedChunkV1,
+    /// CDC chunking + LZ4 compression + xorb container packing.
+    #[serde(rename = "xorb_cdc_v1")]
+    XorbCdcV1,
+}
+
+#[allow(clippy::derivable_impls)] // derive would pick WholeFileV1; legacy records default to FixedChunkV1
+impl Default for StorageRepresentation {
+    fn default() -> Self {
+        // Records created before this field existed were fixed-chunk, uncompressed.
+        Self::FixedChunkV1
+    }
+}
+
+impl StorageRepresentation {
+    /// Returns the metric label for this representation (matches serde rename).
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::WholeFileV1 => "whole_file_v1",
+            Self::FixedChunkV1 => "fixed_chunk_v1",
+            Self::XorbCdcV1 => "xorb_cdc_v1",
+        }
+    }
+}
+
 /// Durable file-version or latest-file metadata record.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FileRecord {
@@ -108,6 +145,10 @@ pub struct FileRecord {
     pub total_bytes: u64,
     /// Chunk size used for this upload. Protocol-object term records may use zero.
     pub chunk_size: u64,
+    /// Physical storage representation — controls the decoder path.
+    /// Defaults to [`FixedChunkV1`] for records that predate this field.
+    #[serde(default)]
+    pub storage_repr: StorageRepresentation,
     /// Optional repository namespace for provider-backed storage.
     pub repository_scope: Option<RepositoryScope>,
     /// Ordered chunks needed to reconstruct the file.
@@ -508,7 +549,10 @@ mod tests {
     )]
     use shardline_protocol::{RepositoryProvider, RepositoryScope};
 
-    use super::{FileChunkRecord, FileRecord, FileRecordInvariantError, RepositoryRecordScope};
+    use super::{
+        FileChunkRecord, FileRecord, FileRecordInvariantError, RepositoryRecordScope,
+        StorageRepresentation,
+    };
 
     #[test]
     fn file_record_storage_layout_referenced_terms_when_chunk_size_is_zero() {
@@ -517,6 +561,7 @@ mod tests {
             content_hash: "c".repeat(64),
             total_bytes: 8,
             chunk_size: 0,
+            storage_repr: crate::StorageRepresentation::WholeFileV1,
             repository_scope: None,
             chunks: Vec::new(),
         };
@@ -533,6 +578,7 @@ mod tests {
             content_hash: "c".repeat(64),
             total_bytes: 8,
             chunk_size: 4,
+            storage_repr: crate::StorageRepresentation::FixedChunkV1,
             repository_scope: None,
             chunks: Vec::new(),
         };
@@ -561,6 +607,7 @@ mod tests {
             content_hash: "c".repeat(64),
             total_bytes: 0,
             chunk_size: 0,
+            storage_repr: crate::StorageRepresentation::WholeFileV1,
             repository_scope: None,
             chunks: vec![FileChunkRecord {
                 hash: "a".repeat(64),
@@ -585,6 +632,7 @@ mod tests {
             content_hash: "c".repeat(64),
             total_bytes: 4,
             chunk_size: 0,
+            storage_repr: crate::StorageRepresentation::WholeFileV1,
             repository_scope: None,
             chunks: vec![FileChunkRecord {
                 hash: "a".repeat(64),
@@ -609,6 +657,7 @@ mod tests {
             content_hash: "c".repeat(64),
             total_bytes: 4,
             chunk_size: 0,
+            storage_repr: crate::StorageRepresentation::WholeFileV1,
             repository_scope: None,
             chunks: vec![FileChunkRecord {
                 hash: "a".repeat(64),
@@ -633,6 +682,7 @@ mod tests {
             content_hash: "c".repeat(64),
             total_bytes: 4,
             chunk_size: 0,
+            storage_repr: crate::StorageRepresentation::WholeFileV1,
             repository_scope: None,
             chunks: vec![],
         };
@@ -670,6 +720,7 @@ mod tests {
             content_hash: "c".repeat(64),
             total_bytes: 8,
             chunk_size: 4,
+            storage_repr: crate::StorageRepresentation::FixedChunkV1,
             repository_scope: Some(scope.clone()),
             chunks: vec![first.clone(), second.clone()],
         };
@@ -685,6 +736,7 @@ mod tests {
             content_hash: "c".repeat(64),
             total_bytes: 8,
             chunk_size: 0,
+            storage_repr: crate::StorageRepresentation::WholeFileV1,
             repository_scope: None,
             chunks: vec![
                 FileChunkRecord {
@@ -718,6 +770,7 @@ mod tests {
             content_hash: "c".repeat(64),
             total_bytes: 8,
             chunk_size: 0,
+            storage_repr: crate::StorageRepresentation::WholeFileV1,
             repository_scope: None,
             chunks: vec![
                 FileChunkRecord {
@@ -814,6 +867,7 @@ mod tests {
             content_hash: "c".repeat(64),
             total_bytes: 0,
             chunk_size: 0,
+            storage_repr: crate::StorageRepresentation::WholeFileV1,
             repository_scope: None,
             chunks: vec![
                 FileChunkRecord {
@@ -903,6 +957,7 @@ mod tests {
             content_hash: "c".repeat(64),
             total_bytes: 10,
             chunk_size: 0,
+            storage_repr: crate::StorageRepresentation::WholeFileV1,
             repository_scope: None,
             chunks: vec![FileChunkRecord {
                 hash: "a".repeat(64),
@@ -927,6 +982,7 @@ mod tests {
             content_hash: "c".repeat(64),
             total_bytes: 0,
             chunk_size: 0,
+            storage_repr: crate::StorageRepresentation::WholeFileV1,
             repository_scope: None,
             chunks: vec![],
         };
@@ -1307,6 +1363,7 @@ mod tests {
             content_hash: "c".repeat(64),
             total_bytes: 1,
             chunk_size: 0,
+            storage_repr: crate::StorageRepresentation::WholeFileV1,
             repository_scope: None,
             chunks: vec![FileChunkRecord {
                 hash: "not-a-valid-hex-string".to_owned(),
@@ -1324,6 +1381,25 @@ mod tests {
         match result {
             Err(FileRecordInvariantError::ChunkHash(_)) => {} // expected
             other => panic!("Expected ChunkHash error, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn storage_representation_as_str_matches_serde_rename() {
+        // as_str() must stay in sync with #[serde(rename = "...")] so that
+        // metric labels match the serialized representation.
+        for (repr, expected) in [
+            (StorageRepresentation::WholeFileV1, "whole_file_v1"),
+            (StorageRepresentation::FixedChunkV1, "fixed_chunk_v1"),
+            (StorageRepresentation::XorbCdcV1, "xorb_cdc_v1"),
+        ] {
+            assert_eq!(repr.as_str(), expected, "as_str() for {repr:?}");
+            let serialized = serde_json::to_value(repr).unwrap();
+            assert_eq!(
+                serialized.as_str().unwrap(),
+                expected,
+                "serde rename for {repr:?}"
+            );
         }
     }
 }

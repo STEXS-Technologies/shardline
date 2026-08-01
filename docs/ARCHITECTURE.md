@@ -4,10 +4,9 @@ Shardline is an open, self-hostable content-addressed storage backend with plugg
 protocol frontends. It uses a protocol-neutral CAS coordinator with explicit frontend
 adapters. The runtime hosts an explicit frontend set.
 Validated frontends in this repository today are Xet, Git LFS, Bazel HTTP remote cache,
-OCI Distribution, and HuggingFace Hub API (REST + Git Smart HTTP).
-They share the same storage, metadata, authorization, lifecycle, and operator surface
-while keeping protocol-specific request shaping and object handling in dedicated
-adapters.
+OCI Distribution, and HuggingFace Hub API (REST + Git Smart HTTP). They share the same
+storage, metadata, authorization, lifecycle, and operator surface while keeping
+protocol-specific request shaping and object handling in dedicated adapters.
 
 ## Goals
 
@@ -106,8 +105,8 @@ The current production server exposes multiple protocol route families:
   `GET|PUT /v1/bazel/cache/cas/{hash}`
 - OCI Distribution: `GET /v2/`, blob upload and download routes, manifest
   `PUT|GET|HEAD|DELETE`, `GET /v2/{repository}/tags/list`, `GET /v2/token`
-- HuggingFace Hub REST: `GET/POST /api/{type}/{ns}/{repo}`, revisions, file entries,
-  LFS objects, commit protocol (NDJSON)
+- HuggingFace Hub REST: `GET/POST /api/{type}/{ns}/{repo}`, revisions, file entries, LFS
+  objects, commit protocol (NDJSON)
 - HuggingFace Hub Git Smart HTTP: `GET /{type}/{ns}/{repo}/info/refs`,
   `GET /{type}/{ns}/{repo}/HEAD`, `POST /{type}/{ns}/{repo}/git-upload-pack`,
   `POST /{type}/{ns}/{repo}/git-receive-pack`
@@ -205,18 +204,21 @@ object upload, blob transfer, cache object transfer, and Xet xorb range transfer
 
 ### Protocol object storage
 
-Digest-addressed Git LFS objects, Bazel CAS entries, and OCI blobs use the same
-bounded streaming chunk ingestor as native file uploads. Their protocol object key
-is mapped to an opaque internal file-record identifier; the authoritative visible
-reference is the atomically committed `FileRecord`, while immutable chunk objects
-are shared across protocols and repositories. Full and ranged responses stream the
-referenced chunks without assembling the complete object in memory.
+Digest-addressed Git LFS objects, Bazel CAS entries, and OCI blobs use the same bounded
+streaming chunk ingestor as native file uploads.
+Their protocol object key is mapped to an opaque internal file-record identifier; the
+authoritative visible reference is the atomically committed `FileRecord`, while
+immutable chunk objects are shared across protocols and repositories.
+Full and ranged responses stream the referenced chunks without assembling the complete
+object in memory.
 
-Upgrades are lazy and backward compatible. Reads and existence checks probe legacy
-whole-object keys first and then the chunk-backed record. New uploads do not create
-a second whole-object copy. OCI cross-repository mounts create another metadata
-reference to the same chunks, and deletion atomically removes both latest and
-version references before ordinary mark-and-sweep can collect unreferenced chunks.
+Upgrades are lazy and backward compatible.
+Reads and existence checks probe legacy whole-object keys first and then the
+chunk-backed record.
+New uploads do not create a second whole-object copy.
+OCI cross-repository mounts create another metadata reference to the same chunks, and
+deletion atomically removes both latest and version references before ordinary
+mark-and-sweep can collect unreferenced chunks.
 
 ## Source Layout
 
@@ -264,32 +266,39 @@ flowchart TD
 
 - `shardline-protocol`: wire-level types — `ShardlineHash`, `ByteRange`, `TokenSigner`,
   `RepositoryScope`, `SecretBytes`
-- `shardline-xet-core`: Merkle hash trees, metadata shard format, xorb object serialization
+- `shardline-xet-core`: Merkle hash trees, metadata shard format, xorb object
+  serialization
 - `shardline-auth`: `AuthProvider` trait with `LocalHmacProvider`, `PassthroughProvider`
 - `shardline-validation`: content hash and identifier validation utilities
-- `shardline-metrics`: shared Prometheus metrics registry (`CasMetrics`) with global singleton
+- `shardline-metrics`: shared Prometheus metrics registry (`CasMetrics`) with global
+  singleton
 
 ### Layer 1 — Foundation
 
-- `shardline-storage`: content-addressed `ObjectStore` trait + `LocalObjectStore` and `S3ObjectStore`
-- `shardline-vcs`: provider adapters (`ProviderAdapter` trait) for GitHub, GitLab, Gitea, Codeberg
+- `shardline-storage`: content-addressed `ObjectStore` trait + `LocalObjectStore` and
+  `S3ObjectStore`
+- `shardline-vcs`: provider adapters (`ProviderAdapter` trait) for GitHub, GitLab,
+  Gitea, Codeberg
 - `shardline-cache`: reconstruction-cache trait + memory, Redis, and disabled adapters
 - `shardline-test-support`: shared test helpers (`DockerLocalStack`)
 
 ### Layer 2 — Metadata and mapping
 
-- `shardline-index`: metadata index and record-storage contracts + SQLite, Postgres, and memory
-  adapters; Hub API tables (`HubStore` trait)
+- `shardline-index`: metadata index and record-storage contracts + SQLite, Postgres, and
+  memory adapters; Hub API tables (`HubStore` trait)
 - `shardline-protocol-adapters`: LFS and Bazel object-key mapping functions
-- `shardline-server-core`: shared server types — `AuthProvider` trait, `ServerObjectStore`,
-  `ShardMetadataLimits`
+- `shardline-server-core`: shared server types — `AuthProvider` trait,
+  `ServerObjectStore`, `ShardMetadataLimits`
 - `shardline-cas`: CAS coordinator composition tying index + object store together
 
 ### Layer 3 — Protocol adapters
 
-- `shardline-xet-adapter`: xorb/shard parsing, reconstruction response building, upload storage
-- `shardline-hub-api`: HuggingFace Hub API compatibility — 15 REST routes + Git Smart HTTP protocol
-- `shardline-oci-adapter`: OCI Distribution protocol — upload sessions, manifest/blob keys
+- `shardline-xet-adapter`: xorb/shard parsing, reconstruction response building, upload
+  storage
+- `shardline-hub-api`: HuggingFace Hub API compatibility — 15 REST routes + Git Smart
+  HTTP protocol
+- `shardline-oci-adapter`: OCI Distribution protocol — upload sessions, manifest/blob
+  keys
 
 ### Layer 4 — Lifecycle services
 
@@ -301,11 +310,13 @@ flowchart TD
 ### Layer 5 — Integration surface
 
 - `shardline-server`: HTTP server, frontend routing, migrations, all protocol frontends
-- `shardline`: operator binary (serve, admin, fsck, gc, rebuild, repair, backup, storage migrate, bench, health, and more)
+- `shardline`: operator binary (serve, admin, fsck, gc, rebuild, repair, backup, storage
+  migrate, bench, health, and more)
 
 ### Layer 6 — Test infrastructure
 
-- `fuzz`: 31 fuzz targets for protocol parsers, storage boundaries, mutable Hub refs, and frontends
+- `fuzz`: 31 fuzz targets for protocol parsers, storage boundaries, mutable Hub refs,
+  and frontends
 
 Crate boundaries keep protocol handling, server operation, storage, indexing, and
 provider integration independent.
@@ -370,9 +381,9 @@ repository.
 The core CAS must remain usable without any platform-specific integration.
 
 Provider adapters are first-class extension points, just like storage adapters.
-GitHub, GitLab, Gitea, Codeberg, and generic forges should plug into the same normalized provider
-contract so repository hosting logic does not leak into chunking, reconstruction, or
-storage code.
+GitHub, GitLab, Gitea, Codeberg, and generic forges should plug into the same normalized
+provider contract so repository hosting logic does not leak into chunking,
+reconstruction, or storage code.
 
 The issuance path is explicit:
 
@@ -385,7 +396,8 @@ model on the data plane.
 
 ## Authentication
 
-The `AuthProvider` trait (defined in `shardline-auth`, re-exported from `shardline-server-core`) defines the authorization boundary:
+The `AuthProvider` trait (defined in `shardline-auth`, re-exported from
+`shardline-server-core`) defines the authorization boundary:
 
 - `verify(token) -> AuthContext` — validate a bearer token and extract identity
 - `mint(context, repo_scope, ttl) -> String` — sign a new scoped token
@@ -398,9 +410,10 @@ Four adapter implementations are bundled:
 - **Passthrough**: trusts an upstream proxy's `Authorization` header
 
 CAS routes (Xet, LFS, Bazel, OCI) require tokens with valid issuer, repository scope,
-and read/write scope. The Hub API routes use the same trait — bearer tokens are validated
-via `HubAuth` which wraps `Arc<dyn AuthProvider>`. When no auth provider is configured,
-Hub API routes accept all requests anonymously.
+and read/write scope.
+The Hub API routes use the same trait — bearer tokens are validated via `HubAuth` which
+wraps `Arc<dyn AuthProvider>`. When no auth provider is configured, Hub API routes
+accept all requests anonymously.
 
 Provider-issued tokens (`shardline admin token` or provider webhook token exchange) go
 through the same `AuthProvider::mint` path, ensuring a single token format across all
@@ -452,6 +465,5 @@ Shardline ships 13 bundled migrations applied via `shardline db migrate up`:
 12. `drop_lfs_objects` — remove legacy LFS objects table
 13. `fix_indexes` — database index optimizations
 
-SQLite uses `BLOB`/`INTEGER`; Postgres uses `BYTEA`/`BOOLEAN`/`BIGINT`.
-Migrations are stored in `migrations/` (Postgres) and
-`crates/shardline-index/migrations/` (SQLite).
+SQLite uses `BLOB`/`INTEGER`; Postgres uses `BYTEA`/`BOOLEAN`/`BIGINT`. Migrations are
+stored in `migrations/` (Postgres) and `crates/shardline-index/migrations/` (SQLite).

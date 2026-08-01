@@ -6,6 +6,86 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+### Upgrade Note — Storage Format Evolution
+
+This release changes the physical storage representation from fixed-size chunking (uncompressed)
+to CDC chunking with LZ4 compression and optional xorb container packing (XorbCdcV1).
+
+**No data migration required.** Old records written by v1.2.x and earlier remain fully readable,
+reconstructable, and protected from garbage collection. The upgrade is safe for existing
+deployments — no downtime or maintenance window needed for data format reasons.
+
+#### What changes
+
+| Aspect | Before (v1.2.x) | After (this release) |
+|---|---|---|
+| Chunking | Fixed-size 4MB chunks | CDC (content-defined), target 64KB |
+| Compression | None | LZ4 (`lz4_flex::compress_prepend_size`) |
+| Containerization | None | Xorb packing at upload finish |
+| Chunk hash | Raw bytes | Raw bytes (unchanged — dedup works across formats) |
+| Storage format per record | Implicit (fixed chunk) | Explicit `storage_repr` field (`fixed_chunk_v1` or `xorb_cdc_v1`) |
+
+#### Backward compatibility
+
+- **WholeFileV1** (v1.0.0–present): Single-object storage, `chunk_size=0` → `ReferencedObjectTerms` layout.
+  Read path unchanged (`reconstruct_referenced_object_file_bytes`).
+- **FixedChunkV1** (v1.0.0–v1.2.2): Uncompressed fixed-size chunks, `packed_end == chunk.length`.
+  Current code detects `packed_end != chunk.length` → skips decompression. Old records are
+  read as raw bytes without LZ4 decoding.
+- **XorbCdcV1** (new): CDC + LZ4 compression + optional xorb packing. `packed_end < chunk.length`
+  triggers decompression. Xorb-backed files use a single-GET fast path.
+
+#### GC compatibility
+
+All three formats are handled correctly:
+- Individual chunk paths and xorb container paths are referenced by the GC.
+- Xorb containers are resolved to their constituent chunk hashes (new in this release).
+- Old format records without the `storage_repr` field default to `FixedChunkV1`.
+
+#### Monitoring
+
+New metrics available:
+
+| Metric | Type | Labels |
+|---|---|---|
+| `shardline_objects_by_repr_total` | Counter | `representation` (`whole_file_v1`, `fixed_chunk_v1`, `xorb_cdc_v1`) |
+
+Operators can query format distribution across the repository:
+```
+shardline_objects_by_repr_total
+```
+
+#### Configuration
+
+- `SHARDLINE_CHUNK_SIZE` now defaults to `64KB` (was `4194304` / 4MB, but in practice
+  was always sized per-deployment). The CDC target chunk size is 64KB; minimum chunk is 8KB;
+  maximum is 128KB.
+
+### Fixed
+
+- **Download stream**: corrected `lz4_flex` size-header parsing (u32 LE, not u64 BE) so compressed
+  payloads are decompressed and reconstructed correctly.
+- **Content identity**: chunk hashes are computed over raw bytes, not compressed bytes, so dedup
+  works across compressed and uncompressed records.
+- **Decompression safety**: added a decompression safety cap with warn logs on failures.
+
+### Changed
+
+- **GC metrics**: split into mark/sweep phases and wired to the direct-read metric.
+- **GC sweep**: xorb cache sidecar files are deleted when their parent xorb is swept.
+
+### Performance
+
+- **S3 uploads**: skip the HEAD request for first-time chunk uploads.
+- **GC**: xorb chunk hashes are cached to avoid re-parsing the container on every GC run.
+
+### Testing
+
+- Raised upload-ingest coverage to 93%+ and added compression metric tests.
+- Added CDC chunker and xorb packer round-trip fuzz targets.
+- Added e2e tests for mixed-format dedup, GC + xorb mixed-format sweep, xorb packer edge cases,
+  xorb range-span reconstruction, xorb chunk-hash cache, and cache-sidecar cleanup.
+
 ## [1.2.2] - 2026-07-28
 
 Patch release fixing Xet protocol uploads broken by stubbed BG4 compression.

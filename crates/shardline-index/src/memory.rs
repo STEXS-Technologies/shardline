@@ -2029,6 +2029,7 @@ mod tests {
             content_hash: "a".repeat(64),
             total_bytes: 8,
             chunk_size: 4,
+            storage_repr: crate::StorageRepresentation::FixedChunkV1,
             repository_scope: Some(scope),
             chunks: vec![
                 FileChunkRecord {
@@ -2059,6 +2060,7 @@ mod tests {
             content_hash: content_seed.repeat(64),
             total_bytes: 0,
             chunk_size: 0,
+            storage_repr: crate::StorageRepresentation::WholeFileV1,
             repository_scope: Some(scope),
             chunks: Vec::new(),
         }

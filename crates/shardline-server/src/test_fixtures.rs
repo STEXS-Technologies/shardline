@@ -18,7 +18,7 @@ use shardline_xet_core::{
 
 #[must_use]
 pub fn xet_hash_hex(hash: &MerkleHash) -> String {
-    let bytes: [u8; 32] = hash.as_bytes().try_into().unwrap_or([0; 32]);
+    let bytes: [u8; 32] = (*hash).into();
     xet_hash_hex_string(ShardlineHash::from_bytes(bytes))
 }
 

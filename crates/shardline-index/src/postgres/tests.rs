@@ -228,6 +228,7 @@ fn file_record(scope: RepositoryScope, content_seed: &str) -> FileRecord {
         content_hash: content_seed.repeat(64),
         total_bytes: 0,
         chunk_size: 0,
+        storage_repr: crate::StorageRepresentation::FixedChunkV1,
         repository_scope: Some(scope),
         chunks: Vec::new(),
     }

@@ -66,6 +66,18 @@ pub fn record_shard_stored() {
     shardline_metrics::metrics().storage.record_shard_stored();
 }
 
+pub fn record_object_stored_by_repr(representation: &str, bytes: u64) {
+    shardline_metrics::metrics()
+        .storage
+        .record_object_stored_by_repr(representation, bytes);
+}
+
+pub fn record_object_read_by_repr(representation: &str, bytes: u64) {
+    shardline_metrics::metrics()
+        .storage
+        .record_object_stored_by_repr(representation, bytes);
+}
+
 pub fn record_lfs_upload() {
     shardline_metrics::metrics().protocol.record_lfs_upload();
 }
@@ -82,6 +94,14 @@ pub fn record_dedup_saves(bytes: u64) {
     shardline_metrics::metrics()
         .storage
         .record_dedup_saves(bytes);
+}
+
+pub fn record_compression_saved(raw_bytes: u64, compressed_bytes: u64) {
+    if raw_bytes > compressed_bytes {
+        shardline_metrics::metrics()
+            .storage
+            .record_compression_saved(raw_bytes.wrapping_sub(compressed_bytes));
+    }
 }
 
 #[cfg(test)]

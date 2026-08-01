@@ -264,7 +264,7 @@ mod tests {
     /// Builds a minimal AppState for testing reconstruction handlers.
     async fn build_reconstruction_state() -> (Arc<AppState>, TempDir) {
         let tmp = TempDir::new().expect("tempdir");
-        let chunk_size = std::num::NonZeroUsize::new(4096).unwrap();
+        let chunk_size = std::num::NonZeroUsize::new(65536).unwrap();
         let config = ServerConfig::new(
             "127.0.0.1:0".parse().unwrap(),
             "http://127.0.0.1:0".to_owned(),

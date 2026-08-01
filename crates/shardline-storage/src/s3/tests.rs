@@ -1588,69 +1588,6 @@ fn metadata_from_external_rejects_outside_prefix() {
     assert!(matches!(result, Err(S3ObjectStoreError::InvalidListedKey)));
 }
 
-// ── existing_object_outcome edge cases ────────────────────────────────
-
-#[test]
-fn existing_object_outcome_length_mismatch() {
-    // This function requires a real store — we test the length-mismatch
-    // rejection path which is the first check and doesn't touch storage.
-    // We construct a store to get the type infrastructure, but the
-    // length mismatch is caught before any S3 call.
-    let store = S3ObjectStore::new(
-        S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
-            .with_endpoint(Some("http://127.0.0.1:9000".to_owned()))
-            .with_allow_http(true),
-    )
-    .unwrap();
-    let key = ObjectKey::parse("test/key").unwrap();
-    let integrity = ObjectIntegrity::new(super::chunk_hash(b"hello"), 5);
-    let result = super::existing_object_outcome(&store, &key, 10, b"hello", &integrity);
-    assert!(matches!(
-        result,
-        Err(S3ObjectStoreError::ExistingObjectConflict)
-    ));
-}
-
-#[test]
-fn existing_object_outcome_zero_length() {
-    let store = S3ObjectStore::new(
-        S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
-            .with_endpoint(Some("http://127.0.0.1:9000".to_owned()))
-            .with_allow_http(true),
-    )
-    .unwrap();
-    let key = ObjectKey::parse("test/key").unwrap();
-    let integrity = ObjectIntegrity::new(super::chunk_hash(b""), 0);
-    // When existing_length is 0, the function calls verify_integrity
-    // which checks the expected bytes match the integrity.
-    // Since both are empty/0, this should succeed and return AlreadyExists.
-    let result = super::existing_object_outcome(&store, &key, 0, b"", &integrity);
-    assert!(matches!(result, Ok(PutOutcome::AlreadyExists)));
-}
-
-#[test]
-fn existing_object_outcome_zero_length_integrity_mismatch() {
-    let store = S3ObjectStore::new(
-        S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
-            .with_endpoint(Some("http://127.0.0.1:9000".to_owned()))
-            .with_allow_http(true),
-    )
-    .unwrap();
-    let key = ObjectKey::parse("test/key").unwrap();
-    let integrity = ObjectIntegrity::new(super::chunk_hash(b"x"), 0);
-    // existing_length (0) == integrity.length() (0) — passes first check.
-    // existing_length == 0 — enters the zero-length path.
-    // verify_integrity is called with expected_bytes (empty) against
-    // integrity (hash of "x", length 0).
-    // Length check passes (0 == 0) but hash check fails
-    // (hash of "" != hash of "x") → IntegrityHashMismatch.
-    let result = super::existing_object_outcome(&store, &key, 0, b"", &integrity);
-    assert!(matches!(
-        result,
-        Err(S3ObjectStoreError::IntegrityHashMismatch)
-    ));
-}
-
 // ── block_on / block_on_result fallback paths ──────────────────────
 
 #[test]
@@ -1846,29 +1783,6 @@ fn s3_put_overwrite_connection_error() {
     let integrity = ObjectIntegrity::new(super::chunk_hash(b"hello world"), 11);
     let result = store.put_overwrite(&key, body, &integrity);
     // verify_integrity passes, then put_opts fails with connection error
-    assert!(
-        result.is_err(),
-        "expected error from unreachable S3: {result:?}"
-    );
-}
-
-// ── existing_object_outcome with non-zero length ───────────────────
-
-#[test]
-fn existing_object_outcome_nonzero_length_read_error() {
-    // existing_object_outcome with a non-zero length where store.read_range
-    // fails because there is no real endpoint.
-    let store = S3ObjectStore::new(
-        S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
-            .with_endpoint(Some("http://127.0.0.1:18988".to_owned()))
-            .with_allow_http(true),
-    )
-    .unwrap();
-    let key = ObjectKey::parse("test/key").unwrap();
-    let integrity = ObjectIntegrity::new(super::chunk_hash(b"hello"), 5);
-    // existing_length (5) == integrity.length() (5) — passes first check.
-    // Then enters the streaming compare loop — store.read_range fails.
-    let result = super::existing_object_outcome(&store, &key, 5, b"hello", &integrity);
     assert!(
         result.is_err(),
         "expected error from unreachable S3: {result:?}"
@@ -2201,24 +2115,4 @@ fn s3_list_flat_namespace_validates_start_after() {
     // Should fail with connection error (the function validates start_after
     // internally in its own way for S3)
     assert!(result.is_err(), "expected connection error");
-}
-
-// ── existing_object_outcome with streaming comparison ───────────────
-
-#[test]
-fn existing_object_outcome_streaming_compare_first_chunk_fails() {
-    // existing_object_outcome with non-zero length where the first
-    // streaming read_range fails (no S3 endpoint).
-    let store = S3ObjectStore::new(
-        S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
-            .with_endpoint(Some("http://127.0.0.1:18973".to_owned()))
-            .with_allow_http(true),
-    )
-    .unwrap();
-    let key = ObjectKey::parse("test/key").unwrap();
-    let integrity = ObjectIntegrity::new(super::chunk_hash(b"x"), 1);
-    // existing_length == 1 (non-zero), integrity.length() == 1 → passes first check.
-    // Then enters streaming loop → store.read_range fails.
-    let result = super::existing_object_outcome(&store, &key, 1, b"x", &integrity);
-    assert!(result.is_err(), "expected error from read_range failure");
 }

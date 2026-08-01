@@ -168,8 +168,29 @@ fn validate_source_object_matches_content_addressed_key(
     bytes: &[u8],
 ) -> Result<(), ServerError> {
     if let Some(expected_hash) = chunk_hash_from_chunk_object_key_if_present(key)? {
+        // XorbCdcV1 chunk objects are stored LZ4-compressed with a 4-byte
+        // little-endian uncompressed-size prefix (see download_stream.rs), so
+        // their content hash only matches after decompression. FixedChunkV1
+        // objects are stored raw. Either verification passing is sufficient;
+        // corrupt objects fail both.
         let observed_hash = xet_hash_hex_string(chunk_hash(bytes));
-        ensure_observed_hash_matches_key(key, expected_hash, &observed_hash)?;
+        let mut matches = observed_hash == expected_hash;
+        if !matches {
+            let decompressed_size = bytes
+                .first_chunk::<4>()
+                .map(|header| u32::from_le_bytes(*header) as u64)
+                .unwrap_or(u64::MAX);
+            // Guard against corrupt size prefixes before allocating (mirror
+            // the download path's MAX_DECOMPRESSED_CHUNK bound).
+            if decompressed_size <= 2 * 1024 * 1024
+                && let Ok(decompressed) = lz4_flex::decompress_size_prepended(bytes)
+            {
+                matches = xet_hash_hex_string(chunk_hash(&decompressed)) == expected_hash;
+            }
+        }
+        if !matches {
+            ensure_observed_hash_matches_key(key, expected_hash, &observed_hash)?;
+        }
     }
 
     if let Some(expected_hash) = xorb_hash_from_object_key_if_present(key)? {
@@ -439,6 +460,23 @@ mod tests {
         assert!(result.is_err(), "expected err for hash mismatch, got ok");
         let err = result.unwrap_err();
         assert!(matches!(err, ServerError::ObjectStore(_)));
+    }
+
+    #[test]
+    fn validate_source_accepts_compressed_chunk_key() {
+        use shardline_index::xet_hash_hex_string;
+
+        // XorbCdcV1 chunk objects are LZ4-compressed with a 4-byte size
+        // prefix: validation must decompress before hashing against the key.
+        let body = b"compressed chunk payload";
+        let correct_hash = chunk_hash(body);
+        let key = chunk_object_key(&xet_hash_hex_string(correct_hash)).unwrap();
+        let compressed = lz4_flex::compress_prepend_size(body);
+        let result = validate_source_object_matches_content_addressed_key(&key, &compressed);
+        assert!(
+            result.is_ok(),
+            "expected ok for compressed chunk, got {result:?}"
+        );
     }
 
     #[test]

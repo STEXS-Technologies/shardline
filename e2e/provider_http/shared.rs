@@ -55,7 +55,7 @@ pub(super) async fn start_provider_runtime(
         addr,
         base_url.clone(),
         storage.path().to_path_buf(),
-        NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN),
+        NonZeroUsize::new(128).unwrap_or(NonZeroUsize::MIN),
     )
     .with_token_signing_key(TOKEN_SIGNING_KEY.to_vec())
     .and_then(|config| {
@@ -94,7 +94,7 @@ pub(super) async fn upload_repository_asset(
     let backend = LocalBackend::new(
         runtime.storage_path().to_path_buf(),
         runtime.base_url().to_owned(),
-        NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN),
+        NonZeroUsize::new(128).unwrap_or(NonZeroUsize::MIN),
     )
     .await?;
     let scope = RepositoryScope::new(provider, owner, repo, Some("main"))?;
