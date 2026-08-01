@@ -741,7 +741,7 @@ mod tests {
     /// which keeps each test self-contained without token minting.
     async fn build_test_state() -> (Arc<AppState>, TempDir) {
         let tmp = TempDir::new().expect("tempdir");
-        let chunk_size = NonZeroUsize::new(4).unwrap();
+        let chunk_size = NonZeroUsize::new(65536).unwrap();
         let config = ServerConfig::new(
             "127.0.0.1:0".parse().unwrap(),
             "http://127.0.0.1:0".to_owned(),
@@ -779,7 +779,7 @@ mod tests {
     /// Builds a minimal [`AppState`] with an auth provider for xet transfer tests.
     async fn build_test_state_with_auth() -> (Arc<AppState>, TempDir) {
         let tmp = TempDir::new().expect("tempdir");
-        let chunk_size = NonZeroUsize::new(4).unwrap();
+        let chunk_size = NonZeroUsize::new(65536).unwrap();
         let config = ServerConfig::new(
             "127.0.0.1:0".parse().unwrap(),
             "http://127.0.0.1:8080".to_owned(),
@@ -1487,8 +1487,11 @@ mod tests {
     async fn get_object_happy_path_after_upload() {
         let (state, _tmp) = build_test_state().await;
         let app = lfs_router(state.clone());
-        let content = b"hello-lfs-content";
-        let oid = test_oid(content);
+        // Use data large enough (>256 bytes) to produce multiple CDC chunks
+        // with chunk_size=128 (min_chunk=16, max_chunk=256), ensuring xorb
+        // packing produces a multi-chunk xorb that the download path handles.
+        let content: Vec<u8> = (0u16..300u16).map(|i| (i as u8) ^ 0xAA).collect();
+        let oid = test_oid(&content);
 
         // Upload first
         let put_response = app
@@ -1499,7 +1502,7 @@ mod tests {
                     .uri(format!("/v1/lfs/objects/{oid}"))
                     .header("content-type", "application/octet-stream")
                     .header("content-length", content.len())
-                    .body(Body::from(content.to_vec()))
+                    .body(Body::from(content.clone()))
                     .unwrap(),
             )
             .await
@@ -2157,8 +2160,11 @@ mod tests {
     async fn verify_object_happy_path_after_upload() {
         let (state, _tmp) = build_test_state().await;
         let app = lfs_router(state.clone());
-        let content = b"verify-test-content";
-        let oid = test_oid(content);
+        // Use data large enough (>256 bytes) to produce multiple CDC chunks
+        // with chunk_size=128 (min_chunk=16, max_chunk=256), ensuring xorb
+        // packing produces a multi-chunk xorb that the verify path handles.
+        let content: Vec<u8> = (0u16..300u16).map(|i| (i as u8) ^ 0xBB).collect();
+        let oid = test_oid(&content);
 
         // Upload
         let put = app
@@ -2168,7 +2174,7 @@ mod tests {
                     .method("PUT")
                     .uri(format!("/v1/lfs/objects/{oid}"))
                     .header("content-type", "application/octet-stream")
-                    .body(Body::from(content.to_vec()))
+                    .body(Body::from(content.clone()))
                     .unwrap(),
             )
             .await

@@ -10,6 +10,7 @@ readme = "README.md"
 description = "Storage integrity checking logic for the Shardline server ecosystem."
 
 [dependencies]
+lz4_flex = "0.11"
 serde_json.workspace = true
 shardline-cas.workspace = true
 shardline-index.workspace = true

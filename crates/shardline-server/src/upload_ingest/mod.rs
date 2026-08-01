@@ -1,6 +1,8 @@
 mod body_reader;
+pub mod cdc;
 mod chunk_store;
 mod ingestor;
+pub mod xorb_packer;
 
 use std::{
     sync::atomic::{AtomicU64, Ordering},

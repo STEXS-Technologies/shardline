@@ -7,13 +7,14 @@ documented in this repository.
 ## Current Source-Tree Contract
 
 The current Shardline source tree should be treated as a content-addressed backend for
-the validated workflows covered by this repository. Release notes identify which
-source-tree capabilities are included in each published version.
+the validated workflows covered by this repository.
+Release notes identify which source-tree capabilities are included in each published
+version.
 
 ## Surface Maturity
 
 | Surface | Tier | Evidence |
-|---------|------|----------|
+| --- | --- | --- |
 | Xet CAS | **Stable** | Native Xet upload and download flows; checked-in `git` + `git-lfs` + `git-xet` push, clone, fetch, pull, historical checkout, and sparse checkout coverage |
 | Git LFS | **Beta** | LFS batch negotiation plus direct object GET/HEAD/PUT routes; `git-lfs` push/pull plus separate pull and fetch --all flows; conformance-tested but limited production evidence |
 | Bazel HTTP remote cache | **Beta** | `ac` and `cas` object GET and PUT routes; `bazel`/`bazelisk` remote-cache flows with remote_download_outputs=all and toplevel; conformance-tested but limited production evidence |
@@ -30,12 +31,13 @@ source-tree capabilities are included in each published version.
 ### Tier Definitions
 
 - **Stable**: broad checked-in route, integration, and native-client coverage for the
-  advertised workflows. This tier does not claim a particular deployment's production,
-  load, failure-injection, or upgrade history.
+  advertised workflows.
+  This tier does not claim a particular deployment's production, load,
+  failure-injection, or upgrade history.
 - **Beta**: checked-in route or client coverage exists, but the compatibility surface or
   operational evidence is narrower.
-- **Experimental**: implemented with targeted tests, but configuration or interoperability
-  may still change.
+- **Experimental**: implemented with targeted tests, but configuration or
+  interoperability may still change.
 - **Internal**: architectural component, not a user-facing promise.
 
 ## Validated Route Surface

@@ -10,21 +10,12 @@ type BoxedBodyStream = Pin<Box<dyn Stream<Item = BodyChunkResult> + Send>>;
 
 pub(super) enum ChunkBuffer {
     Pooled(Bytes),
-    Shared(Bytes),
 }
 
 impl ChunkBuffer {
     pub(super) fn as_slice(&self) -> &[u8] {
         match self {
             Self::Pooled(bytes) => bytes.as_ref(),
-            Self::Shared(bytes) => bytes.as_ref(),
-        }
-    }
-
-    pub(super) const fn len(&self) -> usize {
-        match self {
-            Self::Pooled(bytes) => bytes.len(),
-            Self::Shared(bytes) => bytes.len(),
         }
     }
 }
@@ -136,28 +127,12 @@ mod tests {
     fn pooled_chunk_buffer_as_slice_returns_bytes() {
         let buf = ChunkBuffer::Pooled(Bytes::from_static(b"hello"));
         assert_eq!(buf.as_slice(), b"hello");
-        assert_eq!(buf.len(), 5);
-    }
-
-    #[test]
-    fn shared_chunk_buffer_as_slice_returns_bytes() {
-        let buf = ChunkBuffer::Shared(Bytes::from_static(b"world"));
-        assert_eq!(buf.as_slice(), b"world");
-        assert_eq!(buf.len(), 5);
     }
 
     #[test]
     fn pooled_chunk_buffer_empty() {
         let buf = ChunkBuffer::Pooled(Bytes::new());
         assert_eq!(buf.as_slice(), b"");
-        assert_eq!(buf.len(), 0);
-    }
-
-    #[test]
-    fn shared_chunk_buffer_empty() {
-        let buf = ChunkBuffer::Shared(Bytes::new());
-        assert_eq!(buf.as_slice(), b"");
-        assert_eq!(buf.len(), 0);
     }
 
     // ------------------------------------------------------------------
@@ -279,16 +254,6 @@ mod tests {
         let body2 = read_body_to_bytes(&mut reader).await.unwrap();
         assert!(body1.is_empty());
         assert!(body2.is_empty());
-    }
-
-    #[test]
-    fn chunk_buffer_len_matches_as_slice() {
-        let data = b"chunk data for testing";
-        let pooled = ChunkBuffer::Pooled(Bytes::from_static(data));
-        let shared = ChunkBuffer::Shared(Bytes::from_static(data));
-        assert_eq!(pooled.len(), pooled.as_slice().len());
-        assert_eq!(shared.len(), shared.as_slice().len());
-        assert_eq!(pooled.len(), shared.len());
     }
 
     // ------------------------------------------------------------------

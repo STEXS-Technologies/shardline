@@ -21,13 +21,16 @@ async fn exercise_index_rebuild() -> Result<(), Box<dyn Error>> {
     let backend = LocalBackend::new(
         storage.path().to_path_buf(),
         "http://127.0.0.1:8080".to_owned(),
-        NonZeroUsize::new(4).ok_or("chunk size")?,
+        NonZeroUsize::new(1024).ok_or("chunk size")?,
     )
     .await?;
     backend
         .upload_file("asset.bin", Bytes::from_static(b"aaaabbbbcccc"), None)
         .await?;
-    tokio::time::sleep(Duration::from_millis(10)).await;
+    // Version record recency is tracked at second resolution, so the second
+    // upload must land in a different second than the first for the rebuild
+    // to pick it as the latest version.
+    tokio::time::sleep(Duration::from_millis(1100)).await;
     backend
         .upload_file("asset.bin", Bytes::from_static(b"aaaaZZZZcccc"), None)
         .await?;

@@ -1,6 +1,7 @@
 # Xet-Native File Management CLI
 
-> **Status:** Design proposal. The `shardx` CLI described here is not yet implemented.
+> **Status:** Design proposal.
+> The `shardx` CLI described here is not yet implemented.
 > See [issue #19](https://github.com/STEXS-Technologies/shardline/issues/19) for the
 > current tracking issue.
 
@@ -31,19 +32,22 @@ management against any Xet-compatible server, including shardline itself.
 
 ## Non-Goals
 
-- Reimplementing the shardline server or any part of the CAS coordinator. The CLI is a
-  client only.
+- Reimplementing the shardline server or any part of the CAS coordinator.
+  The CLI is a client only.
 - Replacing Git or Git LFS. The CLI targets direct file transfer, not version control
   workflows.
-- Building a FUSE mount point in the initial scope. (The deprecated `pyxet` offered
-  `xet mount`; this is a future consideration, not an initial goal.)
-- Supporting every Xet-protocol variant in the wild. The initial target is the
-  endpoint and transfer surface that shardline itself implements.
+- Building a FUSE mount point in the initial scope.
+  (The deprecated `pyxet` offered `xet mount`; this is a future consideration, not an
+  initial goal.)
+- Supporting every Xet-protocol variant in the wild.
+  The initial target is the endpoint and transfer surface that shardline itself
+  implements.
 
 ## Dispatch Model
 
-`shardx` is not a separate binary. It is a symlink to `shardline`. The binary detects
-the invocation name at startup and dispatches accordingly:
+`shardx` is not a separate binary.
+It is a symlink to `shardline`. The binary detects the invocation name at startup and
+dispatches accordingly:
 
 ```mermaid
 flowchart TD
@@ -91,8 +95,8 @@ flowchart TD
   linkStyle default stroke:#111827,stroke-width:1.5px;
 ```
 
-Users who type `shardx cp` get a focused file-transfer surface with no
-server-operations commands. Users who type `shardline serve` get the operator surface.
+Users who type `shardx cp` get a focused file-transfer surface with no server-operations
+commands. Users who type `shardline serve` get the operator surface.
 But both come from the same binary — one build, one version, one install.
 
 Install-time setup:
@@ -172,15 +176,15 @@ Response:
 ```
 
 Write token uses the same pattern with `xet-write-token`. The token is scoped to the
-specific repository, owner, and optional revision. The `casUrl` field tells the CLI
-which base URL to use for the subsequent CAS transfer operations. This separation
-supports deployments where the API control plane and the CAS data plane run on
-different hosts or roles.
+specific repository, owner, and optional revision.
+The `casUrl` field tells the CLI which base URL to use for the subsequent CAS transfer
+operations. This separation supports deployments where the API control plane and the CAS
+data plane run on different hosts or roles.
 
 ### Step 2 — CAS Transfer
 
-The CLI uses the `accessToken` to authenticate against the CAS transfer endpoints at
-the `casUrl` base.
+The CLI uses the `accessToken` to authenticate against the CAS transfer endpoints at the
+`casUrl` base.
 
 Xorb download:
 
@@ -197,9 +201,9 @@ Authorization: Bearer <accessToken>
 Body: <xorb bytes>
 ```
 
-The namespace is the server's repository-scoped prefix. For shardline, the namespace
-is derived from the repository scope. The CLI extracts it from the token or from the
-server's advertised namespace convention.
+The namespace is the server's repository-scoped prefix.
+For shardline, the namespace is derived from the repository scope.
+The CLI extracts it from the token or from the server's advertised namespace convention.
 
 ### Step 3 — Metadata Registration (Write Path)
 
@@ -213,8 +217,8 @@ Body: { shard metadata }
 ```
 
 This step is optional for pure CAS upload but required for the file to be
-reconstructable by other clients or by the server's index. The CLI should support both
-modes:
+reconstructable by other clients or by the server's index.
+The CLI should support both modes:
 
 - `--register` (default for write): register file metadata after upload
 - `--no-register`: raw CAS upload without index registration
@@ -252,8 +256,8 @@ shardx info xet://127.0.0.1:8080/generic/myorg/myrepo/main/model.pt
 shardx rm xet://127.0.0.1:8080/generic/myorg/myrepo/main/model.pt
 ```
 
-The CLI should also accept a shorthand form when the server, auth, and default
-provider are configured:
+The CLI should also accept a shorthand form when the server, auth, and default provider
+are configured:
 
 ```bash
 shardx cp ./model.pt myorg/myrepo/main/
@@ -270,25 +274,28 @@ The CLI authenticates to the server via one of the following, checked in order:
 4. `--config` flag or `SHARDLINE_CONFIG` environment variable pointing to a
    configuration file
 
-These are the same environment variables the `shardline` binary uses. Since `shardx`
-is the same binary invoked by symlink, it shares the configuration namespace. A user
-who already has `SHARDLINE_TOKEN` set for the operator tooling gets the same auth for
-file transfers without additional setup.
+These are the same environment variables the `shardline` binary uses.
+Since `shardx` is the same binary invoked by symlink, it shares the configuration
+namespace.
+A user who already has `SHARDLINE_TOKEN` set for the operator tooling gets the
+same auth for file transfers without additional setup.
 
-When a provider API key is supplied, the CLI issues a `POST /v1/providers/{provider}/tokens`
-request to exchange it for a scoped CAS token. When a bearer token is supplied, it is
-used directly as the `Authorization` header on the token-issuance endpoints, and the
-server returns a short-lived CAS-scoped `accessToken`.
+When a provider API key is supplied, the CLI issues a
+`POST /v1/providers/{provider}/tokens` request to exchange it for a scoped CAS token.
+When a bearer token is supplied, it is used directly as the `Authorization` header on
+the token-issuance endpoints, and the server returns a short-lived CAS-scoped
+`accessToken`.
 
 The CLI should cache the CAS access token and transparently refresh it when it expires,
-using the original credentials. This keeps long-lived transfers (large files, deep sync)
-from failing mid-operation.
+using the original credentials.
+This keeps long-lived transfers (large files, deep sync) from failing mid-operation.
 
 ## File Operations
 
 ### `cp`
 
-Upload or download one or more files. Supports recursive directory transfer.
+Upload or download one or more files.
+Supports recursive directory transfer.
 
 ```bash
 # Upload file
@@ -305,10 +312,11 @@ shardx cp xet://host/provider/owner/repo/rev/data/ ./data/ --recursive
 ```
 
 The chunking and xorb construction uses the same `XorbWriter` from
-`shardline-xet-adapter` that the server uses for ingest. Reconstruction uses
-`XorbReader` and the same chunk-assembly logic. This guarantees that files uploaded
-by the CLI are byte-identical to files uploaded through the server's own ingest paths
-and can be reconstructed by any Xet-compatible client.
+`shardline-xet-adapter` that the server uses for ingest.
+Reconstruction uses `XorbReader` and the same chunk-assembly logic.
+This guarantees that files uploaded by the CLI are byte-identical to files uploaded
+through the server's own ingest paths and can be reconstructed by any Xet-compatible
+client.
 
 ### `sync`
 
@@ -323,8 +331,8 @@ shardx sync xet://host/provider/owner/repo/rev/data/ ./data/
 ```
 
 The sync implementation compares file sizes and modification times (local) against
-remote metadata. It skips unchanged files and processes only the delta. For each file
-that needs transfer, it reuses the same `cp` xorb pipeline.
+remote metadata. It skips unchanged files and processes only the delta.
+For each file that needs transfer, it reuses the same `cp` xorb pipeline.
 
 ### `ls`
 
@@ -336,8 +344,9 @@ shardx ls xet://host/provider/owner/repo/rev/data/ --long
 shardx ls xet://host/provider/owner/repo/ --branches
 ```
 
-Output mirrors familiar UNIX `ls` conventions. The `--long` flag includes file size,
-modification time, and content hash. The `--branches` flag lists available revisions.
+Output mirrors familiar UNIX `ls` conventions.
+The `--long` flag includes file size, modification time, and content hash.
+The `--branches` flag lists available revisions.
 
 ### `rm`
 
@@ -348,12 +357,13 @@ shardx rm xet://host/provider/owner/repo/rev/file.bin
 shardx rm xet://host/provider/owner/repo/rev/data/ --recursive
 ```
 
-Removal marks the file for garbage collection. The chunk bytes remain in CAS storage
-until GC sweep confirms no remaining references.
+Removal marks the file for garbage collection.
+The chunk bytes remain in CAS storage until GC sweep confirms no remaining references.
 
 ### `cat`
 
-Stream a remote file to stdout. Useful for piping into other tools.
+Stream a remote file to stdout.
+Useful for piping into other tools.
 
 ```bash
 shardx cat xet://host/provider/owner/repo/rev/model.pt | python3 -c "..."
@@ -387,8 +397,8 @@ shardx branch xet://host/provider/owner/repo/ --delete old-feature
 
 ## Chunking and Deduplication
 
-The CLI reuses the same chunking parameters and xorb format that the server uses. The
-chunk-size boundary is configurable:
+The CLI reuses the same chunking parameters and xorb format that the server uses.
+The chunk-size boundary is configurable:
 
 ```bash
 shardx cp ./large.bin xet://host/... --chunk-size 65536
@@ -409,8 +419,8 @@ When the CLI uploads a file, it:
 
 1. Splits the file into fixed-size chunks (configurable, default 64 KiB).
 2. Hashes each chunk with BLAKE3.
-3. Checks each chunk hash against the CAS server (idempotent put — existing chunks
-   are skipped).
+3. Checks each chunk hash against the CAS server (idempotent put — existing chunks are
+   skipped).
 4. Builds a xorb from the chunk hashes and their pack offsets.
 5. Uploads the xorb to CAS.
 6. Optionally registers the file metadata with the server's index.
@@ -423,15 +433,17 @@ On download, it:
 4. Downloads missing chunks from CAS.
 5. Assembles the file in order.
 
-Existing chunks on the server are not re-uploaded, so uploading the same file twice
-is idempotent and fast. Uploading a file that shares chunks with an existing file
-deduplicates at the chunk level automatically.
+Existing chunks on the server are not re-uploaded, so uploading the same file twice is
+idempotent and fast.
+Uploading a file that shares chunks with an existing file deduplicates at the chunk
+level automatically.
 
 ## Crate Impact
 
-The `xet` subcommand will live in `crates/shardline/src/command/xet.rs` alongside the existing
-operator commands. No new crate is needed. The implementation draws on existing
-workspace crates as libraries:
+The `xet` subcommand will live in `crates/shardline/src/command/xet.rs` alongside the
+existing operator commands.
+No new crate is needed.
+The implementation draws on existing workspace crates as libraries:
 
 | Crate | Role |
 | --- | --- |
@@ -441,8 +453,9 @@ workspace crates as libraries:
 | `shardline-storage` | `ObjectStore` trait — the CLI may talk to CAS via HTTP rather than embedding a store, but the trait defines the contract |
 
 The CLI does not depend on `shardline-server`. It uses the protocol crate and the
-adapter crate as client-side libraries. The server dependency is limited to the HTTP
-API contract — `shardx` is a client, not an embedded server.
+adapter crate as client-side libraries.
+The server dependency is limited to the HTTP API contract — `shardx` is a client, not an
+embedded server.
 
 ## Remote Operation
 
@@ -450,13 +463,13 @@ The CLI communicates with the server over HTTP(S). It does not require any serve
 changes beyond the existing Xet protocol endpoints that shardline already implements.
 
 When the server supports it, the CLI should prefer presigned CAS URLs returned by the
-token endpoint or reconstruction response. Presigned URLs allow direct object-store
-access without proxying through the server's transfer layer, reducing latency for
-large files.
+token endpoint or reconstruction response.
+Presigned URLs allow direct object-store access without proxying through the server's
+transfer layer, reducing latency for large files.
 
-The CLI falls back to the server-proxied transfer endpoint (`/transfer/xorb/...`)
-when presigned URLs are not available — for example, when the server uses a local
-filesystem adapter that cannot issue presigned URLs.
+The CLI falls back to the server-proxied transfer endpoint (`/transfer/xorb/...`) when
+presigned URLs are not available — for example, when the server uses a local filesystem
+adapter that cannot issue presigned URLs.
 
 ## Configuration
 
@@ -477,8 +490,8 @@ api_key = ""              # provider API key (or SHARDLINE_API_KEY)
 token_file = ""           # path to token file (or SHARDLINE_TOKEN_FILE)
 ```
 
-CLI flags override config file values. Config file values override environment
-variables.
+CLI flags override config file values.
+Config file values override environment variables.
 
 ## Packaging
 
@@ -504,9 +517,9 @@ shardline-x.x.x-x86_64-unknown-linux-gnu/
 └── shardline.bash     # shell completion
 ```
 
-The install script creates the `shardx` symlink automatically. Package managers
-(rpm, deb, Homebrew) should declare the symlink as a package symlink, not a
-separate binary.
+The install script creates the `shardx` symlink automatically.
+Package managers (rpm, deb, Homebrew) should declare the symlink as a package symlink,
+not a separate binary.
 
 ## Stub Implementation Path
 

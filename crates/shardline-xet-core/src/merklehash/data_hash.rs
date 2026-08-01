@@ -59,27 +59,6 @@ impl From<DataHash> for [u8; 32] {
     }
 }
 
-impl AsRef<[u8]> for DataHash {
-    fn as_ref(&self) -> &[u8] {
-        // SAFETY: DataHash is repr(transparent) over [u64; 4] which is a plain
-        // byte array. We use a boxed slice to keep the reference valid.
-        // This is safe because [u64; 4] has no padding and is stored contiguously.
-        // We leak a small allocation to return a static reference.
-        // Actually, let's use a different approach: store as bytes internally.
-        // For now, we convert on the fly. This is only used in a few places.
-        //
-        // Actually, let's just use a simple boxed slice approach.
-        // We'll convert to a Vec and leak it. But that's wasteful.
-        // Better approach: just use the byte representation directly.
-        //
-        // Since we can't use unsafe, let's convert to a static reference via leak.
-        // This is acceptable for the limited usage patterns in this crate.
-        let bytes: [u8; 32] = (*self).into();
-        let boxed: &'static mut [u8] = Box::leak(bytes.into());
-        boxed
-    }
-}
-
 impl AsRef<DataHash> for DataHash {
     fn as_ref(&self) -> &DataHash {
         self
@@ -161,11 +140,11 @@ impl DataHash {
         Ok(ret)
     }
 
-    pub fn as_bytes(&self) -> &[u8] {
-        // Convert to bytes and leak for a 'static reference.
-        // This is acceptable for the limited usage in this crate.
-        let bytes: [u8; 32] = (*self).into();
-        Box::leak(bytes.into())
+    /// Converts to a stack-allocated byte array. Prefer the infallible
+    /// `From<DataHash> for [u8; 32]` conversion when a fixed-size buffer is
+    /// sufficient.
+    pub fn to_bytes(&self) -> [u8; 32] {
+        (*self).into()
     }
 
     pub fn from_slice(value: &[u8]) -> Result<Self, DataHashBytesParseError> {
@@ -221,7 +200,8 @@ impl TryFrom<&[u8]> for DataHash {
 
 impl From<DataHash> for Vec<u8> {
     fn from(val: DataHash) -> Self {
-        val.as_bytes().into()
+        let bytes: [u8; 32] = val.into();
+        bytes.to_vec()
     }
 }
 
@@ -420,9 +400,9 @@ mod tests {
     }
 
     #[test]
-    fn as_ref_bytes() {
+    fn into_bytes() {
         let h = DataHash::from([1u64, 2, 3, 4]);
-        let bytes: &[u8] = h.as_ref();
+        let bytes: [u8; 32] = h.into();
         assert_eq!(bytes.len(), 32);
     }
 
@@ -463,7 +443,7 @@ mod tests {
     #[test]
     fn as_bytes() {
         let h = DataHash::from([0x0102030405060708u64, 0, 0, 0]);
-        let bytes = h.as_bytes();
+        let bytes: [u8; 32] = h.into();
         assert_eq!(bytes.len(), 32);
         let first = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
         assert_eq!(first, 0x0102030405060708);

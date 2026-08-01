@@ -1,5 +1,6 @@
 use shardline_index::{
-    FileRecord, PostgresMetadataStoreError, RecordStore, RecordTraversal, RepositoryRecordScope,
+    FileRecord, FileRecordStorageLayout, PostgresMetadataStoreError, RecordStore, RecordTraversal,
+    RepositoryRecordScope,
 };
 use shardline_protocol::{ByteRange, RepositoryScope};
 #[cfg(test)]
@@ -71,6 +72,7 @@ impl super::PostgresBackend {
     ) -> Result<(ServerByteStream, u64), ServerError> {
         let record = self.read_record(file_id, None, None).await?;
         let total_bytes = record.total_bytes;
+        crate::metrics::record_object_read_by_repr(record.storage_repr.as_str(), total_bytes);
         let stream = file_record_byte_stream(self.object_store(), record, range).await?;
         Ok((stream, total_bytes))
     }
@@ -168,13 +170,33 @@ impl super::PostgresBackend {
         let record = self
             .read_record(file_id, content_hash, repository_scope)
             .await?;
+        let total_bytes = record.total_bytes;
         let object_store = self.object_store();
         let server_frontends = self.server_frontends.clone();
-        task::spawn_blocking(move || {
-            reconstruct_file_record_bytes(&object_store, &server_frontends, &record)
-        })
-        .await
-        .map_err(ServerError::BlockingTask)?
+
+        // ReferencedObjectTerms layout (shard/xorb-referenced) is handled
+        // by the raw reconstruct path; StoredChunks layout (ingestor/CDC)
+        // uses the streaming path for LZ4 decompression and xorb packing.
+        if matches!(
+            record.storage_layout(),
+            FileRecordStorageLayout::ReferencedObjectTerms
+        ) {
+            return task::spawn_blocking(move || {
+                reconstruct_file_record_bytes(&object_store, &server_frontends, &record)
+            })
+            .await
+            .map_err(ServerError::BlockingTask)?;
+        }
+
+        // StoredChunks path: stream with LZ4 decompression and xorb-fast-path.
+        let stream = file_record_byte_stream(object_store, record, None).await?;
+        let mut output = Vec::with_capacity(usize::try_from(total_bytes)?);
+        tokio::pin!(stream);
+        use futures_util::StreamExt;
+        while let Some(chunk) = stream.next().await {
+            output.extend_from_slice(&chunk?);
+        }
+        Ok(output)
     }
 
     /// Reads a stored chunk by hash.
@@ -369,6 +391,7 @@ impl super::PostgresBackend {
             content_hash: content_hash.unwrap_or_default().to_owned(),
             total_bytes: 0,
             chunk_size: 0,
+            storage_repr: shardline_index::StorageRepresentation::WholeFileV1,
             repository_scope: repository_scope.cloned(),
             chunks: Vec::new(),
         };
@@ -505,6 +528,7 @@ mod tests {
             content_hash: make_hash('f'),
             total_bytes: 1024,
             chunk_size: 256,
+            storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
             repository_scope: Some(scope.clone()),
             chunks: vec![FileChunkRecord {
                 hash: chunk_hash.to_owned(),
@@ -621,6 +645,7 @@ mod tests {
                 content_hash: make_hash('f'),
                 total_bytes: 1024,
                 chunk_size: 256,
+                storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
                 repository_scope: None,
                 chunks: vec![FileChunkRecord {
                     hash: hash.clone(),
@@ -647,6 +672,7 @@ mod tests {
                 content_hash: make_hash('f'),
                 total_bytes: 0,
                 chunk_size: 0,
+                storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
                 repository_scope: Some(scope.clone()),
                 chunks: Vec::new(),
             };
@@ -1098,6 +1124,7 @@ mod tests {
             content_hash: content_hash.to_owned(),
             total_bytes: 1024,
             chunk_size: 256,
+            storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
             repository_scope: Some(scope.clone()),
             chunks: Vec::new(),
         }
@@ -1443,6 +1470,7 @@ mod tests {
             content_hash: make_hash('e'),
             total_bytes: 0,
             chunk_size: 0,
+            storage_repr: shardline_index::StorageRepresentation::WholeFileV1,
             repository_scope: Some(scope),
             chunks: Vec::new(),
         };

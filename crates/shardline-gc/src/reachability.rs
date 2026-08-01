@@ -115,6 +115,23 @@ fn collect_record_object_references<Locator>(
                         &mut reachability.missing_optional_object_keys,
                     )?;
                 }
+
+                // For XorbCdcV1 records, also resolve the xorb container
+                // to its constituent chunk hashes so that the individual
+                // chunks inside the xorb are protected from GC even if
+                // the xorb container itself is missing or corrupted.
+                if record.storage_repr == shardline_index::StorageRepresentation::XorbCdcV1
+                    && let Some(object_key) = optional_chunk_container_keys(frontends, &chunk.hash)?
+                        .into_iter()
+                        .next()
+                {
+                    collect_live_chunk_references_from_protocol_object(
+                        object_store,
+                        frontends,
+                        &object_key,
+                        reachability,
+                    )?;
+                }
             }
         }
     }
@@ -534,6 +551,7 @@ mod tests {
                 content_hash: hash.to_owned(),
                 total_bytes: 100,
                 chunk_size: 100,
+                storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
                 repository_scope: None,
                 chunks: vec![FileChunkRecord {
                     hash: hash.to_owned(),
@@ -616,6 +634,7 @@ mod tests {
                 content_hash: hash.to_owned(),
                 total_bytes: 200,
                 chunk_size: 200,
+                storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
                 repository_scope: None,
                 chunks: vec![FileChunkRecord {
                     hash: hash.to_owned(),
@@ -672,6 +691,7 @@ mod tests {
                 content_hash: chunk_hash_hex.to_owned(),
                 total_bytes: 100,
                 chunk_size: 100,
+                storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
                 repository_scope: None,
                 chunks: vec![FileChunkRecord {
                     hash: chunk_hash_hex.to_owned(),
@@ -741,6 +761,7 @@ mod tests {
                 content_hash: hash.to_owned(),
                 total_bytes: 100,
                 chunk_size: 0,
+                storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
                 repository_scope: None,
                 chunks: vec![FileChunkRecord {
                     hash: hash.to_owned(),
@@ -796,6 +817,7 @@ mod tests {
                 content_hash: hash1.to_owned(),
                 total_bytes: 50,
                 chunk_size: 50,
+                storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
                 repository_scope: None,
                 chunks: vec![FileChunkRecord {
                     hash: hash1.to_owned(),
@@ -815,6 +837,7 @@ mod tests {
                 content_hash: hash2.to_owned(),
                 total_bytes: 75,
                 chunk_size: 75,
+                storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
                 repository_scope: None,
                 chunks: vec![FileChunkRecord {
                     hash: hash2.to_owned(),

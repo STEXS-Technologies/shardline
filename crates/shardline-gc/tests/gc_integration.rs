@@ -236,6 +236,7 @@ fn local_gc_with_valid_record_no_orphans() {
         content_hash: hash.clone(),
         total_bytes: 17,
         chunk_size: 100,
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         repository_scope: None,
         chunks: vec![FileChunkRecord {
             hash,
@@ -411,6 +412,7 @@ fn gc_with_stores_referenced_chunks_not_orphaned() {
         content_hash: hash.clone(),
         total_bytes: 10,
         chunk_size: 100,
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         repository_scope: None,
         chunks: vec![FileChunkRecord {
             hash,
@@ -462,6 +464,7 @@ fn gc_with_stores_multiple_chunks_some_orphaned() {
         content_hash: ref_hash.clone(),
         total_bytes: 21,
         chunk_size: 100,
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         repository_scope: None,
         chunks: vec![FileChunkRecord {
             hash: ref_hash,

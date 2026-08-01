@@ -45,6 +45,7 @@ fn sample_record(repository_scope: Option<RepositoryScope>) -> FileRecord {
         content_hash: "a".repeat(64),
         total_bytes: 4,
         chunk_size: 4,
+        storage_repr: crate::StorageRepresentation::FixedChunkV1,
         repository_scope,
         chunks: vec![FileChunkRecord {
             hash: "b".repeat(64),
@@ -868,6 +869,7 @@ fn sample_state_machine_records() -> Result<Vec<FileRecord>, Box<dyn Error>> {
             content_hash: xet_hash_hex_string(ShardlineHash::from_bytes([11; 32])),
             total_bytes: 4,
             chunk_size: 4,
+            storage_repr: crate::StorageRepresentation::FixedChunkV1,
             repository_scope: None,
             chunks: vec![FileChunkRecord {
                 hash: xet_hash_hex_string(ShardlineHash::from_bytes([21; 32])),
@@ -884,6 +886,7 @@ fn sample_state_machine_records() -> Result<Vec<FileRecord>, Box<dyn Error>> {
             content_hash: xet_hash_hex_string(ShardlineHash::from_bytes([12; 32])),
             total_bytes: 8,
             chunk_size: 4,
+            storage_repr: crate::StorageRepresentation::FixedChunkV1,
             repository_scope: Some(scope_a),
             chunks: vec![
                 FileChunkRecord {
@@ -911,6 +914,7 @@ fn sample_state_machine_records() -> Result<Vec<FileRecord>, Box<dyn Error>> {
             content_hash: xet_hash_hex_string(ShardlineHash::from_bytes([13; 32])),
             total_bytes: 6,
             chunk_size: 6,
+            storage_repr: crate::StorageRepresentation::FixedChunkV1,
             repository_scope: Some(scope_b),
             chunks: vec![FileChunkRecord {
                 hash: xet_hash_hex_string(ShardlineHash::from_bytes([24; 32])),

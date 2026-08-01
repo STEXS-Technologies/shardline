@@ -37,6 +37,7 @@ fuzz_target!(|data: &str| {
     ));
     drop(
         record_store.commit_file_version_metadata(&shardline_index::FileRecord {
+            storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
             file_id: data.to_owned(),
             content_hash: "a".repeat(64),
             total_bytes: 0,

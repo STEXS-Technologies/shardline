@@ -72,7 +72,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn ingest_without_storage_counts_chunk_processing() {
-        let chunk_size = NonZeroUsize::new(4);
+        let chunk_size = NonZeroUsize::new(128);
         assert!(chunk_size.is_some());
         let Some(chunk_size) = chunk_size else {
             return;
@@ -91,14 +91,15 @@ mod tests {
         };
 
         assert_eq!(response.total_bytes, 8);
-        assert_eq!(response.inserted_chunks, 2);
+        // With chunk_size=128 and data < min_chunk (16), CDC produces 1 chunk
+        assert_eq!(response.inserted_chunks, 1);
         assert_eq!(response.reused_chunks, 0);
         assert_eq!(response.stored_bytes, 8);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn ingest_without_storage_does_not_report_reuse_between_uploads() {
-        let chunk_size = NonZeroUsize::new(4);
+        let chunk_size = NonZeroUsize::new(128);
         assert!(chunk_size.is_some());
         let Some(chunk_size) = chunk_size else {
             return;
@@ -124,14 +125,15 @@ mod tests {
             return;
         };
 
-        assert_eq!(second.inserted_chunks, 2);
+        // With chunk_size=128 and data < min_chunk (16), CDC produces 1 chunk
+        assert_eq!(second.inserted_chunks, 1);
         assert_eq!(second.reused_chunks, 0);
         assert_eq!(second.stored_bytes, 8);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn ingest_without_storage_rejects_invalid_file_id() {
-        let chunk_size = NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN);
+        let chunk_size = NonZeroUsize::new(128).unwrap_or(NonZeroUsize::MIN);
         let result =
             ingest_without_storage(chunk_size, "../invalid", Bytes::from_static(b"test"), None)
                 .await;
@@ -156,7 +158,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn ingest_without_storage_rejects_mismatched_expected_sha256() {
-        let chunk_size = NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN);
+        let chunk_size = NonZeroUsize::new(128).unwrap_or(NonZeroUsize::MIN);
         let body = Bytes::from_static(b"hello world");
         let result = ingest_without_storage(
             chunk_size,
@@ -174,7 +176,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn ingest_without_storage_with_parallelism_uses_custom_parallelism() {
         use super::ingest_without_storage_with_parallelism;
-        let chunk_size = NonZeroUsize::new(2).unwrap_or(NonZeroUsize::MIN);
+        let chunk_size = NonZeroUsize::new(128).unwrap_or(NonZeroUsize::MIN);
         let max_in_flight = NonZeroUsize::new(1).unwrap_or(NonZeroUsize::MIN);
         let result = ingest_without_storage_with_parallelism(
             chunk_size,

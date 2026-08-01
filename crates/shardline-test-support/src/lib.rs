@@ -56,7 +56,7 @@ impl From<InvariantError> for IoError {
 
 /// Shared test fixture providing a temporary directory and default chunk size.
 ///
-/// Eliminates the repetitive `tempfile::tempdir()` + `NonZeroUsize::new(4)` + assert
+/// Eliminates the repetitive `tempfile::tempdir()` + `NonZeroUsize::new(128)` + assert
 /// boilerplate found across ~105 test functions.
 pub struct TempStorage {
     /// The temporary directory (kept alive for the test duration).
@@ -77,7 +77,8 @@ impl TempStorage {
         #[allow(clippy::expect_used)]
         let temp = tempfile::tempdir().expect("failed to create temporary directory");
         #[allow(clippy::expect_used)]
-        let chunk_size = NonZeroUsize::new(4).expect("NonZeroUsize::new(4) should always succeed");
+        let chunk_size =
+            NonZeroUsize::new(128).expect("NonZeroUsize::new(128) should always succeed");
         Self { temp, chunk_size }
     }
     /// Returns the temporary directory path.

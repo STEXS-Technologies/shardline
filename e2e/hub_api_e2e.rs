@@ -167,7 +167,7 @@ async fn try_start_hub_server() -> Result<ServerGuard, Box<dyn std::error::Error
         addr,
         base_url.clone(),
         storage.path().to_path_buf(),
-        NonZeroUsize::new(4).unwrap(),
+        NonZeroUsize::new(128).unwrap(),
     )
     .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())?
     .with_server_frontends([ServerFrontend::Hub].iter().copied())?
@@ -206,7 +206,7 @@ async fn start_hub_server_with_signing_key(
         addr,
         base_url.clone(),
         storage.to_path_buf(),
-        NonZeroUsize::new(4).unwrap(),
+        NonZeroUsize::new(128).unwrap(),
     )
     .with_token_signing_key(signing_key.to_vec())?
     .with_server_frontends([ServerFrontend::Hub])?;

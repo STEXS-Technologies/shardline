@@ -143,6 +143,7 @@ fn make_record(
     let ch = content_hash(total_bytes, chunk_size, &chunks);
 
     FileRecord {
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         file_id: file_id.to_owned(),
         content_hash: ch,
         total_bytes,
@@ -334,6 +335,7 @@ async fn mismatched_version_record_detected() {
         content_hash: "b".repeat(64), // will be overridden below
         total_bytes: chunk_data.len() as u64,
         chunk_size: 4096,
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         repository_scope: None,
         chunks: vec![FileChunkRecord {
             hash: chunk_hash_hex.clone(),
@@ -366,6 +368,7 @@ async fn mismatched_version_record_detected() {
         content_hash: content_hash_val.clone(), // same as version
         total_bytes: 9999,                      // different from version
         chunk_size: 4096,
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         repository_scope: None,
         chunks: vec![FileChunkRecord {
             hash: chunk_hash_hex,
@@ -423,6 +426,7 @@ async fn non_contiguous_chunks_detected_via_reconstruction_plan() {
         content_hash: "b".repeat(64),
         total_bytes,
         chunk_size: 4096,
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         repository_scope: None,
         chunks,
     };
@@ -465,6 +469,7 @@ async fn store_with_invalid_chunk_hash_detected() {
         content_hash: "a".repeat(64),
         total_bytes: 10,
         chunk_size: 4096,
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         repository_scope: None,
         chunks: vec![FileChunkRecord {
             hash: "not-a-valid-hex-hash!!!!".to_owned(),

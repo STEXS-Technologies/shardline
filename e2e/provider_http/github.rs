@@ -302,10 +302,10 @@ async fn provider_webhook_endpoint_creates_repository_deletion_holds()
     assert_eq!(outcome.owner, "team");
     assert_eq!(outcome.repo, "assets");
     assert_eq!(outcome.affected_file_versions, 1);
-    assert_eq!(outcome.affected_chunks, 2);
-    assert_eq!(outcome.applied_holds, 4);
+    assert_eq!(outcome.affected_chunks, 1);
+    assert_eq!(outcome.applied_holds, 2);
 
-    assert_eq!(retention_hold_count(runtime.storage_path())?, 4);
+    assert_eq!(retention_hold_count(runtime.storage_path())?, 2);
     assert_provider_repository_state_absent(
         runtime.storage_path(),
         RepositoryProvider::GitHub,

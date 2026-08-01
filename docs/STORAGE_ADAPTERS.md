@@ -412,3 +412,4 @@ Every index adapter must pass:
 - persist and replace quarantine candidates
 - list quarantine candidates for sweep planning
 - delete quarantine state after recovery or successful sweep
+```

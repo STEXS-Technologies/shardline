@@ -53,7 +53,7 @@ async fn start_mixed_protocol_runtime() -> Result<MixedProtocolRuntime, Box<dyn 
         addr,
         base_url.clone(),
         storage.path().to_path_buf(),
-        NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN),
+        NonZeroUsize::new(128).unwrap_or(NonZeroUsize::MIN),
     )
     .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())?
     .with_server_frontends([
