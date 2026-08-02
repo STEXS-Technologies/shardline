@@ -143,9 +143,9 @@ semver promise** — target the **wire protocol**, not crate internals):
 | Rate limiting / overload handling | RetryWrapper: jittered exp backoff, `retry_max_attempts=5`, `retry_base_delay=3s`, `retry_max_duration=6min` | concurrency admission only (429/503, see §6) | **missing** — §6 |
 | Session/request correlation headers | `SESSION_ID_HEADER`, `REQUEST_ID_HEADER` | tolerated | **missing** |
 | Adaptive concurrency | `ac_max_healthy_rtt` etc. | n/a | **missing** — upload/download concurrency |
-| Streaming download (bounded memory, prefetch) | `xet-data` `DownloadStream`/`UnorderedDownloadStream`, `DataWriter`/`SequentialWriter` | ranged `/transfer/xorb` 206 | **missing** — §4.4 |
-| Streaming upload (incremental, no full-file buffering) | `FileUploadSession` (file-based upstream) | chunked xorb upload (≤64 MiB body default) | **missing** — §4.4 |
-| In-memory payloads (`Bytes`, no disk) | not in upstream (file-oriented) | n/a (CAS is buffer-agnostic) | **missing** — sdx differentiator |
+| Streaming download (bounded memory, prefetch) | `xet-data` `file_reconstruction`: `DownloadStream`/`UnorderedDownloadStream`, `DataWriter`/`SequentialWriter`/`UnorderedWriter`, `FileReconstructor` | ranged `/transfer/xorb` 206 | **missing** — §4.4 |
+| Streaming upload (incremental, no full-file buffering) | `xet-data` `processing`: `FileUploadSession`/`SingleFileCleaner`/`FileDeduper`; `hf-xet` `XetUploadStreamHandle` | chunked xorb upload (≤64 MiB body default) | **missing** — §4.4 |
+| In-memory payloads (`Bytes`, no disk) | `hf-xet` `XetUploadStreamHandle::write(Bytes)` + `download_to_bytes` | n/a (CAS is buffer-agnostic) | **missing** — §4.4 |
 | Credential/config management | `XetConfig`, token files | n/a | **missing** — §5.4 |
 | CLI cp/sync/ls/rm/cat/info/branch | pyxet-style surface (deprecated upstream) | n/a | **missing** — thin wrapper |
 
@@ -187,8 +187,9 @@ crates/sdx/src/
   xorb.rs           — XorbWriter/XorbReader (build, serialize, parse, ranged fetch)
   shard.rs          — shard build/upload (file registration, metadata)
   reconstruction.rs — v1/v2 reconstruction orchestration, range handling, fallback
-  dedup.rs          — global dedup query, eligibility (first chunk; last-8-bytes-LE % 1024 == 0; ~1 query / 4 MiB)
-  transfer.rs       — HTTP layer: xorb upload/download, chunk GET, 206 handling, multipart/byteranges
+  stream.rs          — pull-based DownloadStream/UnorderedDownloadStream, DataWriter trait (Sequential/Unordered), byte-denominated buffer semaphore
+  dedup.rs           — global dedup query, eligibility (first chunk; last-8-bytes-LE % 1024 == 0; ~1 query / 4 MiB)
+  transfer.rs       — HTTP layer: xorb upload/download (streaming bodies + explicit CONTENT_LENGTH), chunk GET, 206 handling, multipart/byteranges
   retry.rs          — RetryPolicy, jittered exponential backoff, error classification
   config.rs         — shardline.toml config, credential caching, env overrides
   session.rs        — UploadSession / DownloadSession (high-level file ops)
@@ -216,11 +217,14 @@ let session = client.download_session().await?;
 session.download_file("remote.bin", "local.bin").await?;
 session.download_range("remote.bin", 0..1024, "head.bin").await?;
 
-// Streaming + in-memory (no temp files):
-client.upload_stream("vector.bin", reader).await?;        // AsyncRead source
-client.upload_bytes("embedding.bin", &bytes).await?;      // Bytes / Vec<u8> in memory
+// Streaming + in-memory (no temp files; mirrors xet-data pull-based streams):
+let mut stream = client.download_stream("vector.bin", None).await?;   // or Some(0..64GiB)
+while let Some(chunk) = stream.next().await? { out.write_all(&chunk)?; } // cat pattern
 let bytes: Bytes = client.download_bytes("embedding.bin").await?;
-client.download_stream("vector.bin", writer).await?;      // AsyncWrite sink
+let mut upload = client.upload_stream("vector.bin").await?;           // push-style handle
+upload.write(&block).await?;                                          // 8 MiB slices
+upload.finish().await?;
+client.upload_bytes("embedding.bin", &bytes).await?;
 ```
 
 Session types mirror the reference `XetSession`/`FileDownloadSession` concepts
@@ -229,28 +233,148 @@ stream group, abort/status.
 
 ### 4.4 Streaming and in-memory data
 
-The library is **not limited to file paths**. Two orthogonal additions over the
-file-oriented API:
+**Guiding principle: mirror upstream `xet-data` 1.5.4 / `hf-xet` mechanics
+exactly, then map each call onto shardline's Xet frontend.** The design below
+is a direct translation of the verified registry sources
+(`xet-data-1.5.4/src`, `hf-xet-1.5.4/src`, `xet-client-1.5.4/src`), not an
+original invention. Goal: stream files of **hundreds of gigabytes** with
+**memory bounded independent of file size** — the file is chunked incrementally
+and streamed out (e.g. to stdout/socket), never buffered whole in RAM.
 
-- **Streaming** (`upload_stream`/`download_stream`): byte-oriented transfer with
-  bounded memory, no full-file buffering.
-  - Upload: `impl AsyncRead` (or `futures::Stream<Item = Bytes>`) is consumed
-    incrementally → CDC chunking as bytes arrive → chunks buffered into xorbs
-    (≤16 MiB blocks, ≤8192 chunks) → xorb POSTed when full or at EOF; a config
-    threshold (e.g. ~1 xorb) bounds in-flight memory. Same dedup/idempotency as
-    file uploads.
-  - Download: reconstruction terms drive **ranged** `/transfer/xorb` fetches;
-    decoded chunks are yielded to `impl AsyncWrite` with backpressure
-    (mirrors `xet-data` `DownloadStream`/`UnorderedDownloadStream` +
-    `DataWriter`/`SequentialWriter`). Supports partial ranges mid-stream.
-- **In-memory payloads** (`upload_bytes`/`download_bytes`): `Bytes`/`Vec<u8>`
-  exchange, zero-copy where possible (`Bytes` is the wire type). Target use
-  case: vector binaries, embedding tensors, generated blobs — anything a
-  program holds in memory that should never touch disk. Internally routed
-  through the same chunk/xorb/transfer machinery (a `Bytes` is just an
-  `AsyncRead` over a buffer).
-- CLI: `sdx cat` already streams to stdout; `cp -`/`cat -` conventions let the
-  CLI read stdin / write stdout for pipe workflows.
+#### 4.4.1 Download: pull-based stream with byte-denominated memory cap
+
+Mirror `xet-data/src/file_reconstruction/` (`download_stream.rs`,
+`unordered_download_stream.rs`, `file_reconstructor.rs`, `data_writer/`).
+
+- **API shape is pull-based, not `AsyncRead`**: `DownloadStream` has
+  `next()` (async) / `blocking_next()` (sync, usable from CLI threads)
+  returning `Option<Bytes>` (`Ok(None)` = EOF or cancellation). The consumer
+  pulls `Bytes` chunks one at a time and forwards them to a socket/stdout.
+  `UnorderedDownloadStream::next()` yields `(u64 file_offset, Bytes)` in
+  completion order, with progress probes (`total_bytes_expected()`,
+  `bytes_in_progress()`, `bytes_completed()`).
+- **Memory bound = byte-denominated adjustable semaphore** (mirror
+  `reconstruction_download_buffer`): default `download_buffer_size = 2 GiB`
+  (base), `per-file = 512 MiB`, hard `limit = 8 GiB`, scaled per active
+  download (`increment_permits_to_target` on enter, shrink via guard on exit).
+  Every in-flight term carries a byte-permit (`acquire_many(term_size)`) that
+  is released **only after the consumer actually consumed those bytes** —
+  so in-flight buffered bytes ≤ semaphore capacity, and sdx exposes the same
+  knob for memory-constrained clients (e.g. `2 MiB` for tiny runners).
+- **Pipeline**: `FileReconstructor::new(client, file_hash)` (builder:
+  `.with_byte_range`, `.with_chunk_cache`, `.with_buffer_semaphore`,
+  `.with_cancellation_token`) → background task runs:
+  1. `ReconstructionTermManager` **prefetches term-metadata blocks**
+     (`GET /v1|v2/reconstructions/{file_id}` with `Range` header) keeping
+     `prefetched_pos - active_pos ≥ min_prefetch_buffer` (default 1 GiB),
+     block sizes clamped `[min_reconstruction_fetch_size, max_reconstruction_fetch_size]`
+     (defaults 256 MiB / 8 GiB; estimator-driven, not fixed).
+  2. For each term: xorb chunk ranges computed from the reconstruction block
+     (dedup map `(xorb_hash, first_chunk_start) → XorbBlock` shares blocks
+     across terms); chunk cache checked first (on-disk, key
+     `(prefix, xorb_hash) + first chunk range`).
+  3. Miss → `acquire_download_permit()` (CAS connection permit, adaptive
+     controller: initial 4, min 1, max 64, `ac_max_healthy_rtt = 90s`) →
+     **ranged `GET /transfer/xorb/{prefix}/{hash}`** with
+     `Range: bytes=S-E` (single range per request by default;
+     `enable_multirange_fetching=false`) → 206 body **streaming-decompressed**
+     into one `Bytes` (sized via `uncompressed_size_if_known`); multi-range
+     responses parse `multipart/byteranges`. **403 → refresh URLs** (shardline:
+     token refresh, single-flight) and retry. Best-effort async chunk-cache put.
+  4. `FileTerm::extract_bytes` slices the xorb data **zero-copy**
+     (`Bytes::slice`) into per-file-term bytes; the reconstruction loop hands
+     `(relative_byte_range, buffer_permit, data_future)` to the writer.
+- **DataWriter abstraction** (mirror `data_writer.rs`): trait
+  `set_next_term_data_source(byte_range, Option<permit>, data_future)` +
+  `finish() -> u64`. `SequentialWriter`: background thread enforces strict
+  byte-range contiguity, `write_all`/vectorized `write_vectored` (≤24 iovecs),
+  then `flush()`; **only then the buffer permit is released**. `UnorderedWriter`:
+  completion order, explicit offsets. `reconstruct_to_writer<W: Write>` runs any
+  `std::io::Write` sink (file, stdout) on `spawn_blocking`.
+- **Cancellation**: `RunState` — `cancel()`/`Drop` aborts promptly; errors
+  surface via `check_error()` at item boundaries; `abort_active_streams()`
+  fires all registered stream callbacks.
+- sdx public surface:
+  `download_stream(file_id, Option<Range>) -> DownloadStream`,
+  `download_unordered_stream(...)`, `download_to_writer(writer)`,
+  `download_bytes() -> Bytes` — CLI `cat` is exactly upstream `xtool`
+  `download.rs`: loop `while let Some(chunk) = stream.next()` →
+  `stdout().write_all(&chunk)`.
+
+#### 4.4.2 Upload: push-style incremental ingest, chunked on the file
+
+Mirror `xet-data/src/processing/` (`file_upload_session.rs`, `file_cleaner.rs`,
+`deduplication/file_deduplication.rs`, `deduplication/data_aggregator.rs`) and
+`hf-xet/xet_session/upload_stream_handle.rs`.
+
+- **Incremental primitive is push-style**: `SingleFileCleaner::add_data(Bytes)`
+  / `add_data_from_bytes` repeatedly, then `finish()`; file uploads are a thin
+  loop over it reading **8 MiB `ingestion_block_size` blocks** — the file is
+  chunked on the file, never buffered whole. sdx exposes the same primitive
+  (`upload_stream_handle.write(Bytes)` / `finish()` mirror), which is exactly
+  the in-memory/vector-binary path: feed `Bytes`/`Vec<u8>` directly, no file.
+- **CDC on a compute thread** (`spawn_blocking` → gear-hash chunker, 64 KiB
+  target / 8–128 KiB bounds, zero-copy `Bytes` slices within the 8 MiB block,
+  partial trailing chunk buffered in `chunkbuf`); SHA-256 updated concurrently;
+  dedup stage spawned as background task.
+- **Dedup loop** (per chunk batch): local session/cache shard lookup first;
+  if no hit and eligible (chunk index 0, or spaced ≥ `min_spacing_between_global_dedup_queries`
+  = 256 chunks ≈ 4 MiB): background `query_for_global_dedup_shard` →
+  `POST /v1/chunks/default-merkledb/{hash}` with **429-no-retry** and 404 =
+  cache miss; returned shard imported, pass re-run once. Defrag-prevention
+  hysteresis (min 8 chunks/range, 0.5 hysteresis, 128-range window).
+- **Xorb cut/flush condition** (mirror exactly): `new_data_size + n > 64 MiB
+  || new_data.len() + 1 > 8192` → `cut_new_xorb` → serialize on compute thread
+  (footer-less) → `acquire_upload_permit()` (adaptive, initial 2, min 1,
+  max 64) → **`POST /v1/xorbs/default/{hash}` with a streaming body**
+  (512 KiB progress blocks, explicit `CONTENT_LENGTH` — fits shardline's
+  default 64 MiB body limit) from a `JoinSet` of parallel upload tasks.
+- **finalize**: cut session tail via `DataAggregator` (64 MiB/8192), join all
+  xorb uploads, then upload merged session shards → `POST /v1/shards`
+  (footer-stripped, dedicated no-read-timeout client, one permit each), then
+  move to cache dir.
+- **RAM bound during upload**: one 8 MiB ingest block + one in-progress xorb
+  (≤64 MiB) + one session tail aggregator (≤64 MiB) — **independent of file
+  size**. Same discipline for in-memory payloads: a multi-GB `Bytes` is fed in
+  8 MiB slices, never cloned whole.
+- In-memory / non-file data (vector binaries, embeddings, generated blobs):
+  `upload_bytes(remote, &bytes)` / `upload_stream(remote, reader)` are
+  first-class APIs; the CAS layer is buffer-agnostic — only bytes matter, no
+  path semantics.
+
+#### 4.4.3 Session/stream-group layer
+
+Mirror `hf-xet/xet_session/` (`download_stream_group.rs`,
+`upload_stream_handle.rs`, `session.rs`):
+
+- `new_download_stream_group()` builder: `.with_endpoint`,
+  `.with_custom_headers`, `.with_token_info`, `.with_token_refresh_url` →
+  `build()`; each group owns a `FileDownloadSession` and registers weak refs
+  for `XetSession::abort()` (cancels runtime subtree + `abort_active_streams`).
+- `XetUploadCommit::upload_stream` → handle with `write(Bytes)`/`finish()`
+  fanning into the same cleaner pipeline.
+- Status via `XetSession::status()` / `XetTaskState`; streams unregister on
+  `Drop`.
+
+#### 4.4.4 Streaming-path retry/timeout behavior (mirror + shardline delta)
+
+- RetryWrapper defaults: `retry_max_attempts = 5`, `retry_base_delay = 3 s`,
+  `retry_max_duration = 6 min`, exponential + jitter; 5xx/408/429 transient,
+  other 4xx fatal, connect/timeout/`IncompleteMessage`/`Canceled` transient.
+- `.with_429_no_retry()` only on dedup queries; `.with_retry_on_403()` only on
+  ranged xorb fetch (URL refresh); `.with_expected_416()` on reconstruction
+  (past-EOF → `Ok(None)`); `.with_expected_404()` on dedup (cache miss).
+- **No `Retry-After` handling upstream** (pure config backoff) — shardline
+  sends `Retry-After: 1` on 503s, so sdx adds honoring it (strictly better,
+  still wire-compatible).
+- Timeouts: read 300 s (resets per packet), connect 60 s, idle 60 s; shard
+  uploads use the no-read-timeout client.
+- `X-Xet-Session-Id` on every request; `X-Request-Id` read from responses for
+  logging.
+- Note: upstream `download_buffer_size = 2 GiB` default is generous; sdx keeps
+  the same defaults but exposes them as tunables (§6.4), and the CLI `cat`
+  path should run with a modest cap (e.g. 64–256 MiB) since it forwards to
+  stdout in real time.
 
 ## 5. Authentication design
 
@@ -409,17 +533,23 @@ Mirrors `docs/XET_NATIVE_CLI.md` stub phases, with the library-first addition:
 - **M2 — Read path (download).** v2/v1 reconstruction client + fallback, ranged
   `/transfer/xorb` fetch, 206/multipart parsing, chunk deserialization,
   `unpacked_length` validation, file assembly, `DownloadSession` + `download_file`
-  / `download_range`. Streaming download: `download_stream` (AsyncWrite sink,
-  backpressure, bounded buffering) + `download_bytes`. E2E: download files
-  uploaded via server ingest; byte-identical.
+  / `download_range`. Streaming download (mirror `xet-data` §4.4.1): pull-based
+  `DownloadStream`/`UnorderedDownloadStream` (`next()`/`blocking_next()`),
+  byte-denominated buffer semaphore (configurable cap), term-metadata prefetch,
+  `DataWriter` (Sequential/Unordered), `reconstruct_to_writer`,
+  `download_bytes`. E2E: download files uploaded via server ingest; byte-identical;
+  **memory-bounded cat of a large file (e.g. 64 GiB synthetic) asserting
+  resident RAM stays ≪ file size**.
 - **M3 — Write path (upload).** Client CDC chunker (verify byte-identity against
   server `CdcChunker`), global dedup query + eligibility, xorb build/serialize/
   upload, shard build/upload (xorbs-before-shard), `UploadSession` +
-  `upload_file` + idempotency. Streaming upload: `upload_stream` (AsyncRead →
-  incremental chunking → xorb flush) + `upload_bytes`/`download_bytes`
-  (in-memory `Bytes`, zero-copy). E2E: upload → server-side reconstruct →
-  identical; cross-file dedup (same chunks stored once); streaming upload of a
-  large reader with bounded memory.
+  `upload_file` + idempotency. Streaming upload (mirror §4.4.2): push-style
+  `add_data(Bytes)` ingest loop (8 MiB blocks), CDC on compute thread, xorb cut
+  at 64 MiB/8192, streaming-body xorb POST, session tail aggregator,
+  `upload_stream` handle + `upload_bytes` (in-memory `Bytes`, zero-copy). E2E:
+  upload → server-side reconstruct → identical; cross-file dedup (same chunks
+  stored once); **streaming upload of a large reader with bounded memory
+  (assert in-flight RAM ≈ 8 MiB + ≤64 MiB xorb + tail)**.
 - **M4 — Retry/backoff + concurrency.** `RetryPolicy`, jittered exponential
   backoff, error classification, `Retry-After` honoring, adaptive/fixed
   concurrency, session/request correlation headers. E2E: 503 saturation tests
