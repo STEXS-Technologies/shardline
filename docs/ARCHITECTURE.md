@@ -449,7 +449,7 @@ Token-gated in production via `SHARDLINE_METRICS_TOKEN_FILE`.
 
 ## Database Migrations
 
-Shardline ships 13 bundled migrations applied via `shardline db migrate up`:
+Shardline ships 14 bundled migrations applied via `shardline db migrate up`:
 
 1. `metadata_store` — core index and record tables
 2. `retention_holds` — GC retention hold tracking
@@ -464,6 +464,7 @@ Shardline ships 13 bundled migrations applied via `shardline db migrate up`:
 11. `drop_inline_content` — remove inline content column
 12. `drop_lfs_objects` — remove legacy LFS objects table
 13. `fix_indexes` — database index optimizations
+14. `upload_intents` — upload lifecycle intent tracking
 
 SQLite uses `BLOB`/`INTEGER`; Postgres uses `BYTEA`/`BOOLEAN`/`BIGINT`. Migrations are
 stored in `migrations/` (Postgres) and `crates/shardline-index/migrations/` (SQLite).

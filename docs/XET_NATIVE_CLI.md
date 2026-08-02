@@ -417,7 +417,8 @@ shardx cp ./data.bin xet://host/... --compression lz4
 
 When the CLI uploads a file, it:
 
-1. Splits the file into fixed-size chunks (configurable, default 64 KiB).
+1. Chunks the file with content-defined chunking (gear-hash CDC, target configurable,
+   default 64 KiB) matching the server's ingest chunker.
 2. Hashes each chunk with BLAKE3.
 3. Checks each chunk hash against the CAS server (idempotent put — existing chunks are
    skipped).
@@ -476,7 +477,7 @@ adapter that cannot issue presigned URLs.
 The CLI reads configuration from a file or environment variables:
 
 ```toml
-# ~/.config/shardline/config.toml or SHARDLINE_CONFIG
+# ~/.config/shardline/shardline.toml or SHARDLINE_CONFIG
 [default]
 endpoint = "http://127.0.0.1:8080"
 provider = "generic"

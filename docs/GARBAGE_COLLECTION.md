@@ -352,10 +352,13 @@ The orphan inventory contains one entry per currently orphaned object, including
 These exports are intended for lifecycle automation, reviewable batch-deletion
 workflows, and operator dashboards.
 
-Immediate deletion for local testing is still possible:
+Near-immediate deletion for local testing is possible, but the retention window is
+clamped: values below `MINIMUM_GC_RETENTION_SECONDS` (3600 seconds) are raised to that
+minimum, so `--retention-seconds 0` still waits 3600 seconds before deletion becomes
+eligible.
 
 ```bash
-shardline gc --mark --sweep --retention-seconds 0
+shardline gc --mark --sweep --retention-seconds 3600
 ```
 
 Current non-goals:
