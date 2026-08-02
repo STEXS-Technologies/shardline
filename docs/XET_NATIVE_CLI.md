@@ -1,7 +1,7 @@
 # Xet-Native File Management CLI
 
 > **Status:** Design proposal.
-> The `shardx` CLI described here is not yet implemented.
+> The `sdx` CLI described here is not yet implemented.
 > See [issue #19](https://github.com/STEXS-Technologies/shardline/issues/19) for the
 > current tracking issue.
 
@@ -11,7 +11,7 @@ custom transfer agent that works with any server supporting the Xet protocol, in
 shardline. However, there is no standalone CLI for uploading and downloading files
 outside of a Git workflow.
 
-This document describes a file-transfer entrypoint `shardx` that provides native file
+This document describes a file-transfer entrypoint `sdx` that provides native file
 management against any Xet-compatible server, including shardline itself.
 
 ## Goals
@@ -27,7 +27,7 @@ management against any Xet-compatible server, including shardline itself.
   server endpoint → scoped CAS token → content-addressed xorb transfer.
 - Support recursive directory upload, filtered download, incremental sync, and streaming
   large files.
-- Ship as a single `shardline` binary — `shardx` is a symlink that invokes the same
+- Ship as a single `shardline` binary — `sdx` is a symlink that invokes the same
   binary, which detects `argv[0]` and routes to the `xet` subcommand automatically.
 
 ## Non-Goals
@@ -45,7 +45,7 @@ management against any Xet-compatible server, including shardline itself.
 
 ## Dispatch Model
 
-`shardx` is not a separate binary.
+`sdx` is not a separate binary.
 It is a symlink to `shardline`. The binary detects the invocation name at startup and
 dispatches accordingly:
 
@@ -59,7 +59,7 @@ flowchart TD
     Binary --> Invocation{argv[0]}
 
     Invocation -->|shardline| Operator[Operator commands]
-    Invocation -->|shardx| Xet[Xet file-transfer commands]
+    Invocation -->|sdx| Xet[Xet file-transfer commands]
 
     subgraph Operator[ ]
         Serve[serve]
@@ -95,7 +95,7 @@ flowchart TD
   linkStyle default stroke:#111827,stroke-width:1.5px;
 ```
 
-Users who type `shardx cp` get a focused file-transfer surface with no server-operations
+Users who type `sdx cp` get a focused file-transfer surface with no server-operations
 commands. Users who type `shardline serve` get the operator surface.
 But both come from the same binary — one build, one version, one install.
 
@@ -103,15 +103,15 @@ Install-time setup:
 
 ```bash
 # The binary ships as shardline. A symlink is created at install time.
-ln -s shardline /usr/local/bin/shardx
+ln -s shardline /usr/local/bin/sdx
 ```
 
 For development:
 
 ```bash
 cargo build
-ln -s target/debug/shardline target/debug/shardx
-./target/debug/shardx cp ./model.pt xet://...
+ln -s target/debug/shardline target/debug/sdx
+./target/debug/sdx cp ./model.pt xet://...
 ```
 
 ## Protocol Flow
@@ -121,11 +121,11 @@ The CLI interacts with a Xet-protocol server through a three-step sequence:
 ```mermaid
 sequenceDiagram
   participant User as User
-  participant CLI as shardx
+  participant CLI as sdx
   participant Server as Xet Server
   participant CAS as CAS Layer
 
-  User->>CLI: shardx cp file.bin org/repo/main/
+  User->>CLI: sdx cp file.bin org/repo/main/
   CLI->>Server: GET /api/{provider}/{owner}/{repo}/xet-write-token/{rev}?subject={subject}
   Server-->>CLI: { casUrl, accessToken, exp }
 
@@ -142,7 +142,7 @@ sequenceDiagram
   CLI->>Server: POST /v1/shards (optional: register file metadata)
   Server-->>CLI: 200 OK
 
-  User->>CLI: shardx cp xet://server/org/repo/main/file.bin .
+  User->>CLI: sdx cp xet://server/org/repo/main/file.bin .
   CLI->>Server: GET /api/{provider}/{owner}/{repo}/xet-read-token/{rev}?subject={subject}
   Server-->>CLI: { casUrl, accessToken, exp }
 
@@ -235,32 +235,32 @@ Examples:
 
 ```bash
 # Upload local file to remote
-shardx cp ./model.pt xet://127.0.0.1:8080/generic/myorg/myrepo/main/model.pt
+sdx cp ./model.pt xet://127.0.0.1:8080/generic/myorg/myrepo/main/model.pt
 
 # Download remote file to local
-shardx cp xet://127.0.0.1:8080/generic/myorg/myrepo/main/model.pt .
+sdx cp xet://127.0.0.1:8080/generic/myorg/myrepo/main/model.pt .
 
 # Sync local directory into remote
-shardx sync ./dataset/ xet://127.0.0.1:8080/generic/myorg/myrepo/main/
+sdx sync ./dataset/ xet://127.0.0.1:8080/generic/myorg/myrepo/main/
 
 # List remote directory
-shardx ls xet://127.0.0.1:8080/generic/myorg/myrepo/main/
+sdx ls xet://127.0.0.1:8080/generic/myorg/myrepo/main/
 
 # Print file to stdout
-shardx cat xet://127.0.0.1:8080/generic/myorg/myrepo/main/model.pt
+sdx cat xet://127.0.0.1:8080/generic/myorg/myrepo/main/model.pt
 
 # Get file info
-shardx info xet://127.0.0.1:8080/generic/myorg/myrepo/main/model.pt
+sdx info xet://127.0.0.1:8080/generic/myorg/myrepo/main/model.pt
 
 # Remove file
-shardx rm xet://127.0.0.1:8080/generic/myorg/myrepo/main/model.pt
+sdx rm xet://127.0.0.1:8080/generic/myorg/myrepo/main/model.pt
 ```
 
 The CLI should also accept a shorthand form when the server, auth, and default provider
 are configured:
 
 ```bash
-shardx cp ./model.pt myorg/myrepo/main/
+sdx cp ./model.pt myorg/myrepo/main/
 ```
 
 ## Authentication
@@ -275,7 +275,7 @@ The CLI authenticates to the server via one of the following, checked in order:
    configuration file
 
 These are the same environment variables the `shardline` binary uses.
-Since `shardx` is the same binary invoked by symlink, it shares the configuration
+Since `sdx` is the same binary invoked by symlink, it shares the configuration
 namespace.
 A user who already has `SHARDLINE_TOKEN` set for the operator tooling gets the
 same auth for file transfers without additional setup.
@@ -299,16 +299,16 @@ Supports recursive directory transfer.
 
 ```bash
 # Upload file
-shardx cp ./local.bin xet://host/provider/owner/repo/rev/remote.bin
+sdx cp ./local.bin xet://host/provider/owner/repo/rev/remote.bin
 
 # Upload directory recursively
-shardx cp ./data/ xet://host/provider/owner/repo/rev/ --recursive
+sdx cp ./data/ xet://host/provider/owner/repo/rev/ --recursive
 
 # Download file
-shardx cp xet://host/provider/owner/repo/rev/remote.bin ./local.bin
+sdx cp xet://host/provider/owner/repo/rev/remote.bin ./local.bin
 
 # Download directory
-shardx cp xet://host/provider/owner/repo/rev/data/ ./data/ --recursive
+sdx cp xet://host/provider/owner/repo/rev/data/ ./data/ --recursive
 ```
 
 The chunking and xorb construction uses the same `XorbWriter` from
@@ -324,10 +324,10 @@ Push-only directory synchronization modeled on `rsync` and `aws s3 sync`.
 
 ```bash
 # Push local directory to remote, uploading only changed files
-shardx sync ./data/ xet://host/provider/owner/repo/rev/data/
+sdx sync ./data/ xet://host/provider/owner/repo/rev/data/
 
 # Pull remote directory to local
-shardx sync xet://host/provider/owner/repo/rev/data/ ./data/
+sdx sync xet://host/provider/owner/repo/rev/data/ ./data/
 ```
 
 The sync implementation compares file sizes and modification times (local) against
@@ -339,9 +339,9 @@ For each file that needs transfer, it reuses the same `cp` xorb pipeline.
 List files and directories at a remote path.
 
 ```bash
-shardx ls xet://host/provider/owner/repo/rev/
-shardx ls xet://host/provider/owner/repo/rev/data/ --long
-shardx ls xet://host/provider/owner/repo/ --branches
+sdx ls xet://host/provider/owner/repo/rev/
+sdx ls xet://host/provider/owner/repo/rev/data/ --long
+sdx ls xet://host/provider/owner/repo/ --branches
 ```
 
 Output mirrors familiar UNIX `ls` conventions.
@@ -353,8 +353,8 @@ The `--branches` flag lists available revisions.
 Remove a file from a remote repository revision.
 
 ```bash
-shardx rm xet://host/provider/owner/repo/rev/file.bin
-shardx rm xet://host/provider/owner/repo/rev/data/ --recursive
+sdx rm xet://host/provider/owner/repo/rev/file.bin
+sdx rm xet://host/provider/owner/repo/rev/data/ --recursive
 ```
 
 Removal marks the file for garbage collection.
@@ -366,7 +366,7 @@ Stream a remote file to stdout.
 Useful for piping into other tools.
 
 ```bash
-shardx cat xet://host/provider/owner/repo/rev/model.pt | python3 -c "..."
+sdx cat xet://host/provider/owner/repo/rev/model.pt | python3 -c "..."
 ```
 
 The cat implementation reconstructs the file and streams it without writing to disk.
@@ -378,8 +378,8 @@ arrives.
 Display metadata about a remote file or repository revision.
 
 ```bash
-shardx info xet://host/provider/owner/repo/rev/model.pt
-shardx info xet://host/provider/owner/repo/rev/
+sdx info xet://host/provider/owner/repo/rev/model.pt
+sdx info xet://host/provider/owner/repo/rev/
 ```
 
 Output includes file size, content hash, chunk count, chunk-level deduplication
@@ -390,9 +390,9 @@ statistics, and modification time.
 List, create, or delete revisions (branches).
 
 ```bash
-shardx branch xet://host/provider/owner/repo/
-shardx branch xet://host/provider/owner/repo/ --create new-feature
-shardx branch xet://host/provider/owner/repo/ --delete old-feature
+sdx branch xet://host/provider/owner/repo/
+sdx branch xet://host/provider/owner/repo/ --create new-feature
+sdx branch xet://host/provider/owner/repo/ --delete old-feature
 ```
 
 ## Chunking and Deduplication
@@ -401,7 +401,7 @@ The CLI reuses the same chunking parameters and xorb format that the server uses
 The chunk-size boundary is configurable:
 
 ```bash
-shardx cp ./large.bin xet://host/... --chunk-size 65536
+sdx cp ./large.bin xet://host/... --chunk-size 65536
 ```
 
 Default chunk size matches the server default (`SHARDLINE_CHUNK_SIZE_BYTES`, typically
@@ -412,7 +412,7 @@ Default chunk size matches the server default (`SHARDLINE_CHUNK_SIZE_BYTES`, typ
 - `bg4lz4`: bg4lz4 compression
 
 ```bash
-shardx cp ./data.bin xet://host/... --compression lz4
+sdx cp ./data.bin xet://host/... --compression lz4
 ```
 
 When the CLI uploads a file, it:
@@ -455,7 +455,7 @@ The implementation draws on existing workspace crates as libraries:
 
 The CLI does not depend on `shardline-server`. It uses the protocol crate and the
 adapter crate as client-side libraries.
-The server dependency is limited to the HTTP API contract — `shardx` is a client, not an
+The server dependency is limited to the HTTP API contract — `sdx` is a client, not an
 embedded server.
 
 ## Remote Operation
@@ -496,7 +496,7 @@ Config file values override environment variables.
 
 ## Packaging
 
-There is one binary: `shardline`. The `shardx` name is a symlink created at install
+There is one binary: `shardline`. The `sdx` name is a symlink created at install
 time.
 
 ```bash
@@ -505,7 +505,7 @@ cargo build --workspace
 
 # Install
 cp target/release/shardline /usr/local/bin/shardline
-ln -s shardline /usr/local/bin/shardx
+ln -s shardline /usr/local/bin/sdx
 ```
 
 The release archive ships one binary plus the symlink:
@@ -513,12 +513,12 @@ The release archive ships one binary plus the symlink:
 ```bash
 shardline-x.x.x-x86_64-unknown-linux-gnu/
 ├── shardline          # the only binary
-├── shardx -> shardline
+├── sdx -> shardline
 ├── shardline.1        # manpage (covers both entrypoints)
 └── shardline.bash     # shell completion
 ```
 
-The install script creates the `shardx` symlink automatically.
+The install script creates the `sdx` symlink automatically.
 Package managers (rpm, deb, Homebrew) should declare the symlink as a package symlink,
 not a separate binary.
 
