@@ -56,7 +56,7 @@ Registered in `crates/shardline-server/src/app.rs` (`register_xet_routes`,
 |---|---|---|
 | `/reconstructions`, `/v1/reconstructions` | GET | Batch reconstruction (`?file_id=`, max 1024 ids) |
 | `/v1/reconstructions/{file_id}` | GET | v1 reconstruction (`?content_hash=`, `Range:`) |
-| `/v2/reconstructions/{file_id}` | GET | v2 response (multi-range fetch descriptors) |
+| `/v2/reconstructions/{file_id}` | GET | v2 response (multi-range fetch descriptors; single range per xorb in practice — v2 wraps v1) |
 | `/shards`, `/v1/shards` | POST | Shard upload + atomic file registration; `{result: 0\|1}` |
 
 **CAS data plane:**
@@ -104,9 +104,11 @@ Registered in `crates/shardline-server/src/app.rs` (`register_xet_routes`,
 
 ### 2.4 Reference client stack (what "full Xet frontend support" means)
 
-From `huggingface/xet-core` (shardline vendors `xet-client`/`xet-data`/
-`xet-core-structures` 1.5.1; current upstream is 1.5.4, published **without a
-semver promise** — target the **wire protocol**, not crate internals):
+From `huggingface/xet-core` (shardline's workspace declares
+`xet-client`/`xet-data`/`xet-core-structures` 1.5.1, and `Cargo.lock` resolves
+**1.5.2** as registry dependencies — not vendored; current upstream is 1.5.4,
+published **without a semver promise** — target the **wire protocol**, not
+crate internals):
 
 - `xet-client`: `cas_client::Client` trait — `get_reconstruction` (v2 with v2→v1
   fallback), `batch_get_reconstruction`, `get_file_reconstruction_info`,
@@ -125,6 +127,25 @@ semver promise** — target the **wire protocol**, not crate internals):
 - `hf-xet`: `XetSession`/`XetSessionBuilder` high-level sessions with
   `with_endpoint`, `with_token_info`, `with_token_refresh_url`,
   `with_custom_headers`.
+
+### 2.5 Server additions required for path addressing (part of issue #19)
+
+Audit finding (2026-08): the Xet frontend addresses content **only by 64-hex
+`file_id`** — there is no path→hash resolution, no listing, no branch, no
+deregistration endpoint. Per decision, issue #19 **includes server-side
+metadata endpoints** — the only server changes in this issue:
+
+| Capability | Endpoint (shape TBD in M5) | Notes |
+|---|---|---|
+| Path→file_id resolution | `GET .../tree/{rev}?path=...` | Resolves `xet://.../rev/path` to a 64-hex `file_id` for reconstruction; read-token auth; revision-scoped |
+| Listing | `GET .../tree/{rev}?prefix=...` | Directory listing for `ls` and `sync`; pagination |
+| Deregistration | `DELETE .../path/{rev}/{path}` | `rm`; semantics vs immutable CAS (mark-deleted vs remove record; GC interaction per `docs/reachability-model.md`) |
+| Branch/revision management | `GET/POST/DELETE .../revisions` | `branch --create/--delete`, `ls --branches`; depends on shardline's provider-scoped revision model (§11 Q4) |
+
+Exact routes/shapes are designed in M5 alongside client modules `tree.rs` /
+`revisions.rs`. Interop note: this path namespace is shardline-specific
+(upstream resolves paths through git trees, which shardline does not serve);
+the client's file_id-level operations remain portable (§4.4.1).
 
 ## 3. Feature parity matrix
 
@@ -146,13 +167,14 @@ semver promise** — target the **wire protocol**, not crate internals):
 | Streaming download (bounded memory, prefetch) | `xet-data` `file_reconstruction`: `DownloadStream`/`UnorderedDownloadStream`, `DataWriter`/`SequentialWriter`/`UnorderedWriter`, `FileReconstructor` | ranged `/transfer/xorb` 206 | **missing** — §4.4 |
 | Streaming upload (incremental, no full-file buffering) | `xet-data` `processing`: `FileUploadSession`/`SingleFileCleaner`/`FileDeduper`; `hf-xet` `XetUploadStreamHandle` | chunked xorb upload (≤64 MiB body default) | **missing** — §4.4 |
 | In-memory payloads (`Bytes`, no disk) | `hf-xet` `XetUploadStreamHandle::write(Bytes)` + `download_to_bytes` | n/a (CAS is buffer-agnostic) | **missing** — §4.4 |
-| Credential/config management | `XetConfig`, token files | n/a | **missing** — §5.4 |
+| Credential/config management | `XetConfig`, token files | n/a | **missing** — §5.2 |
 | CLI cp/sync/ls/rm/cat/info/branch | pyxet-style surface (deprecated upstream) | n/a | **missing** — thin wrapper |
 
 **Conclusion:** every client-side capability in the table above is **missing**;
-there is no prior client code in this workspace. The server needs **no changes**
-for the listed phases (consistent with `docs/XET_NATIVE_CLI.md`), except any
-future features like `/v2/file-chunk-hashes` (deferred, not part of #19).
+there is no prior client code in this workspace. The CAS/data-plane server
+routes need **no changes**; the only server work in issue #19 is the **new
+path/metadata endpoints** for path addressing (§2.5). `/v2/file-chunk-hashes`
+remains deferred (not part of #19).
 
 ## 4. Architecture
 
@@ -163,12 +185,24 @@ New crate: **`crates/sdx`** (package name `sdx`). Dependencies:
 - `shardline-protocol` — token types, hash types, ByteRange, SecretString
 - `shardline-xet-adapter` — XorbWriter/XorbReader/XorbStore contracts (add
   client-facing constructors if the adapter stays clean; otherwise the sdx crate
-  implements them)
-- `shardline-server-core` — reconstruction planning, validation limits
+  implements them); reconstruction response building lives here
+  (`reconstruction.rs`), **not** `shardline-server-core`
+- `shardline-validation` — `ShardMetadataLimits` and validation limits (the
+  `shardline-server-core` dependency in earlier drafts was wrong)
+- `xet-core-structures` (**pinned exact version**, per §11 Q3/Q6) — Merkle hash,
+  `xorb_object` (`ByteGrouping4LZ4`), chunk-format constants; do **not**
+  reimplement BG4
 - `shardline-storage` — ObjectStore trait (contract only, not embedded)
 - `tokio`, `reqwest` (HTTP), `lz4_flex`, `blake3`, `clap` (CLI only), `serde`
 
 Must **not** depend on `shardline-server`.
+
+**Chunker source decision (M3):** the server's `CdcChunker`
+(`shardline-server/src/upload_ingest/cdc.rs`) is the one crate sdx is forbidden
+to depend on. sdx therefore uses the **upstream `xet-data` `Chunker`/`gearhash`**
+(dependency of the pinned `xet-core-structures`) — the same code the server
+claims byte-identity with — and proves byte-identity via E2E tests, not via
+shared code.
 
 CLI surface lives in the existing CLI binary crate (`crates/shardline`; issue #19's
 `crates/cli` refers to this same surface), routed by `argv[0]` symlink detection per
@@ -187,12 +221,15 @@ crates/sdx/src/
   xorb.rs           — XorbWriter/XorbReader (build, serialize, parse, ranged fetch)
   shard.rs          — shard build/upload (file registration, metadata)
   reconstruction.rs — v1/v2 reconstruction orchestration, range handling, fallback
-  stream.rs          — pull-based DownloadStream/UnorderedDownloadStream, DataWriter trait (Sequential/Unordered), byte-denominated buffer semaphore
-  dedup.rs           — global dedup query, eligibility (first chunk; last-8-bytes-LE % 1024 == 0; ~1 query / 4 MiB)
+  stream.rs          — pull-based DownloadStream/UnorderedDownloadStream, DataWriter trait (Sequential/Unordered), byte-denominated buffer semaphore, RunState cancellation/error propagation
+  cache.rs           — on-disk chunk cache ((prefix, xorb_hash) + first chunk range; persisted across files)
+  tree.rs            — path→file_id resolution + listing via the §2.5 server metadata endpoints
+  revisions.rs       — branch/revision list/create/delete via the §2.5 endpoints
+  dedup.rs           — global dedup query, eligibility (first chunk; last-8-bytes-LE % 1024 == 0; ≥256-chunk spacing ≈ 16 MiB at 64 KiB target)
   transfer.rs       — HTTP layer: xorb upload/download (streaming bodies + explicit CONTENT_LENGTH), chunk GET, 206 handling, multipart/byteranges
   retry.rs          — RetryPolicy, jittered exponential backoff, error classification
   config.rs         — shardline.toml config, credential caching, env overrides
-  session.rs        — UploadSession / DownloadSession (high-level file ops)
+  session.rs        — UploadSession / DownloadSession (high-level file ops), stream groups, abort/status
   error.rs          — sdx::Error, retryable classification
 ```
 
@@ -217,14 +254,16 @@ let session = client.download_session().await?;
 session.download_file("remote.bin", "local.bin").await?;
 session.download_range("remote.bin", 0..1024, "head.bin").await?;
 
-// Streaming + in-memory (no temp files; mirrors xet-data pull-based streams):
-let mut stream = client.download_stream("vector.bin", None).await?;   // or Some(0..64GiB)
+// Streaming + in-memory (no temp files; mirrors xet-data pull-based streams).
+// Library core is file_id-addressed; `cp`/`ls`/`cat` resolve xet://…/rev/path
+// via the §2.5 server metadata endpoints (tree.rs/revisions.rs).
+let mut stream = client.download_stream(file_id, None).await?;       // or Some(0..64GiB)
 while let Some(chunk) = stream.next().await? { out.write_all(&chunk)?; } // cat pattern
-let bytes: Bytes = client.download_bytes("embedding.bin").await?;
-let mut upload = client.upload_stream("vector.bin").await?;           // push-style handle
-upload.write(&block).await?;                                          // 8 MiB slices
+let bytes: Bytes = client.download_bytes(file_id).await?;
+let mut upload = client.upload_stream(file_id).await?;               // push-style handle
+upload.write(block).await?;                                          // owned Bytes, 8 MiB slices
 upload.finish().await?;
-client.upload_bytes("embedding.bin", &bytes).await?;
+client.upload_bytes(file_id, &bytes).await?;
 ```
 
 Session types mirror the reference `XetSession`/`FileDownloadSession` concepts
@@ -243,8 +282,10 @@ and streamed out (e.g. to stdout/socket), never buffered whole in RAM.
 
 #### 4.4.1 Download: pull-based stream with byte-denominated memory cap
 
-Mirror `xet-data/src/file_reconstruction/` (`download_stream.rs`,
-`unordered_download_stream.rs`, `file_reconstructor.rs`, `data_writer/`).
+Mirror `xet-data/src/file_reconstruction/` (`file_reconstructor.rs`,
+`reconstruction_terms/`, and `data_writer/` — which contains
+`download_stream.rs`, `unordered_download_stream.rs`,
+`sequential_writer.rs`, `unordered_writer.rs`).
 
 - **API shape is pull-based, not `AsyncRead`**: `DownloadStream` has
   `next()` (async) / `blocking_next()` (sync, usable from CLI threads)
@@ -263,7 +304,10 @@ Mirror `xet-data/src/file_reconstruction/` (`download_stream.rs`,
   knob for memory-constrained clients (e.g. `2 MiB` for tiny runners).
 - **Pipeline**: `FileReconstructor::new(client, file_hash)` (builder:
   `.with_byte_range`, `.with_chunk_cache`, `.with_buffer_semaphore`,
-  `.with_cancellation_token`) → background task runs:
+  `.with_cancellation_token`) → background task runs (**spawned at
+  construction, paused; auto-starts on the first `next()`/`blocking_next()`** —
+  mirror `download_stream_handle.rs`; a dropped handle still spawned work, so
+  `Drop` must cancel):
   1. `ReconstructionTermManager` **prefetches term-metadata blocks**
      (`GET /v1|v2/reconstructions/{file_id}` with `Range` header) keeping
      `prefetched_pos - active_pos ≥ min_prefetch_buffer` (default 1 GiB),
@@ -279,8 +323,10 @@ Mirror `xet-data/src/file_reconstruction/` (`download_stream.rs`,
      `Range: bytes=S-E` (single range per request by default;
      `enable_multirange_fetching=false`) → 206 body **streaming-decompressed**
      into one `Bytes` (sized via `uncompressed_size_if_known`); multi-range
-     responses parse `multipart/byteranges`. **403 → refresh URLs** (shardline:
-     token refresh, single-flight) and retry. Best-effort async chunk-cache put.
+      responses parse `multipart/byteranges`. **403 → refresh URLs**: on
+      shardline the reconstruction-provided fetch URL never changes, so 403
+      means token expiry → single-flight token refresh (§5.2), then retry the
+      same URL. Best-effort async chunk-cache put.
   4. `FileTerm::extract_bytes` slices the xorb data **zero-copy**
      (`Bytes::slice`) into per-file-term bytes; the reconstruction loop hands
      `(relative_byte_range, buffer_permit, data_future)` to the writer.
@@ -319,16 +365,25 @@ Mirror `xet-data/src/processing/` (`file_upload_session.rs`, `file_cleaner.rs`,
   dedup stage spawned as background task.
 - **Dedup loop** (per chunk batch): local session/cache shard lookup first;
   if no hit and eligible (chunk index 0, or spaced ≥ `min_spacing_between_global_dedup_queries`
-  = 256 chunks ≈ 4 MiB): background `query_for_global_dedup_shard` →
-  `POST /v1/chunks/default-merkledb/{hash}` with **429-no-retry** and 404 =
-  cache miss; returned shard imported, pass re-run once. Defrag-prevention
+  = 256 chunks ≈ **16 MiB** at 64 KiB target — note: upstream 1.5.4 hardcodes
+  this field to 0 / never wires the config, so sdx applies the documented
+  default itself): background `query_for_global_dedup_shard` →
+  **`GET` `/v1/chunks/default-merkledb/{hash}`** (GET, not POST — matches
+  shardline `app.rs:406` and upstream `remote_client.rs:159`; a POST would 405)
+  with **429-no-retry** and 404 = cache miss; returned shard imported, pass
+  re-run once. Defrag-prevention
   hysteresis (min 8 chunks/range, 0.5 hysteresis, 128-range window).
 - **Xorb cut/flush condition** (mirror exactly): `new_data_size + n > 64 MiB
   || new_data.len() + 1 > 8192` → `cut_new_xorb` → serialize on compute thread
   (footer-less) → `acquire_upload_permit()` (adaptive, initial 2, min 1,
   max 64) → **`POST /v1/xorbs/default/{hash}` with a streaming body**
-  (512 KiB progress blocks, explicit `CONTENT_LENGTH` — fits shardline's
-  default 64 MiB body limit) from a `JoinSet` of parallel upload tasks.
+  (512 KiB progress blocks, explicit `CONTENT_LENGTH`) from a `JoinSet` of
+  parallel upload tasks. **Body-limit safety margin:** the 64 MiB cut applies
+  to uncompressed data; serialized size adds 8-byte chunk headers + `XETBLOB`
+  header + format-v2 boundary/hash blocks, so incompressible data can exceed
+  shardline's 64 MiB body cap. sdx must cut on **serialized** size ≤ ~60 MiB
+  (or serialize-and-check before upload) — add a worst-case E2E (incompressible
+  data, ≥8192 tiny chunks).
 - **finalize**: cut session tail via `DataAggregator` (64 MiB/8192), join all
   xorb uploads, then upload merged session shards → `POST /v1/shards`
   (footer-stripped, dedicated no-read-timeout client, one permit each), then
@@ -355,15 +410,27 @@ Mirror `hf-xet/xet_session/` (`download_stream_group.rs`,
   fanning into the same cleaner pipeline.
 - Status via `XetSession::status()` / `XetTaskState`; streams unregister on
   `Drop`.
+- **Runtime trap (upstream, must document):** `blocking_next()` /
+  `write_blocking()` **panic inside an async runtime** (upstream asserts
+  no-runtime context); sdx needs the same task-runtime bridging (hf-xet
+  `TaskRuntime`) so CLI threads can block safely, with a documented `#[cfg]`
+  story.
 
 #### 4.4.4 Streaming-path retry/timeout behavior (mirror + shardline delta)
 
 - RetryWrapper defaults: `retry_max_attempts = 5`, `retry_base_delay = 3 s`,
   `retry_max_duration = 6 min`, exponential + jitter; 5xx/408/429 transient,
   other 4xx fatal, connect/timeout/`IncompleteMessage`/`Canceled` transient.
+  **Semantics:** upstream passes `max_attempts` to `ExponentialBackoff::take`,
+  i.e. 5 **retries** → up to 6 requests; sdx `RetryPolicy.max_attempts`
+  means the same (retries, documented).
 - `.with_429_no_retry()` only on dedup queries; `.with_retry_on_403()` only on
   ranged xorb fetch (URL refresh); `.with_expected_416()` on reconstruction
   (past-EOF → `Ok(None)`); `.with_expected_404()` on dedup (cache miss).
+- **Explicit sdx deltas:** the 401/403 token-refresh behavior (§6.3) is an
+  addition — upstream treats 401/403 as fatal except the ranged-fetch 403 URL
+  refresh; sdx's version is strictly more capable and must be marked as a
+  delta in rustdoc so behavior differences are visible.
 - **No `Retry-After` handling upstream** (pure config backoff) — shardline
   sends `Retry-After: 1` on 503s, so sdx adds honoring it (strictly better,
   still wire-compatible).
@@ -422,7 +489,9 @@ Mirror `hf-xet/xet_session/` (`download_stream_group.rs`,
   - OCI upload sessions: active-session cap (default 1024) → **429**
     (`shardline-oci-adapter/src/session.rs:85-87`)
   - Transfer/download: `TransferLimiter` chunk-equivalent budget, 60s acquire
-    timeout → **503** + `Retry-After: 1` (`transfer_limiter.rs:12-60`)
+    timeout → **503** + `Retry-After: 1` (`transfer_limiter.rs:12-60`; nuance:
+    `TransferLimiterClosed` is 503 **without** `Retry-After` — only
+    timed-out/saturated paths carry the header, `error/server.rs:423-430`)
   - Weighted admission (`WeightedAdmission`, xorb=4/shard=8/reconstruction=16/
     batch=32) → **503** + `Retry-After: 1` (`admission.rs:11-81`)
   - Total request timeout 300s → **503** + `Retry-After: 1` (`app.rs:677-684`)
@@ -442,7 +511,7 @@ servers), even though shardline does not emit time-window 429s today.
 - `RetryPolicy` struct, **user-configurable** via builder (see §4.3):
   - `max_attempts` (default 5), `base_delay_ms` (default 3000), `max_duration`
     (default 6 min) — matching the reference client defaults
-    (`xet_config/src/groups/client.rs`)
+    (`xet-runtime-1.5.4/src/config/groups/client.rs`)
   - `honor_retry_after: bool` (default true) — use `Retry-After` when present
   - `jitter: bool` (default true) — jittered exponential backoff
   - `retry_on_429: bool` (default true) — **except** dedup queries, which
@@ -450,9 +519,11 @@ servers), even though shardline does not emit time-window 429s today.
     `query_dedup_api`)
 - Error classification:
   - **Retryable:** 429, 500, 503, 504, connection errors, timeouts
-  - **Non-retryable:** 400, 401 (refresh token first, then retry once), 403
-    (scope too narrow — re-issue with write token; for signed-URL fetches,
-    refresh the URL on 403), 404, 416
+- **Non-retryable:** 400, 404, 416; 401/403 are **refresh triggers, not plain
+  retries** (sdx delta — upstream treats them fatal): 401 → single-flight token
+  refresh, retry once; 403 → re-issue with write token (or refresh the URL for
+  signed-URL fetches), retry once — **loop-guarded: a repeated 403 on a
+  write-token upload is surfaced, not re-issued infinitely**.
 - 503 + `Retry-After: 1` → wait 1s; 429 without `Retry-After` → exponential
   backoff with jitter.
 - Expose per-call override: `session.upload_file(...).retry(policy)` for users
@@ -475,22 +546,29 @@ Derived from `docs/PROTOCOL_CONFORMANCE.md` + HF Xet spec
    rejects uppercase/non-hex.
 2. **Upload ordering:** all xorbs referenced by a shard MUST be uploaded before
    the shard POST; otherwise 400.
-3. **Upload idempotency:** `POST /v1/xorbs/{hash}` returns `was_inserted`; a
-   pre-existing xorb is not an error.
-4. **Global dedup eligibility:** first chunk always eligible; subsequent chunks
-   eligible when last-8-bytes-LE `% 1024 == 0`; throttle to ~1 query per 4 MiB.
+3. **Upload idempotency:** `POST /v1/xorbs/default/{hash}` returns `was_inserted`;
+   a pre-existing xorb is not an error.
+4. **Global dedup eligibility:** **global chunk index 0** always eligible (not
+   the first chunk of every 8 MiB ingest batch); subsequent chunks eligible when
+   last-8-bytes-LE `% 1024 == 0`, spaced ≥256 chunks (≈16 MiB at 64 KiB) from
+   the last query — harmonized with §4.4.2.
 5. **Range semantics:** reconstruction ranges end-inclusive; chunk-index ranges
    end-exclusive; xorb URL byte ranges end-inclusive; first term may include an
    offset into the first decoded chunk.
 6. **206 handling:** single range → plain 206; multiple → `multipart/byteranges`;
    parse parts in order, deserialize chunks, validate `unpacked_length` per term.
 7. **v2→v1 fallback:** if `/v2/reconstructions` returns 404/501, fall back to
-   `/v1/reconstructions`; same for `/v2/shards` → `/v1/shards`.
+   `/v1/reconstructions`. (No `/v2/shards` exists upstream — `upload_shard`
+   only POSTs `/v1/shards`; drop the historical v2-shard fallback clause.)
 8. **Footer-less xorbs:** server normalizes; client must also accept missing
    footers when parsing.
-9. **Xorb size limits:** serialized xorb ≤ 64 MiB (protocol) / 16 MiB block
-   (historical); ≤8192 chunks per xorb; `XORB_BLOCK_SIZE = 16 MiB`,
-   `TARGET_CHUNK_SIZE = 128 KiB`.
+9. **Xorb size limits (upstream 1.5.4):** `TARGET_CHUNK_SIZE = 64 KiB`,
+   `MAX_XORB_BYTES = 64 MiB`, `MAX_XORB_CHUNKS = 8192`, `XORB_BLOCK_SIZE = 64 MiB`
+   (upstream; the 16 MiB/128 KiB values in shardline-xet-core are that crate's
+   own legacy constants the client must **not** mirror). `XORB_BLOCK_SIZE` is
+   only a sizing heuristic — the real cut is the 64 MiB/8192 condition
+   (`file_deduplication.rs:242`), and sdx must respect the serialized-size
+   safety margin (§4.4.2) against shardline's body limit.
 10. **Body limits:** respect `SHARDLINE_MAX_REQUEST_BODY_BYTES` and per-endpoint
     bounds when uploading shards (metadata limits).
 11. **Verification keys:** chunk = BLAKE3 keyed `DATA_KEY`; xorb = Merkle root
@@ -503,13 +581,15 @@ Derived from `docs/PROTOCOL_CONFORMANCE.md` + HF Xet spec
 Thin clap wrapper over the library (per `docs/XET_NATIVE_CLI.md`, with the
 `sdx` naming):
 
-- `sdx cp <src> <dst>` — local ↔ remote (`xet://host/provider/owner/repo/rev/path`)
+- `sdx cp <src> <dst>` — local ↔ remote (`xet://host/provider/owner/repo/rev/path`);
+  path→file_id resolution via the §2.5 metadata endpoints
 - `sdx sync <src> <dst>` — directory sync (push-only)
-- `sdx ls <url>` (+ `--long`, `--branches`) — remote listing
-- `sdx rm <url>` (+ `--recursive`) — metadata deregistration
+- `sdx ls <url>` (+ `--long`, `--branches`) — remote listing (via §2.5)
+- `sdx rm <url>` (+ `--recursive`) — metadata deregistration (via §2.5)
 - `sdx cat <url>` — stream remote file to stdout
 - `sdx info <url>` — file/dir metadata
 - `sdx branch <url> --create/--delete` — revision listing/creation/deletion
+  (via §2.5)
 - Flags: `--chunk-size` (default 64 KiB), `--compression none|lz4|bg4lz4`,
   `--recursive`, `--register/--no-register` (shard registration),
   `--token/--api-key/--token-file/--config`
@@ -537,7 +617,9 @@ Mirrors `docs/XET_NATIVE_CLI.md` stub phases, with the library-first addition:
   `DownloadStream`/`UnorderedDownloadStream` (`next()`/`blocking_next()`),
   byte-denominated buffer semaphore (configurable cap), term-metadata prefetch,
   `DataWriter` (Sequential/Unordered), `reconstruct_to_writer`,
-  `download_bytes`. E2E: download files uploaded via server ingest; byte-identical;
+  `download_bytes`. **Stream-group layer** (§4.4.3): group builder, abort/
+  status, single-flight cancellation; **on-disk chunk cache** (`cache.rs`).
+  E2E: download files uploaded via server ingest; byte-identical;
   **memory-bounded cat of a large file (e.g. 64 GiB synthetic) asserting
   resident RAM stays ≪ file size**.
 - **M3 — Write path (upload).** Client CDC chunker (verify byte-identity against
@@ -546,16 +628,21 @@ Mirrors `docs/XET_NATIVE_CLI.md` stub phases, with the library-first addition:
   `upload_file` + idempotency. Streaming upload (mirror §4.4.2): push-style
   `add_data(Bytes)` ingest loop (8 MiB blocks), CDC on compute thread, xorb cut
   at 64 MiB/8192, streaming-body xorb POST, session tail aggregator,
-  `upload_stream` handle + `upload_bytes` (in-memory `Bytes`, zero-copy). E2E:
+  `upload_stream` handle + `upload_bytes` (in-memory `Bytes`, zero-copy),
+  `XetUploadCommit` group layer (§4.4.3). E2E:
   upload → server-side reconstruct → identical; cross-file dedup (same chunks
   stored once); **streaming upload of a large reader with bounded memory
-  (assert in-flight RAM ≈ 8 MiB + ≤64 MiB xorb + tail)**.
+  (assert in-flight RAM ≈ 8 MiB + ≤64 MiB xorb + tail)**; worst-case
+  incompressible xorb (≥8192 tiny chunks) staying under the server body cap.
 - **M4 — Retry/backoff + concurrency.** `RetryPolicy`, jittered exponential
   backoff, error classification, `Retry-After` honoring, adaptive/fixed
   concurrency, session/request correlation headers. E2E: 503 saturation tests
   against admission-limited shardline; 429 no-`Retry-After` backoff (mock).
-- **M5 — Metadata operations.** `ls`/`info`/`rm`/`branch` via reconstruction +
-  shard metadata; `sync` (push-only); `cat` streaming.
+- **M5 — Metadata operations + server path addressing.** Server (issue #19):
+  implement the §2.5 metadata endpoints (path→file_id, listing, deregistration,
+  branch/revision) in `crates/shardline-server`. Client: `tree.rs`/
+  `revisions.rs` against them; `ls`/`info`/`rm`/`branch`; `sync` (push-only);
+  `cat` streaming.
 - **M6 — CLI + config + packaging.** `sdx` symlink dispatch, clap tree,
   `shardline.toml`, completions, manpage, release archive.
 - **M7 — Cross-frontend conformance.** Run the full suite against a second
@@ -570,7 +657,9 @@ Mirrors `docs/XET_NATIVE_CLI.md` stub phases, with the library-first addition:
 - **E2E against real shardline server** (`e2e/`): upload idempotency, missing-
   xorb rejection, full-file + range reconstruction, dedupe hit/miss,
   unauthorized-scope rejection, token refresh/concurrent/ranged flows,
-  503 admission saturation (Retry-After honored), 429 no-`Retry-After` backoff.
+  503 admission saturation (Retry-After honored), 429 no-`Retry-After` backoff,
+  worst-case incompressible xorb (≥8192 tiny chunks) staying under the body
+  cap.
 - **Cross-implementation:** integration test against an existing
   Xet-compatible client (`git-xet`/`hf_xet`) exchanging files through shardline
   — "no client patches" goal (`PROTOCOL_CONFORMANCE.md:136-157`).
@@ -585,12 +674,19 @@ Mirrors `docs/XET_NATIVE_CLI.md` stub phases, with the library-first addition:
    unless a user needs in-place overwrite semantics. CLI `cp` overwrite can
    degrade to full re-upload for now.
 2. **Signed-URL xorb fetch (XetHub/HF)** vs shardline's plain ranged
-   `/transfer/xorb` — the client must support both: if reconstruction returns
-   `X-Xet-Signed-Range` + `Expires`/`Policy`/`Signature`/`Key-Pair-Id`, fetch the
-   signed URL (refresh on 403); otherwise use `Range` against `casUrl`.
+   `/transfer/xorb` — upstream 1.5.4 has **no** `X-Xet-Signed-Range` header
+   handling anywhere; signed URLs are carried in the reconstruction JSON
+   (`fetch_info[].url`), and shardline already emits a full absolute
+   `{base}/transfer/xorb/default/{hash}` URL there. The client's real job:
+   **use the `url` from the reconstruction response and `Range` against it** —
+   identical for shardline and HF. Keep the header-based signed-range check
+   (`Expires`/`Policy`/`Signature`/`Key-Pair-Id`) as an optional XetHub/S3
+   probe only (refresh on 403); on shardline a 403 means token expiry
+   (§4.4.1), not URL rotation.
 3. **Xorb writer parity:** shardline's xorb format is identical to upstream for
-   `default` namespace; verify `ByteGrouping4LZ4` client-side (vendored
-   `xet-core-structures` 1.5.1) rather than reimplementing BG4.
+   `default` namespace; verify `ByteGrouping4LZ4` client-side via the pinned
+   `xet-core-structures` (workspace declares 1.5.1, lock resolves 1.5.2; §4.1)
+   rather than reimplementing BG4.
 4. **Revision semantics** (`xet://.../{revision}`): token issuance is
    revision-scoped; `branch` commands assume shardline's revision model
    (provider-scoped revisions). Confirm server behavior for non-`main`
@@ -605,8 +701,10 @@ Mirrors `docs/XET_NATIVE_CLI.md` stub phases, with the library-first addition:
 
 ## 12. Out of scope (this issue)
 
-- Server-side changes (none required for M0–M6).
+- Server-side changes are limited to the **§2.5 path/metadata endpoints**
+  (implemented in M5); no CAS/data-plane changes.
 - `/v2/shards` streaming NDJSON upload (only v1 required by shardline).
-- `/v2/file-chunk-hashes` partial-overwrite support (deferred, see §11.1).
+- `/v2/file-chunk-hashes` partial-overwrite support (deferred, see §11 open
+  question 1).
 - Storage quotas / per-tenant rate limiting on the server (tracked separately
   in `docs/SHARDLINE_PRODUCTION_READINESS.md`).
