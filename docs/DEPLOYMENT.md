@@ -884,7 +884,7 @@ shardline fsck
 shardline gc
 shardline gc --mark
 shardline gc --sweep
-shardline gc --mark --sweep --retention-seconds 0
+shardline gc --mark --sweep --retention-seconds 3600
 shardline gc --mark --retention-report reports/gc-retention.json --orphan-inventory reports/gc-orphans.json
 shardline index rebuild
 ```

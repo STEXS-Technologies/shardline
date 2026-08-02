@@ -43,7 +43,9 @@ shardline storage migrate \
 ```
 
 For local endpoints, `--from-root` and `--to-root` are Shardline state roots.
-The command copies payload objects below each root's `chunks/` object-store directory.
+The command copies immutable payload objects below each root's object-store directories —
+`chunks/`, `xorbs/default/`, and `shards/` — filtered by `--prefix` when given (default:
+all payload objects).
 
 If `--from-root` is omitted for a local source, Shardline uses the same project-local
 root discovery as other operator commands.
