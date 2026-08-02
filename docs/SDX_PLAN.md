@@ -1,6 +1,7 @@
 # SDX — Xet Client Library and CLI: Implementation Plan
 
-Status: Implementation plan for [issue #19](https://github.com/STEXS-Technologies/shardline/issues/19).
+Status: Draft implementation plan for [issue #19](https://github.com/STEXS-Technologies/shardline/issues/19) —
+under review on branch `feat/sdx-native-file-management-cli`; **no implementation started**.
 Companion design doc: `docs/XET_NATIVE_CLI.md` (CLI behavior, URL scheme, config, phased stubs).
 
 ## 1. Goal and scope
@@ -162,16 +163,17 @@ New crate: **`crates/sdx`** (package name `sdx`). Dependencies:
 
 Must **not** depend on `shardline-server`.
 
-CLI surface lives in the existing CLI crate (`crates/shardline`), routed by
-`argv[0]` symlink detection per `docs/XET_NATIVE_CLI.md` (dispatch model). The
-CLI module adds the `xet` subcommand tree as a thin clap wrapper over `sdx`.
+CLI surface lives in the existing CLI binary crate (`crates/shardline`; issue #19's
+`crates/cli` refers to this same surface), routed by `argv[0]` symlink detection per
+`docs/XET_NATIVE_CLI.md` (dispatch model). The CLI module adds the `xet` subcommand
+tree as a thin clap wrapper over `sdx`.
 
 ### 4.2 Module map (library)
 
 ```
 crates/sdx/src/
   lib.rs            — re-exports, crate docs
-  client.rs         — SdxClient builder + handle (endpoint, auth, retry policy, concurrency)
+  client.rs         — XetClient builder + handle (endpoint, auth, retry policy, concurrency)
   auth.rs           — token issuance (read/write), refresh w/ 30s buffer, credential sources
   chunk.rs          — client-side CDC chunker (FastCDC gear-hash, 64 KiB target)
   hash.rs           — BLAKE3 keyed hashing, Xet hex conversion (byte-group reversal)
@@ -189,10 +191,10 @@ crates/sdx/src/
 ### 4.3 Public API sketch
 
 ```rust
-use sdx::{SdxClient, SdxClientBuilder, RetryPolicy, UploadSession, DownloadSession, Auth};
+use sdx::{XetClient, XetClientBuilder, RetryPolicy, UploadSession, DownloadSession, Auth};
 
 // Library users write programs against any Xet frontend:
-let client = SdxClientBuilder::new()
+let client = XetClientBuilder::new()
     .endpoint("xet://host/provider/owner/repo/main")   // shardline-style URL
     .auth(Auth::token(read_or_write_token))            // or Auth::refresh_url(...)
     .retry(RetryPolicy::default().max_attempts(5).base_delay_ms(3000))  // user-tunable
@@ -336,7 +338,8 @@ Derived from `docs/PROTOCOL_CONFORMANCE.md` + HF Xet spec
 
 ## 8. CLI surface (`sdx`)
 
-Thin clap wrapper over the library (per `docs/XET_NATIVE_CLI.md`, now renamed):
+Thin clap wrapper over the library (per `docs/XET_NATIVE_CLI.md`, with the
+`sdx` naming):
 
 - `sdx cp <src> <dst>` — local ↔ remote (`xet://host/provider/owner/repo/rev/path`)
 - `sdx sync <src> <dst>` — directory sync (push-only)
