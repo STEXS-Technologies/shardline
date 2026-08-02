@@ -22,6 +22,10 @@ It must:
 5. Provide the `sdx` CLI (`cp`/`sync`/`ls`/`rm`/`cat`/`info`/`branch`) as a thin
    wrapper, dispatched via symlink `argv[0]` (single `shardline` binary, per
    `docs/XET_NATIVE_CLI.md`).
+6. Support **streaming and in-memory data**: stream bytes to/from the backend
+   (`AsyncRead`/`AsyncWrite`), and exchange raw buffers (`Bytes`) for non-file
+   payloads (e.g. vector binaries, embeddings, generated blobs) without touching
+   disk.
 
 Naming: `sdx` (library + CLI name). The names one would reach for first are
 already taken in the ecosystem, so `sdx` is the chosen crate/CLI name.
@@ -139,6 +143,9 @@ semver promise** — target the **wire protocol**, not crate internals):
 | Rate limiting / overload handling | RetryWrapper: jittered exp backoff, `retry_max_attempts=5`, `retry_base_delay=3s`, `retry_max_duration=6min` | concurrency admission only (429/503, see §6) | **missing** — §6 |
 | Session/request correlation headers | `SESSION_ID_HEADER`, `REQUEST_ID_HEADER` | tolerated | **missing** |
 | Adaptive concurrency | `ac_max_healthy_rtt` etc. | n/a | **missing** — upload/download concurrency |
+| Streaming download (bounded memory, prefetch) | `xet-data` `DownloadStream`/`UnorderedDownloadStream`, `DataWriter`/`SequentialWriter` | ranged `/transfer/xorb` 206 | **missing** — §4.4 |
+| Streaming upload (incremental, no full-file buffering) | `FileUploadSession` (file-based upstream) | chunked xorb upload (≤64 MiB body default) | **missing** — §4.4 |
+| In-memory payloads (`Bytes`, no disk) | not in upstream (file-oriented) | n/a (CAS is buffer-agnostic) | **missing** — sdx differentiator |
 | Credential/config management | `XetConfig`, token files | n/a | **missing** — §5.4 |
 | CLI cp/sync/ls/rm/cat/info/branch | pyxet-style surface (deprecated upstream) | n/a | **missing** — thin wrapper |
 
@@ -208,11 +215,42 @@ session.upload_file("local.bin", "remote.bin").await?;
 let session = client.download_session().await?;
 session.download_file("remote.bin", "local.bin").await?;
 session.download_range("remote.bin", 0..1024, "head.bin").await?;
+
+// Streaming + in-memory (no temp files):
+client.upload_stream("vector.bin", reader).await?;        // AsyncRead source
+client.upload_bytes("embedding.bin", &bytes).await?;      // Bytes / Vec<u8> in memory
+let bytes: Bytes = client.download_bytes("embedding.bin").await?;
+client.download_stream("vector.bin", writer).await?;      // AsyncWrite sink
 ```
 
 Session types mirror the reference `XetSession`/`FileDownloadSession` concepts
 (`xet_pkg/src/xet_session/session.rs`): upload commit, download group, download
 stream group, abort/status.
+
+### 4.4 Streaming and in-memory data
+
+The library is **not limited to file paths**. Two orthogonal additions over the
+file-oriented API:
+
+- **Streaming** (`upload_stream`/`download_stream`): byte-oriented transfer with
+  bounded memory, no full-file buffering.
+  - Upload: `impl AsyncRead` (or `futures::Stream<Item = Bytes>`) is consumed
+    incrementally → CDC chunking as bytes arrive → chunks buffered into xorbs
+    (≤16 MiB blocks, ≤8192 chunks) → xorb POSTed when full or at EOF; a config
+    threshold (e.g. ~1 xorb) bounds in-flight memory. Same dedup/idempotency as
+    file uploads.
+  - Download: reconstruction terms drive **ranged** `/transfer/xorb` fetches;
+    decoded chunks are yielded to `impl AsyncWrite` with backpressure
+    (mirrors `xet-data` `DownloadStream`/`UnorderedDownloadStream` +
+    `DataWriter`/`SequentialWriter`). Supports partial ranges mid-stream.
+- **In-memory payloads** (`upload_bytes`/`download_bytes`): `Bytes`/`Vec<u8>`
+  exchange, zero-copy where possible (`Bytes` is the wire type). Target use
+  case: vector binaries, embedding tensors, generated blobs — anything a
+  program holds in memory that should never touch disk. Internally routed
+  through the same chunk/xorb/transfer machinery (a `Bytes` is just an
+  `AsyncRead` over a buffer).
+- CLI: `sdx cat` already streams to stdout; `cp -`/`cat -` conventions let the
+  CLI read stdin / write stdout for pipe workflows.
 
 ## 5. Authentication design
 
@@ -371,12 +409,17 @@ Mirrors `docs/XET_NATIVE_CLI.md` stub phases, with the library-first addition:
 - **M2 — Read path (download).** v2/v1 reconstruction client + fallback, ranged
   `/transfer/xorb` fetch, 206/multipart parsing, chunk deserialization,
   `unpacked_length` validation, file assembly, `DownloadSession` + `download_file`
-  / `download_range`. E2E: download files uploaded via server ingest; byte-identical.
+  / `download_range`. Streaming download: `download_stream` (AsyncWrite sink,
+  backpressure, bounded buffering) + `download_bytes`. E2E: download files
+  uploaded via server ingest; byte-identical.
 - **M3 — Write path (upload).** Client CDC chunker (verify byte-identity against
   server `CdcChunker`), global dedup query + eligibility, xorb build/serialize/
   upload, shard build/upload (xorbs-before-shard), `UploadSession` +
-  `upload_file` + idempotency. E2E: upload → server-side reconstruct → identical;
-  cross-file dedup (same chunks stored once).
+  `upload_file` + idempotency. Streaming upload: `upload_stream` (AsyncRead →
+  incremental chunking → xorb flush) + `upload_bytes`/`download_bytes`
+  (in-memory `Bytes`, zero-copy). E2E: upload → server-side reconstruct →
+  identical; cross-file dedup (same chunks stored once); streaming upload of a
+  large reader with bounded memory.
 - **M4 — Retry/backoff + concurrency.** `RetryPolicy`, jittered exponential
   backoff, error classification, `Retry-After` honoring, adaptive/fixed
   concurrency, session/request correlation headers. E2E: 503 saturation tests
