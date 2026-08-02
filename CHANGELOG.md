@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-08-02
+
 ### Upgrade Note — Storage Format Evolution
 
 This release changes the physical storage representation from fixed-size chunking (uncompressed)
