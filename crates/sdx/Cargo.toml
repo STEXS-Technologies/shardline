@@ -28,6 +28,13 @@ tokio = { workspace = true, features = ["sync"] }
 url.workspace = true
 
 [dev-dependencies]
+axum.workspace = true
+bytes.workspace = true
+# Test-only dependency on the real server crate (established workspace pattern,
+# e.g. `crates/shardline/tests/backup_e2e.rs`). The sdx library itself must NOT
+# depend on shardline-server (SDX_PLAN.md §4.1).
+shardline-protocol.workspace = true
+shardline-server.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync"] }
 wiremock = "0.6"

@@ -183,8 +183,21 @@ impl Auth {
         })
     }
 
+    /// Returns the API base URL used for token issuance.
+    #[must_use]
+    pub fn base_url(&self) -> &str {
+        self.base_url.as_str()
+    }
+
+    /// Returns the repository identity this auth is scoped to.
+    #[must_use]
+    pub const fn repository(&self) -> &RepositoryId {
+        &self.repository
+    }
+
     /// Sets an explicit opaque bearer token (highest credential priority).
     #[must_use]
+    #[allow(clippy::missing_const_for_fn)]
     pub fn with_token(mut self, token: String) -> Self {
         self.token = Some(token);
         self
@@ -192,6 +205,7 @@ impl Auth {
 
     /// Sets an explicit provider bootstrap API key.
     #[must_use]
+    #[allow(clippy::missing_const_for_fn)]
     pub fn with_api_key(mut self, api_key: String) -> Self {
         self.api_key = Some(api_key);
         self
@@ -199,6 +213,7 @@ impl Auth {
 
     /// Sets an explicit token file path containing an opaque bearer token.
     #[must_use]
+    #[allow(clippy::missing_const_for_fn)]
     pub fn with_token_file(mut self, path: PathBuf) -> Self {
         self.token_file = Some(path);
         self
@@ -206,6 +221,7 @@ impl Auth {
 
     /// Sets the optional `?subject=` query parameter sent with every issuance.
     #[must_use]
+    #[allow(clippy::missing_const_for_fn)]
     pub fn with_subject(mut self, subject: String) -> Self {
         self.subject = Some(subject);
         self
