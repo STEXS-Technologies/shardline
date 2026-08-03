@@ -9,13 +9,28 @@ documentation = "https://docs.rs/sdx"
 description = "Native Xet client library for Shardline's Xet frontend."
 
 [dependencies]
+futures-util.workspace = true
 hex.workspace = true
+# Token route constants (`XET_READ_TOKEN_ROUTE` / `XET_WRITE_TOKEN_ROUTE`) come
+# from the adapter crate, which is an allowed sdx dependency per SDX_PLAN.md
+# §4.1. It depends on shardline-server-core (not the forbidden shardline-server).
+shardline-xet-adapter.workspace = true
 thiserror.workspace = true
 # Pinned exact version (Cargo.lock resolves 1.5.2) per SDX_PLAN.md §11 Q6:
 # upstream crates publish without semver promises, so Merkle hash / xorb
 # primitives must not drift. The workspace-level "1.5.1" requirement unifies
 # to the same 1.5.2 in the lockfile.
 xet-core-structures = { version = "=1.5.2" }
+reqwest = { workspace = true, features = ["json", "rustls-tls"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+url.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync"] }
+wiremock = "0.6"
 
 [lints]
 workspace = true
