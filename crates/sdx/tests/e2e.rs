@@ -404,28 +404,16 @@ async fn download_unknown_file_returns_typed_error() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn download_single_chunk_file_surfaces_not_found() {
+async fn download_single_chunk_file_matches_uploaded_bytes() {
     let server = TestServer::start().await;
     let client = server.client();
-    // A file smaller than the chunk target produces exactly one chunk. The
-    // server stores such files as individual-chunk records but its
-    // reconstruction fetch_info advertises `transfer/xorb/default/{chunk_hash}`,
-    // where no object exists (the xorb is stored under its xorb hash). This
-    // is a known server-side quirk (SDX_M2a report); the client must surface
-    // the 404 as a typed NotFound rather than returning corrupt data.
+    // A file smaller than the chunk target produces exactly one CDC chunk.
+    // Single-chunk files are xorb-backed on ingest, so the reconstruction
+    // fetch info points at the stored xorb and the download is byte-identical.
     let data = b"tiny".to_vec();
     let file_id = hex_id('f');
     server.upload(&file_id, &data).await;
 
-    let dir = TempDir::new().unwrap();
-    let dest = dir.path().join("out.bin");
-    let error = client
-        .download_session()
-        .download_file(&file_id, &dest)
-        .await
-        .unwrap_err();
-    assert!(matches!(
-        error,
-        sdx::SdxError::Transfer(sdx::TransferError::NotFound(_))
-    ));
+    let downloaded = download_file(&client, &file_id).await;
+    assert_eq!(downloaded, data);
 }
