@@ -5,17 +5,18 @@
 //! chunk stream without any footer metadata. This module is therefore
 //! **footer-less tolerant** (`docs/SDX_PLAN.md` §7.8): it decodes the chunk
 //! stream sequentially via the pinned upstream `xet-core-structures` public
-//! API [`deserialize_chunks`](xet_core_structures::xorb_object::deserialize_chunks)
-//! — the same call the reference client uses for ranged xorb fetches
+//! API [`deserialize_chunks`] — the same call the reference client uses for
+//! ranged xorb fetches
 //! (`xet-client-1.5.4/src/cas_client/remote_client.rs:455`) — and exposes each
 //! decoded chunk with its data hash (BLAKE3 `DATA_KEY`, M0
-//! [`compute_chunk_hash`](crate::hash::compute_chunk_hash)).
+//! [`compute_chunk_hash`]).
 //!
 //! ByteGrouping4LZ4 / chunk deserialization is **not reimplemented**; the
 //! pinned `xet-core-structures` crate owns the format (plan §4.1 / §11 Q3).
 
 use std::io::Cursor;
 
+use bytes::Bytes;
 use thiserror::Error;
 use xet_core_structures::error::CoreError;
 use xet_core_structures::merklehash::MerkleHash;
@@ -43,6 +44,21 @@ pub struct DecodedChunk {
     pub hash: MerkleHash,
 }
 
+/// Decompressed chunk payload with per-chunk byte offsets, for zero-copy
+/// slicing of a fetched xorb byte range (the streaming download path).
+///
+/// `data` is the concatenation of every decoded chunk payload in fetch order;
+/// `chunk_offsets` records the start offset of each chunk within `data` (the
+/// first entry is always `0`, and the length is `num_chunks + 1`, mirroring the
+/// upstream `deserialize_chunks` byte-index contract).
+#[derive(Debug, Clone)]
+pub struct DecodedChunkData {
+    /// Concatenated decompressed chunk payloads.
+    pub data: Bytes,
+    /// Start byte offset of each chunk within `data`.
+    pub chunk_offsets: Vec<usize>,
+}
+
 /// Reader over serialized xorb bytes.
 ///
 /// Constructed from a fetched xorb byte range (see
@@ -58,6 +74,29 @@ impl XorbReader {
     #[must_use]
     pub const fn new(bytes: Vec<u8>) -> Self {
         Self { bytes }
+    }
+
+    /// Decodes the chunk stream into a single concatenated payload with
+    /// per-chunk byte offsets, without copying each chunk into its own buffer.
+    ///
+    /// Used by the streaming download path ([`crate::stream`]) where a fetched
+    /// xorb byte range is sliced into per-file-term bytes zero-copy. Equivalent
+    /// to the reference client's `deserialize_chunks` usage for ranged xorb
+    /// fetches (`xet-data-1.5.4` `xorb_block.rs` `build_chunk_offsets`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`XorbError::Format`] when the chunk stream is malformed or a
+    /// chunk fails to decompress.
+    pub fn decode_chunk_data(&self) -> Result<DecodedChunkData, XorbError> {
+        let (data, offsets) = deserialize_chunks(&mut Cursor::new(self.bytes.as_slice()))?;
+        Ok(DecodedChunkData {
+            data: Bytes::from(data),
+            chunk_offsets: offsets
+                .into_iter()
+                .map(|offset| usize::try_from(offset).unwrap_or(usize::MAX))
+                .collect(),
+        })
     }
 
     /// Decodes every chunk in the serialized payload, in order.

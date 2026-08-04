@@ -9,6 +9,8 @@ documentation = "https://docs.rs/sdx"
 description = "Native Xet client library for Shardline's Xet frontend."
 
 [dependencies]
+async-trait.workspace = true
+bytes.workspace = true
 futures-util.workspace = true
 hex.workspace = true
 # Token route constants (`XET_READ_TOKEN_ROUTE` / `XET_WRITE_TOKEN_ROUTE`) come
@@ -16,6 +18,10 @@ hex.workspace = true
 # §4.1. It depends on shardline-server-core (not the forbidden shardline-server).
 shardline-xet-adapter.workspace = true
 thiserror.workspace = true
+# Cancellation tokens for the streaming pipeline (M2b1); tokio 1.52 does not
+# re-export CancellationToken in tokio::sync, so use tokio-util (already in the
+# lockfile at 0.7.18 via xet-client). `rt` provides CancellationToken.
+tokio-util = { version = "0.7", default-features = false, features = ["rt"] }
 # Pinned exact version (Cargo.lock resolves 1.5.2) per SDX_PLAN.md §11 Q6:
 # upstream crates publish without semver promises, so Merkle hash / xorb
 # primitives must not drift. The workspace-level "1.5.1" requirement unifies
@@ -24,19 +30,20 @@ xet-core-structures = { version = "=1.5.2" }
 reqwest = { workspace = true, features = ["json", "rustls-tls"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
-tokio = { workspace = true, features = ["sync"] }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time"] }
 url.workspace = true
 
 [dev-dependencies]
 axum.workspace = true
 bytes.workspace = true
+libc.workspace = true
 # Test-only dependency on the real server crate (established workspace pattern,
 # e.g. `crates/shardline/tests/backup_e2e.rs`). The sdx library itself must NOT
 # depend on shardline-server (SDX_PLAN.md §4.1).
 shardline-protocol.workspace = true
 shardline-server.workspace = true
 tempfile.workspace = true
-tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync"] }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
 wiremock = "0.6"
 
 [lints]

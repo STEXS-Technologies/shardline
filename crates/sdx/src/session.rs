@@ -1,18 +1,33 @@
-//! Download sessions for the sdx CAS read path (M2a).
+//! Download sessions for the sdx CAS read path (M2a / M2b1).
 //!
 //! [`DownloadSession`] downloads a file (or a byte range of a file) by its
 //! 64-hex `file_id` — the library core is file_id-addressed; path resolution
 //! arrives with the §2.5 server metadata endpoints in M5
 //! (`docs/SDX_PLAN.md` §4.3). Downloads are sequential and unbuffered-to-disk:
 //! the reconstructed bytes are assembled in memory and written to `dest`.
+//!
+//! M2b1 adds the pull-based streaming surface (`download_stream`,
+//! `download_unordered_stream`, `download_to_writer`, `download_bytes`),
+//! mirroring upstream `xet-data`'s `FileReconstructor` (`docs/SDX_PLAN.md`
+//! §4.4.1).
 
-use std::{ops::RangeInclusive, path::Path, sync::Arc};
+use std::{
+    ops::{Range, RangeInclusive},
+    path::Path,
+    sync::Arc,
+};
+
+use bytes::Bytes;
 
 use crate::{
     auth::TokenService,
     error::SdxError,
     hash::parse_xet_hash_hex,
     reconstruction,
+    stream::{
+        BufferSemaphore, DownloadStream, FileReconstructor, StreamContext, StreamLimits,
+        UnorderedDownloadStream,
+    },
     transfer::{ByteRange, TransferClient},
 };
 
@@ -21,6 +36,32 @@ pub(crate) struct DownloadSessionInner {
     pub(crate) transfer: TransferClient,
     pub(crate) tokens: TokenService,
     pub(crate) api_base: String,
+    pub(crate) buffer_semaphore: Arc<BufferSemaphore>,
+    pub(crate) active_downloads: Arc<std::sync::atomic::AtomicU64>,
+    pub(crate) download_permits: Arc<tokio::sync::Semaphore>,
+    pub(crate) limits: StreamLimits,
+}
+
+impl DownloadSessionInner {
+    /// Builds the streaming pipeline context shared by this session, resolving
+    /// the process-global blocking runtime lazily.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SdxError`] when the dedicated blocking runtime cannot be
+    /// started.
+    pub(crate) fn stream_context(&self) -> Result<StreamContext, SdxError> {
+        Ok(StreamContext {
+            transfer: self.transfer.clone(),
+            api_base: self.api_base.clone(),
+            buffer_semaphore: self.buffer_semaphore.clone(),
+            active_downloads: self.active_downloads.clone(),
+            download_permits: self.download_permits.clone(),
+            limits: self.limits.clone(),
+            #[cfg(not(target_family = "wasm"))]
+            blocking_runtime: crate::stream::global_blocking_runtime()?,
+        })
+    }
 }
 
 /// Sequential download session over one repository.
@@ -67,6 +108,117 @@ impl DownloadSession {
         }
         self.download(file_id, dest, Some(ByteRange::new(start, end)))
             .await
+    }
+
+    /// Returns a pull-based streaming download of `file_id`.
+    ///
+    /// `range` is an end-exclusive byte range; `None` means the full file. The
+    /// returned [`DownloadStream`] yields `Bytes` chunks via
+    /// [`DownloadStream::next`] / [`DownloadStream::blocking_next`] — the
+    /// consumer forwards chunks to a socket/stdout and the file is never
+    /// buffered whole. Memory is bounded by the client's byte-denominated
+    /// buffer semaphore (see [`crate::XetClientBuilder::with_buffer_semaphore`]).
+    ///
+    /// The background reconstruction task is spawned paused and auto-starts on
+    /// the first `next()`/`blocking_next()`; dropping the stream cancels it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SdxError`] when `file_id` is malformed, token issuance fails,
+    /// or `range` is inverted (`start > end`). Reconstruction/fetch errors
+    /// surface on the stream's `next()` calls.
+    pub async fn download_stream(
+        &self,
+        file_id: &str,
+        range: Option<Range<u64>>,
+    ) -> Result<DownloadStream, SdxError> {
+        let reconstructor = self.build_reconstructor(file_id, range).await?;
+        Ok(reconstructor.reconstruct_to_stream())
+    }
+
+    /// Returns a pull-based streaming download of `file_id` that yields
+    /// `(file_offset, Bytes)` pairs in completion order.
+    ///
+    /// Progress probes: [`UnorderedDownloadStream::total_bytes_expected`],
+    /// [`UnorderedDownloadStream::bytes_in_progress`], and
+    /// [`UnorderedDownloadStream::bytes_completed`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SdxError`] when `file_id` is malformed, token issuance fails,
+    /// or `range` is inverted (`start > end`).
+    pub async fn download_unordered_stream(
+        &self,
+        file_id: &str,
+        range: Option<Range<u64>>,
+    ) -> Result<UnorderedDownloadStream, SdxError> {
+        let reconstructor = self.build_reconstructor(file_id, range).await?;
+        Ok(reconstructor.reconstruct_to_unordered_stream())
+    }
+
+    /// Downloads `file_id` into the `std::io::Write` sink `writer` (a file,
+    /// stdout, ...), running it on a `spawn_blocking` thread and returning the
+    /// number of bytes written.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SdxError`] when `file_id` is malformed, token issuance fails,
+    /// a fetch or reconstruction fails, or the writer fails.
+    pub async fn download_to_writer<W: std::io::Write + Send + 'static>(
+        &self,
+        file_id: &str,
+        writer: W,
+    ) -> Result<u64, SdxError> {
+        let reconstructor = self.build_reconstructor(file_id, None).await?;
+        reconstructor.reconstruct_to_writer(writer).await
+    }
+
+    /// Downloads the whole file into a single [`Bytes`] (in-memory convenience
+    /// path; fine for modest files).
+    ///
+    /// Equivalent to draining [`download_stream`](Self::download_stream) with
+    /// `range = None`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SdxError`] when `file_id` is malformed, token issuance fails,
+    /// or a fetch/reconstruction fails.
+    pub async fn download_bytes(&self, file_id: &str) -> Result<Bytes, SdxError> {
+        let mut stream = self.download_stream(file_id, None).await?;
+        let mut out = bytes::BytesMut::new();
+        while let Some(chunk) = stream.next().await? {
+            out.extend_from_slice(&chunk);
+        }
+        Ok(out.freeze())
+    }
+
+    /// Builds a [`FileReconstructor`] for `file_id`, validating the identifier
+    /// and resolving the read token.
+    async fn build_reconstructor(
+        &self,
+        file_id: &str,
+        range: Option<Range<u64>>,
+    ) -> Result<FileReconstructor, SdxError> {
+        // Validate the file identifier before spending a token issuance.
+        let _ = parse_xet_hash_hex(file_id)?;
+        if let Some(range) = &range
+            && range.start > range.end
+        {
+            return Err(SdxError::InvalidByteRange {
+                start: range.start,
+                end: range.end,
+            });
+        }
+        let token = self.inner.tokens.read_token().await?;
+        let mut reconstructor = FileReconstructor::new(
+            self.inner.stream_context()?,
+            file_id.to_owned(),
+            token.token,
+        );
+        if let Some(range) = range {
+            reconstructor = reconstructor.with_byte_range(range);
+        }
+        Ok(reconstructor)
     }
 
     async fn download(
