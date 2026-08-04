@@ -18,6 +18,7 @@ use url::Url;
 use crate::{
     auth::{Auth, HttpConfig, RepositoryId},
     cache::{ChunkCache, DEFAULT_CHUNK_CACHE_BUDGET_BYTES},
+    dedup::DedupClient,
     error::{SdxError, TransferError},
     group::XetStreamGroup,
     session::{DownloadSession, DownloadSessionInner},
@@ -140,6 +141,17 @@ impl XetClient {
     #[must_use]
     pub fn chunk_cache(&self) -> Option<Arc<ChunkCache>> {
         self.inner.chunk_cache.clone()
+    }
+
+    /// Returns a [`DedupClient`] sharing this client's CAS transport for
+    /// global dedup queries (M3a).
+    ///
+    /// Resolve a write-scoped token and pass its `token` and the CAS base URL
+    /// to [`DedupClient::query_for_global_dedup_shard`] (M3b wires this into
+    /// the upload session).
+    #[must_use]
+    pub fn dedup_client(&self) -> DedupClient {
+        DedupClient::new(self.inner.transfer.clone())
     }
 }
 

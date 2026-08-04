@@ -141,4 +141,7 @@ pub enum SdxError {
     /// The `xet://` endpoint URL could not be mapped to an API base and repository identity.
     #[error("invalid endpoint URL: {0}")]
     InvalidEndpoint(String),
+    /// A serialized xorb could not be built (empty input, serialization failure).
+    #[error("xorb build failed: {0}")]
+    XorbBuild(String),
 }

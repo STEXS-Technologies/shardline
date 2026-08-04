@@ -17,6 +17,8 @@ use reqwest::{Response, StatusCode, header};
 use serde::Deserialize;
 use shardline_xet_adapter::{FileReconstructionResponse, FileReconstructionV2Response};
 
+use bytes::Bytes;
+
 use crate::error::TransferError;
 
 /// Inclusive byte range (`start..=end`), the wire semantics used by the Xet
@@ -191,6 +193,34 @@ impl TransferClient {
         let served_range = partial_range
             .unwrap_or_else(|| ByteRange::new(0, u64::try_from(data.len()).unwrap_or(u64::MAX)));
         Ok(RangedXorb { data, served_range })
+    }
+
+    /// Fetches a raw `GET` path under `base_url` and returns the response body.
+    ///
+    /// HTTP 404 is reported as `Ok(None)` — the global dedup query
+    /// (`/v1/chunks/default-merkledb/{hash}`) treats 404 as a cache miss, not
+    /// an error. Every other non-success status is mapped to a typed
+    /// [`TransferError`] (including 429, which is surfaced without retry; M4
+    /// adds retry policies).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TransferError`] when the request fails or the status is a
+    /// non-404 error status.
+    pub async fn get_optional_bytes(
+        &self,
+        base_url: &str,
+        token: &str,
+        path: &str,
+    ) -> Result<Option<Bytes>, TransferError> {
+        let url = format!("{}{}", base_url.trim_end_matches('/'), path);
+        let response = self.client.get(&url).bearer_auth(token).send().await?;
+        if response.status() == StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        let response = ensure_success(response).await?;
+        let body = response.bytes().await?;
+        Ok(Some(body))
     }
 
     async fn get_reconstruction(

@@ -51,14 +51,28 @@
 //! and per-stream [`group::XetTaskState`] status probes; the upload/commit
 //! side of the group layer is M3 and not implemented.
 //!
-//! Later milestones add streaming upload (M3), retry/adaptive concurrency
+//! M3a adds the offline-testable write-path foundation (all of `docs/SDX_PLAN.md`
+//! §4.4.2 / §9-M3): [`chunker::Chunker`] is a streaming CDC chunker
+//! **byte-identical** to the server's `CdcChunker`; [`xorb_build::build_xorb`]
+//! produces serialized xorbs **byte-identical** to the server's
+//! `pack_chunks_into_xorb` (via the pinned upstream `xet-core-structures`
+//! crate, with the shardline format-v2 footer assembled directly — see the
+//! module docs); [`dedup::DedupClient`] implements the global dedup query
+//! (`GET /v1/chunks/default-merkledb/{hash}`, 404 = miss, 429 no-retry) plus
+//! the eligibility and defrag-prevention hysteresis helpers. The upload
+//! session / xorb POST / shard build / streaming upload / `XetUploadCommit`
+//! layer is M3b.
+//!
+//! Later milestones add streaming upload (M3b), retry/adaptive concurrency
 //! (M4), chunking, shard, and path addressing modules from the module map in
 //! `docs/SDX_PLAN.md` §4.2.
 
 pub mod auth;
 pub mod cache;
+pub mod chunker;
 pub mod client;
 pub mod config;
+pub mod dedup;
 pub mod error;
 pub mod group;
 pub mod hash;
@@ -67,14 +81,21 @@ pub mod session;
 pub mod stream;
 pub mod transfer;
 pub mod xorb;
+pub mod xorb_build;
 
 pub use auth::{
     Auth, AuthError, HttpConfig, PROVIDER_KEY_HEADER_NAME, REFRESH_BUFFER_SECONDS, RepositoryId,
     ScopedToken, TokenService,
 };
 pub use cache::{CachedXorbRange, ChunkCache, DEFAULT_CHUNK_CACHE_BUDGET_BYTES};
+pub use chunker::{Chunk, Chunker, DEFAULT_TARGET_CHUNK_SIZE};
 pub use client::{XetClient, XetClientBuilder};
 pub use config::Credential;
+pub use dedup::{
+    DEFRAG_HYSTERESIS_FACTOR, DEFRAG_MIN_CHUNKS_PER_RANGE, DEFRAG_NUM_RANGES_WINDOW, DedupClient,
+    DedupOutcome, DefragPrevention, GLOBAL_DEDUP_CHUNK_MODULUS, GLOBAL_DEDUP_PREFIX,
+    MIN_SPACING_BETWEEN_GLOBAL_DEDUP_QUERIES, is_global_dedup_eligible,
+};
 pub use error::{SdxError, TransferError, XetHashParseError};
 pub use group::{
     GroupedDownloadStream, GroupedUnorderedDownloadStream, XetStreamGroup, XetTaskState,
@@ -97,3 +118,7 @@ pub use transfer::{
 };
 pub use xet_core_structures::merklehash::MerkleHash;
 pub use xorb::{DecodedChunk, XorbError, XorbReader};
+pub use xorb_build::{
+    BuiltXorb, MAX_XORB_BYTES, MAX_XORB_CHUNKS, SERIALIZED_XORB_SAFETY_CAP_BYTES, XorbChunkEntry,
+    build_xorb, serialized_size_le, xorb_cut_condition, xorb_max_addable_chunk,
+};
