@@ -34,8 +34,17 @@
 //! resolution, `unpacked_length` validation, and byte-range assembly;
 //! [`session::DownloadSession`] exposes `download_file` / `download_range`.
 //!
-//! Later milestones add streaming, chunk caching, retry/concurrency, chunking,
-//! shard, and path addressing modules from the module map in
+//! M2b1 adds the streaming download core ([`stream`], `docs/SDX_PLAN.md`
+//! §4.4.1): pull-based [`stream::DownloadStream`] /
+//! [`stream::UnorderedDownloadStream`] (`next()`/`blocking_next()`), the
+//! byte-denominated [`stream::BufferSemaphore`] memory bound, and
+//! `download_stream` / `download_unordered_stream` / `download_to_writer` /
+//! `download_bytes` on [`client::XetClient`] and [`session::DownloadSession`].
+//! The stream-group layer, on-disk chunk cache, and retry/adaptive concurrency
+//! arrive in later milestones.
+//!
+//! Later milestones add streaming upload, chunk caching, retry/concurrency,
+//! chunking, shard, and path addressing modules from the module map in
 //! `docs/SDX_PLAN.md` §4.2.
 
 pub mod auth;
@@ -45,6 +54,7 @@ pub mod error;
 pub mod hash;
 pub mod reconstruction;
 pub mod session;
+pub mod stream;
 pub mod transfer;
 pub mod xorb;
 
@@ -60,6 +70,14 @@ pub use hash::{
 };
 pub use reconstruction::{ReconstructedFile, ResolvedTerm, reconstruct};
 pub use session::DownloadSession;
+pub use stream::{
+    BufferPermit, BufferSemaphore, DEFAULT_COMPLETION_RATE_ESTIMATOR_HALF_LIFE,
+    DEFAULT_DOWNLOAD_BUFFER_LIMIT, DEFAULT_DOWNLOAD_BUFFER_PERFILE_SIZE,
+    DEFAULT_DOWNLOAD_BUFFER_SIZE, DEFAULT_DOWNLOAD_CONCURRENCY,
+    DEFAULT_MAX_RECONSTRUCTION_FETCH_SIZE, DEFAULT_MIN_PREFETCH_BUFFER,
+    DEFAULT_MIN_RECONSTRUCTION_FETCH_SIZE, DEFAULT_TARGET_BLOCK_COMPLETION_TIME_SECS, DataFuture,
+    DataWriter, DownloadStream, StreamLimits, UnorderedDownloadStream,
+};
 pub use transfer::{
     ByteRange, MultipartPart, RangedXorb, TransferClient, parse_multipart_byteranges,
 };

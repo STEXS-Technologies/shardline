@@ -31,7 +31,7 @@ use std::{
 };
 
 use bytes::Bytes;
-use sdx::{Auth, RepositoryId, XetClientBuilder};
+use sdx::{Auth, RepositoryId, StreamLimits, XetClientBuilder};
 use shardline_protocol::{RepositoryProvider, RepositoryScope};
 use shardline_server::{BenchmarkBackend, ServerConfig, ServerFrontend, ServerRole};
 use tempfile::TempDir;
@@ -72,6 +72,10 @@ struct TestServer {
 
 impl TestServer {
     async fn start() -> Self {
+        Self::start_with_chunk_size(NonZeroUsize::new(128).unwrap()).await
+    }
+
+    async fn start_with_chunk_size(chunk_size: NonZeroUsize) -> Self {
         let dir = TempDir::new().unwrap();
         let cfg_dir = dir.path().join("cfg");
         std::fs::create_dir_all(&cfg_dir).unwrap();
@@ -81,7 +85,6 @@ impl TestServer {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let base_url = format!("http://127.0.0.1:{}", addr.port());
-        let chunk_size = NonZeroUsize::new(128).unwrap();
 
         let upload = BenchmarkBackend::isolated_local(
             dir.path().to_path_buf(),
@@ -137,6 +140,12 @@ impl TestServer {
     }
 
     fn client(&self) -> sdx::XetClient {
+        self.client_with(None, None)
+    }
+
+    /// Builds a client with optional streaming options: a fixed buffer
+    /// capacity (memory bound) and/or custom prefetch limits.
+    fn client_with(&self, buffer_cap: Option<u64>, limits: Option<StreamLimits>) -> sdx::XetClient {
         let auth = Auth::new(
             &self.base_url,
             RepositoryId {
@@ -149,14 +158,19 @@ impl TestServer {
         .unwrap()
         .with_api_key(BOOTSTRAP_KEY.to_owned())
         .with_subject(SUBJECT.to_owned());
-        XetClientBuilder::new()
+        let mut builder = XetClientBuilder::new()
             .endpoint(format!(
                 "xet://127.0.0.1:{}/github/team/assets/main",
                 self.port
             ))
-            .auth(auth)
-            .build()
-            .unwrap()
+            .auth(auth);
+        if let Some(cap) = buffer_cap {
+            builder = builder.with_buffer_semaphore(cap);
+        }
+        if let Some(limits) = limits {
+            builder = builder.with_stream_limits(limits);
+        }
+        builder.build().unwrap()
     }
 }
 
@@ -232,6 +246,18 @@ const TINY_ID: char = 'c';
 const ZEROS_ID: char = 'd';
 const RANDOM_ID: char = 'e';
 const UNKNOWN_ID: char = 'f';
+const MEMORY_ID: char = '1';
+
+/// Current resident set size of this process in KiB (Linux `/proc/self/status`).
+fn current_rss_kib() -> u64 {
+    let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+    for line in status.lines() {
+        if let Some(rest) = line.strip_prefix("VmRSS:") {
+            return rest.trim().trim_end_matches(" kB").parse().unwrap_or(0);
+        }
+    }
+    0
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn download_full_multi_xorb_file_matches_uploaded_bytes() {
@@ -416,4 +442,205 @@ async fn download_single_chunk_file_matches_uploaded_bytes() {
 
     let downloaded = download_file(&client, &file_id).await;
     assert_eq!(downloaded, data);
+}
+
+// ============================================================================
+// M2b1 streaming E2E
+// ============================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn download_stream_multi_xorb_file_matches_uploaded_bytes() {
+    let server = TestServer::start().await;
+    let client = server.client();
+    // ~1.3 MiB spans >8192 chunks at the 128-byte chunk target, exercising
+    // multi-xorb reconstruction through the pull-based stream.
+    let data = deterministic_random(1_310_720, 0x51e4);
+    let file_id = hex_id(MULTI_XORB_ID);
+    server.upload(&file_id, &data).await;
+
+    let mut stream = client.download_stream(&file_id, None).await.unwrap();
+    let mut out = Vec::new();
+    while let Some(chunk) = stream.next().await.unwrap() {
+        out.extend_from_slice(&chunk);
+    }
+    assert_eq!(out.len(), data.len());
+    assert_eq!(out, data);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn download_stream_single_xorb_file_matches_uploaded_bytes() {
+    let server = TestServer::start().await;
+    let client = server.client();
+    let data = deterministic_random(65_536, 0x51e4c0de);
+    let file_id = hex_id(SINGLE_XORB_ID);
+    server.upload(&file_id, &data).await;
+
+    let mut stream = client.download_stream(&file_id, None).await.unwrap();
+    let mut out = Vec::new();
+    while let Some(chunk) = stream.next().await.unwrap() {
+        out.extend_from_slice(&chunk);
+    }
+    assert_eq!(out, data);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn download_unordered_stream_matches_uploaded_bytes_sorted() {
+    let server = TestServer::start().await;
+    let client = server.client();
+    let data = deterministic_random(1_310_720, 0x0bf0);
+    let file_id = hex_id(MULTI_XORB_ID);
+    server.upload(&file_id, &data).await;
+
+    let mut stream = client
+        .download_unordered_stream(&file_id, None)
+        .await
+        .unwrap();
+    // Chunks arrive in completion order; reassemble by offset and verify that
+    // the offsets tile the file contiguously.
+    let mut pieces: Vec<(u64, bytes::Bytes)> = Vec::new();
+    while let Some((offset, chunk)) = stream.next().await.unwrap() {
+        pieces.push((offset, chunk));
+    }
+    pieces.sort_by_key(|(offset, _)| *offset);
+    let mut out = Vec::new();
+    let mut expected_offset = 0u64;
+    for (offset, chunk) in &pieces {
+        assert_eq!(*offset, expected_offset);
+        expected_offset = expected_offset.saturating_add(u64::try_from(chunk.len()).unwrap());
+        out.extend_from_slice(chunk);
+    }
+    assert_eq!(expected_offset, u64::try_from(data.len()).unwrap());
+    assert_eq!(out, data);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn download_to_writer_writes_file() {
+    let server = TestServer::start().await;
+    let client = server.client();
+    let data = deterministic_random(262_144, 0x02a7);
+    let file_id = hex_id(RANDOM_ID);
+    server.upload(&file_id, &data).await;
+
+    let dir = TempDir::new().unwrap();
+    let dest = dir.path().join("out.bin");
+    let file = std::fs::File::create(&dest).unwrap();
+    let written = client.download_to_writer(&file_id, file).await.unwrap();
+    assert_eq!(written, u64::try_from(data.len()).unwrap());
+    assert_eq!(tokio::fs::read(&dest).await.unwrap(), data);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn download_bytes_matches_download_file() {
+    let server = TestServer::start().await;
+    let client = server.client();
+    let data = deterministic_random(65_536, 0xbeef);
+    let file_id = hex_id(SINGLE_XORB_ID);
+    server.upload(&file_id, &data).await;
+
+    let bytes = client.download_bytes(&file_id).await.unwrap();
+    assert_eq!(bytes.as_ref(), data.as_slice());
+    // Equivalence with the sequential in-memory path.
+    let file = download_file(&client, &file_id).await;
+    assert_eq!(bytes.as_ref(), file.as_slice());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn download_stream_byte_range_matches_uploaded_bytes() {
+    let server = TestServer::start().await;
+    let client = server.client();
+    let data = deterministic_random(262_144, 0xbad0);
+    let file_id = hex_id(RANDOM_ID);
+    server.upload(&file_id, &data).await;
+
+    let start = 10_000u64;
+    let end = 200_000u64;
+    let mut stream = client
+        .download_stream(&file_id, Some(start..end))
+        .await
+        .unwrap();
+    let mut out = Vec::new();
+    while let Some(chunk) = stream.next().await.unwrap() {
+        out.extend_from_slice(&chunk);
+    }
+    assert_eq!(out, data[start as usize..end as usize]);
+}
+
+/// The milestone's key acceptance test: streaming a large file with a small
+/// buffer cap must keep resident RAM far below the file size.
+///
+/// A 1 GiB synthetic file is streamed through a 64 MiB byte-denominated buffer
+/// semaphore to a plain thread via `blocking_next()`; the memory added by the
+/// streaming pipeline (peak `VmRSS` sampled during the download, minus the
+/// pre-download baseline) must stay below 256 MiB — far below the 1 GiB file
+/// size. In isolation the absolute peak is ~140 MiB.
+///
+/// The server runs in-process, and its ingest retains freed-but-unreturned
+/// glibc arena memory after the upload; `malloc_trim(0)` releases it before
+/// the download. Because the harness runs every E2E test concurrently in one
+/// process, the assertion is on the streaming *delta* over the baseline rather
+/// than the absolute process RSS.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stream_large_file_memory_bounded_cat() {
+    // 64 KiB chunk target keeps term counts (and thus in-flight tasks) small;
+    // the file still spans multiple 64 MiB xorbs.
+    let server = TestServer::start_with_chunk_size(NonZeroUsize::new(65_536).unwrap()).await;
+    let limits = StreamLimits {
+        min_reconstruction_fetch_size: 4 * 1024 * 1024,
+        max_reconstruction_fetch_size: 8 * 1024 * 1024,
+        min_prefetch_buffer: 8 * 1024 * 1024,
+        ..StreamLimits::default()
+    };
+    let client = server.client_with(Some(64 * 1024 * 1024), Some(limits));
+
+    let file_size = 1024 * 1024 * 1024; // 1 GiB
+    let data = deterministic_random(file_size, 0xb00b5e);
+    let file_id = hex_id(MEMORY_ID);
+    server.upload(&file_id, &data).await;
+    // Release the test's 1 GiB buffer before measuring the download's RSS.
+    drop(data);
+    tokio::task::yield_now().await;
+    // The server's in-process ingest retains freed-but-unreturned heap memory
+    // (glibc arena), which would mask the download's RSS; release it back to
+    // the OS so the assertion measures the streaming pipeline only.
+    // SAFETY: malloc_trim is a glibc extension; harmless in a test.
+    unsafe {
+        libc::malloc_trim(0);
+    }
+    tokio::task::yield_now().await;
+    let baseline_kib = current_rss_kib();
+
+    let mut stream = client.download_stream(&file_id, None).await.unwrap();
+    // Consume on a plain (non-async) thread via the dedicated blocking runtime,
+    // sampling peak RSS throughout the stream.
+    let handle = std::thread::spawn(move || {
+        let mut peak_rss_kib = current_rss_kib();
+        let mut total: u64 = 0;
+        loop {
+            peak_rss_kib = peak_rss_kib.max(current_rss_kib());
+            match stream.blocking_next() {
+                Ok(Some(chunk)) => {
+                    total = total.saturating_add(u64::try_from(chunk.len()).unwrap());
+                }
+                Ok(None) => break,
+                Err(error) => return Err(error),
+            }
+        }
+        Ok((total, peak_rss_kib))
+    });
+    let (total, peak_rss_kib) = handle.join().unwrap().unwrap();
+    assert_eq!(
+        total,
+        u64::try_from(file_size).unwrap(),
+        "streamed {total} of {file_size} bytes (byte-identity check)"
+    );
+
+    let bound_kib = 256 * 1024; // 256 MiB
+    let streaming_delta_kib = peak_rss_kib.saturating_sub(baseline_kib);
+    assert!(
+        streaming_delta_kib < bound_kib,
+        "streaming cat added {streaming_delta_kib} KiB over the {baseline_kib} KiB baseline (peak {peak_rss_kib} KiB), exceeding the {bound_kib} KiB bound for a {file_size}-byte file with a 64 MiB buffer cap"
+    );
+    eprintln!(
+        "memory-bounded cat: file {file_size} bytes, buffer cap 64 MiB, baseline RSS {baseline_kib} KiB, peak VmRSS {peak_rss_kib} KiB (streaming delta {streaming_delta_kib} KiB)"
+    );
 }

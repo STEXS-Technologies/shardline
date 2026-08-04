@@ -130,6 +130,14 @@ pub enum SdxError {
         /// Range end.
         end: u64,
     },
+    /// An internal invariant of the streaming download pipeline was violated
+    /// (byte-range contiguity, data-size mismatch, writer channel closure, ...).
+    #[error("internal stream error: {0}")]
+    StreamInternal(String),
+    /// A background task spawned by the streaming pipeline (data fetch, writer
+    /// thread) failed to join or was aborted.
+    #[error("streaming background task failed: {0}")]
+    TaskJoin(String),
     /// The `xet://` endpoint URL could not be mapped to an API base and repository identity.
     #[error("invalid endpoint URL: {0}")]
     InvalidEndpoint(String),

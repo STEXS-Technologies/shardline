@@ -84,18 +84,50 @@ async fn fetch_reconstruction(
     file_id: &str,
     requested_range: Option<ByteRange>,
 ) -> Result<Reconstruction, SdxError> {
+    let response =
+        fetch_reconstruction_response(transfer, api_base, token, file_id, requested_range).await?;
+    match response {
+        ReconstructionResponse::V2(response) => Ok(Reconstruction::from_v2(response)?),
+        ReconstructionResponse::V1(response) => Ok(Reconstruction::from_v1(response)?),
+    }
+}
+
+/// A raw reconstruction response in either supported wire version.
+#[derive(Debug)]
+pub(crate) enum ReconstructionResponse {
+    /// V2 response (`xorbs` fetch metadata).
+    V2(FileReconstructionV2Response),
+    /// V1 response (`fetch_info` fetch metadata).
+    V1(FileReconstructionResponse),
+}
+
+/// Fetches a reconstruction response, preferring V2 and falling back to V1 on
+/// 404/501 (V2 not served). Shared by the sequential [`reconstruct`] path and
+/// the streaming term-manager prefetch path (M2b1, `crate::stream`).
+///
+/// # Errors
+///
+/// Returns [`SdxError`] when the reconstruction request fails or both API
+/// versions are unavailable.
+pub(crate) async fn fetch_reconstruction_response(
+    transfer: &TransferClient,
+    api_base: &str,
+    token: &str,
+    file_id: &str,
+    requested_range: Option<ByteRange>,
+) -> Result<ReconstructionResponse, SdxError> {
     match transfer
         .reconstruction_v2(api_base, token, file_id, requested_range)
         .await
     {
-        Ok(response) => Ok(Reconstruction::from_v2(response)?),
+        Ok(response) => Ok(ReconstructionResponse::V2(response)),
         Err(TransferError::NotFound(_) | TransferError::HttpStatus { status: 501, .. }) => {
             // V2 not available on this frontend: fall back to V1
             // (SDX_PLAN.md §7 item 7, cross-frontend M7).
             let response = transfer
                 .reconstruction_v1(api_base, token, file_id, requested_range)
                 .await?;
-            Ok(Reconstruction::from_v1(response)?)
+            Ok(ReconstructionResponse::V1(response))
         }
         Err(error) => Err(error.into()),
     }
