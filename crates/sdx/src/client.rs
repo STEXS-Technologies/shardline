@@ -11,13 +11,15 @@
 //!
 //! Path addressing (`xet://…/<revision>/<path>`) arrives in M5.
 
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 
 use url::Url;
 
 use crate::{
     auth::{Auth, HttpConfig, RepositoryId},
+    cache::{ChunkCache, DEFAULT_CHUNK_CACHE_BUDGET_BYTES},
     error::{SdxError, TransferError},
+    group::XetStreamGroup,
     session::{DownloadSession, DownloadSessionInner},
     stream::{
         BufferSemaphore, DEFAULT_DOWNLOAD_BUFFER_LIMIT, DEFAULT_DOWNLOAD_BUFFER_SIZE,
@@ -117,6 +119,28 @@ impl XetClient {
     pub fn cas_url(&self) -> Option<String> {
         self.inner.tokens.cas_url()
     }
+
+    /// Creates a stream group over the client's repository.
+    ///
+    /// The group manages concurrent pull-based streams with abort-all and
+    /// per-stream status (see [`XetStreamGroup`], `docs/SDX_PLAN.md` §4.4.3).
+    #[must_use]
+    pub fn new_download_stream_group(&self) -> XetStreamGroup {
+        XetStreamGroup::new(self.inner.clone())
+    }
+
+    /// Returns the number of ranged xorb transfer requests issued by this
+    /// client so far (cache misses only).
+    #[must_use]
+    pub fn xorb_fetch_count(&self) -> u64 {
+        self.inner.xorb_fetch_count()
+    }
+
+    /// Returns the client-configured on-disk chunk cache, if any.
+    #[must_use]
+    pub fn chunk_cache(&self) -> Option<Arc<ChunkCache>> {
+        self.inner.chunk_cache.clone()
+    }
 }
 
 impl Default for XetClientBuilder {
@@ -128,6 +152,9 @@ impl Default for XetClientBuilder {
             buffer_capacity: None,
             download_concurrency: DEFAULT_DOWNLOAD_CONCURRENCY,
             limits: StreamLimits::default(),
+            chunk_cache_dir: None,
+            chunk_cache: None,
+            chunk_cache_budget: None,
         }
     }
 }
@@ -165,6 +192,9 @@ pub struct XetClientBuilder {
     buffer_capacity: Option<u64>,
     download_concurrency: usize,
     limits: StreamLimits,
+    chunk_cache_dir: Option<PathBuf>,
+    chunk_cache: Option<Arc<ChunkCache>>,
+    chunk_cache_budget: Option<u64>,
 }
 
 impl XetClientBuilder {
@@ -227,14 +257,44 @@ impl XetClientBuilder {
         self
     }
 
+    /// Enables the on-disk chunk cache rooted at `cache_dir` with the default
+    /// budget ([`DEFAULT_CHUNK_CACHE_BUDGET_BYTES`], 2 GiB).
+    ///
+    /// Every ranged xorb fetch is checked against the cache first and stored
+    /// back on success (see [`ChunkCache`] and `docs/SDX_PLAN.md` §4.4.1
+    /// step 3). Combine with [`with_chunk_cache_budget`](Self::with_chunk_cache_budget)
+    /// to tune the budget.
+    #[must_use]
+    pub fn with_chunk_cache_dir(mut self, cache_dir: impl Into<PathBuf>) -> Self {
+        self.chunk_cache_dir = Some(cache_dir.into());
+        self
+    }
+
+    /// Uses a prebuilt [`ChunkCache`] (full control over budget and location).
+    #[must_use]
+    pub fn with_chunk_cache(mut self, cache: ChunkCache) -> Self {
+        self.chunk_cache = Some(Arc::new(cache));
+        self
+    }
+
+    /// Sets the budget (bytes) used by the cache directory configured with
+    /// [`with_chunk_cache_dir`](Self::with_chunk_cache_dir). Ignored when a
+    /// prebuilt cache is supplied.
+    #[must_use]
+    pub const fn with_chunk_cache_budget(mut self, budget_bytes: u64) -> Self {
+        self.chunk_cache_budget = Some(budget_bytes);
+        self
+    }
+
     /// Builds the client.
     ///
     /// # Errors
     ///
     /// Returns [`SdxError`] when the endpoint URL cannot be mapped to an API
     /// base and repository identity, no [`Auth`] is configured, the token
-    /// service cannot be built, or the HTTP client cannot be created. (The
-    /// streaming blocking runtime is resolved lazily on first stream use.)
+    /// service cannot be built, the HTTP client cannot be created, or the
+    /// configured chunk-cache directory cannot be initialized. (The streaming
+    /// blocking runtime is resolved lazily on first stream use.)
     pub fn build(self) -> Result<XetClient, SdxError> {
         let endpoint = self.endpoint.ok_or_else(|| {
             SdxError::InvalidEndpoint("no endpoint configured; use `.endpoint(...)`".to_owned())
@@ -273,6 +333,18 @@ impl XetClientBuilder {
         let download_permits = Arc::new(tokio::sync::Semaphore::new(
             self.download_concurrency.max(1),
         ));
+        let chunk_cache = match self.chunk_cache {
+            Some(cache) => Some(cache),
+            None => {
+                let budget = self
+                    .chunk_cache_budget
+                    .unwrap_or(DEFAULT_CHUNK_CACHE_BUDGET_BYTES);
+                match self.chunk_cache_dir {
+                    Some(dir) => Some(Arc::new(ChunkCache::new(dir, budget)?)),
+                    None => None,
+                }
+            }
+        };
         Ok(XetClient {
             inner: Arc::new(DownloadSessionInner {
                 transfer: TransferClient::new(http_client),
@@ -282,6 +354,8 @@ impl XetClientBuilder {
                 active_downloads: Arc::new(std::sync::atomic::AtomicU64::new(0)),
                 download_permits,
                 limits,
+                chunk_cache,
+                xorb_fetch_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             }),
         })
     }

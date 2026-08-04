@@ -23,11 +23,15 @@
 //!   `Range` header) keeps `prefetched_pos - active_pos ≥ min_prefetch_buffer`,
 //!   block sizes clamped `[min_reconstruction_fetch_size,
 //!   max_reconstruction_fetch_size]` (estimator-driven, not fixed).
+//! - The on-disk chunk cache ([`crate::cache`], M2b2) is checked on every xorb
+//!   block fetch **before** the download permit / network; successful fetches
+//!   are stored back (best-effort, spawned). Cached data still counts against
+//!   the buffer semaphore while in flight — the cache is a disk copy, not a
+//!   memory bypass.
 //!
-//! Explicitly **not** in this milestone (later): the stream-group layer
-//! (§4.4.3, M2b2), the on-disk chunk cache (`cache.rs`, M2b2), and
-//! retry/backoff/adaptive concurrency (M4). The download-permit semaphore is a
-//! fixed count (default 4).
+//! Explicitly **not** in this milestone (later): the upload/commit group
+//! (§4.4.3, M3), and retry/backoff/adaptive concurrency (M4). The
+//! download-permit semaphore is a fixed count (default 4).
 //!
 //! # Blocking / async-runtime bridge
 //!
@@ -60,6 +64,7 @@ use xet_core_structures::ExpWeightedMovingAvg;
 use xet_core_structures::merklehash::MerkleHash;
 
 use crate::{
+    cache::ChunkCache,
     error::{SdxError, TransferError},
     hash::parse_xet_hash_hex,
     reconstruction::{ReconstructionResponse, fetch_reconstruction_response},
@@ -132,6 +137,11 @@ pub(crate) struct StreamContext {
     pub active_downloads: Arc<AtomicU64>,
     pub download_permits: Arc<Semaphore>,
     pub limits: StreamLimits,
+    /// Optional on-disk chunk cache (M2b2); checked before every xorb fetch.
+    pub chunk_cache: Option<Arc<ChunkCache>>,
+    /// Count of ranged xorb transfer requests issued (network fetches), for
+    /// observability/E2E request-counting.
+    pub xorb_fetch_count: Arc<AtomicU64>,
     #[cfg(not(target_family = "wasm"))]
     pub blocking_runtime: Arc<tokio::runtime::Runtime>,
 }
@@ -522,19 +532,19 @@ impl RunState {
         self.cancellation_token.cancel();
     }
 
-    /// Returns the stored error, if any.
+    /// Returns the stored error, if any, and clears it (the stream reports it
+    /// once at an item boundary).
     pub(crate) fn check_error(&self) -> Result<(), SdxError> {
         if self.has_error.load(Ordering::Acquire) {
             let mut guard = self
                 .stored_error
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if let Some(error) = guard.take() {
-                return Err(error);
-            }
-            return Err(SdxError::StreamInternal(
-                "unknown error occurred in background task".to_owned(),
-            ));
+            let error = guard.take().unwrap_or_else(|| {
+                SdxError::StreamInternal("unknown error occurred in background task".to_owned())
+            });
+            self.has_error.store(false, Ordering::Release);
+            return Err(error);
         }
         Ok(())
     }
@@ -579,6 +589,24 @@ impl RunState {
 
     pub(crate) fn total_bytes_delivered(&self) -> u64 {
         self.total_bytes_delivered.load(Ordering::Relaxed)
+    }
+
+    /// Returns a snapshot of the stored error message, if any (does not take
+    /// the error out; [`check_error`](Self::check_error) still works).
+    pub(crate) fn error_message(&self) -> Option<String> {
+        if !self.has_error.load(Ordering::Acquire) {
+            return None;
+        }
+        let guard = self
+            .stored_error
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.as_ref().map(ToString::to_string)
+    }
+
+    /// Returns `true` when the cancellation token has been cancelled.
+    pub(crate) fn is_cancelled(&self) -> bool {
+        self.cancellation_token.is_cancelled()
     }
 }
 
@@ -1192,6 +1220,8 @@ pub(crate) struct XorbBlockData {
 
 /// A downloadable xorb byte range, with data cached for sharing across terms.
 pub(crate) struct XorbBlock {
+    /// 64-hex xorb hash (the content-addressed cache key).
+    pub hash: String,
     /// Chunk range within the xorb, end-exclusive.
     pub chunk_range: (u64, u64),
     /// The transfer URL.
@@ -1203,8 +1233,13 @@ pub(crate) struct XorbBlock {
 }
 
 impl XorbBlock {
-    /// Retrieves (or reuses) the decoded block data, fetching from the CAS on
-    /// a cache miss under a download permit.
+    /// Retrieves (or reuses) the decoded block data, checking the on-disk
+    /// chunk cache first and fetching from the CAS on a miss under a download
+    /// permit.
+    ///
+    /// On a cache hit the download permit is never acquired and no network
+    /// request is issued; successful ranged fetches are stored back to the
+    /// cache best-effort (spawned, failures ignored).
     ///
     /// # Errors
     ///
@@ -1217,8 +1252,29 @@ impl XorbBlock {
     ) -> Result<Arc<XorbBlockData>, SdxError> {
         self.data
             .get_or_try_init(|| async {
-                // M2b2 seam: check the on-disk chunk cache before hitting the
-                // CAS here (key: `(prefix, xorb_hash) + first chunk range`).
+                // M2b2: check the on-disk chunk cache before acquiring the
+                // download permit / hitting the CAS (key: xorb hash + exact
+                // chunk range, mirror `xet-data-1.5.4` `xorb_block.rs`).
+                if let Some(cache) = &ctx.chunk_cache
+                    && let Some(cached) = cache.get(&self.hash, self.chunk_range).await?
+                {
+                    let base = usize::try_from(self.chunk_range.0).unwrap_or(usize::MAX);
+                    let chunk_offsets = cached
+                        .chunk_offsets
+                        .iter()
+                        .enumerate()
+                        .map(|(index, offset)| {
+                            (
+                                base.saturating_add(index),
+                                usize::try_from(*offset).unwrap_or(usize::MAX),
+                            )
+                        })
+                        .collect();
+                    return Ok(Arc::new(XorbBlockData {
+                        chunk_offsets,
+                        data: cached.data,
+                    }));
+                }
                 let _download_permit =
                     ctx.download_permits
                         .clone()
@@ -1233,7 +1289,24 @@ impl XorbBlock {
                     .transfer
                     .fetch_xorb_range(&self.url, token, self.bytes)
                     .await?;
+                ctx.xorb_fetch_count.fetch_add(1, Ordering::Relaxed);
                 let chunk_data = XorbReader::new(ranged.data).decode_chunk_data()?;
+                // Best-effort async cache put (mirror upstream `xorb_block.rs`
+                // `tokio::spawn` + warn); failures must not fail the download.
+                if let Some(cache) = &ctx.chunk_cache {
+                    let cache = cache.clone();
+                    let hash = self.hash.clone();
+                    let chunk_range = self.chunk_range;
+                    let data = chunk_data.data.clone();
+                    let chunk_offsets = chunk_data
+                        .chunk_offsets
+                        .iter()
+                        .map(|offset| u32::try_from(*offset).unwrap_or(u32::MAX))
+                        .collect::<Vec<u32>>();
+                    tokio::spawn(async move {
+                        drop(cache.put(&hash, chunk_range, &chunk_offsets, &data).await);
+                    });
+                }
                 let start_chunk = self.chunk_range.0;
                 let base = usize::try_from(start_chunk).unwrap_or(usize::MAX);
                 let chunk_offsets = chunk_data
@@ -1435,25 +1508,43 @@ fn normalize_block(
     if terms.is_empty() {
         return Ok(None);
     }
+    // Index fetch descriptors per xorb hash (sorted by chunk start) so the
+    // per-term lookup below is O(log n) rather than the O(n) linear scan that
+    // would otherwise make large term blocks (e.g. 32k terms × 16k descriptors)
+    // take tens of seconds.
+    let mut descriptor_index: HashMap<String, Vec<XorbDescriptor>> = HashMap::new();
     let mut xorb_blocks: Vec<Arc<XorbBlock>> = Vec::new();
     let mut xorb_index: HashMap<(MerkleHash, u64), usize> = HashMap::new();
     let mut file_terms = Vec::with_capacity(terms.len());
     let mut current_offset = query_start;
     for (term_index, term) in terms.iter().enumerate() {
         let xorb_hash = parse_xet_hash_hex(&term.hash)?;
-        let descriptor = descriptors
-            .for_hash(&term.hash)
-            .into_iter()
-            .find(|d| d.chunks.0 <= term.range.start && term.range.end <= d.chunks.1)
-            .ok_or_else(|| SdxError::MissingFetchInfo {
-                term_index,
-                hash: term.hash.clone(),
-            })?;
+        let sorted = descriptor_index
+            .entry(term.hash.clone())
+            .or_insert_with(|| {
+                let mut list = descriptors.for_hash(&term.hash);
+                list.sort_by_key(|descriptor| descriptor.chunks.0);
+                list
+            });
+        // The covering descriptor is the one with the largest `chunks.0 <=
+        // term.range.start` that also reaches `term.range.end` (mirror the
+        // previous linear `.find` semantics).
+        let position = sorted.partition_point(|descriptor| descriptor.chunks.0 <= term.range.start);
+        let descriptor = match position.checked_sub(1).and_then(|index| sorted.get(index)) {
+            Some(descriptor) if descriptor.chunks.1 >= term.range.end => descriptor.clone(),
+            _ => {
+                return Err(SdxError::MissingFetchInfo {
+                    term_index,
+                    hash: term.hash.clone(),
+                });
+            }
+        };
         let block_index = match xorb_index.entry((xorb_hash, descriptor.chunks.0)) {
             Entry::Occupied(entry) => *entry.get(),
             Entry::Vacant(entry) => {
                 let index = xorb_blocks.len();
                 xorb_blocks.push(Arc::new(XorbBlock {
+                    hash: term.hash.clone(),
                     chunk_range: descriptor.chunks,
                     url: descriptor.url.clone(),
                     bytes: descriptor.bytes,
@@ -1700,35 +1791,35 @@ impl ReconstructionTermManager {
 // FileReconstructor (pipeline)
 // ============================================================================
 
-/// Seam for the on-disk chunk cache (`docs/SDX_PLAN.md` §4.4.1 step 3).
-///
-/// The pipeline checks this slot before fetching a xorb range; it is always
-/// `None` until the on-disk cache lands in M2b2 (`cache.rs`).
-pub(crate) struct ChunkCache;
-
 /// Reconstructs a file from its content-addressed chunks by downloading xorb
 /// blocks and streaming the reassembled data to a writer or pull-based stream.
 ///
 /// Mirrors `xet-data-1.5.4` `file_reconstructor.rs`. The background task is
 /// spawned at construction, paused, and auto-starts on the first
 /// `next()`/`blocking_next()`; dropping the stream cancels promptly.
+///
+/// The on-disk chunk cache ([`ChunkCache`], M2b2) is checked before every xorb
+/// fetch and populated on successful ranged fetches; it defaults to the
+/// client-configured cache (see [`crate::XetClientBuilder::with_chunk_cache_dir`])
+/// and can be overridden per reconstructor via [`with_chunk_cache`](Self::with_chunk_cache).
 pub(crate) struct FileReconstructor {
     ctx: StreamContext,
     file_id: String,
     token: String,
     byte_range: Option<Range<u64>>,
-    chunk_cache: Option<ChunkCache>,
+    chunk_cache: Option<Arc<ChunkCache>>,
     cancellation_token: CancellationToken,
 }
 
 impl FileReconstructor {
     pub(crate) fn new(ctx: StreamContext, file_id: String, token: String) -> Self {
+        let chunk_cache = ctx.chunk_cache.clone();
         Self {
             ctx,
             file_id,
             token,
             byte_range: None,
-            chunk_cache: None,
+            chunk_cache,
             cancellation_token: CancellationToken::new(),
         }
     }
@@ -1739,17 +1830,22 @@ impl FileReconstructor {
     }
 
     /// Replaces the default cancellation token with the given one, for
-    /// coordinated external cancellation.
-    #[allow(dead_code)]
+    /// coordinated external cancellation (the stream-group layer, M2b2).
     pub(crate) fn with_cancellation_token(mut self, token: CancellationToken) -> Self {
         self.cancellation_token = token;
         self
     }
 
-    /// Sets the on-disk chunk cache slot (M2b2 seam; not yet implemented).
+    /// Overrides the on-disk chunk cache used by this reconstructor (defaults
+    /// to the client-configured cache).
+    ///
+    /// The pipeline reads the cache from the shared [`StreamContext`] by
+    /// default; this override exists for callers that build reconstructors
+    /// directly (the CLI and future milestones).
+    #[must_use]
     #[allow(dead_code)]
-    pub(crate) const fn with_chunk_cache(mut self, _cache: ChunkCache) -> Self {
-        self.chunk_cache = Some(ChunkCache);
+    pub fn with_chunk_cache(mut self, cache: Arc<ChunkCache>) -> Self {
+        self.chunk_cache = Some(cache);
         self
     }
 
@@ -1792,20 +1888,25 @@ impl FileReconstructor {
         match self.run_impl(data_writer, &run_state).await {
             Ok(value) => Ok(value),
             Err(RunError::Cancelled) => {
-                // Genuine cancellation: only an error (never a plain cancel)
-                // makes `check_error` fail, so this surfaces stored errors.
-                run_state.check_error()?;
+                // Genuine cancellation: surface any stored error without
+                // consuming it (the stream path reports the typed error via
+                // `check_error`).
+                if let Some(message) = run_state.error_message() {
+                    return Err(SdxError::StreamInternal(message));
+                }
                 Ok(0)
             }
             Err(RunError::Error(error)) => {
+                // Store the error (first-wins) so the stream path can surface
+                // the typed error via `check_error`; return an error to the
+                // writer caller WITHOUT consuming the stored copy (consuming
+                // it would make the stream path report "unknown error
+                // occurred in background task").
                 run_state.set_error(error);
-                // The stored error is the first (most relevant) failure; take
-                // it back out so the writer path returns it while the stream
-                // path also observes it via check_error.
                 Err(run_state
-                    .check_error()
-                    .err()
-                    .unwrap_or_else(|| SdxError::StreamInternal("stored error lost".to_owned())))
+                    .error_message()
+                    .map(SdxError::StreamInternal)
+                    .unwrap_or_else(|| SdxError::StreamInternal("download failed".to_owned())))
             }
         }
     }
@@ -1820,9 +1921,15 @@ impl FileReconstructor {
             file_id,
             token,
             byte_range,
-            chunk_cache: _chunk_cache,
-            ..
+            chunk_cache,
+            cancellation_token: _,
         } = self;
+        // Per-reconstructor cache override wins; otherwise the client-configured
+        // cache (already seeded into `ctx`) applies.
+        let ctx = StreamContext {
+            chunk_cache: chunk_cache.or_else(|| ctx.chunk_cache.clone()),
+            ..ctx
+        };
 
         run_state.check_run_state()?;
         let requested_range = byte_range.unwrap_or(0..u64::MAX);
@@ -2038,13 +2145,25 @@ impl DownloadStream {
 
         match item {
             Some(SequentialRetrievalItem::Data { receiver, permit }) => {
-                let data = match receiver.await {
-                    Ok(data) => data,
-                    Err(_) => {
-                        self.run_state.check_error()?;
-                        return Err(SdxError::StreamInternal(
-                            "data sender was dropped before sending data".to_owned(),
-                        ));
+                // The term's bytes may still be in flight (the data future is
+                // resolving the xorb fetch/decode), so awaiting the oneshot
+                // must race cancellation: a group/session abort has to surface
+                // as a prompt `Ok(None)` rather than hanging on the fetch
+                // (M2b2 stream-group abort semantics).
+                let data = tokio::select! {
+                    biased;
+                    data = receiver => match data {
+                        Ok(data) => data,
+                        Err(_) => {
+                            self.run_state.check_error()?;
+                            return Err(SdxError::StreamInternal(
+                                "data sender was dropped before sending data".to_owned(),
+                            ));
+                        }
+                    },
+                    () = self.run_state.cancelled() => {
+                        self.finished = true;
+                        return Ok(None);
                     }
                 };
                 self.run_state
@@ -2095,6 +2214,17 @@ impl DownloadStream {
         drop(self.start_signal.take());
         self.receiver.close();
         self.finished = true;
+    }
+
+    /// Returns the shared run state (for the stream-group status probe).
+    pub(crate) fn run_state(&self) -> Arc<RunState> {
+        self.run_state.clone()
+    }
+
+    /// Returns the not-yet-fired start signal, if the stream is still paused
+    /// (the stream-group layer wakes paused tasks during abort).
+    pub(crate) fn pending_start_signal(&self) -> Option<Arc<Notify>> {
+        self.start_signal.clone()
     }
 }
 
@@ -2293,6 +2423,17 @@ impl UnorderedDownloadStream {
     pub fn terms_in_progress(&self) -> u64 {
         self.progress.terms_in_progress()
     }
+
+    /// Returns the shared run state (for the stream-group status probe).
+    pub(crate) fn run_state(&self) -> Arc<RunState> {
+        self.run_state.clone()
+    }
+
+    /// Returns the not-yet-fired start signal, if the stream is still paused
+    /// (the stream-group layer wakes paused tasks during abort).
+    pub(crate) fn pending_start_signal(&self) -> Option<Arc<Notify>> {
+        self.start_signal.clone()
+    }
 }
 
 impl Drop for UnorderedDownloadStream {
@@ -2378,6 +2519,8 @@ mod tests {
             active_downloads: Arc::new(AtomicU64::new(0)),
             download_permits: Arc::new(Semaphore::new(DEFAULT_DOWNLOAD_CONCURRENCY)),
             limits: test_limits(),
+            chunk_cache: None,
+            xorb_fetch_count: Arc::new(AtomicU64::new(0)),
             blocking_runtime: test_runtime(),
         }
     }
@@ -2783,6 +2926,61 @@ mod tests {
         expected.extend_from_slice(&chunk_b);
         expected.extend_from_slice(&chunk_c);
         assert_eq!(out, expected);
+    }
+
+    #[tokio::test]
+    async fn download_stream_with_chunk_cache_serves_second_download_from_disk() {
+        let server = MockServer::start().await;
+        let chunk_a = vec![7u8; 64];
+        let chunk_b = vec![9u8; 64];
+        let payload = serialize_payload(&[&chunk_a, &chunk_b]);
+
+        reconstruction_mock(
+            &server,
+            0,
+            4095,
+            0,
+            json!([
+                {"hash": XORB_HASH, "unpacked_length": 64, "range": {"start": 0, "end": 1}},
+                {"hash": XORB_HASH, "unpacked_length": 64, "range": {"start": 1, "end": 2}}
+            ]),
+            json!({
+                XORB_HASH: [{
+                    "url": format!("{}/transfer/xorb/default/{XORB_HASH}", server.uri()),
+                    "ranges": [
+                        {"chunks": {"start": 0, "end": 2}, "bytes": {"start": 0, "end": 200}}
+                    ]
+                }]
+            }),
+        )
+        .await;
+        xorb_range_mock(&server, 0, 200, payload).await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let cache =
+            Arc::new(crate::cache::ChunkCache::new(dir.path().to_path_buf(), 1 << 20).unwrap());
+        let mut ctx = test_stream_context(&server, 1_048_576);
+        ctx.chunk_cache = Some(cache.clone());
+        let mut expected = chunk_a.clone();
+        expected.extend_from_slice(&chunk_b);
+
+        // First download: cache miss, one network fetch.
+        let (first, _) = drain(make_stream(ctx.clone(), None)).await;
+        assert_eq!(first, expected);
+        assert_eq!(ctx.xorb_fetch_count.load(Ordering::Relaxed), 1);
+        // The cache put is spawned best-effort; wait for it to land.
+        for _ in 0..100 {
+            if cache.entry_count().await.unwrap() == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(cache.entry_count().await.unwrap(), 1);
+
+        // Second download: cache hit, no additional network fetch.
+        let (second, _) = drain(make_stream(ctx.clone(), None)).await;
+        assert_eq!(second, expected);
+        assert_eq!(ctx.xorb_fetch_count.load(Ordering::Relaxed), 1);
     }
 
     #[tokio::test]

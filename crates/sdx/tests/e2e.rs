@@ -27,7 +27,8 @@
 use std::{
     num::{NonZeroU64, NonZeroUsize},
     ops::RangeInclusive,
-    time::Duration,
+    path::Path,
+    time::{Duration, Instant},
 };
 
 use bytes::Bytes;
@@ -76,6 +77,7 @@ impl TestServer {
     }
 
     async fn start_with_chunk_size(chunk_size: NonZeroUsize) -> Self {
+        configure_test_pools();
         let dir = TempDir::new().unwrap();
         let cfg_dir = dir.path().join("cfg");
         std::fs::create_dir_all(&cfg_dir).unwrap();
@@ -143,9 +145,29 @@ impl TestServer {
         self.client_with(None, None)
     }
 
+    /// Builds a client with an on-disk chunk cache rooted at `cache_dir`
+    /// (plus the given memory cap / limits).
+    fn client_with_cache_dir(
+        &self,
+        cache_dir: &Path,
+        buffer_cap: Option<u64>,
+        limits: Option<StreamLimits>,
+    ) -> sdx::XetClient {
+        self.client_with_base(buffer_cap, limits, Some(cache_dir))
+    }
+
     /// Builds a client with optional streaming options: a fixed buffer
     /// capacity (memory bound) and/or custom prefetch limits.
     fn client_with(&self, buffer_cap: Option<u64>, limits: Option<StreamLimits>) -> sdx::XetClient {
+        self.client_with_base(buffer_cap, limits, None)
+    }
+
+    fn client_with_base(
+        &self,
+        buffer_cap: Option<u64>,
+        limits: Option<StreamLimits>,
+        cache_dir: Option<&Path>,
+    ) -> sdx::XetClient {
         let auth = Auth::new(
             &self.base_url,
             RepositoryId {
@@ -170,6 +192,9 @@ impl TestServer {
         if let Some(limits) = limits {
             builder = builder.with_stream_limits(limits);
         }
+        if let Some(cache_dir) = cache_dir {
+            builder = builder.with_chunk_cache_dir(cache_dir);
+        }
         builder.build().unwrap()
     }
 }
@@ -178,6 +203,28 @@ impl Drop for TestServer {
     fn drop(&mut self) {
         self._task.abort();
     }
+}
+
+/// Raises the in-process server's execution-pool sizes once per process.
+///
+/// The server reads `SHARDLINE_PARSING_POOL_SIZE` / `SHARDLINE_HASHING_POOL_SIZE`
+/// at router-build time (`crates/shardline-server/src/app.rs`). The default
+/// 8-parsing-permit pool is too small for several concurrent streaming
+/// downloads (each issues 2-3 reconstruction prefetch requests that hold a
+/// parsing permit while the term list is generated), which would surface as
+/// transient 503 "server work queue is saturated" errors. Set once, before any
+/// server boots, so every `TestServer` in this process gets the larger pools.
+fn configure_test_pools() {
+    static CONFIGURED: std::sync::Once = std::sync::Once::new();
+    CONFIGURED.call_once(|| {
+        // SAFETY: guarded by `Once` so the variables are written exactly once
+        // before any server router reads them; this is the standard test-harness
+        // pattern for the server's env-configured pool sizes.
+        unsafe {
+            std::env::set_var("SHARDLINE_PARSING_POOL_SIZE", "64");
+            std::env::set_var("SHARDLINE_HASHING_POOL_SIZE", "64");
+        }
+    });
 }
 
 async fn wait_ready(base_url: &str) {
@@ -642,5 +689,167 @@ async fn stream_large_file_memory_bounded_cat() {
     );
     eprintln!(
         "memory-bounded cat: file {file_size} bytes, buffer cap 64 MiB, baseline RSS {baseline_kib} KiB, peak VmRSS {peak_rss_kib} KiB (streaming delta {streaming_delta_kib} KiB)"
+    );
+}
+
+// ============================================================================
+// M2b2 E2E: on-disk chunk cache + stream group
+// ============================================================================
+
+/// Waits until the cache's spawned best-effort puts have landed (total bytes
+/// stable across two 20 ms samples).
+async fn wait_for_cache_settle(client: &sdx::XetClient) {
+    let cache = client.chunk_cache().expect("cache configured on client");
+    let mut previous = 0u64;
+    for _ in 0..250 {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let total = cache.total_bytes().await.unwrap();
+        if total > 0 && total == previous {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            if cache.total_bytes().await.unwrap() == total {
+                return;
+            }
+        }
+        previous = total;
+    }
+}
+
+/// The milestone's cache acceptance test: a warm cache serves the second
+/// download of the same file with **zero** additional xorb transfer requests.
+///
+/// The first download populates the on-disk cache (best-effort spawned puts);
+/// after it settles, the second download must be byte-identical and issue no
+/// new ranged xorb GETs (reconstruction metadata requests still occur).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cache_warm_second_download_issues_no_xorb_fetches() {
+    let server = TestServer::start().await;
+    let cache_dir = TempDir::new().unwrap();
+    let client = server.client_with_cache_dir(cache_dir.path(), None, None);
+    // ~256 KiB → ~2048 chunks at the 128-byte target (single xorb); every
+    // chunk is fetched individually by the streaming path, so the warm-cache
+    // request-count delta is still meaningful.
+    let data = deterministic_random(262_144, 0xc4c4);
+    let file_id = hex_id('7');
+    server.upload(&file_id, &data).await;
+
+    let first = client.download_bytes(&file_id).await.unwrap();
+    assert_eq!(first.as_ref(), data.as_slice());
+    let first_fetches = client.xorb_fetch_count();
+    assert!(first_fetches > 0, "first download must hit the CAS");
+    wait_for_cache_settle(&client).await;
+
+    let second = client.download_bytes(&file_id).await.unwrap();
+    assert_eq!(
+        second.as_ref(),
+        data.as_slice(),
+        "warm-cache download must be byte-identical"
+    );
+    let second_fetches = client.xorb_fetch_count();
+    let delta = second_fetches.saturating_sub(first_fetches);
+    assert_eq!(
+        delta, 0,
+        "warm cache must serve the second download: first download issued {first_fetches} xorb fetches, second added {delta}"
+    );
+    eprintln!(
+        "cache-warm download: first download {first_fetches} xorb fetches, second added {delta}"
+    );
+}
+
+/// Group acceptance test: several files downloaded concurrently through one
+/// group are all byte-identical, and streams unregister on Drop.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn group_downloads_files_concurrently_byte_identical() {
+    let server = TestServer::start().await;
+    let client = server.client();
+    let group = client.new_download_stream_group();
+
+    let files: Vec<(char, Vec<u8>)> = vec![
+        ('1', deterministic_random(262_144, 0x1111)),
+        ('2', deterministic_random(131_072, 0x2222)),
+        ('3', deterministic_random(65_536, 0x3333)),
+    ];
+    for (digit, data) in &files {
+        server.upload(&hex_id(*digit), data).await;
+    }
+
+    let mut tasks = Vec::new();
+    for (digit, expected) in files.clone() {
+        let group = group.clone();
+        tasks.push(tokio::spawn(async move {
+            let mut stream = group.download_stream(&hex_id(digit), None).await.unwrap();
+            let mut out = Vec::new();
+            while let Some(chunk) = stream.next().await.unwrap() {
+                out.extend_from_slice(&chunk);
+            }
+            (digit, out, expected)
+        }));
+    }
+    for task in tasks {
+        let (digit, out, expected) = task.await.unwrap();
+        assert_eq!(out.len(), expected.len(), "file {digit} length");
+        assert_eq!(out, expected, "file {digit} byte-identity");
+    }
+    // All streams were dropped: the group is empty again.
+    assert_eq!(group.active_stream_count(), 0);
+    assert!(group.status().is_empty());
+}
+
+/// Group acceptance test: abort-all during a large download completes promptly.
+///
+/// A multi-MiB file (32k+ terms at the 128-byte chunk target) is aborted right
+/// after the first chunk arrives; the consumer loop must observe `Ok(None)`
+/// (no hang) within a tight bound, well before the file is fully downloaded.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn group_abort_during_large_download_completes_promptly() {
+    let server = TestServer::start().await;
+    let client = server.client();
+    let group = client.new_download_stream_group();
+
+    let data = deterministic_random(4 * 1024 * 1024, 0xabb0);
+    let file_id = hex_id('9');
+    server.upload(&file_id, &data).await;
+
+    let mut stream = group.download_stream(&file_id, None).await.unwrap();
+    let stream_id = stream.task_id();
+    // Wait for the first chunk so the pipeline is definitely in progress.
+    let first = tokio::time::timeout(Duration::from_secs(15), stream.next())
+        .await
+        .expect("first chunk should arrive")
+        .unwrap()
+        .expect("first chunk should not error");
+    assert!(!first.is_empty());
+
+    let started = Instant::now();
+    group.abort();
+    let mut received: u64 = u64::try_from(first.len()).unwrap();
+    loop {
+        let next = tokio::time::timeout(Duration::from_secs(2), stream.next())
+            .await
+            .expect("next() must return after abort (no hang)");
+        match next.expect("no stream error after abort") {
+            Some(chunk) => {
+                received = received.saturating_add(u64::try_from(chunk.len()).unwrap());
+            }
+            None => break,
+        }
+    }
+    let latency = started.elapsed();
+    assert!(
+        latency < Duration::from_secs(2),
+        "group abort took {latency:?} to surface Ok(None)"
+    );
+    assert!(
+        received < u64::try_from(data.len()).unwrap(),
+        "aborted download received all {received} bytes before abort"
+    );
+    assert!(group.is_aborted());
+    assert!(
+        group
+            .status()
+            .contains(&(stream_id, sdx::XetTaskState::Cancelled))
+    );
+    eprintln!(
+        "group abort latency: {latency:?} ({received} of {} bytes received)",
+        data.len()
     );
 }
