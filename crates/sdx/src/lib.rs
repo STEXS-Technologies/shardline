@@ -40,17 +40,27 @@
 //! byte-denominated [`stream::BufferSemaphore`] memory bound, and
 //! `download_stream` / `download_unordered_stream` / `download_to_writer` /
 //! `download_bytes` on [`client::XetClient`] and [`session::DownloadSession`].
-//! The stream-group layer, on-disk chunk cache, and retry/adaptive concurrency
-//! arrive in later milestones.
 //!
-//! Later milestones add streaming upload, chunk caching, retry/concurrency,
-//! chunking, shard, and path addressing modules from the module map in
+//! M2b2 adds the on-disk chunk cache ([`cache::ChunkCache`],
+//! `docs/SDX_PLAN.md` §4.4.1 step 3) and the stream-group layer
+//! ([`group::XetStreamGroup`], §4.4.3). The cache is content-addressed by the
+//! 64-hex xorb hash, atomic (temp+rename), LRU budget-bounded (default 2 GiB),
+//! and tolerant of corruption (CRC-verified, delete-on-corrupt); every ranged
+//! xorb fetch checks the cache before acquiring the download permit / hitting
+//! the network. The stream group manages concurrent downloads with abort-all
+//! and per-stream [`group::XetTaskState`] status probes; the upload/commit
+//! side of the group layer is M3 and not implemented.
+//!
+//! Later milestones add streaming upload (M3), retry/adaptive concurrency
+//! (M4), chunking, shard, and path addressing modules from the module map in
 //! `docs/SDX_PLAN.md` §4.2.
 
 pub mod auth;
+pub mod cache;
 pub mod client;
 pub mod config;
 pub mod error;
+pub mod group;
 pub mod hash;
 pub mod reconstruction;
 pub mod session;
@@ -62,9 +72,13 @@ pub use auth::{
     Auth, AuthError, HttpConfig, PROVIDER_KEY_HEADER_NAME, REFRESH_BUFFER_SECONDS, RepositoryId,
     ScopedToken, TokenService,
 };
+pub use cache::{CachedXorbRange, ChunkCache, DEFAULT_CHUNK_CACHE_BUDGET_BYTES};
 pub use client::{XetClient, XetClientBuilder};
 pub use config::Credential;
 pub use error::{SdxError, TransferError, XetHashParseError};
+pub use group::{
+    GroupedDownloadStream, GroupedUnorderedDownloadStream, XetStreamGroup, XetTaskState,
+};
 pub use hash::{
     compute_chunk_hash, compute_term_verification_hash, parse_xet_hash_hex, xet_hash_hex_string,
 };

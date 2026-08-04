@@ -14,13 +14,17 @@
 use std::{
     ops::{Range, RangeInclusive},
     path::Path,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use bytes::Bytes;
 
 use crate::{
     auth::TokenService,
+    cache::ChunkCache,
     error::SdxError,
     hash::parse_xet_hash_hex,
     reconstruction,
@@ -37,9 +41,13 @@ pub(crate) struct DownloadSessionInner {
     pub(crate) tokens: TokenService,
     pub(crate) api_base: String,
     pub(crate) buffer_semaphore: Arc<BufferSemaphore>,
-    pub(crate) active_downloads: Arc<std::sync::atomic::AtomicU64>,
+    pub(crate) active_downloads: Arc<AtomicU64>,
     pub(crate) download_permits: Arc<tokio::sync::Semaphore>,
     pub(crate) limits: StreamLimits,
+    /// Optional on-disk chunk cache (M2b2), shared by all streams.
+    pub(crate) chunk_cache: Option<Arc<ChunkCache>>,
+    /// Count of ranged xorb transfer requests (for observability/E2E).
+    pub(crate) xorb_fetch_count: Arc<AtomicU64>,
 }
 
 impl DownloadSessionInner {
@@ -58,9 +66,49 @@ impl DownloadSessionInner {
             active_downloads: self.active_downloads.clone(),
             download_permits: self.download_permits.clone(),
             limits: self.limits.clone(),
+            chunk_cache: self.chunk_cache.clone(),
+            xorb_fetch_count: self.xorb_fetch_count.clone(),
             #[cfg(not(target_family = "wasm"))]
             blocking_runtime: crate::stream::global_blocking_runtime()?,
         })
+    }
+
+    /// Builds a [`FileReconstructor`] for `file_id`, validating the identifier
+    /// and resolving the read token.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SdxError`] when `file_id` is malformed, `range` is inverted
+    /// (`start > end`), token issuance fails, or the blocking runtime cannot
+    /// be resolved.
+    pub(crate) async fn build_reconstructor(
+        &self,
+        file_id: &str,
+        range: Option<Range<u64>>,
+    ) -> Result<FileReconstructor, SdxError> {
+        // Validate the file identifier before spending a token issuance.
+        let _ = parse_xet_hash_hex(file_id)?;
+        if let Some(range) = &range
+            && range.start > range.end
+        {
+            return Err(SdxError::InvalidByteRange {
+                start: range.start,
+                end: range.end,
+            });
+        }
+        let token = self.tokens.read_token().await?;
+        let mut reconstructor =
+            FileReconstructor::new(self.stream_context()?, file_id.to_owned(), token.token);
+        if let Some(range) = range {
+            reconstructor = reconstructor.with_byte_range(range);
+        }
+        Ok(reconstructor)
+    }
+
+    /// Returns the number of ranged xorb transfer requests issued so far.
+    #[must_use]
+    pub(crate) fn xorb_fetch_count(&self) -> u64 {
+        self.xorb_fetch_count.load(Ordering::Relaxed)
     }
 }
 
@@ -194,31 +242,16 @@ impl DownloadSession {
 
     /// Builds a [`FileReconstructor`] for `file_id`, validating the identifier
     /// and resolving the read token.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SdxError`] when `file_id` is malformed or token issuance fails.
     async fn build_reconstructor(
         &self,
         file_id: &str,
         range: Option<Range<u64>>,
     ) -> Result<FileReconstructor, SdxError> {
-        // Validate the file identifier before spending a token issuance.
-        let _ = parse_xet_hash_hex(file_id)?;
-        if let Some(range) = &range
-            && range.start > range.end
-        {
-            return Err(SdxError::InvalidByteRange {
-                start: range.start,
-                end: range.end,
-            });
-        }
-        let token = self.inner.tokens.read_token().await?;
-        let mut reconstructor = FileReconstructor::new(
-            self.inner.stream_context()?,
-            file_id.to_owned(),
-            token.token,
-        );
-        if let Some(range) = range {
-            reconstructor = reconstructor.with_byte_range(range);
-        }
-        Ok(reconstructor)
+        self.inner.build_reconstructor(file_id, range).await
     }
 
     async fn download(

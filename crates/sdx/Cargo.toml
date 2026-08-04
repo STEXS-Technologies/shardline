@@ -11,6 +11,10 @@ description = "Native Xet client library for Shardline's Xet frontend."
 [dependencies]
 async-trait.workspace = true
 bytes.workspace = true
+# CRC32 for on-disk chunk-cache corruption detection (M2b2); already in the
+# workspace lockfile (pulled by flate2 at 1.5.0), so offline resolution is
+# unchanged.
+crc32fast = "1.5"
 futures-util.workspace = true
 hex.workspace = true
 # Token route constants (`XET_READ_TOKEN_ROUTE` / `XET_WRITE_TOKEN_ROUTE`) come

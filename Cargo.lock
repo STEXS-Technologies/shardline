@@ -3060,6 +3060,7 @@ dependencies = [
  "async-trait",
  "axum",
  "bytes",
+ "crc32fast",
  "futures-util",
  "hex",
  "libc",
