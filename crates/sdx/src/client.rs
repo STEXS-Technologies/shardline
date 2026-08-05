@@ -153,6 +153,79 @@ impl XetClient {
     pub fn dedup_client(&self) -> DedupClient {
         DedupClient::new(self.inner.transfer.clone())
     }
+
+    /// Creates an [`crate::upload::UploadSession`] over this client's repository (M3b).
+    ///
+    /// A session is reusable across multiple files and must be finalized with
+    /// [`crate::upload::UploadSession::finalize`] (which uploads the session shard).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SdxError`] when the session's dedicated shard-upload client
+    /// cannot be built.
+    pub fn upload_session(&self) -> Result<crate::upload::UploadSession, SdxError> {
+        crate::upload::UploadSession::new(&self.inner)
+    }
+
+    /// Uploads the local file at `path` (content-addressed; returns the
+    /// content-derived `file_id`). Path addressing / remote registration is M5.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SdxError`] when the file cannot be read or any upload step
+    /// fails.
+    pub async fn upload_file(
+        &self,
+        path: impl AsRef<std::path::Path>,
+    ) -> Result<crate::upload::UploadFileInfo, SdxError> {
+        let session = self.upload_session()?;
+        let info = session.upload_file(path).await?;
+        session.finalize().await?;
+        Ok(info)
+    }
+
+    /// Uploads an in-memory payload as a content-addressed file.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SdxError`] when any upload step fails.
+    pub async fn upload_bytes(
+        &self,
+        bytes: impl Into<bytes::Bytes>,
+    ) -> Result<crate::upload::UploadFileInfo, SdxError> {
+        let session = self.upload_session()?;
+        let info = session.upload_bytes(bytes).await?;
+        session.finalize().await?;
+        Ok(info)
+    }
+
+    /// Uploads a `std::io::Read` stream as a content-addressed file.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SdxError`] when the reader fails or any upload step fails.
+    pub async fn upload_stream<R: std::io::Read + Send + 'static>(
+        &self,
+        reader: R,
+    ) -> Result<crate::upload::UploadFileInfo, SdxError> {
+        let session = self.upload_session()?;
+        let info = session.upload_stream(reader).await?;
+        session.finalize().await?;
+        Ok(info)
+    }
+
+    /// Creates an upload group over this client's repository (M3b §4.4.3).
+    ///
+    /// The group owns an [`crate::upload::UploadSession`]; handles returned by
+    /// [`crate::group::XetUploadCommit::upload_stream`] fan into the same pipeline and the
+    /// group's `commit()` finalizes it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SdxError`] when the group's upload session cannot be built.
+    pub fn new_upload_group(&self) -> Result<crate::group::XetUploadCommit, SdxError> {
+        crate::group::XetUploadCommit::new(&self.inner)
+    }
 }
 
 impl Default for XetClientBuilder {
@@ -167,6 +240,7 @@ impl Default for XetClientBuilder {
             chunk_cache_dir: None,
             chunk_cache: None,
             chunk_cache_budget: None,
+            upload_chunk_size: crate::chunker::DEFAULT_TARGET_CHUNK_SIZE,
         }
     }
 }
@@ -207,6 +281,7 @@ pub struct XetClientBuilder {
     chunk_cache_dir: Option<PathBuf>,
     chunk_cache: Option<Arc<ChunkCache>>,
     chunk_cache_budget: Option<u64>,
+    upload_chunk_size: usize,
 }
 
 impl XetClientBuilder {
@@ -298,6 +373,16 @@ impl XetClientBuilder {
         self
     }
 
+    /// Sets the CDC target chunk size used by uploads (M3b).
+    ///
+    /// Must be a power of two and greater than 64; the default is 64 KiB
+    /// (`docs/SDX_PLAN.md` §4.4.2, mirroring the server's chunker).
+    #[must_use]
+    pub const fn with_upload_chunk_size(mut self, chunk_size: usize) -> Self {
+        self.upload_chunk_size = chunk_size;
+        self
+    }
+
     /// Builds the client.
     ///
     /// # Errors
@@ -368,6 +453,7 @@ impl XetClientBuilder {
                 limits,
                 chunk_cache,
                 xorb_fetch_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                upload_chunk_size: self.upload_chunk_size,
             }),
         })
     }

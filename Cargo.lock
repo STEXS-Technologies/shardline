@@ -3063,6 +3063,7 @@ dependencies = [
  "crc32fast",
  "futures-util",
  "hex",
+ "http-body",
  "libc",
  "reqwest 0.12.28",
  "serde",

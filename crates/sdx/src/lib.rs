@@ -59,13 +59,19 @@
 //! crate, with the shardline format-v2 footer assembled directly — see the
 //! module docs); [`dedup::DedupClient`] implements the global dedup query
 //! (`GET /v1/chunks/default-merkledb/{hash}`, 404 = miss, 429 no-retry) plus
-//! the eligibility and defrag-prevention hysteresis helpers. The upload
-//! session / xorb POST / shard build / streaming upload / `XetUploadCommit`
-//! layer is M3b.
+//! the eligibility and defrag-prevention hysteresis helpers.
 //!
-//! Later milestones add streaming upload (M3b), retry/adaptive concurrency
-//! (M4), chunking, shard, and path addressing modules from the module map in
-//! `docs/SDX_PLAN.md` §4.2.
+//! M3b adds the network + session layer on top: [`upload::UploadSession`]
+//! runs the push-style ingest loop (8 MiB blocks, CDC on a compute thread,
+//! session + eligibility-gated global dedup, HEAD-probed idempotent xorb
+//! uploads with streaming bodies from a `JoinSet`, xorbs-before-shard via
+//! fork-format v3 shards serialized by [`shard`]) and the streaming surface
+//! ([`upload::UploadStreamHandle`], [`crate::XetClient::upload_file`] /
+//! `upload_bytes` / `upload_stream`, and the group layer
+//! [`group::XetUploadCommit`]). Retry/backoff/adaptive concurrency is M4.
+//!
+//! Later milestones add retry/adaptive concurrency (M4), chunking, shard, and
+//! path addressing modules from the module map in `docs/SDX_PLAN.md` §4.2.
 
 pub mod auth;
 pub mod cache;
@@ -78,8 +84,10 @@ pub mod group;
 pub mod hash;
 pub mod reconstruction;
 pub mod session;
+pub mod shard;
 pub mod stream;
 pub mod transfer;
+pub mod upload;
 pub mod xorb;
 pub mod xorb_build;
 
@@ -98,13 +106,15 @@ pub use dedup::{
 };
 pub use error::{SdxError, TransferError, XetHashParseError};
 pub use group::{
-    GroupedDownloadStream, GroupedUnorderedDownloadStream, XetStreamGroup, XetTaskState,
+    GroupedDownloadStream, GroupedUnorderedDownloadStream, GroupedUploadStream, XetStreamGroup,
+    XetTaskState, XetUploadCommit,
 };
 pub use hash::{
     compute_chunk_hash, compute_term_verification_hash, parse_xet_hash_hex, xet_hash_hex_string,
 };
 pub use reconstruction::{ReconstructedFile, ResolvedTerm, reconstruct};
 pub use session::DownloadSession;
+pub use shard::{ShardFileEntry, ShardSegment, ShardXorb, ShardXorbChunk, serialize_shard};
 pub use stream::{
     BufferPermit, BufferSemaphore, DEFAULT_COMPLETION_RATE_ESTIMATOR_HALF_LIFE,
     DEFAULT_DOWNLOAD_BUFFER_LIMIT, DEFAULT_DOWNLOAD_BUFFER_PERFILE_SIZE,
@@ -114,7 +124,12 @@ pub use stream::{
     DataWriter, DownloadStream, StreamLimits, UnorderedDownloadStream,
 };
 pub use transfer::{
-    ByteRange, MultipartPart, RangedXorb, TransferClient, parse_multipart_byteranges,
+    ByteRange, MultipartPart, RangedXorb, TransferClient, XORB_UPLOAD_PROGRESS_BLOCK_SIZE,
+    parse_multipart_byteranges,
+};
+pub use upload::{
+    DEFAULT_UPLOAD_CONCURRENCY, INGESTION_BLOCK_SIZE, UploadFileInfo, UploadReport, UploadSession,
+    UploadStreamHandle,
 };
 pub use xet_core_structures::merklehash::MerkleHash;
 pub use xorb::{DecodedChunk, XorbError, XorbReader};
