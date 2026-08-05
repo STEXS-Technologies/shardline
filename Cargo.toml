@@ -72,6 +72,7 @@ shardline-auth = { version = "1.0.1", path = "crates/shardline-auth" }
 shardline-vcs = { version = "1.0.1", path = "crates/shardline-vcs" }
 shardline-xet-adapter = { version = "1.0.1", path = "crates/shardline-xet-adapter" }
 shardline-xet-core = { version = "1.0.1", path = "crates/shardline-xet-core" }
+sdx = { version = "1.3.0", path = "crates/sdx" }
 sqlx = { version = "0.8.6", default-features = false }
 subtle = { version = "2.6", default-features = false }
 tempfile = "3.15"
