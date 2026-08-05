@@ -24,6 +24,7 @@ use xet_core_structures::merklehash::MerkleHash;
 use crate::{
     error::{SdxError, TransferError},
     hash::compute_term_verification_hash,
+    retry::RetryContext,
     transfer::{ByteRange, TransferClient},
     xorb::{DecodedChunk, XorbReader},
 };
@@ -57,7 +58,10 @@ pub struct ResolvedTerm {
 /// file when `requested_range` is `None`).
 ///
 /// `api_base` is the API control-plane base URL and `token` is an opaque
-/// read-scoped bearer token from [`crate::TokenService`].
+/// read-scoped bearer token from [`crate::TokenService`]. When `retry` is
+/// present, reconstruction and xorb-fetch requests are retried with backoff and
+/// token refresh per the M4 [`RetryContext`]; when `None`, requests are issued
+/// once with no retry.
 ///
 /// # Errors
 ///
@@ -66,26 +70,30 @@ pub struct ResolvedTerm {
 /// decoded bytes, or the requested range is past the end of the file.
 pub async fn reconstruct(
     transfer: &TransferClient,
+    retry: Option<&RetryContext>,
     api_base: &str,
     token: &str,
     file_id: &str,
     requested_range: Option<ByteRange>,
 ) -> Result<ReconstructedFile, SdxError> {
-    let plan = fetch_reconstruction(transfer, api_base, token, file_id, requested_range).await?;
-    assemble(transfer, token, plan, requested_range).await
+    let plan =
+        fetch_reconstruction(transfer, retry, api_base, token, file_id, requested_range).await?;
+    assemble(transfer, retry, token, plan, requested_range).await
 }
 
 /// Fetches the reconstruction plan, preferring V2 and falling back to V1 on
 /// 404/501 (V2 not served).
 async fn fetch_reconstruction(
     transfer: &TransferClient,
+    retry: Option<&RetryContext>,
     api_base: &str,
     token: &str,
     file_id: &str,
     requested_range: Option<ByteRange>,
 ) -> Result<Reconstruction, SdxError> {
     let response =
-        fetch_reconstruction_response(transfer, api_base, token, file_id, requested_range).await?;
+        fetch_reconstruction_response(transfer, retry, api_base, token, file_id, requested_range)
+            .await?;
     match response {
         ReconstructionResponse::V2(response) => Ok(Reconstruction::from_v2(response)?),
         ReconstructionResponse::V1(response) => Ok(Reconstruction::from_v1(response)?),
@@ -111,25 +119,51 @@ pub(crate) enum ReconstructionResponse {
 /// versions are unavailable.
 pub(crate) async fn fetch_reconstruction_response(
     transfer: &TransferClient,
+    retry: Option<&RetryContext>,
     api_base: &str,
     token: &str,
     file_id: &str,
     requested_range: Option<ByteRange>,
 ) -> Result<ReconstructionResponse, SdxError> {
-    match transfer
-        .reconstruction_v2(api_base, token, file_id, requested_range)
+    let v2: Result<ReconstructionResponse, SdxError> =
+        match run_with_retry(retry, token, |tok| async move {
+            transfer
+                .reconstruction_v2(api_base, &tok, file_id, requested_range)
+                .await
+        })
         .await
-    {
-        Ok(response) => Ok(ReconstructionResponse::V2(response)),
-        Err(TransferError::NotFound(_) | TransferError::HttpStatus { status: 501, .. }) => {
-            // V2 not available on this frontend: fall back to V1
-            // (SDX_PLAN.md §7 item 7, cross-frontend M7).
-            let response = transfer
-                .reconstruction_v1(api_base, token, file_id, requested_range)
+        {
+            Ok(response) => Ok(ReconstructionResponse::V2(response)),
+            Err(TransferError::NotFound(_) | TransferError::HttpStatus { status: 501, .. }) => {
+                // V2 not available on this frontend: fall back to V1
+                // (SDX_PLAN.md §7 item 7, cross-frontend M7).
+                let response = run_with_retry(retry, token, |tok| async move {
+                    transfer
+                        .reconstruction_v1(api_base, &tok, file_id, requested_range)
+                        .await
+                })
                 .await?;
-            Ok(ReconstructionResponse::V1(response))
-        }
-        Err(error) => Err(error.into()),
+                Ok(ReconstructionResponse::V1(response))
+            }
+            Err(error) => Err(error.into()),
+        };
+    v2
+}
+
+/// Runs a reconstruction HTTP call through the retry context if present,
+/// otherwise as a single attempt.
+async fn run_with_retry<T, F, Fut>(
+    retry: Option<&RetryContext>,
+    token: &str,
+    mut attempt: F,
+) -> Result<T, TransferError>
+where
+    F: FnMut(String) -> Fut,
+    Fut: std::future::Future<Output = Result<T, TransferError>>,
+{
+    match retry {
+        Some(context) => context.run(token.to_owned(), attempt).await,
+        None => attempt(token.to_owned()).await,
     }
 }
 
@@ -137,15 +171,24 @@ pub(crate) async fn fetch_reconstruction_response(
 /// validates `unpacked_length`, and assembles the output.
 async fn assemble(
     transfer: &TransferClient,
+    retry: Option<&RetryContext>,
     token: &str,
     plan: Reconstruction,
     requested_range: Option<ByteRange>,
 ) -> Result<ReconstructedFile, SdxError> {
     let mut decoded_fetches: HashMap<usize, Vec<DecodedChunk>> = HashMap::new();
     for (fetch_index, fetch) in plan.fetches.iter().enumerate() {
-        let ranged = transfer
-            .fetch_xorb_range(&fetch.url, token, fetch.bytes)
-            .await?;
+        let fetch_url = fetch.url.clone();
+        let fetch_bytes = fetch.bytes;
+        let ranged = run_with_retry(retry, token, move |tok| {
+            let fetch_url = fetch_url.clone();
+            async move {
+                transfer
+                    .fetch_xorb_range(&fetch_url, &tok, fetch_bytes)
+                    .await
+            }
+        })
+        .await?;
         let chunks = XorbReader::new(ranged.data).decode_chunks()?;
         let expected_chunks = fetch.chunks.1.saturating_sub(fetch.chunks.0);
         let actual_chunks = u64::try_from(chunks.len()).unwrap_or(u64::MAX);
@@ -404,7 +447,10 @@ mod tests {
     };
 
     use super::Reconstruction;
-    use crate::{error::SdxError, hash::compute_chunk_hash, transfer::TransferClient};
+    use crate::error::SdxError;
+    use crate::hash::compute_chunk_hash;
+    use crate::retry::{RetryContext, RetryMarkers, RetryPolicy, RetryScope};
+    use crate::transfer::TransferClient;
 
     const FILE_ID: &str = "0000000000000000000000000000000000000000000000000000000000000000";
     const XORB_HASH: &str = "1111111111111111111111111111111111111111111111111111111111111111";
@@ -603,7 +649,7 @@ mod tests {
         xorb_range_mock(&server, XORB_HASH, 0, 200, payload).await;
 
         let transfer = transfer_client();
-        let file = super::reconstruct(&transfer, &server.uri(), "read-token", FILE_ID, None)
+        let file = super::reconstruct(&transfer, None, &server.uri(), "read-token", FILE_ID, None)
             .await
             .unwrap();
         let mut expected = chunk_a.clone();
@@ -651,7 +697,7 @@ mod tests {
         xorb_range_mock(&server, XORB_HASH, 0, 100, payload).await;
 
         let transfer = transfer_client();
-        let file = super::reconstruct(&transfer, &server.uri(), "read-token", FILE_ID, None)
+        let file = super::reconstruct(&transfer, None, &server.uri(), "read-token", FILE_ID, None)
             .await
             .unwrap();
         assert_eq!(file.data, chunk);
@@ -686,9 +732,16 @@ mod tests {
 
         let transfer = transfer_client();
         let range = super::ByteRange::new(16, 63);
-        let file = super::reconstruct(&transfer, &server.uri(), "read-token", FILE_ID, Some(range))
-            .await
-            .unwrap();
+        let file = super::reconstruct(
+            &transfer,
+            None,
+            &server.uri(),
+            "read-token",
+            FILE_ID,
+            Some(range),
+        )
+        .await
+        .unwrap();
         assert_eq!(file.data, chunk[16..64]);
     }
 
@@ -719,7 +772,7 @@ mod tests {
         xorb_range_mock(&server, XORB_HASH, 0, 100, payload).await;
 
         let transfer = transfer_client();
-        let error = super::reconstruct(&transfer, &server.uri(), "read-token", FILE_ID, None)
+        let error = super::reconstruct(&transfer, None, &server.uri(), "read-token", FILE_ID, None)
             .await
             .unwrap_err();
         assert!(matches!(error, SdxError::UnpackedLengthMismatch { .. }));
@@ -738,6 +791,7 @@ mod tests {
         let transfer = transfer_client();
         let error = super::reconstruct(
             &transfer,
+            None,
             &server.uri(),
             "read-token",
             FILE_ID,
@@ -782,7 +836,7 @@ mod tests {
         xorb_range_mock(&server, XORB_HASH, 0, 40, payload).await;
 
         let transfer = transfer_client();
-        let file = super::reconstruct(&transfer, &server.uri(), "read-token", FILE_ID, None)
+        let file = super::reconstruct(&transfer, None, &server.uri(), "read-token", FILE_ID, None)
             .await
             .unwrap();
         assert_eq!(file.data, chunk);
@@ -800,5 +854,75 @@ mod tests {
         let plan = Reconstruction::from_v2(response).unwrap();
         assert!(plan.terms.is_empty());
         assert!(plan.fetches.is_empty());
+    }
+
+    #[tokio::test]
+    async fn reconstruct_retries_transient_failures_and_stays_byte_identical() {
+        use std::time::Duration;
+
+        let server = MockServer::start().await;
+        let chunk = vec![7u8; 64];
+        let payload = serialize_payload(&[&chunk]);
+
+        // The reconstruction endpoint 503s twice, then serves the plan; the
+        // M4 retry context must retry (backoff) and still produce identical
+        // bytes.
+        Mock::given(method("GET"))
+            .and(path(format!("/v2/reconstructions/{FILE_ID}")))
+            .and(header("authorization", "Bearer read-token"))
+            .respond_with(ResponseTemplate::new(503).set_body_json(json!({"error": "overloaded"})))
+            .up_to_n_times(2)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("/v2/reconstructions/{FILE_ID}")))
+            .and(header("authorization", "Bearer read-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(v2_response_body(
+                0,
+                json!([
+                    {"hash": XORB_HASH, "unpacked_length": 64, "range": {"start": 0, "end": 1}}
+                ]),
+                json!({
+                    XORB_HASH: [{
+                        "url": format!("{}/transfer/xorb/default/{XORB_HASH}", server.uri()),
+                        "ranges": [
+                            {"chunks": {"start": 0, "end": 1}, "bytes": {"start": 0, "end": 100}}
+                        ]
+                    }]
+                }),
+            )))
+            .mount(&server)
+            .await;
+        xorb_range_mock(&server, XORB_HASH, 0, 100, payload.clone()).await;
+
+        let retry = RetryContext {
+            policy: RetryPolicy::new()
+                .with_base_delay(Duration::from_millis(1))
+                .with_jitter(false),
+            tokens: None,
+            scope: RetryScope::Read,
+            markers: RetryMarkers::reconstruction(),
+        };
+        let transfer = transfer_client();
+        let file = super::reconstruct(
+            &transfer,
+            Some(&retry),
+            &server.uri(),
+            "read-token",
+            FILE_ID,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(file.data, chunk);
+        // 2×503 + 1×200 reconstruction requests (the xorb fetch is separate).
+        let reconstruction_hits = server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .filter(|request| request.url.path().contains("/reconstructions/"))
+            .count();
+        assert_eq!(reconstruction_hits, 3);
     }
 }

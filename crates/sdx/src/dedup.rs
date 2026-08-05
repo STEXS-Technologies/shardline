@@ -105,6 +105,27 @@ impl DedupClient {
             |shard_body| DedupOutcome::Present { shard_body },
         ))
     }
+
+    /// Retry-layer variant of [`query_for_global_dedup_shard`]: returns
+    /// [`TransferError`] instead of wrapping in [`SdxError`], so it can run
+    /// inside a [`crate::retry`] closure. `hash_hex` is assumed already
+    /// validated.
+    pub(crate) async fn query_raw(
+        &self,
+        base_url: &str,
+        token: &str,
+        hash_hex: &str,
+    ) -> Result<DedupOutcome, crate::error::TransferError> {
+        let path = format!("/v1/chunks/{GLOBAL_DEDUP_PREFIX}/{hash_hex}");
+        let body = self
+            .transfer
+            .get_optional_bytes(base_url, token, &path)
+            .await?;
+        Ok(body.map_or_else(
+            || DedupOutcome::Miss,
+            |shard_body| DedupOutcome::Present { shard_body },
+        ))
+    }
 }
 
 /// Returns whether a chunk at `chunk_index` with hash `chunk_hash` is eligible
@@ -357,7 +378,7 @@ mod tests {
             .unwrap_err();
         assert!(matches!(
             err,
-            SdxError::Transfer(TransferError::TooManyRequests(_))
+            SdxError::Transfer(TransferError::TooManyRequests { .. })
         ));
         // No retry: exactly one request was issued.
         assert_eq!(request_count(&server).await, 1);

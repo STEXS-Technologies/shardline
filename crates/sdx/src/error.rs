@@ -38,8 +38,13 @@ pub enum TransferError {
     #[error("range not satisfiable (416): {0}")]
     RangeNotSatisfiable(String),
     /// The server is rate limiting or overloaded (HTTP 429).
-    #[error("too many requests (429): {0}")]
-    TooManyRequests(String),
+    #[error("too many requests (429): {message}")]
+    TooManyRequests {
+        /// Error message from the response body, when present.
+        message: String,
+        /// `Retry-After` delta-seconds from the response, when present.
+        retry_after: Option<u64>,
+    },
     /// Some other non-success status (including 5xx).
     #[error("server returned HTTP {status}: {message}")]
     HttpStatus {
@@ -47,6 +52,8 @@ pub enum TransferError {
         status: u16,
         /// Error message from the response body, when present.
         message: String,
+        /// `Retry-After` delta-seconds from the response, when present.
+        retry_after: Option<u64>,
     },
     /// Transport-level failure (connect, DNS, timeout, TLS, ...).
     #[error("transport error: {0}")]
@@ -57,6 +64,31 @@ pub enum TransferError {
     /// A `multipart/byteranges` response could not be parsed.
     #[error("malformed multipart/byteranges response: {0}")]
     MalformedMultipart(String),
+    /// A token refresh requested after a 401/403 response failed.
+    #[error("token refresh failed after an auth failure: {0}")]
+    TokenRefresh(String),
+}
+
+impl TransferError {
+    /// Returns the `Retry-After` delay advertised by a 429/503/504 response, if
+    /// the server sent one (shardline sends `Retry-After: 1` on 503s).
+    #[must_use]
+    pub fn retry_after(&self) -> Option<std::time::Duration> {
+        let seconds = match self {
+            TransferError::TooManyRequests { retry_after, .. } => *retry_after,
+            TransferError::HttpStatus { retry_after, .. } => *retry_after,
+            TransferError::BadRequest(_)
+            | TransferError::Unauthorized(_)
+            | TransferError::Forbidden(_)
+            | TransferError::NotFound(_)
+            | TransferError::RangeNotSatisfiable(_)
+            | TransferError::Transport(_)
+            | TransferError::InvalidResponse(_)
+            | TransferError::MalformedMultipart(_)
+            | TransferError::TokenRefresh(_) => return None,
+        };
+        seconds.map(std::time::Duration::from_secs)
+    }
 }
 
 /// Top-level errors surfaced by the sdx client read path.

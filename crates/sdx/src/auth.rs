@@ -574,6 +574,25 @@ impl TokenService {
         Box::pin(async move { this.issue(scope).await })
     }
 
+    /// Drops the cached read token so the next [`read_token`](Self::read_token)
+    /// re-issues one. Used by the M4 retry layer to force a fresh token after a
+    /// 401/403 (the server rejected the cached token even though it is within
+    /// its expiration window).
+    pub(crate) fn invalidate_read(&self) {
+        self.invalidate(Scope::Read);
+    }
+
+    /// Drops the cached write token so the next [`write_token`](Self::write_token)
+    /// re-issues one. Used by the M4 retry layer on upload 403s.
+    pub(crate) fn invalidate_write(&self) {
+        self.invalidate(Scope::Write);
+    }
+
+    fn invalidate(&self, scope: Scope) {
+        let mut state = self.lock_state();
+        *cached_mut(scope, &mut state) = None;
+    }
+
     fn now(&self) -> u64 {
         (self.inner.clock)()
     }

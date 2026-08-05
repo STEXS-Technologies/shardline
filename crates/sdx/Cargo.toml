@@ -20,6 +20,9 @@ hex.workspace = true
 # http-body 1.x (already in the lockfile as a reqwest/hyper transitive dep) is
 # used to build a streamed request body that advertises an exact Content-Length.
 http-body = "1"
+# `tracing` for debug-level request logging (M4 correlation headers); already in
+# the lockfile (workspace server uses it), so offline resolution is unchanged.
+tracing.workspace = true
 # Token route constants (`XET_READ_TOKEN_ROUTE` / `XET_WRITE_TOKEN_ROUTE`) come
 # from the adapter crate, which is an allowed sdx dependency per SDX_PLAN.md
 # §4.1. It depends on shardline-server-core (not the forbidden shardline-server).

@@ -28,6 +28,7 @@ use crate::{
     error::SdxError,
     hash::parse_xet_hash_hex,
     reconstruction,
+    retry::{RetryContext, RetryMarkers, RetryPolicy, RetryScope},
     stream::{
         BufferSemaphore, DownloadStream, FileReconstructor, StreamContext, StreamLimits,
         UnorderedDownloadStream,
@@ -50,9 +51,24 @@ pub(crate) struct DownloadSessionInner {
     pub(crate) xorb_fetch_count: Arc<AtomicU64>,
     /// CDC target chunk size for uploads (M3b), default 64 KiB.
     pub(crate) upload_chunk_size: usize,
+    /// Fixed upload connection-permit count (M4), default 2.
+    pub(crate) upload_concurrency: usize,
+    /// Retry policy (M4) applied to all CAS requests.
+    pub(crate) retry_policy: RetryPolicy,
 }
 
 impl DownloadSessionInner {
+    /// Builds a [`RetryContext`] for a read-scoped CAS request using this
+    /// session's policy, token service, and session id.
+    pub(crate) fn retry_context(&self) -> RetryContext {
+        RetryContext {
+            policy: self.retry_policy.clone(),
+            tokens: Some(self.tokens.clone()),
+            scope: RetryScope::Read,
+            markers: RetryMarkers::reconstruction(),
+        }
+    }
+
     /// Builds the streaming pipeline context shared by this session, resolving
     /// the process-global blocking runtime lazily.
     ///
@@ -70,6 +86,8 @@ impl DownloadSessionInner {
             limits: self.limits.clone(),
             chunk_cache: self.chunk_cache.clone(),
             xorb_fetch_count: self.xorb_fetch_count.clone(),
+            tokens: self.tokens.clone(),
+            retry_policy: self.retry_policy.clone(),
             #[cfg(not(target_family = "wasm"))]
             blocking_runtime: crate::stream::global_blocking_runtime()?,
         })
@@ -264,8 +282,10 @@ impl DownloadSession {
     ) -> Result<u64, SdxError> {
         parse_xet_hash_hex(file_id)?;
         let token = self.inner.tokens.read_token().await?;
+        let retry = self.inner.retry_context();
         let file = reconstruction::reconstruct(
             &self.inner.transfer,
+            Some(&retry),
             &self.inner.api_base,
             &token.token,
             file_id,

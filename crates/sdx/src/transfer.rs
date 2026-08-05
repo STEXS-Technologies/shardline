@@ -75,13 +75,37 @@ pub struct RangedXorb {
 #[derive(Debug, Clone)]
 pub struct TransferClient {
     client: reqwest::Client,
+    /// Stable per-client id sent as `X-Xet-Session-Id` on every request
+    /// (`docs/SDX_PLAN.md` §4.4.4).
+    session_id: String,
 }
 
 impl TransferClient {
     /// Creates a transfer client using the supplied HTTP client.
     #[must_use]
-    pub const fn new(client: reqwest::Client) -> Self {
-        Self { client }
+    pub fn new(client: reqwest::Client) -> Self {
+        Self {
+            client,
+            session_id: generate_session_id(),
+        }
+    }
+
+    /// Overrides the `X-Xet-Session-Id` sent on every request.
+    #[must_use]
+    pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
+        self.session_id = session_id.into();
+        self
+    }
+
+    /// Returns the `X-Xet-Session-Id` this client sends on every request.
+    #[must_use]
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    /// Applies the common per-request headers (correlation session id).
+    fn with_session(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        request.header(SESSION_ID_HEADER.clone(), &self.session_id)
     }
 
     /// Fetches a V1 reconstruction response for `file_id`.
@@ -147,13 +171,10 @@ impl TransferClient {
         token: &str,
         range: ByteRange,
     ) -> Result<RangedXorb, TransferError> {
-        let response = self
-            .client
-            .get(url)
-            .bearer_auth(token)
-            .header(header::RANGE, range.to_range_header())
-            .send()
-            .await?;
+        let request = self
+            .with_session(self.client.get(url).bearer_auth(token))
+            .header(header::RANGE, range.to_range_header());
+        let response = request.send().await?;
         let response = ensure_success(response).await?;
 
         let content_type = response
@@ -217,7 +238,10 @@ impl TransferClient {
         path: &str,
     ) -> Result<Option<Bytes>, TransferError> {
         let url = format!("{}{}", base_url.trim_end_matches('/'), path);
-        let response = self.client.get(&url).bearer_auth(token).send().await?;
+        let response = self
+            .with_session(self.client.get(&url).bearer_auth(token))
+            .send()
+            .await?;
         if response.status() == StatusCode::NOT_FOUND {
             return Ok(None);
         }
@@ -244,13 +268,17 @@ impl TransferClient {
         hash: &str,
     ) -> Result<bool, TransferError> {
         let url = format!("{}/v1/xorbs/default/{hash}", base_url.trim_end_matches('/'));
-        let response = self.client.head(&url).bearer_auth(token).send().await?;
+        let response = self
+            .with_session(self.client.head(&url).bearer_auth(token))
+            .send()
+            .await?;
         match response.status() {
             StatusCode::OK => Ok(true),
             StatusCode::NOT_FOUND => Ok(false),
             status => {
+                let retry_after = parse_retry_after(response.headers());
                 let message = response.text().await.unwrap_or_default();
-                Err(http_error(status, message))
+                Err(http_error(status, message, retry_after))
             }
         }
     }
@@ -283,9 +311,7 @@ impl TransferClient {
             length,
         ));
         let response = self
-            .client
-            .post(&url)
-            .bearer_auth(token)
+            .with_session(self.client.post(&url).bearer_auth(token))
             .body(body)
             .send()
             .await?;
@@ -312,9 +338,7 @@ impl TransferClient {
     ) -> Result<ShardUploadResponse, TransferError> {
         let url = format!("{}/v1/shards", base_url.trim_end_matches('/'));
         let response = self
-            .client
-            .post(&url)
-            .bearer_auth(token)
+            .with_session(self.client.post(&url).bearer_auth(token))
             .body(body)
             .send()
             .await?;
@@ -343,9 +367,7 @@ impl TransferClient {
         url.push_str("/reconstructions/");
         url.push_str(file_id);
         let mut request = self
-            .client
-            .get(&url)
-            .bearer_auth(token)
+            .with_session(self.client.get(&url).bearer_auth(token))
             .header(header::ACCEPT, "application/json");
         if let Some(range) = range {
             request = request.header(header::RANGE, range.to_range_header());
@@ -353,6 +375,21 @@ impl TransferClient {
         let response = request.send().await?;
         ensure_success(response).await
     }
+}
+
+/// `X-Xet-Session-Id` correlation header sent on every CAS request.
+static SESSION_ID_HEADER: reqwest::header::HeaderName =
+    reqwest::header::HeaderName::from_static("x-xet-session-id");
+
+/// Generates a stable-enough per-client session id without pulling a UUID/rand
+/// dependency: a process counter plus the wall-clock timestamp.
+fn generate_session_id() -> String {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let counter = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
+    format!("sdx-{now:x}-{counter}")
 }
 
 /// Size of each progress block in a streamed xorb upload body.
@@ -429,12 +466,28 @@ where
 
 async fn ensure_success(response: Response) -> Result<Response, TransferError> {
     let status = response.status();
+    let request_id = response
+        .headers()
+        .get("x-request-id")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("unknown");
+    tracing::debug!(request_id, status = %status, "CAS request completed");
     if status.is_success() {
         return Ok(response);
     }
+    let retry_after = parse_retry_after(response.headers());
     let body = response.text().await.unwrap_or_default();
     let message = parse_error_message(&body).unwrap_or(body);
-    Err(http_error(status, message))
+    Err(http_error(status, message, retry_after))
+}
+
+/// Parses a `Retry-After` delta-seconds value (shardline sends `Retry-After: 1`
+/// on 503s). Non-numeric values (HTTP-date) are ignored.
+fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+    headers
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<u64>().ok())
 }
 
 fn parse_error_message(body: &str) -> Option<String> {
@@ -443,17 +496,25 @@ fn parse_error_message(body: &str) -> Option<String> {
         .map(|parsed| parsed.error)
 }
 
-const fn http_error(status: StatusCode, message: String) -> TransferError {
+const fn http_error(
+    status: StatusCode,
+    message: String,
+    retry_after: Option<u64>,
+) -> TransferError {
     match status.as_u16() {
         400 => TransferError::BadRequest(message),
         401 => TransferError::Unauthorized(message),
         403 => TransferError::Forbidden(message),
         404 => TransferError::NotFound(message),
         416 => TransferError::RangeNotSatisfiable(message),
-        429 => TransferError::TooManyRequests(message),
+        429 => TransferError::TooManyRequests {
+            message,
+            retry_after,
+        },
         _ => TransferError::HttpStatus {
             status: status.as_u16(),
             message,
+            retry_after,
         },
     }
 }
@@ -605,6 +666,10 @@ struct ErrorBody {
 mod tests {
     use super::{TransferClient, parse_multipart_byteranges};
     use bytes::Bytes;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
+    };
 
     #[test]
     fn parse_multipart_single_part() {
@@ -706,5 +771,43 @@ mod tests {
             "upload_xorb request body too short: {} bytes",
             raw.len()
         );
+    }
+
+    /// Verifies the `X-Xet-Session-Id` correlation header is sent on every
+    /// request and is stable per client.
+    #[tokio::test]
+    async fn requests_send_x_xet_session_id_header() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/probe"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"ok"))
+            .mount(&server)
+            .await;
+
+        let client = TransferClient::new(reqwest::Client::new()).with_session_id("my-session");
+        let session_id = client.session_id().to_owned();
+        assert_eq!(session_id, "my-session");
+        let _ = client
+            .get_optional_bytes(&server.uri(), "tok", "/probe")
+            .await
+            .unwrap();
+
+        let requests = server.received_requests().await.unwrap_or_default();
+        let value = requests[0]
+            .headers
+            .get("x-xet-session-id")
+            .and_then(|value| value.to_str().ok());
+        assert_eq!(value, Some("my-session"));
+    }
+
+    /// A default client generates a non-empty per-client session id.
+    #[test]
+    fn generated_session_id_is_non_empty() {
+        let a = TransferClient::new(reqwest::Client::new());
+        let b = TransferClient::new(reqwest::Client::new());
+        assert!(!a.session_id().is_empty());
+        assert!(!b.session_id().is_empty());
+        // Extremely likely to differ, but the invariant is non-empty + stable.
+        assert_eq!(a.session_id(), a.session_id());
     }
 }
