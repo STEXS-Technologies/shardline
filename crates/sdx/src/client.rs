@@ -318,6 +318,16 @@ impl XetClientBuilder {
         self
     }
 
+    /// Configures the client from a full `xet://` URL (identity + optional
+    /// path). The repository identity comes from the URL; the path is ignored
+    /// for building (path addressing is the M5 tree API's job). The endpoint
+    /// is set to the URL's 4-segment identity form.
+    #[must_use]
+    pub fn from_url(mut self, url: &crate::url::XetUrl) -> Self {
+        self.endpoint = Some(url.endpoint_url());
+        self
+    }
+
     /// Sets the authentication configuration (M1 [`Auth`]).
     #[must_use]
     pub fn auth(mut self, auth: Auth) -> Self {
@@ -586,9 +596,53 @@ fn parse_endpoint(endpoint: &str) -> Result<(String, RepositoryId), SdxError> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{RepositoryId, error::SdxError};
+    use crate::{Auth, RepositoryId, XetClientBuilder, error::SdxError};
 
     use super::parse_endpoint;
+
+    fn repository() -> RepositoryId {
+        RepositoryId {
+            provider: "github".to_owned(),
+            owner: "team".to_owned(),
+            repo: "assets".to_owned(),
+            revision: "main".to_owned(),
+        }
+    }
+
+    /// `from_url` uses the URL's 4-segment identity; building succeeds when the
+    /// auth repository matches it.
+    #[test]
+    fn builder_from_url_builds_with_matching_auth_scope() {
+        let url =
+            crate::url::XetUrl::parse("xet://example.com/github/team/assets/main/dir/file.txt")
+                .unwrap();
+        let auth = Auth::new("http://example.com", repository())
+            .unwrap()
+            .with_api_key("bootstrap".to_owned());
+        let client = XetClientBuilder::new()
+            .from_url(&url)
+            .auth(auth)
+            .build()
+            .unwrap();
+        let _ = client;
+    }
+
+    /// `from_url` with a repository that mismatches the auth repository still
+    /// fails the build's repo cross-check.
+    #[test]
+    fn builder_from_url_mismatched_auth_scope_errors() {
+        let url = crate::url::XetUrl::parse("xet://example.com/github/other/assets/main").unwrap();
+        let auth = Auth::new("http://example.com", repository())
+            .unwrap()
+            .with_api_key("bootstrap".to_owned());
+        let error = XetClientBuilder::new()
+            .from_url(&url)
+            .auth(auth)
+            .build()
+            .err()
+            .unwrap();
+        assert!(matches!(error, SdxError::InvalidEndpoint(_)));
+    }
 
     #[test]
     fn parse_endpoint_maps_host_port_and_identity() {

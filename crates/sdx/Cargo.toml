@@ -20,6 +20,9 @@ hex.workspace = true
 # http-body 1.x (already in the lockfile as a reqwest/hyper transitive dep) is
 # used to build a streamed request body that advertises an exact Content-Length.
 http-body = "1"
+# percent-encoding for URL-segment decoding in XetUrl (already in the lockfile
+# as a `url` transitive dep).
+percent-encoding = "2.3"
 # `tracing` for debug-level request logging (M4 correlation headers); already in
 # the lockfile (workspace server uses it), so offline resolution is unchanged.
 tracing.workspace = true
@@ -40,6 +43,7 @@ xet-core-structures = { version = "=1.5.2" }
 reqwest = { workspace = true, features = ["json", "rustls-tls", "stream"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
+toml.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time"] }
 url.workspace = true
 
