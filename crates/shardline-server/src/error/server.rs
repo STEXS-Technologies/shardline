@@ -240,6 +240,15 @@ pub enum ServerError {
     /// A blocking worker task failed before it could finish storage work.
     #[error("blocking worker task failed")]
     BlockingTask(#[source] JoinError),
+    /// A path, prefix, or revision string was malformed.
+    #[error("invalid path or revision")]
+    InvalidPath,
+    /// The referenced file has no record in the revision scope.
+    #[error("file is not registered in revision {0}")]
+    UnregisteredFile(String),
+    /// The revision already exists.
+    #[error("revision already exists")]
+    RevisionConflict,
 }
 
 impl ServerError {
@@ -308,7 +317,10 @@ impl ServerError {
             | Self::TransferLimiterTimedOut
             | Self::WorkQueueSaturated
             | Self::RequestTimedOut
-            | Self::BlockingTask(_) => "INTERNAL",
+            | Self::BlockingTask(_)
+            | Self::InvalidPath
+            | Self::UnregisteredFile(_)
+            | Self::RevisionConflict => "INTERNAL",
         }
     }
 
@@ -356,6 +368,8 @@ impl ServerError {
                 StatusCode::TOO_MANY_REQUESTS
             }
             Self::UploadIntentConflict => StatusCode::CONFLICT,
+            Self::InvalidPath | Self::UnregisteredFile(_) => StatusCode::BAD_REQUEST,
+            Self::RevisionConflict => StatusCode::CONFLICT,
             Self::TransferLimiterClosed
             | Self::TransferLimiterTimedOut
             | Self::WorkQueueSaturated

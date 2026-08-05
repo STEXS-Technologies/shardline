@@ -6,6 +6,7 @@ use std::{
 
 use axum::body::Bytes;
 use sha2::{Digest, Sha256};
+use shardline_index::{RepoKey, RevisionRecord, TreeEntry, TreeKey};
 use shardline_protocol::{ByteRange, RepositoryScope};
 use shardline_storage::{
     AsyncObjectStore, DeleteOutcome, ObjectBody, ObjectIntegrity, ObjectKey, ObjectMetadata,
@@ -35,6 +36,15 @@ use crate::{
 pub enum ServerBackend {
     Local(LocalBackend),
     Postgres(PostgresBackend),
+}
+
+/// Outcome of registering a path mapping.
+#[derive(Debug, Clone)]
+pub struct RegisterPathOutcome {
+    /// The stored tree entry snapshot.
+    pub entry: shardline_index::TreeEntry,
+    /// True when no prior mapping existed at this path.
+    pub created: bool,
 }
 
 fn protocol_object_file_id(object_key: &ObjectKey) -> String {
@@ -647,6 +657,83 @@ impl ServerBackend {
             Ok(DeleteOutcome::NotFound)
         }
     }
+
+    pub(crate) async fn resolve_tree_path(
+        &self,
+        key: &TreeKey,
+        path: &str,
+    ) -> Result<Option<TreeEntry>, ServerError> {
+        match self {
+            Self::Local(backend) => backend.resolve_tree_path(key, path).await,
+            Self::Postgres(backend) => backend.resolve_tree_path(key, path).await,
+        }
+    }
+
+    pub(crate) async fn scan_tree_raw(
+        &self,
+        key: &TreeKey,
+        prefix: &str,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<TreeEntry>, ServerError> {
+        match self {
+            Self::Local(backend) => backend.scan_tree_raw(key, prefix, cursor, limit).await,
+            Self::Postgres(backend) => backend.scan_tree_raw(key, prefix, cursor, limit).await,
+        }
+    }
+
+    pub(crate) async fn register_tree_path(
+        &self,
+        key: &TreeKey,
+        path: &str,
+        file_id: &str,
+        scope: Option<&RepositoryScope>,
+    ) -> Result<RegisterPathOutcome, ServerError> {
+        match self {
+            Self::Local(backend) => backend.register_tree_path(key, path, file_id, scope).await,
+            Self::Postgres(backend) => backend.register_tree_path(key, path, file_id, scope).await,
+        }
+    }
+
+    pub(crate) async fn delete_tree_path(
+        &self,
+        key: &TreeKey,
+        path: &str,
+        recursive: bool,
+    ) -> Result<u64, ServerError> {
+        match self {
+            Self::Local(backend) => backend.delete_tree_path(key, path, recursive).await,
+            Self::Postgres(backend) => backend.delete_tree_path(key, path, recursive).await,
+        }
+    }
+
+    pub(crate) async fn list_revisions(
+        &self,
+        key: &RepoKey,
+    ) -> Result<Vec<RevisionRecord>, ServerError> {
+        match self {
+            Self::Local(backend) => backend.list_revisions(key).await,
+            Self::Postgres(backend) => backend.list_revisions(key).await,
+        }
+    }
+
+    pub(crate) async fn create_revision(&self, rev: &RevisionRecord) -> Result<bool, ServerError> {
+        match self {
+            Self::Local(backend) => backend.create_revision(rev).await,
+            Self::Postgres(backend) => backend.create_revision(rev).await,
+        }
+    }
+
+    pub(crate) async fn delete_revision(
+        &self,
+        key: &RepoKey,
+        rev: &str,
+    ) -> Result<bool, ServerError> {
+        match self {
+            Self::Local(backend) => backend.delete_revision(key, rev).await,
+            Self::Postgres(backend) => backend.delete_revision(key, rev).await,
+        }
+    }
 }
 
 async fn verify_sha256_body(
@@ -895,7 +982,10 @@ fn server_error_to_oci(error: ServerError) -> shardline_oci_adapter::OciAdapterE
         | ServerError::TransferLimiterTimedOut
         | ServerError::WorkQueueSaturated
         | ServerError::RequestTimedOut
-        | ServerError::SigningKeyError(_)) => OciAdapterError::Io(Error::other(other.to_string())),
+        | ServerError::SigningKeyError(_)
+        | ServerError::InvalidPath
+        | ServerError::UnregisteredFile(_)
+        | ServerError::RevisionConflict) => OciAdapterError::Io(Error::other(other.to_string())),
     }
 }
 

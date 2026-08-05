@@ -3603,6 +3603,7 @@ dependencies = [
  "jsonwebtoken",
  "libc",
  "lz4_flex 0.11.6",
+ "percent-encoding",
  "prometheus",
  "redis",
  "reqwest 0.12.28",

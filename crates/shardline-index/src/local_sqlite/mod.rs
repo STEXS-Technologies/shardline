@@ -8,6 +8,7 @@ mod records;
 mod store;
 #[cfg(test)]
 mod tests;
+mod tree_store;
 
 pub use error::LocalIndexStoreError;
 pub(crate) use helpers::{collect_rows, i64_to_u64, record_not_found_error, u64_to_i64};

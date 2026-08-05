@@ -6,6 +6,10 @@ pub const XORB_TRANSFER_NAMESPACE: &str = "default";
 pub const XORB_TRANSFER_ROUTE: &str = "/transfer/xorb/{prefix}/{hash}";
 pub const XET_READ_TOKEN_ROUTE: &str = "/api/{provider}/{owner}/{repo}/xet-read-token/{rev}";
 pub const XET_WRITE_TOKEN_ROUTE: &str = "/api/{provider}/{owner}/{repo}/xet-write-token/{rev}";
+pub const XET_TREE_ROUTE: &str = "/api/{provider}/{owner}/{repo}/tree/{rev}";
+pub const XET_PATH_ROUTE: &str = "/api/{provider}/{owner}/{repo}/path/{rev}/{*path}";
+pub const XET_REVISIONS_ROUTE: &str = "/api/{provider}/{owner}/{repo}/revisions";
+pub const XET_REVISION_ROUTE: &str = "/api/{provider}/{owner}/{repo}/revisions/{rev}";
 
 /// # Errors
 ///

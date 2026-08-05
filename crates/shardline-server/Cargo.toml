@@ -55,6 +55,7 @@ dotenvy.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time", "test-util"] }
 tracing.workspace = true
 url.workspace = true
+percent-encoding = "2.3"
 shardline-xet-core.workspace = true
 prometheus.workspace = true
 tower.workspace = true

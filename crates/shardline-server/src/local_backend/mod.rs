@@ -4,6 +4,7 @@ mod objects;
 pub(crate) mod records;
 mod xorbs;
 
+pub(crate) use crate::backend::RegisterPathOutcome;
 pub use backend::LocalBackend;
 pub use backend::chunk_hash;
 pub(crate) use backend::content_hash;
