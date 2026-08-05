@@ -21,6 +21,7 @@ use crate::{
     dedup::DedupClient,
     error::{SdxError, TransferError},
     group::XetStreamGroup,
+    retry::RetryPolicy,
     session::{DownloadSession, DownloadSessionInner},
     stream::{
         BufferSemaphore, DEFAULT_DOWNLOAD_BUFFER_LIMIT, DEFAULT_DOWNLOAD_BUFFER_SIZE,
@@ -236,11 +237,14 @@ impl Default for XetClientBuilder {
             http: None,
             buffer_capacity: None,
             download_concurrency: DEFAULT_DOWNLOAD_CONCURRENCY,
+            upload_concurrency: crate::upload::DEFAULT_UPLOAD_CONCURRENCY,
             limits: StreamLimits::default(),
             chunk_cache_dir: None,
             chunk_cache: None,
             chunk_cache_budget: None,
             upload_chunk_size: crate::chunker::DEFAULT_TARGET_CHUNK_SIZE,
+            retry_policy: RetryPolicy::default(),
+            session_id: None,
         }
     }
 }
@@ -277,11 +281,14 @@ pub struct XetClientBuilder {
     http: Option<HttpConfig>,
     buffer_capacity: Option<u64>,
     download_concurrency: usize,
+    upload_concurrency: usize,
     limits: StreamLimits,
     chunk_cache_dir: Option<PathBuf>,
     chunk_cache: Option<Arc<ChunkCache>>,
     chunk_cache_budget: Option<u64>,
     upload_chunk_size: usize,
+    retry_policy: RetryPolicy,
+    session_id: Option<String>,
 }
 
 impl XetClientBuilder {
@@ -327,8 +334,9 @@ impl XetClientBuilder {
     }
 
     /// Sets the fixed CAS connection-permit count (how many ranged xorb
-    /// fetches run concurrently per client). Defaults to 4; the adaptive
-    /// controller arrives in M4.
+    /// fetches run concurrently per client). Defaults to 4. The fixed override
+    /// is the M4 §6.4 knob; an adaptive controller that scales concurrency from
+    /// measured RTT is a documented future default seam.
     #[must_use]
     #[allow(clippy::missing_const_for_fn)]
     pub fn with_download_concurrency(mut self, concurrency: usize) -> Self {
@@ -383,6 +391,30 @@ impl XetClientBuilder {
         self
     }
 
+    /// Sets the fixed upload connection-permit count (how many xorb/shard
+    /// uploads run concurrently per session). Defaults to 2 (M4 §6.4).
+    #[must_use]
+    #[allow(clippy::missing_const_for_fn)]
+    pub fn with_upload_concurrency(mut self, concurrency: usize) -> Self {
+        self.upload_concurrency = concurrency.max(1);
+        self
+    }
+
+    /// Sets the retry policy applied to all CAS requests (M4 §6.3).
+    #[must_use]
+    pub const fn with_retry_policy(mut self, policy: RetryPolicy) -> Self {
+        self.retry_policy = policy;
+        self
+    }
+
+    /// Sets a stable `X-Xet-Session-Id` sent on every request (defaults to a
+    /// generated per-client id).
+    #[must_use]
+    pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
+        self.session_id = Some(session_id.into());
+        self
+    }
+
     /// Builds the client.
     ///
     /// # Errors
@@ -408,11 +440,20 @@ impl XetClientBuilder {
         }
         let tokens = auth.build()?;
         let http = self.http.unwrap_or_default();
+        // M4 timeouts (§4.4.4): connect 60 s, read 300 s (resets per packet),
+        // idle 60 s. No fixed total request timeout so long downloads are not
+        // capped at a wall-clock limit.
         let http_client = reqwest::Client::builder()
             .connect_timeout(http.connect_timeout())
-            .timeout(http.request_timeout())
+            .read_timeout(std::time::Duration::from_secs(300))
+            .pool_idle_timeout(std::time::Duration::from_secs(60))
             .build()
             .map_err(TransferError::from)?;
+        let session_id = self.session_id.clone().unwrap_or_default();
+        let mut transfer = TransferClient::new(http_client);
+        if !session_id.is_empty() {
+            transfer = transfer.with_session_id(session_id);
+        }
         let (buffer_semaphore, limits) = match self.buffer_capacity {
             Some(capacity) => (
                 Arc::new(BufferSemaphore::new(capacity, capacity, capacity)),
@@ -444,7 +485,7 @@ impl XetClientBuilder {
         };
         Ok(XetClient {
             inner: Arc::new(DownloadSessionInner {
-                transfer: TransferClient::new(http_client),
+                transfer,
                 tokens,
                 api_base,
                 buffer_semaphore,
@@ -454,6 +495,8 @@ impl XetClientBuilder {
                 chunk_cache,
                 xorb_fetch_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
                 upload_chunk_size: self.upload_chunk_size,
+                upload_concurrency: self.upload_concurrency,
+                retry_policy: self.retry_policy,
             }),
         })
     }

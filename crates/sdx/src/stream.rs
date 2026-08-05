@@ -64,10 +64,12 @@ use xet_core_structures::ExpWeightedMovingAvg;
 use xet_core_structures::merklehash::MerkleHash;
 
 use crate::{
+    auth::TokenService,
     cache::ChunkCache,
     error::{SdxError, TransferError},
     hash::parse_xet_hash_hex,
     reconstruction::{ReconstructionResponse, fetch_reconstruction_response},
+    retry::{RetryContext, RetryMarkers, RetryPolicy, RetryScope},
     transfer::{ByteRange, TransferClient},
     xorb::XorbReader,
 };
@@ -142,8 +144,25 @@ pub(crate) struct StreamContext {
     /// Count of ranged xorb transfer requests issued (network fetches), for
     /// observability/E2E request-counting.
     pub xorb_fetch_count: Arc<AtomicU64>,
+    /// Token service (M4) for 401/403 refresh on retry.
+    pub tokens: TokenService,
+    /// Retry policy (M4) applied to reconstruction + xorb fetches.
+    pub retry_policy: RetryPolicy,
     #[cfg(not(target_family = "wasm"))]
     pub blocking_runtime: Arc<tokio::runtime::Runtime>,
+}
+
+impl StreamContext {
+    /// Builds a read-scoped [`RetryContext`] for a reconstruction / ranged-xorb
+    /// request.
+    pub(crate) fn retry_context(&self) -> RetryContext {
+        RetryContext {
+            policy: self.retry_policy.clone(),
+            tokens: Some(self.tokens.clone()),
+            scope: RetryScope::Read,
+            markers: RetryMarkers::ranged_xorb(),
+        }
+    }
 }
 
 /// The process-global dedicated runtime used for blocking bridges
@@ -1285,9 +1304,14 @@ impl XorbBlock {
                                 "download permit acquire failed: {error}"
                             ))
                         })?;
-                let ranged = ctx
-                    .transfer
-                    .fetch_xorb_range(&self.url, token, self.bytes)
+                let retry = ctx.retry_context();
+                let url = self.url.clone();
+                let bytes = self.bytes;
+                let ranged = retry
+                    .run(token.to_owned(), move |tok| {
+                        let url = url.clone();
+                        async move { ctx.transfer.fetch_xorb_range(&url, &tok, bytes).await }
+                    })
                     .await?;
                 ctx.xorb_fetch_count.fetch_add(1, Ordering::Relaxed);
                 let chunk_data = XorbReader::new(ranged.data).decode_chunk_data()?;
@@ -1466,8 +1490,10 @@ async fn fetch_term_block(
         return Ok(None);
     }
     let wire_range = ByteRange::new(query_range.start, query_range.end.saturating_sub(1));
+    let retry = ctx.retry_context();
     let response = match fetch_reconstruction_response(
         &ctx.transfer,
+        Some(&retry),
         &ctx.api_base,
         token,
         file_id,
@@ -2456,7 +2482,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::{reconstruction, transfer::TransferClient};
+    use crate::{auth::Auth, reconstruction, transfer::TransferClient};
 
     const FILE_ID: &str = "0000000000000000000000000000000000000000000000000000000000000000";
     const XORB_HASH: &str = "1111111111111111111111111111111111111111111111111111111111111111";
@@ -2521,8 +2547,27 @@ mod tests {
             limits: test_limits(),
             chunk_cache: None,
             xorb_fetch_count: Arc::new(AtomicU64::new(0)),
+            tokens: test_tokens(server),
+            retry_policy: RetryPolicy::default(),
             blocking_runtime: test_runtime(),
         }
+    }
+
+    /// Builds a token service used only as a retry-context carrier in stream
+    /// tests (its `read_token` is never exercised because tests never 401).
+    fn test_tokens(server: &MockServer) -> TokenService {
+        let auth = Auth::new(
+            &server.uri(),
+            crate::RepositoryId {
+                provider: "github".to_owned(),
+                owner: "team".to_owned(),
+                repo: "assets".to_owned(),
+                revision: "main".to_owned(),
+            },
+        )
+        .unwrap()
+        .with_token(READ_TOKEN.to_owned());
+        auth.build().unwrap()
     }
 
     /// Mounts a 200 reconstruction response for `file_hash` scoped to exactly
@@ -3361,10 +3406,16 @@ mod tests {
 
         // M2a sequential reconstruction.
         let transfer = TransferClient::new(reqwest::Client::new());
-        let file =
-            reconstruction::reconstruct(&transfer, &full_server.uri(), READ_TOKEN, FILE_ID, None)
-                .await
-                .unwrap();
+        let file = reconstruction::reconstruct(
+            &transfer,
+            None,
+            &full_server.uri(),
+            READ_TOKEN,
+            FILE_ID,
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(file.data, expected);
 
         // Streaming path.

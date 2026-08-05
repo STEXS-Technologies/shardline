@@ -83,6 +83,7 @@ pub mod error;
 pub mod group;
 pub mod hash;
 pub mod reconstruction;
+pub mod retry;
 pub mod session;
 pub mod shard;
 pub mod stream;
@@ -113,6 +114,7 @@ pub use hash::{
     compute_chunk_hash, compute_term_verification_hash, parse_xet_hash_hex, xet_hash_hex_string,
 };
 pub use reconstruction::{ReconstructedFile, ResolvedTerm, reconstruct};
+pub use retry::RetryPolicy;
 pub use session::DownloadSession;
 pub use shard::{ShardFileEntry, ShardSegment, ShardXorb, ShardXorbChunk, serialize_shard};
 pub use stream::{

@@ -37,8 +37,9 @@
 //!   boundary); the RAM bound and xorb-cut semantics are identical, and
 //!   duplicate xorbs across files are uploaded at most once via the HEAD
 //!   probe. A session-wide aggregator is a future refinement.
-//! - No retry / 403-refresh / adaptive concurrency (M4); upload permits are a
-//!   fixed semaphore.
+//! - Uploads apply the M4 retry policy (xorb/shard POSTs retry transient
+//!   failures; dedup queries are 429-fail-fast). Upload permits are a fixed
+//!   semaphore (adaptive concurrency is a future default seam).
 
 use std::collections::HashMap;
 use std::io::Read;
@@ -56,6 +57,7 @@ use crate::chunker::{Chunk, Chunker};
 use crate::dedup::{DedupClient, DedupOutcome, is_global_dedup_eligible};
 use crate::error::{SdxError, TransferError};
 use crate::hash::{parse_xet_hash_hex, xet_hash_hex_string};
+use crate::retry::{RetryContext, RetryMarkers, RetryPolicy, RetryScope};
 use crate::session::DownloadSessionInner;
 use crate::shard::{
     MDB_CHUNK_WITH_GLOBAL_DEDUP_FLAG, ShardFileEntry, ShardSegment, ShardXorb, ShardXorbChunk,
@@ -237,10 +239,54 @@ struct UploadSessionInner {
     /// Dedicated no-read-timeout client for (potentially large) shard POSTs.
     shard_transfer: TransferClient,
     chunk_target_size: usize,
+    /// Retry policy (M4) applied to xorb/shard uploads and dedup queries.
+    retry_policy: RetryPolicy,
     xorb_posts: AtomicU64,
     xorb_skipped: AtomicU64,
     shard_posts: AtomicU64,
     state: Mutex<SessionState>,
+}
+
+impl UploadSessionInner {
+    /// Builds a write-scoped [`RetryContext`] for xorb/shard uploads.
+    fn upload_retry_context(&self) -> RetryContext {
+        RetryContext {
+            policy: self.retry_policy.clone(),
+            tokens: Some(self.tokens.clone()),
+            scope: RetryScope::Write,
+            // 403 on an upload re-issues the write token once (loop-guarded).
+            markers: RetryMarkers {
+                retry_on_403: true,
+                ..RetryMarkers::default()
+            },
+        }
+    }
+
+    /// Builds a write-scoped [`RetryContext`] for global dedup queries (404 =
+    /// miss, 429 fail-fast).
+    fn dedup_retry_context(&self) -> RetryContext {
+        RetryContext {
+            policy: self.retry_policy.clone(),
+            tokens: Some(self.tokens.clone()),
+            scope: RetryScope::Write,
+            markers: RetryMarkers::dedup(),
+        }
+    }
+
+    /// Resolves the write token and returns `(CAS base URL, bearer token)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SdxError`] when token issuance fails.
+    async fn cas_credentials(&self) -> Result<(String, String), SdxError> {
+        let token = self.tokens.write_token().await?;
+        let base = if token.cas_url.is_empty() {
+            self.api_base.clone()
+        } else {
+            token.cas_url
+        };
+        Ok((base, token.token))
+    }
 }
 
 /// Session-wide state shared by all file pipelines in this session.
@@ -387,12 +433,19 @@ impl FileUploadPipeline {
                 .lock()
                 .await
                 .last_global_query_index = Some(global_index);
-            let (base, token) = self.session.inner.cas_credentials().await?;
-            let outcome = self
-                .session
-                .inner
-                .dedup
-                .query_for_global_dedup_shard(&base, &token, &xet_hash_hex_string(hash))
+            let session = self.session.clone();
+            let (base, token) = session.inner.cas_credentials().await?;
+            let hash_hex = xet_hash_hex_string(hash);
+            // Dedup queries are 429-fail-fast and treat 404 as a miss.
+            let retry = session.inner.dedup_retry_context();
+            let dedup = session.inner.dedup.clone();
+            let outcome = retry
+                .run(token, |tok| {
+                    let dedup = dedup.clone();
+                    let base = base.clone();
+                    let hash_hex = hash_hex.clone();
+                    async move { dedup.query_raw(&base, &tok, &hash_hex).await }
+                })
                 .await?;
             if let DedupOutcome::Present { shard_body } = outcome
                 && let Ok(xorbs) = parse_shard_xorbs(&shard_body)
@@ -469,13 +522,19 @@ impl FileUploadPipeline {
             .collect();
         let built = build_xorb(&pairs)?;
 
-        // HEAD-first idempotency probe.
+        // HEAD-first idempotency probe (retried on transient failures).
         let (base, token) = self.session.inner.cas_credentials().await?;
-        let exists = self
-            .session
-            .inner
-            .transfer
-            .head_xorb(&base, &token, &built.xorb_hash_hex)
+        let retry = self.session.inner.upload_retry_context();
+        let transfer = self.session.inner.transfer.clone();
+        let xorb_hash_hex = built.xorb_hash_hex.clone();
+        let base_head = base.clone();
+        let exists = retry
+            .run(token.clone(), move |tok| {
+                let hclient = transfer.clone();
+                let b = base_head.clone();
+                let hash = xorb_hash_hex.clone();
+                async move { hclient.head_xorb(&b, &tok, &hash).await }
+            })
             .await?;
         if exists {
             self.session
@@ -488,7 +547,7 @@ impl FileUploadPipeline {
                 .xorb_posts
                 .fetch_add(1, Ordering::Relaxed);
             let permit = self.session.inner.upload_permits.clone();
-            let transfer = self.session.inner.transfer.clone();
+            let upload_transfer = self.session.inner.transfer.clone();
             let hash = built.xorb_hash_hex.clone();
             let body = Bytes::copy_from_slice(&built.serialized);
             self.session
@@ -501,7 +560,17 @@ impl FileUploadPipeline {
                     let _permit = permit.acquire_owned().await.map_err(|_error| {
                         SdxError::UploadSession("upload permit semaphore closed".to_owned())
                     })?;
-                    transfer.upload_xorb(&base, &token, &hash, body).await?;
+                    // Retry the streaming xorb POST with backoff/refresh; the
+                    // serialized bytes are in memory, so replays are safe.
+                    retry
+                        .run(token, move |tok| {
+                            let tclient = upload_transfer.clone();
+                            let base = base.clone();
+                            let hash = hash.clone();
+                            let body = body.clone();
+                            async move { tclient.upload_xorb(&base, &tok, &hash, body).await }
+                        })
+                        .await?;
                     Ok(())
                 });
         }
@@ -678,9 +747,10 @@ impl UploadSession {
                 tokens: inner.tokens.clone(),
                 api_base: inner.api_base.clone(),
                 dedup: DedupClient::new(inner.transfer.clone()),
-                upload_permits: Arc::new(Semaphore::new(DEFAULT_UPLOAD_CONCURRENCY)),
+                upload_permits: Arc::new(Semaphore::new(inner.upload_concurrency.max(1))),
                 shard_transfer: TransferClient::new(shard_client),
                 chunk_target_size: inner.upload_chunk_size,
+                retry_policy: inner.retry_policy.clone(),
                 xorb_posts: AtomicU64::new(0),
                 xorb_skipped: AtomicU64::new(0),
                 shard_posts: AtomicU64::new(0),
@@ -820,9 +890,18 @@ impl UploadSession {
                 .map_err(|_error| {
                     SdxError::UploadSession("upload permit semaphore closed".to_owned())
                 })?;
-            self.inner
-                .shard_transfer
-                .upload_shard(&base, &token, shard)
+            let retry = self.inner.upload_retry_context();
+            retry
+                .run(token, move |tok| {
+                    let shard = shard.clone();
+                    let base = base.clone();
+                    async move {
+                        self.inner
+                            .shard_transfer
+                            .upload_shard(&base, &tok, shard)
+                            .await
+                    }
+                })
                 .await?;
             self.inner.shard_posts.fetch_add(1, Ordering::Relaxed);
         }
@@ -855,23 +934,6 @@ impl UploadSession {
             ));
         }
         Ok(())
-    }
-}
-
-impl UploadSessionInner {
-    /// Resolves the write token and returns `(CAS base URL, bearer token)`.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`SdxError`] when token issuance fails.
-    async fn cas_credentials(&self) -> Result<(String, String), SdxError> {
-        let token = self.tokens.write_token().await?;
-        let base = if token.cas_url.is_empty() {
-            self.api_base.clone()
-        } else {
-            token.cas_url
-        };
-        Ok((base, token.token))
     }
 }
 
@@ -1224,5 +1286,105 @@ mod tests {
         assert_eq!(report.xorb_posts, 0);
         assert_eq!(report.files.len(), 0);
         assert_eq!(report, report.clone());
+    }
+
+    async fn build_client_with_policy(
+        server: &MockServer,
+        policy: crate::retry::RetryPolicy,
+    ) -> crate::XetClient {
+        let auth = Auth::new(
+            &server.uri(),
+            RepositoryId {
+                provider: "github".to_owned(),
+                owner: "team".to_owned(),
+                repo: "assets".to_owned(),
+                revision: "main".to_owned(),
+            },
+        )
+        .unwrap()
+        .with_api_key(BOOTSTRAP_KEY.to_owned())
+        .with_subject("user".to_owned());
+        let port = server.uri().split(':').next_back().unwrap().to_owned();
+        XetClientBuilder::new()
+            .endpoint(format!("xet://127.0.0.1:{port}/github/team/assets/main"))
+            .auth(auth)
+            .with_upload_chunk_size(128)
+            .with_retry_policy(policy)
+            .build()
+            .unwrap()
+    }
+
+    /// The xorb POST 503s twice (retryable admission), then succeeds; the M4
+    /// retry layer must replay the in-memory xorb and complete the upload.
+    #[tokio::test]
+    async fn upload_retries_xorb_post_on_503() {
+        use std::time::Duration;
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/github/team/assets/xet-write-token/main"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "casUrl": server.uri(),
+                "exp": 4_000_000_000u64,
+                "accessToken": WRITE_TOKEN,
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"/v1/chunks/default-merkledb/.*"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(json!({"error": "miss"})))
+            .mount(&server)
+            .await;
+        Mock::given(method("HEAD"))
+            .and(path_regex(r"/v1/xorbs/default/.*"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        // xorb POST: 503 twice, then success (first-match-wins exhaustion).
+        Mock::given(method("POST"))
+            .and(path_regex(r"/v1/xorbs/default/.*"))
+            .and(header("authorization", format!("Bearer {WRITE_TOKEN}")))
+            .respond_with(ResponseTemplate::new(503).set_body_json(json!({"error": "admitted"})))
+            .up_to_n_times(2)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path_regex(r"/v1/xorbs/default/.*"))
+            .and(header("authorization", format!("Bearer {WRITE_TOKEN}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"was_inserted": true})))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/shards"))
+            .and(header("authorization", format!("Bearer {WRITE_TOKEN}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"result": 1})))
+            .mount(&server)
+            .await;
+
+        let client = build_client_with_policy(
+            &server,
+            crate::retry::RetryPolicy::new()
+                .with_base_delay(Duration::from_millis(1))
+                .with_jitter(false),
+        )
+        .await;
+        let session = client.upload_session().unwrap();
+        session
+            .upload_bytes(b"some upload data".to_vec())
+            .await
+            .unwrap();
+        let report = session.finalize().await.unwrap();
+        assert_eq!(report.xorb_posts, 1);
+        assert_eq!(report.shard_posts, 1);
+        let xorb_posts = server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .filter(|request| {
+                request.method.as_str() == "POST" && request.url.path().starts_with("/v1/xorbs/")
+            })
+            .count();
+        assert_eq!(xorb_posts, 3); // 2×503 + 1×200
     }
 }
