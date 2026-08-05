@@ -91,6 +91,7 @@ pub mod stream;
 pub mod transfer;
 pub mod tree;
 pub mod upload;
+pub mod url;
 pub mod xorb;
 pub mod xorb_build;
 
@@ -101,7 +102,10 @@ pub use auth::{
 pub use cache::{CachedXorbRange, ChunkCache, DEFAULT_CHUNK_CACHE_BUDGET_BYTES};
 pub use chunker::{Chunk, Chunker, DEFAULT_TARGET_CHUNK_SIZE};
 pub use client::{XetClient, XetClientBuilder};
-pub use config::Credential;
+pub use config::{
+    AuthSection, Credential, DefaultSection, SdxConfig, SdxConfigError,
+    resolve_credential_from_config, resolve_credential_from_env,
+};
 pub use dedup::{
     DEFRAG_HYSTERESIS_FACTOR, DEFRAG_MIN_CHUNKS_PER_RANGE, DEFRAG_NUM_RANGES_WINDOW, DedupClient,
     DedupOutcome, DefragPrevention, GLOBAL_DEDUP_CHUNK_MODULUS, GLOBAL_DEDUP_PREFIX,
@@ -137,6 +141,7 @@ pub use upload::{
     DEFAULT_UPLOAD_CONCURRENCY, INGESTION_BLOCK_SIZE, UploadFileInfo, UploadReport, UploadSession,
     UploadStreamHandle,
 };
+pub use url::XetUrl;
 pub use xet_core_structures::merklehash::MerkleHash;
 pub use xorb::{DecodedChunk, XorbError, XorbReader};
 pub use xorb_build::{
