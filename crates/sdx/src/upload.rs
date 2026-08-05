@@ -234,6 +234,7 @@ struct UploadSessionInner {
     transfer: TransferClient,
     tokens: TokenService,
     api_base: String,
+    repository: crate::auth::RepositoryId,
     dedup: DedupClient,
     upload_permits: Arc<Semaphore>,
     /// Dedicated no-read-timeout client for (potentially large) shard POSTs.
@@ -302,6 +303,8 @@ struct SessionState {
     file_infos: Vec<ShardFileEntry>,
     /// In-flight xorb upload tasks.
     xorb_upload_tasks: JoinSet<Result<(), SdxError>>,
+    /// Pending `(remote, file_id)` path registrations to apply at `finalize`.
+    pending_registrations: Vec<(String, String)>,
     /// Global chunk index across the whole session (drives dedup eligibility).
     global_chunk_index: u64,
     /// Last chunk index a global dedup query was issued for.
@@ -317,6 +320,7 @@ impl Default for SessionState {
             file_reports: Vec::new(),
             file_infos: Vec::new(),
             xorb_upload_tasks: JoinSet::new(),
+            pending_registrations: Vec::new(),
             global_chunk_index: 0,
             last_global_query_index: None,
             finalized: false,
@@ -746,6 +750,7 @@ impl UploadSession {
                 transfer: inner.transfer.clone(),
                 tokens: inner.tokens.clone(),
                 api_base: inner.api_base.clone(),
+                repository: inner.repository.clone(),
                 dedup: DedupClient::new(inner.transfer.clone()),
                 upload_permits: Arc::new(Semaphore::new(inner.upload_concurrency.max(1))),
                 shard_transfer: TransferClient::new(shard_client),
@@ -759,40 +764,57 @@ impl UploadSession {
         })
     }
 
-    /// Uploads the local file at `path`.
+    /// Uploads the local file at `path` under the remote path `remote`.
     ///
     /// The file is read in [`INGESTION_BLOCK_SIZE`] blocks on a compute
     /// thread; the returned [`UploadFileInfo::file_id`] is the content-derived
-    /// file identifier.
+    /// file identifier, and `remote` is registered to it at
+    /// [`UploadSession::finalize`].
     ///
     /// # Errors
     ///
     /// Returns [`SdxError`] when the file cannot be read or the upload fails.
-    pub async fn upload_file(&self, path: impl AsRef<Path>) -> Result<UploadFileInfo, SdxError> {
+    pub async fn upload_file(
+        &self,
+        path: impl AsRef<Path>,
+        remote: &str,
+    ) -> Result<UploadFileInfo, SdxError> {
         let file = std::fs::File::open(path)?;
-        self.upload_stream(file).await
+        self.upload_stream(remote, file).await
     }
 
-    /// Uploads an in-memory payload, fed in 8 MiB slices (zero-copy).
+    /// Uploads an in-memory payload, fed in 8 MiB slices (zero-copy), and
+    /// registers it under the remote path `remote` at
+    /// [`UploadSession::finalize`].
     ///
     /// # Errors
     ///
     /// Returns [`SdxError`] when the upload fails.
-    pub async fn upload_bytes(&self, bytes: impl Into<Bytes>) -> Result<UploadFileInfo, SdxError> {
+    pub async fn upload_bytes(
+        &self,
+        remote: &str,
+        bytes: impl Into<Bytes>,
+    ) -> Result<UploadFileInfo, SdxError> {
         let bytes = bytes.into();
-        self.upload_stream(std::io::Cursor::new(bytes)).await
+        self.upload_stream(remote, std::io::Cursor::new(bytes))
+            .await
     }
 
-    /// Uploads a `std::io::Read` stream.
+    /// Uploads a `std::io::Read` stream under the remote path `remote`.
     ///
     /// The reader is consumed on a `spawn_blocking` compute thread that also
     /// runs the CDC chunker; chunks cross back to the async pipeline as
-    /// zero-copy [`Bytes`] slices.
+    /// zero-copy [`Bytes`] slices. `remote` is registered to the resulting
+    /// `file_id` at [`UploadSession::finalize`].
     ///
     /// # Errors
     ///
     /// Returns [`SdxError`] when the reader fails or the upload fails.
-    pub async fn upload_stream<R>(&self, reader: R) -> Result<UploadFileInfo, SdxError>
+    pub async fn upload_stream<R>(
+        &self,
+        remote: &str,
+        reader: R,
+    ) -> Result<UploadFileInfo, SdxError>
     where
         R: Read + Send + 'static,
     {
@@ -817,6 +839,13 @@ impl UploadSession {
         reader_task
             .await
             .map_err(|error| SdxError::TaskJoin(error.to_string()))??;
+        // Record the pending path registration; applied in `finalize`.
+        self.inner
+            .state
+            .lock()
+            .await
+            .pending_registrations
+            .push((remote.to_owned(), info.file_id.clone()));
         Ok(info)
     }
 
@@ -904,6 +933,22 @@ impl UploadSession {
                 })
                 .await?;
             self.inner.shard_posts.fetch_add(1, Ordering::Relaxed);
+        }
+
+        // Apply pending path registrations after the shard POST (xorbs and the
+        // shard are stored first, so `register_path` finds the file in scope).
+        let pending = std::mem::take(&mut self.inner.state.lock().await.pending_registrations);
+        if !pending.is_empty() {
+            let metadata = crate::tree::MetadataClient::from_upload(
+                &self.inner.transfer,
+                &self.inner.tokens,
+                &self.inner.api_base,
+                &self.inner.repository,
+                &self.inner.retry_policy,
+            );
+            for (remote, file_id) in pending {
+                metadata.register_path(&remote, &file_id).await?;
+            }
         }
 
         Ok(UploadReport {
@@ -1040,6 +1085,19 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"result": 1})))
             .mount(&server)
             .await;
+        // Path registration (M5b) performed by `finalize`.
+        Mock::given(method("PUT"))
+            .and(path_regex(r"/api/github/team/assets/path/main/.*"))
+            .and(header("authorization", format!("Bearer {WRITE_TOKEN}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "path": "remote/file",
+                "fileId": "0".repeat(64),
+                "size": 0,
+                "updatedAt": 0,
+                "created": true,
+            })))
+            .mount(&server)
+            .await;
         let client = build_client(&server).await;
         (server, client)
     }
@@ -1084,7 +1142,7 @@ mod tests {
         let (server, client) = mock_client().await;
         let session = client.upload_session().unwrap();
         let info = session
-            .upload_bytes(b"hello upload world".to_vec())
+            .upload_bytes("remote/hello.bin", b"hello upload world".to_vec())
             .await
             .unwrap();
         assert_eq!(info.total_bytes, 18);
@@ -1133,7 +1191,7 @@ mod tests {
         let (server, client) = mock_client_opts(true, None).await;
         let session = client.upload_session().unwrap();
         session
-            .upload_bytes(b"already stored".to_vec())
+            .upload_bytes("remote/stored.bin", b"already stored".to_vec())
             .await
             .unwrap();
         let report = session.finalize().await.unwrap();
@@ -1154,11 +1212,11 @@ mod tests {
         let (_server, client) = mock_client().await;
         let session = client.upload_session().unwrap();
         let first = session
-            .upload_bytes(b"same content twice".to_vec())
+            .upload_bytes("remote/same.bin", b"same content twice".to_vec())
             .await
             .unwrap();
         let second = session
-            .upload_bytes(b"same content twice".to_vec())
+            .upload_bytes("remote/same.bin", b"same content twice".to_vec())
             .await
             .unwrap();
         let report = session.finalize().await.unwrap();
@@ -1194,7 +1252,10 @@ mod tests {
             mock_client_opts(false, Some((xet_hash_hex_string(chunk_hash), imported))).await;
 
         let session = client.upload_session().unwrap();
-        let info = session.upload_bytes(b"dedup me".to_vec()).await.unwrap();
+        let info = session
+            .upload_bytes("remote/dedup.bin", b"dedup me".to_vec())
+            .await
+            .unwrap();
         assert_eq!(info.inserted_chunks, 0);
         assert_eq!(info.reused_chunks, 1);
         let report = session.finalize().await.unwrap();
@@ -1360,6 +1421,18 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"result": 1})))
             .mount(&server)
             .await;
+        Mock::given(method("PUT"))
+            .and(path_regex(r"/api/github/team/assets/path/main/.*"))
+            .and(header("authorization", format!("Bearer {WRITE_TOKEN}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "path": "remote/file",
+                "fileId": "0".repeat(64),
+                "size": 0,
+                "updatedAt": 0,
+                "created": true,
+            })))
+            .mount(&server)
+            .await;
 
         let client = build_client_with_policy(
             &server,
@@ -1370,7 +1443,7 @@ mod tests {
         .await;
         let session = client.upload_session().unwrap();
         session
-            .upload_bytes(b"some upload data".to_vec())
+            .upload_bytes("remote/upload.bin", b"some upload data".to_vec())
             .await
             .unwrap();
         let report = session.finalize().await.unwrap();

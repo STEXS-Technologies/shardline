@@ -41,8 +41,12 @@ const SHARD_FOOTER_VERSION: u64 = 2;
 const SHARD_HEADER_SIZE: u64 = 48;
 /// Serialized footer size (u64 fields; see module docs).
 const SHARD_FOOTER_SIZE: u64 = 200;
-/// Serialized v3 file/xorb entry size.
-const SHARD_ENTRY_SIZE: usize = 60;
+/// Serialized v3 file/xorb entry size (60 data bytes + 4 trailing padding bytes:
+/// each `#[repr(C)]` header/entry has a `u32` field followed by `u64` fields, so
+/// the fork's serializer writes a 64-byte buffer).
+const SHARD_ENTRY_SIZE: usize = 64;
+/// Trailing zero padding appended to each 60-byte entry to reach 64 bytes.
+const SHARD_ENTRY_PADDING: [u8; 4] = [0u8; 4];
 /// V2 shard entry size (48 bytes), for parsing legacy shards.
 const SHARD_V2_ENTRY_SIZE: usize = 48;
 /// Returns the bookend marker hash (all-ones), used to terminate a shard section.
@@ -237,6 +241,7 @@ fn append_file_header(out: &mut Vec<u8>, file_hash: MerkleHash, num_entries: usi
     out.extend_from_slice(&u64::try_from(num_entries).unwrap_or(u64::MAX).to_le_bytes());
     out.extend_from_slice(&0u64.to_le_bytes()); // _unused
     out.extend_from_slice(&0u64.to_le_bytes()); // _pad
+    out.extend_from_slice(&SHARD_ENTRY_PADDING);
 }
 
 fn append_file_entry(out: &mut Vec<u8>, segment: &ShardSegment) {
@@ -245,6 +250,7 @@ fn append_file_entry(out: &mut Vec<u8>, segment: &ShardSegment) {
     out.extend_from_slice(&segment.unpacked_segment_bytes.to_le_bytes());
     out.extend_from_slice(&segment.chunk_index_start.to_le_bytes());
     out.extend_from_slice(&segment.chunk_index_end.to_le_bytes());
+    out.extend_from_slice(&SHARD_ENTRY_PADDING);
 }
 
 fn append_xorb_header(
@@ -258,6 +264,7 @@ fn append_xorb_header(
     out.extend_from_slice(&u64::try_from(num_entries).unwrap_or(u64::MAX).to_le_bytes());
     out.extend_from_slice(&num_bytes.to_le_bytes());
     out.extend_from_slice(&0u64.to_le_bytes()); // num_bytes_on_disk
+    out.extend_from_slice(&SHARD_ENTRY_PADDING);
 }
 
 fn append_xorb_entry(out: &mut Vec<u8>, chunk: &ShardXorbChunk) {
@@ -266,6 +273,7 @@ fn append_xorb_entry(out: &mut Vec<u8>, chunk: &ShardXorbChunk) {
     out.extend_from_slice(&chunk.unpacked_segment_bytes.to_le_bytes());
     out.extend_from_slice(&chunk.flags.to_le_bytes());
     out.extend_from_slice(&0u64.to_le_bytes()); // _unused
+    out.extend_from_slice(&SHARD_ENTRY_PADDING);
 }
 
 /// Writes the fork's placeholder footer (`MDBShardFileFooter::default` with the
@@ -483,7 +491,7 @@ mod tests {
         let bytes = serialize_shard(&files, &xorbs);
         // 48-byte header + 1 file (60 + 2*60) + bookend(60) + 2 xorbs
         // (60+2*60 + 60+1*60) + bookend(60) + 200-byte footer.
-        assert_eq!(bytes.len(), 48 + 180 + 60 + 300 + 60 + 200);
+        assert_eq!(bytes.len(), 48 + 192 + 64 + 320 + 64 + 200);
         // Header tag + version 3.
         assert!(bytes.starts_with(b"HFRepoMetaData"));
         assert_eq!(bytes.get(32..40), Some(&3u64.to_le_bytes()[..]));

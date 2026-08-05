@@ -55,6 +55,8 @@ pub(crate) struct DownloadSessionInner {
     pub(crate) upload_concurrency: usize,
     /// Retry policy (M4) applied to all CAS requests.
     pub(crate) retry_policy: RetryPolicy,
+    /// Repository identity from the `xet://` endpoint (M5b metadata routes).
+    pub(crate) repository: crate::auth::RepositoryId,
 }
 
 impl DownloadSessionInner {

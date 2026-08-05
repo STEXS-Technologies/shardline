@@ -183,4 +183,10 @@ pub enum SdxError {
     /// finalized twice.
     #[error("upload session {0}")]
     UploadSession(String),
+    /// Creating a revision that already exists (HTTP 409 `RevisionConflict`).
+    #[error("revision already exists: {0}")]
+    RevisionExists(String),
+    /// A path-namespace or revision request failed to produce a valid response.
+    #[error("metadata operation failed: {0}")]
+    Metadata(String),
 }
