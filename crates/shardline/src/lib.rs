@@ -56,10 +56,13 @@ mod rebuild;
 mod repair;
 pub mod report_output;
 mod storage_migration;
+mod xet;
 
 pub use adapter::{CliRuntimeError, run_health_check};
 pub use admin::{AdminTokenError, mint_admin_token, mint_admin_token_from_sources};
-pub use artifact::{CliArtifactError, render_completion, render_manpage};
+pub use artifact::{
+    CliArtifactError, render_completion, render_manpage, render_xet_completion, render_xet_manpage,
+};
 pub use backup::{BackupRuntimeError, run_backup_manifest};
 pub use bench::{
     BenchConfig, BenchDeploymentTarget, BenchInventoryScope, BenchReport, BenchRuntimeError,

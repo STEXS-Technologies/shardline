@@ -3274,6 +3274,7 @@ dependencies = [
 name = "shardline"
 version = "1.3.0"
 dependencies = [
+ "axum",
  "bytes",
  "clap",
  "clap_complete",
@@ -3283,6 +3284,7 @@ dependencies = [
  "libc",
  "reqwest 0.12.28",
  "rusqlite",
+ "sdx",
  "serde",
  "serde_json",
  "serial_test",

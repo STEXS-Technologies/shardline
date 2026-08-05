@@ -27,6 +27,11 @@ pub async fn run(args: impl Iterator<Item = OsString>) -> ExitCode {
         )
         .init();
 
+    let args: Vec<OsString> = args.collect();
+    if let Some(xet_args) = xet_args(&args) {
+        return crate::xet::run_xet(xet_args).await;
+    }
+
     match CliCommand::parse(args) {
         Ok(CliCommand::ProviderlessSetup) => match run_providerless_setup(None) {
             Ok(report) => {
@@ -574,6 +579,50 @@ const fn gc_mode_name(mark: bool, sweep: bool) -> &'static str {
         (false, true) => "sweep",
         (true, true) => "mark-and-sweep",
     }
+}
+
+/// Returns the argument vector to pass to the `sdx` file-management lane, or
+/// `None` when the invocation should go to the operator CLI.
+///
+/// Two routes dispatch here:
+/// * the `sdx` symlink (`argv[0]` basename is `sdx`) — pass args unchanged;
+/// * the `xet` escape-hatch subcommand on the operator binary — strip the
+///   leading `xet` token so the xet parser sees the subcommand directly.
+fn xet_args(args: &[OsString]) -> Option<Vec<OsString>> {
+    if args
+        .first()
+        .is_some_and(|program| program_basename(program) == "sdx")
+    {
+        return Some(args.to_vec());
+    }
+    // Scan for the bare `xet` escape-hatch token, skipping global flag values.
+    let mut index = 1;
+    while index < args.len() {
+        let Some(token) = args.get(index) else {
+            break;
+        };
+        let value = token.to_string_lossy();
+        match value.as_ref() {
+            "--env-file" | "-c" | "--config" => index = index.saturating_add(2),
+            _ if value.starts_with("--env-file=") || value.starts_with("--config=") => {
+                index = index.saturating_add(1);
+            }
+            "xet" => {
+                let mut stripped = args.to_vec();
+                stripped.remove(index);
+                return Some(stripped);
+            }
+            _ if value.starts_with('-') => index = index.saturating_add(1),
+            _ => break,
+        }
+    }
+    None
+}
+
+/// Returns the basename of an executable path string.
+fn program_basename(program: &OsString) -> String {
+    let value = program.to_string_lossy();
+    value.rsplit('/').next().unwrap_or_default().to_owned()
 }
 
 #[cfg(test)]
