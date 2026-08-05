@@ -40,6 +40,11 @@ pub struct XetClient {
 }
 
 impl XetClient {
+    /// Crate-internal access to the shared session state (metadata modules).
+    pub(crate) const fn download_inner(&self) -> &Arc<DownloadSessionInner> {
+        &self.inner
+    }
+
     /// Creates a download session over the client's repository.
     #[must_use]
     pub fn download_session(&self) -> DownloadSession {
@@ -168,49 +173,57 @@ impl XetClient {
         crate::upload::UploadSession::new(&self.inner)
     }
 
-    /// Uploads the local file at `path` (content-addressed; returns the
-    /// content-derived `file_id`). Path addressing / remote registration is M5.
+    /// Uploads the local file at `path` and registers it under the remote path
+    /// `remote` in the client's revision, returning the content-derived
+    /// `file_id`. After this returns, `resolve_path(remote)` resolves to the
+    /// uploaded file.
     ///
     /// # Errors
     ///
-    /// Returns [`SdxError`] when the file cannot be read or any upload step
-    /// fails.
+    /// Returns [`SdxError`] when the file cannot be read or any upload or
+    /// registration step fails.
     pub async fn upload_file(
         &self,
         path: impl AsRef<std::path::Path>,
+        remote: &str,
     ) -> Result<crate::upload::UploadFileInfo, SdxError> {
         let session = self.upload_session()?;
-        let info = session.upload_file(path).await?;
+        let info = session.upload_file(path, remote).await?;
         session.finalize().await?;
         Ok(info)
     }
 
-    /// Uploads an in-memory payload as a content-addressed file.
+    /// Uploads an in-memory payload as a content-addressed file and registers
+    /// it under the remote path `remote`.
     ///
     /// # Errors
     ///
-    /// Returns [`SdxError`] when any upload step fails.
+    /// Returns [`SdxError`] when any upload or registration step fails.
     pub async fn upload_bytes(
         &self,
+        remote: &str,
         bytes: impl Into<bytes::Bytes>,
     ) -> Result<crate::upload::UploadFileInfo, SdxError> {
         let session = self.upload_session()?;
-        let info = session.upload_bytes(bytes).await?;
+        let info = session.upload_bytes(remote, bytes).await?;
         session.finalize().await?;
         Ok(info)
     }
 
-    /// Uploads a `std::io::Read` stream as a content-addressed file.
+    /// Uploads a `std::io::Read` stream as a content-addressed file and
+    /// registers it under the remote path `remote`.
     ///
     /// # Errors
     ///
-    /// Returns [`SdxError`] when the reader fails or any upload step fails.
+    /// Returns [`SdxError`] when the reader fails or any upload or
+    /// registration step fails.
     pub async fn upload_stream<R: std::io::Read + Send + 'static>(
         &self,
+        remote: &str,
         reader: R,
     ) -> Result<crate::upload::UploadFileInfo, SdxError> {
         let session = self.upload_session()?;
-        let info = session.upload_stream(reader).await?;
+        let info = session.upload_stream(remote, reader).await?;
         session.finalize().await?;
         Ok(info)
     }
@@ -497,6 +510,7 @@ impl XetClientBuilder {
                 upload_chunk_size: self.upload_chunk_size,
                 upload_concurrency: self.upload_concurrency,
                 retry_policy: self.retry_policy,
+                repository,
             }),
         })
     }

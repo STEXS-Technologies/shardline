@@ -347,6 +347,45 @@ impl TransferClient {
         serde_json::from_slice(&response_bytes).map_err(|error| transfer_error_from_json(&error))
     }
 
+    /// Issues an arbitrary CAS/API request (with the `X-Xet-Session-Id` and
+    /// bearer headers) and returns `(status, body)` for any status.
+    ///
+    /// This is the low-level primitive used by the path-namespace and revision
+    /// metadata layers (M5b). Non-2xx statuses are mapped to typed
+    /// [`TransferError`]s so the M4 [`RetryContext`] can classify them; the
+    /// caller matches specific statuses (e.g. 409 → `RevisionExists`) from the
+    /// error.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TransferError`] for transport failures and every non-2xx
+    /// status.
+    pub(crate) async fn request_raw(
+        &self,
+        method: &reqwest::Method,
+        url: &str,
+        token: &str,
+        body: Option<&serde_json::Value>,
+    ) -> Result<(StatusCode, Vec<u8>), TransferError> {
+        let mut request = self
+            .with_session(self.client.request(method.clone(), url).bearer_auth(token))
+            .header(header::ACCEPT, "application/json");
+        if let Some(body) = body {
+            request = request
+                .header(header::CONTENT_TYPE, "application/json")
+                .json(body);
+        }
+        let response = request.send().await?;
+        let status = response.status();
+        let retry_after = parse_retry_after(response.headers());
+        let body_bytes = response.bytes().await?.to_vec();
+        if status.is_success() {
+            return Ok((status, body_bytes));
+        }
+        let message = String::from_utf8_lossy(&body_bytes).into_owned();
+        Err(http_error(status, message, retry_after))
+    }
+
     async fn get_reconstruction(
         &self,
         base_url: &str,

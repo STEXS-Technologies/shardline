@@ -145,6 +145,30 @@ impl TestServer {
         self.client_with(None, None)
     }
 
+    /// Builds a client scoped to a specific revision (default `main`).
+    fn client_for_revision(&self, revision: &str) -> sdx::XetClient {
+        let auth = Auth::new(
+            &self.base_url,
+            RepositoryId {
+                provider: "github".to_owned(),
+                owner: "team".to_owned(),
+                repo: "assets".to_owned(),
+                revision: revision.to_owned(),
+            },
+        )
+        .unwrap()
+        .with_api_key(BOOTSTRAP_KEY.to_owned())
+        .with_subject(SUBJECT.to_owned());
+        XetClientBuilder::new()
+            .endpoint(format!(
+                "xet://127.0.0.1:{}/github/team/assets/{revision}",
+                self.port
+            ))
+            .auth(auth)
+            .build()
+            .unwrap()
+    }
+
     /// Builds a client with an on-disk chunk cache rooted at `cache_dir`
     /// (plus the given memory cap / limits).
     fn client_with_cache_dir(
@@ -852,4 +876,185 @@ async fn group_abort_during_large_download_completes_promptly() {
         "group abort latency: {latency:?} ({received} of {} bytes received)",
         data.len()
     );
+}
+
+// ============================================================================
+// M5b E2E: path-namespace + revision metadata over the live M5a endpoints.
+// ============================================================================
+
+/// Uploads `data` via the client (native upload + automatic path registration)
+/// and returns the content `file_id`.
+async fn client_upload(client: &sdx::XetClient, remote: &str, data: Vec<u8>) -> String {
+    client
+        .upload_bytes(remote, data)
+        .await
+        .expect("client upload + register should succeed")
+        .file_id
+}
+
+/// Downloads a full file by `file_id` into memory (streaming path).
+async fn stream_download(client: &sdx::XetClient, file_id: &str) -> Vec<u8> {
+    let mut stream = client.download_stream(file_id, None).await.unwrap();
+    let mut out = Vec::new();
+    while let Some(chunk) = stream.next().await.unwrap() {
+        out.extend_from_slice(&chunk);
+    }
+    out
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn metadata_register_resolve_download_round_trip() {
+    let server = TestServer::start().await;
+    let client = server.client();
+    let data = deterministic_random(4096, 0xabc);
+    let file_id = client_upload(&client, "dir/file.bin", data.clone()).await;
+    assert_eq!(file_id.len(), 64);
+
+    let entry = client.resolve_path("dir/file.bin").await.unwrap();
+    assert_eq!(entry.file_id, file_id);
+    assert_eq!(entry.size, u64::try_from(data.len()).unwrap());
+
+    let downloaded = stream_download(&client, &file_id).await;
+    assert_eq!(downloaded, data);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn metadata_reupload_idempotency_and_repoint() {
+    let server = TestServer::start().await;
+    let client = server.client();
+    let original = deterministic_random(2048, 0x11);
+    let changed = deterministic_random(2048, 0x22);
+
+    let first = client_upload(&client, "same.bin", original.clone()).await;
+    let second = client_upload(&client, "same.bin", original.clone()).await;
+    // Same content → same file_id; re-registering is `created:false`.
+    assert_eq!(first, second);
+    let reg = client.register_path("same.bin", &first).await.unwrap();
+    assert!(
+        !reg.created,
+        "re-registering an existing path must report created=false"
+    );
+
+    // Changed content → a new file_id, and the path repoints.
+    let third = client_upload(&client, "same.bin", changed.clone()).await;
+    assert_ne!(first, third);
+    let entry = client.resolve_path("same.bin").await.unwrap();
+    assert_eq!(entry.file_id, third);
+
+    // The old content is still downloadable by its original file_id.
+    let old = stream_download(&client, &first).await;
+    assert_eq!(old, original);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn metadata_listing_nested_prefixes_and_dedup() {
+    use std::collections::HashSet;
+
+    let server = TestServer::start().await;
+    let client = server.client();
+    client_upload(&client, "data/a.txt", b"a".to_vec()).await;
+    client_upload(&client, "data/sub/b.txt", b"b".to_vec()).await;
+    client_upload(&client, "data/sub/c.txt", b"c".to_vec()).await;
+    client_upload(&client, "top.txt", b"t".to_vec()).await;
+    client_upload(&client, "top2.txt", b"u".to_vec()).await;
+    client_upload(&client, "top3.txt", b"v".to_vec()).await;
+
+    // Root shows the `data/` directory and the top-level files.
+    let root = client.list_dir("").await.unwrap();
+    assert!(root.entries.iter().any(|e| e.path == "data/" && e.is_dir));
+    assert!(
+        root.entries
+            .iter()
+            .any(|e| e.path == "top.txt" && !e.is_dir)
+    );
+    assert!(root.entries.iter().any(|e| e.path == "top2.txt"));
+    assert!(root.entries.iter().any(|e| e.path == "top3.txt"));
+
+    // `data` lists its file and the nested `sub/` directory.
+    let data = client.list_dir("data").await.unwrap();
+    assert!(data.entries.iter().any(|e| e.path == "data/a.txt"));
+    assert!(
+        data.entries
+            .iter()
+            .any(|e| e.path == "data/sub/" && e.is_dir)
+    );
+
+    // list_dir_all walks everything and deduplicates by path.
+    let all = client.list_dir_all("").await.unwrap();
+    assert!(all.len() >= 4);
+    let mut seen = HashSet::new();
+    for entry in &all {
+        assert!(
+            seen.insert(entry.path.clone()),
+            "duplicate path {} in list_dir_all",
+            entry.path
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn metadata_deregistration_and_recursive_delete() {
+    let server = TestServer::start().await;
+    let client = server.client();
+    client_upload(&client, "rm/leaf.txt", b"x".to_vec()).await;
+    client_upload(&client, "rm/nested/one.txt", b"y".to_vec()).await;
+    client_upload(&client, "rm/nested/two.txt", b"w".to_vec()).await;
+    client_upload(&client, "keep.txt", b"z".to_vec()).await;
+
+    // Non-recursive delete removes exactly one leaf.
+    let deleted = client.delete_path("rm/leaf.txt", false).await.unwrap();
+    assert_eq!(deleted, 1);
+    assert!(client.resolve_path("rm/leaf.txt").await.is_err());
+
+    // Recursive delete removes the subtree.
+    let deleted = client.delete_path("rm", true).await.unwrap();
+    assert_eq!(deleted, 2);
+    assert!(client.resolve_path("rm/nested/one.txt").await.is_err());
+
+    // Idempotent second delete → 0.
+    let again = client.delete_path("rm", true).await.unwrap();
+    assert_eq!(again, 0);
+    // The sibling was untouched.
+    let kept = client.resolve_path("keep.txt").await.unwrap();
+    assert_eq!(kept.path, "keep.txt");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn metadata_revisions_create_list_duplicate_delete() {
+    let server = TestServer::start().await;
+    // Revision create/delete routes enforce a strict scope match on the
+    // revision, so use a client whose token is scoped to the new branch.
+    let client = server.client_for_revision("branch-a");
+
+    client.create_revision("branch-a").await.unwrap();
+    let revisions = client.list_revisions().await.unwrap();
+    assert!(revisions.iter().any(|r| r.name == "branch-a"));
+
+    // Duplicate create → RevisionExists.
+    let err = client.create_revision("branch-a").await.unwrap_err();
+    assert!(matches!(err, sdx::SdxError::RevisionExists(_)));
+
+    // Delete is idempotent.
+    client.delete_revision("branch-a").await.unwrap();
+    let revisions = client.list_revisions().await.unwrap();
+    assert!(!revisions.iter().any(|r| r.name == "branch-a"));
+    client.delete_revision("branch-a").await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn metadata_register_into_new_revision_auto_creates_it() {
+    let server = TestServer::start().await;
+    // A client scoped to a revision that does not yet exist.
+    let client = server.client_for_revision("fresh-rev");
+    // Register a path into `fresh-rev`: the server auto-creates the revision,
+    // and resolve works within it.
+    client
+        .upload_bytes("fresh/file.txt", b"fresh".to_vec())
+        .await
+        .unwrap();
+    let revisions = client.list_revisions().await.unwrap();
+    assert!(revisions.iter().any(|r| r.name == "fresh-rev"));
+
+    let entry = client.resolve_path("fresh/file.txt").await.unwrap();
+    assert_eq!(entry.path, "fresh/file.txt");
 }

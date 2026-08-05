@@ -84,10 +84,12 @@ pub mod group;
 pub mod hash;
 pub mod reconstruction;
 pub mod retry;
+pub mod revisions;
 pub mod session;
 pub mod shard;
 pub mod stream;
 pub mod transfer;
+pub mod tree;
 pub mod upload;
 pub mod xorb;
 pub mod xorb_build;
@@ -115,6 +117,7 @@ pub use hash::{
 };
 pub use reconstruction::{ReconstructedFile, ResolvedTerm, reconstruct};
 pub use retry::RetryPolicy;
+pub use revisions::Revision;
 pub use session::DownloadSession;
 pub use shard::{ShardFileEntry, ShardSegment, ShardXorb, ShardXorbChunk, serialize_shard};
 pub use stream::{
@@ -129,6 +132,7 @@ pub use transfer::{
     ByteRange, MultipartPart, RangedXorb, TransferClient, XORB_UPLOAD_PROGRESS_BLOCK_SIZE,
     parse_multipart_byteranges,
 };
+pub use tree::{DirEntry, DirListing, PathEntry, RegisterResult};
 pub use upload::{
     DEFAULT_UPLOAD_CONCURRENCY, INGESTION_BLOCK_SIZE, UploadFileInfo, UploadReport, UploadSession,
     UploadStreamHandle,
