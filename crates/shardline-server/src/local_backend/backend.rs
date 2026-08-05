@@ -2,7 +2,9 @@ use std::{num::NonZeroUsize, path::PathBuf, sync::Arc};
 
 use shardline_index::{
     FileChunkRecord, LocalIndexStore, LocalRecordStore, ReconstructionStore, RecordTraversal,
+    RepoKey, RevisionRecord, TreeEntry, TreeKey, TreeStore,
 };
+use shardline_protocol::unix_now_seconds_lossy;
 use shardline_storage::{ObjectPrefix, ObjectStore};
 
 use crate::{
@@ -13,6 +15,7 @@ use crate::{
     model::ServerStatsResponse,
     object_store::{ServerObjectStore, visit_object_prefix},
     overflow::{checked_add, checked_increment},
+    validation::validate_content_hash,
 };
 
 use super::records::read_record;
@@ -318,6 +321,143 @@ impl LocalBackend {
         repository_scope: Option<&shardline_protocol::RepositoryScope>,
     ) -> Result<shardline_index::FileRecord, ServerError> {
         read_record(&self.record_store, file_id, content_hash, repository_scope).await
+    }
+
+    /// Resolves a single canonical path to its tree entry, if any.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError`] when the index lookup fails.
+    pub(crate) async fn resolve_tree_path(
+        &self,
+        key: &TreeKey,
+        path: &str,
+    ) -> Result<Option<TreeEntry>, ServerError> {
+        Ok(self.index_store.tree_entry(key, path).await?)
+    }
+
+    /// Scans raw tree rows for a revision under `prefix`, resuming after `cursor`,
+    /// returning at most `limit` raw rows ordered by path.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError`] when the index scan fails.
+    pub(crate) async fn scan_tree_raw(
+        &self,
+        key: &TreeKey,
+        prefix: &str,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<TreeEntry>, ServerError> {
+        Ok(self
+            .index_store
+            .scan_tree(key, prefix, cursor, limit)
+            .await?)
+    }
+
+    /// Validates the referenced file record and upserts a path mapping, wrapped in
+    /// the metadata write lock so concurrent registrations cannot race.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError::UnregisteredFile`] when no record exists in the revision
+    /// scope, [`ServerError::InvalidContentHash`] for a malformed `file_id`, or the
+    /// adapter error when persistence fails.
+    pub(crate) async fn register_tree_path(
+        &self,
+        key: &TreeKey,
+        path: &str,
+        file_id: &str,
+        repository_scope: Option<&shardline_protocol::RepositoryScope>,
+    ) -> Result<super::RegisterPathOutcome, ServerError> {
+        let _guard = self.metadata_write_lock.lock().await;
+        validate_content_hash(file_id)?;
+        let record = match self.read_record(file_id, None, repository_scope).await {
+            Ok(record) => record,
+            Err(ServerError::NotFound) => {
+                return Err(ServerError::UnregisteredFile(key.revision.clone()));
+            }
+            Err(error) => return Err(error),
+        };
+        let now = unix_now_seconds_lossy();
+        let revision_record = RevisionRecord {
+            provider: key.provider.clone(),
+            owner: key.owner.clone(),
+            repo: key.repo.clone(),
+            revision: key.revision.clone(),
+            created_at_unix_seconds: now,
+            updated_at_unix_seconds: now,
+        };
+        // Auto-create the revision registry row when it does not yet exist.
+        let _created = self.index_store.upsert_revision(&revision_record).await?;
+        let entry = TreeEntry {
+            provider: key.provider.clone(),
+            owner: key.owner.clone(),
+            repo: key.repo.clone(),
+            revision: key.revision.clone(),
+            path: path.to_owned(),
+            file_id: file_id.to_owned(),
+            size_bytes: record.total_bytes,
+            updated_at_unix_seconds: now,
+        };
+        let outcome = self.index_store.upsert_tree_entry(&entry).await?;
+        Ok(super::RegisterPathOutcome {
+            entry,
+            created: outcome.created,
+        })
+    }
+
+    /// Deletes one path mapping (or the path and every descendant when `recursive`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError`] when the index deletion fails.
+    pub(crate) async fn delete_tree_path(
+        &self,
+        key: &TreeKey,
+        path: &str,
+        recursive: bool,
+    ) -> Result<u64, ServerError> {
+        Ok(self
+            .index_store
+            .delete_tree_entries(key, path, recursive)
+            .await?)
+    }
+
+    /// Lists the revision registry for a repository.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError`] when the index lookup fails.
+    pub(crate) async fn list_revisions(
+        &self,
+        key: &RepoKey,
+    ) -> Result<Vec<RevisionRecord>, ServerError> {
+        Ok(self.index_store.list_revisions(key).await?)
+    }
+
+    /// Creates a revision registry row, returning whether it was newly created.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError`] when the index upsert fails.
+    pub(crate) async fn create_revision(&self, rev: &RevisionRecord) -> Result<bool, ServerError> {
+        Ok(self.index_store.upsert_revision(rev).await?)
+    }
+
+    /// Deletes a revision and all of its tree entries, returning whether the revision
+    /// previously existed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError`] when the index deletion fails.
+    pub(crate) async fn delete_revision(
+        &self,
+        key: &RepoKey,
+        rev: &str,
+    ) -> Result<bool, ServerError> {
+        let removed = self.index_store.delete_revision(key, rev).await?;
+        Ok(removed > 0)
     }
 }
 

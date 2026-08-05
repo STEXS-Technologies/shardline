@@ -1,5 +1,6 @@
 mod index_store;
 mod record_store;
+mod tree_store;
 mod types;
 
 pub(crate) use types::PostgresRecordKind;

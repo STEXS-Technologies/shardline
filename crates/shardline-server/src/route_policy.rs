@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
 
+use crate::xet_adapter::{XET_PATH_ROUTE, XET_REVISION_ROUTE, XET_REVISIONS_ROUTE, XET_TREE_ROUTE};
+
 /// Auth policy for a single route.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RouteAuthPolicy {
@@ -193,6 +195,26 @@ pub(crate) fn register_route_policies(registry: &mut RoutePolicyRegistry) {
         "/v2/reconstructions/{file_id}",
         RouteAuthPolicy::Authenticated,
     );
+
+    // M5a metadata endpoints
+    registry.register("GET", XET_TREE_ROUTE, RouteAuthPolicy::Authenticated);
+    registry.register("PUT", XET_PATH_ROUTE, RouteAuthPolicy::AuthenticatedWrite);
+    registry.register(
+        "DELETE",
+        XET_PATH_ROUTE,
+        RouteAuthPolicy::AuthenticatedWrite,
+    );
+    registry.register("GET", XET_REVISIONS_ROUTE, RouteAuthPolicy::Authenticated);
+    registry.register(
+        "POST",
+        XET_REVISION_ROUTE,
+        RouteAuthPolicy::AuthenticatedWrite,
+    );
+    registry.register(
+        "DELETE",
+        XET_REVISION_ROUTE,
+        RouteAuthPolicy::AuthenticatedWrite,
+    );
 }
 
 #[cfg(test)]
@@ -206,8 +228,8 @@ mod tests {
         // When adding a new route, update this count AND add its policy above.
         // This test ensures no route is added without an auth policy.
         assert!(
-            registry.len() >= 20,
-            "Expected at least 20 registered routes, got {}. Add a policy for new routes.",
+            registry.len() >= 26,
+            "Expected at least 26 registered routes, got {}. Add a policy for new routes.",
             registry.len()
         );
     }

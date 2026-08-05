@@ -127,7 +127,8 @@ pub(crate) mod xet_adapter {
         ReconstructionUrlRange, shard_object_key, store_uploaded_xorb,
     };
     pub(crate) use shardline_xet_adapter::{
-        ShardUploadResponse, XET_READ_TOKEN_ROUTE, XET_WRITE_TOKEN_ROUTE, XORB_TRANSFER_ROUTE,
+        ShardUploadResponse, XET_PATH_ROUTE, XET_READ_TOKEN_ROUTE, XET_REVISION_ROUTE,
+        XET_REVISIONS_ROUTE, XET_TREE_ROUTE, XET_WRITE_TOKEN_ROUTE, XORB_TRANSFER_ROUTE,
         XetAdapterError, XorbParseError, XorbVisitError, build_batch_reconstruction_response,
         build_reconstruction_response, reconstruction_v2_from_v1, register_uploaded_shard_bytes,
         resolve_dedupe_shard_object, shard_hash_from_object_key_if_present,

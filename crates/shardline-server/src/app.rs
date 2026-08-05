@@ -1,3 +1,4 @@
+mod metadata_routes;
 mod operational;
 mod protocol_routes;
 mod provider;
@@ -56,7 +57,13 @@ use crate::{
     server_frontend::ServerFrontend,
     server_role::ServerRole,
     transfer_limiter::TransferLimiter,
-    xet_adapter::{XET_READ_TOKEN_ROUTE, XET_WRITE_TOKEN_ROUTE, XORB_TRANSFER_ROUTE},
+    xet_adapter::{
+        XET_PATH_ROUTE, XET_READ_TOKEN_ROUTE, XET_REVISION_ROUTE, XET_REVISIONS_ROUTE,
+        XET_TREE_ROUTE, XET_WRITE_TOKEN_ROUTE, XORB_TRANSFER_ROUTE,
+    },
+};
+use metadata_routes::{
+    create_revision, delete_path, delete_revision, list_revisions, register_path, tree_lookup,
 };
 use operational::{
     head_xorb, health, metrics, read_chunk, read_xorb_transfer, ready, stats, upload_shard,
@@ -377,10 +384,19 @@ fn register_frontend_routes(
     app: Router<Arc<AppState>>,
     frontend: ServerFrontend,
     role: ServerRole,
-    _app_state: &AppState,
+    app_state: &AppState,
 ) -> Router<Arc<AppState>> {
+    // The Hub frontend already owns the `/api/{type}/{ns}/{repo}/tree/{rev}` and
+    // `/api/{type}/{ns}/{repo}/revisions` path shapes, which structurally collide
+    // with the M5 metadata routes. When Hub is enabled the Hub's routes win and the
+    // Xet M5 routes are omitted to avoid an axum route-insertion conflict.
+    let hub_enabled = app_state
+        .config
+        .server_frontends()
+        .iter()
+        .any(|candidate| matches!(candidate, ServerFrontend::Hub));
     match frontend {
-        ServerFrontend::Xet => register_xet_routes(app, role),
+        ServerFrontend::Xet => register_xet_routes(app, role, hub_enabled),
         ServerFrontend::Lfs => register_lfs_routes(app, role),
         ServerFrontend::BazelHttp => register_bazel_routes(app, role),
         ServerFrontend::Oci => register_oci_routes(app, role),
@@ -388,7 +404,11 @@ fn register_frontend_routes(
     }
 }
 
-fn register_xet_routes(mut app: Router<Arc<AppState>>, role: ServerRole) -> Router<Arc<AppState>> {
+fn register_xet_routes(
+    mut app: Router<Arc<AppState>>,
+    role: ServerRole,
+    hub_enabled: bool,
+) -> Router<Arc<AppState>> {
     if role.serves_api() {
         app = app
             .route(XET_READ_TOKEN_ROUTE, get(issue_xet_read_token))
@@ -399,6 +419,19 @@ fn register_xet_routes(mut app: Router<Arc<AppState>>, role: ServerRole) -> Rout
             .route("/v2/reconstructions/{file_id}", get(reconstruction_v2))
             .route("/shards", post(upload_shard))
             .route("/v1/shards", post(upload_shard));
+        if !hub_enabled {
+            app = app
+                .route(XET_TREE_ROUTE, get(tree_lookup))
+                .route(
+                    XET_PATH_ROUTE,
+                    axum::routing::put(register_path).delete(delete_path),
+                )
+                .route(XET_REVISIONS_ROUTE, get(list_revisions))
+                .route(
+                    XET_REVISION_ROUTE,
+                    axum::routing::post(create_revision).delete(delete_revision),
+                );
+        }
     }
     if role.serves_transfer() {
         app = app
@@ -688,3 +721,6 @@ mod tests;
 
 #[cfg(test)]
 mod e2e_tests;
+
+#[cfg(test)]
+mod metadata_routes_tests;

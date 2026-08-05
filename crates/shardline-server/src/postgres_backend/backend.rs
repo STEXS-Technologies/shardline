@@ -1,11 +1,14 @@
 use std::{num::NonZeroUsize, path::PathBuf};
 
-use shardline_index::{PostgresIndexStore, PostgresRecordStore};
+use shardline_index::{
+    PostgresIndexStore, PostgresRecordStore, RepoKey, RevisionRecord, TreeEntry, TreeKey, TreeStore,
+};
+use shardline_protocol::unix_now_seconds_lossy;
 
 use super::connect_postgres_metadata_pool;
 use crate::{
     ServerError, ServerFrontend, config::default_upload_max_in_flight_chunks,
-    object_store::ServerObjectStore,
+    object_store::ServerObjectStore, validation::validate_content_hash,
 };
 
 /// Server backend that keeps file metadata in Postgres and object bytes in the selected store.
@@ -233,6 +236,140 @@ impl PostgresBackend {
             tracing::info!(count = reconciled, "intent reconciliation complete");
         }
         Ok(())
+    }
+
+    /// Resolves a single canonical path to its tree entry, if any.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError`] when the index lookup fails.
+    pub(crate) async fn resolve_tree_path(
+        &self,
+        key: &TreeKey,
+        path: &str,
+    ) -> Result<Option<TreeEntry>, ServerError> {
+        Ok(self.index_store.tree_entry(key, path).await?)
+    }
+
+    /// Scans raw tree rows for a revision under `prefix`, resuming after `cursor`,
+    /// returning at most `limit` raw rows ordered by path.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError`] when the index scan fails.
+    pub(crate) async fn scan_tree_raw(
+        &self,
+        key: &TreeKey,
+        prefix: &str,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<TreeEntry>, ServerError> {
+        Ok(self
+            .index_store
+            .scan_tree(key, prefix, cursor, limit)
+            .await?)
+    }
+
+    /// Validates the referenced file record and upserts a path mapping.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError::UnregisteredFile`] when no record exists in the revision
+    /// scope, [`ServerError::InvalidContentHash`] for a malformed `file_id`, or the
+    /// adapter error when persistence fails.
+    pub(crate) async fn register_tree_path(
+        &self,
+        key: &TreeKey,
+        path: &str,
+        file_id: &str,
+        repository_scope: Option<&shardline_protocol::RepositoryScope>,
+    ) -> Result<crate::backend::RegisterPathOutcome, ServerError> {
+        validate_content_hash(file_id)?;
+        let record = match self.read_record(file_id, None, repository_scope).await {
+            Ok(record) => record,
+            Err(ServerError::NotFound) => {
+                return Err(ServerError::UnregisteredFile(key.revision.clone()));
+            }
+            Err(error) => return Err(error),
+        };
+        let now = unix_now_seconds_lossy();
+        let revision_record = RevisionRecord {
+            provider: key.provider.clone(),
+            owner: key.owner.clone(),
+            repo: key.repo.clone(),
+            revision: key.revision.clone(),
+            created_at_unix_seconds: now,
+            updated_at_unix_seconds: now,
+        };
+        let _created = self.index_store.upsert_revision(&revision_record).await?;
+        let entry = TreeEntry {
+            provider: key.provider.clone(),
+            owner: key.owner.clone(),
+            repo: key.repo.clone(),
+            revision: key.revision.clone(),
+            path: path.to_owned(),
+            file_id: file_id.to_owned(),
+            size_bytes: record.total_bytes,
+            updated_at_unix_seconds: now,
+        };
+        let outcome = self.index_store.upsert_tree_entry(&entry).await?;
+        Ok(crate::backend::RegisterPathOutcome {
+            entry,
+            created: outcome.created,
+        })
+    }
+
+    /// Deletes one path mapping (or the path and every descendant when `recursive`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError`] when the index deletion fails.
+    pub(crate) async fn delete_tree_path(
+        &self,
+        key: &TreeKey,
+        path: &str,
+        recursive: bool,
+    ) -> Result<u64, ServerError> {
+        Ok(self
+            .index_store
+            .delete_tree_entries(key, path, recursive)
+            .await?)
+    }
+
+    /// Lists the revision registry for a repository.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError`] when the index lookup fails.
+    pub(crate) async fn list_revisions(
+        &self,
+        key: &RepoKey,
+    ) -> Result<Vec<RevisionRecord>, ServerError> {
+        Ok(self.index_store.list_revisions(key).await?)
+    }
+
+    /// Creates a revision registry row, returning whether it was newly created.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError`] when the index upsert fails.
+    pub(crate) async fn create_revision(&self, rev: &RevisionRecord) -> Result<bool, ServerError> {
+        Ok(self.index_store.upsert_revision(rev).await?)
+    }
+
+    /// Deletes a revision and all of its tree entries, returning whether the revision
+    /// previously existed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError`] when the index deletion fails.
+    pub(crate) async fn delete_revision(
+        &self,
+        key: &RepoKey,
+        rev: &str,
+    ) -> Result<bool, ServerError> {
+        let removed = self.index_store.delete_revision(key, rev).await?;
+        Ok(removed > 0)
     }
 }
 
