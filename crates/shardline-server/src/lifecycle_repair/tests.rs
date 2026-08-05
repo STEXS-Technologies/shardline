@@ -1761,3 +1761,158 @@ async fn repair_multiple_webhook_deliveries_mixed_actions() {
     // Only the "wh-b" delivery (500) should remain
     assert_eq!(deliveries_after[0].delivery_id(), "wh-b");
 }
+
+/// Stores a packed xorb (built exactly like the ingestor) and returns its hash.
+async fn store_xorb(object_store: &ServerObjectStore, chunks: &[(Vec<u8>, u64)]) -> String {
+    use crate::upload_ingest::xorb_packer::pack_chunks_into_xorb;
+    use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectStore};
+    let packed = pack_chunks_into_xorb(chunks).expect("pack xorb");
+    let key = crate::xet_adapter::xorb_object_key(&packed.xorb_hash_hex).expect("xorb key");
+    let integrity = ObjectIntegrity::new(
+        crate::local_backend::chunk_hash(&packed.serialized),
+        u64::try_from(packed.serialized.len()).expect("len"),
+    );
+    let _ = ObjectStore::put_if_absent(
+        object_store,
+        &key,
+        ObjectBody::from_bytes(packed.serialized.clone().into()),
+        &integrity,
+    )
+    .expect("store xorb");
+    packed.xorb_hash_hex
+}
+
+fn blake3_chunk_key(data: &[u8]) -> ObjectKey {
+    let hash_hex = shardline_index::xet_hash_hex_string(crate::local_backend::chunk_hash(data));
+    crate::chunk_store::chunk_object_key(&hash_hex).expect("chunk key")
+}
+
+/// A repointed XorbCdcV1 single-chunk record (hash = xorb hash) references a
+/// stored xorb; the individually-stored raw member chunk must be reachable so the
+/// repair removes its quarantine candidate as reachable.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn repair_removes_reachable_quarantine_for_repointed_single_chunk_xorb() {
+    let (_root, record_store, index_store, object_store) = make_test_stores();
+    let options = LifecycleRepairOptions::default();
+    let now = 1000;
+
+    let data = b"aaaabbbbcccc".to_vec();
+    let xorb_hash = store_xorb(&object_store, &[(data.clone(), 0)]).await;
+    let member_key = blake3_chunk_key(&data);
+    seed_object(&object_store, &member_key);
+
+    let record = FileRecord {
+        file_id: "repointed-file".to_owned(),
+        content_hash: valid_hash(),
+        total_bytes: data.len() as u64,
+        chunk_size: 1024,
+        storage_repr: shardline_index::StorageRepresentation::XorbCdcV1,
+        repository_scope: None,
+        chunks: vec![FileChunkRecord {
+            hash: xorb_hash,
+            offset: 0,
+            length: data.len() as u64,
+            range_start: 0,
+            range_end: 1,
+            packed_start: 0,
+            packed_end: 300,
+        }],
+    };
+    record_store.write_version_record(&record).await.unwrap();
+    record_store.write_latest_record(&record).await.unwrap();
+
+    let candidate = QuarantineCandidate::new(member_key, 12, 0, 5000).unwrap();
+    index_store.upsert_quarantine_candidate(&candidate).unwrap();
+
+    let report = run_lifecycle_repair_with_stores_at_time(
+        &record_store,
+        &index_store,
+        &object_store,
+        &[ServerFrontend::Xet],
+        options,
+        now,
+    )
+    .await
+    .expect("repair should succeed");
+
+    assert_eq!(report.scanned_quarantine_candidates, 1);
+    assert_eq!(report.removed_reachable_quarantine_candidates, 1);
+    assert_eq!(report.removed_missing_quarantine_candidates, 0);
+    assert_eq!(report.removed_held_quarantine_candidates, 0);
+}
+
+/// A multi-chunk repointed XorbCdcV1 record references a xorb whose member chunks
+/// are all individually stored; every member raw chunk must be reachable.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn repair_multi_chunk_xorb_members_all_reachable() {
+    let (_root, record_store, index_store, object_store) = make_test_stores();
+    let options = LifecycleRepairOptions::default();
+    let now = 1000;
+
+    let data1 = b"first-chunk-data".to_vec();
+    let data2 = b"second-chunk-data".to_vec();
+    let xorb_hash = store_xorb(
+        &object_store,
+        &[(data1.clone(), 0), (data2.clone(), data1.len() as u64)],
+    )
+    .await;
+    let member1 = blake3_chunk_key(&data1);
+    let member2 = blake3_chunk_key(&data2);
+    seed_object(&object_store, &member1);
+    seed_object(&object_store, &member2);
+
+    let record = FileRecord {
+        file_id: "repointed-multi".to_owned(),
+        content_hash: valid_hash(),
+        total_bytes: (data1.len() + data2.len()) as u64,
+        chunk_size: 1024,
+        storage_repr: shardline_index::StorageRepresentation::XorbCdcV1,
+        repository_scope: None,
+        chunks: vec![
+            FileChunkRecord {
+                hash: xorb_hash.clone(),
+                offset: 0,
+                length: data1.len() as u64,
+                range_start: 0,
+                range_end: 1,
+                packed_start: 0,
+                packed_end: 300,
+            },
+            FileChunkRecord {
+                hash: xorb_hash,
+                offset: data1.len() as u64,
+                length: data2.len() as u64,
+                range_start: 1,
+                range_end: 2,
+                packed_start: 300,
+                packed_end: 600,
+            },
+        ],
+    };
+    record_store.write_version_record(&record).await.unwrap();
+    record_store.write_latest_record(&record).await.unwrap();
+
+    for key in [&member1, &member2] {
+        index_store
+            .upsert_quarantine_candidate(
+                &QuarantineCandidate::new(key.clone(), 16, 0, 5000).unwrap(),
+            )
+            .unwrap();
+    }
+
+    let report = run_lifecycle_repair_with_stores_at_time(
+        &record_store,
+        &index_store,
+        &object_store,
+        &[ServerFrontend::Xet],
+        options,
+        now,
+    )
+    .await
+    .expect("repair should succeed");
+
+    assert_eq!(report.scanned_quarantine_candidates, 2);
+    assert_eq!(report.removed_reachable_quarantine_candidates, 2);
+    assert_eq!(report.removed_missing_quarantine_candidates, 0);
+    assert_eq!(report.removed_held_quarantine_candidates, 0);
+}
