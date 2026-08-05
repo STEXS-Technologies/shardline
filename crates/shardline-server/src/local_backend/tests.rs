@@ -1133,3 +1133,46 @@ async fn record_chunk_metadata_matches_chunk_size() {
     }
     assert_eq!(expected_offset, record.total_bytes);
 }
+
+/// Regression: a 12-byte (single CDC chunk) upload is xorb-backed on ingest. The
+/// record references the xorb hash; the download path must resolve the xorb and
+/// return byte-identical content (and correct sub-ranges).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn download_single_chunk_xorb_backed_file_roundtrips() {
+    use futures_util::TryStreamExt;
+    use shardline_protocol::ByteRange;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let chunk_size = NonZeroUsize::new(1024).expect("chunk_size");
+    let backend = LocalBackend::new(
+        temp.path().to_path_buf(),
+        "http://127.0.0.1:8080".to_owned(),
+        chunk_size,
+    )
+    .await
+    .expect("backend");
+
+    let payload: Vec<u8> = b"aaaabbbbcccc".to_vec();
+    backend
+        .upload_file("small.bin", Bytes::from(payload.clone()), None)
+        .await
+        .expect("upload");
+
+    let downloaded = backend
+        .download_file("small.bin", None, None)
+        .await
+        .expect("download");
+    assert_eq!(downloaded, payload.as_slice());
+
+    // Sub-range read over the same single-chunk xorb-backed record.
+    let (stream, _total) = backend
+        .read_file_stream("small.bin", Some(ByteRange::new(4, 7).expect("range")))
+        .await
+        .expect("range stream");
+    let mut stream = stream;
+    let mut range_bytes = Vec::new();
+    while let Some(chunk) = stream.try_next().await.expect("stream item") {
+        range_bytes.extend_from_slice(&chunk);
+    }
+    assert_eq!(range_bytes, &payload[4..=7]);
+}

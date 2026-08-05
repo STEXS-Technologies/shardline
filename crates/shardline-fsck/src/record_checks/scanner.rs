@@ -243,6 +243,27 @@ where
     Ok(Some(record))
 }
 
+/// Returns whether a single XorbCdcV1 chunk record is xorb-backed.
+///
+/// The ingestor repoints a single-chunk record's `hash` to the packed xorb hash
+/// and sets `packed_end` to the chunk's serialized length inside the xorb.
+/// `packed_end > 0` alone is not a discriminator: legacy pre-packing records also
+/// carry `packed_end = compressed_length > 0` with `hash` as the raw chunk hash.
+/// The stored-object probe below separates repointed records (a xorb object exists
+/// under the record hash) from legacy records (no such object).
+fn single_chunk_is_xorb_backed(
+    object_store: &ServerObjectStore,
+    chunk: &FileChunkRecord,
+) -> Result<bool, FsckError> {
+    if chunk.packed_end == 0 {
+        return Ok(false); // legacy record predating xorb packing
+    }
+    let Ok(object_key) = xorb_object_key(&chunk.hash) else {
+        return Ok(false);
+    };
+    Ok(matches!(object_store.metadata(&object_key)?, Some(metadata) if metadata.length() != 0))
+}
+
 pub(crate) fn inspect_chunks(
     object_root: &Path,
     record_location: &str,
@@ -251,18 +272,29 @@ pub(crate) fn inspect_chunks(
     reachability: &mut FsckReachability,
     report: &mut FsckReport,
 ) -> Result<(), FsckError> {
+    // Determine whether this record's chunks are xorb-backed terms. Native Xet
+    // records (chunk_size == 0) always reference a xorb container directly.
+    // XorbCdcV1 records reference a xorb container when the ingestor repointed
+    // their hashes: all chunks of a multi-chunk file share one xorb hash, and a
+    // single-chunk record is xorb-backed only when a stored xorb object exists
+    // under its hash (the probe separates repointed records from legacy
+    // pre-packing records whose hash is the raw chunk hash).
+    let single_chunk_xorb_backed = if record.chunks.len() == 1 {
+        single_chunk_is_xorb_backed(
+            object_store,
+            record.chunks.first().ok_or(FsckError::Overflow)?,
+        )?
+    } else {
+        false
+    };
+    let all_chunks_xorb_backed = record.chunk_size == 0
+        || (record.storage_repr == StorageRepresentation::XorbCdcV1
+            && (record.chunks.len() > 1 || single_chunk_xorb_backed));
+
     for chunk in &record.chunks {
         report.inspected_chunk_references = checked_increment(report.inspected_chunk_references)?;
 
-        // Native Xet term records (chunk_size == 0) reference a xorb
-        // container directly.  XorbCdcV1 records reference a xorb container
-        // only when the ingestor rewrote their hashes, which happens for
-        // files with more than one chunk: single-chunk files keep individual
-        // chunk hashes, so the standalone chunk object at
-        // `chunk_object_key(&chunk.hash)` exists for them.
-        if record.chunk_size == 0
-            || (record.storage_repr == StorageRepresentation::XorbCdcV1 && record.chunks.len() > 1)
-        {
+        if all_chunks_xorb_backed {
             inspect_native_xet_term(
                 object_root,
                 object_store,
