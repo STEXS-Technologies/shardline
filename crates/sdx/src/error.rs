@@ -144,4 +144,11 @@ pub enum SdxError {
     /// A serialized xorb could not be built (empty input, serialization failure).
     #[error("xorb build failed: {0}")]
     XorbBuild(String),
+    /// A serialized metadata shard could not be built or parsed.
+    #[error("shard build/parse failed: {0}")]
+    ShardParse(String),
+    /// The upload session received data after it was finalized, or was
+    /// finalized twice.
+    #[error("upload session {0}")]
+    UploadSession(String),
 }

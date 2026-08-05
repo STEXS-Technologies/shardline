@@ -48,6 +48,8 @@ pub(crate) struct DownloadSessionInner {
     pub(crate) chunk_cache: Option<Arc<ChunkCache>>,
     /// Count of ranged xorb transfer requests (for observability/E2E).
     pub(crate) xorb_fetch_count: Arc<AtomicU64>,
+    /// CDC target chunk size for uploads (M3b), default 64 KiB.
+    pub(crate) upload_chunk_size: usize,
 }
 
 impl DownloadSessionInner {

@@ -29,11 +29,14 @@
 //! prefer `next()` there. `blocking_next()` is compiled only on non-wasm
 //! targets (wasm has no multi-thread runtime).
 //!
-//! # Out of scope (M3)
+//! # Upload side (M3b, §4.4.3)
 //!
-//! The upload/commit side (`upload_stream_handle.rs`, `upload_commit.rs`,
-//! `XetUploadCommit`) is M3 and intentionally **not** implemented here; this
-//! module is download-only.
+//! [`XetUploadCommit`] is the upload counterpart: it owns an
+//! [`UploadSession`] and manages concurrent
+//! streaming uploads ([`GroupedUploadStream`]) with abort-all and per-upload
+//! status, mirroring `hf-xet` `upload_commit.rs` / `upload_stream_handle.rs`.
+//! Create one via [`crate::XetClient::new_upload_group`]. The shared session
+//! is finalized by [`XetUploadCommit::commit`] (uploads the session shard).
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -48,6 +51,7 @@ use crate::{
     error::SdxError,
     session::DownloadSessionInner,
     stream::{DownloadStream, RunState, UnorderedDownloadStream},
+    upload::{UploadFileInfo, UploadReport, UploadSession, UploadStreamHandle},
 };
 
 /// Per-stream task state for the group status probe.
@@ -534,6 +538,307 @@ impl GroupedUnorderedDownloadStream {
 
 impl Drop for GroupedUnorderedDownloadStream {
     fn drop(&mut self) {
+        if let Some(group) = self.group.upgrade() {
+            group.unregister(self.id);
+        }
+    }
+}
+
+// ============================================================================
+// Upload side (§4.4.3): XetUploadCommit + GroupedUploadStream
+// ============================================================================
+
+/// A session-level group managing concurrent streaming uploads with abort-all
+/// and per-upload status (mirror `hf-xet` `upload_commit.rs` /
+/// `upload_stream_handle.rs`).
+///
+/// The group owns one [`UploadSession`]. [`XetUploadCommit::upload_stream`]
+/// returns a [`GroupedUploadStream`] handle whose `write`/`finish` fan into
+/// that shared pipeline; [`XetUploadCommit::commit`] finalizes the session
+/// (uploads the session shard, xorbs-before-shard). All handles must be
+/// finished before `commit`.
+///
+/// Clone is cheap: all clones share the underlying group state and session.
+#[derive(Clone)]
+pub struct XetUploadCommit {
+    inner: Arc<XetUploadCommitInner>,
+}
+
+/// All shared state owned by one [`XetUploadCommit`].
+struct XetUploadCommitInner {
+    session: UploadSession,
+    id: u64,
+    token: CancellationToken,
+    aborted: AtomicBool,
+    active: Mutex<HashMap<u64, Weak<UploadRegistration>>>,
+    next_id: AtomicU64,
+}
+
+/// Per-upload bookkeeping shared between the group and the handle wrapper.
+struct UploadRegistration {
+    handle: UploadStreamHandle,
+}
+
+impl UploadRegistration {
+    fn state(&self, group_aborted: bool) -> XetTaskState {
+        let flags = self.handle.status_flags();
+        if group_aborted || flags.aborted {
+            return XetTaskState::Cancelled;
+        }
+        if let Some(message) = flags.error {
+            return XetTaskState::Failed(message);
+        }
+        if flags.finished {
+            return XetTaskState::Completed;
+        }
+        if flags.started {
+            return XetTaskState::InProgress;
+        }
+        XetTaskState::Queued
+    }
+}
+
+impl XetUploadCommit {
+    /// Creates an upload group over the client's shared session state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SdxError`] when the group's upload session cannot be built.
+    pub(crate) fn new(session: &Arc<DownloadSessionInner>) -> Result<Self, SdxError> {
+        let upload_session = UploadSession::new(session)?;
+        Ok(Self {
+            inner: Arc::new(XetUploadCommitInner {
+                session: upload_session,
+                id: NEXT_GROUP_ID.fetch_add(1, Ordering::Relaxed),
+                token: CancellationToken::new(),
+                aborted: AtomicBool::new(false),
+                active: Mutex::new(HashMap::new()),
+                next_id: AtomicU64::new(0),
+            }),
+        })
+    }
+
+    /// Returns the unique group id.
+    #[must_use]
+    pub fn id(&self) -> u64 {
+        self.inner.id
+    }
+
+    /// Returns `true` after [`abort`](Self::abort) has been called.
+    #[must_use]
+    pub fn is_aborted(&self) -> bool {
+        self.inner.aborted.load(Ordering::Relaxed)
+    }
+
+    /// Creates a streaming upload handle registered with this group.
+    ///
+    /// Feed data with [`GroupedUploadStream::write`] and finalize with
+    /// [`GroupedUploadStream::finish`]; every handle must be finished before
+    /// [`commit`](Self::commit). Dropping the handle cancels it and unregisters
+    /// it from the group.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SdxError`] when the group has been aborted.
+    pub fn upload_stream(&self) -> Result<GroupedUploadStream, SdxError> {
+        let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
+        if self.inner.aborted.load(Ordering::Relaxed) {
+            return Err(SdxError::UploadSession(
+                "upload group aborted; cannot start new streams".to_owned(),
+            ));
+        }
+        let handle = self.inner.session.upload_stream_handle_with_id(id);
+        let registration = Arc::new(UploadRegistration {
+            handle: handle.clone(),
+        });
+        let mut active = self
+            .inner
+            .active
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        active.insert(id, Arc::downgrade(&registration));
+        Ok(GroupedUploadStream::new(
+            handle,
+            id,
+            registration,
+            Arc::downgrade(&self.inner),
+        ))
+    }
+
+    /// Finalizes the shared upload session: joins all xorb uploads, then
+    /// uploads the session shard.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SdxError`] when a xorb upload failed, the shard cannot be
+    /// built, or the shard POST fails. Calling twice fails.
+    pub async fn commit(&self) -> Result<UploadReport, SdxError> {
+        self.inner.session.finalize().await
+    }
+
+    /// Aborts every active upload in this group and cancels the group's
+    /// cancellation subtree.
+    ///
+    /// Active [`GroupedUploadStream`] handles report [`XetTaskState::Cancelled`];
+    /// handles created after the abort fail immediately.
+    pub fn abort(&self) {
+        self.inner.aborted.store(true, Ordering::Relaxed);
+        self.inner.token.cancel();
+        let active = self
+            .inner
+            .active
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for weak in active.values() {
+            if let Some(registration) = weak.upgrade() {
+                registration.handle.abort();
+            }
+        }
+    }
+
+    /// Returns a snapshot of every live upload's status as `(upload_id, state)`
+    /// pairs, ordered by upload id.
+    #[must_use]
+    pub fn status(&self) -> Vec<(u64, XetTaskState)> {
+        let aborted = self.inner.aborted.load(Ordering::Relaxed);
+        let active = self
+            .inner
+            .active
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut states = Vec::with_capacity(active.len());
+        for (id, weak) in active.iter() {
+            let Some(registration) = weak.upgrade() else {
+                continue;
+            };
+            states.push((*id, registration.state(aborted)));
+        }
+        states.sort_by_key(|(id, _)| *id);
+        states
+    }
+
+    /// Number of live (not-yet-dropped) upload handles registered with this
+    /// group.
+    #[must_use]
+    pub fn active_upload_count(&self) -> usize {
+        let active = self
+            .inner
+            .active
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        active
+            .values()
+            .filter(|weak| weak.upgrade().is_some())
+            .count()
+    }
+}
+
+impl XetUploadCommitInner {
+    /// Unregisters an upload by id (called from the wrapper's `Drop`).
+    fn unregister(&self, id: u64) {
+        let mut active = self
+            .active
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        active.remove(&id);
+    }
+}
+
+/// A group-scoped streaming upload handle.
+///
+/// Wraps the M3b [`UploadStreamHandle`] with group registration: `Drop`
+/// unregisters (and cancels) the upload, [`cancel`](Self::cancel) stops only
+/// this upload, and [`task_id`](Self::task_id) identifies it in the group
+/// status probe.
+pub struct GroupedUploadStream {
+    handle: UploadStreamHandle,
+    id: u64,
+    registration: Arc<UploadRegistration>,
+    group: Weak<XetUploadCommitInner>,
+}
+
+impl GroupedUploadStream {
+    const fn new(
+        handle: UploadStreamHandle,
+        id: u64,
+        registration: Arc<UploadRegistration>,
+        group: Weak<XetUploadCommitInner>,
+    ) -> Self {
+        Self {
+            handle,
+            id,
+            registration,
+            group,
+        }
+    }
+
+    /// Returns the unique upload id within its group.
+    #[must_use]
+    pub const fn task_id(&self) -> u64 {
+        self.id
+    }
+
+    /// Feeds data into this upload's ingest pipeline.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SdxError`] when the upload is finished/aborted or a dedup /
+    /// staging step fails.
+    pub async fn write(&self, data: impl Into<Bytes>) -> Result<(), SdxError> {
+        self.handle.write(data).await
+    }
+
+    /// Blocking version of [`write`](Self::write), bridged onto the
+    /// client-owned dedicated blocking runtime (works from plain threads; the
+    /// upstream `write_blocking` panics inside an async runtime — sdx's bridge
+    /// does not).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SdxError`] when the blocking runtime cannot be resolved or the
+    /// write fails.
+    #[cfg(not(target_family = "wasm"))]
+    pub fn write_blocking(&self, data: impl Into<Bytes>) -> Result<(), SdxError> {
+        self.handle.write_blocking(data)
+    }
+
+    /// Finalizes this upload and returns its file result.
+    ///
+    /// Must be called before the group's [`commit`](XetUploadCommit::commit).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SdxError`] when the upload is already finished/aborted or a
+    /// xorb cut fails.
+    pub async fn finish(&self) -> Result<UploadFileInfo, SdxError> {
+        self.handle.finish().await
+    }
+
+    /// Returns the finished result without finalizing, if available.
+    #[must_use]
+    pub fn try_finish(&self) -> Option<UploadFileInfo> {
+        self.handle.try_finish()
+    }
+
+    /// Returns this upload's status snapshot.
+    #[must_use]
+    pub fn status(&self) -> XetTaskState {
+        let aborted = self
+            .group
+            .upgrade()
+            .is_none_or(|group| group.aborted.load(Ordering::Relaxed));
+        self.registration.state(aborted)
+    }
+
+    /// Cancels this upload only (the group and sibling uploads continue).
+    pub fn cancel(&self) {
+        self.handle.abort();
+    }
+}
+
+impl Drop for GroupedUploadStream {
+    fn drop(&mut self) {
+        self.handle.abort();
         if let Some(group) = self.group.upgrade() {
             group.unregister(self.id);
         }

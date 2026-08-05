@@ -15,7 +15,10 @@
 
 use reqwest::{Response, StatusCode, header};
 use serde::Deserialize;
-use shardline_xet_adapter::{FileReconstructionResponse, FileReconstructionV2Response};
+use shardline_xet_adapter::{
+    FileReconstructionResponse, FileReconstructionV2Response, ShardUploadResponse,
+    XorbUploadResponse,
+};
 
 use bytes::Bytes;
 
@@ -223,6 +226,103 @@ impl TransferClient {
         Ok(Some(body))
     }
 
+    /// Probes whether a serialized xorb already exists via
+    /// `HEAD /v1/xorbs/default/{hash}`.
+    ///
+    /// HTTP 200 reports `Ok(true)`, HTTP 404 `Ok(false)`, and every other
+    /// status is surfaced as a typed [`TransferError`]. Used by the upload
+    /// path as the idempotency probe before re-uploading a xorb.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TransferError`] when the request fails or the status is not
+    /// 200/404.
+    pub async fn head_xorb(
+        &self,
+        base_url: &str,
+        token: &str,
+        hash: &str,
+    ) -> Result<bool, TransferError> {
+        let url = format!("{}/v1/xorbs/default/{hash}", base_url.trim_end_matches('/'));
+        let response = self.client.head(&url).bearer_auth(token).send().await?;
+        match response.status() {
+            StatusCode::OK => Ok(true),
+            StatusCode::NOT_FOUND => Ok(false),
+            status => {
+                let message = response.text().await.unwrap_or_default();
+                Err(http_error(status, message))
+            }
+        }
+    }
+
+    /// Uploads a serialized xorb via `POST /v1/xorbs/default/{hash}`.
+    ///
+    /// The body is streamed in [`XORB_UPLOAD_PROGRESS_BLOCK_SIZE`] (512 KiB)
+    /// progress blocks with an explicit `Content-Length` (the body advertises
+    /// its exact total size, so the HTTP layer frames it with a
+    /// `Content-Length` header rather than chunked transfer-encoding). This
+    /// lets the server pre-reject oversized bodies and report progress without
+    /// buffering the request twice. Idempotent server-side: re-uploading an
+    /// existing xorb returns `was_inserted = false`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TransferError`] when the request fails or the server returns
+    /// a non-success status.
+    pub async fn upload_xorb(
+        &self,
+        base_url: &str,
+        token: &str,
+        hash: &str,
+        serialized: Bytes,
+    ) -> Result<XorbUploadResponse, TransferError> {
+        let url = format!("{}/v1/xorbs/default/{hash}", base_url.trim_end_matches('/'));
+        let length = u64::try_from(serialized.len()).unwrap_or(u64::MAX);
+        let body = reqwest::Body::wrap(SizedStreamBody::new(
+            xorb_progress_stream(serialized),
+            length,
+        ));
+        let response = self
+            .client
+            .post(&url)
+            .bearer_auth(token)
+            .body(body)
+            .send()
+            .await?;
+        let response = ensure_success(response).await?;
+        let response_bytes = response.bytes().await?;
+        serde_json::from_slice(&response_bytes).map_err(|error| transfer_error_from_json(&error))
+    }
+
+    /// Uploads a serialized metadata shard via `POST /v1/shards`.
+    ///
+    /// The caller must have uploaded every xorb the shard references first
+    /// (xorbs-before-shard); the server rejects shards referencing absent
+    /// xorbs. The response reports whether the shard was newly registered.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TransferError`] when the request fails or the server returns
+    /// a non-success status.
+    pub async fn upload_shard(
+        &self,
+        base_url: &str,
+        token: &str,
+        body: Vec<u8>,
+    ) -> Result<ShardUploadResponse, TransferError> {
+        let url = format!("{}/v1/shards", base_url.trim_end_matches('/'));
+        let response = self
+            .client
+            .post(&url)
+            .bearer_auth(token)
+            .body(body)
+            .send()
+            .await?;
+        let response = ensure_success(response).await?;
+        let response_bytes = response.bytes().await?;
+        serde_json::from_slice(&response_bytes).map_err(|error| transfer_error_from_json(&error))
+    }
+
     async fn get_reconstruction(
         &self,
         base_url: &str,
@@ -252,6 +352,78 @@ impl TransferClient {
         }
         let response = request.send().await?;
         ensure_success(response).await
+    }
+}
+
+/// Size of each progress block in a streamed xorb upload body.
+pub const XORB_UPLOAD_PROGRESS_BLOCK_SIZE: usize = 512 * 1024;
+
+/// Splits `serialized` into [`XORB_UPLOAD_PROGRESS_BLOCK_SIZE`] blocks for a
+/// streamed request body (progress granularity; the total length is carried by
+/// the explicit `Content-Length` header).
+fn xorb_progress_stream(
+    serialized: Bytes,
+) -> impl futures_util::Stream<Item = Result<Bytes, std::convert::Infallible>> {
+    futures_util::stream::unfold(serialized, |mut remaining| async move {
+        if remaining.is_empty() {
+            return None;
+        }
+        let take = XORB_UPLOAD_PROGRESS_BLOCK_SIZE.min(remaining.len());
+        let head = remaining.split_to(take);
+        Some((Ok(head), remaining))
+    })
+}
+
+/// A streamed [`http_body::Body`] that advertises an exact total length, so the
+/// HTTP/1.1 layer frames it with an explicit `Content-Length` header while data
+/// is still delivered in streaming progress blocks.
+struct SizedStreamBody<S> {
+    inner: std::pin::Pin<Box<S>>,
+    remaining: u64,
+}
+
+impl<S> SizedStreamBody<S> {
+    fn new(stream: S, total: u64) -> Self {
+        Self {
+            inner: Box::pin(stream),
+            remaining: total,
+        }
+    }
+}
+
+impl<S> http_body::Body for SizedStreamBody<S>
+where
+    S: futures_util::Stream<Item = Result<Bytes, std::convert::Infallible>> + Send + 'static,
+{
+    type Data = Bytes;
+    type Error = std::convert::Infallible;
+
+    fn poll_frame(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+        let this = self.get_mut();
+        match this.inner.as_mut().poll_next(cx) {
+            std::task::Poll::Ready(Some(Ok(data))) => {
+                this.remaining = this
+                    .remaining
+                    .saturating_sub(u64::try_from(data.len()).unwrap_or(u64::MAX));
+                std::task::Poll::Ready(Some(Ok(http_body::Frame::data(data))))
+            }
+            std::task::Poll::Ready(Some(Err(error))) => std::task::Poll::Ready(Some(Err(error))),
+            std::task::Poll::Ready(None) => std::task::Poll::Ready(None),
+            std::task::Poll::Pending => std::task::Poll::Pending,
+        }
+    }
+
+    fn size_hint(&self) -> http_body::SizeHint {
+        let mut hint = http_body::SizeHint::default();
+        hint.set_exact(self.remaining);
+        hint
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.remaining == 0
     }
 }
 
@@ -431,7 +603,8 @@ struct ErrorBody {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_multipart_byteranges;
+    use super::{TransferClient, parse_multipart_byteranges};
+    use bytes::Bytes;
 
     #[test]
     fn parse_multipart_single_part() {
@@ -487,5 +660,51 @@ mod tests {
         let content_type = format!("multipart/byteranges; boundary=\"{boundary}\"");
         let parts = parse_multipart_byteranges(&content_type, body.as_bytes()).unwrap();
         assert_eq!(parts[0].data, b"ab");
+    }
+
+    /// Verifies at the wire level that `upload_xorb` sends an explicit
+    /// `Content-Length` header (framing a streamed 512 KiB progress body) equal
+    /// to the serialized xorb length. The shardline server relies on this to
+    /// pre-reject oversized request bodies via the body size hint.
+    #[tokio::test]
+    async fn upload_xorb_sends_explicit_content_length_on_wire() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 8192];
+            let n = sock.read(&mut buf).await.unwrap();
+            let _ = sock
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 21\r\n\r\n{\"was_inserted\":true}",
+                )
+                .await;
+            buf[..n].to_vec()
+        });
+
+        let client = TransferClient::new(reqwest::Client::new());
+        let serialized = Bytes::from(vec![7u8; 194]);
+        let base = format!("http://{addr}");
+        let result = client
+            .upload_xorb(&base, "token", &"ab".repeat(32), serialized)
+            .await;
+        let response = result.unwrap();
+        assert!(response.was_inserted);
+
+        let raw = server.await.unwrap();
+        let text = String::from_utf8_lossy(&raw);
+        assert!(
+            text.to_lowercase().contains("content-length: 194"),
+            "upload_xorb request missing explicit Content-Length:\n{text}"
+        );
+        // The full serialized xorb body follows the header block.
+        assert!(
+            raw.len() >= 194,
+            "upload_xorb request body too short: {} bytes",
+            raw.len()
+        );
     }
 }
