@@ -7,6 +7,13 @@ repository.workspace = true
 homepage.workspace = true
 documentation = "https://docs.rs/sdx"
 description = "Native Xet client library for Shardline's Xet frontend."
+readme = "README.md"
+keywords = ["xet", "cas", "deduplication", "shardline", "client"]
+categories = [
+    "development-tools",
+    "filesystem",
+    "network-programming",
+]
 
 [dependencies]
 async-trait.workspace = true
