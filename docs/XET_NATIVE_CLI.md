@@ -357,8 +357,10 @@ sdx rm xet://host/provider/owner/repo/rev/file.bin
 sdx rm xet://host/provider/owner/repo/rev/data/ --recursive
 ```
 
-Removal marks the file for garbage collection.
-The chunk bytes remain in CAS storage until GC sweep confirms no remaining references.
+`sdx rm` deregisters the path→file_id mapping from the revision's tree store.
+It does **not** delete the file record or its CAS objects: the content remains
+reachable and reconstructable by its file_id, and storage is not reclaimed
+(see `docs/reachability-model.md`).
 
 ### `cat`
 

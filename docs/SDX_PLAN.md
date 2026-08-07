@@ -235,6 +235,16 @@ crates/sdx/src/
 
 ### 4.3 Public API sketch
 
+> **Amended to match the implemented API.** The upload first argument is the
+> remote **path**, not a file_id: `upload_file(local_path, remote)` /
+> `upload_bytes(remote, bytes)` / `upload_stream(remote, reader)`, all of which
+> register the uploaded file under `remote` at `finalize`. Downloads are
+> **file_id**-addressed: `download_file(file_id, dest)` /
+> `download_stream(file_id, range)` / `download_range(file_id, range, dest)`.
+> A `xet://…/rev/path` is resolved to its file_id via `resolve_path` (§2.5);
+> `register_path(remote, file_id)` exposes the same path→file_id mapping
+> directly.
+
 ```rust
 use sdx::{XetClient, XetClientBuilder, RetryPolicy, UploadSession, DownloadSession, Auth};
 
@@ -247,12 +257,16 @@ let client = XetClientBuilder::new()
     .build()
     .await?;
 
+// Upload: the first argument is the remote *path*, not a file_id.
 let session = client.upload_session().await?;
-session.upload_file("local.bin", "remote.bin").await?;
+session.upload_file("local.bin", "remote.bin").await?;   // upload_file(local_path, remote)
 
+// Download is file_id-addressed: resolve a xet://…/rev/path to its file_id first.
+let path_entry = client.resolve_path("remote.bin").await?;   // §2.5 tree store
+let file_id = &path_entry.file_id;
 let session = client.download_session().await?;
-session.download_file("remote.bin", "local.bin").await?;
-session.download_range("remote.bin", 0..1024, "head.bin").await?;
+session.download_file(file_id, "local.bin").await?;
+session.download_range(file_id, 0..1024, "head.bin").await?;
 
 // Streaming + in-memory (no temp files; mirrors xet-data pull-based streams).
 // Library core is file_id-addressed; `cp`/`ls`/`cat` resolve xet://…/rev/path
@@ -260,10 +274,13 @@ session.download_range("remote.bin", 0..1024, "head.bin").await?;
 let mut stream = client.download_stream(file_id, None).await?;       // or Some(0..64GiB)
 while let Some(chunk) = stream.next().await? { out.write_all(&chunk)?; } // cat pattern
 let bytes: Bytes = client.download_bytes(file_id).await?;
-let mut upload = client.upload_stream(file_id).await?;               // push-style handle
+// Streaming uploads feed a reader (`upload_stream(remote, reader)`); the
+// push-style in-memory handle is `upload_stream_handle()` (write/finish).
+let mut upload = client.upload_session()?.upload_stream_handle();
 upload.write(block).await?;                                          // owned Bytes, 8 MiB slices
 upload.finish().await?;
-client.upload_bytes(file_id, &bytes).await?;
+client.upload_stream("remote.bin", reader).await?;   // upload_stream(remote, reader)
+client.upload_bytes("remote.bin", &bytes).await?;    // upload_bytes(remote, bytes)
 ```
 
 Session types mirror the reference `XetSession`/`FileDownloadSession` concepts

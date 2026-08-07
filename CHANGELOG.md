@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+### Added
+
+- **`sdx` native Xet client library** (`crates/sdx`) — auth with credential resolution and single-flight token refresh, V1/V2 reconstruction + ranged xorb fetch, streaming bounded-memory download, on-disk chunk cache, upload with session/global dedup and streaming xorb/shard upload, retry/backoff with token refresh on 401/403
+- **`sdx` CLI** — `cp`/`sync`/`ls`/`rm`/`cat`/`info`/`branch` over the Xet file_id surface, dispatched via the `shardline` binary's `argv[0]` symlink (`sdx`) and the `shardline xet` escape hatch
+- **Server metadata endpoints (M5)** — path→file_id tree store and revision registry for the Xet frontend
+- **Cross-frontend conformance suite** — HF-style mock frontend exercising the client's portable file_id-level surface against a non-shardline Xet wire protocol
+
 ## [1.3.0] - 2026-08-02
 
 ### Upgrade Note — Storage Format Evolution
