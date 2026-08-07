@@ -13,6 +13,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 - **Server metadata endpoints (M5)** — path→file_id tree store and revision registry for the Xet frontend
 - **Cross-frontend conformance suite** — HF-style mock frontend exercising the client's portable file_id-level surface against a non-shardline Xet wire protocol
 
+### Fixed
+
+- **Single-chunk xorb-backed downloads** — the ingestor now xorb-backs single-chunk records so CAS downloads of small files work over the xorb transfer path
+- **fsck / lifecycle-repair reachability for xorb-backed records** — fsck no longer reports a false `missing_chunk` for single-chunk files (record hash points at the stored xorb, not the raw chunk), and lifecycle-repair now resolves the xorb's member chunks so the individually-stored dedup chunks stay reachable
+
 ## [1.3.0] - 2026-08-02
 
 ### Upgrade Note — Storage Format Evolution
