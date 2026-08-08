@@ -45,6 +45,7 @@ mod record;
 mod record_key;
 #[cfg(test)]
 mod test_invariant_error;
+mod tree;
 mod upload_intent;
 mod xet_hash;
 
@@ -74,5 +75,6 @@ pub use store::{
     AsyncIndexStore, DedupeStore, IndexStore, IndexStoreFuture, LifecycleStore,
     ReconstructionStore, Repository,
 };
+pub use tree::{RepoKey, RevisionRecord, TreeEntry, TreeEntryOutcome, TreeKey, TreeStore};
 pub use upload_intent::{UploadIntent, UploadIntentState, UploadIntentStore};
 pub use xet_hash::{parse_xet_hash_hex, xet_hash_hex_string};

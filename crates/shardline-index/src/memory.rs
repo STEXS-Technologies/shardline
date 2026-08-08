@@ -12,8 +12,9 @@ use thiserror::Error;
 use crate::{
     AsyncIndexStore, DedupeShardMapping, DedupeStore, FileId, FileReconstruction, FileRecord,
     IndexStoreFuture, LifecycleStore, ProviderRepositoryState, QuarantineCandidate,
-    ReconstructionStore, RecordMutation, RecordStoreFuture, RecordTraversal, RepositoryRecordScope,
-    RetentionHold, StoredObjectId, StoredRecord, WebhookDelivery, XorbId,
+    ReconstructionStore, RecordMutation, RecordStoreFuture, RecordTraversal, RepoKey,
+    RepositoryRecordScope, RetentionHold, RevisionRecord, StoredObjectId, StoredRecord, TreeEntry,
+    TreeEntryOutcome, TreeKey, TreeStore, WebhookDelivery, XorbId,
     upload_intent::{UploadIntent, UploadIntentState, UploadIntentStore},
     xet_hash_hex_string,
 };
@@ -528,6 +529,141 @@ impl AsyncIndexStore for MemoryIndexStore {
     impl_async_lifecycle_delegation!(MemoryIndexStore);
 }
 
+#[async_trait::async_trait]
+impl TreeStore for MemoryIndexStore {
+    type Error = MemoryIndexStoreError;
+
+    async fn upsert_tree_entry(&self, entry: &TreeEntry) -> Result<TreeEntryOutcome, Self::Error> {
+        let key = MemoryTreeKey::from_entry(entry);
+        let mut state = self.lock_state()?;
+        let existed = state.tree_entries.contains_key(&key);
+        state.tree_entries.insert(key, entry.clone());
+        Ok(TreeEntryOutcome { created: !existed })
+    }
+
+    async fn tree_entry(
+        &self,
+        key: &TreeKey,
+        path: &str,
+    ) -> Result<Option<TreeEntry>, Self::Error> {
+        let search = MemoryTreeKey::from_key(key, path);
+        Ok(self.lock_state()?.tree_entries.get(&search).cloned())
+    }
+
+    async fn delete_tree_entries(
+        &self,
+        key: &TreeKey,
+        path: &str,
+        recursive: bool,
+    ) -> Result<u64, Self::Error> {
+        let mut state = self.lock_state()?;
+        let mut deleted = 0u64;
+        if recursive {
+            let prefix_with_slash = format!("{path}/");
+            let tree = &mut state.tree_entries;
+            tree.retain(|k, _| {
+                if k.provider != key.provider
+                    || k.owner != key.owner
+                    || k.repo != key.repo
+                    || k.revision != key.revision
+                {
+                    return true;
+                }
+                if k.path == path || k.path.starts_with(&prefix_with_slash) {
+                    deleted = deleted.saturating_add(1);
+                    false
+                } else {
+                    true
+                }
+            });
+        } else {
+            let search = MemoryTreeKey::from_key(key, path);
+            if state.tree_entries.remove(&search).is_some() {
+                deleted = 1;
+            }
+        }
+        Ok(deleted)
+    }
+
+    async fn scan_tree(
+        &self,
+        key: &TreeKey,
+        prefix: &str,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<TreeEntry>, Self::Error> {
+        let state = self.lock_state()?;
+        let prefix_with_slash = if prefix.is_empty() {
+            String::new()
+        } else {
+            format!("{prefix}/")
+        };
+        let mut result = Vec::new();
+        for (k, entry) in &state.tree_entries {
+            if k.provider != key.provider
+                || k.owner != key.owner
+                || k.repo != key.repo
+                || k.revision != key.revision
+            {
+                continue;
+            }
+            if !prefix.is_empty() && k.path != prefix && !k.path.starts_with(&prefix_with_slash) {
+                continue;
+            }
+            if cursor.is_some_and(|c| k.path.as_str() <= c) {
+                continue;
+            }
+            result.push(entry.clone());
+            if result.len() >= limit {
+                break;
+            }
+        }
+        Ok(result)
+    }
+
+    async fn upsert_revision(&self, rev: &RevisionRecord) -> Result<bool, Self::Error> {
+        let key = MemoryRevisionKey::from_record(rev);
+        let mut state = self.lock_state()?;
+        let existed = state.revisions.contains_key(&key);
+        state.revisions.insert(key, rev.clone());
+        Ok(!existed)
+    }
+
+    async fn revision(
+        &self,
+        key: &RepoKey,
+        rev: &str,
+    ) -> Result<Option<RevisionRecord>, Self::Error> {
+        let search = MemoryRevisionKey::from_key(key, rev);
+        Ok(self.lock_state()?.revisions.get(&search).cloned())
+    }
+
+    async fn list_revisions(&self, key: &RepoKey) -> Result<Vec<RevisionRecord>, Self::Error> {
+        let state = self.lock_state()?;
+        Ok(state
+            .revisions
+            .iter()
+            .filter(|(k, _)| {
+                k.provider == key.provider && k.owner == key.owner && k.repo == key.repo
+            })
+            .map(|(_, v)| v.clone())
+            .collect())
+    }
+
+    async fn delete_revision(&self, key: &RepoKey, rev: &str) -> Result<u64, Self::Error> {
+        let mut state = self.lock_state()?;
+        let revision_key = MemoryRevisionKey::from_key(key, rev);
+        let removed = state.revisions.remove(&revision_key).is_some();
+        state.tree_entries.retain(|k, _| {
+            !(k.provider == key.provider
+                && k.owner == key.owner
+                && k.repo == key.repo
+                && k.revision == rev)
+        });
+        Ok(u64::from(removed))
+    }
+}
+
 const fn provider_sort_key(provider: RepositoryProvider) -> &'static str {
     match provider {
         RepositoryProvider::GitHub => "github",
@@ -556,6 +692,8 @@ struct MemoryIndexState {
     webhook_deliveries: HashMap<MemoryWebhookDeliveryKey, WebhookDelivery>,
     provider_repository_states: HashMap<MemoryProviderRepositoryStateKey, ProviderRepositoryState>,
     upload_intents: HashMap<String, UploadIntent>,
+    tree_entries: BTreeMap<MemoryTreeKey, TreeEntry>,
+    revisions: BTreeMap<MemoryRevisionKey, RevisionRecord>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -572,7 +710,6 @@ struct MemoryProviderRepositoryStateKey {
     owner: String,
     repo: String,
 }
-
 impl MemoryProviderRepositoryStateKey {
     fn new(provider: RepositoryProvider, owner: &str, repo: &str) -> Self {
         Self {
@@ -594,6 +731,65 @@ impl MemoryWebhookDeliveryKey {
             owner: delivery.owner().to_owned(),
             repo: delivery.repo().to_owned(),
             delivery_id: delivery.delivery_id().to_owned(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct MemoryTreeKey {
+    provider: String,
+    owner: String,
+    repo: String,
+    revision: String,
+    path: String,
+}
+
+impl MemoryTreeKey {
+    fn from_entry(entry: &TreeEntry) -> Self {
+        Self {
+            provider: entry.provider.clone(),
+            owner: entry.owner.clone(),
+            repo: entry.repo.clone(),
+            revision: entry.revision.clone(),
+            path: entry.path.clone(),
+        }
+    }
+
+    fn from_key(key: &TreeKey, path: &str) -> Self {
+        Self {
+            provider: key.provider.clone(),
+            owner: key.owner.clone(),
+            repo: key.repo.clone(),
+            revision: key.revision.clone(),
+            path: path.to_owned(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct MemoryRevisionKey {
+    provider: String,
+    owner: String,
+    repo: String,
+    revision: String,
+}
+
+impl MemoryRevisionKey {
+    fn from_record(rev: &RevisionRecord) -> Self {
+        Self {
+            provider: rev.provider.clone(),
+            owner: rev.owner.clone(),
+            repo: rev.repo.clone(),
+            revision: rev.revision.clone(),
+        }
+    }
+
+    fn from_key(key: &RepoKey, rev: &str) -> Self {
+        Self {
+            provider: key.provider.clone(),
+            owner: key.owner.clone(),
+            repo: key.repo.clone(),
+            revision: rev.to_owned(),
         }
     }
 }

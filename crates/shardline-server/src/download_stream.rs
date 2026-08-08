@@ -25,6 +25,21 @@ pub const STREAM_READ_BUFFER_BYTES: u64 = 1024 * 1024;
 
 pub type ServerByteStream = Pin<Box<dyn Stream<Item = Result<Bytes, ServerError>> + Send>>;
 
+/// Returns whether a serialized xorb object is stored under `hash_hex`.
+///
+/// Used by the single-chunk routing decision in [`file_record_byte_stream`]: a
+/// xorb-backed single-chunk record stores its `hash` as the xorb hash, an
+/// opaque value that is indistinguishable from a plain chunk data hash without
+/// checking storage. A metadata miss (or an error) means the record is treated
+/// as individual-chunk-backed; the subsequent read then surfaces any real
+/// storage failure.
+fn xorb_object_exists(object_store: &ServerObjectStore, hash_hex: &str) -> bool {
+    let Ok(object_key) = crate::xet_adapter::xorb_object_key(hash_hex) else {
+        return false;
+    };
+    matches!(object_store.metadata(&object_key), Ok(Some(metadata)) if metadata.length() != 0)
+}
+
 /// Reads a xorb-backed file record by fetching the single xorb object, parsing
 /// all chunks, and extracting the requested byte range.
 ///
@@ -142,18 +157,22 @@ pub(crate) async fn file_record_byte_stream(
     }
 
     // Fast path: if all chunks are in the same xorb, read it once.
-    // For a single chunk we also check packed_start > 0 — regular chunks
-    // always have packed_start == 0 (the serde default), while xorb-backed
-    // chunks have a non-zero offset into the xorb serialized data.
+    // For a single chunk the record hash is either the chunk's data hash
+    // (individual-chunk storage) or the xorb's hash (xorb-backed storage);
+    // both are opaque 64-hex values, so we probe the object store for a
+    // stored xorb object under that hash. Xorb-backed chunks always carry a
+    // nonzero packed_end (the chunk's serialized length inside the xorb),
+    // which lets us skip the probe for legacy records that predate packing.
     let first_hash = record.chunks.first().map(|c| &c.hash);
     let all_same_hash = first_hash.is_some_and(|h| record.chunks.iter().all(|c| c.hash == *h));
     let is_xorb_backed = if record.chunks.len() > 1 {
         all_same_hash
     } else {
-        // Single chunk: only route through the xorb path when the
-        // chunk has a non-zero packed_start (indicating it is a slice
-        // within a xorb, not a standalone chunk).
-        all_same_hash && record.chunks.first().is_some_and(|c| c.packed_start > 0)
+        all_same_hash
+            && record
+                .chunks
+                .first()
+                .is_some_and(|c| c.packed_end > 0 && xorb_object_exists(&object_store, &c.hash))
     };
 
     if is_xorb_backed {
@@ -1670,10 +1689,12 @@ mod tests {
         .unwrap();
 
         // 3. Create FileRecord with one xorb-backed entry.
-        //    Use the xorb hash as the chunk hash, and a non-zero packed_start
-        //    so the is_xorb_backed guard detects it as xorb-backed. The xorb
-        //    fast path reads the entire xorb and indexes decoded chunks by
-        //    range_start — it does not use packed_start for data access.
+        //    Use the xorb hash as the chunk hash with the real packed offsets
+        //    (packed_start is 0 — the sole chunk is the first in the xorb).
+        //    The is_xorb_backed guard detects the record as xorb-backed by
+        //    probing for the stored xorb object under the record hash. The
+        //    xorb fast path reads the entire xorb and indexes decoded chunks
+        //    by range_start — it does not use packed_start for data access.
         let entry = &packed.chunk_entries[0];
         let raw_len = content.len() as u64;
         let next_index = entry.chunk_index.checked_add(1).unwrap();
@@ -1694,7 +1715,7 @@ mod tests {
                 length: raw_len,
                 range_start: u64::from(entry.chunk_index),
                 range_end: u64::from(next_index),
-                packed_start: 1, // non-zero to signal xorb-backed to the guard
+                packed_start: u64::from(entry.packed_offset),
                 packed_end: u64::from(packed_end),
             }],
         };

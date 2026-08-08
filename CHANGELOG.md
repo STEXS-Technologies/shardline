@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+### Added
+
+- **`sdx` native Xet client library** (`crates/sdx`) — auth with credential resolution and single-flight token refresh, V1/V2 reconstruction + ranged xorb fetch, streaming bounded-memory download, on-disk chunk cache, upload with session/global dedup and streaming xorb/shard upload, retry/backoff with token refresh on 401/403
+- **`sdx` CLI** — `cp`/`sync`/`ls`/`rm`/`cat`/`info`/`branch` over the Xet file_id surface, dispatched via the `shardline` binary's `argv[0]` symlink (`sdx`) and the `shardline xet` escape hatch
+- **Server metadata endpoints** — path→file_id tree store and revision registry for the Xet frontend
+- **Cross-frontend conformance suite** — HF-style mock frontend exercising the client's portable file_id-level surface against a non-shardline Xet wire protocol
+
+### Fixed
+
+- **Single-chunk xorb-backed downloads** — the ingestor now xorb-backs single-chunk records so CAS downloads of small files work over the xorb transfer path
+- **fsck / lifecycle-repair reachability for xorb-backed records** — fsck no longer reports a false `missing_chunk` for single-chunk files (record hash points at the stored xorb, not the raw chunk), and lifecycle-repair now resolves the xorb's member chunks so the individually-stored dedup chunks stay reachable
+
 ## [1.3.0] - 2026-08-02
 
 ### Upgrade Note — Storage Format Evolution
