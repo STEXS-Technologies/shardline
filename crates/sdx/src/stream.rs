@@ -3013,8 +3013,9 @@ mod tests {
         let (first, _) = drain(make_stream(ctx.clone(), None)).await;
         assert_eq!(first, expected);
         assert_eq!(ctx.xorb_fetch_count.load(Ordering::Relaxed), 1);
-        // The cache put is spawned best-effort; wait for it to land.
-        for _ in 0..100 {
+        // The cache put is spawned best-effort; wait for it to land. Generous
+        // budget (5 s) under slow instrumentation.
+        for _ in 0..500 {
             if cache.entry_count().await.unwrap() == 1 {
                 break;
             }
