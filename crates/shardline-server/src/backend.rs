@@ -1327,12 +1327,14 @@ mod tests {
     // ── Repository reference probe helpers ─────────────────────────────────
 
     #[test]
+    #[serial_test::serial]
     fn repository_reference_probe_count_starts_at_zero() {
         clear_repository_reference_probe_filter();
         assert_eq!(repository_reference_probe_count(), 0);
     }
 
     #[test]
+    #[serial_test::serial]
     fn repository_reference_probe_count_increments_when_filter_matches() {
         clear_repository_reference_probe_filter();
         reset_repository_reference_probe_count_for_hash("aabb");
@@ -1991,6 +1993,7 @@ mod tests {
     // ── Repository reference probe tests ─────────────────────────────────
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial_test::serial]
     async fn count_repository_reference_probe_directly() {
         let _guard = lock_repository_reference_probe_test().await;
         // Reset count and filter so other tests aren't affected
@@ -2015,6 +2018,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial_test::serial]
     async fn count_repository_reference_probe_without_filter_counts_all() {
         let _guard = lock_repository_reference_probe_test().await;
         // Reset count and filter so other tests aren't affected
@@ -2034,6 +2038,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial_test::serial]
     async fn lock_repository_reference_probe_test_acquires_lock() {
         let guard = lock_repository_reference_probe_test().await;
         drop(guard);

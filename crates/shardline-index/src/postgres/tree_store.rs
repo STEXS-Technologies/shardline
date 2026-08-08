@@ -278,3 +278,149 @@ impl TreeStore for PostgresIndexStore {
         Ok(result.rows_affected())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
+
+    use super::*;
+
+    async fn connect_postgres() -> Option<sqlx::PgPool> {
+        let url = std::env::var("DATABASE_URL").ok()?;
+        sqlx::PgPool::connect(&url).await.ok()
+    }
+
+    fn tree_key(revision: &str) -> TreeKey {
+        TreeKey::new("github", "owner", "repo", revision)
+    }
+
+    fn repo_key() -> RepoKey {
+        RepoKey::new("github", "owner", "repo")
+    }
+
+    fn entry(revision: &str, path: &str) -> TreeEntry {
+        TreeEntry {
+            provider: "github".to_owned(),
+            owner: "owner".to_owned(),
+            repo: "repo".to_owned(),
+            revision: revision.to_owned(),
+            path: path.to_owned(),
+            file_id: "ab".repeat(32),
+            size_bytes: 123,
+            updated_at_unix_seconds: 1000,
+        }
+    }
+
+    /// Round-trips the Postgres TreeStore against a migrated schema (created by
+    /// `shardline -- db migrate up`, which the `postgres` CI job runs first).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pg_tree_store_upsert_scan_delete_roundtrip() {
+        let Some(pool) = connect_postgres().await else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let store = PostgresIndexStore::new(pool);
+        let key = tree_key("main");
+
+        let e = entry("main", "data/model.pt");
+        assert!(
+            TreeStore::upsert_tree_entry(&store, &e)
+                .await
+                .expect("upsert")
+                .created
+        );
+        assert!(
+            !TreeStore::upsert_tree_entry(&store, &e)
+                .await
+                .expect("upsert")
+                .created
+        );
+
+        let loaded = TreeStore::tree_entry(&store, &key, "data/model.pt")
+            .await
+            .expect("tree_entry")
+            .expect("present");
+        assert_eq!(loaded.file_id, e.file_id);
+        assert_eq!(loaded.size_bytes, 123);
+
+        let scanned = TreeStore::scan_tree(&store, &key, "data", None, 100)
+            .await
+            .expect("scan");
+        assert_eq!(scanned.len(), 1);
+        let cursor = scanned[0].path.clone();
+        assert!(
+            TreeStore::scan_tree(&store, &key, "", Some(&cursor), 100)
+                .await
+                .expect("scan cursor")
+                .is_empty()
+        );
+
+        let removed = TreeStore::delete_tree_entries(&store, &key, "data", true)
+            .await
+            .expect("delete");
+        assert_eq!(removed, 1);
+        assert!(
+            TreeStore::tree_entry(&store, &key, "data/model.pt")
+                .await
+                .expect("lookup")
+                .is_none()
+        );
+        // Clean up any revision registry rows created by other tests in this run.
+        let _ = TreeStore::delete_revision(&store, &repo_key(), "main")
+            .await
+            .expect("delete revision");
+    }
+
+    /// Exercises the revision registry (upsert / read / list / delete cascade).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pg_revision_registry_lifecycle() {
+        let Some(pool) = connect_postgres().await else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let store = PostgresIndexStore::new(pool);
+        let rev = RevisionRecord {
+            provider: "github".to_owned(),
+            owner: "owner".to_owned(),
+            repo: "repo".to_owned(),
+            revision: "feature".to_owned(),
+            created_at_unix_seconds: 1,
+            updated_at_unix_seconds: 1,
+        };
+        assert!(
+            TreeStore::upsert_revision(&store, &rev)
+                .await
+                .expect("upsert")
+        );
+        assert!(
+            !TreeStore::upsert_revision(&store, &rev)
+                .await
+                .expect("upsert")
+        );
+
+        let loaded = TreeStore::revision(&store, &repo_key(), "feature")
+            .await
+            .expect("revision")
+            .expect("present");
+        assert_eq!(loaded.revision, "feature");
+
+        let listed = TreeStore::list_revisions(&store, &repo_key())
+            .await
+            .expect("list");
+        assert_eq!(listed.len(), 1);
+
+        TreeStore::upsert_tree_entry(&store, &entry("feature", "x.txt"))
+            .await
+            .expect("upsert");
+        let removed = TreeStore::delete_revision(&store, &repo_key(), "feature")
+            .await
+            .expect("delete revision");
+        assert_eq!(removed, 1);
+        assert!(
+            TreeStore::revision(&store, &repo_key(), "feature")
+                .await
+                .expect("revision")
+                .is_none()
+        );
+    }
+}
