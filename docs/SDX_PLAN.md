@@ -135,14 +135,15 @@ Audit finding (2026-08): the Xet frontend addresses content **only by 64-hex
 deregistration endpoint. Per decision, issue #19 **includes server-side
 metadata endpoints** — the only server changes in this issue:
 
-| Capability | Endpoint (shape TBD in M5) | Notes |
+| Capability | Endpoint (shape TBD, see §2.5) | Notes |
 |---|---|---|
 | Path→file_id resolution | `GET .../tree/{rev}?path=...` | Resolves `xet://.../rev/path` to a 64-hex `file_id` for reconstruction; read-token auth; revision-scoped |
 | Listing | `GET .../tree/{rev}?prefix=...` | Directory listing for `ls` and `sync`; pagination |
 | Deregistration | `DELETE .../path/{rev}/{path}` | `rm`; semantics vs immutable CAS (mark-deleted vs remove record; GC interaction per `docs/reachability-model.md`) |
 | Branch/revision management | `GET/POST/DELETE .../revisions` | `branch --create/--delete`, `ls --branches`; depends on shardline's provider-scoped revision model (§11 Q4) |
 
-Exact routes/shapes are designed in M5 alongside client modules `tree.rs` /
+Exact routes/shapes are designed alongside the metadata endpoints and client
+modules `tree.rs` /
 `revisions.rs`. Interop note: this path namespace is shardline-specific
 (upstream resolves paths through git trees, which shardline does not serve);
 the client's file_id-level operations remain portable (§4.4.1).
@@ -197,7 +198,7 @@ New crate: **`crates/sdx`** (package name `sdx`). Dependencies:
 
 Must **not** depend on `shardline-server`.
 
-**Chunker source decision (M3):** the server's `CdcChunker`
+**Chunker source decision:** the server's `CdcChunker`
 (`shardline-server/src/upload_ingest/cdc.rs`) is the one crate sdx is forbidden
 to depend on. sdx therefore uses the **upstream `xet-data` `Chunker`/`gearhash`**
 (dependency of the pinned `xet-core-structures`) — the same code the server
@@ -621,13 +622,13 @@ Thin clap wrapper over the library (per `docs/XET_NATIVE_CLI.md`, with the
 
 Mirrors `docs/XET_NATIVE_CLI.md` stub phases, with the library-first addition:
 
-- **M0 — Crate scaffolding + hash/hex primitives.** `crates/sdx` skeleton,
+- **Crate scaffolding + hash/hex primitives.** `crates/sdx` skeleton,
   module map, BLAKE3 keyed hashing, Xet hex conversion, golden-vector unit tests
   (`shardline-index` vectors). No network.
-- **M1 — Auth + token service.** Token issuance (read/write) against shardline
+- **Auth + token service.** Token issuance (read/write) against shardline
   token routes, refresh with 30s buffer, single-flight, credential sources,
   `Auth` builder. Unit tests with mock server.
-- **M2 — Read path (download).** v2/v1 reconstruction client + fallback, ranged
+- **Read path (download).** v2/v1 reconstruction client + fallback, ranged
   `/transfer/xorb` fetch, 206/multipart parsing, chunk deserialization,
   `unpacked_length` validation, file assembly, `DownloadSession` + `download_file`
   / `download_range`. Streaming download (mirror `xet-data` §4.4.1): pull-based
@@ -639,7 +640,7 @@ Mirrors `docs/XET_NATIVE_CLI.md` stub phases, with the library-first addition:
   E2E: download files uploaded via server ingest; byte-identical;
   **memory-bounded cat of a large file (e.g. 64 GiB synthetic) asserting
   resident RAM stays ≪ file size**.
-- **M3 — Write path (upload).** Client CDC chunker (verify byte-identity against
+- **Write path (upload).** Client CDC chunker (verify byte-identity against
   server `CdcChunker`), global dedup query + eligibility, xorb build/serialize/
   upload, shard build/upload (xorbs-before-shard), `UploadSession` +
   `upload_file` + idempotency. Streaming upload (mirror §4.4.2): push-style
@@ -651,18 +652,18 @@ Mirrors `docs/XET_NATIVE_CLI.md` stub phases, with the library-first addition:
   stored once); **streaming upload of a large reader with bounded memory
   (assert in-flight RAM ≈ 8 MiB + ≤64 MiB xorb + tail)**; worst-case
   incompressible xorb (≥8192 tiny chunks) staying under the server body cap.
-- **M4 — Retry/backoff + concurrency.** `RetryPolicy`, jittered exponential
+- **Retry/backoff + concurrency.** `RetryPolicy`, jittered exponential
   backoff, error classification, `Retry-After` honoring, adaptive/fixed
   concurrency, session/request correlation headers. E2E: 503 saturation tests
   against admission-limited shardline; 429 no-`Retry-After` backoff (mock).
-- **M5 — Metadata operations + server path addressing.** Server (issue #19):
+- **Metadata operations + server path addressing.** Server (issue #19):
   implement the §2.5 metadata endpoints (path→file_id, listing, deregistration,
   branch/revision) in `crates/shardline-server`. Client: `tree.rs`/
   `revisions.rs` against them; `ls`/`info`/`rm`/`branch`; `sync` (push-only);
   `cat` streaming.
-- **M6 — CLI + config + packaging.** `sdx` symlink dispatch, clap tree,
+- **CLI + config + packaging.** `sdx` symlink dispatch, clap tree,
   `shardline.toml`, completions, manpage, release archive.
-- **M7 — Cross-frontend conformance.** Run the full suite against a second
+- **Cross-frontend conformance.** Run the full suite against a second
   Xet-compatible frontend (openxet or HF-style mock); conformance tests from
   `docs/PROTOCOL_CONFORMANCE.md` (`:136-157`).
 
@@ -707,7 +708,7 @@ Mirrors `docs/XET_NATIVE_CLI.md` stub phases, with the library-first addition:
 4. **Revision semantics** (`xet://.../{revision}`): token issuance is
    revision-scoped; `branch` commands assume shardline's revision model
    (provider-scoped revisions). Confirm server behavior for non-`main`
-   revisions in M5.
+   revisions with the metadata endpoints.
 5. **Rate limiting is server-policy-dependent**: shardline has no time-window
    rate limiting today, but may add it (listed as required work). The library's
    retry policy must be frontend-agnostic and user-tunable so behavior remains
@@ -719,7 +720,7 @@ Mirrors `docs/XET_NATIVE_CLI.md` stub phases, with the library-first addition:
 ## 12. Out of scope (this issue)
 
 - Server-side changes are limited to the **§2.5 path/metadata endpoints**
-  (implemented in M5); no CAS/data-plane changes.
+  (implemented in this issue); no CAS/data-plane changes.
 - `/v2/shards` streaming NDJSON upload (only v1 required by shardline).
 - `/v2/file-chunk-hashes` partial-overwrite support (deferred, see §11 open
   question 1).
