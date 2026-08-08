@@ -801,3 +801,136 @@ async fn write_token_required_for_mutations() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
 }
+
+// ── Error / normalization edge cases ─────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn resolve_path_empty_or_malformed_returns_400() {
+    let (app, _tmp) = build_app(false).await;
+    // Empty path is rejected.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(tree_url("?path="))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    // Traversal segments are rejected.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(tree_url("?path=../etc/passwd"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    // Leading slash is rejected.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(tree_url("?path=%2Fabsolute"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn register_with_invalid_body_or_path_returns_400() {
+    let (app, tmp) = build_app(false).await;
+    let id = file_id(3);
+    write_record(tmp.path(), &id, 10, None).await;
+
+    // Malformed JSON body is rejected.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(path_url("a.txt"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from("not-json"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    // Path with a `..` segment is rejected before any store write.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(path_url("a/../b.txt"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(json!({ "fileId": id }).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    // Invalid fileId (non-hex) is rejected with 400.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(path_url("b.txt"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(json!({ "fileId": "not-a-hex-id" }).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn create_revision_rejects_invalid_revision() {
+    let (app, _tmp) = build_app(false).await;
+    // Over-long revision is rejected with 400.
+    let long_rev = "r".repeat(513);
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/generic/{OWNER}/{REPO}/revisions/{long_rev}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    // Control characters in a revision are rejected with 400.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/generic/{OWNER}/{REPO}/revisions/bad%0Arev"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}

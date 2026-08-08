@@ -620,4 +620,96 @@ mod tests {
             .unwrap();
         assert_eq!(removed, 0);
     }
+
+    #[tokio::test]
+    async fn scan_tree_prefix_matches_nothing_returns_empty() {
+        let store = make_store();
+        TreeStore::upsert_tree_entry(&store, &entry("main", "a.txt", &file_id(1), 1, 1))
+            .await
+            .unwrap();
+        let rows = TreeStore::scan_tree(&store, &key("main"), "nonexistent", None, 100)
+            .await
+            .unwrap();
+        assert!(rows.is_empty());
+    }
+
+    #[tokio::test]
+    async fn scan_tree_respects_limit() {
+        let store = make_store();
+        for n in 0..5 {
+            let id = (n + 1) as u8;
+            TreeStore::upsert_tree_entry(
+                &store,
+                &entry("main", &format!("f{n}.txt"), &file_id(id), 1, 1),
+            )
+            .await
+            .unwrap();
+        }
+        let rows = TreeStore::scan_tree(&store, &key("main"), "", None, 3)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 3);
+        // Cursor resumes after the last returned raw path.
+        let cursor = rows.last().unwrap().path.clone();
+        let more = TreeStore::scan_tree(&store, &key("main"), "", Some(&cursor), 100)
+            .await
+            .unwrap();
+        assert_eq!(more.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn delete_recursive_with_no_descendants_removes_nothing() {
+        let store = make_store();
+        TreeStore::upsert_tree_entry(&store, &entry("main", "a.txt", &file_id(1), 1, 1))
+            .await
+            .unwrap();
+        let removed = TreeStore::delete_tree_entries(&store, &key("main"), "a.txt", true)
+            .await
+            .unwrap();
+        assert_eq!(removed, 1);
+        let removed = TreeStore::delete_tree_entries(&store, &key("main"), "missing/dir", true)
+            .await
+            .unwrap();
+        assert_eq!(removed, 0);
+    }
+
+    #[tokio::test]
+    async fn revision_missing_and_empty_list() {
+        let store = make_store();
+        assert!(
+            TreeStore::revision(&store, &repo_key(), "nope")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            TreeStore::list_revisions(&store, &repo_key())
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn upsert_revision_returns_false_on_update() {
+        let store = make_store();
+        let rev = RevisionRecord {
+            provider: "github".to_owned(),
+            owner: "owner".to_owned(),
+            repo: "repo".to_owned(),
+            revision: "main".to_owned(),
+            created_at_unix_seconds: 1,
+            updated_at_unix_seconds: 1,
+        };
+        assert!(TreeStore::upsert_revision(&store, &rev).await.unwrap());
+        let refreshed = RevisionRecord {
+            updated_at_unix_seconds: 2,
+            ..rev
+        };
+        assert!(
+            !TreeStore::upsert_revision(&store, &refreshed)
+                .await
+                .unwrap()
+        );
+    }
 }
