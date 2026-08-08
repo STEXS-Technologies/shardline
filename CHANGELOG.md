@@ -4,19 +4,46 @@ All notable changes to Shardline are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [1.4.0] - 2026-08-08
+
+Minor release adding the native `sdx` Xet client library and file-management CLI,
+server metadata endpoints for path addressing, and a cross-frontend conformance
+suite. There are no intentional breaking CAS/data-plane changes from `1.3.0`.
 
 ### Added
 
-- **`sdx` native Xet client library** (`crates/sdx`) — auth with credential resolution and single-flight token refresh, V1/V2 reconstruction + ranged xorb fetch, streaming bounded-memory download, on-disk chunk cache, upload with session/global dedup and streaming xorb/shard upload, retry/backoff with token refresh on 401/403
-- **`sdx` CLI** — `cp`/`sync`/`ls`/`rm`/`cat`/`info`/`branch` over the Xet file_id surface, dispatched via the `shardline` binary's `argv[0]` symlink (`sdx`) and the `shardline xet` escape hatch
-- **Server metadata endpoints** — path→file_id tree store and revision registry for the Xet frontend
-- **Cross-frontend conformance suite** — HF-style mock frontend exercising the client's portable file_id-level surface against a non-shardline Xet wire protocol
+- **`sdx` client library** (`crates/sdx`): native Xet client with V1/V2
+  reconstruction, ranged xorb fetch, streaming bounded-memory download/upload,
+  on-disk chunk cache, global dedup, retry/backoff, and token refresh on 401/403.
+- **`sdx` CLI**: `cp`/`sync`/`ls`/`rm`/`cat`/`info`/`branch` over the Xet file_id
+  surface, dispatched via the `shardline` binary's `argv[0]` symlink (`sdx`) and
+  the `shardline xet` escape hatch.
+- **Server metadata endpoints**: path→file_id tree store and revision registry for
+  the Xet frontend, backed by a `TreeStore` trait across SQLite, Postgres, and the
+  in-memory test store.
+- **Cross-frontend conformance suite**: HF-style mock frontend exercising the
+  client's portable file_id-level surface against a non-shardline Xet wire
+  protocol.
 
 ### Fixed
 
-- **Single-chunk xorb-backed downloads** — the ingestor now xorb-backs single-chunk records so CAS downloads of small files work over the xorb transfer path
-- **fsck / lifecycle-repair reachability for xorb-backed records** — fsck no longer reports a false `missing_chunk` for single-chunk files (record hash points at the stored xorb, not the raw chunk), and lifecycle-repair now resolves the xorb's member chunks so the individually-stored dedup chunks stay reachable
+- **Single-chunk xorb-backed downloads**: single-chunk records are now xorb-backed
+  on ingest so CAS downloads of small files work over the transfer path.
+- **fsck / lifecycle-repair reachability for xorb-backed records**: fsck no longer
+  reports a false `missing_chunk` for single-chunk files, and lifecycle-repair now
+  resolves the xorb's member chunks so the individually-stored dedup chunks stay
+  reachable.
+- **Postgres tree-store migration**: the metadata tree tables are now provisioned
+  by `db migrate` on Postgres (previously SQLite-only).
+- **CI stability**: hardened timing-sensitive streaming/abort/cache tests under
+  llvm-cov instrumentation and fixed a repository-probe-filter test serialization
+  flake.
+
+### Changed
+
+- **Workspace release**: workspace version bumped to `1.4.0` with coherent
+  `[workspace.dependencies]` requirements and a coordinated crates.io publish
+  runbook (`docs/RELEASE.md`, `scripts/publish-coordinated.sh`).
 
 ## [1.3.0] - 2026-08-02
 
@@ -418,7 +445,10 @@ There are no intentional breaking API or configuration changes from `1.0.0`.
 - Documented async storage TOCTOU races with 1.2M-run fuzz validation (`40ef000`)
 - Updated all architecture, deployment, and Hub API docs for 20-crate structure (`1203d8e`)
 
-[Unreleased]: https://github.com/STEXS-Technologies/shardline/compare/v1.2.1...HEAD
+[Unreleased]: https://github.com/STEXS-Technologies/shardline/compare/v1.4.0...HEAD
+[1.4.0]: https://github.com/STEXS-Technologies/shardline/compare/v1.3.0...v1.4.0
+[1.3.0]: https://github.com/STEXS-Technologies/shardline/compare/v1.2.2...v1.3.0
+[1.2.2]: https://github.com/STEXS-Technologies/shardline/compare/v1.2.1...v1.2.2
 [1.2.1]: https://github.com/STEXS-Technologies/shardline/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/STEXS-Technologies/shardline/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/STEXS-Technologies/shardline/compare/v1.0.1...v1.1.0
