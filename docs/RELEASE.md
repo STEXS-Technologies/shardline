@@ -57,7 +57,7 @@ on crates.io at the new version before any crate that depends on it.
 14. `shardline-oci-adapter`
 15. `shardline-protocol-adapters`
 16. `shardline-xet-adapter`  ← MUST land before `sdx`
-17. `sdx`                    ← depends on the adapter (M5a route constants)
+17. `sdx`                    ← depends on the adapter (tree/path/revision route constants)
 18. `shardline-fsck`
 19. `shardline-gc`
 20. `shardline-provider-events`
@@ -73,8 +73,9 @@ on crates.io at the new version before any crate that depends on it.
 
 ## The `shardline-xet-adapter` → `sdx` constraint (critical)
 
-`sdx` imports the M5a route constants (`XET_TREE_ROUTE`, `XET_PATH_ROUTE`,
-`XET_REVISIONS_ROUTE`, `XET_REVISION_ROUTE`) from `shardline-xet-adapter`. Those
+`sdx` imports the tree/path/revision route constants (`XET_TREE_ROUTE`,
+`XET_PATH_ROUTE`, `XET_REVISIONS_ROUTE`, `XET_REVISION_ROUTE`) from
+`shardline-xet-adapter`. Those
 constants only exist on this branch; the published `shardline-xet-adapter@1.3.0` does
 not have them.
 
