@@ -39,12 +39,6 @@ suite. There are no intentional breaking CAS/data-plane changes from `1.3.0`.
   llvm-cov instrumentation and fixed a repository-probe-filter test serialization
   flake.
 
-### Changed
-
-- **Workspace release**: workspace version bumped to `1.4.0` with coherent
-  `[workspace.dependencies]` requirements and a coordinated crates.io publish
-  runbook (`docs/RELEASE.md`, `scripts/publish-coordinated.sh`).
-
 ## [1.3.0] - 2026-08-02
 
 ### Upgrade Note — Storage Format Evolution
