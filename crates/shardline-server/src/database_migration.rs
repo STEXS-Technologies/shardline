@@ -129,7 +129,7 @@ struct AppliedMigration {
 
 const MIGRATION_HISTORY_TABLE: &str = "shardline_schema_migrations";
 
-const SHARDLINE_MIGRATIONS: [DatabaseMigration; 14] = [
+const SHARDLINE_MIGRATIONS: [DatabaseMigration; 15] = [
     DatabaseMigration {
         version: "20260417000000",
         name: "metadata_store",
@@ -217,6 +217,12 @@ const SHARDLINE_MIGRATIONS: [DatabaseMigration; 14] = [
         name: "upload_intents",
         up_sql: include_str!("../migrations/20260721000000_upload_intents.up.sql"),
         down_sql: include_str!("../migrations/20260721000000_upload_intents.down.sql"),
+    },
+    DatabaseMigration {
+        version: "20260805000000",
+        name: "tree_store",
+        up_sql: include_str!("../migrations/20260805000000_tree_store.up.sql"),
+        down_sql: include_str!("../migrations/20260805000000_tree_store.down.sql"),
     },
 ];
 
@@ -479,7 +485,25 @@ mod tests {
 
     #[test]
     fn bundled_migrations_have_expected_count() {
-        assert_eq!(bundled_database_migrations().len(), 14);
+        assert_eq!(bundled_database_migrations().len(), 15);
+    }
+
+    #[test]
+    fn bundled_migrations_include_tree_store_with_sql() {
+        let migrations = bundled_database_migrations();
+        let tree_store = migrations
+            .iter()
+            .find(|m| m.name == "tree_store")
+            .expect("tree_store migration must be registered");
+        assert_eq!(tree_store.version, "20260805000000");
+        // Both the up and down SQL must be bundled (non-empty) so the Postgres
+        // migration path cannot silently omit the tree tables again.
+        assert!(!tree_store.up_sql.is_empty());
+        assert!(!tree_store.down_sql.is_empty());
+        assert!(tree_store.up_sql.contains("shardline_tree_entries"));
+        assert!(tree_store.up_sql.contains("shardline_revisions"));
+        assert!(tree_store.down_sql.contains("shardline_tree_entries"));
+        assert!(tree_store.down_sql.contains("shardline_revisions"));
     }
 
     #[test]
