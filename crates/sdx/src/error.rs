@@ -1,0 +1,192 @@
+use std::io;
+
+use thiserror::Error;
+
+/// Failure to parse a 64-character Xet CAS API hexadecimal hash string.
+#[derive(Debug, Clone, Error)]
+pub enum XetHashParseError {
+    /// The hash string did not contain exactly 64 hexadecimal characters.
+    #[error("hash must contain exactly 64 lowercase hexadecimal characters")]
+    InvalidLength,
+    /// The hash string contained a character outside lowercase hexadecimal, or hex decoding failed.
+    #[error("invalid hash character: {0}")]
+    InvalidCharacter(String),
+}
+
+/// Transport and protocol errors from the CAS read path (reconstruction and
+/// ranged xorb fetch).
+///
+/// HTTP status codes are mapped per the Xet protocol error semantics
+/// (`docs/PROTOCOL_CONFORMANCE.md` "Error Semantics"): 400 malformed input,
+/// 401 missing/invalid token, 403 valid token lacking scope, 404 missing
+/// file/xorb, 416 unsatisfiable range, 429 overload, 5xx server failure.
+#[derive(Debug, Error)]
+pub enum TransferError {
+    /// The server rejected the request as malformed (HTTP 400).
+    #[error("bad request (400): {0}")]
+    BadRequest(String),
+    /// The credential was missing or invalid (HTTP 401).
+    #[error("unauthorized (401): {0}")]
+    Unauthorized(String),
+    /// The credential is valid but lacks the required scope (HTTP 403).
+    #[error("forbidden (403): {0}")]
+    Forbidden(String),
+    /// The requested file, xorb, or chunk does not exist (HTTP 404).
+    #[error("not found (404): {0}")]
+    NotFound(String),
+    /// The requested byte range cannot be satisfied (HTTP 416).
+    #[error("range not satisfiable (416): {0}")]
+    RangeNotSatisfiable(String),
+    /// The server is rate limiting or overloaded (HTTP 429).
+    #[error("too many requests (429): {message}")]
+    TooManyRequests {
+        /// Error message from the response body, when present.
+        message: String,
+        /// `Retry-After` delta-seconds from the response, when present.
+        retry_after: Option<u64>,
+    },
+    /// Some other non-success status (including 5xx).
+    #[error("server returned HTTP {status}: {message}")]
+    HttpStatus {
+        /// The HTTP status code.
+        status: u16,
+        /// Error message from the response body, when present.
+        message: String,
+        /// `Retry-After` delta-seconds from the response, when present.
+        retry_after: Option<u64>,
+    },
+    /// Transport-level failure (connect, DNS, timeout, TLS, ...).
+    #[error("transport error: {0}")]
+    Transport(#[from] reqwest::Error),
+    /// The response was not a valid transfer response.
+    #[error("invalid transfer response: {0}")]
+    InvalidResponse(String),
+    /// A `multipart/byteranges` response could not be parsed.
+    #[error("malformed multipart/byteranges response: {0}")]
+    MalformedMultipart(String),
+    /// A token refresh requested after a 401/403 response failed.
+    #[error("token refresh failed after an auth failure: {0}")]
+    TokenRefresh(String),
+}
+
+impl TransferError {
+    /// Returns the `Retry-After` delay advertised by a 429/503/504 response, if
+    /// the server sent one (shardline sends `Retry-After: 1` on 503s).
+    #[must_use]
+    pub fn retry_after(&self) -> Option<std::time::Duration> {
+        let seconds = match self {
+            TransferError::TooManyRequests { retry_after, .. } => *retry_after,
+            TransferError::HttpStatus { retry_after, .. } => *retry_after,
+            TransferError::BadRequest(_)
+            | TransferError::Unauthorized(_)
+            | TransferError::Forbidden(_)
+            | TransferError::NotFound(_)
+            | TransferError::RangeNotSatisfiable(_)
+            | TransferError::Transport(_)
+            | TransferError::InvalidResponse(_)
+            | TransferError::MalformedMultipart(_)
+            | TransferError::TokenRefresh(_) => return None,
+        };
+        seconds.map(std::time::Duration::from_secs)
+    }
+}
+
+/// Top-level errors surfaced by the sdx client read path.
+#[derive(Debug, Error)]
+pub enum SdxError {
+    /// Token issuance / refresh failed.
+    #[error(transparent)]
+    Auth(#[from] crate::auth::AuthError),
+    /// A CAS transfer request failed.
+    #[error(transparent)]
+    Transfer(#[from] TransferError),
+    /// Serialized xorb bytes could not be decoded.
+    #[error(transparent)]
+    Xorb(#[from] crate::xorb::XorbError),
+    /// The file identifier was not valid 64-character lowercase hex.
+    #[error(transparent)]
+    Hash(#[from] XetHashParseError),
+    /// File I/O failed while writing a download.
+    #[error("I/O error: {0}")]
+    Io(#[from] io::Error),
+    /// The supplied byte range is inverted (`start > end`).
+    #[error("invalid byte range {start}..={end}: start exceeds end")]
+    InvalidByteRange {
+        /// Range start.
+        start: u64,
+        /// Range end.
+        end: u64,
+    },
+    /// The reconstruction response contained no terms.
+    #[error("reconstruction response for {file_id} contained no terms")]
+    EmptyReconstruction {
+        /// The requested file identifier.
+        file_id: String,
+    },
+    /// A term referenced a xorb with no matching fetch information.
+    #[error("reconstruction term {term_index} references xorb {hash} with no fetch information")]
+    MissingFetchInfo {
+        /// Index of the offending term.
+        term_index: usize,
+        /// Xorb hash the term referenced.
+        hash: String,
+    },
+    /// A term's decoded byte count disagreed with its declared unpacked length.
+    #[error(
+        "term {term_index} unpacked length mismatch: expected {expected} bytes, decoded {actual}"
+    )]
+    UnpackedLengthMismatch {
+        /// Index of the offending term.
+        term_index: usize,
+        /// The declared unpacked length.
+        expected: u64,
+        /// The number of bytes actually decoded.
+        actual: u64,
+    },
+    /// A fetched xorb range decoded to a different number of chunks than the
+    /// reconstruction declared.
+    #[error("xorb fetch {url} produced {actual} chunks but the reconstruction expected {expected}")]
+    FetchChunkCountMismatch {
+        /// The transfer URL that was fetched.
+        url: String,
+        /// The declared chunk count for the fetched range.
+        expected: u64,
+        /// The number of chunks actually decoded.
+        actual: u64,
+    },
+    /// The reconstructed range was shorter than requested (past end of file).
+    #[error("requested range {start}..={end} is past the end of the file")]
+    RangePastEnd {
+        /// Range start.
+        start: u64,
+        /// Range end.
+        end: u64,
+    },
+    /// An internal invariant of the streaming download pipeline was violated
+    /// (byte-range contiguity, data-size mismatch, writer channel closure, ...).
+    #[error("internal stream error: {0}")]
+    StreamInternal(String),
+    /// A background task spawned by the streaming pipeline (data fetch, writer
+    /// thread) failed to join or was aborted.
+    #[error("streaming background task failed: {0}")]
+    TaskJoin(String),
+    /// The `xet://` endpoint URL could not be mapped to an API base and repository identity.
+    #[error("invalid endpoint URL: {0}")]
+    InvalidEndpoint(String),
+    /// A serialized xorb could not be built (empty input, serialization failure).
+    #[error("xorb build failed: {0}")]
+    XorbBuild(String),
+    /// A serialized metadata shard could not be built or parsed.
+    #[error("shard build/parse failed: {0}")]
+    ShardParse(String),
+    /// The upload session received data after it was finalized, or was
+    /// finalized twice.
+    #[error("upload session {0}")]
+    UploadSession(String),
+    /// Creating a revision that already exists (HTTP 409 `RevisionConflict`).
+    #[error("revision already exists: {0}")]
+    RevisionExists(String),
+    /// A path-namespace or revision request failed to produce a valid response.
+    #[error("metadata operation failed: {0}")]
+    Metadata(String),
+}

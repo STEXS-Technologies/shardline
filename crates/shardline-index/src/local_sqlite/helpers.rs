@@ -223,6 +223,8 @@ fn is_valid_local_table_name(name: &str) -> bool {
             | "shardline_retention_holds"
             | "shardline_webhook_deliveries"
             | "shardline_provider_repository_states"
+            | "shardline_tree_entries"
+            | "shardline_revisions"
     )
 }
 
@@ -236,6 +238,8 @@ fn local_metadata_has_rows(connection: &Connection) -> Result<bool, LocalIndexSt
         "shardline_retention_holds",
         "shardline_webhook_deliveries",
         "shardline_provider_repository_states",
+        "shardline_tree_entries",
+        "shardline_revisions",
     ];
     for table in tables {
         if !is_valid_local_table_name(table) {
@@ -1404,6 +1408,8 @@ mod tests {
         assert!(is_valid_local_table_name(
             "shardline_provider_repository_states"
         ));
+        assert!(is_valid_local_table_name("shardline_tree_entries"));
+        assert!(is_valid_local_table_name("shardline_revisions"));
     }
 
     #[test]

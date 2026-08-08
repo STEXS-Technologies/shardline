@@ -30,6 +30,28 @@ pub fn render_completion(shell: CompletionShell) -> Result<String, CliArtifactEr
     Ok(String::from_utf8(output)?)
 }
 
+/// Render the `sdx` (xet file-management) manpage into one UTF-8 string.
+///
+/// # Errors
+///
+/// Returns [`CliArtifactError`] when the generated output cannot be rendered or encoded.
+pub fn render_xet_manpage() -> Result<String, CliArtifactError> {
+    let mut output = Vec::new();
+    write_xet_manpage(&mut output)?;
+    Ok(String::from_utf8(output)?)
+}
+
+/// Render the `sdx` (xet file-management) shell-completion script.
+///
+/// # Errors
+///
+/// Returns [`CliArtifactError`] when the generated output cannot be rendered or encoded.
+pub fn render_xet_completion(shell: CompletionShell) -> Result<String, CliArtifactError> {
+    let mut output = Vec::new();
+    write_xet_completion(&mut output, shell);
+    Ok(String::from_utf8(output)?)
+}
+
 /// Render the Shardline manpage into one UTF-8 string.
 ///
 /// # Errors
@@ -107,9 +129,77 @@ where
     Ok(())
 }
 
+/// Write the `sdx` shell-completion script to one output writer.
+pub fn write_xet_completion<W>(writer: &mut W, shell: CompletionShell)
+where
+    W: Write,
+{
+    let mut command = crate::xet::xet_cli_command();
+    let command_name = command.get_name().to_owned();
+    match shell {
+        CompletionShell::Bash => {
+            clap_complete::generate(
+                clap_complete::Shell::Bash,
+                &mut command,
+                command_name,
+                writer,
+            );
+        }
+        CompletionShell::Elvish => {
+            clap_complete::generate(
+                clap_complete::Shell::Elvish,
+                &mut command,
+                command_name,
+                writer,
+            );
+        }
+        CompletionShell::Fish => {
+            clap_complete::generate(
+                clap_complete::Shell::Fish,
+                &mut command,
+                command_name,
+                writer,
+            );
+        }
+        CompletionShell::PowerShell => {
+            clap_complete::generate(
+                clap_complete::Shell::PowerShell,
+                &mut command,
+                command_name,
+                writer,
+            );
+        }
+        CompletionShell::Zsh => {
+            clap_complete::generate(
+                clap_complete::Shell::Zsh,
+                &mut command,
+                command_name,
+                writer,
+            );
+        }
+    }
+}
+
+/// Write the `sdx` manpage to one output writer.
+///
+/// # Errors
+///
+/// Returns [`CliArtifactError`] when writing the generated manpage fails.
+pub fn write_xet_manpage<W>(writer: &mut W) -> Result<(), CliArtifactError>
+where
+    W: Write,
+{
+    let command = crate::xet::xet_cli_command();
+    Man::new(command).render(writer)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{CliArtifactError, render_completion, render_manpage, write_completion};
+    use super::{
+        CliArtifactError, render_completion, render_manpage, render_xet_completion,
+        render_xet_manpage, write_completion, write_xet_completion,
+    };
     use crate::command::CompletionShell;
 
     #[test]
@@ -125,6 +215,40 @@ mod tests {
         assert!(rendered.contains(".TH shardline"));
         assert!(rendered.contains("gc"));
         assert!(rendered.contains("bench"));
+    }
+
+    #[test]
+    fn xet_completion_mentions_sdx_and_commands() {
+        let rendered = render_xet_completion(CompletionShell::Bash).unwrap();
+        assert!(rendered.contains("sdx"));
+        assert!(rendered.contains("complete"));
+    }
+
+    #[test]
+    fn xet_manpage_mentions_file_commands() {
+        let rendered = render_xet_manpage().unwrap();
+        assert!(rendered.contains(".TH sdx"));
+        assert!(rendered.contains("cp"));
+        assert!(rendered.contains("branch"));
+    }
+
+    #[test]
+    fn xet_completion_writes_each_shell() {
+        for shell in [
+            CompletionShell::Bash,
+            CompletionShell::Elvish,
+            CompletionShell::Fish,
+            CompletionShell::PowerShell,
+            CompletionShell::Zsh,
+        ] {
+            let mut buf = Vec::new();
+            write_xet_completion(&mut buf, shell);
+            let output = String::from_utf8(buf).expect("completion output must be valid UTF-8");
+            assert!(
+                output.contains("sdx"),
+                "xet completion for {shell:?} should mention sdx"
+            );
+        }
     }
 
     // ── All completion shells via write_completion ─────────────────────────

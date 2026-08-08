@@ -19,6 +19,11 @@ mkdir -p "${out_dir}/${archive_root}"
 cp "target/${target}/release/${binary_name}" "${out_dir}/${archive_root}/"
 cp README.md LICENSE-MIT LICENSE-APACHE "${out_dir}/${archive_root}/"
 
+# `sdx` is a symlink to the shardline binary; the binary dispatches on argv[0].
+if [[ "${target}" != *windows* ]]; then
+  (cd "${out_dir}/${archive_root}" && ln -s "${binary_name}" sdx)
+fi
+
 if [[ "${target}" == *windows* ]]; then
   (
     cd "${out_dir}"

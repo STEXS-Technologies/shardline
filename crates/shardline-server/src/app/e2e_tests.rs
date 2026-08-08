@@ -2075,6 +2075,165 @@ async fn reconstruction_requires_auth() {
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn single_chunk_file_ingest_is_xorb_backed_and_reconstructs_byte_identical() {
+    let tmp = TempDir::new().unwrap();
+    let chunk_size = NonZeroUsize::new(128).unwrap();
+    let object_store = ServerObjectStore::local(tmp.path().join("chunks")).unwrap();
+    let local = LocalBackend::new_with_object_store_and_upload_parallelism_with_frontends(
+        tmp.path().to_path_buf(),
+        "http://127.0.0.1:8080".to_owned(),
+        chunk_size,
+        NonZeroUsize::new(64).unwrap(),
+        object_store.clone(),
+        &[ServerFrontend::Xet],
+    )
+    .await
+    .unwrap();
+    let upload_backend = local.clone();
+    let server_backend = ServerBackend::Local(local);
+
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        tmp.path().to_path_buf(),
+        chunk_size,
+    )
+    .with_server_role(ServerRole::All)
+    .with_server_frontends(vec![ServerFrontend::Xet])
+    .unwrap();
+
+    let state = Arc::new(AppState {
+        config,
+        role: ServerRole::All,
+        backend: server_backend.clone(),
+        auth: None,
+        provider_tokens: None,
+        reconstruction_cache: ReconstructionCacheService::disabled(),
+        transfer_limiter: TransferLimiter::new(chunk_size, NonZeroUsize::new(64).unwrap()),
+        oci_registry_token_limiter: Arc::new(tokio::sync::Semaphore::new(100)),
+        admission: crate::admission::WeightedAdmission::new(
+            std::num::NonZeroUsize::new(256).unwrap(),
+        ),
+        pools: crate::admission::ExecutionPools::default_sizes(),
+        protocol_metrics: ProtocolMetrics::default(),
+    });
+
+    let app = Router::new()
+        .route(
+            "/v1/reconstructions/{file_id}",
+            get(super::reconstruction_routes::reconstruction),
+        )
+        .route(
+            "/transfer/xorb/{prefix}/{hash}",
+            get(super::operational::read_xorb_transfer),
+        )
+        .route(
+            "/v1/chunks/default/{hash}",
+            get(super::operational::read_chunk),
+        )
+        .with_state(Arc::clone(&state));
+
+    // Upload a single-chunk file via the ingest path (CDC, 128-byte target).
+    let content = b"single-chunk-ingest-payload";
+    let file_id = "a".repeat(64);
+    let upload = upload_backend
+        .upload_file(&file_id, axum::body::Bytes::from_static(content), None)
+        .await
+        .unwrap();
+    assert_eq!(upload.chunks.len(), 1, "payload must be a single CDC chunk");
+    let chunk_hash = upload.chunks.first().unwrap().hash.clone();
+
+    // The stored record must reference the xorb, not the individual chunk.
+    let record = upload_backend
+        .file_record(&file_id, None, None)
+        .await
+        .unwrap();
+    let record_chunk = record.chunks.first().unwrap();
+    assert_eq!(record_chunk.range_start, 0);
+    assert_eq!(record_chunk.range_end, 1);
+    assert!(
+        record_chunk.packed_end > 0,
+        "xorb-backed chunks carry a packed length"
+    );
+    assert_ne!(
+        record_chunk.hash, chunk_hash,
+        "single-chunk record must point at the xorb hash, not the chunk hash"
+    );
+
+    // The server download stream returns byte-identical data.
+    use futures_util::StreamExt;
+    let mut stream =
+        crate::download_stream::file_record_byte_stream(object_store, record.clone(), None)
+            .await
+            .unwrap();
+    let mut downloaded = Vec::new();
+    while let Some(item) = stream.next().await {
+        downloaded.extend_from_slice(&item.unwrap());
+    }
+    assert_eq!(downloaded, content);
+
+    // The reconstruction fetch info references the stored xorb URL.
+    let recon = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v1/reconstructions/{file_id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(recon.status(), StatusCode::OK);
+    let json = body_json(recon).await;
+    let fetch_info = json
+        .get("fetch_info")
+        .and_then(Value::as_object)
+        .expect("fetch_info object");
+    assert_eq!(fetch_info.len(), 1, "single chunk yields one fetch entry");
+    let (fetch_hash, entries) = fetch_info.iter().next().unwrap();
+    assert_eq!(*fetch_hash, record_chunk.hash);
+    let entry = entries.as_array().unwrap().first().unwrap();
+    let url = entry.get("url").and_then(Value::as_str).unwrap();
+    assert_eq!(
+        url,
+        format!(
+            "http://127.0.0.1:8080/transfer/xorb/default/{}",
+            record_chunk.hash
+        )
+    );
+    let url_range = entry.get("url_range").unwrap();
+    let range_start = url_range.get("start").and_then(Value::as_u64).unwrap();
+    let range_end = url_range.get("end").and_then(Value::as_u64).unwrap();
+
+    // The transfer endpoint serves the xorb byte range with 206.
+    let transfer = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(url)
+                .header(header::RANGE, format!("bytes={range_start}-{range_end}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(transfer.status(), StatusCode::PARTIAL_CONTENT);
+
+    // The individual chunk object is still stored for the dedup path: the
+    // upload pipeline stores every chunk both standalone (under its chunk
+    // hash) and inside the xorb, so dedupe shards can reference it. The
+    // `/v1/chunks/default/{hash}` HTTP endpoint serves *dedupe shards*, which
+    // the server-side ingest path does not build; the standalone chunk read
+    // (`read_chunk`) is the direct proof that the individual-chunk storage
+    // path is intact for dedup.
+    let chunk_bytes = upload_backend.read_chunk(&chunk_hash).await.unwrap();
+    let decompressed = lz4_flex::decompress_size_prepended(&chunk_bytes).unwrap();
+    assert_eq!(decompressed.as_slice(), content);
+}
+
 // ============================================================================
 // Admission Control E2E Test
 // ============================================================================
@@ -6949,7 +7108,8 @@ async fn lfs_verify_detects_corrupted_storage() {
         .unwrap();
     assert_eq!(verify_ok.status(), StatusCode::OK);
 
-    // Find and corrupt the authoritative stored chunk on disk.
+    // The standalone chunk is still stored alongside the xorb (the dedup
+    // path reads chunks by their data hash).
     let chunk_hash =
         shardline_index::xet_hash_hex_string(crate::local_backend::chunk_hash(content));
     let stored_path = tmp
@@ -6963,11 +7123,31 @@ async fn lfs_verify_detects_corrupted_storage() {
         stored_path
     );
 
+    // Single-chunk objects are xorb-backed on ingest, so the verify path reads
+    // the stored xorb object (not the standalone chunk). Corrupt the xorb the
+    // record references — the same xorb the ingest path produced.
+    let packed =
+        crate::upload_ingest::xorb_packer::pack_chunks_into_xorb(&[(content.to_vec(), 0u64)])
+            .unwrap();
+    let xorb_hash = packed.xorb_hash_hex;
+    let xorb_path = tmp
+        .path()
+        .join("chunks")
+        .join("xorbs")
+        .join("default")
+        .join(&xorb_hash[..2])
+        .join(format!("{xorb_hash}.xorb"));
+    assert!(
+        xorb_path.exists(),
+        "stored xorb should exist at {:?}",
+        xorb_path
+    );
+
     // Truncate to change content — verify will read truncated bytes and compute wrong hash
     let file = std::fs::OpenOptions::new()
         .write(true)
         .truncate(true)
-        .open(&stored_path)
+        .open(&xorb_path)
         .unwrap();
     file.set_len(3).unwrap(); // only keep first 3 bytes
     drop(file);
