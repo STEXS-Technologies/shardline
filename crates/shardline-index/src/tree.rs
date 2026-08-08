@@ -215,3 +215,114 @@ pub trait TreeStore: Send + Sync {
     /// Returns the adapter error when deletion fails.
     async fn delete_revision(&self, key: &RepoKey, rev: &str) -> Result<u64, Self::Error>;
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::unwrap_in_result,
+        clippy::arithmetic_side_effects,
+        clippy::option_if_let_else,
+        clippy::unreachable,
+        clippy::shadow_unrelated,
+        clippy::let_underscore_must_use
+    )]
+    use shardline_protocol::{RepositoryProvider, RepositoryScope};
+
+    use super::{RepoKey, RevisionRecord, TreeEntry, TreeEntryOutcome, TreeKey};
+
+    #[test]
+    fn repo_key_new_and_fields() {
+        let key = RepoKey::new("github", "owner", "repo");
+        assert_eq!(key.provider, "github");
+        assert_eq!(key.owner, "owner");
+        assert_eq!(key.repo, "repo");
+        assert_eq!(key, RepoKey::new("github", "owner", "repo"));
+    }
+
+    #[test]
+    fn repo_key_from_scope_drops_revision() {
+        let scope =
+            RepositoryScope::new(RepositoryProvider::GitLab, "team", "assets", Some("main"))
+                .unwrap();
+        let key = RepoKey::from_scope(&scope);
+        assert_eq!(key.provider, "gitlab");
+        assert_eq!(key.owner, "team");
+        assert_eq!(key.repo, "assets");
+        // Revision is dropped — RepoKey carries no revision.
+        let key2 = RepoKey::new("gitlab", "team", "assets");
+        assert_eq!(key, key2);
+    }
+
+    #[test]
+    fn tree_key_new_and_fields() {
+        let key = TreeKey::new("github", "owner", "repo", "main");
+        assert_eq!(key.revision, "main");
+        assert_eq!(key, TreeKey::new("github", "owner", "repo", "main"));
+        assert_ne!(key, TreeKey::new("github", "owner", "repo", "feature"));
+    }
+
+    #[test]
+    fn tree_key_from_scope_with_revision() {
+        let scope =
+            RepositoryScope::new(RepositoryProvider::GitHub, "owner", "repo", Some("feature"))
+                .unwrap();
+        let key = TreeKey::from_scope(&scope).expect("scope has revision");
+        assert_eq!(key, TreeKey::new("github", "owner", "repo", "feature"));
+    }
+
+    #[test]
+    fn tree_key_from_scope_without_revision_returns_none() {
+        let scope =
+            RepositoryScope::new(RepositoryProvider::GitHub, "owner", "repo", None).unwrap();
+        assert!(TreeKey::from_scope(&scope).is_none());
+    }
+
+    #[test]
+    fn tree_entry_equality_and_fields() {
+        let entry = TreeEntry {
+            provider: "github".to_owned(),
+            owner: "owner".to_owned(),
+            repo: "repo".to_owned(),
+            revision: "main".to_owned(),
+            path: "data/model.pt".to_owned(),
+            file_id: "ab".repeat(32),
+            size_bytes: 123,
+            updated_at_unix_seconds: 1000,
+        };
+        assert_eq!(entry.path, "data/model.pt");
+        assert_eq!(entry.size_bytes, 123);
+        assert_eq!(entry.updated_at_unix_seconds, 1000);
+        let same = TreeEntry { ..entry.clone() };
+        assert_eq!(entry, same);
+    }
+
+    #[test]
+    fn tree_entry_outcome_created_flag() {
+        assert!(TreeEntryOutcome { created: true }.created);
+        assert!(!TreeEntryOutcome { created: false }.created);
+    }
+
+    #[test]
+    fn revision_record_fields_and_equality() {
+        let record = RevisionRecord {
+            provider: "github".to_owned(),
+            owner: "owner".to_owned(),
+            repo: "repo".to_owned(),
+            revision: "main".to_owned(),
+            created_at_unix_seconds: 1,
+            updated_at_unix_seconds: 2,
+        };
+        assert_eq!(record.revision, "main");
+        assert_eq!(record.created_at_unix_seconds, 1);
+        assert_eq!(record, record.clone());
+        let other = RevisionRecord {
+            revision: "feature".to_owned(),
+            ..record.clone()
+        };
+        assert_ne!(record, other);
+    }
+}
