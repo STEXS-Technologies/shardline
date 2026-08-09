@@ -46,6 +46,7 @@ jobs:
         shardline-oci-adapter
         shardline-protocol-adapters
         shardline-xet-adapter
+        sdx
         shardline-provider-events
         shardline-hub-api
         shardline-fsck
