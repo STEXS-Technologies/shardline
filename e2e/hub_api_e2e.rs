@@ -33,6 +33,12 @@ impl ServerGuard {
     fn token(&self) -> &str {
         &self.token
     }
+    /// Returns a Write-scoped token bound to an arbitrary `owner/name` repo, for
+    /// use with repo-scoped Hub-API routes whose `{ns}/{repo}` must match the
+    /// token's `RepositoryScope` (`require_repository_binding`).
+    fn token_for(&self, owner: &str, name: &str) -> String {
+        mint_token_for(owner, name, shardline_protocol::TokenScope::Write).unwrap()
+    }
 }
 
 impl Drop for ServerGuard {
@@ -84,12 +90,26 @@ fn write_provider_config(
 
 /// Mint a token scoped to the default test repository with the given scope.
 fn mint_token(scope: shardline_protocol::TokenScope) -> Result<String, Box<dyn std::error::Error>> {
+    mint_token_for("test-owner", "test-model", scope)
+}
+
+/// Mint a token scoped to an arbitrary `owner/name` repository.
+///
+/// The security fix (`5a0df2f`) made every repo-scoped Hub-API route enforce
+/// `require_repository_binding`: the token's `RepositoryScope` must exactly
+/// match the `{ns}/{repo}` in the URL path. Tests must therefore present a
+/// token scoped to the specific repo they create/access.
+fn mint_token_for(
+    owner: &str,
+    name: &str,
+    scope: shardline_protocol::TokenScope,
+) -> Result<String, Box<dyn std::error::Error>> {
     bearer_token(
         "test-subject",
         scope,
         shardline_protocol::RepositoryProvider::GitHub,
-        "test-owner",
-        "test-repo",
+        owner,
+        name,
         Some("main"),
     )
 }
@@ -130,11 +150,20 @@ fn mint_token_with_key(
     signing_key: &[u8],
     scope: shardline_protocol::TokenScope,
 ) -> Result<String, Box<dyn std::error::Error>> {
+    mint_token_with_key_for(signing_key, "test-owner", "test-model", scope)
+}
+
+fn mint_token_with_key_for(
+    signing_key: &[u8],
+    owner: &str,
+    name: &str,
+    scope: shardline_protocol::TokenScope,
+) -> Result<String, Box<dyn std::error::Error>> {
     let signer = shardline_protocol::TokenSigner::new(signing_key)?;
     let repository = shardline_protocol::RepositoryScope::new(
         shardline_protocol::RepositoryProvider::GitHub,
-        "test-owner",
-        "test-repo",
+        owner,
+        name,
         Some("main"),
     )?;
     let claims =
@@ -326,7 +355,8 @@ async fn whoami_rejects_missing_token_when_auth_is_configured() {
 async fn repo_create_model_returns_201() {
     let srv = start_hub_server().await;
     let base_url = srv.base_url();
-    let token = srv.token();
+    // Token must be scoped to the exact repo being created.
+    let token = srv.token_for("test-owner", "new-model");
     let client = Client::new();
     let resp = client
         .post(format!("{base_url}/api/repos/create"))
@@ -354,7 +384,8 @@ async fn repo_create_model_returns_201() {
 async fn repo_create_dataset_returns_201() {
     let srv = start_hub_server().await;
     let base_url = srv.base_url();
-    let token = srv.token();
+    // Token must be scoped to the exact repo being created.
+    let token = srv.token_for("test-owner", "new-dataset");
     let client = Client::new();
     let resp = client
         .post(format!("{base_url}/api/repos/create"))
@@ -381,7 +412,8 @@ async fn repo_create_dataset_returns_201() {
 async fn repo_create_duplicate_returns_conflict_with_native_huggingface_url() {
     let srv = start_hub_server().await;
     let base_url = srv.base_url();
-    let token = srv.token();
+    // Token must be scoped to the exact repo being created.
+    let token = srv.token_for("test-owner", "dupe-repo");
     let client = Client::new();
     let payload = serde_json::json!({
         "name": "test-owner/dupe-repo",
@@ -446,17 +478,19 @@ async fn repo_list_returns_created_repos() {
     let token = srv.token();
     let client = Client::new();
 
-    // Create two repos
-    for name in ["test-owner/list-model", "test-owner/list-dataset"] {
+    // Create two repos, each with a token scoped to that exact repo.
+    for full in ["test-owner/list-model", "test-owner/list-dataset"] {
+        let (owner, name) = full.split_once('/').expect("repo id has a slash");
         let typ = if name.contains("model") {
             "model"
         } else {
             "dataset"
         };
+        let repo_token = srv.token_for(owner, name);
         client
             .post(format!("{base_url}/api/repos/create"))
-            .header("Authorization", format!("Bearer {token}"))
-            .json(&serde_json::json!({"name": name, "type": typ, "private": false}))
+            .header("Authorization", format!("Bearer {repo_token}"))
+            .json(&serde_json::json!({"name": full, "type": typ, "private": false}))
             .send()
             .await
             .unwrap();
@@ -507,9 +541,11 @@ async fn repo_search_finds_matching_repos() {
     let token = srv.token();
     let client = Client::new();
 
+    // Token must be scoped to the exact repo being created.
+    let create_token = srv.token_for("test-owner", "alpha-search");
     client
         .post(format!("{base_url}/api/repos/create"))
-        .header("Authorization", format!("Bearer {token}"))
+        .header("Authorization", format!("Bearer {create_token}"))
         .json(&serde_json::json!({"name": "test-owner/alpha-search", "type": "model", "private": false}))
         .send()
         .await
@@ -594,7 +630,9 @@ async fn repo_info_returns_model_info() {
 async fn repo_info_nonexistent_returns_404() {
     let srv = start_hub_server().await;
     let base_url = srv.base_url();
-    let token = srv.token();
+    // Token scoped to the exact (non-existent) repo so binding passes and the
+    // repo-not-found 404 is returned (a mismatched scope would 403 instead).
+    let token = srv.token_for("test-owner", "nonexistent");
     let client = Client::new();
     let resp = client
         .get(format!("{base_url}/api/models/test-owner/nonexistent"))
@@ -613,7 +651,9 @@ async fn repo_info_nonexistent_returns_404() {
 async fn modelcard_nonexistent_repo_returns_404() {
     let srv = start_hub_server().await;
     let base_url = srv.base_url();
-    let token = srv.token();
+    // Token scoped to the exact (non-existent) repo so binding passes and the
+    // repo-not-found 404 is returned (a mismatched scope would 403 instead).
+    let token = srv.token_for("test-owner", "no-such-model");
     let client = Client::new();
     let resp = client
         .get(format!(
@@ -774,7 +814,9 @@ async fn revisions_after_commit_contains_main() {
 async fn revisions_nonexistent_repo_returns_404() {
     let srv = start_hub_server().await;
     let base_url = srv.base_url();
-    let token = srv.token();
+    // Token scoped to the exact (non-existent) repo so binding passes and the
+    // repo-not-found 404 is returned (a mismatched scope would 403 instead).
+    let token = srv.token_for("test-owner", "nonexistent");
     let client = Client::new();
     let resp = client
         .get(format!(
@@ -1195,8 +1237,14 @@ async fn hub_signing_key_rotation_revokes_old_tokens_without_losing_metadata() {
     const NEW_KEY: &[u8] = b"new-test-signing-key-32-bytes-long!!";
 
     let storage = tempfile::tempdir().unwrap();
-    let old_write_token =
-        mint_token_with_key(OLD_KEY, shardline_protocol::TokenScope::Write).unwrap();
+    // Token must be scoped to the exact repo being created.
+    let old_write_token = mint_token_with_key_for(
+        OLD_KEY,
+        "test-owner",
+        "rotated-key-model",
+        shardline_protocol::TokenScope::Write,
+    )
+    .unwrap();
     let (old_base_url, old_server) = start_hub_server_with_signing_key(storage.path(), OLD_KEY)
         .await
         .unwrap();
@@ -1737,7 +1785,9 @@ async fn repo_delete_removes_repo() {
 async fn repo_delete_nonexistent_returns_404() {
     let srv = start_hub_server().await;
     let base_url = srv.base_url();
-    let token = srv.token();
+    // Token scoped to the exact (non-existent) repo so binding passes and the
+    // repo-not-found 404 is returned (a mismatched scope would 403 instead).
+    let token = srv.token_for("test-owner", "nonexistent");
     let client = Client::new();
     let resp = client
         .delete(format!("{base_url}/api/models/test-owner/nonexistent"))
@@ -2662,12 +2712,14 @@ async fn hub_search_after_delete_returns_empty() {
     let srv = start_hub_server().await;
     let base_url = srv.base_url();
     let token = srv.token();
+    // Token scoped to the exact repo being created/deleted.
+    let delete_me_token = srv.token_for("test-owner", "zzz-delete-me");
 
     // Create a repo with a unique name for search.
     let client = Client::new();
     client
         .post(format!("{base_url}/api/repos/create"))
-        .header("Authorization", format!("Bearer {token}"))
+        .header("Authorization", format!("Bearer {delete_me_token}"))
         .json(&serde_json::json!({
             "name": "test-owner/zzz-delete-me",
             "type": "model",
@@ -2699,7 +2751,7 @@ async fn hub_search_after_delete_returns_empty() {
     // Delete the repo.
     let resp = client
         .delete(format!("{base_url}/api/models/test-owner/zzz-delete-me"))
-        .header("Authorization", format!("Bearer {token}"))
+        .header("Authorization", format!("Bearer {delete_me_token}"))
         .send()
         .await
         .unwrap();
@@ -3109,10 +3161,11 @@ async fn create_dataset_with_jsonl(base_url: &str, token: &str, jsonl_content: &
 async fn hub_dataset_parquet_returns_file_list() {
     let srv = start_hub_server().await;
     let base_url = srv.base_url();
-    let token = srv.token();
+    // Token must be scoped to the exact dataset repo being created/accessed.
+    let token = srv.token_for("test-owner", "test-dataset");
 
     let jsonl = b"{\"text\":\"hello\",\"label\":0}\n{\"text\":\"world\",\"label\":1}\n";
-    create_dataset_with_jsonl(base_url, token, jsonl).await;
+    create_dataset_with_jsonl(base_url, &token, jsonl).await;
 
     let client = Client::new();
     let resp = client
@@ -3151,10 +3204,11 @@ async fn hub_dataset_parquet_returns_file_list() {
 async fn hub_dataset_first_rows_returns_columns_and_rows() {
     let srv = start_hub_server().await;
     let base_url = srv.base_url();
-    let token = srv.token();
+    // Token must be scoped to the exact dataset repo being created/accessed.
+    let token = srv.token_for("test-owner", "test-dataset");
 
     let jsonl = b"{\"text\":\"hello\",\"label\":0}\n{\"text\":\"world\",\"label\":1}\n";
-    create_dataset_with_jsonl(base_url, token, jsonl).await;
+    create_dataset_with_jsonl(base_url, &token, jsonl).await;
 
     let client = Client::new();
     let resp = client
@@ -3189,14 +3243,15 @@ async fn hub_dataset_first_rows_returns_columns_and_rows() {
 async fn hub_dataset_viewer_returns_paginated_rows() {
     let srv = start_hub_server().await;
     let base_url = srv.base_url();
-    let token = srv.token();
+    // Token must be scoped to the exact dataset repo being created/accessed.
+    let token = srv.token_for("test-owner", "test-dataset");
 
     // Create a dataset with enough rows to test pagination
     let mut jsonl = String::new();
     for i in 0..20 {
         jsonl.push_str(&format!("{{\"text\":\"row-{i}\",\"id\":{i}}}\n"));
     }
-    create_dataset_with_jsonl(base_url, token, jsonl.as_bytes()).await;
+    create_dataset_with_jsonl(base_url, &token, jsonl.as_bytes()).await;
 
     let client = Client::new();
 

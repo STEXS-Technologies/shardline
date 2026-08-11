@@ -74,6 +74,21 @@ async fn ensure_pg() -> &'static str {
 
 const TEST_SIGNING_KEY: &[u8] = b"0123456789abcdef0123456789abcdef";
 
+/// Mint a Write-scoped bearer token bound to an arbitrary `owner/name` repo.
+///
+/// Since the security fix (`5a0df2f`) every repo-scoped Hub-API route enforces
+/// `require_repository_binding`, so tests must present a token whose
+/// `RepositoryScope` exactly matches the `{ns}/{repo}` they operate on.
+/// This is the repo-scoped counterpart to the harness's generic
+/// `auth_header()` (which is fixed to `test/test`).
+fn mint_token_for(owner: &str, name: &str) -> String {
+    let provider = LocalHmacProvider::new(TEST_SIGNING_KEY).unwrap();
+    let repo =
+        RepositoryScope::new(RepositoryProvider::Generic, owner, name, Some("main")).unwrap();
+    let claims = TokenClaims::new("shardline", owner, TokenScope::Write, repo, u64::MAX).unwrap();
+    provider.mint_token(&claims).unwrap()
+}
+
 struct TestServer {
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
     base_url: String,
@@ -151,6 +166,13 @@ impl TestServer {
 
     fn auth_header(&self) -> &str {
         &self.token
+    }
+
+    /// Returns a bearer token scoped to an arbitrary `owner/name` repo, for use
+    /// with repo-scoped Hub-API routes whose `{ns}/{repo}` must match the
+    /// token's `RepositoryScope`.
+    fn auth_header_for(&self, owner: &str, name: &str) -> String {
+        mint_token_for(owner, name)
     }
 }
 
@@ -1575,11 +1597,11 @@ async fn test_reconstruction_cache_hit() {
 async fn test_hub_create_same_repo_twice_returns_409() {
     let server = TestServer::start(&[ServerFrontend::Hub]).await;
     let client = reqwest::Client::new();
-    let auth = || format!("Bearer {}", server.auth_header());
 
     let ns = "pg-conflict-team";
     let name = "pg-conflict-model";
     let model_path = format!("{ns}/{name}");
+    let auth = || format!("Bearer {}", server.auth_header_for(ns, name));
 
     // First create — should succeed.
     let create1 = client
@@ -2048,11 +2070,11 @@ async fn test_lfs_batch_with_large_size() {
 async fn test_hub_create_dataset_repo() {
     let server = TestServer::start(&[ServerFrontend::Hub]).await;
     let client = reqwest::Client::new();
-    let auth = || format!("Bearer {}", server.auth_header());
 
     let ns = "ds-team";
     let name = "ds-repo";
     let ds_path = format!("{ns}/{name}");
+    let auth = || format!("Bearer {}", server.auth_header_for(ns, name));
 
     let create_resp = client
         .post(server.url("/api/repos/create"))
@@ -2081,11 +2103,11 @@ async fn test_hub_create_dataset_repo() {
 async fn test_hub_create_space_repo() {
     let server = TestServer::start(&[ServerFrontend::Hub]).await;
     let client = reqwest::Client::new();
-    let auth = || format!("Bearer {}", server.auth_header());
 
     let ns = "space-team";
     let name = "space-app";
     let sp_path = format!("{ns}/{name}");
+    let auth = || format!("Bearer {}", server.auth_header_for(ns, name));
 
     let create_resp = client
         .post(server.url("/api/repos/create"))
@@ -2114,11 +2136,11 @@ async fn test_hub_create_space_repo() {
 async fn test_hub_revisions_list_json_array() {
     let server = TestServer::start(&[ServerFrontend::Hub]).await;
     let client = reqwest::Client::new();
-    let auth = || format!("Bearer {}", server.auth_header());
 
     let ns = "rev-team";
     let name = "rev-model";
     let path = format!("{ns}/{name}");
+    let auth = || format!("Bearer {}", server.auth_header_for(ns, name));
 
     // Create repo
     client
@@ -2294,11 +2316,11 @@ async fn test_bazel_cas_content_hash_mismatch() {
 async fn test_hub_create_repo_and_commit() {
     let server = TestServer::start(&[ServerFrontend::Hub]).await;
     let client = reqwest::Client::new();
-    let auth = || format!("Bearer {}", server.auth_header());
 
     let ns = "e2e-team";
     let name = "e2e-model";
     let model_path = format!("{ns}/{name}");
+    let auth = || format!("Bearer {}", server.auth_header_for(ns, name));
 
     // Create a model repo
     let create_resp = client
@@ -2414,11 +2436,11 @@ async fn test_hub_upload_lfs_and_batch() {
 async fn test_hub_modelcard() {
     let server = TestServer::start(&[ServerFrontend::Hub]).await;
     let client = reqwest::Client::new();
-    let auth = || format!("Bearer {}", server.auth_header());
 
     let ns = "card-team";
     let name = "card-model";
     let model_path = format!("{ns}/{name}");
+    let auth = || format!("Bearer {}", server.auth_header_for(ns, name));
 
     // Create a model repo
     let create_resp = client
@@ -3046,7 +3068,15 @@ async fn test_cross_lfs_to_oci_blob() {
 async fn test_cross_hub_lfs_to_v1_lfs() {
     let server = TestServer::start(&[ServerFrontend::Hub, ServerFrontend::Lfs]).await;
     let client = reqwest::Client::new();
-    let auth = || format!("Bearer {}", server.auth_header());
+
+    // Hub LFS keys are namespaced by the token's repository scope, so both the
+    // Hub PUT and GET must use a token bound to the same repo for the keys to
+    // line up. The V1 LFS read uses a different scope, keeping the namespaces
+    // distinct so the cross-protocol read returns 404.
+    let ns = "lfs-cross-team";
+    let name = "lfs-cross-repo";
+    let hub_auth = || format!("Bearer {}", server.auth_header_for(ns, name));
+    let v1_auth = || format!("Bearer {}", server.auth_header());
 
     let content = b"hub-lfs-to-v1-cross-pg";
     let oid = sha256_hex(content);
@@ -3054,7 +3084,7 @@ async fn test_cross_hub_lfs_to_v1_lfs() {
     // Upload via Hub's /lfs/objects/{oid}
     let put_resp = client
         .put(server.url(&format!("/lfs/objects/{oid}")))
-        .header("Authorization", auth())
+        .header("Authorization", hub_auth())
         .header("Content-Type", "application/octet-stream")
         .body(content.to_vec())
         .send()
@@ -3070,7 +3100,7 @@ async fn test_cross_hub_lfs_to_v1_lfs() {
     // Verify same-protocol read via Hub LFS works
     let hub_get = client
         .get(server.url(&format!("/lfs/objects/{oid}")))
-        .header("Authorization", auth())
+        .header("Authorization", hub_auth())
         .send()
         .await
         .unwrap();
@@ -3084,7 +3114,7 @@ async fn test_cross_hub_lfs_to_v1_lfs() {
     // Cross-protocol read via V1 LFS — different storage backend → 404
     let v1_get = client
         .get(server.url(&format!("/v1/lfs/objects/{oid}")))
-        .header("Authorization", auth())
+        .header("Authorization", v1_auth())
         .send()
         .await
         .unwrap();
@@ -3221,7 +3251,10 @@ async fn test_413_payload_too_large_bazel() {
 async fn test_413_payload_too_large_hub_commit() {
     // Hub routes have their own 64MB body limit (hardcoded in hub_routes).
     // Verifying the endpoint works — create repo and send valid commit.
-    let (app, token) = app_with_body_limit(&[ServerFrontend::Hub], 1024).await;
+    let (app, _) = app_with_body_limit(&[ServerFrontend::Hub], 1024).await;
+    // Create + commit target `pg-413-team/pg-413-model`, so present a token
+    // scoped to that exact repo (repo-scoped binding is enforced on create).
+    let token = mint_token_for("pg-413-team", "pg-413-model");
 
     // Create a repo
     let create_body = serde_json::json!({
@@ -3384,13 +3417,13 @@ async fn test_very_long_url_path_does_not_crash() {
 async fn test_concurrent_hub_commit_and_read() {
     let server = TestServer::start(&[ServerFrontend::Hub]).await;
     let client = reqwest::Client::new();
-    let auth = || format!("Bearer {}", server.auth_header());
     let base_url = server.base_url.clone();
 
     // Create a repo
     let ns = "concurrent-team-pg";
     let name = "concurrent-model-pg";
     let model_path = format!("{ns}/{name}");
+    let auth = || format!("Bearer {}", server.auth_header_for(ns, name));
 
     let create_resp = client
         .post(format!("{base_url}/api/repos/create"))
@@ -3418,7 +3451,7 @@ async fn test_concurrent_hub_commit_and_read() {
 
     let commit_url = format!("{base_url}/api/models/{ns}/{name}/commit/main");
     let revisions_url = format!("{base_url}/api/models/{ns}/{name}/revisions");
-    let token = server.auth_header().to_owned();
+    let token = server.auth_header_for(ns, name);
 
     let (r1, r2) = tokio::join!(
         async {
@@ -3561,11 +3594,11 @@ async fn test_hub_whoami_with_auth() {
 async fn test_hub_commit_with_auth() {
     let server = TestServer::start(&[ServerFrontend::Hub]).await;
     let client = reqwest::Client::new();
-    let auth = || format!("Bearer {}", server.auth_header());
 
     let ns = "hub-auth-team-pg";
     let name = "hub-auth-model-pg";
     let model_path = format!("{ns}/{name}");
+    let auth = || format!("Bearer {}", server.auth_header_for(ns, name));
 
     // Create a model repo (requires Write scope)
     let create_resp = client
@@ -3610,12 +3643,12 @@ async fn test_hub_commit_with_auth() {
 async fn test_hub_xet_read_token_with_auth() {
     let server = TestServer::start(&[ServerFrontend::Hub]).await;
     let client = reqwest::Client::new();
-    let auth = || format!("Bearer {}", server.auth_header());
 
     // Create a repo first
     let ns = "read-token-auth-pg";
     let name = "read-token-auth-repo";
     let model_path = format!("{ns}/{name}");
+    let auth = || format!("Bearer {}", server.auth_header_for(ns, name));
 
     let create_resp = client
         .post(server.url("/api/repos/create"))
@@ -3654,12 +3687,12 @@ async fn test_hub_xet_read_token_with_auth() {
 async fn test_hub_xet_write_token_with_auth() {
     let server = TestServer::start(&[ServerFrontend::Hub]).await;
     let client = reqwest::Client::new();
-    let auth = || format!("Bearer {}", server.auth_header());
 
     // Create a repo first
     let ns = "write-token-auth-pg";
     let name = "write-token-auth-repo";
     let model_path = format!("{ns}/{name}");
+    let auth = || format!("Bearer {}", server.auth_header_for(ns, name));
 
     let create_resp = client
         .post(server.url("/api/repos/create"))
@@ -4082,11 +4115,11 @@ async fn test_concurrent_hub_repo_creation() {
     let server = TestServer::start(&[ServerFrontend::Hub]).await;
     let _client = reqwest::Client::new();
     let base_url = server.base_url.clone();
-    let token = server.auth_header().to_owned();
 
     let ns = "concurrent-create-pg";
     let name = "concurrent-create-repo";
     let model_path = format!("{ns}/{name}");
+    let token = server.auth_header_for(ns, name);
 
     // 5 concurrent POST /api/repos/create with the same name
     let mut handles = Vec::new();

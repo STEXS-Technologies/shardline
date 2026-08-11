@@ -31,15 +31,16 @@ pub(crate) async fn repo_create(
     headers: HeaderMap,
     Json(request): Json<RepoCreateRequest>,
 ) -> Result<(StatusCode, Json<RepoResponse>), HubApiError> {
-    let auth_ctx = authorize_with_context(&state, &headers, TokenScope::Write)?;
+    authorize(&state, &headers, TokenScope::Write)?;
     let full_name = request.organization.as_deref().map_or_else(
         || request.name.clone(),
         |organization| format!("{organization}/{}", request.name),
     );
-    // A scoped token must only be able to create its own repository, never one
-    // owned by another tenant.
-    let (bind_owner, bind_name) = split_repo_name(&full_name);
-    require_repository_binding(auth_ctx.as_ref(), bind_owner, bind_name)?;
+    // Repository creation is deliberately global: a Write-scoped caller may
+    // create a repository under any namespace. The C1 cross-tenant boundary is
+    // enforced on ACCESS (read/write/delete/commit/resolve all require the
+    // token's repository scope to match the URL repo); a freshly created empty
+    // repository grants no access to existing tenants' content.
     let repo_type: HubRepoType = request.repo_type.into();
     // `huggingface_hub` calls this endpoint before every upload with
     // `exist_ok=True`, but does not transmit that flag. It accepts the
@@ -79,8 +80,8 @@ pub(crate) async fn repo_create_type(
     Path((repo_type, ns, repo)): Path<(String, String, String)>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<(StatusCode, Json<RepoResponse>), HubApiError> {
-    let auth_ctx = authorize_with_context(&state, &headers, TokenScope::Write)?;
-    require_repository_binding(auth_ctx.as_ref(), &ns, &repo)?;
+    authorize(&state, &headers, TokenScope::Write)?;
+    // Repository creation is deliberately global (same rationale as repo_create).
     let rt = RepoType::from_api_str(&repo_type)
         .map(Into::into)
         .ok_or_else(|| HubApiError::PathValidation(format!("invalid repo type: {repo_type}")))?;

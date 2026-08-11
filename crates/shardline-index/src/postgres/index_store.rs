@@ -1166,6 +1166,15 @@ mod tests {
             eprintln!("skipping: no DATABASE_URL");
             return;
         };
+        // Robust against a persistent Postgres: a previous run may have left
+        // this fixed-id intent in a terminal state, which would make the forward
+        // transition chain below fail. Clean the row so the test starts fresh
+        // (CI's ephemeral database does not surface this).
+        sqlx::query("DELETE FROM shardline_upload_intents WHERE intent_id = $1")
+            .bind("test-intent-transition")
+            .execute(&pool)
+            .await
+            .expect("clean leftover intent");
         let store = make_pg_store(pool);
         let intent = UploadIntent::new(
             "test-intent-transition".into(),
