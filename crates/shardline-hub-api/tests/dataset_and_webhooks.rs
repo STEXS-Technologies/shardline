@@ -97,7 +97,7 @@ async fn dataset_first_rows_returns_jsonl_data() {
     }];
     store.store_files("commit_jsonl", &files).unwrap();
     // Pre-populate ObjectStore
-    let key = ObjectKey::parse("lfs/sha_jsonl").unwrap();
+    let key = ObjectKey::parse("protocols/lfs/global/objects/sha_jsonl").unwrap();
     let body = ObjectBody::from_slice(jsonl_content.as_bytes());
     let integrity = ObjectIntegrity::new(
         shardline_protocol::ShardlineHash::from_bytes(
@@ -152,7 +152,7 @@ async fn dataset_first_rows_returns_csv_data() {
     }];
     store.store_files("commit_csv", &files).unwrap();
     // Pre-populate ObjectStore
-    let key = ObjectKey::parse("lfs/sha_csv2").unwrap();
+    let key = ObjectKey::parse("protocols/lfs/global/objects/sha_csv2").unwrap();
     let body = ObjectBody::from_slice(csv_content.as_bytes());
     let integrity = ObjectIntegrity::new(
         shardline_protocol::ShardlineHash::from_bytes(
@@ -210,7 +210,7 @@ async fn dataset_viewer_returns_paginated_rows() {
     }];
     store.store_files("commit_paginated", &files).unwrap();
     // Pre-populate ObjectStore
-    let key = ObjectKey::parse("lfs/sha_paginated").unwrap();
+    let key = ObjectKey::parse("protocols/lfs/global/objects/sha_paginated").unwrap();
     let body = ObjectBody::from_slice(&jsonl_bytes);
     let integrity = ObjectIntegrity::new(
         shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(&jsonl_bytes).as_bytes()),

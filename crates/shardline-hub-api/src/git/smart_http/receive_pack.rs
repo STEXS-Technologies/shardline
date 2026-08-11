@@ -12,13 +12,18 @@ use super::super::pack::{GitObject, ObjectType};
 use super::super::pktline::{self, FLUSH};
 use super::error::SmartHttpError;
 use super::pack_parse::parse_pack_data;
-use super::ref_advertisement::{authorize_write, is_valid_refname, resolve_repo_id};
+use super::ref_advertisement::{
+    authorize_write_with_context, is_valid_refname, resolve_repo_id,
+};
 use super::tree_walk::{parse_commit_object, walk_git_tree};
 use super::upload_pack::build_lfs_pointer_blob;
-use crate::{error::HubApiError, routes::HubState};
+use crate::{
+    error::HubApiError,
+    routes::{HubState, lfs_object_key, require_repository_binding},
+};
 use shardline_index::hub::canonical_ref_name;
-use shardline_protocol::ShardlineHash;
-use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectStore};
+use shardline_protocol::{RepositoryScope, ShardlineHash};
+use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectStore};
 
 // ---- Receive-pack: POST /{type}/{ns}/{repo}/git-receive-pack ----
 
@@ -34,9 +39,11 @@ pub async fn receive_pack(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, HubApiError> {
-    authorize_write(&state, &headers)?;
+    let auth_ctx = authorize_write_with_context(&state, &headers)?;
+    require_repository_binding(auth_ctx.as_ref(), &ns, &repo)?;
 
     let repo_id = resolve_repo_id(&repo_type, &ns, &repo);
+    let repo_scope = auth_ctx.as_ref().map(|c| c.claims().repository());
 
     let (updates, pack_data) = parse_receive_pack_request(&body);
 
@@ -76,7 +83,16 @@ pub async fn receive_pack(
         let result = if new_sha == "0000000000000000000000000000000000000000" {
             delete_push_ref(&state, &repo_id, old_sha, refname)
         } else {
-            store_push_objects(&state, &repo_id, old_sha, new_sha, refname, &objects).await
+            store_push_objects(
+                &state,
+                &repo_id,
+                old_sha,
+                new_sha,
+                refname,
+                &objects,
+                repo_scope,
+            )
+            .await
         };
         match result {
             Ok(()) => results.push((refname.clone(), true, None)),
@@ -140,6 +156,7 @@ async fn store_push_objects(
     new_sha: &str,
     ref_name: &str,
     objects: &[GitObject],
+    repo_scope: Option<&RepositoryScope>,
 ) -> Result<(), SmartHttpError> {
     // Build SHA → object index.
     let mut sha_to_obj: HashMap<[u8; 20], &GitObject> = HashMap::new();
@@ -193,7 +210,7 @@ async fn store_push_objects(
             let pointer_blob = build_lfs_pointer_blob(&file.sha, file.size);
             let pointer_sha = pointer_blob.sha1();
             if let Some(blob_obj) = sha_to_obj.get(&pointer_sha) {
-                let key = ObjectKey::parse(&format!("lfs/{}", file.sha))
+                let key = lfs_object_key(&file.sha, repo_scope)
                     .map_err(|e| SmartHttpError::StoreLfsObject(e.to_string()))?;
                 let object_body = ObjectBody::from_slice(&blob_obj.data);
                 let integrity = ObjectIntegrity::new(

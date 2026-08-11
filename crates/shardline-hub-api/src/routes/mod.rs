@@ -20,7 +20,9 @@ pub(crate) use self::commits::*;
 pub(crate) use self::dataset::*;
 pub(crate) use self::handlers::{git_head, whoami};
 pub(crate) use self::health::*;
-pub(crate) use self::helpers::{authorize, repo_type_path};
+pub(crate) use self::helpers::{
+    authorize, authorize_with_context, lfs_object_key, repo_type_path, require_repository_binding,
+};
 pub(crate) use self::lfs::*;
 pub(crate) use self::repos::*;
 pub(crate) use self::resolve::*;

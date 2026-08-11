@@ -18,7 +18,7 @@ use crate::{
 // (used implicitly via state.store methods)
 use shardline_protocol::{SecretString, TokenScope};
 
-use super::{HubState, authorize};
+use super::{HubState, authorize_with_context, require_repository_binding};
 
 /// Delivers webhook events to registered URLs.
 ///
@@ -280,7 +280,8 @@ pub(crate) async fn webhook_create(
     Json(request): Json<WebhookCreateRequest>,
 ) -> Result<(StatusCode, Json<WebhookResponse>), HubApiError> {
     shardline_metrics::record_hub_api_request("webhook_create", "POST", 201);
-    authorize(&state, &headers, TokenScope::Write)?;
+    let auth_ctx = authorize_with_context(&state, &headers, TokenScope::Write)?;
+    require_repository_binding(auth_ctx.as_ref(), &ns, &repo)?;
     if request.events.len() > MAX_WEBHOOK_EVENTS {
         return Err(HubApiError::PathValidation(format!(
             "webhook events exceeds maximum of {MAX_WEBHOOK_EVENTS}"
@@ -326,7 +327,8 @@ pub(crate) async fn webhook_list(
     Path((_repo_type, ns, repo)): Path<(String, String, String)>,
 ) -> Result<Json<WebhookListResponse>, HubApiError> {
     shardline_metrics::record_hub_api_request("webhook_list", "GET", 200);
-    authorize(&state, &headers, TokenScope::Read)?;
+    let auth_ctx = authorize_with_context(&state, &headers, TokenScope::Read)?;
+    require_repository_binding(auth_ctx.as_ref(), &ns, &repo)?;
     let name = format!("{ns}/{repo}");
     let webhooks = state
         .store
@@ -345,7 +347,8 @@ pub(crate) async fn webhook_delete(
     Path((_repo_type, ns, repo, webhook_id)): Path<(String, String, String, String)>,
 ) -> Result<StatusCode, HubApiError> {
     shardline_metrics::record_hub_api_request("webhook_delete", "DELETE", 204);
-    authorize(&state, &headers, TokenScope::Write)?;
+    let auth_ctx = authorize_with_context(&state, &headers, TokenScope::Write)?;
+    require_repository_binding(auth_ctx.as_ref(), &ns, &repo)?;
     let name = format!("{ns}/{repo}");
     state
         .store
