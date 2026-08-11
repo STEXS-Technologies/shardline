@@ -76,6 +76,21 @@ fn s3_config(key_prefix: &str) -> S3ObjectStoreConfig {
 
 const TEST_SIGNING_KEY: &[u8] = b"0123456789abcdef0123456789abcdef";
 
+/// Mint a Write-scoped bearer token bound to an arbitrary `owner/name` repo.
+///
+/// Since the security fix (`5a0df2f`) every repo-scoped Hub-API route enforces
+/// `require_repository_binding`, so tests must present a token whose
+/// `RepositoryScope` exactly matches the `{ns}/{repo}` they operate on.
+/// This is the repo-scoped counterpart to the harness's generic
+/// `auth_header()` (which is fixed to `test/test`).
+fn mint_token_for(owner: &str, name: &str) -> String {
+    let provider = LocalHmacProvider::new(TEST_SIGNING_KEY).unwrap();
+    let repo =
+        RepositoryScope::new(RepositoryProvider::Generic, owner, name, Some("main")).unwrap();
+    let claims = TokenClaims::new("shardline", owner, TokenScope::Write, repo, u64::MAX).unwrap();
+    provider.mint_token(&claims).unwrap()
+}
+
 struct TestServer {
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
     base_url: String,
@@ -152,6 +167,13 @@ impl TestServer {
 
     fn auth_header(&self) -> &str {
         &self.token
+    }
+
+    /// Returns a bearer token scoped to an arbitrary `owner/name` repo, for use
+    /// with repo-scoped Hub-API routes whose `{ns}/{repo}` must match the
+    /// token's `RepositoryScope`.
+    fn auth_header_for(&self, owner: &str, name: &str) -> String {
+        mint_token_for(owner, name)
     }
 }
 
@@ -1033,11 +1055,11 @@ async fn test_lfs_patch_object() {
 async fn test_hub_create_repo_and_commit() {
     let server = TestServer::start(&[ServerFrontend::Hub]).await;
     let client = reqwest::Client::new();
-    let auth = || format!("Bearer {}", server.auth_header());
 
     let ns = "s3e2e-team";
     let name = "s3e2e-model";
     let model_path = format!("{ns}/{name}");
+    let auth = || format!("Bearer {}", server.auth_header_for(ns, name));
 
     let create_resp = client
         .post(server.url("/api/repos/create"))
@@ -1117,11 +1139,11 @@ async fn test_hub_upload_lfs_and_batch() {
 async fn test_hub_modelcard() {
     let server = TestServer::start(&[ServerFrontend::Hub]).await;
     let client = reqwest::Client::new();
-    let auth = || format!("Bearer {}", server.auth_header());
 
     let ns = "s3card-team";
     let name = "s3card-model";
     let model_path = format!("{ns}/{name}");
+    let auth = || format!("Bearer {}", server.auth_header_for(ns, name));
 
     client
         .post(server.url("/api/repos/create"))
@@ -1174,11 +1196,11 @@ async fn test_hub_modelcard() {
 async fn test_s3_hub_create_same_repo_twice_returns_409() {
     let server = TestServer::start(&[ServerFrontend::Hub]).await;
     let client = reqwest::Client::new();
-    let auth = || format!("Bearer {}", server.auth_header());
 
     let ns = "s3-conflict-team";
     let name = "s3-conflict-model";
     let model_path = format!("{ns}/{name}");
+    let auth = || format!("Bearer {}", server.auth_header_for(ns, name));
 
     // First create — should succeed.
     let create1 = client
@@ -2030,7 +2052,15 @@ async fn test_s3_cross_lfs_to_oci_blob() {
 async fn test_s3_cross_hub_lfs_to_v1_lfs() {
     let server = TestServer::start(&[ServerFrontend::Hub, ServerFrontend::Lfs]).await;
     let client = reqwest::Client::new();
-    let auth = || format!("Bearer {}", server.auth_header());
+
+    // Hub LFS keys are namespaced by the token's repository scope, so both the
+    // Hub PUT and GET must use a token bound to the same repo for the keys to
+    // line up. The V1 LFS read uses a different scope, keeping the namespaces
+    // distinct so the cross-protocol read returns 404.
+    let ns = "s3-lfs-cross-team";
+    let name = "s3-lfs-cross-repo";
+    let hub_auth = || format!("Bearer {}", server.auth_header_for(ns, name));
+    let v1_auth = || format!("Bearer {}", server.auth_header());
 
     let content = b"s3-hub-lfs-to-v1-cross";
     let oid = sha256_hex(content);
@@ -2038,7 +2068,7 @@ async fn test_s3_cross_hub_lfs_to_v1_lfs() {
     // Upload via Hub's /lfs/objects/{oid}
     let put_resp = client
         .put(server.url(&format!("/lfs/objects/{oid}")))
-        .header("Authorization", auth())
+        .header("Authorization", hub_auth())
         .header("Content-Type", "application/octet-stream")
         .body(content.to_vec())
         .send()
@@ -2054,7 +2084,7 @@ async fn test_s3_cross_hub_lfs_to_v1_lfs() {
     // Verify same-protocol read via Hub LFS works
     let hub_get = client
         .get(server.url(&format!("/lfs/objects/{oid}")))
-        .header("Authorization", auth())
+        .header("Authorization", hub_auth())
         .send()
         .await
         .unwrap();
@@ -2068,7 +2098,7 @@ async fn test_s3_cross_hub_lfs_to_v1_lfs() {
     // Cross-protocol read via V1 LFS → 404 (different storage backend)
     let v1_get = client
         .get(server.url(&format!("/v1/lfs/objects/{oid}")))
-        .header("Authorization", auth())
+        .header("Authorization", v1_auth())
         .send()
         .await
         .unwrap();
@@ -2108,11 +2138,11 @@ async fn test_s3_hub_whoami_with_auth() {
 async fn test_s3_hub_commit_with_auth() {
     let server = TestServer::start(&[ServerFrontend::Hub]).await;
     let client = reqwest::Client::new();
-    let auth = || format!("Bearer {}", server.auth_header());
 
     let ns = "s3-hub-auth-team";
     let name = "s3-hub-auth-model";
     let model_path = format!("{ns}/{name}");
+    let auth = || format!("Bearer {}", server.auth_header_for(ns, name));
 
     let create_resp = client
         .post(server.url("/api/repos/create"))
@@ -2155,11 +2185,11 @@ async fn test_s3_hub_commit_with_auth() {
 async fn test_s3_hub_xet_read_token_with_auth() {
     let server = TestServer::start(&[ServerFrontend::Hub]).await;
     let client = reqwest::Client::new();
-    let auth = || format!("Bearer {}", server.auth_header());
 
     let ns = "s3-read-token-auth";
     let name = "s3-read-token-repo";
     let model_path = format!("{ns}/{name}");
+    let auth = || format!("Bearer {}", server.auth_header_for(ns, name));
 
     client
         .post(server.url("/api/repos/create"))
@@ -2196,11 +2226,11 @@ async fn test_s3_hub_xet_read_token_with_auth() {
 async fn test_s3_hub_xet_write_token_with_auth() {
     let server = TestServer::start(&[ServerFrontend::Hub]).await;
     let client = reqwest::Client::new();
-    let auth = || format!("Bearer {}", server.auth_header());
 
     let ns = "s3-write-token-auth";
     let name = "s3-write-token-repo";
     let model_path = format!("{ns}/{name}");
+    let auth = || format!("Bearer {}", server.auth_header_for(ns, name));
 
     client
         .post(server.url("/api/repos/create"))

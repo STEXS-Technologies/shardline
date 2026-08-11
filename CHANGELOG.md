@@ -87,8 +87,12 @@ compares, `alg`-confusion guard, parameterized SQL, symlink-race protection,
   exfiltration webhooks, and read private datasets. Fixed: all repository-scoped
   Hub API handlers now enforce `require_repository_binding` (the token's
   `owner`/`name` must match the request path); genuinely global routes (list,
-  search, whoami) are documentedly exempt. Covered by a new `cross_tenant_authz`
-  integration suite (same-repo success + cross-repo `403`).
+  search, whoami) are documentedly exempt, and repository creation
+  (`/api/repos/create` and the `{type}/{ns}/{repo}` POST path) requires only
+  Write scope — a caller need not hold a token pre-scoped to a
+  not-yet-existing repository, while every access route remains bound.
+  Covered by a new `cross_tenant_authz` integration suite (same-repo success
+  + cross-repo `403`).
 - **[Medium] Hub API LFS global namespace → cross-tenant content poisoning** —
   Hub API LFS objects were stored under a bare global `lfs/{oid}` key with no
   per-repo namespace, so a Write-scoped tenant could pre-empt a predictable OID

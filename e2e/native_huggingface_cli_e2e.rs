@@ -22,7 +22,13 @@ type TestError = Box<dyn Error>;
 
 struct HubRuntime {
     base_url: String,
-    token: String,
+    // Per-repo tokens: repo-scoped Hub-API routes (upload/commit/download/
+    // resolve/delete/webhooks) enforce `require_repository_binding`, so each
+    // repo this flow touches needs a token whose `RepositoryScope` matches it
+    // exactly. `repo create` is deliberately-global (Write scope only).
+    created_token: String,
+    model_token: String,
+    dataset_token: String,
     _storage: tempfile::TempDir,
     server: JoinHandle<Result<(), ServerError>>,
 }
@@ -64,7 +70,7 @@ async fn exercise_huggingface_cli_flows() -> Result<(), TestError> {
             created_repo,
             "--private",
             "--token",
-            runtime.token.as_str(),
+            runtime.created_token.as_str(),
             "--format",
             "quiet",
         ],
@@ -81,7 +87,7 @@ async fn exercise_huggingface_cli_flows() -> Result<(), TestError> {
             path_as_str(&single_file)?,
             "single.txt",
             "--token",
-            runtime.token.as_str(),
+            runtime.model_token.as_str(),
             "--commit-message",
             "single file upload",
             "--format",
@@ -108,7 +114,7 @@ async fn exercise_huggingface_cli_flows() -> Result<(), TestError> {
             "--include",
             "*.json",
             "--token",
-            runtime.token.as_str(),
+            runtime.model_token.as_str(),
             "--commit-message",
             "folder upload with include filter",
             "--format",
@@ -128,7 +134,7 @@ async fn exercise_huggingface_cli_flows() -> Result<(), TestError> {
             path_as_str(&single_download)?,
             "--force-download",
             "--token",
-            runtime.token.as_str(),
+            runtime.model_token.as_str(),
             "--format",
             "quiet",
         ],
@@ -153,7 +159,7 @@ async fn exercise_huggingface_cli_flows() -> Result<(), TestError> {
             path_as_str(&filtered_download)?,
             "--force-download",
             "--token",
-            runtime.token.as_str(),
+            runtime.model_token.as_str(),
             "--format",
             "quiet",
         ],
@@ -178,7 +184,7 @@ async fn exercise_huggingface_cli_flows() -> Result<(), TestError> {
             model_repo,
             "single.txt",
             "--token",
-            runtime.token.as_str(),
+            runtime.model_token.as_str(),
             "--commit-message",
             "delete single file",
             "--format",
@@ -197,7 +203,7 @@ async fn exercise_huggingface_cli_flows() -> Result<(), TestError> {
             "dataset",
             "--private",
             "--token",
-            runtime.token.as_str(),
+            runtime.dataset_token.as_str(),
             "--format",
             "quiet",
         ],
@@ -215,7 +221,7 @@ async fn exercise_huggingface_cli_flows() -> Result<(), TestError> {
             "--repo-type",
             "dataset",
             "--token",
-            runtime.token.as_str(),
+            runtime.dataset_token.as_str(),
             "--format",
             "quiet",
         ],
@@ -234,7 +240,7 @@ async fn exercise_huggingface_cli_flows() -> Result<(), TestError> {
             path_as_str(&dataset_download)?,
             "--force-download",
             "--token",
-            runtime.token.as_str(),
+            runtime.dataset_token.as_str(),
             "--format",
             "quiet",
         ],
@@ -244,10 +250,10 @@ async fn exercise_huggingface_cli_flows() -> Result<(), TestError> {
         b"{\"id\":1,\"value\":\"ok\"}\n"
     );
 
-    for (repo, repo_type) in [
-        (created_repo, "model"),
-        (model_repo, "model"),
-        (dataset_repo, "dataset"),
+    for (repo, repo_type, repo_token) in [
+        (created_repo, "model", runtime.created_token.as_str()),
+        (model_repo, "model", runtime.model_token.as_str()),
+        (dataset_repo, "dataset", runtime.dataset_token.as_str()),
     ] {
         run_hf(
             &runtime,
@@ -260,7 +266,7 @@ async fn exercise_huggingface_cli_flows() -> Result<(), TestError> {
                 repo_type,
                 "--yes",
                 "--token",
-                runtime.token.as_str(),
+                repo_token,
                 "--format",
                 "quiet",
             ],
@@ -295,18 +301,39 @@ async fn start_hub_runtime() -> Result<HubRuntime, TestError> {
     )?;
     let server = tokio::spawn(async move { serve_with_listener(config, listener).await });
     wait_for_health(&base_url).await?;
-    let token = bearer_token(
+    // One Write token per repo the flow touches; `require_repository_binding`
+    // requires each repo's operations to use the token scoped to that exact
+    // `{ns}/{repo}`.
+    let created_token = bearer_token(
         "github-user-1",
         TokenScope::Write,
         RepositoryProvider::GitHub,
         "team",
-        "assets",
+        "cli-created",
+        Some("main"),
+    )?;
+    let model_token = bearer_token(
+        "github-user-1",
+        TokenScope::Write,
+        RepositoryProvider::GitHub,
+        "team",
+        "cli-model",
+        Some("main"),
+    )?;
+    let dataset_token = bearer_token(
+        "github-user-1",
+        TokenScope::Write,
+        RepositoryProvider::GitHub,
+        "team",
+        "cli-dataset",
         Some("main"),
     )?;
 
     Ok(HubRuntime {
         base_url,
-        token,
+        created_token,
+        model_token,
+        dataset_token,
         _storage: storage,
         server,
     })
@@ -332,7 +359,10 @@ fn run_hf<const N: usize>(
     let command = arguments
         .iter()
         .map(|argument| {
-            if *argument == runtime.token {
+            if *argument == runtime.created_token
+                || *argument == runtime.model_token
+                || *argument == runtime.dataset_token
+            {
                 "<TOKEN>"
             } else {
                 argument
