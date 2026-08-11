@@ -51,6 +51,7 @@ mod fsck;
 #[cfg(feature = "fuzzing")]
 mod fuzz;
 mod ingest_bench;
+mod jwt_algorithm;
 mod jwks_provider;
 mod lifecycle_repair;
 mod local_backend;
@@ -213,7 +214,7 @@ pub(crate) mod gc {
 }
 pub(crate) use shardline_protocol_adapters::{
     LFS_CONTENT_TYPE, LfsBatchRequest, LfsBatchResponse, LfsObjectError, LfsObjectResponse,
-    cas_headers,
+    LfsOperation, TransferAdapter, cas_headers,
 };
 pub(crate) use shardline_xet_adapter::ShardUploadResponse;
 pub use storage_migration::{

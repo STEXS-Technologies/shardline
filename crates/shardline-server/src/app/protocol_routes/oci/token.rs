@@ -1,4 +1,5 @@
 use std::fmt::Write;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use axum::{
@@ -238,6 +239,30 @@ fn parse_oci_registry_token_scopes(
     Ok((requested_scope, requested_repository))
 }
 
+/// An OCI distribution-scope action.
+///
+/// Action identifiers are case-sensitive per the OCI distribution spec, so
+/// `"Pull"` is rejected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OciAction {
+    /// Allow pulling (reading) content from a repository.
+    Pull,
+    /// Allow pushing (writing) content to a repository.
+    Push,
+}
+
+impl std::str::FromStr for OciAction {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "pull" => Ok(Self::Pull),
+            "push" => Ok(Self::Push),
+            _ => Err(()),
+        }
+    }
+}
+
 fn parse_oci_registry_actions(actions: &str) -> Result<TokenScope, ServerError> {
     let mut saw_pull = false;
     let mut saw_push = false;
@@ -246,10 +271,10 @@ fn parse_oci_registry_actions(actions: &str) -> Result<TokenScope, ServerError> 
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
-        match action {
-            "pull" => saw_pull = true,
-            "push" => saw_push = true,
-            _ => return Err(ServerError::InvalidManifestReference),
+        match OciAction::from_str(action) {
+            Ok(OciAction::Pull) => saw_pull = true,
+            Ok(OciAction::Push) => saw_push = true,
+            Err(()) => return Err(ServerError::InvalidManifestReference),
         }
     }
     if saw_push {
@@ -1157,6 +1182,34 @@ mod tests {
             parse_oci_registry_actions("invalid"),
             Err(ServerError::InvalidManifestReference)
         ));
+    }
+
+    // ── OciAction ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn oci_action_parses_canonical_values() {
+        assert_eq!("pull".parse::<super::OciAction>(), Ok(super::OciAction::Pull));
+        assert_eq!("push".parse::<super::OciAction>(), Ok(super::OciAction::Push));
+    }
+
+    #[test]
+    fn oci_action_parsing_is_case_sensitive() {
+        for value in ["Pull", "PULL", "Push", "PUSH"] {
+            assert!(
+                value.parse::<super::OciAction>().is_err(),
+                "expected {value:?} to be rejected as case-sensitive"
+            );
+        }
+    }
+
+    #[test]
+    fn oci_action_rejects_unknown_values() {
+        for value in ["", "delete", "list", "read", "write"] {
+            assert!(
+                value.parse::<super::OciAction>().is_err(),
+                "expected {value:?} to be rejected"
+            );
+        }
     }
 
     // ── parse_oci_registry_token_scopes ─────────────────────────────────────

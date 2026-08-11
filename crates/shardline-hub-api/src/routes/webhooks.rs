@@ -1,3 +1,4 @@
+use std::str::FromStr;
 use std::sync::LazyLock;
 use tokio::sync::Semaphore;
 
@@ -8,7 +9,11 @@ use axum::{
     http::StatusCode,
 };
 
-use crate::{error::HubApiError, models::*};
+use crate::{
+    error::HubApiError,
+    models::*,
+    types::WebhookScheme,
+};
 // HubRepoType used in the webhook_create handler for repo lookup
 // (used implicitly via state.store methods)
 use shardline_protocol::{SecretString, TokenScope};
@@ -191,7 +196,7 @@ pub(crate) fn validate_webhook_url(url: &str) -> Result<(), HubApiError> {
         .map_err(|e| HubApiError::PathValidation(format!("invalid webhook URL: {e}")))?;
 
     let scheme = parsed.scheme();
-    if scheme != "http" && scheme != "https" {
+    if WebhookScheme::from_str(scheme).is_err() {
         return Err(HubApiError::PathValidation(format!(
             "webhook URL scheme must be http or https, got {scheme}"
         )));

@@ -104,9 +104,22 @@ impl fmt::Debug for ServerAuth {
 }
 
 fn parse_bearer_token(header: &str) -> Result<&str, ServerError> {
-    let Some(token) = header.strip_prefix("Bearer ") else {
+    // Accept any ASCII-case variant of the `Bearer ` prefix (RFC 6750 scheme
+    // names are case-insensitive). No allocation; bounds are checked up front.
+    const BEARER_PREFIX: [u8; 7] = *b"bearer ";
+    let header_bytes = header.as_bytes();
+    let has_prefix = header_bytes.len() >= BEARER_PREFIX.len()
+        && header_bytes
+            .iter()
+            .take(BEARER_PREFIX.len())
+            .zip(BEARER_PREFIX.iter())
+            .all(|(byte, prefix)| byte.to_ascii_lowercase() == *prefix);
+    if !has_prefix {
         return Err(ServerError::InvalidAuthorizationHeader);
-    };
+    }
+    let token = header
+        .get(BEARER_PREFIX.len()..)
+        .ok_or(ServerError::InvalidAuthorizationHeader)?;
     if token.trim().is_empty() {
         return Err(ServerError::InvalidAuthorizationHeader);
     }
@@ -431,6 +444,33 @@ mod tests {
         let result = parse_bearer_token("Bearer valid-token-here");
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "valid-token-here");
+    }
+
+    #[test]
+    fn parse_bearer_token_accepts_case_insensitive_prefix() {
+        use super::parse_bearer_token;
+        for header in [
+            "bearer valid-token",
+            "BEARER valid-token",
+            "BeArEr valid-token",
+            "bEaReR valid-token",
+        ] {
+            let result = parse_bearer_token(header);
+            assert!(result.is_ok(), "expected Ok for {header:?}, got {result:?}");
+            assert_eq!(result.unwrap(), "valid-token");
+        }
+    }
+
+    #[test]
+    fn parse_bearer_token_rejects_wrong_scheme_prefix() {
+        use super::parse_bearer_token;
+        for header in ["BearerX token", "bear token", "bearerr token"] {
+            let result = parse_bearer_token(header);
+            assert!(
+                matches!(result, Err(ServerError::InvalidAuthorizationHeader)),
+                "expected Err for {header:?}, got {result:?}"
+            );
+        }
     }
 
     // ── scope_allows ───────────────────────────────────────────────────────

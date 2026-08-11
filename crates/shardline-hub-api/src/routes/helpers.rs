@@ -1,6 +1,7 @@
 use axum::http::HeaderMap;
 
 use crate::error::HubApiError;
+use crate::models::RepoType;
 use shardline_index::hub::HubRepoType;
 use shardline_protocol::TokenScope;
 
@@ -20,10 +21,9 @@ pub(crate) fn authorize(
 }
 
 /// Converts a `HubRepoType` to the API path string.
-pub(crate) const fn repo_type_path(rt: HubRepoType) -> &'static str {
-    match rt {
-        HubRepoType::Model => "models",
-        HubRepoType::Dataset => "datasets",
-        HubRepoType::Space => "spaces",
-    }
+///
+/// Delegates to [`RepoType::as_path_str`] so the plural path segment mapping
+/// lives in a single place.
+pub(crate) fn repo_type_path(rt: HubRepoType) -> &'static str {
+    RepoType::from(rt).as_path_str()
 }

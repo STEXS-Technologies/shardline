@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::str::FromStr;
 
 use hmac::{Hmac, Mac};
 use serde_json::{Value, from_slice};
@@ -238,11 +239,9 @@ pub(crate) const fn parse_gitlab_visibility(level: u64) -> RepositoryVisibility 
 }
 
 pub(crate) fn parse_visibility_name(value: &str) -> RepositoryVisibility {
-    match value {
-        "private" => RepositoryVisibility::Private,
-        "internal" => RepositoryVisibility::Internal,
-        _value => RepositoryVisibility::Public,
-    }
+    // Route through the single canonical string -> visibility parser. Unknown
+    // names fall back to `Public`, matching the historical lenient behavior.
+    RepositoryVisibility::from_str(value).unwrap_or(RepositoryVisibility::Public)
 }
 
 pub(crate) fn normalize_default_revision(value: &str) -> Result<RevisionRef, VcsReferenceError> {

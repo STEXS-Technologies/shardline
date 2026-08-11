@@ -83,6 +83,57 @@ fn object_storage_adapter_parse_rejects_unknown() {
 }
 
 #[test]
+fn auth_provider_kind_parse_is_case_insensitive_and_whitespace_tolerant() {
+    assert_eq!(
+        AuthProviderKind::parse("Local").unwrap(),
+        AuthProviderKind::Local
+    );
+    assert_eq!(
+        AuthProviderKind::parse(" OIDC ").unwrap(),
+        AuthProviderKind::Oidc
+    );
+    assert_eq!(
+        AuthProviderKind::parse("  JwKs").unwrap(),
+        AuthProviderKind::Jwks
+    );
+    assert_eq!(
+        AuthProviderKind::parse("PASSTHROUGH ").unwrap(),
+        AuthProviderKind::Passthrough
+    );
+    assert_eq!(
+        AuthProviderKind::parse("ED25519").unwrap(),
+        AuthProviderKind::Ed25519
+    );
+}
+
+#[test]
+fn object_storage_adapter_parse_is_case_insensitive_and_whitespace_tolerant() {
+    assert_eq!(
+        ObjectStorageAdapter::parse("Local").unwrap(),
+        ObjectStorageAdapter::Local
+    );
+    assert_eq!(
+        ObjectStorageAdapter::parse(" S3 ").unwrap(),
+        ObjectStorageAdapter::S3
+    );
+}
+
+#[test]
+fn deployment_mode_parse_is_case_insensitive_and_whitespace_tolerant() {
+    assert_eq!(DeploymentMode::parse("Insecure"), Some(DeploymentMode::Insecure));
+    assert_eq!(
+        DeploymentMode::parse(" AUTHENTICATED "),
+        Some(DeploymentMode::Authenticated)
+    );
+    assert_eq!(
+        DeploymentMode::parse("strict"),
+        Some(DeploymentMode::Strict)
+    );
+    assert_eq!(DeploymentMode::parse("unknown"), None);
+    assert_eq!(DeploymentMode::parse(""), None);
+}
+
+#[test]
 fn server_config_new_constructs_with_defaults() {
     let config = ServerConfig::new(
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
@@ -2006,4 +2057,56 @@ fn parse_byte_size_invalid() {
 fn parse_byte_size_unknown_unit() {
     assert!(parse_byte_size("64xyz").is_err());
     assert!(parse_byte_size("1PB").is_err());
+}
+
+#[test]
+fn byte_unit_parses_all_units_and_empty() {
+    use std::str::FromStr;
+
+    assert_eq!(ByteUnit::from_str("b").unwrap(), ByteUnit::B);
+    assert_eq!(ByteUnit::from_str("").unwrap(), ByteUnit::B);
+    assert_eq!(ByteUnit::from_str("kib").unwrap(), ByteUnit::KiB);
+    assert_eq!(ByteUnit::from_str("mib").unwrap(), ByteUnit::MiB);
+    assert_eq!(ByteUnit::from_str("gib").unwrap(), ByteUnit::GiB);
+    assert_eq!(ByteUnit::from_str("tib").unwrap(), ByteUnit::TiB);
+    assert_eq!(ByteUnit::from_str("kb").unwrap(), ByteUnit::KB);
+    assert_eq!(ByteUnit::from_str("mb").unwrap(), ByteUnit::MB);
+    assert_eq!(ByteUnit::from_str("gb").unwrap(), ByteUnit::GB);
+    assert_eq!(ByteUnit::from_str("tb").unwrap(), ByteUnit::TB);
+}
+
+#[test]
+fn byte_unit_is_case_insensitive_and_whitespace_tolerant() {
+    use std::str::FromStr;
+
+    assert_eq!(ByteUnit::from_str("B").unwrap(), ByteUnit::B);
+    assert_eq!(ByteUnit::from_str(" KiB ").unwrap(), ByteUnit::KiB);
+    assert_eq!(ByteUnit::from_str("MIB").unwrap(), ByteUnit::MiB);
+    assert_eq!(ByteUnit::from_str("GB").unwrap(), ByteUnit::GB);
+}
+
+#[test]
+// All multipliers are exact powers of 2 or 10 (≤ 2^40), hence exactly
+// representable in f64; exact equality is intentional and correct here.
+#[allow(clippy::float_cmp)]
+fn byte_unit_as_multiplier() {
+    assert_eq!(ByteUnit::B.as_multiplier(), 1.0);
+    assert_eq!(ByteUnit::KiB.as_multiplier(), 1024.0);
+    assert_eq!(ByteUnit::MiB.as_multiplier(), 1_048_576.0_f64);
+    assert_eq!(ByteUnit::GiB.as_multiplier(), 1_073_741_824.0_f64);
+    assert_eq!(ByteUnit::TiB.as_multiplier(), 1_099_511_627_776.0_f64);
+    assert_eq!(ByteUnit::KB.as_multiplier(), 1_000.0);
+    assert_eq!(ByteUnit::MB.as_multiplier(), 1_000_000.0_f64);
+    assert_eq!(ByteUnit::GB.as_multiplier(), 1_000_000_000.0_f64);
+    assert_eq!(ByteUnit::TB.as_multiplier(), 1_000_000_000_000.0_f64);
+}
+
+#[test]
+fn byte_unit_rejects_unknown() {
+    use std::str::FromStr;
+
+    assert!(matches!(
+        ByteUnit::from_str("xyz"),
+        Err(ServerConfigError::ChunkSizeParse(_))
+    ));
 }

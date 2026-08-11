@@ -19,7 +19,7 @@ use super::helpers::legacy_record_path;
 use super::{
     DedupeShardRecord, FileReconstructionRecord, LEGACY_IMPORT_COMPLETED_KEY,
     LOCAL_METADATA_DATABASE_FILE_NAME, LOCAL_SCHEMA_MIGRATIONS_TABLE, LOCAL_SQLITE_MIGRATIONS,
-    LegacyQuarantineCandidateRecord, LocalIndexStore, LocalIndexStoreError, LocalRecordKind,
+    LegacyQuarantineCandidateRecord, LocalIndexStore, LocalIndexStoreError, RecordKind,
     LocalRecordStore, StoredObjectPresenceRecord,
 };
 use crate::{
@@ -624,11 +624,11 @@ async fn exercise_local_sqlite_imports_legacy_filesystem_metadata() -> Result<()
     let scope = sample_repository_scope()?;
     let record = sample_record(Some(scope.clone()));
     write_json(
-        &legacy_record_path(storage.path(), LocalRecordKind::Latest, &record),
+        &legacy_record_path(storage.path(), RecordKind::Latest, &record),
         &record,
     )?;
     write_json(
-        &legacy_record_path(storage.path(), LocalRecordKind::Version, &record),
+        &legacy_record_path(storage.path(), RecordKind::Version, &record),
         &record,
     )?;
 

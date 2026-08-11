@@ -11,7 +11,7 @@ members = ["crates/*"]
 # - getrandom: duplicate (0.3 workspace, older via xet ecosystem) — NOT FIXABLE.
 
 [workspace.package]
-version = "1.4.0"
+version = "1.5.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/STEXS-Technologies/shardline"
@@ -50,29 +50,29 @@ serial_test = "3.5.0"
 serde_json = "1.0"
 sha1 = "0.10"
 sha2 = { version = "0.10", features = ["compress"] }
-shardline = { version = "1.4.0", path = "crates/shardline" }
-shardline-cache = { version = "1.4.0", path = "crates/shardline-cache" }
-shardline-cas = { version = "1.4.0", path = "crates/shardline-cas" }
-shardline-fsck = { version = "1.4.0", path = "crates/shardline-fsck" }
-shardline-gc = { version = "1.4.0", path = "crates/shardline-gc" }
-shardline-hub-api = { version = "1.4.0", path = "crates/shardline-hub-api" }
-shardline-index = { version = "1.4.0", path = "crates/shardline-index" }
-shardline-metrics = { version = "1.4.0", path = "crates/shardline-metrics" }
-shardline-protocol = { version = "1.4.0", path = "crates/shardline-protocol" }
-shardline-protocol-adapters = { version = "1.4.0", path = "crates/shardline-protocol-adapters" }
-shardline-rebuild = { version = "1.4.0", path = "crates/shardline-rebuild" }
-shardline-provider-events = { version = "1.4.0", path = "crates/shardline-provider-events" }
-shardline-oci-adapter = { version = "1.4.0", path = "crates/shardline-oci-adapter" }
-shardline-server = { version = "1.4.0", path = "crates/shardline-server" }
-shardline-server-core = { version = "1.4.0", path = "crates/shardline-server-core" }
-shardline-storage = { version = "1.4.0", path = "crates/shardline-storage" }
-shardline-test-support = { version = "1.4.0", path = "crates/shardline-test-support" }
-shardline-validation = { version = "1.4.0", path = "crates/shardline-validation" }
-shardline-auth = { version = "1.4.0", path = "crates/shardline-auth" }
-shardline-vcs = { version = "1.4.0", path = "crates/shardline-vcs" }
-shardline-xet-adapter = { version = "1.4.0", path = "crates/shardline-xet-adapter" }
-shardline-xet-core = { version = "1.4.0", path = "crates/shardline-xet-core" }
-sdx = { version = "1.4.0", path = "crates/sdx" }
+shardline = { version = "1.5.0", path = "crates/shardline" }
+shardline-cache = { version = "1.5.0", path = "crates/shardline-cache" }
+shardline-cas = { version = "1.5.0", path = "crates/shardline-cas" }
+shardline-fsck = { version = "1.5.0", path = "crates/shardline-fsck" }
+shardline-gc = { version = "1.5.0", path = "crates/shardline-gc" }
+shardline-hub-api = { version = "1.5.0", path = "crates/shardline-hub-api" }
+shardline-index = { version = "1.5.0", path = "crates/shardline-index" }
+shardline-metrics = { version = "1.5.0", path = "crates/shardline-metrics" }
+shardline-protocol = { version = "1.5.0", path = "crates/shardline-protocol" }
+shardline-protocol-adapters = { version = "1.5.0", path = "crates/shardline-protocol-adapters" }
+shardline-rebuild = { version = "1.5.0", path = "crates/shardline-rebuild" }
+shardline-provider-events = { version = "1.5.0", path = "crates/shardline-provider-events" }
+shardline-oci-adapter = { version = "1.5.0", path = "crates/shardline-oci-adapter" }
+shardline-server = { version = "1.5.0", path = "crates/shardline-server" }
+shardline-server-core = { version = "1.5.0", path = "crates/shardline-server-core" }
+shardline-storage = { version = "1.5.0", path = "crates/shardline-storage" }
+shardline-test-support = { version = "1.5.0", path = "crates/shardline-test-support" }
+shardline-validation = { version = "1.5.0", path = "crates/shardline-validation" }
+shardline-auth = { version = "1.5.0", path = "crates/shardline-auth" }
+shardline-vcs = { version = "1.5.0", path = "crates/shardline-vcs" }
+shardline-xet-adapter = { version = "1.5.0", path = "crates/shardline-xet-adapter" }
+shardline-xet-core = { version = "1.5.0", path = "crates/shardline-xet-core" }
+sdx = { version = "1.5.0", path = "crates/sdx" }
 sqlx = { version = "0.8.6", default-features = false }
 subtle = { version = "2.6", default-features = false }
 tempfile = "3.15"

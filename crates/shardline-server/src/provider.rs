@@ -8,6 +8,7 @@ use std::{
     io::Error as IoError,
     num::NonZeroU64,
     path::Path,
+    str::FromStr,
 };
 
 mod config_io;
@@ -15,7 +16,9 @@ mod config_io;
 use axum::http::HeaderMap;
 use serde::Deserialize;
 use serde_json::Error as SerdeJsonError;
-use shardline_protocol::{SecretBytes, SecretString, TokenScope};
+use shardline_protocol::{
+    RepositoryProvider, RepositoryProviderParseError, SecretBytes, SecretString, TokenScope,
+};
 use shardline_vcs::{
     AuthorizationRequest, BuiltInProviderCatalog, BuiltInProviderError, CodebergAdapter,
     GenericAdapter, GitHubAdapter, GitLabAdapter, GiteaAdapter, GrantedRepositoryAccess,
@@ -459,23 +462,28 @@ const fn repository_access(scope: TokenScope) -> RepositoryAccess {
     }
 }
 
-fn parse_provider_kind(value: &str) -> Result<ProviderKind, ProviderServiceError> {
-    match value {
-        "github" => Ok(ProviderKind::GitHub),
-        "gitea" => Ok(ProviderKind::Gitea),
-        "gitlab" => Ok(ProviderKind::GitLab),
-        "codeberg" => Ok(ProviderKind::Codeberg),
-        "generic" => Ok(ProviderKind::Generic),
-        _other => Err(ProviderServiceError::UnknownProvider),
+/// A provider-string parse failure is surfaced as `UnknownProvider` — there is
+/// exactly one reason `RepositoryProvider::from_str` errors (the value is not a
+/// known provider name), so the conversion is total and lossless.
+impl From<RepositoryProviderParseError> for ProviderServiceError {
+    fn from(_: RepositoryProviderParseError) -> Self {
+        Self::UnknownProvider
     }
 }
 
+fn parse_provider_kind(value: &str) -> Result<ProviderKind, ProviderServiceError> {
+    // Single source of truth: delegate to the canonical `RepositoryProvider`
+    // parser and convert via the `From<RepositoryProvider> for ProviderKind`
+    // impl, instead of re-matching the provider strings here.
+    RepositoryProvider::from_str(value)
+        .map(ProviderKind::from)
+        .map_err(ProviderServiceError::from)
+}
+
 fn visibility(value: &str) -> RepositoryVisibility {
-    match value {
-        "private" => RepositoryVisibility::Private,
-        "internal" => RepositoryVisibility::Internal,
-        _other => RepositoryVisibility::Public,
-    }
+    // Delegate to the canonical case-insensitive `RepositoryVisibility` parser;
+    // unknown values still fall back to `Public` (historical lenient behavior).
+    RepositoryVisibility::from_str(value).unwrap_or(RepositoryVisibility::Public)
 }
 
 #[cfg(test)]

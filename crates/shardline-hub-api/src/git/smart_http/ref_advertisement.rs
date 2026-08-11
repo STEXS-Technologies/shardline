@@ -9,7 +9,11 @@ use serde::Deserialize;
 use std::fmt::Write;
 
 use super::super::pktline::{self, FLUSH};
-use crate::{error::HubApiError, routes::HubState};
+use crate::{
+    error::HubApiError,
+    routes::HubState,
+    types::GitSmartHttpService,
+};
 
 /// Query parameters for `GET /info/refs`.
 #[derive(Debug, Deserialize)]
@@ -145,37 +149,37 @@ pub async fn info_refs(
     Query(query): Query<InfoRefsQuery>,
     headers: HeaderMap,
 ) -> Result<Response, HubApiError> {
-    let service = query.service.as_deref().unwrap_or("git-upload-pack");
-    if service != "git-upload-pack" && service != "git-receive-pack" {
-        return Err(HubApiError::NotFound);
-    }
+    let service = query
+        .service
+        .as_deref()
+        .unwrap_or(GitSmartHttpService::UploadPack.as_str())
+        .parse::<GitSmartHttpService>()
+        .map_err(|_err| HubApiError::NotFound)?;
 
-    if service == "git-receive-pack" {
-        authorize_write(&state, &headers)?;
-    } else {
-        authorize_read(&state, &headers)?;
+    match service {
+        GitSmartHttpService::ReceivePack => authorize_write(&state, &headers)?,
+        GitSmartHttpService::UploadPack => authorize_read(&state, &headers)?,
     }
 
     let repo_id = resolve_repo_id(&repo_type, &ns, &repo);
     let refs = collect_refs(&state, &repo_id).await?;
 
-    let (capabilities, content_type) = if service == "git-receive-pack" {
-        (
+    let (capabilities, content_type) = match service {
+        GitSmartHttpService::ReceivePack => (
             "report-status delete-refs side-band-64k quiet",
             "application/x-git-receive-pack-advertisement",
-        )
-    } else {
-        (
+        ),
+        GitSmartHttpService::UploadPack => (
             "side-band-64k thin-pack multi_ack_detailed",
             "application/x-git-upload-pack-advertisement",
-        )
+        ),
     };
 
     let mut body = String::new();
     let mut line_buf = String::with_capacity(128);
     body.push_str(&pktline::encode_line({
         line_buf.clear();
-        writeln!(line_buf, "# service={service}").ok();
+        writeln!(line_buf, "# service={}", service.as_str()).ok();
         &line_buf
     })?);
     body.push_str(FLUSH);

@@ -1,10 +1,11 @@
+use std::str::FromStr;
 use std::time::Duration;
 
 use futures_util::TryStreamExt;
 use serde_json::to_vec;
 use sqlx::{Postgres, Row, Transaction, postgres::PgRow, query, query_scalar, types::Json};
 
-use super::{PostgresMetadataStoreError, PostgresRecordKind, PostgresRecordLocator, i64_to_u64};
+use super::{PostgresMetadataStoreError, PostgresRecordLocator, RecordKind, i64_to_u64};
 use crate::{
     DedupeShardMapping, FileRecord, RecordMutation, RecordStoreFuture, RecordTraversal,
     RepositoryRecordScope, StoredRecord,
@@ -152,7 +153,7 @@ impl super::PostgresRecordStore {
 
     async fn list_record_locators(
         &self,
-        kind: PostgresRecordKind,
+        kind: RecordKind,
     ) -> Result<Vec<PostgresRecordLocator>, PostgresMetadataStoreError> {
         let rows = query(
             "SELECT record_key, record_kind, scope_key, file_id, content_hash
@@ -171,7 +172,7 @@ impl super::PostgresRecordStore {
 
     async fn visit_record_locators<Visitor, VisitorError>(
         &self,
-        kind: PostgresRecordKind,
+        kind: RecordKind,
         mut visitor: Visitor,
     ) -> Result<(), VisitorError>
     where
@@ -201,7 +202,7 @@ impl super::PostgresRecordStore {
 
     async fn visit_records<Visitor, VisitorError>(
         &self,
-        kind: PostgresRecordKind,
+        kind: RecordKind,
         mut visitor: Visitor,
     ) -> Result<(), VisitorError>
     where
@@ -237,7 +238,7 @@ impl super::PostgresRecordStore {
 
     async fn list_repository_record_locators(
         &self,
-        kind: PostgresRecordKind,
+        kind: RecordKind,
         repository: &RepositoryRecordScope,
     ) -> Result<Vec<PostgresRecordLocator>, PostgresMetadataStoreError> {
         let scope_key = shared_repository_record_scope_key(repository);
@@ -268,7 +269,7 @@ impl super::PostgresRecordStore {
 
     async fn visit_repository_records<Visitor, VisitorError>(
         &self,
-        kind: PostgresRecordKind,
+        kind: RecordKind,
         repository: &RepositoryRecordScope,
         mut visitor: Visitor,
     ) -> Result<(), VisitorError>
@@ -321,7 +322,7 @@ impl RecordTraversal for super::PostgresRecordStore {
     fn list_latest_record_locators(
         &self,
     ) -> RecordStoreFuture<'_, Vec<Self::Locator>, Self::Error> {
-        Box::pin(async move { self.list_record_locators(PostgresRecordKind::Latest).await })
+        Box::pin(async move { self.list_record_locators(RecordKind::Latest).await })
     }
 
     fn visit_latest_record_locators<'operation, Visitor, VisitorError>(
@@ -335,7 +336,7 @@ impl RecordTraversal for super::PostgresRecordStore {
         VisitorError: Send + 'operation,
     {
         Box::pin(async move {
-            self.visit_record_locators(PostgresRecordKind::Latest, &mut visitor)
+            self.visit_record_locators(RecordKind::Latest, &mut visitor)
                 .await
         })
     }
@@ -351,7 +352,7 @@ impl RecordTraversal for super::PostgresRecordStore {
         VisitorError: Send + 'operation,
     {
         Box::pin(async move {
-            self.visit_records(PostgresRecordKind::Latest, &mut visitor)
+            self.visit_records(RecordKind::Latest, &mut visitor)
                 .await
         })
     }
@@ -359,7 +360,7 @@ impl RecordTraversal for super::PostgresRecordStore {
     fn list_version_record_locators(
         &self,
     ) -> RecordStoreFuture<'_, Vec<Self::Locator>, Self::Error> {
-        Box::pin(async move { self.list_record_locators(PostgresRecordKind::Version).await })
+        Box::pin(async move { self.list_record_locators(RecordKind::Version).await })
     }
 
     fn list_repository_latest_record_locators<'operation>(
@@ -367,7 +368,7 @@ impl RecordTraversal for super::PostgresRecordStore {
         repository: &'operation RepositoryRecordScope,
     ) -> RecordStoreFuture<'operation, Vec<Self::Locator>, Self::Error> {
         Box::pin(async move {
-            self.list_repository_record_locators(PostgresRecordKind::Latest, repository)
+            self.list_repository_record_locators(RecordKind::Latest, repository)
                 .await
         })
     }
@@ -384,7 +385,7 @@ impl RecordTraversal for super::PostgresRecordStore {
         VisitorError: Send + 'operation,
     {
         Box::pin(async move {
-            self.visit_repository_records(PostgresRecordKind::Latest, repository, &mut visitor)
+            self.visit_repository_records(RecordKind::Latest, repository, &mut visitor)
                 .await
         })
     }
@@ -394,7 +395,7 @@ impl RecordTraversal for super::PostgresRecordStore {
         repository: &'operation RepositoryRecordScope,
     ) -> RecordStoreFuture<'operation, Vec<Self::Locator>, Self::Error> {
         Box::pin(async move {
-            self.list_repository_record_locators(PostgresRecordKind::Version, repository)
+            self.list_repository_record_locators(RecordKind::Version, repository)
                 .await
         })
     }
@@ -410,7 +411,7 @@ impl RecordTraversal for super::PostgresRecordStore {
         VisitorError: Send + 'operation,
     {
         Box::pin(async move {
-            self.visit_record_locators(PostgresRecordKind::Version, &mut visitor)
+            self.visit_record_locators(RecordKind::Version, &mut visitor)
                 .await
         })
     }
@@ -426,7 +427,7 @@ impl RecordTraversal for super::PostgresRecordStore {
         VisitorError: Send + 'operation,
     {
         Box::pin(async move {
-            self.visit_records(PostgresRecordKind::Version, &mut visitor)
+            self.visit_records(RecordKind::Version, &mut visitor)
                 .await
         })
     }
@@ -443,7 +444,7 @@ impl RecordTraversal for super::PostgresRecordStore {
         VisitorError: Send + 'operation,
     {
         Box::pin(async move {
-            self.visit_repository_records(PostgresRecordKind::Version, repository, &mut visitor)
+            self.visit_repository_records(RecordKind::Version, repository, &mut visitor)
                 .await
         })
     }
@@ -512,12 +513,12 @@ impl RecordTraversal for super::PostgresRecordStore {
     }
 
     fn latest_record_locator(&self, record: &FileRecord) -> Self::Locator {
-        record_locator(PostgresRecordKind::Latest, record, None)
+        record_locator(RecordKind::Latest, record, None)
     }
 
     fn version_record_locator(&self, record: &FileRecord) -> Self::Locator {
         record_locator(
-            PostgresRecordKind::Version,
+            RecordKind::Version,
             record,
             Some(record.content_hash.clone()),
         )
@@ -624,10 +625,11 @@ async fn upsert_dedupe_shard_mapping_in_transaction(
 fn record_locator_from_row(
     row: &PgRow,
 ) -> Result<PostgresRecordLocator, PostgresMetadataStoreError> {
-    let kind = PostgresRecordKind::parse(row.try_get::<String, _>("record_kind")?.as_str())?;
+    let kind = RecordKind::from_str(row.try_get::<String, _>("record_kind")?.as_str())
+        .map_err(|_err| PostgresMetadataStoreError::InvalidRecordKind)?;
     let content_hash = match kind {
-        PostgresRecordKind::Latest => None,
-        PostgresRecordKind::Version => Some(row.try_get::<String, _>("content_hash")?),
+        RecordKind::Latest => None,
+        RecordKind::Version => Some(row.try_get::<String, _>("content_hash")?),
     };
     Ok(PostgresRecordLocator {
         record_key: row.try_get("record_key")?,
@@ -653,7 +655,7 @@ fn stored_record_from_row(
 }
 
 pub(super) fn record_locator(
-    kind: PostgresRecordKind,
+    kind: RecordKind,
     record: &FileRecord,
     content_hash: Option<String>,
 ) -> PostgresRecordLocator {
@@ -689,7 +691,7 @@ mod tests {
     )]
     use shardline_protocol::{RepositoryProvider, RepositoryScope};
 
-    use super::PostgresRecordKind;
+    use super::RecordKind;
     use super::record_locator;
     use crate::{FileChunkRecord, FileRecord};
 
@@ -718,7 +720,7 @@ mod tests {
         let scope =
             RepositoryScope::new(RepositoryProvider::GitHub, "team", "repo", Some("main")).unwrap();
         let record = sample_record(Some(scope));
-        let locator = record_locator(PostgresRecordKind::Latest, &record, None);
+        let locator = record_locator(RecordKind::Latest, &record, None);
 
         assert_eq!(locator.file_id(), "test.bin");
         assert!(locator.content_hash().is_none());
@@ -730,7 +732,7 @@ mod tests {
     fn record_locator_produces_version_locator_with_content_hash() {
         let record = sample_record(None);
         let locator = record_locator(
-            PostgresRecordKind::Version,
+            RecordKind::Version,
             &record,
             Some(record.content_hash.clone()),
         );
@@ -746,9 +748,9 @@ mod tests {
         let scope =
             RepositoryScope::new(RepositoryProvider::GitLab, "team", "assets", None).unwrap();
         let record = sample_record(Some(scope));
-        let latest = record_locator(PostgresRecordKind::Latest, &record, None);
+        let latest = record_locator(RecordKind::Latest, &record, None);
         let version = record_locator(
-            PostgresRecordKind::Version,
+            RecordKind::Version,
             &record,
             Some(record.content_hash.clone()),
         );
@@ -762,7 +764,7 @@ mod tests {
         let scope =
             RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", None).unwrap();
         let record = sample_record(Some(scope));
-        let locator = record_locator(PostgresRecordKind::Latest, &record, None);
+        let locator = record_locator(RecordKind::Latest, &record, None);
 
         // The locator key should contain scope information
         assert!(locator.record_key().contains("github"));
@@ -771,7 +773,7 @@ mod tests {
     #[test]
     fn record_locator_without_repository_scope() {
         let record = sample_record(None);
-        let locator = record_locator(PostgresRecordKind::Latest, &record, None);
+        let locator = record_locator(RecordKind::Latest, &record, None);
 
         // Without scope, the key should still be valid
         assert!(!locator.record_key().is_empty());

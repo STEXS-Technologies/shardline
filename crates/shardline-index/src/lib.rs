@@ -43,6 +43,7 @@ mod provider;
 mod reconstruction;
 mod record;
 mod record_key;
+mod record_kind;
 #[cfg(test)]
 mod test_invariant_error;
 mod tree;

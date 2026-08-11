@@ -42,6 +42,7 @@ pub mod models;
 pub mod resolve;
 pub mod routes;
 pub mod state;
+pub mod types;
 
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
