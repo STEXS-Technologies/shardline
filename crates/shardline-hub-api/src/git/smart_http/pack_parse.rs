@@ -6,7 +6,11 @@ use super::super::pack::{GitObject, ObjectType, PackError, apply_delta, parse_of
 
 /// Maximum total decompressed size for all objects in a receive-pack (512 MB).
 /// Prevents zlib-bomb attacks that decompress to many GB of memory.
-const MAX_TOTAL_DECOMPRESSED_SIZE: usize = 512 * 1024 * 1024;
+///
+/// This is the canonical bound shared with the pack generator's delta-target
+/// ceiling ([`crate::git::pack`]), so both sides reference a single constant
+/// instead of duplicating the 512 MiB figure.
+pub(crate) const MAX_DECOMPRESSED_TOTAL_BYTES: usize = 512 * 1024 * 1024;
 
 /// # Errors
 ///
@@ -81,7 +85,7 @@ pub fn parse_pack_data(data: &[u8]) -> Result<Vec<GitObject>, PackError> {
                         total_decompressed = total_decompressed
                             .checked_add(decompressed.len())
                             .ok_or(PackError::ExcessiveDecompressedSize)?;
-                        if total_decompressed > MAX_TOTAL_DECOMPRESSED_SIZE {
+                        if total_decompressed > MAX_DECOMPRESSED_TOTAL_BYTES {
                             return Err(PackError::ExcessiveDecompressedSize);
                         }
                         let ot = match obj_type {
@@ -113,7 +117,7 @@ pub fn parse_pack_data(data: &[u8]) -> Result<Vec<GitObject>, PackError> {
                         total_decompressed = total_decompressed
                             .checked_add(delta_data.len())
                             .ok_or(PackError::ExcessiveDecompressedSize)?;
-                        if total_decompressed > MAX_TOTAL_DECOMPRESSED_SIZE {
+                        if total_decompressed > MAX_DECOMPRESSED_TOTAL_BYTES {
                             return Err(PackError::ExcessiveDecompressedSize);
                         }
                         let base_idx = objects
@@ -129,7 +133,7 @@ pub fn parse_pack_data(data: &[u8]) -> Result<Vec<GitObject>, PackError> {
                         total_decompressed = total_decompressed
                             .checked_add(resolved_data.len())
                             .ok_or(PackError::ExcessiveDecompressedSize)?;
-                        if total_decompressed > MAX_TOTAL_DECOMPRESSED_SIZE {
+                        if total_decompressed > MAX_DECOMPRESSED_TOTAL_BYTES {
                             return Err(PackError::ExcessiveDecompressedSize);
                         }
                         let resolved = GitObject {
@@ -164,7 +168,7 @@ pub fn parse_pack_data(data: &[u8]) -> Result<Vec<GitObject>, PackError> {
                         total_decompressed = total_decompressed
                             .checked_add(delta_data.len())
                             .ok_or(PackError::ExcessiveDecompressedSize)?;
-                        if total_decompressed > MAX_TOTAL_DECOMPRESSED_SIZE {
+                        if total_decompressed > MAX_DECOMPRESSED_TOTAL_BYTES {
                             return Err(PackError::ExcessiveDecompressedSize);
                         }
                         let &base_idx = sha_index.get(&base_sha).ok_or(PackError::InvalidDelta)?;
@@ -178,7 +182,7 @@ pub fn parse_pack_data(data: &[u8]) -> Result<Vec<GitObject>, PackError> {
                         total_decompressed = total_decompressed
                             .checked_add(resolved_data.len())
                             .ok_or(PackError::ExcessiveDecompressedSize)?;
-                        if total_decompressed > MAX_TOTAL_DECOMPRESSED_SIZE {
+                        if total_decompressed > MAX_DECOMPRESSED_TOTAL_BYTES {
                             return Err(PackError::ExcessiveDecompressedSize);
                         }
                         let resolved = GitObject {

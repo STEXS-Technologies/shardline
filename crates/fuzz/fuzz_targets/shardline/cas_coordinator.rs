@@ -14,9 +14,7 @@ use shardline_storage::SyncObjectStoreBridge;
 
 use shardline_index::{MemoryIndexStore, StoredObjectId};
 use shardline_protocol::ShardlineHash;
-use shardline_storage::{
-    ObjectBody, ObjectIntegrity, ObjectKey, ObjectStore, PutOutcome,
-};
+use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectStore, PutOutcome};
 
 /// Maximum body bytes accepted by the fuzz coordinator.
 const MAX_BODY_BYTES: u64 = 4096;
@@ -50,11 +48,8 @@ fuzz_target!(|data: Vec<u8>| {
     };
 
     // Test 1: store_content_addressed_blob observes size limits.
-    let outcome = runtime.block_on(coordinator.store_content_addressed_blob(
-        &key,
-        &integrity,
-        body.clone(),
-    ));
+    let outcome =
+        runtime.block_on(coordinator.store_content_addressed_blob(&key, &integrity, body.clone()));
 
     if body_len > MAX_BODY_BYTES {
         // Must be rejected.
@@ -83,11 +78,7 @@ fuzz_target!(|data: Vec<u8>| {
     assert_eq!(outcome, PutOutcome::Inserted);
 
     // Test 3: Idempotent — storing the same blob again returns AlreadyExists.
-    let second = runtime.block_on(coordinator.store_content_addressed_blob(
-        &key,
-        &integrity,
-        body,
-    ));
+    let second = runtime.block_on(coordinator.store_content_addressed_blob(&key, &integrity, body));
     assert!(
         matches!(second, Ok(PutOutcome::AlreadyExists)),
         "idempotent store should return AlreadyExists, got {second:?}"
@@ -95,7 +86,10 @@ fuzz_target!(|data: Vec<u8>| {
 
     // Test 4: is_object_reachable returns true for the stored object.
     let object_id = StoredObjectId::new(hash);
-    let reachable = runtime.block_on(ObjectReachability::is_object_reachable(&coordinator, &object_id));
+    let reachable = runtime.block_on(ObjectReachability::is_object_reachable(
+        &coordinator,
+        &object_id,
+    ));
     assert!(
         matches!(reachable, Ok(true)),
         "stored object should be reachable, got {reachable:?}"
@@ -120,12 +114,16 @@ impl ObjectStore for MemoryObjectStore {
         body: ObjectBody<'_>,
         integrity: &ObjectIntegrity,
     ) -> Result<PutOutcome, Self::Error> {
-        let body_len = u64::try_from(body.as_slice().len()).map_err(|_err| MemoryObjectError::Integrity)?;
+        let body_len =
+            u64::try_from(body.as_slice().len()).map_err(|_err| MemoryObjectError::Integrity)?;
         if body_len != integrity.length() {
             return Err(MemoryObjectError::Integrity);
         }
 
-        let mut objects = self.objects.lock().map_err(|_err| MemoryObjectError::Integrity)?;
+        let mut objects = self
+            .objects
+            .lock()
+            .map_err(|_err| MemoryObjectError::Integrity)?;
         if let Some(existing) = objects.get(key) {
             if existing.as_slice() == body.as_slice() {
                 return Ok(PutOutcome::AlreadyExists);
@@ -142,7 +140,10 @@ impl ObjectStore for MemoryObjectStore {
         key: &ObjectKey,
         range: shardline_protocol::ByteRange,
     ) -> Result<Vec<u8>, Self::Error> {
-        let objects = self.objects.lock().map_err(|_err| MemoryObjectError::Integrity)?;
+        let objects = self
+            .objects
+            .lock()
+            .map_err(|_err| MemoryObjectError::Integrity)?;
         let object = objects.get(key).ok_or(MemoryObjectError::Missing)?;
         let start = usize::try_from(range.start()).map_err(|_err| MemoryObjectError::Missing)?;
         let length = range.len().ok_or(MemoryObjectError::Missing)?;
@@ -152,7 +153,10 @@ impl ObjectStore for MemoryObjectStore {
     }
 
     fn contains(&self, key: &ObjectKey) -> Result<bool, Self::Error> {
-        let objects = self.objects.lock().map_err(|_err| MemoryObjectError::Integrity)?;
+        let objects = self
+            .objects
+            .lock()
+            .map_err(|_err| MemoryObjectError::Integrity)?;
         Ok(objects.contains_key(key))
     }
 
@@ -160,7 +164,10 @@ impl ObjectStore for MemoryObjectStore {
         &self,
         key: &ObjectKey,
     ) -> Result<Option<shardline_storage::ObjectMetadata>, Self::Error> {
-        let objects = self.objects.lock().map_err(|_err| MemoryObjectError::Integrity)?;
+        let objects = self
+            .objects
+            .lock()
+            .map_err(|_err| MemoryObjectError::Integrity)?;
         Ok(objects.get(key).map(|object| {
             shardline_storage::ObjectMetadata::new(
                 key.clone(),
@@ -174,7 +181,10 @@ impl ObjectStore for MemoryObjectStore {
         &self,
         prefix: &shardline_storage::ObjectPrefix,
     ) -> Result<Vec<shardline_storage::ObjectMetadata>, Self::Error> {
-        let objects = self.objects.lock().map_err(|_err| MemoryObjectError::Integrity)?;
+        let objects = self
+            .objects
+            .lock()
+            .map_err(|_err| MemoryObjectError::Integrity)?;
         let mut result: Vec<_> = objects
             .iter()
             .filter(|(key, _)| key.as_str().starts_with(prefix.as_str()))
@@ -194,7 +204,10 @@ impl ObjectStore for MemoryObjectStore {
         &self,
         key: &ObjectKey,
     ) -> Result<shardline_storage::DeleteOutcome, Self::Error> {
-        let mut objects = self.objects.lock().map_err(|_err| MemoryObjectError::Integrity)?;
+        let mut objects = self
+            .objects
+            .lock()
+            .map_err(|_err| MemoryObjectError::Integrity)?;
         if objects.remove(key).is_some() {
             Ok(shardline_storage::DeleteOutcome::Deleted)
         } else {

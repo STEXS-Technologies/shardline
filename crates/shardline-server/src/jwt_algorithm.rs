@@ -128,17 +128,8 @@ mod tests {
     #[test]
     fn as_str_round_trips_canonical_strings() {
         for value in [
-            "RS256",
-            "RS384",
-            "RS512",
-            "ES256",
-            "ES384",
-            "ES512",
-            "HS256",
-            "HS384",
-            "HS512",
-            "EdDSA",
-            "none",
+            "RS256", "RS384", "RS512", "ES256", "ES384", "ES512", "HS256", "HS384", "HS512",
+            "EdDSA", "none",
         ] {
             let parsed: JwtAlgorithm = value.parse().expect("valid algorithm");
             assert_eq!(parsed.as_str(), value);
@@ -147,7 +138,9 @@ mod tests {
 
     #[test]
     fn parsing_is_case_sensitive() {
-        for value in ["rs256", "rs512", "es256", "hs256", "eddsa", "NONE", "None", "EdDsa"] {
+        for value in [
+            "rs256", "rs512", "es256", "hs256", "eddsa", "NONE", "None", "EdDsa",
+        ] {
             assert!(
                 value.parse::<JwtAlgorithm>().is_err(),
                 "expected {value:?} to be rejected as case-sensitive"
@@ -167,7 +160,9 @@ mod tests {
 
     #[test]
     fn classifies_asymmetric_algorithms() {
-        for value in ["RS256", "RS384", "RS512", "ES256", "ES384", "ES512", "EdDSA"] {
+        for value in [
+            "RS256", "RS384", "RS512", "ES256", "ES384", "ES512", "EdDSA",
+        ] {
             let parsed: JwtAlgorithm = value.parse().expect("valid algorithm");
             assert!(parsed.is_asymmetric(), "{value:?} should be asymmetric");
             assert!(!parsed.is_symmetric(), "{value:?} should not be symmetric");
@@ -180,7 +175,10 @@ mod tests {
         for value in ["HS256", "HS384", "HS512"] {
             let parsed: JwtAlgorithm = value.parse().expect("valid algorithm");
             assert!(parsed.is_symmetric(), "{value:?} should be symmetric");
-            assert!(!parsed.is_asymmetric(), "{value:?} should not be asymmetric");
+            assert!(
+                !parsed.is_asymmetric(),
+                "{value:?} should not be asymmetric"
+            );
             assert!(!parsed.is_none(), "{value:?} should not be none");
         }
     }

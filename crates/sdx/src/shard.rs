@@ -209,9 +209,8 @@ pub fn parse_shard_xorbs(body: &[u8]) -> Result<Vec<ShardXorb>, SdxError> {
         let num_entries = read_xorb_num_entries(header, version)?;
         let num_bytes = read_xorb_num_bytes(header, version)?;
         let entry_len = entry_size(version);
-        let num_chunks = usize::try_from(num_entries).map_err(|e| {
-            shard_parse(&format!("xorb chunk count does not fit in usize: {e}"))
-        })?;
+        let num_chunks = usize::try_from(num_entries)
+            .map_err(|e| shard_parse(&format!("xorb chunk count does not fit in usize: {e}")))?;
         if num_chunks > MAX_XORB_CHUNK_ENTRIES {
             return Err(shard_parse("xorb chunk count exceeds maximum"));
         }
@@ -452,7 +451,8 @@ mod tests {
     use super::{
         MAX_XORB_CHUNK_ENTRIES, MDB_DEFAULT_XORB_FLAG, SHARD_ENTRY_PADDING, SHARD_ENTRY_SIZE,
         SHARD_FOOTER_SIZE, SHARD_HEADER_TAG, ShardFileEntry, ShardSegment, ShardXorb,
-        ShardXorbChunk, bookend, find_chunk_in_xorbs, hash_bytes, parse_shard_xorbs, serialize_shard,
+        ShardXorbChunk, bookend, find_chunk_in_xorbs, hash_bytes, parse_shard_xorbs,
+        serialize_shard,
     };
 
     fn chunk(hash: MerkleHash, start: u64, len: u64) -> ShardXorbChunk {

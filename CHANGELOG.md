@@ -67,6 +67,12 @@ plaintext, with an automatic upgrade of existing plaintext rows.
 - **Base64 decode before cap**: the hub-api commit handler now bounds the encoded
   length against `MAX_INLINE_FILE_BYTES` before decoding, rather than allocating
   the decoded buffer first.
+- **GC sweep performance**: the delete-time reachability re-check now collects the
+  referenced-key set ONCE immediately before the sweep loop (O(1) per candidate)
+  instead of re-running a full reachability mark per expired candidate (which was
+  effectively quadratic at scale — one mark per candidate, each reading/parsing
+  xorb containers on large stores). The TOCTOU hardening is preserved with a
+  strictly smaller delete-time window.
 
 ### Security
 A three-lane adversarial audit (independent code-audit, money-lane/impact, and a

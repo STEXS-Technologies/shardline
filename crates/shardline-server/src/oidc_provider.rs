@@ -7,10 +7,10 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+use crate::jwt_algorithm::JwtAlgorithm;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode};
 use reqwest::Client;
 use serde::Deserialize;
-use crate::jwt_algorithm::JwtAlgorithm;
 use shardline_protocol::{RepositoryProvider, RepositoryScope, TokenClaims, TokenScope};
 use shardline_server_core::{AuthError, AuthProvider};
 

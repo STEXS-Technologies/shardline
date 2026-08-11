@@ -115,7 +115,7 @@ mod tests {
         let content = vec![0u8; 100];
         let result = DownloadResult::Inline {
             size: 100,
-            sha: "abc123".to_owned(),
+            sha: "c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6".to_owned(),
             content: Some(content.clone()),
         };
 
@@ -126,7 +126,10 @@ mod tests {
                 content: c,
             } => {
                 assert_eq!(size, 100);
-                assert_eq!(sha, "abc123");
+                assert_eq!(
+                    sha,
+                    "c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6"
+                );
                 assert_eq!(c.as_deref(), Some(content.as_slice()));
             }
             _ => panic!("expected Inline variant"),
@@ -360,11 +363,17 @@ mod tests {
         let files = vec![shardline_index::hub::HubFileEntry {
             path: "readme.md".into(),
             size: content.len() as u64,
-            sha: "abc123".into(),
+            sha: "c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6".into(),
             is_lfs: false,
         }];
         let content_data = content.to_vec();
-        let (_ts, state) = setup_resolve_state(&files, &[("abc123", content)]);
+        let (_ts, state) = setup_resolve_state(
+            &files,
+            &[(
+                "c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6",
+                content,
+            )],
+        );
         let result = resolve_file_from_store(&state, "sha_resolve", "readme.md").unwrap();
         match &result {
             DownloadResult::Inline {
@@ -373,7 +382,10 @@ mod tests {
                 content: c,
             } => {
                 assert_eq!(*size, content_data.len() as u64);
-                assert_eq!(sha.as_str(), "abc123");
+                assert_eq!(
+                    sha.as_str(),
+                    "c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6"
+                );
                 assert_eq!(c, &Some(content_data));
             }
             _ => assert!(
@@ -389,14 +401,17 @@ mod tests {
         let files = vec![shardline_index::hub::HubFileEntry {
             path: "model.bin".into(),
             size,
-            sha: "oid123".into(),
+            sha: "d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7".into(),
             is_lfs: true,
         }];
         let (_ts, state) = setup_resolve_state(&files, &[]);
         let result = resolve_file_from_store(&state, "sha_resolve", "model.bin").unwrap();
         match &result {
             DownloadResult::LfsRedirect { oid, size: s } => {
-                assert_eq!(oid.as_str(), "oid123");
+                assert_eq!(
+                    oid.as_str(),
+                    "d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7"
+                );
                 assert_eq!(*s, size);
             }
             _ => assert!(
@@ -419,10 +434,16 @@ mod tests {
         let files = vec![shardline_index::hub::HubFileEntry {
             path: "big.txt".into(),
             size: content.len() as u64,
-            sha: "bigsha".into(),
+            sha: "e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8".into(),
             is_lfs: false,
         }];
-        let (_ts, state) = setup_resolve_state(&files, &[("bigsha", &content)]);
+        let (_ts, state) = setup_resolve_state(
+            &files,
+            &[(
+                "e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8",
+                &content,
+            )],
+        );
         let result = resolve_file_from_store(&state, "sha_resolve", "big.txt").unwrap();
         match &result {
             DownloadResult::Inline { size, .. } => {
@@ -443,7 +464,7 @@ mod tests {
         let files = vec![shardline_index::hub::HubFileEntry {
             path: "huge.txt".into(),
             size,
-            sha: "hugesha".into(),
+            sha: "f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9".into(),
             is_lfs: false,
         }];
         let (_ts, state) = setup_resolve_state(&files, &[]);

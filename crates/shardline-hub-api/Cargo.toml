@@ -28,6 +28,7 @@ sha2.workspace = true
 shardline-index.workspace = true
 shardline-metrics.workspace = true
 shardline-protocol.workspace = true
+shardline-protocol-adapters.workspace = true
 shardline-server-core.workspace = true
 shardline-storage.workspace = true
 thiserror.workspace = true

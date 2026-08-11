@@ -46,11 +46,9 @@ impl RecordTraversal for LocalRecordStore {
     ) -> RecordStoreFuture<'_, Vec<Self::Locator>, Self::Error> {
         let store = self.clone();
         Box::pin(async move {
-            tokio::task::spawn_blocking(move || {
-                store.list_record_locators(RecordKind::Version)
-            })
-            .await
-            .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
+            tokio::task::spawn_blocking(move || store.list_record_locators(RecordKind::Version))
+                .await
+                .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
         })
     }
 

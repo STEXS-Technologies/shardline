@@ -190,6 +190,16 @@ async fn store_push_objects(
         .store_files(new_sha, &files)
         .map_err(|e| SmartHttpError::StoreFiles(e.to_string()))?;
 
+    // Build an O(1) index of blob content (keyed by its sha256, the LFS OID)
+    // once, before resolving any per-file LFS content. This avoids re-hashing
+    // every pack blob for every LFS file (previously O(files × blobs)). The map
+    // borrows the parsed pack objects and lives only as long as `objects`.
+    let content_by_sha256: HashMap<String, &GitObject> = objects
+        .iter()
+        .filter(|obj| obj.object_type == ObjectType::Blob)
+        .map(|obj| (content_sha256(&obj.data), obj))
+        .collect();
+
     // Store LFS objects that were included in the pack.
     // LFS pointer blobs only contain metadata; the actual file content is
     // uploaded separately via PUT /lfs/objects/{oid}.  If the client bundled
@@ -200,7 +210,7 @@ async fn store_push_objects(
             // Find the object whose content should be stored for this file.
             // See `find_lfs_blob` for how the canonical pointer and the actual
             // content object are matched (including non-canonical pointers).
-            let blob_obj = find_lfs_blob(file, objects, &sha_to_obj)
+            let blob_obj = find_lfs_blob(file, &sha_to_obj, &content_by_sha256)
                 .ok_or_else(|| SmartHttpError::LfsContentNotFoundInPack(file.sha.clone()))?;
             let key = lfs_object_key(&file.sha, repo_scope)
                 .map_err(|e| SmartHttpError::StoreLfsObject(e.to_string()))?;
@@ -254,23 +264,22 @@ async fn store_push_objects(
 /// historical fast path. A pointer may however be non-canonical — CRLF line
 /// endings, extra fields, reordered attributes — in which case its git SHA1
 /// differs from the canonical pointer and the exact-SHA lookup misses. Rather
-/// than silently dropping the LFS payload, we then search the parsed pack
-/// objects for any blob whose sha256 content equals the file's OID
-/// (`file.sha`), which is the real content the LFS pointer references. Returns
-/// `None` if no matching object exists at all.
+/// than silently dropping the LFS payload, we then look up the prebuilt
+/// `content_by_sha256` index for any blob whose sha256 content equals the
+/// file's OID (`file.sha`), which is the real content the LFS pointer
+/// references. This is an O(1) lookup instead of a per-file scan of every pack
+/// blob. Returns `None` if no matching object exists at all.
 pub(super) fn find_lfs_blob<'obj>(
     file: &HubFileEntry,
-    objects: &'obj [GitObject],
     sha_to_obj: &HashMap<[u8; 20], &'obj GitObject>,
+    content_by_sha256: &HashMap<String, &'obj GitObject>,
 ) -> Option<&'obj GitObject> {
     let pointer_blob = build_lfs_pointer_blob(&file.sha, file.size);
     let pointer_sha = pointer_blob.sha1();
     if let Some(blob_obj) = sha_to_obj.get(&pointer_sha) {
         return Some(*blob_obj);
     }
-    objects
-        .iter()
-        .find(|obj| obj.object_type == ObjectType::Blob && content_sha256(&obj.data) == file.sha)
+    content_by_sha256.get(&file.sha).copied()
 }
 
 /// Computes the lowercase hex sha256 of `data` (the LFS OID format).

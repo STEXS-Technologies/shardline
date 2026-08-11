@@ -21,8 +21,11 @@ pub(crate) use self::dataset::*;
 pub(crate) use self::handlers::{git_head, whoami};
 pub(crate) use self::health::*;
 pub(crate) use self::helpers::{
-    authorize, authorize_with_context, lfs_object_key, repo_type_path, require_repository_binding,
+    authorize, authorize_with_context, repo_type_path, require_repository_binding,
 };
+// Re-export the canonical LFS object-key builder from the shared protocol
+// adapters so sibling modules and `crate::routes::lfs_object_key` references
+// resolve to a single implementation (no duplicated key derivation).
 pub(crate) use self::lfs::*;
 pub(crate) use self::repos::*;
 pub(crate) use self::resolve::*;
@@ -31,6 +34,7 @@ pub use self::state::HubState;
 pub(crate) use self::tokens::*;
 pub(crate) use self::tree::*;
 pub(crate) use self::webhooks::*;
+pub(crate) use shardline_protocol_adapters::lfs_object_key;
 
 #[cfg(test)]
 pub(crate) use crate::auth::HubAuth;

@@ -57,12 +57,7 @@ fn postgres_record_keys_distinguish_scope_file_and_kind_without_parsing() {
 
     assert_ne!(first_key, second_key);
     assert_ne!(
-        shared_record_key(
-            RecordKind::Latest.as_str(),
-            &first_key,
-            "file",
-            None
-        ),
+        shared_record_key(RecordKind::Latest.as_str(), &first_key, "file", None),
         shared_record_key(
             RecordKind::Version.as_str(),
             &first_key,

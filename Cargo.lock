@@ -3547,6 +3547,7 @@ dependencies = [
  "shardline-index",
  "shardline-metrics",
  "shardline-protocol",
+ "shardline-protocol-adapters",
  "shardline-server-core",
  "shardline-storage",
  "tempfile",

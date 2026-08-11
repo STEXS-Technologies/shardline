@@ -59,6 +59,19 @@ fn lfs_pointer_blob_format() {
 
 // --- find_lfs_blob (F-deep-2.3) ---
 
+/// Builds the sha256→object content index exactly as the production caller in
+/// `receive_pack.rs` does, so tests exercise the same O(1) fallback lookup.
+fn build_content_index(objects: &[GitObject]) -> std::collections::HashMap<String, &GitObject> {
+    use sha2::Digest;
+    let mut index = std::collections::HashMap::new();
+    for obj in objects {
+        if obj.object_type == ObjectType::Blob {
+            index.insert(hex::encode(sha2::Sha256::digest(&obj.data)), obj);
+        }
+    }
+    index
+}
+
 #[test]
 fn find_lfs_blob_non_canonical_pointer_finds_content() {
     // A non-canonical pointer blob (e.g. CRLF line endings) whose git SHA1
@@ -85,8 +98,9 @@ fn find_lfs_blob_non_canonical_pointer_finds_content() {
     for obj in &objects {
         sha_to_obj.insert(obj.sha1(), obj);
     }
+    let content_by_sha256 = build_content_index(&objects);
 
-    let found = find_lfs_blob(&file, &objects, &sha_to_obj);
+    let found = find_lfs_blob(&file, &sha_to_obj, &content_by_sha256);
     assert!(
         found.is_some(),
         "non-canonical pointer must still find the content blob"
@@ -118,7 +132,8 @@ fn find_lfs_blob_canonical_pointer_matches_by_sha1() {
     for obj in &objects {
         sha_to_obj.insert(obj.sha1(), obj);
     }
-    let found = find_lfs_blob(&file, &objects, &sha_to_obj);
+    let content_by_sha256 = build_content_index(&objects);
+    let found = find_lfs_blob(&file, &sha_to_obj, &content_by_sha256);
     // The canonical pointer is matched by its git SHA1 fast path.
     assert_eq!(found.unwrap().sha1(), pointer.sha1());
 }
@@ -143,8 +158,9 @@ fn find_lfs_blob_none_when_no_matching_object() {
     for obj in &objects {
         sha_to_obj.insert(obj.sha1(), obj);
     }
+    let content_by_sha256 = build_content_index(&objects);
     assert!(
-        find_lfs_blob(&file, &objects, &sha_to_obj).is_none(),
+        find_lfs_blob(&file, &sha_to_obj, &content_by_sha256).is_none(),
         "no matching object should yield None (the push is then failed)"
     );
 }

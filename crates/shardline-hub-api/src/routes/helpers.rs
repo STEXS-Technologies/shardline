@@ -3,10 +3,8 @@ use axum::http::HeaderMap;
 use crate::error::HubApiError;
 use crate::models::RepoType;
 use shardline_index::hub::HubRepoType;
-use shardline_protocol::{RepositoryScope, TokenScope};
+use shardline_protocol::TokenScope;
 use shardline_server_core::AuthContext;
-use shardline_server_core::protocol_support::scope_namespace;
-use shardline_storage::ObjectKey;
 
 use super::HubState;
 
@@ -77,36 +75,6 @@ pub(crate) fn require_repository_binding(
     } else {
         Err(HubApiError::Forbidden)
     }
-}
-
-/// Builds a repository-namespaced LFS object key.
-///
-/// This mirrors the key layout of the core helper
-/// `shardline_protocol_adapters::lfs::lfs_object_key` (which the hub-api crate
-/// does not depend on directly), reusing the same `scope_namespace` derivation
-/// from `shardline-server-core`. Binding the storage key to the token's
-/// `RepositoryScope` ensures the same OID in two different repositories maps to
-/// two distinct storage objects, closing the cross-tenant first-writer-wins
-/// content-substitution vector.
-///
-/// Unlike the core helper this does not independently validate `oid` as a
-/// content hash — callers already validate OIDs on the write paths (e.g.
-/// [`crate::commit::validate_lfs_oid`]) and the read paths look up by stored
-/// hashes, so we only enforce a valid [`ObjectKey`] as the previous hub-api
-/// implementation did.
-///
-/// # Errors
-///
-/// Returns [`HubApiError::CasError`] when the derived key is invalid.
-pub(crate) fn lfs_object_key(
-    oid: &str,
-    repository_scope: Option<&RepositoryScope>,
-) -> Result<ObjectKey, HubApiError> {
-    ObjectKey::parse(&format!(
-        "protocols/lfs/{}/objects/{oid}",
-        scope_namespace(repository_scope)
-    ))
-    .map_err(|e| HubApiError::CasError(e.to_string()))
 }
 
 /// Converts a `HubRepoType` to the API path string.

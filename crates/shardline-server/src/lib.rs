@@ -51,8 +51,8 @@ mod fsck;
 #[cfg(feature = "fuzzing")]
 mod fuzz;
 mod ingest_bench;
-mod jwt_algorithm;
 mod jwks_provider;
+mod jwt_algorithm;
 mod lifecycle_repair;
 mod local_backend;
 mod local_fs;

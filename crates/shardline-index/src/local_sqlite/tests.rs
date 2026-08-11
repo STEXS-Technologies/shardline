@@ -19,8 +19,8 @@ use super::helpers::legacy_record_path;
 use super::{
     DedupeShardRecord, FileReconstructionRecord, LEGACY_IMPORT_COMPLETED_KEY,
     LOCAL_METADATA_DATABASE_FILE_NAME, LOCAL_SCHEMA_MIGRATIONS_TABLE, LOCAL_SQLITE_MIGRATIONS,
-    LegacyQuarantineCandidateRecord, LocalIndexStore, LocalIndexStoreError, RecordKind,
-    LocalRecordStore, StoredObjectPresenceRecord,
+    LegacyQuarantineCandidateRecord, LocalIndexStore, LocalIndexStoreError, LocalRecordStore,
+    RecordKind, StoredObjectPresenceRecord,
 };
 use crate::{
     DedupeShardMapping, DedupeStore, FileChunkRecord, FileId, FileReconstruction, FileRecord,

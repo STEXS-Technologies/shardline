@@ -3,11 +3,11 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::{
     error::Error as StdError,
     ffi::OsStr,
-    str::FromStr,
     fs::{self, OpenOptions},
     io::{Error as IoError, ErrorKind, Read},
     ops::Deref,
     path::{Path, PathBuf},
+    str::FromStr,
     time::{Duration, UNIX_EPOCH},
 };
 
@@ -29,8 +29,9 @@ use shardline_storage::{
 use super::{
     DedupeShardRecord, FileReconstructionRecord, LEGACY_IMPORT_COMPLETED_KEY,
     LOCAL_SCHEMA_MIGRATIONS_TABLE, LOCAL_SQLITE_MIGRATIONS, LegacyQuarantineCandidateRecord,
-    LocalIndexStoreError, LocalRecordLocator, MAX_CONTROL_PLANE_METADATA_BYTES, RecordKind,
-    MAX_LOCAL_RECORD_METADATA_BYTES, MAX_RECONSTRUCTION_METADATA_BYTES, StoredObjectPresenceRecord,
+    LocalIndexStoreError, LocalRecordLocator, MAX_CONTROL_PLANE_METADATA_BYTES,
+    MAX_LOCAL_RECORD_METADATA_BYTES, MAX_RECONSTRUCTION_METADATA_BYTES, RecordKind,
+    StoredObjectPresenceRecord,
 };
 use crate::{
     DedupeShardMapping, FileId, FileReconstruction, FileRecord, ProviderRepositoryState,
@@ -1200,11 +1201,7 @@ fn map_directory_path_error(
     }
 }
 
-pub(crate) fn legacy_record_path(
-    root: &Path,
-    kind: RecordKind,
-    record: &FileRecord,
-) -> PathBuf {
+pub(crate) fn legacy_record_path(root: &Path, kind: RecordKind, record: &FileRecord) -> PathBuf {
     let base = match kind {
         RecordKind::Latest => root.join("files"),
         RecordKind::Version => root.join("file_versions"),

@@ -136,8 +136,8 @@ fn validate_jwt_alg_none_attack_blocked() {
         "JWKS verify_jwt_claims now rejects alg:none via typed guard"
     );
     assert!(
-        jwks_fn.contains("alg.is_symmetric()"),
-        "JWKS verify_jwt_claims blocks symmetric alg-confusion"
+        jwks_fn.contains("alg.is_asymmetric()"),
+        "JWKS verify_jwt_claims blocks symmetric alg-confusion via the asymmetric guard"
     );
 }
 

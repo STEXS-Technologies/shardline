@@ -50,6 +50,7 @@ fn optional_redis_tls_material_file(
     let bytes = read_secret_file_bytes(
         Path::new(&path),
         MAX_REDIS_TLS_MATERIAL_BYTES,
+        false,
         |source| ServerConfigError::RedisTlsMaterial {
             name: env_name,
             source,
@@ -84,6 +85,7 @@ pub(super) fn configure_provider_runtime_from_paths(
             let provider_api_key = read_secret_file_bytes(
                 &provider_api_key_path,
                 MAX_PROVIDER_API_KEY_BYTES,
+                false,
                 ServerConfigError::ProviderApiKey,
                 |observed_bytes, maximum_bytes| ServerConfigError::ProviderApiKeyTooLarge {
                     observed_bytes,
@@ -169,6 +171,7 @@ pub(super) fn optional_s3_secret_from_sources(
             let bytes = read_secret_file_bytes(
                 Path::new(&path),
                 MAX_S3_CREDENTIAL_BYTES,
+                false,
                 |source| ServerConfigError::S3CredentialFile {
                     name: file_env_name,
                     source,
@@ -238,9 +241,20 @@ where
         .with_virtual_hosted_style_request(virtual_hosted_style_request))
 }
 
+/// Reads a secret file, returning its bytes verbatim.
+///
+/// When `strip_trailing_newline` is `true`, a single trailing line terminator
+/// (`\n`, or `\r\n`) that is almost always an artifact of writing the file with
+/// `echo $KEY > file` or an editor is removed. This must only be enabled for
+/// FIXED-LENGTH key files (e.g. the exact-32-byte Hub webhook secret key), where
+/// a stray `\n` otherwise aborts startup with a misleading length error.
+/// Variable-length secrets (S3 credentials, provider API keys, metrics tokens,
+/// Redis TLS material, etc.) must pass `false` so a credential legitimately
+/// ending in `\n` is never silently altered.
 pub(super) fn read_secret_file_bytes(
     path: &Path,
     maximum_bytes: u64,
+    strip_trailing_newline: bool,
     read_error: impl Fn(IoError) -> ServerConfigError + Copy,
     error: impl Fn(u64, u64) -> ServerConfigError + Copy,
     _length_mismatch_error: impl Fn(u64, u64) -> ServerConfigError + Copy,
@@ -251,11 +265,9 @@ pub(super) fn read_secret_file_bytes(
 
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes).map_err(read_error)?;
-    // Strip a single trailing newline that is almost always an artifact of
-    // writing the key file with `echo $KEY > file` or an editor. This matters
-    // most for fixed-length keys (e.g. the 32-byte Hub webhook secret), where a
-    // stray `\n` otherwise aborts startup with a misleading length error.
-    bytes = strip_one_trailing_newline(bytes);
+    if strip_trailing_newline {
+        bytes = strip_one_trailing_newline(bytes);
+    }
     ensure_secret_size_within_limit(bytes.len() as u64, maximum_bytes, error)?;
 
     Ok(SecretBytes::new(bytes))
@@ -487,6 +499,7 @@ mod tests {
         let result = read_secret_file_bytes(
             tmp.path(),
             4096,
+            false,
             read_error,
             size_error,
             length_mismatch_error,
@@ -502,6 +515,7 @@ mod tests {
         let result = read_secret_file_bytes(
             tmp.path(),
             4096,
+            false,
             read_error,
             size_error,
             length_mismatch_error,
@@ -520,6 +534,7 @@ mod tests {
         let result = read_secret_file_bytes(
             tmp.path(),
             50,
+            false,
             read_error,
             size_error,
             length_mismatch_error,
@@ -546,6 +561,7 @@ mod tests {
         let result = read_secret_file_bytes(
             tmp.path(),
             32,
+            true,
             read_error,
             size_error,
             length_mismatch_error,
@@ -567,6 +583,7 @@ mod tests {
         let result = read_secret_file_bytes(
             tmp.path(),
             32,
+            true,
             read_error,
             size_error,
             length_mismatch_error,
@@ -588,11 +605,55 @@ mod tests {
         let result = read_secret_file_bytes(
             tmp.path(),
             32,
+            true,
             read_error,
             size_error,
             length_mismatch_error,
         );
         assert!(result.is_err());
+    }
+
+    /// A variable-length secret (e.g. an S3-style credential) that legitimately
+    /// ends in a newline must be preserved VERBATIM: the shared reader must not
+    /// strip trailing newlines for non-fixed-length secrets.
+    #[test]
+    fn read_secret_file_preserves_trailing_newline_when_strip_disabled() {
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        tmp.write_all(b"AKIA.../token\n").unwrap();
+        tmp.flush().unwrap();
+
+        let result = read_secret_file_bytes(
+            tmp.path(),
+            4096,
+            false,
+            read_error,
+            size_error,
+            length_mismatch_error,
+        );
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().expose_secret(), b"AKIA.../token\n");
+    }
+
+    /// The same variable-length value read through the S3 credential loader
+    /// (which uses `strip_trailing_newline: false`) is preserved verbatim.
+    #[test]
+    fn optional_s3_secret_from_file_preserves_trailing_newline() {
+        use super::optional_s3_secret_from_sources;
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        std::io::Write::write_all(&mut tmp, b"secret-value\n").unwrap();
+        tmp.flush().unwrap();
+
+        let result = optional_s3_secret_from_sources(
+            "TEST_ENV",
+            None,
+            "TEST_FILE_ENV",
+            Some(tmp.path().display().to_string()),
+        );
+        assert!(result.is_ok());
+        assert_eq!(
+            result.unwrap().as_ref().map(SecretString::expose_secret),
+            Some("secret-value\n")
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1047,6 +1108,7 @@ mod tests {
         let result = read_secret_file_bytes(
             Path::new("/nonexistent/secret.file"),
             4096,
+            false,
             ServerConfigError::MetricsToken,
             |obs, max| ServerConfigError::MetricsTokenTooLarge {
                 observed_bytes: obs,
