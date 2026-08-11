@@ -29,6 +29,27 @@ impl RepositoryScopeCacheKey {
         self.provider
     }
 
+    /// Returns the repository provider as the canonical protocol enum.
+    ///
+    /// The stored key keeps a `&'static str` token so the `Hash`-derived cache
+    /// semantics and the string wire representation stay unchanged
+    /// (`RepositoryProvider` does not implement `Hash`, so it cannot be stored
+    /// directly without reworking the derived `Hash`). This accessor reverse
+    /// maps the token back to the canonical enum.
+    #[must_use]
+    pub fn provider_kind(self) -> RepositoryProvider {
+        match self.provider {
+            "github" => RepositoryProvider::GitHub,
+            "gitea" => RepositoryProvider::Gitea,
+            "gitlab" => RepositoryProvider::GitLab,
+            "codeberg" => RepositoryProvider::Codeberg,
+            // Unreachable by construction: `provider` is only ever populated
+            // from `RepositoryProvider::as_str()` via `provider_token`. Kept as
+            // a lint-safe fallback (no unwrap/panic) to keep the match exhaustive.
+            _other => RepositoryProvider::Generic,
+        }
+    }
+
     /// Returns the repository owner or namespace.
     #[must_use]
     pub fn owner(&self) -> &str {
@@ -367,6 +388,27 @@ mod tests {
         let long_id = "a".repeat(1000);
         let key = ReconstructionCacheKey::latest(&long_id, None);
         assert_eq!(key.file_id().len(), 1000);
+    }
+
+    #[test]
+    fn repository_scope_cache_key_provider_kind_roundtrip_all_variants() {
+        let providers = [
+            (RepositoryProvider::GitHub, "github"),
+            (RepositoryProvider::Gitea, "gitea"),
+            (RepositoryProvider::GitLab, "gitlab"),
+            (RepositoryProvider::Codeberg, "codeberg"),
+            (RepositoryProvider::Generic, "generic"),
+        ];
+        for (provider, token) in providers {
+            let scope = RepositoryScope::new(provider, "owner", "repo", None);
+            assert!(scope.is_ok(), "scope creation failed for {token}");
+            let Ok(scope) = scope else {
+                continue;
+            };
+            let scope_key = RepositoryScopeCacheKey::from_scope(&scope);
+            assert_eq!(scope_key.provider(), token);
+            assert_eq!(scope_key.provider_kind(), provider);
+        }
     }
 
     #[test]

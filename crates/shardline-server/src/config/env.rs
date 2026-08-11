@@ -402,18 +402,14 @@ pub(crate) fn admission_max_weight_from_env() -> NonZeroUsize {
 
 /// Parses the `SHARDLINE_DEPLOYMENT_MODE` environment variable.
 pub(crate) fn deployment_mode_from_env() -> Option<DeploymentMode> {
-    match var("SHARDLINE_DEPLOYMENT_MODE") {
-        Ok(v) if v.eq_ignore_ascii_case("insecure") => Some(DeploymentMode::Insecure),
-        Ok(v) if v.eq_ignore_ascii_case("authenticated") => Some(DeploymentMode::Authenticated),
-        Ok(v) if v.eq_ignore_ascii_case("strict") => Some(DeploymentMode::Strict),
-        Ok(other) => {
-            tracing::warn!(
-                "unknown SHARDLINE_DEPLOYMENT_MODE value '{other}', falling back to default"
-            );
-            None
-        }
-        Err(_) => None,
-    }
+    let value = var("SHARDLINE_DEPLOYMENT_MODE").ok()?;
+    let Some(mode) = DeploymentMode::parse(&value) else {
+        tracing::warn!(
+            "unknown SHARDLINE_DEPLOYMENT_MODE value '{value}', falling back to default"
+        );
+        return None;
+    };
+    Some(mode)
 }
 
 fn parse_server_frontends_env(value: &str) -> Result<Vec<ServerFrontend>, ServerConfigError> {
@@ -842,6 +838,30 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
         for key in KEYS {
             remove_env_var(key);
         }
+    }
+
+    // ── deployment_mode_from_env ───────────────────────────────────────────
+
+    #[test]
+    #[serial_test::serial]
+    fn deployment_mode_from_env_is_case_insensitive_and_whitespace_tolerant() {
+        for (value, expected) in [
+            ("insecure", super::DeploymentMode::Insecure),
+            (" AUTHENTICATED ", super::DeploymentMode::Authenticated),
+            ("Strict", super::DeploymentMode::Strict),
+        ] {
+            set_env_var("SHARDLINE_DEPLOYMENT_MODE", value);
+            assert_eq!(super::deployment_mode_from_env(), Some(expected));
+        }
+        remove_env_var("SHARDLINE_DEPLOYMENT_MODE");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn deployment_mode_from_env_falls_back_for_unknown_value() {
+        set_env_var("SHARDLINE_DEPLOYMENT_MODE", "nonsense");
+        assert_eq!(super::deployment_mode_from_env(), None);
+        remove_env_var("SHARDLINE_DEPLOYMENT_MODE");
     }
 
     // ── parse_server_frontends_env ─────────────────────────────────────────

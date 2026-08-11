@@ -35,6 +35,24 @@ impl ProviderKind {
     }
 }
 
+impl From<ProviderKind> for RepositoryProvider {
+    fn from(kind: ProviderKind) -> Self {
+        kind.repository_provider()
+    }
+}
+
+impl From<RepositoryProvider> for ProviderKind {
+    fn from(provider: RepositoryProvider) -> Self {
+        match provider {
+            RepositoryProvider::GitHub => Self::GitHub,
+            RepositoryProvider::Gitea => Self::Gitea,
+            RepositoryProvider::GitLab => Self::GitLab,
+            RepositoryProvider::Codeberg => Self::Codeberg,
+            RepositoryProvider::Generic => Self::Generic,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::ProviderKind;
@@ -79,6 +97,54 @@ mod tests {
         assert_ne!(ProviderKind::Gitea, ProviderKind::GitLab);
         assert_ne!(ProviderKind::GitLab, ProviderKind::Codeberg);
         assert_ne!(ProviderKind::Codeberg, ProviderKind::Generic);
+    }
+
+    #[test]
+    fn provider_kind_converts_to_repository_provider_all_variants() {
+        assert_eq!(
+            RepositoryProvider::from(ProviderKind::GitHub),
+            RepositoryProvider::GitHub
+        );
+        assert_eq!(
+            RepositoryProvider::from(ProviderKind::Gitea),
+            RepositoryProvider::Gitea
+        );
+        assert_eq!(
+            RepositoryProvider::from(ProviderKind::GitLab),
+            RepositoryProvider::GitLab
+        );
+        assert_eq!(
+            RepositoryProvider::from(ProviderKind::Codeberg),
+            RepositoryProvider::Codeberg
+        );
+        assert_eq!(
+            RepositoryProvider::from(ProviderKind::Generic),
+            RepositoryProvider::Generic
+        );
+    }
+
+    #[test]
+    fn repository_provider_converts_to_provider_kind_all_variants() {
+        assert_eq!(
+            ProviderKind::from(RepositoryProvider::GitHub),
+            ProviderKind::GitHub
+        );
+        assert_eq!(
+            ProviderKind::from(RepositoryProvider::Gitea),
+            ProviderKind::Gitea
+        );
+        assert_eq!(
+            ProviderKind::from(RepositoryProvider::GitLab),
+            ProviderKind::GitLab
+        );
+        assert_eq!(
+            ProviderKind::from(RepositoryProvider::Codeberg),
+            ProviderKind::Codeberg
+        );
+        assert_eq!(
+            ProviderKind::from(RepositoryProvider::Generic),
+            ProviderKind::Generic
+        );
     }
 
     #[test]

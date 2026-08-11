@@ -17,7 +17,7 @@ pub(crate) use records::{
     DedupeShardRecord, FileReconstructionRecord, LegacyQuarantineCandidateRecord,
     StoredObjectPresenceRecord,
 };
-pub(crate) use store::LocalRecordKind;
+pub(crate) use crate::record_kind::RecordKind;
 pub use store::{LocalIndexStore, LocalRecordLocator, LocalRecordStore};
 
 pub(crate) const LOCAL_METADATA_DATABASE_FILE_NAME: &str = "metadata.sqlite3";

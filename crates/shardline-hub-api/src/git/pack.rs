@@ -24,6 +24,23 @@ pub enum PackError {
     ExcessiveDecompressedSize,
 }
 
+/// Hard ceiling for a single delta target size, in bytes.
+///
+/// Git delta targets are capped by the same bound the pack parser uses for
+/// the total decompressed size of all objects in a receive-pack
+/// (`MAX_TOTAL_DECOMPRESSED_SIZE`, 512 MiB). We reuse 512 MiB as the ceiling
+/// for any one delta target so a malicious delta can never force an
+/// unbounded allocation before the `result.len() != target_size` check runs.
+const MAX_DELTA_TARGET_SIZE: usize = 512 * 1024 * 1024;
+
+/// Maximum number of bytes a delta varint may span.
+///
+/// Each byte carries 7 value bits, so 10 bytes covers up to 70 bits of
+/// payload, which can never fit in a `usize`. Cap the decoder at 10 bytes
+/// (and reject shifts ≥ 64) so the shift never overflows and parsing always
+/// terminates.
+const MAX_DELTA_VARINT_BYTES: usize = 10;
+
 impl std::fmt::Display for PackError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -278,6 +295,12 @@ pub fn apply_delta(base: &[u8], delta: &[u8]) -> Result<Vec<u8>, PackError> {
         return Err(PackError::InvalidDelta);
     }
 
+    // Enforce a hard maximum on the target size before allocating, so a
+    // malicious delta can never trigger an unbounded `with_capacity`.
+    if target_size > MAX_DELTA_TARGET_SIZE {
+        return Err(PackError::ExcessiveDecompressedSize);
+    }
+
     let mut result = Vec::with_capacity(target_size);
 
     while pos < delta.len() {
@@ -295,7 +318,8 @@ pub fn apply_delta(base: &[u8], delta: &[u8]) -> Result<Vec<u8>, PackError> {
             for i in 0..4 {
                 if cmd & (1 << i) != 0 {
                     let offset_byte = delta.get(pos).copied().ok_or(PackError::InvalidDelta)?;
-                    copy_offset |= (offset_byte as usize).wrapping_shl(shift);
+                    copy_offset |=
+                        (offset_byte as usize).checked_shl(shift).ok_or(PackError::InvalidDelta)?;
                     pos = pos.wrapping_add(1);
                     shift = shift.wrapping_add(8);
                 }
@@ -305,7 +329,8 @@ pub fn apply_delta(base: &[u8], delta: &[u8]) -> Result<Vec<u8>, PackError> {
             for i in 4..7 {
                 if cmd & (1 << i) != 0 {
                     let size_byte = delta.get(pos).copied().ok_or(PackError::InvalidDelta)?;
-                    copy_size |= (size_byte as usize).wrapping_shl(shift);
+                    copy_size |=
+                        (size_byte as usize).checked_shl(shift).ok_or(PackError::InvalidDelta)?;
                     pos = pos.wrapping_add(1);
                     shift = shift.wrapping_add(8);
                 }
@@ -316,12 +341,15 @@ pub fn apply_delta(base: &[u8], delta: &[u8]) -> Result<Vec<u8>, PackError> {
                 copy_size = 0x10000;
             }
 
-            if copy_offset.wrapping_add(copy_size) > base.len() {
+            let copy_end = copy_offset
+                .checked_add(copy_size)
+                .ok_or(PackError::InvalidDelta)?;
+            if copy_end > base.len() {
                 return Err(PackError::InvalidDelta);
             }
 
             result.extend_from_slice(
-                base.get(copy_offset..copy_offset.wrapping_add(copy_size))
+                base.get(copy_offset..copy_end)
                     .ok_or(PackError::InvalidDelta)?,
             );
         } else if cmd != 0 {
@@ -355,14 +383,22 @@ pub fn apply_delta(base: &[u8], delta: &[u8]) -> Result<Vec<u8>, PackError> {
 fn parse_delta_varint(data: &[u8], mut pos: usize) -> Result<(usize, usize), PackError> {
     let mut result: usize = 0;
     let mut shift: u32 = 0;
-    loop {
+    let mut terminated = false;
+    for _ in 0..MAX_DELTA_VARINT_BYTES {
         let byte = data.get(pos).copied().ok_or(PackError::InvalidDelta)?;
         pos = pos.wrapping_add(1);
-        result |= ((byte & 0x7f) as usize).wrapping_shl(shift);
+        if shift >= 64 {
+            return Err(PackError::InvalidDelta);
+        }
+        result |= ((byte & 0x7f) as usize).checked_shl(shift).ok_or(PackError::InvalidDelta)?;
         shift = shift.wrapping_add(7);
         if byte & 0x80 == 0 {
+            terminated = true;
             break;
         }
+    }
+    if !terminated {
+        return Err(PackError::InvalidDelta);
     }
     Ok((result, pos))
 }

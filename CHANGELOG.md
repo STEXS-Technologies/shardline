@@ -4,6 +4,71 @@ All notable changes to Shardline are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.5.0] - 2026-08-11
+
+Minor release that hardens parsing boundaries with newtypes, caps untrusted
+allocations, and broadens fuzz coverage. **No breaking API changes and no
+data-format changes** — all newtype work is additive (new types, `From` impls,
+and consolidation of internal duplicates). Wire formats, token claims, and
+on-disk layouts are unchanged; existing deployments need no migration.
+
+### Added
+- **Newtypes for closed-domain strings** (additive, no signatures removed):
+  - `JwtAlgorithm` in `shardline-server` — typed JWT algorithm enum with
+    `is_asymmetric()` / `is_symmetric()` / `is_none()` classifications; both
+    the JWKS and OIDC providers now route their `alg`-confusion guard through
+    it instead of bare `== "none"` literal checks.
+  - `ByteUnit` (`shardline-server` config) — case-insensitive `FromStr` driving
+    `parse_byte_size`; `GitSmartHttpService`, `HubSortField`, `SortDirection`,
+    and `WebhookScheme` (`shardline-hub-api`); `OciAction` (OCI token scope).
+  - `RepositoryVisibility::FromStr` (`shardline-vcs`) — single canonical,
+    case-insensitive, whitespace-tolerant parser.
+  - Bidirectional `From` impls: `ProviderKind` ↔ `RepositoryProvider`
+    (`shardline-vcs`), and `RepoType` ↔ `HubRepoType` (`shardline-hub-api`).
+  - `RepositoryScopeCacheKey::provider_kind()` typed accessor
+    (`shardline-cache`) returning the canonical `RepositoryProvider`.
+  - `RepositoryProviderParseError` is now re-exported from the
+    `shardline-protocol` crate root.
+- **Fuzz coverage** (`shardline-fuzz`): registered the previously-orphaned
+  `shardline_cas_coordinator` target (and wired the missing `shardline-cas`
+  dependency); added 5 new targets — `sdx_shard_parse`, `sdx_url`,
+  `sdx_config` (first coverage for the `sdx` client), `auth_ed25519`
+  (first coverage for `shardline-auth`), and a CAS-coordinator target; fixed
+  the no-op/stub targets `git_tree_walker`, `index_hub`, and `git_pack`; removed
+  two exact-duplicate targets (`hub_api_routes`, `rebuild_candidates`).
+
+### Changed
+- **Case-insensitive parsing made uniform**: `parse_bool` (`shardline-protocol`),
+  the `Bearer` scheme (RFC 9110 scheme comparison, `shardline-server` +
+  `shardline-hub-api`), `DeploymentMode` / `AuthProviderKind` /
+  `ObjectStorageAdapter` config enums, and `RepositoryVisibility` now all accept
+  any ASCII case and surrounding whitespace. Previously several were
+  case-sensitive and silently fell through to defaults.
+- **JWT `alg`-confusion guard strengthened**: in addition to `none`, symmetric
+  algorithms (`HS256/384/512`) are now rejected before key matching in both
+  providers, so a token signed with a symmetric secret cannot be confused for an
+  asymmetric-key verification.
+- **LFS server routing** now parses `operation`/`transfers` through the existing
+  `LfsOperation`/`TransferAdapter` enums instead of re-matching raw strings.
+- **Provider/visibility parser dedup**: the third `parse_provider_kind` and
+  `visibility` parsers in `shardline-server` now delegate to the single canonical
+  `RepositoryProvider::from_str` / `RepositoryVisibility::from_str`.
+
+### Fixed
+- **Untrusted-allocation caps**: bounded `Vec::with_capacity` and aggregate
+  decompression output that were driven by attacker-influenced counts — xorb
+  shard header entry counts (`shardline-xet-core`), file-segment/verification
+  tables, `sdx` shard parsing, git pack delta varints (capped + shift-overflow
+  guards), and xorb reconstruction (decompression-bomb aggregate cap; resolves a
+  known `leak-` fuzz artifact).
+- **Base64 decode before cap**: the hub-api commit handler now bounds the encoded
+  length against `MAX_INLINE_FILE_BYTES` before decoding, rather than allocating
+  the decoded buffer first.
+
+### Internal
+- Unified the duplicate `PostgresRecordKind` / `LocalRecordKind` into a single
+  `RecordKind` (`shardline-index`, `pub(crate)` — internal, no public impact).
+
 ## [1.4.0] - 2026-08-08
 
 Minor release adding the native `sdx` Xet client library and file-management CLI,

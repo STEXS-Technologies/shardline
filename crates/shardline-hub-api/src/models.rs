@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use shardline_index::hub::HubRepoType;
 use shardline_protocol::SecretString;
 
 /// Repository type (model, dataset, space).
@@ -13,17 +14,15 @@ pub enum RepoType {
 impl RepoType {
     /// Parses a repository type string from an API response.
     ///
+    /// Delegates to the canonical [`HubRepoType::parse_str`] parser (the single
+    /// source of truth) and maps the result through [`From`].
+    ///
     /// # Errors
     ///
     /// Returns `None` for unrecognized types.
     #[must_use]
     pub fn from_api_str(value: &str) -> Option<Self> {
-        match value {
-            "models" | "model" => Some(Self::Model),
-            "datasets" | "dataset" => Some(Self::Dataset),
-            "spaces" | "space" => Some(Self::Space),
-            _ => None,
-        }
+        HubRepoType::parse_str(value).map(Into::into)
     }
 
     /// Returns the plural API path segment.
@@ -33,6 +32,28 @@ impl RepoType {
             Self::Model => "models",
             Self::Dataset => "datasets",
             Self::Space => "spaces",
+        }
+    }
+}
+
+impl From<HubRepoType> for RepoType {
+    /// Converts the data-layer [`HubRepoType`] into the API [`RepoType`].
+    fn from(value: HubRepoType) -> Self {
+        match value {
+            HubRepoType::Model => Self::Model,
+            HubRepoType::Dataset => Self::Dataset,
+            HubRepoType::Space => Self::Space,
+        }
+    }
+}
+
+impl From<RepoType> for HubRepoType {
+    /// Converts the API [`RepoType`] into the data-layer [`HubRepoType`].
+    fn from(value: RepoType) -> Self {
+        match value {
+            RepoType::Model => Self::Model,
+            RepoType::Dataset => Self::Dataset,
+            RepoType::Space => Self::Space,
         }
     }
 }
@@ -684,6 +705,49 @@ mod tests {
     #[test]
     fn as_path_str_space() {
         assert_eq!(RepoType::Space.as_path_str(), "spaces");
+    }
+
+    // -----------------------------------------------------------------------
+    // From impls between RepoType and HubRepoType
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn from_hub_repo_type_model() {
+        assert_eq!(RepoType::from(HubRepoType::Model), RepoType::Model);
+    }
+
+    #[test]
+    fn from_hub_repo_type_dataset() {
+        assert_eq!(RepoType::from(HubRepoType::Dataset), RepoType::Dataset);
+    }
+
+    #[test]
+    fn from_hub_repo_type_space() {
+        assert_eq!(RepoType::from(HubRepoType::Space), RepoType::Space);
+    }
+
+    #[test]
+    fn into_hub_repo_type_model() {
+        assert_eq!(HubRepoType::from(RepoType::Model), HubRepoType::Model);
+    }
+
+    #[test]
+    fn into_hub_repo_type_dataset() {
+        assert_eq!(HubRepoType::from(RepoType::Dataset), HubRepoType::Dataset);
+    }
+
+    #[test]
+    fn into_hub_repo_type_space() {
+        assert_eq!(HubRepoType::from(RepoType::Space), HubRepoType::Space);
+    }
+
+    #[test]
+    fn from_api_str_routes_through_hub_parser() {
+        // from_api_str delegates to the canonical HubRepoType::parse_str parser.
+        assert_eq!(RepoType::from_api_str("models"), Some(RepoType::Model));
+        assert_eq!(RepoType::from_api_str("dataset"), Some(RepoType::Dataset));
+        assert_eq!(RepoType::from_api_str("spaces"), Some(RepoType::Space));
+        assert_eq!(RepoType::from_api_str("unknown"), None);
     }
 
     // -----------------------------------------------------------------------

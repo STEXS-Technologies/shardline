@@ -76,7 +76,17 @@ const fn scope_allows(actual_scope: TokenScope, required_scope: TokenScope) -> b
 }
 
 fn parse_bearer_token(header: &str) -> Result<&str, HubApiError> {
-    let Some(token) = header.strip_prefix("Bearer ") else {
+    // RFC 9110: the auth scheme is case-insensitive, so accept any ASCII-case
+    // variant of `Bearer` followed by exactly one space. Match on the byte
+    // prefix without allocating; bounds are checked via `get` (no indexing).
+    const SCHEME: &[u8] = b"bearer ";
+    let Some(prefix) = header.get(..SCHEME.len()) else {
+        return Err(HubApiError::InvalidToken);
+    };
+    if !prefix.as_bytes().eq_ignore_ascii_case(SCHEME) {
+        return Err(HubApiError::InvalidToken);
+    }
+    let Some(token) = header.get(SCHEME.len()..) else {
         return Err(HubApiError::InvalidToken);
     };
     if token.trim().is_empty() || token.len() > MAX_TOKEN_STRING_BYTES {

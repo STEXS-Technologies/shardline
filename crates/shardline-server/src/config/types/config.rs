@@ -2,6 +2,7 @@ use std::{
     net::SocketAddr,
     num::{NonZeroU64, NonZeroUsize},
     path::{Path, PathBuf},
+    str::FromStr,
     thread::available_parallelism,
     time::Duration,
 };
@@ -867,6 +868,74 @@ impl ServerConfig {
     }
 }
 
+/// A human-readable byte-size unit suffix.
+///
+/// Supports both decimal (SI) units (`B`, `KB`, `MB`, `GB`, `TB` — powers of
+/// 1000) and binary (IEC) units (`KiB`, `MiB`, `GiB`, `TiB` — powers of 1024).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ByteUnit {
+    /// Plain bytes.
+    B,
+    /// Binary kibibytes (`1024` bytes).
+    KiB,
+    /// Binary mebibytes (`1024^2` bytes).
+    MiB,
+    /// Binary gibibytes (`1024^3` bytes).
+    GiB,
+    /// Binary tebibytes (`1024^4` bytes).
+    TiB,
+    /// Decimal kilobytes (`1000` bytes).
+    KB,
+    /// Decimal megabytes (`1000^2` bytes).
+    MB,
+    /// Decimal gigabytes (`1000^3` bytes).
+    GB,
+    /// Decimal terabytes (`1000^4` bytes).
+    TB,
+}
+
+impl ByteUnit {
+    /// Returns the multiplier (bytes per unit) for this unit.
+    #[must_use]
+    pub const fn as_multiplier(self) -> f64 {
+        match self {
+            Self::B => 1.0,
+            Self::KiB => 1024.0,
+            Self::MiB => 1_048_576.0_f64,         // 1024^2
+            Self::GiB => 1_073_741_824.0_f64,     // 1024^3
+            Self::TiB => 1_099_511_627_776.0_f64, // 1024^4
+            Self::KB => 1_000.0,
+            Self::MB => 1_000_000.0_f64,         // 1000^2
+            Self::GB => 1_000_000_000.0_f64,     // 1000^3
+            Self::TB => 1_000_000_000_000.0_f64, // 1000^4
+        }
+    }
+}
+
+impl FromStr for ByteUnit {
+    type Err = ServerConfigError;
+
+    /// Parses a byte-unit suffix, ignoring ASCII case and surrounding whitespace.
+    ///
+    /// An empty string is treated as plain bytes (`B`).
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_lowercase().as_str() {
+            "b" | "" => Ok(Self::B),
+            "kib" => Ok(Self::KiB),
+            "mib" => Ok(Self::MiB),
+            "gib" => Ok(Self::GiB),
+            "tib" => Ok(Self::TiB),
+            "kb" => Ok(Self::KB),
+            "mb" => Ok(Self::MB),
+            "gb" => Ok(Self::GB),
+            "tb" => Ok(Self::TB),
+            _ => Err(ServerConfigError::ChunkSizeParse(
+                "unknown size unit".to_owned(),
+            )),
+        }
+    }
+}
+
 /// Parse a human-readable byte size string like `"64KB"`, `"1GB"`, `"512b"`,
 /// `"57mb"`, or a plain number interpreted as bytes.
 ///
@@ -924,24 +993,7 @@ pub fn parse_byte_size(s: &str) -> Result<usize, ServerConfigError> {
     }
 
     // Decimal (SI) units use powers of 1000; binary (IEC) use powers of 1024.
-    let multiplier: f64 = match unit.to_lowercase().as_str() {
-        "b" | "" => 1.0,
-        // Binary (IEC) — powers of 1024
-        "kib" => 1024.0,
-        "mib" => 1_048_576.0_f64,         // 1024^2
-        "gib" => 1_073_741_824.0_f64,     // 1024^3
-        "tib" => 1_099_511_627_776.0_f64, // 1024^4
-        // Decimal (SI) — powers of 1000
-        "kb" => 1_000.0,
-        "mb" => 1_000_000.0_f64,         // 1000^2
-        "gb" => 1_000_000_000.0_f64,     // 1000^3
-        "tb" => 1_000_000_000_000.0_f64, // 1000^4
-        _ => {
-            return Err(ServerConfigError::ChunkSizeParse(
-                "unknown size unit".to_owned(),
-            ));
-        }
-    };
+    let multiplier: f64 = ByteUnit::from_str(unit)?.as_multiplier();
 
     #[allow(clippy::float_arithmetic)]
     let bytes = (num * multiplier) as usize;

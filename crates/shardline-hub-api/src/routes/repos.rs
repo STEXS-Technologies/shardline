@@ -1,3 +1,5 @@
+use std::str::FromStr;
+
 use axum::http::HeaderMap;
 use axum::{
     Json,
@@ -9,7 +11,11 @@ use axum::{
 use shardline_protocol::ByteRange;
 use shardline_storage::{ObjectKey, ObjectStore};
 
-use crate::{error::HubApiError, models::*};
+use crate::{
+    error::HubApiError,
+    models::*,
+    types::{HubSortField, SortDirection},
+};
 use shardline_index::hub::HubRepoType;
 use shardline_protocol::TokenScope;
 
@@ -27,11 +33,7 @@ pub(crate) async fn repo_create(
         || request.name.clone(),
         |organization| format!("{organization}/{}", request.name),
     );
-    let repo_type = match request.repo_type {
-        RepoType::Model => HubRepoType::Model,
-        RepoType::Dataset => HubRepoType::Dataset,
-        RepoType::Space => HubRepoType::Space,
-    };
+    let repo_type: HubRepoType = request.repo_type.into();
     // `huggingface_hub` calls this endpoint before every upload with
     // `exist_ok=True`, but does not transmit that flag. It accepts the
     // established 409 conflict response when it contains the existing
@@ -71,7 +73,8 @@ pub(crate) async fn repo_create_type(
     Json(body): Json<serde_json::Value>,
 ) -> Result<(StatusCode, Json<RepoResponse>), HubApiError> {
     authorize(&state, &headers, TokenScope::Write)?;
-    let rt = HubRepoType::parse_str(&repo_type)
+    let rt = RepoType::from_api_str(&repo_type)
+        .map(Into::into)
         .ok_or_else(|| HubApiError::PathValidation(format!("invalid repo type: {repo_type}")))?;
     let name = format!("{ns}/{repo}");
     let private = body
@@ -133,11 +136,7 @@ pub(crate) fn repo_response_from_hub(repo: &shardline_index::hub::HubRepo) -> Re
         .unwrap_or_default();
     RepoResponse {
         id: repo.repo_id.clone(),
-        repo_type: match repo.repo_type {
-            HubRepoType::Model => RepoType::Model,
-            HubRepoType::Dataset => RepoType::Dataset,
-            HubRepoType::Space => RepoType::Space,
-        },
+        repo_type: repo.repo_type.into(),
         private: repo.private,
         sha: None,
         siblings: None,
@@ -238,7 +237,8 @@ pub(crate) async fn repo_search(
 ) -> Result<Json<RepoListResponse>, HubApiError> {
     shardline_metrics::record_hub_api_request("repo_search", "GET", 200);
     authorize(&state, &headers, TokenScope::Read)?;
-    let rt = HubRepoType::parse_str(&repo_type)
+    let rt = RepoType::from_api_str(&repo_type)
+        .map(Into::into)
         .ok_or_else(|| HubApiError::PathValidation(format!("invalid repo type: {repo_type}")))?;
     if query.q.len() < 2 {
         return Err(HubApiError::PathValidation(
@@ -253,19 +253,28 @@ pub(crate) async fn repo_search(
 
     // Apply server-side sorting when requested.
     if let Some(sort) = &query.sort {
-        match sort.as_str() {
-            "lastModified" => {
+        // Unknown sort fields parse to `None` and fall through to the default
+        // (unsorted) order, preserving the previous `_ => {}` behavior.
+        match HubSortField::from_str(sort).ok() {
+            Some(HubSortField::LastModified) => {
                 repos.sort_by_key(|b| std::cmp::Reverse(b.updated_at_unix_seconds));
             }
-            "likes" => {
+            Some(HubSortField::Likes) => {
                 // No likes field on HubRepo yet; keep default order.
             }
-            "downloads" => {
+            Some(HubSortField::Downloads) => {
                 // No downloads field on HubRepo yet; keep default order.
             }
-            _ => {}
+            None => {
+                // Unknown sort field; keep default order.
+            }
         }
-        if query.direction.as_deref() == Some("asc") {
+        if query
+            .direction
+            .as_deref()
+            .and_then(|d| SortDirection::from_str(d).ok())
+            == Some(SortDirection::Asc)
+        {
             repos.reverse();
         }
     }
@@ -369,7 +378,7 @@ pub(crate) async fn repo_info(
 ) -> Result<Json<RepoResponse>, HubApiError> {
     shardline_metrics::record_hub_api_request("repo_info", "GET", 200);
     authorize(&state, &headers, TokenScope::Read)?;
-    let _rt = HubRepoType::parse_str(&repo_type)
+    RepoType::from_api_str(&repo_type)
         .ok_or_else(|| HubApiError::PathValidation(format!("invalid repo type: {repo_type}")))?;
     let name = format!("{ns}/{repo}");
     let entry = state

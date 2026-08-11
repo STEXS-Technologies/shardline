@@ -170,6 +170,15 @@ pub fn parse_ndjson_commit(body: &str) -> Result<ParsedCommit, HubApiError> {
                 .ok_or_else(|| {
                     HubApiError::PathValidation(format!("line {line_idx}: missing file content"))
                 })?;
+            // Bound the decoded size before allocating the decode buffer:
+            // each group of 4 base64 characters decodes to at most 3 bytes,
+            // so `encoded_len / 4 * 3` is a strict upper bound on the decoded
+            // length. Reject early when it would exceed the inline file cap.
+            if content_b64.len().saturating_div(4).saturating_mul(3) > MAX_INLINE_FILE_BYTES {
+                return Err(HubApiError::PathValidation(format!(
+                    "line {line_idx}: inline file exceeds maximum of {MAX_INLINE_FILE_BYTES} bytes; use LFS for large files"
+                )));
+            }
             let content = STANDARD.decode(content_b64).map_err(|e| {
                 HubApiError::PathValidation(format!("line {line_idx}: invalid base64: {e}"))
             })?;

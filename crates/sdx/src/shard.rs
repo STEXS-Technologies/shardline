@@ -49,6 +49,14 @@ const SHARD_ENTRY_SIZE: usize = 64;
 const SHARD_ENTRY_PADDING: [u8; 4] = [0u8; 4];
 /// V2 shard entry size (48 bytes), for parsing legacy shards.
 const SHARD_V2_ENTRY_SIZE: usize = 48;
+/// Maximum number of chunks a single xorb section may declare in its shard
+/// header. Each entry serializes to `SHARD_ENTRY_SIZE` (64) bytes, so this caps
+/// a single xorb's chunk table at 64 MiB. A valid xorb holds at most one
+/// `XORB_BLOCK_SIZE` (16 MiB) split into chunks of at least `TARGET_CHUNK_SIZE`,
+/// so 1 Mi entries is far beyond any valid shard xorb. This guards
+/// `Vec::with_capacity` against an attacker-inflated count read from the shard
+/// body before any bound is enforced.
+const MAX_XORB_CHUNK_ENTRIES: usize = 1 << 20;
 /// Returns the bookend marker hash (all-ones), used to terminate a shard section.
 fn bookend() -> MerkleHash {
     MerkleHash::from([0xFFu8; 32])
@@ -201,8 +209,14 @@ pub fn parse_shard_xorbs(body: &[u8]) -> Result<Vec<ShardXorb>, SdxError> {
         let num_entries = read_xorb_num_entries(header, version)?;
         let num_bytes = read_xorb_num_bytes(header, version)?;
         let entry_len = entry_size(version);
-        let mut chunks = Vec::with_capacity(usize::try_from(num_entries).unwrap_or(usize::MAX));
-        for _ in 0..num_entries {
+        let num_chunks = usize::try_from(num_entries).map_err(|e| {
+            shard_parse(&format!("xorb chunk count does not fit in usize: {e}"))
+        })?;
+        if num_chunks > MAX_XORB_CHUNK_ENTRIES {
+            return Err(shard_parse("xorb chunk count exceeds maximum"));
+        }
+        let mut chunks = Vec::with_capacity(num_chunks);
+        for _ in 0..num_chunks {
             let entry = reader.take(usize::try_from(entry_len).unwrap_or(usize::MAX))?;
             chunks.push(read_xorb_chunk(entry, version)?);
         }
@@ -436,8 +450,9 @@ mod tests {
     use xet_core_structures::merklehash::{MerkleHash, compute_data_hash};
 
     use super::{
-        ShardFileEntry, ShardSegment, ShardXorb, ShardXorbChunk, bookend, find_chunk_in_xorbs,
-        parse_shard_xorbs, serialize_shard,
+        MAX_XORB_CHUNK_ENTRIES, MDB_DEFAULT_XORB_FLAG, SHARD_ENTRY_PADDING, SHARD_ENTRY_SIZE,
+        SHARD_FOOTER_SIZE, SHARD_HEADER_TAG, ShardFileEntry, ShardSegment, ShardXorb,
+        ShardXorbChunk, bookend, find_chunk_in_xorbs, hash_bytes, parse_shard_xorbs, serialize_shard,
     };
 
     fn chunk(hash: MerkleHash, start: u64, len: u64) -> ShardXorbChunk {
@@ -524,6 +539,30 @@ mod tests {
         assert_eq!(xorb.xorb_hash, x1);
         assert_eq!(index, 0);
         assert!(find_chunk_in_xorbs(&parsed, &compute_data_hash(b"absent")).is_none());
+    }
+
+    #[test]
+    fn shard_parser_rejects_huge_xorb_chunk_count() {
+        // A xorb section declaring more than the allocation cap must error
+        // instead of attempting a huge `Vec::with_capacity`. The body carries
+        // only the headers; the parser must reject the count before reading
+        // entries or allocating.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&SHARD_HEADER_TAG);
+        bytes.extend_from_slice(&3u64.to_le_bytes());
+        bytes.extend_from_slice(&SHARD_FOOTER_SIZE.to_le_bytes());
+        // File section bookend (full SHARD_ENTRY_SIZE header).
+        bytes.extend_from_slice(&hash_bytes(bookend()));
+        bytes.extend_from_slice(&[0u8; SHARD_ENTRY_SIZE - 32]);
+        // Xorb header declaring one entry past the cap.
+        bytes.extend_from_slice(&hash_bytes(MerkleHash::from([5u8; 32])));
+        bytes.extend_from_slice(&MDB_DEFAULT_XORB_FLAG.to_le_bytes());
+        bytes.extend_from_slice(&(MAX_XORB_CHUNK_ENTRIES as u64 + 1).to_le_bytes());
+        bytes.extend_from_slice(&0u64.to_le_bytes()); // num_bytes_in_xorb
+        bytes.extend_from_slice(&0u64.to_le_bytes()); // num_bytes_on_disk
+        bytes.extend_from_slice(&SHARD_ENTRY_PADDING);
+
+        assert!(parse_shard_xorbs(&bytes).is_err());
     }
 
     #[test]

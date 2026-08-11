@@ -10,6 +10,14 @@ use shardline_protocol::{SecretBytes, SecretString};
 use super::error::ServerConfigError;
 use crate::reconstruction_cache::ReconstructionCacheAdapter;
 
+/// Compares two strings ignoring ASCII case and surrounding whitespace.
+///
+/// Used to make config token parsing uniform across auth providers, storage
+/// adapters, and deployment modes.
+pub(crate) fn caseless_eq(left: &str, right: &str) -> bool {
+    left.trim().eq_ignore_ascii_case(right.trim())
+}
+
 /// Authentication provider selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthProviderKind {
@@ -33,13 +41,18 @@ impl AuthProviderKind {
     /// Returns [`ServerConfigError::InvalidAuthProvider`] when the token is not
     /// supported.
     pub fn parse(value: &str) -> Result<Self, ServerConfigError> {
-        match value {
-            "local" => Ok(Self::Local),
-            "oidc" => Ok(Self::Oidc),
-            "jwks" => Ok(Self::Jwks),
-            "passthrough" => Ok(Self::Passthrough),
-            "ed25519" => Ok(Self::Ed25519),
-            _other => Err(ServerConfigError::InvalidAuthProvider),
+        if caseless_eq(value, "local") {
+            Ok(Self::Local)
+        } else if caseless_eq(value, "oidc") {
+            Ok(Self::Oidc)
+        } else if caseless_eq(value, "jwks") {
+            Ok(Self::Jwks)
+        } else if caseless_eq(value, "passthrough") {
+            Ok(Self::Passthrough)
+        } else if caseless_eq(value, "ed25519") {
+            Ok(Self::Ed25519)
+        } else {
+            Err(ServerConfigError::InvalidAuthProvider)
         }
     }
 }
@@ -61,10 +74,12 @@ impl ObjectStorageAdapter {
     /// Returns [`ServerConfigError::InvalidObjectStorageAdapter`] when the token is not
     /// supported.
     pub fn parse(value: &str) -> Result<Self, ServerConfigError> {
-        match value {
-            "local" => Ok(Self::Local),
-            "s3" => Ok(Self::S3),
-            _other => Err(ServerConfigError::InvalidObjectStorageAdapter),
+        if caseless_eq(value, "local") {
+            Ok(Self::Local)
+        } else if caseless_eq(value, "s3") {
+            Ok(Self::S3)
+        } else {
+            Err(ServerConfigError::InvalidObjectStorageAdapter)
         }
     }
 }
@@ -87,6 +102,22 @@ impl DeploymentMode {
     #[must_use]
     pub const fn default() -> Self {
         Self::Insecure
+    }
+
+    /// Parses a deployment mode token, ignoring ASCII case and surrounding whitespace.
+    ///
+    /// Returns `None` when the token is not a supported deployment mode.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        if caseless_eq(value, "insecure") {
+            Some(Self::Insecure)
+        } else if caseless_eq(value, "authenticated") {
+            Some(Self::Authenticated)
+        } else if caseless_eq(value, "strict") {
+            Some(Self::Strict)
+        } else {
+            None
+        }
     }
 }
 
