@@ -37,6 +37,12 @@ use crate::{
 /// Objects above this threshold are rejected with a 413 to prevent OOM.
 const MAX_LFS_VERIFY_BYTES: u64 = 1_073_741_824; // 1 GiB
 const MAX_LFS_PATCH_RANGES: usize = 65_536;
+/// Maximum declared LFS object size accepted by the chunked PATCH path (1 TiB).
+///
+/// Bounds the declared `total` from a `Content-Range` header so a caller cannot
+/// request an arbitrary `u64` offset (which would create a multi-TiB sparse
+/// staging file). One TiB is well above any legitimate dataset/model object.
+const MAX_LFS_OBJECT_SIZE: u64 = 1 << 40; // 1 TiB
 
 /// Returns a 422 UNPROCESSABLE_ENTITY response for LFS validation errors.
 fn lfs_validation_response(message: &str) -> Response {
@@ -496,6 +502,14 @@ pub(crate) async fn lfs_patch_object(
             StatusCode::RANGE_NOT_SATISFIABLE,
             [(CONTENT_TYPE, LFS_CONTENT_TYPE)],
             Json(json!({ "message": "Content-Range exceeds object length" })),
+        )
+            .into_response());
+    }
+    if total > MAX_LFS_OBJECT_SIZE {
+        return Ok((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            [(CONTENT_TYPE, LFS_CONTENT_TYPE)],
+            Json(json!({ "message": "declared object size exceeds maximum allowed" })),
         )
             .into_response());
     }

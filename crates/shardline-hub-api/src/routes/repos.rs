@@ -9,7 +9,7 @@ use axum::{
 };
 
 use shardline_protocol::ByteRange;
-use shardline_storage::{ObjectKey, ObjectStore};
+use shardline_storage::ObjectStore;
 
 use crate::{
     error::HubApiError,
@@ -19,7 +19,10 @@ use crate::{
 use shardline_index::hub::HubRepoType;
 use shardline_protocol::TokenScope;
 
-use super::{HubState, authorize, repo_type_path};
+use super::{
+    HubState, authorize, authorize_with_context, lfs_object_key, repo_type_path,
+    require_repository_binding,
+};
 
 // ---- Repo create (generic, requires Write) ----
 
@@ -28,11 +31,15 @@ pub(crate) async fn repo_create(
     headers: HeaderMap,
     Json(request): Json<RepoCreateRequest>,
 ) -> Result<(StatusCode, Json<RepoResponse>), HubApiError> {
-    authorize(&state, &headers, TokenScope::Write)?;
+    let auth_ctx = authorize_with_context(&state, &headers, TokenScope::Write)?;
     let full_name = request.organization.as_deref().map_or_else(
         || request.name.clone(),
         |organization| format!("{organization}/{}", request.name),
     );
+    // A scoped token must only be able to create its own repository, never one
+    // owned by another tenant.
+    let (bind_owner, bind_name) = split_repo_name(&full_name);
+    require_repository_binding(auth_ctx.as_ref(), bind_owner, bind_name)?;
     let repo_type: HubRepoType = request.repo_type.into();
     // `huggingface_hub` calls this endpoint before every upload with
     // `exist_ok=True`, but does not transmit that flag. It accepts the
@@ -72,7 +79,8 @@ pub(crate) async fn repo_create_type(
     Path((repo_type, ns, repo)): Path<(String, String, String)>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<(StatusCode, Json<RepoResponse>), HubApiError> {
-    authorize(&state, &headers, TokenScope::Write)?;
+    let auth_ctx = authorize_with_context(&state, &headers, TokenScope::Write)?;
+    require_repository_binding(auth_ctx.as_ref(), &ns, &repo)?;
     let rt = RepoType::from_api_str(&repo_type)
         .map(Into::into)
         .ok_or_else(|| HubApiError::PathValidation(format!("invalid repo type: {repo_type}")))?;
@@ -216,6 +224,8 @@ pub(crate) async fn repo_list(
     headers: HeaderMap,
 ) -> Result<Json<RepoListResponse>, HubApiError> {
     shardline_metrics::record_hub_api_request("repo_list", "GET", 200);
+    // Intentionally global: lists repositories across the whole instance, not a
+    // single repo, so there is no repository binding to enforce.
     authorize(&state, &headers, TokenScope::Read)?;
     let repos = state
         .store
@@ -236,6 +246,8 @@ pub(crate) async fn repo_search(
     Query(query): Query<RepoSearchQuery>,
 ) -> Result<Json<RepoListResponse>, HubApiError> {
     shardline_metrics::record_hub_api_request("repo_search", "GET", 200);
+    // Intentionally global: searches across all repositories, not a single repo,
+    // so there is no repository binding to enforce.
     authorize(&state, &headers, TokenScope::Read)?;
     let rt = RepoType::from_api_str(&repo_type)
         .map(Into::into)
@@ -310,7 +322,8 @@ pub(crate) async fn repo_modelcard(
     Path((_repo_type, ns, repo)): Path<(String, String, String)>,
 ) -> Result<axum::response::Response, HubApiError> {
     shardline_metrics::record_hub_api_request("repo_modelcard", "GET", 200);
-    authorize(&state, &headers, TokenScope::Read)?;
+    let auth_ctx = authorize_with_context(&state, &headers, TokenScope::Read)?;
+    require_repository_binding(auth_ctx.as_ref(), &ns, &repo)?;
     let name = format!("{ns}/{repo}");
     let entry = state
         .store
@@ -334,7 +347,12 @@ pub(crate) async fn repo_modelcard(
         ("Content-Type", "text/markdown; charset=utf-8"),
         ("X-Shardline-SHA", readme.sha.as_str()),
     ];
-    let content = read_file_from_object_store(&state, &readme.sha).ok_or(HubApiError::NotFound)?;
+    let content = read_file_from_object_store(
+        &state,
+        &readme.sha,
+        auth_ctx.as_ref().map(|c| c.claims().repository()),
+    )
+    .ok_or(HubApiError::NotFound)?;
     Ok((resp_headers, content).into_response())
 }
 
@@ -346,7 +364,8 @@ pub(crate) async fn repo_revisions(
     Path((_repo_type, ns, repo)): Path<(String, String, String)>,
 ) -> Result<Json<RevisionListResponse>, HubApiError> {
     shardline_metrics::record_hub_api_request("repo_revisions", "GET", 200);
-    authorize(&state, &headers, TokenScope::Read)?;
+    let auth_ctx = authorize_with_context(&state, &headers, TokenScope::Read)?;
+    require_repository_binding(auth_ctx.as_ref(), &ns, &repo)?;
     let name = format!("{ns}/{repo}");
     let _ = state
         .store
@@ -377,7 +396,8 @@ pub(crate) async fn repo_info(
     Path((repo_type, ns, repo)): Path<(String, String, String)>,
 ) -> Result<Json<RepoResponse>, HubApiError> {
     shardline_metrics::record_hub_api_request("repo_info", "GET", 200);
-    authorize(&state, &headers, TokenScope::Read)?;
+    let auth_ctx = authorize_with_context(&state, &headers, TokenScope::Read)?;
+    require_repository_binding(auth_ctx.as_ref(), &ns, &repo)?;
     RepoType::from_api_str(&repo_type)
         .ok_or_else(|| HubApiError::PathValidation(format!("invalid repo type: {repo_type}")))?;
     let name = format!("{ns}/{repo}");
@@ -393,7 +413,8 @@ pub(crate) async fn repo_info(
         && let Some(sha) = commit_sha
         && let Ok(files) = state.store.get_files(&sha)
         && let Some(readme) = files.iter().find(|f| f.path == "README.md")
-        && let Some(content) = read_file_from_object_store(&state, &readme.sha)
+        && let Some(content) =
+            read_file_from_object_store(&state, &readme.sha, auth_ctx.as_ref().map(|c| c.claims().repository()))
     {
         response.card_data = parse_yaml_frontmatter(&content);
     }
@@ -407,7 +428,8 @@ pub(crate) async fn repo_revision_info(
     Path((_repo_type, ns, repo, rev)): Path<(String, String, String, String)>,
 ) -> Result<Json<RepoResponse>, HubApiError> {
     shardline_metrics::record_hub_api_request("repo_revision_info", "GET", 200);
-    authorize(&state, &headers, TokenScope::Read)?;
+    let auth_ctx = authorize_with_context(&state, &headers, TokenScope::Read)?;
+    require_repository_binding(auth_ctx.as_ref(), &ns, &repo)?;
     let name = format!("{ns}/{repo}");
     let entry = state
         .store
@@ -465,13 +487,28 @@ pub(crate) async fn repo_delete_compat(
     delete_repository(&state, &headers, &name)
 }
 
-/// Reads a file from the ObjectStore by its SHA.
-fn read_file_from_object_store(state: &HubState, sha: &str) -> Option<Vec<u8>> {
-    let key = ObjectKey::parse(&format!("lfs/{sha}")).ok()?;
+/// Reads a file from the ObjectStore by its SHA, using the repository-scoped
+/// LFS key so reads find the namespaced writes made by `apply_commit`.
+fn read_file_from_object_store(
+    state: &HubState,
+    sha: &str,
+    repository_scope: Option<&shardline_protocol::RepositoryScope>,
+) -> Option<Vec<u8>> {
+    let key = lfs_object_key(sha, repository_scope).ok()?;
     let size = state.object_store.metadata(&key).ok()??.length();
     let range_end = size.checked_sub(1)?;
     let range = ByteRange::new(0, range_end).ok()?;
     state.object_store.read_range(&key, range).ok()
+}
+
+/// Splits a `owner/name` repository identifier into `(owner, name)`. When no
+/// separator is present, the owner is treated as empty (which can never match a
+/// scoped token's non-empty owner, so repo-scoped binding will deny it).
+fn split_repo_name(full_name: &str) -> (&str, &str) {
+    match full_name.split_once('/') {
+        Some((owner, name)) => (owner, name),
+        None => ("", full_name),
+    }
 }
 
 fn delete_repository(
@@ -480,7 +517,9 @@ fn delete_repository(
     name: &str,
 ) -> Result<StatusCode, HubApiError> {
     shardline_metrics::record_hub_api_request("repo_delete", "DELETE", 204);
-    authorize(state, headers, TokenScope::Write)?;
+    let auth_ctx = authorize_with_context(state, headers, TokenScope::Write)?;
+    let (owner, repo) = split_repo_name(name);
+    require_repository_binding(auth_ctx.as_ref(), owner, repo)?;
     // Verify repo exists
     let _repo = state
         .store

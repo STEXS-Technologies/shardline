@@ -65,6 +65,34 @@ on-disk layouts are unchanged; existing deployments need no migration.
   length against `MAX_INLINE_FILE_BYTES` before decoding, rather than allocating
   the decoded buffer first.
 
+### Security
+A three-lane adversarial audit (independent code-audit, money-lane/impact, and a
+refutation pass) of the Hub API frontend found and fixed the following. The core
+Xet/LFS/OCI/Bazel frontends were audited and verified sound (constant-time token
+compares, `alg`-confusion guard, parameterized SQL, symlink-race protection,
+`ObjectKey` path-traversal rejection, scoped storage namespaces).
+- **[Critical] Hub API cross-tenant authorization bypass** — every Hub API route
+  checked only the token's `scope` (Read/Write) and never bound the token's
+  `RepositoryScope` to the URL-path repository. Any authenticated user could
+  read, modify, delete, or `git push` to any other tenant's repository, install
+  exfiltration webhooks, and read private datasets. Fixed: all repository-scoped
+  Hub API handlers now enforce `require_repository_binding` (the token's
+  `owner`/`name` must match the request path); genuinely global routes (list,
+  search, whoami) are documentedly exempt. Covered by a new `cross_tenant_authz`
+  integration suite (same-repo success + cross-repo `403`).
+- **[Medium] Hub API LFS global namespace → cross-tenant content poisoning** —
+  Hub API LFS objects were stored under a bare global `lfs/{oid}` key with no
+  per-repo namespace, so a Write-scoped tenant could pre-empt a predictable OID
+  (first-writer-wins via `put_if_absent`) to substitute attacker bytes for a
+  victim's, and any Read-scoped tenant could read any OID. Fixed: Hub API LFS
+  keys are now namespaced per-repo via `scope_namespace(claims.repository())` on
+  both read and write paths, matching the core server's LFS isolation.
+- **[Low, defensive] LFS PATCH unbounded `Content-Range`** — the chunked PATCH
+  path accepted an arbitrary `u64` declared object size. Now capped at
+  `MAX_LFS_OBJECT_SIZE` (1 TiB); oversized declared totals are rejected with
+  `413`. (No measurable security impact — sparse files do not exhaust inodes and
+  assembly is sha256-gated — but capped defensively.)
+
 ### Internal
 - Unified the duplicate `PostgresRecordKind` / `LocalRecordKind` into a single
   `RecordKind` (`shardline-index`, `pub(crate)` — internal, no public impact).

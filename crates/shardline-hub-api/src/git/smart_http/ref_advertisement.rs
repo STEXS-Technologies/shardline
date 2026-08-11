@@ -11,9 +11,10 @@ use std::fmt::Write;
 use super::super::pktline::{self, FLUSH};
 use crate::{
     error::HubApiError,
-    routes::HubState,
+    routes::{HubState, require_repository_binding},
     types::GitSmartHttpService,
 };
+use shardline_server_core::AuthContext;
 
 /// Query parameters for `GET /info/refs`.
 #[derive(Debug, Deserialize)]
@@ -33,18 +34,40 @@ pub(super) fn resolve_repo_id(_repo_type: &str, ns: &str, repo: &str) -> String 
     format!("{ns}/{repo}")
 }
 
+#[cfg(test)]
 pub(super) fn authorize_read(state: &HubState, headers: &HeaderMap) -> Result<(), HubApiError> {
-    if let Some(ref auth) = state.auth {
-        let _ = auth.authorize(headers, TokenScope::Read)?;
-    }
-    Ok(())
+    authorize_read_with_context(state, headers).map(|_| ())
 }
 
+#[cfg(test)]
 pub(super) fn authorize_write(state: &HubState, headers: &HeaderMap) -> Result<(), HubApiError> {
+    authorize_write_with_context(state, headers).map(|_| ())
+}
+
+/// Like [`authorize_read`] but returns the verified auth context so the caller
+/// can enforce a token→repository binding.
+pub(super) fn authorize_read_with_context(
+    state: &HubState,
+    headers: &HeaderMap,
+) -> Result<Option<AuthContext>, HubApiError> {
     if let Some(ref auth) = state.auth {
-        let _ = auth.authorize(headers, TokenScope::Write)?;
+        Ok(Some(auth.authorize(headers, TokenScope::Read)?))
+    } else {
+        Ok(None)
     }
-    Ok(())
+}
+
+/// Like [`authorize_write`] but returns the verified auth context so the caller
+/// can enforce a token→repository binding.
+pub(super) fn authorize_write_with_context(
+    state: &HubState,
+    headers: &HeaderMap,
+) -> Result<Option<AuthContext>, HubApiError> {
+    if let Some(ref auth) = state.auth {
+        Ok(Some(auth.authorize(headers, TokenScope::Write)?))
+    } else {
+        Ok(None)
+    }
 }
 
 use shardline_protocol::TokenScope;
@@ -156,10 +179,11 @@ pub async fn info_refs(
         .parse::<GitSmartHttpService>()
         .map_err(|_err| HubApiError::NotFound)?;
 
-    match service {
-        GitSmartHttpService::ReceivePack => authorize_write(&state, &headers)?,
-        GitSmartHttpService::UploadPack => authorize_read(&state, &headers)?,
-    }
+    let auth_ctx = match service {
+        GitSmartHttpService::ReceivePack => authorize_write_with_context(&state, &headers)?,
+        GitSmartHttpService::UploadPack => authorize_read_with_context(&state, &headers)?,
+    };
+    require_repository_binding(auth_ctx.as_ref(), &ns, &repo)?;
 
     let repo_id = resolve_repo_id(&repo_type, &ns, &repo);
     let refs = collect_refs(&state, &repo_id).await?;

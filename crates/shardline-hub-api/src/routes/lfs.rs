@@ -8,9 +8,9 @@ use bytes::Bytes;
 
 use crate::{commit, error::HubApiError, models::*};
 use shardline_protocol::TokenScope;
-use shardline_storage::{ObjectKey, ObjectStore};
+use shardline_storage::ObjectStore;
 
-use super::{HubState, authorize};
+use super::{HubState, authorize_with_context, lfs_object_key};
 
 // ---- LFS batch (requires Read) ----
 
@@ -20,13 +20,17 @@ pub(crate) async fn lfs_batch(
     Json(request): Json<LfsBatchRequest>,
 ) -> Result<Json<LfsBatchResponse>, HubApiError> {
     shardline_metrics::record_hub_api_request("lfs_batch", "POST", 200);
-    authorize(&state, &headers, TokenScope::Read)?;
+    // These LFS routes carry no `ns/repo` in the URL path; the token itself
+    // identifies the repository, so its claims scope both authorizes the request
+    // and namespaces the LFS object keys.
+    let auth_ctx = authorize_with_context(&state, &headers, TokenScope::Read)?;
+    let repository_scope = auth_ctx.as_ref().map(|c| c.claims().repository());
 
     let objects: Vec<LfsObjectResponse> = request
         .objects
         .iter()
         .map(|obj| {
-            let key = match ObjectKey::parse(&format!("lfs/{}", obj.oid)) {
+            let key = match lfs_object_key(&obj.oid, repository_scope) {
                 Ok(k) => k,
                 Err(e) => {
                     return LfsObjectResponse {
@@ -134,12 +138,12 @@ pub(crate) async fn lfs_upload(
 ) -> Result<StatusCode, HubApiError> {
     shardline_metrics::record_hub_api_request("lfs_upload", "PUT", 200);
     shardline_metrics::record_hub_api_file_upload();
-    authorize(&state, &headers, TokenScope::Write)?;
+    let auth_ctx = authorize_with_context(&state, &headers, TokenScope::Write)?;
     commit::validate_lfs_oid(&oid)?;
 
     use shardline_storage::{ObjectBody, ObjectIntegrity};
-    let key = ObjectKey::parse(&format!("lfs/{oid}"))
-        .map_err(|e| HubApiError::CasError(e.to_string()))?;
+    let repository_scope = auth_ctx.as_ref().map(|c| c.claims().repository());
+    let key = lfs_object_key(&oid, repository_scope)?;
     let object_body = ObjectBody::from_slice(&body);
     let integrity = ObjectIntegrity::new(
         shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(&body).as_bytes()),
@@ -170,10 +174,9 @@ pub(crate) async fn lfs_download(
 > {
     shardline_metrics::record_hub_api_request("lfs_download", "GET", 200);
     shardline_metrics::record_hub_api_file_download();
-    authorize(&state, &headers, TokenScope::Read)?;
-
-    let key = ObjectKey::parse(&format!("lfs/{oid}"))
-        .map_err(|e| HubApiError::CasError(e.to_string()))?;
+    let auth_ctx = authorize_with_context(&state, &headers, TokenScope::Read)?;
+    let repository_scope = auth_ctx.as_ref().map(|c| c.claims().repository());
+    let key = lfs_object_key(&oid, repository_scope)?;
     let meta = state
         .object_store
         .metadata(&key)

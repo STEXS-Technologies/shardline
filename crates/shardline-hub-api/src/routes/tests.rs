@@ -962,10 +962,11 @@ fn make_store_with_revision(
 
 /// Pre-populate ObjectStore with content for a given SHA.
 fn store_test_content(td: &tempfile::TempDir, sha: &str, content: &[u8]) {
-    use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectStore};
+    use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectStore};
     let object_store = shardline_server_core::ServerObjectStore::local(td.path().join("lfs"))
         .expect("local object store");
-    let key = ObjectKey::parse(&format!("lfs/{sha}")).expect("valid key");
+    // Global namespace (None scope) — matches the permissive-mode read paths.
+    let key = crate::routes::lfs_object_key(sha, None).expect("valid key");
     let body = ObjectBody::from_slice(content);
     let integrity = ObjectIntegrity::new(
         shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(content).as_bytes()),
@@ -1706,7 +1707,7 @@ async fn handler_apply_commit_inline_file() {
             content: b"world".to_vec(),
         }],
     };
-    let result = apply_commit(&state, "org/apply-test", "parent_apply", &parsed)
+    let result = apply_commit(&state, "org/apply-test", "parent_apply", &parsed, None)
         .await
         .unwrap();
     assert!(!result.commit_id.is_empty());
@@ -1743,7 +1744,7 @@ async fn handler_apply_commit_lfs_pointer() {
             size: 2_000_000,
         }],
     };
-    let result = apply_commit(&state, "org/apply-lfs", "parent_lfs2", &parsed)
+    let result = apply_commit(&state, "org/apply-lfs", "parent_lfs2", &parsed, None)
         .await
         .unwrap();
     let new_files = state.store.get_files(&result.commit_id).unwrap();
@@ -1781,7 +1782,7 @@ async fn handler_apply_commit_delete() {
             path: "old.txt".into(),
         }],
     };
-    let result = apply_commit(&state, "org/apply-del", "parent_del2", &parsed)
+    let result = apply_commit(&state, "org/apply-del", "parent_del2", &parsed, None)
         .await
         .unwrap();
     let new_files = state.store.get_files(&result.commit_id).unwrap();
@@ -1805,7 +1806,7 @@ async fn handler_apply_commit_parent_mismatch() {
         parent_commit: Some("different_sha".into()),
         instructions: vec![],
     };
-    let result = apply_commit(&state, "org/apply-mismatch", "actual_sha", &parsed).await;
+    let result = apply_commit(&state, "org/apply-mismatch", "actual_sha", &parsed, None).await;
     assert!(result.is_err());
     let err = result.unwrap_err();
     assert!(
@@ -2109,9 +2110,10 @@ async fn handler_lfs_batch_upload_new_object() {
 #[tokio::test]
 async fn handler_lfs_batch_download_existing_object() {
     let (_td, state) = make_lfs_state();
-    // Store an LFS object in the object store
-    use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectStore};
-    let key = ObjectKey::parse("lfs/existing_oid").unwrap();
+    // Store an LFS object in the object store (global namespace, matching the
+    // permissive-mode read path).
+    use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectStore};
+    let key = crate::routes::lfs_object_key("existing_oid", None).unwrap();
     let integrity = ObjectIntegrity::new(
         shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(b"some data").as_bytes()),
         9,
@@ -2175,9 +2177,9 @@ async fn handler_lfs_batch_download_missing_object() {
 #[tokio::test]
 async fn handler_lfs_batch_verify_existing() {
     let (_td, state) = make_lfs_state();
-    // Store an LFS object in the object store
-    use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectStore};
-    let key = ObjectKey::parse("lfs/verify_oid").unwrap();
+    // Store an LFS object in the object store (global namespace).
+    use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectStore};
+    let key = crate::routes::lfs_object_key("verify_oid", None).unwrap();
     let integrity = ObjectIntegrity::new(
         shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(b"data").as_bytes()),
         4,
@@ -2266,9 +2268,9 @@ async fn handler_lfs_upload_success() {
     .await;
     assert!(result.is_ok());
     assert_eq!(result.unwrap(), StatusCode::OK);
-    // Verify it's stored in the object store
-    use shardline_storage::{ObjectKey, ObjectStore};
-    let key = ObjectKey::parse(&format!("lfs/{oid}")).unwrap();
+    // Verify it's stored in the object store (global namespace).
+    use shardline_storage::ObjectStore;
+    let key = crate::routes::lfs_object_key(oid, None).unwrap();
     assert!(state.object_store.contains(&key).unwrap());
     let data = state
         .object_store
@@ -2298,9 +2300,9 @@ async fn handler_lfs_download_missing() {
 async fn handler_lfs_download_success() {
     let (_td, state) = make_test_state();
     let oid = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-    // Store an LFS object in the object store
-    use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectStore};
-    let key = ObjectKey::parse(&format!("lfs/{oid}")).unwrap();
+    // Store an LFS object in the object store (global namespace).
+    use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectStore};
+    let key = crate::routes::lfs_object_key(oid, None).unwrap();
     let integrity = ObjectIntegrity::new(
         shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(b"download data").as_bytes()),
         13,
@@ -2905,7 +2907,7 @@ async fn handler_apply_commit_empty_instructions() {
         parent_commit: None,
         instructions: vec![],
     };
-    let result = apply_commit(&state, "org/empty-inst", "parent_empty", &parsed)
+    let result = apply_commit(&state, "org/empty-inst", "parent_empty", &parsed, None)
         .await
         .unwrap();
     assert!(!result.commit_id.is_empty());

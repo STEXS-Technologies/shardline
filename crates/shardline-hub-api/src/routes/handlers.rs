@@ -5,8 +5,7 @@ use axum::{Json, extract::State};
 use crate::{error::HubApiError, models::*};
 use shardline_protocol::TokenScope;
 
-use super::HubState;
-use super::authorize;
+use super::{HubState, authorize_with_context, require_repository_binding};
 
 // ---- Whoami ----
 
@@ -43,7 +42,8 @@ pub(crate) async fn git_head(
     headers: HeaderMap,
     Path((_repo_type, ns, repo)): Path<(String, String, String)>,
 ) -> Result<String, HubApiError> {
-    authorize(&state, &headers, TokenScope::Read)?;
+    let auth_ctx = authorize_with_context(&state, &headers, TokenScope::Read)?;
+    require_repository_binding(auth_ctx.as_ref(), &ns, &repo)?;
     let repo_id = format!("{ns}/{repo}");
     let revisions = state.store.list_revisions(&repo_id).map_err(|e| {
         tracing::debug!("failed to list revisions for {repo_id}: {e}");
