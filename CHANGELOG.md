@@ -92,6 +92,51 @@ compares, `alg`-confusion guard, parameterized SQL, symlink-race protection,
   `MAX_LFS_OBJECT_SIZE` (1 TiB); oversized declared totals are rejected with
   `413`. (No measurable security impact — sparse files do not exhaust inodes and
   assembly is sha256-gated — but capped defensively.)
+- **[Medium] Hub API `repo_list`/`repo_search` leaked other tenants' private
+  repos** — the global list/search endpoints returned `private` repos from every
+  tenant (the store queries had no identity/visibility filter). Now filtered by
+  caller ownership (private repos visible only to their owner; public repos
+  always visible).
+- **[High] `apply_delta` unbounded output growth (git receive-pack OOM)** — a
+  crafted pack delta whose copy instructions sum beyond the declared target size
+  grew the result vector unboundedly (up to ~32 TB transient allocation). The
+  mid-loop size checks now reject before each `extend_from_slice`.
+- **[High] GC quarantine sweep used a stale orphan snapshot** — an object
+  re-referenced after the snapshot could be deleted while the index still
+  references it (free-during-insert data-loss race). The sweep now re-verifies
+  reachability against current index state immediately before each delete and
+  skips referenced objects.
+- **[Medium] Reconstruction-cache loader-failure latch leak** — a failed load
+  left the key `loading` forever, stalling every later requester 30 s and
+  breaking load-once. The latch is now cleared on the error path (waiters are
+  woken and can retry).
+- **[Medium] `sdx` path registration mangled spaces into `+`** — path segments
+  were form-encoded (`+` = space); now RFC-3986 pchar percent-encoded (`%20`),
+  so `register_path`/`delete_path`/`list_dir`/`resolve_path` round-trip
+  consistently.
+- **[Medium] receive-pack silently dropped bundled LFS content** when a pushed
+  pointer blob was not byte-identical to the canonical pointer (CRLF/extra
+  fields) — content is now matched by `sha256(content) == oid`, and a push whose
+  referenced LFS content is entirely absent fails loudly instead of creating a
+  broken ref.
+- **[Low] git pack parser accepted truncated zlib streams / partial packs** —
+  `decompress_zlib` now requires `StreamEnd`, and `parse_pack_data` rejects a
+  header whose `num_objects` is not fully consumed (no more garbage objects
+  stored as a valid revision).
+- **[Low] zero-length suffix byte-range** returned a bogus 1-byte range instead
+  of `Unsatisfiable` — now consistent with the non-suffix branch.
+- **[Medium] webhook delivery DNS-rebinding TOCTOU** — delivery now re-resolves
+  and re-verifies the address set immediately before the HTTP send (the
+  documented rebinding window is closed; shared-client pinning was not available
+  without the `dns` feature, so re-resolve+compare was used).
+- **[Low-Med] upload-intent transitions were not idempotent** — two concurrent
+  callers sharing one intent could spuriously 5xx with
+  `InvalidUploadTransition`; `transition_intent` now treats at-or-past-target as
+  success across sqlite/postgres/memory.
+- **Concurrency verification** — added three loom contract models (CAS
+  coordinator exactly-once store + reachability-vs-sweep, reconstruction-cache
+  load-once, GC quarantine no-free-during-insert/no-resurrect); all invariants
+  hold under exhaustive interleaving exploration.
 
 ### Internal
 - Unified the duplicate `PostgresRecordKind` / `LocalRecordKind` into a single

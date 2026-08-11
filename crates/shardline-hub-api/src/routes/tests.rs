@@ -1120,6 +1120,112 @@ async fn handler_repo_search_finds_matching() {
 }
 
 // ------------------------------------------------------------------
+// Cross-tenant private-repo leak (F-deep-1)
+// ------------------------------------------------------------------
+
+/// Builds a `HubState` with a mock auth provider that always authenticates a
+/// caller with repository scope `alice/own` (owner `alice`).
+fn make_alice_auth_state() -> (tempfile::TempDir, HubState) {
+    use shardline_protocol::{
+        RepositoryProvider, RepositoryScope, TokenClaims, TokenScope as ProtoScope,
+    };
+    use shardline_server_core::{AuthError, AuthProvider};
+
+    struct AliceProvider;
+    impl AuthProvider for AliceProvider {
+        fn verify_token(
+            &self,
+            _token: &str,
+        ) -> Result<TokenClaims, shardline_server_core::AuthError> {
+            let repo = RepositoryScope::new(RepositoryProvider::Generic, "alice", "own", None)
+                .map_err(|_err| AuthError::InvalidToken)?;
+            let claims = TokenClaims::new("issuer", "alice", ProtoScope::Read, repo, u64::MAX)
+                .map_err(|_err| AuthError::InvalidToken)?;
+            Ok(claims)
+        }
+        fn mint_token(
+            &self,
+            _claims: &TokenClaims,
+        ) -> Result<String, shardline_server_core::AuthError> {
+            Ok("alice-token".into())
+        }
+    }
+
+    let (td, store) = make_delete_test_store();
+    store
+        .create_repo(HubRepoType::Model, "bob/private-repo", true)
+        .expect("create bob private repo");
+    store
+        .create_repo(HubRepoType::Model, "bob/public-repo", false)
+        .expect("create bob public repo");
+    store
+        .create_repo(HubRepoType::Model, "alice/own", true)
+        .expect("create alice own repo");
+    let object_store = shardline_server_core::ServerObjectStore::local(td.path().join("lfs"))
+        .expect("local object store");
+    let state = HubState {
+        store,
+        object_store,
+        auth: Some(HubAuth::new(Box::new(AliceProvider))),
+        http_client: None,
+    };
+    (td, state)
+}
+
+fn alice_headers() -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        axum::http::header::AUTHORIZATION,
+        "Bearer alice-token".parse().unwrap(),
+    );
+    headers
+}
+
+#[tokio::test]
+async fn repo_list_hides_other_tenants_private_repos() {
+    let (_td, state) = make_alice_auth_state();
+    let result = repo_list(State(state), alice_headers()).await.unwrap();
+    let ids: Vec<String> = result.repos.iter().map(|r| r.id.clone()).collect();
+    // Alice's own private repo and bob's public repo remain visible.
+    assert!(ids.iter().any(|id| id == "alice/own"));
+    assert!(ids.iter().any(|id| id == "bob/public-repo"));
+    // bob's private repo must be hidden.
+    assert!(
+        !ids.iter().any(|id| id == "bob/private-repo"),
+        "other tenant's private repo leaked: {ids:?}"
+    );
+}
+
+#[tokio::test]
+async fn repo_search_hides_other_tenants_private_repos() {
+    let (_td, state) = make_alice_auth_state();
+    // Search for bob's private repo by its full ID.
+    let result = repo_search(
+        State(state),
+        alice_headers(),
+        Path("models".to_string()),
+        Query(RepoSearchQuery {
+            q: "bob/private-repo".into(),
+            author: None,
+            sort: None,
+            direction: None,
+            limit: 50,
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(
+        result.repos.is_empty(),
+        "other tenant's private repo leaked in search: {:?}",
+        result
+            .repos
+            .iter()
+            .map(|r| r.id.clone())
+            .collect::<Vec<_>>()
+    );
+}
+
+// ------------------------------------------------------------------
 // repo_info
 // ------------------------------------------------------------------
 

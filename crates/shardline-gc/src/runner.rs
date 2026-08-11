@@ -158,8 +158,10 @@ where
     if options.sweep {
         let sweep_start = std::time::Instant::now();
         sweep_quarantine_entries(
+            record_store,
             object_store,
             index_store,
+            frontends,
             &orphan_objects,
             now_unix_seconds,
             &mut quarantine_entries,

@@ -12,16 +12,14 @@ use super::super::pack::{GitObject, ObjectType};
 use super::super::pktline::{self, FLUSH};
 use super::error::SmartHttpError;
 use super::pack_parse::parse_pack_data;
-use super::ref_advertisement::{
-    authorize_write_with_context, is_valid_refname, resolve_repo_id,
-};
+use super::ref_advertisement::{authorize_write_with_context, is_valid_refname, resolve_repo_id};
 use super::tree_walk::{parse_commit_object, walk_git_tree};
 use super::upload_pack::build_lfs_pointer_blob;
 use crate::{
     error::HubApiError,
     routes::{HubState, lfs_object_key, require_repository_binding},
 };
-use shardline_index::hub::canonical_ref_name;
+use shardline_index::hub::{HubFileEntry, canonical_ref_name};
 use shardline_protocol::{RepositoryScope, ShardlineHash};
 use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectStore};
 
@@ -84,13 +82,7 @@ pub async fn receive_pack(
             delete_push_ref(&state, &repo_id, old_sha, refname)
         } else {
             store_push_objects(
-                &state,
-                &repo_id,
-                old_sha,
-                new_sha,
-                refname,
-                &objects,
-                repo_scope,
+                &state, &repo_id, old_sha, new_sha, refname, &objects, repo_scope,
             )
             .await
         };
@@ -205,23 +197,22 @@ async fn store_push_objects(
     // ObjectStore rather than Postgres BYTEA.
     for file in &files {
         if file.is_lfs {
-            // Look up the blob data from the pack objects by computing
-            // the SHA of the LFS pointer blob and fetching it.
-            let pointer_blob = build_lfs_pointer_blob(&file.sha, file.size);
-            let pointer_sha = pointer_blob.sha1();
-            if let Some(blob_obj) = sha_to_obj.get(&pointer_sha) {
-                let key = lfs_object_key(&file.sha, repo_scope)
-                    .map_err(|e| SmartHttpError::StoreLfsObject(e.to_string()))?;
-                let object_body = ObjectBody::from_slice(&blob_obj.data);
-                let integrity = ObjectIntegrity::new(
-                    ShardlineHash::from_bytes(*blake3::hash(&blob_obj.data).as_bytes()),
-                    blob_obj.data.len() as u64,
-                );
-                state
-                    .object_store
-                    .put_if_absent(&key, object_body, &integrity)
-                    .map_err(|e| SmartHttpError::StoreLfsObject(e.to_string()))?;
-            }
+            // Find the object whose content should be stored for this file.
+            // See `find_lfs_blob` for how the canonical pointer and the actual
+            // content object are matched (including non-canonical pointers).
+            let blob_obj = find_lfs_blob(file, objects, &sha_to_obj)
+                .ok_or_else(|| SmartHttpError::LfsContentNotFoundInPack(file.sha.clone()))?;
+            let key = lfs_object_key(&file.sha, repo_scope)
+                .map_err(|e| SmartHttpError::StoreLfsObject(e.to_string()))?;
+            let object_body = ObjectBody::from_slice(&blob_obj.data);
+            let integrity = ObjectIntegrity::new(
+                ShardlineHash::from_bytes(*blake3::hash(&blob_obj.data).as_bytes()),
+                blob_obj.data.len() as u64,
+            );
+            state
+                .object_store
+                .put_if_absent(&key, object_body, &integrity)
+                .map_err(|e| SmartHttpError::StoreLfsObject(e.to_string()))?;
         }
     }
 
@@ -254,6 +245,38 @@ async fn store_push_objects(
         .map_err(|e| SmartHttpError::CreateRevision(e.to_string()))?;
 
     Ok(())
+}
+
+/// Finds the pack object whose content should be stored for an LFS file.
+///
+/// The canonical LFS pointer blob (exactly as produced by
+/// [`build_lfs_pointer_blob`]) is matched by its git SHA1 first, preserving the
+/// historical fast path. A pointer may however be non-canonical — CRLF line
+/// endings, extra fields, reordered attributes — in which case its git SHA1
+/// differs from the canonical pointer and the exact-SHA lookup misses. Rather
+/// than silently dropping the LFS payload, we then search the parsed pack
+/// objects for any blob whose sha256 content equals the file's OID
+/// (`file.sha`), which is the real content the LFS pointer references. Returns
+/// `None` if no matching object exists at all.
+pub(super) fn find_lfs_blob<'obj>(
+    file: &HubFileEntry,
+    objects: &'obj [GitObject],
+    sha_to_obj: &HashMap<[u8; 20], &'obj GitObject>,
+) -> Option<&'obj GitObject> {
+    let pointer_blob = build_lfs_pointer_blob(&file.sha, file.size);
+    let pointer_sha = pointer_blob.sha1();
+    if let Some(blob_obj) = sha_to_obj.get(&pointer_sha) {
+        return Some(*blob_obj);
+    }
+    objects
+        .iter()
+        .find(|obj| obj.object_type == ObjectType::Blob && content_sha256(&obj.data) == file.sha)
+}
+
+/// Computes the lowercase hex sha256 of `data` (the LFS OID format).
+fn content_sha256(data: &[u8]) -> String {
+    use sha2::Digest;
+    hex::encode(sha2::Sha256::digest(data))
 }
 
 fn delete_push_ref(

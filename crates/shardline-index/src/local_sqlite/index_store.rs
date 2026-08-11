@@ -552,13 +552,20 @@ impl UploadIntentStore for super::LocalIndexStore {
         let Some(current) = current else {
             return Ok(false);
         };
+        if current.state() == new_state {
+            // Idempotent: the intent is already in the target state. This happens
+            // when a duplicate concurrent caller performs the same transition, so
+            // treat it as success rather than an invalid transition.
+            return Ok(true);
+        }
         if !current.state().can_transition_to(new_state) {
             return Ok(false);
         }
         let store = self.clone();
         let intent_id = intent_id.to_owned();
+        let read_id = intent_id.clone();
         let current_state = current.state();
-        tokio::task::spawn_blocking(move || {
+        let transitioned = tokio::task::spawn_blocking(move || -> Result<bool, LocalIndexStoreError> {
             let conn = store.open_connection()?;
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -571,7 +578,17 @@ impl UploadIntentStore for super::LocalIndexStore {
             Ok(rows > 0)
         })
         .await
-        .map_err(|e| LocalIndexStoreError::Io(std::io::Error::other(e)))?
+        .map_err(|e| LocalIndexStoreError::Io(std::io::Error::other(e)))??;
+        if transitioned {
+            return Ok(true);
+        }
+        // Race: a concurrent caller advanced the state between our read and the
+        // conditional UPDATE, so the UPDATE matched zero rows. If the intent is
+        // now already in the target state, the transition is effectively complete
+        // — report success so the caller does not see a spurious invalid
+        // transition.
+        let now = self.intent_by_id(&read_id).await?;
+        Ok(now.is_some_and(|intent| intent.state() == new_state))
     }
 
     async fn intent_by_id(&self, intent_id: &str) -> Result<Option<UploadIntent>, Self::Error> {
@@ -1181,5 +1198,82 @@ mod tests {
         })
         .unwrap();
         assert_eq!(count, 0);
+    }
+
+    // ── UploadIntentStore: transition idempotency ─────────────────────────
+
+    #[test]
+    fn transition_intent_to_same_state_is_idempotent() {
+        let store = make_store();
+        let intent = UploadIntent::new(
+            "same-state-intent".to_owned(),
+            "objects/test".to_owned(),
+            "abcdef".to_owned(),
+            42,
+        );
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(store.create_intent(&intent)).unwrap();
+
+        // Advance Created -> Storing.
+        let first = rt
+            .block_on(store.transition_intent("same-state-intent", UploadIntentState::Storing))
+            .unwrap();
+        assert!(first, "initial Created -> Storing should succeed");
+        // Repeating the same transition (a duplicate concurrent caller's view)
+        // must be a no-op success, not a false/invalid transition.
+        let second = rt
+            .block_on(store.transition_intent("same-state-intent", UploadIntentState::Storing))
+            .unwrap();
+        assert!(second, "same-state transition must be idempotent");
+    }
+
+    #[test]
+    fn concurrent_same_intent_transitions_both_succeed() {
+        use std::sync::Arc;
+
+        let store = make_store();
+        let intent = UploadIntent::new(
+            "concurrent-intent".to_owned(),
+            "objects/test".to_owned(),
+            "abcdef".to_owned(),
+            42,
+        );
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(store.create_intent(&intent)).unwrap();
+
+        // Two callers racing to move the same intent into Storing. Both must end
+        // up observing success (a spurious InvalidUploadTransition is a bug).
+        let store = Arc::new(store);
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let handle = rt.handle().clone();
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let store = Arc::clone(&store);
+            let barrier = Arc::clone(&barrier);
+            let handle = handle.clone();
+            handles.push(std::thread::spawn(move || {
+                handle.block_on(async {
+                    barrier.wait().await;
+                    store
+                        .transition_intent("concurrent-intent", UploadIntentState::Storing)
+                        .await
+                        .unwrap()
+                })
+            }));
+        }
+        for h in handles {
+            assert!(
+                h.join().unwrap(),
+                "a concurrent same-intent transition must not fail"
+            );
+        }
     }
 }

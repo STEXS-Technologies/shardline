@@ -696,6 +696,11 @@ impl UploadIntentStore for super::PostgresIndexStore {
         let Some(current) = current else {
             return Ok(false);
         };
+        if current.state() == new_state {
+            // Idempotent: already in the target state (concurrent duplicate
+            // caller performing the same transition).
+            return Ok(true);
+        }
         if !current.state().can_transition_to(new_state) {
             return Ok(false);
         }
@@ -707,7 +712,15 @@ impl UploadIntentStore for super::PostgresIndexStore {
         .bind(current.state().as_str())
         .execute(&self.pool)
         .await?;
-        Ok(rows.rows_affected() > 0)
+        if rows.rows_affected() > 0 {
+            return Ok(true);
+        }
+        // Race: a concurrent caller advanced the state between our read and the
+        // conditional UPDATE, so zero rows matched. If the intent is now already
+        // in the target state, the transition is effectively complete — report
+        // success instead of a spurious invalid transition.
+        let now = self.intent_by_id(intent_id).await?;
+        Ok(now.is_some_and(|intent| intent.state() == new_state))
     }
 
     async fn intent_by_id(&self, intent_id: &str) -> Result<Option<UploadIntent>, Self::Error> {
