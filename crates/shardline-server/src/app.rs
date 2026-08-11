@@ -603,7 +603,23 @@ fn build_hub_state(
             match shardline_hub_api::secrets::WebhookSecretCipher::new(key_bytes) {
                 Ok(cipher) => {
                     // App-level data upgrade: re-encrypt legacy plaintext rows.
-                    shardline_hub_api::secrets::upgrade_webhook_secrets(&store, &cipher);
+                    // Run the sweep as a background task so startup latency stays
+                    // bounded regardless of repository count. This is purely an
+                    // accelerator — the delivery path already upgrades lazily per
+                    // row — and it is idempotent vs. that lazy path: both write
+                    // the same valid ciphertext under the same key, and since the
+                    // nonce is random a concurrent write just replaces one valid
+                    // blob with another (last-write-wins is harmless).
+                    let sweep_store = store.clone();
+                    let sweep_cipher = cipher.clone();
+                    let _sweep_handle = tokio::task::spawn_blocking(move || {
+                        tracing::info!("starting background webhook-secret upgrade sweep");
+                        shardline_hub_api::secrets::upgrade_webhook_secrets(
+                            &sweep_store,
+                            &sweep_cipher,
+                        );
+                        tracing::info!("background webhook-secret upgrade sweep completed");
+                    });
                     Some(cipher)
                 }
                 Err(e) => {

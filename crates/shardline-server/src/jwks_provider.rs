@@ -8,10 +8,10 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use crate::jwt_algorithm::JwtAlgorithm;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode};
 use reqwest::{Client, StatusCode};
 use serde::Deserialize;
-use crate::jwt_algorithm::JwtAlgorithm;
 use shardline_protocol::{RepositoryProvider, RepositoryScope, TokenClaims, TokenScope};
 use shardline_server_core::{AuthError, AuthProvider};
 use tokio::sync::RwLock;
@@ -264,15 +264,12 @@ impl JwksProvider {
         // Alg-confusion guard: never accept `none` (unauthenticated) or a
         // symmetric HMAC variant when verifying against asymmetric JWKS keys.
         if !alg.is_asymmetric() {
+            // `none` is rejected as a distinct, unauthenticated case.
             if alg.is_none() {
                 return Err(AuthError::InvalidToken);
             }
-            if alg.is_symmetric() {
-                return Err(AuthError::ProviderError(format!(
-                    "unsupported or insecure algorithm: {}",
-                    alg.as_str()
-                )));
-            }
+            // Any other non-asymmetric algorithm (e.g. symmetric HMAC) is
+            // rejected the same way: it cannot be verified against JWKS keys.
             return Err(AuthError::ProviderError(format!(
                 "unsupported or insecure algorithm: {}",
                 alg.as_str()

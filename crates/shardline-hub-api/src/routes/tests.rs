@@ -1384,11 +1384,15 @@ async fn handler_repo_info_with_card_data() {
         &[HubFileEntry {
             path: "README.md".into(),
             size: readme_content.len() as u64,
-            sha: "readme_sha".into(),
+            sha: "abababababababababababababababababababababababababababababababab".into(),
             is_lfs: false,
         }],
     );
-    store_test_content(&_td, "readme_sha", readme_content);
+    store_test_content(
+        &_td,
+        "abababababababababababababababababababababababababababababababab",
+        readme_content,
+    );
     let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
         .expect("local object store");
     let state = HubState {
@@ -1462,11 +1466,15 @@ async fn handler_repo_modelcard_with_readme() {
         &[HubFileEntry {
             path: "README.md".into(),
             size: content.len() as u64,
-            sha: "rm_sha".into(),
+            sha: "1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b".into(),
             is_lfs: false,
         }],
     );
-    store_test_content(&_td, "rm_sha", content);
+    store_test_content(
+        &_td,
+        "1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b",
+        content,
+    );
     let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
         .expect("local object store");
     let state = HubState {
@@ -2226,12 +2234,16 @@ async fn handler_resolve_file_inline() {
         &[HubFileEntry {
             path: "data.txt".into(),
             size: content.len() as u64,
-            sha: "data_sha".into(),
+            sha: "2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c".into(),
             is_lfs: false,
         }],
     );
     // Pre-load file content into ObjectStore
-    store_test_content(&_td, "data_sha", content);
+    store_test_content(
+        &_td,
+        "2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c",
+        content,
+    );
     let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
         .expect("local object store");
     let state = HubState {
@@ -2323,7 +2335,7 @@ async fn handler_lfs_batch_upload_new_object() {
                 name: "main".into(),
             },
             objects: vec![LfsObjectRequest {
-                oid: "abc123".into(),
+                oid: "e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0".into(),
                 size: 1000,
             }],
         }),
@@ -2348,7 +2360,11 @@ async fn handler_lfs_batch_download_existing_object() {
     // Store an LFS object in the object store (global namespace, matching the
     // permissive-mode read path).
     use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectStore};
-    let key = crate::routes::lfs_object_key("existing_oid", None).unwrap();
+    let key = crate::routes::lfs_object_key(
+        "7171717171717171717171717171717171717171717171717171717171717171",
+        None,
+    )
+    .unwrap();
     let integrity = ObjectIntegrity::new(
         shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(b"some data").as_bytes()),
         9,
@@ -2366,7 +2382,7 @@ async fn handler_lfs_batch_download_existing_object() {
                 name: "main".into(),
             },
             objects: vec![LfsObjectRequest {
-                oid: "existing_oid".into(),
+                oid: "7171717171717171717171717171717171717171717171717171717171717171".into(),
                 size: 9,
             }],
         }),
@@ -2392,7 +2408,7 @@ async fn handler_lfs_batch_download_missing_object() {
                 name: "main".into(),
             },
             objects: vec![LfsObjectRequest {
-                oid: "missing_oid".into(),
+                oid: "9393939393939393939393939393939393939393939393939393939393939393".into(),
                 size: 100,
             }],
         }),
@@ -2414,7 +2430,11 @@ async fn handler_lfs_batch_verify_existing() {
     let (_td, state) = make_lfs_state();
     // Store an LFS object in the object store (global namespace).
     use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectStore};
-    let key = crate::routes::lfs_object_key("verify_oid", None).unwrap();
+    let key = crate::routes::lfs_object_key(
+        "8282828282828282828282828282828282828282828282828282828282828282",
+        None,
+    )
+    .unwrap();
     let integrity = ObjectIntegrity::new(
         shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(b"data").as_bytes()),
         4,
@@ -2432,7 +2452,7 @@ async fn handler_lfs_batch_verify_existing() {
                 name: "main".into(),
             },
             objects: vec![LfsObjectRequest {
-                oid: "verify_oid".into(),
+                oid: "8282828282828282828282828282828282828282828282828282828282828282".into(),
                 size: 4,
             }],
         }),
@@ -2456,7 +2476,7 @@ async fn handler_lfs_batch_verify_missing() {
                 name: "main".into(),
             },
             objects: vec![LfsObjectRequest {
-                oid: "no_verify_oid".into(),
+                oid: "a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4".into(),
                 size: 1,
             }],
         }),
@@ -2524,7 +2544,7 @@ async fn handler_lfs_download_missing() {
     let result = lfs_download(
         State(state),
         default_headers(),
-        Path("nonexistent_oid".to_string()),
+        Path("b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5".to_string()),
     )
     .await;
     assert!(result.is_err());
@@ -2771,11 +2791,15 @@ async fn handler_dataset_first_rows_with_jsonl() {
         &[HubFileEntry {
             path: "data/train/data.jsonl".into(),
             size: jsonl_content.len() as u64,
-            sha: "jsonl_sha".into(),
+            sha: "3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d".into(),
             is_lfs: false,
         }],
     );
-    store_test_content(&_td, "jsonl_sha", jsonl_content);
+    store_test_content(
+        &_td,
+        "3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d",
+        jsonl_content,
+    );
     let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
         .expect("local object store");
     let state = HubState {
@@ -2817,11 +2841,15 @@ async fn handler_dataset_viewer_with_data() {
         &[HubFileEntry {
             path: "default/train/data.csv".into(),
             size: csv_content.len() as u64,
-            sha: "csv_sha".into(),
+            sha: "4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e".into(),
             is_lfs: false,
         }],
     );
-    store_test_content(&_td, "csv_sha", csv_content);
+    store_test_content(
+        &_td,
+        "4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e",
+        csv_content,
+    );
     let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
         .expect("local object store");
     let state = HubState {
@@ -2859,11 +2887,15 @@ async fn handler_dataset_viewer_pagination() {
         &[HubFileEntry {
             path: "data/test/data.csv".into(),
             size: csv_content.len() as u64,
-            sha: "vp_sha".into(),
+            sha: "5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f".into(),
             is_lfs: false,
         }],
     );
-    store_test_content(&_td, "vp_sha", csv_content);
+    store_test_content(
+        &_td,
+        "5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f",
+        csv_content,
+    );
     let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
         .expect("local object store");
     let state = HubState {
@@ -3985,13 +4017,13 @@ async fn handler_dataset_parquet_finds_data_files() {
             HubFileEntry {
                 path: "data/train/data.parquet".into(),
                 size: 1000,
-                sha: "pq_sha".into(),
+                sha: "6060606060606060606060606060606060606060606060606060606060606060".into(),
                 is_lfs: false,
             },
             HubFileEntry {
                 path: "README.md".into(),
                 size: 50,
-                sha: "rm_sha".into(),
+                sha: "1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b".into(),
                 is_lfs: false,
             },
         ],

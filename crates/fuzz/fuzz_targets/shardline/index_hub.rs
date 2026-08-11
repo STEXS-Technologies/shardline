@@ -4,14 +4,7 @@ use libfuzzer_sys::fuzz_target;
 use shardline_index::hub::HubRepoType;
 
 /// Every token accepted by `parse_str` (singular and plural spellings).
-const ACCEPTED_TOKENS: [&str; 6] = [
-    "model",
-    "models",
-    "dataset",
-    "datasets",
-    "space",
-    "spaces",
-];
+const ACCEPTED_TOKENS: [&str; 6] = ["model", "models", "dataset", "datasets", "space", "spaces"];
 
 fuzz_target!(|data: &str| {
     // INVARIANT 1: parse_str is deterministic for any input.

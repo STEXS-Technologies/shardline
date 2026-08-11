@@ -120,7 +120,10 @@ fn object_storage_adapter_parse_is_case_insensitive_and_whitespace_tolerant() {
 
 #[test]
 fn deployment_mode_parse_is_case_insensitive_and_whitespace_tolerant() {
-    assert_eq!(DeploymentMode::parse("Insecure"), Some(DeploymentMode::Insecure));
+    assert_eq!(
+        DeploymentMode::parse("Insecure"),
+        Some(DeploymentMode::Insecure)
+    );
     assert_eq!(
         DeploymentMode::parse(" AUTHENTICATED "),
         Some(DeploymentMode::Authenticated)

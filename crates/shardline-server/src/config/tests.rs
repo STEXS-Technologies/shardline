@@ -989,6 +989,7 @@ fn read_secret_file_bytes_rejects_oversized_signing_key_before_reading() {
     let bytes = super::read_secret_file_bytes(
         temp.path(),
         1_048_576,
+        false,
         super::ServerConfigError::TokenSigningKey,
         |observed_bytes, maximum_bytes| super::ServerConfigError::TokenSigningKeyTooLarge {
             observed_bytes,
@@ -1030,6 +1031,7 @@ fn read_secret_file_bytes_accepts_projected_secret_symlink_within_directory() {
     let bytes = super::read_secret_file_bytes(
         &link,
         1_048_576,
+        false,
         super::ServerConfigError::TokenSigningKey,
         |observed_bytes, maximum_bytes| super::ServerConfigError::TokenSigningKeyTooLarge {
             observed_bytes,
@@ -1070,6 +1072,7 @@ fn read_secret_file_bytes_rejects_symlinked_secret_path_outside_directory() {
     let bytes = super::read_secret_file_bytes(
         &link,
         1_048_576,
+        false,
         super::ServerConfigError::TokenSigningKey,
         |observed_bytes, maximum_bytes| super::ServerConfigError::TokenSigningKeyTooLarge {
             observed_bytes,
@@ -1112,6 +1115,7 @@ fn read_secret_file_bytes_rejects_growth_after_validation_without_retaining_appe
     let bytes = super::read_secret_file_bytes(
         temp.path(),
         1_048_576,
+        false,
         super::ServerConfigError::TokenSigningKey,
         |observed_bytes, maximum_bytes| super::ServerConfigError::TokenSigningKeyTooLarge {
             observed_bytes,
@@ -1187,6 +1191,7 @@ fn read_secret_file_bytes_accepts_valid_regular_file() {
     let bytes = super::read_secret_file_bytes(
         temp.path(),
         1_048_576,
+        false,
         super::ServerConfigError::TokenSigningKey,
         |observed_bytes, maximum_bytes| super::ServerConfigError::TokenSigningKeyTooLarge {
             observed_bytes,
@@ -1213,6 +1218,7 @@ fn read_secret_file_bytes_accepts_empty_file() {
     let bytes = super::read_secret_file_bytes(
         temp.path(),
         1_048_576,
+        false,
         super::ServerConfigError::TokenSigningKey,
         |observed_bytes, maximum_bytes| super::ServerConfigError::TokenSigningKeyTooLarge {
             observed_bytes,
@@ -1235,6 +1241,7 @@ fn read_secret_file_bytes_rejects_nonexistent_file() {
     let bytes = super::read_secret_file_bytes(
         &path,
         1_048_576,
+        false,
         super::ServerConfigError::TokenSigningKey,
         |observed_bytes, maximum_bytes| super::ServerConfigError::TokenSigningKeyTooLarge {
             observed_bytes,
@@ -1266,6 +1273,7 @@ fn read_secret_file_bytes_rejects_oversized_file() {
     let bytes = super::read_secret_file_bytes(
         temp.path(),
         128,
+        false,
         super::ServerConfigError::TokenSigningKey,
         |observed_bytes, maximum_bytes| super::ServerConfigError::TokenSigningKeyTooLarge {
             observed_bytes,

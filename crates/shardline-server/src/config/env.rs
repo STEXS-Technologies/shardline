@@ -178,6 +178,7 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
             "SHARDLINE_TOKEN_SIGNING_KEY_FILE",
         ),
         MAX_TOKEN_SIGNING_KEY_BYTES,
+        true,
         ServerConfigError::EmptyTokenSigningKey,
         |env, file_env| ServerConfigError::SecretSourceConflict { env, file_env },
         ServerConfigError::TokenSigningKey,
@@ -196,6 +197,7 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
             "SHARDLINE_HUB_WEBHOOK_SECRET_KEY_FILE",
         ),
         HUB_WEBHOOK_SECRET_KEY_BYTES,
+        true,
         ServerConfigError::EmptyHubWebhookSecretKey,
         |env, file_env| ServerConfigError::SecretSourceConflict { env, file_env },
         ServerConfigError::HubWebhookSecretKey,
@@ -214,6 +216,7 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
             "SHARDLINE_ED25519_PRIVATE_KEY_FILE",
         ),
         MAX_ED25519_KEY_BYTES,
+        false,
         ServerConfigError::EmptyEd25519PrivateKey,
         |env, file_env| ServerConfigError::SecretSourceConflict { env, file_env },
         ServerConfigError::Ed25519PrivateKey,
@@ -232,6 +235,7 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
             "SHARDLINE_ED25519_PUBLIC_KEY_FILE",
         ),
         MAX_ED25519_KEY_BYTES,
+        false,
         ServerConfigError::EmptyEd25519PublicKey,
         |env, file_env| ServerConfigError::SecretSourceConflict { env, file_env },
         ServerConfigError::Ed25519PublicKey,
@@ -248,6 +252,7 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
         Ok(path) => Some(read_secret_file_bytes(
             Path::new(&path),
             MAX_METRICS_TOKEN_BYTES,
+            false,
             ServerConfigError::MetricsToken,
             |observed_bytes, maximum_bytes| ServerConfigError::MetricsTokenTooLarge {
                 observed_bytes,
@@ -459,9 +464,19 @@ fn parse_server_frontends_env(value: &str) -> Result<Vec<ServerFrontend>, Server
 /// Returns `None` when neither env var is set. Returns an error when both
 /// are set (source conflict), the file cannot be read, or the file content
 /// exceeds the size limit.
+///
+/// When `strip_trailing_newline` is `true`, a single trailing line terminator
+/// is stripped from a file-sourced value. Enable it only for fixed-length keys
+/// (e.g. the 32-byte Hub webhook secret); variable-length secrets must pass
+/// `false` so a trailing newline is never silently altered.
+// The shared loader legitimately carries several error-mapping callbacks; the
+// additional `strip_trailing_newline` flag keeps it one argument over clippy's
+// default threshold.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn load_secret_from_env_or_file_with_conflict_check(
     env_names: (&'static str, &'static str),
     maximum_bytes: u64,
+    strip_trailing_newline: bool,
     empty_error: ServerConfigError,
     source_conflict_error: impl Fn(&'static str, &'static str) -> ServerConfigError + Copy,
     read_error: impl Fn(IoError) -> ServerConfigError + Copy,
@@ -489,6 +504,7 @@ pub(super) fn load_secret_from_env_or_file_with_conflict_check(
             let bytes = read_secret_file_bytes(
                 Path::new(&path),
                 maximum_bytes,
+                strip_trailing_newline,
                 read_error,
                 too_large_error,
                 length_mismatch_error,
@@ -999,6 +1015,7 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
                 "SHARDLINE_HUB_WEBHOOK_SECRET_KEY_FILE",
             ),
             super::HUB_WEBHOOK_SECRET_KEY_BYTES,
+            true,
             super::ServerConfigError::EmptyHubWebhookSecretKey,
             |env, file_env| super::ServerConfigError::SecretSourceConflict { env, file_env },
             super::ServerConfigError::HubWebhookSecretKey,

@@ -28,10 +28,12 @@ pub enum PackError {
 ///
 /// Git delta targets are capped by the same bound the pack parser uses for
 /// the total decompressed size of all objects in a receive-pack
-/// (`MAX_TOTAL_DECOMPRESSED_SIZE`, 512 MiB). We reuse 512 MiB as the ceiling
-/// for any one delta target so a malicious delta can never force an
-/// unbounded allocation before the `result.len() != target_size` check runs.
-const MAX_DELTA_TARGET_SIZE: usize = 512 * 1024 * 1024;
+/// ([`crate::git::smart_http::pack_parse::MAX_DECOMPRESSED_TOTAL_BYTES`],
+/// 512 MiB). We reuse that single shared constant as the ceiling for any one
+/// delta target so a malicious delta can never force an unbounded allocation
+/// before the `result.len() != target_size` check runs.
+const MAX_DELTA_TARGET_SIZE: usize =
+    crate::git::smart_http::pack_parse::MAX_DECOMPRESSED_TOTAL_BYTES;
 
 /// Maximum number of bytes a delta varint may span.
 ///

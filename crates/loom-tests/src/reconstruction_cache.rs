@@ -50,10 +50,7 @@ fn write_guard<T>(r: &RwLock<T>) -> loom::sync::RwLockWriteGuard<'_, T> {
     }
 }
 
-fn cv_wait<'guard, T>(
-    cv: &Condvar,
-    guard: MutexGuard<'guard, T>,
-) -> MutexGuard<'guard, T> {
+fn cv_wait<'guard, T>(cv: &Condvar, guard: MutexGuard<'guard, T>) -> MutexGuard<'guard, T> {
     match cv.wait(guard) {
         Ok(g) => g,
         Err(poisoned) => poisoned.into_inner(),

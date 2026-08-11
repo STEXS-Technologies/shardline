@@ -1091,10 +1091,9 @@ async fn receive_pack_stores_lfs_objects() {
     let state = common::state();
     // receive_pack now stores LFS objects under the repository namespace
     // (global, since the common test state has no auth configured).
-    let key = shardline_storage::ObjectKey::parse(&format!(
-        "protocols/lfs/global/objects/{lfs_oid}"
-    ))
-    .unwrap();
+    let key =
+        shardline_storage::ObjectKey::parse(&format!("protocols/lfs/global/objects/{lfs_oid}"))
+            .unwrap();
     assert!(
         state.object_store.contains(&key).unwrap(),
         "LFS object should be stored after push"

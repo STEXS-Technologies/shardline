@@ -118,40 +118,6 @@ where
     Ok(())
 }
 
-/// Re-verifies that `object_key` is still absent from the current referenced
-/// set by re-running the reachability mark against the live index/record
-/// state.
-///
-/// Returns `Ok(true)` when the object is still unreferenced (safe to delete)
-/// and `Ok(false)` when it has become referenced since the cycle snapshot
-/// (the delete must be skipped to avoid destroying live data).
-async fn is_object_still_unreferenced<RecordAdapter, IndexAdapter>(
-    record_store: &RecordAdapter,
-    object_store: &ServerObjectStore,
-    index_store: &IndexAdapter,
-    frontends: &[ServerFrontend],
-    object_key: &ObjectKey,
-) -> Result<bool, GcError>
-where
-    RecordAdapter: RecordStore + Sync,
-    RecordAdapter::Error: Into<GcError>,
-    IndexAdapter: AsyncIndexStore + Sync,
-    IndexAdapter::Error: Into<GcError>,
-{
-    let mut reachability = ReachabilityAccumulator::default();
-    collect_referenced_object_keys(
-        record_store,
-        index_store,
-        object_store,
-        frontends,
-        &mut reachability,
-    )
-    .await?;
-    Ok(!reachability
-        .referenced_object_keys
-        .contains(object_key.as_str()))
-}
-
 /// Sweeps expired quarantine candidates whose objects are confirmed still
 /// unreferenced at delete time.
 ///
@@ -176,6 +142,59 @@ where
     IndexAdapter::Error: Into<GcError>,
 {
     let object_keys = quarantine_entries.keys().cloned().collect::<Vec<_>>();
+
+    // Collect-once-then-check delete-time reachability.
+    //
+    // The cycle snapshot (`orphan_objects`) is taken at mark time. Between
+    // that snapshot and this sweep a chunk may have been re-referenced (e.g.
+    // re-uploaded, or an object-store write landing between
+    // `collect_referenced_object_keys` and `scan_orphan_objects` in the
+    // runner). Deleting it then would destroy live data and cause
+    // reconstruction 404s.
+    //
+    // To close that stale-snapshot window we re-run the reachability mark
+    // against the *current* index/record state once, immediately before the
+    // sweep, and hold the resulting referenced-key set in memory. Every
+    // expired candidate is then checked with an O(1) set membership test
+    // against that single pre-built set — NOT a fresh full mark per candidate
+    // (a full mark visits every record, every dedupe shard mapping, and for
+    // XorbCdcV1 records reads + parses the stored xorb container; doing it
+    // once per candidate would make the sweep O(candidates × store_size)).
+    //
+    // Residual window: the mark is taken once for the whole sweep, so a chunk
+    // re-referenced strictly between that mark and its storage delete could
+    // still be deleted. That window is far smaller than the original
+    // cycle-start snapshot and, in aggregate, strictly smaller than a sweep
+    // that never re-checked at all. The GC sweep runs in a separate process
+    // from the server, so this is closed to the extent the index/record
+    // stores are shared and consistent at read time. If a candidate is
+    // referenced in this set we skip the storage delete and only release the
+    // (now stale) quarantine entry; the object stays on disk and is seen as
+    // live on the next cycle, so no data is lost and nothing is resurrected.
+    //
+    // We only pay for the mark when at least one candidate actually reaches
+    // the delete-time check (expired + still in `orphan_objects`); a sweep
+    // with nothing to delete skips it entirely.
+    let requires_reachability_check = object_keys.iter().any(|object_key| {
+        orphan_objects.contains_key(object_key)
+            && quarantine_entries
+                .get(object_key)
+                .is_some_and(|candidate| candidate.delete_after_unix_seconds() <= now_unix_seconds)
+    });
+    let mut referenced_object_keys = HashSet::new();
+    if requires_reachability_check {
+        let mut reachability = ReachabilityAccumulator::default();
+        collect_referenced_object_keys(
+            record_store,
+            index_store,
+            object_store,
+            frontends,
+            &mut reachability,
+        )
+        .await?;
+        referenced_object_keys = reachability.referenced_object_keys;
+    }
+
     for object_key in object_keys {
         let orphan = orphan_objects.get(&object_key);
         if orphan.is_none() {
@@ -222,36 +241,13 @@ where
             .await
             .map_err(Into::into)?;
 
-        // Re-verify reachability at delete time.
-        //
-        // `orphan_objects` is a snapshot taken at the start of the GC cycle.
-        // Between that snapshot and this delete a chunk may have been
-        // re-referenced (e.g. re-uploaded, or an object-store write landing
-        // between `collect_referenced_object_keys` and `scan_orphan_objects`
-        // in the runner). Deleting it then would destroy live data and cause
-        // reconstruction 404s.
-        //
-        // Re-run the referenced-set collection against the *current* index
-        // and record state immediately before the storage delete. The GC
-        // sweep runs in a separate process from the server, so this closes
-        // the cross-process TOCTOU to the extent the index/record stores are
-        // shared and consistent at read time. If the object is now referenced
-        // we skip the storage delete and only release the (now stale)
-        // quarantine entry; the object stays on disk and will be seen as live
-        // on the next cycle, so no data is lost and nothing is resurrected.
-        //
-        // This deliberately re-scans the referenced set per candidate (rather
-        // than once) so the reachability check is as close to the delete as
-        // possible. The sweep path operates on expired quarantine candidates,
-        // which are expected to be a small minority of objects.
-        let still_unreferenced = is_object_still_unreferenced(
-            record_store,
-            object_store,
-            index_store,
-            frontends,
-            &orphan.object_key,
-        )
-        .await?;
+        // Re-verify reachability at delete time against the single
+        // referenced-set collected once above (O(1) membership check, no
+        // per-candidate mark). If the object is now referenced we skip the
+        // storage delete and only release the (now stale) quarantine entry;
+        // the object stays on disk and will be seen as live on the next
+        // cycle, so no data is lost and nothing is resurrected.
+        let still_unreferenced = !referenced_object_keys.contains(orphan.object_key.as_str());
         if !still_unreferenced {
             tracing::debug!(
                 "skipping sweep delete for {object_key}: object became referenced after snapshot",
@@ -724,6 +720,84 @@ mod tests {
                 .await
                 .unwrap();
             assert!(!found);
+        });
+    }
+
+    // ── sweep: collect-once reachability regression (AR-1) ─────────────
+    //
+    // Regression test for the quadratic sweep regression: the sweep must
+    // collect the referenced set exactly once for the whole sweep, regardless
+    // of how many expired quarantine candidates it processes. Previously each
+    // candidate triggered its own full reachability mark (every record, every
+    // dedupe shard mapping, and for XorbCdcV1 a read + parse of the stored
+    // xorb container), making the sweep O(candidates × store_size).
+    //
+    // We instrument the collector with a test-only per-thread counter
+    // (`collect_call_count`/`reset_collect_call_count`) and assert that
+    // sweeping several expired candidates runs the mark exactly once.
+
+    #[test]
+    fn sweep_collects_referenced_set_once_for_multiple_expired_candidates() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let index_store = MemoryIndexStore::new();
+            let record_store = MemoryRecordStore::new();
+            let object_store = ServerObjectStore::blackhole();
+
+            let now = 1_000_000_u64;
+            let mut orphan_objects = HashMap::new();
+            let mut quarantine_entries = HashMap::new();
+
+            // Several expired quarantine candidates (each with a distinct
+            // object key). None are referenced by any live record, so every
+            // one is a valid sweep delete.
+            let candidate_count = 5_u64;
+            for i in 0..candidate_count {
+                let hash = format!("{i:0>64}");
+                let orphan = make_orphan(&hash, 64 + i);
+                orphan_objects.insert(orphan.hash.clone(), orphan.clone());
+                let candidate = QuarantineCandidate::new(
+                    orphan.object_key.clone(),
+                    orphan.bytes,
+                    now - 100_000, // first seen long ago
+                    now - 1,       // expired before now
+                )
+                .unwrap();
+                index_store
+                    .upsert_quarantine_candidate(&candidate)
+                    .await
+                    .unwrap();
+                quarantine_entries.insert(orphan.hash.clone(), candidate);
+            }
+
+            let mut report = LocalGcReport::default();
+            crate::reachability::reset_collect_call_count();
+            sweep_quarantine_entries(
+                &record_store,
+                &object_store,
+                &index_store,
+                &[ServerFrontend::Xet],
+                &orphan_objects,
+                now,
+                &mut quarantine_entries,
+                &mut report,
+            )
+            .await
+            .unwrap();
+
+            // The referenced set is built once, not once per candidate.
+            assert_eq!(
+                crate::reachability::collect_call_count(),
+                1,
+                "collect_referenced_object_keys must run exactly once for the whole sweep"
+            );
+            // Every expired, unreferenced candidate was swept.
+            assert_eq!(
+                report.deleted_chunks, candidate_count,
+                "all expired unreferenced candidates should be deleted"
+            );
+            assert_eq!(report.released_quarantine_candidates, candidate_count);
+            assert!(quarantine_entries.is_empty());
         });
     }
 

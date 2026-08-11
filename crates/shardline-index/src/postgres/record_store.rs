@@ -351,10 +351,7 @@ impl RecordTraversal for super::PostgresRecordStore {
         Visitor: FnMut(StoredRecord<Self::Locator>) -> Result<(), VisitorError> + Send + 'operation,
         VisitorError: Send + 'operation,
     {
-        Box::pin(async move {
-            self.visit_records(RecordKind::Latest, &mut visitor)
-                .await
-        })
+        Box::pin(async move { self.visit_records(RecordKind::Latest, &mut visitor).await })
     }
 
     fn list_version_record_locators(
@@ -426,10 +423,7 @@ impl RecordTraversal for super::PostgresRecordStore {
         Visitor: FnMut(StoredRecord<Self::Locator>) -> Result<(), VisitorError> + Send + 'operation,
         VisitorError: Send + 'operation,
     {
-        Box::pin(async move {
-            self.visit_records(RecordKind::Version, &mut visitor)
-                .await
-        })
+        Box::pin(async move { self.visit_records(RecordKind::Version, &mut visitor).await })
     }
 
     fn visit_repository_version_records<'operation, Visitor, VisitorError>(

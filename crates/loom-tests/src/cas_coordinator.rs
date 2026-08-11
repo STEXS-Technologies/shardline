@@ -132,7 +132,10 @@ fn concurrent_store_content_addressed_blob_is_exactly_once() {
             "exactly one concurrent store must win"
         );
         // The object is durably present and reachable.
-        assert!(coordinator.is_present(42), "inserted object must be present");
+        assert!(
+            coordinator.is_present(42),
+            "inserted object must be present"
+        );
         assert!(
             coordinator.is_object_reachable(42),
             "inserted object must be reachable"
@@ -161,7 +164,10 @@ fn sweep_never_frees_a_reachable_object() {
         assert!(h2.join().is_ok());
 
         // The store is the sole writer of a fresh key, so it must have won.
-        assert!(store_ran.load(Ordering::SeqCst), "fresh key must be inserted");
+        assert!(
+            store_ran.load(Ordering::SeqCst),
+            "fresh key must be inserted"
+        );
 
         // Free-during-insert: a sweep must never free an object a concurrent
         // store just made reachable. A reachable object is always present.
