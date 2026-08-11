@@ -9,11 +9,7 @@ use axum::{
     http::StatusCode,
 };
 
-use crate::{
-    error::HubApiError,
-    models::*,
-    types::WebhookScheme,
-};
+use crate::{error::HubApiError, models::*, types::WebhookScheme};
 // HubRepoType used in the webhook_create handler for repo lookup
 // (used implicitly via state.store methods)
 use shardline_protocol::{SecretString, TokenScope};
@@ -131,24 +127,21 @@ async fn deliver_one_webhook(
     // "localtest.me" (→127.0.0.1) or "metadata.google.internal" (→169.254.169.254)
     // would pass the string-based check but resolve to private IPs.
     //
-    // NOTE: There is a theoretical TOCTOU (time-of-check-time-of-use) window
-    // between DNS validation and the actual HTTP connection — a DNS rebinding
-    // attack could change the resolution between the two lookups. Mitigating
-    // this fully requires reqwest's `dns` feature (ClientBuilder::resolve) to
-    // pin the connection to validated addresses, which is not currently enabled.
-    // The attack window is very narrow in practice and requires a cooperating
-    // authoritative DNS server, so this is accepted as a known limitation.
-    {
-        let parsed_url =
-            url::Url::parse(url).map_err(|e| format!("webhook URL parse failed: {e}"))?;
-        let host = parsed_url.host_str().ok_or("webhook URL has no host")?;
-        let port = parsed_url.port_or_known_default().unwrap_or(80);
-        let host_port = format!("{host}:{port}");
-        for addr in tokio::net::lookup_host(&*host_port).await? {
-            if is_private_ip(&addr.ip()) {
-                return Err("webhook URL resolves to a private address".into());
-            }
+    // The shared reqwest client (no `dns` feature) cannot carry per-host
+    // resolution pins via `ClientBuilder::resolve`, so we narrow the
+    // time-of-check-time-of-use window by recording the validated (public)
+    // addresses here and re-resolving immediately before the send below,
+    // rejecting on any mismatch. See `deliver_one_webhook`'s pre-send check.
+    let parsed_url = url::Url::parse(url).map_err(|e| format!("webhook URL parse failed: {e}"))?;
+    let host = parsed_url.host_str().ok_or("webhook URL has no host")?;
+    let port = parsed_url.port_or_known_default().unwrap_or(80);
+    let host_port = format!("{host}:{port}");
+    let mut validated = std::collections::HashSet::new();
+    for addr in tokio::net::lookup_host(&*host_port).await? {
+        if is_private_ip(&addr.ip()) {
+            return Err("webhook URL resolves to a private address".into());
         }
+        validated.insert(addr.ip());
     }
     let mut request = client
         .post(url)
@@ -162,6 +155,22 @@ async fn deliver_one_webhook(
         mac.update(body);
         let signature = hex::encode(mac.finalize().into_bytes());
         request = request.header("X-Hub-Signature-256", format!("sha256={signature}"));
+    }
+    // Re-resolve immediately before sending to detect DNS rebinding between the
+    // validation above and the actual connection. If the hostname now resolves
+    // to a private address, or to an address that was not in the validated set,
+    // reject the delivery rather than connect to a rebound (e.g. cloud metadata)
+    // endpoint. This is a best-effort mitigation given the shared client cannot
+    // pin addresses at connect time; the window is not fully closed without the
+    // reqwest `dns` feature.
+    for addr in tokio::net::lookup_host(&*host_port).await? {
+        let ip = addr.ip();
+        if is_private_ip(&ip) || !validated.contains(&ip) {
+            return Err(
+                "webhook URL resolved to a different address than validated (possible DNS rebinding)"
+                    .into(),
+            );
+        }
     }
     let response = request.body(body.to_vec()).send().await?;
     if !response.status().is_success() {

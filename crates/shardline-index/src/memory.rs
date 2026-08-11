@@ -377,9 +377,14 @@ impl UploadIntentStore for MemoryIndexStore {
     type Error = MemoryIndexStoreError;
 
     async fn create_intent(&self, intent: &UploadIntent) -> Result<(), Self::Error> {
+        // Idempotent, matching the SQL stores (INSERT OR IGNORE / ON CONFLICT
+        // DO NOTHING): never overwrite an existing intent. Overwriting a fresh
+        // `Created` intent over a concurrent caller's already-advanced intent
+        // would reset its durable state and corrupt the upload lifecycle.
         self.lock_state()?
             .upload_intents
-            .insert(intent.intent_id().to_owned(), intent.clone());
+            .entry(intent.intent_id().to_owned())
+            .or_insert_with(|| intent.clone());
         Ok(())
     }
 

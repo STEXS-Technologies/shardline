@@ -40,6 +40,10 @@ pub fn parse_pack_data(data: &[u8]) -> Result<Vec<GitObject>, PackError> {
     let mut sha_index: HashMap<[u8; 20], usize> = HashMap::new();
     let mut pos: usize = 12;
     let mut total_decompressed: usize = 0;
+    // Number of objects actually parsed from the stream. If the loop ends
+    // before consuming `num_objects` objects (e.g. a truncated pack), we must
+    // reject the partial result instead of handing it to the caller as complete.
+    let mut consumed: u64 = 0;
 
     for _ in 0..num_objects {
         if pos >= data.len() {
@@ -93,6 +97,7 @@ pub fn parse_pack_data(data: &[u8]) -> Result<Vec<GitObject>, PackError> {
                         let sha = obj.sha1();
                         sha_index.insert(sha, objects.len());
                         objects.push(obj);
+                        consumed = consumed.wrapping_add(1);
                     }
                     Err(_) => break,
                 }
@@ -134,6 +139,7 @@ pub fn parse_pack_data(data: &[u8]) -> Result<Vec<GitObject>, PackError> {
                         let sha = resolved.sha1();
                         sha_index.insert(sha, objects.len());
                         objects.push(resolved);
+                        consumed = consumed.wrapping_add(1);
                     }
                     Err(_) => break,
                 }
@@ -182,12 +188,21 @@ pub fn parse_pack_data(data: &[u8]) -> Result<Vec<GitObject>, PackError> {
                         let sha = resolved.sha1();
                         sha_index.insert(sha, objects.len());
                         objects.push(resolved);
+                        consumed = consumed.wrapping_add(1);
                     }
                     Err(_) => break,
                 }
             }
             _ => break,
         }
+    }
+
+    // Reject a truncated pack: if we parsed fewer objects than the header
+    // declared, the stream was cut short and the partial `objects` list must
+    // not be treated as a complete set (a broken commit would reference an OID
+    // that was never stored).
+    if consumed < num_objects as u64 {
+        return Err(PackError::InvalidDelta);
     }
 
     Ok(objects)
@@ -204,6 +219,8 @@ pub(super) fn decompress_zlib(data: &[u8]) -> Result<(Vec<u8>, usize), Box<dyn s
     let mut decompressor = Decompress::new(true); // true = zlib-wrapped (not raw deflate)
     let mut output = Vec::new();
     let mut input_pos = 0;
+    // Whether the decompressor reported that the zlib stream ended cleanly.
+    let mut reached_stream_end = false;
 
     loop {
         let before_in = decompressor.total_in();
@@ -243,7 +260,11 @@ pub(super) fn decompress_zlib(data: &[u8]) -> Result<(Vec<u8>, usize), Box<dyn s
         output.truncate(start.wrapping_add(produced as usize));
         input_pos = input_pos.wrapping_add(consumed as usize);
 
-        if status == flate2::Status::StreamEnd || in_len == 0 {
+        if status == flate2::Status::StreamEnd {
+            reached_stream_end = true;
+            break;
+        }
+        if in_len == 0 {
             break;
         }
     }
@@ -253,6 +274,14 @@ pub(super) fn decompress_zlib(data: &[u8]) -> Result<(Vec<u8>, usize), Box<dyn s
             "decompressed data exceeds maximum size of {MAX_DECOMPRESSED_SIZE} bytes"
         )
         .into());
+    }
+
+    // A truncated zlib stream runs out of input before the decompressor reports
+    // `StreamEnd`. Reject it rather than returning partial bytes as a valid
+    // object — an object that decompresses incompletely would be stored with a
+    // corrupted (non-matching) hash.
+    if !reached_stream_end {
+        return Err("truncated zlib stream: decompressor did not reach StreamEnd".into());
     }
 
     Ok((output, input_pos))

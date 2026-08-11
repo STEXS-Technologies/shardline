@@ -226,13 +226,23 @@ pub(crate) async fn repo_list(
     shardline_metrics::record_hub_api_request("repo_list", "GET", 200);
     // Intentionally global: lists repositories across the whole instance, not a
     // single repo, so there is no repository binding to enforce.
-    authorize(&state, &headers, TokenScope::Read)?;
+    let auth_ctx = authorize_with_context(&state, &headers, TokenScope::Read)?;
+    let caller_owner = auth_ctx
+        .as_ref()
+        .map(|ctx| ctx.claims().repository().owner().to_owned());
     let repos = state
         .store
         .list_repos()
         .map_err(|e| HubApiError::CasError(e.to_string()))?;
+    // Cross-tenant privacy: a caller must never see another tenant's private
+    // repositories, even though the list endpoint is global. Public repos and
+    // the caller's own private repos remain visible.
+    let visible: Vec<_> = repos
+        .into_iter()
+        .filter(|repo| repo_visible_to_owner(repo, caller_owner.as_deref()))
+        .collect();
     let response = RepoListResponse {
-        repos: repos.iter().map(repo_response_from_hub).collect(),
+        repos: visible.iter().map(repo_response_from_hub).collect(),
     };
     Ok(Json(response))
 }
@@ -248,7 +258,10 @@ pub(crate) async fn repo_search(
     shardline_metrics::record_hub_api_request("repo_search", "GET", 200);
     // Intentionally global: searches across all repositories, not a single repo,
     // so there is no repository binding to enforce.
-    authorize(&state, &headers, TokenScope::Read)?;
+    let auth_ctx = authorize_with_context(&state, &headers, TokenScope::Read)?;
+    let caller_owner = auth_ctx
+        .as_ref()
+        .map(|ctx| ctx.claims().repository().owner().to_owned());
     let rt = RepoType::from_api_str(&repo_type)
         .map(Into::into)
         .ok_or_else(|| HubApiError::PathValidation(format!("invalid repo type: {repo_type}")))?;
@@ -291,10 +304,38 @@ pub(crate) async fn repo_search(
         }
     }
 
+    // Cross-tenant privacy: hide other tenants' private repositories from the
+    // search results, mirroring `repo_list`.
+    let visible: Vec<_> = repos
+        .into_iter()
+        .filter(|repo| repo_visible_to_owner(repo, caller_owner.as_deref()))
+        .collect();
     let response = RepoListResponse {
-        repos: repos.iter().map(repo_response_from_hub).collect(),
+        repos: visible.iter().map(repo_response_from_hub).collect(),
     };
     Ok(Json(response))
+}
+
+/// Returns whether a repository is visible to a caller identified by `owner`.
+///
+/// In permissive mode (`owner` is `None`) every repository is visible, matching
+/// the historical behavior when no auth is configured. When the caller has an
+/// authenticated identity, a private repository owned by another tenant is
+/// hidden, while public repositories and the caller's own private repositories
+/// remain visible. The repository's owner is derived from the leading namespace
+/// of its `owner/name` `repo_id`.
+fn repo_visible_to_owner(repo: &shardline_index::hub::HubRepo, owner: Option<&str>) -> bool {
+    let Some(owner) = owner else {
+        return true;
+    };
+    if !repo.private {
+        return true;
+    }
+    let repo_owner = repo
+        .repo_id
+        .split_once('/')
+        .map_or(repo.repo_id.as_str(), |(owner_part, _name)| owner_part);
+    repo_owner == owner
 }
 
 // ---- Validate YAML (requires Read) ----
@@ -413,8 +454,11 @@ pub(crate) async fn repo_info(
         && let Some(sha) = commit_sha
         && let Ok(files) = state.store.get_files(&sha)
         && let Some(readme) = files.iter().find(|f| f.path == "README.md")
-        && let Some(content) =
-            read_file_from_object_store(&state, &readme.sha, auth_ctx.as_ref().map(|c| c.claims().repository()))
+        && let Some(content) = read_file_from_object_store(
+            &state,
+            &readme.sha,
+            auth_ctx.as_ref().map(|c| c.claims().repository()),
+        )
     {
         response.card_data = parse_yaml_frontmatter(&content);
     }
