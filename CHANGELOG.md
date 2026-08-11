@@ -147,6 +147,30 @@ compares, `alg`-confusion guard, parameterized SQL, symlink-race protection,
   coordinator exactly-once store + reachability-vs-sweep, reconstruction-cache
   load-once, GC quarantine no-free-during-insert/no-resurrect); all invariants
   hold under exhaustive interleaving exploration.
+- **[Medium] Hub `repo_list`/`repo_search` leaked private repos within a
+  namespace** — the visibility filter compared only the owner segment, so
+  under OIDC (claims owner constant per subject) every user saw all other
+  users' private repos, and a local token saw every private repo in its
+  namespace. The filter now compares the FULL repo identity
+  (`{owner}/{name}` exactly) for both list and search.
+- **[Medium] Webhook-secret key-removal downgrade** — if
+  `SHARDLINE_HUB_WEBHOOK_SECRET_KEY` is removed after rows were encrypted,
+  stored `sse1:` ciphertext was previously used verbatim as the signing
+  secret (silent webhook breakage). Resolution now fails loudly
+  (`NoCipherForCiphertext`) when a ciphertext row has no key; ciphertext
+  classification requires full structural validation so a legacy plaintext
+  secret starting with `sse1:` is no longer misclassified; decrypted bytes
+  are zeroized on all paths.
+- **[Low] Webhook-secret key file trailing newline** — a 32-byte key file
+  written with a trailing newline (e.g. `echo $KEY > file`) no longer aborts
+  startup with a misleading length error; one trailing newline is stripped
+  automatically and the length error message is explicit.
+- **Dependency hygiene** — documented the rationale for every suppressed
+  `cargo audit` advisory in `.cargo/audit.toml` and `deny.toml`.
+- **Residual (documented, accepted)** — webhook delivery DNS-rebinding window
+  is narrowed by pre-send re-resolution but not fully closed (connect-time
+  pinning would require the reqwest `dns` feature, which ripples to 5 crates
+  and pulls hickory-resolver; not warranted for the Low residual).
 
 ### Internal
 - Unified the duplicate `PostgresRecordKind` / `LocalRecordKind` into a single

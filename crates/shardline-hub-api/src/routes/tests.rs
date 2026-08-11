@@ -1164,6 +1164,9 @@ fn make_alice_auth_state() -> (tempfile::TempDir, HubState) {
     store
         .create_repo(HubRepoType::Model, "alice/own", true)
         .expect("create alice own repo");
+    store
+        .create_repo(HubRepoType::Model, "alice/other", true)
+        .expect("create alice other private repo");
     let object_store = shardline_server_core::ServerObjectStore::local(td.path().join("lfs"))
         .expect("local object store");
     let state = HubState {
@@ -1198,6 +1201,12 @@ async fn repo_list_hides_other_tenants_private_repos() {
         !ids.iter().any(|id| id == "bob/private-repo"),
         "other tenant's private repo leaked: {ids:?}"
     );
+    // A same-namespace private repo (alice/other) must also be hidden: the token
+    // is scoped to alice/own, not the whole alice namespace.
+    assert!(
+        !ids.iter().any(|id| id == "alice/other"),
+        "same-namespace private repo leaked: {ids:?}"
+    );
 }
 
 #[tokio::test]
@@ -1226,6 +1235,101 @@ async fn repo_search_hides_other_tenants_private_repos() {
             .iter()
             .map(|r| r.id.clone())
             .collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
+async fn repo_search_hides_same_namespace_private_repos() {
+    let (_td, state) = make_alice_auth_state();
+    // Alice's token is scoped to alice/own; alice/other is the same namespace
+    // but a different repository, so it must be hidden.
+    let result = repo_search(
+        State(state),
+        alice_headers(),
+        Path("models".to_string()),
+        Query(RepoSearchQuery {
+            q: "alice/other".into(),
+            author: None,
+            sort: None,
+            direction: None,
+            limit: 50,
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(
+        result.repos.is_empty(),
+        "same-namespace private repo leaked in search: {:?}",
+        result
+            .repos
+            .iter()
+            .map(|r| r.id.clone())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
+async fn repo_list_hides_oidc_owner_same_namespace_private_repos() {
+    use shardline_protocol::{
+        RepositoryProvider, RepositoryScope, TokenClaims, TokenScope as ProtoScope,
+    };
+    use shardline_server_core::{AuthError, AuthProvider};
+
+    // Under OIDC every subject is scoped to a single owner (`oidc`); a token
+    // for `oidc/user1` must not reveal `oidc/user2`'s private repo.
+    struct OidcUser1Provider;
+    impl AuthProvider for OidcUser1Provider {
+        fn verify_token(
+            &self,
+            _token: &str,
+        ) -> Result<TokenClaims, shardline_server_core::AuthError> {
+            let repo = RepositoryScope::new(RepositoryProvider::Generic, "oidc", "user1", None)
+                .map_err(|_err| AuthError::InvalidToken)?;
+            let claims = TokenClaims::new("issuer", "oidc", ProtoScope::Read, repo, u64::MAX)
+                .map_err(|_err| AuthError::InvalidToken)?;
+            Ok(claims)
+        }
+        fn mint_token(
+            &self,
+            _claims: &TokenClaims,
+        ) -> Result<String, shardline_server_core::AuthError> {
+            Ok("oidc-token".into())
+        }
+    }
+
+    let (td, store) = make_delete_test_store();
+    store
+        .create_repo(HubRepoType::Model, "oidc/user1", true)
+        .expect("create oidc user1 private repo");
+    store
+        .create_repo(HubRepoType::Model, "oidc/user2", true)
+        .expect("create oidc user2 private repo");
+    store
+        .create_repo(HubRepoType::Model, "oidc/shared", false)
+        .expect("create oidc public repo");
+    let object_store = shardline_server_core::ServerObjectStore::local(td.path().join("lfs"))
+        .expect("local object store");
+    let state = HubState {
+        store,
+        object_store,
+        auth: Some(HubAuth::new(Box::new(OidcUser1Provider))),
+        http_client: None,
+        webhook_secret_cipher: None,
+    };
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        axum::http::header::AUTHORIZATION,
+        "Bearer oidc-token".parse().unwrap(),
+    );
+    let result = repo_list(State(state), headers).await.unwrap();
+    let ids: Vec<String> = result.repos.iter().map(|r| r.id.clone()).collect();
+    // The caller's own private repo and public repos remain visible.
+    assert!(ids.iter().any(|id| id == "oidc/user1"));
+    assert!(ids.iter().any(|id| id == "oidc/shared"));
+    // The other OIDC subject's private repo in the same namespace must be hidden.
+    assert!(
+        !ids.iter().any(|id| id == "oidc/user2"),
+        "same-namespace OIDC private repo leaked: {ids:?}"
     );
 }
 

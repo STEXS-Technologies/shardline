@@ -227,19 +227,20 @@ pub(crate) async fn repo_list(
     // Intentionally global: lists repositories across the whole instance, not a
     // single repo, so there is no repository binding to enforce.
     let auth_ctx = authorize_with_context(&state, &headers, TokenScope::Read)?;
-    let caller_owner = auth_ctx
-        .as_ref()
-        .map(|ctx| ctx.claims().repository().owner().to_owned());
+    let caller_repo_id = auth_ctx.as_ref().map(|ctx| {
+        let repo = ctx.claims().repository();
+        format!("{}/{}", repo.owner(), repo.name())
+    });
     let repos = state
         .store
         .list_repos()
         .map_err(|e| HubApiError::CasError(e.to_string()))?;
     // Cross-tenant privacy: a caller must never see another tenant's private
     // repositories, even though the list endpoint is global. Public repos and
-    // the caller's own private repos remain visible.
+    // the caller's own private repos (exact `owner/name` match) remain visible.
     let visible: Vec<_> = repos
         .into_iter()
-        .filter(|repo| repo_visible_to_owner(repo, caller_owner.as_deref()))
+        .filter(|repo| repo_visible_to_owner(repo, caller_repo_id.as_deref()))
         .collect();
     let response = RepoListResponse {
         repos: visible.iter().map(repo_response_from_hub).collect(),
@@ -259,9 +260,10 @@ pub(crate) async fn repo_search(
     // Intentionally global: searches across all repositories, not a single repo,
     // so there is no repository binding to enforce.
     let auth_ctx = authorize_with_context(&state, &headers, TokenScope::Read)?;
-    let caller_owner = auth_ctx
-        .as_ref()
-        .map(|ctx| ctx.claims().repository().owner().to_owned());
+    let caller_repo_id = auth_ctx.as_ref().map(|ctx| {
+        let repo = ctx.claims().repository();
+        format!("{}/{}", repo.owner(), repo.name())
+    });
     let rt = RepoType::from_api_str(&repo_type)
         .map(Into::into)
         .ok_or_else(|| HubApiError::PathValidation(format!("invalid repo type: {repo_type}")))?;
@@ -308,7 +310,7 @@ pub(crate) async fn repo_search(
     // search results, mirroring `repo_list`.
     let visible: Vec<_> = repos
         .into_iter()
-        .filter(|repo| repo_visible_to_owner(repo, caller_owner.as_deref()))
+        .filter(|repo| repo_visible_to_owner(repo, caller_repo_id.as_deref()))
         .collect();
     let response = RepoListResponse {
         repos: visible.iter().map(repo_response_from_hub).collect(),
@@ -316,26 +318,30 @@ pub(crate) async fn repo_search(
     Ok(Json(response))
 }
 
-/// Returns whether a repository is visible to a caller identified by `owner`.
+/// Returns whether a repository is visible to a caller identified by the full
+/// `owner/name` repository identity from their scoped token.
 ///
-/// In permissive mode (`owner` is `None`) every repository is visible, matching
-/// the historical behavior when no auth is configured. When the caller has an
-/// authenticated identity, a private repository owned by another tenant is
-/// hidden, while public repositories and the caller's own private repositories
-/// remain visible. The repository's owner is derived from the leading namespace
-/// of its `owner/name` `repo_id`.
-fn repo_visible_to_owner(repo: &shardline_index::hub::HubRepo, owner: Option<&str>) -> bool {
-    let Some(owner) = owner else {
+/// In permissive mode (`caller_repo_id` is `None`) every repository is visible,
+/// matching the historical behavior when no auth is configured. When the caller
+/// has an authenticated identity, a private repository is hidden unless it is
+/// the caller's *own* repository (an exact `owner/name` match of `repo_id`);
+/// public repositories remain visible.
+///
+/// The comparison uses the full repository identity rather than only the owner
+/// namespace to prevent same-namespace private-repo leaks: under OIDC every
+/// subject is scoped to a single owner, and a Local token scoped to one repo in
+/// a namespace must not reveal other private repos in that same namespace.
+fn repo_visible_to_owner(
+    repo: &shardline_index::hub::HubRepo,
+    caller_repo_id: Option<&str>,
+) -> bool {
+    let Some(caller_repo_id) = caller_repo_id else {
         return true;
     };
     if !repo.private {
         return true;
     }
-    let repo_owner = repo
-        .repo_id
-        .split_once('/')
-        .map_or(repo.repo_id.as_str(), |(owner_part, _name)| owner_part);
-    repo_owner == owner
+    repo.repo_id == caller_repo_id
 }
 
 // ---- Validate YAML (requires Read) ----

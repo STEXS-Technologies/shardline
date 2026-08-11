@@ -251,9 +251,32 @@ pub(super) fn read_secret_file_bytes(
 
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes).map_err(read_error)?;
+    // Strip a single trailing newline that is almost always an artifact of
+    // writing the key file with `echo $KEY > file` or an editor. This matters
+    // most for fixed-length keys (e.g. the 32-byte Hub webhook secret), where a
+    // stray `\n` otherwise aborts startup with a misleading length error.
+    bytes = strip_one_trailing_newline(bytes);
     ensure_secret_size_within_limit(bytes.len() as u64, maximum_bytes, error)?;
 
     Ok(SecretBytes::new(bytes))
+}
+
+/// Strips exactly one trailing line terminator (`\n`, or `\r\n`) that is an
+/// artifact of how the secret file was written. Only the final terminator is
+/// removed; any other bytes — including newlines embedded elsewhere in the
+/// secret — are left untouched so legitimate key material is never altered.
+fn strip_one_trailing_newline(mut bytes: Vec<u8>) -> Vec<u8> {
+    let Some(&last) = bytes.last() else {
+        return bytes;
+    };
+    if last != b'\n' {
+        return bytes;
+    }
+    bytes.pop();
+    if bytes.last() == Some(&b'\r') {
+        bytes.pop();
+    }
+    bytes
 }
 
 #[cfg(unix)]
@@ -504,6 +527,72 @@ mod tests {
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("exceed") || err_msg.contains("TooLarge"));
+    }
+
+    // -----------------------------------------------------------------------
+    // read_secret_file_bytes — fixed-length key trailing-newline handling
+    // -----------------------------------------------------------------------
+
+    /// A 32-byte AES-256 key written as `echo $KEY > file` gains a trailing `\n`;
+    /// that artifact must be stripped so the 33-byte file loads as a 32-byte key.
+    #[test]
+    fn read_secret_file_strips_single_trailing_newline() {
+        const KEY: &[u8; 32] = b"0123456789abcdef0123456789abcdef";
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        tmp.write_all(KEY).unwrap();
+        tmp.write_all(b"\n").unwrap();
+        tmp.flush().unwrap();
+
+        let result = read_secret_file_bytes(
+            tmp.path(),
+            32,
+            read_error,
+            size_error,
+            length_mismatch_error,
+        );
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().expose_secret(), KEY);
+    }
+
+    /// A Windows/CRLF writer produces a 34-byte file (32 key bytes + `\r\n`);
+    /// both `\r` and `\n` must be stripped.
+    #[test]
+    fn read_secret_file_strips_crlf_trailing_newline() {
+        const KEY: &[u8; 32] = b"0123456789abcdef0123456789abcdef";
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        tmp.write_all(KEY).unwrap();
+        tmp.write_all(b"\r\n").unwrap();
+        tmp.flush().unwrap();
+
+        let result = read_secret_file_bytes(
+            tmp.path(),
+            32,
+            read_error,
+            size_error,
+            length_mismatch_error,
+        );
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().expose_secret(), KEY);
+    }
+
+    /// A genuinely 33-byte key with no newline artifact must still be rejected:
+    /// stripping only touches a trailing line terminator, never key bytes.
+    #[test]
+    fn read_secret_file_non_newline_extra_byte_is_err() {
+        const KEY: &[u8; 32] = b"0123456789abcdef0123456789abcdef";
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        tmp.write_all(KEY).unwrap();
+        tmp.write_all(b"X").unwrap(); // 33rd byte, not a newline artifact
+        tmp.flush().unwrap();
+
+        let result = read_secret_file_bytes(
+            tmp.path(),
+            32,
+            read_error,
+            size_error,
+            length_mismatch_error,
+        );
+        assert!(result.is_err());
     }
 
     // -----------------------------------------------------------------------

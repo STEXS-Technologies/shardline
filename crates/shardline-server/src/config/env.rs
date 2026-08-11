@@ -979,6 +979,42 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
         remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
     }
 
+    // ── env-provided secrets are never newline-trimmed ─────────────────────
+
+    #[test]
+    #[serial_test::serial]
+    fn hub_webhook_secret_from_env_is_not_newline_trimmed() {
+        // Trailing-newline stripping applies only to secret *files*. An
+        // env-provided value (32 key bytes + `\n` = 33 bytes) must exceed the
+        // 32-byte bound and be rejected, proving env values are left untouched.
+        // SAFETY: serialized env test
+        set_env_var(
+            "SHARDLINE_HUB_WEBHOOK_SECRET_KEY",
+            "0123456789abcdef0123456789abcdef\n",
+        );
+        remove_env_var("SHARDLINE_HUB_WEBHOOK_SECRET_KEY_FILE");
+        let result = super::load_secret_from_env_or_file_with_conflict_check(
+            (
+                "SHARDLINE_HUB_WEBHOOK_SECRET_KEY",
+                "SHARDLINE_HUB_WEBHOOK_SECRET_KEY_FILE",
+            ),
+            super::HUB_WEBHOOK_SECRET_KEY_BYTES,
+            super::ServerConfigError::EmptyHubWebhookSecretKey,
+            |env, file_env| super::ServerConfigError::SecretSourceConflict { env, file_env },
+            super::ServerConfigError::HubWebhookSecretKey,
+            |observed, maximum| super::ServerConfigError::HubWebhookSecretKeyTooLarge {
+                observed_bytes: observed,
+                maximum_bytes: maximum,
+            },
+            |expected, observed| super::ServerConfigError::HubWebhookSecretKeyLengthMismatch {
+                expected_bytes: expected,
+                observed_bytes: observed,
+            },
+        );
+        remove_env_var("SHARDLINE_HUB_WEBHOOK_SECRET_KEY");
+        assert!(result.is_err());
+    }
+
     // ── load_non_zero_usize_env ────────────────────────────────────────────
 
     // ── load_non_zero_usize_env ────────────────────────────────────────────
