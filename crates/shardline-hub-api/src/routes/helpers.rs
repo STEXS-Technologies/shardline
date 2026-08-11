@@ -4,8 +4,8 @@ use crate::error::HubApiError;
 use crate::models::RepoType;
 use shardline_index::hub::HubRepoType;
 use shardline_protocol::{RepositoryScope, TokenScope};
-use shardline_server_core::protocol_support::scope_namespace;
 use shardline_server_core::AuthContext;
+use shardline_server_core::protocol_support::scope_namespace;
 use shardline_storage::ObjectKey;
 
 use super::HubState;

@@ -199,9 +199,15 @@ mod tests {
 
     #[test]
     fn hub_sort_field_accepts_valid() {
-        assert_eq!("lastModified".parse::<HubSortField>(), Ok(HubSortField::LastModified));
+        assert_eq!(
+            "lastModified".parse::<HubSortField>(),
+            Ok(HubSortField::LastModified)
+        );
         assert_eq!("likes".parse::<HubSortField>(), Ok(HubSortField::Likes));
-        assert_eq!("downloads".parse::<HubSortField>(), Ok(HubSortField::Downloads));
+        assert_eq!(
+            "downloads".parse::<HubSortField>(),
+            Ok(HubSortField::Downloads)
+        );
     }
 
     #[test]

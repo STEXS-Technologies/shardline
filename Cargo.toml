@@ -19,6 +19,7 @@ homepage = "https://github.com/STEXS-Technologies/shardline"
 documentation = "https://docs.rs/shardline"
 
 [workspace.dependencies]
+aes-gcm = "0.10"
 async-trait = "0.1"
 dotenvy = "0.15"
 toml = "0.8"

@@ -10,8 +10,10 @@ readme = "README.md"
 description = "HuggingFace Hub API compatibility layer for Shardline."
 
 [dependencies]
+aes-gcm.workspace = true
 axum.workspace = true
 base64.workspace = true
+getrandom.workspace = true
 blake3.workspace = true
 bytes.workspace = true
 chrono.workspace = true

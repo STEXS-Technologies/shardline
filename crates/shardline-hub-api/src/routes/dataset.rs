@@ -10,9 +10,7 @@ use crate::{error::HubApiError, models::*};
 use shardline_index::hub::{HubFileEntry, HubRepoType};
 use shardline_protocol::TokenScope;
 
-use super::{
-    HubState, authorize_with_context, lfs_object_key, require_repository_binding,
-};
+use super::{HubState, authorize_with_context, lfs_object_key, require_repository_binding};
 
 // ---- Dataset viewer endpoints ----
 

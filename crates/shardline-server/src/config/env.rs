@@ -15,9 +15,10 @@ use super::secrets::{
 use super::{
     AuthProviderKind, DEFAULT_MAX_REQUEST_BODY_BYTES, DEFAULT_MAX_SHARD_FILES,
     DEFAULT_MAX_SHARD_RECONSTRUCTION_TERMS, DEFAULT_MAX_SHARD_XORB_CHUNKS, DEFAULT_MAX_SHARD_XORBS,
-    DeploymentMode, MAX_ED25519_KEY_BYTES, MAX_METRICS_TOKEN_BYTES, MAX_TOKEN_SIGNING_KEY_BYTES,
-    ObjectStorageAdapter, ServerConfig, ServerConfigError, ShardMetadataLimits,
-    default_transfer_max_in_flight_chunks, default_upload_max_in_flight_chunks, parse_byte_size,
+    DeploymentMode, HUB_WEBHOOK_SECRET_KEY_BYTES, MAX_ED25519_KEY_BYTES, MAX_METRICS_TOKEN_BYTES,
+    MAX_TOKEN_SIGNING_KEY_BYTES, ObjectStorageAdapter, ServerConfig, ServerConfigError,
+    ShardMetadataLimits, default_transfer_max_in_flight_chunks,
+    default_upload_max_in_flight_chunks, parse_byte_size,
 };
 use crate::{
     reconstruction_cache::ReconstructionCacheAdapter, server_frontend::ServerFrontend,
@@ -189,6 +190,24 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
             observed_bytes: observed,
         },
     )?;
+    let hub_webhook_secret_key = load_secret_from_env_or_file_with_conflict_check(
+        (
+            "SHARDLINE_HUB_WEBHOOK_SECRET_KEY",
+            "SHARDLINE_HUB_WEBHOOK_SECRET_KEY_FILE",
+        ),
+        HUB_WEBHOOK_SECRET_KEY_BYTES,
+        ServerConfigError::EmptyHubWebhookSecretKey,
+        |env, file_env| ServerConfigError::SecretSourceConflict { env, file_env },
+        ServerConfigError::HubWebhookSecretKey,
+        |observed, maximum| ServerConfigError::HubWebhookSecretKeyTooLarge {
+            observed_bytes: observed,
+            maximum_bytes: maximum,
+        },
+        |expected, observed| ServerConfigError::HubWebhookSecretKeyLengthMismatch {
+            expected_bytes: expected,
+            observed_bytes: observed,
+        },
+    )?;
     let ed25519_private_key = load_secret_from_env_or_file_with_conflict_check(
         (
             "SHARDLINE_ED25519_PRIVATE_KEY",
@@ -283,6 +302,9 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
     }
     if let Some(signing_key) = token_signing_key {
         config = config.with_token_signing_key(signing_key)?;
+    }
+    if let Some(webhook_key) = hub_webhook_secret_key {
+        config = config.with_hub_webhook_secret_key(webhook_key)?;
     }
 
     // Validate chunk size upper bound (1 GB).
