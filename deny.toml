@@ -3,12 +3,14 @@ all-features = true
 
 [advisories]
 ignore = [
-    # quick-xml DoS via quadratic attribute check / unbounded namespace allocation.
-    # object_store parses XML from the configured S3 endpoint, not attacker-controlled input.
-    # Upgrade blocked on object_store releasing with quick-xml >= 0.41.
+    # rationale: quick-xml DoS via quadratic attribute check / unbounded namespace allocation.
+    # object_store only parses XML from the configured S3 endpoint (trusted operator input),
+    # not attacker-controlled data. Upgrade blocked on object_store releasing with quick-xml >= 0.41.
     # Re-check when object_store bumps its quick-xml dependency past 0.40.
     # Owner: shardline. Expiry: 2026-10-25.
     { id = "RUSTSEC-2026-0194", reason = "object_store parses XML from S3 endpoint, not attacker-controlled input. Upgrade blocked on object_store releasing with quick-xml >= 0.41." },
+    # rationale: same quick-xml DoS as RUSTSEC-2026-0194 — only parses XML from the trusted,
+    # operator-configured S3 endpoint, never attacker-controlled input.
     # Owner: shardline. Expiry: 2026-10-25.
     { id = "RUSTSEC-2026-0195", reason = "object_store parses XML from S3 endpoint, not attacker-controlled input. Upgrade blocked on object_store releasing with quick-xml >= 0.41." },
 ]

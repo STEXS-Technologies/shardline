@@ -253,7 +253,9 @@ pub enum ServerConfigError {
     #[error("hub webhook secret key must not be empty")]
     EmptyHubWebhookSecretKey,
     /// The Hub webhook secret key is not a valid AES-256 key length.
-    #[error("hub webhook secret key must be exactly {expected} bytes, got {observed}")]
+    #[error(
+        "hub webhook secret key must be exactly {expected} bytes (a trailing newline is stripped automatically); got {observed}"
+    )]
     HubWebhookSecretKeyLength {
         /// Required key length in bytes.
         expected: usize,

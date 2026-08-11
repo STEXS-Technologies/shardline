@@ -109,7 +109,9 @@ pub(crate) async fn deliver_webhook_events(
 ///
 /// When an at-rest cipher is configured, stored `sse1:`-formatted ciphertext is
 /// decrypted; legacy plaintext rows are re-encrypted in place (lazy upgrade).
-/// When no key is configured, the stored value is returned unchanged.
+/// When no key is configured, a legacy plaintext value is returned unchanged;
+/// a stored `sse1:`-prefixed ciphertext with no key configured is an explicit
+/// error (never silently used as the HMAC secret).
 fn resolve_webhook_secret(
     state: &HubState,
     webhook: &HubWebhook,
@@ -118,6 +120,15 @@ fn resolve_webhook_secret(
         return Ok(None);
     };
     let Some(cipher) = state.webhook_secret_cipher.as_ref() else {
+        if stored
+            .expose_secret()
+            .starts_with(crate::secrets::MAGIC_PREFIX)
+        {
+            // Rows previously encrypted at rest would otherwise have their
+            // base64 ciphertext used verbatim as the HMAC secret, silently
+            // rejecting every delivery. Fail loudly instead.
+            return Err(crate::secrets::WebhookSecretCipherError::NoCipherForCiphertext);
+        }
         return Ok(Some(stored.clone()));
     };
     let repo_id = &webhook.repo_id;
@@ -799,6 +810,35 @@ mod tests {
         assert_eq!(wh.secret.as_ref().unwrap().expose_secret(), "plain-secret");
         let resolved = resolve_webhook_secret(&state, &wh).unwrap().unwrap();
         assert_eq!(resolved.expose_secret(), "plain-secret");
+    }
+
+    #[test]
+    fn ciphertext_without_key_fails_loudly() {
+        let (_ts, state) = make_encrypted_state(&ENC_KEY);
+        let repo = "org/enc";
+        let cipher = WebhookSecretCipher::new(SecretBytes::new(ENC_KEY.to_vec())).unwrap();
+        let encrypted = cipher.encrypt(repo, "secret").unwrap();
+        state
+            .store
+            .create_webhook(
+                repo,
+                "https://example.com/hook",
+                &["push".to_owned()],
+                Some(&encrypted),
+            )
+            .unwrap();
+        // Rebuild state without a cipher, simulating a deployment where the key
+        // was removed after rows were encrypted at rest.
+        let no_cipher_state = HubState {
+            webhook_secret_cipher: None,
+            ..state
+        };
+        let wh = no_cipher_state.store.list_webhooks(repo).unwrap().remove(0);
+        let result = resolve_webhook_secret(&no_cipher_state, &wh);
+        assert!(
+            matches!(result, Err(WebhookSecretCipherError::NoCipherForCiphertext)),
+            "expected a loud error when ciphertext has no key, got: {result:?}"
+        );
     }
 
     #[test]

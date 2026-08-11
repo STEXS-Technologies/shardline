@@ -27,7 +27,7 @@ use shardline_protocol::{SecretBytes, SecretString};
 use thiserror::Error;
 
 /// Magic prefix distinguishing at-rest encrypted webhook secrets.
-const MAGIC_PREFIX: &str = "sse1:";
+pub(crate) const MAGIC_PREFIX: &str = "sse1:";
 /// AES-GCM nonce length in bytes.
 const NONCE_LEN: usize = 12;
 /// AES-256 key length in bytes.
@@ -59,6 +59,9 @@ pub enum WebhookSecretCipherError {
     /// The decrypted secret was not valid UTF-8.
     #[error("decrypted webhook secret is not valid UTF-8")]
     NotUtf8,
+    /// Stored ciphertext exists but no encryption key is configured.
+    #[error("stored webhook secret is encrypted but no encryption key is configured")]
+    NoCipherForCiphertext,
 }
 
 /// Encrypts and decrypts Hub webhook signing secrets at rest.
@@ -128,14 +131,22 @@ impl WebhookSecretCipher {
 
     /// Decrypts a stored webhook secret bound to `repo_id`.
     ///
-    /// Values with the `sse1:` prefix are decrypted. Values without it are
-    /// treated as legacy plaintext (used as-is, with `needs_upgrade` set) so
-    /// deployments can enable encryption without a disruptive backfill.
+    /// Classification of a stored value:
+    /// - No `sse1:` prefix -> legacy plaintext (used as-is, `needs_upgrade` set)
+    ///   so deployments can enable encryption without a disruptive backfill.
+    /// - `sse1:` prefix AND the suffix decodes as base64 with at least the nonce
+    ///   length -> real at-rest ciphertext; the AEAD secret is decrypted. A
+    ///   decrypt failure (wrong key or tampered data) is a loud error.
+    /// - `sse1:` prefix but the suffix is not valid base64 (or is too short) ->
+    ///   a legacy plaintext secret that merely begins with the magic prefix; it
+    ///   is treated as plaintext (`needs_upgrade` set) so the lazy upgrade can
+    ///   re-encrypt those bytes.
     ///
     /// # Errors
     ///
-    /// Returns an error when the stored value is malformed or fails AEAD
-    /// authentication (wrong key or tampered ciphertext).
+    /// Returns an error when the stored value is a structurally valid ciphertext
+    /// but fails AEAD authentication (wrong key or tampered ciphertext), or the
+    /// decrypted secret is not valid UTF-8.
     pub fn decrypt(
         &self,
         repo_id: &str,
@@ -147,13 +158,20 @@ impl WebhookSecretCipher {
                 needs_upgrade: true,
             });
         };
-        let blob = base64::engine::general_purpose::STANDARD
-            .decode(encoded)
-            .map_err(WebhookSecretCipherError::BadFormat)?;
+        let Ok(blob) = base64::engine::general_purpose::STANDARD.decode(encoded) else {
+            // Not valid base64, so this is legacy plaintext that merely begins
+            // with the magic prefix.
+            return Ok(DecryptedSecret {
+                secret: SecretString::from_secret(stored),
+                needs_upgrade: true,
+            });
+        };
         if blob.len() < NONCE_LEN {
-            return Err(WebhookSecretCipherError::BadFormat(
-                base64::DecodeError::InvalidLength(NONCE_LEN),
-            ));
+            // Decodes as base64 but is too short to carry a nonce + ciphertext.
+            return Ok(DecryptedSecret {
+                secret: SecretString::from_secret(stored),
+                needs_upgrade: true,
+            });
         }
         let (nonce_bytes, ciphertext) = blob.split_at(NONCE_LEN);
         let cipher = Aes256Gcm::new(GenericArray::<u8, U32>::from_slice(
@@ -166,14 +184,35 @@ impl WebhookSecretCipher {
         let plain = cipher
             .decrypt(GenericArray::<u8, U12>::from_slice(nonce_bytes), payload)
             .map_err(|e| WebhookSecretCipherError::Decrypt(e.to_string()))?;
-        let secret = String::from_utf8(plain)
-            .ok()
-            .ok_or(WebhookSecretCipherError::NotUtf8)?;
-        Ok(DecryptedSecret {
-            secret: SecretString::new(secret),
-            needs_upgrade: false,
-        })
+        // Wrap the raw plaintext in `SecretBytes` so the buffer is zeroized on
+        // drop regardless of whether UTF-8 conversion succeeds.
+        let secret_bytes = SecretBytes::new(plain);
+        String::from_utf8(secret_bytes.expose_secret().to_vec()).map_or_else(
+            |_| Err(WebhookSecretCipherError::NotUtf8),
+            |secret| {
+                Ok(DecryptedSecret {
+                    secret: SecretString::new(secret),
+                    needs_upgrade: false,
+                })
+            },
+        )
     }
+}
+
+/// Returns whether `stored` is a well-formed `sse1:` ciphertext blob — that is,
+/// the suffix decodes as base64 with at least the nonce length.
+///
+/// This distinguishes real at-rest ciphertext from legacy plaintext that merely
+/// begins with the magic prefix. A legacy value that starts with `sse1:` but is
+/// not structurally valid ciphertext must be re-encrypted by the upgrade sweep,
+/// never skipped.
+pub(crate) fn is_ciphertext(stored: &str) -> bool {
+    let Some(encoded) = stored.strip_prefix(MAGIC_PREFIX) else {
+        return false;
+    };
+    base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .is_ok_and(|blob| blob.len() >= NONCE_LEN)
 }
 
 /// App-level data upgrade: sweeps existing webhook rows and re-encrypts any
@@ -197,7 +236,10 @@ pub fn upgrade_webhook_secrets(
             let Some(stored) = webhook.secret.as_ref() else {
                 continue;
             };
-            if stored.expose_secret().starts_with(MAGIC_PREFIX) {
+            // Only skip rows whose full structure validates as ciphertext. A
+            // legacy value that merely begins with the magic prefix but is not
+            // valid ciphertext must be re-encrypted.
+            if is_ciphertext(stored.expose_secret()) {
                 continue;
             }
             match cipher.encrypt(&webhook.repo_id, stored.expose_secret()) {
@@ -292,15 +334,42 @@ mod tests {
     }
 
     #[test]
-    fn malformed_ciphertext_is_rejected() {
+    fn sse1_prefixed_bad_base64_is_legacy_and_upgradeable() {
         let cipher = WebhookSecretCipher::new(test_key()).unwrap();
-        assert!(matches!(
-            cipher.decrypt("org/model", "sse1:!!!not-base64!!!"),
-            Err(WebhookSecretCipherError::BadFormat(_))
-        ));
-        assert!(matches!(
-            cipher.decrypt("org/model", "sse1:"),
-            Err(WebhookSecretCipherError::BadFormat(_))
-        ));
+        // A legacy secret that merely begins with the magic prefix but whose
+        // suffix is not valid base64 must be treated as plaintext and upgraded,
+        // never as malformed ciphertext.
+        let dec = cipher.decrypt("org/model", "sse1:my-secret").unwrap();
+        assert!(dec.needs_upgrade);
+        assert_eq!(dec.secret.expose_secret(), "sse1:my-secret");
+    }
+
+    #[test]
+    fn sse1_prefixed_short_base64_is_legacy() {
+        let cipher = WebhookSecretCipher::new(test_key()).unwrap();
+        // base64("short") decodes but is shorter than the 12-byte nonce, so it
+        // is not structurally valid ciphertext and must be legacy plaintext.
+        let encoded = base64::engine::general_purpose::STANDARD.encode("short");
+        let stored = format!("{MAGIC_PREFIX}{encoded}");
+        let dec = cipher.decrypt("org/model", &stored).unwrap();
+        assert!(dec.needs_upgrade);
+        assert_eq!(dec.secret.expose_secret(), stored);
+    }
+
+    #[test]
+    fn is_ciphertext_classifies_full_structure() {
+        let cipher = WebhookSecretCipher::new(test_key()).unwrap();
+        // Real ciphertext.
+        let real = cipher.encrypt("org/model", "s3cr3t").unwrap();
+        assert!(is_ciphertext(&real));
+        // Legacy plaintext with or without the prefix, and short base64, are
+        // not ciphertext.
+        assert!(!is_ciphertext("plain"));
+        assert!(!is_ciphertext("sse1:my-secret"));
+        let short = format!(
+            "{MAGIC_PREFIX}{}",
+            base64::engine::general_purpose::STANDARD.encode("short")
+        );
+        assert!(!is_ciphertext(&short));
     }
 }
