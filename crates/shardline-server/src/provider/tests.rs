@@ -9,7 +9,9 @@ use std::{
 
 use axum::http::{HeaderMap, HeaderValue};
 use hmac::Mac;
+use serde_json::json;
 use shardline_protocol::{SecretBytes, SecretString, TokenScope};
+use shardline_server_core::at_rest::AtRestCipher;
 use shardline_vcs::{
     BuiltInProviderCatalog, BuiltInProviderError, GitHubAdapter, ProviderBoundaryError,
     ProviderKind, ProviderRepositoryPolicy, ProviderSubject, ProviderTokenIssuer, RepositoryAccess,
@@ -487,22 +489,25 @@ fn provider_service_rejects_non_utf8_webhook_auth_header_before_adapter_parsing(
 
 #[test]
 fn provider_registry_rejects_missing_webhook_secret() {
-    let registry = ProviderRegistry::from_document(ProviderConfigDocument {
-        providers: vec![ProviderConfig {
-            kind: "github".to_owned(),
-            integration_subject: "github-app".to_owned(),
-            webhook_secret: None,
-            repositories: vec![RepositoryPolicyConfig {
-                owner: "team".to_owned(),
-                name: "assets".to_owned(),
-                visibility: "private".to_owned(),
-                default_revision: "main".to_owned(),
-                clone_url: "https://github.example/team/assets.git".to_owned(),
-                read_subjects: vec!["github-user-1".to_owned()],
-                write_subjects: vec!["github-user-1".to_owned()],
+    let registry = ProviderRegistry::from_document(
+        ProviderConfigDocument {
+            providers: vec![ProviderConfig {
+                kind: "github".to_owned(),
+                integration_subject: "github-app".to_owned(),
+                webhook_secret: None,
+                repositories: vec![RepositoryPolicyConfig {
+                    owner: "team".to_owned(),
+                    name: "assets".to_owned(),
+                    visibility: "private".to_owned(),
+                    default_revision: "main".to_owned(),
+                    clone_url: "https://github.example/team/assets.git".to_owned(),
+                    read_subjects: vec!["github-user-1".to_owned()],
+                    write_subjects: vec!["github-user-1".to_owned()],
+                }],
             }],
-        }],
-    });
+        },
+        None,
+    );
 
     assert!(matches!(
         registry,
@@ -512,22 +517,25 @@ fn provider_registry_rejects_missing_webhook_secret() {
 
 #[test]
 fn provider_registry_rejects_empty_webhook_secret() {
-    let registry = ProviderRegistry::from_document(ProviderConfigDocument {
-        providers: vec![ProviderConfig {
-            kind: "github".to_owned(),
-            integration_subject: "github-app".to_owned(),
-            webhook_secret: Some(SecretString::from_secret("   ")),
-            repositories: vec![RepositoryPolicyConfig {
-                owner: "team".to_owned(),
-                name: "assets".to_owned(),
-                visibility: "private".to_owned(),
-                default_revision: "main".to_owned(),
-                clone_url: "https://github.example/team/assets.git".to_owned(),
-                read_subjects: vec!["github-user-1".to_owned()],
-                write_subjects: vec!["github-user-1".to_owned()],
+    let registry = ProviderRegistry::from_document(
+        ProviderConfigDocument {
+            providers: vec![ProviderConfig {
+                kind: "github".to_owned(),
+                integration_subject: "github-app".to_owned(),
+                webhook_secret: Some(SecretString::from_secret("   ")),
+                repositories: vec![RepositoryPolicyConfig {
+                    owner: "team".to_owned(),
+                    name: "assets".to_owned(),
+                    visibility: "private".to_owned(),
+                    default_revision: "main".to_owned(),
+                    clone_url: "https://github.example/team/assets.git".to_owned(),
+                    read_subjects: vec!["github-user-1".to_owned()],
+                    write_subjects: vec!["github-user-1".to_owned()],
+                }],
             }],
-        }],
-    });
+        },
+        None,
+    );
 
     assert!(matches!(
         registry,
@@ -551,6 +559,7 @@ fn provider_service_rejects_oversized_configuration_before_json_parsing() {
         "issuer",
         NonZeroU64::MIN,
         b"a]32-byte-signing-key-for-testing!",
+        None,
     );
 
     assert!(matches!(
@@ -592,6 +601,7 @@ fn provider_service_rejects_configuration_growth_after_validation() {
         "issuer",
         NonZeroU64::MIN,
         b"a]32-byte-signing-key-for-testing!",
+        None,
     );
 
     assert!(matches!(
@@ -627,6 +637,7 @@ fn provider_service_accepts_projected_secret_symlink_configuration_path() {
         "issuer",
         NonZeroU64::MIN,
         b"a]32-byte-signing-key-for-testing!",
+        None,
     );
 
     assert!(service.is_ok());
@@ -657,6 +668,7 @@ fn provider_service_rejects_symlinked_configuration_path_outside_directory() {
         "issuer",
         NonZeroU64::MIN,
         b"a]32-byte-signing-key-for-testing!",
+        None,
     );
 
     assert!(matches!(service, Err(ProviderServiceError::Io(_))));
@@ -1026,6 +1038,7 @@ fn provider_service_from_file_rejects_empty_api_key() {
         "issuer",
         NonZeroU64::MIN,
         b"a]32-byte-signing-key-for-testing!",
+        None,
     );
 
     assert!(matches!(result, Err(ProviderServiceError::EmptyApiKey)));
@@ -1044,6 +1057,7 @@ fn provider_service_from_file_rejects_oversized_api_key() {
         "issuer",
         NonZeroU64::MIN,
         b"a]32-byte-signing-key-for-testing!",
+        None,
     );
 
     assert!(matches!(result, Err(ProviderServiceError::ApiKeyTooLarge)));
@@ -1078,7 +1092,7 @@ fn provider_registry_rejects_duplicate_provider() {
         ],
     };
 
-    let result = ProviderRegistry::from_document(document);
+    let result = ProviderRegistry::from_document(document, None);
     assert!(matches!(
         result,
         Err(ProviderServiceError::DuplicateProvider)
@@ -1104,7 +1118,7 @@ fn provider_registry_accepts_different_provider_kinds() {
         ],
     };
 
-    let result = ProviderRegistry::from_document(document);
+    let result = ProviderRegistry::from_document(document, None);
     assert!(result.is_ok());
 }
 
@@ -1126,7 +1140,7 @@ fn built_in_provider_from_config_gitea() {
             write_subjects: vec!["user-1".to_owned()],
         }],
     };
-    let result = BuiltInProvider::from_config(config);
+    let result = BuiltInProvider::from_config(config, None);
     assert!(result.is_ok());
     let provider = result.unwrap();
     assert_eq!(provider.kind(), ProviderKind::Gitea);
@@ -1148,7 +1162,7 @@ fn built_in_provider_from_config_gitlab() {
             write_subjects: vec!["user-1".to_owned()],
         }],
     };
-    let result = BuiltInProvider::from_config(config);
+    let result = BuiltInProvider::from_config(config, None);
     assert!(result.is_ok());
     let provider = result.unwrap();
     assert_eq!(provider.kind(), ProviderKind::GitLab);
@@ -1170,7 +1184,7 @@ fn built_in_provider_from_config_codeberg() {
             write_subjects: vec!["user-1".to_owned()],
         }],
     };
-    let result = BuiltInProvider::from_config(config);
+    let result = BuiltInProvider::from_config(config, None);
     assert!(result.is_ok());
     let provider = result.unwrap();
     assert_eq!(provider.kind(), ProviderKind::Codeberg);
@@ -1192,7 +1206,7 @@ fn built_in_provider_from_config_generic() {
             write_subjects: vec!["user-1".to_owned()],
         }],
     };
-    let result = BuiltInProvider::from_config(config);
+    let result = BuiltInProvider::from_config(config, None);
     assert!(result.is_ok());
     let provider = result.unwrap();
     assert_eq!(provider.kind(), ProviderKind::Generic);
@@ -1669,6 +1683,7 @@ fn provider_service_from_file_rejects_missing_config_path() {
         "issuer",
         NonZeroU64::MIN,
         b"a]32-byte-signing-key-for-testing!",
+        None,
     );
 
     assert!(matches!(result, Err(ProviderServiceError::Io(_))));
@@ -1686,7 +1701,177 @@ fn provider_service_from_file_rejects_malformed_json() {
         "issuer",
         NonZeroU64::MIN,
         b"a]32-byte-signing-key-for-testing!",
+        None,
     );
 
     assert!(matches!(result, Err(ProviderServiceError::Json(_))));
+}
+
+// ── provider-config at-rest encryption (SHARDLINE_CONFIG_SECRET_KEY) ─────
+
+fn at_rest_test_key() -> SecretBytes {
+    SecretBytes::new(b"0123456789abcdef0123456789abcdef".to_vec())
+}
+
+fn at_rest_wrong_key() -> SecretBytes {
+    SecretBytes::new(b"abcdef0123456789abcdef0123456789".to_vec())
+}
+
+fn provider_config_with_webhook_secret(webhook_secret: &str) -> Vec<u8> {
+    serde_json::to_vec(&json!({
+        "providers": [{
+            "kind": "github",
+            "integration_subject": "github-app",
+            "webhook_secret": webhook_secret,
+            "repositories": [{
+                "owner": "team",
+                "name": "assets",
+                "visibility": "private",
+                "default_revision": "main",
+                "clone_url": "https://github.example/team/assets.git",
+                "read_subjects": ["github-user-1"],
+                "write_subjects": ["github-user-1"]
+            }]
+        }]
+    }))
+    .expect("serialize provider config")
+}
+
+fn provider_config_secret_identity(kind: &str, field: &str) -> String {
+    super::provider_config_secret_identity(kind, field)
+}
+
+fn write_provider_config_bytes(contents: &[u8]) -> tempfile::NamedTempFile {
+    let mut config = tempfile::NamedTempFile::new().unwrap();
+    config.write_all(contents).unwrap();
+    config.as_file().sync_all().unwrap();
+    config
+}
+
+#[test]
+fn provider_config_encrypted_write_read_round_trips_in_memory() {
+    let cipher = AtRestCipher::new(at_rest_test_key()).unwrap();
+    let identity = provider_config_secret_identity("github", "webhook_secret");
+    let encrypted = cipher.encrypt(&identity, "s3cr3t-value").unwrap();
+
+    let config = write_provider_config_bytes(&provider_config_with_webhook_secret(&encrypted));
+
+    // At rest the file must carry ciphertext, never the plaintext secret.
+    let on_disk = fs::read(config.path()).unwrap();
+    let on_disk = String::from_utf8(on_disk).unwrap();
+    assert!(
+        on_disk.contains("sse1:"),
+        "ciphertext must be `sse1:`-prefixed"
+    );
+    assert!(
+        !on_disk.contains("s3cr3t-value"),
+        "plaintext secret must not appear at rest"
+    );
+
+    // Reading with the key decrypts the secret in memory and builds the registry.
+    let service = ProviderTokenService::from_file(
+        config.path(),
+        b"bootstrap".to_vec(),
+        "issuer",
+        NonZeroU64::MIN,
+        b"a]32-byte-signing-key-for-testing!",
+        Some(&cipher),
+    );
+    let service = service.expect("provider token service with decrypted secret");
+    assert!(service.registry.provider("github").is_ok());
+}
+
+#[test]
+fn provider_config_wrong_key_fails_loud() {
+    let cipher = AtRestCipher::new(at_rest_test_key()).unwrap();
+    let identity = provider_config_secret_identity("github", "webhook_secret");
+    let encrypted = cipher.encrypt(&identity, "s3cr3t-value").unwrap();
+    let config = write_provider_config_bytes(&provider_config_with_webhook_secret(&encrypted));
+
+    let wrong = AtRestCipher::new(at_rest_wrong_key()).unwrap();
+    let result = ProviderTokenService::from_file(
+        config.path(),
+        b"bootstrap".to_vec(),
+        "issuer",
+        NonZeroU64::MIN,
+        b"a]32-byte-signing-key-for-testing!",
+        Some(&wrong),
+    );
+    assert!(matches!(
+        result,
+        Err(ProviderServiceError::SecretDecrypt(_))
+    ));
+}
+
+#[test]
+fn provider_config_encrypted_without_key_fails_loud() {
+    let cipher = AtRestCipher::new(at_rest_test_key()).unwrap();
+    let identity = provider_config_secret_identity("github", "webhook_secret");
+    let encrypted = cipher.encrypt(&identity, "s3cr3t-value").unwrap();
+    let config = write_provider_config_bytes(&provider_config_with_webhook_secret(&encrypted));
+
+    let result = ProviderTokenService::from_file(
+        config.path(),
+        b"bootstrap".to_vec(),
+        "issuer",
+        NonZeroU64::MIN,
+        b"a]32-byte-signing-key-for-testing!",
+        None,
+    );
+    assert!(matches!(
+        result,
+        Err(ProviderServiceError::EncryptedSecretWithoutKey)
+    ));
+}
+
+#[test]
+fn provider_config_aad_binds_secret_to_provider_identity() {
+    let cipher = AtRestCipher::new(at_rest_test_key()).unwrap();
+    // Encrypt bound to a different provider than the config declares.
+    let identity = provider_config_secret_identity("gitea", "webhook_secret");
+    let encrypted = cipher.encrypt(&identity, "s3cr3t-value").unwrap();
+    let config = write_provider_config_bytes(&provider_config_with_webhook_secret(&encrypted));
+
+    let result = ProviderTokenService::from_file(
+        config.path(),
+        b"bootstrap".to_vec(),
+        "issuer",
+        NonZeroU64::MIN,
+        b"a]32-byte-signing-key-for-testing!",
+        Some(&cipher),
+    );
+    assert!(matches!(
+        result,
+        Err(ProviderServiceError::SecretDecrypt(_))
+    ));
+}
+
+#[test]
+fn provider_config_legacy_plaintext_parses_with_and_without_key() {
+    let config = write_provider_config_bytes(&provider_config_with_webhook_secret("s3cr3t-value"));
+
+    // Without a key: legacy plaintext is used as-is.
+    let service = ProviderTokenService::from_file(
+        config.path(),
+        b"bootstrap".to_vec(),
+        "issuer",
+        NonZeroU64::MIN,
+        b"a]32-byte-signing-key-for-testing!",
+        None,
+    );
+    let service = service.expect("legacy config without key");
+    assert!(service.registry.provider("github").is_ok());
+
+    // With a key: legacy plaintext passes through unchanged.
+    let cipher = AtRestCipher::new(at_rest_test_key()).unwrap();
+    let service = ProviderTokenService::from_file(
+        config.path(),
+        b"bootstrap".to_vec(),
+        "issuer",
+        NonZeroU64::MIN,
+        b"a]32-byte-signing-key-for-testing!",
+        Some(&cipher),
+    );
+    let service = service.expect("legacy config with key");
+    assert!(service.registry.provider("github").is_ok());
 }

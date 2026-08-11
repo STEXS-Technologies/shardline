@@ -10,10 +10,13 @@ Minor release that hardens parsing boundaries with newtypes, caps untrusted
 allocations, and broadens fuzz coverage. **No breaking API changes** — all
 newtype work is additive (new types, `From` impls, and consolidation of internal
 duplicates). Wire formats and token claims are unchanged; existing deployments
-need no migration. The one data-format change is **opt-in**: when
+need no migration. The data-format changes are **opt-in**: when
 `SHARDLINE_HUB_WEBHOOK_SECRET_KEY` is configured, Hub webhook signing secrets are
 stored at rest using AES-256-GCM (`sse1:`-prefixed ciphertext) instead of
-plaintext, with an automatic upgrade of existing plaintext rows.
+plaintext, with an automatic upgrade of existing plaintext rows; and when
+`SHARDLINE_CONFIG_SECRET_KEY` is configured, provider-config webhook secrets are
+stored at rest using the same `sse1:` envelope, with legacy plaintext values
+parsed unchanged.
 
 ### Added
 - **Newtypes for closed-domain strings** (additive, no signatures removed):
@@ -149,6 +152,14 @@ compares, `alg`-confusion guard, parameterized SQL, symlink-race protection,
   and re-verifies the address set immediately before the HTTP send (the
   documented rebinding window is closed; shared-client pinning was not available
   without the `dns` feature, so re-resolve+compare was used).
+- **[Medium] Provider-config secrets at rest** — the `webhook_secret` field of
+  the provider configuration JSON (`config.provider_config_path()`) is now
+  encrypted at rest (AES-256-GCM, one random 12-byte nonce per value, bound to
+  the provider via AAD `provider:<kind>:<field>`) whenever
+  `SHARDLINE_CONFIG_SECRET_KEY` (or `_FILE`) is configured; the server emits a
+  startup warning otherwise. Legacy plaintext values are parsed unchanged with
+  or without a key; an at-rest encrypted value fails loudly on a wrong/missing
+  key rather than falling back to plaintext.
 - **[Low-Med] upload-intent transitions were not idempotent** — two concurrent
   callers sharing one intent could spuriously 5xx with
   `InvalidUploadTransition`; `transition_intent` now treats at-or-past-target as

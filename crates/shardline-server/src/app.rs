@@ -168,6 +168,26 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
         bounded_api_body_limit(max_request_body_bytes, MAX_PROVIDER_WEBHOOK_BODY_BYTES);
     let backend = ServerBackend::from_config(&config).await?;
     let auth = build_auth_provider(&config).await?;
+    let config_secret_cipher = config.config_secret_key().map_or_else(
+        || {
+            tracing::warn!(
+                "SHARDLINE_CONFIG_SECRET_KEY not configured; provider-config secrets will be stored unencrypted"
+            );
+            None
+        },
+        |key| {
+            let key_bytes = shardline_protocol::SecretBytes::new(key.to_vec());
+            match shardline_server_core::at_rest::AtRestCipher::new(key_bytes) {
+                Ok(cipher) => Some(cipher),
+                Err(e) => {
+                    tracing::warn!(
+                        "invalid SHARDLINE_CONFIG_SECRET_KEY; provider-config secrets will be stored unencrypted: {e}"
+                    );
+                    None
+                }
+            }
+        },
+    );
     let provider_tokens = if role.serves_api() {
         match (
             config.provider_config_path(),
@@ -188,6 +208,7 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
                 issuer,
                 ttl_seconds,
                 signing_key,
+                config_secret_cipher.as_ref(),
             )?),
             _ => None,
         }

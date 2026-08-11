@@ -13,11 +13,11 @@ use super::secrets::{
     load_redis_tls_config_from_env, load_s3_object_store_config_from_env, read_secret_file_bytes,
 };
 use super::{
-    AuthProviderKind, DEFAULT_MAX_REQUEST_BODY_BYTES, DEFAULT_MAX_SHARD_FILES,
-    DEFAULT_MAX_SHARD_RECONSTRUCTION_TERMS, DEFAULT_MAX_SHARD_XORB_CHUNKS, DEFAULT_MAX_SHARD_XORBS,
-    DeploymentMode, HUB_WEBHOOK_SECRET_KEY_BYTES, MAX_ED25519_KEY_BYTES, MAX_METRICS_TOKEN_BYTES,
-    MAX_TOKEN_SIGNING_KEY_BYTES, ObjectStorageAdapter, ServerConfig, ServerConfigError,
-    ShardMetadataLimits, default_transfer_max_in_flight_chunks,
+    AuthProviderKind, CONFIG_SECRET_KEY_BYTES, DEFAULT_MAX_REQUEST_BODY_BYTES,
+    DEFAULT_MAX_SHARD_FILES, DEFAULT_MAX_SHARD_RECONSTRUCTION_TERMS, DEFAULT_MAX_SHARD_XORB_CHUNKS,
+    DEFAULT_MAX_SHARD_XORBS, DeploymentMode, HUB_WEBHOOK_SECRET_KEY_BYTES, MAX_ED25519_KEY_BYTES,
+    MAX_METRICS_TOKEN_BYTES, MAX_TOKEN_SIGNING_KEY_BYTES, ObjectStorageAdapter, ServerConfig,
+    ServerConfigError, ShardMetadataLimits, default_transfer_max_in_flight_chunks,
     default_upload_max_in_flight_chunks, parse_byte_size,
 };
 use crate::{
@@ -210,6 +210,25 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
             observed_bytes: observed,
         },
     )?;
+    let config_secret_key = load_secret_from_env_or_file_with_conflict_check(
+        (
+            "SHARDLINE_CONFIG_SECRET_KEY",
+            "SHARDLINE_CONFIG_SECRET_KEY_FILE",
+        ),
+        CONFIG_SECRET_KEY_BYTES,
+        true,
+        ServerConfigError::EmptyConfigSecretKey,
+        |env, file_env| ServerConfigError::SecretSourceConflict { env, file_env },
+        ServerConfigError::ConfigSecretKey,
+        |observed, maximum| ServerConfigError::ConfigSecretKeyTooLarge {
+            observed_bytes: observed,
+            maximum_bytes: maximum,
+        },
+        |expected, observed| ServerConfigError::ConfigSecretKeyLengthMismatch {
+            expected_bytes: expected,
+            observed_bytes: observed,
+        },
+    )?;
     let ed25519_private_key = load_secret_from_env_or_file_with_conflict_check(
         (
             "SHARDLINE_ED25519_PRIVATE_KEY",
@@ -310,6 +329,9 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
     }
     if let Some(webhook_key) = hub_webhook_secret_key {
         config = config.with_hub_webhook_secret_key(webhook_key)?;
+    }
+    if let Some(config_key) = config_secret_key {
+        config = config.with_config_secret_key(config_key)?;
     }
 
     // Validate chunk size upper bound (1 GB).
@@ -1029,6 +1051,43 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
             },
         );
         remove_env_var("SHARDLINE_HUB_WEBHOOK_SECRET_KEY");
+        assert!(result.is_err());
+    }
+
+    // ── provider-config secret key env handling ────────────────────────────
+
+    #[test]
+    #[serial_test::serial]
+    fn config_secret_from_env_is_not_newline_trimmed() {
+        // Trailing-newline stripping applies only to secret *files*. An
+        // env-provided value (32 key bytes + `\n` = 33 bytes) must exceed the
+        // 32-byte bound and be rejected, proving env values are left untouched.
+        // SAFETY: serialized env test
+        set_env_var(
+            "SHARDLINE_CONFIG_SECRET_KEY",
+            "0123456789abcdef0123456789abcdef\n",
+        );
+        remove_env_var("SHARDLINE_CONFIG_SECRET_KEY_FILE");
+        let result = super::load_secret_from_env_or_file_with_conflict_check(
+            (
+                "SHARDLINE_CONFIG_SECRET_KEY",
+                "SHARDLINE_CONFIG_SECRET_KEY_FILE",
+            ),
+            super::CONFIG_SECRET_KEY_BYTES,
+            true,
+            super::ServerConfigError::EmptyConfigSecretKey,
+            |env, file_env| super::ServerConfigError::SecretSourceConflict { env, file_env },
+            super::ServerConfigError::ConfigSecretKey,
+            |observed, maximum| super::ServerConfigError::ConfigSecretKeyTooLarge {
+                observed_bytes: observed,
+                maximum_bytes: maximum,
+            },
+            |expected, observed| super::ServerConfigError::ConfigSecretKeyLengthMismatch {
+                expected_bytes: expected,
+                observed_bytes: observed,
+            },
+        );
+        remove_env_var("SHARDLINE_CONFIG_SECRET_KEY");
         assert!(result.is_err());
     }
 
