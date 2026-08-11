@@ -17,10 +17,10 @@ use super::defaults::{
     DEFAULT_MAX_REQUEST_BODY_BYTES, DEFAULT_OCI_REGISTRY_TOKEN_MAX_IN_FLIGHT_REQUESTS,
     DEFAULT_OCI_REGISTRY_TOKEN_TTL_SECONDS, DEFAULT_OCI_UPLOAD_MAX_ACTIVE_SESSIONS,
     DEFAULT_OCI_UPLOAD_SESSION_TTL_SECONDS, DEFAULT_PARALLELISM_FALLBACK,
-    MAX_DEFAULT_TRANSFER_MAX_IN_FLIGHT_CHUNKS, MAX_DEFAULT_UPLOAD_MAX_IN_FLIGHT_CHUNKS,
-    MAX_ED25519_KEY_BYTES, MAX_METRICS_TOKEN_BYTES, MAX_PROVIDER_API_KEY_BYTES,
-    MAX_TOKEN_SIGNING_KEY_BYTES, MIN_DEFAULT_TRANSFER_MAX_IN_FLIGHT_CHUNKS,
-    MIN_DEFAULT_UPLOAD_MAX_IN_FLIGHT_CHUNKS,
+    HUB_WEBHOOK_SECRET_KEY_BYTES, MAX_DEFAULT_TRANSFER_MAX_IN_FLIGHT_CHUNKS,
+    MAX_DEFAULT_UPLOAD_MAX_IN_FLIGHT_CHUNKS, MAX_ED25519_KEY_BYTES, MAX_METRICS_TOKEN_BYTES,
+    MAX_PROVIDER_API_KEY_BYTES, MAX_TOKEN_SIGNING_KEY_BYTES,
+    MIN_DEFAULT_TRANSFER_MAX_IN_FLIGHT_CHUNKS, MIN_DEFAULT_UPLOAD_MAX_IN_FLIGHT_CHUNKS,
 };
 use super::enums::{
     AuthConfig, AuthProviderKind, CacheConfig, DeploymentMode, ObjectStorageAdapter, OciConfig,
@@ -95,6 +95,7 @@ impl ServerConfig {
             deployment_mode: DeploymentMode::default(),
             auth: AuthConfig {
                 token_signing_key: None,
+                hub_webhook_secret_key: None,
                 auth_provider: AuthProviderKind::Local,
                 auth_oidc_issuer: None,
                 auth_jwks_url: None,
@@ -488,6 +489,15 @@ impl ServerConfig {
             .map(SecretBytes::expose_secret)
     }
 
+    /// Returns the optional Hub webhook secret encryption key (AES-256).
+    #[must_use]
+    pub fn hub_webhook_secret_key(&self) -> Option<&[u8]> {
+        self.auth
+            .hub_webhook_secret_key
+            .as_ref()
+            .map(SecretBytes::expose_secret)
+    }
+
     /// Returns the optional Ed25519 private key.
     #[must_use]
     pub fn ed25519_private_key(&self) -> Option<&[u8]> {
@@ -632,6 +642,33 @@ impl ServerConfig {
         )?;
 
         self.auth.token_signing_key = Some(token_signing_key);
+        Ok(self)
+    }
+
+    /// Enables at-rest encryption for Hub webhook signing secrets with the
+    /// supplied 32-byte AES-256 key.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerConfigError::EmptyHubWebhookSecretKey`] when the key is
+    /// empty, or [`ServerConfigError::HubWebhookSecretKeyLength`] when the key
+    /// is not exactly 32 bytes.
+    pub fn with_hub_webhook_secret_key(
+        mut self,
+        key: impl Into<SecretBytes>,
+    ) -> Result<Self, ServerConfigError> {
+        let key = key.into();
+        if key.expose_secret().is_empty() {
+            return Err(ServerConfigError::EmptyHubWebhookSecretKey);
+        }
+        let observed = key.len();
+        if observed != usize::try_from(HUB_WEBHOOK_SECRET_KEY_BYTES).unwrap_or(0) {
+            return Err(ServerConfigError::HubWebhookSecretKeyLength {
+                expected: usize::try_from(HUB_WEBHOOK_SECRET_KEY_BYTES).unwrap_or(0),
+                observed,
+            });
+        }
+        self.auth.hub_webhook_secret_key = Some(key);
         Ok(self)
     }
 

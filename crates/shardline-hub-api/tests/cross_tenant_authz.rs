@@ -130,8 +130,11 @@ fn build_state() -> (TempDir, HubState) {
     let state = HubState {
         store: boxed,
         object_store,
-        auth: Some(shardline_hub_api::auth::HubAuth::new(Box::new(RepoTokenProvider))),
+        auth: Some(shardline_hub_api::auth::HubAuth::new(Box::new(
+            RepoTokenProvider,
+        ))),
         http_client: None,
+        webhook_secret_cipher: None,
     };
     (tmp, state)
 }
@@ -201,14 +204,12 @@ async fn same_repo_commit_succeeds() {
 {"file":{"path":"f.txt","content":"aGVsbG8="}}
 "#;
     let response = app
-        .oneshot(
-            request(
-                "POST",
-                "/api/models/alice/own/commit/main",
-                ndjson_headers("alice:own:write"),
-                Body::from(body),
-            ),
-        )
+        .oneshot(request(
+            "POST",
+            "/api/models/alice/own/commit/main",
+            ndjson_headers("alice:own:write"),
+            Body::from(body),
+        ))
         .await
         .unwrap();
     assert_eq!(
@@ -229,14 +230,12 @@ async fn cross_repo_commit_is_forbidden() {
 {"file":{"path":"evil.txt","content":"Yg=="}}
 "#;
     let response = app
-        .oneshot(
-            request(
-                "POST",
-                "/api/models/bob/own/commit/main",
-                ndjson_headers("alice:own:write"),
-                Body::from(body),
-            ),
-        )
+        .oneshot(request(
+            "POST",
+            "/api/models/bob/own/commit/main",
+            ndjson_headers("alice:own:write"),
+            Body::from(body),
+        ))
         .await
         .unwrap();
     assert_eq!(
@@ -254,14 +253,12 @@ async fn cross_repo_delete_is_forbidden() {
     let app = shardline_hub_api::hub_routes(state, true);
 
     let response = app
-        .oneshot(
-            request(
-                "DELETE",
-                "/api/models/bob/own",
-                auth_header("alice:own:write"),
-                Body::empty(),
-            ),
-        )
+        .oneshot(request(
+            "DELETE",
+            "/api/models/bob/own",
+            auth_header("alice:own:write"),
+            Body::empty(),
+        ))
         .await
         .unwrap();
     assert_eq!(
@@ -279,14 +276,12 @@ async fn same_repo_delete_succeeds() {
     let app = shardline_hub_api::hub_routes(state, true);
 
     let response = app
-        .oneshot(
-            request(
-                "DELETE",
-                "/api/models/alice/own",
-                auth_header("alice:own:write"),
-                Body::empty(),
-            ),
-        )
+        .oneshot(request(
+            "DELETE",
+            "/api/models/alice/own",
+            auth_header("alice:own:write"),
+            Body::empty(),
+        ))
         .await
         .unwrap();
     assert_eq!(
@@ -304,14 +299,12 @@ async fn cross_repo_read_resolve_is_forbidden() {
     let app = shardline_hub_api::hub_routes(state, true);
 
     let response = app
-        .oneshot(
-            request(
-                "GET",
-                "/bob/own/resolve/main/big.bin",
-                auth_header("alice:own:read"),
-                Body::empty(),
-            ),
-        )
+        .oneshot(request(
+            "GET",
+            "/bob/own/resolve/main/big.bin",
+            auth_header("alice:own:read"),
+            Body::empty(),
+        ))
         .await
         .unwrap();
     assert_eq!(
@@ -329,14 +322,12 @@ async fn same_repo_read_resolve_not_forbidden() {
     let app = shardline_hub_api::hub_routes(state, true);
 
     let response = app
-        .oneshot(
-            request(
-                "GET",
-                "/alice/own/resolve/main/big.bin",
-                auth_header("alice:own:read"),
-                Body::empty(),
-            ),
-        )
+        .oneshot(request(
+            "GET",
+            "/alice/own/resolve/main/big.bin",
+            auth_header("alice:own:read"),
+            Body::empty(),
+        ))
         .await
         .unwrap();
     assert_ne!(
@@ -357,14 +348,12 @@ async fn bob_token_can_write_bob_own() {
 {"file":{"path":"bob.txt","content":"Ym9i"}}
 "#;
     let response = app
-        .oneshot(
-            request(
-                "POST",
-                "/api/models/bob/own/commit/main",
-                ndjson_headers("bob:own:write"),
-                Body::from(body),
-            ),
-        )
+        .oneshot(request(
+            "POST",
+            "/api/models/bob/own/commit/main",
+            ndjson_headers("bob:own:write"),
+            Body::from(body),
+        ))
         .await
         .unwrap();
     assert_eq!(

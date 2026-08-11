@@ -349,6 +349,7 @@ mod tests {
             object_store,
             auth: None,
             http_client: None,
+            webhook_secret_cipher: None,
         };
         (ts, state)
     }

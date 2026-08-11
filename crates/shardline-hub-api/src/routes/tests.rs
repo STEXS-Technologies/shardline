@@ -79,6 +79,7 @@ fn make_test_state() -> (tempfile::TempDir, HubState) {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     (td, state)
 }
@@ -1029,6 +1030,7 @@ async fn handler_repo_list_with_repos() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let result = repo_list(State(state), default_headers()).await.unwrap();
     assert_eq!(result.repos.len(), 2);
@@ -1099,6 +1101,7 @@ async fn handler_repo_search_finds_matching() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     // The search uses LIKE 'q%' on repo_id, so prefix-match the full ID.
     let result = repo_search(
@@ -1168,6 +1171,7 @@ fn make_alice_auth_state() -> (tempfile::TempDir, HubState) {
         object_store,
         auth: Some(HubAuth::new(Box::new(AliceProvider))),
         http_client: None,
+        webhook_secret_cipher: None,
     };
     (td, state)
 }
@@ -1252,6 +1256,7 @@ async fn handler_repo_info_returns_repo() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let result = repo_info(
         State(state),
@@ -1287,6 +1292,7 @@ async fn handler_repo_info_with_card_data() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let result = repo_info(
         State(state),
@@ -1330,6 +1336,7 @@ async fn handler_repo_modelcard_no_readme() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let result = repo_modelcard(
         State(state),
@@ -1363,6 +1370,7 @@ async fn handler_repo_modelcard_with_readme() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let result = repo_modelcard(
         State(state),
@@ -1397,6 +1405,7 @@ async fn handler_repo_revisions_with_revisions() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let result = repo_revisions(
         State(state),
@@ -1511,6 +1520,7 @@ async fn handler_repo_delete_success() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let result = repo_delete(
         State(state.clone()),
@@ -1577,6 +1587,7 @@ async fn handler_preupload_checks_existence() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let result = preupload(
         State(state),
@@ -1652,6 +1663,7 @@ async fn handler_commit_inline_file_success() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let body = r#"{"header":{"message":"add readme"}}
 {"file":{"path":"README.md","content":"SGVsbG8gV29ybGQ="}}
@@ -1685,6 +1697,7 @@ async fn handler_commit_lfs_pointer_success() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     // Valid SHA-256 OID (64 hex chars)
     let oid = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
@@ -1730,6 +1743,7 @@ async fn handler_commit_delete_file() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let body = r#"{"header":{"message":"delete file"}}
 {"deletedEntry":{"path":"old.txt"}}
@@ -1764,6 +1778,7 @@ async fn handler_commit_parent_mismatch() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     // Body specifies parentCommit that does NOT match URL resolution
     let body = r#"{"header":{"message":"mismatch","parentCommit":"wrong_parent_sha"}}
@@ -1804,6 +1819,7 @@ async fn handler_apply_commit_inline_file() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let parsed = ParsedCommit {
         message: "apply inline".into(),
@@ -1839,6 +1855,7 @@ async fn handler_apply_commit_lfs_pointer() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let oid = "1111222233334444555566667777888899990000aaaabbbbccccddddeeeeffff";
     let parsed = ParsedCommit {
@@ -1880,6 +1897,7 @@ async fn handler_apply_commit_delete() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let parsed = ParsedCommit {
         message: "delete file".into(),
@@ -1906,6 +1924,7 @@ async fn handler_apply_commit_parent_mismatch() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let parsed = ParsedCommit {
         message: "bad parent".into(),
@@ -1953,6 +1972,7 @@ async fn handler_file_tree_basic() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let entries = file_tree(
         State(state),
@@ -2004,6 +2024,7 @@ async fn handler_file_tree_recursive() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let entries = file_tree(
         State(state),
@@ -2061,6 +2082,7 @@ async fn handler_file_tree_with_limit_and_cursor() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let entries = file_tree(
         State(state),
@@ -2113,6 +2135,7 @@ async fn handler_resolve_file_inline() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let result = resolve_file(
         State(state),
@@ -2148,6 +2171,7 @@ async fn handler_resolve_file_not_found() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let result = resolve_file(
         State(state),
@@ -2178,6 +2202,7 @@ fn make_lfs_state() -> (tempfile::TempDir, HubState) {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     (td, state)
 }
@@ -2441,6 +2466,7 @@ async fn handler_repo_revisions_has_initial() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let result = repo_revisions(
         State(state),
@@ -2465,6 +2491,7 @@ async fn handler_git_head_with_revision() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let result = git_head(
         State(state),
@@ -2491,6 +2518,7 @@ async fn handler_commit_no_revision() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     // "nonexistent_rev" isn't a known ref or SHA → revision not found
     let result = commit(
@@ -2537,6 +2565,7 @@ async fn handler_dataset_parquet_lists_files() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let result = dataset_parquet(
         State(state),
@@ -2583,6 +2612,7 @@ async fn handler_dataset_parquet_csv_and_jsonl_included() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let result = dataset_parquet(
         State(state),
@@ -2609,6 +2639,7 @@ async fn handler_dataset_first_rows_empty_dataset() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let result = dataset_first_rows(
         State(state),
@@ -2648,6 +2679,7 @@ async fn handler_dataset_first_rows_with_jsonl() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let result = dataset_first_rows(
         State(state),
@@ -2693,6 +2725,7 @@ async fn handler_dataset_viewer_with_data() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let result = dataset_viewer(
         State(state),
@@ -2734,6 +2767,7 @@ async fn handler_dataset_viewer_pagination() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let result = dataset_viewer(
         State(state),
@@ -2767,6 +2801,7 @@ async fn handler_webhook_create_success() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let (status, resp) = webhook_create(
         State(state),
@@ -2795,6 +2830,7 @@ async fn handler_webhook_create_invalid_url() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let result = webhook_create(
         State(state),
@@ -2825,6 +2861,7 @@ async fn handler_webhook_create_too_many_events() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let events: Vec<String> = (0..51).map(|i| format!("event_{i}")).collect();
     let result = webhook_create(
@@ -2860,6 +2897,7 @@ async fn handler_webhook_list_empty() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let result = webhook_list(
         State(state),
@@ -2897,6 +2935,7 @@ async fn handler_webhook_list_with_webhooks() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let result = webhook_list(
         State(state),
@@ -2930,6 +2969,7 @@ async fn handler_webhook_delete_success() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let result = webhook_delete(
         State(state.clone()),
@@ -2981,6 +3021,7 @@ fn route_authorize_with_auth_and_no_header_is_err() {
         object_store,
         auth: Some(HubAuth::new(Box::new(MockProvider))),
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let headers = HeaderMap::new();
     let result = authorize(&state, &headers, TokenScope::Read);
@@ -3007,6 +3048,7 @@ async fn handler_apply_commit_empty_instructions() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let parsed = ParsedCommit {
         message: "empty commit".into(),
@@ -3034,6 +3076,7 @@ async fn handler_dataset_parquet_non_dataset_repo_errors() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let result = dataset_parquet(
         State(state),
@@ -3064,6 +3107,7 @@ async fn handler_dataset_first_rows_non_dataset_errors() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let result = dataset_first_rows(
         State(state),
@@ -3099,6 +3143,7 @@ async fn handler_dataset_viewer_non_dataset_errors() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let result = dataset_viewer(
         State(state),
@@ -3136,6 +3181,7 @@ async fn handler_repo_search_sort_by_last_modified_asc() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let result = repo_search(
         State(state),
@@ -3167,6 +3213,7 @@ async fn handler_repo_search_sort_likes_noop() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     // "likes" sort is currently a no-op — just verify it doesn't error.
     let result = repo_search(
@@ -3199,6 +3246,7 @@ async fn handler_repo_search_sort_downloads_noop() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     // "downloads" sort is currently a no-op — just verify it doesn't error.
     let result = repo_search(
@@ -3235,6 +3283,7 @@ async fn handler_repo_search_unknown_sort_keeps_default_order() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let result = repo_search(
         State(state),
@@ -3298,6 +3347,7 @@ async fn handler_dataset_first_rows_content_not_inline() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let result = dataset_first_rows(
         State(state),
@@ -3328,6 +3378,7 @@ async fn handler_dataset_viewer_split_not_found() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let result = dataset_viewer(
         State(state),
@@ -3448,6 +3499,7 @@ async fn handler_repo_revision_info_returns_siblings() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let result = repo_revision_info(
         State(state),
@@ -3494,6 +3546,7 @@ async fn handler_repo_delete_compat_success() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let result = repo_delete_compat(
         State(state),
@@ -3519,6 +3572,7 @@ async fn handler_repo_delete_compat_with_organization() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let result = repo_delete_compat(
         State(state),
@@ -3558,6 +3612,7 @@ async fn handler_file_tree_at_root_returns_files() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let entries = file_tree_at_root(
         State(state),
@@ -3594,6 +3649,7 @@ async fn handler_git_head_returns_ref() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let result = git_head(
         State(state),
@@ -3651,6 +3707,7 @@ async fn handler_repo_create_conflict() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let req = RepoCreateRequest {
         repo_type: RepoType::Model,
@@ -3757,6 +3814,7 @@ async fn handler_webhook_create_duplicate_url() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let result = webhook_create(
         State(state),
@@ -3788,6 +3846,7 @@ async fn handler_lfs_upload_and_download_roundtrip() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     // Upload
     let result = lfs_upload(
@@ -3840,6 +3899,7 @@ async fn handler_dataset_parquet_finds_data_files() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let resp = dataset_parquet(
         State(state),
@@ -3882,6 +3942,7 @@ async fn handler_webhook_list_with_hooks() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let resp = webhook_list(
         State(state),

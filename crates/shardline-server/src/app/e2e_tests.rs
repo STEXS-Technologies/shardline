@@ -274,6 +274,7 @@ async fn build_test_hub_state(root: &std::path::Path) -> shardline_hub_api::rout
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     }
 }
 

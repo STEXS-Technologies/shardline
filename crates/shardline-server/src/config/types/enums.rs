@@ -125,6 +125,8 @@ impl DeploymentMode {
 #[derive(Clone, PartialEq, Eq)]
 pub struct AuthConfig {
     pub token_signing_key: Option<SecretBytes>,
+    /// AES-256 key for at-rest encryption of Hub webhook signing secrets.
+    pub hub_webhook_secret_key: Option<SecretBytes>,
     pub auth_provider: AuthProviderKind,
     pub auth_oidc_issuer: Option<String>,
     pub auth_jwks_url: Option<String>,

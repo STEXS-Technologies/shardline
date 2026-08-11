@@ -41,6 +41,7 @@ pub mod git;
 pub mod models;
 pub mod resolve;
 pub mod routes;
+pub mod secrets;
 pub mod state;
 pub mod types;
 

@@ -586,6 +586,7 @@ fn make_hub_state() -> (tempfile::TempDir, HubState) {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     (tmp, state)
 }
@@ -1396,6 +1397,7 @@ fn authorize_read_with_auth_rejects_missing_token() {
         object_store: hub_state.object_store,
         auth: Some(crate::auth::HubAuth::new(Box::new(MockAuth))),
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let headers = axum::http::HeaderMap::new();
     let result = authorize_read(&state, &headers);
@@ -1540,6 +1542,7 @@ fn authorize_write_with_auth_rejects_missing_token() {
         object_store: hub_state.object_store,
         auth: Some(crate::auth::HubAuth::new(Box::new(MockAuth))),
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let headers = axum::http::HeaderMap::new();
     let result = authorize_write(&state, &headers);

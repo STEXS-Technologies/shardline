@@ -1188,8 +1188,14 @@ mod tests {
 
     #[test]
     fn oci_action_parses_canonical_values() {
-        assert_eq!("pull".parse::<super::OciAction>(), Ok(super::OciAction::Pull));
-        assert_eq!("push".parse::<super::OciAction>(), Ok(super::OciAction::Push));
+        assert_eq!(
+            "pull".parse::<super::OciAction>(),
+            Ok(super::OciAction::Pull)
+        );
+        assert_eq!(
+            "push".parse::<super::OciAction>(),
+            Ok(super::OciAction::Push)
+        );
     }
 
     #[test]

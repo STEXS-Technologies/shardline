@@ -576,6 +576,7 @@ async fn validate_commit_body_bounded_by_router() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
 
     let store = state.store.clone();

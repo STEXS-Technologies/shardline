@@ -288,6 +288,22 @@ pub trait HubStore: Send + Sync {
     /// Returns an error when the storage backend operation fails.
     fn delete_webhook(&self, repo_id: &str, webhook_id: &str) -> Result<(), Self::Error>;
 
+    /// Updates the stored (opaque) signing secret for a webhook.
+    ///
+    /// Used to lazily re-encrypt legacy plaintext rows when at-rest encryption
+    /// is enabled. The store treats the secret as opaque bytes and never
+    /// interprets it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the storage backend operation fails.
+    fn update_webhook_secret(
+        &self,
+        repo_id: &str,
+        webhook_id: &str,
+        secret: Option<&str>,
+    ) -> Result<(), Self::Error>;
+
     /// Returns webhooks subscribed to a given event for a repository.
     ///
     /// # Errors
@@ -397,6 +413,13 @@ trait ErasedHubStore: Send + Sync {
         &self,
         repo_id: &str,
         webhook_id: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
+
+    fn update_webhook_secret(
+        &self,
+        repo_id: &str,
+        webhook_id: &str,
+        secret: Option<&str>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
     fn webhooks_for_event(
@@ -531,6 +554,16 @@ impl<T: HubStore> ErasedHubStore for T {
         webhook_id: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         T::delete_webhook(self, repo_id, webhook_id)
+            .map_err(|e| Box::new(std::io::Error::other(e.to_string())) as _)
+    }
+
+    fn update_webhook_secret(
+        &self,
+        repo_id: &str,
+        webhook_id: &str,
+        secret: Option<&str>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        T::update_webhook_secret(self, repo_id, webhook_id, secret)
             .map_err(|e| Box::new(std::io::Error::other(e.to_string())) as _)
     }
 
@@ -758,6 +791,21 @@ impl BoxedHubStore {
         self.inner.delete_webhook(repo_id, webhook_id)
     }
 
+    /// Updates the stored (opaque) signing secret for a webhook.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the storage backend operation fails.
+    pub fn update_webhook_secret(
+        &self,
+        repo_id: &str,
+        webhook_id: &str,
+        secret: Option<&str>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.inner
+            .update_webhook_secret(repo_id, webhook_id, secret)
+    }
+
     /// Returns webhooks subscribed to a given event for a repository.
     ///
     /// # Errors
@@ -893,6 +941,15 @@ where
         webhook_id: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         T::delete_webhook(&self.0, repo_id, webhook_id).map_err(Into::into)
+    }
+
+    fn update_webhook_secret(
+        &self,
+        repo_id: &str,
+        webhook_id: &str,
+        secret: Option<&str>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        T::update_webhook_secret(&self.0, repo_id, webhook_id, secret).map_err(Into::into)
     }
 
     fn webhooks_for_event(
@@ -1386,6 +1443,21 @@ mod tests {
             let mut webhooks = self.webhooks.lock().unwrap();
             if let Some(repo_webhooks) = webhooks.get_mut(repo_id) {
                 repo_webhooks.retain(|wh| wh.id != webhook_id);
+            }
+            Ok(())
+        }
+
+        fn update_webhook_secret(
+            &self,
+            repo_id: &str,
+            webhook_id: &str,
+            secret: Option<&str>,
+        ) -> Result<(), Self::Error> {
+            let mut webhooks = self.webhooks.lock().unwrap();
+            if let Some(repo_webhooks) = webhooks.get_mut(repo_id)
+                && let Some(wh) = repo_webhooks.iter_mut().find(|wh| wh.id == webhook_id)
+            {
+                wh.secret = secret.map(SecretString::from_secret);
             }
             Ok(())
         }

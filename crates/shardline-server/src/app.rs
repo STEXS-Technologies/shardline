@@ -590,11 +590,38 @@ fn build_hub_state(
         }
     };
 
+    // Thread an at-rest cipher for webhook signing secrets when configured.
+    let webhook_secret_cipher = app_state.config.hub_webhook_secret_key().map_or_else(
+        || {
+            tracing::warn!(
+                "SHARDLINE_HUB_WEBHOOK_SECRET_KEY not configured; webhook signing secrets will be stored unencrypted"
+            );
+            None
+        },
+        |key| {
+            let key_bytes = shardline_protocol::SecretBytes::new(key.to_vec());
+            match shardline_hub_api::secrets::WebhookSecretCipher::new(key_bytes) {
+                Ok(cipher) => {
+                    // App-level data upgrade: re-encrypt legacy plaintext rows.
+                    shardline_hub_api::secrets::upgrade_webhook_secrets(&store, &cipher);
+                    Some(cipher)
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "invalid SHARDLINE_HUB_WEBHOOK_SECRET_KEY; webhook signing secrets will be stored unencrypted: {e}"
+                    );
+                    None
+                }
+            }
+        },
+    );
+
     Ok(shardline_hub_api::routes::HubState {
         store,
         object_store: app_state.backend.object_store(),
         auth: hub_auth,
         http_client,
+        webhook_secret_cipher,
     })
 }
 

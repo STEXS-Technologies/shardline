@@ -7,10 +7,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 ## [1.5.0] - 2026-08-11
 
 Minor release that hardens parsing boundaries with newtypes, caps untrusted
-allocations, and broadens fuzz coverage. **No breaking API changes and no
-data-format changes** — all newtype work is additive (new types, `From` impls,
-and consolidation of internal duplicates). Wire formats, token claims, and
-on-disk layouts are unchanged; existing deployments need no migration.
+allocations, and broadens fuzz coverage. **No breaking API changes** — all
+newtype work is additive (new types, `From` impls, and consolidation of internal
+duplicates). Wire formats and token claims are unchanged; existing deployments
+need no migration. The one data-format change is **opt-in**: when
+`SHARDLINE_HUB_WEBHOOK_SECRET_KEY` is configured, Hub webhook signing secrets are
+stored at rest using AES-256-GCM (`sse1:`-prefixed ciphertext) instead of
+plaintext, with an automatic upgrade of existing plaintext rows.
 
 ### Added
 - **Newtypes for closed-domain strings** (additive, no signatures removed):
@@ -125,6 +128,13 @@ compares, `alg`-confusion guard, parameterized SQL, symlink-race protection,
   stored as a valid revision).
 - **[Low] zero-length suffix byte-range** returned a bogus 1-byte range instead
   of `Unsatisfiable` — now consistent with the non-suffix branch.
+- **[Medium] Hub webhook signing secrets at rest** — previously stored as
+  plaintext `TEXT`. Webhook secrets are now encrypted at rest (AES-256-GCM, one
+  random 12-byte nonce per row, bound to the repo via AAD) whenever
+  `SHARDLINE_HUB_WEBHOOK_SECRET_KEY` (or `_FILE`) is configured; the server emits
+  a startup warning otherwise. A migration sweeps and re-encrypts existing
+  plaintext rows, and legacy rows are lazily upgraded on read. Secrets are never
+  returned by the webhook API and never logged.
 - **[Medium] webhook delivery DNS-rebinding TOCTOU** — delivery now re-resolves
   and re-verifies the address set immediately before the HTTP send (the
   documented rebinding window is closed; shared-client pinning was not available
