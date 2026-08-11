@@ -34,6 +34,7 @@ use crate::model::{ProviderTokenIssueRequest, ProviderTokenIssueResponse};
 #[cfg(test)]
 use config_io::set_before_provider_config_read_hook;
 use config_io::{parse_provider_config_document, read_provider_config_bytes};
+use shardline_server_core::at_rest::{AtRestCipher, is_ciphertext};
 
 const PROVIDER_API_KEY_HEADER: &str = "x-shardline-provider-key";
 const GITHUB_EVENT_HEADER: &str = "x-github-event";
@@ -105,6 +106,7 @@ impl ProviderTokenService {
         issuer_identity: &str,
         ttl_seconds: NonZeroU64,
         signing_key: &[u8],
+        config_secret_cipher: Option<&AtRestCipher>,
     ) -> Result<Self, ProviderServiceError> {
         if api_key.is_empty() {
             return Err(ProviderServiceError::EmptyApiKey);
@@ -116,7 +118,7 @@ impl ProviderTokenService {
         let mut bytes = read_provider_config_bytes(config_path)?;
         let document = parse_provider_config_document(&mut bytes)?;
         let issuer = ProviderTokenIssuer::new(issuer_identity, signing_key, ttl_seconds)?;
-        let registry = ProviderRegistry::from_document(document)?;
+        let registry = ProviderRegistry::from_document(document, config_secret_cipher)?;
 
         Ok(Self {
             api_key: SecretBytes::new(api_key),
@@ -224,11 +226,14 @@ struct ProviderRegistry {
 }
 
 impl ProviderRegistry {
-    fn from_document(document: ProviderConfigDocument) -> Result<Self, ProviderServiceError> {
+    fn from_document(
+        document: ProviderConfigDocument,
+        config_secret_cipher: Option<&AtRestCipher>,
+    ) -> Result<Self, ProviderServiceError> {
         let mut providers = HashMap::new();
         for provider in document.providers {
             let key = provider.kind.clone();
-            let built = BuiltInProvider::from_config(provider)?;
+            let built = BuiltInProvider::from_config(provider, config_secret_cipher)?;
             if providers.insert(key, built).is_some() {
                 return Err(ProviderServiceError::DuplicateProvider);
             }
@@ -254,7 +259,11 @@ enum BuiltInProvider {
 }
 
 impl BuiltInProvider {
-    fn from_config(config: ProviderConfig) -> Result<Self, ProviderServiceError> {
+    fn from_config(
+        config: ProviderConfig,
+        config_secret_cipher: Option<&AtRestCipher>,
+    ) -> Result<Self, ProviderServiceError> {
+        let identity_kind = config.kind.clone();
         let ProviderConfig {
             kind,
             integration_subject,
@@ -263,6 +272,26 @@ impl BuiltInProvider {
         } = config;
         let kind = parse_provider_kind(&kind)?;
         let webhook_secret = webhook_secret.ok_or(ProviderServiceError::MissingWebhookSecret)?;
+        // Decrypt any at-rest-encrypted secret before handing it to the adapter.
+        // Legacy plaintext (no `sse1:` prefix) passes through unchanged; a real
+        // `sse1:` ciphertext is decrypted with a loud error on wrong key or
+        // tampering. Encrypted data without a configured key is a loud error.
+        let webhook_secret = match config_secret_cipher {
+            Some(cipher) => {
+                cipher
+                    .decrypt(
+                        &provider_config_secret_identity(&identity_kind, "webhook_secret"),
+                        webhook_secret.expose_secret(),
+                    )?
+                    .secret
+            }
+            None => {
+                if is_ciphertext(webhook_secret.expose_secret()) {
+                    return Err(ProviderServiceError::EncryptedSecretWithoutKey);
+                }
+                webhook_secret
+            }
+        };
         if webhook_secret.expose_secret().trim().is_empty() {
             return Err(ProviderServiceError::EmptyWebhookSecret);
         }
@@ -435,6 +464,16 @@ pub enum ProviderServiceError {
     /// The provider webhook secret was configured as empty text.
     #[error("provider webhook secret must not be empty")]
     EmptyWebhookSecret,
+    /// A provider-config secret is at-rest encrypted but no encryption key was
+    /// configured for this process.
+    #[error(
+        "provider-config secret is at-rest encrypted but no SHARDLINE_CONFIG_SECRET_KEY is configured"
+    )]
+    EncryptedSecretWithoutKey,
+    /// A provider-config at-rest secret could not be decrypted (wrong key or
+    /// tampered data).
+    #[error("provider-config secret could not be decrypted (wrong key or tampered data)")]
+    SecretDecrypt(#[from] shardline_server_core::at_rest::CipherError),
     /// The requested provider was not configured.
     #[error("provider is not configured")]
     UnknownProvider,
@@ -484,6 +523,24 @@ fn visibility(value: &str) -> RepositoryVisibility {
     // Delegate to the canonical case-insensitive `RepositoryVisibility` parser;
     // unknown values still fall back to `Public` (historical lenient behavior).
     RepositoryVisibility::from_str(value).unwrap_or(RepositoryVisibility::Public)
+}
+
+/// Canonical at-rest AAD identity for a provider-config secret field.
+///
+/// The identity binds a ciphertext to the exact provider kind and field it was
+/// created for, so a secret cannot be transplanted between providers (or between
+/// a provider's `api_key` and `webhook_secret`). The scheme is:
+///
+/// ```text
+/// provider:<kind>:<field>
+/// ```
+///
+/// where `<kind>` is the raw `kind` string from the provider config (e.g.
+/// `github`) and `<field>` is one of `webhook_secret`. This same identity is
+/// used both when encrypting on write and when decrypting on read, and must
+/// never change for a field without migrating existing ciphertext.
+fn provider_config_secret_identity(kind: &str, field: &str) -> String {
+    format!("provider:{kind}:{field}")
 }
 
 #[cfg(test)]

@@ -319,6 +319,8 @@ pub(super) fn map_provider_issue_error(error: ProviderServiceError) -> ServerErr
         | other @ ProviderServiceError::DuplicateProvider
         | other @ ProviderServiceError::MissingWebhookSecret
         | other @ ProviderServiceError::EmptyWebhookSecret
+        | other @ ProviderServiceError::EncryptedSecretWithoutKey
+        | other @ ProviderServiceError::SecretDecrypt(_)
         | other @ ProviderServiceError::Token(_)
         | other @ ProviderServiceError::BuiltIn(_) => ServerError::Provider(other),
     }

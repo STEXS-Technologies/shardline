@@ -14,13 +14,14 @@ use tracing;
 
 use super::super::secrets::ensure_secret_size_within_limit;
 use super::defaults::{
-    DEFAULT_MAX_REQUEST_BODY_BYTES, DEFAULT_OCI_REGISTRY_TOKEN_MAX_IN_FLIGHT_REQUESTS,
-    DEFAULT_OCI_REGISTRY_TOKEN_TTL_SECONDS, DEFAULT_OCI_UPLOAD_MAX_ACTIVE_SESSIONS,
-    DEFAULT_OCI_UPLOAD_SESSION_TTL_SECONDS, DEFAULT_PARALLELISM_FALLBACK,
-    HUB_WEBHOOK_SECRET_KEY_BYTES, MAX_DEFAULT_TRANSFER_MAX_IN_FLIGHT_CHUNKS,
-    MAX_DEFAULT_UPLOAD_MAX_IN_FLIGHT_CHUNKS, MAX_ED25519_KEY_BYTES, MAX_METRICS_TOKEN_BYTES,
-    MAX_PROVIDER_API_KEY_BYTES, MAX_TOKEN_SIGNING_KEY_BYTES,
-    MIN_DEFAULT_TRANSFER_MAX_IN_FLIGHT_CHUNKS, MIN_DEFAULT_UPLOAD_MAX_IN_FLIGHT_CHUNKS,
+    CONFIG_SECRET_KEY_BYTES, DEFAULT_MAX_REQUEST_BODY_BYTES,
+    DEFAULT_OCI_REGISTRY_TOKEN_MAX_IN_FLIGHT_REQUESTS, DEFAULT_OCI_REGISTRY_TOKEN_TTL_SECONDS,
+    DEFAULT_OCI_UPLOAD_MAX_ACTIVE_SESSIONS, DEFAULT_OCI_UPLOAD_SESSION_TTL_SECONDS,
+    DEFAULT_PARALLELISM_FALLBACK, HUB_WEBHOOK_SECRET_KEY_BYTES,
+    MAX_DEFAULT_TRANSFER_MAX_IN_FLIGHT_CHUNKS, MAX_DEFAULT_UPLOAD_MAX_IN_FLIGHT_CHUNKS,
+    MAX_ED25519_KEY_BYTES, MAX_METRICS_TOKEN_BYTES, MAX_PROVIDER_API_KEY_BYTES,
+    MAX_TOKEN_SIGNING_KEY_BYTES, MIN_DEFAULT_TRANSFER_MAX_IN_FLIGHT_CHUNKS,
+    MIN_DEFAULT_UPLOAD_MAX_IN_FLIGHT_CHUNKS,
 };
 use super::enums::{
     AuthConfig, AuthProviderKind, CacheConfig, DeploymentMode, ObjectStorageAdapter, OciConfig,
@@ -96,6 +97,7 @@ impl ServerConfig {
             auth: AuthConfig {
                 token_signing_key: None,
                 hub_webhook_secret_key: None,
+                config_secret_key: None,
                 auth_provider: AuthProviderKind::Local,
                 auth_oidc_issuer: None,
                 auth_jwks_url: None,
@@ -498,6 +500,15 @@ impl ServerConfig {
             .map(SecretBytes::expose_secret)
     }
 
+    /// Returns the optional provider-config secret encryption key (AES-256).
+    #[must_use]
+    pub fn config_secret_key(&self) -> Option<&[u8]> {
+        self.auth
+            .config_secret_key
+            .as_ref()
+            .map(SecretBytes::expose_secret)
+    }
+
     /// Returns the optional Ed25519 private key.
     #[must_use]
     pub fn ed25519_private_key(&self) -> Option<&[u8]> {
@@ -669,6 +680,33 @@ impl ServerConfig {
             });
         }
         self.auth.hub_webhook_secret_key = Some(key);
+        Ok(self)
+    }
+
+    /// Enables at-rest encryption for provider-config secrets with the supplied
+    /// 32-byte AES-256 key.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerConfigError::EmptyConfigSecretKey`] when the key is
+    /// empty, or [`ServerConfigError::ConfigSecretKeyLength`] when the key is
+    /// not exactly 32 bytes.
+    pub fn with_config_secret_key(
+        mut self,
+        key: impl Into<SecretBytes>,
+    ) -> Result<Self, ServerConfigError> {
+        let key = key.into();
+        if key.expose_secret().is_empty() {
+            return Err(ServerConfigError::EmptyConfigSecretKey);
+        }
+        let observed = key.len();
+        if observed != usize::try_from(CONFIG_SECRET_KEY_BYTES).unwrap_or(0) {
+            return Err(ServerConfigError::ConfigSecretKeyLength {
+                expected: usize::try_from(CONFIG_SECRET_KEY_BYTES).unwrap_or(0),
+                observed,
+            });
+        }
+        self.auth.config_secret_key = Some(key);
         Ok(self)
     }
 

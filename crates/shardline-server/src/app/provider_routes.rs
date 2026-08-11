@@ -287,6 +287,7 @@ mod tests {
             "test-issuer",
             std::num::NonZeroU64::MIN,
             b"a]32-byte-signing-key-for-testing!",
+            None,
         )
         .expect("failed to create ProviderTokenService from empty config");
 

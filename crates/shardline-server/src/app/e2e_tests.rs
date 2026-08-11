@@ -551,6 +551,7 @@ async fn test_app_with_provider_tokens(frontends: &[ServerFrontend]) -> (Router,
         "test-issuer",
         NonZeroU64::MIN,
         b"a]32-byte-signing-key-for-testing!",
+        None,
     )
     .expect("provider token service");
 

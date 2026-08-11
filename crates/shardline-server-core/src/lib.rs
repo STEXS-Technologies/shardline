@@ -26,6 +26,7 @@ pub mod auth {
     pub use shardline_auth::*;
 }
 
+pub mod at_rest;
 pub mod object_store;
 pub mod ops;
 pub mod protocol_support;
