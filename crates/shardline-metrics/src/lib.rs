@@ -1,5 +1,23 @@
 //! Metrics collection for shardline.
 //!
+//! All server components report through this crate's shared Prometheus
+//! registry. The global instance is created lazily and registered exactly
+//! once, so recording is always safe to call.
+//!
+//! # Quick start
+//!
+//! ```
+//! use shardline_metrics::metrics;
+//!
+//! // The global metrics instance is always available and never fails.
+//! let m = metrics();
+//! m.system.set_uptime(1_700_000_000);
+//!
+//! // Render everything in Prometheus exposition format for scraping.
+//! let text = shardline_metrics::encode_metrics();
+//! assert!(text.contains("shardline_server_uptime_seconds"));
+//! ```
+//!
 //! # Error handling convention
 //!
 //! All metrics use prometheus counters/gauges/histograms registered in a shared

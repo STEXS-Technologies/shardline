@@ -208,6 +208,68 @@ async fn memory_cache_delete_missing_returns_false() {
     assert!(!deleted);
 }
 
+// ── delete() releases an orphaned loading latch ────────────────────────
+//
+// When a loader fails in a path that does not notify (e.g. the caller uses
+// get() + load() + put() and load() errors out), the loading latch inserted
+// during get()'s slow path is left behind. A subsequent get() for the same
+// key would then block until the 30s stall timeout. delete() must clear the
+// latch and wake any waiter so a retry succeeds promptly.
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delete_clears_orphaned_loading_latch_and_wakes_waiter() {
+    use std::sync::Arc;
+    use tokio::sync::Notify;
+
+    let cache = Arc::new(MemoryReconstructionCache::new(
+        NonZeroU64::new(3600).unwrap_or(NonZeroU64::MIN),
+        NonZeroUsize::new(100).unwrap_or(NonZeroUsize::MIN),
+    ));
+    let key = ReconstructionCacheKey::latest("orphan-latch", None);
+
+    // Seed an orphaned loading latch, as left behind by a failed loader.
+    {
+        let mut inner = cache.inner.write().await;
+        inner.loading.insert(key.clone(), Arc::new(Notify::new()));
+    }
+
+    // A get() on the orphaned latch would otherwise wait the full 30s stall.
+    // delete() must clear it and wake the waiter promptly (well under 5s).
+    let cache_get = Arc::clone(&cache);
+    let key_get = key.clone();
+    let waiter = tokio::spawn(async move {
+        tokio::time::timeout(Duration::from_secs(5), cache_get.get(&key_get)).await
+    });
+
+    // Give the waiter time to start blocking on the latch.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let deleted = cache.delete(&key).await.unwrap();
+    // No payload entry was present, so delete reports false — but it must
+    // still have released the orphaned loading latch.
+    assert!(!deleted);
+
+    match waiter.await.unwrap() {
+        Ok(Ok(None)) => {}
+        Ok(Ok(Some(_))) => panic!("no cached value expected after latch release"),
+        Ok(Err(e)) => panic!("get returned unexpected error: {e}"),
+        Err(_) => panic!("waiter stalled on orphaned latch despite delete"),
+    }
+
+    // A post-failure get_or_load retry must succeed without a 30s stall.
+    let retry = tokio::time::timeout(
+        Duration::from_secs(5),
+        cache.get_or_load(&key, || {
+            Box::pin(async { Ok::<_, ReconstructionCacheError>(b"ok".to_vec()) })
+        }),
+    )
+    .await;
+    match retry {
+        Ok(result) => assert_eq!(result.unwrap(), Some(b"ok".to_vec())),
+        Err(_) => panic!("get_or_load stalled after latch cleanup"),
+    }
+}
+
 // ── ready() test ─────────────────────────────────────────────────────
 
 #[tokio::test]

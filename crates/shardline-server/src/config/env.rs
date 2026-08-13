@@ -13,11 +13,12 @@ use super::secrets::{
     load_redis_tls_config_from_env, load_s3_object_store_config_from_env, read_secret_file_bytes,
 };
 use super::{
-    AuthProviderKind, DEFAULT_MAX_REQUEST_BODY_BYTES, DEFAULT_MAX_SHARD_FILES,
-    DEFAULT_MAX_SHARD_RECONSTRUCTION_TERMS, DEFAULT_MAX_SHARD_XORB_CHUNKS, DEFAULT_MAX_SHARD_XORBS,
-    DeploymentMode, MAX_ED25519_KEY_BYTES, MAX_METRICS_TOKEN_BYTES, MAX_TOKEN_SIGNING_KEY_BYTES,
-    ObjectStorageAdapter, ServerConfig, ServerConfigError, ShardMetadataLimits,
-    default_transfer_max_in_flight_chunks, default_upload_max_in_flight_chunks, parse_byte_size,
+    AuthProviderKind, CONFIG_SECRET_KEY_BYTES, DEFAULT_MAX_REQUEST_BODY_BYTES,
+    DEFAULT_MAX_SHARD_FILES, DEFAULT_MAX_SHARD_RECONSTRUCTION_TERMS, DEFAULT_MAX_SHARD_XORB_CHUNKS,
+    DEFAULT_MAX_SHARD_XORBS, DeploymentMode, HUB_WEBHOOK_SECRET_KEY_BYTES, MAX_ED25519_KEY_BYTES,
+    MAX_METRICS_TOKEN_BYTES, MAX_TOKEN_SIGNING_KEY_BYTES, ObjectStorageAdapter, ServerConfig,
+    ServerConfigError, ShardMetadataLimits, default_transfer_max_in_flight_chunks,
+    default_upload_max_in_flight_chunks, parse_byte_size,
 };
 use crate::{
     reconstruction_cache::ReconstructionCacheAdapter, server_frontend::ServerFrontend,
@@ -177,6 +178,7 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
             "SHARDLINE_TOKEN_SIGNING_KEY_FILE",
         ),
         MAX_TOKEN_SIGNING_KEY_BYTES,
+        true,
         ServerConfigError::EmptyTokenSigningKey,
         |env, file_env| ServerConfigError::SecretSourceConflict { env, file_env },
         ServerConfigError::TokenSigningKey,
@@ -189,12 +191,51 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
             observed_bytes: observed,
         },
     )?;
+    let hub_webhook_secret_key = load_secret_from_env_or_file_with_conflict_check(
+        (
+            "SHARDLINE_HUB_WEBHOOK_SECRET_KEY",
+            "SHARDLINE_HUB_WEBHOOK_SECRET_KEY_FILE",
+        ),
+        HUB_WEBHOOK_SECRET_KEY_BYTES,
+        true,
+        ServerConfigError::EmptyHubWebhookSecretKey,
+        |env, file_env| ServerConfigError::SecretSourceConflict { env, file_env },
+        ServerConfigError::HubWebhookSecretKey,
+        |observed, maximum| ServerConfigError::HubWebhookSecretKeyTooLarge {
+            observed_bytes: observed,
+            maximum_bytes: maximum,
+        },
+        |expected, observed| ServerConfigError::HubWebhookSecretKeyLengthMismatch {
+            expected_bytes: expected,
+            observed_bytes: observed,
+        },
+    )?;
+    let config_secret_key = load_secret_from_env_or_file_with_conflict_check(
+        (
+            "SHARDLINE_CONFIG_SECRET_KEY",
+            "SHARDLINE_CONFIG_SECRET_KEY_FILE",
+        ),
+        CONFIG_SECRET_KEY_BYTES,
+        true,
+        ServerConfigError::EmptyConfigSecretKey,
+        |env, file_env| ServerConfigError::SecretSourceConflict { env, file_env },
+        ServerConfigError::ConfigSecretKey,
+        |observed, maximum| ServerConfigError::ConfigSecretKeyTooLarge {
+            observed_bytes: observed,
+            maximum_bytes: maximum,
+        },
+        |expected, observed| ServerConfigError::ConfigSecretKeyLengthMismatch {
+            expected_bytes: expected,
+            observed_bytes: observed,
+        },
+    )?;
     let ed25519_private_key = load_secret_from_env_or_file_with_conflict_check(
         (
             "SHARDLINE_ED25519_PRIVATE_KEY",
             "SHARDLINE_ED25519_PRIVATE_KEY_FILE",
         ),
         MAX_ED25519_KEY_BYTES,
+        false,
         ServerConfigError::EmptyEd25519PrivateKey,
         |env, file_env| ServerConfigError::SecretSourceConflict { env, file_env },
         ServerConfigError::Ed25519PrivateKey,
@@ -213,6 +254,7 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
             "SHARDLINE_ED25519_PUBLIC_KEY_FILE",
         ),
         MAX_ED25519_KEY_BYTES,
+        false,
         ServerConfigError::EmptyEd25519PublicKey,
         |env, file_env| ServerConfigError::SecretSourceConflict { env, file_env },
         ServerConfigError::Ed25519PublicKey,
@@ -229,6 +271,7 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
         Ok(path) => Some(read_secret_file_bytes(
             Path::new(&path),
             MAX_METRICS_TOKEN_BYTES,
+            false,
             ServerConfigError::MetricsToken,
             |observed_bytes, maximum_bytes| ServerConfigError::MetricsTokenTooLarge {
                 observed_bytes,
@@ -283,6 +326,12 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
     }
     if let Some(signing_key) = token_signing_key {
         config = config.with_token_signing_key(signing_key)?;
+    }
+    if let Some(webhook_key) = hub_webhook_secret_key {
+        config = config.with_hub_webhook_secret_key(webhook_key)?;
+    }
+    if let Some(config_key) = config_secret_key {
+        config = config.with_config_secret_key(config_key)?;
     }
 
     // Validate chunk size upper bound (1 GB).
@@ -402,18 +451,14 @@ pub(crate) fn admission_max_weight_from_env() -> NonZeroUsize {
 
 /// Parses the `SHARDLINE_DEPLOYMENT_MODE` environment variable.
 pub(crate) fn deployment_mode_from_env() -> Option<DeploymentMode> {
-    match var("SHARDLINE_DEPLOYMENT_MODE") {
-        Ok(v) if v.eq_ignore_ascii_case("insecure") => Some(DeploymentMode::Insecure),
-        Ok(v) if v.eq_ignore_ascii_case("authenticated") => Some(DeploymentMode::Authenticated),
-        Ok(v) if v.eq_ignore_ascii_case("strict") => Some(DeploymentMode::Strict),
-        Ok(other) => {
-            tracing::warn!(
-                "unknown SHARDLINE_DEPLOYMENT_MODE value '{other}', falling back to default"
-            );
-            None
-        }
-        Err(_) => None,
-    }
+    let value = var("SHARDLINE_DEPLOYMENT_MODE").ok()?;
+    let Some(mode) = DeploymentMode::parse(&value) else {
+        tracing::warn!(
+            "unknown SHARDLINE_DEPLOYMENT_MODE value '{value}', falling back to default"
+        );
+        return None;
+    };
+    Some(mode)
 }
 
 fn parse_server_frontends_env(value: &str) -> Result<Vec<ServerFrontend>, ServerConfigError> {
@@ -441,9 +486,19 @@ fn parse_server_frontends_env(value: &str) -> Result<Vec<ServerFrontend>, Server
 /// Returns `None` when neither env var is set. Returns an error when both
 /// are set (source conflict), the file cannot be read, or the file content
 /// exceeds the size limit.
+///
+/// When `strip_trailing_newline` is `true`, a single trailing line terminator
+/// is stripped from a file-sourced value. Enable it only for fixed-length keys
+/// (e.g. the 32-byte Hub webhook secret); variable-length secrets must pass
+/// `false` so a trailing newline is never silently altered.
+// The shared loader legitimately carries several error-mapping callbacks; the
+// additional `strip_trailing_newline` flag keeps it one argument over clippy's
+// default threshold.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn load_secret_from_env_or_file_with_conflict_check(
     env_names: (&'static str, &'static str),
     maximum_bytes: u64,
+    strip_trailing_newline: bool,
     empty_error: ServerConfigError,
     source_conflict_error: impl Fn(&'static str, &'static str) -> ServerConfigError + Copy,
     read_error: impl Fn(IoError) -> ServerConfigError + Copy,
@@ -471,6 +526,7 @@ pub(super) fn load_secret_from_env_or_file_with_conflict_check(
             let bytes = read_secret_file_bytes(
                 Path::new(&path),
                 maximum_bytes,
+                strip_trailing_newline,
                 read_error,
                 too_large_error,
                 length_mismatch_error,
@@ -844,6 +900,30 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
         }
     }
 
+    // ── deployment_mode_from_env ───────────────────────────────────────────
+
+    #[test]
+    #[serial_test::serial]
+    fn deployment_mode_from_env_is_case_insensitive_and_whitespace_tolerant() {
+        for (value, expected) in [
+            ("insecure", super::DeploymentMode::Insecure),
+            (" AUTHENTICATED ", super::DeploymentMode::Authenticated),
+            ("Strict", super::DeploymentMode::Strict),
+        ] {
+            set_env_var("SHARDLINE_DEPLOYMENT_MODE", value);
+            assert_eq!(super::deployment_mode_from_env(), Some(expected));
+        }
+        remove_env_var("SHARDLINE_DEPLOYMENT_MODE");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn deployment_mode_from_env_falls_back_for_unknown_value() {
+        set_env_var("SHARDLINE_DEPLOYMENT_MODE", "nonsense");
+        assert_eq!(super::deployment_mode_from_env(), None);
+        remove_env_var("SHARDLINE_DEPLOYMENT_MODE");
+    }
+
     // ── parse_server_frontends_env ─────────────────────────────────────────
 
     #[test]
@@ -935,6 +1015,181 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
         remove_env_var("SHARDLINE_METRICS_TOKEN_FILE");
         remove_env_var("SHARDLINE_ROOT_DIR");
         remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+    }
+
+    // ── env-provided secrets are never newline-trimmed ─────────────────────
+
+    #[test]
+    #[serial_test::serial]
+    fn hub_webhook_secret_from_env_is_not_newline_trimmed() {
+        // Trailing-newline stripping applies only to secret *files*. An
+        // env-provided value (32 key bytes + `\n` = 33 bytes) must exceed the
+        // 32-byte bound and be rejected, proving env values are left untouched.
+        // SAFETY: serialized env test
+        set_env_var(
+            "SHARDLINE_HUB_WEBHOOK_SECRET_KEY",
+            "0123456789abcdef0123456789abcdef\n",
+        );
+        remove_env_var("SHARDLINE_HUB_WEBHOOK_SECRET_KEY_FILE");
+        let result = super::load_secret_from_env_or_file_with_conflict_check(
+            (
+                "SHARDLINE_HUB_WEBHOOK_SECRET_KEY",
+                "SHARDLINE_HUB_WEBHOOK_SECRET_KEY_FILE",
+            ),
+            super::HUB_WEBHOOK_SECRET_KEY_BYTES,
+            true,
+            super::ServerConfigError::EmptyHubWebhookSecretKey,
+            |env, file_env| super::ServerConfigError::SecretSourceConflict { env, file_env },
+            super::ServerConfigError::HubWebhookSecretKey,
+            |observed, maximum| super::ServerConfigError::HubWebhookSecretKeyTooLarge {
+                observed_bytes: observed,
+                maximum_bytes: maximum,
+            },
+            |expected, observed| super::ServerConfigError::HubWebhookSecretKeyLengthMismatch {
+                expected_bytes: expected,
+                observed_bytes: observed,
+            },
+        );
+        remove_env_var("SHARDLINE_HUB_WEBHOOK_SECRET_KEY");
+        assert!(result.is_err());
+    }
+
+    // ── provider-config secret key env handling ────────────────────────────
+
+    #[test]
+    #[serial_test::serial]
+    fn config_secret_from_env_is_not_newline_trimmed() {
+        // Trailing-newline stripping applies only to secret *files*. An
+        // env-provided value (32 key bytes + `\n` = 33 bytes) must exceed the
+        // 32-byte bound and be rejected, proving env values are left untouched.
+        // SAFETY: serialized env test
+        set_env_var(
+            "SHARDLINE_CONFIG_SECRET_KEY",
+            "0123456789abcdef0123456789abcdef\n",
+        );
+        remove_env_var("SHARDLINE_CONFIG_SECRET_KEY_FILE");
+        let result = super::load_secret_from_env_or_file_with_conflict_check(
+            (
+                "SHARDLINE_CONFIG_SECRET_KEY",
+                "SHARDLINE_CONFIG_SECRET_KEY_FILE",
+            ),
+            super::CONFIG_SECRET_KEY_BYTES,
+            true,
+            super::ServerConfigError::EmptyConfigSecretKey,
+            |env, file_env| super::ServerConfigError::SecretSourceConflict { env, file_env },
+            super::ServerConfigError::ConfigSecretKey,
+            |observed, maximum| super::ServerConfigError::ConfigSecretKeyTooLarge {
+                observed_bytes: observed,
+                maximum_bytes: maximum,
+            },
+            |expected, observed| super::ServerConfigError::ConfigSecretKeyLengthMismatch {
+                expected_bytes: expected,
+                observed_bytes: observed,
+            },
+        );
+        remove_env_var("SHARDLINE_CONFIG_SECRET_KEY");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn config_secret_key_from_env_is_applied_to_config() {
+        // A valid 32-byte key configured via the environment must flow through
+        // the full loader into `ServerConfig::with_config_secret_key`.
+        // SAFETY: serialized env test
+        set_env_var(
+            "SHARDLINE_CONFIG_SECRET_KEY",
+            "0123456789abcdef0123456789abcdef",
+        );
+        remove_env_var("SHARDLINE_CONFIG_SECRET_KEY_FILE");
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+
+        let result = super::load_server_config_from_env();
+        remove_env_var("SHARDLINE_CONFIG_SECRET_KEY");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+
+        let config = result.expect("config loads with a config secret key");
+        assert_eq!(
+            config.config_secret_key(),
+            Some(b"0123456789abcdef0123456789abcdef".as_slice())
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn config_secret_key_from_file_is_applied_to_config() {
+        use std::io::Write;
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        tmp.write_all(b"0123456789abcdef0123456789abcdef").unwrap();
+        tmp.flush().unwrap();
+
+        // SAFETY: serialized env test
+        set_env_var(
+            "SHARDLINE_CONFIG_SECRET_KEY_FILE",
+            tmp.path().to_str().unwrap(),
+        );
+        remove_env_var("SHARDLINE_CONFIG_SECRET_KEY");
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+
+        let result = super::load_server_config_from_env();
+        remove_env_var("SHARDLINE_CONFIG_SECRET_KEY_FILE");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+
+        let config = result.expect("config loads with a config secret key file");
+        assert_eq!(
+            config.config_secret_key(),
+            Some(b"0123456789abcdef0123456789abcdef".as_slice())
+        );
+    }
+
+    #[test]
+    fn server_config_with_config_secret_key_rejects_empty() {
+        let config = test_server_config();
+        let result = config.with_config_secret_key(Vec::new());
+        assert!(matches!(
+            result,
+            Err(super::ServerConfigError::EmptyConfigSecretKey)
+        ));
+    }
+
+    #[test]
+    fn server_config_with_config_secret_key_rejects_wrong_length() {
+        let config = test_server_config();
+        let result = config.with_config_secret_key(b"too-short".to_vec());
+        assert!(matches!(
+            result,
+            Err(super::ServerConfigError::ConfigSecretKeyLength {
+                expected,
+                observed,
+            }) if expected == usize::try_from(super::CONFIG_SECRET_KEY_BYTES).unwrap_or(0)
+                && observed == 9
+        ));
+    }
+
+    #[test]
+    fn server_config_with_config_secret_key_accepts_32_bytes() {
+        let config = test_server_config();
+        let config = config
+            .with_config_secret_key(b"0123456789abcdef0123456789abcdef".to_vec())
+            .expect("32-byte key is accepted");
+        assert_eq!(
+            config.config_secret_key(),
+            Some(b"0123456789abcdef0123456789abcdef".as_slice())
+        );
+    }
+
+    fn test_server_config() -> super::ServerConfig {
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+        super::ServerConfig::new(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+            "http://127.0.0.1:8080".to_owned(),
+            std::path::PathBuf::from("/tmp/shardline"),
+            std::num::NonZeroUsize::MIN,
+        )
     }
 
     // ── load_non_zero_usize_env ────────────────────────────────────────────

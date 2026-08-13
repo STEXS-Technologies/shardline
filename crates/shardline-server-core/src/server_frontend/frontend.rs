@@ -18,6 +18,17 @@ pub enum ServerFrontend {
 impl ServerFrontend {
     /// Parses a frontend token.
     ///
+    /// # Examples
+    ///
+    /// ```
+    /// use shardline_server_core::server_frontend::ServerFrontend;
+    ///
+    /// let frontend = ServerFrontend::parse("lfs")?;
+    /// assert_eq!(frontend.as_str(), "lfs");
+    /// assert!(ServerFrontend::parse("unknown").is_err());
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    ///
     /// # Errors
     ///
     /// Returns [`ServerFrontendParseError`] when the token is not a supported

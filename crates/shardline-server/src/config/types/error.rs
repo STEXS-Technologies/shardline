@@ -230,6 +230,70 @@ pub enum ServerConfigError {
     /// The token signing key was empty.
     #[error("token signing key must not be empty")]
     EmptyTokenSigningKey,
+    /// The Hub webhook secret key file could not be read.
+    #[error("hub webhook secret key could not be read")]
+    HubWebhookSecretKey(#[source] IoError),
+    /// The Hub webhook secret key exceeded the bounded parser ceiling.
+    #[error("hub webhook secret key exceeded the bounded parser ceiling")]
+    HubWebhookSecretKeyTooLarge {
+        /// Observed secret file length in bytes.
+        observed_bytes: u64,
+        /// Maximum accepted secret file length in bytes.
+        maximum_bytes: u64,
+    },
+    /// The Hub webhook secret key changed after validation and was rejected.
+    #[error("hub webhook secret key changed during bounded read")]
+    HubWebhookSecretKeyLengthMismatch {
+        /// Validated secret file length in bytes.
+        expected_bytes: u64,
+        /// Observed secret file length in bytes after bounded read.
+        observed_bytes: u64,
+    },
+    /// The Hub webhook secret key was empty.
+    #[error("hub webhook secret key must not be empty")]
+    EmptyHubWebhookSecretKey,
+    /// The Hub webhook secret key is not a valid AES-256 key length.
+    #[error(
+        "hub webhook secret key must be exactly {expected} bytes (a trailing newline is stripped automatically); got {observed}"
+    )]
+    HubWebhookSecretKeyLength {
+        /// Required key length in bytes.
+        expected: usize,
+        /// Observed key length in bytes.
+        observed: usize,
+    },
+    /// The provider-config secret key file could not be read.
+    #[error("provider-config secret key could not be read")]
+    ConfigSecretKey(#[source] IoError),
+    /// The provider-config secret key exceeded the bounded parser ceiling.
+    #[error("provider-config secret key exceeded the bounded parser ceiling")]
+    ConfigSecretKeyTooLarge {
+        /// Observed secret file length in bytes.
+        observed_bytes: u64,
+        /// Maximum accepted secret file length in bytes.
+        maximum_bytes: u64,
+    },
+    /// The provider-config secret key changed after validation and was rejected.
+    #[error("provider-config secret key changed during bounded read")]
+    ConfigSecretKeyLengthMismatch {
+        /// Validated secret file length in bytes.
+        expected_bytes: u64,
+        /// Observed secret file length in bytes after bounded read.
+        observed_bytes: u64,
+    },
+    /// The provider-config secret key was empty.
+    #[error("provider-config secret key must not be empty")]
+    EmptyConfigSecretKey,
+    /// The provider-config secret key is not a valid AES-256 key length.
+    #[error(
+        "provider-config secret key must be exactly {expected} bytes (a trailing newline is stripped automatically); got {observed}"
+    )]
+    ConfigSecretKeyLength {
+        /// Required key length in bytes.
+        expected: usize,
+        /// Observed key length in bytes.
+        observed: usize,
+    },
     /// The metrics token file could not be read.
     #[error("metrics token could not be read")]
     MetricsToken(#[source] IoError),

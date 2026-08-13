@@ -25,9 +25,38 @@ pub enum ParseStoredFileRecordError {
 
 /// Parses stored file record bytes, rejecting oversized metadata before JSON parsing.
 ///
+/// # Examples
+///
+/// ```
+/// use shardline_server_core::parse_stored_file_record_bytes;
+///
+/// let record = br#"{
+///     "file_id": "assets/logo.png",
+///     "content_hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+///     "total_bytes": 1024,
+///     "chunk_size": 1024,
+///     "storage_repr": "fixed_chunk_v1",
+///     "chunks": [{
+///         "hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+///         "offset": 0,
+///         "length": 1024,
+///         "range_start": 0,
+///         "range_end": 1,
+///         "packed_start": 0,
+///         "packed_end": 1
+///     }]
+/// }"#;
+///
+/// let parsed = parse_stored_file_record_bytes(record)?;
+/// assert_eq!(parsed.file_id, "assets/logo.png");
+/// assert_eq!(parsed.total_bytes, 1024);
+/// assert_eq!(parsed.chunks.len(), 1);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+///
 /// # Errors
 ///
-/// Returns an error if the metadata exceeds [`MAX_LOCAL_RECORD_METADATA_BYTES`] or
+/// Returns an error if the metadata exceeds [`crate::MAX_LOCAL_RECORD_METADATA_BYTES`] or
 /// if JSON deserialization fails.
 pub fn parse_stored_file_record_bytes(
     bytes: &[u8],

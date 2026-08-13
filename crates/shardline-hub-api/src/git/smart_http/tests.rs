@@ -7,7 +7,7 @@
 )]
 
 use super::pack_parse::decompress_zlib;
-use super::receive_pack::{build_report_response, parse_receive_pack_request};
+use super::receive_pack::{build_report_response, find_lfs_blob, parse_receive_pack_request};
 use super::ref_advertisement::{
     GitRef, authorize_read, authorize_write, collect_refs, is_valid_refname, resolve_repo_id,
 };
@@ -55,6 +55,114 @@ fn lfs_pointer_blob_format() {
     assert!(content.starts_with("version https://git-lfs.github.com/spec/v1\n"));
     assert!(content.contains("oid sha256:abc123\n"));
     assert!(content.contains("size 4096\n"));
+}
+
+// --- find_lfs_blob (F-deep-2.3) ---
+
+/// Builds the sha256→object content index exactly as the production caller in
+/// `receive_pack.rs` does, so tests exercise the same O(1) fallback lookup.
+fn build_content_index(objects: &[GitObject]) -> std::collections::HashMap<String, &GitObject> {
+    use sha2::Digest;
+    let mut index = std::collections::HashMap::new();
+    for obj in objects {
+        if obj.object_type == ObjectType::Blob {
+            index.insert(hex::encode(sha2::Sha256::digest(&obj.data)), obj);
+        }
+    }
+    index
+}
+
+#[test]
+fn find_lfs_blob_non_canonical_pointer_finds_content() {
+    // A non-canonical pointer blob (e.g. CRLF line endings) whose git SHA1
+    // differs from the canonical pointer must still resolve the real content
+    // blob by its sha256 content (the LFS OID) — no silent drop.
+    use sha2::Digest;
+    let content = b"actual file bytes\n";
+    let oid = hex::encode(sha2::Sha256::digest(content));
+    let file = HubFileEntry {
+        path: "big.bin".to_owned(),
+        size: content.len() as u64,
+        sha: oid,
+        is_lfs: true,
+    };
+    // A blob with the actual content.
+    let content_obj = crate::git::pack::create_blob_object(content);
+    // A non-canonical pointer blob (CRLF line endings instead of LF).
+    let noncanonical_pointer = crate::git::pack::create_blob_object(
+        b"version https://git-lfs.github.com/spec/v1\r\noid sha256:<oid>\r\nsize <n>\r\n",
+    );
+    let objects = vec![content_obj, noncanonical_pointer];
+    let mut sha_to_obj: std::collections::HashMap<[u8; 20], &GitObject> =
+        std::collections::HashMap::new();
+    for obj in &objects {
+        sha_to_obj.insert(obj.sha1(), obj);
+    }
+    let content_by_sha256 = build_content_index(&objects);
+
+    let found = find_lfs_blob(&file, &sha_to_obj, &content_by_sha256);
+    assert!(
+        found.is_some(),
+        "non-canonical pointer must still find the content blob"
+    );
+    assert_eq!(
+        found.unwrap().data,
+        content,
+        "the resolved blob should be the real content, not the pointer text"
+    );
+}
+
+#[test]
+fn find_lfs_blob_canonical_pointer_matches_by_sha1() {
+    use sha2::Digest;
+    let content = b"canonical content";
+    let oid = hex::encode(sha2::Sha256::digest(content));
+    let file = HubFileEntry {
+        path: "f.bin".to_owned(),
+        size: content.len() as u64,
+        sha: oid,
+        is_lfs: true,
+    };
+    // Canonical pointer blob (matches `build_lfs_pointer_blob` output).
+    let pointer = build_lfs_pointer_blob(&file.sha, file.size);
+    let content_obj = crate::git::pack::create_blob_object(content);
+    let objects = vec![pointer.clone(), content_obj];
+    let mut sha_to_obj: std::collections::HashMap<[u8; 20], &GitObject> =
+        std::collections::HashMap::new();
+    for obj in &objects {
+        sha_to_obj.insert(obj.sha1(), obj);
+    }
+    let content_by_sha256 = build_content_index(&objects);
+    let found = find_lfs_blob(&file, &sha_to_obj, &content_by_sha256);
+    // The canonical pointer is matched by its git SHA1 fast path.
+    assert_eq!(found.unwrap().sha1(), pointer.sha1());
+}
+
+#[test]
+fn find_lfs_blob_none_when_no_matching_object() {
+    use sha2::Digest;
+    let content = b"something";
+    let oid = hex::encode(sha2::Sha256::digest(content));
+    let file = HubFileEntry {
+        path: "missing.bin".to_owned(),
+        size: content.len() as u64,
+        sha: oid,
+        is_lfs: true,
+    };
+    // A pack with an unrelated blob only; neither the canonical pointer nor a
+    // content object with the matching sha256 is present.
+    let unrelated = crate::git::pack::create_blob_object(b"unrelated");
+    let objects = vec![unrelated];
+    let mut sha_to_obj: std::collections::HashMap<[u8; 20], &GitObject> =
+        std::collections::HashMap::new();
+    for obj in &objects {
+        sha_to_obj.insert(obj.sha1(), obj);
+    }
+    let content_by_sha256 = build_content_index(&objects);
+    assert!(
+        find_lfs_blob(&file, &sha_to_obj, &content_by_sha256).is_none(),
+        "no matching object should yield None (the push is then failed)"
+    );
 }
 
 #[test]
@@ -494,6 +602,7 @@ fn make_hub_state() -> (tempfile::TempDir, HubState) {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     (tmp, state)
 }
@@ -895,6 +1004,32 @@ fn parse_pack_data_unsupported_version() {
     assert!(objects.is_empty());
 }
 
+// --- parse_pack_data truncated pack (F-deep-2.5) ---
+
+#[test]
+fn parse_pack_data_truncated_claims_more_objects_errors() {
+    // A header claiming more objects than the stream actually contains must
+    // error instead of returning a partial object list.
+    use flate2::write::ZlibEncoder;
+    use std::io::Write;
+    let mut enc = ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    enc.write_all(b"blob content").unwrap();
+    let compressed = enc.finish().unwrap();
+
+    let mut pack = b"PACK".to_vec();
+    pack.extend_from_slice(&2u32.to_be_bytes()); // version 2
+    pack.extend_from_slice(&2u32.to_be_bytes()); // claims 2 objects
+    // Only 1 object is actually present in the stream.
+    pack.push((3 << 4) | (compressed.len() as u8 & 0x0f)); // blob, size low nibble
+    pack.extend_from_slice(&compressed);
+
+    let result = parse_pack_data(&pack);
+    assert!(
+        result.is_err(),
+        "truncated pack must error instead of returning partial objects, got {result:?}"
+    );
+}
+
 // --- authorize_read / authorize_write tests (no auth configured) ---
 
 #[test]
@@ -976,8 +1111,10 @@ fn parse_pack_data_roundtrip_commit_and_tree() {
 
 #[test]
 fn parse_pack_data_unknown_object_type_breaks() {
-    // A pack with an object of type 5 (reserved, not 1..4 or 6..7)
-    // should stop parsing and return whatever was parsed (empty).
+    // A pack with an object of type 5 (reserved, not 1..4 or 6..7) cannot be
+    // parsed, and since the header claims an object that is never produced,
+    // the truncated/malformed pack must error instead of returning a partial
+    // (empty) object list.
     let mut data = b"PACK".to_vec();
     data.extend_from_slice(&2u32.to_be_bytes()); // version 2
     data.extend_from_slice(&1u32.to_be_bytes()); // 1 object
@@ -985,8 +1122,11 @@ fn parse_pack_data_unknown_object_type_breaks() {
     // type 5 = (5 << 4) | 0 = 0x50
     data.push(0x50);
     // No compressed data follows, parser will break on zlib decompression
-    let objects = parse_pack_data(&data).unwrap();
-    assert!(objects.is_empty());
+    let result = parse_pack_data(&data);
+    assert!(
+        result.is_err(),
+        "pack claiming an object that cannot be parsed must error, got {result:?}"
+    );
 }
 
 #[test]
@@ -1273,6 +1413,7 @@ fn authorize_read_with_auth_rejects_missing_token() {
         object_store: hub_state.object_store,
         auth: Some(crate::auth::HubAuth::new(Box::new(MockAuth))),
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let headers = axum::http::HeaderMap::new();
     let result = authorize_read(&state, &headers);
@@ -1417,6 +1558,7 @@ fn authorize_write_with_auth_rejects_missing_token() {
         object_store: hub_state.object_store,
         auth: Some(crate::auth::HubAuth::new(Box::new(MockAuth))),
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let headers = axum::http::HeaderMap::new();
     let result = authorize_write(&state, &headers);
@@ -1522,11 +1664,51 @@ fn decompress_zlib_garbage_returns_error() {
 }
 
 #[test]
-fn decompress_zlib_empty_input_returns_empty() {
-    // Empty input produces an empty output with 0 bytes consumed.
-    let result = decompress_zlib(b"").unwrap();
-    assert!(result.0.is_empty());
-    assert_eq!(result.1, 0);
+fn decompress_zlib_empty_input_is_truncated() {
+    // Empty input never reaches `StreamEnd`, so it is a truncated zlib stream
+    // and must be rejected (it would otherwise return partial bytes as a valid
+    // object).
+    let result = decompress_zlib(b"");
+    assert!(
+        result.is_err(),
+        "empty zlib input should be treated as truncated: {result:?}"
+    );
+}
+
+// --- decompress_zlib truncation (F-deep-2.4) ---
+
+#[test]
+fn decompress_zlib_truncated_stream_errors() {
+    // A valid zlib stream that is cut short must error instead of returning
+    // partial decompressed bytes as a complete object.
+    use flate2::write::ZlibEncoder;
+    use std::io::Write;
+    let mut enc = ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    enc.write_all(b"hello world, this is a fairly long payload to truncate")
+        .unwrap();
+    let full = enc.finish().unwrap();
+    assert!(full.len() > 4, "compressed payload should be non-trivial");
+
+    // Truncate several bytes off the end so the stream cannot reach StreamEnd.
+    let truncated = &full[..full.len() - 4];
+    let result = decompress_zlib(truncated);
+    assert!(
+        result.is_err(),
+        "truncated zlib stream must error, got {result:?}"
+    );
+}
+
+#[test]
+fn decompress_zlib_full_stream_ok() {
+    // A complete zlib stream still decompresses successfully.
+    use flate2::write::ZlibEncoder;
+    use std::io::Write;
+    let mut enc = ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    let payload = b"complete stream payload";
+    enc.write_all(payload).unwrap();
+    let full = enc.finish().unwrap();
+    let (decompressed, _used) = decompress_zlib(&full).unwrap();
+    assert_eq!(decompressed, payload);
 }
 
 // --- parse_pack_data with invalid offset ---

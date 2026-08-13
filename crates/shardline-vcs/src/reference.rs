@@ -5,6 +5,10 @@ use crate::ProviderKind;
 const MAX_REFERENCE_COMPONENT_BYTES: usize = 512;
 
 /// Repository identity within a provider.
+///
+/// Represents the `owner/name` pair that scopes a repository on a Git hosting
+/// provider. Shardline validates this identity before persisting it or
+/// embedding it into signed tokens.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RepositoryRef {
     provider: ProviderKind,
@@ -14,6 +18,18 @@ pub struct RepositoryRef {
 
 impl RepositoryRef {
     /// Creates a repository reference.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use shardline_vcs::{ProviderKind, RepositoryRef};
+    ///
+    /// let repository = RepositoryRef::new(ProviderKind::GitHub, "acme", "assets")?;
+    /// assert_eq!(repository.provider(), ProviderKind::GitHub);
+    /// assert_eq!(repository.owner(), "acme");
+    /// assert_eq!(repository.name(), "assets");
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     ///
     /// # Errors
     ///
@@ -55,6 +71,17 @@ pub struct RevisionRef(String);
 
 impl RevisionRef {
     /// Creates a revision reference.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use shardline_vcs::RevisionRef;
+    ///
+    /// let revision = RevisionRef::new("refs/heads/main")?;
+    /// assert_eq!(revision.as_str(), "refs/heads/main");
+    /// assert!(RevisionRef::new("bad\nrevision").is_err());
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     ///
     /// # Errors
     ///

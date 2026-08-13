@@ -30,6 +30,15 @@ pub enum TransferAdapter {
 
 impl TransferAdapter {
     /// Returns the wire-protocol string for this transfer adapter.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use shardline_protocol_adapters::TransferAdapter;
+    ///
+    /// assert_eq!(TransferAdapter::Basic.as_str(), "basic");
+    /// assert_eq!(TransferAdapter::Xet.as_str(), "xet");
+    /// ```
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -56,6 +65,14 @@ pub enum LfsOperation {
 
 impl LfsOperation {
     /// Returns the wire-protocol string for this operation.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use shardline_protocol_adapters::LfsOperation;
+    ///
+    /// assert_eq!(LfsOperation::Upload.as_str(), "upload");
+    /// ```
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -68,6 +85,17 @@ impl LfsOperation {
 impl std::str::FromStr for LfsOperation {
     type Err = ();
 
+    /// Parses a wire-protocol operation name.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use shardline_protocol_adapters::LfsOperation;
+    ///
+    /// assert_eq!("download".parse::<LfsOperation>()?, LfsOperation::Download);
+    /// assert!("sidecar".parse::<LfsOperation>().is_err());
+    /// # Ok::<(), ()>(())
+    /// ```
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "download" => Ok(Self::Download),
@@ -160,6 +188,23 @@ pub struct LfsObjectError {
 }
 
 /// Returns the storage object key for an LFS object.
+///
+/// Maps an LFS object ID to its content-addressed location under the global or
+/// repository-scoped namespace.
+///
+/// # Examples
+///
+/// ```
+/// use shardline_protocol_adapters::lfs_object_key;
+///
+/// let oid = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+/// let key = lfs_object_key(oid, None)?;
+/// assert!(key.as_str().starts_with("protocols/lfs/global/objects/"));
+/// assert!(key.as_str().ends_with(oid));
+///
+/// assert!(lfs_object_key("not-a-valid-sha256", None).is_err());
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 ///
 /// # Errors
 ///

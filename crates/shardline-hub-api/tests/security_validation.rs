@@ -48,8 +48,12 @@ fn validate_jwt_signature_checked_oidc() {
         "OIDC provider validates issuer claim"
     );
     assert!(
-        oidc_source.contains("if alg_str == \"none\""),
-        "OIDC provider rejects alg:none attack"
+        oidc_source.contains("JwtAlgorithm::from_str"),
+        "OIDC provider parses alg via typed JwtAlgorithm"
+    );
+    assert!(
+        oidc_source.contains("alg.is_none()"),
+        "OIDC provider rejects alg:none attack via typed guard"
     );
 }
 
@@ -80,15 +84,21 @@ fn validate_jwt_signature_checked_jwks() {
         "JWKS provider validates issuer claim"
     );
     assert!(
-        jwks_source.contains("if alg_str == \"none\""),
-        "JWKS provider rejects alg:none attack"
+        jwks_source.contains("JwtAlgorithm::from_str"),
+        "JWKS provider parses alg via typed JwtAlgorithm"
+    );
+    assert!(
+        jwks_source.contains("alg.is_none()"),
+        "JWKS provider rejects alg:none attack via typed guard"
     );
 }
 
 /// Verifies alg:none attack is now blocked.
 ///
-/// **[FIXED]**: Both providers now check `if alg_str == "none"` and return
-/// `AuthError::InvalidToken`.
+/// **[HARDENED]**: Both providers now parse `alg` via a typed `JwtAlgorithm`
+/// and reject `none` (`alg.is_none()`) and any symmetric algorithm
+/// (`alg.is_symmetric()`, alg-confusion guard) with `AuthError::InvalidToken`
+/// / `ProviderError` before key matching.
 #[test]
 fn validate_jwt_alg_none_attack_blocked() {
     let oidc_source = include_str!("../../shardline-server/src/oidc_provider.rs");
@@ -100,8 +110,16 @@ fn validate_jwt_alg_none_attack_blocked() {
         .unwrap();
     let oidc_fn = &oidc_source[oidc_verify_start..oidc_verify_end];
     assert!(
-        oidc_fn.contains("if alg_str == \"none\""),
-        "OIDC verify_jwt_claims now rejects alg:none"
+        oidc_fn.contains("JwtAlgorithm::from_str"),
+        "OIDC verify_jwt_claims parses alg via typed JwtAlgorithm"
+    );
+    assert!(
+        oidc_fn.contains("alg.is_none()"),
+        "OIDC verify_jwt_claims now rejects alg:none via typed guard"
+    );
+    assert!(
+        oidc_fn.contains("alg.is_symmetric()"),
+        "OIDC verify_jwt_claims blocks symmetric alg-confusion"
     );
 
     let jwks_verify_start = jwks_source.find("fn verify_jwt_claims").unwrap();
@@ -110,8 +128,16 @@ fn validate_jwt_alg_none_attack_blocked() {
         .unwrap();
     let jwks_fn = &jwks_source[jwks_verify_start..jwks_verify_end];
     assert!(
-        jwks_fn.contains("if alg_str == \"none\""),
-        "JWKS verify_jwt_claims now rejects alg:none"
+        jwks_fn.contains("JwtAlgorithm::from_str"),
+        "JWKS verify_jwt_claims parses alg via typed JwtAlgorithm"
+    );
+    assert!(
+        jwks_fn.contains("alg.is_none()"),
+        "JWKS verify_jwt_claims now rejects alg:none via typed guard"
+    );
+    assert!(
+        jwks_fn.contains("alg.is_asymmetric()"),
+        "JWKS verify_jwt_claims blocks symmetric alg-confusion via the asymmetric guard"
     );
 }
 
@@ -180,7 +206,7 @@ fn validate_webhook_url_validation_exists() {
         "validate_webhook_url function exists"
     );
     assert!(
-        routes_source.contains("scheme != \"http\" && scheme != \"https\""),
+        routes_source.contains("WebhookScheme::from_str(scheme).is_err()"),
         "validate_webhook_url checks scheme is http or https"
     );
     assert!(
@@ -550,6 +576,7 @@ async fn validate_commit_body_bounded_by_router() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
 
     let store = state.store.clone();

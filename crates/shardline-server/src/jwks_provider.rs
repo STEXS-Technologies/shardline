@@ -8,6 +8,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use crate::jwt_algorithm::JwtAlgorithm;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode};
 use reqwest::{Client, StatusCode};
 use serde::Deserialize;
@@ -257,8 +258,22 @@ impl JwksProvider {
             .and_then(|v| v.as_str())
             .ok_or_else(|| AuthError::ProviderError("missing alg in JWT header".to_owned()))?;
 
-        if alg_str == "none" {
-            return Err(AuthError::InvalidToken);
+        let alg = JwtAlgorithm::from_str(alg_str)
+            .map_err(|_e| AuthError::ProviderError(format!("unsupported algorithm: {alg_str}")))?;
+
+        // Alg-confusion guard: never accept `none` (unauthenticated) or a
+        // symmetric HMAC variant when verifying against asymmetric JWKS keys.
+        if !alg.is_asymmetric() {
+            // `none` is rejected as a distinct, unauthenticated case.
+            if alg.is_none() {
+                return Err(AuthError::InvalidToken);
+            }
+            // Any other non-asymmetric algorithm (e.g. symmetric HMAC) is
+            // rejected the same way: it cannot be verified against JWKS keys.
+            return Err(AuthError::ProviderError(format!(
+                "unsupported or insecure algorithm: {}",
+                alg.as_str()
+            )));
         }
 
         let algorithm = Algorithm::from_str(alg_str)
@@ -405,12 +420,20 @@ fn base64_decode_url(input: &str) -> Result<Vec<u8>, base64::DecodeError> {
 /// suitable for JWKS-based token verification.
 #[cfg(test)]
 fn validate_algorithm(alg_str: &str) -> Result<(), String> {
-    match alg_str {
-        "RS256" | "RS384" | "RS512" | "ES256" | "ES384" | "ES512" => Ok(()),
-        "HS256" | "HS384" | "HS512" | "EdDSA" | "none" => {
-            Err(format!("unsupported or insecure algorithm: {alg_str}"))
-        }
-        _ => Err(format!("unsupported algorithm: {alg_str}")),
+    let alg = JwtAlgorithm::from_str(alg_str)
+        .map_err(|()| format!("unsupported algorithm: {alg_str}"))?;
+    match alg {
+        JwtAlgorithm::Rs256
+        | JwtAlgorithm::Rs384
+        | JwtAlgorithm::Rs512
+        | JwtAlgorithm::Es256
+        | JwtAlgorithm::Es384
+        | JwtAlgorithm::Es512 => Ok(()),
+        JwtAlgorithm::Hs256
+        | JwtAlgorithm::Hs384
+        | JwtAlgorithm::Hs512
+        | JwtAlgorithm::EdDsa
+        | JwtAlgorithm::None => Err(format!("unsupported or insecure algorithm: {alg_str}")),
     }
 }
 
@@ -1110,8 +1133,6 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
 
     #[test]
     fn mint_token_returns_error() {
-        use shardline_protocol::{RepositoryProvider, RepositoryScope, TokenClaims, TokenScope};
-
         let provider = make_provider(None);
         let repo = RepositoryScope::new(RepositoryProvider::Generic, "owner", "repo", Some("main"))
             .expect("valid repo scope");

@@ -7,6 +7,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+use crate::jwt_algorithm::JwtAlgorithm;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode};
 use reqwest::Client;
 use serde::Deserialize;
@@ -235,13 +236,29 @@ impl OidcProvider {
             .and_then(|v| v.as_str())
             .ok_or_else(|| AuthError::ProviderError("missing alg in JWT header".to_owned()))?;
 
-        if alg_str == "none" {
-            return Err(AuthError::InvalidToken);
+        let alg = JwtAlgorithm::from_str(alg_str)
+            .map_err(|_e| AuthError::ProviderError(format!("unsupported algorithm: {alg_str}")))?;
+
+        // Alg-confusion guard: never accept `none` (unauthenticated) or a
+        // symmetric HMAC variant when verifying against asymmetric JWKS keys.
+        if !alg.is_asymmetric() {
+            if alg.is_none() {
+                return Err(AuthError::InvalidToken);
+            }
+            if alg.is_symmetric() {
+                return Err(AuthError::ProviderError(format!(
+                    "unsupported or insecure algorithm: {}",
+                    alg.as_str()
+                )));
+            }
+            return Err(AuthError::ProviderError(format!(
+                "unsupported or insecure algorithm: {}",
+                alg.as_str()
+            )));
         }
 
         let algorithm = Algorithm::from_str(alg_str)
             .map_err(|_e| AuthError::ProviderError(format!("unsupported algorithm: {alg_str}")))?;
-
         let jwk = keys
             .iter()
             .find(|k| k.kid == kid && is_algorithm_compatible(&k.key_type, algorithm))
@@ -1065,8 +1082,6 @@ mod tests {
 
     #[test]
     fn mint_token_returns_error() {
-        use shardline_protocol::{RepositoryProvider, RepositoryScope, TokenClaims, TokenScope};
-
         let provider = make_provider_no_audience(None);
         let repo = RepositoryScope::new(RepositoryProvider::Generic, "owner", "repo", Some("main"))
             .expect("valid repo scope");

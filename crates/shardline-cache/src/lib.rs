@@ -8,7 +8,11 @@
 //! for single-process deployments; the Redis adapter lets multiple server
 //! replicas share cached reconstruction payloads.
 //!
-//! # Example
+//! # Quick start
+//!
+//! Build a cache key for a file reconstruction response — either the latest
+//! visible revision or one immutable version — with an optional repository
+//! scope:
 //!
 //! ```
 //! use shardline_cache::ReconstructionCacheKey;
@@ -21,9 +25,15 @@
 //!
 //! assert_eq!(latest.content_hash(), None);
 //! assert_eq!(immutable.content_hash(), Some("content-456"));
-//! assert_eq!(latest.repository_scope().unwrap().provider(), "github");
+//! if let Some(scope_key) = latest.repository_scope() {
+//!     assert_eq!(scope_key.provider(), "github");
+//!     assert_eq!(scope_key.owner(), "acme");
+//! }
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
+//!
+//! Use the keys with [`MemoryReconstructionCache`] (single-process) or
+//! [`RedisReconstructionCache`] (shared across server replicas).
 
 mod disabled;
 mod error;

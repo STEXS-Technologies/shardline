@@ -79,6 +79,7 @@ fn make_test_state() -> (tempfile::TempDir, HubState) {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     (td, state)
 }
@@ -962,10 +963,11 @@ fn make_store_with_revision(
 
 /// Pre-populate ObjectStore with content for a given SHA.
 fn store_test_content(td: &tempfile::TempDir, sha: &str, content: &[u8]) {
-    use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectStore};
+    use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectStore};
     let object_store = shardline_server_core::ServerObjectStore::local(td.path().join("lfs"))
         .expect("local object store");
-    let key = ObjectKey::parse(&format!("lfs/{sha}")).expect("valid key");
+    // Global namespace (None scope) — matches the permissive-mode read paths.
+    let key = crate::routes::lfs_object_key(sha, None).expect("valid key");
     let body = ObjectBody::from_slice(content);
     let integrity = ObjectIntegrity::new(
         shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(content).as_bytes()),
@@ -1028,6 +1030,7 @@ async fn handler_repo_list_with_repos() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let result = repo_list(State(state), default_headers()).await.unwrap();
     assert_eq!(result.repos.len(), 2);
@@ -1098,6 +1101,7 @@ async fn handler_repo_search_finds_matching() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     // The search uses LIKE 'q%' on repo_id, so prefix-match the full ID.
     let result = repo_search(
@@ -1116,6 +1120,217 @@ async fn handler_repo_search_finds_matching() {
     .unwrap();
     assert_eq!(result.repos.len(), 1);
     assert_eq!(result.repos[0].id, "org/my-model");
+}
+
+// ------------------------------------------------------------------
+// Cross-tenant private-repo leak (F-deep-1)
+// ------------------------------------------------------------------
+
+/// Builds a `HubState` with a mock auth provider that always authenticates a
+/// caller with repository scope `alice/own` (owner `alice`).
+fn make_alice_auth_state() -> (tempfile::TempDir, HubState) {
+    use shardline_protocol::{
+        RepositoryProvider, RepositoryScope, TokenClaims, TokenScope as ProtoScope,
+    };
+    use shardline_server_core::{AuthError, AuthProvider};
+
+    struct AliceProvider;
+    impl AuthProvider for AliceProvider {
+        fn verify_token(
+            &self,
+            _token: &str,
+        ) -> Result<TokenClaims, shardline_server_core::AuthError> {
+            let repo = RepositoryScope::new(RepositoryProvider::Generic, "alice", "own", None)
+                .map_err(|_err| AuthError::InvalidToken)?;
+            let claims = TokenClaims::new("issuer", "alice", ProtoScope::Read, repo, u64::MAX)
+                .map_err(|_err| AuthError::InvalidToken)?;
+            Ok(claims)
+        }
+        fn mint_token(
+            &self,
+            _claims: &TokenClaims,
+        ) -> Result<String, shardline_server_core::AuthError> {
+            Ok("alice-token".into())
+        }
+    }
+
+    let (td, store) = make_delete_test_store();
+    store
+        .create_repo(HubRepoType::Model, "bob/private-repo", true)
+        .expect("create bob private repo");
+    store
+        .create_repo(HubRepoType::Model, "bob/public-repo", false)
+        .expect("create bob public repo");
+    store
+        .create_repo(HubRepoType::Model, "alice/own", true)
+        .expect("create alice own repo");
+    store
+        .create_repo(HubRepoType::Model, "alice/other", true)
+        .expect("create alice other private repo");
+    let object_store = shardline_server_core::ServerObjectStore::local(td.path().join("lfs"))
+        .expect("local object store");
+    let state = HubState {
+        store,
+        object_store,
+        auth: Some(HubAuth::new(Box::new(AliceProvider))),
+        http_client: None,
+        webhook_secret_cipher: None,
+    };
+    (td, state)
+}
+
+fn alice_headers() -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        axum::http::header::AUTHORIZATION,
+        "Bearer alice-token".parse().unwrap(),
+    );
+    headers
+}
+
+#[tokio::test]
+async fn repo_list_hides_other_tenants_private_repos() {
+    let (_td, state) = make_alice_auth_state();
+    let result = repo_list(State(state), alice_headers()).await.unwrap();
+    let ids: Vec<String> = result.repos.iter().map(|r| r.id.clone()).collect();
+    // Alice's own private repo and bob's public repo remain visible.
+    assert!(ids.iter().any(|id| id == "alice/own"));
+    assert!(ids.iter().any(|id| id == "bob/public-repo"));
+    // bob's private repo must be hidden.
+    assert!(
+        !ids.iter().any(|id| id == "bob/private-repo"),
+        "other tenant's private repo leaked: {ids:?}"
+    );
+    // A same-namespace private repo (alice/other) must also be hidden: the token
+    // is scoped to alice/own, not the whole alice namespace.
+    assert!(
+        !ids.iter().any(|id| id == "alice/other"),
+        "same-namespace private repo leaked: {ids:?}"
+    );
+}
+
+#[tokio::test]
+async fn repo_search_hides_other_tenants_private_repos() {
+    let (_td, state) = make_alice_auth_state();
+    // Search for bob's private repo by its full ID.
+    let result = repo_search(
+        State(state),
+        alice_headers(),
+        Path("models".to_string()),
+        Query(RepoSearchQuery {
+            q: "bob/private-repo".into(),
+            author: None,
+            sort: None,
+            direction: None,
+            limit: 50,
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(
+        result.repos.is_empty(),
+        "other tenant's private repo leaked in search: {:?}",
+        result
+            .repos
+            .iter()
+            .map(|r| r.id.clone())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
+async fn repo_search_hides_same_namespace_private_repos() {
+    let (_td, state) = make_alice_auth_state();
+    // Alice's token is scoped to alice/own; alice/other is the same namespace
+    // but a different repository, so it must be hidden.
+    let result = repo_search(
+        State(state),
+        alice_headers(),
+        Path("models".to_string()),
+        Query(RepoSearchQuery {
+            q: "alice/other".into(),
+            author: None,
+            sort: None,
+            direction: None,
+            limit: 50,
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(
+        result.repos.is_empty(),
+        "same-namespace private repo leaked in search: {:?}",
+        result
+            .repos
+            .iter()
+            .map(|r| r.id.clone())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
+async fn repo_list_hides_oidc_owner_same_namespace_private_repos() {
+    use shardline_protocol::{
+        RepositoryProvider, RepositoryScope, TokenClaims, TokenScope as ProtoScope,
+    };
+    use shardline_server_core::{AuthError, AuthProvider};
+
+    // Under OIDC every subject is scoped to a single owner (`oidc`); a token
+    // for `oidc/user1` must not reveal `oidc/user2`'s private repo.
+    struct OidcUser1Provider;
+    impl AuthProvider for OidcUser1Provider {
+        fn verify_token(
+            &self,
+            _token: &str,
+        ) -> Result<TokenClaims, shardline_server_core::AuthError> {
+            let repo = RepositoryScope::new(RepositoryProvider::Generic, "oidc", "user1", None)
+                .map_err(|_err| AuthError::InvalidToken)?;
+            let claims = TokenClaims::new("issuer", "oidc", ProtoScope::Read, repo, u64::MAX)
+                .map_err(|_err| AuthError::InvalidToken)?;
+            Ok(claims)
+        }
+        fn mint_token(
+            &self,
+            _claims: &TokenClaims,
+        ) -> Result<String, shardline_server_core::AuthError> {
+            Ok("oidc-token".into())
+        }
+    }
+
+    let (td, store) = make_delete_test_store();
+    store
+        .create_repo(HubRepoType::Model, "oidc/user1", true)
+        .expect("create oidc user1 private repo");
+    store
+        .create_repo(HubRepoType::Model, "oidc/user2", true)
+        .expect("create oidc user2 private repo");
+    store
+        .create_repo(HubRepoType::Model, "oidc/shared", false)
+        .expect("create oidc public repo");
+    let object_store = shardline_server_core::ServerObjectStore::local(td.path().join("lfs"))
+        .expect("local object store");
+    let state = HubState {
+        store,
+        object_store,
+        auth: Some(HubAuth::new(Box::new(OidcUser1Provider))),
+        http_client: None,
+        webhook_secret_cipher: None,
+    };
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        axum::http::header::AUTHORIZATION,
+        "Bearer oidc-token".parse().unwrap(),
+    );
+    let result = repo_list(State(state), headers).await.unwrap();
+    let ids: Vec<String> = result.repos.iter().map(|r| r.id.clone()).collect();
+    // The caller's own private repo and public repos remain visible.
+    assert!(ids.iter().any(|id| id == "oidc/user1"));
+    assert!(ids.iter().any(|id| id == "oidc/shared"));
+    // The other OIDC subject's private repo in the same namespace must be hidden.
+    assert!(
+        !ids.iter().any(|id| id == "oidc/user2"),
+        "same-namespace OIDC private repo leaked: {ids:?}"
+    );
 }
 
 // ------------------------------------------------------------------
@@ -1145,6 +1360,7 @@ async fn handler_repo_info_returns_repo() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let result = repo_info(
         State(state),
@@ -1168,11 +1384,15 @@ async fn handler_repo_info_with_card_data() {
         &[HubFileEntry {
             path: "README.md".into(),
             size: readme_content.len() as u64,
-            sha: "readme_sha".into(),
+            sha: "abababababababababababababababababababababababababababababababab".into(),
             is_lfs: false,
         }],
     );
-    store_test_content(&_td, "readme_sha", readme_content);
+    store_test_content(
+        &_td,
+        "abababababababababababababababababababababababababababababababab",
+        readme_content,
+    );
     let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
         .expect("local object store");
     let state = HubState {
@@ -1180,6 +1400,7 @@ async fn handler_repo_info_with_card_data() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let result = repo_info(
         State(state),
@@ -1223,6 +1444,7 @@ async fn handler_repo_modelcard_no_readme() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let result = repo_modelcard(
         State(state),
@@ -1244,11 +1466,15 @@ async fn handler_repo_modelcard_with_readme() {
         &[HubFileEntry {
             path: "README.md".into(),
             size: content.len() as u64,
-            sha: "rm_sha".into(),
+            sha: "1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b".into(),
             is_lfs: false,
         }],
     );
-    store_test_content(&_td, "rm_sha", content);
+    store_test_content(
+        &_td,
+        "1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b",
+        content,
+    );
     let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
         .expect("local object store");
     let state = HubState {
@@ -1256,6 +1482,7 @@ async fn handler_repo_modelcard_with_readme() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let result = repo_modelcard(
         State(state),
@@ -1290,6 +1517,7 @@ async fn handler_repo_revisions_with_revisions() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let result = repo_revisions(
         State(state),
@@ -1404,6 +1632,7 @@ async fn handler_repo_delete_success() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let result = repo_delete(
         State(state.clone()),
@@ -1470,6 +1699,7 @@ async fn handler_preupload_checks_existence() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let result = preupload(
         State(state),
@@ -1545,6 +1775,7 @@ async fn handler_commit_inline_file_success() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let body = r#"{"header":{"message":"add readme"}}
 {"file":{"path":"README.md","content":"SGVsbG8gV29ybGQ="}}
@@ -1578,6 +1809,7 @@ async fn handler_commit_lfs_pointer_success() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     // Valid SHA-256 OID (64 hex chars)
     let oid = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
@@ -1623,6 +1855,7 @@ async fn handler_commit_delete_file() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let body = r#"{"header":{"message":"delete file"}}
 {"deletedEntry":{"path":"old.txt"}}
@@ -1657,6 +1890,7 @@ async fn handler_commit_parent_mismatch() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     // Body specifies parentCommit that does NOT match URL resolution
     let body = r#"{"header":{"message":"mismatch","parentCommit":"wrong_parent_sha"}}
@@ -1697,6 +1931,7 @@ async fn handler_apply_commit_inline_file() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let parsed = ParsedCommit {
         message: "apply inline".into(),
@@ -1706,7 +1941,7 @@ async fn handler_apply_commit_inline_file() {
             content: b"world".to_vec(),
         }],
     };
-    let result = apply_commit(&state, "org/apply-test", "parent_apply", &parsed)
+    let result = apply_commit(&state, "org/apply-test", "parent_apply", &parsed, None)
         .await
         .unwrap();
     assert!(!result.commit_id.is_empty());
@@ -1732,6 +1967,7 @@ async fn handler_apply_commit_lfs_pointer() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let oid = "1111222233334444555566667777888899990000aaaabbbbccccddddeeeeffff";
     let parsed = ParsedCommit {
@@ -1743,7 +1979,7 @@ async fn handler_apply_commit_lfs_pointer() {
             size: 2_000_000,
         }],
     };
-    let result = apply_commit(&state, "org/apply-lfs", "parent_lfs2", &parsed)
+    let result = apply_commit(&state, "org/apply-lfs", "parent_lfs2", &parsed, None)
         .await
         .unwrap();
     let new_files = state.store.get_files(&result.commit_id).unwrap();
@@ -1773,6 +2009,7 @@ async fn handler_apply_commit_delete() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let parsed = ParsedCommit {
         message: "delete file".into(),
@@ -1781,7 +2018,7 @@ async fn handler_apply_commit_delete() {
             path: "old.txt".into(),
         }],
     };
-    let result = apply_commit(&state, "org/apply-del", "parent_del2", &parsed)
+    let result = apply_commit(&state, "org/apply-del", "parent_del2", &parsed, None)
         .await
         .unwrap();
     let new_files = state.store.get_files(&result.commit_id).unwrap();
@@ -1799,13 +2036,14 @@ async fn handler_apply_commit_parent_mismatch() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let parsed = ParsedCommit {
         message: "bad parent".into(),
         parent_commit: Some("different_sha".into()),
         instructions: vec![],
     };
-    let result = apply_commit(&state, "org/apply-mismatch", "actual_sha", &parsed).await;
+    let result = apply_commit(&state, "org/apply-mismatch", "actual_sha", &parsed, None).await;
     assert!(result.is_err());
     let err = result.unwrap_err();
     assert!(
@@ -1846,6 +2084,7 @@ async fn handler_file_tree_basic() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let entries = file_tree(
         State(state),
@@ -1897,6 +2136,7 @@ async fn handler_file_tree_recursive() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let entries = file_tree(
         State(state),
@@ -1954,6 +2194,7 @@ async fn handler_file_tree_with_limit_and_cursor() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let entries = file_tree(
         State(state),
@@ -1993,12 +2234,16 @@ async fn handler_resolve_file_inline() {
         &[HubFileEntry {
             path: "data.txt".into(),
             size: content.len() as u64,
-            sha: "data_sha".into(),
+            sha: "2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c".into(),
             is_lfs: false,
         }],
     );
     // Pre-load file content into ObjectStore
-    store_test_content(&_td, "data_sha", content);
+    store_test_content(
+        &_td,
+        "2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c",
+        content,
+    );
     let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
         .expect("local object store");
     let state = HubState {
@@ -2006,6 +2251,7 @@ async fn handler_resolve_file_inline() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let result = resolve_file(
         State(state),
@@ -2041,6 +2287,7 @@ async fn handler_resolve_file_not_found() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let result = resolve_file(
         State(state),
@@ -2071,6 +2318,7 @@ fn make_lfs_state() -> (tempfile::TempDir, HubState) {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     (td, state)
 }
@@ -2087,7 +2335,7 @@ async fn handler_lfs_batch_upload_new_object() {
                 name: "main".into(),
             },
             objects: vec![LfsObjectRequest {
-                oid: "abc123".into(),
+                oid: "e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0".into(),
                 size: 1000,
             }],
         }),
@@ -2109,9 +2357,14 @@ async fn handler_lfs_batch_upload_new_object() {
 #[tokio::test]
 async fn handler_lfs_batch_download_existing_object() {
     let (_td, state) = make_lfs_state();
-    // Store an LFS object in the object store
-    use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectStore};
-    let key = ObjectKey::parse("lfs/existing_oid").unwrap();
+    // Store an LFS object in the object store (global namespace, matching the
+    // permissive-mode read path).
+    use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectStore};
+    let key = crate::routes::lfs_object_key(
+        "7171717171717171717171717171717171717171717171717171717171717171",
+        None,
+    )
+    .unwrap();
     let integrity = ObjectIntegrity::new(
         shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(b"some data").as_bytes()),
         9,
@@ -2129,7 +2382,7 @@ async fn handler_lfs_batch_download_existing_object() {
                 name: "main".into(),
             },
             objects: vec![LfsObjectRequest {
-                oid: "existing_oid".into(),
+                oid: "7171717171717171717171717171717171717171717171717171717171717171".into(),
                 size: 9,
             }],
         }),
@@ -2155,7 +2408,7 @@ async fn handler_lfs_batch_download_missing_object() {
                 name: "main".into(),
             },
             objects: vec![LfsObjectRequest {
-                oid: "missing_oid".into(),
+                oid: "9393939393939393939393939393939393939393939393939393939393939393".into(),
                 size: 100,
             }],
         }),
@@ -2175,9 +2428,13 @@ async fn handler_lfs_batch_download_missing_object() {
 #[tokio::test]
 async fn handler_lfs_batch_verify_existing() {
     let (_td, state) = make_lfs_state();
-    // Store an LFS object in the object store
-    use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectStore};
-    let key = ObjectKey::parse("lfs/verify_oid").unwrap();
+    // Store an LFS object in the object store (global namespace).
+    use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectStore};
+    let key = crate::routes::lfs_object_key(
+        "8282828282828282828282828282828282828282828282828282828282828282",
+        None,
+    )
+    .unwrap();
     let integrity = ObjectIntegrity::new(
         shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(b"data").as_bytes()),
         4,
@@ -2195,7 +2452,7 @@ async fn handler_lfs_batch_verify_existing() {
                 name: "main".into(),
             },
             objects: vec![LfsObjectRequest {
-                oid: "verify_oid".into(),
+                oid: "8282828282828282828282828282828282828282828282828282828282828282".into(),
                 size: 4,
             }],
         }),
@@ -2219,7 +2476,7 @@ async fn handler_lfs_batch_verify_missing() {
                 name: "main".into(),
             },
             objects: vec![LfsObjectRequest {
-                oid: "no_verify_oid".into(),
+                oid: "a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4".into(),
                 size: 1,
             }],
         }),
@@ -2266,9 +2523,9 @@ async fn handler_lfs_upload_success() {
     .await;
     assert!(result.is_ok());
     assert_eq!(result.unwrap(), StatusCode::OK);
-    // Verify it's stored in the object store
-    use shardline_storage::{ObjectKey, ObjectStore};
-    let key = ObjectKey::parse(&format!("lfs/{oid}")).unwrap();
+    // Verify it's stored in the object store (global namespace).
+    use shardline_storage::ObjectStore;
+    let key = crate::routes::lfs_object_key(oid, None).unwrap();
     assert!(state.object_store.contains(&key).unwrap());
     let data = state
         .object_store
@@ -2287,7 +2544,7 @@ async fn handler_lfs_download_missing() {
     let result = lfs_download(
         State(state),
         default_headers(),
-        Path("nonexistent_oid".to_string()),
+        Path("b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5".to_string()),
     )
     .await;
     assert!(result.is_err());
@@ -2298,9 +2555,9 @@ async fn handler_lfs_download_missing() {
 async fn handler_lfs_download_success() {
     let (_td, state) = make_test_state();
     let oid = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-    // Store an LFS object in the object store
-    use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectStore};
-    let key = ObjectKey::parse(&format!("lfs/{oid}")).unwrap();
+    // Store an LFS object in the object store (global namespace).
+    use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectStore};
+    let key = crate::routes::lfs_object_key(oid, None).unwrap();
     let integrity = ObjectIntegrity::new(
         shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(b"download data").as_bytes()),
         13,
@@ -2333,6 +2590,7 @@ async fn handler_repo_revisions_has_initial() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let result = repo_revisions(
         State(state),
@@ -2357,6 +2615,7 @@ async fn handler_git_head_with_revision() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let result = git_head(
         State(state),
@@ -2383,6 +2642,7 @@ async fn handler_commit_no_revision() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     // "nonexistent_rev" isn't a known ref or SHA → revision not found
     let result = commit(
@@ -2429,6 +2689,7 @@ async fn handler_dataset_parquet_lists_files() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let result = dataset_parquet(
         State(state),
@@ -2475,6 +2736,7 @@ async fn handler_dataset_parquet_csv_and_jsonl_included() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let result = dataset_parquet(
         State(state),
@@ -2501,6 +2763,7 @@ async fn handler_dataset_first_rows_empty_dataset() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let result = dataset_first_rows(
         State(state),
@@ -2528,11 +2791,15 @@ async fn handler_dataset_first_rows_with_jsonl() {
         &[HubFileEntry {
             path: "data/train/data.jsonl".into(),
             size: jsonl_content.len() as u64,
-            sha: "jsonl_sha".into(),
+            sha: "3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d".into(),
             is_lfs: false,
         }],
     );
-    store_test_content(&_td, "jsonl_sha", jsonl_content);
+    store_test_content(
+        &_td,
+        "3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d",
+        jsonl_content,
+    );
     let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
         .expect("local object store");
     let state = HubState {
@@ -2540,6 +2807,7 @@ async fn handler_dataset_first_rows_with_jsonl() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let result = dataset_first_rows(
         State(state),
@@ -2573,11 +2841,15 @@ async fn handler_dataset_viewer_with_data() {
         &[HubFileEntry {
             path: "default/train/data.csv".into(),
             size: csv_content.len() as u64,
-            sha: "csv_sha".into(),
+            sha: "4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e".into(),
             is_lfs: false,
         }],
     );
-    store_test_content(&_td, "csv_sha", csv_content);
+    store_test_content(
+        &_td,
+        "4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e",
+        csv_content,
+    );
     let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
         .expect("local object store");
     let state = HubState {
@@ -2585,6 +2857,7 @@ async fn handler_dataset_viewer_with_data() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let result = dataset_viewer(
         State(state),
@@ -2614,11 +2887,15 @@ async fn handler_dataset_viewer_pagination() {
         &[HubFileEntry {
             path: "data/test/data.csv".into(),
             size: csv_content.len() as u64,
-            sha: "vp_sha".into(),
+            sha: "5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f".into(),
             is_lfs: false,
         }],
     );
-    store_test_content(&_td, "vp_sha", csv_content);
+    store_test_content(
+        &_td,
+        "5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f",
+        csv_content,
+    );
     let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
         .expect("local object store");
     let state = HubState {
@@ -2626,6 +2903,7 @@ async fn handler_dataset_viewer_pagination() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let result = dataset_viewer(
         State(state),
@@ -2659,6 +2937,7 @@ async fn handler_webhook_create_success() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let (status, resp) = webhook_create(
         State(state),
@@ -2687,6 +2966,7 @@ async fn handler_webhook_create_invalid_url() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let result = webhook_create(
         State(state),
@@ -2717,6 +2997,7 @@ async fn handler_webhook_create_too_many_events() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let events: Vec<String> = (0..51).map(|i| format!("event_{i}")).collect();
     let result = webhook_create(
@@ -2752,6 +3033,7 @@ async fn handler_webhook_list_empty() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let result = webhook_list(
         State(state),
@@ -2789,6 +3071,7 @@ async fn handler_webhook_list_with_webhooks() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let result = webhook_list(
         State(state),
@@ -2822,6 +3105,7 @@ async fn handler_webhook_delete_success() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let result = webhook_delete(
         State(state.clone()),
@@ -2873,6 +3157,7 @@ fn route_authorize_with_auth_and_no_header_is_err() {
         object_store,
         auth: Some(HubAuth::new(Box::new(MockProvider))),
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let headers = HeaderMap::new();
     let result = authorize(&state, &headers, TokenScope::Read);
@@ -2899,13 +3184,14 @@ async fn handler_apply_commit_empty_instructions() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let parsed = ParsedCommit {
         message: "empty commit".into(),
         parent_commit: None,
         instructions: vec![],
     };
-    let result = apply_commit(&state, "org/empty-inst", "parent_empty", &parsed)
+    let result = apply_commit(&state, "org/empty-inst", "parent_empty", &parsed, None)
         .await
         .unwrap();
     assert!(!result.commit_id.is_empty());
@@ -2926,6 +3212,7 @@ async fn handler_dataset_parquet_non_dataset_repo_errors() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let result = dataset_parquet(
         State(state),
@@ -2956,6 +3243,7 @@ async fn handler_dataset_first_rows_non_dataset_errors() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let result = dataset_first_rows(
         State(state),
@@ -2991,6 +3279,7 @@ async fn handler_dataset_viewer_non_dataset_errors() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let result = dataset_viewer(
         State(state),
@@ -3028,6 +3317,7 @@ async fn handler_repo_search_sort_by_last_modified_asc() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let result = repo_search(
         State(state),
@@ -3059,6 +3349,7 @@ async fn handler_repo_search_sort_likes_noop() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     // "likes" sort is currently a no-op — just verify it doesn't error.
     let result = repo_search(
@@ -3091,6 +3382,7 @@ async fn handler_repo_search_sort_downloads_noop() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     // "downloads" sort is currently a no-op — just verify it doesn't error.
     let result = repo_search(
@@ -3127,6 +3419,7 @@ async fn handler_repo_search_unknown_sort_keeps_default_order() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let result = repo_search(
         State(state),
@@ -3190,6 +3483,7 @@ async fn handler_dataset_first_rows_content_not_inline() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let result = dataset_first_rows(
         State(state),
@@ -3220,6 +3514,7 @@ async fn handler_dataset_viewer_split_not_found() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let result = dataset_viewer(
         State(state),
@@ -3340,6 +3635,7 @@ async fn handler_repo_revision_info_returns_siblings() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let result = repo_revision_info(
         State(state),
@@ -3386,6 +3682,7 @@ async fn handler_repo_delete_compat_success() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let result = repo_delete_compat(
         State(state),
@@ -3411,6 +3708,7 @@ async fn handler_repo_delete_compat_with_organization() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let result = repo_delete_compat(
         State(state),
@@ -3450,6 +3748,7 @@ async fn handler_file_tree_at_root_returns_files() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let entries = file_tree_at_root(
         State(state),
@@ -3486,6 +3785,7 @@ async fn handler_git_head_returns_ref() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let result = git_head(
         State(state),
@@ -3543,6 +3843,7 @@ async fn handler_repo_create_conflict() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let req = RepoCreateRequest {
         repo_type: RepoType::Model,
@@ -3649,6 +3950,7 @@ async fn handler_webhook_create_duplicate_url() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let result = webhook_create(
         State(state),
@@ -3680,6 +3982,7 @@ async fn handler_lfs_upload_and_download_roundtrip() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     // Upload
     let result = lfs_upload(
@@ -3714,13 +4017,13 @@ async fn handler_dataset_parquet_finds_data_files() {
             HubFileEntry {
                 path: "data/train/data.parquet".into(),
                 size: 1000,
-                sha: "pq_sha".into(),
+                sha: "6060606060606060606060606060606060606060606060606060606060606060".into(),
                 is_lfs: false,
             },
             HubFileEntry {
                 path: "README.md".into(),
                 size: 50,
-                sha: "rm_sha".into(),
+                sha: "1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b".into(),
                 is_lfs: false,
             },
         ],
@@ -3732,6 +4035,7 @@ async fn handler_dataset_parquet_finds_data_files() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let resp = dataset_parquet(
         State(state),
@@ -3774,6 +4078,7 @@ async fn handler_webhook_list_with_hooks() {
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     };
     let resp = webhook_list(
         State(state),

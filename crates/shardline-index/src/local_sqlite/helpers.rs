@@ -7,6 +7,7 @@ use std::{
     io::{Error as IoError, ErrorKind, Read},
     ops::Deref,
     path::{Path, PathBuf},
+    str::FromStr,
     time::{Duration, UNIX_EPOCH},
 };
 
@@ -28,8 +29,9 @@ use shardline_storage::{
 use super::{
     DedupeShardRecord, FileReconstructionRecord, LEGACY_IMPORT_COMPLETED_KEY,
     LOCAL_SCHEMA_MIGRATIONS_TABLE, LOCAL_SQLITE_MIGRATIONS, LegacyQuarantineCandidateRecord,
-    LocalIndexStoreError, LocalRecordKind, LocalRecordLocator, MAX_CONTROL_PLANE_METADATA_BYTES,
-    MAX_LOCAL_RECORD_METADATA_BYTES, MAX_RECONSTRUCTION_METADATA_BYTES, StoredObjectPresenceRecord,
+    LocalIndexStoreError, LocalRecordLocator, MAX_CONTROL_PLANE_METADATA_BYTES,
+    MAX_LOCAL_RECORD_METADATA_BYTES, MAX_RECONSTRUCTION_METADATA_BYTES, RecordKind,
+    StoredObjectPresenceRecord,
 };
 use crate::{
     DedupeShardMapping, FileId, FileReconstruction, FileRecord, ProviderRepositoryState,
@@ -198,8 +200,8 @@ pub(crate) fn ensure_legacy_import_state(
         return Ok(());
     }
 
-    import_legacy_file_records(&transaction, root, LocalRecordKind::Latest)?;
-    import_legacy_file_records(&transaction, root, LocalRecordKind::Version)?;
+    import_legacy_file_records(&transaction, root, RecordKind::Latest)?;
+    import_legacy_file_records(&transaction, root, RecordKind::Version)?;
     import_legacy_reconstructions(&transaction, root)?;
     import_legacy_xorbs(&transaction, root)?;
     import_legacy_dedupe_mappings(&transaction, root)?;
@@ -276,11 +278,11 @@ fn legacy_layout_exists(root: &Path) -> bool {
 fn import_legacy_file_records(
     transaction: &Transaction<'_>,
     root: &Path,
-    kind: LocalRecordKind,
+    kind: RecordKind,
 ) -> Result<(), LocalIndexStoreError> {
     let directory = match kind {
-        LocalRecordKind::Latest => root.join("files"),
-        LocalRecordKind::Version => root.join("file_versions"),
+        RecordKind::Latest => root.join("files"),
+        RecordKind::Version => root.join("file_versions"),
     };
     for path in collect_legacy_files(&directory)? {
         let bytes = read_existing_file_bounded(
@@ -299,7 +301,7 @@ fn import_legacy_file_records(
         let locator = local_record_locator(
             kind,
             &record,
-            (kind == LocalRecordKind::Version).then(|| record.content_hash.clone()),
+            (kind == RecordKind::Version).then(|| record.content_hash.clone()),
         );
         upsert_file_record_row(
             transaction,
@@ -688,7 +690,7 @@ pub(crate) fn upsert_file_record_row(
 }
 
 pub(crate) fn local_record_locator(
-    kind: LocalRecordKind,
+    kind: RecordKind,
     record: &FileRecord,
     content_hash: Option<String>,
 ) -> LocalRecordLocator {
@@ -711,11 +713,12 @@ pub(crate) fn local_record_locator(
 pub(crate) fn local_record_locator_from_row(
     row: &Row<'_>,
 ) -> Result<LocalRecordLocator, SqliteError> {
-    let kind = LocalRecordKind::parse(row.get_ref("record_kind")?.as_str()?)
+    let kind = RecordKind::from_str(row.get_ref("record_kind")?.as_str()?)
+        .map_err(|_err| LocalIndexStoreError::InvalidRecordKind)
         .map_err(|error| SqliteError::FromSqlConversionFailure(0, Type::Text, Box::new(error)))?;
     let content_hash = match kind {
-        LocalRecordKind::Latest => None,
-        LocalRecordKind::Version => Some(row.get::<_, String>("content_hash")?),
+        RecordKind::Latest => None,
+        RecordKind::Version => Some(row.get::<_, String>("content_hash")?),
     };
     Ok(LocalRecordLocator {
         record_key: row.get("record_key")?,
@@ -1198,22 +1201,18 @@ fn map_directory_path_error(
     }
 }
 
-pub(crate) fn legacy_record_path(
-    root: &Path,
-    kind: LocalRecordKind,
-    record: &FileRecord,
-) -> PathBuf {
+pub(crate) fn legacy_record_path(root: &Path, kind: RecordKind, record: &FileRecord) -> PathBuf {
     let base = match kind {
-        LocalRecordKind::Latest => root.join("files"),
-        LocalRecordKind::Version => root.join("file_versions"),
+        RecordKind::Latest => root.join("files"),
+        RecordKind::Version => root.join("file_versions"),
     };
     match (&record.repository_scope, kind) {
-        (Some(scope), LocalRecordKind::Latest) => scoped_root(&base, scope).join(&record.file_id),
-        (Some(scope), LocalRecordKind::Version) => scoped_root(&base, scope)
+        (Some(scope), RecordKind::Latest) => scoped_root(&base, scope).join(&record.file_id),
+        (Some(scope), RecordKind::Version) => scoped_root(&base, scope)
             .join(&record.file_id)
             .join(&record.content_hash),
-        (None, LocalRecordKind::Latest) => base.join(&record.file_id),
-        (None, LocalRecordKind::Version) => base.join(&record.file_id).join(&record.content_hash),
+        (None, RecordKind::Latest) => base.join(&record.file_id),
+        (None, RecordKind::Version) => base.join(&record.file_id).join(&record.content_hash),
     }
 }
 
@@ -1564,7 +1563,7 @@ mod tests {
     fn legacy_record_path_latest_no_scope() {
         let storage = shardline_test_support::TempStorage::new();
         let record = sample_record(None);
-        let path = legacy_record_path(storage.path(), LocalRecordKind::Latest, &record);
+        let path = legacy_record_path(storage.path(), RecordKind::Latest, &record);
         assert!(path.ends_with("test.bin"));
         assert!(path.starts_with(storage.path().join("files")));
     }
@@ -1574,7 +1573,7 @@ mod tests {
         let storage = shardline_test_support::TempStorage::new();
         let scope = sample_scope();
         let record = sample_record(Some(scope));
-        let path = legacy_record_path(storage.path(), LocalRecordKind::Latest, &record);
+        let path = legacy_record_path(storage.path(), RecordKind::Latest, &record);
         let path_str = path.to_string_lossy();
         assert!(path_str.contains("github"));
         assert!(path_str.contains("test.bin"));
@@ -1584,7 +1583,7 @@ mod tests {
     fn legacy_record_path_version_no_scope() {
         let storage = shardline_test_support::TempStorage::new();
         let record = sample_record(None);
-        let path = legacy_record_path(storage.path(), LocalRecordKind::Version, &record);
+        let path = legacy_record_path(storage.path(), RecordKind::Version, &record);
         assert!(path.starts_with(storage.path().join("file_versions")));
         assert!(path.ends_with(&record.content_hash));
         assert!(path.to_string_lossy().contains("test.bin"));
@@ -1595,7 +1594,7 @@ mod tests {
         let storage = shardline_test_support::TempStorage::new();
         let scope = sample_scope();
         let record = sample_record(Some(scope));
-        let path = legacy_record_path(storage.path(), LocalRecordKind::Version, &record);
+        let path = legacy_record_path(storage.path(), RecordKind::Version, &record);
         let path_str = path.to_string_lossy();
         assert!(path_str.contains("file_versions"));
         assert!(path_str.contains("github"));
@@ -1666,8 +1665,8 @@ mod tests {
     #[test]
     fn local_record_locator_latest_has_no_content_hash() {
         let record = sample_record(None);
-        let locator = local_record_locator(LocalRecordKind::Latest, &record, None);
-        assert_eq!(locator.kind, LocalRecordKind::Latest);
+        let locator = local_record_locator(RecordKind::Latest, &record, None);
+        assert_eq!(locator.kind, RecordKind::Latest);
         assert_eq!(locator.file_id, "test.bin");
         assert!(locator.content_hash.is_none());
     }
@@ -1676,8 +1675,8 @@ mod tests {
     fn local_record_locator_version_has_content_hash() {
         let record = sample_record(None);
         let ch = record.content_hash.clone();
-        let locator = local_record_locator(LocalRecordKind::Version, &record, Some(ch.clone()));
-        assert_eq!(locator.kind, LocalRecordKind::Version);
+        let locator = local_record_locator(RecordKind::Version, &record, Some(ch.clone()));
+        assert_eq!(locator.kind, RecordKind::Version);
         assert_eq!(locator.content_hash, Some(ch));
     }
 

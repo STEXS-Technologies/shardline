@@ -1,3 +1,4 @@
+use std::str::FromStr;
 use std::sync::LazyLock;
 use tokio::sync::Semaphore;
 
@@ -8,12 +9,13 @@ use axum::{
     http::StatusCode,
 };
 
-use crate::{error::HubApiError, models::*};
+use crate::{error::HubApiError, models::*, types::WebhookScheme};
 // HubRepoType used in the webhook_create handler for repo lookup
 // (used implicitly via state.store methods)
+use shardline_index::hub::HubWebhook;
 use shardline_protocol::{SecretString, TokenScope};
 
-use super::{HubState, authorize};
+use super::{HubState, authorize_with_context, require_repository_binding};
 
 /// Delivers webhook events to registered URLs.
 ///
@@ -61,13 +63,21 @@ pub(crate) async fn deliver_webhook_events(
     for webhook in &webhooks {
         let url = webhook.url.clone();
         let body = body.clone();
-        let secret = webhook.secret.clone();
         let client = client.clone();
+        let url_for_log = sanitize_log_url(&url);
+        // Resolve the plaintext signing secret, decrypting at-rest ciphertext
+        // and lazily upgrading legacy plaintext rows when a key is configured.
+        let secret = match resolve_webhook_secret(state, webhook) {
+            Ok(secret) => secret,
+            Err(e) => {
+                tracing::warn!("failed to resolve secret for webhook {url_for_log}: {e}");
+                continue;
+            }
+        };
         let Ok(permit) = WEBHOOK_DELIVERY_SEMAPHORE.acquire().await else {
             tracing::warn!("webhook delivery semaphore closed");
             return;
         };
-        let url_for_log = sanitize_log_url(&url);
         // Spawn a delivery task and a separate monitoring task that holds the
         // semaphore permit and logs panics. If the delivery task panics, tokio
         // catches it and the JoinHandle returns Err, which we log here.
@@ -93,6 +103,48 @@ pub(crate) async fn deliver_webhook_events(
             }
         });
     }
+}
+
+/// Resolves the plaintext signing secret for a webhook at delivery time.
+///
+/// When an at-rest cipher is configured, stored `sse1:`-formatted ciphertext is
+/// decrypted; legacy plaintext rows are re-encrypted in place (lazy upgrade).
+/// When no key is configured, a legacy plaintext value is returned unchanged;
+/// a stored `sse1:`-prefixed ciphertext with no key configured is an explicit
+/// error (never silently used as the HMAC secret).
+fn resolve_webhook_secret(
+    state: &HubState,
+    webhook: &HubWebhook,
+) -> Result<Option<SecretString>, crate::secrets::WebhookSecretCipherError> {
+    let Some(stored) = webhook.secret.as_ref() else {
+        return Ok(None);
+    };
+    let Some(cipher) = state.webhook_secret_cipher.as_ref() else {
+        if stored
+            .expose_secret()
+            .starts_with(crate::secrets::MAGIC_PREFIX)
+        {
+            // Rows previously encrypted at rest would otherwise have their
+            // base64 ciphertext used verbatim as the HMAC secret, silently
+            // rejecting every delivery. Fail loudly instead.
+            return Err(crate::secrets::WebhookSecretCipherError::NoCipherForCiphertext);
+        }
+        return Ok(Some(stored.clone()));
+    };
+    let repo_id = &webhook.repo_id;
+    let decrypted = cipher.decrypt(repo_id, stored.expose_secret())?;
+    if decrypted.needs_upgrade {
+        // Rewrite the legacy plaintext row as ciphertext (best-effort).
+        if let Ok(encrypted) = cipher.encrypt(repo_id, decrypted.secret.expose_secret())
+            && let Err(e) =
+                state
+                    .store
+                    .update_webhook_secret(repo_id, &webhook.id, Some(&encrypted))
+        {
+            tracing::warn!("failed to upgrade webhook secret for {}: {e}", webhook.id);
+        }
+    }
+    Ok(Some(decrypted.secret))
 }
 
 /// Sanitizes a URL for safe inclusion in log messages.
@@ -126,24 +178,21 @@ async fn deliver_one_webhook(
     // "localtest.me" (→127.0.0.1) or "metadata.google.internal" (→169.254.169.254)
     // would pass the string-based check but resolve to private IPs.
     //
-    // NOTE: There is a theoretical TOCTOU (time-of-check-time-of-use) window
-    // between DNS validation and the actual HTTP connection — a DNS rebinding
-    // attack could change the resolution between the two lookups. Mitigating
-    // this fully requires reqwest's `dns` feature (ClientBuilder::resolve) to
-    // pin the connection to validated addresses, which is not currently enabled.
-    // The attack window is very narrow in practice and requires a cooperating
-    // authoritative DNS server, so this is accepted as a known limitation.
-    {
-        let parsed_url =
-            url::Url::parse(url).map_err(|e| format!("webhook URL parse failed: {e}"))?;
-        let host = parsed_url.host_str().ok_or("webhook URL has no host")?;
-        let port = parsed_url.port_or_known_default().unwrap_or(80);
-        let host_port = format!("{host}:{port}");
-        for addr in tokio::net::lookup_host(&*host_port).await? {
-            if is_private_ip(&addr.ip()) {
-                return Err("webhook URL resolves to a private address".into());
-            }
+    // The shared reqwest client (no `dns` feature) cannot carry per-host
+    // resolution pins via `ClientBuilder::resolve`, so we narrow the
+    // time-of-check-time-of-use window by recording the validated (public)
+    // addresses here and re-resolving immediately before the send below,
+    // rejecting on any mismatch. See `deliver_one_webhook`'s pre-send check.
+    let parsed_url = url::Url::parse(url).map_err(|e| format!("webhook URL parse failed: {e}"))?;
+    let host = parsed_url.host_str().ok_or("webhook URL has no host")?;
+    let port = parsed_url.port_or_known_default().unwrap_or(80);
+    let host_port = format!("{host}:{port}");
+    let mut validated = std::collections::HashSet::new();
+    for addr in tokio::net::lookup_host(&*host_port).await? {
+        if is_private_ip(&addr.ip()) {
+            return Err("webhook URL resolves to a private address".into());
         }
+        validated.insert(addr.ip());
     }
     let mut request = client
         .post(url)
@@ -157,6 +206,22 @@ async fn deliver_one_webhook(
         mac.update(body);
         let signature = hex::encode(mac.finalize().into_bytes());
         request = request.header("X-Hub-Signature-256", format!("sha256={signature}"));
+    }
+    // Re-resolve immediately before sending to detect DNS rebinding between the
+    // validation above and the actual connection. If the hostname now resolves
+    // to a private address, or to an address that was not in the validated set,
+    // reject the delivery rather than connect to a rebound (e.g. cloud metadata)
+    // endpoint. This is a best-effort mitigation given the shared client cannot
+    // pin addresses at connect time; the window is not fully closed without the
+    // reqwest `dns` feature.
+    for addr in tokio::net::lookup_host(&*host_port).await? {
+        let ip = addr.ip();
+        if is_private_ip(&ip) || !validated.contains(&ip) {
+            return Err(
+                "webhook URL resolved to a different address than validated (possible DNS rebinding)"
+                    .into(),
+            );
+        }
     }
     let response = request.body(body.to_vec()).send().await?;
     if !response.status().is_success() {
@@ -191,7 +256,7 @@ pub(crate) fn validate_webhook_url(url: &str) -> Result<(), HubApiError> {
         .map_err(|e| HubApiError::PathValidation(format!("invalid webhook URL: {e}")))?;
 
     let scheme = parsed.scheme();
-    if scheme != "http" && scheme != "https" {
+    if WebhookScheme::from_str(scheme).is_err() {
         return Err(HubApiError::PathValidation(format!(
             "webhook URL scheme must be http or https, got {scheme}"
         )));
@@ -275,7 +340,8 @@ pub(crate) async fn webhook_create(
     Json(request): Json<WebhookCreateRequest>,
 ) -> Result<(StatusCode, Json<WebhookResponse>), HubApiError> {
     shardline_metrics::record_hub_api_request("webhook_create", "POST", 201);
-    authorize(&state, &headers, TokenScope::Write)?;
+    let auth_ctx = authorize_with_context(&state, &headers, TokenScope::Write)?;
+    require_repository_binding(auth_ctx.as_ref(), &ns, &repo)?;
     if request.events.len() > MAX_WEBHOOK_EVENTS {
         return Err(HubApiError::PathValidation(format!(
             "webhook events exceeds maximum of {MAX_WEBHOOK_EVENTS}"
@@ -299,13 +365,25 @@ pub(crate) async fn webhook_create(
             request.url
         )));
     }
+    // Encrypt the signing secret at rest when a cipher is configured.
+    let secret_to_store: Option<String> =
+        match (&state.webhook_secret_cipher, request.secret.as_ref()) {
+            (Some(cipher), Some(plain)) => Some(
+                cipher
+                    .encrypt(&name, plain.expose_secret())
+                    .map_err(HubApiError::from)?,
+            ),
+            _ => None,
+        };
     let webhook = state
         .store
         .create_webhook(
             &name,
             &request.url,
             &request.events,
-            request.secret.as_ref().map(SecretString::expose_secret),
+            secret_to_store
+                .as_deref()
+                .or_else(|| request.secret.as_ref().map(SecretString::expose_secret)),
         )
         .map_err(|e| HubApiError::CasError(e.to_string()))?;
     Ok((
@@ -321,7 +399,8 @@ pub(crate) async fn webhook_list(
     Path((_repo_type, ns, repo)): Path<(String, String, String)>,
 ) -> Result<Json<WebhookListResponse>, HubApiError> {
     shardline_metrics::record_hub_api_request("webhook_list", "GET", 200);
-    authorize(&state, &headers, TokenScope::Read)?;
+    let auth_ctx = authorize_with_context(&state, &headers, TokenScope::Read)?;
+    require_repository_binding(auth_ctx.as_ref(), &ns, &repo)?;
     let name = format!("{ns}/{repo}");
     let webhooks = state
         .store
@@ -340,7 +419,8 @@ pub(crate) async fn webhook_delete(
     Path((_repo_type, ns, repo, webhook_id)): Path<(String, String, String, String)>,
 ) -> Result<StatusCode, HubApiError> {
     shardline_metrics::record_hub_api_request("webhook_delete", "DELETE", 204);
-    authorize(&state, &headers, TokenScope::Write)?;
+    let auth_ctx = authorize_with_context(&state, &headers, TokenScope::Write)?;
+    require_repository_binding(auth_ctx.as_ref(), &ns, &repo)?;
     let name = format!("{ns}/{repo}");
     state
         .store
@@ -561,6 +641,226 @@ mod tests {
     fn is_private_ip_true_for_ipv4_mapped_loopback_v6() {
         let ip: IpAddr = "::ffff:127.0.0.1".parse().unwrap();
         assert!(is_private_ip(&ip));
+    }
+
+    // ── At-rest webhook secret encryption ─────────────────────────────────
+
+    use axum::Json;
+    use axum::extract::{Path, State};
+    use axum::http::StatusCode;
+    use shardline_index::hub::{BoxedHubStore, HubRepoType};
+    use shardline_protocol::SecretBytes;
+    use shardline_server_core::ServerObjectStore;
+
+    use crate::models::WebhookCreateRequest;
+    use crate::secrets::{WebhookSecretCipher, WebhookSecretCipherError};
+
+    const ENC_KEY: [u8; 32] = *b"0123456789abcdef0123456789abcdef";
+
+    fn make_encrypted_state(key: &[u8; 32]) -> (tempfile::TempDir, HubState) {
+        let ts = tempfile::tempdir().unwrap();
+        shardline_index::hub::ensure_hub_tables(ts.path()).unwrap();
+        let store = shardline_index::LocalIndexStore::open(ts.path().to_path_buf());
+        let boxed = BoxedHubStore::from_store(store);
+        boxed
+            .create_repo(HubRepoType::Model, "org/enc", false)
+            .unwrap();
+        let cipher = WebhookSecretCipher::new(SecretBytes::new(key.to_vec())).unwrap();
+        let object_store = ServerObjectStore::local(ts.path().join("lfs")).unwrap();
+        let state = HubState {
+            store: boxed,
+            object_store,
+            auth: None,
+            http_client: None,
+            webhook_secret_cipher: Some(cipher),
+        };
+        (ts, state)
+    }
+
+    #[tokio::test]
+    async fn webhook_create_stores_ciphertext_at_rest() {
+        let (_ts, state) = make_encrypted_state(&ENC_KEY);
+        let plaintext = "s3cr3t-webhook-token";
+        let (status, resp) = webhook_create(
+            State(state.clone()),
+            axum::http::HeaderMap::new(),
+            Path(("models".into(), "org".into(), "enc".into())),
+            Json(WebhookCreateRequest {
+                url: "https://example.com/hook".into(),
+                events: vec!["push".into()],
+                secret: Some(SecretString::from_secret(plaintext)),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(status, StatusCode::CREATED);
+        let stored = state
+            .store
+            .list_webhooks("org/enc")
+            .unwrap()
+            .into_iter()
+            .find(|wh| wh.id == resp.id)
+            .unwrap();
+        let raw = stored.secret.as_ref().unwrap().expose_secret().to_owned();
+        assert!(raw.starts_with("sse1:"));
+        assert_ne!(raw, plaintext);
+    }
+
+    #[test]
+    fn decrypt_round_trips_hmac_signing_secret() {
+        let (_ts, state) = make_encrypted_state(&ENC_KEY);
+        let repo = "org/enc";
+        let plaintext = "hmac-signing-secret";
+        let cipher = WebhookSecretCipher::new(SecretBytes::new(ENC_KEY.to_vec())).unwrap();
+        let encrypted = cipher.encrypt(repo, plaintext).unwrap();
+        state
+            .store
+            .create_webhook(
+                repo,
+                "https://example.com/hook",
+                &["push".to_owned()],
+                Some(&encrypted),
+            )
+            .unwrap();
+        let webhook = state.store.list_webhooks(repo).unwrap().remove(0);
+        let resolved = resolve_webhook_secret(&state, &webhook).unwrap().unwrap();
+        assert_eq!(resolved.expose_secret(), plaintext);
+
+        // The decrypted secret must produce the same HMAC-SHA256 signature as
+        // the original plaintext over the delivery body.
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+        type HmacSha256 = Hmac<Sha256>;
+        let body = b"{\"event\":\"push\"}";
+        let mut expected = HmacSha256::new_from_slice(plaintext.as_bytes()).unwrap();
+        expected.update(body);
+        let expected_sig = format!("sha256={}", hex::encode(expected.finalize().into_bytes()));
+        let mut actual = HmacSha256::new_from_slice(resolved.expose_secret().as_bytes()).unwrap();
+        actual.update(body);
+        let actual_sig = format!("sha256={}", hex::encode(actual.finalize().into_bytes()));
+        assert_eq!(expected_sig, actual_sig);
+    }
+
+    #[test]
+    fn legacy_plaintext_row_is_upgraded_on_read() {
+        let (_ts, state) = make_encrypted_state(&ENC_KEY);
+        let repo = "org/enc";
+        // Seed a legacy plaintext row as if it predated encryption.
+        state
+            .store
+            .create_webhook(
+                repo,
+                "https://example.com/hook",
+                &["push".to_owned()],
+                Some("legacy-plain"),
+            )
+            .unwrap();
+        let seeded = state.store.list_webhooks(repo).unwrap().remove(0);
+        assert!(
+            !seeded
+                .secret
+                .as_ref()
+                .unwrap()
+                .expose_secret()
+                .starts_with("sse1:")
+        );
+
+        // Reading it with a configured cipher decrypts AND upgrades in place.
+        let resolved = resolve_webhook_secret(&state, &seeded).unwrap().unwrap();
+        assert_eq!(resolved.expose_secret(), "legacy-plain");
+
+        let upgraded = state.store.list_webhooks(repo).unwrap().remove(0);
+        assert!(
+            upgraded
+                .secret
+                .as_ref()
+                .unwrap()
+                .expose_secret()
+                .starts_with("sse1:")
+        );
+    }
+
+    #[test]
+    fn without_key_secret_stored_and_read_as_plaintext() {
+        let ts = tempfile::tempdir().unwrap();
+        shardline_index::hub::ensure_hub_tables(ts.path()).unwrap();
+        let store = shardline_index::LocalIndexStore::open(ts.path().to_path_buf());
+        let boxed = BoxedHubStore::from_store(store);
+        boxed
+            .create_repo(HubRepoType::Model, "org/plain", false)
+            .unwrap();
+        let object_store = ServerObjectStore::local(ts.path().join("lfs")).unwrap();
+        let state = HubState {
+            store: boxed,
+            object_store,
+            auth: None,
+            http_client: None,
+            webhook_secret_cipher: None,
+        };
+        state
+            .store
+            .create_webhook(
+                "org/plain",
+                "https://example.com/hook",
+                &["push".to_owned()],
+                Some("plain-secret"),
+            )
+            .unwrap();
+        let wh = state.store.list_webhooks("org/plain").unwrap().remove(0);
+        assert_eq!(wh.secret.as_ref().unwrap().expose_secret(), "plain-secret");
+        let resolved = resolve_webhook_secret(&state, &wh).unwrap().unwrap();
+        assert_eq!(resolved.expose_secret(), "plain-secret");
+    }
+
+    #[test]
+    fn ciphertext_without_key_fails_loudly() {
+        let (_ts, state) = make_encrypted_state(&ENC_KEY);
+        let repo = "org/enc";
+        let cipher = WebhookSecretCipher::new(SecretBytes::new(ENC_KEY.to_vec())).unwrap();
+        let encrypted = cipher.encrypt(repo, "secret").unwrap();
+        state
+            .store
+            .create_webhook(
+                repo,
+                "https://example.com/hook",
+                &["push".to_owned()],
+                Some(&encrypted),
+            )
+            .unwrap();
+        // Rebuild state without a cipher, simulating a deployment where the key
+        // was removed after rows were encrypted at rest.
+        let no_cipher_state = HubState {
+            webhook_secret_cipher: None,
+            ..state
+        };
+        let wh = no_cipher_state.store.list_webhooks(repo).unwrap().remove(0);
+        let result = resolve_webhook_secret(&no_cipher_state, &wh);
+        assert!(
+            matches!(result, Err(WebhookSecretCipherError::NoCipherForCiphertext)),
+            "expected a loud error when ciphertext has no key, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn wrong_key_fails_to_decrypt_without_panic() {
+        const WRONG_KEY: [u8; 32] = *b"abcdef0123456789abcdef0123456789";
+        let (_ts, state) = make_encrypted_state(&ENC_KEY);
+        let repo = "org/enc";
+        let cipher = WebhookSecretCipher::new(SecretBytes::new(ENC_KEY.to_vec())).unwrap();
+        let encrypted = cipher.encrypt(repo, "secret").unwrap();
+        state
+            .store
+            .create_webhook(
+                repo,
+                "https://example.com/hook",
+                &["push".to_owned()],
+                Some(&encrypted),
+            )
+            .unwrap();
+        let wh = state.store.list_webhooks(repo).unwrap().remove(0);
+        let wrong = WebhookSecretCipher::new(SecretBytes::new(WRONG_KEY.to_vec())).unwrap();
+        let result = wrong.decrypt(repo, wh.secret.as_ref().unwrap().expose_secret());
+        assert!(matches!(result, Err(WebhookSecretCipherError::Decrypt(_))));
     }
 
     #[test]

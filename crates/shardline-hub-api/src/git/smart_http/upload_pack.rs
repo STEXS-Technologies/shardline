@@ -9,8 +9,13 @@ use axum::{
 
 use super::super::pack::{GitObject, create_commit_object, empty_pack, generate_pack};
 use super::super::pktline::{self, FLUSH};
-use super::ref_advertisement::{GitRef, authorize_read, collect_refs, resolve_repo_id};
-use crate::{error::HubApiError, routes::HubState};
+use super::ref_advertisement::{
+    GitRef, authorize_read_with_context, collect_refs, resolve_repo_id,
+};
+use crate::{
+    error::HubApiError,
+    routes::{HubState, require_repository_binding},
+};
 use shardline_index::hub::HubFileEntry;
 
 // ---- Upload-pack: POST /{type}/{ns}/{repo}/git-upload-pack ----
@@ -27,7 +32,8 @@ pub async fn upload_pack(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, HubApiError> {
-    authorize_read(&state, &headers)?;
+    let auth_ctx = authorize_read_with_context(&state, &headers)?;
+    require_repository_binding(auth_ctx.as_ref(), &ns, &repo)?;
 
     let repo_id = resolve_repo_id(&repo_type, &ns, &repo);
 

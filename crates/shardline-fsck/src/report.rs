@@ -1,6 +1,29 @@
 use crate::FsckIssue;
 
 /// Integrity-check report.
+///
+/// Aggregates the outcome of one fsck run: how many records, chunk references,
+/// shard mappings, and webhook deliveries were inspected, plus the issues that
+/// were found.
+///
+/// # Examples
+///
+/// ```
+/// use shardline_fsck::FsckReport;
+///
+/// let report = FsckReport {
+///     latest_records: 100,
+///     version_records: 100,
+///     inspected_chunk_references: 300,
+///     inspected_dedupe_shard_mappings: 5,
+///     inspected_reconstructions: 5,
+///     inspected_webhook_deliveries: 0,
+///     inspected_provider_repository_states: 0,
+///     issues: Vec::new(),
+/// };
+/// assert!(report.is_clean());
+/// assert_eq!(report.issue_count(), 0);
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FsckReport {
     /// Number of latest records scanned through the configured record store.

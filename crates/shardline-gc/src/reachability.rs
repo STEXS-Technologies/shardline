@@ -1,5 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
+#[cfg(test)]
+use std::cell::Cell;
+
 use shardline_index::{
     AsyncIndexStore, FileRecordStorageLayout, RecordStore, RecordTraversal, StoredRecord,
     xet_hash_hex_string,
@@ -34,6 +37,30 @@ pub(super) struct ReachabilityAccumulator {
     pub(super) scanned_records: u64,
 }
 
+// Test-only invocation counter for `collect_referenced_object_keys`.
+//
+// A full reachability mark is an expensive operation (every record, every
+// dedupe shard mapping, and — for XorbCdcV1 records — a read + parse of the
+// stored xorb container). The sweep path must collect the referenced set
+// exactly once regardless of how many quarantine candidates it sweeps, so the
+// regression test asserts this count stays at 1. The counter is thread-local:
+// each `#[test]` runs on its own thread, so concurrent tests do not perturb
+// one another's counts.
+#[cfg(test)]
+thread_local! {
+    static COLLECT_CALL_COUNT: Cell<u64> = const { Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_collect_call_count() {
+    COLLECT_CALL_COUNT.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn collect_call_count() -> u64 {
+    COLLECT_CALL_COUNT.with(Cell::get)
+}
+
 pub(super) async fn collect_referenced_object_keys<RecordAdapter, IndexAdapter>(
     record_store: &RecordAdapter,
     index_store: &IndexAdapter,
@@ -47,6 +74,9 @@ where
     IndexAdapter: AsyncIndexStore + Sync,
     IndexAdapter::Error: Into<GcError>,
 {
+    #[cfg(test)]
+    COLLECT_CALL_COUNT.with(|count| count.set(count.get().saturating_add(1)));
+
     RecordTraversal::visit_latest_records(record_store, |entry| {
         collect_record_object_references(object_store, frontends, &entry, reachability)
     })

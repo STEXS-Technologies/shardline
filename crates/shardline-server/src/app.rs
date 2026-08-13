@@ -153,6 +153,33 @@ impl Drop for ActiveProtocolRequestGuard<'_> {
 
 /// Builds the Shardline HTTP router.
 ///
+/// Initializes the configured metadata backend, object store, authentication,
+/// and reconstruction cache, then assembles the full Axum [`Router`] for the
+/// configured server role. This is the entry point for embedders that want to
+/// serve Shardline routes from their own process or test them in-process.
+///
+/// # Examples
+///
+/// ```no_run
+/// use shardline_server::{ServerConfig, app::router};
+/// use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+/// use std::num::NonZeroUsize;
+///
+/// #[tokio::main]
+/// async fn main() -> Result<(), Box<dyn std::error::Error>> {
+///     let config = ServerConfig::new(
+///         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+///         "http://127.0.0.1:8080".to_owned(),
+///         std::env::temp_dir(),
+///         NonZeroUsize::new(64 * 1024).expect("64 KiB chunk size is non-zero"),
+///     );
+///     let app = router(config).await?;
+///     let listener = tokio::net::TcpListener::bind("127.0.0.1:8080").await?;
+///     axum::serve(listener, app).await?;
+///     Ok(())
+/// }
+/// ```
+///
 /// # Errors
 ///
 /// Returns [`ServerError`] when the configured backend cannot initialize.
@@ -168,6 +195,26 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
         bounded_api_body_limit(max_request_body_bytes, MAX_PROVIDER_WEBHOOK_BODY_BYTES);
     let backend = ServerBackend::from_config(&config).await?;
     let auth = build_auth_provider(&config).await?;
+    let config_secret_cipher = config.config_secret_key().map_or_else(
+        || {
+            tracing::warn!(
+                "SHARDLINE_CONFIG_SECRET_KEY not configured; provider-config secrets will be stored unencrypted"
+            );
+            None
+        },
+        |key| {
+            let key_bytes = shardline_protocol::SecretBytes::new(key.to_vec());
+            match shardline_server_core::at_rest::AtRestCipher::new(key_bytes) {
+                Ok(cipher) => Some(cipher),
+                Err(e) => {
+                    tracing::warn!(
+                        "invalid SHARDLINE_CONFIG_SECRET_KEY; provider-config secrets will be stored unencrypted: {e}"
+                    );
+                    None
+                }
+            }
+        },
+    );
     let provider_tokens = if role.serves_api() {
         match (
             config.provider_config_path(),
@@ -188,6 +235,7 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
                 issuer,
                 ttl_seconds,
                 signing_key,
+                config_secret_cipher.as_ref(),
             )?),
             _ => None,
         }
@@ -306,6 +354,23 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
 }
 
 /// Runs the Shardline HTTP server.
+///
+/// # Examples
+///
+/// ```no_run
+/// use shardline_server::{ServerConfig, serve};
+///
+/// #[tokio::main]
+/// async fn main() -> Result<(), Box<dyn std::error::Error>> {
+///     let config = ServerConfig::from_env()?;
+///     serve(config).await?;
+///     Ok(())
+/// }
+/// ```
+///
+/// This is a long-running function: it binds the configured address, initializes
+/// the router (including the metadata backend and object store), and serves
+/// until the process receives a shutdown signal.
 ///
 /// # Errors
 ///
@@ -590,11 +655,54 @@ fn build_hub_state(
         }
     };
 
+    // Thread an at-rest cipher for webhook signing secrets when configured.
+    let webhook_secret_cipher = app_state.config.hub_webhook_secret_key().map_or_else(
+        || {
+            tracing::warn!(
+                "SHARDLINE_HUB_WEBHOOK_SECRET_KEY not configured; webhook signing secrets will be stored unencrypted"
+            );
+            None
+        },
+        |key| {
+            let key_bytes = shardline_protocol::SecretBytes::new(key.to_vec());
+            match shardline_hub_api::secrets::WebhookSecretCipher::new(key_bytes) {
+                Ok(cipher) => {
+                    // App-level data upgrade: re-encrypt legacy plaintext rows.
+                    // Run the sweep as a background task so startup latency stays
+                    // bounded regardless of repository count. This is purely an
+                    // accelerator — the delivery path already upgrades lazily per
+                    // row — and it is idempotent vs. that lazy path: both write
+                    // the same valid ciphertext under the same key, and since the
+                    // nonce is random a concurrent write just replaces one valid
+                    // blob with another (last-write-wins is harmless).
+                    let sweep_store = store.clone();
+                    let sweep_cipher = cipher.clone();
+                    let _sweep_handle = tokio::task::spawn_blocking(move || {
+                        tracing::info!("starting background webhook-secret upgrade sweep");
+                        shardline_hub_api::secrets::upgrade_webhook_secrets(
+                            &sweep_store,
+                            &sweep_cipher,
+                        );
+                        tracing::info!("background webhook-secret upgrade sweep completed");
+                    });
+                    Some(cipher)
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "invalid SHARDLINE_HUB_WEBHOOK_SECRET_KEY; webhook signing secrets will be stored unencrypted: {e}"
+                    );
+                    None
+                }
+            }
+        },
+    );
+
     Ok(shardline_hub_api::routes::HubState {
         store,
         object_store: app_state.backend.object_store(),
         auth: hub_auth,
         http_client,
+        webhook_secret_cipher,
     })
 }
 

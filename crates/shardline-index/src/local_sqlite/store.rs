@@ -149,7 +149,7 @@ impl LocalIndexStore {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct LocalRecordLocator {
     pub(crate) record_key: String,
-    pub(crate) kind: LocalRecordKind,
+    pub(crate) kind: RecordKind,
     pub(crate) scope_key: String,
     pub(crate) file_id: String,
     pub(crate) content_hash: Option<String>,
@@ -296,19 +296,19 @@ impl LocalRecordStore {
 
     fn version_record_locator(&self, record: &FileRecord) -> LocalRecordLocator {
         helpers::local_record_locator(
-            LocalRecordKind::Version,
+            RecordKind::Version,
             record,
             Some(record.content_hash.clone()),
         )
     }
 
     fn latest_record_locator(&self, record: &FileRecord) -> LocalRecordLocator {
-        helpers::local_record_locator(LocalRecordKind::Latest, record, None)
+        helpers::local_record_locator(RecordKind::Latest, record, None)
     }
 
     pub(crate) fn list_record_locators(
         &self,
-        kind: LocalRecordKind,
+        kind: RecordKind,
     ) -> Result<Vec<LocalRecordLocator>, LocalIndexStoreError> {
         let connection = self.open_connection()?;
         let mut statement = connection.prepare(
@@ -333,7 +333,7 @@ impl LocalRecordStore {
 
     pub(crate) fn list_repository_record_locators(
         &self,
-        kind: LocalRecordKind,
+        kind: RecordKind,
         repository: &RepositoryRecordScope,
     ) -> Result<Vec<LocalRecordLocator>, LocalIndexStoreError> {
         let connection = self.open_connection()?;
@@ -371,25 +371,4 @@ impl LocalRecordStore {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) enum LocalRecordKind {
-    Latest,
-    Version,
-}
-
-impl LocalRecordKind {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::Latest => "latest",
-            Self::Version => "version",
-        }
-    }
-
-    pub(crate) fn parse(value: &str) -> Result<Self, LocalIndexStoreError> {
-        match value {
-            "latest" => Ok(Self::Latest),
-            "version" => Ok(Self::Version),
-            _other => Err(LocalIndexStoreError::InvalidRecordKind),
-        }
-    }
-}
+pub(crate) use crate::record_kind::RecordKind;

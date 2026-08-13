@@ -11,6 +11,21 @@ pub const XET_PATH_ROUTE: &str = "/api/{provider}/{owner}/{repo}/path/{rev}/{*pa
 pub const XET_REVISIONS_ROUTE: &str = "/api/{provider}/{owner}/{repo}/revisions";
 pub const XET_REVISION_ROUTE: &str = "/api/{provider}/{owner}/{repo}/revisions/{rev}";
 
+/// Validates that a hash path is a 64-character lowercase hex digest.
+///
+/// Hash paths appear in xorb transfer URLs and object keys; this rejects
+/// malformed values before they reach storage.
+///
+/// # Examples
+///
+/// ```
+/// use shardline_xet_adapter::validate_hash_path;
+///
+/// let hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+/// assert!(validate_hash_path(hash).is_ok());
+/// assert!(validate_hash_path("short").is_err());
+/// ```
+///
 /// # Errors
 ///
 /// Returns an error when the hash is not valid hex.
@@ -19,6 +34,21 @@ pub fn validate_hash_path(value: &str) -> Result<(), XetAdapterError> {
     Ok(())
 }
 
+/// Validates an optional content hash, passing when the value is `None`.
+///
+/// Useful for request bodies where a content hash may be omitted.
+///
+/// # Examples
+///
+/// ```
+/// use shardline_xet_adapter::validate_optional_content_hash;
+///
+/// let hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+/// assert!(validate_optional_content_hash(Some(hash)).is_ok());
+/// assert!(validate_optional_content_hash(None).is_ok());
+/// assert!(validate_optional_content_hash(Some("bad")).is_err());
+/// ```
+///
 /// # Errors
 ///
 /// Returns an error when the provided hash is not valid hex.
@@ -30,6 +60,17 @@ pub fn validate_optional_content_hash(content_hash: Option<&str>) -> Result<(), 
     Ok(())
 }
 
+/// Validates the transfer namespace prefix for xorb transfer routes.
+///
+/// # Examples
+///
+/// ```
+/// use shardline_xet_adapter::validate_xorb_transfer_namespace;
+///
+/// assert!(validate_xorb_transfer_namespace("default").is_ok());
+/// assert!(validate_xorb_transfer_namespace("custom").is_err());
+/// ```
+///
 /// # Errors
 ///
 /// Returns an error when the prefix does not match the expected transfer namespace.
@@ -41,6 +82,20 @@ pub fn validate_xorb_transfer_namespace(prefix: &str) -> Result<(), XetAdapterEr
     Ok(())
 }
 
+/// Builds the xorb transfer URL for a hash on the given server base URL.
+///
+/// # Examples
+///
+/// ```
+/// use shardline_xet_adapter::build_xorb_transfer_url;
+///
+/// let hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+/// let url = build_xorb_transfer_url("http://localhost:8080/", hash);
+/// assert_eq!(
+///     url,
+///     "http://localhost:8080/transfer/xorb/default/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+/// );
+/// ```
 #[must_use]
 pub fn build_xorb_transfer_url(public_base_url: &str, hash_hex: &str) -> String {
     let trimmed_base_url = public_base_url.trim_end_matches('/');

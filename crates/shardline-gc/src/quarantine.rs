@@ -1,11 +1,15 @@
 use std::collections::{HashMap, HashSet};
 
-use shardline_index::{AsyncIndexStore, QuarantineCandidate};
+use shardline_index::{AsyncIndexStore, QuarantineCandidate, RecordStore};
 use shardline_storage::{ObjectKey, ObjectStore};
 use shardline_xet_adapter::xorb_hash_from_object_key_if_present;
 
-use crate::{GcError, reachability::OrphanObject, types::LocalGcReport};
-use shardline_server_core::{checked_add, checked_increment};
+use crate::{
+    GcError, ServerFrontend,
+    reachability::{OrphanObject, ReachabilityAccumulator, collect_referenced_object_keys},
+    types::LocalGcReport,
+};
+use shardline_server_core::{ServerObjectStore, checked_add, checked_increment};
 
 pub(super) async fn read_quarantine_entries<IndexAdapter>(
     index_store: &IndexAdapter,
@@ -114,21 +118,83 @@ where
     Ok(())
 }
 
-pub(super) async fn sweep_quarantine_entries<ObjectAdapter, IndexAdapter>(
-    object_store: &ObjectAdapter,
+/// Sweeps expired quarantine candidates whose objects are confirmed still
+/// unreferenced at delete time.
+///
+/// This is an internal helper called only from the runner; the eight
+/// parameters bundle the store context plus the per-cycle state, so the
+/// `too_many_arguments` default warning is intentionally suppressed.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn sweep_quarantine_entries<RecordAdapter, IndexAdapter>(
+    record_store: &RecordAdapter,
+    object_store: &ServerObjectStore,
     index_store: &IndexAdapter,
+    frontends: &[ServerFrontend],
     orphan_objects: &HashMap<String, OrphanObject>,
     now_unix_seconds: u64,
     quarantine_entries: &mut HashMap<String, QuarantineCandidate>,
     report: &mut LocalGcReport,
 ) -> Result<(), GcError>
 where
-    ObjectAdapter: ObjectStore,
-    ObjectAdapter::Error: Into<GcError>,
-    IndexAdapter: AsyncIndexStore,
+    RecordAdapter: RecordStore + Sync,
+    RecordAdapter::Error: Into<GcError>,
+    IndexAdapter: AsyncIndexStore + Sync,
     IndexAdapter::Error: Into<GcError>,
 {
     let object_keys = quarantine_entries.keys().cloned().collect::<Vec<_>>();
+
+    // Collect-once-then-check delete-time reachability.
+    //
+    // The cycle snapshot (`orphan_objects`) is taken at mark time. Between
+    // that snapshot and this sweep a chunk may have been re-referenced (e.g.
+    // re-uploaded, or an object-store write landing between
+    // `collect_referenced_object_keys` and `scan_orphan_objects` in the
+    // runner). Deleting it then would destroy live data and cause
+    // reconstruction 404s.
+    //
+    // To close that stale-snapshot window we re-run the reachability mark
+    // against the *current* index/record state once, immediately before the
+    // sweep, and hold the resulting referenced-key set in memory. Every
+    // expired candidate is then checked with an O(1) set membership test
+    // against that single pre-built set — NOT a fresh full mark per candidate
+    // (a full mark visits every record, every dedupe shard mapping, and for
+    // XorbCdcV1 records reads + parses the stored xorb container; doing it
+    // once per candidate would make the sweep O(candidates × store_size)).
+    //
+    // Residual window: the mark is taken once for the whole sweep, so a chunk
+    // re-referenced strictly between that mark and its storage delete could
+    // still be deleted. That window is far smaller than the original
+    // cycle-start snapshot and, in aggregate, strictly smaller than a sweep
+    // that never re-checked at all. The GC sweep runs in a separate process
+    // from the server, so this is closed to the extent the index/record
+    // stores are shared and consistent at read time. If a candidate is
+    // referenced in this set we skip the storage delete and only release the
+    // (now stale) quarantine entry; the object stays on disk and is seen as
+    // live on the next cycle, so no data is lost and nothing is resurrected.
+    //
+    // We only pay for the mark when at least one candidate actually reaches
+    // the delete-time check (expired + still in `orphan_objects`); a sweep
+    // with nothing to delete skips it entirely.
+    let requires_reachability_check = object_keys.iter().any(|object_key| {
+        orphan_objects.contains_key(object_key)
+            && quarantine_entries
+                .get(object_key)
+                .is_some_and(|candidate| candidate.delete_after_unix_seconds() <= now_unix_seconds)
+    });
+    let mut referenced_object_keys = HashSet::new();
+    if requires_reachability_check {
+        let mut reachability = ReachabilityAccumulator::default();
+        collect_referenced_object_keys(
+            record_store,
+            index_store,
+            object_store,
+            frontends,
+            &mut reachability,
+        )
+        .await?;
+        referenced_object_keys = reachability.referenced_object_keys;
+    }
+
     for object_key in object_keys {
         let orphan = orphan_objects.get(&object_key);
         if orphan.is_none() {
@@ -174,9 +240,26 @@ where
             .delete_quarantine_candidate(removed_candidate.object_key())
             .await
             .map_err(Into::into)?;
+
+        // Re-verify reachability at delete time against the single
+        // referenced-set collected once above (O(1) membership check, no
+        // per-candidate mark). If the object is now referenced we skip the
+        // storage delete and only release the (now stale) quarantine entry;
+        // the object stays on disk and will be seen as live on the next
+        // cycle, so no data is lost and nothing is resurrected.
+        let still_unreferenced = !referenced_object_keys.contains(orphan.object_key.as_str());
+        if !still_unreferenced {
+            tracing::debug!(
+                "skipping sweep delete for {object_key}: object became referenced after snapshot",
+            );
+            report.released_quarantine_candidates =
+                checked_increment(report.released_quarantine_candidates)?;
+            continue;
+        }
+
         let _outcome = object_store
             .delete_if_present(&orphan.object_key)
-            .map_err(Into::into)?;
+            .map_err(GcError::ObjectStore)?;
 
         // When a xorb container is swept, also remove its chunk-hash cache
         // sidecar (_xorb_chunks/{prefix}/{hash}) so orphaned cache entries
@@ -187,7 +270,7 @@ where
         {
             let _cache_outcome = object_store
                 .delete_if_present(&cache_key)
-                .map_err(Into::into);
+                .map_err(GcError::ObjectStore);
         }
 
         report.deleted_chunks = checked_increment(report.deleted_chunks)?;
@@ -203,13 +286,13 @@ where
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
-    use shardline_index::MemoryIndexStore;
+    use shardline_index::{MemoryIndexStore, MemoryRecordStore};
     use shardline_server_core::ServerObjectStore;
     use shardline_storage::ObjectKey;
 
     fn make_orphan(hash: &str, bytes: u64) -> OrphanObject {
         let prefix = &hash[..2];
-        let object_key = ObjectKey::parse(&format!("chunks/{prefix}/{hash}")).unwrap();
+        let object_key = ObjectKey::parse(&format!("{prefix}/{hash}")).unwrap();
         OrphanObject {
             hash: hash.to_owned(),
             object_key,
@@ -567,6 +650,7 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             let index_store = MemoryIndexStore::new();
+            let record_store = MemoryRecordStore::new();
             let object_store = shardline_server_core::ServerObjectStore::blackhole();
 
             let now = 1_000_000_u64;
@@ -609,8 +693,10 @@ mod tests {
             };
 
             sweep_quarantine_entries(
+                &record_store,
                 &object_store,
                 &index_store,
+                &[ServerFrontend::Xet],
                 &orphan_objects,
                 now,
                 &mut quarantine_entries,
@@ -637,11 +723,90 @@ mod tests {
         });
     }
 
+    // ── sweep: collect-once reachability regression (AR-1) ─────────────
+    //
+    // Regression test for the quadratic sweep regression: the sweep must
+    // collect the referenced set exactly once for the whole sweep, regardless
+    // of how many expired quarantine candidates it processes. Previously each
+    // candidate triggered its own full reachability mark (every record, every
+    // dedupe shard mapping, and for XorbCdcV1 a read + parse of the stored
+    // xorb container), making the sweep O(candidates × store_size).
+    //
+    // We instrument the collector with a test-only per-thread counter
+    // (`collect_call_count`/`reset_collect_call_count`) and assert that
+    // sweeping several expired candidates runs the mark exactly once.
+
+    #[test]
+    fn sweep_collects_referenced_set_once_for_multiple_expired_candidates() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let index_store = MemoryIndexStore::new();
+            let record_store = MemoryRecordStore::new();
+            let object_store = ServerObjectStore::blackhole();
+
+            let now = 1_000_000_u64;
+            let mut orphan_objects = HashMap::new();
+            let mut quarantine_entries = HashMap::new();
+
+            // Several expired quarantine candidates (each with a distinct
+            // object key). None are referenced by any live record, so every
+            // one is a valid sweep delete.
+            let candidate_count = 5_u64;
+            for i in 0..candidate_count {
+                let hash = format!("{i:0>64}");
+                let orphan = make_orphan(&hash, 64 + i);
+                orphan_objects.insert(orphan.hash.clone(), orphan.clone());
+                let candidate = QuarantineCandidate::new(
+                    orphan.object_key.clone(),
+                    orphan.bytes,
+                    now - 100_000, // first seen long ago
+                    now - 1,       // expired before now
+                )
+                .unwrap();
+                index_store
+                    .upsert_quarantine_candidate(&candidate)
+                    .await
+                    .unwrap();
+                quarantine_entries.insert(orphan.hash.clone(), candidate);
+            }
+
+            let mut report = LocalGcReport::default();
+            crate::reachability::reset_collect_call_count();
+            sweep_quarantine_entries(
+                &record_store,
+                &object_store,
+                &index_store,
+                &[ServerFrontend::Xet],
+                &orphan_objects,
+                now,
+                &mut quarantine_entries,
+                &mut report,
+            )
+            .await
+            .unwrap();
+
+            // The referenced set is built once, not once per candidate.
+            assert_eq!(
+                crate::reachability::collect_call_count(),
+                1,
+                "collect_referenced_object_keys must run exactly once for the whole sweep"
+            );
+            // Every expired, unreferenced candidate was swept.
+            assert_eq!(
+                report.deleted_chunks, candidate_count,
+                "all expired unreferenced candidates should be deleted"
+            );
+            assert_eq!(report.released_quarantine_candidates, candidate_count);
+            assert!(quarantine_entries.is_empty());
+        });
+    }
+
     #[test]
     fn sweep_skips_non_expired_orphan() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             let index_store = MemoryIndexStore::new();
+            let record_store = MemoryRecordStore::new();
             let object_store = shardline_server_core::ServerObjectStore::blackhole();
 
             let now = 1_000_000_u64;
@@ -678,8 +843,10 @@ mod tests {
             };
 
             sweep_quarantine_entries(
+                &record_store,
                 &object_store,
                 &index_store,
+                &[ServerFrontend::Xet],
                 &orphan_objects,
                 now,
                 &mut quarantine_entries,
@@ -699,6 +866,7 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             let index_store = MemoryIndexStore::new();
+            let record_store = MemoryRecordStore::new();
             let object_store = shardline_server_core::ServerObjectStore::blackhole();
 
             let now = 1_000_000_u64;
@@ -737,8 +905,10 @@ mod tests {
             };
 
             sweep_quarantine_entries(
+                &record_store,
                 &object_store,
                 &index_store,
+                &[ServerFrontend::Xet],
                 &HashMap::new(), // empty orphan_objects
                 now,
                 &mut quarantine_entries,
@@ -986,6 +1156,7 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             let index_store = MemoryIndexStore::new();
+            let record_store = MemoryRecordStore::new();
             let object_store = ServerObjectStore::blackhole();
 
             let now = 1_000_000_u64;
@@ -1008,8 +1179,10 @@ mod tests {
 
             // Empty orphan_objects → release.
             sweep_quarantine_entries(
+                &record_store,
                 &object_store,
                 &index_store,
+                &[ServerFrontend::Xet],
                 &HashMap::new(),
                 now,
                 &mut quarantine_entries,
@@ -1030,6 +1203,7 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             let index_store = MemoryIndexStore::new();
+            let record_store = MemoryRecordStore::new();
             let object_store = ServerObjectStore::blackhole();
 
             let now = 1_000_000_u64;
@@ -1046,8 +1220,10 @@ mod tests {
             let mut report = LocalGcReport::default();
 
             sweep_quarantine_entries(
+                &record_store,
                 &object_store,
                 &index_store,
+                &[ServerFrontend::Xet],
                 &orphan_objects,
                 now,
                 &mut quarantine_entries,
@@ -1068,6 +1244,7 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             let index_store = MemoryIndexStore::new();
+            let record_store = MemoryRecordStore::new();
             let object_store = ServerObjectStore::blackhole();
 
             let now = 1_000_000_u64;
@@ -1092,8 +1269,10 @@ mod tests {
             let mut report = LocalGcReport::default();
 
             sweep_quarantine_entries(
+                &record_store,
                 &object_store,
                 &index_store,
+                &[ServerFrontend::Xet],
                 &orphan_objects,
                 now,
                 &mut quarantine_entries,
@@ -1104,6 +1283,114 @@ mod tests {
 
             assert_eq!(report.deleted_chunks, 0);
             assert_eq!(quarantine_entries.len(), 1);
+        });
+    }
+
+    // ── sweep: object re-referenced after snapshot → delete skipped ─────
+    //
+    // This is the delete-time TOCTOU regression test for F-deep-3.1. The
+    // snapshot (`orphan_objects`) says the chunk is an orphan with an expired
+    // quarantine candidate, but by sweep time the chunk is referenced by a
+    // live record. The sweep must NOT delete it.
+    //
+    // An integration test would additionally assert this across processes
+    // (server re-uploading while a separate GC process sweeps) against a
+    // shared index: the object re-referenced between snapshot and delete is
+    // not deleted. This harness test reproduces the same state transition
+    // within one process and asserts the observable behaviour.
+
+    #[test]
+    fn sweep_skips_delete_when_object_becomes_referenced() {
+        use shardline_index::{FileChunkRecord, FileRecord, RecordMutation, StorageRepresentation};
+        use shardline_storage::{ObjectBody, ObjectIntegrity};
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let record_store = MemoryRecordStore::new();
+            let index_store = MemoryIndexStore::new();
+
+            let dir = tempfile::tempdir().unwrap();
+            let object_store = ServerObjectStore::local(dir.path().join("chunks")).unwrap();
+
+            let now = 1_000_000_u64;
+            let hash = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+            let key = make_orphan(hash, 0).object_key;
+            let data = b"referenced chunk data".to_vec();
+
+            // Put the chunk on disk.
+            let integrity = ObjectIntegrity::new(
+                shardline_server_core::chunk_hash(&data),
+                u64::try_from(data.len()).unwrap_or(0),
+            );
+            object_store
+                .put_if_absent(&key, ObjectBody::Borrowed(&data), &integrity)
+                .unwrap();
+
+            // The chunk is now referenced by a live record (the state that
+            // would be produced by a concurrent re-upload landing between
+            // `collect_referenced_object_keys` and `scan_orphan_objects`).
+            let record = FileRecord {
+                file_id: "live-file".to_owned(),
+                content_hash: hash.to_owned(),
+                total_bytes: 100,
+                chunk_size: 100,
+                storage_repr: StorageRepresentation::FixedChunkV1,
+                repository_scope: None,
+                chunks: vec![FileChunkRecord {
+                    hash: hash.to_owned(),
+                    offset: 0,
+                    length: 100,
+                    range_start: 0,
+                    range_end: 1,
+                    packed_start: 0,
+                    packed_end: 0,
+                }],
+            };
+            record_store.write_latest_record(&record).await.unwrap();
+
+            // But the cycle snapshot still treats it as an orphan with an
+            // expired quarantine candidate.
+            let orphan = make_orphan(hash, u64::try_from(data.len()).unwrap_or(0));
+            let mut orphan_objects = HashMap::new();
+            orphan_objects.insert(orphan.hash.clone(), orphan.clone());
+
+            let candidate = QuarantineCandidate::new(
+                orphan.object_key.clone(),
+                orphan.bytes,
+                now - 200_000, // first seen long ago
+                now - 1,       // expired before now
+            )
+            .unwrap();
+            index_store
+                .upsert_quarantine_candidate(&candidate)
+                .await
+                .unwrap();
+            let mut quarantine_entries = HashMap::new();
+            quarantine_entries.insert(orphan.hash.clone(), candidate);
+
+            let mut report = LocalGcReport::default();
+
+            sweep_quarantine_entries(
+                &record_store,
+                &object_store,
+                &index_store,
+                &[ServerFrontend::Xet],
+                &orphan_objects,
+                now,
+                &mut quarantine_entries,
+                &mut report,
+            )
+            .await
+            .unwrap();
+
+            // The delete-time re-check sees the object is now referenced and
+            // skips the storage delete: no data loss.
+            assert_eq!(report.deleted_chunks, 0);
+            assert_eq!(report.deleted_bytes, 0);
+            assert_eq!(report.released_quarantine_candidates, 1);
+            assert!(quarantine_entries.is_empty());
+            // The chunk is still present on disk.
+            assert!(object_store.contains(&orphan.object_key).unwrap());
         });
     }
 

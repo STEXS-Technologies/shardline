@@ -475,9 +475,45 @@ pub(crate) fn encode_query(value: &str) -> String {
 
 /// Percent-encodes each path segment, preserving `/` separators (so a
 /// `{*path}` wildcard captures the raw segments and axum decodes them).
+///
+/// Unlike [`encode_query`], this uses RFC-3986 path-segment encoding rather than
+/// `form_urlencoded::byte_serialize`. The query encoder treats a space as `+`
+/// (valid only in query strings), but path segments are NOT query strings: axum's
+/// `Path` percent-decodes segments and treats `+` literally, so using the query
+/// encoder would register `a b.txt` as `a+b.txt` and the server would then
+/// register/delete the mangled path. Path-segment encoding keeps `+` literal and
+/// encodes a space as `%20`, so `register_path`/`delete_path`/`list_dir`/
+/// `resolve_path` all round-trip the same path.
+/// RFC 3986 path-segment character set (`pchar`): unreserved chars plus
+/// sub-delims plus `:` and `@`. Everything else (space, `%`, non-ASCII, ...)
+/// is percent-encoded. In particular `+` (a sub-delim) stays literal, which is
+/// exactly the behavior `encode_path_segments` needs to avoid mangling spaces
+/// into `+`. percent-encoding 2.x does not ship this set, so it is built from
+/// `NON_ALPHANUMERIC` by un-encoding the permitted characters.
+const PATH_SEGMENT_PCHAR: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'.')
+    .remove(b'_')
+    .remove(b'~')
+    .remove(b'!')
+    .remove(b'$')
+    .remove(b'&')
+    .remove(b'\'')
+    .remove(b'(')
+    .remove(b')')
+    .remove(b'*')
+    .remove(b'+')
+    .remove(b',')
+    .remove(b';')
+    .remove(b'=')
+    .remove(b':')
+    .remove(b'@');
+
 pub(crate) fn encode_path_segments(path: &str) -> String {
     path.split('/')
-        .map(encode_query)
+        .map(|segment| {
+            percent_encoding::utf8_percent_encode(segment, PATH_SEGMENT_PCHAR).to_string()
+        })
         .collect::<Vec<_>>()
         .join("/")
 }
@@ -558,7 +594,49 @@ mod tests {
     #[test]
     fn encode_path_segments_preserves_separators() {
         assert_eq!(encode_path_segments("data/model.pt"), "data/model.pt");
-        assert_eq!(encode_path_segments("a b/c.txt"), "a+b/c.txt");
+        assert_eq!(encode_path_segments("a b/c.txt"), "a%20b/c.txt");
+    }
+
+    /// A path segment is NOT a query string: axum's `Path` percent-decodes and
+    /// treats `+` literally, so it must stay literal here and spaces must become
+    /// `%20`. This guarantees `register_path`/`delete_path`/`list_dir`/`resolve_path`
+    /// all encode the same way and round-trip back to the original path.
+    #[test]
+    fn encode_path_segments_round_trips_spaces_plus_percent_unicode() {
+        // Note: `a b.txt` (with a literal space) must NOT become `a+b.txt`.
+        let original = "a b.txt";
+        let encoded = encode_path_segments(original);
+        assert_eq!(encoded, "a%20b.txt");
+        assert_ne!(
+            encoded, "a+b.txt",
+            "space must not be encoded as '+' in a path segment"
+        );
+
+        // `+` in a path is literal data, not a space.
+        assert_eq!(encode_path_segments("x+y.txt"), "x+y.txt");
+
+        // `%` must be percent-encoded so the server-side decode round-trips
+        // instead of treating the literal `%` as an escape prefix.
+        assert_eq!(encode_path_segments("100%done.txt"), "100%25done.txt");
+
+        // Non-ASCII round-trips through UTF-8 percent-encoding.
+        assert_eq!(encode_path_segments("café.txt"), "caf%C3%A9.txt");
+
+        // Multi-segment round-trip: encode each segment, then percent-decode
+        // each decoded segment to reconstruct the original path.
+        let path = "dir with space/sub dir/100% caf\u{e9}+x.txt";
+        let encoded = encode_path_segments(path);
+        let round_tripped = encoded
+            .split('/')
+            .map(|segment| {
+                percent_encoding::percent_decode_str(segment)
+                    .decode_utf8()
+                    .expect("encoded segments must be valid UTF-8")
+                    .into_owned()
+            })
+            .collect::<Vec<_>>()
+            .join("/");
+        assert_eq!(round_tripped, path);
     }
 
     /// Verifies keyset pagination walking: `list_dir_all` follows the cursor

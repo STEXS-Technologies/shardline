@@ -1,3 +1,5 @@
+use std::str::FromStr;
+
 use thiserror::Error;
 
 use crate::{AuthorizationRequest, ProviderKind, RepositoryRef, RevisionRef};
@@ -78,6 +80,22 @@ impl ProviderSubject {
 }
 
 /// Repository visibility as reported by a provider.
+///
+/// Determines which repositories a provider reports as publicly readable,
+/// private, or internally visible. Shardline maps this onto authorization
+/// decisions when issuing repository-scoped tokens.
+///
+/// # Examples
+///
+/// ```
+/// use shardline_vcs::RepositoryVisibility;
+/// use std::str::FromStr;
+///
+/// let visibility = RepositoryVisibility::from_str(" PRIVATE ")?;
+/// assert_eq!(visibility, RepositoryVisibility::Private);
+/// assert!(RepositoryVisibility::from_str("secret").is_err());
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RepositoryVisibility {
     /// Publicly readable repository.
@@ -86,6 +104,29 @@ pub enum RepositoryVisibility {
     Private,
     /// Provider-specific internal visibility.
     Internal,
+}
+
+/// Repository visibility parse failure.
+#[derive(Debug, Clone, Copy, Error, PartialEq, Eq)]
+#[error("repository visibility was invalid")]
+pub struct RepositoryVisibilityParseError;
+
+impl FromStr for RepositoryVisibility {
+    type Err = RepositoryVisibilityParseError;
+
+    /// Parses a case-insensitive, whitespace-tolerant visibility name.
+    ///
+    /// Accepts `"public"`, `"private"`, and `"internal"` (in any case, with
+    /// surrounding whitespace). Any other value yields
+    /// `RepositoryVisibilityParseError`.
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "public" => Ok(Self::Public),
+            "private" => Ok(Self::Private),
+            "internal" => Ok(Self::Internal),
+            _other => Err(RepositoryVisibilityParseError),
+        }
+    }
 }
 
 /// Normalized repository metadata resolved from a provider.
@@ -340,6 +381,8 @@ fn validate_component(value: &str, max_bytes: usize) -> Result<(), ProviderBound
 
 #[cfg(test)]
 mod tests {
+    use std::str::FromStr;
+
     use super::{
         AuthorizationDecision, CanonicalCloneUrl, MAX_PROVIDER_IDENTITY_BYTES,
         MAX_PROVIDER_URL_BYTES, ProviderAdapter, ProviderBoundaryError, ProviderSubject,
@@ -588,6 +631,26 @@ mod tests {
         assert_eq!(request.delivery_id(), "delivery-1");
         assert_eq!(request.signature(), Some("sig"));
         assert_eq!(request.body(), b"{}");
+    }
+
+    #[test]
+    fn repository_visibility_from_str_all_variants() {
+        assert_eq!(
+            RepositoryVisibility::from_str("public").unwrap(),
+            RepositoryVisibility::Public
+        );
+        assert_eq!(
+            RepositoryVisibility::from_str("PRIVATE").unwrap(),
+            RepositoryVisibility::Private
+        );
+        assert_eq!(
+            RepositoryVisibility::from_str("  Internal  ").unwrap(),
+            RepositoryVisibility::Internal
+        );
+        assert_eq!(
+            RepositoryVisibility::from_str("unknown"),
+            Err(super::RepositoryVisibilityParseError)
+        );
     }
 
     #[test]

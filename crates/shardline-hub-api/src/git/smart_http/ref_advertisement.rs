@@ -9,7 +9,12 @@ use serde::Deserialize;
 use std::fmt::Write;
 
 use super::super::pktline::{self, FLUSH};
-use crate::{error::HubApiError, routes::HubState};
+use crate::{
+    error::HubApiError,
+    routes::{HubState, require_repository_binding},
+    types::GitSmartHttpService,
+};
+use shardline_server_core::AuthContext;
 
 /// Query parameters for `GET /info/refs`.
 #[derive(Debug, Deserialize)]
@@ -29,18 +34,40 @@ pub(super) fn resolve_repo_id(_repo_type: &str, ns: &str, repo: &str) -> String 
     format!("{ns}/{repo}")
 }
 
+#[cfg(test)]
 pub(super) fn authorize_read(state: &HubState, headers: &HeaderMap) -> Result<(), HubApiError> {
-    if let Some(ref auth) = state.auth {
-        let _ = auth.authorize(headers, TokenScope::Read)?;
-    }
-    Ok(())
+    authorize_read_with_context(state, headers).map(|_| ())
 }
 
+#[cfg(test)]
 pub(super) fn authorize_write(state: &HubState, headers: &HeaderMap) -> Result<(), HubApiError> {
+    authorize_write_with_context(state, headers).map(|_| ())
+}
+
+/// Like [`authorize_read`] but returns the verified auth context so the caller
+/// can enforce a token→repository binding.
+pub(super) fn authorize_read_with_context(
+    state: &HubState,
+    headers: &HeaderMap,
+) -> Result<Option<AuthContext>, HubApiError> {
     if let Some(ref auth) = state.auth {
-        let _ = auth.authorize(headers, TokenScope::Write)?;
+        Ok(Some(auth.authorize(headers, TokenScope::Read)?))
+    } else {
+        Ok(None)
     }
-    Ok(())
+}
+
+/// Like [`authorize_write`] but returns the verified auth context so the caller
+/// can enforce a token→repository binding.
+pub(super) fn authorize_write_with_context(
+    state: &HubState,
+    headers: &HeaderMap,
+) -> Result<Option<AuthContext>, HubApiError> {
+    if let Some(ref auth) = state.auth {
+        Ok(Some(auth.authorize(headers, TokenScope::Write)?))
+    } else {
+        Ok(None)
+    }
 }
 
 use shardline_protocol::TokenScope;
@@ -145,37 +172,38 @@ pub async fn info_refs(
     Query(query): Query<InfoRefsQuery>,
     headers: HeaderMap,
 ) -> Result<Response, HubApiError> {
-    let service = query.service.as_deref().unwrap_or("git-upload-pack");
-    if service != "git-upload-pack" && service != "git-receive-pack" {
-        return Err(HubApiError::NotFound);
-    }
+    let service = query
+        .service
+        .as_deref()
+        .unwrap_or(GitSmartHttpService::UploadPack.as_str())
+        .parse::<GitSmartHttpService>()
+        .map_err(|_err| HubApiError::NotFound)?;
 
-    if service == "git-receive-pack" {
-        authorize_write(&state, &headers)?;
-    } else {
-        authorize_read(&state, &headers)?;
-    }
+    let auth_ctx = match service {
+        GitSmartHttpService::ReceivePack => authorize_write_with_context(&state, &headers)?,
+        GitSmartHttpService::UploadPack => authorize_read_with_context(&state, &headers)?,
+    };
+    require_repository_binding(auth_ctx.as_ref(), &ns, &repo)?;
 
     let repo_id = resolve_repo_id(&repo_type, &ns, &repo);
     let refs = collect_refs(&state, &repo_id).await?;
 
-    let (capabilities, content_type) = if service == "git-receive-pack" {
-        (
+    let (capabilities, content_type) = match service {
+        GitSmartHttpService::ReceivePack => (
             "report-status delete-refs side-band-64k quiet",
             "application/x-git-receive-pack-advertisement",
-        )
-    } else {
-        (
+        ),
+        GitSmartHttpService::UploadPack => (
             "side-band-64k thin-pack multi_ack_detailed",
             "application/x-git-upload-pack-advertisement",
-        )
+        ),
     };
 
     let mut body = String::new();
     let mut line_buf = String::with_capacity(128);
     body.push_str(&pktline::encode_line({
         line_buf.clear();
-        writeln!(line_buf, "# service={service}").ok();
+        writeln!(line_buf, "# service={}", service.as_str()).ok();
         &line_buf
     })?);
     body.push_str(FLUSH);

@@ -5790,12 +5790,17 @@ async fn oci_upload_max_active_sessions_rejected() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn hub_dataset_and_model_operations() {
-    let (base_url, token, _storage, server) = start_hub_server().await;
+    let (base_url, _token, _storage, server) = start_hub_server().await;
     let client = Client::new();
+
+    // Repo-scoped tokens: `require_repository_binding` requires each repo's
+    // operations to use a token scoped to that exact `{ns}/{repo}`.
+    let dataset_token = mint_token("test-subject", "test-owner", "test-dataset", "main").unwrap();
+    let model_token = mint_token("test-subject", "test-owner", "test-model", "main").unwrap();
 
     let create_dataset = client
         .post(format!("{base_url}/api/repos/create"))
-        .header("Authorization", format!("Bearer {token}"))
+        .header("Authorization", format!("Bearer {dataset_token}"))
         .json(&serde_json::json!({"name": "test-owner/test-dataset", "type": "dataset", "private": false}))
         .send().await.unwrap();
     assert_eq!(
@@ -5809,7 +5814,7 @@ async fn hub_dataset_and_model_operations() {
         .get(format!(
             "{base_url}/api/datasets/test-owner/test-dataset/parquet"
         ))
-        .header("Authorization", format!("Bearer {token}"))
+        .header("Authorization", format!("Bearer {dataset_token}"))
         .send()
         .await
         .unwrap();
@@ -5822,7 +5827,7 @@ async fn hub_dataset_and_model_operations() {
 
     let create_model = client
         .post(format!("{base_url}/api/repos/create"))
-        .header("Authorization", format!("Bearer {token}"))
+        .header("Authorization", format!("Bearer {model_token}"))
         .json(&serde_json::json!({"name": "test-owner/test-model", "type": "model", "private": false}))
         .send().await.unwrap();
     assert_eq!(create_model.status(), 201, "model repo creation");
@@ -5831,7 +5836,7 @@ async fn hub_dataset_and_model_operations() {
         .get(format!(
             "{base_url}/api/models/test-owner/test-model/modelcard"
         ))
-        .header("Authorization", format!("Bearer {token}"))
+        .header("Authorization", format!("Bearer {model_token}"))
         .send()
         .await
         .unwrap();
@@ -5842,13 +5847,20 @@ async fn hub_dataset_and_model_operations() {
         modelcard.status()
     );
 
-    for url in [
-        format!("{base_url}/datasets/test-owner/test-dataset/resolve/main/nonexistent.parquet"),
-        format!("{base_url}/models/test-owner/test-model/resolve/main/model.bin"),
+    // Resolve each repo with a token scoped to that exact repo.
+    for (url, t) in [
+        (
+            format!("{base_url}/datasets/test-owner/test-dataset/resolve/main/nonexistent.parquet"),
+            &dataset_token,
+        ),
+        (
+            format!("{base_url}/models/test-owner/test-model/resolve/main/model.bin"),
+            &model_token,
+        ),
     ] {
         let resp = client
             .get(&url)
-            .header("Authorization", format!("Bearer {token}"))
+            .header("Authorization", format!("Bearer {t}"))
             .send()
             .await
             .unwrap();
@@ -5856,7 +5868,8 @@ async fn hub_dataset_and_model_operations() {
     }
 
     // LFS object upload — would have caught the missing `size` column in
-    // shardline_hub_lfs_objects (BUG #1).
+    // shardline_hub_lfs_objects (BUG #1). Hub LFS keys are namespaced by the
+    // token's repo scope; use a consistent dataset-scoped token.
     let lfs_body = b"lfs content";
     let lfs_sha = {
         let mut h = sha2::Sha256::new();
@@ -5866,7 +5879,7 @@ async fn hub_dataset_and_model_operations() {
     let lfs_upload = client
         .put(format!("{base_url}/lfs/objects/{lfs_sha}"))
         .header("Content-Type", "application/octet-stream")
-        .header("Authorization", format!("Bearer {token}"))
+        .header("Authorization", format!("Bearer {dataset_token}"))
         .body(lfs_body.to_vec())
         .send()
         .await
@@ -5881,7 +5894,7 @@ async fn hub_dataset_and_model_operations() {
     // Duplicate repository creation is a client conflict, not a server error.
     let dup_repo = client
         .post(format!("{base_url}/api/repos/create"))
-        .header("Authorization", format!("Bearer {token}"))
+        .header("Authorization", format!("Bearer {dataset_token}"))
         .json(&serde_json::json!({"name": "test-owner/test-dataset", "type": "dataset", "private": false}))
         .send().await.unwrap();
     assert_eq!(
@@ -10440,13 +10453,18 @@ async fn concurrent_lfs_operations() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn hub_webhook_create_and_list() {
-    let (base_url, token, _storage, server) = start_hub_server().await;
+    let (base_url, _token, _storage, server) = start_hub_server().await;
     let client = Client::new();
+
+    // Repo-scoped tokens: `require_repository_binding` requires each repo's
+    // operations to use a token scoped to that exact `{ns}/{repo}`.
+    let model_token = mint_token("test-subject", "test-owner", "test-model", "main").unwrap();
+    let model2_token = mint_token("test-subject", "test-owner", "test-model2", "main").unwrap();
 
     // Create a model repo so we can attach a webhook to it.
     let create = client
         .post(format!("{base_url}/api/repos/create"))
-        .header("Authorization", format!("Bearer {token}"))
+        .header("Authorization", format!("Bearer {model_token}"))
         .json(&serde_json::json!({"name": "test-owner/test-model", "type": "model", "private": false}))
         .send()
         .await
@@ -10463,7 +10481,7 @@ async fn hub_webhook_create_and_list() {
         .post(format!(
             "{base_url}/api/models/test-owner/test-model/webhooks"
         ))
-        .header("Authorization", format!("Bearer {token}"))
+        .header("Authorization", format!("Bearer {model_token}"))
         .json(&serde_json::json!({
             "url": "https://example.com/webhook",
             "events": ["push", "delete"],
@@ -10494,7 +10512,7 @@ async fn hub_webhook_create_and_list() {
         .get(format!(
             "{base_url}/api/models/test-owner/test-model/webhooks"
         ))
-        .header("Authorization", format!("Bearer {token}"))
+        .header("Authorization", format!("Bearer {model_token}"))
         .send()
         .await
         .unwrap();
@@ -10509,7 +10527,7 @@ async fn hub_webhook_create_and_list() {
     // List on a repo with no webhooks should return empty.
     let create2 = client
         .post(format!("{base_url}/api/repos/create"))
-        .header("Authorization", format!("Bearer {token}"))
+        .header("Authorization", format!("Bearer {model2_token}"))
         .json(&serde_json::json!({"name": "test-owner/test-model2", "type": "model", "private": false}))
         .send()
         .await
@@ -10519,7 +10537,7 @@ async fn hub_webhook_create_and_list() {
         .get(format!(
             "{base_url}/api/models/test-owner/test-model2/webhooks"
         ))
-        .header("Authorization", format!("Bearer {token}"))
+        .header("Authorization", format!("Bearer {model2_token}"))
         .send()
         .await
         .unwrap();
@@ -10532,13 +10550,17 @@ async fn hub_webhook_create_and_list() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn hub_webhook_delete() {
-    let (base_url, token, _storage, server) = start_hub_server().await;
+    let (base_url, _token, _storage, server) = start_hub_server().await;
     let client = Client::new();
+
+    // Repo-scoped token: `require_repository_binding` requires the token's
+    // `RepositoryScope` to match `test-owner/test-model` exactly.
+    let model_token = mint_token("test-subject", "test-owner", "test-model", "main").unwrap();
 
     // Create a model repo.
     let create = client
         .post(format!("{base_url}/api/repos/create"))
-        .header("Authorization", format!("Bearer {token}"))
+        .header("Authorization", format!("Bearer {model_token}"))
         .json(&serde_json::json!({"name": "test-owner/test-model", "type": "model", "private": false}))
         .send()
         .await
@@ -10550,7 +10572,7 @@ async fn hub_webhook_delete() {
         .post(format!(
             "{base_url}/api/models/test-owner/test-model/webhooks"
         ))
-        .header("Authorization", format!("Bearer {token}"))
+        .header("Authorization", format!("Bearer {model_token}"))
         .json(&serde_json::json!({"url": "https://example.com/hook", "events": ["push"]}))
         .send()
         .await
@@ -10564,7 +10586,7 @@ async fn hub_webhook_delete() {
         .delete(format!(
             "{base_url}/api/models/test-owner/test-model/webhooks/{wh_id}"
         ))
-        .header("Authorization", format!("Bearer {token}"))
+        .header("Authorization", format!("Bearer {model_token}"))
         .send()
         .await
         .unwrap();
@@ -10575,7 +10597,7 @@ async fn hub_webhook_delete() {
         .get(format!(
             "{base_url}/api/models/test-owner/test-model/webhooks"
         ))
-        .header("Authorization", format!("Bearer {token}"))
+        .header("Authorization", format!("Bearer {model_token}"))
         .send()
         .await
         .unwrap();
@@ -10591,13 +10613,18 @@ async fn hub_webhook_delete() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn hub_dataset_operations() {
-    let (base_url, token, _storage, server) = start_hub_server().await;
+    let (base_url, _token, _storage, server) = start_hub_server().await;
     let client = Client::new();
+
+    // Repo-scoped token: `require_repository_binding` requires the token's
+    // `RepositoryScope` to match `test-owner/test-dataset` exactly.
+    let dataset_token =
+        mint_token("test-subject", "test-owner", "test-dataset", "main").unwrap();
 
     // Create a dataset repo.
     let create = client
         .post(format!("{base_url}/api/repos/create"))
-        .header("Authorization", format!("Bearer {token}"))
+        .header("Authorization", format!("Bearer {dataset_token}"))
         .json(&serde_json::json!({"name": "test-owner/test-dataset", "type": "dataset", "private": false}))
         .send()
         .await
@@ -10612,7 +10639,7 @@ async fn hub_dataset_operations() {
     // Verify the dataset exists via info endpoint.
     let info = client
         .get(format!("{base_url}/api/datasets/test-owner/test-dataset"))
-        .header("Authorization", format!("Bearer {token}"))
+        .header("Authorization", format!("Bearer {dataset_token}"))
         .send()
         .await
         .unwrap();
@@ -10625,7 +10652,7 @@ async fn hub_dataset_operations() {
         .get(format!(
             "{base_url}/api/datasets/test-owner/test-dataset/parquet"
         ))
-        .header("Authorization", format!("Bearer {token}"))
+        .header("Authorization", format!("Bearer {dataset_token}"))
         .send()
         .await
         .unwrap();
@@ -10641,7 +10668,7 @@ async fn hub_dataset_operations() {
         .get(format!(
             "{base_url}/api/datasets/test-owner/test-dataset/first-rows"
         ))
-        .header("Authorization", format!("Bearer {token}"))
+        .header("Authorization", format!("Bearer {dataset_token}"))
         .send()
         .await
         .unwrap();
@@ -10657,13 +10684,17 @@ async fn hub_dataset_operations() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn hub_model_modelcard() {
-    let (base_url, token, _storage, server) = start_hub_server().await;
+    let (base_url, _token, _storage, server) = start_hub_server().await;
     let client = Client::new();
+
+    // Repo-scoped token: `require_repository_binding` requires the token's
+    // `RepositoryScope` to match `test-owner/test-model` exactly.
+    let model_token = mint_token("test-subject", "test-owner", "test-model", "main").unwrap();
 
     // Create a model repo.
     let create = client
         .post(format!("{base_url}/api/repos/create"))
-        .header("Authorization", format!("Bearer {token}"))
+        .header("Authorization", format!("Bearer {model_token}"))
         .json(&serde_json::json!({"name": "test-owner/test-model", "type": "model", "private": false}))
         .send()
         .await
@@ -10675,7 +10706,7 @@ async fn hub_model_modelcard() {
         .get(format!(
             "{base_url}/api/models/test-owner/test-model/modelcard"
         ))
-        .header("Authorization", format!("Bearer {token}"))
+        .header("Authorization", format!("Bearer {model_token}"))
         .send()
         .await
         .unwrap();
@@ -10691,7 +10722,7 @@ async fn hub_model_modelcard() {
         .post(format!(
             "{base_url}/api/models/test-owner/test-model/commit/main"
         ))
-        .header("Authorization", format!("Bearer {token}"))
+        .header("Authorization", format!("Bearer {model_token}"))
         .header("Content-Type", "application/x-ndjson")
         .body(ndjson)
         .send()
@@ -10709,7 +10740,7 @@ async fn hub_model_modelcard() {
         .get(format!(
             "{base_url}/api/models/test-owner/test-model/modelcard"
         ))
-        .header("Authorization", format!("Bearer {token}"))
+        .header("Authorization", format!("Bearer {model_token}"))
         .send()
         .await
         .unwrap();

@@ -69,7 +69,7 @@ pub struct StoredRecord<Locator> {
 /// One chunk term stored for a file version record.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FileChunkRecord {
-    /// Chunk hash in Xet CAS API hexadecimal ordering.
+    /// The chunk's content hash as lowercase hexadecimal text.
     pub hash: String,
     /// Byte offset inside the reconstructed file.
     pub offset: u64,
@@ -146,7 +146,7 @@ pub struct FileRecord {
     /// Chunk size used for this upload. Protocol-object term records may use zero.
     pub chunk_size: u64,
     /// Physical storage representation — controls the decoder path.
-    /// Defaults to [`FixedChunkV1`] for records that predate this field.
+    /// Defaults to [`StorageRepresentation::FixedChunkV1`] for records that predate this field.
     #[serde(default)]
     pub storage_repr: StorageRepresentation,
     /// Optional repository namespace for provider-backed storage.
@@ -224,6 +224,34 @@ impl FileRecord {
     }
 
     /// Validates the invariants required to build a deterministic reconstruction plan.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use shardline_index::{FileChunkRecord, FileRecord, StorageRepresentation};
+    ///
+    /// let hash = "a".repeat(64);
+    /// let record = FileRecord {
+    ///     file_id: "assets/logo.png".to_owned(),
+    ///     content_hash: hash.clone(),
+    ///     total_bytes: 1024,
+    ///     chunk_size: 1024,
+    ///     storage_repr: StorageRepresentation::FixedChunkV1,
+    ///     repository_scope: None,
+    ///     chunks: vec![FileChunkRecord {
+    ///         hash,
+    ///         offset: 0,
+    ///         length: 1024,
+    ///         range_start: 0,
+    ///         range_end: 1,
+    ///         packed_start: 0,
+    ///         packed_end: 1,
+    ///     }],
+    /// };
+    ///
+    /// record.validate_reconstruction_plan()?;
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     ///
     /// # Errors
     ///

@@ -4,6 +4,199 @@ All notable changes to Shardline are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.5.0] - 2026-08-11
+
+Minor release that hardens parsing boundaries with newtypes, caps untrusted
+allocations, and broadens fuzz coverage. **No breaking API changes** — all
+newtype work is additive (new types, `From` impls, and consolidation of internal
+duplicates). Wire formats and token claims are unchanged; existing deployments
+need no migration. The data-format changes are **opt-in**: when
+`SHARDLINE_HUB_WEBHOOK_SECRET_KEY` is configured, Hub webhook signing secrets are
+stored at rest using AES-256-GCM (`sse1:`-prefixed ciphertext) instead of
+plaintext, with an automatic upgrade of existing plaintext rows; and when
+`SHARDLINE_CONFIG_SECRET_KEY` is configured, provider-config webhook secrets are
+stored at rest using the same `sse1:` envelope, with legacy plaintext values
+parsed unchanged.
+
+### Added
+- **Newtypes for closed-domain strings** (additive, no signatures removed):
+  - `JwtAlgorithm` in `shardline-server` — typed JWT algorithm enum with
+    `is_asymmetric()` / `is_symmetric()` / `is_none()` classifications; both
+    the JWKS and OIDC providers now route their `alg`-confusion guard through
+    it instead of bare `== "none"` literal checks.
+  - `ByteUnit` (`shardline-server` config) — case-insensitive `FromStr` driving
+    `parse_byte_size`; `GitSmartHttpService`, `HubSortField`, `SortDirection`,
+    and `WebhookScheme` (`shardline-hub-api`); `OciAction` (OCI token scope).
+  - `RepositoryVisibility::FromStr` (`shardline-vcs`) — single canonical,
+    case-insensitive, whitespace-tolerant parser.
+  - Bidirectional `From` impls: `ProviderKind` ↔ `RepositoryProvider`
+    (`shardline-vcs`), and `RepoType` ↔ `HubRepoType` (`shardline-hub-api`).
+  - `RepositoryScopeCacheKey::provider_kind()` typed accessor
+    (`shardline-cache`) returning the canonical `RepositoryProvider`.
+  - `RepositoryProviderParseError` is now re-exported from the
+    `shardline-protocol` crate root.
+- **Fuzz coverage** (`shardline-fuzz`): registered the previously-orphaned
+  `shardline_cas_coordinator` target (and wired the missing `shardline-cas`
+  dependency); added 5 new targets — `sdx_shard_parse`, `sdx_url`,
+  `sdx_config` (first coverage for the `sdx` client), `auth_ed25519`
+  (first coverage for `shardline-auth`), and a CAS-coordinator target; fixed
+  the no-op/stub targets `git_tree_walker`, `index_hub`, and `git_pack`; removed
+  two exact-duplicate targets (`hub_api_routes`, `rebuild_candidates`).
+
+### Changed
+- **Case-insensitive parsing made uniform**: `parse_bool` (`shardline-protocol`),
+  the `Bearer` scheme (RFC 9110 scheme comparison, `shardline-server` +
+  `shardline-hub-api`), `DeploymentMode` / `AuthProviderKind` /
+  `ObjectStorageAdapter` config enums, and `RepositoryVisibility` now all accept
+  any ASCII case and surrounding whitespace. Previously several were
+  case-sensitive and silently fell through to defaults.
+- **JWT `alg`-confusion guard strengthened**: in addition to `none`, symmetric
+  algorithms (`HS256/384/512`) are now rejected before key matching in both
+  providers, so a token signed with a symmetric secret cannot be confused for an
+  asymmetric-key verification.
+- **LFS server routing** now parses `operation`/`transfers` through the existing
+  `LfsOperation`/`TransferAdapter` enums instead of re-matching raw strings.
+- **Provider/visibility parser dedup**: the third `parse_provider_kind` and
+  `visibility` parsers in `shardline-server` now delegate to the single canonical
+  `RepositoryProvider::from_str` / `RepositoryVisibility::from_str`.
+
+### Fixed
+- **Untrusted-allocation caps**: bounded `Vec::with_capacity` and aggregate
+  decompression output that were driven by attacker-influenced counts — xorb
+  shard header entry counts (`shardline-xet-core`), file-segment/verification
+  tables, `sdx` shard parsing, git pack delta varints (capped + shift-overflow
+  guards), and xorb reconstruction (decompression-bomb aggregate cap; resolves a
+  known `leak-` fuzz artifact).
+- **Base64 decode before cap**: the hub-api commit handler now bounds the encoded
+  length against `MAX_INLINE_FILE_BYTES` before decoding, rather than allocating
+  the decoded buffer first.
+- **GC sweep performance**: the delete-time reachability re-check now collects the
+  referenced-key set ONCE immediately before the sweep loop (O(1) per candidate)
+  instead of re-running a full reachability mark per expired candidate (which was
+  effectively quadratic at scale — one mark per candidate, each reading/parsing
+  xorb containers on large stores). The TOCTOU hardening is preserved with a
+  strictly smaller delete-time window.
+
+### Security
+A three-lane adversarial audit (independent code-audit, money-lane/impact, and a
+refutation pass) of the Hub API frontend found and fixed the following. The core
+Xet/LFS/OCI/Bazel frontends were audited and verified sound (constant-time token
+compares, `alg`-confusion guard, parameterized SQL, symlink-race protection,
+`ObjectKey` path-traversal rejection, scoped storage namespaces).
+- **[Critical] Hub API cross-tenant authorization bypass** — every Hub API route
+  checked only the token's `scope` (Read/Write) and never bound the token's
+  `RepositoryScope` to the URL-path repository. Any authenticated user could
+  read, modify, delete, or `git push` to any other tenant's repository, install
+  exfiltration webhooks, and read private datasets. Fixed: all repository-scoped
+  Hub API handlers now enforce `require_repository_binding` (the token's
+  `owner`/`name` must match the request path); genuinely global routes (list,
+  search, whoami) are documentedly exempt, and repository creation
+  (`/api/repos/create` and the `{type}/{ns}/{repo}` POST path) requires only
+  Write scope — a caller need not hold a token pre-scoped to a
+  not-yet-existing repository, while every access route remains bound.
+  Covered by a new `cross_tenant_authz` integration suite (same-repo success
+  + cross-repo `403`).
+- **[Medium] Hub API LFS global namespace → cross-tenant content poisoning** —
+  Hub API LFS objects were stored under a bare global `lfs/{oid}` key with no
+  per-repo namespace, so a Write-scoped tenant could pre-empt a predictable OID
+  (first-writer-wins via `put_if_absent`) to substitute attacker bytes for a
+  victim's, and any Read-scoped tenant could read any OID. Fixed: Hub API LFS
+  keys are now namespaced per-repo via `scope_namespace(claims.repository())` on
+  both read and write paths, matching the core server's LFS isolation.
+- **[Low, defensive] LFS PATCH unbounded `Content-Range`** — the chunked PATCH
+  path accepted an arbitrary `u64` declared object size. Now capped at
+  `MAX_LFS_OBJECT_SIZE` (1 TiB); oversized declared totals are rejected with
+  `413`. (No measurable security impact — sparse files do not exhaust inodes and
+  assembly is sha256-gated — but capped defensively.)
+- **[Medium] Hub API `repo_list`/`repo_search` leaked other tenants' private
+  repos** — the global list/search endpoints returned `private` repos from every
+  tenant (the store queries had no identity/visibility filter). Now filtered by
+  caller ownership (private repos visible only to their owner; public repos
+  always visible).
+- **[High] `apply_delta` unbounded output growth (git receive-pack OOM)** — a
+  crafted pack delta whose copy instructions sum beyond the declared target size
+  grew the result vector unboundedly (up to ~32 TB transient allocation). The
+  mid-loop size checks now reject before each `extend_from_slice`.
+- **[High] GC quarantine sweep used a stale orphan snapshot** — an object
+  re-referenced after the snapshot could be deleted while the index still
+  references it (free-during-insert data-loss race). The sweep now re-verifies
+  reachability against current index state immediately before each delete and
+  skips referenced objects.
+- **[Medium] Reconstruction-cache loader-failure latch leak** — a failed load
+  left the key `loading` forever, stalling every later requester 30 s and
+  breaking load-once. The latch is now cleared on the error path (waiters are
+  woken and can retry).
+- **[Medium] `sdx` path registration mangled spaces into `+`** — path segments
+  were form-encoded (`+` = space); now RFC-3986 pchar percent-encoded (`%20`),
+  so `register_path`/`delete_path`/`list_dir`/`resolve_path` round-trip
+  consistently.
+- **[Medium] receive-pack silently dropped bundled LFS content** when a pushed
+  pointer blob was not byte-identical to the canonical pointer (CRLF/extra
+  fields) — content is now matched by `sha256(content) == oid`, and a push whose
+  referenced LFS content is entirely absent fails loudly instead of creating a
+  broken ref.
+- **[Low] git pack parser accepted truncated zlib streams / partial packs** —
+  `decompress_zlib` now requires `StreamEnd`, and `parse_pack_data` rejects a
+  header whose `num_objects` is not fully consumed (no more garbage objects
+  stored as a valid revision).
+- **[Low] zero-length suffix byte-range** returned a bogus 1-byte range instead
+  of `Unsatisfiable` — now consistent with the non-suffix branch.
+- **[Medium] Hub webhook signing secrets at rest** — previously stored as
+  plaintext `TEXT`. Webhook secrets are now encrypted at rest (AES-256-GCM, one
+  random 12-byte nonce per row, bound to the repo via AAD) whenever
+  `SHARDLINE_HUB_WEBHOOK_SECRET_KEY` (or `_FILE`) is configured; the server emits
+  a startup warning otherwise. A migration sweeps and re-encrypts existing
+  plaintext rows, and legacy rows are lazily upgraded on read. Secrets are never
+  returned by the webhook API and never logged.
+- **[Medium] webhook delivery DNS-rebinding TOCTOU** — delivery now re-resolves
+  and re-verifies the address set immediately before the HTTP send (the
+  documented rebinding window is closed; shared-client pinning was not available
+  without the `dns` feature, so re-resolve+compare was used).
+- **[Medium] Provider-config secrets at rest** — the `webhook_secret` field of
+  the provider configuration JSON (`config.provider_config_path()`) is now
+  encrypted at rest (AES-256-GCM, one random 12-byte nonce per value, bound to
+  the provider via AAD `provider:<kind>:<field>`) whenever
+  `SHARDLINE_CONFIG_SECRET_KEY` (or `_FILE`) is configured; the server emits a
+  startup warning otherwise. Legacy plaintext values are parsed unchanged with
+  or without a key; an at-rest encrypted value fails loudly on a wrong/missing
+  key rather than falling back to plaintext.
+- **[Low-Med] upload-intent transitions were not idempotent** — two concurrent
+  callers sharing one intent could spuriously 5xx with
+  `InvalidUploadTransition`; `transition_intent` now treats at-or-past-target as
+  success across sqlite/postgres/memory.
+- **Concurrency verification** — added three loom contract models (CAS
+  coordinator exactly-once store + reachability-vs-sweep, reconstruction-cache
+  load-once, GC quarantine no-free-during-insert/no-resurrect); all invariants
+  hold under exhaustive interleaving exploration.
+- **[Medium] Hub `repo_list`/`repo_search` leaked private repos within a
+  namespace** — the visibility filter compared only the owner segment, so
+  under OIDC (claims owner constant per subject) every user saw all other
+  users' private repos, and a local token saw every private repo in its
+  namespace. The filter now compares the FULL repo identity
+  (`{owner}/{name}` exactly) for both list and search.
+- **[Medium] Webhook-secret key-removal downgrade** — if
+  `SHARDLINE_HUB_WEBHOOK_SECRET_KEY` is removed after rows were encrypted,
+  stored `sse1:` ciphertext was previously used verbatim as the signing
+  secret (silent webhook breakage). Resolution now fails loudly
+  (`NoCipherForCiphertext`) when a ciphertext row has no key; ciphertext
+  classification requires full structural validation so a legacy plaintext
+  secret starting with `sse1:` is no longer misclassified; decrypted bytes
+  are zeroized on all paths.
+- **[Low] Webhook-secret key file trailing newline** — a 32-byte key file
+  written with a trailing newline (e.g. `echo $KEY > file`) no longer aborts
+  startup with a misleading length error; one trailing newline is stripped
+  automatically and the length error message is explicit.
+- **Dependency hygiene** — documented the rationale for every suppressed
+  `cargo audit` advisory in `.cargo/audit.toml` and `deny.toml`.
+- **Residual (documented, accepted)** — webhook delivery DNS-rebinding window
+  is narrowed by pre-send re-resolution but not fully closed (connect-time
+  pinning would require the reqwest `dns` feature, which ripples to 5 crates
+  and pulls hickory-resolver; not warranted for the Low residual).
+
+### Internal
+- Unified the duplicate `PostgresRecordKind` / `LocalRecordKind` into a single
+  `RecordKind` (`shardline-index`, `pub(crate)` — internal, no public impact).
+
 ## [1.4.0] - 2026-08-08
 
 Minor release adding the native `sdx` Xet client library and file-management CLI,

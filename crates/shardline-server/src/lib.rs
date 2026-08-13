@@ -23,7 +23,10 @@
 //! [`run_fsck`], [`run_lifecycle_repair`], [`run_gc`], and
 //! [`run_storage_migration`].
 //!
-//! # Example
+//! # Quick start
+//!
+//! The fastest way to stand up a Shardline server is to build a [`ServerConfig`]
+//! and hand it to [`serve`]:
 //!
 //! ```no_run
 //! use shardline_server::{ServerConfig, serve};
@@ -35,6 +38,37 @@
 //!     Ok(())
 //! }
 //! ```
+//!
+//! Embedders that need programmatic control (for example in tests or fixtures)
+//! can construct [`ServerConfig::new`] directly instead of parsing the
+//! environment:
+//!
+//! ```
+//! use shardline_server::ServerConfig;
+//! use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+//! use std::num::NonZeroUsize;
+//!
+//! let config = ServerConfig::new(
+//!     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+//!     "http://127.0.0.1:8080".to_owned(),
+//!     std::env::temp_dir(),
+//!     NonZeroUsize::new(64 * 1024).expect("64 KiB chunk size is non-zero"),
+//! );
+//!
+//! assert_eq!(config.bind_addr().port(), 8080);
+//! assert_eq!(config.public_base_url(), "http://127.0.0.1:8080");
+//! ```
+//!
+//! To validate a configuration before starting the server, use
+//! [`run_config_check`] (see its docs for a runnable example).
+//!
+//! # Operational workflows
+//!
+//! The operator-facing entry points mirror the `shardline` CLI: [`run_fsck`] and
+//! [`run_local_fsck`] verify storage integrity, [`run_gc`] and
+//! [`run_gc_diagnostics`] reclaim unreachable chunks, [`run_lifecycle_repair`]
+//! repairs provider lifecycle metadata, and [`run_index_rebuild`] rebuilds the
+//! latest-record index from immutable version records.
 
 mod admission;
 pub mod app;
@@ -52,6 +86,7 @@ mod fsck;
 mod fuzz;
 mod ingest_bench;
 mod jwks_provider;
+mod jwt_algorithm;
 mod lifecycle_repair;
 mod local_backend;
 mod local_fs;
@@ -213,7 +248,7 @@ pub(crate) mod gc {
 }
 pub(crate) use shardline_protocol_adapters::{
     LFS_CONTENT_TYPE, LfsBatchRequest, LfsBatchResponse, LfsObjectError, LfsObjectResponse,
-    cas_headers,
+    LfsOperation, TransferAdapter, cas_headers,
 };
 pub(crate) use shardline_xet_adapter::ShardUploadResponse;
 pub use storage_migration::{
@@ -231,6 +266,24 @@ use postgres_backend::connect_postgres_metadata_pool;
 use shardline_index::{LocalIndexStore, LocalRecordStore, PostgresIndexStore, PostgresRecordStore};
 
 /// Runs garbage collection against the configured metadata backend and local chunk storage.
+///
+/// # Examples
+///
+/// ```no_run
+/// use shardline_server::{LocalGcOptions, ServerConfig, run_gc};
+///
+/// #[tokio::main]
+/// async fn main() -> Result<(), Box<dyn std::error::Error>> {
+///     let config = ServerConfig::from_env()?;
+///     // Start with a dry run, then move to `mark_and_sweep(retention_seconds)`.
+///     let report = run_gc(config, LocalGcOptions::dry_run()).await?;
+///     assert_eq!(report.deleted_chunks, 0);
+///     Ok(())
+/// }
+/// ```
+///
+/// See [`LocalGcOptions`] for the supported modes: `dry_run`, `mark_only`,
+/// `sweep_only`, and `mark_and_sweep`.
 ///
 /// # Errors
 ///

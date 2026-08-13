@@ -9,6 +9,26 @@ use shardline_server_core::{InvalidSerializedShardError, OpsRecordKind, ServerOb
 use thiserror::Error;
 
 /// One integrity issue reported by the checker.
+///
+/// A classification ([`FsckIssueKind`]), a stable storage location, and a
+/// structured detail payload. These are the items surfaced to operators in the
+/// fsck report.
+///
+/// # Examples
+///
+/// ```
+/// use shardline_fsck::{FsckIssue, FsckIssueDetail, FsckIssueKind};
+///
+/// let issue = FsckIssue {
+///     kind: FsckIssueKind::MissingChunk,
+///     location: "protocols/xet/global/chunks/abcd".to_owned(),
+///     detail: FsckIssueDetail::HashMismatch {
+///         expected_hash: "expected".to_owned(),
+///         observed_hash: "observed".to_owned(),
+///     },
+/// };
+/// assert_eq!(issue.kind.as_str(), "missing_chunk");
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FsckIssue {
     /// Problem classification.
@@ -344,6 +364,15 @@ pub enum FsckIssueKind {
 
 impl FsckIssueKind {
     /// Stable issue label for CLI and logs.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use shardline_fsck::FsckIssueKind;
+    ///
+    /// assert_eq!(FsckIssueKind::ChunkHashMismatch.as_str(), "chunk_hash_mismatch");
+    /// assert_eq!(FsckIssueKind::MissingVersionRecord.as_str(), "missing_version_record");
+    /// ```
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {

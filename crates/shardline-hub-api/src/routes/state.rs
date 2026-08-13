@@ -1,4 +1,5 @@
 use crate::auth::HubAuth;
+use crate::secrets::WebhookSecretCipher;
 use shardline_index::hub::BoxedHubStore;
 use shardline_server_core::ServerObjectStore;
 
@@ -10,6 +11,12 @@ pub struct HubState {
     pub auth: Option<HubAuth>,
     /// Optional HTTP client for webhook delivery.
     pub http_client: Option<reqwest::Client>,
+    /// Optional cipher for at-rest encryption of webhook signing secrets.
+    ///
+    /// When `None`, webhook secrets are stored as plaintext (and a startup
+    /// warning is emitted). When `Some`, secrets are encrypted on write and
+    /// decrypted at delivery time.
+    pub webhook_secret_cipher: Option<WebhookSecretCipher>,
 }
 
 impl std::fmt::Debug for HubState {

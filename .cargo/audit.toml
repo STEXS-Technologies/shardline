@@ -2,15 +2,19 @@
 # https://rustsec.org/advisories/
 
 [advisories]
-# Ignore RSA Marvin Attack - we don't use MySQL (only Postgres)
-# The vulnerable rsa crate is only pulled in via sqlx-mysql which we don't use
+# rationale: RSA "Marvin" timing side-channel (CVE-2023-3446) in the `rsa` crate.
+# Only reachable via the `sqlx-mysql` feature path; the server uses Postgres only,
+# so the vulnerable code is never compiled into the shipped binary.
 # Track: https://rustsec.org/advisories/RUSTSEC-2023-0071
 ignore = [
     "RUSTSEC-2023-0071",
-    # quick-xml DoS via quadratic attribute check / unbounded namespace allocation.
-    # object_store parses XML from the configured S3 endpoint, not attacker-controlled input.
-    # Upgrade blocked on object_store releasing with quick-xml >= 0.41.
-    # Re-check when object_store bumps its quick-xml dependency past 0.40.
+    # rationale: quick-xml DoS via quadratic attribute check / unbounded namespace allocation.
+    # object_store only parses XML from the configured S3 endpoint (trusted operator
+    # input), not attacker-controlled data. Upgrade blocked on object_store releasing
+    # with quick-xml >= 0.41; re-check when it bumps past 0.40.
     "RUSTSEC-2026-0194",
+    # rationale: same quick-xml DoS as RUSTSEC-2026-0194 — only parses XML from the
+    # trusted, operator-configured S3 endpoint, never attacker-controlled input.
+    # No upstream fix until object_store releases with quick-xml >= 0.41.
     "RUSTSEC-2026-0195",
 ]

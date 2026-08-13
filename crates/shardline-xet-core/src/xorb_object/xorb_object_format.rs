@@ -27,6 +27,14 @@ pub(crate) const XORB_OBJECT_FORMAT_BOUNDARIES_VERSION_NO_UNPACKED_INFO: u8 = 0;
 pub(crate) const XORB_OBJECT_FORMAT_BOUNDARIES_VERSION: u8 = 1;
 const XORB_OBJECT_INFO_DEFAULT_LENGTH: u64 = 92;
 
+/// Maximum total decompressed output accepted when reconstructing a xorb via
+/// `reconstruct_xorb_with_footer`. Chunks are validated individually against
+/// `MAX_CHUNK_SIZE`, but the aggregate output across the loop was previously
+/// unbounded (a decompression bomb). A single xorb holds at most one
+/// `XORB_BLOCK_SIZE` (16 MiB) of uncompressed data, so 64 MiB allows up to four
+/// full xorb-blocks while bounding decompression memory.
+const MAX_DECOMPRESSED_OUTPUT_BYTES: u64 = 64 * 1024 * 1024;
+
 #[inline]
 fn prealloc_num_chunks(declared_size: usize) -> usize {
     let average_num_chunks_per_xorb: usize = XORB_BLOCK_SIZE.load(Ordering::Relaxed) as usize
@@ -728,6 +736,7 @@ pub fn reconstruct_xorb_with_footer(
     let mut chunk_hash_and_size: Vec<(MerkleHash, u64)> =
         Vec::with_capacity(estimated_chunks.max(16));
     let mut info = XorbObjectInfoV1::default();
+    let mut total_decompressed_bytes: u64 = 0;
 
     while (reader.position() as usize) < raw_data.len() {
         let chunk_header = match deserialize_chunk_header(&mut reader) {
@@ -746,6 +755,18 @@ pub fn reconstruct_xorb_with_footer(
             .get_compression_scheme()?
             .decompress_from_slice(&compressed_buf)
             .map_err(|e| CoreError::MalformedData(format!("Failed to decompress chunk: {e}")))?;
+
+        let uncompressed_len = uncompressed_data.len() as u64;
+        total_decompressed_bytes = total_decompressed_bytes
+            .checked_add(uncompressed_len)
+            .ok_or_else(|| {
+                CoreError::MalformedData("decompressed output size overflow".to_string())
+            })?;
+        if total_decompressed_bytes > MAX_DECOMPRESSED_OUTPUT_BYTES {
+            return Err(CoreError::MalformedData(format!(
+                "decompressed output exceeds maximum of {MAX_DECOMPRESSED_OUTPUT_BYTES} bytes"
+            )));
+        }
 
         let chunk_hash = compute_data_hash(&uncompressed_data);
         chunk_hash_and_size.push((chunk_hash, uncompressed_data.len() as u64));

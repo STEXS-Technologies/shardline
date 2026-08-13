@@ -8,7 +8,10 @@
 
 #![cfg(loom)]
 
+mod cas_coordinator;
+mod gc_quarantine;
 mod object_store;
+mod reconstruction_cache;
 
 use loom::sync::{Arc, Condvar, Mutex, RwLock};
 use loom::thread;

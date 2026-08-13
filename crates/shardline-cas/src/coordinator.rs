@@ -109,11 +109,11 @@ where
         if current.state() == shardline_index::UploadIntentState::Visible {
             return work().await;
         }
-        if !matches!(
-            current.state(),
-            shardline_index::UploadIntentState::Created
-                | shardline_index::UploadIntentState::Storing
-        ) {
+        // A terminal `Failed` intent cannot be resumed. Any other in-flight state
+        // (Created / Storing / Stored / MetadataCommitted) is tolerated so that a
+        // concurrent duplicate caller for the same intent does not spuriously
+        // fail; the forward transitions below are themselves idempotent.
+        if current.state() == shardline_index::UploadIntentState::Failed {
             return Err(E::from(CasError::InvalidUploadTransition));
         }
         self.transition_upload(
@@ -165,6 +165,10 @@ where
 
     /// Records one validated persistence boundary for an upload.
     ///
+    /// Transitions are idempotent and tolerant of a concurrent duplicate caller:
+    /// if the intent is already at or beyond the target state in the committed
+    /// chain, the boundary is considered already reached and no error is raised.
+    ///
     /// # Errors
     ///
     /// Returns CasError when the transition is invalid, missing, or cannot be
@@ -174,16 +178,56 @@ where
         intent_id: &str,
         next: shardline_index::UploadIntentState,
     ) -> Result<(), CasError> {
+        let current = self
+            .index
+            .intent_by_id(intent_id)
+            .await
+            .map_err(CasError::from_record)?;
+        let Some(current) = current else {
+            return Err(CasError::InvalidUploadTransition);
+        };
+        // Already at or past the target in the committed chain: a concurrent
+        // duplicate caller advanced it, so the boundary is effectively reached.
+        if committed_state_rank(current.state()) >= committed_state_rank(next) {
+            return Ok(());
+        }
         let transitioned = self
             .index
             .transition_intent(intent_id, next)
             .await
             .map_err(CasError::from_record)?;
         if transitioned {
-            Ok(())
-        } else {
-            Err(CasError::InvalidUploadTransition)
+            return Ok(());
         }
+        // The store's atomic read raced with a concurrent duplicate caller and
+        // observed a state ahead of `next`, so it declined the backward-looking
+        // conditional update. Re-check: if the intent is now at or past the
+        // target, the boundary is effectively already reached.
+        let after = self
+            .index
+            .intent_by_id(intent_id)
+            .await
+            .map_err(CasError::from_record)?;
+        match after {
+            Some(intent) if committed_state_rank(intent.state()) >= committed_state_rank(next) => {
+                Ok(())
+            }
+            _ => Err(CasError::InvalidUploadTransition),
+        }
+    }
+}
+
+/// Returns the order of an upload-intent state along the committed chain,
+/// used to detect "already at-or-past" for idempotent forward transitions.
+/// `Failed` is terminal and out of the chain (rank `u8::MAX`).
+const fn committed_state_rank(state: shardline_index::UploadIntentState) -> u8 {
+    match state {
+        shardline_index::UploadIntentState::Created => 0,
+        shardline_index::UploadIntentState::Storing => 1,
+        shardline_index::UploadIntentState::Stored => 2,
+        shardline_index::UploadIntentState::MetadataCommitted => 3,
+        shardline_index::UploadIntentState::Visible => 4,
+        shardline_index::UploadIntentState::Failed => u8::MAX,
     }
 }
 
@@ -362,6 +406,60 @@ mod tests {
         assert_eq!(retry, Ok(42));
         let stored = rt
             .block_on(index.intent_by_id("visible-intent"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.state(), UploadIntentState::Visible);
+    }
+
+    #[test]
+    fn concurrent_with_upload_intent_same_intent_both_ok() {
+        use std::sync::Arc;
+
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let index = MemoryIndexStore::new();
+        let coordinator = Arc::new(CasCoordinator::new(
+            index.clone(),
+            (),
+            (),
+            CasLimits::new(NonZeroU64::MAX, NonZeroU64::MAX, NonZeroU64::MAX),
+        ));
+        let intent = UploadIntent::new(
+            "same-intent".to_owned(),
+            "objects/test".to_owned(),
+            "abcdef".to_owned(),
+            42,
+        );
+        let handle = rt.handle().clone();
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let mut handles: Vec<std::thread::JoinHandle<Result<i32, CasError>>> = Vec::new();
+        for _ in 0..2 {
+            let coordinator = Arc::clone(&coordinator);
+            let intent = intent.clone();
+            let barrier = Arc::clone(&barrier);
+            let handle = handle.clone();
+            handles.push(std::thread::spawn(move || {
+                handle.block_on(async {
+                    barrier.wait().await;
+                    coordinator
+                        .with_upload_intent(&intent, || async { Ok(42_i32) })
+                        .await
+                })
+            }));
+        }
+        for h in handles {
+            assert_eq!(
+                h.join().unwrap(),
+                Ok(42),
+                "a concurrent caller for the same intent must not get a spurious \
+                 InvalidUploadTransition (5xx)"
+            );
+        }
+        let stored = rt
+            .block_on(index.intent_by_id("same-intent"))
             .unwrap()
             .unwrap();
         assert_eq!(stored.state(), UploadIntentState::Visible);

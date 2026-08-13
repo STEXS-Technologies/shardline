@@ -20,7 +20,10 @@ futures-util.workspace = true
 hex.workspace = true
 libfuzzer-sys.workspace = true
 object_store = { workspace = true, default-features = true }
+sdx.workspace = true
 shardline.workspace = true
+shardline-auth.workspace = true
+shardline-cas.workspace = true
 shardline-fsck.workspace = true
 shardline-gc.workspace = true
 shardline-hub-api.workspace = true
@@ -34,6 +37,7 @@ shardline-storage = { workspace = true, features = ["s3"] }
 shardline-vcs.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt", "macros"] }
+toml.workspace = true
 shardline-xet-core.workspace = true
 
 [[bin]]
@@ -181,20 +185,8 @@ test = false
 doc = false
 
 [[bin]]
-name = "shardline_hub_api_routes"
-path = "fuzz_targets/shardline/hub_api_routes.rs"
-test = false
-doc = false
-
-[[bin]]
 name = "shardline_hub_refs"
 path = "fuzz_targets/shardline/hub_refs.rs"
-test = false
-doc = false
-
-[[bin]]
-name = "shardline_rebuild_candidates"
-path = "fuzz_targets/shardline/rebuild_candidates.rs"
 test = false
 doc = false
 
@@ -243,6 +235,42 @@ doc = false
 [[bin]]
 name = "shardline_xorb_packer_roundtrip"
 path = "fuzz_targets/shardline/xorb_packer_roundtrip.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "shardline_cas_coordinator"
+path = "fuzz_targets/shardline/cas_coordinator.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "shardline_sdx_shard_parse"
+path = "fuzz_targets/shardline/sdx_shard_parse.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "shardline_sdx_url"
+path = "fuzz_targets/shardline/sdx_url.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "shardline_sdx_config"
+path = "fuzz_targets/shardline/sdx_config.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "shardline_auth_ed25519"
+path = "fuzz_targets/shardline/auth_ed25519.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "shardline_provider_events"
+path = "fuzz_targets/shardline/provider_events.rs"
 test = false
 doc = false
 

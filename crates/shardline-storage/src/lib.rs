@@ -21,7 +21,10 @@
 //! The central trait is [`ObjectStore`]. It is implemented by [`LocalObjectStore`]
 //! for local deployments and [`S3ObjectStore`] for S3-compatible object storage.
 //!
-//! # Example
+//! # Quick start
+//!
+//! Validate a key and prefix, then describe the expected integrity of an
+//! object before it reaches storage:
 //!
 //! ```
 //! use shardline_protocol::ShardlineHash;
@@ -36,8 +39,15 @@
 //! assert_eq!(key.as_str(), "xorbs/default/aa/bb/example.xorb");
 //! assert_eq!(prefix.as_str(), "xorbs/default/");
 //! assert_eq!(integrity.hash(), hash);
+//!
+//! // Path traversal is rejected before it reaches the filesystem.
+//! assert!(ObjectKey::parse("xorbs/../secret").is_err());
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
+//!
+//! To store objects, use [`LocalObjectStore`] for local deployments or
+//! [`S3ObjectStore`] (feature `s3`) for S3-compatible object storage; both
+//! implement the [`ObjectStore`] trait.
 
 /// Symlink-resistant filesystem helpers used by local storage adapters.
 #[cfg(unix)]

@@ -14,6 +14,19 @@ pub enum ServerRole {
 impl ServerRole {
     /// Parses a role token.
     ///
+    /// # Examples
+    ///
+    /// ```
+    /// use shardline_server::ServerRole;
+    ///
+    /// let role = ServerRole::parse("api")?;
+    /// assert_eq!(role, ServerRole::Api);
+    /// assert!(role.serves_api());
+    /// assert!(!role.serves_transfer());
+    /// assert_eq!(role.as_str(), "api");
+    /// # Ok::<(), shardline_server::ServerRoleParseError>(())
+    /// ```
+    ///
     /// # Errors
     ///
     /// Returns [`ServerRoleParseError`] when the token is not a supported role.

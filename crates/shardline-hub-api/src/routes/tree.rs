@@ -8,7 +8,7 @@ use crate::{error::HubApiError, models::*};
 use shardline_index::hub::HubFileEntry;
 use shardline_protocol::TokenScope;
 
-use super::{HubState, authorize};
+use super::{HubState, authorize_with_context, require_repository_binding};
 
 // ---- File tree (requires Read) ----
 
@@ -44,7 +44,8 @@ async fn file_tree_for_path(
     query: TreeQuery,
 ) -> Result<Json<Vec<TreeEntry>>, HubApiError> {
     shardline_metrics::record_hub_api_request("file_tree", "GET", 200);
-    authorize(&state, &headers, TokenScope::Read)?;
+    let auth_ctx = authorize_with_context(&state, &headers, TokenScope::Read)?;
+    require_repository_binding(auth_ctx.as_ref(), &ns, &repo)?;
     let name = format!("{ns}/{repo}");
     let commit_sha = state
         .store

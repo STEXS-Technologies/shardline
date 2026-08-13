@@ -570,6 +570,20 @@ impl HubStore for LocalIndexStore {
         Ok(())
     }
 
+    fn update_webhook_secret(
+        &self,
+        repo_id: &str,
+        webhook_id: &str,
+        secret: Option<&str>,
+    ) -> Result<(), Self::Error> {
+        let conn = open_hub_connection_rw(self.root())?;
+        conn.execute(
+            "UPDATE shardline_hub_webhooks SET secret = ?1 WHERE repo_id = ?2 AND id = ?3",
+            params![secret, repo_id, webhook_id],
+        )?;
+        Ok(())
+    }
+
     fn webhooks_for_event(
         &self,
         repo_id: &str,

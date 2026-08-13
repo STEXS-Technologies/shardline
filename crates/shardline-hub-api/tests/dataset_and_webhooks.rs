@@ -38,19 +38,19 @@ async fn dataset_parquet_lists_data_files() {
         HubFileEntry {
             path: "default/train/data.parquet".to_owned(),
             size: 1024,
-            sha: "sha_parquet".to_owned(),
+            sha: "1010101010101010101010101010101010101010101010101010101010101010".to_owned(),
             is_lfs: false,
         },
         HubFileEntry {
             path: "default/test/data.csv".to_owned(),
             size: 512,
-            sha: "sha_csv".to_owned(),
+            sha: "1111111111111111111111111111111111111111111111111111111111111111".to_owned(),
             is_lfs: false,
         },
         HubFileEntry {
             path: "README.md".to_owned(),
             size: 100,
-            sha: "sha_readme".to_owned(),
+            sha: "1212121212121212121212121212121212121212121212121212121212121212".to_owned(),
             is_lfs: false,
         },
     ];
@@ -92,12 +92,12 @@ async fn dataset_first_rows_returns_jsonl_data() {
     let files = vec![HubFileEntry {
         path: "data.jsonl".to_owned(),
         size: jsonl_content.len() as u64,
-        sha: "sha_jsonl".to_owned(),
+        sha: "1313131313131313131313131313131313131313131313131313131313131313".to_owned(),
         is_lfs: false,
     }];
     store.store_files("commit_jsonl", &files).unwrap();
     // Pre-populate ObjectStore
-    let key = ObjectKey::parse("lfs/sha_jsonl").unwrap();
+    let key = ObjectKey::parse("protocols/lfs/global/objects/1313131313131313131313131313131313131313131313131313131313131313").unwrap();
     let body = ObjectBody::from_slice(jsonl_content.as_bytes());
     let integrity = ObjectIntegrity::new(
         shardline_protocol::ShardlineHash::from_bytes(
@@ -147,12 +147,12 @@ async fn dataset_first_rows_returns_csv_data() {
     let files = vec![HubFileEntry {
         path: "data.csv".to_owned(),
         size: csv_content.len() as u64,
-        sha: "sha_csv2".to_owned(),
+        sha: "1414141414141414141414141414141414141414141414141414141414141414".to_owned(),
         is_lfs: false,
     }];
     store.store_files("commit_csv", &files).unwrap();
     // Pre-populate ObjectStore
-    let key = ObjectKey::parse("lfs/sha_csv2").unwrap();
+    let key = ObjectKey::parse("protocols/lfs/global/objects/1414141414141414141414141414141414141414141414141414141414141414").unwrap();
     let body = ObjectBody::from_slice(csv_content.as_bytes());
     let integrity = ObjectIntegrity::new(
         shardline_protocol::ShardlineHash::from_bytes(
@@ -205,12 +205,12 @@ async fn dataset_viewer_returns_paginated_rows() {
     let files = vec![HubFileEntry {
         path: "data.jsonl".to_owned(),
         size: jsonl_bytes.len() as u64,
-        sha: "sha_paginated".to_owned(),
+        sha: "1515151515151515151515151515151515151515151515151515151515151515".to_owned(),
         is_lfs: false,
     }];
     store.store_files("commit_paginated", &files).unwrap();
     // Pre-populate ObjectStore
-    let key = ObjectKey::parse("lfs/sha_paginated").unwrap();
+    let key = ObjectKey::parse("protocols/lfs/global/objects/1515151515151515151515151515151515151515151515151515151515151515").unwrap();
     let body = ObjectBody::from_slice(&jsonl_bytes);
     let integrity = ObjectIntegrity::new(
         shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(&jsonl_bytes).as_bytes()),

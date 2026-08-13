@@ -14,6 +14,23 @@ pub(crate) const fn map_object_key_error(error: ObjectKeyError) -> ServerObjectS
 
 /// Returns the chunk object key for a hex-encoded content hash.
 ///
+/// The key is laid out as `<2-char-prefix>/<64-char-hash>`, which mirrors how
+/// chunk objects are addressed in storage.
+///
+/// # Examples
+///
+/// ```
+/// use shardline_server_core::chunk_object_key;
+///
+/// let hash_hex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+/// let key = chunk_object_key(hash_hex)?;
+/// assert_eq!(
+///     key.as_str(),
+///     "01/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+/// );
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+///
 /// # Errors
 ///
 /// Returns [`ServerObjectStoreError`] when the hash is malformed or the key cannot be created.
@@ -30,6 +47,26 @@ pub fn chunk_object_key(hash_hex: &str) -> Result<ObjectKey, ServerObjectStoreEr
 ///
 /// Returns `Some(hash_hex)` if the key is in the format `<2-char-prefix>/<64-char-hash>`,
 /// `None` otherwise.
+///
+/// # Examples
+///
+/// ```
+/// use shardline_server_core::chunk_hash_from_chunk_object_key_if_present;
+/// use shardline_storage::ObjectKey;
+///
+/// let key = ObjectKey::parse(
+///     "01/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+/// )?;
+/// assert_eq!(
+///     chunk_hash_from_chunk_object_key_if_present(&key)?,
+///     Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+/// );
+///
+/// // Keys with a different layout yield `None`.
+/// let unrelated = ObjectKey::parse("xorbs/default/aa/bb/example.xorb")?;
+/// assert_eq!(chunk_hash_from_chunk_object_key_if_present(&unrelated)?, None);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 ///
 /// # Errors
 ///
@@ -60,6 +97,17 @@ pub fn chunk_hash_from_chunk_object_key_if_present(
 }
 
 /// Computes a blake3 content hash for the given bytes.
+///
+/// # Examples
+///
+/// ```
+/// use shardline_server_core::chunk_hash;
+///
+/// let hash = chunk_hash(b"payload");
+/// assert_eq!(hash.as_bytes().len(), 32);
+/// assert_eq!(hash, chunk_hash(b"payload"));
+/// assert_ne!(hash, chunk_hash(b"different"));
+/// ```
 #[must_use]
 pub fn chunk_hash(bytes: &[u8]) -> ShardlineHash {
     let digest = blake3::hash(bytes);

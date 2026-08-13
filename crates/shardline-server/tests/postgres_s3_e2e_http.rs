@@ -95,6 +95,21 @@ fn s3_config(key_prefix: &str) -> S3ObjectStoreConfig {
 
 const TEST_SIGNING_KEY: &[u8] = b"0123456789abcdef0123456789abcdef";
 
+/// Mint a Write-scoped bearer token bound to an arbitrary `owner/name` repo.
+///
+/// Since the security fix (`5a0df2f`) every repo-scoped Hub-API route enforces
+/// `require_repository_binding`, so tests must present a token whose
+/// `RepositoryScope` exactly matches the `{ns}/{repo}` they operate on.
+/// This is the repo-scoped counterpart to the harness's generic
+/// `auth_header()` (which is fixed to `test/test`).
+fn mint_token_for(owner: &str, name: &str) -> String {
+    let provider = LocalHmacProvider::new(TEST_SIGNING_KEY).unwrap();
+    let repo =
+        RepositoryScope::new(RepositoryProvider::Generic, owner, name, Some("main")).unwrap();
+    let claims = TokenClaims::new("shardline", owner, TokenScope::Write, repo, u64::MAX).unwrap();
+    provider.mint_token(&claims).unwrap()
+}
+
 struct TestServer {
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
     base_url: String,
@@ -173,6 +188,13 @@ impl TestServer {
 
     fn auth_header(&self) -> &str {
         &self.token
+    }
+
+    /// Returns a bearer token scoped to an arbitrary `owner/name` repo, for use
+    /// with repo-scoped Hub-API routes whose `{ns}/{repo}` must match the
+    /// token's `RepositoryScope`.
+    fn auth_header_for(&self, owner: &str, name: &str) -> String {
+        mint_token_for(owner, name)
     }
 }
 
@@ -1056,9 +1078,9 @@ async fn test_lfs_patch_object() {
 async fn test_hub_create_repo_and_commit() {
     let server = TestServer::start(&[ServerFrontend::Hub]).await;
     let client = reqwest::Client::new();
-    let auth = || format!("Bearer {}", server.auth_header());
     let (ns, name) = ("pgs3-team", "pgs3-model");
     let mp = format!("{ns}/{name}");
+    let auth = || format!("Bearer {}", server.auth_header_for(ns, name));
 
     assert_eq!(
         client
@@ -1148,8 +1170,8 @@ async fn test_hub_upload_lfs_and_batch() {
 async fn test_hub_modelcard() {
     let server = TestServer::start(&[ServerFrontend::Hub]).await;
     let client = reqwest::Client::new();
-    let auth = || format!("Bearer {}", server.auth_header());
     let (ns, name) = ("pgs3card-team", "pgs3card-model");
+    let auth = || format!("Bearer {}", server.auth_header_for(ns, name));
 
     client
         .post(server.url("/api/repos/create"))
