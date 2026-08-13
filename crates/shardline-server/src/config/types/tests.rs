@@ -2273,3 +2273,31 @@ fn server_config_s3_defaults_min_part_and_quotas() {
         "4 TiB aggregate quota"
     );
 }
+
+#[test]
+fn server_config_default_chunk_size_is_power_of_two() {
+    let config = ServerConfig::new(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+        "http://localhost:8080".to_owned(),
+        PathBuf::from("/tmp/test"),
+        NonZeroUsize::new(65536).unwrap(),
+    );
+    // The env default is "64KiB" (65536), a power of two required by the CDC
+    // chunker; the builder default must stay power-of-two too.
+    assert!(config.chunk_size().get().is_power_of_two());
+    config.validate_runtime_requirements().unwrap();
+}
+
+#[test]
+fn validate_runtime_requirements_rejects_non_power_of_two_chunk_size() {
+    let config = ServerConfig::new(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+        "http://localhost:8080".to_owned(),
+        PathBuf::from("/tmp/test"),
+        NonZeroUsize::new(64000).unwrap(), // 64KB (decimal) — not a power of two
+    );
+    assert!(matches!(
+        config.validate_runtime_requirements(),
+        Err(ServerConfigError::ChunkSizeNotPowerOfTwo)
+    ));
+}

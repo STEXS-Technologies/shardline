@@ -20,7 +20,7 @@ use std::{num::NonZeroUsize, sync::Arc, time::Instant};
 
 use axum::{
     body::Body,
-    http::{HeaderValue, StatusCode, header::ETAG},
+    http::{HeaderMap, HeaderValue, StatusCode, header::ETAG},
     response::{IntoResponse, Response},
 };
 use shardline_index::S3ObjectEntry;
@@ -38,7 +38,7 @@ use crate::{
     upload_ingest::{RequestBodyReader, read_body_to_bytes},
 };
 
-use super::{S3ObjectContext, acquire_object_upload_lock, s3_xml_content_type};
+use super::{S3ObjectContext, acquire_object_upload_lock, aws_chunked, s3_xml_content_type};
 
 /// Maps a local I/O failure to the S3 internal-error envelope.
 fn io_to_s3(error: std::io::Error) -> S3Error {
@@ -99,6 +99,7 @@ pub(super) async fn s3_upload_part(
     context: &S3ObjectContext,
     part_number: u32,
     upload_id: &str,
+    headers: &HeaderMap,
     body: Body,
 ) -> Result<Response, S3Error> {
     let root = state.config.root_dir();
@@ -123,6 +124,22 @@ pub(super) async fn s3_upload_part(
         Err(ServerError::RequestBodyTooLarge) => return Err(entity_too_large()),
         Err(error) => return Err(S3Error::from(error)),
     };
+
+    // Real clients stream multipart parts with AWS chunked encoding; decode
+    // the framing so the part file holds the actual payload. The decoded size
+    // is enforced by the decoder against the part ceiling.
+    if aws_chunked::is_aws_chunked(headers) {
+        let max_bytes_u64 = u64::try_from(max_bytes.get()).map_err(|_error| S3Error::internal())?;
+        if let Some(decoded) = aws_chunked::declared_decoded_content_length(headers)
+            && decoded > max_bytes_u64
+        {
+            return Err(entity_too_large());
+        }
+        body = RequestBodyReader::from_stream(aws_chunked::decode_aws_chunked(
+            body,
+            u64::try_from(max_bytes.get()).map_err(|_error| S3Error::internal())?,
+        ));
+    }
 
     // Stream the body to the part file (overwrite semantics).
     let part_path = part_file_path(root, upload_id, part_number)?;

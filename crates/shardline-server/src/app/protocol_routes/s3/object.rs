@@ -14,7 +14,7 @@ use axum::{
     extract::{Path, State},
     http::{
         HeaderMap, HeaderValue, StatusCode, Uri,
-        header::{CONTENT_LENGTH, CONTENT_TYPE, ETAG, LAST_MODIFIED, RANGE},
+        header::{ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_TYPE, ETAG, LAST_MODIFIED, RANGE},
     },
     response::{IntoResponse, Response},
 };
@@ -30,8 +30,8 @@ use crate::{
 };
 
 use super::{
-    S3ObjectContext, acquire_object_upload_lock, authorize_s3, format_http_date, has_sub_resource,
-    multipart, parse_s3_query, require_s3_object_context,
+    S3ObjectContext, acquire_object_upload_lock, authorize_s3, aws_chunked, format_http_date,
+    has_sub_resource, multipart, parse_s3_query, require_s3_object_context,
 };
 
 /// `PUT /{bucket}/{*key}` — stream the body through the CDC ingestor.
@@ -76,7 +76,8 @@ pub(crate) async fn s3_put_object(
         }
     });
     if let (Some(part_number), Some(upload_id)) = (part_number, upload_id) {
-        return multipart::s3_upload_part(&state, &context, part_number, upload_id, body).await;
+        return multipart::s3_upload_part(&state, &context, part_number, upload_id, &headers, body)
+            .await;
     }
     if !resources.is_empty() {
         return Err(S3Error::not_implemented());
@@ -96,6 +97,29 @@ pub(crate) async fn s3_put_object(
             });
         }
         Err(error) => return Err(S3Error::from(error)),
+    };
+
+    // Real clients (mc, AWS SDKs, pyarrow) stream bodies with AWS chunked
+    // encoding; decode the framing so the CDC ingestor stores the actual
+    // payload (and size). The decoded size is enforced against the part
+    // ceiling by the decoder.
+    let body = if aws_chunked::is_aws_chunked(&headers) {
+        let max_bytes_u64 = u64::try_from(max_bytes.get()).map_err(|_error| S3Error::internal())?;
+        if let Some(decoded) = aws_chunked::declared_decoded_content_length(&headers)
+            && decoded > max_bytes_u64
+        {
+            return Err(S3Error {
+                code: "EntityTooLarge",
+                message: "Your proposed upload exceeds the maximum allowed object size".to_owned(),
+                status: StatusCode::PAYLOAD_TOO_LARGE,
+            });
+        }
+        RequestBodyReader::from_stream(aws_chunked::decode_aws_chunked(
+            body,
+            u64::try_from(max_bytes.get()).map_err(|_error| S3Error::internal())?,
+        ))
+    } else {
+        body
     };
 
     // Serialize concurrent overwrites of the same key; the swap below (index
@@ -221,6 +245,13 @@ pub(crate) async fn s3_get_object(
         CONTENT_TYPE,
         HeaderValue::from_static("application/octet-stream"),
     );
+    // Real clients (mc, the AWS SDKs) parse `Last-Modified` on GetObject
+    // responses; serve it from the listing-index snapshot like HeadObject.
+    let last_modified = last_modified_for(&state, &context).await?;
+    response.headers_mut().insert(
+        LAST_MODIFIED,
+        HeaderValue::from_str(&last_modified).map_err(|_error| S3Error::internal())?,
+    );
     metrics::record_download("s3", total_length, 0.0, true);
     Ok(response)
 }
@@ -258,6 +289,12 @@ pub(crate) async fn s3_head_object(
         CONTENT_TYPE,
         HeaderValue::from_static("application/octet-stream"),
     );
+    // Clients (pyarrow, the AWS SDKs) use `Accept-Ranges` on HeadObject to
+    // decide the object supports ranged (seekable) access; without it pyarrow
+    // opens a non-seekable stream and parquet reads fail.
+    response
+        .headers_mut()
+        .insert(ACCEPT_RANGES, HeaderValue::from_static("bytes"));
     if !content_hash.is_empty() {
         let etag = etag_header(&content_hash);
         response.headers_mut().insert(

@@ -23,6 +23,8 @@ pub enum S3SubResource {
     PartNumber(u32),
     /// `?list-type=2` — `ListObjectsV2`.
     ListObjects,
+    /// `?delete=` — `DeleteObjects` (batch delete).
+    DeleteObjects,
     /// `?location` — `GetBucketLocation` stub.
     Location,
     /// `?acl` — out of scope (`NotImplemented`).
@@ -65,6 +67,8 @@ enum QueryParameter {
     PartNumber,
     /// `?list-type=<v>`.
     ListType,
+    /// `?delete=` — `DeleteObjects` (batch delete).
+    Delete,
     /// `?location`.
     Location,
     /// `?acl`.
@@ -99,6 +103,7 @@ impl QueryParameter {
             "uploadId" => Some(Self::UploadId),
             "partNumber" => Some(Self::PartNumber),
             "list-type" => Some(Self::ListType),
+            "delete" => Some(Self::Delete),
             "location" => Some(Self::Location),
             "acl" => Some(Self::Acl),
             "policy" => Some(Self::Policy),
@@ -135,6 +140,7 @@ pub fn parse_subresource(name: &str, value: &str) -> Option<S3SubResource> {
         } else {
             S3SubResource::Other
         }),
+        QueryParameter::Delete => Some(S3SubResource::DeleteObjects),
         QueryParameter::Location => Some(S3SubResource::Location),
         QueryParameter::Acl => Some(S3SubResource::Acl),
         QueryParameter::Policy => Some(S3SubResource::Policy),
