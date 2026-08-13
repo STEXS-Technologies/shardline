@@ -63,10 +63,13 @@ pub use multipart::{
     validate_part_number, validate_upload_id,
 };
 pub use protocol_support::{
-    QueryMap, S3SubResource, classify, etag_header, parse_s3_range, parse_subresource,
+    ConditionalHeader, CopySource, EntityTagSet, InvalidS3HeaderValue, QueryMap, S3SubResource,
+    classify, etag_header, parse_copy_source, parse_s3_range, parse_subresource,
+    read_conditional_headers,
 };
 pub use types::{
-    CompleteMultipartUploadResult, CompleteParts, Contents, HeadObjectHeaders,
-    InitiateMultipartUploadResult, ListBucketResult, MAX_S3_DELETE_KEYS, PutObjectResponseHeaders,
-    S3ErrorBody, parse_complete_multipart_parts, parse_delete_object_keys,
+    CompleteMultipartUploadResult, CompleteParts, Contents, CopyObjectResult, HeadObjectHeaders,
+    InitiateMultipartUploadResult, ListBucketResult, ListBucketsResult, MAX_S3_DELETE_KEYS,
+    PutObjectResponseHeaders, S3ErrorBody, parse_complete_multipart_parts,
+    parse_delete_object_keys,
 };

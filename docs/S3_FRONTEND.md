@@ -48,7 +48,8 @@ as out of scope until a real client need appears.
    **BLAKE3 root content hash** (opaque; identical for single-PUT and multipart
    of the same bytes). Errors are an S3 XML envelope (`<Error><Code>…`);
    codes: `NoSuchKey`, `NoSuchBucket`, `AccessDenied`, `InvalidRange`,
-   `EntityTooSmall`, `InvalidPart`, `NoSuchUpload`, `NotImplemented`, `InternalError`.
+   `EntityTooSmall`, `InvalidPart`, `NoSuchUpload`, `NotImplemented`,
+   `PreconditionFailed` (conditional mismatches), `MalformedXML`, `InternalError`.
 
 ## Operation matrix
 
@@ -74,27 +75,27 @@ access-key and Bearer auth forms.
 | `GetBucketLocation` | stub → `us-east-1` (S3A / pyarrow region-probe) |
 | `CreateBucket` | no-op `200` (S3A missing-bucket probe) |
 | `ListObjectsV2` | index-backed (`shardline_s3_objects`); `prefix`/`delimiter`/`max-keys`/`continuation-token`/`start-after`; zero object-store reads — the index rows carry size/ETag/mtime |
+| `DeleteObjects` (batch) | `POST /{bucket}?delete=`; ≤ 1000 distinct keys per request (`MalformedXML` beyond, `400`); invalid keys become per-key `<Error>` rows |
+| `CopyObject` | `PUT` with `x-amz-copy-source`; source must be in the caller's bound bucket; dest gets a fresh ETag (same content → same ETag) |
+| Conditional requests | `If-Match` / `If-None-Match` on Get/Put/Head/Delete; `412 PreconditionFailed` on mismatch (`404 NoSuchKey` when `If-Match` targets a missing object) |
+| `ListBuckets` | service-level `GET /`; lists the caller's single `{owner}.{name}` bucket |
 
 ### Planned (near-term follow-up)
 
-| Operation | Why / trigger |
-|---|---|
-| `DeleteObjects` (batch) | Iceberg GC, S3A bulk deletes |
-| Conditional requests (`If-Match` / `If-None-Match`) | pyiceberg optimistic metadata commits, `object_store` conditional puts |
-| `ListBuckets` | CLI tooling (`aws s3 ls`) |
+None — the originally planned operations (`DeleteObjects`, conditional
+requests, `ListBuckets`) are all supported; `CopyObject` was pulled in ahead
+of schedule (Spark rename-commit / `object_store::copy` shape).
 
 ### Out-until-demand (explicitly excluded; respond `501 NotImplemented`)
 
 | Operation | Reconsider when |
 |---|---|
-| `CopyObject` | a Spark rename-commit or `object_store::copy` client path |
 | `ListParts` / `ListMultipartUploads` | a multipart-resume workflow |
 | `ListObjectsV1` | a legacy SDK (trivial V2 alias if ever needed) |
 | Multi-range `GetObject` (`bytes=a,b`) | a client using multi-range |
 | `PostObject` (form upload) | — |
 | Object tagging / attributes / restore / select / torrent / legal-hold / retention / ACL | — |
 | Bucket policy / lifecycle / versioning / CORS / notification / ACL / encryption / tagging / replication / website, `DeleteBucket`, `ListBucketMultipartUploads`, `ListObjectVersions` | explicit ruling: no admin/AWS-side surface |
-| Service `GET /` | — |
 
 ## Protocol deviations (documented)
 
@@ -108,6 +109,9 @@ access-key and Bearer auth forms.
 - **Multipart part size minimums** follow S3 (5 MiB for all but the final part);
   the part-size ceiling (`SHARDLINE_S3_MAX_PART_BYTES`) and the per-session /
   aggregate byte quotas are configurable.
+- **Errors** use the S3 XML envelope (`<Error><Code>…`); codes include
+  `PreconditionFailed` (`412`) for conditional-request mismatches and
+  `MalformedXML` (`400`) for schema violations.
 
 ## Auth & roles
 

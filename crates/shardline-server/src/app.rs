@@ -74,8 +74,8 @@ use protocol_routes::{
     bazel_put_ac, bazel_put_cas, lfs_batch, lfs_delete_object, lfs_get_object, lfs_head_object,
     lfs_patch_object, lfs_put_object, lfs_verify_object, oci_api_dispatch, oci_dispatch,
     oci_registry_token, oci_transfer_dispatch, oci_v2_root, s3_create_bucket, s3_delete_bucket,
-    s3_delete_object, s3_get_bucket, s3_get_object, s3_head_bucket, s3_head_object, s3_post_bucket,
-    s3_post_object, s3_put_object,
+    s3_delete_object, s3_get_bucket, s3_get_object, s3_head_bucket, s3_head_object,
+    s3_list_buckets, s3_post_bucket, s3_post_object, s3_put_object,
 };
 #[cfg(feature = "fuzzing")]
 pub(crate) use protocol_routes::{parse_oci_path, parse_upload_content_range};
@@ -621,6 +621,8 @@ fn register_oci_routes(mut app: Router<Arc<AppState>>, role: ServerRole) -> Rout
 fn register_s3_routes(mut app: Router<Arc<AppState>>, role: ServerRole) -> Router<Arc<AppState>> {
     if role.serves_api() {
         app = app
+            // Service-level `GET /` — `ListBuckets` (the caller's single bucket).
+            .route("/", axum::routing::get(s3_list_buckets))
             .route(
                 "/{bucket}",
                 axum::routing::put(s3_create_bucket)

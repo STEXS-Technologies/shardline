@@ -163,6 +163,17 @@ impl S3Error {
         }
     }
 
+    /// A conditional request (`If-Match` / `If-None-Match`) failed against the
+    /// stored object (`PreconditionFailed`, `412`).
+    #[must_use]
+    pub fn precondition_failed() -> Self {
+        Self {
+            code: "PreconditionFailed",
+            message: "At least one of the pre-conditions you specified did not hold.".to_owned(),
+            status: StatusCode::PRECONDITION_FAILED,
+        }
+    }
+
     /// Returns this error with a replaced message (keeps the code and status).
     #[must_use]
     pub fn with_message(mut self, message: String) -> Self {
@@ -379,6 +390,13 @@ mod tests {
             "{}",
             error.message
         );
+    }
+
+    #[test]
+    fn precondition_failed_constructor_maps_to_412() {
+        let error = S3Error::precondition_failed();
+        assert_eq!(error.code, "PreconditionFailed");
+        assert_eq!(error.status, StatusCode::PRECONDITION_FAILED);
     }
 
     #[tokio::test]

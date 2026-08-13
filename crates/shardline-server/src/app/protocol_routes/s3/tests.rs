@@ -42,7 +42,10 @@ use crate::{
 };
 
 use super::{
-    bucket::{s3_create_bucket, s3_delete_bucket, s3_get_bucket, s3_head_bucket, s3_post_bucket},
+    bucket::{
+        s3_create_bucket, s3_delete_bucket, s3_get_bucket, s3_head_bucket, s3_list_buckets,
+        s3_post_bucket,
+    },
     format_http_date,
     object::{s3_delete_object, s3_get_object, s3_head_object, s3_post_object, s3_put_object},
 };
@@ -133,6 +136,7 @@ fn sigv4_auth(token: &str) -> String {
 /// Builds the S3 router with the test state attached.
 fn s3_router(state: Arc<AppState>) -> Router {
     Router::new()
+        .route("/", get(s3_list_buckets))
         .route(
             "/{bucket}",
             put(s3_create_bucket)
@@ -2418,4 +2422,434 @@ async fn s3_delete_objects_invalid_keys_yield_per_key_errors_and_valid_keys_dele
         object_status(&app, "../escape.txt").await,
         StatusCode::NOT_FOUND
     );
+}
+
+// =========================================================================
+// ListBuckets (GET /)
+// =========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_list_buckets_returns_the_callers_bucket() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state);
+
+    let list = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/")
+                .header(
+                    header::AUTHORIZATION,
+                    sigv4_auth(&mint_token(TokenScope::Read, OWNER, NAME)),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(list.status(), StatusCode::OK);
+    let body = String::from_utf8(body_bytes(list).await).unwrap();
+    assert!(body.contains("<ListAllMyBucketsResult"), "{body}");
+    assert!(
+        body.contains("<Bucket><Name>acme.models</Name></Bucket>"),
+        "ListBuckets must list the caller's single bucket: {body}"
+    );
+    // Exactly one bucket (the token is bound to exactly one scope).
+    assert_eq!(body.matches("<Bucket>").count(), 1, "{body}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_list_buckets_missing_auth_returns_403() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state);
+
+    let list = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(list.status(), StatusCode::FORBIDDEN);
+    let body = String::from_utf8(body_bytes(list).await).unwrap();
+    assert!(body.contains("<Code>AccessDenied</Code>"), "{body}");
+}
+
+// =========================================================================
+// Conditional requests (If-Match / If-None-Match)
+// =========================================================================
+
+/// GETs an object and returns its quoted ETag (asserting the read succeeded).
+async fn get_etag(app: &Router, key: &str) -> String {
+    let response = get_etag_request(app, key).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    response
+        .headers()
+        .get(header::ETAG)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned()
+}
+
+/// GETs an object and returns the full response (body readable).
+async fn get_etag_request(app: &Router, key: &str) -> axum::http::Response<Body> {
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/{BUCKET}/{key}"))
+                .header(
+                    header::AUTHORIZATION,
+                    sigv4_auth(&mint_token(TokenScope::Read, OWNER, NAME)),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+/// Builds a method request with an optional conditional header.
+fn conditional_request(
+    method: &str,
+    uri: String,
+    auth: &str,
+    condition: Option<(&str, &str)>,
+) -> axum::http::Request<Body> {
+    let mut builder = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header(header::AUTHORIZATION, auth);
+    if let Some((name, value)) = condition {
+        builder = builder.header(name, value);
+    }
+    builder.body(Body::empty()).unwrap()
+}
+
+/// PUTs a body with an optional conditional header.
+fn conditional_put_request(
+    uri: String,
+    body: Vec<u8>,
+    condition: Option<(&str, &str)>,
+) -> axum::http::Request<Body> {
+    let mut builder = Request::builder()
+        .method("PUT")
+        .uri(uri)
+        .header(
+            header::AUTHORIZATION,
+            sigv4_auth(&mint_token(TokenScope::Write, OWNER, NAME)),
+        )
+        .header(header::CONTENT_TYPE, "application/octet-stream");
+    if let Some((name, value)) = condition {
+        builder = builder.header(name, value);
+    }
+    builder.body(Body::from(body)).unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_get_if_match_ok_when_etag_matches() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state);
+    let content = b"if-match-content".to_vec();
+
+    seed_object(&app, "cond.txt").await;
+    let put = app
+        .clone()
+        .oneshot(put_request(format!("/{BUCKET}/cond.txt"), content.clone()))
+        .await
+        .unwrap();
+    assert_eq!(put.status(), StatusCode::OK);
+    let etag = get_etag(&app, "cond.txt").await;
+
+    let get = app
+        .clone()
+        .oneshot(conditional_request(
+            "GET",
+            format!("/{BUCKET}/cond.txt"),
+            &sigv4_auth(&mint_token(TokenScope::Read, OWNER, NAME)),
+            Some(("if-match", &etag)),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(get.status(), StatusCode::OK);
+    assert_eq!(body_bytes(get).await, content);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_get_if_match_mismatch_returns_412() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state);
+    seed_object(&app, "cond.txt").await;
+
+    let get = app
+        .clone()
+        .oneshot(conditional_request(
+            "GET",
+            format!("/{BUCKET}/cond.txt"),
+            &sigv4_auth(&mint_token(TokenScope::Read, OWNER, NAME)),
+            Some(("if-match", "\"deadbeef\"")),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(get.status(), StatusCode::PRECONDITION_FAILED);
+    let body = String::from_utf8(body_bytes(get).await).unwrap();
+    assert!(body.contains("<Code>PreconditionFailed</Code>"), "{body}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_put_if_none_match_on_missing_proceeds() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state);
+
+    // Create-if-absent: a fresh key with If-None-Match must succeed.
+    let put = app
+        .clone()
+        .oneshot(conditional_put_request(
+            format!("/{BUCKET}/fresh.txt"),
+            b"created".to_vec(),
+            Some(("if-none-match", "\"anything\"")),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(put.status(), StatusCode::OK);
+    assert_eq!(get_etag(&app, "fresh.txt").await.len(), 66); // quoted 64-hex hash
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_put_if_none_match_on_existing_returns_412() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state);
+    seed_object(&app, "cond.txt").await;
+    let etag = get_etag(&app, "cond.txt").await;
+
+    let put = app
+        .clone()
+        .oneshot(conditional_put_request(
+            format!("/{BUCKET}/cond.txt"),
+            b"should-not-land".to_vec(),
+            Some(("if-none-match", &etag)),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(put.status(), StatusCode::PRECONDITION_FAILED);
+    // The write did not happen: the stored content is unchanged.
+    assert_eq!(
+        body_bytes(get_etag_request(&app, "cond.txt").await).await,
+        b"seed-content".to_vec()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_put_if_match_mismatch_checked_before_write() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state);
+    seed_object(&app, "cond.txt").await;
+
+    let put = app
+        .clone()
+        .oneshot(conditional_put_request(
+            format!("/{BUCKET}/cond.txt"),
+            b"should-not-land".to_vec(),
+            Some(("if-match", "\"deadbeef\"")),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(put.status(), StatusCode::PRECONDITION_FAILED);
+    // The write was rejected BEFORE mutating anything.
+    assert_eq!(
+        body_bytes(get_etag_request(&app, "cond.txt").await).await,
+        b"seed-content".to_vec()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_put_if_match_on_missing_returns_404() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state);
+
+    // RFC 9110: a missing resource fails If-Match.
+    let put = app
+        .clone()
+        .oneshot(conditional_put_request(
+            format!("/{BUCKET}/never-existed.txt"),
+            b"x".to_vec(),
+            Some(("if-match", "\"deadbeef\"")),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(put.status(), StatusCode::NOT_FOUND);
+    let body = String::from_utf8(body_bytes(put).await).unwrap();
+    assert!(body.contains("<Code>NoSuchKey</Code>"), "{body}");
+    // Nothing was created.
+    assert_eq!(
+        object_status(&app, "never-existed.txt").await,
+        StatusCode::NOT_FOUND
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_head_if_none_match_star_on_existing_returns_412() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state);
+    seed_object(&app, "cond.txt").await;
+
+    let head = app
+        .clone()
+        .oneshot(conditional_request(
+            "HEAD",
+            format!("/{BUCKET}/cond.txt"),
+            &sigv4_auth(&mint_token(TokenScope::Read, OWNER, NAME)),
+            Some(("if-none-match", "*")),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(head.status(), StatusCode::PRECONDITION_FAILED);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_delete_if_match_mismatch_returns_412_and_object_survives() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state);
+    seed_object(&app, "cond.txt").await;
+
+    let delete = app
+        .clone()
+        .oneshot(conditional_request(
+            "DELETE",
+            format!("/{BUCKET}/cond.txt"),
+            &sigv4_auth(&mint_token(TokenScope::Write, OWNER, NAME)),
+            Some(("if-match", "\"deadbeef\"")),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(delete.status(), StatusCode::PRECONDITION_FAILED);
+    assert_eq!(object_status(&app, "cond.txt").await, StatusCode::OK);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_delete_if_match_on_missing_returns_404() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state);
+
+    let delete = app
+        .clone()
+        .oneshot(conditional_request(
+            "DELETE",
+            format!("/{BUCKET}/never-existed.txt"),
+            &sigv4_auth(&mint_token(TokenScope::Write, OWNER, NAME)),
+            Some(("if-match", "\"deadbeef\"")),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(delete.status(), StatusCode::NOT_FOUND);
+}
+
+// =========================================================================
+// CopyObject (PUT with x-amz-copy-source)
+// =========================================================================
+
+/// A write-token `PUT` request carrying `x-amz-copy-source`.
+fn copy_request(uri: String, copy_source: &str) -> axum::http::Request<Body> {
+    Request::builder()
+        .method("PUT")
+        .uri(uri)
+        .header(
+            header::AUTHORIZATION,
+            sigv4_auth(&mint_token(TokenScope::Write, OWNER, NAME)),
+        )
+        .header("x-amz-copy-source", copy_source)
+        .body(Body::empty())
+        .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_copy_object_same_bucket_roundtrip() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state);
+    let source_content = b"copyable-content".to_vec();
+
+    // Seed the source.
+    let put = app
+        .clone()
+        .oneshot(put_request(
+            format!("/{BUCKET}/src/file.bin"),
+            source_content.clone(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(put.status(), StatusCode::OK);
+    let source_etag = get_etag(&app, "src/file.bin").await;
+
+    // Copy to a destination key.
+    let copy = app
+        .clone()
+        .oneshot(copy_request(
+            format!("/{BUCKET}/dst/file.bin"),
+            &format!("/{BUCKET}/src/file.bin"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(copy.status(), StatusCode::OK);
+    let body = String::from_utf8(body_bytes(copy).await).unwrap();
+    assert!(body.contains("<CopyObjectResult"), "{body}");
+    assert!(
+        body.contains(&format!("<ETag>{source_etag}</ETag>")),
+        "identical content must yield the identical ETag: {body}"
+    );
+    assert!(body.contains("<LastModified>"), "{body}");
+
+    // The destination holds the source's bytes with the same ETag.
+    let dest_get = get_etag_request(&app, "dst/file.bin").await;
+    assert_eq!(dest_get.status(), StatusCode::OK);
+    assert_eq!(body_bytes(dest_get).await, source_content);
+    let dest_etag = get_etag(&app, "dst/file.bin").await;
+    assert_eq!(dest_etag, source_etag);
+    // The source is untouched.
+    assert_eq!(object_status(&app, "src/file.bin").await, StatusCode::OK);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_copy_object_missing_source_returns_no_such_key() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state);
+
+    let copy = app
+        .clone()
+        .oneshot(copy_request(
+            format!("/{BUCKET}/dst/missing.bin"),
+            "/acme.models/never-wrote.bin",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(copy.status(), StatusCode::NOT_FOUND);
+    let body = String::from_utf8(body_bytes(copy).await).unwrap();
+    assert!(body.contains("<Code>NoSuchKey</Code>"), "{body}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_copy_object_cross_bucket_returns_access_denied() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state);
+    seed_object(&app, "src.txt").await;
+
+    // The source bucket does not match the caller's bound bucket.
+    let copy = app
+        .clone()
+        .oneshot(copy_request(
+            format!("/{BUCKET}/dst.txt"),
+            "/other.owner/secret.bin",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(copy.status(), StatusCode::FORBIDDEN);
+    let body = String::from_utf8(body_bytes(copy).await).unwrap();
+    assert!(body.contains("<Code>AccessDenied</Code>"), "{body}");
+    // Nothing was written to the destination.
+    assert_eq!(object_status(&app, "dst.txt").await, StatusCode::NOT_FOUND);
 }
