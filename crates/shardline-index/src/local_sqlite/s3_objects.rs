@@ -74,7 +74,7 @@ fn scan_s3_objects_sql(
         "SELECT scope_namespace, object_key, file_id, size_bytes, content_hash,
                 updated_at_unix_seconds
          FROM shardline_s3_objects
-         WHERE scope_namespace = ?1 AND object_key LIKE (?2 || '%')",
+         WHERE scope_namespace = ?1 AND substr(object_key, 1, length(?2)) = ?2",
     );
     let mut args: Vec<Value> = vec![
         Value::Text(scope_namespace.to_owned()),
@@ -329,6 +329,30 @@ mod tests {
         assert_eq!(
             scan(&store, "global", "", Some(&cursor), 100).await,
             vec!["f4.txt", "f5.txt"]
+        );
+    }
+
+    #[tokio::test]
+    async fn scan_s3_objects_prefix_matches_literal_string() {
+        // A prefix containing LIKE metacharacters must match literally (string
+        // prefix semantics, not SQL LIKE pattern semantics).
+        let store = make_store();
+        for key in ["100%done", "100_plus", "100done", "plain"] {
+            S3ObjectIndexStore::upsert_s3_object(&store, &entry("global", key, "f", 0, 0))
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            scan(&store, "global", "100%", None, 100).await,
+            vec!["100%done"]
+        );
+        assert_eq!(
+            scan(&store, "global", "100_", None, 100).await,
+            vec!["100_plus"]
+        );
+        assert_eq!(
+            scan(&store, "global", "100", None, 100).await,
+            vec!["100%done", "100_plus", "100done"]
         );
     }
 

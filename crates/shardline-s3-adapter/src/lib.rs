@@ -38,6 +38,7 @@
 mod auth;
 mod error;
 mod key;
+mod listing;
 mod multipart;
 mod protocol_support;
 mod types;
@@ -45,6 +46,10 @@ mod types;
 pub use auth::{extract_access_key, extract_access_key_from_query, require_s3_bucket_binding};
 pub use error::{S3Error, S3ErrorClass, S3ErrorClassify};
 pub use key::{BucketDecodeError, S3KeyError, decode_bucket, encode_bucket, s3_object_key};
+pub use listing::{
+    ListObjectsV2Params, ListPage, MAX_LIST_KEYS, decode_continuation_token,
+    encode_continuation_token, format_iso8601, group_page, parse_list_objects_v2_params,
+};
 pub use multipart::{
     MAX_S3_PART_NUMBER, MultipartPart, MultipartUploadSession, S3SessionError, S3UploadSessionLock,
     count_active_sessions, create_session, delete_session, is_expired, lock_upload_sessions,

@@ -3992,6 +3992,48 @@ async fn s3_multipart_roundtrip_through_full_router() {
     assert_eq!(body_bytes(get).await, [part1, part2].concat());
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_list_objects_v2_through_full_router() {
+    let (app, _tmp) = test_app_with_auth(&[ServerFrontend::S3]).await;
+    let token = test_token(TokenScope::Write);
+    let auth = format!("AWS4-HMAC-SHA256 Credential={token}/20260813/us-east-1/s3/aws4_request");
+
+    for (key, content) in [("root.txt", b"1".to_vec()), ("dir/a.txt", b"2".to_vec())] {
+        let put = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/test.test/{key}"))
+                    .header(header::AUTHORIZATION, &auth)
+                    .body(Body::from(content))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(put.status(), StatusCode::OK);
+    }
+
+    // S3A delimiter shape through the full router: root.txt + dir/ rollup.
+    let list = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/test.test?list-type=2&delimiter=%2F")
+                .header(header::AUTHORIZATION, &auth)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(list.status(), StatusCode::OK);
+    let xml = String::from_utf8(body_bytes(list).await).unwrap();
+    assert!(xml.contains("<Key>root.txt</Key>"), "{xml}");
+    assert!(xml.contains("<Prefix>dir/</Prefix>"), "{xml}");
+    assert!(xml.contains("<IsTruncated>false</IsTruncated>"), "{xml}");
+}
+
 // ---------------------------------------------------------------------------
 // LFS Batch Xet Transfer Tests
 // ---------------------------------------------------------------------------

@@ -71,7 +71,7 @@ impl S3ObjectIndexStore for PostgresIndexStore {
             "SELECT scope_namespace, object_key, file_id, size_bytes, content_hash,
                     updated_at_unix_seconds
              FROM shardline_s3_objects
-             WHERE scope_namespace = $1 AND object_key LIKE ($2 || '%')",
+             WHERE scope_namespace = $1 AND substr(object_key, 1, length($2)) = $2",
         );
         let mut index = 3usize;
         if cursor.is_some() {
