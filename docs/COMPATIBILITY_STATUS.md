@@ -20,6 +20,7 @@ version.
 | Bazel HTTP remote cache | **Beta** | `ac` and `cas` object GET and PUT routes; `bazel`/`bazelisk` remote-cache flows with remote_download_outputs=all and toplevel; conformance-tested but limited production evidence |
 | OCI Distribution | **Stable** | Full blob upload/download, manifest PUT/GET/HEAD/DELETE, tag listing with pagination, token-service flow at /v2/token, upload cancellation, scoped upload-session handling; checked-in `skopeo`, Docker, Helm, and Podman client coverage |
 | Hugging Face Hub API | **Beta** | Repository create/info/delete, revision and tree lookup, preupload, NDJSON commit, resolve/download, dataset viewer routes, basic search, webhooks, Git Smart HTTP clone/fetch/push; `hf` CLI model and dataset create, upload, download, filtered snapshot, delete-files, and delete-repository flows; conformance-tested but limited production evidence |
+| S3 frontend (protocol) | **Beta** | Client-shaped S3 PUT/GET/Range/HEAD/DELETE, multipart upload (create/part/complete/abort), HeadBucket/GetBucketLocation/CreateBucket stubs, and ListObjectsV2 flows; SigV4 access-key and Bearer auth bridges; index-backed listing with zero object-store reads; conformance-tested but limited production evidence |
 | Ed25519 auth provider | **Experimental** | Signing and verification, verification-only mode, environment/TOML configuration, and authenticated HTTP flows have targeted tests; the operator CLI does not mint Ed25519 tokens |
 | Local filesystem storage | **Stable** | Checked-in adapter, concurrency, and operator workflow coverage |
 | S3-compatible storage | **Stable** | Checked-in object read/write/list and HTTP integration coverage |
@@ -50,6 +51,11 @@ version.
 - Hugging Face Hub API: repository create/info/delete, revision and tree lookup,
   preupload, NDJSON commit, resolve/download, dataset viewer routes, basic search,
   webhooks, and Git Smart HTTP clone/fetch/push
+- S3 frontend: object `PUT`, `GET` (with `Range`/`Content-Range`), `HEAD`, and `DELETE`;
+  multipart upload (`CreateMultipartUpload`, `UploadPart`, `CompleteMultipartUpload`,
+  `AbortMultipartUpload`); `HeadBucket`/`GetBucketLocation`/`CreateBucket` stubs; and
+  `ListObjectsV2` (`prefix`/`delimiter`/`max-keys`/`continuation-token`/`start-after`),
+  with the SigV4 access-key and Bearer auth bridges
 
 ## Current Limits
 
