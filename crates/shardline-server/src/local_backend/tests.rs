@@ -1166,7 +1166,11 @@ async fn download_single_chunk_xorb_backed_file_roundtrips() {
 
     // Sub-range read over the same single-chunk xorb-backed record.
     let (stream, _total) = backend
-        .read_file_stream("small.bin", Some(ByteRange::new(4, 7).expect("range")))
+        .read_file_stream(
+            "small.bin",
+            None,
+            Some(ByteRange::new(4, 7).expect("range")),
+        )
         .await
         .expect("range stream");
     let mut stream = stream;

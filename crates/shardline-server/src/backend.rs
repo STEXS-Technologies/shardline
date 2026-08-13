@@ -38,6 +38,21 @@ pub enum ServerBackend {
     Postgres(PostgresBackend),
 }
 
+/// A single atomic resolution of an S3 object's readable representation.
+///
+/// Produced by [`ServerBackend::s3_object_read_snapshot`]; the GET path
+/// streams via [`ServerBackend::read_object_stream_pinned`] with the same
+/// version so the length and the served bytes always agree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct S3ObjectReadSnapshot {
+    /// The object's logical length in bytes.
+    pub total_bytes: u64,
+    /// The immutable record version to stream from. `None` means the object is
+    /// served from a direct object at the protocol key and has no record to
+    /// pin.
+    pub record_content_hash: Option<String>,
+}
+
 /// Outcome of registering a path mapping.
 #[derive(Debug, Clone)]
 pub struct RegisterPathOutcome {
@@ -293,11 +308,11 @@ impl ServerBackend {
         object_key: &ObjectKey,
     ) -> Result<(u64, String), ServerError> {
         let file_id = protocol_object_file_id(object_key);
-        match self.file_total_bytes(&file_id, None, None).await {
-            Ok(size) => {
-                let record = self.protocol_file_record(&file_id).await?;
-                Ok((size, record.content_hash))
-            }
+        // One record read: size and content hash come from the same record
+        // snapshot, so a concurrent overwrite can never yield a torn HEAD
+        // (size from the old version, hash from the new).
+        match self.protocol_file_record(&file_id).await {
+            Ok(record) => Ok((record.total_bytes, record.content_hash)),
             Err(ServerError::NotFound) => {
                 let size = self.object_length(object_key).await?;
                 Ok((size, String::new()))
@@ -727,8 +742,98 @@ impl ServerBackend {
         }
         let file_id = protocol_object_file_id(object_key);
         let (stream, record_length) = match self {
-            Self::Local(backend) => backend.read_file_stream(&file_id, range).await?,
-            Self::Postgres(backend) => backend.read_file_stream(&file_id, range).await?,
+            Self::Local(backend) => backend.read_file_stream(&file_id, None, range).await?,
+            Self::Postgres(backend) => backend.read_file_stream(&file_id, None, range).await?,
+        };
+        if record_length != total_length {
+            return Err(ServerError::ObjectStore(
+                ObjectStoreError::StoredLengthMismatch,
+            ));
+        }
+        crate::metrics::record_object_read_by_repr("file_read", total_length);
+        Ok(stream)
+    }
+
+    /// Resolves an S3 object's length and record version in ONE record read.
+    ///
+    /// The S3 GET path must resolve the length and the stream from the SAME
+    /// immutable record version. Resolving the length from the latest record
+    /// and then the stream from a *later* latest record can observe a
+    /// mid-overwrite state (old length, new stream) and fail with
+    /// [`ObjectStoreError::StoredLengthMismatch`]. This snapshot pins the
+    /// version; [`Self::read_object_stream_pinned`] then streams that exact
+    /// version.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError::NotFound`] when neither a direct object nor a
+    /// record exists.
+    pub(crate) async fn s3_object_read_snapshot(
+        &self,
+        object_key: &ObjectKey,
+    ) -> Result<S3ObjectReadSnapshot, ServerError> {
+        // Raw direct-object probe: unlike `object_length`, this does NOT fall
+        // back to the record, so the snapshot can tell direct-backed from
+        // record-backed objects (S3 objects are record-only).
+        let direct = match self {
+            Self::Local(backend) => backend.object_length(object_key).await,
+            Self::Postgres(backend) => backend.object_length(object_key).await,
+        };
+        match direct {
+            Ok(length) => Ok(S3ObjectReadSnapshot {
+                total_bytes: length,
+                record_content_hash: None,
+            }),
+            Err(ServerError::NotFound) => {
+                let file_id = protocol_object_file_id(object_key);
+                let record = self.protocol_file_record(&file_id).await?;
+                Ok(S3ObjectReadSnapshot {
+                    total_bytes: record.total_bytes,
+                    record_content_hash: Some(record.content_hash),
+                })
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Streams an S3 object pinned to a [`S3ObjectReadSnapshot`]'s version.
+    ///
+    /// When `content_hash` is `Some`, the stream is read from that **immutable
+    /// version record** (keyed by file id + content hash), so the served bytes
+    /// and length always match the snapshot — a concurrent overwrite commits a
+    /// new latest record but can never change the pinned version mid-read.
+    /// When `None`, the direct object at the protocol key is served (existing
+    /// [`Self::read_object_stream`] behavior).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError::NotFound`] when the pinned record is gone, or
+    /// [`ObjectStoreError::StoredLengthMismatch`] when the pinned version's
+    /// length disagrees with `total_length` (a genuine corruption signal).
+    pub(crate) async fn read_object_stream_pinned(
+        &self,
+        object_key: &ObjectKey,
+        total_length: u64,
+        range: Option<ByteRange>,
+        content_hash: Option<&str>,
+    ) -> Result<ServerByteStream, ServerError> {
+        let Some(hash) = content_hash else {
+            return self
+                .read_object_stream(object_key, total_length, range)
+                .await;
+        };
+        let file_id = protocol_object_file_id(object_key);
+        let (stream, record_length) = match self {
+            Self::Local(backend) => {
+                backend
+                    .read_file_stream(&file_id, Some(hash), range)
+                    .await?
+            }
+            Self::Postgres(backend) => {
+                backend
+                    .read_file_stream(&file_id, Some(hash), range)
+                    .await?
+            }
         };
         if record_length != total_length {
             return Err(ServerError::ObjectStore(

@@ -1979,6 +1979,85 @@ async fn s3_overwrite_is_atomic_no_transient_404_for_readers() {
     }
 }
 
+/// Stress test for the overwrite race: N back-to-back overwrites alternating
+/// two contents while M concurrent GETs hammer the key.
+///
+/// Every GET must return exactly one of the two contents — never a 404
+/// (`NoSuchKey`), never a 500 (`StoredLengthMismatch` from resolving the
+/// length from one record version and the stream from another), never a torn
+/// body. The pre-fix code failed this within a handful of rounds; with the
+/// length+stream resolved from one immutable record snapshot it is stable.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_overwrite_stress_readers_never_see_torn_or_absent_object() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state);
+    let write_auth = sigv4_auth(&mint_token(TokenScope::Write, OWNER, NAME));
+    let read_auth = sigv4_auth(&mint_token(TokenScope::Read, OWNER, NAME));
+    let contents = [vec![0xAA_u8; 16], vec![0xBB_u8; 300_000]];
+
+    let put = app
+        .clone()
+        .oneshot(put_request(format!("/{BUCKET}/{KEY}"), contents[0].clone()))
+        .await
+        .unwrap();
+    assert_eq!(put.status(), StatusCode::OK);
+
+    for round in 0..20 {
+        let content = contents[round % 2].clone();
+        let (overwrite, reads) = tokio::join!(
+            app.clone().oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/{BUCKET}/{KEY}"))
+                    .header(header::AUTHORIZATION, &write_auth)
+                    .body(Body::from(content))
+                    .unwrap(),
+            ),
+            async {
+                let mut tasks = Vec::new();
+                for _ in 0..50 {
+                    let app = app.clone();
+                    let read_auth = read_auth.clone();
+                    tasks.push(tokio::spawn(async move {
+                        let response = app
+                            .oneshot(
+                                Request::builder()
+                                    .method("GET")
+                                    .uri(format!("/{BUCKET}/{KEY}"))
+                                    .header(header::AUTHORIZATION, &read_auth)
+                                    .body(Body::empty())
+                                    .unwrap(),
+                            )
+                            .await
+                            .unwrap();
+                        let status = response.status();
+                        let body = body_bytes(response).await;
+                        (status, body)
+                    }));
+                }
+                let mut results = Vec::with_capacity(tasks.len());
+                for task in tasks {
+                    results.push(task.await.unwrap());
+                }
+                results
+            },
+        );
+        assert_eq!(
+            overwrite.unwrap().status(),
+            StatusCode::OK,
+            "overwrite round {round}"
+        );
+        for (index, (status, body)) in reads.into_iter().enumerate() {
+            assert_eq!(status, StatusCode::OK, "round {round} read {index}");
+            assert!(
+                body == contents[0] || body == contents[1],
+                "round {round} read {index}: torn/absent read of {} bytes",
+                body.len()
+            );
+        }
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn s3_complete_non_final_small_part_returns_entity_too_small() {
     // The S3 5 MiB minimum applies to every part except the final one.
