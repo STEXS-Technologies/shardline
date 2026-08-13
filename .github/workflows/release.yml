@@ -30,30 +30,40 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
+      # CRATE_PACKAGES must be dependency-first (bottom-up): the workspace
+      # rewrites path deps to crates.io requirements, so `cargo publish` for a
+      # crate can only resolve once every shardline-* crate it depends on
+      # (runtime AND dev deps) is already on crates.io. Derive-verified against
+      # `cargo metadata`; keep in sync with scripts/publish-coordinated.sh.
+      # Hard constraints enforced by this order:
+      #   - shardline-server precedes sdx (sdx dev-depends on shardline-server
+      #     for its test suite; this is what broke the v1.5.0 release)
+      #   - shardline-server and sdx precede shardline (the CLI facade)
+      #   - shardline-protocol-adapters precedes shardline-hub-api (runtime dep)
       CRATE_PACKAGES: >-
-        shardline-protocol
-        shardline-xet-core
         shardline-metrics
-        shardline-auth
-        shardline-validation
+        shardline-protocol
         shardline-test-support
-        shardline-storage
+        shardline-validation
+        shardline-xet-core
+        shardline-auth
         shardline-cache
+        shardline-storage
         shardline-vcs
         shardline-index
         shardline-cas
         shardline-server-core
-        shardline-oci-adapter
+        shardline-bench
         shardline-protocol-adapters
-        shardline-xet-adapter
-        sdx
-        shardline-provider-events
         shardline-hub-api
+        shardline-oci-adapter
+        shardline-xet-adapter
         shardline-fsck
         shardline-gc
+        shardline-provider-events
         shardline-rebuild
         shardline-server
-        shardline-bench
+        sdx
         shardline
     steps:
       - name: Checkout
