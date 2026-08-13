@@ -8,6 +8,7 @@
 //! claims, and then dispatches on the query sub-resources.
 
 pub(super) mod bucket;
+pub(super) mod multipart;
 pub(super) mod object;
 
 #[cfg(test)]
@@ -73,6 +74,8 @@ pub(super) fn authorize_s3(
 
 /// The scope namespace, storage object key, and client key for one S3 request.
 pub(super) struct S3ObjectContext {
+    /// The bucket name (`{owner}.{name}`).
+    pub(super) bucket: String,
     /// sha256 repository-scope namespace keying the listing index rows.
     pub(super) scope_namespace: String,
     /// The client-facing S3 object key (no `protocols/s3/` prefix).
@@ -98,6 +101,7 @@ pub(super) fn require_s3_object_context(
     let object_key =
         s3_object_key(&scope_namespace, key).map_err(|_error| S3Error::no_such_key(key))?;
     Ok(S3ObjectContext {
+        bucket: bucket.to_owned(),
         scope_namespace,
         key: key.to_owned(),
         object_key,

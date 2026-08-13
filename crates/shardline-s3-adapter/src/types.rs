@@ -160,6 +160,66 @@ impl CompleteMultipartUploadResult {
     }
 }
 
+/// The `InitiateMultipartUpload` response envelope.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InitiateMultipartUploadResult {
+    /// The bucket name (`{owner}.{name}`).
+    pub bucket: String,
+    /// The completed object key.
+    pub key: String,
+    /// The opaque upload id for the new multipart upload session.
+    pub upload_id: String,
+}
+
+impl InitiateMultipartUploadResult {
+    /// Serializes the result to the S3 `InitiateMultipartUploadResult` XML
+    /// envelope.
+    #[must_use]
+    pub fn to_xml(&self) -> String {
+        format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<InitiateMultipartUploadResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\n  <Bucket>{}</Bucket>\n  <Key>{}</Key>\n  <UploadId>{}</UploadId>\n</InitiateMultipartUploadResult>\n",
+            xml_escape(&self.bucket),
+            xml_escape(&self.key),
+            xml_escape(&self.upload_id),
+        )
+    }
+}
+
+/// Parses the part numbers from a `CompleteMultipartUpload` request body.
+///
+/// The body is the S3
+/// `<CompleteMultipartUpload><Part><PartNumber>N</PartNumber><ETag>…</ETag></Part>…</CompleteMultipartUpload>`
+/// envelope. Parsing is intentionally minimal (the handler validates
+/// completeness against the stored session); every `<PartNumber>N</PartNumber>`
+/// value is extracted in document order.
+///
+/// # Errors
+///
+/// Returns [`crate::S3Error::invalid_part`] when no part numbers are present or
+/// a part number is not a valid `u32` within `1..=10000`.
+pub fn parse_complete_multipart_parts(body: &str) -> Result<Vec<u32>, crate::S3Error> {
+    const OPEN: &str = "<PartNumber>";
+    const CLOSE: &str = "</PartNumber>";
+    let mut parts = Vec::new();
+    for segment in body.split(OPEN).skip(1) {
+        let Some((raw_number, _rest)) = segment.split_once(CLOSE) else {
+            continue;
+        };
+        let number = raw_number
+            .trim()
+            .parse::<u32>()
+            .map_err(|_error| crate::S3Error::invalid_part())?;
+        if number == 0 || number > crate::multipart::MAX_S3_PART_NUMBER {
+            return Err(crate::S3Error::invalid_part());
+        }
+        parts.push(number);
+    }
+    if parts.is_empty() {
+        return Err(crate::S3Error::invalid_part());
+    }
+    Ok(parts)
+}
+
 /// Response headers for a successful `PutObject`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PutObjectResponseHeaders {
@@ -370,6 +430,58 @@ mod tests {
              \x20 <Key>data/model.pt</Key>\n\
              \x20 <ETag>\"cd34\"</ETag>\n\
              </CompleteMultipartUploadResult>\n"
+        );
+    }
+
+    #[test]
+    fn initiate_multipart_upload_result_xml_golden() {
+        let result = InitiateMultipartUploadResult {
+            bucket: "acme.models".to_owned(),
+            key: "data/model.pt".to_owned(),
+            upload_id: "upload-abc-123".to_owned(),
+        };
+        assert_eq!(
+            result.to_xml(),
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+             <InitiateMultipartUploadResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\n\
+             \x20 <Bucket>acme.models</Bucket>\n\
+             \x20 <Key>data/model.pt</Key>\n\
+             \x20 <UploadId>upload-abc-123</UploadId>\n\
+             </InitiateMultipartUploadResult>\n"
+        );
+    }
+
+    #[test]
+    fn parse_complete_multipart_parts_extracts_numbers_in_order() {
+        let body = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+             <CompleteMultipartUpload xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\n\
+             \x20 <Part><PartNumber>1</PartNumber><ETag>\"a\"</ETag></Part>\n\
+             \x20 <Part><PartNumber>2</PartNumber><ETag>\"b\"</ETag></Part>\n\
+             \x20 <Part><PartNumber>3</PartNumber><ETag>\"c\"</ETag></Part>\n\
+             </CompleteMultipartUpload>\n";
+        assert_eq!(
+            super::parse_complete_multipart_parts(body).unwrap(),
+            vec![1, 2, 3]
+        );
+    }
+
+    #[test]
+    fn parse_complete_multipart_parts_rejects_empty_or_malformed() {
+        assert!(super::parse_complete_multipart_parts("").is_err());
+        assert!(super::parse_complete_multipart_parts("<CompleteMultipartUpload/>").is_err());
+        assert!(
+            super::parse_complete_multipart_parts("<Part><PartNumber>0</PartNumber></Part>")
+                .is_err()
+        );
+        assert!(
+            super::parse_complete_multipart_parts("<Part><PartNumber>10001</PartNumber></Part>")
+                .is_err()
+        );
+        assert!(
+            super::parse_complete_multipart_parts(
+                "<Part><PartNumber>not-a-number</PartNumber></Part>"
+            )
+            .is_err()
         );
     }
 

@@ -20,7 +20,7 @@ use axum::{
 };
 use shardline_index::S3ObjectEntry;
 use shardline_protocol::TokenScope;
-use shardline_s3_adapter::{S3Error, etag_header, parse_s3_range};
+use shardline_s3_adapter::{S3Error, S3SubResource, classify, etag_header, parse_s3_range};
 
 use crate::{
     ServerError,
@@ -30,7 +30,7 @@ use crate::{
 };
 
 use super::{
-    S3ObjectContext, authorize_s3, format_http_date, has_sub_resource, parse_s3_query,
+    S3ObjectContext, authorize_s3, format_http_date, has_sub_resource, multipart, parse_s3_query,
     require_s3_object_context,
 };
 
@@ -52,10 +52,29 @@ pub(crate) async fn s3_put_object(
     let claims = auth.as_ref().map(scope_from_auth);
     let context = require_s3_object_context(claims, &bucket, &key)?;
 
-    // Multipart (`?uploads`, `?uploadId`, `?partNumber`) and out-of-scope
-    // sub-resources are later-lane / 501 work.
+    // `?partNumber=N&uploadId=U` dispatches to UploadPart; other sub-resources
+    // (multipart create/completion and out-of-scope ops) are handled below or
+    // rejected as 501.
     let query = parse_s3_query(&uri)?;
-    if has_sub_resource(&query) {
+    let resources = classify(&query);
+    let part_number = resources.iter().find_map(|resource| {
+        if let S3SubResource::PartNumber(number) = resource {
+            Some(*number)
+        } else {
+            None
+        }
+    });
+    let upload_id = resources.iter().find_map(|resource| {
+        if let S3SubResource::UploadId(id) = resource {
+            Some(id.as_str())
+        } else {
+            None
+        }
+    });
+    if let (Some(part_number), Some(upload_id)) = (part_number, upload_id) {
+        return multipart::s3_upload_part(&state, &context, part_number, upload_id, body).await;
+    }
+    if !resources.is_empty() {
         return Err(S3Error::not_implemented());
     }
 
@@ -250,9 +269,17 @@ pub(crate) async fn s3_delete_object(
     let claims = auth.as_ref().map(scope_from_auth);
     let context = require_s3_object_context(claims, &bucket, &key)?;
 
-    // `?uploadId` (AbortMultipartUpload) is Lane 4 work.
+    // `?uploadId` dispatches to AbortMultipartUpload; other sub-resources are
+    // out of scope.
     let query = parse_s3_query(&uri)?;
-    if has_sub_resource(&query) {
+    let resources = classify(&query);
+    if let Some(S3SubResource::UploadId(upload_id)) = resources
+        .iter()
+        .find(|resource| matches!(resource, S3SubResource::UploadId(_)))
+    {
+        return multipart::s3_abort_multipart_upload(&state, &context, upload_id).await;
+    }
+    if !resources.is_empty() {
         return Err(S3Error::not_implemented());
     }
 
@@ -276,11 +303,28 @@ pub(crate) async fn s3_post_object(
     Path((bucket, key)): Path<(String, String)>,
     uri: Uri,
     headers: HeaderMap,
+    body: Body,
 ) -> Result<Response, S3Error> {
     let auth = authorize_s3(&state, &headers, TokenScope::Write)?;
     let claims = auth.as_ref().map(scope_from_auth);
-    let _context = require_s3_object_context(claims, &bucket, &key)?;
-    let _query = parse_s3_query(&uri)?;
+    let context = require_s3_object_context(claims, &bucket, &key)?;
+
+    // `?uploads` → CreateMultipartUpload, `?uploadId` → CompleteMultipartUpload;
+    // anything else (PostObject) is out of scope.
+    let query = parse_s3_query(&uri)?;
+    let resources = classify(&query);
+    if resources
+        .iter()
+        .any(|resource| matches!(resource, S3SubResource::Uploads))
+    {
+        return multipart::s3_create_multipart_upload(&state, &context).await;
+    }
+    if let Some(S3SubResource::UploadId(upload_id)) = resources
+        .iter()
+        .find(|resource| matches!(resource, S3SubResource::UploadId(_)))
+    {
+        return multipart::s3_complete_multipart_upload(&state, &context, upload_id, body).await;
+    }
     Err(S3Error::not_implemented())
 }
 

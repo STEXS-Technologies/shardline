@@ -116,6 +116,34 @@ impl S3Error {
         }
     }
 
+    /// The server is temporarily overloaded (an internal resource cap was hit,
+    /// for example the maximum number of active multipart upload sessions).
+    #[must_use]
+    pub fn slow_down() -> Self {
+        Self {
+            code: "SlowDown",
+            message: "Please reduce your request rate.".to_owned(),
+            status: StatusCode::SERVICE_UNAVAILABLE,
+        }
+    }
+
+    /// A request parameter was invalid.
+    #[must_use]
+    pub fn invalid_argument(message: &str) -> Self {
+        Self {
+            code: "InvalidArgument",
+            message: message.to_owned(),
+            status: StatusCode::BAD_REQUEST,
+        }
+    }
+
+    /// Returns this error with a replaced message (keeps the code and status).
+    #[must_use]
+    pub fn with_message(mut self, message: String) -> Self {
+        self.message = message;
+        self
+    }
+
     /// Builds the S3 error envelope for a coarse server-error class.
     ///
     /// The concrete `From<shardline_server::error::ServerError>` impl lives in
@@ -200,6 +228,34 @@ pub trait S3ErrorClassify {
 impl<E: S3ErrorClassify> From<E> for S3Error {
     fn from(value: E) -> Self {
         Self::from_class(value.s3_class())
+    }
+}
+
+impl From<crate::multipart::S3SessionError> for S3Error {
+    fn from(value: crate::multipart::S3SessionError) -> Self {
+        match value {
+            crate::multipart::S3SessionError::NotFound => Self::no_such_upload(),
+            crate::multipart::S3SessionError::TooManySessions => Self::slow_down(),
+            crate::multipart::S3SessionError::MissingPart(_) => Self::invalid_part(),
+            crate::multipart::S3SessionError::InvalidPartNumber => {
+                Self::invalid_argument("partNumber must be between 1 and 10000")
+            }
+            crate::multipart::S3SessionError::Io(error) => {
+                Self::internal().with_message(error.to_string())
+            }
+            crate::multipart::S3SessionError::Json(error) => {
+                Self::internal().with_message(error.to_string())
+            }
+            crate::multipart::S3SessionError::InvalidUploadId => {
+                Self::internal().with_message("invalid upload session id".to_owned())
+            }
+            crate::multipart::S3SessionError::Overflow => {
+                Self::internal().with_message("upload session overflow".to_owned())
+            }
+            crate::multipart::S3SessionError::BlockingTask(error) => {
+                Self::internal().with_message(error.to_string())
+            }
+        }
     }
 }
 

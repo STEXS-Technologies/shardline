@@ -274,6 +274,32 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
         protocol_metrics: ProtocolMetrics::default(),
     });
 
+    // Sweep expired S3 multipart upload sessions at startup (crash recovery);
+    // in-flight sweeps also run on every session creation.
+    if state
+        .config
+        .server_frontends()
+        .iter()
+        .any(|frontend| matches!(frontend, ServerFrontend::S3))
+    {
+        match shardline_s3_adapter::sweep_expired_sessions(
+            state.config.root_dir(),
+            state.config.s3_upload_session_ttl_seconds(),
+        )
+        .await
+        {
+            Ok(removed) => {
+                tracing::info!(
+                    removed,
+                    "s3 startup sweep removed expired multipart upload sessions"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, "s3 startup sweep of expired multipart upload sessions failed");
+            }
+        }
+    }
+
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods([

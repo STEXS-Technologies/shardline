@@ -80,23 +80,38 @@ impl RequestBodyReader {
     /// The reader is drained with no total-byte ceiling; callers that need a
     /// bound (for example multipart part sizes) must enforce it themselves.
     ///
-    /// Consumed by the S3 multipart lane (Lane 4); exercised by the unit tests
-    /// below until that lane lands.
+    /// The S3 multipart lane uses the multi-reader variant
+    /// ([`Self::from_reader_chain`]); this single-reader convenience is
+    /// exercised by the unit tests below.
     #[allow(dead_code)]
     pub(crate) fn from_reader(
         reader: impl AsyncRead + Send + Unpin + 'static,
         chunk_size: usize,
     ) -> Self {
-        let stream = stream::unfold(reader, move |mut reader| async move {
-            let mut buffer = vec![0_u8; chunk_size];
-            match reader.read(&mut buffer).await {
-                Ok(0) => None,
-                Ok(read) => {
-                    buffer.truncate(read);
-                    Some((Ok(Bytes::from(buffer)), reader))
+        Self::from_reader_chain(vec![reader], chunk_size)
+    }
+
+    /// Creates a reader over an ordered list of async readers, feeding them
+    /// back-to-back as one continuous stream.
+    ///
+    /// Used by S3 multipart completion to stream every part file through a
+    /// single ingest pass.
+    pub(crate) fn from_reader_chain<R>(readers: Vec<R>, chunk_size: usize) -> Self
+    where
+        R: AsyncRead + Send + Unpin + 'static,
+    {
+        let stream = stream::iter(readers).flat_map(move |reader| {
+            stream::unfold(reader, move |mut reader| async move {
+                let mut buffer = vec![0_u8; chunk_size];
+                match reader.read(&mut buffer).await {
+                    Ok(0) => None,
+                    Ok(read) => {
+                        buffer.truncate(read);
+                        Some((Ok(Bytes::from(buffer)), reader))
+                    }
+                    Err(error) => Some((Err(ServerError::Io(error)), reader)),
                 }
-                Err(error) => Some((Err(ServerError::Io(error)), reader)),
-            }
+            })
         });
         Self::from_stream(stream)
     }

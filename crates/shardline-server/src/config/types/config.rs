@@ -17,7 +17,8 @@ use super::defaults::{
     CONFIG_SECRET_KEY_BYTES, DEFAULT_MAX_REQUEST_BODY_BYTES,
     DEFAULT_OCI_REGISTRY_TOKEN_MAX_IN_FLIGHT_REQUESTS, DEFAULT_OCI_REGISTRY_TOKEN_TTL_SECONDS,
     DEFAULT_OCI_UPLOAD_MAX_ACTIVE_SESSIONS, DEFAULT_OCI_UPLOAD_SESSION_TTL_SECONDS,
-    DEFAULT_PARALLELISM_FALLBACK, DEFAULT_S3_MAX_PART_BYTES, HUB_WEBHOOK_SECRET_KEY_BYTES,
+    DEFAULT_PARALLELISM_FALLBACK, DEFAULT_S3_MAX_PART_BYTES, DEFAULT_S3_UPLOAD_MAX_ACTIVE_SESSIONS,
+    DEFAULT_S3_UPLOAD_SESSION_TTL_SECONDS, HUB_WEBHOOK_SECRET_KEY_BYTES,
     MAX_DEFAULT_TRANSFER_MAX_IN_FLIGHT_CHUNKS, MAX_DEFAULT_UPLOAD_MAX_IN_FLIGHT_CHUNKS,
     MAX_ED25519_KEY_BYTES, MAX_METRICS_TOKEN_BYTES, MAX_PROVIDER_API_KEY_BYTES,
     MAX_TOKEN_SIGNING_KEY_BYTES, MIN_DEFAULT_TRANSFER_MAX_IN_FLIGHT_CHUNKS,
@@ -68,6 +69,8 @@ pub struct ServerConfig {
     pub(crate) shutdown_timeout: Option<Duration>,
     pub(crate) admission_max_weight: NonZeroUsize,
     pub(crate) s3_max_part_bytes: NonZeroU64,
+    pub(crate) s3_upload_session_ttl_seconds: NonZeroU64,
+    pub(crate) s3_upload_max_active_sessions: NonZeroUsize,
 }
 
 impl ServerConfig {
@@ -152,6 +155,8 @@ impl ServerConfig {
             shutdown_timeout: None,
             admission_max_weight: NonZeroUsize::new(256).unwrap_or(NonZeroUsize::MIN),
             s3_max_part_bytes: DEFAULT_S3_MAX_PART_BYTES,
+            s3_upload_session_ttl_seconds: DEFAULT_S3_UPLOAD_SESSION_TTL_SECONDS,
+            s3_upload_max_active_sessions: DEFAULT_S3_UPLOAD_MAX_ACTIVE_SESSIONS,
         }
     }
 
@@ -654,6 +659,47 @@ impl ServerConfig {
             });
         }
         self.s3_max_part_bytes = s3_max_part_bytes;
+        Ok(self)
+    }
+
+    /// Returns the S3 multipart upload session TTL in seconds.
+    #[must_use]
+    pub const fn s3_upload_session_ttl_seconds(&self) -> NonZeroU64 {
+        self.s3_upload_session_ttl_seconds
+    }
+
+    /// Overrides the S3 multipart upload session TTL in seconds.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerConfigError::S3UploadSessionTtl`] when the value is zero.
+    pub const fn with_s3_upload_session_ttl_seconds(
+        mut self,
+        s3_upload_session_ttl_seconds: NonZeroU64,
+    ) -> Result<Self, ServerConfigError> {
+        self.s3_upload_session_ttl_seconds = s3_upload_session_ttl_seconds;
+        Ok(self)
+    }
+
+    /// Returns the maximum number of concurrently active S3 multipart upload
+    /// sessions.
+    #[must_use]
+    pub const fn s3_upload_max_active_sessions(&self) -> NonZeroUsize {
+        self.s3_upload_max_active_sessions
+    }
+
+    /// Overrides the maximum number of concurrently active S3 multipart upload
+    /// sessions.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerConfigError::S3UploadMaxActiveSessions`] when the value
+    /// is zero.
+    pub const fn with_s3_upload_max_active_sessions(
+        mut self,
+        s3_upload_max_active_sessions: NonZeroUsize,
+    ) -> Result<Self, ServerConfigError> {
+        self.s3_upload_max_active_sessions = s3_upload_max_active_sessions;
         Ok(self)
     }
 
