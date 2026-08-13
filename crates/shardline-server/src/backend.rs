@@ -789,6 +789,23 @@ impl ServerBackend {
         }
     }
 
+    /// Removes a stale **direct** object at the protocol key without touching
+    /// the file record.
+    ///
+    /// Used by the S3 overwrite path: the new body is streamed to a new record
+    /// version first (atomic), then any pre-existing direct object that would
+    /// shadow the record is dropped. The old record version is left for GC
+    /// (record stores are versioned; the index row points at the new version).
+    pub(crate) async fn delete_direct_object_if_present(
+        &self,
+        object_key: &ObjectKey,
+    ) -> Result<DeleteOutcome, ServerError> {
+        match self {
+            Self::Local(backend) => backend.delete_object_if_present(object_key).await,
+            Self::Postgres(backend) => backend.delete_object_if_present(object_key).await,
+        }
+    }
+
     pub(crate) async fn resolve_tree_path(
         &self,
         key: &TreeKey,

@@ -30,16 +30,20 @@ use crate::{
 };
 
 use super::{
-    S3ObjectContext, authorize_s3, format_http_date, has_sub_resource, multipart, parse_s3_query,
-    require_s3_object_context,
+    S3ObjectContext, acquire_object_upload_lock, authorize_s3, format_http_date, has_sub_resource,
+    multipart, parse_s3_query, require_s3_object_context,
 };
 
 /// `PUT /{bucket}/{*key}` — stream the body through the CDC ingestor.
 ///
-/// Overwrite semantics are delete-then-upload: when the key already resolves
-/// (direct object or record), it is removed before the replacement body is
-/// streamed. On success the S3 listing-index row is upserted with the new
-/// record's file id, size, and BLAKE3 root content hash.
+/// Overwrite semantics are **atomic upload-then-swap**: the new body is
+/// streamed to a new record version first (the protocol file id is
+/// deterministic, so a fresh version lands on top without removing the old
+/// one), then the listing-index row is swapped and any stale direct object is
+/// dropped. A mid-stream failure (chunked/lying Content-Length, client
+/// disconnect) commits nothing — the old record version, index row, and direct
+/// object remain intact and readers never observe a transient 404. A per-key
+/// upload lock serializes concurrent overwrites of the same key.
 #[tracing::instrument(skip(state, headers, body), fields(bucket, key))]
 pub(crate) async fn s3_put_object(
     State(state): State<Arc<AppState>>,
@@ -94,27 +98,38 @@ pub(crate) async fn s3_put_object(
         Err(error) => return Err(S3Error::from(error)),
     };
 
-    // S3 overwrite semantics: delete-then-upload.
-    match state.backend.object_length(&context.object_key).await {
-        Ok(_length) => {
-            let _existing = state
-                .backend
-                .delete_object_if_present(&context.object_key)
-                .await?;
-        }
-        Err(ServerError::NotFound) => {}
-        Err(error) => return Err(S3Error::from(error)),
-    }
+    // Serialize concurrent overwrites of the same key; the swap below (index
+    // upsert + stale-direct drop) is atomic with respect to other overwrites.
+    let object_lock = acquire_object_upload_lock(context.object_key.as_str());
+    let _object_guard = object_lock.lock().await;
 
+    // Stream the new body FIRST. On failure nothing was committed (the record
+    // commit only happens at ingest finish), so the old record version remains
+    // the latest and the index row still points at it.
     let start = Instant::now();
-    let uploaded = state
+    let uploaded = match state
         .backend
         .put_s3_object_stream(&context.object_key, body)
-        .await?;
+        .await
+    {
+        Ok(uploaded) => uploaded,
+        // A chunked body with a lying/absent Content-Length can exceed the
+        // limit mid-stream; surface it as the S3 EntityTooLarge envelope.
+        Err(ServerError::RequestBodyTooLarge) => {
+            return Err(S3Error {
+                code: "EntityTooLarge",
+                message: "Your proposed upload exceeds the maximum allowed object size".to_owned(),
+                status: StatusCode::PAYLOAD_TOO_LARGE,
+            });
+        }
+        Err(error) => return Err(S3Error::from(error)),
+    };
     let elapsed = start.elapsed().as_secs_f64();
     metrics::record_upload("s3", uploaded.total_bytes, elapsed, true);
 
-    // Refresh the S3 listing-index snapshot.
+    // Swap: point the index at the new record version, then drop any stale
+    // direct object that would shadow the record (the old record version is
+    // left for GC — record stores are versioned).
     let now = i64::try_from(shardline_protocol::unix_now_seconds_lossy())
         .map_err(|_error| S3Error::internal())?;
     state
@@ -127,6 +142,10 @@ pub(crate) async fn s3_put_object(
             content_hash: uploaded.content_hash.clone(),
             updated_at_unix_seconds: now,
         })
+        .await?;
+    let _stale_direct = state
+        .backend
+        .delete_direct_object_if_present(&context.object_key)
         .await?;
 
     let etag = etag_header(&uploaded.content_hash);

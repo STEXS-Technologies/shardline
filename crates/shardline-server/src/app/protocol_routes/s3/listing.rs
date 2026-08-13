@@ -63,7 +63,12 @@ pub(crate) async fn s3_list_objects_v2(
             fetch_limit,
         )
         .await?;
-    let page = group_page(entries, &params.prefix, params.delimiter, params.max_keys);
+    let page = group_page(
+        entries,
+        &params.prefix,
+        params.delimiter.map(shardline_s3_adapter::Delimiter::get),
+        params.max_keys,
+    );
 
     let next_continuation_token = if page.is_truncated {
         page.next_cursor.as_deref().map(encode_continuation_token)

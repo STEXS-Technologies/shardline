@@ -95,6 +95,17 @@ impl S3Error {
         }
     }
 
+    /// The upload exceeded the maximum allowed size (S3's `EntityTooLarge`,
+    /// `400` — distinct from the HTTP-level `413` body-limit envelope).
+    #[must_use]
+    pub fn entity_too_large() -> Self {
+        Self {
+            code: "EntityTooLarge",
+            message: "Your proposed upload exceeds the maximum allowed size".to_owned(),
+            status: StatusCode::BAD_REQUEST,
+        }
+    }
+
     /// The operation is recognized but not implemented by the S3 frontend.
     #[must_use]
     pub fn not_implemented() -> Self {
@@ -240,6 +251,8 @@ impl From<crate::multipart::S3SessionError> for S3Error {
             crate::multipart::S3SessionError::InvalidPartNumber => {
                 Self::invalid_argument("partNumber must be between 1 and 10000")
             }
+            crate::multipart::S3SessionError::SessionQuotaExceeded
+            | crate::multipart::S3SessionError::AggregateQuotaExceeded => Self::entity_too_large(),
             crate::multipart::S3SessionError::Io(error) => {
                 Self::internal().with_message(error.to_string())
             }

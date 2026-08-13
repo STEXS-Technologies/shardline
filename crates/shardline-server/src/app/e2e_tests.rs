@@ -85,7 +85,9 @@ async fn test_app_for_frontends_with_role(
     .with_server_frontends(frontends.to_vec())
     .expect("server frontends")
     .with_token_signing_key(b"0123456789abcdef0123456789abcdef".to_vec())
-    .expect("token signing key");
+    .expect("token signing key")
+    .with_s3_min_part_bytes(std::num::NonZeroU64::new(1).unwrap())
+    .expect("s3 min part bytes");
 
     config
         .validate_runtime_requirements()
@@ -329,7 +331,9 @@ async fn test_app_with_auth(frontends: &[ServerFrontend]) -> (Router, TempDir) {
     .with_server_frontends(frontends.to_vec())
     .expect("server frontends")
     .with_token_signing_key(TEST_SIGNING_KEY.to_vec())
-    .expect("token signing key");
+    .expect("token signing key")
+    .with_s3_min_part_bytes(std::num::NonZeroU64::new(1).unwrap())
+    .expect("s3 min part bytes");
 
     config
         .validate_runtime_requirements()
@@ -577,7 +581,9 @@ async fn test_app_with_provider_tokens(frontends: &[ServerFrontend]) -> (Router,
     .with_server_frontends(frontends.to_vec())
     .expect("server frontends")
     .with_token_signing_key(TEST_SIGNING_KEY.to_vec())
-    .expect("token signing key");
+    .expect("token signing key")
+    .with_s3_min_part_bytes(std::num::NonZeroU64::new(1).unwrap())
+    .expect("s3 min part bytes");
 
     config
         .validate_runtime_requirements()
@@ -1710,7 +1716,9 @@ async fn backward_compatibility_all_formats_readable() {
     .with_server_frontends(vec![ServerFrontend::BazelHttp])
     .expect("server frontends")
     .with_token_signing_key(b"0123456789abcdef0123456789abcdef".to_vec())
-    .expect("token signing key");
+    .expect("token signing key")
+    .with_s3_min_part_bytes(std::num::NonZeroU64::new(1).unwrap())
+    .expect("s3 min part bytes");
     config
         .validate_runtime_requirements()
         .expect("runtime requirements");

@@ -103,6 +103,43 @@ pub enum S3KeyError {
     ObjectKey(#[from] ObjectKeyError),
 }
 
+/// A validated client-facing S3 object key.
+///
+/// [`S3ObjectKey::parse`] is the single typed choke point for the key-level
+/// checks (non-empty, no leading slash, no control characters); the assembled
+/// storage-key length and path-safety checks remain in
+/// [`s3_object_key`]'s `ObjectKey::parse`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct S3ObjectKey(String);
+
+impl S3ObjectKey {
+    /// Validates a client-facing S3 object key.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`S3KeyError::EmptyKey`] for an empty key,
+    /// [`S3KeyError::LeadingSlash`] when the key starts with `/`, and
+    /// [`S3KeyError::ControlCharacter`] when it contains a control character.
+    pub fn parse(key: &str) -> Result<Self, S3KeyError> {
+        if key.is_empty() {
+            return Err(S3KeyError::EmptyKey);
+        }
+        if key.as_bytes().first() == Some(&b'/') {
+            return Err(S3KeyError::LeadingSlash);
+        }
+        if key.chars().any(char::is_control) {
+            return Err(S3KeyError::ControlCharacter);
+        }
+        Ok(Self(key.to_owned()))
+    }
+
+    /// Returns the validated key.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// Builds the storage object key for an S3 object.
 ///
 /// The key layout is `protocols/s3/{scope_namespace}/{key}` where
@@ -126,16 +163,12 @@ pub enum S3KeyError {
 /// Returns [`S3KeyError`] when the key is empty, starts with `/`, contains a
 /// control character, or the assembled path exceeds the [`ObjectKey`] limits.
 pub fn s3_object_key(scope_namespace: &str, key: &str) -> Result<ObjectKey, S3KeyError> {
-    if key.is_empty() {
-        return Err(S3KeyError::EmptyKey);
-    }
-    if key.starts_with('/') {
-        return Err(S3KeyError::LeadingSlash);
-    }
-    if key.chars().any(char::is_control) {
-        return Err(S3KeyError::ControlCharacter);
-    }
-    ObjectKey::parse(&format!("protocols/s3/{scope_namespace}/{key}")).map_err(S3KeyError::from)
+    let validated = S3ObjectKey::parse(key)?;
+    ObjectKey::parse(&format!(
+        "protocols/s3/{scope_namespace}/{}",
+        validated.as_str()
+    ))
+    .map_err(S3KeyError::from)
 }
 
 #[cfg(test)]
@@ -281,5 +314,106 @@ mod tests {
     fn s3_object_key_rejects_oversized_assembled_path() {
         let result = s3_object_key("global", &"k".repeat(8192));
         assert!(matches!(result, Err(S3KeyError::ObjectKey(_))));
+    }
+
+    #[test]
+    fn bucket_decode_extra_edge_cases() {
+        // Multi-dot buckets decode to a dotted NAME (split on the first dot).
+        assert_eq!(
+            decode_bucket("a.b.c.d").unwrap(),
+            ("a".to_owned(), "b.c.d".to_owned())
+        );
+        // Uppercase anywhere is rejected.
+        assert!(matches!(
+            decode_bucket("A.B"),
+            Err(BucketDecodeError::NotLowercase)
+        ));
+        // A doubled separator yields a name starting with a dot (names may
+        // contain dots); an EMPTY owner or name is rejected.
+        assert_eq!(
+            decode_bucket("a..b").unwrap(),
+            ("a".to_owned(), ".b".to_owned())
+        );
+        assert!(matches!(
+            decode_bucket(".b"),
+            Err(BucketDecodeError::EmptyPart)
+        ));
+        assert!(matches!(
+            decode_bucket("a."),
+            Err(BucketDecodeError::EmptyPart)
+        ));
+        // 63 chars accepted, 64 rejected.
+        assert!(decode_bucket(&format!("{}.{}", "a".repeat(31), "b".repeat(31))).is_ok());
+        assert!(matches!(
+            decode_bucket(&format!("{}.{}", "a".repeat(32), "b".repeat(31))),
+            Err(BucketDecodeError::TooLong)
+        ));
+        // Unicode is allowed (only ASCII uppercase is rejected).
+        assert_eq!(
+            decode_bucket("über.models").unwrap(),
+            ("über".to_owned(), "models".to_owned())
+        );
+    }
+
+    #[test]
+    fn s3_object_key_unicode_and_special_characters() {
+        // Unicode keys are ordinary path segments.
+        let key = s3_object_key("global", "ünïcode/🦆.txt").unwrap();
+        assert!(key.as_str().ends_with("ünïcode/🦆.txt"));
+        // Percent and underscore are ordinary key characters (the listing
+        // index matches prefixes as literal strings, not LIKE patterns).
+        assert!(s3_object_key("global", "100%/done").is_ok());
+        assert!(s3_object_key("global", "100_done").is_ok());
+        // Absolute, traversal, and control-character keys are rejected.
+        assert!(matches!(
+            s3_object_key("global", "/abs"),
+            Err(S3KeyError::LeadingSlash)
+        ));
+        assert!(matches!(
+            s3_object_key("global", "../evil"),
+            Err(S3KeyError::ObjectKey(_))
+        ));
+        assert!(matches!(
+            s3_object_key("global", "a/../evil"),
+            Err(S3KeyError::ObjectKey(_))
+        ));
+        assert!(matches!(
+            s3_object_key("global", "bad\u{7}"),
+            Err(S3KeyError::ControlCharacter)
+        ));
+        // Empty key.
+        assert!(matches!(
+            s3_object_key("global", ""),
+            Err(S3KeyError::EmptyKey)
+        ));
+    }
+
+    #[test]
+    fn s3_object_key_length_limit_boundary() {
+        // The assembled path may not exceed MAX_OBJECT_KEY_BYTES (4096).
+        let prefix_len = "protocols/s3/global/".len();
+        let at_limit = "k".repeat(4096 - prefix_len);
+        assert!(s3_object_key("global", &at_limit).is_ok());
+        let over_limit = "k".repeat(4096 - prefix_len + 1);
+        assert!(matches!(
+            s3_object_key("global", &over_limit),
+            Err(S3KeyError::ObjectKey(_))
+        ));
+    }
+
+    #[test]
+    fn s3_object_key_typed_constructor() {
+        assert!(S3ObjectKey::parse("data/model.pt").is_ok());
+        assert!(matches!(S3ObjectKey::parse(""), Err(S3KeyError::EmptyKey)));
+        assert!(matches!(
+            S3ObjectKey::parse("/leading"),
+            Err(S3KeyError::LeadingSlash)
+        ));
+        assert!(matches!(
+            S3ObjectKey::parse("bad\u{7}"),
+            Err(S3KeyError::ControlCharacter)
+        ));
+        let key = S3ObjectKey::parse("ünïcode/🦆.txt").unwrap();
+        assert_eq!(key.as_str(), "ünïcode/🦆.txt");
     }
 }

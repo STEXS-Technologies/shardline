@@ -37,8 +37,12 @@ as out of scope until a real client need appears.
    `CompleteMultipartUpload` feeds the parts sequentially through **one CDC
    pass**, producing a single `FileRecord` — preserving whole-object dedup and
    the single-record read model (GetObject + Range work unchanged). Part count
-   capped at 10,000. No 5 MB minimum part size (documented deviation — harmless
-   under dedup). `AbortMultipartUpload` discards the session.
+   capped at 10,000. S3's **5 MiB minimum part size** applies to every part
+   except the final one (enforced at Complete, matching S3); per-session and
+   aggregate byte quotas (`SHARDLINE_S3_UPLOAD_SESSION_MAX_BYTES` /
+   `SHARDLINE_S3_UPLOAD_TOTAL_MAX_BYTES`) bound disk use; session expiry is
+   anchored to **initiation** (keep-alive parts do not extend it), matching
+   S3's 7-day multipart lifecycle. `AbortMultipartUpload` discards the session.
 4. **GetObject Range / ETag / errors.** Range reuses the existing byte-range +
    reconstruction path (`parse_http_byte_range`, 206/416 semantics). ETag is the
    **BLAKE3 root content hash** (opaque; identical for single-PUT and multipart
@@ -96,12 +100,14 @@ access-key and Bearer auth forms.
 
 - **ETag** is the BLAKE3 root hash, not MD5 or the multipart composite — opaque
   per the S3 spec; all six target clients treat it as opaque.
-- **No 5 MB minimum part size** (harmless under content-addressed dedup).
 - **SigV4 signature is not verified** — the access key *is* the credential;
   production requires TLS.
 - **Bucket names** are `{owner}.{name}`; owners containing `.` are not addressable.
 - **`Content-MD5`** is accepted but not verified (integrity comes from the content
   address).
+- **Multipart part size minimums** follow S3 (5 MiB for all but the final part);
+  the part-size ceiling (`SHARDLINE_S3_MAX_PART_BYTES`) and the per-session /
+  aggregate byte quotas are configurable.
 
 ## Auth & roles
 

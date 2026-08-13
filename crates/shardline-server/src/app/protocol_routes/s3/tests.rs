@@ -56,6 +56,19 @@ const KEY: &str = "data/model.pt";
 
 /// Builds an auth-enabled [`AppState`] whose token scope is `acme.models`.
 async fn build_test_state() -> (Arc<AppState>, TempDir) {
+    build_test_state_with_options(
+        NonZeroU64::new(1).unwrap(),
+        NonZeroU64::new(1 << 40).unwrap(),
+    )
+    .await
+}
+
+/// Like [`build_test_state`] but with an explicit S3 minimum part size and
+/// session byte quota (used by the quota/min-size hardening tests).
+async fn build_test_state_with_options(
+    min_part_bytes: NonZeroU64,
+    session_max_bytes: NonZeroU64,
+) -> (Arc<AppState>, TempDir) {
     let tmp = TempDir::new().expect("tempdir");
     let chunk_size = NonZeroUsize::new(65536).unwrap();
     let config = ServerConfig::new(
@@ -69,7 +82,11 @@ async fn build_test_state() -> (Arc<AppState>, TempDir) {
     .with_token_signing_key(TEST_SIGNING_KEY.to_vec())
     .expect("token signing key")
     .with_s3_max_part_bytes(NonZeroU64::new(1_048_576).unwrap())
-    .expect("s3 max part bytes");
+    .expect("s3 max part bytes")
+    .with_s3_min_part_bytes(min_part_bytes)
+    .expect("s3 min part bytes")
+    .with_s3_upload_session_max_bytes(session_max_bytes)
+    .expect("s3 session max bytes");
 
     let backend = crate::ServerBackend::from_config(&config)
         .await
@@ -1230,7 +1247,10 @@ async fn s3_multipart_session_ttl_eviction_and_handler_rejection() {
         let mut session = shardline_s3_adapter::read_session(root, upload_id, ttl)
             .await
             .unwrap();
-        session.last_touched_unix_seconds = 1;
+        // Expiry is anchored to session creation (keep-alive parts cannot
+        // extend the lifetime), so backdating created_at makes the session
+        // expire regardless of last_touched.
+        session.created_at_unix_seconds = 1;
         let json = serde_json::to_vec(&session).unwrap();
         tokio::fs::write(&metadata_path, json).await.unwrap();
     }
@@ -1522,4 +1542,566 @@ async fn s3_list_objects_v2_start_after_skips() {
     assert!(!xml.contains("<Key>a.txt</Key>"), "{xml}");
     assert!(!xml.contains("<Key>b.txt</Key>"), "{xml}");
     assert!(xml.contains("<Key>c.txt</Key>"), "{xml}");
+}
+
+// =========================================================================
+// Hardening: multipart lifecycle / auth / key edge cases
+// =========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_abort_then_complete_returns_no_such_upload() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state);
+
+    let upload_id = create_upload_id(&app).await;
+    assert_eq!(
+        upload_part(&app, &upload_id, 1, b"x").await.status(),
+        StatusCode::OK
+    );
+
+    // Abort deletes the session (and its part files).
+    let abort = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/{BUCKET}/{KEY}?uploadId={upload_id}"))
+                .header(
+                    header::AUTHORIZATION,
+                    sigv4_auth(&mint_token(TokenScope::Write, OWNER, NAME)),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(abort.status(), StatusCode::NO_CONTENT);
+
+    // Completing a dead session → NoSuchUpload.
+    let complete = complete_upload(&app, &upload_id, complete_body(&upload_id, &[1])).await;
+    assert_eq!(complete.status(), StatusCode::NOT_FOUND);
+    let body = String::from_utf8(body_bytes(complete).await).unwrap();
+    assert!(body.contains("<Code>NoSuchUpload</Code>"), "{body}");
+
+    // Uploading a part to a dead session → NoSuchUpload.
+    let part = upload_part(&app, &upload_id, 2, b"y").await;
+    assert_eq!(part.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_concurrent_upload_part_last_writer_wins() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state);
+
+    let upload_id = create_upload_id(&app).await;
+    // Two concurrent UploadPart calls for the SAME part number: the per-session
+    // write lock serializes them, so the part file is one of the two bodies.
+    let (first, second) = tokio::join!(
+        async {
+            app.clone()
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri(format!("/{BUCKET}/{KEY}?partNumber=1&uploadId={upload_id}"))
+                        .header(
+                            header::AUTHORIZATION,
+                            sigv4_auth(&mint_token(TokenScope::Write, OWNER, NAME)),
+                        )
+                        .body(Body::from(b"first-writer".to_vec()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+        },
+        async {
+            app.clone()
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri(format!("/{BUCKET}/{KEY}?partNumber=1&uploadId={upload_id}"))
+                        .header(
+                            header::AUTHORIZATION,
+                            sigv4_auth(&mint_token(TokenScope::Write, OWNER, NAME)),
+                        )
+                        .body(Body::from(b"second-writer".to_vec()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+        },
+    );
+    assert_eq!(first.status(), StatusCode::OK);
+    assert_eq!(second.status(), StatusCode::OK);
+
+    // Completion succeeds and the assembled object is exactly one of the two
+    // bodies (never an interleaved mix).
+    let complete = complete_upload(&app, &upload_id, complete_body(&upload_id, &[1])).await;
+    assert_eq!(complete.status(), StatusCode::OK);
+    let get = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/{BUCKET}/{KEY}"))
+                .header(
+                    header::AUTHORIZATION,
+                    sigv4_auth(&mint_token(TokenScope::Read, OWNER, NAME)),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get.status(), StatusCode::OK);
+    let body = body_bytes(get).await;
+    assert!(
+        body == b"first-writer" || body == b"second-writer",
+        "part must be exactly one of the two writers, got {body:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_sigv4_with_malformed_credential_scope_still_authenticates() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state);
+
+    // The access key is the first Credential path segment; malformed date
+    // segments, extra commas, and extra slashes are ignored (the signature is
+    // never verified).
+    let token = mint_token(TokenScope::Write, OWNER, NAME);
+    for malformed in [
+        format!("AWS4-HMAC-SHA256 Credential={token}/not-a-date/,,/s3/aws4_request"),
+        format!("AWS4-HMAC-SHA256 Credential={token}/20260813//s3///aws4_request"),
+        format!("AWS4-HMAC-SHA256 Credential={token},,,"),
+    ] {
+        let put = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/{BUCKET}/{KEY}"))
+                    .header(header::AUTHORIZATION, &malformed)
+                    .body(Body::from(b"malformed-sig".to_vec()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(put.status(), StatusCode::OK, "header {malformed:?}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_bearer_with_trailing_space_is_rejected() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state);
+
+    // The adapter returns the raw value; the server-side token verifier
+    // rejects tokens containing whitespace.
+    let token = mint_token(TokenScope::Write, OWNER, NAME);
+    let put = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/{BUCKET}/{KEY}"))
+                .header(header::AUTHORIZATION, format!("Bearer {token} "))
+                .body(Body::from(b"x".to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(put.status(), StatusCode::FORBIDDEN);
+    let body = String::from_utf8(body_bytes(put).await).unwrap();
+    assert!(body.contains("<Code>AccessDenied</Code>"), "{body}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_query_credentials_are_ignored_header_wins() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state);
+
+    let header_token = mint_token(TokenScope::Write, OWNER, NAME);
+    let query_token = mint_token(TokenScope::Write, "other", NAME);
+    let query = format!("X-Amz-Credential={query_token}/20260813/us-east-1/s3/aws4_request");
+
+    // Conflicting query credential + valid header → the header wins.
+    let put = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/{BUCKET}/{KEY}?{query}"))
+                .header(header::AUTHORIZATION, format!("Bearer {header_token}"))
+                .body(Body::from(b"header-wins".to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(put.status(), StatusCode::OK, "header credential must win");
+
+    // Query credential only → denied (the handlers read the header only).
+    let put = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/{BUCKET}/{KEY}?{query}"))
+                .body(Body::from(b"no-header".to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(put.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_unsafe_key_returns_no_such_key() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state);
+
+    // Path-traversal and absolute keys are rejected at key construction.
+    for key in ["../evil", "%2e%2e%2fevil", "/abs", "a/../evil"] {
+        let put = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/{BUCKET}/{key}"))
+                    .header(
+                        header::AUTHORIZATION,
+                        sigv4_auth(&mint_token(TokenScope::Write, OWNER, NAME)),
+                    )
+                    .body(Body::from(b"x".to_vec()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(put.status(), StatusCode::NOT_FOUND, "key {key:?}");
+        let body = String::from_utf8(body_bytes(put).await).unwrap();
+        assert!(
+            body.contains("<Code>NoSuchKey</Code>"),
+            "key {key:?}: {body}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_unicode_key_roundtrip() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state);
+
+    let key = "ünïcode/🦆.txt";
+    let content = b"unicode-key-content";
+    let put = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/{BUCKET}/{key}"))
+                .header(
+                    header::AUTHORIZATION,
+                    sigv4_auth(&mint_token(TokenScope::Write, OWNER, NAME)),
+                )
+                .body(Body::from(content.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(put.status(), StatusCode::OK);
+    let get = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/{BUCKET}/{key}"))
+                .header(
+                    header::AUTHORIZATION,
+                    sigv4_auth(&mint_token(TokenScope::Read, OWNER, NAME)),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get.status(), StatusCode::OK);
+    assert_eq!(body_bytes(get).await, content);
+}
+
+// =========================================================================
+// Audit fixes: atomic overwrite (F-s3-1), quotas/min-part (F-s3-2),
+// listing params (F-s3-3), sweep/upload race (F-s3-4)
+// =========================================================================
+
+/// A chunked request body with no size hint (streams at runtime).
+fn streamed_body(chunk_size: usize, chunk_count: usize) -> Body {
+    use axum::body::Bytes;
+    use futures_util::stream;
+    let chunks: Vec<Result<Bytes, axum::Error>> = (0..chunk_count)
+        .map(|_| Ok(Bytes::from(vec![0x42_u8; chunk_size])))
+        .collect();
+    Body::from_stream(stream::iter(chunks))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_failed_overwrite_keeps_old_object_and_index() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state.clone());
+    let auth = sigv4_auth(&mint_token(TokenScope::Write, OWNER, NAME));
+
+    // Seed the key with a small object.
+    let old_content = b"old-object-content";
+    let put = app
+        .clone()
+        .oneshot(put_request(
+            format!("/{BUCKET}/{KEY}"),
+            old_content.to_vec(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(put.status(), StatusCode::OK);
+    let old_etag = put
+        .headers()
+        .get(header::ETAG)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+
+    // A chunked overwrite whose body exceeds SHARDLINE_S3_MAX_PART_BYTES (1 MiB
+    // in the test config) mid-stream must fail WITHOUT touching the old object.
+    let oversized = streamed_body(600_000, 3); // 1.8 MiB total, no size hint
+    let failed = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/{BUCKET}/{KEY}"))
+                .header(header::AUTHORIZATION, &auth)
+                .body(oversized)
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        failed.status(),
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "mid-stream oversize → 413"
+    );
+
+    // The old object is still readable and the index still points at it.
+    let get = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/{BUCKET}/{KEY}"))
+                .header(header::AUTHORIZATION, &auth)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get.status(), StatusCode::OK);
+    assert_eq!(body_bytes(get).await, old_content);
+
+    let repo_scope = RepositoryScope::new(RepositoryProvider::Generic, OWNER, NAME, None).unwrap();
+    let namespace = crate::protocol_support::scope_namespace(Some(&repo_scope));
+    let rows = state
+        .backend
+        .scan_s3_objects(&namespace, "", None, 100)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        shardline_s3_adapter::etag_header(&rows[0].content_hash),
+        old_etag,
+        "index must still point at the old content hash"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_overwrite_is_atomic_no_transient_404_for_readers() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state);
+    let write_auth = sigv4_auth(&mint_token(TokenScope::Write, OWNER, NAME));
+    let read_auth = sigv4_auth(&mint_token(TokenScope::Read, OWNER, NAME));
+
+    let old_content = vec![0xAA_u8; 16];
+    let put = app
+        .clone()
+        .oneshot(put_request(format!("/{BUCKET}/{KEY}"), old_content.clone()))
+        .await
+        .unwrap();
+    assert_eq!(put.status(), StatusCode::OK);
+
+    // Overwrite with a large-enough body that the ingest takes a moment, while
+    // a concurrent reader hammers the key. Every read must be 200 (old or new
+    // bytes) — never a transient 404.
+    let new_content = vec![0xBB_u8; 300_000];
+    let (overwrite, reads) = tokio::join!(
+        app.clone().oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/{BUCKET}/{KEY}"))
+                .header(header::AUTHORIZATION, &write_auth)
+                .body(Body::from(new_content.clone()))
+                .unwrap(),
+        ),
+        async {
+            let mut results = Vec::new();
+            for _ in 0..12 {
+                let response = app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .method("GET")
+                            .uri(format!("/{BUCKET}/{KEY}"))
+                            .header(header::AUTHORIZATION, &read_auth)
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                let body = body_bytes(response).await;
+                results.push(body);
+            }
+            results
+        },
+    );
+    assert_eq!(overwrite.unwrap().status(), StatusCode::OK);
+    for body in reads {
+        assert!(
+            body == old_content || body == new_content,
+            "concurrent read saw a torn/absent object: {} bytes",
+            body.len()
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_complete_non_final_small_part_returns_entity_too_small() {
+    // The S3 5 MiB minimum applies to every part except the final one.
+    let (state, _tmp) = build_test_state_with_options(
+        NonZeroU64::new(5_242_880).unwrap(), // 5 MiB minimum
+        NonZeroU64::new(1 << 40).unwrap(),
+    )
+    .await;
+    let app = s3_router(state);
+
+    let upload_id = create_upload_id(&app).await;
+    // Part 1 is tiny and NOT final (part 2 is); part 2 (final) may be small.
+    assert_eq!(
+        upload_part(&app, &upload_id, 1, b"tiny-non-final")
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        upload_part(&app, &upload_id, 2, b"final").await.status(),
+        StatusCode::OK
+    );
+
+    let complete = complete_upload(&app, &upload_id, complete_body(&upload_id, &[1, 2])).await;
+    assert_eq!(complete.status(), StatusCode::BAD_REQUEST);
+    let body = String::from_utf8(body_bytes(complete).await).unwrap();
+    assert!(body.contains("<Code>EntityTooSmall</Code>"), "{body}");
+
+    // A single-part upload (the part IS final) has no minimum.
+    let single = create_upload_id(&app).await;
+    assert_eq!(
+        upload_part(&app, &single, 1, b"only-part").await.status(),
+        StatusCode::OK
+    );
+    let complete = complete_upload(&app, &single, complete_body(&single, &[1])).await;
+    assert_eq!(
+        complete.status(),
+        StatusCode::OK,
+        "single final part has no minimum"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_upload_part_exceeding_session_quota_returns_error() {
+    let (state, _tmp) = build_test_state_with_options(
+        NonZeroU64::new(1).unwrap(),
+        NonZeroU64::new(200).unwrap(), // 200-byte per-session quota
+    )
+    .await;
+    let app = s3_router(state);
+
+    let upload_id = create_upload_id(&app).await;
+    let part1 = vec![0x01_u8; 150];
+    let part2 = vec![0x02_u8; 100];
+    assert_eq!(
+        upload_part(&app, &upload_id, 1, &part1).await.status(),
+        StatusCode::OK
+    );
+    // 150 + 100 > 200 → quota exceeded.
+    let over = upload_part(&app, &upload_id, 2, &part2).await;
+    assert_eq!(over.status(), StatusCode::BAD_REQUEST);
+    let body = String::from_utf8(body_bytes(over).await).unwrap();
+    assert!(body.contains("<Code>EntityTooLarge</Code>"), "{body}");
+
+    // The rejected part must not have orphaned a part file: completing with
+    // only part 1 works.
+    let complete = complete_upload(&app, &upload_id, complete_body(&upload_id, &[1])).await;
+    assert_eq!(complete.status(), StatusCode::OK);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_listing_max_keys_zero_and_multi_char_delimiter_are_400() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state);
+
+    for query in ["list-type=2&max-keys=0", "list-type=2&delimiter=%2F%2F"] {
+        let list = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/{BUCKET}?{query}"))
+                    .header(
+                        header::AUTHORIZATION,
+                        sigv4_auth(&mint_token(TokenScope::Read, OWNER, NAME)),
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(list.status(), StatusCode::BAD_REQUEST, "query {query}");
+        let body = String::from_utf8(body_bytes(list).await).unwrap();
+        assert!(
+            body.contains("<Code>InvalidArgument</Code>"),
+            "query {query}: {body}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_sweep_during_upload_part_is_safe() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state.clone());
+    let root = state.config.root_dir();
+    let ttl = state.config.s3_upload_session_ttl_seconds();
+
+    let upload_id = create_upload_id(&app).await;
+
+    // A sweep (which the store runs under the global session lock) racing an
+    // UploadPart (which holds the same lock) cannot delete the session dir
+    // mid-write or 500 the upload: they serialize.
+    let (sweep, part) = tokio::join!(
+        shardline_s3_adapter::sweep_expired_sessions(root, ttl),
+        upload_part(&app, &upload_id, 1, b"sweep-race-part"),
+    );
+    sweep.unwrap();
+    assert_eq!(
+        part.status(),
+        StatusCode::OK,
+        "UploadPart must not 500 under a sweep"
+    );
+
+    // The session survives and completes normally.
+    let complete = complete_upload(&app, &upload_id, complete_body(&upload_id, &[1])).await;
+    assert_eq!(complete.status(), StatusCode::OK);
 }
