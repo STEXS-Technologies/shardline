@@ -1,16 +1,16 @@
-//! HTTP layer for the sdx CAS read path (M2a).
+//! HTTP client for the Xet CAS data plane: file-reconstruction requests and
+//! ranged xorb (chunk-container) fetches.
 //!
-//! Covers reconstruction requests (with optional `Range:` header) and ranged
-//! xorb fetches through the shardline transfer endpoint
-//! (`/transfer/xorb/{prefix}/{hash}`, namespace `default`), including 206
-//! single-range and `multipart/byteranges` response handling
-//! (`docs/SDX_PLAN.md` §7 item 6).
+//! [`TransferClient`] issues reconstruction requests (with an optional
+//! `Range:` header) and ranged xorb fetches through the shardline transfer
+//! endpoint (`/transfer/xorb/{prefix}/{hash}`, namespace `default`), handling
+//! 206 single-range and `multipart/byteranges` responses.
 //!
 //! Shardline's transfer handler (`crates/shardline-server/src/app/operational.rs`
 //! `read_xorb_transfer`) serves **single-range** 206 responses with a
 //! `Content-Range: bytes start-end/total` header (see `byte_range_stream_response`
 //! in `reconstruction_helpers.rs`); it never emits multipart. The multipart
-//! parser is provided for cross-frontend compatibility (M7) and is unit-tested
+//! parser is provided for cross-frontend compatibility and is unit-tested
 //! against the RFC 7233 format.
 
 use reqwest::{Response, StatusCode, header};
@@ -71,7 +71,36 @@ pub struct RangedXorb {
     pub served_range: ByteRange,
 }
 
-/// HTTP client for the CAS read path.
+/// HTTP client for the Xet CAS data plane: reconstruction requests and ranged
+/// xorb fetches.
+///
+/// Cheap to clone and share across tasks; every request carries a stable
+/// `X-Xet-Session-Id` correlation header.
+///
+/// # Examples
+///
+/// Fetch a byte range of a serialized xorb from a CAS endpoint:
+///
+/// ```no_run
+/// # async fn example() -> Result<(), sdx::TransferError> {
+/// use sdx::{ByteRange, TransferClient};
+///
+/// let client = TransferClient::new(reqwest::Client::new())
+///     .with_session_id("my-session".to_owned());
+///
+/// // `url` is the absolute transfer URL from a reconstruction response and
+/// // `token` is a read-scoped CAS token from `TokenService::read_token`.
+/// let xorb = client
+///     .fetch_xorb_range(
+///         "https://cas.example.com/transfer/xorb/ab/0123…",
+///         "read-token",
+///         ByteRange::new(0, 4096),
+///     )
+///     .await?;
+/// println!("fetched {} bytes", xorb.data.len());
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Clone)]
 pub struct TransferClient {
     client: reqwest::Client,
@@ -108,11 +137,14 @@ impl TransferClient {
         request.header(SESSION_ID_HEADER.clone(), &self.session_id)
     }
 
-    /// Fetches a V1 reconstruction response for `file_id`.
+    /// Fetches the reconstruction plan for `file_id` from the v1
+    /// reconstruction endpoint.
     ///
-    /// When `range` is present, a `Range: bytes=start-end` header (inclusive)
-    /// is sent and the response terms cover only the chunks intersecting that
-    /// range.
+    /// The plan lists the xorb byte ranges (`fetch_info`) and chunk terms that
+    /// compose the file, which [`crate::reconstruction::reconstruct`] then
+    /// fetches and assembles. When `range` is present, a
+    /// `Range: bytes=start-end` header (inclusive) is sent and the response
+    /// terms cover only the chunks intersecting that range.
     ///
     /// # Errors
     ///
@@ -132,7 +164,8 @@ impl TransferClient {
         serde_json::from_slice(&body).map_err(|error| transfer_error_from_json(&error))
     }
 
-    /// Fetches a V2 reconstruction response for `file_id`.
+    /// Fetches the reconstruction plan for `file_id` from the v2
+    /// reconstruction endpoint (`xorbs` fetch metadata).
     ///
     /// See [`TransferClient::reconstruction_v1`] for the range semantics.
     ///
@@ -154,12 +187,14 @@ impl TransferClient {
         serde_json::from_slice(&body).map_err(|error| transfer_error_from_json(&error))
     }
 
-    /// Fetches `range` bytes of a serialized xorb from an absolute transfer
-    /// URL (as advertised in the reconstruction `fetch_info`/`xorbs`).
+    /// Fetches a byte range of a serialized xorb from an absolute transfer
+    /// URL.
     ///
-    /// Accepts a single-range 206 (with `Content-Range`) or, defensively, a
-    /// `multipart/byteranges` body. A plain 200 is treated as the full xorb
-    /// starting at offset 0.
+    /// Xorbs are the serialized chunk containers that make up a file; the URL
+    /// is the absolute transfer URL advertised in the reconstruction plan
+    /// (`fetch_info`/`xorbs`). Accepts a single-range 206 (with
+    /// `Content-Range`) or, defensively, a `multipart/byteranges` body. A
+    /// plain 200 is treated as the full xorb starting at offset 0.
     ///
     /// # Errors
     ///

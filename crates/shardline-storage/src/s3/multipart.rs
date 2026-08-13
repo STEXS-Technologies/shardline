@@ -58,9 +58,9 @@ impl S3ObjectStore {
     /// to the canonical key.
     ///
     /// After the caller has streamed all bytes through the writer returned by
-    /// [`begin_content_addressed_upload`], this method:
+    /// [`S3ObjectStore::begin_content_addressed_upload`], this method:
     /// 1. Finalizes the multipart upload to the temp key.
-    /// 2. Atomically copies temp → canonical using [`CopyMode::Create`].
+    /// 2. Atomically copies temp → canonical using `CopyMode::Create`.
     /// 3. Deletes the temp key.
     ///
     /// If the canonical key already exists (concurrent writer finished first),

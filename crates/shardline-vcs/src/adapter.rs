@@ -80,6 +80,22 @@ impl ProviderSubject {
 }
 
 /// Repository visibility as reported by a provider.
+///
+/// Determines which repositories a provider reports as publicly readable,
+/// private, or internally visible. Shardline maps this onto authorization
+/// decisions when issuing repository-scoped tokens.
+///
+/// # Examples
+///
+/// ```
+/// use shardline_vcs::RepositoryVisibility;
+/// use std::str::FromStr;
+///
+/// let visibility = RepositoryVisibility::from_str(" PRIVATE ")?;
+/// assert_eq!(visibility, RepositoryVisibility::Private);
+/// assert!(RepositoryVisibility::from_str("secret").is_err());
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RepositoryVisibility {
     /// Publicly readable repository.
@@ -102,7 +118,7 @@ impl FromStr for RepositoryVisibility {
     ///
     /// Accepts `"public"`, `"private"`, and `"internal"` (in any case, with
     /// surrounding whitespace). Any other value yields
-    /// [`RepositoryVisibilityParseError`].
+    /// `RepositoryVisibilityParseError`.
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value.trim().to_ascii_lowercase().as_str() {
             "public" => Ok(Self::Public),

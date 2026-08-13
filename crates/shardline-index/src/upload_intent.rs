@@ -1,6 +1,14 @@
 use std::time::Duration;
 
 /// Persisted state of a content-addressed upload intent.
+///
+/// An upload normally moves
+/// [`Created`](UploadIntentState::Created) → [`Storing`](UploadIntentState::Storing)
+/// → [`Stored`](UploadIntentState::Stored) →
+/// [`MetadataCommitted`](UploadIntentState::MetadataCommitted) →
+/// [`Visible`](UploadIntentState::Visible), or to
+/// [`Failed`](UploadIntentState::Failed) from any pre-`Visible` state. Use
+/// [`UploadIntentState::can_transition_to`] to check whether a move is valid.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UploadIntentState {
     /// Intent was created but no bytes have been written yet.
@@ -49,6 +57,20 @@ impl UploadIntentState {
     ///
     /// Repeating a state is permitted so retries are idempotent. A failed
     /// operation is terminal and no state may skip a persistence boundary.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use shardline_index::UploadIntentState;
+    ///
+    /// assert!(UploadIntentState::Created.can_transition_to(UploadIntentState::Storing));
+    /// assert!(UploadIntentState::Stored.can_transition_to(UploadIntentState::MetadataCommitted));
+    /// assert!(UploadIntentState::MetadataCommitted.can_transition_to(UploadIntentState::Visible));
+    ///
+    /// // States cannot be skipped, and `Failed` is terminal.
+    /// assert!(!UploadIntentState::Created.can_transition_to(UploadIntentState::Visible));
+    /// assert!(!UploadIntentState::Failed.can_transition_to(UploadIntentState::Created));
+    /// ```
     #[must_use]
     pub const fn can_transition_to(self, next: Self) -> bool {
         matches!(
@@ -83,6 +105,26 @@ pub struct UploadIntent {
 
 impl UploadIntent {
     /// Creates a new upload intent record.
+    ///
+    /// The intent starts in the [`Created`](UploadIntentState::Created) state.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use shardline_index::{UploadIntent, UploadIntentState};
+    ///
+    /// let intent = UploadIntent::new(
+    ///     "intent-1".to_owned(),
+    ///     "chunks/aa/bb/example.xorb".to_owned(),
+    ///     "a".repeat(64),
+    ///     1024,
+    /// );
+    /// assert_eq!(intent.intent_id(), "intent-1");
+    /// assert_eq!(intent.object_key(), "chunks/aa/bb/example.xorb");
+    /// assert_eq!(intent.object_hash(), "a".repeat(64));
+    /// assert_eq!(intent.object_length(), 1024);
+    /// assert_eq!(intent.state(), UploadIntentState::Created);
+    /// ```
     #[must_use]
     #[allow(clippy::missing_const_for_fn)]
     pub fn new(

@@ -1,8 +1,19 @@
 /// Parses a boolean value from common operator-friendly strings.
 ///
 /// Matching is case-insensitive and tolerant of leading/trailing ASCII
-/// whitespace, consistent with the `RepositoryProvider`/`DeploymentMode`
-/// deserializers.
+/// whitespace.
+///
+/// # Examples
+///
+/// ```
+/// use shardline_protocol::parse_bool;
+///
+/// assert_eq!(parse_bool("true"), Some(true));
+/// assert_eq!(parse_bool("1"), Some(true));
+/// assert_eq!(parse_bool(" yes "), Some(true));
+/// assert_eq!(parse_bool("OFF"), Some(false));
+/// assert_eq!(parse_bool("maybe"), None);
+/// ```
 #[must_use]
 pub fn parse_bool(value: &str) -> Option<bool> {
     match value.trim() {

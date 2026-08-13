@@ -16,6 +16,35 @@
 //! This crate provides validated xorb parsing, shard metadata normalization,
 //! reconstruction response building, and xorb transfer URL construction for
 //! the Shardline server.
+//!
+//! # Quick start
+//!
+//! The validation helpers are pure — they check hashes and transfer
+//! namespaces before anything touches storage:
+//!
+//! ```
+//! use shardline_xet_adapter::{
+//!     build_xorb_transfer_url, validate_hash_path, validate_xorb_transfer_namespace,
+//! };
+//!
+//! let hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+//!
+//! // Hash paths must be 64 lowercase hex characters.
+//! assert!(validate_hash_path(hash).is_ok());
+//! assert!(validate_hash_path("not-a-hash").is_err());
+//!
+//! // Transfer URLs use the `default` namespace.
+//! assert!(validate_xorb_transfer_namespace("default").is_ok());
+//! assert!(validate_xorb_transfer_namespace("other").is_err());
+//!
+//! let url = build_xorb_transfer_url("http://localhost:8080/", hash);
+//! assert_eq!(url, format!("http://localhost:8080/transfer/xorb/default/{hash}"));
+//! ```
+//!
+//! Parsing and validating actual xorb containers starts with
+//! [`validate_serialized_xorb`] and [`decode_serialized_xorb_chunks`];
+//! reconstruction responses are built with
+//! [`build_batch_reconstruction_response`].
 
 mod error;
 mod frontend;

@@ -14,8 +14,8 @@
 //! Version-control provider boundaries for Shardline.
 //!
 //! Shardline can issue repository-scoped CAS tokens from several Git hosting
-//! providers. This crate keeps the provider-facing boundary isolated from the
-//! HTTP server:
+//! providers (GitHub, Gitea, GitLab, Codeberg, and a generic boundary). This
+//! crate keeps the provider-facing layer isolated from the HTTP server:
 //!
 //! - [`ProviderAdapter`] normalizes provider metadata and authorization checks.
 //! - [`RepositoryRef`] and [`RevisionRef`] validate repository identity before it
@@ -25,19 +25,38 @@
 //! - [`BuiltInProviderCatalog`] wires the GitHub, Gitea, GitLab, and generic
 //!   adapters from deployment configuration.
 //!
-//! # Example
+//! # Quick start
+//!
+//! The core value types are pure and can be validated without any network
+//! access, which makes them the ideal starting point:
 //!
 //! ```
-//! use shardline_vcs::{ProviderKind, RepositoryAccess, RepositoryRef, RevisionRef};
+//! use shardline_vcs::{
+//!     ProviderKind, RepositoryAccess, RepositoryRef, RepositoryVisibility, RevisionRef,
+//! };
+//! use std::str::FromStr;
 //!
+//! // Validate repository and revision identity before embedding them in tokens.
 //! let repository = RepositoryRef::new(ProviderKind::GitHub, "acme", "assets")?;
 //! let revision = RevisionRef::new("refs/heads/main")?;
 //!
 //! assert_eq!(repository.owner(), "acme");
+//! assert_eq!(repository.name(), "assets");
 //! assert_eq!(revision.as_str(), "refs/heads/main");
-//! assert_eq!(RepositoryAccess::Read, RepositoryAccess::Read);
+//!
+//! // Provider-reported visibility parses case-insensitively.
+//! let visibility = RepositoryVisibility::from_str(" Private ")?;
+//! assert_eq!(visibility, RepositoryVisibility::Private);
+//!
+//! // Access levels are distinct and copyable.
+//! assert_ne!(RepositoryAccess::Read, RepositoryAccess::Write);
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
+//!
+//! From there, plug the validated references into a [`ProviderAdapter`]
+//! implementation (for example [`GitHubAdapter`] or [`GenericAdapter`]) to
+//! resolve repository metadata, or into a [`ProviderTokenIssuer`] to mint
+//! repository-scoped CAS tokens.
 
 mod adapter;
 mod authorization;

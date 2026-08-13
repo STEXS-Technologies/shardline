@@ -10,6 +10,21 @@ pub struct ObjectKey(String);
 impl ObjectKey {
     /// Validates and creates an object key.
     ///
+    /// # Examples
+    ///
+    /// ```
+    /// use shardline_storage::ObjectKey;
+    ///
+    /// let key = ObjectKey::parse("xorbs/default/aa/bb/example.xorb")?;
+    /// assert_eq!(key.as_str(), "xorbs/default/aa/bb/example.xorb");
+    ///
+    /// // Absolute paths, traversal, and empty input are rejected.
+    /// assert!(ObjectKey::parse("/etc/passwd").is_err());
+    /// assert!(ObjectKey::parse("xorbs/../secret").is_err());
+    /// assert!(ObjectKey::parse("").is_err());
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    ///
     /// # Errors
     ///
     /// Returns [`ObjectKeyError`] when the key is empty, too large, or contains path
@@ -47,6 +62,19 @@ pub struct ObjectPrefix(String);
 
 impl ObjectPrefix {
     /// Validates and creates an object prefix.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use shardline_storage::ObjectPrefix;
+    ///
+    /// let prefix = ObjectPrefix::parse("xorbs/default/")?;
+    /// assert_eq!(prefix.as_str(), "xorbs/default/");
+    ///
+    /// // An empty prefix (the whole namespace) is valid.
+    /// assert!(ObjectPrefix::parse("").is_ok());
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     ///
     /// # Errors
     ///

@@ -16,12 +16,42 @@
 //!
 //! This crate contains pure data structures and constants that are shared
 //! between the server crate and potential future crate extractions.
+//!
+//! # Quick start
+//!
+//! Store a content-addressed object under a validated key. This example uses
+//! a `blackhole` store, which discards all writes and performs no I/O:
+//!
+//! ```
+//! use shardline_protocol::ShardlineHash;
+//! use shardline_server_core::ServerObjectStore;
+//! use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectStore, PutOutcome};
+//!
+//! let store = ServerObjectStore::blackhole();
+//! let key = ObjectKey::parse("chunks/aa/bb/example.xorb")?;
+//!
+//! let hash = ShardlineHash::from_bytes([7; 32]);
+//! let body = ObjectBody::from_slice(b"serialized chunk bytes");
+//! let integrity = ObjectIntegrity::new(hash, body.as_slice().len() as u64);
+//!
+//! assert_eq!(
+//!     ObjectStore::put_if_absent(&store, &key, body, &integrity)?,
+//!     PutOutcome::Inserted
+//! );
+//! assert!(!ObjectStore::contains(&store, &key)?);
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
+//!
+//! For filesystem-backed storage, use [`ServerObjectStore::local`] (see its
+//! documentation for a `no_run` example).
 
 // ---------------------------------------------------------------------------
 // Submodules
 // ---------------------------------------------------------------------------
 
-/// Backward-compatible re-exports from the `shardline-auth` crate.
+/// Authentication and authorization types used by the Shardline server.
+///
+/// Re-exported from the `shardline-auth` crate for backward compatibility.
 pub mod auth {
     pub use shardline_auth::*;
 }

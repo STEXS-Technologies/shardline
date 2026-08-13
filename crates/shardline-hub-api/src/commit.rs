@@ -99,11 +99,35 @@ pub struct ParsedCommit {
 
 /// Parses a streaming NDJSON commit body.
 ///
+/// A commit is a sequence of newline-delimited JSON instructions: one header
+/// line plus one line per file, LFS pointer, or deletion. This is the same
+/// format used by `huggingface_hub`'s commit API.
+///
 /// Expected lines:
 /// - `{"header":{"message":"...","parentCommit":"..."}}` (or `"summary"` instead of `"message"`)
 /// - `{"file":{"path":"...","content":"<base64>"}}`
 /// - `{"lfsFile":{"path":"...","oid":"...","size":123}}`
 /// - `{"deletedEntry":{"path":"..."}}`
+///
+/// # Examples
+///
+/// ```
+/// use shardline_hub_api::commit::{CommitInstruction, parse_ndjson_commit};
+/// use base64::Engine;
+///
+/// let content = base64::engine::general_purpose::STANDARD.encode(b"hello world");
+/// let body = format!(
+///     "{{\"header\":{{\"message\":\"add readme\",\"parentCommit\":\"abc123\"}}}}\n\
+///      {{\"file\":{{\"path\":\"README.md\",\"content\":\"{content}\"}}}}\n\
+///      {{\"deletedEntry\":{{\"path\":\"old.txt\"}}}}"
+/// );
+///
+/// let commit = parse_ndjson_commit(&body)?;
+/// assert_eq!(commit.message, "add readme");
+/// assert_eq!(commit.parent_commit.as_deref(), Some("abc123"));
+/// assert_eq!(commit.instructions.len(), 2);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 ///
 /// # Errors
 ///
@@ -258,6 +282,16 @@ pub fn parse_ndjson_commit(body: &str) -> Result<ParsedCommit, HubApiError> {
 }
 
 /// Validates an LFS OID format (64 lowercase hex characters for SHA-256).
+///
+/// # Examples
+///
+/// ```
+/// use shardline_hub_api::commit::validate_lfs_oid;
+///
+/// assert!(validate_lfs_oid("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef").is_ok());
+/// assert!(validate_lfs_oid("too-short").is_err());
+/// assert!(validate_lfs_oid(&"A".repeat(64)).is_err(), "uppercase hex is rejected");
+/// ```
 ///
 /// # Errors
 ///

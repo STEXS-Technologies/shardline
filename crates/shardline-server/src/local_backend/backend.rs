@@ -461,6 +461,20 @@ impl LocalBackend {
     }
 }
 
+/// Computes the BLAKE3 content hash used to address a chunk.
+///
+/// This is the same hash the local backend uses to store and retrieve chunk
+/// objects, so it is safe to use for content-addressing before upload.
+///
+/// # Examples
+///
+/// ```
+/// use shardline_server::chunk_hash;
+///
+/// let hash = chunk_hash(b"hello world");
+/// assert_eq!(hash.hex_string().len(), 64);
+/// assert_eq!(hash, chunk_hash(b"hello world"));
+/// ```
 #[must_use]
 pub fn chunk_hash(bytes: &[u8]) -> shardline_protocol::ShardlineHash {
     let digest = blake3::hash(bytes);

@@ -142,6 +142,28 @@ pub(crate) fn resolve_config_content(explicit: Option<&Path>) -> Result<Option<S
 /// Parses a shardline.toml file at the given path (or auto-detected) and
 /// returns the deserialized config struct.
 ///
+/// # Examples
+///
+/// ```
+/// use shardline_server::load_toml_config;
+///
+/// let dir = tempfile::tempdir()?;
+/// let path = dir.path().join("shardline.toml");
+/// std::fs::write(
+///     &path,
+///     "[server]\nbind_addr = \"0.0.0.0:9999\"\npublic_base_url = \"http://localhost:9999\"\n",
+/// )?;
+///
+/// let parsed = load_toml_config(Some(&path))?;
+/// assert!(parsed.is_some(), "the provided config file was parsed");
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+///
+/// When `config_path` is `None`, the standard candidate paths
+/// (`shardline.toml`, `~/.config/shardline/shardline.toml`, and
+/// `/etc/shardline/shardline.toml`) are probed in order and the first existing
+/// file is used; `Ok(None)` is returned when none of them exist.
+///
 /// # Errors
 ///
 /// Returns an error message string when the file exists but cannot be

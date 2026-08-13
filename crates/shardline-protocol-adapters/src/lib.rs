@@ -17,6 +17,31 @@
 //! This crate owns the small, self-contained functions that map protocol
 //! identifiers to validated [`shardline_storage::ObjectKey`] values. It
 //! avoids pulling in heavy server dependencies such as `axum` or `sqlx`.
+//!
+//! # Quick start
+//!
+//! Everything here is pure. The most common task is mapping an LFS object ID
+//! to a storage key:
+//!
+//! ```
+//! use shardline_protocol_adapters::{LfsOperation, TransferAdapter, lfs_object_key};
+//!
+//! let oid = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+//! let key = lfs_object_key(oid, None)?;
+//! assert!(key.as_str().starts_with("protocols/lfs/global/objects/"));
+//! assert!(key.as_str().ends_with(oid));
+//!
+//! // Malformed OIDs are rejected instead of being stored under a bad key.
+//! assert!(lfs_object_key("not-a-valid-sha256", None).is_err());
+//!
+//! // Batch operations and transfer adapters round-trip through their wire names.
+//! assert_eq!("download".parse(), Ok(LfsOperation::Download));
+//! assert_eq!(TransferAdapter::Xet.as_str(), "xet");
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
+//!
+//! See also [`bazel_cache_object_key`] for the Bazel HTTP cache mapping and
+//! [`scope_namespace`] for repository-scoped key prefixes.
 
 mod bazel;
 mod lfs;
@@ -46,6 +71,16 @@ impl From<shardline_storage::ObjectKeyError> for ProtocolError {
 
 /// Validates that `value` is exactly 64 lowercase hexadecimal characters.
 ///
+/// # Examples
+///
+/// ```
+/// use shardline_protocol_adapters::validate_content_hash;
+///
+/// let oid = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+/// assert!(validate_content_hash(oid).is_ok());
+/// assert!(validate_content_hash(&"A".repeat(64)).is_err(), "uppercase is rejected");
+/// ```
+///
 /// # Errors
 ///
 /// Returns [`ProtocolError::InvalidContentHash`] when the input is malformed.
@@ -54,6 +89,17 @@ pub fn validate_content_hash(value: &str) -> Result<(), ProtocolError> {
 }
 
 /// Maps a raw string to a validated [`ObjectKey`].
+///
+/// # Examples
+///
+/// ```
+/// use shardline_protocol_adapters::object_key;
+///
+/// let key = object_key("protocols/xet/global/xorbs/abcd")?;
+/// assert!(key.as_str().ends_with("abcd"));
+/// assert!(object_key("").is_err());
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 ///
 /// # Errors
 ///
@@ -68,6 +114,25 @@ pub fn object_key(value: &str) -> Result<ObjectKey, ProtocolError> {
 /// When the scope is `None` the global namespace `"global"` is returned.
 /// Otherwise the provider, owner, name, and optional revision are hashed
 /// with SHA-256 and hex-encoded.
+///
+/// # Examples
+///
+/// ```
+/// use shardline_protocol::RepositoryProvider;
+/// use shardline_protocol_adapters::scope_namespace;
+///
+/// assert_eq!(scope_namespace(None), "global");
+///
+/// let scope = shardline_protocol::RepositoryScope::new(
+///     RepositoryProvider::GitHub,
+///     "acme",
+///     "assets",
+///     None,
+/// )?;
+/// let namespace = scope_namespace(Some(&scope));
+/// assert_eq!(namespace.len(), 64, "scoped namespaces are sha256 hex digests");
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 #[must_use]
 pub fn scope_namespace(repository_scope: Option<&shardline_protocol::RepositoryScope>) -> String {
     use sha2::{Digest, Sha256};

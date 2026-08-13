@@ -13,6 +13,56 @@
 
 //! `sdx` is a native Xet client library for Shardline's Xet frontend.
 //!
+//! It downloads files from (and uploads files to) Xet repositories through the
+//! shardline CAS frontend: the client resolves a repo-scoped read/write token,
+//! fetches a file's reconstruction plan, streams and decodes the chunk data,
+//! and writes it out — with bounded memory and an optional on-disk chunk
+//! cache. Files are addressed by their 64-hex content hash (`file_id`).
+//!
+//! # Quick start
+//!
+//! Point [`XetClientBuilder`] at a `xet://` endpoint and an [`Auth`] scope,
+//! then download a file by its 64-hex content id:
+//!
+//! ```no_run
+//! use sdx::{Auth, RepositoryId, XetClientBuilder};
+//!
+//! #[tokio::main]
+//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//!     // The credential is resolved from the SHARDLINE_TOKEN /
+//!     // SHARDLINE_API_KEY / SHARDLINE_TOKEN_FILE environment variables when
+//!     // the download runs, or set explicitly with `.with_token(..)` /
+//!     // `.with_api_key(..)`.
+//!     let auth = Auth::new(
+//!         "https://xet.example.com",
+//!         RepositoryId {
+//!             provider: "github".to_owned(),
+//!             owner: "shardline".to_owned(),
+//!             repo: "assets".to_owned(),
+//!             revision: "main".to_owned(),
+//!         },
+//!     )?;
+//!
+//!     let client = XetClientBuilder::new()
+//!         .endpoint("xet://xet.example.com/github/shardline/assets/main")
+//!         .auth(auth)
+//!         .build()?;
+//!
+//!     // `file_id` is the 64-hex content hash of the file to fetch (from a
+//!     // tree listing, an upload, or a reconstruction response).
+//!     let file_id =
+//!         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+//!     let bytes = client.download_bytes(file_id).await?;
+//!     println!("downloaded {} bytes", bytes.len());
+//!     Ok(())
+//! }
+//! ```
+//!
+//! # Design history (milestones)
+//!
+//! The milestone notes below (M0–M4, `docs/SDX_PLAN.md`) are the crate's
+//! design history and are not needed to use the library:
+//!
 //! M0 provides the hash and hexadecimal primitives the Xet wire protocol
 //! requires: BLAKE3 keyed hashing for chunk data (and term verification) via
 //! the pinned upstream `xet-core-structures` crate, plus strict Xet CAS API

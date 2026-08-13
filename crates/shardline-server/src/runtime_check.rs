@@ -26,6 +26,36 @@ pub struct ConfigCheckReport {
 
 /// Validates the selected runtime configuration and backend reachability.
 ///
+/// Exercises the same initialization path as [`serve`](crate::serve) — backend
+/// construction, reconstruction-cache setup, and readiness checks — without
+/// binding a listener. Use this for pre-flight checks in deployments and
+/// operator tooling.
+///
+/// # Examples
+///
+/// ```
+/// use shardline_server::{ServerConfig, run_config_check};
+/// use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+/// use std::num::NonZeroUsize;
+///
+/// #[tokio::main]
+/// async fn main() -> Result<(), Box<dyn std::error::Error>> {
+///     let dir = tempfile::tempdir()?;
+///     let config = ServerConfig::new(
+///         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+///         "http://127.0.0.1:8080".to_owned(),
+///         dir.path().to_path_buf(),
+///         NonZeroUsize::MIN,
+///     )
+///     .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())?;
+///
+///     let report = run_config_check(config).await?;
+///     assert_eq!(report.status, "ok");
+///     assert_eq!(report.server_role, "all");
+///     Ok(())
+/// }
+/// ```
+///
 /// # Errors
 ///
 /// Returns [`ServerError`] when the configured backend cannot initialize or fails its
