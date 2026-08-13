@@ -2192,3 +2192,37 @@ fn byte_unit_rejects_unknown() {
         Err(ServerConfigError::ChunkSizeParse(_))
     ));
 }
+
+#[test]
+fn server_config_builder_with_s3_upload_session_ttl_and_max_active() {
+    let config = ServerConfig::new(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+        "http://localhost:8080".to_owned(),
+        PathBuf::from("/tmp/test"),
+        NonZeroUsize::new(4096).unwrap(),
+    )
+    .with_s3_upload_session_ttl_seconds(NonZeroU64::new(7200).unwrap())
+    .expect("s3 upload session ttl")
+    .with_s3_upload_max_active_sessions(NonZeroUsize::new(64).unwrap())
+    .expect("s3 upload max active sessions");
+    assert_eq!(
+        config.s3_upload_session_ttl_seconds(),
+        NonZeroU64::new(7200).unwrap()
+    );
+    assert_eq!(
+        config.s3_upload_max_active_sessions(),
+        NonZeroUsize::new(64).unwrap()
+    );
+}
+
+#[test]
+fn server_config_defaults_for_s3_upload_sessions() {
+    let config = ServerConfig::new(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+        "http://localhost:8080".to_owned(),
+        PathBuf::from("/tmp/test"),
+        NonZeroUsize::new(4096).unwrap(),
+    );
+    assert_eq!(config.s3_upload_session_ttl_seconds().get(), 3600);
+    assert_eq!(config.s3_upload_max_active_sessions().get(), 1024);
+}

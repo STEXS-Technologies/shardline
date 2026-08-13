@@ -697,16 +697,18 @@ async fn s3_delete_object_is_idempotent() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn s3_post_object_returns_501_not_implemented() {
+async fn s3_post_without_sub_resource_returns_501_not_implemented() {
     let (state, _tmp) = build_test_state().await;
     let app = s3_router(state);
 
+    // POST without `?uploads` or `?uploadId` is PostObject (form upload), which
+    // is out of scope → 501.
     let post = app
         .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(format!("/{BUCKET}/{KEY}?uploads"))
+                .uri(format!("/{BUCKET}/{KEY}"))
                 .header(
                     header::AUTHORIZATION,
                     sigv4_auth(&mint_token(TokenScope::Write, OWNER, NAME)),
@@ -870,4 +872,446 @@ fn format_http_date_known_timestamp() {
         format_http_date(1_785_110_400),
         "Mon, 27 Jul 2026 00:00:00 GMT"
     );
+}
+
+// =========================================================================
+// Multipart upload (Lane 4)
+// =========================================================================
+
+/// Creates a multipart upload and extracts the upload id from the XML.
+async fn create_upload_id(app: &Router) -> String {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/{BUCKET}/{KEY}?uploads"))
+                .header(
+                    header::AUTHORIZATION,
+                    sigv4_auth(&mint_token(TokenScope::Write, OWNER, NAME)),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let xml = String::from_utf8(body_bytes(response).await).unwrap();
+    extract_tag(&xml, "UploadId")
+}
+
+/// Extracts the text content of the first `<tag>…</tag>` occurrence.
+fn extract_tag(xml: &str, tag: &str) -> String {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let start = xml.find(&open).unwrap() + open.len();
+    let end = xml.find(&close).unwrap();
+    xml[start..end].to_owned()
+}
+
+/// Uploads one part and returns the response.
+async fn upload_part(
+    app: &Router,
+    upload_id: &str,
+    part_number: u32,
+    content: &[u8],
+) -> axum::http::Response<Body> {
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!(
+                    "/{BUCKET}/{KEY}?partNumber={part_number}&uploadId={upload_id}"
+                ))
+                .header(
+                    header::AUTHORIZATION,
+                    sigv4_auth(&mint_token(TokenScope::Write, OWNER, NAME)),
+                )
+                .body(Body::from(content.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+/// Builds a minimal `CompleteMultipartUpload` request body.
+fn complete_body(upload_id: &str, part_numbers: &[u32]) -> String {
+    let mut xml = String::from(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+         <CompleteMultipartUpload xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\n",
+    );
+    for part in part_numbers {
+        xml.push_str(&format!(
+            "  <Part><PartNumber>{part}</PartNumber><ETag>\"{upload_id}-{part}\"</ETag></Part>\n"
+        ));
+    }
+    xml.push_str("</CompleteMultipartUpload>\n");
+    xml
+}
+
+/// Sends a `CompleteMultipartUpload` request.
+async fn complete_upload(
+    app: &Router,
+    upload_id: &str,
+    body: String,
+) -> axum::http::Response<Body> {
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/{BUCKET}/{KEY}?uploadId={upload_id}"))
+                .header(
+                    header::AUTHORIZATION,
+                    sigv4_auth(&mint_token(TokenScope::Write, OWNER, NAME)),
+                )
+                .header(header::CONTENT_TYPE, "application/xml")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_multipart_roundtrip_assembles_parts_and_ranges() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state);
+    let auth = sigv4_auth(&mint_token(TokenScope::Read, OWNER, NAME));
+
+    let upload_id = create_upload_id(&app).await;
+
+    // Three parts of varying sizes (all under the 1 MiB test cap).
+    let part1 = vec![0x11_u8; 256 * 1024];
+    let part2 = vec![0x22_u8; 512 * 1024];
+    let part3 = vec![0x33_u8; 64 * 1024];
+    let assembled = [part1.clone(), part2.clone(), part3.clone()].concat();
+
+    let put1 = upload_part(&app, &upload_id, 1, &part1).await;
+    assert_eq!(put1.status(), StatusCode::OK);
+    assert!(
+        put1.headers().get(header::ETAG).is_some(),
+        "UploadPart must return a per-part etag"
+    );
+    assert_eq!(
+        upload_part(&app, &upload_id, 2, &part2).await.status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        upload_part(&app, &upload_id, 3, &part3).await.status(),
+        StatusCode::OK
+    );
+
+    let complete = complete_upload(&app, &upload_id, complete_body(&upload_id, &[1, 2, 3])).await;
+    assert_eq!(complete.status(), StatusCode::OK);
+    let xml = String::from_utf8(body_bytes(complete).await).unwrap();
+    assert!(xml.contains("<CompleteMultipartUploadResult"), "{xml}");
+    assert!(xml.contains("<Bucket>acme.models</Bucket>"), "{xml}");
+    assert!(xml.contains("<Key>data/model.pt</Key>"), "{xml}");
+    assert!(xml.contains("<ETag>\""), "{xml}");
+
+    // Full GET returns the assembled bytes.
+    let get = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/{BUCKET}/{KEY}"))
+                .header(header::AUTHORIZATION, &auth)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get.status(), StatusCode::OK);
+    assert_eq!(body_bytes(get).await, assembled);
+
+    // Range over a multipart object (spanning into part 2).
+    let range = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/{BUCKET}/{KEY}"))
+                .header(header::AUTHORIZATION, &auth)
+                .header(header::RANGE, "bytes=262144-262147")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(range.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(body_bytes(range).await, &part2[0..4]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_multipart_etag_matches_single_put_of_same_bytes() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state);
+
+    // Multipart upload of the assembled bytes.
+    let upload_id = create_upload_id(&app).await;
+    let part1 = b"multipart-identity-".to_vec();
+    let part2 = b"part-two".to_vec();
+    let assembled = [part1.clone(), part2.clone()].concat();
+    assert_eq!(
+        upload_part(&app, &upload_id, 1, &part1).await.status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        upload_part(&app, &upload_id, 2, &part2).await.status(),
+        StatusCode::OK
+    );
+    let complete = complete_upload(&app, &upload_id, complete_body(&upload_id, &[1, 2])).await;
+    assert_eq!(complete.status(), StatusCode::OK);
+    let xml = String::from_utf8(body_bytes(complete).await).unwrap();
+    let multipart_etag = extract_tag(&xml, "ETag");
+
+    // Single PUT of the same bytes on a different key.
+    let put = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/{BUCKET}/single.pt"))
+                .header(
+                    header::AUTHORIZATION,
+                    sigv4_auth(&mint_token(TokenScope::Write, OWNER, NAME)),
+                )
+                .header(header::CONTENT_TYPE, "application/octet-stream")
+                .body(Body::from(assembled))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(put.status(), StatusCode::OK);
+    let single_etag = put
+        .headers()
+        .get(header::ETAG)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+
+    assert_eq!(
+        multipart_etag, single_etag,
+        "multipart and single-put of the same bytes must share the BLAKE3 etag"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_complete_with_missing_part_returns_invalid_part() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state);
+
+    let upload_id = create_upload_id(&app).await;
+    assert_eq!(
+        upload_part(&app, &upload_id, 1, b"one").await.status(),
+        StatusCode::OK
+    );
+    // Part 2 is never uploaded.
+    assert_eq!(
+        upload_part(&app, &upload_id, 3, b"three").await.status(),
+        StatusCode::OK
+    );
+
+    let complete = complete_upload(&app, &upload_id, complete_body(&upload_id, &[1, 3])).await;
+    assert_eq!(complete.status(), StatusCode::BAD_REQUEST);
+    let body = String::from_utf8(body_bytes(complete).await).unwrap();
+    assert!(body.contains("<Code>InvalidPart</Code>"), "{body}");
+
+    // The session is still alive: uploading the missing part and retrying works.
+    assert_eq!(
+        upload_part(&app, &upload_id, 2, b"two").await.status(),
+        StatusCode::OK
+    );
+    let complete = complete_upload(&app, &upload_id, complete_body(&upload_id, &[1, 2, 3])).await;
+    assert_eq!(complete.status(), StatusCode::OK);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_complete_unknown_upload_id_returns_no_such_upload() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state);
+
+    let upload_id = "00".repeat(16); // valid hex, never created
+    let complete = complete_upload(&app, &upload_id, complete_body(&upload_id, &[1])).await;
+    assert_eq!(complete.status(), StatusCode::NOT_FOUND);
+    let body = String::from_utf8(body_bytes(complete).await).unwrap();
+    assert!(body.contains("<Code>NoSuchUpload</Code>"), "{body}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_abort_multipart_leaves_no_object_and_no_index_row() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state.clone());
+    let auth = sigv4_auth(&mint_token(TokenScope::Write, OWNER, NAME));
+
+    let upload_id = create_upload_id(&app).await;
+    assert_eq!(
+        upload_part(&app, &upload_id, 1, b"partial").await.status(),
+        StatusCode::OK
+    );
+
+    let abort = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/{BUCKET}/{KEY}?uploadId={upload_id}"))
+                .header(header::AUTHORIZATION, &auth)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(abort.status(), StatusCode::NO_CONTENT);
+
+    // No object…
+    let get = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/{BUCKET}/{KEY}"))
+                .header(header::AUTHORIZATION, &auth)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get.status(), StatusCode::NOT_FOUND);
+
+    // …and no index row.
+    let repo_scope = RepositoryScope::new(RepositoryProvider::Generic, OWNER, NAME, None).unwrap();
+    let namespace = crate::protocol_support::scope_namespace(Some(&repo_scope));
+    let rows = state
+        .backend
+        .scan_s3_objects(&namespace, "", None, 100)
+        .await
+        .unwrap();
+    assert!(rows.is_empty(), "no index row after abort");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_upload_part_oversized_returns_413_entity_too_large() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state);
+
+    let upload_id = create_upload_id(&app).await;
+    let oversized = vec![0xAB_u8; 1_048_577]; // 1 MiB + 1
+    let put = upload_part(&app, &upload_id, 1, &oversized).await;
+    assert_eq!(put.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    let body = String::from_utf8(body_bytes(put).await).unwrap();
+    assert!(body.contains("<Code>EntityTooLarge</Code>"), "{body}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_upload_part_out_of_range_returns_400() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state);
+
+    let upload_id = create_upload_id(&app).await;
+    let zero = upload_part(&app, &upload_id, 0, b"x").await;
+    assert_eq!(zero.status(), StatusCode::BAD_REQUEST);
+    let over = upload_part(&app, &upload_id, 10_001, b"x").await;
+    assert_eq!(over.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_multipart_session_ttl_eviction_and_handler_rejection() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state.clone());
+    let root = state.config.root_dir();
+    let ttl = state.config.s3_upload_session_ttl_seconds();
+
+    async fn backdate_session(root: &std::path::Path, upload_id: &str, ttl: NonZeroU64) {
+        let metadata_path = shardline_s3_adapter::session_metadata_path(root, upload_id).unwrap();
+        let mut session = shardline_s3_adapter::read_session(root, upload_id, ttl)
+            .await
+            .unwrap();
+        session.last_touched_unix_seconds = 1;
+        let json = serde_json::to_vec(&session).unwrap();
+        tokio::fs::write(&metadata_path, json).await.unwrap();
+    }
+
+    // Startup sweep removes a backdated (expired) session.
+    let upload_id = create_upload_id(&app).await;
+    backdate_session(root, &upload_id, ttl).await;
+    let removed = shardline_s3_adapter::sweep_expired_sessions(root, ttl)
+        .await
+        .unwrap();
+    assert_eq!(removed, 1);
+
+    // A backdated session is rejected by the handlers as NoSuchUpload.
+    let upload_id = create_upload_id(&app).await;
+    backdate_session(root, &upload_id, ttl).await;
+    let complete = complete_upload(&app, &upload_id, complete_body(&upload_id, &[1])).await;
+    assert_eq!(complete.status(), StatusCode::NOT_FOUND);
+    let body = String::from_utf8(body_bytes(complete).await).unwrap();
+    assert!(body.contains("<Code>NoSuchUpload</Code>"), "{body}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_create_multipart_upload_returns_initiate_xml() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state);
+
+    let create = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/{BUCKET}/{KEY}?uploads"))
+                .header(
+                    header::AUTHORIZATION,
+                    sigv4_auth(&mint_token(TokenScope::Write, OWNER, NAME)),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create.status(), StatusCode::OK);
+    let xml = String::from_utf8(body_bytes(create).await).unwrap();
+    assert!(xml.contains("<InitiateMultipartUploadResult"), "{xml}");
+    assert!(xml.contains("<Bucket>acme.models</Bucket>"), "{xml}");
+    assert!(xml.contains("<Key>data/model.pt</Key>"), "{xml}");
+    assert!(xml.contains("<UploadId>"), "{xml}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_list_parts_and_list_multipart_uploads_return_501() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state);
+    let auth = sigv4_auth(&mint_token(TokenScope::Read, OWNER, NAME));
+
+    let list_parts = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/{BUCKET}/{KEY}?uploadId=abc"))
+                .header(header::AUTHORIZATION, &auth)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(list_parts.status(), StatusCode::NOT_IMPLEMENTED);
+    let body = String::from_utf8(body_bytes(list_parts).await).unwrap();
+    assert!(body.contains("<Code>NotImplemented</Code>"), "{body}");
+
+    let list_uploads = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/{BUCKET}?uploads"))
+                .header(header::AUTHORIZATION, &auth)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(list_uploads.status(), StatusCode::NOT_IMPLEMENTED);
 }

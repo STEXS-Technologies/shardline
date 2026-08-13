@@ -3904,6 +3904,94 @@ async fn s3_put_get_delete_roundtrip_through_full_router() {
     assert_eq!(delete.status(), StatusCode::NO_CONTENT);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_multipart_roundtrip_through_full_router() {
+    let (app, _tmp) = test_app_with_auth(&[ServerFrontend::S3]).await;
+    let token = test_token(TokenScope::Write);
+    let auth = format!("AWS4-HMAC-SHA256 Credential={token}/20260813/us-east-1/s3/aws4_request");
+
+    // CreateMultipartUpload.
+    let create = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/test.test/data/mp.pt?uploads")
+                .header(header::AUTHORIZATION, &auth)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create.status(), StatusCode::OK);
+    let create_xml = String::from_utf8(body_bytes(create).await).unwrap();
+    let open = "<UploadId>";
+    let upload_id_start = create_xml.find(open).unwrap() + open.len();
+    let upload_id_end = create_xml.find("</UploadId>").unwrap();
+    let upload_id = &create_xml[upload_id_start..upload_id_end];
+
+    // UploadPart (two parts).
+    let part1: &[u8] = b"e2e-part-one-";
+    let part2: &[u8] = b"second-part";
+    for (part_number, content) in [(1_u32, part1), (2, part2)] {
+        let put = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!(
+                        "/test.test/data/mp.pt?partNumber={part_number}&uploadId={upload_id}"
+                    ))
+                    .header(header::AUTHORIZATION, &auth)
+                    .body(Body::from(content.to_vec()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(put.status(), StatusCode::OK);
+        assert!(put.headers().contains_key(header::ETAG));
+    }
+
+    // CompleteMultipartUpload.
+    let complete_body = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+         <CompleteMultipartUpload xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\n\
+         \x20 <Part><PartNumber>1</PartNumber><ETag>\"{upload_id}-1\"</ETag></Part>\n\
+         \x20 <Part><PartNumber>2</PartNumber><ETag>\"{upload_id}-2\"</ETag></Part>\n\
+         </CompleteMultipartUpload>\n"
+    );
+    let complete = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/test.test/data/mp.pt?uploadId={upload_id}"))
+                .header(header::AUTHORIZATION, &auth)
+                .header(header::CONTENT_TYPE, "application/xml")
+                .body(Body::from(complete_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(complete.status(), StatusCode::OK);
+
+    // GET returns the assembled bytes.
+    let get = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/test.test/data/mp.pt")
+                .header(header::AUTHORIZATION, &auth)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get.status(), StatusCode::OK);
+    assert_eq!(body_bytes(get).await, [part1, part2].concat());
+}
+
 // ---------------------------------------------------------------------------
 // LFS Batch Xet Transfer Tests
 // ---------------------------------------------------------------------------

@@ -369,6 +369,18 @@ pub enum ServerConfigError {
         /// The minimum accepted part size in bytes.
         minimum_bytes: u64,
     },
+    /// The S3 multipart upload-session TTL could not be parsed.
+    #[error("invalid s3 upload session ttl")]
+    S3UploadSessionTtl(ParseIntError),
+    /// The S3 multipart upload-session TTL was zero.
+    #[error("s3 upload session ttl must be greater than zero")]
+    ZeroS3UploadSessionTtlSeconds,
+    /// The S3 multipart upload live-session ceiling could not be parsed.
+    #[error("invalid s3 upload max active sessions")]
+    S3UploadMaxActiveSessions(ParseIntError),
+    /// The S3 multipart upload live-session ceiling was zero.
+    #[error("s3 upload max active sessions must be greater than zero")]
+    ZeroS3UploadMaxActiveSessions,
     /// The public base URL is not a valid URL.
     #[error("SHARDLINE_PUBLIC_BASE_URL is not a valid URL: {0}")]
     InvalidPublicBaseUrl(String),

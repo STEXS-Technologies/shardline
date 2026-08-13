@@ -97,3 +97,16 @@ pub(crate) const DEFAULT_S3_MAX_PART_BYTES: NonZeroU64 = match NonZeroU64::new(1
     Some(value) => value,
     None => NonZeroU64::MIN,
 };
+
+/// Default S3 multipart upload session TTL in seconds (1 hour).
+pub(crate) const DEFAULT_S3_UPLOAD_SESSION_TTL_SECONDS: NonZeroU64 = match NonZeroU64::new(3_600) {
+    Some(value) => value,
+    None => NonZeroU64::MIN,
+};
+
+/// Default maximum number of concurrently active S3 multipart upload sessions.
+pub(crate) const DEFAULT_S3_UPLOAD_MAX_ACTIVE_SESSIONS: NonZeroUsize =
+    match NonZeroUsize::new(1_024) {
+        Some(value) => value,
+        None => NonZeroUsize::MIN,
+    };
