@@ -357,6 +357,9 @@ pub enum ServerConfigError {
     /// The chunk size exceeds the maximum allowed value.
     #[error("chunk size must not exceed 1 GB")]
     ChunkSizeTooLarge,
+    /// The chunk size was not a power of two (the CDC chunker requires it).
+    #[error("chunk size must be a power of two (e.g. 64KiB = 65536 bytes)")]
+    ChunkSizeNotPowerOfTwo,
     /// The maximum S3 multipart part size could not be parsed.
     #[error("invalid s3 max part bytes")]
     S3MaxPartBytes(ParseIntError),

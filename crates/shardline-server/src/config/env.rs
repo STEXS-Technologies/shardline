@@ -90,7 +90,7 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
     );
     let raw_chunk_size_str = var("SHARDLINE_CHUNK_SIZE")
         .or_else(|_| var("SHARDLINE_CHUNK_SIZE_BYTES"))
-        .unwrap_or_else(|_error| "64KB".to_owned());
+        .unwrap_or_else(|_error| "64KiB".to_owned());
     let raw_chunk_size = parse_byte_size(&raw_chunk_size_str)?;
     let Some(chunk_size) = NonZeroUsize::new(raw_chunk_size) else {
         return Err(ServerConfigError::ZeroChunkSize);
@@ -387,10 +387,16 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
         config = config.with_config_secret_key(config_key)?;
     }
 
-    // Validate chunk size upper bound (1 GB).
+    // Validate chunk size bounds: the CDC chunker requires a power of two
+    // (see `upload_ingest::cdc::CdcChunker`), so a misconfigured value must
+    // fail startup with a clear error instead of panicking on the first
+    // upload. Upper bound is 1 GB.
     const MAX_CHUNK_SIZE: usize = 1_073_741_824;
     if chunk_size.get() > MAX_CHUNK_SIZE {
         return Err(ServerConfigError::ChunkSizeTooLarge);
+    }
+    if !chunk_size.get().is_power_of_two() {
+        return Err(ServerConfigError::ChunkSizeNotPowerOfTwo);
     }
 
     // Validate auth provider configuration.

@@ -7,6 +7,7 @@
 //! SigV4→bearer bridge ([`authorize_s3`]), binds the bucket to the token
 //! claims, and then dispatches on the query sub-resources.
 
+pub(super) mod aws_chunked;
 pub(super) mod bucket;
 pub(super) mod listing;
 pub(super) mod multipart;
@@ -49,7 +50,9 @@ pub(super) fn acquire_object_upload_lock(object_key: &str) -> Arc<tokio::sync::M
         .clone()
 }
 
-pub(crate) use bucket::{s3_create_bucket, s3_delete_bucket, s3_get_bucket, s3_head_bucket};
+pub(crate) use bucket::{
+    s3_create_bucket, s3_delete_bucket, s3_get_bucket, s3_head_bucket, s3_post_bucket,
+};
 pub(crate) use object::{
     s3_delete_object, s3_get_object, s3_head_object, s3_post_object, s3_put_object,
 };

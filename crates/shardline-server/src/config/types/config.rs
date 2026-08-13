@@ -1030,6 +1030,13 @@ impl ServerConfig {
     /// Returns [`ServerConfigError::ConfigFileError`] when the deployment mode
     /// constraints are not satisfied.
     pub fn validate_runtime_requirements(&self) -> Result<(), ServerConfigError> {
+        // The CDC chunker requires a power-of-two chunk size; a misconfigured
+        // value must fail startup with a clear error instead of panicking on
+        // the first upload (see `upload_ingest::cdc::CdcChunker`).
+        if !self.chunk_size.get().is_power_of_two() {
+            return Err(ServerConfigError::ChunkSizeNotPowerOfTwo);
+        }
+
         if self.auth.token_signing_key.is_none()
             && (self.server_role.serves_api() || self.server_role.serves_transfer())
             && matches!(self.auth.auth_provider, AuthProviderKind::Local)

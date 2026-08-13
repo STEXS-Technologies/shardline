@@ -74,8 +74,8 @@ use protocol_routes::{
     bazel_put_ac, bazel_put_cas, lfs_batch, lfs_delete_object, lfs_get_object, lfs_head_object,
     lfs_patch_object, lfs_put_object, lfs_verify_object, oci_api_dispatch, oci_dispatch,
     oci_registry_token, oci_transfer_dispatch, oci_v2_root, s3_create_bucket, s3_delete_bucket,
-    s3_delete_object, s3_get_bucket, s3_get_object, s3_head_bucket, s3_head_object, s3_post_object,
-    s3_put_object,
+    s3_delete_object, s3_get_bucket, s3_get_object, s3_head_bucket, s3_head_object, s3_post_bucket,
+    s3_post_object, s3_put_object,
 };
 #[cfg(feature = "fuzzing")]
 pub(crate) use protocol_routes::{parse_oci_path, parse_upload_content_range};
@@ -613,6 +613,11 @@ fn register_oci_routes(mut app: Router<Arc<AppState>>, role: ServerRole) -> Rout
 ///
 /// S3 is an API-tier frontend (reads + writes touch records/ingest), so the
 /// routes are registered only when the role serves the API surface.
+///
+/// Bucket-level operations are registered on BOTH `/{bucket}` and `/{bucket}/`:
+/// real clients (mc, the AWS SDKs, pyarrow) canonicalize bucket paths with a
+/// trailing slash (`PUT /ac.assets/`, `GET /ac.assets/?location=`), and axum
+/// does not match `/{bucket}` against the trailing-slash form.
 fn register_s3_routes(mut app: Router<Arc<AppState>>, role: ServerRole) -> Router<Arc<AppState>> {
     if role.serves_api() {
         app = app
@@ -621,6 +626,15 @@ fn register_s3_routes(mut app: Router<Arc<AppState>>, role: ServerRole) -> Route
                 axum::routing::put(s3_create_bucket)
                     .get(s3_get_bucket)
                     .head(s3_head_bucket)
+                    .post(s3_post_bucket)
+                    .delete(s3_delete_bucket),
+            )
+            .route(
+                "/{bucket}/",
+                axum::routing::put(s3_create_bucket)
+                    .get(s3_get_bucket)
+                    .head(s3_head_bucket)
+                    .post(s3_post_bucket)
                     .delete(s3_delete_bucket),
             )
             .route(

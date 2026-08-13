@@ -194,6 +194,18 @@ pub(crate) fn register_route_policies(registry: &mut RoutePolicyRegistry) {
     registry.register("GET", "/{bucket}", RouteAuthPolicy::Authenticated);
     registry.register("HEAD", "/{bucket}", RouteAuthPolicy::Authenticated);
     registry.register("DELETE", "/{bucket}", RouteAuthPolicy::AuthenticatedWrite);
+    registry.register(
+        "POST",
+        "/{bucket}",
+        RouteAuthPolicy::AuthenticatedWrite, // DeleteObjects (batch delete)
+    );
+    // Trailing-slash aliases: real clients (mc, AWS SDKs) canonicalize bucket
+    // paths with a trailing slash (`PUT /ac.assets/`, `GET /ac.assets/?location=`).
+    registry.register("PUT", "/{bucket}/", RouteAuthPolicy::AuthenticatedWrite);
+    registry.register("GET", "/{bucket}/", RouteAuthPolicy::Authenticated);
+    registry.register("HEAD", "/{bucket}/", RouteAuthPolicy::Authenticated);
+    registry.register("POST", "/{bucket}/", RouteAuthPolicy::AuthenticatedWrite);
+    registry.register("DELETE", "/{bucket}/", RouteAuthPolicy::AuthenticatedWrite);
     registry.register("GET", "/{bucket}/{*key}", RouteAuthPolicy::Authenticated);
     registry.register("HEAD", "/{bucket}/{*key}", RouteAuthPolicy::Authenticated);
     registry.register(
@@ -250,10 +262,11 @@ mod tests {
         register_route_policies(&mut registry);
         // When adding a new route, update this count AND add its policy above.
         // This test ensures no route is added without an auth policy.
-        // 31 pre-S3 entries + 9 S3 routes = 40.
+        // 31 pre-S3 entries + 10 S3 routes + 5 trailing-slash bucket aliases
+        // (incl. POST for DeleteObjects) = 46.
         assert!(
-            registry.len() >= 40,
-            "Expected at least 40 registered routes, got {}. Add a policy for new routes.",
+            registry.len() >= 46,
+            "Expected at least 46 registered routes, got {}. Add a policy for new routes.",
             registry.len()
         );
     }

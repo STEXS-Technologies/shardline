@@ -201,6 +201,14 @@ enum CompleteXmlElement {
     PartNumber,
     /// An `ETag` element (opaque; ignored).
     ETag,
+    /// The `Delete` root element of a `DeleteObjects` request.
+    Delete,
+    /// The `Object` element of a `DeleteObjects` request.
+    Object,
+    /// The `Key` element of a `DeleteObjects` request.
+    Key,
+    /// The `Quiet` element of a `DeleteObjects` request.
+    Quiet,
     /// Any other element (ignored).
     Other,
 }
@@ -213,6 +221,10 @@ impl CompleteXmlElement {
             "Part" => Self::Part,
             "PartNumber" => Self::PartNumber,
             "ETag" => Self::ETag,
+            "Delete" => Self::Delete,
+            "Object" => Self::Object,
+            "Key" => Self::Key,
+            "Quiet" => Self::Quiet,
             _ => Self::Other,
         }
     }
@@ -388,6 +400,47 @@ pub fn parse_complete_multipart_parts(body: &str) -> Result<CompleteParts, crate
     Ok(CompleteParts {
         part_numbers: parts,
     })
+}
+
+/// Parses the `<Key>` values from a `DeleteObjects` request body.
+///
+/// The body is the S3
+/// `<Delete><Object><Key>k</Key></Object>…</Delete>` envelope. Only `Key`
+/// element text is read (the `Quiet` flag is ignored); every key is returned
+/// in document order (duplicates preserved). Empty keys are skipped.
+///
+/// # Errors
+///
+/// Returns [`crate::S3Error::invalid_part`] when the body contains an
+/// unterminated tag.
+pub fn parse_delete_object_keys(body: &str) -> Result<Vec<String>, crate::S3Error> {
+    let mut scanner = CompleteXmlScanner::new(body);
+    let mut keys = Vec::new();
+    let mut pending_key: Option<String> = None;
+    loop {
+        match scanner.next_event()? {
+            XmlEvent::Open(element) => {
+                if element == CompleteXmlElement::Key {
+                    pending_key = Some(String::new());
+                }
+            }
+            XmlEvent::Text(text) => {
+                if let Some(buffer) = pending_key.as_mut() {
+                    buffer.push_str(text);
+                }
+            }
+            XmlEvent::Close(element) => {
+                if element == CompleteXmlElement::Key
+                    && let Some(raw_key) = pending_key.take()
+                    && !raw_key.is_empty()
+                {
+                    keys.push(raw_key);
+                }
+            }
+            XmlEvent::End => break,
+        }
+    }
+    Ok(keys)
 }
 
 /// Response headers for a successful `PutObject`.
@@ -759,5 +812,36 @@ mod tests {
                     </CompleteMultipartUpload>";
         let parts = super::parse_complete_multipart_parts(body).unwrap();
         assert_eq!(parts.part_numbers(), &BTreeSet::from([1, 2]));
+    }
+    #[test]
+    fn parse_delete_object_keys_extracts_keys_in_order() {
+        let body = "<?xml version=\"1.0\"?><Delete>\
+                    <Quiet>true</Quiet>\
+                    <Object><Key>a.txt</Key></Object>\
+                    <Object><Key>dir/b.txt</Key></Object>\
+                    </Delete>";
+        assert_eq!(
+            super::parse_delete_object_keys(body).unwrap(),
+            vec!["a.txt", "dir/b.txt"]
+        );
+    }
+
+    #[test]
+    fn parse_delete_object_keys_empty_and_malformed() {
+        // Empty body / no keys.
+        assert!(super::parse_delete_object_keys("").unwrap().is_empty());
+        assert!(
+            super::parse_delete_object_keys("<Delete></Delete>")
+                .unwrap()
+                .is_empty()
+        );
+        // An unterminated tag is an error; an unclosed `<Key>` (no closing
+        // element) simply yields no key.
+        assert!(super::parse_delete_object_keys("<Delete><Object><Key").is_err());
+        assert!(
+            super::parse_delete_object_keys("<Delete><Object><Key>a")
+                .unwrap()
+                .is_empty()
+        );
     }
 }
