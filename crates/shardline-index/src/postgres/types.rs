@@ -48,7 +48,7 @@ impl PostgresIndexStore {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PostgresRecordLocator {
     pub(super) record_key: String,
-    pub(super) kind: PostgresRecordKind,
+    pub(super) kind: RecordKind,
     pub(super) scope_key: String,
     pub(super) file_id: String,
     pub(super) content_hash: Option<String>,
@@ -94,28 +94,7 @@ impl PostgresRecordStore {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) enum PostgresRecordKind {
-    Latest,
-    Version,
-}
-
-impl PostgresRecordKind {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::Latest => "latest",
-            Self::Version => "version",
-        }
-    }
-
-    pub(crate) fn parse(value: &str) -> Result<Self, PostgresMetadataStoreError> {
-        match value {
-            "latest" => Ok(Self::Latest),
-            "version" => Ok(Self::Version),
-            _other => Err(PostgresMetadataStoreError::InvalidRecordKind),
-        }
-    }
-}
+pub(crate) use crate::record_kind::RecordKind;
 
 /// Postgres metadata-store failure.
 #[derive(Debug, Error)]
@@ -206,7 +185,7 @@ mod tests {
     fn postgres_record_locator_accessors() {
         let locator = PostgresRecordLocator {
             record_key: "rk:latest:scope:aabb".into(),
-            kind: PostgresRecordKind::Latest,
+            kind: RecordKind::Latest,
             scope_key: "scope".into(),
             file_id: "aabb".into(),
             content_hash: None,
@@ -217,7 +196,7 @@ mod tests {
 
         let version_locator = PostgresRecordLocator {
             record_key: "rk:version:scope:aabb".into(),
-            kind: PostgresRecordKind::Version,
+            kind: RecordKind::Version,
             scope_key: "scope".into(),
             file_id: "aabb".into(),
             content_hash: Some("cafebabedeadbeef".repeat(4)),
@@ -231,41 +210,27 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // PostgresRecordKind
+    // RecordKind
     // ------------------------------------------------------------------
     #[test]
     fn postgres_record_kind_as_str() {
-        assert_eq!(PostgresRecordKind::Latest.as_str(), "latest");
-        assert_eq!(PostgresRecordKind::Version.as_str(), "version");
+        assert_eq!(RecordKind::Latest.as_str(), "latest");
+        assert_eq!(RecordKind::Version.as_str(), "version");
     }
 
     #[test]
     fn postgres_record_kind_parse_valid() {
-        assert!(matches!(
-            PostgresRecordKind::parse("latest"),
-            Ok(PostgresRecordKind::Latest)
-        ));
-        assert!(matches!(
-            PostgresRecordKind::parse("version"),
-            Ok(PostgresRecordKind::Version)
-        ));
+        assert!(matches!("latest".parse(), Ok(RecordKind::Latest)));
+        assert!(matches!("version".parse(), Ok(RecordKind::Version)));
     }
 
     #[test]
     fn postgres_record_kind_parse_invalid() {
-        let result = PostgresRecordKind::parse("unknown");
+        let result: Result<RecordKind, _> = "unknown".parse();
         assert!(result.is_err());
-        assert!(matches!(
-            result,
-            Err(PostgresMetadataStoreError::InvalidRecordKind)
-        ));
 
-        let result = PostgresRecordKind::parse("");
+        let result: Result<RecordKind, _> = "".parse();
         assert!(result.is_err());
-        assert!(matches!(
-            result,
-            Err(PostgresMetadataStoreError::InvalidRecordKind)
-        ));
     }
 
     // ------------------------------------------------------------------

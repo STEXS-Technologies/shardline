@@ -1,3 +1,5 @@
+use std::str::FromStr;
+
 use axum::http::HeaderMap;
 use axum::{
     Json,
@@ -7,13 +9,20 @@ use axum::{
 };
 
 use shardline_protocol::ByteRange;
-use shardline_storage::{ObjectKey, ObjectStore};
+use shardline_storage::ObjectStore;
 
-use crate::{error::HubApiError, models::*};
+use crate::{
+    error::HubApiError,
+    models::*,
+    types::{HubSortField, SortDirection},
+};
 use shardline_index::hub::HubRepoType;
 use shardline_protocol::TokenScope;
 
-use super::{HubState, authorize, repo_type_path};
+use super::{
+    HubState, authorize, authorize_with_context, lfs_object_key, repo_type_path,
+    require_repository_binding,
+};
 
 // ---- Repo create (generic, requires Write) ----
 
@@ -27,11 +36,12 @@ pub(crate) async fn repo_create(
         || request.name.clone(),
         |organization| format!("{organization}/{}", request.name),
     );
-    let repo_type = match request.repo_type {
-        RepoType::Model => HubRepoType::Model,
-        RepoType::Dataset => HubRepoType::Dataset,
-        RepoType::Space => HubRepoType::Space,
-    };
+    // Repository creation is deliberately global: a Write-scoped caller may
+    // create a repository under any namespace. The C1 cross-tenant boundary is
+    // enforced on ACCESS (read/write/delete/commit/resolve all require the
+    // token's repository scope to match the URL repo); a freshly created empty
+    // repository grants no access to existing tenants' content.
+    let repo_type: HubRepoType = request.repo_type.into();
     // `huggingface_hub` calls this endpoint before every upload with
     // `exist_ok=True`, but does not transmit that flag. It accepts the
     // established 409 conflict response when it contains the existing
@@ -71,7 +81,9 @@ pub(crate) async fn repo_create_type(
     Json(body): Json<serde_json::Value>,
 ) -> Result<(StatusCode, Json<RepoResponse>), HubApiError> {
     authorize(&state, &headers, TokenScope::Write)?;
-    let rt = HubRepoType::parse_str(&repo_type)
+    // Repository creation is deliberately global (same rationale as repo_create).
+    let rt = RepoType::from_api_str(&repo_type)
+        .map(Into::into)
         .ok_or_else(|| HubApiError::PathValidation(format!("invalid repo type: {repo_type}")))?;
     let name = format!("{ns}/{repo}");
     let private = body
@@ -133,11 +145,7 @@ pub(crate) fn repo_response_from_hub(repo: &shardline_index::hub::HubRepo) -> Re
         .unwrap_or_default();
     RepoResponse {
         id: repo.repo_id.clone(),
-        repo_type: match repo.repo_type {
-            HubRepoType::Model => RepoType::Model,
-            HubRepoType::Dataset => RepoType::Dataset,
-            HubRepoType::Space => RepoType::Space,
-        },
+        repo_type: repo.repo_type.into(),
         private: repo.private,
         sha: None,
         siblings: None,
@@ -217,13 +225,26 @@ pub(crate) async fn repo_list(
     headers: HeaderMap,
 ) -> Result<Json<RepoListResponse>, HubApiError> {
     shardline_metrics::record_hub_api_request("repo_list", "GET", 200);
-    authorize(&state, &headers, TokenScope::Read)?;
+    // Intentionally global: lists repositories across the whole instance, not a
+    // single repo, so there is no repository binding to enforce.
+    let auth_ctx = authorize_with_context(&state, &headers, TokenScope::Read)?;
+    let caller_repo_id = auth_ctx.as_ref().map(|ctx| {
+        let repo = ctx.claims().repository();
+        format!("{}/{}", repo.owner(), repo.name())
+    });
     let repos = state
         .store
         .list_repos()
         .map_err(|e| HubApiError::CasError(e.to_string()))?;
+    // Cross-tenant privacy: a caller must never see another tenant's private
+    // repositories, even though the list endpoint is global. Public repos and
+    // the caller's own private repos (exact `owner/name` match) remain visible.
+    let visible: Vec<_> = repos
+        .into_iter()
+        .filter(|repo| repo_visible_to_owner(repo, caller_repo_id.as_deref()))
+        .collect();
     let response = RepoListResponse {
-        repos: repos.iter().map(repo_response_from_hub).collect(),
+        repos: visible.iter().map(repo_response_from_hub).collect(),
     };
     Ok(Json(response))
 }
@@ -237,8 +258,15 @@ pub(crate) async fn repo_search(
     Query(query): Query<RepoSearchQuery>,
 ) -> Result<Json<RepoListResponse>, HubApiError> {
     shardline_metrics::record_hub_api_request("repo_search", "GET", 200);
-    authorize(&state, &headers, TokenScope::Read)?;
-    let rt = HubRepoType::parse_str(&repo_type)
+    // Intentionally global: searches across all repositories, not a single repo,
+    // so there is no repository binding to enforce.
+    let auth_ctx = authorize_with_context(&state, &headers, TokenScope::Read)?;
+    let caller_repo_id = auth_ctx.as_ref().map(|ctx| {
+        let repo = ctx.claims().repository();
+        format!("{}/{}", repo.owner(), repo.name())
+    });
+    let rt = RepoType::from_api_str(&repo_type)
+        .map(Into::into)
         .ok_or_else(|| HubApiError::PathValidation(format!("invalid repo type: {repo_type}")))?;
     if query.q.len() < 2 {
         return Err(HubApiError::PathValidation(
@@ -253,27 +281,68 @@ pub(crate) async fn repo_search(
 
     // Apply server-side sorting when requested.
     if let Some(sort) = &query.sort {
-        match sort.as_str() {
-            "lastModified" => {
+        // Unknown sort fields parse to `None` and fall through to the default
+        // (unsorted) order, preserving the previous `_ => {}` behavior.
+        match HubSortField::from_str(sort).ok() {
+            Some(HubSortField::LastModified) => {
                 repos.sort_by_key(|b| std::cmp::Reverse(b.updated_at_unix_seconds));
             }
-            "likes" => {
+            Some(HubSortField::Likes) => {
                 // No likes field on HubRepo yet; keep default order.
             }
-            "downloads" => {
+            Some(HubSortField::Downloads) => {
                 // No downloads field on HubRepo yet; keep default order.
             }
-            _ => {}
+            None => {
+                // Unknown sort field; keep default order.
+            }
         }
-        if query.direction.as_deref() == Some("asc") {
+        if query
+            .direction
+            .as_deref()
+            .and_then(|d| SortDirection::from_str(d).ok())
+            == Some(SortDirection::Asc)
+        {
             repos.reverse();
         }
     }
 
+    // Cross-tenant privacy: hide other tenants' private repositories from the
+    // search results, mirroring `repo_list`.
+    let visible: Vec<_> = repos
+        .into_iter()
+        .filter(|repo| repo_visible_to_owner(repo, caller_repo_id.as_deref()))
+        .collect();
     let response = RepoListResponse {
-        repos: repos.iter().map(repo_response_from_hub).collect(),
+        repos: visible.iter().map(repo_response_from_hub).collect(),
     };
     Ok(Json(response))
+}
+
+/// Returns whether a repository is visible to a caller identified by the full
+/// `owner/name` repository identity from their scoped token.
+///
+/// In permissive mode (`caller_repo_id` is `None`) every repository is visible,
+/// matching the historical behavior when no auth is configured. When the caller
+/// has an authenticated identity, a private repository is hidden unless it is
+/// the caller's *own* repository (an exact `owner/name` match of `repo_id`);
+/// public repositories remain visible.
+///
+/// The comparison uses the full repository identity rather than only the owner
+/// namespace to prevent same-namespace private-repo leaks: under OIDC every
+/// subject is scoped to a single owner, and a Local token scoped to one repo in
+/// a namespace must not reveal other private repos in that same namespace.
+fn repo_visible_to_owner(
+    repo: &shardline_index::hub::HubRepo,
+    caller_repo_id: Option<&str>,
+) -> bool {
+    let Some(caller_repo_id) = caller_repo_id else {
+        return true;
+    };
+    if !repo.private {
+        return true;
+    }
+    repo.repo_id == caller_repo_id
 }
 
 // ---- Validate YAML (requires Read) ----
@@ -301,7 +370,8 @@ pub(crate) async fn repo_modelcard(
     Path((_repo_type, ns, repo)): Path<(String, String, String)>,
 ) -> Result<axum::response::Response, HubApiError> {
     shardline_metrics::record_hub_api_request("repo_modelcard", "GET", 200);
-    authorize(&state, &headers, TokenScope::Read)?;
+    let auth_ctx = authorize_with_context(&state, &headers, TokenScope::Read)?;
+    require_repository_binding(auth_ctx.as_ref(), &ns, &repo)?;
     let name = format!("{ns}/{repo}");
     let entry = state
         .store
@@ -325,7 +395,12 @@ pub(crate) async fn repo_modelcard(
         ("Content-Type", "text/markdown; charset=utf-8"),
         ("X-Shardline-SHA", readme.sha.as_str()),
     ];
-    let content = read_file_from_object_store(&state, &readme.sha).ok_or(HubApiError::NotFound)?;
+    let content = read_file_from_object_store(
+        &state,
+        &readme.sha,
+        auth_ctx.as_ref().map(|c| c.claims().repository()),
+    )
+    .ok_or(HubApiError::NotFound)?;
     Ok((resp_headers, content).into_response())
 }
 
@@ -337,7 +412,8 @@ pub(crate) async fn repo_revisions(
     Path((_repo_type, ns, repo)): Path<(String, String, String)>,
 ) -> Result<Json<RevisionListResponse>, HubApiError> {
     shardline_metrics::record_hub_api_request("repo_revisions", "GET", 200);
-    authorize(&state, &headers, TokenScope::Read)?;
+    let auth_ctx = authorize_with_context(&state, &headers, TokenScope::Read)?;
+    require_repository_binding(auth_ctx.as_ref(), &ns, &repo)?;
     let name = format!("{ns}/{repo}");
     let _ = state
         .store
@@ -368,8 +444,9 @@ pub(crate) async fn repo_info(
     Path((repo_type, ns, repo)): Path<(String, String, String)>,
 ) -> Result<Json<RepoResponse>, HubApiError> {
     shardline_metrics::record_hub_api_request("repo_info", "GET", 200);
-    authorize(&state, &headers, TokenScope::Read)?;
-    let _rt = HubRepoType::parse_str(&repo_type)
+    let auth_ctx = authorize_with_context(&state, &headers, TokenScope::Read)?;
+    require_repository_binding(auth_ctx.as_ref(), &ns, &repo)?;
+    RepoType::from_api_str(&repo_type)
         .ok_or_else(|| HubApiError::PathValidation(format!("invalid repo type: {repo_type}")))?;
     let name = format!("{ns}/{repo}");
     let entry = state
@@ -384,7 +461,11 @@ pub(crate) async fn repo_info(
         && let Some(sha) = commit_sha
         && let Ok(files) = state.store.get_files(&sha)
         && let Some(readme) = files.iter().find(|f| f.path == "README.md")
-        && let Some(content) = read_file_from_object_store(&state, &readme.sha)
+        && let Some(content) = read_file_from_object_store(
+            &state,
+            &readme.sha,
+            auth_ctx.as_ref().map(|c| c.claims().repository()),
+        )
     {
         response.card_data = parse_yaml_frontmatter(&content);
     }
@@ -398,7 +479,8 @@ pub(crate) async fn repo_revision_info(
     Path((_repo_type, ns, repo, rev)): Path<(String, String, String, String)>,
 ) -> Result<Json<RepoResponse>, HubApiError> {
     shardline_metrics::record_hub_api_request("repo_revision_info", "GET", 200);
-    authorize(&state, &headers, TokenScope::Read)?;
+    let auth_ctx = authorize_with_context(&state, &headers, TokenScope::Read)?;
+    require_repository_binding(auth_ctx.as_ref(), &ns, &repo)?;
     let name = format!("{ns}/{repo}");
     let entry = state
         .store
@@ -456,13 +538,28 @@ pub(crate) async fn repo_delete_compat(
     delete_repository(&state, &headers, &name)
 }
 
-/// Reads a file from the ObjectStore by its SHA.
-fn read_file_from_object_store(state: &HubState, sha: &str) -> Option<Vec<u8>> {
-    let key = ObjectKey::parse(&format!("lfs/{sha}")).ok()?;
+/// Reads a file from the ObjectStore by its SHA, using the repository-scoped
+/// LFS key so reads find the namespaced writes made by `apply_commit`.
+fn read_file_from_object_store(
+    state: &HubState,
+    sha: &str,
+    repository_scope: Option<&shardline_protocol::RepositoryScope>,
+) -> Option<Vec<u8>> {
+    let key = lfs_object_key(sha, repository_scope).ok()?;
     let size = state.object_store.metadata(&key).ok()??.length();
     let range_end = size.checked_sub(1)?;
     let range = ByteRange::new(0, range_end).ok()?;
     state.object_store.read_range(&key, range).ok()
+}
+
+/// Splits a `owner/name` repository identifier into `(owner, name)`. When no
+/// separator is present, the owner is treated as empty (which can never match a
+/// scoped token's non-empty owner, so repo-scoped binding will deny it).
+fn split_repo_name(full_name: &str) -> (&str, &str) {
+    match full_name.split_once('/') {
+        Some((owner, name)) => (owner, name),
+        None => ("", full_name),
+    }
 }
 
 fn delete_repository(
@@ -471,7 +568,9 @@ fn delete_repository(
     name: &str,
 ) -> Result<StatusCode, HubApiError> {
     shardline_metrics::record_hub_api_request("repo_delete", "DELETE", 204);
-    authorize(state, headers, TokenScope::Write)?;
+    let auth_ctx = authorize_with_context(state, headers, TokenScope::Write)?;
+    let (owner, repo) = split_repo_name(name);
+    require_repository_binding(auth_ctx.as_ref(), owner, repo)?;
     // Verify repo exists
     let _repo = state
         .store

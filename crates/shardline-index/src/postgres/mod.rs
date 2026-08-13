@@ -3,7 +3,7 @@ mod record_store;
 mod tree_store;
 mod types;
 
-pub(crate) use types::PostgresRecordKind;
+pub(crate) use types::RecordKind;
 pub use types::{
     PostgresIndexStore, PostgresMetadataStoreError, PostgresRecordLocator, PostgresRecordStore,
 };

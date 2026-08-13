@@ -1,14 +1,13 @@
-//! Environment-variable credential resolution, token-file loading, and
-//! `shardline.toml` config-file parsing for the `sdx` token service (M1 / M6a).
+//! Credential resolution for the `sdx` token service: from environment
+//! variables, token files, and the `shardline.toml` config file.
 //!
-//! Mirrors the credential priority order from `docs/SDX_PLAN.md` §5.2 and the
-//! Authentication section of `docs/XET_NATIVE_CLI.md`:
+//! Credentials are resolved in priority order:
 //!
 //! 1. `SHARDLINE_TOKEN` — opaque server bearer token
 //! 2. `SHARDLINE_API_KEY` — provider bootstrap API key
 //! 3. `SHARDLINE_TOKEN_FILE` — path to a file containing an opaque bearer token
 //!
-//! M6a adds the `shardline.toml` config file ([`SdxConfig`]): a `[default]`
+//! [`SdxConfig`] parses the `shardline.toml` config file: a `[default]`
 //! section with endpoint/repository defaults and an `[auth]` section with
 //! credential fields. Credential priority is CLI flags > env vars >
 //! config `[auth]` section > none (see [`resolve_credential_from_config`]).
@@ -273,7 +272,7 @@ pub fn read_token_file(path: &Path) -> Result<String, io::Error> {
     Ok(contents.trim().to_owned())
 }
 
-/// Resolves a credential from the environment in the §5.2 priority order:
+/// Resolves a credential from the environment, in priority order:
 /// `SHARDLINE_TOKEN` > `SHARDLINE_API_KEY` > `SHARDLINE_TOKEN_FILE`.
 ///
 /// `env` is injected so callers can substitute a test double; the production
@@ -304,7 +303,7 @@ pub fn resolve_credential_from_env(
     Ok(None)
 }
 
-/// Resolves a credential with the full §5.2 priority: env vars first (via
+/// Resolves a credential with the full priority order: env vars first (via
 /// [`resolve_credential_from_env`]), then the config-file `[auth]` section
 /// (`token` > `api_key` > `token_file`).
 ///

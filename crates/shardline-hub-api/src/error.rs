@@ -66,6 +66,16 @@ pub enum HubApiError {
     /// Pack file generation error.
     #[error("pack error: {0}")]
     Pack(#[from] PackError),
+
+    /// Webhook secret encryption/decryption failure.
+    #[error("webhook secret crypto error: {0}")]
+    WebhookSecret(#[from] crate::secrets::WebhookSecretCipherError),
+}
+
+impl From<shardline_protocol_adapters::ProtocolError> for HubApiError {
+    fn from(error: shardline_protocol_adapters::ProtocolError) -> Self {
+        HubApiError::CasError(error.to_string())
+    }
 }
 
 impl IntoResponse for HubApiError {
@@ -76,7 +86,8 @@ impl IntoResponse for HubApiError {
             | Self::CasError(_)
             | Self::PktLine(_)
             | Self::Pack(_)
-            | Self::SigningKeyError(_) => (
+            | Self::SigningKeyError(_)
+            | Self::WebhookSecret(_) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal error".to_owned(),
             ),

@@ -10,6 +10,17 @@ use crate::{
     types::OciReference,
 };
 
+/// Validates an OCI repository name against the registry naming rules.
+///
+/// # Examples
+///
+/// ```
+/// use shardline_oci_adapter::validate_repository;
+///
+/// assert!(validate_repository("acme/models").is_ok());
+/// assert!(validate_repository("Acme/Models").is_err());
+/// ```
+///
 /// # Errors
 ///
 /// Returns an error when the repository name is not a valid OCI repository name.
@@ -17,6 +28,29 @@ pub fn validate_repository(repository: &str) -> Result<(), OciAdapterError> {
     validate_oci_repository_name(repository)
 }
 
+/// Parses an OCI reference into a [`Digest`](OciReference::Digest) or
+/// [`Tag`](OciReference::Tag).
+///
+/// A reference is a digest when it starts with the `sha256:` prefix; anything
+/// else must be a valid tag.
+///
+/// # Examples
+///
+/// ```
+/// use shardline_oci_adapter::{OciReference, parse_reference};
+///
+/// let digest = parse_reference(
+///     "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+/// )?;
+/// assert!(matches!(digest, OciReference::Digest(_)));
+///
+/// let tag = parse_reference("latest")?;
+/// assert!(matches!(tag, OciReference::Tag(_)));
+///
+/// assert!(parse_reference("bad tag!").is_err());
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+///
 /// # Errors
 ///
 /// Returns an error when the reference is not a valid OCI tag or digest.
@@ -28,6 +62,25 @@ pub fn parse_reference(reference: &str) -> Result<OciReference, OciAdapterError>
     Ok(OciReference::Tag(reference.to_owned()))
 }
 
+/// Builds the storage object key for a blob in an OCI repository.
+///
+/// # Examples
+///
+/// ```
+/// use shardline_oci_adapter::oci_blob_key;
+///
+/// let key = oci_blob_key(
+///     "acme/models",
+///     "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+///     None,
+/// )?;
+/// assert!(key.as_str().starts_with("protocols/oci/global/repos/"));
+/// assert!(key.as_str().ends_with(
+///     "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+/// ));
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+///
 /// # Errors
 ///
 /// Returns an error when the repository, digest, or scope is invalid.
@@ -180,11 +233,35 @@ pub fn oci_tag_target_prefix(
     .map_err(OciAdapterError::from)
 }
 
+/// Returns the registry URL path for a blob in an OCI repository.
+///
+/// # Examples
+///
+/// ```
+/// use shardline_oci_adapter::oci_blob_location;
+///
+/// assert_eq!(
+///     oci_blob_location("acme/models", "0123"),
+///     "/v2/acme/models/blobs/sha256:0123"
+/// );
+/// ```
 #[must_use]
 pub fn oci_blob_location(repository: &str, digest_hex: &str) -> String {
     format!("/v2/{repository}/blobs/sha256:{digest_hex}")
 }
 
+/// Returns the registry URL path for a manifest in an OCI repository.
+///
+/// # Examples
+///
+/// ```
+/// use shardline_oci_adapter::oci_manifest_location;
+///
+/// assert_eq!(
+///     oci_manifest_location("acme/models", "v1.2.3"),
+///     "/v2/acme/models/manifests/v1.2.3"
+/// );
+/// ```
 #[must_use]
 pub fn oci_manifest_location(repository: &str, reference: &str) -> String {
     format!("/v2/{repository}/manifests/{reference}")

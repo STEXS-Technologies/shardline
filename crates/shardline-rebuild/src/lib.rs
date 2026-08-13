@@ -15,6 +15,45 @@
 //!
 //! This crate provides pure rebuild functions that operate on explicit
 //! store parameters rather than server configuration.
+//!
+//! # Quick start
+//!
+//! The issue and report types are pure data that describe what a rebuild
+//! found and fixed:
+//!
+//! ```
+//! use shardline_rebuild::{
+//!     IndexRebuildIssue, IndexRebuildIssueDetail, IndexRebuildIssueKind,
+//!     IndexRebuildReport,
+//! };
+//!
+//! let issue = IndexRebuildIssue {
+//!     kind: IndexRebuildIssueKind::InvalidVersionRecordJson,
+//!     location: "records/latest/acme-assets.json".to_owned(),
+//!     detail: IndexRebuildIssueDetail::RecordJsonInvalid,
+//! };
+//! assert_eq!(issue.kind.as_str(), "invalid_version_record_json");
+//!
+//! let report = IndexRebuildReport {
+//!     scanned_version_records: 120,
+//!     scanned_retained_shards: 4,
+//!     rebuilt_latest_records: 1,
+//!     unchanged_latest_records: 119,
+//!     removed_stale_latest_records: 0,
+//!     scanned_reconstructions: 4,
+//!     unchanged_reconstructions: 4,
+//!     removed_stale_reconstructions: 0,
+//!     rebuilt_dedupe_shard_mappings: 0,
+//!     unchanged_dedupe_shard_mappings: 0,
+//!     removed_stale_dedupe_shard_mappings: 0,
+//!     issues: vec![issue],
+//! };
+//! assert!(!report.is_clean());
+//! assert_eq!(report.issue_count(), 1);
+//! ```
+//!
+//! To run a real rebuild, use [`run_index_rebuild_with_stores`] with explicit
+//! record, index, and object-store adapters.
 
 mod candidates;
 mod error;

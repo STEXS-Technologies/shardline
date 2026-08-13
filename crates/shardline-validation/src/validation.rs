@@ -21,6 +21,20 @@ pub fn validate_content_hash_with<E>(value: &str, error_fn: fn() -> E) -> Result
 
 /// Validates that a file identifier is safe for use as a single path component.
 ///
+/// Rejects empty or `.` values, absolute paths, `..` traversal, backslashes,
+/// control characters, and identifiers longer than 1024 bytes.
+///
+/// # Examples
+///
+/// ```
+/// use shardline_validation::validate_identifier;
+///
+/// assert!(validate_identifier("models.bin").is_ok());
+/// assert!(validate_identifier("nested/model.bin").is_err(), "no path separators");
+/// assert!(validate_identifier("../secret").is_err(), "no traversal");
+/// assert!(validate_identifier("/etc/passwd").is_err(), "no absolute paths");
+/// ```
+///
 /// # Errors
 ///
 /// Returns [`ValidateIdentifierError`] if the identifier is empty, contains
@@ -48,6 +62,16 @@ pub fn validate_identifier(value: &str) -> Result<(), ValidateIdentifierError> {
 pub struct ValidateIdentifierError;
 
 /// Validates that a content hash is exactly 64 lowercase hex characters.
+///
+/// # Examples
+///
+/// ```
+/// use shardline_validation::validate_content_hash;
+///
+/// let hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+/// assert!(validate_content_hash(hash).is_ok());
+/// assert!(validate_content_hash("short").is_err());
+/// ```
 ///
 /// # Errors
 ///

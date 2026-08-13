@@ -26,6 +26,8 @@ pub enum SmartHttpError {
     StoreFiles(String),
     #[error("failed to store LFS object: {0}")]
     StoreLfsObject(String),
+    #[error("LFS content for oid {0} was not present in the pack")]
+    LfsContentNotFoundInPack(String),
     #[error("{0}")]
     NonFastForward(String),
     #[error("failed to create revision: {0}")]

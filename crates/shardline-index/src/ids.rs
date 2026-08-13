@@ -6,6 +6,16 @@ pub struct FileId(ShardlineHash);
 
 impl FileId {
     /// Creates a file identifier from a protocol hash.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use shardline_index::FileId;
+    /// use shardline_protocol::ShardlineHash;
+    ///
+    /// let file_id = FileId::new(ShardlineHash::from_bytes([1; 32]));
+    /// assert_eq!(file_id.hash().as_bytes(), &[1; 32]);
+    /// ```
     #[must_use]
     pub const fn new(hash: ShardlineHash) -> Self {
         Self(hash)

@@ -13,6 +13,7 @@ cargo llvm-cov \
     --workspace \
     --all-features \
     --exclude shardline-fuzz \
+    --exclude shardline-bench \
     --no-report \
     "$@"
 

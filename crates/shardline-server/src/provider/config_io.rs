@@ -158,6 +158,8 @@ pub(super) fn set_before_provider_config_read_hook(
 mod tests {
     use std::io::Write;
 
+    use serial_test::serial;
+
     use super::*;
     use crate::provider::ProviderConfigDocument;
 
@@ -333,20 +335,33 @@ mod tests {
     // ── set_before_provider_config_read_hook test ─────────────────────────
 
     #[test]
+    #[serial(provider_config_hook)]
     fn set_before_provider_config_read_hook_stores_registration() {
         use super::super::BEFORE_PROVIDER_CONFIG_READ_HOOK;
 
         let path = std::path::PathBuf::from("/tmp/test-hook-config");
-        let called = std::sync::atomic::AtomicBool::new(false);
+        let called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let hook_called = called.clone();
         set_before_provider_config_read_hook(path.clone(), move || {
-            called.store(true, std::sync::atomic::Ordering::SeqCst);
+            hook_called.store(true, std::sync::atomic::Ordering::SeqCst);
         });
 
-        // Verify the hook was stored
-        let slot = BEFORE_PROVIDER_CONFIG_READ_HOOK.lock().unwrap();
-        assert!(slot.is_some());
-        let registration = slot.as_ref().unwrap();
-        assert_eq!(registration.path, path);
+        // Verify the hook was stored. The mutex may have been poisoned by an
+        // earlier test, so recover the guard instead of unwrapping. The guard
+        // is scoped so it is released before the hook is run below.
+        let stored_path = {
+            let slot = match BEFORE_PROVIDER_CONFIG_READ_HOOK.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            slot.as_ref().map(|registration| registration.path.clone())
+        };
+        assert_eq!(stored_path.as_deref(), Some(path.as_path()));
+
+        // Run the stored hook to exercise its closure (and consume the
+        // registration so it cannot affect later tests).
+        run_before_provider_config_read_hook(&path);
+        assert!(called.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     // ── read_bounded_provider_config — UnexpectedEof during initial read ──

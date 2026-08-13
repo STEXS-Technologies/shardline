@@ -13,6 +13,22 @@ pub struct RepositoryScopeCacheKey {
 
 impl RepositoryScopeCacheKey {
     /// Creates a repository scope cache key from a protocol scope.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use shardline_cache::RepositoryScopeCacheKey;
+    /// use shardline_protocol::{RepositoryProvider, RepositoryScope};
+    ///
+    /// let scope =
+    ///     RepositoryScope::new(RepositoryProvider::GitLab, "group", "project", None)?;
+    /// let key = RepositoryScopeCacheKey::from_scope(&scope);
+    /// assert_eq!(key.provider(), "gitlab");
+    /// assert_eq!(key.owner(), "group");
+    /// assert_eq!(key.repo(), "project");
+    /// assert_eq!(key.revision(), None);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     #[must_use]
     pub fn from_scope(scope: &RepositoryScope) -> Self {
         Self {
@@ -27,6 +43,40 @@ impl RepositoryScopeCacheKey {
     #[must_use]
     pub const fn provider(&self) -> &str {
         self.provider
+    }
+
+    /// Returns the repository provider as the canonical protocol enum.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use shardline_cache::RepositoryScopeCacheKey;
+    /// use shardline_protocol::{RepositoryProvider, RepositoryScope};
+    ///
+    /// let scope =
+    ///     RepositoryScope::new(RepositoryProvider::GitHub, "acme", "assets", None)?;
+    /// let key = RepositoryScopeCacheKey::from_scope(&scope);
+    /// assert_eq!(key.provider_kind(), RepositoryProvider::GitHub);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    ///
+    /// Note: the stored key keeps a `&'static str` token so the `Hash`-derived cache
+    /// semantics and the string wire representation stay unchanged
+    /// (`RepositoryProvider` does not implement `Hash`, so it cannot be stored
+    /// directly without reworking the derived `Hash`). This accessor reverse
+    /// maps the token back to the canonical enum.
+    #[must_use]
+    pub fn provider_kind(self) -> RepositoryProvider {
+        match self.provider {
+            "github" => RepositoryProvider::GitHub,
+            "gitea" => RepositoryProvider::Gitea,
+            "gitlab" => RepositoryProvider::GitLab,
+            "codeberg" => RepositoryProvider::Codeberg,
+            // Unreachable by construction: `provider` is only ever populated
+            // from `RepositoryProvider::as_str()` via `provider_token`. Kept as
+            // a lint-safe fallback (no unwrap/panic) to keep the match exhaustive.
+            _other => RepositoryProvider::Generic,
+        }
     }
 
     /// Returns the repository owner or namespace.
@@ -58,6 +108,33 @@ pub struct ReconstructionCacheKey {
 
 impl ReconstructionCacheKey {
     /// Creates a cache key for the latest visible reconstruction of one file.
+    ///
+    /// The key has no content hash, so it always resolves to whatever is
+    /// currently the latest reconstruction for `file_id`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use shardline_cache::ReconstructionCacheKey;
+    /// use shardline_protocol::{RepositoryProvider, RepositoryScope};
+    ///
+    /// let scope =
+    ///     RepositoryScope::new(RepositoryProvider::GitHub, "acme", "assets", Some("main"))?;
+    ///
+    /// // A repository-scoped "latest" key.
+    /// let key = ReconstructionCacheKey::latest("assets/logo.png", Some(&scope));
+    /// assert_eq!(key.file_id(), "assets/logo.png");
+    /// assert_eq!(key.content_hash(), None);
+    /// if let Some(scope_key) = key.repository_scope() {
+    ///     assert_eq!(scope_key.repo(), "assets");
+    ///     assert_eq!(scope_key.revision(), Some("main"));
+    /// }
+    ///
+    /// // A global (unscoped) key.
+    /// let global = ReconstructionCacheKey::latest("assets/logo.png", None);
+    /// assert!(global.repository_scope().is_none());
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     #[must_use]
     pub fn latest(file_id: &str, repository_scope: Option<&RepositoryScope>) -> Self {
         Self {
@@ -68,6 +145,24 @@ impl ReconstructionCacheKey {
     }
 
     /// Creates a cache key for one immutable file version.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use shardline_cache::ReconstructionCacheKey;
+    /// use shardline_protocol::{RepositoryProvider, RepositoryScope};
+    ///
+    /// let scope =
+    ///     RepositoryScope::new(RepositoryProvider::GitHub, "acme", "assets", Some("main"))?;
+    ///
+    /// let key = ReconstructionCacheKey::version("assets/logo.png", "content-456", Some(&scope));
+    /// assert_eq!(key.file_id(), "assets/logo.png");
+    /// assert_eq!(key.content_hash(), Some("content-456"));
+    /// if let Some(scope_key) = key.repository_scope() {
+    ///     assert_eq!(scope_key.owner(), "acme");
+    /// }
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     #[must_use]
     pub fn version(
         file_id: &str,
@@ -367,6 +462,27 @@ mod tests {
         let long_id = "a".repeat(1000);
         let key = ReconstructionCacheKey::latest(&long_id, None);
         assert_eq!(key.file_id().len(), 1000);
+    }
+
+    #[test]
+    fn repository_scope_cache_key_provider_kind_roundtrip_all_variants() {
+        let providers = [
+            (RepositoryProvider::GitHub, "github"),
+            (RepositoryProvider::Gitea, "gitea"),
+            (RepositoryProvider::GitLab, "gitlab"),
+            (RepositoryProvider::Codeberg, "codeberg"),
+            (RepositoryProvider::Generic, "generic"),
+        ];
+        for (provider, token) in providers {
+            let scope = RepositoryScope::new(provider, "owner", "repo", None);
+            assert!(scope.is_ok(), "scope creation failed for {token}");
+            let Ok(scope) = scope else {
+                continue;
+            };
+            let scope_key = RepositoryScopeCacheKey::from_scope(&scope);
+            assert_eq!(scope_key.provider(), token);
+            assert_eq!(scope_key.provider_kind(), provider);
+        }
     }
 
     #[test]

@@ -101,6 +101,17 @@ pub enum IndexRebuildIssueKind {
 
 impl IndexRebuildIssueKind {
     /// Stable issue label for CLI and logs.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use shardline_rebuild::IndexRebuildIssueKind;
+    ///
+    /// assert_eq!(
+    ///     IndexRebuildIssueKind::VersionPathMismatch.as_str(),
+    ///     "version_path_mismatch"
+    /// );
+    /// ```
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {

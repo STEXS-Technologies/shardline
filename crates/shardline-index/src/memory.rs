@@ -19,7 +19,7 @@ use crate::{
     xet_hash_hex_string,
 };
 
-/// In-memory implementation of [`IndexStore`].
+/// In-memory implementation of [`crate::IndexStore`].
 #[derive(Debug, Clone, Default)]
 pub struct MemoryIndexStore {
     state: Arc<Mutex<MemoryIndexState>>,
@@ -377,9 +377,14 @@ impl UploadIntentStore for MemoryIndexStore {
     type Error = MemoryIndexStoreError;
 
     async fn create_intent(&self, intent: &UploadIntent) -> Result<(), Self::Error> {
+        // Idempotent, matching the SQL stores (INSERT OR IGNORE / ON CONFLICT
+        // DO NOTHING): never overwrite an existing intent. Overwriting a fresh
+        // `Created` intent over a concurrent caller's already-advanced intent
+        // would reset its durable state and corrupt the upload lifecycle.
         self.lock_state()?
             .upload_intents
-            .insert(intent.intent_id().to_owned(), intent.clone());
+            .entry(intent.intent_id().to_owned())
+            .or_insert_with(|| intent.clone());
         Ok(())
     }
 
@@ -803,7 +808,7 @@ pub struct MemoryRecordLocator {
     content_hash: Option<String>,
 }
 
-/// In-memory implementation of [`RecordStore`].
+/// In-memory implementation of [`crate::RecordStore`].
 #[derive(Debug, Clone, Default)]
 pub struct MemoryRecordStore {
     state: Arc<Mutex<MemoryRecordState>>,

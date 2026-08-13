@@ -24,6 +24,25 @@ pub enum PackError {
     ExcessiveDecompressedSize,
 }
 
+/// Hard ceiling for a single delta target size, in bytes.
+///
+/// Git delta targets are capped by the same bound the pack parser uses for
+/// the total decompressed size of all objects in a receive-pack
+/// ([`crate::git::smart_http::pack_parse::MAX_DECOMPRESSED_TOTAL_BYTES`],
+/// 512 MiB). We reuse that single shared constant as the ceiling for any one
+/// delta target so a malicious delta can never force an unbounded allocation
+/// before the `result.len() != target_size` check runs.
+const MAX_DELTA_TARGET_SIZE: usize =
+    crate::git::smart_http::pack_parse::MAX_DECOMPRESSED_TOTAL_BYTES;
+
+/// Maximum number of bytes a delta varint may span.
+///
+/// Each byte carries 7 value bits, so 10 bytes covers up to 70 bits of
+/// payload, which can never fit in a `usize`. Cap the decoder at 10 bytes
+/// (and reject shifts ≥ 64) so the shift never overflows and parsing always
+/// terminates.
+const MAX_DELTA_VARINT_BYTES: usize = 10;
+
 impl std::fmt::Display for PackError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -278,6 +297,12 @@ pub fn apply_delta(base: &[u8], delta: &[u8]) -> Result<Vec<u8>, PackError> {
         return Err(PackError::InvalidDelta);
     }
 
+    // Enforce a hard maximum on the target size before allocating, so a
+    // malicious delta can never trigger an unbounded `with_capacity`.
+    if target_size > MAX_DELTA_TARGET_SIZE {
+        return Err(PackError::ExcessiveDecompressedSize);
+    }
+
     let mut result = Vec::with_capacity(target_size);
 
     while pos < delta.len() {
@@ -295,7 +320,9 @@ pub fn apply_delta(base: &[u8], delta: &[u8]) -> Result<Vec<u8>, PackError> {
             for i in 0..4 {
                 if cmd & (1 << i) != 0 {
                     let offset_byte = delta.get(pos).copied().ok_or(PackError::InvalidDelta)?;
-                    copy_offset |= (offset_byte as usize).wrapping_shl(shift);
+                    copy_offset |= (offset_byte as usize)
+                        .checked_shl(shift)
+                        .ok_or(PackError::InvalidDelta)?;
                     pos = pos.wrapping_add(1);
                     shift = shift.wrapping_add(8);
                 }
@@ -305,7 +332,9 @@ pub fn apply_delta(base: &[u8], delta: &[u8]) -> Result<Vec<u8>, PackError> {
             for i in 4..7 {
                 if cmd & (1 << i) != 0 {
                     let size_byte = delta.get(pos).copied().ok_or(PackError::InvalidDelta)?;
-                    copy_size |= (size_byte as usize).wrapping_shl(shift);
+                    copy_size |= (size_byte as usize)
+                        .checked_shl(shift)
+                        .ok_or(PackError::InvalidDelta)?;
                     pos = pos.wrapping_add(1);
                     shift = shift.wrapping_add(8);
                 }
@@ -316,12 +345,35 @@ pub fn apply_delta(base: &[u8], delta: &[u8]) -> Result<Vec<u8>, PackError> {
                 copy_size = 0x10000;
             }
 
-            if copy_offset.wrapping_add(copy_size) > base.len() {
+            // A single copy instruction must never request more bytes than the
+            // declared target size; reject it up front so a malicious delta
+            // cannot drive unbounded growth through copy-size amplification.
+            if copy_size > target_size {
+                return Err(PackError::ExcessiveDecompressedSize);
+            }
+
+            let copy_end = copy_offset
+                .checked_add(copy_size)
+                .ok_or(PackError::InvalidDelta)?;
+            if copy_end > base.len() {
                 return Err(PackError::InvalidDelta);
             }
 
+            // Bound the running output size *before* extending the buffer. The
+            // `with_capacity` cap alone is insufficient: repeated copies can
+            // keep appending past `target_size` and allocate far beyond it
+            // before the final `result.len() != target_size` check runs. Reject
+            // as soon as the projected length would exceed `target_size`.
+            let projected = result
+                .len()
+                .checked_add(copy_size)
+                .ok_or(PackError::ExcessiveDecompressedSize)?;
+            if projected > target_size {
+                return Err(PackError::ExcessiveDecompressedSize);
+            }
+
             result.extend_from_slice(
-                base.get(copy_offset..copy_offset.wrapping_add(copy_size))
+                base.get(copy_offset..copy_end)
                     .ok_or(PackError::InvalidDelta)?,
             );
         } else if cmd != 0 {
@@ -329,6 +381,15 @@ pub fn apply_delta(base: &[u8], delta: &[u8]) -> Result<Vec<u8>, PackError> {
             let insert_size = cmd as usize;
             if pos.wrapping_add(insert_size) > delta.len() {
                 return Err(PackError::InvalidDelta);
+            }
+            // Bound the running output size before extending the buffer, as
+            // with copy instructions above.
+            let projected = result
+                .len()
+                .checked_add(insert_size)
+                .ok_or(PackError::ExcessiveDecompressedSize)?;
+            if projected > target_size {
+                return Err(PackError::ExcessiveDecompressedSize);
             }
             result.extend_from_slice(
                 delta
@@ -355,14 +416,24 @@ pub fn apply_delta(base: &[u8], delta: &[u8]) -> Result<Vec<u8>, PackError> {
 fn parse_delta_varint(data: &[u8], mut pos: usize) -> Result<(usize, usize), PackError> {
     let mut result: usize = 0;
     let mut shift: u32 = 0;
-    loop {
+    let mut terminated = false;
+    for _ in 0..MAX_DELTA_VARINT_BYTES {
         let byte = data.get(pos).copied().ok_or(PackError::InvalidDelta)?;
         pos = pos.wrapping_add(1);
-        result |= ((byte & 0x7f) as usize).wrapping_shl(shift);
+        if shift >= 64 {
+            return Err(PackError::InvalidDelta);
+        }
+        result |= ((byte & 0x7f) as usize)
+            .checked_shl(shift)
+            .ok_or(PackError::InvalidDelta)?;
         shift = shift.wrapping_add(7);
         if byte & 0x80 == 0 {
+            terminated = true;
             break;
         }
+    }
+    if !terminated {
+        return Err(PackError::InvalidDelta);
     }
     Ok((result, pos))
 }
@@ -873,19 +944,76 @@ mod tests {
 
     #[test]
     fn apply_delta_copy_exceeding_base_errors() {
-        // Copy instruction requests bytes beyond base length
+        // Copy instruction requests bytes beyond base length (but within the
+        // target size, so the base-bounds check is what rejects it).
         let base = b"short";
         let mut delta = Vec::new();
         // Source size: 5
         delta.push(5);
         // Target size: 10
         delta.push(10);
-        // Copy: offset=0, size=65536 (too large for base)
+        // Copy: offset=0, size=8 (exceeds base length 5, within target 10)
         delta.push(0x90);
-        delta.push(0x00); // size = 0 means 65536
+        delta.push(0x08); // size = 8
 
         let result = apply_delta(base, &delta);
         assert!(matches!(result, Err(PackError::InvalidDelta)));
+    }
+
+    #[test]
+    #[allow(clippy::vec_init_then_push)]
+    fn apply_delta_copy_sum_exceeding_target_errors() {
+        // Regression test for unbounded-growth / OOM: a delta whose copy
+        // instructions sum far beyond the declared target_size must error
+        // (ExcessiveDecompressedSize) rather than grow the result Vec unbounded.
+        // Base: 131072 bytes (0x80 0x80 0x08 varint).
+        let base = vec![b'X'; 131072];
+        let mut delta = Vec::new();
+        // Source size: 131072 (varint: 0x80 0x80 0x08).
+        delta.push(0x80);
+        delta.push(0x80);
+        delta.push(0x08);
+        // Target size: 100000 (varint: 0xA0 0x8D 0x06).
+        delta.push(0xA0);
+        delta.push(0x8D);
+        delta.push(0x06);
+        // Two copy instructions, each emitting 65536 bytes from offset 0
+        // (cmd 0x90 = copy flag + 1 size byte; size byte 0 => 65536).
+        // Sum would be 131072 > target_size 100000.
+        delta.push(0x90);
+        delta.push(0x00);
+        delta.push(0x90);
+        delta.push(0x00);
+
+        let result = apply_delta(&base, &delta);
+        assert!(
+            matches!(result, Err(PackError::ExcessiveDecompressedSize)),
+            "expected ExcessiveDecompressedSize, got {result:?}"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::vec_init_then_push)]
+    fn apply_delta_single_copy_exceeding_target_errors() {
+        // A single copy instruction that requests more bytes than the target
+        // size must be rejected up front (copy-size amplification guard).
+        let base = vec![b'Y'; 70000];
+        let mut delta = Vec::new();
+        // Source size: 70000 (varint: 0xF0 0xA2 0x04).
+        delta.push(0xF0);
+        delta.push(0xA2);
+        delta.push(0x04);
+        // Target size: 10.
+        delta.push(10);
+        // Copy: offset=0, size=65536 (size byte 0 => 65536) > target 10.
+        delta.push(0x90);
+        delta.push(0x00);
+
+        let result = apply_delta(&base, &delta);
+        assert!(
+            matches!(result, Err(PackError::ExcessiveDecompressedSize)),
+            "expected ExcessiveDecompressedSize, got {result:?}"
+        );
     }
 
     #[test]

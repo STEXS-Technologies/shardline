@@ -8,6 +8,23 @@ use std::{fmt, str};
 use serde::{Deserialize, Serialize};
 
 /// The DataHash is a 256-bit value stored as `[u64; 4]`.
+///
+/// Used to content-address data (files, chunks, xorbs). Can be constructed
+/// from raw bytes, parsed from 64-hex strings, and rendered back to hex.
+///
+/// # Examples
+///
+/// ```
+/// use shardline_xet_core::MerkleHash;
+///
+/// let hex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+/// let hash = MerkleHash::from_hex(hex)?;
+/// assert_eq!(hash.hex(), hex);
+///
+/// let bytes: [u8; 32] = hash.into();
+/// assert_eq!(bytes.len(), 32);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 #[derive(Clone, Copy, Default, Serialize, Deserialize)]
 pub struct DataHash([u64; 4]);
 
@@ -114,6 +131,17 @@ impl From<ParseIntError> for DataHashHexParseError {
 }
 
 impl DataHash {
+    /// Renders this hash as a 64-character lowercase hex string.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use shardline_xet_core::MerkleHash;
+    ///
+    /// let hash = MerkleHash::from_hex("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")?;
+    /// assert_eq!(hash.hex().len(), 64);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     pub fn hex(&self) -> String {
         format!(
             "{:016x}{:016x}{:016x}{:016x}",
@@ -124,6 +152,24 @@ impl DataHash {
         )
     }
 
+    /// Parses a 64-character hex string into a hash.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use shardline_xet_core::MerkleHash;
+    ///
+    /// let hash = MerkleHash::from_hex(
+    ///     "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    /// )?;
+    /// assert!(MerkleHash::from_hex("not-hex").is_err());
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DataHashHexParseError`] when the input is not exactly 64
+    /// hex digits.
     pub fn from_hex(h: &str) -> Result<DataHash, DataHashHexParseError> {
         if h.len() != 64 {
             return Err(DataHashHexParseError {});

@@ -16,7 +16,7 @@ pub const MAX_TOKEN_STRING_BYTES: usize = 16_384;
 const TOKEN_SIGNATURE_HEX_BYTES: usize = 64;
 const MAX_TOKEN_PAYLOAD_HEX_BYTES: usize = MAX_TOKEN_STRING_BYTES - 2;
 
-/// CAS token scope.
+/// Scope of a bearer token used to authorize access to content-addressed storage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TokenScope {
     /// Read-only CAS access.
@@ -117,6 +117,20 @@ pub struct RepositoryScope {
 impl RepositoryScope {
     /// Creates a repository scope.
     ///
+    /// # Examples
+    ///
+    /// ```
+    /// use shardline_protocol::{RepositoryProvider, RepositoryScope};
+    ///
+    /// let scope =
+    ///     RepositoryScope::new(RepositoryProvider::GitHub, "acme", "assets", Some("main"))?;
+    /// assert_eq!(scope.provider().as_str(), "github");
+    /// assert_eq!(scope.owner(), "acme");
+    /// assert_eq!(scope.name(), "assets");
+    /// assert_eq!(scope.revision(), Some("main"));
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    ///
     /// # Errors
     ///
     /// Returns [`TokenClaimsError`] when the owner, name, or revision contain invalid
@@ -178,6 +192,29 @@ pub struct TokenClaims {
 
 impl TokenClaims {
     /// Creates token claims.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use shardline_protocol::{
+    ///     RepositoryProvider, RepositoryScope, TokenClaims, TokenScope,
+    /// };
+    ///
+    /// let repository =
+    ///     RepositoryScope::new(RepositoryProvider::GitHub, "acme", "assets", None)?;
+    /// let claims = TokenClaims::new(
+    ///     "shardline",
+    ///     "alice",
+    ///     TokenScope::Read,
+    ///     repository,
+    ///     1_700_000_600,
+    /// )?;
+    /// assert_eq!(claims.issuer(), "shardline");
+    /// assert_eq!(claims.subject(), "alice");
+    /// assert_eq!(claims.scope(), TokenScope::Read);
+    /// assert_eq!(claims.expires_at_unix_seconds(), 1_700_000_600);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     ///
     /// # Errors
     ///
@@ -330,6 +367,29 @@ impl TokenSigner {
 
     /// Signs token claims into an opaque bearer token string.
     ///
+    /// # Examples
+    ///
+    /// ```
+    /// use shardline_protocol::{
+    ///     RepositoryProvider, RepositoryScope, TokenClaims, TokenScope, TokenSigner,
+    /// };
+    ///
+    /// let repository =
+    ///     RepositoryScope::new(RepositoryProvider::GitHub, "acme", "assets", None)?;
+    /// let claims = TokenClaims::new(
+    ///     "shardline",
+    ///     "alice",
+    ///     TokenScope::Read,
+    ///     repository,
+    ///     1_700_000_600,
+    /// )?;
+    /// let signer = TokenSigner::new(b"development-only-signing-key-32bytes")?;
+    ///
+    /// let token = signer.sign(&claims)?;
+    /// assert!(token.contains('.'));
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    ///
     /// # Errors
     ///
     /// Returns [`TokenCodecError`] when the claims cannot be serialized.
@@ -340,6 +400,34 @@ impl TokenSigner {
     }
 
     /// Verifies a token against the supplied current Unix timestamp.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use shardline_protocol::{
+    ///     RepositoryProvider, RepositoryScope, TokenClaims, TokenScope, TokenSigner,
+    /// };
+    ///
+    /// let repository =
+    ///     RepositoryScope::new(RepositoryProvider::GitHub, "acme", "assets", None)?;
+    /// let claims = TokenClaims::new(
+    ///     "shardline",
+    ///     "alice",
+    ///     TokenScope::Read,
+    ///     repository,
+    ///     1_700_000_600,
+    /// )?;
+    /// let signer = TokenSigner::new(b"development-only-signing-key-32bytes")?;
+    /// let token = signer.sign(&claims)?;
+    ///
+    /// // Verifying before the expiry succeeds...
+    /// let verified = signer.verify_at(&token, 1_700_000_000)?;
+    /// assert_eq!(verified.subject(), "alice");
+    ///
+    /// // ...and verifying after the expiry fails.
+    /// assert!(signer.verify_at(&token, 1_700_000_601).is_err());
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     ///
     /// # Errors
     ///

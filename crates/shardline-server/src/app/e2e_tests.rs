@@ -274,6 +274,7 @@ async fn build_test_hub_state(root: &std::path::Path) -> shardline_hub_api::rout
         object_store,
         auth: None,
         http_client: None,
+        webhook_secret_cipher: None,
     }
 }
 
@@ -550,6 +551,7 @@ async fn test_app_with_provider_tokens(frontends: &[ServerFrontend]) -> (Router,
         "test-issuer",
         NonZeroU64::MIN,
         b"a]32-byte-signing-key-for-testing!",
+        None,
     )
     .expect("provider token service");
 

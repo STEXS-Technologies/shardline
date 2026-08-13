@@ -11,19 +11,48 @@
 //!   contracts used by local and Postgres-backed deployments.
 //! - [`AsyncIndexStore`] exposes the same boundary for async server workflows.
 //!
-//! # Example
+//! # Quick start
+//!
+//! Create an upload intent and follow its state machine, then validate the
+//! reconstruction plan of a stored [`FileRecord`]:
 //!
 //! ```
-//! use shardline_index::{FileId, FileReconstruction, ReconstructionTerm, StoredObjectId};
-//! use shardline_protocol::{ChunkRange, ShardlineHash};
+//! use shardline_index::{
+//!     FileChunkRecord, FileRecord, StorageRepresentation, UploadIntent, UploadIntentState,
+//! };
 //!
-//! let file_id = FileId::new(ShardlineHash::from_bytes([1; 32]));
-//! let object_id = StoredObjectId::new(ShardlineHash::from_bytes([2; 32]));
-//! let term = ReconstructionTerm::new(object_id, ChunkRange::new(0, 2)?, 128);
-//! let reconstruction = FileReconstruction::new(vec![term]);
+//! // A durable upload intent starts in the `Created` state and can only move
+//! // forward through the persistence boundaries.
+//! let intent = UploadIntent::new(
+//!     "intent-1".to_owned(),
+//!     "chunks/aa/bb/example.xorb".to_owned(),
+//!     "a".repeat(64),
+//!     1024,
+//! );
+//! assert_eq!(intent.state(), UploadIntentState::Created);
+//! assert!(intent.state().can_transition_to(UploadIntentState::Storing));
+//! assert!(!intent.state().can_transition_to(UploadIntentState::Visible));
 //!
-//! assert_eq!(file_id.hash().as_bytes(), &[1; 32]);
-//! assert_eq!(reconstruction.terms()[0].object_id(), object_id);
+//! // A stored file record must describe a contiguous, ordered chunk plan.
+//! let hash = "a".repeat(64);
+//! let record = FileRecord {
+//!     file_id: "assets/logo.png".to_owned(),
+//!     content_hash: hash.clone(),
+//!     total_bytes: 1024,
+//!     chunk_size: 1024,
+//!     storage_repr: StorageRepresentation::FixedChunkV1,
+//!     repository_scope: None,
+//!     chunks: vec![FileChunkRecord {
+//!         hash,
+//!         offset: 0,
+//!         length: 1024,
+//!         range_start: 0,
+//!         range_end: 1,
+//!         packed_start: 0,
+//!         packed_end: 1,
+//!     }],
+//! };
+//! record.validate_reconstruction_plan()?;
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
@@ -43,6 +72,7 @@ mod provider;
 mod reconstruction;
 mod record;
 mod record_key;
+mod record_kind;
 #[cfg(test)]
 mod test_invariant_error;
 mod tree;

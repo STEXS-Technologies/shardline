@@ -5,6 +5,46 @@
 //! This crate provides OCI registry protocol support: upload session management,
 //! manifest and blob key construction, content-addressed storage helpers, and
 //! S3 multipart upload orchestration.
+//!
+//! # Quick start
+//!
+//! The reference and key helpers are pure and are the easiest place to start:
+//!
+//! ```
+//! use shardline_oci_adapter::{OciReference, parse_reference, validate_repository};
+//!
+//! // A reference is either a `sha256:` digest or a tag.
+//! let digest = parse_reference(
+//!     "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+//! )?;
+//! assert!(matches!(digest, OciReference::Digest(_)));
+//!
+//! let tag = parse_reference("v1.2.3")?;
+//! assert!(matches!(tag, OciReference::Tag(_)));
+//!
+//! // Repository names follow OCI naming rules.
+//! assert!(validate_repository("acme/models").is_ok());
+//! assert!(validate_repository("Acme/Models").is_err());
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
+//!
+//! `oci_*_key` functions map those references to validated storage
+//! [`ObjectKey`](shardline_storage::ObjectKey) values:
+//!
+//! ```
+//! use shardline_oci_adapter::oci_blob_key;
+//!
+//! let key = oci_blob_key(
+//!     "acme/models",
+//!     "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+//!     None,
+//! )?;
+//! assert!(key.as_str().starts_with("protocols/oci/"));
+//! assert!(key.as_str().ends_with(
+//!     "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+//! ));
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
 
 mod error;
 mod protocol_support;

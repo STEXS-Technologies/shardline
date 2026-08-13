@@ -567,13 +567,24 @@ fn parse_bool_false_variants() {
 #[test]
 fn parse_bool_rejects_invalid_inputs() {
     assert_eq!(parse_bool(""), None);
-    assert_eq!(parse_bool("True"), None);
-    assert_eq!(parse_bool("FALSE"), None);
-    assert_eq!(parse_bool("YES"), None);
     assert_eq!(parse_bool("maybe"), None);
-    assert_eq!(parse_bool("  true"), None);
-    assert_eq!(parse_bool("true "), None);
-    assert_eq!(parse_bool("yes "), None);
+    assert_eq!(parse_bool("tru"), None);
+    assert_eq!(parse_bool("yess"), None);
+    assert_eq!(parse_bool("on "), Some(true)); // surrounding whitespace is tolerated
+    assert_eq!(parse_bool(" true"), Some(true));
+}
+
+#[test]
+fn parse_bool_is_case_insensitive_and_whitespace_tolerant() {
+    assert_eq!(parse_bool("True"), Some(true));
+    assert_eq!(parse_bool("FALSE"), Some(false));
+    assert_eq!(parse_bool("YES"), Some(true));
+    assert_eq!(parse_bool("No"), Some(false));
+    assert_eq!(parse_bool("ON"), Some(true));
+    assert_eq!(parse_bool("off"), Some(false));
+    assert_eq!(parse_bool("  true "), Some(true));
+    assert_eq!(parse_bool("\tfalse\n"), Some(false));
+    assert_eq!(parse_bool(" 1 "), Some(true));
 }
 
 // ===========================================================================

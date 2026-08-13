@@ -7,7 +7,7 @@ use axum::{
 use crate::{error::HubApiError, resolve};
 use shardline_protocol::TokenScope;
 
-use super::{HubState, authorize};
+use super::{HubState, authorize_with_context, require_repository_binding};
 
 // ---- File resolve (download, requires Read) ----
 
@@ -36,14 +36,20 @@ async fn resolve_file_for_repository(
     file_path: String,
 ) -> Result<Response, HubApiError> {
     shardline_metrics::record_hub_api_request("resolve_file", "GET", 200);
-    authorize(&state, &headers, TokenScope::Read)?;
+    let auth_ctx = authorize_with_context(&state, &headers, TokenScope::Read)?;
+    require_repository_binding(auth_ctx.as_ref(), &ns, &repo)?;
     let name = format!("{ns}/{repo}");
     let commit_sha = state
         .store
         .resolve_revision(&name, &rev)
         .map_err(|e| HubApiError::CasError(e.to_string()))?
         .ok_or(HubApiError::RevisionNotFound)?;
-    let result = resolve::resolve_file_from_store(&state, &commit_sha, &file_path)?;
+    let result = resolve::resolve_file_from_store_scoped(
+        &state,
+        &commit_sha,
+        &file_path,
+        auth_ctx.as_ref().map(|c| c.claims().repository()),
+    )?;
 
     match result {
         resolve::DownloadResult::Inline { size, sha, content } => {

@@ -75,6 +75,7 @@ pub(crate) fn setup() {
             object_store,
             auth: None,
             http_client: None,
+            webhook_secret_cipher: None,
         };
         let _ = STATE.set(state);
 

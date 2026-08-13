@@ -650,6 +650,30 @@ impl HubStore for PostgresIndexStore {
         })
     }
 
+    fn update_webhook_secret(
+        &self,
+        repo_id: &str,
+        webhook_id: &str,
+        secret: Option<&str>,
+    ) -> Result<(), Self::Error> {
+        let pool = self.pool().clone();
+        let repo_id = repo_id.to_owned();
+        let webhook_id = webhook_id.to_owned();
+        let secret = secret.map(SecretString::from_secret);
+
+        block_on_async(async {
+            sqlx::query(
+                "UPDATE shardline_hub_webhooks SET secret = $1 WHERE repo_id = $2 AND id = $3",
+            )
+            .bind(secret.as_ref().map(SecretString::as_ref))
+            .bind(&repo_id)
+            .bind(&webhook_id)
+            .execute(&pool)
+            .await?;
+            Ok(())
+        })
+    }
+
     fn webhooks_for_event(
         &self,
         repo_id: &str,

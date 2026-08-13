@@ -30,6 +30,19 @@ pub struct MemoryReconstructionCache {
 
 impl MemoryReconstructionCache {
     /// Creates a bounded in-memory reconstruction cache.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use shardline_cache::MemoryReconstructionCache;
+    /// use std::num::{NonZeroU64, NonZeroUsize};
+    ///
+    /// // Entries expire after 60 seconds; at most 1_000 are kept.
+    /// let ttl = NonZeroU64::try_from(60)?;
+    /// let max_entries = NonZeroUsize::try_from(1_000)?;
+    /// let cache = MemoryReconstructionCache::new(ttl, max_entries);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     #[must_use]
     pub fn new(ttl_seconds: NonZeroU64, max_entries: NonZeroUsize) -> Self {
         Self {
@@ -241,7 +254,15 @@ impl AsyncReconstructionCache for MemoryReconstructionCache {
     ) -> ReconstructionCacheFuture<'operation, bool> {
         Box::pin(async move {
             let mut inner = self.inner.write().await;
-            Ok(inner.remove(key).is_some())
+            let removed = inner.remove(key).is_some();
+            // Also release any in-flight loading latch for this key. The key is
+            // explicitly gone, so waiting callers must wake and observe an
+            // absence rather than block until the adapter's stall timeout. This
+            // is what lets a failed loader's concurrency latch be cleaned up.
+            if let Some(notify) = inner.loading.remove(key) {
+                notify.notify_waiters();
+            }
+            Ok(removed)
         })
     }
 }

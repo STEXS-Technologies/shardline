@@ -1,15 +1,17 @@
-//! [`XetClient`] builder and handle for the sdx CAS read path (M2a / M2b1).
+//! Build and use a Xet client: download files from (and upload files to) a
+//! Xet repository, addressed by 64-hex content id.
 //!
-//! The client maps a `xet://` endpoint URL (`docs/XET_NATIVE_CLI.md` "URL
-//! Scheme") onto an API base URL and repository identity, holds the
-//! [`TokenService`](crate::auth::TokenService) (M1), and exposes
-//! [`DownloadSession`]s.
+//! A [`XetClient`] maps a `xet://` endpoint URL onto an API base URL and a
+//! repository identity, holds the [`TokenService`](crate::auth::TokenService)
+//! that issues repo-scoped CAS tokens, and exposes downloads (and uploads)
+//! over [`DownloadSession`]s. The endpoint form is:
 //!
 //! ```text
 //! xet://<host>[:<port>]/<provider>/<owner>/<repo>/<revision>
 //! ```
 //!
-//! Path addressing (`xet://…/<revision>/<path>`) arrives in M5.
+//! (Milestone labels like `M2a`/`M2b1` in the code below refer to the internal
+//! `docs/SDX_PLAN.md` design history; path addressing arrives in M5.)
 
 use std::{path::PathBuf, sync::Arc};
 
@@ -30,10 +32,51 @@ use crate::{
     transfer::TransferClient,
 };
 
-/// A configured Xet client handle.
+/// A configured Xet client handle for one repository.
 ///
-/// Clone is cheap: the handle shares the HTTP client, token service, endpoint
-/// state, and the byte-denominated download buffer semaphore.
+/// Built with [`XetClientBuilder`], then used to download files by 64-hex
+/// content id (streaming with bounded memory) or upload new ones. Clone is
+/// cheap: the handle shares the HTTP client, token service, endpoint state,
+/// and the byte-denominated download buffer semaphore.
+///
+/// # Examples
+///
+/// Build a client and download a file:
+///
+/// ```no_run
+/// # async fn example() -> Result<(), sdx::SdxError> {
+/// use sdx::{Auth, RepositoryId, XetClientBuilder};
+///
+/// let client = XetClientBuilder::new()
+///     .endpoint("xet://127.0.0.1:8080/github/team/assets/main")
+///     .auth(
+///         Auth::new(
+///             "http://127.0.0.1:8080",
+///             RepositoryId {
+///                 provider: "github".to_owned(),
+///                 owner: "team".to_owned(),
+///                 repo: "assets".to_owned(),
+///                 revision: "main".to_owned(),
+///             },
+///         )?
+///         .with_api_key("bootstrap".to_owned()),
+///     )
+///     .build()?;
+///
+/// // `file_id` is the 64-hex content hash of the file to fetch.
+/// let file_id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+///
+/// // In-memory convenience path (modest files):
+/// let bytes = client.download_bytes(file_id).await?;
+///
+/// // Or stream chunk-by-chunk with bounded memory:
+/// let mut stream = client.download_stream(file_id, None).await?;
+/// while let Some(chunk) = stream.next().await? {
+///     println!("chunk of {} bytes", chunk.len());
+/// }
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Clone)]
 pub struct XetClient {
     inner: Arc<DownloadSessionInner>,
@@ -53,9 +96,12 @@ impl XetClient {
         }
     }
 
-    /// Returns a pull-based streaming download of `file_id` (full file).
+    /// Downloads `file_id` as a streaming, bounded-memory byte reader (the
+    /// full file).
     ///
-    /// See [`DownloadSession::download_stream`] for details.
+    /// The returned [`DownloadStream`] yields `Bytes` chunks in file order; the
+    /// file is never buffered whole. See [`DownloadSession::download_stream`]
+    /// for details.
     ///
     /// # Errors
     ///
@@ -70,8 +116,9 @@ impl XetClient {
             .await
     }
 
-    /// Returns a pull-based streaming download of `file_id` that yields
-    /// `(file_offset, Bytes)` pairs in completion order.
+    /// Downloads `file_id` as a streaming, bounded-memory byte reader that
+    /// yields `(file_offset, Bytes)` pairs in completion order (first chunk to
+    /// finish first).
     ///
     /// See [`DownloadSession::download_unordered_stream`] for details.
     ///
@@ -127,10 +174,8 @@ impl XetClient {
         self.inner.tokens.cas_url()
     }
 
-    /// Creates a stream group over the client's repository.
-    ///
-    /// The group manages concurrent pull-based streams with abort-all and
-    /// per-stream status (see [`XetStreamGroup`], `docs/SDX_PLAN.md` §4.4.3).
+    /// Creates a stream group for running concurrent downloads under one
+    /// handle, with abort-all and per-stream status (see [`XetStreamGroup`]).
     #[must_use]
     pub fn new_download_stream_group(&self) -> XetStreamGroup {
         XetStreamGroup::new(self.inner.clone())
@@ -149,18 +194,18 @@ impl XetClient {
         self.inner.chunk_cache.clone()
     }
 
-    /// Returns a [`DedupClient`] sharing this client's CAS transport for
-    /// global dedup queries (M3a).
+    /// Returns a [`DedupClient`] for querying the global dedup store, sharing
+    /// this client's CAS transport.
     ///
     /// Resolve a write-scoped token and pass its `token` and the CAS base URL
-    /// to [`DedupClient::query_for_global_dedup_shard`] (M3b wires this into
-    /// the upload session).
+    /// to [`DedupClient::query_for_global_dedup_shard`].
     #[must_use]
     pub fn dedup_client(&self) -> DedupClient {
         DedupClient::new(self.inner.transfer.clone())
     }
 
-    /// Creates an [`crate::upload::UploadSession`] over this client's repository (M3b).
+    /// Creates an [`crate::upload::UploadSession`] for writing files into this
+    /// client's repository.
     ///
     /// A session is reusable across multiple files and must be finalized with
     /// [`crate::upload::UploadSession::finalize`] (which uploads the session shard).
@@ -228,7 +273,8 @@ impl XetClient {
         Ok(info)
     }
 
-    /// Creates an upload group over this client's repository (M3b §4.4.3).
+    /// Creates an upload group for running multiple concurrent uploads under
+    /// one handle.
     ///
     /// The group owns an [`crate::upload::UploadSession`]; handles returned by
     /// [`crate::group::XetUploadCommit::upload_stream`] fan into the same pipeline and the
@@ -262,7 +308,10 @@ impl Default for XetClientBuilder {
     }
 }
 
-/// Builder for [`XetClient`].
+/// Builder for [`XetClient`]: configure the `xet://` endpoint, authentication,
+/// memory/concurrency limits, chunk cache, and retry policy, then build.
+///
+/// # Examples
 ///
 /// ```no_run
 /// # async fn example() -> Result<(), sdx::SdxError> {
@@ -280,11 +329,13 @@ impl Default for XetClientBuilder {
 /// .with_api_key("bootstrap".to_owned())
 /// .with_subject("user".to_owned());
 ///
-/// let client = XetClientBuilder::new()
+/// let _client = XetClientBuilder::new()
 ///     .endpoint("xet://127.0.0.1:8080/github/team/assets/main")
 ///     .auth(auth)
+///     // Bound streaming memory to 256 MiB and allow 8 concurrent fetches.
+///     .with_buffer_semaphore(256 * 1024 * 1024)
+///     .with_download_concurrency(8)
 ///     .build()?;
-/// let session = client.download_session();
 /// # Ok(())
 /// # }
 /// ```
@@ -328,7 +379,8 @@ impl XetClientBuilder {
         self
     }
 
-    /// Sets the authentication configuration (M1 [`Auth`]).
+    /// Sets the authentication configuration ([`Auth`]): how the client
+    /// obtains repo-scoped CAS tokens.
     #[must_use]
     pub fn auth(mut self, auth: Auth) -> Self {
         self.auth = Some(auth);
@@ -356,10 +408,9 @@ impl XetClientBuilder {
         self
     }
 
-    /// Sets the fixed CAS connection-permit count (how many ranged xorb
-    /// fetches run concurrently per client). Defaults to 4. The fixed override
-    /// is the M4 §6.4 knob; an adaptive controller that scales concurrency from
-    /// measured RTT is a documented future default seam.
+    /// Sets how many ranged chunk fetches may run concurrently per client
+    /// (default 4). Higher values can improve throughput on high-latency links
+    /// at the cost of more in-flight requests.
     #[must_use]
     #[allow(clippy::missing_const_for_fn)]
     pub fn with_download_concurrency(mut self, concurrency: usize) -> Self {
@@ -404,10 +455,11 @@ impl XetClientBuilder {
         self
     }
 
-    /// Sets the CDC target chunk size used by uploads (M3b).
+    /// Sets the content-defined chunking (CDC) target chunk size used by
+    /// uploads.
     ///
     /// Must be a power of two and greater than 64; the default is 64 KiB
-    /// (`docs/SDX_PLAN.md` §4.4.2, mirroring the server's chunker).
+    /// (mirroring the server's chunker).
     #[must_use]
     pub const fn with_upload_chunk_size(mut self, chunk_size: usize) -> Self {
         self.upload_chunk_size = chunk_size;
@@ -423,7 +475,8 @@ impl XetClientBuilder {
         self
     }
 
-    /// Sets the retry policy applied to all CAS requests (M4 §6.3).
+    /// Sets the retry policy applied to all CAS requests (attempts, backoff,
+    /// and 401/403 token refresh).
     #[must_use]
     pub const fn with_retry_policy(mut self, policy: RetryPolicy) -> Self {
         self.retry_policy = policy;

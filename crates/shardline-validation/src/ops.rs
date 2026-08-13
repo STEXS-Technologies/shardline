@@ -5,6 +5,16 @@ pub const MAX_LOCAL_RECORD_METADATA_BYTES: u64 = 1_073_741_824;
 
 /// Checked addition returning an error on overflow.
 ///
+/// # Examples
+///
+/// ```
+/// use shardline_validation::checked_add;
+///
+/// assert_eq!(checked_add(40, 2)?, 42);
+/// assert!(checked_add(u64::MAX, 1).is_err());
+/// # Ok::<(), shardline_validation::RebuildOverflowError>(())
+/// ```
+///
 /// # Errors
 ///
 /// Returns [`RebuildOverflowError`] when the addition overflows.

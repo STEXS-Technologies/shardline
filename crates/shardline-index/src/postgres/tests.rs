@@ -8,7 +8,7 @@
 
 use shardline_protocol::{ChunkRange, RepositoryProvider, RepositoryScope, ShardlineHash};
 
-use super::PostgresRecordKind;
+use super::RecordKind;
 use super::index_store::PostgresFileReconstructionRecord;
 use super::record_store::record_locator;
 use super::types::{i64_to_u64, u64_to_i64};
@@ -57,14 +57,9 @@ fn postgres_record_keys_distinguish_scope_file_and_kind_without_parsing() {
 
     assert_ne!(first_key, second_key);
     assert_ne!(
+        shared_record_key(RecordKind::Latest.as_str(), &first_key, "file", None),
         shared_record_key(
-            PostgresRecordKind::Latest.as_str(),
-            &first_key,
-            "file",
-            None
-        ),
-        shared_record_key(
-            PostgresRecordKind::Version.as_str(),
+            RecordKind::Version.as_str(),
             &first_key,
             "file",
             Some("a".repeat(64).as_str())
@@ -81,8 +76,8 @@ fn postgres_latest_locator_ignores_content_hash_for_stable_head_keys() {
     };
     let first = file_record(scope.clone(), "a");
     let second = file_record(scope, "b");
-    let first_key = record_locator(PostgresRecordKind::Latest, &first, None);
-    let second_key = record_locator(PostgresRecordKind::Latest, &second, None);
+    let first_key = record_locator(RecordKind::Latest, &first, None);
+    let second_key = record_locator(RecordKind::Latest, &second, None);
 
     assert_eq!(first_key, second_key);
 }
@@ -161,7 +156,7 @@ fn postgres_record_locator_version_includes_content_hash_in_key() {
     let scope = RepositoryScope::new(RepositoryProvider::GitHub, "team", "repo", None).unwrap();
     let record = file_record(scope, "content");
     let locator = record_locator(
-        PostgresRecordKind::Version,
+        RecordKind::Version,
         &record,
         Some(record.content_hash.clone()),
     );
@@ -175,7 +170,7 @@ fn postgres_record_locator_version_includes_content_hash_in_key() {
 fn postgres_record_locator_latest_has_no_content_hash() {
     let scope = RepositoryScope::new(RepositoryProvider::GitHub, "team", "repo", None).unwrap();
     let record = file_record(scope, "content");
-    let locator = record_locator(PostgresRecordKind::Latest, &record, None);
+    let locator = record_locator(RecordKind::Latest, &record, None);
 
     assert!(locator.content_hash().is_none());
     assert_eq!(locator.file_id(), record.file_id);
@@ -185,9 +180,9 @@ fn postgres_record_locator_latest_has_no_content_hash() {
 fn postgres_record_locator_keys_differ_by_kind() {
     let scope = RepositoryScope::new(RepositoryProvider::GitHub, "team", "repo", None).unwrap();
     let record = file_record(scope, "content");
-    let latest = record_locator(PostgresRecordKind::Latest, &record, None);
+    let latest = record_locator(RecordKind::Latest, &record, None);
     let version = record_locator(
-        PostgresRecordKind::Version,
+        RecordKind::Version,
         &record,
         Some(record.content_hash.clone()),
     );

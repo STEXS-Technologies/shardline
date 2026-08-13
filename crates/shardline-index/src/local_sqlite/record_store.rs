@@ -4,7 +4,7 @@ use rusqlite::{OptionalExtension, params};
 use shardline_protocol::unix_now_seconds_lossy;
 
 use super::{
-    LocalIndexStoreError, LocalRecordKind, LocalRecordLocator, LocalRecordStore, i64_to_u64,
+    LocalIndexStoreError, LocalRecordLocator, LocalRecordStore, RecordKind, i64_to_u64,
     record_not_found_error,
 };
 use crate::{
@@ -20,7 +20,7 @@ impl RecordTraversal for LocalRecordStore {
     ) -> RecordStoreFuture<'_, Vec<Self::Locator>, Self::Error> {
         let store = self.clone();
         Box::pin(async move {
-            tokio::task::spawn_blocking(move || store.list_record_locators(LocalRecordKind::Latest))
+            tokio::task::spawn_blocking(move || store.list_record_locators(RecordKind::Latest))
                 .await
                 .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
         })
@@ -34,7 +34,7 @@ impl RecordTraversal for LocalRecordStore {
         let repository = repository.clone();
         Box::pin(async move {
             tokio::task::spawn_blocking(move || {
-                store.list_repository_record_locators(LocalRecordKind::Latest, &repository)
+                store.list_repository_record_locators(RecordKind::Latest, &repository)
             })
             .await
             .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
@@ -46,11 +46,9 @@ impl RecordTraversal for LocalRecordStore {
     ) -> RecordStoreFuture<'_, Vec<Self::Locator>, Self::Error> {
         let store = self.clone();
         Box::pin(async move {
-            tokio::task::spawn_blocking(move || {
-                store.list_record_locators(LocalRecordKind::Version)
-            })
-            .await
-            .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
+            tokio::task::spawn_blocking(move || store.list_record_locators(RecordKind::Version))
+                .await
+                .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
         })
     }
 
@@ -62,7 +60,7 @@ impl RecordTraversal for LocalRecordStore {
         let repository = repository.clone();
         Box::pin(async move {
             tokio::task::spawn_blocking(move || {
-                store.list_repository_record_locators(LocalRecordKind::Version, &repository)
+                store.list_repository_record_locators(RecordKind::Version, &repository)
             })
             .await
             .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
@@ -154,12 +152,12 @@ impl RecordTraversal for LocalRecordStore {
     }
 
     fn latest_record_locator(&self, record: &FileRecord) -> Self::Locator {
-        super::helpers::local_record_locator(LocalRecordKind::Latest, record, None)
+        super::helpers::local_record_locator(RecordKind::Latest, record, None)
     }
 
     fn version_record_locator(&self, record: &FileRecord) -> Self::Locator {
         super::helpers::local_record_locator(
-            LocalRecordKind::Version,
+            RecordKind::Version,
             record,
             Some(record.content_hash.clone()),
         )

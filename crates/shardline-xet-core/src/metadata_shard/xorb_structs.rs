@@ -12,6 +12,15 @@ pub const MDB_CHUNK_WITH_GLOBAL_DEDUP_FLAG: u32 = 1 << 31;
 const MDB_SHARD_FORMAT_V3: u64 = 3;
 const MDB_V2_INFO_ENTRY_SIZE: usize = 48;
 
+/// Maximum number of chunk entries a single xorb may declare in its shard
+/// header (`XorbChunkSequenceHeader::num_entries`). Each entry serializes to
+/// 64 bytes, so this caps a single xorb's chunk table at 64 MiB. A valid xorb
+/// holds at most one `XORB_BLOCK_SIZE` (16 MiB) of data split into chunks of
+/// at least `TARGET_CHUNK_SIZE`, so 1 Mi entries is far beyond any legitimate
+/// xorb. This guards `Vec::with_capacity` against attacker-inflated counts
+/// read from a shard header before any bound is enforced.
+const MAX_XORB_CHUNK_ENTRIES: usize = 1 << 20;
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct XorbChunkSequenceHeader {
     pub xorb_hash: MerkleHash,
@@ -190,8 +199,20 @@ impl MDBXorbInfo {
         if metadata.is_bookend() {
             return Ok(None);
         }
-        let mut chunks = Vec::with_capacity(metadata.num_entries as usize);
-        for _ in 0..metadata.num_entries {
+        let num_entries = usize::try_from(metadata.num_entries).map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("xorb num_entries does not fit in usize: {e}"),
+            )
+        })?;
+        if num_entries > MAX_XORB_CHUNK_ENTRIES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "xorb chunk entry count exceeds maximum",
+            ));
+        }
+        let mut chunks = Vec::with_capacity(num_entries);
+        for _ in 0..num_entries {
             chunks.push(XorbChunkSequenceEntry::deserialize(reader, version)?);
         }
         Ok(Some(Self { metadata, chunks }))
@@ -511,6 +532,17 @@ mod tests {
         bookend.serialize(&mut buf).unwrap();
         let mut r = Cursor::new(&buf);
         assert!(MDBXorbInfo::deserialize(&mut r, 3).unwrap().is_none());
+    }
+
+    #[test]
+    fn info_deserialize_rejects_too_many_entries() {
+        // A shard header declaring more than the allocation cap must error
+        // instead of attempting a huge `Vec::with_capacity`.
+        let header = make_header(MAX_XORB_CHUNK_ENTRIES as u64 + 1, 0);
+        let mut buf = Vec::new();
+        header.serialize(&mut buf).unwrap();
+        let mut r = Cursor::new(&buf);
+        assert!(MDBXorbInfo::deserialize(&mut r, 3).is_err());
     }
 
     #[test]

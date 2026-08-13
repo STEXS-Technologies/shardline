@@ -1,8 +1,9 @@
-//! Token issuance, caching, and refresh for the `sdx` client (M1).
+//! Authentication for Xet repositories: issue, cache, and transparently
+//! refresh repo+revision-scoped read/write CAS tokens.
 //!
-//! Implements the §5.2 authentication design from `docs/SDX_PLAN.md` against
-//! the shardline token-issuance wire contract (the "Step 1 — Token Issuance"
-//! section of `docs/XET_NATIVE_CLI.md`):
+//! Tokens are issued against the shardline token-issuance wire contract (the
+//! "Step 1 — Token Issuance" section of `docs/XET_NATIVE_CLI.md`, design §5.2
+//! of `docs/SDX_PLAN.md`):
 //!
 //! - `GET /api/{provider}/{owner}/{repo}/xet-read-token/{rev}` and
 //!   `GET /api/{provider}/{owner}/{repo}/xet-write-token/{rev}`, using the
@@ -119,7 +120,7 @@ impl Default for HttpConfig {
 /// Configuration for the [`TokenService`]: endpoint, repository identity,
 /// credential sources, optional subject, and HTTP timeouts.
 ///
-/// Credential sources are resolved in the §5.2 priority order:
+/// Credential sources are resolved in priority order:
 ///
 /// 1. explicit static token ([`Auth::with_token`])
 /// 2. explicit API key ([`Auth::with_api_key`])
@@ -127,7 +128,7 @@ impl Default for HttpConfig {
 /// 4. environment (`SHARDLINE_TOKEN` / `SHARDLINE_API_KEY` /
 ///    `SHARDLINE_TOKEN_FILE`, resolved by [`crate::config`])
 ///
-/// Config-file `[auth]` section parsing is M6 CLI scope and is intentionally
+/// Config-file `[auth]` section parsing is CLI scope and is intentionally
 /// not handled here.
 #[derive(Clone)]
 pub struct Auth {
@@ -457,11 +458,38 @@ struct CacheState {
     write_inflight: Option<Shared<RefreshFuture>>,
 }
 
-/// Token-issuance client with per-scope caching and single-flight refresh.
+/// Token-issuance client with per-scope caching and transparent refresh.
 ///
-/// Cheap to clone and share across tasks: the shared state lives behind an
-/// [`Arc`]. All methods are safe to call concurrently; at most one issuance
-/// request is in flight per scope at any time.
+/// Resolves the repo+revision-scoped read/write CAS token used for downloads
+/// and uploads. Cheap to clone and share across tasks: the shared state lives
+/// behind an [`Arc`], and at most one issuance request is in flight per scope
+/// (concurrent callers share the same in-flight refresh).
+///
+/// # Examples
+///
+/// ```no_run
+/// # async fn example() -> Result<(), sdx::AuthError> {
+/// use sdx::{Auth, RepositoryId};
+///
+/// let tokens = Auth::new(
+///     "http://127.0.0.1:8080",
+///     RepositoryId {
+///         provider: "github".to_owned(),
+///         owner: "team".to_owned(),
+///         repo: "assets".to_owned(),
+///         revision: "main".to_owned(),
+///     },
+/// )?
+/// .with_api_key("bootstrap".to_owned())
+/// .build()?;
+///
+/// // Resolve a read-scoped token for downloads (`write_token` for uploads);
+/// // repeated calls hit the cache and only re-issue near expiration.
+/// let read = tokens.read_token().await?;
+/// println!("CAS base: {}", read.cas_url);
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Clone)]
 pub struct TokenService {
     inner: Arc<TokenServiceInner>,

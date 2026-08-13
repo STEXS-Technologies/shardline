@@ -132,7 +132,18 @@ impl ReconstructionCacheService {
         }
 
         shardline_metrics::record_reconstruction_cache_miss();
-        let response = load().await?;
+        let response = match load().await {
+            Ok(response) => response,
+            Err(error) => {
+                // The adapter may have registered an in-flight loading latch for
+                // `key` during get(). If the loader failed, that latch is never
+                // released by a put(); without cleanup, concurrent callers wait on
+                // it until the adapter's stall timeout. Delete the key so the
+                // latch is removed and waiters wake and retry promptly.
+                self.adapter.delete(key).await.ok();
+                return Err(error);
+            }
+        };
         let payload = to_vec(&response)?;
         if payload_within_bound(&payload) {
             let _ignored = self.adapter.put(key, &payload).await;

@@ -2,6 +2,32 @@ use super::RebuildError;
 use super::types::{IndexRebuildIssue, IndexRebuildIssueDetail, IndexRebuildIssueKind};
 
 /// Index-rebuild report.
+///
+/// Aggregates the outcome of one rebuild run: how many version records and
+/// retained shards were scanned, how many latest records were recreated or
+/// left unchanged, and which non-fatal issues were collected.
+///
+/// # Examples
+///
+/// ```
+/// use shardline_rebuild::IndexRebuildReport;
+///
+/// let report = IndexRebuildReport {
+///     scanned_version_records: 100,
+///     scanned_retained_shards: 5,
+///     rebuilt_latest_records: 0,
+///     unchanged_latest_records: 100,
+///     removed_stale_latest_records: 0,
+///     scanned_reconstructions: 5,
+///     unchanged_reconstructions: 5,
+///     removed_stale_reconstructions: 0,
+///     rebuilt_dedupe_shard_mappings: 0,
+///     unchanged_dedupe_shard_mappings: 0,
+///     removed_stale_dedupe_shard_mappings: 0,
+///     issues: Vec::new(),
+/// };
+/// assert!(report.is_clean());
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexRebuildReport {
     /// Number of version records scanned through the configured record store.

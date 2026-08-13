@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::io::{Seek, SeekFrom, Write};
+use std::str::FromStr;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Instant;
 
@@ -25,7 +26,7 @@ use super::{MAX_LFS_BATCH_OBJECTS, direct_object_response};
 use crate::app::{AppState, authorize, scope_from_auth};
 use crate::{
     LFS_CONTENT_TYPE, LfsBatchRequest, LfsBatchResponse, LfsObjectError, LfsObjectResponse,
-    ServerError,
+    LfsOperation, ServerError, TransferAdapter,
     admission::weights,
     cas_headers::{ACCESS_TOKEN, TOKEN_EXPIRATION, URL},
     lfs_object_key, metrics,
@@ -36,6 +37,12 @@ use crate::{
 /// Objects above this threshold are rejected with a 413 to prevent OOM.
 const MAX_LFS_VERIFY_BYTES: u64 = 1_073_741_824; // 1 GiB
 const MAX_LFS_PATCH_RANGES: usize = 65_536;
+/// Maximum declared LFS object size accepted by the chunked PATCH path (1 TiB).
+///
+/// Bounds the declared `total` from a `Content-Range` header so a caller cannot
+/// request an arbitrary `u64` offset (which would create a multi-TiB sparse
+/// staging file). One TiB is well above any legitimate dataset/model object.
+const MAX_LFS_OBJECT_SIZE: u64 = 1 << 40; // 1 TiB
 
 /// Returns a 422 UNPROCESSABLE_ENTITY response for LFS validation errors.
 fn lfs_validation_response(message: &str) -> Response {
@@ -147,10 +154,13 @@ pub(crate) async fn lfs_batch(
     headers: HeaderMap,
     Json(request): Json<LfsBatchRequest>,
 ) -> Result<Response, ServerError> {
-    let requested_scope = match request.operation.as_str() {
-        "download" => TokenScope::Read,
-        "upload" => TokenScope::Write,
-        _ => return Ok(lfs_validation_response("unsupported operation")),
+    let operation = match LfsOperation::from_str(&request.operation) {
+        Ok(operation) => operation,
+        Err(()) => return Ok(lfs_validation_response("unsupported operation")),
+    };
+    let requested_scope = match operation {
+        LfsOperation::Download => TokenScope::Read,
+        LfsOperation::Upload => TokenScope::Write,
     };
     let auth = authorize(&state, &headers, requested_scope)?;
     if request.objects.len() > MAX_LFS_BATCH_OBJECTS {
@@ -176,13 +186,21 @@ pub(crate) async fn lfs_batch(
 
     // Determine the transfer adapter. Prefer "xet" when the client supports it
     // and the server has an auth provider to mint CAS tokens. Fall back to "basic".
-    let use_xet =
-        request.transfers.iter().any(|t| t == "xet") && state.auth.is_some() && auth.is_some();
+    let adapters: Vec<Option<TransferAdapter>> = request
+        .transfers
+        .iter()
+        .map(|transfer| match transfer.as_str() {
+            "xet" => Some(TransferAdapter::Xet),
+            "basic" => Some(TransferAdapter::Basic),
+            _ => None,
+        })
+        .collect();
+    let supports_xet = adapters.contains(&Some(TransferAdapter::Xet));
+    let supports_basic = adapters.contains(&Some(TransferAdapter::Basic));
+    let use_xet = supports_xet && state.auth.is_some() && auth.is_some();
     let transfer = if use_xet {
         "xet"
-    } else if request.transfers.is_empty()
-        || request.transfers.iter().any(|transfer| transfer == "basic")
-    {
+    } else if request.transfers.is_empty() || supports_basic {
         "basic"
     } else {
         return Ok((
@@ -228,8 +246,8 @@ pub(crate) async fn lfs_batch(
             }
         };
         let object_length = state.backend.object_length(&object_key).await;
-        match request.operation.as_str() {
-            "download" => match object_length {
+        match operation {
+            LfsOperation::Download => match object_length {
                 Ok(length) => {
                     let action = if let Some(ref header) = xet_action_header {
                         json!({
@@ -271,7 +289,7 @@ pub(crate) async fn lfs_batch(
                 }),
                 Err(error) => return Err(error),
             },
-            "upload" => {
+            LfsOperation::Upload => {
                 let (size, actions) = match object_length {
                     Ok(length) => (length, None),
                     Err(ServerError::NotFound) => {
@@ -307,9 +325,6 @@ pub(crate) async fn lfs_batch(
                     error: None,
                 });
             }
-            // Operation was validated as "download" or "upload" above — this
-            // arm exists only for match exhaustiveness on &str.
-            _ => {}
         }
     }
     Ok((
@@ -487,6 +502,14 @@ pub(crate) async fn lfs_patch_object(
             StatusCode::RANGE_NOT_SATISFIABLE,
             [(CONTENT_TYPE, LFS_CONTENT_TYPE)],
             Json(json!({ "message": "Content-Range exceeds object length" })),
+        )
+            .into_response());
+    }
+    if total > MAX_LFS_OBJECT_SIZE {
+        return Ok((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            [(CONTENT_TYPE, LFS_CONTENT_TYPE)],
+            Json(json!({ "message": "declared object size exceeds maximum allowed" })),
         )
             .into_response());
     }

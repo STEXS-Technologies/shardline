@@ -19,6 +19,16 @@ pub type Sha256 = MerkleHash;
 const MDB_SHARD_FORMAT_V3: u64 = 3;
 const MDB_V2_INFO_ENTRY_SIZE: usize = 48;
 
+/// Maximum number of file segments (and, when verification is present, the same
+/// number of verification entries) a single file may declare in its shard
+/// header (`FileDataSequenceHeader::num_entries`). Each entry serializes to
+/// `MDB_FILE_INFO_ENTRY_SIZE` (60) bytes, so this caps a single file's entry
+/// table at ~60 MiB. A valid file's segments are bounded by the shard's xorb
+/// count; 1 Mi entries is far beyond any legitimate file. This guards
+/// `Vec::with_capacity` against attacker-inflated counts read from a shard
+/// header before any bound is enforced.
+const MAX_FILE_SEGMENTS: usize = 1 << 20;
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 #[repr(C)]
 pub struct FileDataSequenceHeader {
@@ -387,7 +397,18 @@ impl MDBFileInfo {
             return Ok(None);
         }
 
-        let num_entries = metadata.num_entries as usize;
+        let num_entries = usize::try_from(metadata.num_entries).map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("file num_entries does not fit in usize: {e}"),
+            )
+        })?;
+        if num_entries > MAX_FILE_SEGMENTS {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "file segment count exceeds maximum",
+            ));
+        }
         let mut segments = Vec::with_capacity(num_entries);
         for _ in 0..num_entries {
             segments.push(FileDataSequenceEntry::deserialize(reader, version)?);
@@ -638,6 +659,22 @@ mod tests {
         assert_eq!(info.segments[0].chunk_index_end, 11);
         assert!(MDBFileInfo::deserialize(&mut reader, 2).unwrap().is_none());
         assert_eq!(reader.position(), 3 * MDB_V2_INFO_ENTRY_SIZE as u64);
+    }
+
+    #[test]
+    fn file_info_deserialize_rejects_too_many_segments() {
+        // A file header declaring more than the allocation cap must error
+        // instead of attempting a huge `Vec::with_capacity`.
+        let h = FileDataSequenceHeader::new(
+            compute_data_hash(b"f"),
+            MAX_FILE_SEGMENTS as u64 + 1,
+            false,
+            false,
+        );
+        let mut buf = Vec::new();
+        h.serialize(&mut buf).unwrap();
+        let mut r = Cursor::new(&buf);
+        assert!(MDBFileInfo::deserialize(&mut r, 3).is_err());
     }
 
     #[test]

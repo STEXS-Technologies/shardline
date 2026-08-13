@@ -1,12 +1,12 @@
 use shardline_protocol::ByteRange;
-use shardline_storage::{ObjectKey, ObjectStore};
+use shardline_storage::ObjectStore;
 
 use crate::{error::HubApiError, routes::HubState};
 
-/// Resolves a file download request.
+/// Resolves a file download request using the global LFS namespace.
 ///
-/// Returns `DownloadResult::Inline` for files ≤1 MiB, or `DownloadResult::Redirect`
-/// for larger files that should be fetched from the LFS endpoint.
+/// Backward-compatible wrapper that delegates to
+/// [`resolve_file_from_store_scoped`] with no repository scope.
 ///
 /// # Errors
 ///
@@ -15,6 +15,24 @@ pub fn resolve_file_from_store(
     state: &HubState,
     commit_sha: &str,
     file_path: &str,
+) -> Result<DownloadResult, HubApiError> {
+    resolve_file_from_store_scoped(state, commit_sha, file_path, None)
+}
+
+/// Resolves a file download request, namespacing LFS object reads by the
+/// provided repository scope.
+///
+/// Returns `DownloadResult::Inline` for files ≤1 MiB, or `DownloadResult::Redirect`
+/// for larger files that should be fetched from the LFS endpoint.
+///
+/// # Errors
+///
+/// Returns [`HubApiError`] if the revision or file is not found.
+pub fn resolve_file_from_store_scoped(
+    state: &HubState,
+    commit_sha: &str,
+    file_path: &str,
+    repository_scope: Option<&shardline_protocol::RepositoryScope>,
 ) -> Result<DownloadResult, HubApiError> {
     let files = state
         .store
@@ -25,7 +43,7 @@ pub fn resolve_file_from_store(
         .find(|f| f.path == file_path)
         .ok_or(HubApiError::NotFound)?;
 
-    let content = get_object_store_content(state, &file.sha);
+    let content = get_object_store_content(state, &file.sha, repository_scope);
 
     if file.size <= MAX_INLINE_SIZE {
         Ok(DownloadResult::Inline {
@@ -50,9 +68,14 @@ pub fn resolve_file_from_store(
 /// Maximum inline file size (1 MiB).
 const MAX_INLINE_SIZE: u64 = 1_048_576;
 
-/// Reads file content from ObjectStore using its SHA.
-fn get_object_store_content(state: &HubState, sha: &str) -> Option<Vec<u8>> {
-    let key = ObjectKey::parse(&format!("lfs/{sha}")).ok()?;
+/// Reads file content from ObjectStore using its SHA, namespaced by the given
+/// repository scope so reads find the repository-scoped writes.
+fn get_object_store_content(
+    state: &HubState,
+    sha: &str,
+    repository_scope: Option<&shardline_protocol::RepositoryScope>,
+) -> Option<Vec<u8>> {
+    let key = crate::routes::lfs_object_key(sha, repository_scope).ok()?;
     let size = state.object_store.metadata(&key).ok()??.length();
     let range_end = size.checked_sub(1)?;
     let range = ByteRange::new(0, range_end).ok()?;
@@ -92,7 +115,7 @@ mod tests {
         let content = vec![0u8; 100];
         let result = DownloadResult::Inline {
             size: 100,
-            sha: "abc123".to_owned(),
+            sha: "c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6".to_owned(),
             content: Some(content.clone()),
         };
 
@@ -103,7 +126,10 @@ mod tests {
                 content: c,
             } => {
                 assert_eq!(size, 100);
-                assert_eq!(sha, "abc123");
+                assert_eq!(
+                    sha,
+                    "c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6"
+                );
                 assert_eq!(c.as_deref(), Some(content.as_slice()));
             }
             _ => panic!("expected Inline variant"),
@@ -307,9 +333,10 @@ mod tests {
         let object_store = shardline_server_core::ServerObjectStore::local(ts.path().join("lfs"))
             .expect("local object store");
 
-        // Pre-load content into ObjectStore
+        // Pre-load content into ObjectStore using the repository-namespaced key
+        // (global namespace, matching the scope used by these tests).
         for (sha, data) in content {
-            let key = ObjectKey::parse(&format!("lfs/{sha}")).expect("valid key");
+            let key = crate::routes::lfs_object_key(sha, None).expect("valid key");
             let body = ObjectBody::from_slice(data);
             let integrity = ObjectIntegrity::new(
                 shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(data).as_bytes()),
@@ -325,6 +352,7 @@ mod tests {
             object_store,
             auth: None,
             http_client: None,
+            webhook_secret_cipher: None,
         };
         (ts, state)
     }
@@ -335,11 +363,17 @@ mod tests {
         let files = vec![shardline_index::hub::HubFileEntry {
             path: "readme.md".into(),
             size: content.len() as u64,
-            sha: "abc123".into(),
+            sha: "c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6".into(),
             is_lfs: false,
         }];
         let content_data = content.to_vec();
-        let (_ts, state) = setup_resolve_state(&files, &[("abc123", content)]);
+        let (_ts, state) = setup_resolve_state(
+            &files,
+            &[(
+                "c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6",
+                content,
+            )],
+        );
         let result = resolve_file_from_store(&state, "sha_resolve", "readme.md").unwrap();
         match &result {
             DownloadResult::Inline {
@@ -348,7 +382,10 @@ mod tests {
                 content: c,
             } => {
                 assert_eq!(*size, content_data.len() as u64);
-                assert_eq!(sha.as_str(), "abc123");
+                assert_eq!(
+                    sha.as_str(),
+                    "c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6"
+                );
                 assert_eq!(c, &Some(content_data));
             }
             _ => assert!(
@@ -364,14 +401,17 @@ mod tests {
         let files = vec![shardline_index::hub::HubFileEntry {
             path: "model.bin".into(),
             size,
-            sha: "oid123".into(),
+            sha: "d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7".into(),
             is_lfs: true,
         }];
         let (_ts, state) = setup_resolve_state(&files, &[]);
         let result = resolve_file_from_store(&state, "sha_resolve", "model.bin").unwrap();
         match &result {
             DownloadResult::LfsRedirect { oid, size: s } => {
-                assert_eq!(oid.as_str(), "oid123");
+                assert_eq!(
+                    oid.as_str(),
+                    "d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7"
+                );
                 assert_eq!(*s, size);
             }
             _ => assert!(
@@ -394,10 +434,16 @@ mod tests {
         let files = vec![shardline_index::hub::HubFileEntry {
             path: "big.txt".into(),
             size: content.len() as u64,
-            sha: "bigsha".into(),
+            sha: "e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8".into(),
             is_lfs: false,
         }];
-        let (_ts, state) = setup_resolve_state(&files, &[("bigsha", &content)]);
+        let (_ts, state) = setup_resolve_state(
+            &files,
+            &[(
+                "e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8",
+                &content,
+            )],
+        );
         let result = resolve_file_from_store(&state, "sha_resolve", "big.txt").unwrap();
         match &result {
             DownloadResult::Inline { size, .. } => {
@@ -418,7 +464,7 @@ mod tests {
         let files = vec![shardline_index::hub::HubFileEntry {
             path: "huge.txt".into(),
             size,
-            sha: "hugesha".into(),
+            sha: "f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9".into(),
             is_lfs: false,
         }];
         let (_ts, state) = setup_resolve_state(&files, &[]);

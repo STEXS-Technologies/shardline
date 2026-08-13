@@ -2,6 +2,7 @@ use std::{
     net::SocketAddr,
     num::{NonZeroU64, NonZeroUsize},
     path::{Path, PathBuf},
+    str::FromStr,
     thread::available_parallelism,
     time::Duration,
 };
@@ -13,9 +14,10 @@ use tracing;
 
 use super::super::secrets::ensure_secret_size_within_limit;
 use super::defaults::{
-    DEFAULT_MAX_REQUEST_BODY_BYTES, DEFAULT_OCI_REGISTRY_TOKEN_MAX_IN_FLIGHT_REQUESTS,
-    DEFAULT_OCI_REGISTRY_TOKEN_TTL_SECONDS, DEFAULT_OCI_UPLOAD_MAX_ACTIVE_SESSIONS,
-    DEFAULT_OCI_UPLOAD_SESSION_TTL_SECONDS, DEFAULT_PARALLELISM_FALLBACK,
+    CONFIG_SECRET_KEY_BYTES, DEFAULT_MAX_REQUEST_BODY_BYTES,
+    DEFAULT_OCI_REGISTRY_TOKEN_MAX_IN_FLIGHT_REQUESTS, DEFAULT_OCI_REGISTRY_TOKEN_TTL_SECONDS,
+    DEFAULT_OCI_UPLOAD_MAX_ACTIVE_SESSIONS, DEFAULT_OCI_UPLOAD_SESSION_TTL_SECONDS,
+    DEFAULT_PARALLELISM_FALLBACK, HUB_WEBHOOK_SECRET_KEY_BYTES,
     MAX_DEFAULT_TRANSFER_MAX_IN_FLIGHT_CHUNKS, MAX_DEFAULT_UPLOAD_MAX_IN_FLIGHT_CHUNKS,
     MAX_ED25519_KEY_BYTES, MAX_METRICS_TOKEN_BYTES, MAX_PROVIDER_API_KEY_BYTES,
     MAX_TOKEN_SIGNING_KEY_BYTES, MIN_DEFAULT_TRANSFER_MAX_IN_FLIGHT_CHUNKS,
@@ -69,6 +71,29 @@ pub struct ServerConfig {
 
 impl ServerConfig {
     /// Creates server configuration.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use shardline_server::ServerConfig;
+    /// use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    /// use std::num::NonZeroUsize;
+    ///
+    /// let config = ServerConfig::new(
+    ///     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+    ///     "http://127.0.0.1:8080".to_owned(),
+    ///     std::env::temp_dir(),
+    ///     NonZeroUsize::new(64 * 1024).expect("64 KiB chunk size is non-zero"),
+    /// );
+    ///
+    /// assert_eq!(config.bind_addr().port(), 8080);
+    /// assert_eq!(config.public_base_url(), "http://127.0.0.1:8080");
+    /// assert_eq!(config.root_dir(), std::env::temp_dir());
+    /// ```
+    ///
+    /// The resulting config is a local-deployment default: a local filesystem
+    /// metadata backend, a local object store, and the Xet protocol frontend.
+    /// Point [`serve`](crate::serve) at it to start the server.
     #[must_use]
     pub fn new(
         bind_addr: SocketAddr,
@@ -94,6 +119,8 @@ impl ServerConfig {
             deployment_mode: DeploymentMode::default(),
             auth: AuthConfig {
                 token_signing_key: None,
+                hub_webhook_secret_key: None,
+                config_secret_key: None,
                 auth_provider: AuthProviderKind::Local,
                 auth_oidc_issuer: None,
                 auth_jwks_url: None,
@@ -487,6 +514,24 @@ impl ServerConfig {
             .map(SecretBytes::expose_secret)
     }
 
+    /// Returns the optional Hub webhook secret encryption key (AES-256).
+    #[must_use]
+    pub fn hub_webhook_secret_key(&self) -> Option<&[u8]> {
+        self.auth
+            .hub_webhook_secret_key
+            .as_ref()
+            .map(SecretBytes::expose_secret)
+    }
+
+    /// Returns the optional provider-config secret encryption key (AES-256).
+    #[must_use]
+    pub fn config_secret_key(&self) -> Option<&[u8]> {
+        self.auth
+            .config_secret_key
+            .as_ref()
+            .map(SecretBytes::expose_secret)
+    }
+
     /// Returns the optional Ed25519 private key.
     #[must_use]
     pub fn ed25519_private_key(&self) -> Option<&[u8]> {
@@ -631,6 +676,60 @@ impl ServerConfig {
         )?;
 
         self.auth.token_signing_key = Some(token_signing_key);
+        Ok(self)
+    }
+
+    /// Enables at-rest encryption for Hub webhook signing secrets with the
+    /// supplied 32-byte AES-256 key.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerConfigError::EmptyHubWebhookSecretKey`] when the key is
+    /// empty, or [`ServerConfigError::HubWebhookSecretKeyLength`] when the key
+    /// is not exactly 32 bytes.
+    pub fn with_hub_webhook_secret_key(
+        mut self,
+        key: impl Into<SecretBytes>,
+    ) -> Result<Self, ServerConfigError> {
+        let key = key.into();
+        if key.expose_secret().is_empty() {
+            return Err(ServerConfigError::EmptyHubWebhookSecretKey);
+        }
+        let observed = key.len();
+        if observed != usize::try_from(HUB_WEBHOOK_SECRET_KEY_BYTES).unwrap_or(0) {
+            return Err(ServerConfigError::HubWebhookSecretKeyLength {
+                expected: usize::try_from(HUB_WEBHOOK_SECRET_KEY_BYTES).unwrap_or(0),
+                observed,
+            });
+        }
+        self.auth.hub_webhook_secret_key = Some(key);
+        Ok(self)
+    }
+
+    /// Enables at-rest encryption for provider-config secrets with the supplied
+    /// 32-byte AES-256 key.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerConfigError::EmptyConfigSecretKey`] when the key is
+    /// empty, or [`ServerConfigError::ConfigSecretKeyLength`] when the key is
+    /// not exactly 32 bytes.
+    pub fn with_config_secret_key(
+        mut self,
+        key: impl Into<SecretBytes>,
+    ) -> Result<Self, ServerConfigError> {
+        let key = key.into();
+        if key.expose_secret().is_empty() {
+            return Err(ServerConfigError::EmptyConfigSecretKey);
+        }
+        let observed = key.len();
+        if observed != usize::try_from(CONFIG_SECRET_KEY_BYTES).unwrap_or(0) {
+            return Err(ServerConfigError::ConfigSecretKeyLength {
+                expected: usize::try_from(CONFIG_SECRET_KEY_BYTES).unwrap_or(0),
+                observed,
+            });
+        }
+        self.auth.config_secret_key = Some(key);
         Ok(self)
     }
 
@@ -867,6 +966,74 @@ impl ServerConfig {
     }
 }
 
+/// A human-readable byte-size unit suffix.
+///
+/// Supports both decimal (SI) units (`B`, `KB`, `MB`, `GB`, `TB` — powers of
+/// 1000) and binary (IEC) units (`KiB`, `MiB`, `GiB`, `TiB` — powers of 1024).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ByteUnit {
+    /// Plain bytes.
+    B,
+    /// Binary kibibytes (`1024` bytes).
+    KiB,
+    /// Binary mebibytes (`1024^2` bytes).
+    MiB,
+    /// Binary gibibytes (`1024^3` bytes).
+    GiB,
+    /// Binary tebibytes (`1024^4` bytes).
+    TiB,
+    /// Decimal kilobytes (`1000` bytes).
+    KB,
+    /// Decimal megabytes (`1000^2` bytes).
+    MB,
+    /// Decimal gigabytes (`1000^3` bytes).
+    GB,
+    /// Decimal terabytes (`1000^4` bytes).
+    TB,
+}
+
+impl ByteUnit {
+    /// Returns the multiplier (bytes per unit) for this unit.
+    #[must_use]
+    pub const fn as_multiplier(self) -> f64 {
+        match self {
+            Self::B => 1.0,
+            Self::KiB => 1024.0,
+            Self::MiB => 1_048_576.0_f64,         // 1024^2
+            Self::GiB => 1_073_741_824.0_f64,     // 1024^3
+            Self::TiB => 1_099_511_627_776.0_f64, // 1024^4
+            Self::KB => 1_000.0,
+            Self::MB => 1_000_000.0_f64,         // 1000^2
+            Self::GB => 1_000_000_000.0_f64,     // 1000^3
+            Self::TB => 1_000_000_000_000.0_f64, // 1000^4
+        }
+    }
+}
+
+impl FromStr for ByteUnit {
+    type Err = ServerConfigError;
+
+    /// Parses a byte-unit suffix, ignoring ASCII case and surrounding whitespace.
+    ///
+    /// An empty string is treated as plain bytes (`B`).
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_lowercase().as_str() {
+            "b" | "" => Ok(Self::B),
+            "kib" => Ok(Self::KiB),
+            "mib" => Ok(Self::MiB),
+            "gib" => Ok(Self::GiB),
+            "tib" => Ok(Self::TiB),
+            "kb" => Ok(Self::KB),
+            "mb" => Ok(Self::MB),
+            "gb" => Ok(Self::GB),
+            "tb" => Ok(Self::TB),
+            _ => Err(ServerConfigError::ChunkSizeParse(
+                "unknown size unit".to_owned(),
+            )),
+        }
+    }
+}
+
 /// Parse a human-readable byte size string like `"64KB"`, `"1GB"`, `"512b"`,
 /// `"57mb"`, or a plain number interpreted as bytes.
 ///
@@ -924,24 +1091,7 @@ pub fn parse_byte_size(s: &str) -> Result<usize, ServerConfigError> {
     }
 
     // Decimal (SI) units use powers of 1000; binary (IEC) use powers of 1024.
-    let multiplier: f64 = match unit.to_lowercase().as_str() {
-        "b" | "" => 1.0,
-        // Binary (IEC) — powers of 1024
-        "kib" => 1024.0,
-        "mib" => 1_048_576.0_f64,         // 1024^2
-        "gib" => 1_073_741_824.0_f64,     // 1024^3
-        "tib" => 1_099_511_627_776.0_f64, // 1024^4
-        // Decimal (SI) — powers of 1000
-        "kb" => 1_000.0,
-        "mb" => 1_000_000.0_f64,         // 1000^2
-        "gb" => 1_000_000_000.0_f64,     // 1000^3
-        "tb" => 1_000_000_000_000.0_f64, // 1000^4
-        _ => {
-            return Err(ServerConfigError::ChunkSizeParse(
-                "unknown size unit".to_owned(),
-            ));
-        }
-    };
+    let multiplier: f64 = ByteUnit::from_str(unit)?.as_multiplier();
 
     #[allow(clippy::float_arithmetic)]
     let bytes = (num * multiplier) as usize;

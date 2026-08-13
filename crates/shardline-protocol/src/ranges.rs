@@ -174,6 +174,19 @@ pub fn parse_http_byte_range(
                 "suffix length must be non-zero".to_owned(),
             ));
         }
+        // A zero-length resource cannot satisfy any range; this matches the
+        // non-suffix branch, which rejects `start >= resource_length` (and
+        // would previously let a zero-length resource report a bogus 1-byte
+        // `[0,0]` suffix range that `read_range` could read past the end of).
+        if resource_length == 0 {
+            return Err(HttpRangeParseError::Unsatisfiable);
+        }
+        // Clamp the requested suffix length to the resource length so a `-N`
+        // larger than the resource returns the full range `[0, len-1]`.
+        let suffix_len = suffix_len.min(resource_length);
+        // `resource_length` is non-zero here (guarded above) and `suffix_len`
+        // is clamped to `resource_length`, so neither `saturating_sub` can
+        // actually saturate: `start = len - suffix_len`, `end = len - 1`.
         let start = resource_length.saturating_sub(suffix_len);
         let end = resource_length.saturating_sub(1);
         return ByteRange::new(start, end)
@@ -368,6 +381,49 @@ mod tests {
         let expected = ByteRange::new(0, 99);
         assert!(expected.is_ok());
         assert_eq!(result.unwrap(), expected.unwrap());
+    }
+
+    #[test]
+    fn http_byte_range_suffix_zero_resource_length_is_unsatisfiable() {
+        // A zero-length resource must not report a bogus 1-byte `[0,0]` suffix
+        // range; it is unsatisfiable, matching the non-suffix branch.
+        for suffix in ["-1", "-5", "-999"] {
+            let value = format!("bytes={suffix}");
+            assert!(
+                matches!(
+                    parse_http_byte_range(&value, 0),
+                    Err(HttpRangeParseError::Unsatisfiable)
+                ),
+                "suffix {suffix} on a zero-length resource must be Unsatisfiable"
+            );
+        }
+    }
+
+    #[test]
+    fn http_byte_range_suffix_nonzero_resource_preserved() {
+        // `-N` smaller than the resource -> [len-N, len-1].
+        let small = parse_http_byte_range("bytes=-4", 20);
+        let expected_small = ByteRange::new(16, 19);
+        assert!(expected_small.is_ok());
+        assert_eq!(small.unwrap(), expected_small.unwrap());
+
+        // `-N` equal to the resource length -> full range [0, len-1].
+        let exact = parse_http_byte_range("bytes=-20", 20);
+        let expected_exact = ByteRange::new(0, 19);
+        assert!(expected_exact.is_ok());
+        assert_eq!(exact.unwrap(), expected_exact.unwrap());
+
+        // `-N` larger than the resource -> clamped to the full range.
+        let oversized = parse_http_byte_range("bytes=-999", 20);
+        let expected_oversized = ByteRange::new(0, 19);
+        assert!(expected_oversized.is_ok());
+        assert_eq!(oversized.unwrap(), expected_oversized.unwrap());
+
+        // Single-byte resource, `-1` -> [0,0].
+        let one = parse_http_byte_range("bytes=-1", 1);
+        let expected_one = ByteRange::new(0, 0);
+        assert!(expected_one.is_ok());
+        assert_eq!(one.unwrap(), expected_one.unwrap());
     }
 
     // --- error Display tests ---

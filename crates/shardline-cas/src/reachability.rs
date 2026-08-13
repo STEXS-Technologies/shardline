@@ -13,7 +13,31 @@ use crate::CasError;
 ///
 /// An object is reachable if it is registered in the index as part of a
 /// committed file reconstruction or pending upload intent. This is the single
-/// authority for reachability across GC, fsck, repair, and deletion.
+/// authority for reachability across GC, fsck, repair, and deletion — lifecycle
+/// tools must never decide reachability by querying storage internals directly.
+///
+/// # Examples
+///
+/// The trait is blanket-implemented for every [`AsyncIndexStore`], so a
+/// [`shardline_index::MemoryIndexStore`] can answer reachability queries out
+/// of the box:
+///
+/// ```
+/// use shardline_cas::ObjectReachability;
+/// use shardline_index::{MemoryIndexStore, StoredObjectId};
+/// use shardline_protocol::ShardlineHash;
+///
+/// #[tokio::main]
+/// async fn main() -> Result<(), Box<dyn std::error::Error>> {
+///     let store = MemoryIndexStore::new();
+///     let object_id = StoredObjectId::new(ShardlineHash::from_bytes([9; 32]));
+///
+///     assert!(!ObjectReachability::is_object_reachable(&store, &object_id).await?);
+///     store.insert_object(&object_id)?;
+///     assert!(ObjectReachability::is_object_reachable(&store, &object_id).await?);
+///     Ok(())
+/// }
+/// ```
 #[async_trait::async_trait]
 pub trait ObjectReachability {
     /// Returns whether an object is reachable.
