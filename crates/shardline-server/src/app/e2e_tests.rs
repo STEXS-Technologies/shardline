@@ -13,7 +13,7 @@ use axum::{
     body::Body,
     http::{Request, StatusCode, header},
     middleware,
-    routing::{get, head, post},
+    routing::{get, head, post, put},
 };
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
@@ -240,7 +240,24 @@ async fn test_app_for_frontends_with_role(
                 }
             },
             ServerFrontend::S3 => {
-                // S3 routes are registered in a later lane.
+                if state.role.serves_api() {
+                    app = app
+                        .route(
+                            "/{bucket}",
+                            put(super::protocol_routes::s3_create_bucket)
+                                .get(super::protocol_routes::s3_get_bucket)
+                                .head(super::protocol_routes::s3_head_bucket)
+                                .delete(super::protocol_routes::s3_delete_bucket),
+                        )
+                        .route(
+                            "/{bucket}/{*key}",
+                            get(super::protocol_routes::s3_get_object)
+                                .head(super::protocol_routes::s3_head_object)
+                                .put(super::protocol_routes::s3_put_object)
+                                .post(super::protocol_routes::s3_post_object)
+                                .delete(super::protocol_routes::s3_delete_object),
+                        );
+                }
             }
             ServerFrontend::Hub => {
                 hub_state = Some(build_test_hub_state(tmp.path()).await);
@@ -467,7 +484,24 @@ async fn test_app_with_auth(frontends: &[ServerFrontend]) -> (Router, TempDir) {
                 }
             },
             ServerFrontend::S3 => {
-                // S3 routes are registered in a later lane.
+                if state.role.serves_api() {
+                    app = app
+                        .route(
+                            "/{bucket}",
+                            put(super::protocol_routes::s3_create_bucket)
+                                .get(super::protocol_routes::s3_get_bucket)
+                                .head(super::protocol_routes::s3_head_bucket)
+                                .delete(super::protocol_routes::s3_delete_bucket),
+                        )
+                        .route(
+                            "/{bucket}/{*key}",
+                            get(super::protocol_routes::s3_get_object)
+                                .head(super::protocol_routes::s3_head_object)
+                                .put(super::protocol_routes::s3_put_object)
+                                .post(super::protocol_routes::s3_post_object)
+                                .delete(super::protocol_routes::s3_delete_object),
+                        );
+                }
             }
             ServerFrontend::Hub => {
                 hub_state = Some(build_test_hub_state(tmp.path()).await);
@@ -3817,6 +3851,57 @@ async fn lfs_batch_with_insufficient_scope() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_put_get_delete_roundtrip_through_full_router() {
+    let (app, _tmp) = test_app_with_auth(&[ServerFrontend::S3]).await;
+    let token = test_token(TokenScope::Write);
+    let auth = format!("AWS4-HMAC-SHA256 Credential={token}/20260813/us-east-1/s3/aws4_request");
+    let content = b"s3-e2e-roundtrip";
+
+    let put = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/test.test/data/e2e.pt")
+                .header(header::AUTHORIZATION, &auth)
+                .body(Body::from(content.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(put.status(), StatusCode::OK);
+
+    let get = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/test.test/data/e2e.pt")
+                .header(header::AUTHORIZATION, &auth)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get.status(), StatusCode::OK);
+    assert_eq!(body_bytes(get).await, content);
+
+    let delete = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/test.test/data/e2e.pt")
+                .header(header::AUTHORIZATION, &auth)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(delete.status(), StatusCode::NO_CONTENT);
 }
 
 // ---------------------------------------------------------------------------

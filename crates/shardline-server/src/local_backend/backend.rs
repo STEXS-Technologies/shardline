@@ -2,7 +2,7 @@ use std::{num::NonZeroUsize, path::PathBuf, sync::Arc};
 
 use shardline_index::{
     FileChunkRecord, LocalIndexStore, LocalRecordStore, ReconstructionStore, RecordTraversal,
-    RepoKey, RevisionRecord, TreeEntry, TreeKey, TreeStore,
+    RepoKey, RevisionRecord, S3ObjectEntry, S3ObjectIndexStore, TreeEntry, TreeKey, TreeStore,
 };
 use shardline_protocol::unix_now_seconds_lossy;
 use shardline_storage::{ObjectPrefix, ObjectStore};
@@ -321,6 +321,64 @@ impl LocalBackend {
         repository_scope: Option<&shardline_protocol::RepositoryScope>,
     ) -> Result<shardline_index::FileRecord, ServerError> {
         read_record(&self.record_store, file_id, content_hash, repository_scope).await
+    }
+
+    /// Loads the authoritative file-version record for a protocol object's
+    /// deterministic file id.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError::NotFound`] when no record exists, or the adapter
+    /// error when the record cannot be read.
+    pub(crate) async fn protocol_file_record(
+        &self,
+        file_id: &str,
+    ) -> Result<shardline_index::FileRecord, ServerError> {
+        self.read_record(file_id, None, None).await
+    }
+
+    /// Upserts one S3 object listing-index row.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError`] when the index write fails.
+    pub(crate) async fn upsert_s3_object(&self, entry: &S3ObjectEntry) -> Result<(), ServerError> {
+        self.index_store.upsert_s3_object(entry).await?;
+        Ok(())
+    }
+
+    /// Deletes one S3 object listing-index row, returning whether a row was removed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError`] when the index delete fails.
+    pub(crate) async fn delete_s3_object(
+        &self,
+        scope_namespace: &str,
+        object_key: &str,
+    ) -> Result<bool, ServerError> {
+        self.index_store
+            .delete_s3_object(scope_namespace, object_key)
+            .await
+            .map_err(ServerError::from)
+    }
+
+    /// Scans S3 object listing rows for a scope namespace.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError`] when the index scan fails.
+    pub(crate) async fn scan_s3_objects(
+        &self,
+        scope_namespace: &str,
+        prefix: &str,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<S3ObjectEntry>, ServerError> {
+        self.index_store
+            .scan_s3_objects(scope_namespace, prefix, cursor, limit)
+            .await
+            .map_err(ServerError::from)
     }
 
     /// Resolves a single canonical path to its tree entry, if any.

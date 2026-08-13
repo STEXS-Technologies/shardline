@@ -1,6 +1,6 @@
 use shardline_index::{
     FileRecord, FileRecordStorageLayout, PostgresMetadataStoreError, RecordStore, RecordTraversal,
-    RepositoryRecordScope,
+    RepositoryRecordScope, S3ObjectEntry, S3ObjectIndexStore,
 };
 use shardline_protocol::{ByteRange, RepositoryScope};
 #[cfg(test)]
@@ -405,6 +405,64 @@ impl super::PostgresBackend {
             .await
             .map_err(map_record_store_error)?;
         parse_stored_file_record_bytes(&bytes)
+    }
+
+    /// Loads the authoritative file-version record for a protocol object's
+    /// deterministic file id.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError::NotFound`] when no record exists, or the adapter
+    /// error when the record cannot be read.
+    pub(crate) async fn protocol_file_record(
+        &self,
+        file_id: &str,
+    ) -> Result<FileRecord, ServerError> {
+        self.read_record(file_id, None, None).await
+    }
+
+    /// Upserts one S3 object listing-index row.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError`] when the index write fails.
+    pub(crate) async fn upsert_s3_object(&self, entry: &S3ObjectEntry) -> Result<(), ServerError> {
+        self.index_store.upsert_s3_object(entry).await?;
+        Ok(())
+    }
+
+    /// Deletes one S3 object listing-index row, returning whether a row was removed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError`] when the index delete fails.
+    pub(crate) async fn delete_s3_object(
+        &self,
+        scope_namespace: &str,
+        object_key: &str,
+    ) -> Result<bool, ServerError> {
+        self.index_store
+            .delete_s3_object(scope_namespace, object_key)
+            .await
+            .map_err(ServerError::from)
+    }
+
+    /// Scans S3 object listing rows for a scope namespace.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError`] when the index scan fails.
+    pub(crate) async fn scan_s3_objects(
+        &self,
+        scope_namespace: &str,
+        prefix: &str,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<S3ObjectEntry>, ServerError> {
+        self.index_store
+            .scan_s3_objects(scope_namespace, prefix, cursor, limit)
+            .await
+            .map_err(ServerError::from)
     }
 }
 

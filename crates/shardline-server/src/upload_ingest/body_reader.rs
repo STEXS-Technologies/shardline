@@ -2,6 +2,7 @@ use std::{num::NonZeroUsize, pin::Pin};
 
 use axum::body::{Body, Bytes, HttpBody};
 use futures_util::stream::{self, Stream, StreamExt};
+use tokio::io::{AsyncRead, AsyncReadExt};
 
 use crate::{ServerError, overflow::checked_add};
 
@@ -71,6 +72,33 @@ impl RequestBodyReader {
             expected_total_bytes: None,
             read_bytes: 0,
         }
+    }
+
+    /// Creates a reader over an async byte reader (for example a staged part
+    /// file), feeding the body in fixed-size chunks.
+    ///
+    /// The reader is drained with no total-byte ceiling; callers that need a
+    /// bound (for example multipart part sizes) must enforce it themselves.
+    ///
+    /// Consumed by the S3 multipart lane (Lane 4); exercised by the unit tests
+    /// below until that lane lands.
+    #[allow(dead_code)]
+    pub(crate) fn from_reader(
+        reader: impl AsyncRead + Send + Unpin + 'static,
+        chunk_size: usize,
+    ) -> Self {
+        let stream = stream::unfold(reader, move |mut reader| async move {
+            let mut buffer = vec![0_u8; chunk_size];
+            match reader.read(&mut buffer).await {
+                Ok(0) => None,
+                Ok(read) => {
+                    buffer.truncate(read);
+                    Some((Ok(Bytes::from(buffer)), reader))
+                }
+                Err(error) => Some((Err(ServerError::Io(error)), reader)),
+            }
+        });
+        Self::from_stream(stream)
     }
 
     /// Reads the next body chunk while enforcing the configured total byte limit.
@@ -311,5 +339,56 @@ mod tests {
         assert!(second.is_some());
         let third = reader.next_bytes().await.unwrap();
         assert!(third.is_none());
+    }
+
+    // ------------------------------------------------------------------
+    // RequestBodyReader::from_reader (async file/reader feeder)
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn from_reader_feeds_all_bytes_in_chunks() {
+        use tokio::io::AsyncWriteExt;
+
+        let data = b"file-feeder-content-for-the-ingestor";
+        let (mut writer, reader) = tokio::io::duplex(1024);
+        writer.write_all(data).await.unwrap();
+        drop(writer); // EOF for the read side
+
+        let mut reader = RequestBodyReader::from_reader(reader, 4);
+        let mut collected = Vec::new();
+        while let Some(bytes) = reader.next_bytes().await.unwrap() {
+            collected.extend_from_slice(&bytes);
+        }
+        assert_eq!(collected, data);
+    }
+
+    #[tokio::test]
+    async fn from_reader_single_chunk_larger_than_buffer_is_split() {
+        use tokio::io::AsyncWriteExt;
+
+        let data = vec![0x5A_u8; 1000];
+        let (mut writer, reader) = tokio::io::duplex(4096);
+        writer.write_all(&data).await.unwrap();
+        drop(writer);
+
+        let mut reader = RequestBodyReader::from_reader(reader, 128);
+        let mut collected = Vec::new();
+        let mut chunk_count = 0_u64;
+        while let Some(bytes) = reader.next_bytes().await.unwrap() {
+            chunk_count = crate::overflow::checked_add(chunk_count, 1).unwrap();
+            assert!(bytes.len() <= 128);
+            collected.extend_from_slice(&bytes);
+        }
+        assert_eq!(collected, data);
+        // 1000 bytes / 128-byte buffers → 7 full chunks + 1 remainder of 104.
+        assert_eq!(chunk_count, 8);
+    }
+
+    #[tokio::test]
+    async fn from_reader_empty_reader_yields_no_chunks() {
+        let (writer, reader) = tokio::io::duplex(16);
+        drop(writer);
+        let mut reader = RequestBodyReader::from_reader(reader, 16);
+        assert!(reader.next_bytes().await.unwrap().is_none());
     }
 }
