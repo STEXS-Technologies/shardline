@@ -42,7 +42,7 @@ use crate::{
 };
 
 use super::{
-    bucket::{s3_create_bucket, s3_delete_bucket, s3_get_bucket, s3_head_bucket},
+    bucket::{s3_create_bucket, s3_delete_bucket, s3_get_bucket, s3_head_bucket, s3_post_bucket},
     format_http_date,
     object::{s3_delete_object, s3_get_object, s3_head_object, s3_post_object, s3_put_object},
 };
@@ -138,7 +138,8 @@ fn s3_router(state: Arc<AppState>) -> Router {
             put(s3_create_bucket)
                 .get(s3_get_bucket)
                 .head(s3_head_bucket)
-                .delete(s3_delete_bucket),
+                .delete(s3_delete_bucket)
+                .post(s3_post_bucket),
         )
         .route(
             "/{bucket}/{*key}",
@@ -2104,4 +2105,238 @@ async fn s3_sweep_during_upload_part_is_safe() {
     // The session survives and completes normally.
     let complete = complete_upload(&app, &upload_id, complete_body(&upload_id, &[1])).await;
     assert_eq!(complete.status(), StatusCode::OK);
+}
+
+// =========================================================================
+// DeleteObjects (POST /{bucket}?delete=)
+// =========================================================================
+
+/// Builds a `DeleteObjects` XML request body from the given keys.
+fn delete_objects_body(keys: &[&str]) -> String {
+    let mut xml = String::from("<?xml version=\"1.0\"?><Delete>");
+    for key in keys {
+        xml.push_str("<Object><Key>");
+        xml.push_str(key);
+        xml.push_str("</Key></Object>");
+    }
+    xml.push_str("</Delete>");
+    xml
+}
+
+/// A write-token `POST /{bucket}?delete=` request with an XML body.
+fn delete_objects_request(uri: String, body: String) -> axum::http::Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header(
+            header::AUTHORIZATION,
+            sigv4_auth(&mint_token(TokenScope::Write, OWNER, NAME)),
+        )
+        .header(header::CONTENT_TYPE, "application/xml")
+        .body(Body::from(body))
+        .unwrap()
+}
+
+/// Seeds an object with the given key and asserts the PUT succeeded.
+async fn seed_object(app: &Router, key: &str) {
+    let put = app
+        .clone()
+        .oneshot(put_request(
+            format!("/{BUCKET}/{key}"),
+            b"seed-content".to_vec(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(put.status(), StatusCode::OK, "seeding {key}");
+}
+
+/// GETs an object and returns its status (used to prove deletion).
+async fn object_status(app: &Router, key: &str) -> StatusCode {
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/{BUCKET}/{key}"))
+                .header(
+                    header::AUTHORIZATION,
+                    sigv4_auth(&mint_token(TokenScope::Read, OWNER, NAME)),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .status()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_delete_objects_empty_keys_are_400_malformed_xml() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state);
+
+    // Both a body with no keys at all and a body whose only `<Key>` is empty
+    // must be `400 MalformedXML` (never a 500) per S3's published schema.
+    for body in [
+        "<Delete></Delete>",
+        "<Delete><Object><Key></Key></Object></Delete>",
+    ] {
+        let post = app
+            .clone()
+            .oneshot(delete_objects_request(
+                format!("/{BUCKET}?delete="),
+                body.to_owned(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(post.status(), StatusCode::BAD_REQUEST, "body {body}");
+        let response_body = String::from_utf8(body_bytes(post).await).unwrap();
+        assert!(
+            response_body.contains("<Code>MalformedXML</Code>"),
+            "body {body}: {response_body}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_delete_objects_over_1000_keys_rejected_before_any_deletion() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state);
+
+    // A sentinel that is NOT in the batch: it must survive, proving no
+    // deletion happened when the request was rejected.
+    seed_object(&app, "survivor.txt").await;
+
+    let keys: Vec<String> = (0..=shardline_s3_adapter::MAX_S3_DELETE_KEYS)
+        .map(|index| format!("key-{index:04}.txt"))
+        .collect();
+    let key_refs: Vec<&str> = keys.iter().map(String::as_str).collect();
+    let post = app
+        .clone()
+        .oneshot(delete_objects_request(
+            format!("/{BUCKET}?delete="),
+            delete_objects_body(&key_refs),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(post.status(), StatusCode::BAD_REQUEST);
+    let body = String::from_utf8(body_bytes(post).await).unwrap();
+    assert!(body.contains("<Code>MalformedXML</Code>"), "{body}");
+
+    // Nothing was deleted: the sentinel is still readable, and a batch key
+    // that never existed is still absent (404, not 204).
+    assert_eq!(object_status(&app, "survivor.txt").await, StatusCode::OK);
+    assert_eq!(
+        object_status(&app, "key-0000.txt").await,
+        StatusCode::NOT_FOUND
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_delete_objects_duplicate_keys_collapse_to_one_delete() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state);
+
+    for key in ["dup/a.txt", "dup/b.txt", "dup/c.txt"] {
+        seed_object(&app, key).await;
+    }
+
+    // Three distinct keys, five `<Object>` entries: the duplicates must
+    // collapse into a single delete (and a single `<Deleted>` row) each.
+    let post = app
+        .clone()
+        .oneshot(delete_objects_request(
+            format!("/{BUCKET}?delete="),
+            delete_objects_body(&[
+                "dup/a.txt",
+                "dup/a.txt",
+                "dup/b.txt",
+                "dup/a.txt",
+                "dup/c.txt",
+            ]),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(post.status(), StatusCode::OK);
+    let body = String::from_utf8(body_bytes(post).await).unwrap();
+    assert_eq!(body.matches("<Deleted>").count(), 3, "{body}");
+    assert_eq!(body.matches("<Error>").count(), 0, "{body}");
+
+    // All three objects are actually gone.
+    for key in ["dup/a.txt", "dup/b.txt", "dup/c.txt"] {
+        assert_eq!(
+            object_status(&app, key).await,
+            StatusCode::NOT_FOUND,
+            "key {key} must be deleted"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_delete_objects_invalid_keys_yield_per_key_errors_and_valid_keys_deleted() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state);
+
+    for key in ["good-a.txt", "good-b.txt"] {
+        seed_object(&app, key).await;
+    }
+
+    // A batch interleaving valid and invalid keys: the valid keys must be
+    // deleted, the invalid ones reported as per-key `<Error>` rows, and the
+    // request must return 200 (never abort mid-batch after mutating state).
+    let post = app
+        .clone()
+        .oneshot(delete_objects_request(
+            format!("/{BUCKET}?delete="),
+            delete_objects_body(&[
+                "good-a.txt",
+                "/leading-slash.txt",
+                "good-b.txt",
+                "../escape.txt",
+            ]),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(post.status(), StatusCode::OK);
+    let body = String::from_utf8(body_bytes(post).await).unwrap();
+
+    assert_eq!(body.matches("<Deleted>").count(), 2, "{body}");
+    assert_eq!(body.matches("<Error>").count(), 2, "{body}");
+    assert!(body.contains("<Code>NoSuchKey</Code>"), "{body}");
+    assert!(
+        body.contains("<Key>/leading-slash.txt</Key>"),
+        "leading-slash key must have an Error row: {body}"
+    );
+    assert!(
+        body.contains("<Key>../escape.txt</Key>"),
+        "traversal key must have an Error row: {body}"
+    );
+
+    // Rows are emitted in request order: Deleted(a), Error(slash), Deleted(b),
+    // Error(traversal).
+    let deleted_a = body.find("<Deleted><Key>good-a.txt</Key>").unwrap();
+    let error_slash = body.find("<Error><Key>/leading-slash.txt</Key>").unwrap();
+    let deleted_b = body.find("<Deleted><Key>good-b.txt</Key>").unwrap();
+    let error_traversal = body.find("<Error><Key>../escape.txt</Key>").unwrap();
+    assert!(
+        deleted_a < error_slash && error_slash < deleted_b && deleted_b < error_traversal,
+        "rows must be in request order: {body}"
+    );
+
+    // The valid keys are gone; the invalid keys were never stored (404).
+    assert_eq!(
+        object_status(&app, "good-a.txt").await,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        object_status(&app, "good-b.txt").await,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        object_status(&app, "/leading-slash.txt").await,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        object_status(&app, "../escape.txt").await,
+        StatusCode::NOT_FOUND
+    );
 }

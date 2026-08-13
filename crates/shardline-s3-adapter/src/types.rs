@@ -402,6 +402,14 @@ pub fn parse_complete_multipart_parts(body: &str) -> Result<CompleteParts, crate
     })
 }
 
+/// The maximum number of keys in a single `DeleteObjects` request.
+///
+/// S3's published limit is 1000 keys per batch delete; exceeding it is
+/// `MalformedXML` (`400`). The same constant bounds the `<DeleteResult>`
+/// response, keeping both the backend work (two ops per key) and the response
+/// size linear in the protocol cap.
+pub const MAX_S3_DELETE_KEYS: usize = 1000;
+
 /// Parses the `<Key>` values from a `DeleteObjects` request body.
 ///
 /// The body is the S3
