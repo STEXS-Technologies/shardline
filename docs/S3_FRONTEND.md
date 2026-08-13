@@ -1,6 +1,9 @@
 # S3 Frontend — Compatibility & Scope
 
-**Status:** in development on `feat/s3-frontend` (targeting a post-1.5.0 release).
+**Status:** implemented on `feat/s3-frontend` — every operation in the
+SUPPORTED matrix below is implemented and covered by the client-shaped e2e
+suite (`crates/shardline-server/tests/s3_frontend_e2e.rs`); targeting a
+post-1.5.0 release.
 **Tracking issue:** #15.
 **Design review:** oracle, 2026-08-13.
 
@@ -46,6 +49,12 @@ as out of scope until a real client need appears.
 ## Operation matrix
 
 ### Supported (this branch)
+
+All operations in this table are **implemented** and exercised by the
+client-shaped e2e suite (`crates/shardline-server/tests/s3_frontend_e2e.rs`):
+pyarrow (PUT/GET/Range/multipart), Polars / object_store (HeadObject),
+S3A (bucket probes), and DuckDB (ListObjectsV2) shapes, over both the SigV4
+access-key and Bearer auth forms.
 
 | Operation | Notes |
 |---|---|
