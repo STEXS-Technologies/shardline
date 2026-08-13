@@ -57,6 +57,7 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 axum.workspace = true
+shardline-server-core.workspace = true
 rusqlite = { workspace = true, features = ["bundled"] }
 serial_test.workspace = true
 shardline-test-support.workspace = true
