@@ -141,10 +141,13 @@ fn expected_summary(
         }
     }
 
-    for &(release_after_unix_seconds, held_at_unix_seconds, object_exists) in retention_states {
-        let is_expired = release_after_unix_seconds.is_some_and(|release_after| {
-            release_after < held_at_unix_seconds || release_after <= now_unix_seconds
-        });
+    for &(release_after_unix_seconds, _held_at_unix_seconds, object_exists) in retention_states {
+        // Match the production classifier exactly: a hold expires solely by its
+        // absolute release deadline (release_after <= now). `held_at` plays no
+        // role — RetentionHold::new rejects inverted timelines (release_after <
+        // held_at) at creation, so that state is unreachable in production data.
+        let is_expired = release_after_unix_seconds
+            .is_some_and(|release_after| release_after <= now_unix_seconds);
         if is_expired {
             summary.retention_delete_expired = checked_increment(summary.retention_delete_expired)?;
         } else if object_exists {

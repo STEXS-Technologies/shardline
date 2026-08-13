@@ -3201,6 +3201,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "shardline-s3-adapter"
+version = "1.5.0"
+dependencies = [
+ "axum",
+ "base64",
+ "chrono",
+ "getrandom 0.3.4",
+ "hex",
+ "serde",
+ "serde_json",
+ "shardline-index",
+ "shardline-protocol",
+ "shardline-server-core",
+ "shardline-storage",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "shardline-server"
 version = "1.5.0"
 dependencies = [
@@ -3208,6 +3227,7 @@ dependencies = [
  "base64",
  "blake3",
  "bytes",
+ "chrono",
  "dotenvy",
  "futures-util",
  "getrandom 0.3.4",
@@ -3233,6 +3253,7 @@ dependencies = [
  "shardline-protocol-adapters",
  "shardline-provider-events",
  "shardline-rebuild",
+ "shardline-s3-adapter",
  "shardline-server-core",
  "shardline-storage",
  "shardline-vcs",
