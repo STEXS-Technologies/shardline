@@ -23,7 +23,7 @@
     clippy::unnecessary_map_or
 )]
 
-use std::{num::NonZeroUsize, time::Duration};
+use std::{num::NonZeroUsize, path::Path, time::Duration};
 
 use shardline_protocol::{RepositoryProvider, RepositoryScope, TokenClaims, TokenScope};
 use shardline_server::{ServerConfig, ServerFrontend, ServerRole, app};
@@ -118,14 +118,26 @@ impl Drop for TestServer {
 // Client availability gating + blocking subprocess helper.
 // ---------------------------------------------------------------------------
 
-/// Runs an `mc` subprocess on the blocking pool and returns its output.
+/// Runs an `mc` subprocess on the blocking pool with an **isolated** config
+/// directory and returns its output.
 ///
 /// `mc` can take seconds for large uploads; running it on the blocking pool
 /// keeps the async runtime workers (which serve the S3 frontend) alive.
-async fn mc_run(args: &[String]) -> std::process::Output {
-    let args: Vec<String> = args.to_vec();
+///
+/// Every `mc` invocation must use a per-test `--config-dir` (inside the test's
+/// `TempDir`): `mc alias set` reads and rewrites the whole config file without
+/// locking, so parallel tests sharing `~/.mc/config.json` race and lose each
+/// other's aliases. Worse, `mc` treats a path whose alias is unknown as a
+/// **local filesystem path** — `mc mb s3test-*/ac.assets` then creates a
+/// directory under the crate CWD instead of hitting the server. The isolated
+/// config dir makes the alias registration deterministic and hermetic.
+async fn mc_run(config_dir: &Path, args: &[&str]) -> std::process::Output {
+    let config_dir = config_dir.to_path_buf();
+    let args: Vec<String> = args.iter().map(|arg| (*arg).to_owned()).collect();
     tokio::task::spawn_blocking(move || {
         std::process::Command::new("mc")
+            .arg("--config-dir")
+            .arg(config_dir)
             .args(&args)
             .output()
             .unwrap()
@@ -134,12 +146,51 @@ async fn mc_run(args: &[String]) -> std::process::Output {
     .unwrap()
 }
 
+/// Registers an mc alias and **verifies** it actually took effect.
+///
+/// `mc alias set` exits `0` even when it fails (e.g. its endpoint probe got a
+/// connection error), so exit status alone is not enough: the alias must be
+/// usable or every later `mc` command silently falls back to a local path.
+async fn mc_alias_set(config_dir: &Path, alias: &str, endpoint: &str, token: &str) {
+    let output = mc_run(
+        config_dir,
+        &["alias", "set", alias, endpoint, token, "dummy-secret"],
+    )
+    .await;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success() && !stderr.contains("mc: <ERROR>"),
+        "mc alias set failed (stderr): {stderr}"
+    );
+}
+
 /// Returns whether `mc` is on PATH.
 fn mc_available() -> bool {
     std::process::Command::new("mc")
         .arg("--version")
         .output()
         .is_ok_and(|output| output.status.success())
+}
+
+/// Fails the test if an `mc` local-fallback artifact (`s3test-*`) was created
+/// in the crate working directory.
+///
+/// `cargo test` runs with the CWD set to the package dir, so when `mc` cannot
+/// resolve an alias it writes `{alias}/{bucket}/{key}` under
+/// `crates/shardline-server/`. These leaked blobs were once committed by
+/// accident; this guard makes any recurrence a hard test failure.
+fn assert_no_leaked_mc_artifacts() {
+    let cwd = std::env::current_dir().expect("current dir");
+    let leaked: Vec<String> = std::fs::read_dir(&cwd)
+        .expect("read crate dir")
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with("s3test-"))
+        .collect();
+    assert!(
+        leaked.is_empty(),
+        "mc fell back to local paths and leaked artifacts in the crate dir {cwd:?}: {leaked:?}"
+    );
 }
 
 /// Returns whether `python3` with pyarrow is available.
@@ -163,25 +214,13 @@ async fn mc_put_get_list_stat_rm_roundtrip() {
     let server = TestServer::start().await;
     let token = mint_token(OWNER, NAME);
     let tmp = TempDir::new().unwrap();
+    let config_dir = tmp.path().join("mc-config");
     let alias_name = format!("s3test-rt-{}", std::process::id());
 
-    let alias = mc_run(&[
-        "alias".to_owned(),
-        "set".to_owned(),
-        alias_name.clone(),
-        server.base_url.clone(),
-        token.clone(),
-        "dummy-secret".to_owned(),
-    ])
-    .await;
-    assert!(
-        alias.status.success(),
-        "mc alias set failed: {}",
-        String::from_utf8_lossy(&alias.stderr)
-    );
+    mc_alias_set(&config_dir, &alias_name, &server.base_url, &token).await;
 
     // CreateBucket (mc sends PUT /{bucket}/ — the trailing-slash form).
-    let mb = mc_run(&["mb".to_owned(), format!("{alias_name}/{BUCKET}")]).await;
+    let mb = mc_run(&config_dir, &["mb", &format!("{alias_name}/{BUCKET}")]).await;
     assert!(
         mb.status.success(),
         "mc mb failed: {}",
@@ -191,11 +230,14 @@ async fn mc_put_get_list_stat_rm_roundtrip() {
     // PutObject (mc streams an AWS-chunked body).
     let file = tmp.path().join("hello.txt");
     std::fs::write(&file, b"hello real-client\n").unwrap();
-    let cp = mc_run(&[
-        "cp".to_owned(),
-        file.to_str().unwrap().to_owned(),
-        format!("{alias_name}/{BUCKET}/hello.txt"),
-    ])
+    let cp = mc_run(
+        &config_dir,
+        &[
+            "cp",
+            file.to_str().unwrap(),
+            &format!("{alias_name}/{BUCKET}/hello.txt"),
+        ],
+    )
     .await;
     assert!(
         cp.status.success(),
@@ -204,12 +246,16 @@ async fn mc_put_get_list_stat_rm_roundtrip() {
     );
 
     // GetObject (mc cat) — must return the DECODED bytes.
-    let cat = mc_run(&["cat".to_owned(), format!("{alias_name}/{BUCKET}/hello.txt")]).await;
+    let cat = mc_run(
+        &config_dir,
+        &["cat", &format!("{alias_name}/{BUCKET}/hello.txt")],
+    )
+    .await;
     assert!(cat.status.success(), "mc cat failed");
     assert_eq!(cat.stdout, b"hello real-client\n");
 
     // ListObjectsV2.
-    let ls = mc_run(&["ls".to_owned(), format!("{alias_name}/{BUCKET}")]).await;
+    let ls = mc_run(&config_dir, &["ls", &format!("{alias_name}/{BUCKET}")]).await;
     assert!(ls.status.success(), "mc ls failed");
     let listing = String::from_utf8_lossy(&ls.stdout);
     assert!(
@@ -218,29 +264,35 @@ async fn mc_put_get_list_stat_rm_roundtrip() {
     );
 
     // HeadObject.
-    let stat = mc_run(&[
-        "stat".to_owned(),
-        format!("{alias_name}/{BUCKET}/hello.txt"),
-    ])
+    let stat = mc_run(
+        &config_dir,
+        &["stat", &format!("{alias_name}/{BUCKET}/hello.txt")],
+    )
     .await;
     assert!(stat.status.success(), "mc stat failed");
     let stat_out = String::from_utf8_lossy(&stat.stdout);
     assert!(stat_out.contains("hello.txt"), "{stat_out}");
 
     // DeleteObject (mc rm uses the DeleteObjects batch endpoint).
-    let rm = mc_run(&["rm".to_owned(), format!("{alias_name}/{BUCKET}/hello.txt")]).await;
+    let rm = mc_run(
+        &config_dir,
+        &["rm", &format!("{alias_name}/{BUCKET}/hello.txt")],
+    )
+    .await;
     assert!(
         rm.status.success(),
         "mc rm failed: {}",
         String::from_utf8_lossy(&rm.stderr)
     );
 
-    let ls_after = mc_run(&["ls".to_owned(), format!("{alias_name}/{BUCKET}")]).await;
+    let ls_after = mc_run(&config_dir, &["ls", &format!("{alias_name}/{BUCKET}")]).await;
     let listing_after = String::from_utf8_lossy(&ls_after.stdout);
     assert!(
         !listing_after.contains("hello.txt"),
         "hello.txt must be gone after rm: {listing_after}"
     );
+
+    assert_no_leaked_mc_artifacts();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -252,19 +304,11 @@ async fn mc_multipart_upload_matches_source() {
     let server = TestServer::start().await;
     let token = mint_token(OWNER, NAME);
     let tmp = TempDir::new().unwrap();
+    let config_dir = tmp.path().join("mc-config");
     let alias_name = format!("s3test-mp-{}", std::process::id());
 
-    let alias = mc_run(&[
-        "alias".to_owned(),
-        "set".to_owned(),
-        alias_name.clone(),
-        server.base_url.clone(),
-        token.clone(),
-        "dummy-secret".to_owned(),
-    ])
-    .await;
-    assert!(alias.status.success(), "mc alias set failed");
-    let mb = mc_run(&["mb".to_owned(), format!("{alias_name}/{BUCKET}")]).await;
+    mc_alias_set(&config_dir, &alias_name, &server.base_url, &token).await;
+    let mb = mc_run(&config_dir, &["mb", &format!("{alias_name}/{BUCKET}")]).await;
     assert!(mb.status.success(), "mc mb failed");
 
     // A 20 MiB file forces multipart (mc default part size is 16 MiB).
@@ -276,11 +320,14 @@ async fn mc_multipart_upload_matches_source() {
     }
     std::fs::write(&big, &source).unwrap();
 
-    let up = mc_run(&[
-        "cp".to_owned(),
-        big.to_str().unwrap().to_owned(),
-        format!("{alias_name}/{BUCKET}/big.bin"),
-    ])
+    let up = mc_run(
+        &config_dir,
+        &[
+            "cp",
+            big.to_str().unwrap(),
+            &format!("{alias_name}/{BUCKET}/big.bin"),
+        ],
+    )
     .await;
     assert!(
         up.status.success(),
@@ -289,13 +336,19 @@ async fn mc_multipart_upload_matches_source() {
     );
 
     // Download and compare bytes (verifies the aws-chunked decode + CDC).
-    let cat = mc_run(&["cat".to_owned(), format!("{alias_name}/{BUCKET}/big.bin")]).await;
+    let cat = mc_run(
+        &config_dir,
+        &["cat", &format!("{alias_name}/{BUCKET}/big.bin")],
+    )
+    .await;
     assert!(cat.status.success(), "mc cat big.bin failed");
     assert_eq!(cat.stdout.len(), source.len(), "downloaded size must match");
     assert_eq!(
         cat.stdout, source,
         "multipart object bytes must match the source"
     );
+
+    assert_no_leaked_mc_artifacts();
 }
 
 // ---------------------------------------------------------------------------
@@ -384,4 +437,6 @@ async fn pyarrow_parquet_write_read_info() {
         stdout.contains("ALL PYARROW CHECKS PASSED"),
         "pyarrow checks did not complete:\n{stdout}\n{stderr}"
     );
+
+    assert_no_leaked_mc_artifacts();
 }
