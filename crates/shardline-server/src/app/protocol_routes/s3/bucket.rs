@@ -2,8 +2,10 @@
 //!
 //! `CreateBucket` is a no-op `200` for S3A / object_store missing-bucket
 //! probes, `HeadBucket` answers the connect probe (`200`, `404 NoSuchBucket`,
-//! `403 AccessDenied`), `GetBucketLocation` returns the `us-east-1` stub, and
-//! `DeleteBucket` plus `ListObjectsV2` (Lane 5) respond `501 NotImplemented`.
+//! `403 AccessDenied`), `GetBucketLocation` returns the `us-east-1` stub,
+//! `ListObjectsV2` (`?list-type=2`) serves the index-backed listing, and
+//! `DeleteBucket` plus every other bucket sub-resource respond
+//! `501 NotImplemented`.
 
 use std::sync::Arc;
 
@@ -15,7 +17,7 @@ use axum::{
 use shardline_protocol::TokenScope;
 use shardline_s3_adapter::{S3Error, S3SubResource, classify, require_s3_bucket_binding};
 
-use super::{authorize_s3, parse_s3_query, s3_xml_content_type};
+use super::{authorize_s3, listing, parse_s3_query, s3_xml_content_type};
 use crate::app::{AppState, scope_from_auth};
 
 /// `PUT /{bucket}` — `CreateBucket` stub: a no-op `200` once the bucket
@@ -56,8 +58,9 @@ pub(crate) async fn s3_head_bucket(
 ///
 /// `?location` serves the `GetBucketLocation` stub
 /// (`<LocationConstraint>us-east-1</LocationConstraint>`); `?list-type=2`
-/// (`ListObjectsV2`) and every other bucket sub-resource respond
-/// `501 NotImplemented` (listing is Lane 5; the rest are out of scope).
+/// dispatches to [`s3_list_objects_v2`](listing::s3_list_objects_v2);
+/// `?list-type=1` and every other bucket sub-resource respond
+/// `501 NotImplemented`.
 #[tracing::instrument(skip(state, headers), fields(bucket))]
 pub(crate) async fn s3_get_bucket(
     State(state): State<Arc<AppState>>,
@@ -74,6 +77,12 @@ pub(crate) async fn s3_get_bucket(
         .any(|resource| matches!(resource, S3SubResource::Location))
     {
         return Ok(get_bucket_location_response());
+    }
+    if classify(&query)
+        .iter()
+        .any(|resource| matches!(resource, S3SubResource::ListObjects))
+    {
+        return listing::s3_list_objects_v2(State(state), Path(bucket), uri, headers).await;
     }
     Err(S3Error::not_implemented())
 }

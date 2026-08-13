@@ -60,12 +60,12 @@ as out of scope until a real client need appears.
 | `HeadBucket` | stub (S3A / object_store connect-probe) |
 | `GetBucketLocation` | stub → `us-east-1` (S3A / pyarrow region-probe) |
 | `CreateBucket` | no-op `200` (S3A missing-bucket probe) |
+| `ListObjectsV2` | index-backed (`shardline_s3_objects`); `prefix`/`delimiter`/`max-keys`/`continuation-token`/`start-after`; zero object-store reads — the index rows carry size/ETag/mtime |
 
 ### Planned (near-term follow-up)
 
 | Operation | Why / trigger |
 |---|---|
-| `ListObjectsV2` | every directory/glob/discovery path (DuckDB glob, Polars, Spark listing, Iceberg catalog). **Gating decision:** key enumeration must be settled before the object-key layout freezes (`list_prefix` over `protocols/s3/{scope}/` vs a `protocol_key → file_id` index). |
 | `DeleteObjects` (batch) | Iceberg GC, S3A bulk deletes |
 | Conditional requests (`If-Match` / `If-None-Match`) | pyiceberg optimistic metadata commits, `object_store` conditional puts |
 | `ListBuckets` | CLI tooling (`aws s3 ls`) |

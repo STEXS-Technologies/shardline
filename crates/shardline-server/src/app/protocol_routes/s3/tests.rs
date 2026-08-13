@@ -809,16 +809,17 @@ async fn s3_head_bucket_rejects_mismatched_token() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn s3_list_objects_v2_returns_501_not_implemented_xml() {
+async fn s3_list_objects_v1_returns_501_not_implemented_xml() {
     let (state, _tmp) = build_test_state().await;
     let app = s3_router(state);
 
+    // `?list-type=1` (ListObjectsV1) is out of scope → 501.
     let list = app
         .clone()
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri(format!("/{BUCKET}?list-type=2"))
+                .uri(format!("/{BUCKET}?list-type=1"))
                 .header(
                     header::AUTHORIZATION,
                     sigv4_auth(&mint_token(TokenScope::Read, OWNER, NAME)),
@@ -1314,4 +1315,211 @@ async fn s3_list_parts_and_list_multipart_uploads_return_501() {
         .await
         .unwrap();
     assert_eq!(list_uploads.status(), StatusCode::NOT_IMPLEMENTED);
+}
+
+// =========================================================================
+// ListObjectsV2 (Lane 5)
+// =========================================================================
+
+/// Sends a `ListObjectsV2` request and returns the XML body.
+async fn list_objects(app: &Router, query: &str) -> String {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/{BUCKET}?{query}"))
+                .header(
+                    header::AUTHORIZATION,
+                    sigv4_auth(&mint_token(TokenScope::Read, OWNER, NAME)),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK, "list {query:?}");
+    String::from_utf8(body_bytes(response).await).unwrap()
+}
+
+/// PUTs one object under the bucket.
+async fn put_object(app: &Router, key: &str, content: &[u8]) {
+    let put = app
+        .clone()
+        .oneshot(put_request(format!("/{BUCKET}/{key}"), content.to_vec()))
+        .await
+        .unwrap();
+    assert_eq!(put.status(), StatusCode::OK, "put {key}");
+}
+
+/// Counts occurrences of a substring (used for `<Contents>`/`<CommonPrefixes>`).
+fn count_occurrences(haystack: &str, needle: &str) -> usize {
+    haystack.matches(needle).count()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_list_objects_v2_prefix_shape_duckdb_glob() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state);
+    put_object(&app, "dir/a.txt", b"a").await;
+    put_object(&app, "dir/sub/b.txt", b"b").await;
+    put_object(&app, "other.txt", b"c").await;
+
+    // `prefix=dir/` returns only keys under dir/.
+    let xml = list_objects(&app, "list-type=2&prefix=dir%2F").await;
+    assert!(xml.contains("<Key>dir/a.txt</Key>"), "{xml}");
+    assert!(xml.contains("<Key>dir/sub/b.txt</Key>"), "{xml}");
+    assert!(!xml.contains("<Key>other.txt</Key>"), "{xml}");
+    assert!(!xml.contains("<CommonPrefixes>"), "{xml}");
+    assert!(xml.contains("<IsTruncated>false</IsTruncated>"), "{xml}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_list_objects_v2_delimiter_shape_s3a() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state);
+    put_object(&app, "a.txt", b"1").await;
+    put_object(&app, "dir/b.txt", b"2").await;
+    put_object(&app, "dir/sub/c.txt", b"3").await;
+    put_object(&app, "zz.txt", b"4").await;
+
+    // `prefix=` + `delimiter=/` → top-level Contents + CommonPrefixes; nested
+    // keys collapse into the `dir/` rollup.
+    let xml = list_objects(&app, "list-type=2&delimiter=%2F").await;
+    assert!(xml.contains("<Key>a.txt</Key>"), "{xml}");
+    assert!(xml.contains("<Key>zz.txt</Key>"), "{xml}");
+    assert!(!xml.contains("<Key>dir/b.txt</Key>"), "{xml}");
+    assert!(!xml.contains("<Key>dir/sub/c.txt</Key>"), "{xml}");
+    assert!(
+        xml.contains("<CommonPrefixes>") && xml.contains("<Prefix>dir/</Prefix>"),
+        "{xml}"
+    );
+    assert_eq!(count_occurrences(&xml, "<Contents>"), 2);
+    assert_eq!(count_occurrences(&xml, "<CommonPrefixes>"), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_list_objects_v2_pagination_with_continuation_token() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state);
+    put_object(&app, "a.txt", b"1").await;
+    put_object(&app, "b.txt", b"2").await;
+    put_object(&app, "c.txt", b"3").await;
+
+    let first = list_objects(&app, "list-type=2&max-keys=1").await;
+    assert!(first.contains("<Key>a.txt</Key>"), "{first}");
+    assert!(first.contains("<IsTruncated>true</IsTruncated>"), "{first}");
+    assert!(first.contains("<NextContinuationToken>"), "{first}");
+    let token1 = extract_tag(&first, "NextContinuationToken");
+
+    let second = list_objects(
+        &app,
+        &format!("list-type=2&max-keys=1&continuation-token={token1}"),
+    )
+    .await;
+    assert!(second.contains("<Key>b.txt</Key>"), "{second}");
+    assert!(
+        second.contains("<IsTruncated>true</IsTruncated>"),
+        "{second}"
+    );
+    let token2 = extract_tag(&second, "NextContinuationToken");
+
+    let third = list_objects(
+        &app,
+        &format!("list-type=2&max-keys=1&continuation-token={token2}"),
+    )
+    .await;
+    assert!(third.contains("<Key>c.txt</Key>"), "{third}");
+    assert!(
+        third.contains("<IsTruncated>false</IsTruncated>"),
+        "{third}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_list_objects_v2_size_and_etag_match_index() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state.clone());
+    let content = b"list-me-please";
+    let put = app
+        .clone()
+        .oneshot(put_request(format!("/{BUCKET}/size.pt"), content.to_vec()))
+        .await
+        .unwrap();
+    let put_etag = put
+        .headers()
+        .get(header::ETAG)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+
+    let xml = list_objects(&app, "list-type=2&prefix=size.pt").await;
+    assert!(xml.contains("<Key>size.pt</Key>"), "{xml}");
+    assert!(
+        xml.contains(&format!("<Size>{}</Size>", content.len())),
+        "{xml}"
+    );
+    assert!(xml.contains(&format!("<ETag>{put_etag}</ETag>")), "{xml}");
+    assert!(xml.contains("<LastModified>"), "{xml}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_list_objects_v2_empty_bucket() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state);
+
+    let xml = list_objects(&app, "list-type=2").await;
+    assert!(xml.contains("<ListBucketResult"), "{xml}");
+    assert_eq!(count_occurrences(&xml, "<Contents>"), 0);
+    assert_eq!(count_occurrences(&xml, "<CommonPrefixes>"), 0);
+    assert!(xml.contains("<IsTruncated>false</IsTruncated>"), "{xml}");
+    assert!(!xml.contains("<NextContinuationToken>"), "{xml}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_list_objects_v2_key_equal_to_prefix_is_contents() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state);
+    put_object(&app, "dir", b"object").await;
+    put_object(&app, "dir/a.txt", b"1").await;
+
+    // prefix=dir lists the object `dir` itself plus dir/a.txt.
+    let xml = list_objects(&app, "list-type=2&prefix=dir").await;
+    assert!(xml.contains("<Key>dir</Key>"), "{xml}");
+    assert!(xml.contains("<Key>dir/a.txt</Key>"), "{xml}");
+
+    // prefix=dir/ lists dir/ contents; `dir/` as a key would be a Contents row.
+    let xml = list_objects(&app, "list-type=2&prefix=dir%2F").await;
+    assert!(xml.contains("<Key>dir/a.txt</Key>"), "{xml}");
+    assert!(!xml.contains("<Key>dir</Key>"), "{xml}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_list_objects_v2_delimiter_at_prefix_boundary() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state);
+    put_object(&app, "dir/a.txt", b"1").await;
+    put_object(&app, "dirx/y.txt", b"2").await;
+
+    // prefix=dir + delimiter=/ → `dir/a.txt` groups into CommonPrefixes `dir/`
+    // (the delimiter sits exactly at the prefix boundary); `dirx/` groups too.
+    let xml = list_objects(&app, "list-type=2&prefix=dir&delimiter=%2F").await;
+    assert!(!xml.contains("<Key>dir/a.txt</Key>"), "{xml}");
+    assert!(xml.contains("<Prefix>dir/</Prefix>"), "{xml}");
+    assert!(xml.contains("<Prefix>dirx/</Prefix>"), "{xml}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_list_objects_v2_start_after_skips() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state);
+    put_object(&app, "a.txt", b"1").await;
+    put_object(&app, "b.txt", b"2").await;
+    put_object(&app, "c.txt", b"3").await;
+
+    let xml = list_objects(&app, "list-type=2&start-after=b.txt").await;
+    assert!(!xml.contains("<Key>a.txt</Key>"), "{xml}");
+    assert!(!xml.contains("<Key>b.txt</Key>"), "{xml}");
+    assert!(xml.contains("<Key>c.txt</Key>"), "{xml}");
 }

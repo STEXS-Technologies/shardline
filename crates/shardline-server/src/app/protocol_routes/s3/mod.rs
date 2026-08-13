@@ -8,6 +8,7 @@
 //! claims, and then dispatches on the query sub-resources.
 
 pub(super) mod bucket;
+pub(super) mod listing;
 pub(super) mod multipart;
 pub(super) mod object;
 
