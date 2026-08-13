@@ -326,6 +326,9 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
             ServerFrontend::Lfs | ServerFrontend::BazelHttp | ServerFrontend::Oci => {
                 app = register_frontend_routes(app, *frontend, role, &state);
             }
+            ServerFrontend::S3 => {
+                // S3 routes are registered in a later lane.
+            }
         }
     }
 
@@ -466,6 +469,7 @@ fn register_frontend_routes(
         ServerFrontend::BazelHttp => register_bazel_routes(app, role),
         ServerFrontend::Oci => register_oci_routes(app, role),
         ServerFrontend::Hub => app, // Hub routes are built separately
+        ServerFrontend::S3 => app,  // S3 routes are registered in a later lane
     }
 }
 

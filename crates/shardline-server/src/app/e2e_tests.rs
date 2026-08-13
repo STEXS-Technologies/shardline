@@ -239,6 +239,9 @@ async fn test_app_for_frontends_with_role(
                     );
                 }
             },
+            ServerFrontend::S3 => {
+                // S3 routes are registered in a later lane.
+            }
             ServerFrontend::Hub => {
                 hub_state = Some(build_test_hub_state(tmp.path()).await);
             }
@@ -463,6 +466,9 @@ async fn test_app_with_auth(frontends: &[ServerFrontend]) -> (Router, TempDir) {
                     );
                 }
             },
+            ServerFrontend::S3 => {
+                // S3 routes are registered in a later lane.
+            }
             ServerFrontend::Hub => {
                 hub_state = Some(build_test_hub_state(tmp.path()).await);
             }
@@ -723,6 +729,9 @@ async fn test_app_with_provider_tokens(frontends: &[ServerFrontend]) -> (Router,
                     );
                 }
             },
+            ServerFrontend::S3 => {
+                // S3 routes are registered in a later lane.
+            }
             ServerFrontend::Hub => {
                 hub_state = Some(build_test_hub_state(tmp.path()).await);
             }

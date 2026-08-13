@@ -3692,10 +3692,12 @@ dependencies = [
 name = "shardline-s3-adapter"
 version = "1.5.0"
 dependencies = [
+ "axum",
  "shardline-protocol",
  "shardline-server-core",
  "shardline-storage",
  "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]

@@ -19,7 +19,7 @@ use super::help::{
     name = "shardline",
     version,
     about = "Content-addressed storage server and operations CLI.",
-    long_about = "Shardline serves CAS protocol frontends, provider integration, storage maintenance, and operational workflows from one CLI.\n\nThe current frontend set in this repository is Xet, Git LFS, Bazel HTTP remote cache, and OCI Distribution.\n\nUse `shardline help <command>` to inspect a command in detail.",
+    long_about = "Shardline serves CAS protocol frontends, provider integration, storage maintenance, and operational workflows from one CLI.\n\nThe current frontend set in this repository is Xet, Git LFS, Bazel HTTP remote cache, OCI Distribution, and S3.\n\nUse `shardline help <command>` to inspect a command in detail.",
     after_help = CLI_AFTER_LONG_HELP,
     arg_required_else_help = true,
     next_line_help = true
@@ -648,6 +648,8 @@ pub(crate) enum CliServerFrontend {
     Oci,
     /// Serve the HuggingFace Hub API compatibility frontend.
     Hub,
+    /// Serve the S3-compatible object-storage frontend.
+    S3,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
