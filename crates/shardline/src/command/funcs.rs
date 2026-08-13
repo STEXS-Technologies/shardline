@@ -284,6 +284,7 @@ impl From<CliServerFrontend> for ServerFrontend {
             CliServerFrontend::BazelHttp => Self::BazelHttp,
             CliServerFrontend::Oci => Self::Oci,
             CliServerFrontend::Hub => Self::Hub,
+            CliServerFrontend::S3 => Self::S3,
         }
     }
 }

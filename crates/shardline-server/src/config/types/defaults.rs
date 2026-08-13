@@ -88,3 +88,12 @@ pub(crate) const DEFAULT_OCI_REGISTRY_TOKEN_MAX_IN_FLIGHT_REQUESTS: NonZeroUsize
         Some(value) => value,
         None => NonZeroUsize::MIN,
     };
+
+/// S3 multipart part sizes below this value are rejected (1 MiB).
+pub(crate) const MIN_S3_MAX_PART_BYTES: u64 = 1_048_576;
+
+/// Default maximum S3 multipart part size in bytes (1 GiB).
+pub(crate) const DEFAULT_S3_MAX_PART_BYTES: NonZeroU64 = match NonZeroU64::new(1_073_741_824) {
+    Some(value) => value,
+    None => NonZeroU64::MIN,
+};

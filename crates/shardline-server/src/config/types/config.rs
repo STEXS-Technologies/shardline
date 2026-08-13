@@ -17,11 +17,11 @@ use super::defaults::{
     CONFIG_SECRET_KEY_BYTES, DEFAULT_MAX_REQUEST_BODY_BYTES,
     DEFAULT_OCI_REGISTRY_TOKEN_MAX_IN_FLIGHT_REQUESTS, DEFAULT_OCI_REGISTRY_TOKEN_TTL_SECONDS,
     DEFAULT_OCI_UPLOAD_MAX_ACTIVE_SESSIONS, DEFAULT_OCI_UPLOAD_SESSION_TTL_SECONDS,
-    DEFAULT_PARALLELISM_FALLBACK, HUB_WEBHOOK_SECRET_KEY_BYTES,
+    DEFAULT_PARALLELISM_FALLBACK, DEFAULT_S3_MAX_PART_BYTES, HUB_WEBHOOK_SECRET_KEY_BYTES,
     MAX_DEFAULT_TRANSFER_MAX_IN_FLIGHT_CHUNKS, MAX_DEFAULT_UPLOAD_MAX_IN_FLIGHT_CHUNKS,
     MAX_ED25519_KEY_BYTES, MAX_METRICS_TOKEN_BYTES, MAX_PROVIDER_API_KEY_BYTES,
     MAX_TOKEN_SIGNING_KEY_BYTES, MIN_DEFAULT_TRANSFER_MAX_IN_FLIGHT_CHUNKS,
-    MIN_DEFAULT_UPLOAD_MAX_IN_FLIGHT_CHUNKS,
+    MIN_DEFAULT_UPLOAD_MAX_IN_FLIGHT_CHUNKS, MIN_S3_MAX_PART_BYTES,
 };
 use super::enums::{
     AuthConfig, AuthProviderKind, CacheConfig, DeploymentMode, ObjectStorageAdapter, OciConfig,
@@ -67,6 +67,7 @@ pub struct ServerConfig {
     pub(crate) provider: ProviderConfig,
     pub(crate) shutdown_timeout: Option<Duration>,
     pub(crate) admission_max_weight: NonZeroUsize,
+    pub(crate) s3_max_part_bytes: NonZeroU64,
 }
 
 impl ServerConfig {
@@ -150,6 +151,7 @@ impl ServerConfig {
             },
             shutdown_timeout: None,
             admission_max_weight: NonZeroUsize::new(256).unwrap_or(NonZeroUsize::MIN),
+            s3_max_part_bytes: DEFAULT_S3_MAX_PART_BYTES,
         }
     }
 
@@ -628,6 +630,31 @@ impl ServerConfig {
     pub const fn with_admission_max_weight(mut self, max_weight: NonZeroUsize) -> Self {
         self.admission_max_weight = max_weight;
         self
+    }
+
+    /// Returns the maximum S3 multipart part size in bytes.
+    #[must_use]
+    pub const fn s3_max_part_bytes(&self) -> NonZeroU64 {
+        self.s3_max_part_bytes
+    }
+
+    /// Overrides the maximum S3 multipart part size in bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerConfigError::S3MaxPartBytesTooSmall`] when the value is
+    /// smaller than 1 MiB. Zero is rejected by the [`NonZeroU64`] type.
+    pub fn with_s3_max_part_bytes(
+        mut self,
+        s3_max_part_bytes: NonZeroU64,
+    ) -> Result<Self, ServerConfigError> {
+        if s3_max_part_bytes.get() < MIN_S3_MAX_PART_BYTES {
+            return Err(ServerConfigError::S3MaxPartBytesTooSmall {
+                minimum_bytes: MIN_S3_MAX_PART_BYTES,
+            });
+        }
+        self.s3_max_part_bytes = s3_max_part_bytes;
+        Ok(self)
     }
 
     /// Sets the target xorb container size in bytes.

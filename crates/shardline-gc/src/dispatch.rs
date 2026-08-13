@@ -31,9 +31,13 @@ pub(super) fn optional_chunk_container_keys(
                     object_keys.push(cache_key);
                 }
             }
+            // S3 protocol keys are skipped by `scan_orphan_objects`'s
+            // unrecognized-key path and chunks are record-protected, so GC/fsck
+            // need no behavior change.
             ServerFrontend::Lfs
             | ServerFrontend::BazelHttp
             | ServerFrontend::Oci
+            | ServerFrontend::S3
             | ServerFrontend::Hub => {}
         }
     }
@@ -66,9 +70,11 @@ pub(super) fn managed_protocol_object_identity(
                     return Ok(Some(hash.to_owned()));
                 }
             }
+            // S3 objects are handled by the unrecognized-key path; no-op here.
             ServerFrontend::Lfs
             | ServerFrontend::BazelHttp
             | ServerFrontend::Oci
+            | ServerFrontend::S3
             | ServerFrontend::Hub => {}
         }
     }
@@ -102,9 +108,11 @@ where
                     return result;
                 }
             }
+            // S3 chunks are record-protected, so GC/fsck need no behavior change.
             ServerFrontend::Lfs
             | ServerFrontend::BazelHttp
             | ServerFrontend::Oci
+            | ServerFrontend::S3
             | ServerFrontend::Hub => {}
         }
     }

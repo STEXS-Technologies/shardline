@@ -357,6 +357,18 @@ pub enum ServerConfigError {
     /// The chunk size exceeds the maximum allowed value.
     #[error("chunk size must not exceed 1 GB")]
     ChunkSizeTooLarge,
+    /// The maximum S3 multipart part size could not be parsed.
+    #[error("invalid s3 max part bytes")]
+    S3MaxPartBytes(ParseIntError),
+    /// The maximum S3 multipart part size was zero.
+    #[error("s3 max part bytes must be greater than zero")]
+    ZeroS3MaxPartBytes,
+    /// The maximum S3 multipart part size was below the 1 MiB floor.
+    #[error("s3 max part bytes must be at least {minimum_bytes} bytes")]
+    S3MaxPartBytesTooSmall {
+        /// The minimum accepted part size in bytes.
+        minimum_bytes: u64,
+    },
     /// The public base URL is not a valid URL.
     #[error("SHARDLINE_PUBLIC_BASE_URL is not a valid URL: {0}")]
     InvalidPublicBaseUrl(String),

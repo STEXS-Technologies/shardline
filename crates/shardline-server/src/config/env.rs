@@ -15,9 +15,10 @@ use super::secrets::{
 use super::{
     AuthProviderKind, CONFIG_SECRET_KEY_BYTES, DEFAULT_MAX_REQUEST_BODY_BYTES,
     DEFAULT_MAX_SHARD_FILES, DEFAULT_MAX_SHARD_RECONSTRUCTION_TERMS, DEFAULT_MAX_SHARD_XORB_CHUNKS,
-    DEFAULT_MAX_SHARD_XORBS, DeploymentMode, HUB_WEBHOOK_SECRET_KEY_BYTES, MAX_ED25519_KEY_BYTES,
-    MAX_METRICS_TOKEN_BYTES, MAX_TOKEN_SIGNING_KEY_BYTES, ObjectStorageAdapter, ServerConfig,
-    ServerConfigError, ShardMetadataLimits, default_transfer_max_in_flight_chunks,
+    DEFAULT_MAX_SHARD_XORBS, DEFAULT_S3_MAX_PART_BYTES, DeploymentMode,
+    HUB_WEBHOOK_SECRET_KEY_BYTES, MAX_ED25519_KEY_BYTES, MAX_METRICS_TOKEN_BYTES,
+    MAX_TOKEN_SIGNING_KEY_BYTES, ObjectStorageAdapter, ServerConfig, ServerConfigError,
+    ShardMetadataLimits, default_transfer_max_in_flight_chunks,
     default_upload_max_in_flight_chunks, parse_byte_size,
 };
 use crate::{
@@ -169,6 +170,13 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
     else {
         return Err(ServerConfigError::ZeroOciRegistryTokenMaxInFlightRequests);
     };
+    let raw_s3_max_part_bytes = var("SHARDLINE_S3_MAX_PART_BYTES")
+        .unwrap_or_else(|_error| DEFAULT_S3_MAX_PART_BYTES.get().to_string())
+        .parse::<u64>()
+        .map_err(ServerConfigError::S3MaxPartBytes)?;
+    let Some(s3_max_part_bytes) = NonZeroU64::new(raw_s3_max_part_bytes) else {
+        return Err(ServerConfigError::ZeroS3MaxPartBytes);
+    };
     let reconstruction_cache_redis_url = var("SHARDLINE_RECONSTRUCTION_CACHE_REDIS_URL").ok();
     let reconstruction_cache_redis_tls = load_redis_tls_config_from_env()?;
     let index_postgres_url = var("SHARDLINE_INDEX_POSTGRES_URL").ok();
@@ -307,6 +315,7 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
             reconstruction_cache_ttl_seconds,
             reconstruction_cache_memory_max_entries,
         )
+        .with_s3_max_part_bytes(s3_max_part_bytes)?
         .with_admission_max_weight(admission_max_weight_from_env());
     config.cache.adapter = reconstruction_cache_adapter;
     config.cache.redis_url = reconstruction_cache_redis_url.map(SecretString::new);
