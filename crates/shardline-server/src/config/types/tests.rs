@@ -2226,3 +2226,50 @@ fn server_config_defaults_for_s3_upload_sessions() {
     assert_eq!(config.s3_upload_session_ttl_seconds().get(), 3600);
     assert_eq!(config.s3_upload_max_active_sessions().get(), 1024);
 }
+
+#[test]
+fn server_config_s3_min_part_bytes_and_quotas() {
+    let config = ServerConfig::new(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+        "http://localhost:8080".to_owned(),
+        PathBuf::from("/tmp/test"),
+        NonZeroUsize::new(4096).unwrap(),
+    )
+    .with_s3_min_part_bytes(NonZeroU64::new(5_242_880).unwrap())
+    .expect("s3 min part bytes")
+    .with_s3_upload_session_max_bytes(NonZeroU64::new(1_099_511_627_776).unwrap())
+    .expect("s3 session max bytes")
+    .with_s3_upload_total_max_bytes(NonZeroU64::new(4_398_046_511_104).unwrap())
+    .expect("s3 total max bytes");
+    assert_eq!(config.s3_min_part_bytes().get(), 5_242_880);
+    assert_eq!(
+        config.s3_upload_session_max_bytes().get(),
+        1_099_511_627_776
+    );
+    assert_eq!(config.s3_upload_total_max_bytes().get(), 4_398_046_511_104);
+}
+
+#[test]
+fn server_config_s3_defaults_min_part_and_quotas() {
+    let config = ServerConfig::new(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+        "http://localhost:8080".to_owned(),
+        PathBuf::from("/tmp/test"),
+        NonZeroUsize::new(4096).unwrap(),
+    );
+    assert_eq!(
+        config.s3_min_part_bytes().get(),
+        5_242_880,
+        "S3 5 MiB minimum"
+    );
+    assert_eq!(
+        config.s3_upload_session_max_bytes().get(),
+        1_099_511_627_776,
+        "1 TiB session quota"
+    );
+    assert_eq!(
+        config.s3_upload_total_max_bytes().get(),
+        4_398_046_511_104,
+        "4 TiB aggregate quota"
+    );
+}

@@ -8,6 +8,13 @@
 //! file through ONE CDC ingest pass (`RequestBodyReader::from_reader_chain` +
 //! `put_s3_object_stream`), producing a single `FileRecord` whose BLAKE3 root
 //! content hash equals a single `PutObject` of the same bytes.
+//!
+//! Every mutating operation holds the adapter's global session lock for its
+//! whole duration — the same pattern the OCI frontend uses — so a concurrent
+//! session sweep (which also takes that lock) can never remove the session
+//! directory mid-write, and concurrent `UploadPart`/`Complete`/`Abort` calls
+//! for the same session serialize. The adapter's `store_part_locked` /
+//! `delete_session_locked` variants are used to avoid re-acquiring the lock.
 
 use std::{num::NonZeroUsize, sync::Arc, time::Instant};
 
@@ -19,7 +26,8 @@ use axum::{
 use shardline_index::S3ObjectEntry;
 use shardline_s3_adapter::{
     CompleteMultipartUploadResult, InitiateMultipartUploadResult, S3Error, create_session,
-    delete_session, parse_complete_multipart_parts, part_file_path, read_session, store_part,
+    delete_session_locked, lock_upload_sessions, parse_complete_multipart_parts, part_file_path,
+    read_session, store_part_locked,
 };
 use tokio::io::AsyncWriteExt;
 
@@ -30,7 +38,7 @@ use crate::{
     upload_ingest::{RequestBodyReader, read_body_to_bytes},
 };
 
-use super::{S3ObjectContext, s3_xml_content_type};
+use super::{S3ObjectContext, acquire_object_upload_lock, s3_xml_content_type};
 
 /// Maps a local I/O failure to the S3 internal-error envelope.
 fn io_to_s3(error: std::io::Error) -> S3Error {
@@ -61,6 +69,7 @@ pub(super) async fn s3_create_multipart_upload(
         &context.scope_namespace,
         state.config.s3_upload_session_ttl_seconds(),
         state.config.s3_upload_max_active_sessions(),
+        state.config.s3_upload_total_max_bytes(),
     )
     .await?;
     let xml = InitiateMultipartUploadResult {
@@ -82,6 +91,9 @@ pub(super) async fn s3_create_multipart_upload(
 /// Streams the part body to the session's `part-{N}` file (overwrite: the
 /// last upload of a part number wins) and responds `200` with an opaque
 /// per-part ETag (`"<upload_id>-<N>"`) the client echoes back in Complete.
+/// The per-session and aggregate byte quotas are enforced under the session
+/// lock; the S3 5 MiB minimum is enforced for non-final parts at Complete
+/// (matching S3, which validates at completion).
 pub(super) async fn s3_upload_part(
     state: &Arc<AppState>,
     context: &S3ObjectContext,
@@ -91,6 +103,10 @@ pub(super) async fn s3_upload_part(
 ) -> Result<Response, S3Error> {
     let root = state.config.root_dir();
     let ttl = state.config.s3_upload_session_ttl_seconds();
+
+    // Hold the global session lock for the whole mutation so a concurrent
+    // sweep cannot remove the session directory mid-write (F-s3-4).
+    let _session_lock = lock_upload_sessions(root).await?;
 
     // The session must exist, be unexpired, and belong to this bucket/key.
     let session = read_session(root, upload_id, ttl).await?;
@@ -122,7 +138,21 @@ pub(super) async fn s3_upload_part(
     }
     file.flush().await.map_err(io_to_s3)?;
 
-    store_part(root, upload_id, part_number, total_bytes, ttl).await?;
+    if let Err(error) = store_part_locked(
+        root,
+        upload_id,
+        part_number,
+        total_bytes,
+        ttl,
+        state.config.s3_upload_session_max_bytes(),
+        state.config.s3_upload_total_max_bytes(),
+    )
+    .await
+    {
+        // A quota rejection must not leave an orphaned part file behind.
+        let _ignored = tokio::fs::remove_file(&part_path).await;
+        return Err(S3Error::from(error));
+    }
 
     // Opaque per-part ETag (documented deviation: the client echoes it back in
     // Complete; we ignore the echoed value).
@@ -137,9 +167,12 @@ pub(super) async fn s3_upload_part(
 
 /// `POST /{bucket}/{*key}?uploadId=U` — `CompleteMultipartUpload`.
 ///
-/// Validates that every part `1..=N` was uploaded, then streams the part files
-/// in order through ONE `FileUploadIngestor` pass (whole-object dedup), removes
-/// the session, upserts the S3 listing-index row, and responds `200` with the
+/// Validates the echoed part list against the session, enforces S3's 5 MiB
+/// minimum for every non-final part, then streams the part files in order
+/// through ONE `FileUploadIngestor` pass (whole-object dedup), removes the
+/// session, and atomically swaps the object (upload-then-swap, like
+/// `PutObject`): the new record is streamed first, then the listing-index row
+/// is upserted and any stale direct object dropped. Responds `200` with the
 /// `CompleteMultipartUploadResult` XML envelope (`ETag` = the BLAKE3 root
 /// content hash — identical to a single `PutObject` of the same bytes).
 pub(super) async fn s3_complete_multipart_upload(
@@ -151,32 +184,44 @@ pub(super) async fn s3_complete_multipart_upload(
     let root = state.config.root_dir();
     let ttl = state.config.s3_upload_session_ttl_seconds();
 
+    // Hold the global session lock so a concurrent UploadPart cannot write
+    // into a part file while completion is ingesting it, and a concurrent
+    // sweep cannot remove the session mid-completion.
+    let _session_lock = lock_upload_sessions(root).await?;
+
     let session = read_session(root, upload_id, ttl).await?;
     if session.key != context.key || session.scope_namespace != context.scope_namespace {
         return Err(S3Error::no_such_upload());
     }
 
-    // Parse the Complete request body minimally (the client echoes the part
-    // numbers/etags it uploaded).
+    // Parse the Complete request body (the client echoes the part
+    // numbers/etags it uploaded; ETags are opaque and ignored).
     let mut reader = RequestBodyReader::from_body(body, state.config.max_request_body_bytes())
         .map_err(S3Error::from)?;
     let bytes = read_body_to_bytes(&mut reader)
         .await
         .map_err(S3Error::from)?;
     let body_str = std::str::from_utf8(&bytes).map_err(|_error| S3Error::invalid_part())?;
-    let mut requested_parts = parse_complete_multipart_parts(body_str)?;
+    let requested = parse_complete_multipart_parts(body_str)?;
 
-    // The client's part list must exactly match the uploaded parts.
-    requested_parts.sort_unstable();
-    let uploaded_parts: Vec<u32> = session.parts.keys().copied().collect();
-    if requested_parts != uploaded_parts {
+    // The client's part set must exactly match the uploaded parts.
+    let uploaded_parts: std::collections::BTreeSet<u32> = session.parts.keys().copied().collect();
+    if requested.part_numbers() != &uploaded_parts {
         return Err(S3Error::invalid_part());
     }
 
     // Every part 1..=N must be present (missing → InvalidPart).
-    let Some((&max_part, _)) = session.parts.last_key_value() else {
+    let Some(&max_part) = session.parts.keys().last() else {
         return Err(S3Error::invalid_part());
     };
+
+    // S3's 5 MiB minimum applies to every part except the final one.
+    let min_part_bytes = state.config.s3_min_part_bytes().get();
+    for (part_number, part) in &session.parts {
+        if *part_number < max_part && part.size_bytes < min_part_bytes {
+            return Err(S3Error::entity_too_small());
+        }
+    }
 
     // Build one continuous stream from the part files, in order.
     let chunk_size = state.config.chunk_size().get();
@@ -191,18 +236,13 @@ pub(super) async fn s3_complete_multipart_upload(
     }
     let parts_reader = RequestBodyReader::from_reader_chain(part_files, chunk_size);
 
-    // S3 overwrite semantics (same as PutObject): delete-then-upload.
-    match state.backend.object_length(&context.object_key).await {
-        Ok(_length) => {
-            let _existing = state
-                .backend
-                .delete_object_if_present(&context.object_key)
-                .await?;
-        }
-        Err(ServerError::NotFound) => {}
-        Err(error) => return Err(S3Error::from(error)),
-    }
+    // Serialize concurrent overwrites of the target object key.
+    let object_lock = acquire_object_upload_lock(context.object_key.as_str());
+    let _object_guard = object_lock.lock().await;
 
+    // Atomic overwrite (same as PutObject): stream the new record FIRST (a
+    // failure commits nothing and the old object stays readable), then swap
+    // the index row and drop any stale direct object.
     let start = Instant::now();
     let uploaded = state
         .backend
@@ -213,7 +253,7 @@ pub(super) async fn s3_complete_multipart_upload(
 
     // The session is consumed by the completion; a failed cleanup is swept at
     // startup or on the next session creation.
-    let _ignored = delete_session(root, upload_id).await;
+    let _ignored = delete_session_locked(root, upload_id).await;
 
     let now = i64::try_from(shardline_protocol::unix_now_seconds_lossy())
         .map_err(|_error| S3Error::internal())?;
@@ -227,6 +267,10 @@ pub(super) async fn s3_complete_multipart_upload(
             content_hash: uploaded.content_hash.clone(),
             updated_at_unix_seconds: now,
         })
+        .await?;
+    let _stale_direct = state
+        .backend
+        .delete_direct_object_if_present(&context.object_key)
         .await?;
 
     let xml = CompleteMultipartUploadResult {
@@ -254,10 +298,15 @@ pub(super) async fn s3_abort_multipart_upload(
 ) -> Result<Response, S3Error> {
     let root = state.config.root_dir();
     let ttl = state.config.s3_upload_session_ttl_seconds();
+
+    // Hold the global session lock so the session directory is not deleted
+    // while a concurrent UploadPart/Complete is writing to it (and vice versa).
+    let _session_lock = lock_upload_sessions(root).await?;
+
     let session = read_session(root, upload_id, ttl).await?;
     if session.key != context.key || session.scope_namespace != context.scope_namespace {
         return Err(S3Error::no_such_upload());
     }
-    delete_session(root, upload_id).await?;
+    delete_session_locked(root, upload_id).await?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }

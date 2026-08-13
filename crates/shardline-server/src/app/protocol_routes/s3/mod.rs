@@ -15,6 +15,11 @@ pub(super) mod object;
 #[cfg(test)]
 mod tests;
 
+use std::{
+    collections::HashMap,
+    sync::{Arc, LazyLock, Mutex},
+};
+
 use axum::http::{HeaderMap, HeaderValue, Uri, header::AUTHORIZATION};
 use shardline_protocol::{RepositoryScope, TokenScope};
 use shardline_s3_adapter::{
@@ -23,6 +28,26 @@ use shardline_s3_adapter::{
 use shardline_storage::ObjectKey;
 
 use crate::{ServerError, app::AppState, auth::AuthContext, protocol_support::scope_namespace};
+
+/// Serializes overwrite operations (`PutObject` and multipart completion)
+/// per storage object key.
+///
+/// The overwrite is upload-then-swap: the new body is streamed to a new record
+/// version first, then the index row is swapped and any stale direct object
+/// dropped. The per-key lock prevents two concurrent overwrites of the same
+/// key from interleaving their swaps.
+static S3_OBJECT_UPLOAD_LOCKS: LazyLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Returns the per-key upload lock for an object, creating it on first use.
+pub(super) fn acquire_object_upload_lock(object_key: &str) -> Arc<tokio::sync::Mutex<()>> {
+    let mut map = S3_OBJECT_UPLOAD_LOCKS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    map.entry(object_key.to_owned())
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
+}
 
 pub(crate) use bucket::{s3_create_bucket, s3_delete_bucket, s3_get_bucket, s3_head_bucket};
 pub(crate) use object::{

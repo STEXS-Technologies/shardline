@@ -49,6 +49,105 @@ pub enum S3SubResource {
     Other,
 }
 
+/// A typed S3 query-parameter name (the `?subresource` dispatch set plus the
+/// recognized-but-unsupported operations).
+///
+/// This is the single typed choke point between raw query strings and the
+/// [`S3SubResource`] model: [`QueryParameter::parse`] owns the literal name
+/// table and every other site matches the typed enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QueryParameter {
+    /// `?uploads` — `CreateMultipartUpload`.
+    Uploads,
+    /// `?uploadId=<id>`.
+    UploadId,
+    /// `?partNumber=<n>`.
+    PartNumber,
+    /// `?list-type=<v>`.
+    ListType,
+    /// `?location`.
+    Location,
+    /// `?acl`.
+    Acl,
+    /// `?policy`.
+    Policy,
+    /// `?lifecycle`.
+    Lifecycle,
+    /// `?versioning`.
+    Versioning,
+    /// `?cors`.
+    Cors,
+    /// `?notification`.
+    Notification,
+    /// `?tagging`.
+    Tagging,
+    /// `?encryption`.
+    Encryption,
+    /// A recognized-but-unsupported sub-resource (for example `restore`,
+    /// `select`, `torrent`, `legal-hold`, `retention`, `attributes`,
+    /// `replication`, `website`, `versionId`, `versions`, `logging`,
+    /// `requestPayment`, `accelerate`, or `object-lock`) — maps to
+    /// [`S3SubResource::Other`].
+    Other,
+}
+
+impl QueryParameter {
+    /// Parses a raw query-parameter name into the typed set.
+    fn parse(name: &str) -> Option<Self> {
+        match name {
+            "uploads" => Some(Self::Uploads),
+            "uploadId" => Some(Self::UploadId),
+            "partNumber" => Some(Self::PartNumber),
+            "list-type" => Some(Self::ListType),
+            "location" => Some(Self::Location),
+            "acl" => Some(Self::Acl),
+            "policy" => Some(Self::Policy),
+            "lifecycle" => Some(Self::Lifecycle),
+            "versioning" => Some(Self::Versioning),
+            "cors" => Some(Self::Cors),
+            "notification" => Some(Self::Notification),
+            "tagging" => Some(Self::Tagging),
+            "encryption" => Some(Self::Encryption),
+            "restore" | "select" | "torrent" | "legal-hold" | "retention" | "attributes"
+            | "replication" | "website" | "versionId" | "versions" | "logging"
+            | "requestPayment" | "accelerate" | "object-lock" => Some(Self::Other),
+            _ => None,
+        }
+    }
+}
+
+/// Parses one query pair into its typed sub-resource, if the name is a
+/// recognized sub-resource.
+///
+/// Plain listing/operation parameters (`prefix`, `delimiter`, `max-keys`,
+/// `continuation-token`, `fetch-owner`, …) return `None`.
+#[must_use]
+pub fn parse_subresource(name: &str, value: &str) -> Option<S3SubResource> {
+    match QueryParameter::parse(name)? {
+        QueryParameter::Uploads => Some(S3SubResource::Uploads),
+        QueryParameter::UploadId => Some(S3SubResource::UploadId(value.to_owned())),
+        QueryParameter::PartNumber => match value.parse::<u32>() {
+            Ok(number) => Some(S3SubResource::PartNumber(number)),
+            Err(_error) => Some(S3SubResource::Other),
+        },
+        QueryParameter::ListType => Some(if value.parse::<u32>().ok() == Some(2) {
+            S3SubResource::ListObjects
+        } else {
+            S3SubResource::Other
+        }),
+        QueryParameter::Location => Some(S3SubResource::Location),
+        QueryParameter::Acl => Some(S3SubResource::Acl),
+        QueryParameter::Policy => Some(S3SubResource::Policy),
+        QueryParameter::Lifecycle => Some(S3SubResource::Lifecycle),
+        QueryParameter::Versioning => Some(S3SubResource::Versioning),
+        QueryParameter::Cors => Some(S3SubResource::Cors),
+        QueryParameter::Notification => Some(S3SubResource::Notification),
+        QueryParameter::Tagging => Some(S3SubResource::Tagging),
+        QueryParameter::Encryption => Some(S3SubResource::Encryption),
+        QueryParameter::Other => Some(S3SubResource::Other),
+    }
+}
+
 /// Classifies the query parameters of an S3 request into the recognized
 /// sub-resources, in query order.
 ///
@@ -57,35 +156,10 @@ pub enum S3SubResource {
 /// ignored.
 #[must_use]
 pub fn classify(query: &QueryMap) -> Vec<S3SubResource> {
-    let mut resources = Vec::new();
-    for (name, value) in query {
-        match name.as_str() {
-            "uploads" => resources.push(S3SubResource::Uploads),
-            "uploadId" => resources.push(S3SubResource::UploadId(value.clone())),
-            "partNumber" => match value.parse::<u32>() {
-                Ok(number) => resources.push(S3SubResource::PartNumber(number)),
-                Err(_error) => resources.push(S3SubResource::Other),
-            },
-            "list-type" if value == "2" => resources.push(S3SubResource::ListObjects),
-            "list-type" => resources.push(S3SubResource::Other),
-            "location" => resources.push(S3SubResource::Location),
-            "acl" => resources.push(S3SubResource::Acl),
-            "policy" => resources.push(S3SubResource::Policy),
-            "lifecycle" => resources.push(S3SubResource::Lifecycle),
-            "versioning" => resources.push(S3SubResource::Versioning),
-            "cors" => resources.push(S3SubResource::Cors),
-            "notification" => resources.push(S3SubResource::Notification),
-            "tagging" => resources.push(S3SubResource::Tagging),
-            "encryption" => resources.push(S3SubResource::Encryption),
-            "restore" | "select" | "torrent" | "legal-hold" | "retention" | "attributes"
-            | "replication" | "website" | "versionId" | "versions" | "logging"
-            | "requestPayment" | "accelerate" | "object-lock" => {
-                resources.push(S3SubResource::Other);
-            }
-            _ => {}
-        }
-    }
-    resources
+    query
+        .iter()
+        .filter_map(|(name, value)| parse_subresource(name, value))
+        .collect()
 }
 
 /// Formats a content hash as the S3-style quoted ETag header value.
@@ -337,6 +411,49 @@ mod tests {
         let error = parse_s3_range(None, 0).unwrap_err();
         assert_eq!(error.code, "InvalidRange");
         let error = parse_s3_range(Some("bytes=-5"), 0).unwrap_err();
+        assert_eq!(error.code, "InvalidRange");
+    }
+
+    #[test]
+    fn parse_s3_range_edge_cases() {
+        // Open-ended from zero.
+        assert_eq!(
+            parse_s3_range(Some("bytes=0-"), 100).unwrap(),
+            ByteRange::new(0, 99).unwrap()
+        );
+        // A zero-length suffix is invalid.
+        let error = parse_s3_range(Some("bytes=-0"), 100).unwrap_err();
+        assert_eq!(error.code, "InvalidRange");
+        assert_eq!(error.status, 416);
+        // Inverted range.
+        let error = parse_s3_range(Some("bytes=5-2"), 100).unwrap_err();
+        assert_eq!(error.code, "InvalidRange");
+        // A huge end is clamped to the resource length.
+        assert_eq!(
+            parse_s3_range(Some("bytes=0-18446744073709551615"), 100).unwrap(),
+            ByteRange::new(0, 99).unwrap()
+        );
+        // Multi-range is rejected.
+        let error = parse_s3_range(Some("bytes=0-1,3-4"), 100).unwrap_err();
+        assert_eq!(error.code, "InvalidRange");
+        // The byte-range unit must be lowercase `bytes=`.
+        for header in ["Bytes=0-1", "BYTES=0-1", "bytes =0-1"] {
+            let error = parse_s3_range(Some(header), 100).unwrap_err();
+            assert_eq!(error.code, "InvalidRange", "header {header:?}");
+        }
+        // Single-byte open-ended range.
+        assert_eq!(
+            parse_s3_range(Some("bytes=99-"), 100).unwrap(),
+            ByteRange::new(99, 99).unwrap()
+        );
+        // Start beyond the resource.
+        let error = parse_s3_range(Some("bytes=100-"), 100).unwrap_err();
+        assert_eq!(error.code, "InvalidRange");
+        // Numeric overflow in the end is invalid syntax.
+        let error = parse_s3_range(Some("bytes=0-99999999999999999999999"), 100).unwrap_err();
+        assert_eq!(error.code, "InvalidRange");
+        // Whitespace padding is not accepted.
+        let error = parse_s3_range(Some(" bytes=0-1"), 100).unwrap_err();
         assert_eq!(error.code, "InvalidRange");
     }
 }

@@ -381,6 +381,24 @@ pub enum ServerConfigError {
     /// The S3 multipart upload live-session ceiling was zero.
     #[error("s3 upload max active sessions must be greater than zero")]
     ZeroS3UploadMaxActiveSessions,
+    /// The S3 multipart minimum part size could not be parsed.
+    #[error("invalid s3 min part bytes")]
+    S3MinPartBytes(ParseIntError),
+    /// The S3 multipart minimum part size was zero.
+    #[error("s3 min part bytes must be greater than zero")]
+    ZeroS3MinPartBytes,
+    /// The S3 multipart session byte quota could not be parsed.
+    #[error("invalid s3 upload session max bytes")]
+    S3UploadSessionMaxBytes(ParseIntError),
+    /// The S3 multipart session byte quota was zero.
+    #[error("s3 upload session max bytes must be greater than zero")]
+    ZeroS3UploadSessionMaxBytes,
+    /// The S3 multipart aggregate byte quota could not be parsed.
+    #[error("invalid s3 upload total max bytes")]
+    S3UploadTotalMaxBytes(ParseIntError),
+    /// The S3 multipart aggregate byte quota was zero.
+    #[error("s3 upload total max bytes must be greater than zero")]
+    ZeroS3UploadTotalMaxBytes,
     /// The public base URL is not a valid URL.
     #[error("SHARDLINE_PUBLIC_BASE_URL is not a valid URL: {0}")]
     InvalidPublicBaseUrl(String),

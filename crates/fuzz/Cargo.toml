@@ -31,6 +31,7 @@ shardline-index.workspace = true
 shardline-protocol.workspace = true
 shardline-protocol-adapters.workspace = true
 shardline-rebuild.workspace = true
+shardline-s3-adapter.workspace = true
 shardline-server = { workspace = true, features = ["fuzzing"] }
 shardline-server-core.workspace = true
 shardline-storage = { workspace = true, features = ["s3"] }
@@ -271,6 +272,42 @@ doc = false
 [[bin]]
 name = "shardline_provider_events"
 path = "fuzz_targets/shardline/provider_events.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "shardline_s3_complete_xml"
+path = "fuzz_targets/shardline/s3_complete_xml.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "shardline_s3_query_classify"
+path = "fuzz_targets/shardline/s3_query_classify.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "shardline_s3_bucket_decode"
+path = "fuzz_targets/shardline/s3_bucket_decode.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "shardline_s3_range_parse"
+path = "fuzz_targets/shardline/s3_range_parse.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "shardline_s3_listing_params"
+path = "fuzz_targets/shardline/s3_listing_params.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "shardline_s3_continuation_token"
+path = "fuzz_targets/shardline/s3_continuation_token.rs"
 test = false
 doc = false
 

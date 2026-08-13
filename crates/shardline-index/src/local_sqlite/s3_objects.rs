@@ -392,4 +392,21 @@ mod tests {
             .expect("query sqlite_master");
         count != 0
     }
+
+    #[tokio::test]
+    async fn scan_s3_objects_superset_prefix_is_empty() {
+        let store = make_store();
+        for key in ["a.txt", "dir/1.txt", "dir/sub/2.txt"] {
+            S3ObjectIndexStore::upsert_s3_object(&store, &entry("global", key, "f", 0, 0))
+                .await
+                .unwrap();
+        }
+        // A prefix longer than any stored key (a superset) matches nothing.
+        assert!(
+            scan(&store, "global", "dir/sub/very/long", None, 100)
+                .await
+                .is_empty()
+        );
+        assert!(scan(&store, "global", "zzz", None, 100).await.is_empty());
+    }
 }

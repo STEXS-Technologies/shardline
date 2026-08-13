@@ -420,8 +420,10 @@ async fn s3_pyarrow_put_get_range_and_multipart() {
     assert!(xml.contains("<Code>InvalidRange</Code>"), "{xml}");
 
     // ── Multipart of a large object → assembled bytes + ETag identity ───────
-    let part1 = vec![0x11_u8; 512 * 1024];
-    let part2 = vec![0x22_u8; 512 * 1024];
+    // Parts 1 and 2 are non-final, so S3's 5 MiB minimum applies; the final
+    // part 3 may be small.
+    let part1 = vec![0x11_u8; 5 * 1024 * 1024];
+    let part2 = vec![0x22_u8; 5 * 1024 * 1024];
     let part3 = vec![0x33_u8; 256 * 1024];
     let assembled = [part1.clone(), part2.clone(), part3.clone()].concat();
 
@@ -555,8 +557,8 @@ async fn s3_object_store_head_before_get() {
 
     // Multipart put → HeadObject reflects the assembled size and the
     // complete-etag.
-    let part1 = vec![0xAA_u8; 128 * 1024];
-    let part2 = vec![0xBB_u8; 64 * 1024];
+    let part1 = vec![0xAA_u8; 5 * 1024 * 1024]; // non-final → 5 MiB minimum
+    let part2 = vec![0xBB_u8; 64 * 1024]; // final part may be small
     let upload_id = client
         .create_multipart(&bucket_name, "tables/events/part-00001.parquet", &auth)
         .await;

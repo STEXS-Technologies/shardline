@@ -16,13 +16,81 @@ use crate::{S3Error, types::Contents};
 /// The S3 `ListObjectsV2` maximum page size.
 pub const MAX_LIST_KEYS: usize = 1000;
 
+/// A typed `ListObjectsV2` query-parameter name.
+///
+/// [`ListParam::parse`] owns the literal name table; the params parser matches
+/// the enum only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ListParam {
+    /// `prefix`.
+    Prefix,
+    /// `delimiter`.
+    Delimiter,
+    /// `max-keys`.
+    MaxKeys,
+    /// `continuation-token`.
+    ContinuationToken,
+    /// `start-after`.
+    StartAfter,
+}
+
+impl ListParam {
+    /// Parses a raw query-parameter name into the typed set. Unknown names
+    /// (for example `fetch-owner` or `encoding-type`, which real S3 clients
+    /// send) return `None` and are ignored.
+    fn parse(name: &str) -> Option<Self> {
+        match name {
+            "prefix" => Some(Self::Prefix),
+            "delimiter" => Some(Self::Delimiter),
+            "max-keys" => Some(Self::MaxKeys),
+            "continuation-token" => Some(Self::ContinuationToken),
+            "start-after" => Some(Self::StartAfter),
+            _ => None,
+        }
+    }
+}
+
+/// A validated `ListObjectsV2` grouping delimiter (exactly one character).
+///
+/// [`Delimiter::parse`] rejects empty (treated as "no delimiter") and
+/// multi-character values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Delimiter(char);
+
+impl Delimiter {
+    /// Parses a delimiter value.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`S3Error::invalid_argument`] when the value is more than one
+    /// character.
+    pub fn parse(value: &str) -> Result<Option<Self>, S3Error> {
+        let mut chars = value.chars();
+        let Some(first) = chars.next() else {
+            return Ok(None);
+        };
+        if chars.next().is_some() {
+            return Err(S3Error::invalid_argument(
+                "delimiter must be a single character",
+            ));
+        }
+        Ok(Some(Self(first)))
+    }
+
+    /// Returns the delimiter character.
+    #[must_use]
+    pub const fn get(self) -> char {
+        self.0
+    }
+}
+
 /// Parsed `ListObjectsV2` request parameters.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ListObjectsV2Params {
     /// The raw-key prefix filter (empty lists every key).
     pub prefix: String,
     /// The grouping delimiter (for example `/`); `None` disables grouping.
-    pub delimiter: Option<char>,
+    pub delimiter: Option<Delimiter>,
     /// The page row budget (`Contents` rows + `CommonPrefixes`), capped at
     /// [`MAX_LIST_KEYS`].
     pub max_keys: usize,
@@ -60,15 +128,17 @@ pub struct ListPage {
 
 /// Parses the `ListObjectsV2` query parameters from a decoded query map.
 ///
-/// Plain listing parameters (`prefix`, `delimiter`, `max-keys`,
-/// `continuation-token`, `start-after`) are consumed; everything else is
-/// ignored. `max-keys` is capped at [`MAX_LIST_KEYS`] (S3 behavior).
+/// Only the typed listing parameters (`prefix`, `delimiter`, `max-keys`,
+/// `continuation-token`, `start-after`) are read; everything else (including
+/// the `list-type=2` sub-resource and client extras such as `fetch-owner`) is
+/// ignored. `max-keys` must be a positive integer and is capped at
+/// [`MAX_LIST_KEYS`].
 ///
 /// # Errors
 ///
-/// Returns [`S3Error::invalid_argument`] when `max-keys` is not a
-/// non-negative integer or when `continuation-token` is not a valid base64
-/// cursor.
+/// Returns [`S3Error::invalid_argument`] when `max-keys` is missing/zero/non-
+/// numeric, the delimiter is more than one character, or
+/// `continuation-token` is not a valid base64 cursor.
 pub fn parse_list_objects_v2_params(
     query: &[(String, String)],
 ) -> Result<ListObjectsV2Params, S3Error> {
@@ -80,20 +150,25 @@ pub fn parse_list_objects_v2_params(
         start_after: None,
     };
     for (name, value) in query {
-        match name.as_str() {
-            "prefix" => params.prefix = value.clone(),
-            "delimiter" => params.delimiter = value.chars().next(),
-            "max-keys" => {
-                params.max_keys = value
+        match ListParam::parse(name) {
+            Some(ListParam::Prefix) => params.prefix = value.clone(),
+            Some(ListParam::Delimiter) => params.delimiter = Delimiter::parse(value)?,
+            Some(ListParam::MaxKeys) => {
+                let parsed = value
                     .parse::<usize>()
-                    .map_err(|_error| S3Error::invalid_argument("invalid max-keys"))?
-                    .min(MAX_LIST_KEYS);
+                    .map_err(|_error| S3Error::invalid_argument("invalid max-keys"))?;
+                if parsed == 0 {
+                    return Err(S3Error::invalid_argument(
+                        "max-keys must be greater than zero",
+                    ));
+                }
+                params.max_keys = parsed.min(MAX_LIST_KEYS);
             }
-            "continuation-token" => {
+            Some(ListParam::ContinuationToken) => {
                 params.continuation_token = Some(decode_continuation_token(value)?);
             }
-            "start-after" => params.start_after = Some(value.clone()),
-            _ => {}
+            Some(ListParam::StartAfter) => params.start_after = Some(value.clone()),
+            None => {}
         }
     }
     Ok(params)
@@ -281,7 +356,7 @@ mod tests {
         ]))
         .unwrap();
         assert_eq!(params.prefix, "data/");
-        assert_eq!(params.delimiter, Some('/'));
+        assert_eq!(params.delimiter, Some(Delimiter('/')));
         assert_eq!(params.max_keys, MAX_LIST_KEYS, "max-keys is capped at 1000");
         assert_eq!(params.start_after.as_deref(), Some("data/z.pt"));
         assert_eq!(params.cursor(), Some("data/z.pt"));
@@ -501,5 +576,67 @@ mod tests {
     fn format_iso8601_known_timestamp() {
         assert_eq!(format_iso8601(0), "1970-01-01T00:00:00Z");
         assert_eq!(format_iso8601(1_785_110_400), "2026-07-27T00:00:00Z");
+    }
+
+    #[test]
+    fn group_page_delimiter_inside_prefix_groups_remainder() {
+        // When the prefix itself ends with a delimiter, grouping applies to
+        // the remainder only; nested segments still collapse.
+        let entries = vec![
+            entry("a/b/c/d.txt"),
+            entry("a/b/c/e.txt"),
+            entry("a/b/f.txt"),
+        ];
+        let page = group_page(entries, "a/b/", Some('/'), MAX_LIST_KEYS);
+        let (contents, prefixes) = keys(&page);
+        // Deeper nesting collapses; a key with no delimiter in its remainder
+        // is a top-level Contents row.
+        assert_eq!(contents, vec!["a/b/f.txt"]);
+        assert_eq!(prefixes, vec!["a/b/c/"]);
+        assert_eq!(page.next_cursor.as_deref(), Some("a/b/f.txt"));
+    }
+
+    #[test]
+    fn group_page_prefix_matching_nothing_is_empty() {
+        // A prefix longer than any key (a superset) matches no rows.
+        let page = group_page(Vec::new(), "dir/very/long", Some('/'), MAX_LIST_KEYS);
+        assert!(page.contents.is_empty());
+        assert!(page.common_prefixes.is_empty());
+        assert_eq!(page.next_cursor, None);
+        assert!(!page.is_truncated);
+    }
+
+    #[test]
+    fn parse_params_rejects_zero_max_keys() {
+        let result = parse_list_objects_v2_params(&query(&[("max-keys", "0")]));
+        assert!(result.is_err());
+        let error = result.unwrap_err();
+        assert_eq!(error.code, "InvalidArgument");
+        assert_eq!(error.status, 400);
+    }
+
+    #[test]
+    fn parse_params_rejects_multi_char_delimiter() {
+        for delimiter in ["//", "ab", "%%"] {
+            let result = parse_list_objects_v2_params(&query(&[("delimiter", delimiter)]));
+            assert!(result.is_err(), "delimiter {delimiter:?} must be rejected");
+            let error = result.unwrap_err();
+            assert_eq!(error.code, "InvalidArgument");
+        }
+    }
+
+    #[test]
+    fn parse_params_unknown_keys_are_ignored() {
+        // Real clients send fetch-owner / encoding-type / list-type; those must
+        // not break the listing params parse (list-type=2 is a sub-resource).
+        let params = parse_list_objects_v2_params(&query(&[
+            ("list-type", "2"),
+            ("prefix", "dir/"),
+            ("fetch-owner", "true"),
+            ("encoding-type", "url"),
+        ]))
+        .unwrap();
+        assert_eq!(params.prefix, "dir/");
+        assert_eq!(params.max_keys, MAX_LIST_KEYS);
     }
 }

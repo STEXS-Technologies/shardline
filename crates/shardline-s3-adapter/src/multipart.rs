@@ -64,6 +64,12 @@ pub enum S3SessionError {
     /// The maximum number of active upload sessions was reached.
     #[error("too many active s3 upload sessions")]
     TooManySessions,
+    /// The upload session exceeded its aggregate byte quota.
+    #[error("s3 upload session byte quota exceeded")]
+    SessionQuotaExceeded,
+    /// The aggregate byte quota across active sessions was exceeded.
+    #[error("s3 upload aggregate byte quota exceeded")]
+    AggregateQuotaExceeded,
     /// Numeric conversion exceeded supported bounds.
     #[error("s3 upload session overflow")]
     Overflow,
@@ -96,7 +102,9 @@ pub struct MultipartUploadSession {
     pub parts: BTreeMap<u32, MultipartPart>,
     /// Unix seconds when the session was created.
     pub created_at_unix_seconds: u64,
-    /// Unix seconds of the last part write (TTL is anchored to this).
+    /// Unix seconds of the last part write (diagnostics; expiry is anchored to
+    /// [`Self::created_at_unix_seconds`] so keep-alive parts cannot extend the
+    /// session lifetime indefinitely).
     pub last_touched_unix_seconds: u64,
 }
 
@@ -248,12 +256,14 @@ async fn acquire_session_file_lock(path: PathBuf) -> Result<S3FileLock, S3Sessio
 
 /// Creates a new multipart upload session and returns its upload id.
 ///
-/// Expired sessions are swept first; the max-active cap is enforced against
-/// the remaining sessions.
+/// Expired sessions are swept first; the max-active cap and the aggregate
+/// byte quota are enforced against the remaining sessions.
 ///
 /// # Errors
 ///
-/// Returns [`S3SessionError::TooManySessions`] when the cap is reached, or
+/// Returns [`S3SessionError::TooManySessions`] when the active-session cap is
+/// reached, [`S3SessionError::AggregateQuotaExceeded`] when the aggregate byte
+/// quota across active sessions is already exhausted, or
 /// [`S3SessionError::Io`]/[`S3SessionError::Json`] on persistence failure.
 pub async fn create_session(
     root: &Path,
@@ -262,6 +272,7 @@ pub async fn create_session(
     scope_namespace: &str,
     ttl_seconds: NonZeroU64,
     max_active_sessions: NonZeroUsize,
+    total_max_bytes: NonZeroU64,
 ) -> Result<String, S3SessionError> {
     let _lock = lock_upload_sessions(root).await?;
     let now_unix_seconds = unix_now_seconds_checked()?;
@@ -269,6 +280,10 @@ pub async fn create_session(
     let active_sessions = count_active_sessions_locked(root, ttl_seconds, now_unix_seconds).await?;
     if active_sessions >= max_active_sessions.get() {
         return Err(S3SessionError::TooManySessions);
+    }
+    let total_bytes = total_active_bytes_locked(root, ttl_seconds, now_unix_seconds).await?;
+    if total_bytes >= total_max_bytes.get() {
+        return Err(S3SessionError::AggregateQuotaExceeded);
     }
     let upload_id = new_upload_id();
     let dir = session_dir(root, &upload_id)?;
@@ -313,13 +328,15 @@ pub async fn read_session(
 /// Records a stored part's size in the session metadata.
 ///
 /// The part file itself is written by the caller (which streams the request
-/// body to [`part_file_path`]); this persists the size and refreshes the
-/// session TTL under the session lock.
+/// body to [`part_file_path`]); this persists the size under the session lock
+/// and enforces the per-session and aggregate byte quotas.
 ///
 /// # Errors
 ///
 /// Returns [`S3SessionError::NotFound`] when the session is missing or expired,
-/// [`S3SessionError::InvalidPartNumber`] for an out-of-range part number, and
+/// [`S3SessionError::InvalidPartNumber`] for an out-of-range part number,
+/// [`S3SessionError::SessionQuotaExceeded`]/[`S3SessionError::AggregateQuotaExceeded`]
+/// when the byte quotas would be exceeded, and
 /// [`S3SessionError::Io`]/[`S3SessionError::Json`] on persistence failure.
 pub async fn store_part(
     root: &Path,
@@ -327,10 +344,42 @@ pub async fn store_part(
     part_number: u32,
     size_bytes: u64,
     ttl_seconds: NonZeroU64,
+    session_max_bytes: NonZeroU64,
+    total_max_bytes: NonZeroU64,
 ) -> Result<(), S3SessionError> {
     validate_upload_id(upload_id)?;
     validate_part_number(part_number)?;
     let _lock = lock_upload_sessions(root).await?;
+    store_part_locked(
+        root,
+        upload_id,
+        part_number,
+        size_bytes,
+        ttl_seconds,
+        session_max_bytes,
+        total_max_bytes,
+    )
+    .await
+}
+
+/// The lock-free counterpart of [`store_part`]: the caller must hold the
+/// session lock ([`lock_upload_sessions`]) for the duration of the mutation so
+/// a concurrent sweep cannot remove the session directory mid-write.
+///
+/// # Errors
+///
+/// See [`store_part`].
+pub async fn store_part_locked(
+    root: &Path,
+    upload_id: &str,
+    part_number: u32,
+    size_bytes: u64,
+    ttl_seconds: NonZeroU64,
+    session_max_bytes: NonZeroU64,
+    total_max_bytes: NonZeroU64,
+) -> Result<(), S3SessionError> {
+    validate_upload_id(upload_id)?;
+    validate_part_number(part_number)?;
     let now_unix_seconds = unix_now_seconds_checked()?;
     let mut session = load_session_at(
         &session_dir(root, upload_id)?,
@@ -338,6 +387,26 @@ pub async fn store_part(
         now_unix_seconds,
     )
     .await?;
+
+    // Enforce the aggregate byte quotas (checked under the lock).
+    let previous_size = session
+        .parts
+        .get(&part_number)
+        .map_or(0_u64, |part| part.size_bytes);
+    let session_total = session
+        .parts
+        .values()
+        .fold(0_u64, |total, part| total.saturating_add(part.size_bytes));
+    let delta = size_bytes.saturating_sub(previous_size);
+    let new_session_total = session_total.saturating_add(delta);
+    if new_session_total > session_max_bytes.get() {
+        return Err(S3SessionError::SessionQuotaExceeded);
+    }
+    let total_active = total_active_bytes_locked(root, ttl_seconds, now_unix_seconds).await?;
+    if total_active.saturating_add(delta) > total_max_bytes.get() {
+        return Err(S3SessionError::AggregateQuotaExceeded);
+    }
+
     session.parts.insert(
         part_number,
         MultipartPart {
@@ -360,6 +429,17 @@ pub async fn store_part(
 pub async fn delete_session(root: &Path, upload_id: &str) -> Result<(), S3SessionError> {
     validate_upload_id(upload_id)?;
     let _lock = lock_upload_sessions(root).await?;
+    delete_session_locked(root, upload_id).await
+}
+
+/// The lock-free counterpart of [`delete_session`]: the caller must hold the
+/// session lock ([`lock_upload_sessions`]) for the duration of the mutation.
+///
+/// # Errors
+///
+/// See [`delete_session`].
+pub async fn delete_session_locked(root: &Path, upload_id: &str) -> Result<(), S3SessionError> {
+    validate_upload_id(upload_id)?;
     delete_session_dir(&session_dir(root, upload_id)?).await
 }
 
@@ -393,6 +473,10 @@ pub async fn count_active_sessions(
 }
 
 /// Returns whether a session has expired against the TTL.
+///
+/// Expiry is anchored to **session creation** (matching S3: the multipart
+/// upload lifecycle runs from initiation; `UploadPart` does not extend it), so
+/// keep-alive parts cannot keep a session alive indefinitely.
 #[must_use]
 pub const fn is_expired(
     session: &MultipartUploadSession,
@@ -400,7 +484,7 @@ pub const fn is_expired(
     now_unix_seconds: u64,
 ) -> bool {
     session
-        .last_touched_unix_seconds
+        .created_at_unix_seconds
         .saturating_add(ttl_seconds.get())
         <= now_unix_seconds
 }
@@ -533,6 +617,42 @@ async fn count_active_sessions_locked(
     Ok(active)
 }
 
+/// Sums the stored part bytes across all active sessions (caller must hold
+/// the session lock). Used to enforce the aggregate byte quota.
+async fn total_active_bytes_locked(
+    root: &Path,
+    ttl_seconds: NonZeroU64,
+    now_unix_seconds: u64,
+) -> Result<u64, S3SessionError> {
+    let dir = upload_dir(root);
+    let mut entries = match fs::read_dir(&dir).await {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(S3SessionError::Io(error)),
+    };
+    let mut total = 0_u64;
+    while let Some(entry) = entries.next_entry().await? {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if validate_upload_id(file_name).is_err() {
+            continue;
+        }
+        if let Ok(session) = load_session_at(&path, ttl_seconds, now_unix_seconds).await {
+            let session_total = session
+                .parts
+                .values()
+                .fold(0_u64, |sum, part| sum.saturating_add(part.size_bytes));
+            total = total.saturating_add(session_total);
+        }
+    }
+    Ok(total)
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(
@@ -558,6 +678,10 @@ mod tests {
 
     fn cap(count: usize) -> NonZeroUsize {
         NonZeroUsize::new(count).unwrap()
+    }
+
+    fn quota(bytes: u64) -> NonZeroU64 {
+        NonZeroU64::new(bytes).unwrap()
     }
 
     async fn make_root() -> tempfile::TempDir {
@@ -607,6 +731,7 @@ mod tests {
             "global",
             ttl(3600),
             cap(16),
+            quota(1 << 40),
         )
         .await
         .unwrap();
@@ -619,9 +744,17 @@ mod tests {
             )
             .await
             .unwrap();
-            store_part(root.path(), &upload_id, part, size, ttl(3600))
-                .await
-                .unwrap();
+            store_part(
+                root.path(),
+                &upload_id,
+                part,
+                size,
+                ttl(3600),
+                quota(1 << 40),
+                quota(1 << 40),
+            )
+            .await
+            .unwrap();
         }
 
         let session = read_session(root.path(), &upload_id, ttl(3600))
@@ -647,15 +780,32 @@ mod tests {
             "global",
             ttl(3600),
             cap(16),
+            quota(1 << 40),
         )
         .await
         .unwrap();
-        store_part(root.path(), &upload_id, 1, 100, ttl(3600))
-            .await
-            .unwrap();
-        store_part(root.path(), &upload_id, 1, 200, ttl(3600))
-            .await
-            .unwrap();
+        store_part(
+            root.path(),
+            &upload_id,
+            1,
+            100,
+            ttl(3600),
+            quota(1 << 40),
+            quota(1 << 40),
+        )
+        .await
+        .unwrap();
+        store_part(
+            root.path(),
+            &upload_id,
+            1,
+            200,
+            ttl(3600),
+            quota(1 << 40),
+            quota(1 << 40),
+        )
+        .await
+        .unwrap();
         let session = read_session(root.path(), &upload_id, ttl(3600))
             .await
             .unwrap();
@@ -686,12 +836,21 @@ mod tests {
             "global",
             ttl(3600),
             cap(16),
+            quota(1 << 40),
         )
         .await
         .unwrap();
-        store_part(root.path(), &upload_id, 1, 10, ttl(3600))
-            .await
-            .unwrap();
+        store_part(
+            root.path(),
+            &upload_id,
+            1,
+            10,
+            ttl(3600),
+            quota(1 << 40),
+            quota(1 << 40),
+        )
+        .await
+        .unwrap();
 
         let dir = session_dir(root.path(), &upload_id).unwrap();
         assert!(dir.exists());
@@ -715,12 +874,13 @@ mod tests {
             "global",
             ttl(3600),
             cap(16),
+            quota(1 << 40),
         )
         .await
         .unwrap();
         // Rewrite the session with a last_touched in the past.
         let mut session = session_at(root.path(), &upload_id);
-        session.last_touched_unix_seconds = 1;
+        session.created_at_unix_seconds = 1;
         persist_session(root.path(), &upload_id, &session)
             .await
             .unwrap();
@@ -742,18 +902,52 @@ mod tests {
     async fn active_sessions_respect_max_cap() {
         let root = make_root().await;
         // Cap of 2: the first two creates succeed, the third is rejected.
-        let first = create_session(root.path(), "a", "1", "g", ttl(3600), cap(2))
-            .await
-            .unwrap();
-        let second = create_session(root.path(), "a", "2", "g", ttl(3600), cap(2))
-            .await
-            .unwrap();
-        let third = create_session(root.path(), "a", "3", "g", ttl(3600), cap(2)).await;
+        let first = create_session(
+            root.path(),
+            "a",
+            "1",
+            "g",
+            ttl(3600),
+            cap(2),
+            quota(1 << 40),
+        )
+        .await
+        .unwrap();
+        let second = create_session(
+            root.path(),
+            "a",
+            "2",
+            "g",
+            ttl(3600),
+            cap(2),
+            quota(1 << 40),
+        )
+        .await
+        .unwrap();
+        let third = create_session(
+            root.path(),
+            "a",
+            "3",
+            "g",
+            ttl(3600),
+            cap(2),
+            quota(1 << 40),
+        )
+        .await;
         assert!(matches!(third, Err(S3SessionError::TooManySessions)));
 
         // Deleting one frees the slot.
         delete_session(root.path(), &first).await.unwrap();
-        let third = create_session(root.path(), "a", "3", "g", ttl(3600), cap(2)).await;
+        let third = create_session(
+            root.path(),
+            "a",
+            "3",
+            "g",
+            ttl(3600),
+            cap(2),
+            quota(1 << 40),
+        )
+        .await;
         assert!(third.is_ok());
         let _ = second;
     }
@@ -761,14 +955,30 @@ mod tests {
     #[tokio::test]
     async fn count_active_sessions_ignores_expired() {
         let root = make_root().await;
-        let live = create_session(root.path(), "a", "1", "g", ttl(3600), cap(16))
-            .await
-            .unwrap();
-        let stale = create_session(root.path(), "a", "2", "g", ttl(3600), cap(16))
-            .await
-            .unwrap();
+        let live = create_session(
+            root.path(),
+            "a",
+            "1",
+            "g",
+            ttl(3600),
+            cap(16),
+            quota(1 << 40),
+        )
+        .await
+        .unwrap();
+        let stale = create_session(
+            root.path(),
+            "a",
+            "2",
+            "g",
+            ttl(3600),
+            cap(16),
+            quota(1 << 40),
+        )
+        .await
+        .unwrap();
         let mut session = session_at(root.path(), &stale);
-        session.last_touched_unix_seconds = 1;
+        session.created_at_unix_seconds = 1;
         persist_session(root.path(), &stale, &session)
             .await
             .unwrap();
@@ -788,5 +998,163 @@ mod tests {
         assert!(part_file_path(root.path(), "bad/id", 1).is_err());
         assert!(part_file_path(root.path(), "abc123", 0).is_err());
         assert!(part_file_path(root.path(), "abc123", 10_001).is_err());
+    }
+
+    #[tokio::test]
+    async fn store_part_enforces_session_byte_quota() {
+        let root = make_root().await;
+        let upload_id = create_session(
+            root.path(),
+            "acme.models",
+            "k",
+            "global",
+            ttl(3600),
+            cap(16),
+            quota(1 << 40),
+        )
+        .await
+        .unwrap();
+        store_part(
+            root.path(),
+            &upload_id,
+            1,
+            100,
+            ttl(3600),
+            quota(150),
+            quota(1 << 40),
+        )
+        .await
+        .unwrap();
+        // A second part pushes the session over its 150-byte quota.
+        let result = store_part(
+            root.path(),
+            &upload_id,
+            2,
+            100,
+            ttl(3600),
+            quota(150),
+            quota(1 << 40),
+        )
+        .await;
+        assert!(matches!(result, Err(S3SessionError::SessionQuotaExceeded)));
+        // Replacing a part (same total) stays within the quota.
+        store_part(
+            root.path(),
+            &upload_id,
+            1,
+            50,
+            ttl(3600),
+            quota(150),
+            quota(1 << 40),
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn store_part_enforces_aggregate_byte_quota() {
+        let root = make_root().await;
+        let upload_id = create_session(
+            root.path(),
+            "acme.models",
+            "k",
+            "global",
+            ttl(3600),
+            cap(16),
+            quota(200),
+        )
+        .await
+        .unwrap();
+        store_part(
+            root.path(),
+            &upload_id,
+            1,
+            100,
+            ttl(3600),
+            quota(1 << 40),
+            quota(200),
+        )
+        .await
+        .unwrap();
+        // The aggregate (100) + 150 exceeds the 200-byte aggregate quota.
+        let result = store_part(
+            root.path(),
+            &upload_id,
+            2,
+            150,
+            ttl(3600),
+            quota(1 << 40),
+            quota(200),
+        )
+        .await;
+        assert!(matches!(
+            result,
+            Err(S3SessionError::AggregateQuotaExceeded)
+        ));
+    }
+
+    #[tokio::test]
+    async fn create_session_rejects_exhausted_aggregate_quota() {
+        let root = make_root().await;
+        let first = create_session(root.path(), "a", "1", "g", ttl(3600), cap(16), quota(200))
+            .await
+            .unwrap();
+        store_part(
+            root.path(),
+            &first,
+            1,
+            200,
+            ttl(3600),
+            quota(1 << 40),
+            quota(200),
+        )
+        .await
+        .unwrap();
+        // The aggregate is exhausted: a new session is rejected.
+        let second =
+            create_session(root.path(), "a", "2", "g", ttl(3600), cap(16), quota(200)).await;
+        assert!(matches!(
+            second,
+            Err(S3SessionError::AggregateQuotaExceeded)
+        ));
+    }
+
+    #[tokio::test]
+    async fn expiry_is_anchored_to_creation_not_keep_alive() {
+        let root = make_root().await;
+        let upload_id = create_session(
+            root.path(),
+            "acme.models",
+            "k",
+            "global",
+            ttl(3600),
+            cap(16),
+            quota(1 << 40),
+        )
+        .await
+        .unwrap();
+        // A keep-alive part refreshes last_touched but NOT the creation-based
+        // expiry anchor; backdating created_at makes the session expire even
+        // though last_touched is fresh.
+        store_part(
+            root.path(),
+            &upload_id,
+            1,
+            10,
+            ttl(3600),
+            quota(1 << 40),
+            quota(1 << 40),
+        )
+        .await
+        .unwrap();
+        let mut session = session_at(root.path(), &upload_id);
+        session.created_at_unix_seconds = 1;
+        persist_session(root.path(), &upload_id, &session)
+            .await
+            .unwrap();
+        assert!(matches!(
+            read_session(root.path(), &upload_id, ttl(3600)).await,
+            Err(S3SessionError::NotFound)
+        ));
     }
 }

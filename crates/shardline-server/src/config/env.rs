@@ -15,11 +15,13 @@ use super::secrets::{
 use super::{
     AuthProviderKind, CONFIG_SECRET_KEY_BYTES, DEFAULT_MAX_REQUEST_BODY_BYTES,
     DEFAULT_MAX_SHARD_FILES, DEFAULT_MAX_SHARD_RECONSTRUCTION_TERMS, DEFAULT_MAX_SHARD_XORB_CHUNKS,
-    DEFAULT_MAX_SHARD_XORBS, DEFAULT_S3_MAX_PART_BYTES, DEFAULT_S3_UPLOAD_MAX_ACTIVE_SESSIONS,
-    DEFAULT_S3_UPLOAD_SESSION_TTL_SECONDS, DeploymentMode, HUB_WEBHOOK_SECRET_KEY_BYTES,
-    MAX_ED25519_KEY_BYTES, MAX_METRICS_TOKEN_BYTES, MAX_TOKEN_SIGNING_KEY_BYTES,
-    ObjectStorageAdapter, ServerConfig, ServerConfigError, ShardMetadataLimits,
-    default_transfer_max_in_flight_chunks, default_upload_max_in_flight_chunks, parse_byte_size,
+    DEFAULT_MAX_SHARD_XORBS, DEFAULT_S3_MAX_PART_BYTES, DEFAULT_S3_MIN_PART_BYTES,
+    DEFAULT_S3_UPLOAD_MAX_ACTIVE_SESSIONS, DEFAULT_S3_UPLOAD_SESSION_MAX_BYTES,
+    DEFAULT_S3_UPLOAD_SESSION_TTL_SECONDS, DEFAULT_S3_UPLOAD_TOTAL_MAX_BYTES, DeploymentMode,
+    HUB_WEBHOOK_SECRET_KEY_BYTES, MAX_ED25519_KEY_BYTES, MAX_METRICS_TOKEN_BYTES,
+    MAX_TOKEN_SIGNING_KEY_BYTES, ObjectStorageAdapter, ServerConfig, ServerConfigError,
+    ShardMetadataLimits, default_transfer_max_in_flight_chunks,
+    default_upload_max_in_flight_chunks, parse_byte_size,
 };
 use crate::{
     reconstruction_cache::ReconstructionCacheAdapter, server_frontend::ServerFrontend,
@@ -193,6 +195,27 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
     else {
         return Err(ServerConfigError::ZeroS3UploadMaxActiveSessions);
     };
+    let raw_s3_min_part_bytes = var("SHARDLINE_S3_MIN_PART_BYTES")
+        .unwrap_or_else(|_error| DEFAULT_S3_MIN_PART_BYTES.get().to_string())
+        .parse::<u64>()
+        .map_err(ServerConfigError::S3MinPartBytes)?;
+    let Some(s3_min_part_bytes) = NonZeroU64::new(raw_s3_min_part_bytes) else {
+        return Err(ServerConfigError::ZeroS3MinPartBytes);
+    };
+    let raw_s3_upload_session_max_bytes = var("SHARDLINE_S3_UPLOAD_SESSION_MAX_BYTES")
+        .unwrap_or_else(|_error| DEFAULT_S3_UPLOAD_SESSION_MAX_BYTES.get().to_string())
+        .parse::<u64>()
+        .map_err(ServerConfigError::S3UploadSessionMaxBytes)?;
+    let Some(s3_upload_session_max_bytes) = NonZeroU64::new(raw_s3_upload_session_max_bytes) else {
+        return Err(ServerConfigError::ZeroS3UploadSessionMaxBytes);
+    };
+    let raw_s3_upload_total_max_bytes = var("SHARDLINE_S3_UPLOAD_TOTAL_MAX_BYTES")
+        .unwrap_or_else(|_error| DEFAULT_S3_UPLOAD_TOTAL_MAX_BYTES.get().to_string())
+        .parse::<u64>()
+        .map_err(ServerConfigError::S3UploadTotalMaxBytes)?;
+    let Some(s3_upload_total_max_bytes) = NonZeroU64::new(raw_s3_upload_total_max_bytes) else {
+        return Err(ServerConfigError::ZeroS3UploadTotalMaxBytes);
+    };
     let reconstruction_cache_redis_url = var("SHARDLINE_RECONSTRUCTION_CACHE_REDIS_URL").ok();
     let reconstruction_cache_redis_tls = load_redis_tls_config_from_env()?;
     let index_postgres_url = var("SHARDLINE_INDEX_POSTGRES_URL").ok();
@@ -334,6 +357,9 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
         .with_s3_max_part_bytes(s3_max_part_bytes)?
         .with_s3_upload_session_ttl_seconds(s3_upload_session_ttl_seconds)?
         .with_s3_upload_max_active_sessions(s3_upload_max_active_sessions)?
+        .with_s3_min_part_bytes(s3_min_part_bytes)?
+        .with_s3_upload_session_max_bytes(s3_upload_session_max_bytes)?
+        .with_s3_upload_total_max_bytes(s3_upload_total_max_bytes)?
         .with_admission_max_weight(admission_max_weight_from_env());
     config.cache.adapter = reconstruction_cache_adapter;
     config.cache.redis_url = reconstruction_cache_redis_url.map(SecretString::new);
