@@ -101,6 +101,34 @@ as out of scope until a real client need appears.
 - S3 is an **API-tier** frontend (reads + writes touch records/ingest); a
   transfer-only role does not serve S3.
 
+## Durability & integrity
+
+The S3 frontend does **not** get its own storage or metadata path — it rides the
+same CAS pipeline as every other frontend, so it inherits the same integrity and
+durability guarantees:
+
+- **Write integrity** — `PutObject` and `CompleteMultipartUpload` stream through
+  the shared `FileUploadIngestor` (CDC chunking, per-chunk BLAKE3 + BLAKE3-root
+  content hash), stored content-addressed with `ObjectIntegrity` (hash + size
+  verified at the store boundary). Identical to Xet/LFS/OCI/Bazel/Hub uploads.
+- **Read integrity** — `GetObject` / `Range` reconstruct via the shared
+  record-reconstruction path, which verifies every chunk hash against the
+  `FileRecord` before returning bytes. A corrupted or wrong chunk fails rather
+  than serving garbage.
+- **Metadata durability** — the `FileRecord` is committed transactionally in the
+  shared index (sqlite/postgres); chunks are durable in the configured storage
+  backend. fsck validates the record↔chunk contract; GC reachability protects
+  the chunks via the record.
+- **The S3 listing index (`shardline_s3_objects`) is a derived snapshot, GC
+  inert, and not a reachability source** — deleting a listing row never touches
+  chunks or records. Delete ordering is crash-safe: index row first, then
+  record+object (`delete_object_if_present`).
+- **Listing nuance** — `ListObjectsV2` serves the snapshot (size/hash/mtime from
+  the index row); `HeadObject`/`GetObject` always resolve through the
+  authoritative `FileRecord`. A listing row can lag the record until the next
+  write of that key (same model as the Xet `TreeStore`); reads are always
+  correct.
+
 ## References
 
 - Issue #15 · design review (oracle, 2026-08-13)

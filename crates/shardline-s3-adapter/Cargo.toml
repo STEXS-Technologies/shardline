@@ -1,0 +1,18 @@
+[package]
+name = "shardline-s3-adapter"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/shardline-s3-adapter"
+description = "S3-compatible protocol adapter for the Shardline server ecosystem."
+
+[dependencies]
+shardline-protocol.workspace = true
+shardline-server-core.workspace = true
+shardline-storage.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

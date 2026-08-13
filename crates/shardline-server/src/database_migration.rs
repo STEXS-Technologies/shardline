@@ -129,7 +129,7 @@ struct AppliedMigration {
 
 const MIGRATION_HISTORY_TABLE: &str = "shardline_schema_migrations";
 
-const SHARDLINE_MIGRATIONS: [DatabaseMigration; 15] = [
+const SHARDLINE_MIGRATIONS: [DatabaseMigration; 16] = [
     DatabaseMigration {
         version: "20260417000000",
         name: "metadata_store",
@@ -223,6 +223,12 @@ const SHARDLINE_MIGRATIONS: [DatabaseMigration; 15] = [
         name: "tree_store",
         up_sql: include_str!("../migrations/20260805000000_tree_store.up.sql"),
         down_sql: include_str!("../migrations/20260805000000_tree_store.down.sql"),
+    },
+    DatabaseMigration {
+        version: "20260813000000",
+        name: "s3_object_index",
+        up_sql: include_str!("../migrations/20260813000000_s3_object_index.up.sql"),
+        down_sql: include_str!("../migrations/20260813000000_s3_object_index.down.sql"),
     },
 ];
 
@@ -485,7 +491,7 @@ mod tests {
 
     #[test]
     fn bundled_migrations_have_expected_count() {
-        assert_eq!(bundled_database_migrations().len(), 15);
+        assert_eq!(bundled_database_migrations().len(), 16);
     }
 
     #[test]
