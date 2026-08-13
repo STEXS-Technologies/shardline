@@ -5,6 +5,20 @@ const HASH_BYTE_LENGTH: usize = 32;
 const HASH_HEX_LENGTH: usize = 64;
 
 /// A 32-byte protocol hash.
+///
+/// # Examples
+///
+/// ```
+/// use shardline_protocol::ShardlineHash;
+///
+/// let hash = ShardlineHash::from_bytes([1; 32]);
+/// assert_eq!(hash.as_bytes(), &[1; 32]);
+///
+/// // The canonical text form round-trips.
+/// let hex = hash.hex_string();
+/// assert_eq!(ShardlineHash::parse_hex(&hex)?, hash);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ShardlineHash {
     bytes: [u8; HASH_BYTE_LENGTH],
@@ -24,6 +38,21 @@ impl ShardlineHash {
     }
 
     /// Parses a hash from canonical lowercase hexadecimal text.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use shardline_protocol::ShardlineHash;
+    ///
+    /// let hex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    /// let hash = ShardlineHash::parse_hex(hex)?;
+    /// assert_eq!(hash.hex_string(), hex);
+    ///
+    /// // Wrong-length or non-lowercase input is rejected.
+    /// assert!(ShardlineHash::parse_hex("ABC").is_err());
+    /// assert!(ShardlineHash::parse_hex("not-a-hash").is_err());
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     ///
     /// # Errors
     ///

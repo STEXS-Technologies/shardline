@@ -1091,6 +1091,107 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
         assert!(result.is_err());
     }
 
+    #[test]
+    #[serial_test::serial]
+    fn config_secret_key_from_env_is_applied_to_config() {
+        // A valid 32-byte key configured via the environment must flow through
+        // the full loader into `ServerConfig::with_config_secret_key`.
+        // SAFETY: serialized env test
+        set_env_var(
+            "SHARDLINE_CONFIG_SECRET_KEY",
+            "0123456789abcdef0123456789abcdef",
+        );
+        remove_env_var("SHARDLINE_CONFIG_SECRET_KEY_FILE");
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+
+        let result = super::load_server_config_from_env();
+        remove_env_var("SHARDLINE_CONFIG_SECRET_KEY");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+
+        let config = result.expect("config loads with a config secret key");
+        assert_eq!(
+            config.config_secret_key(),
+            Some(b"0123456789abcdef0123456789abcdef".as_slice())
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn config_secret_key_from_file_is_applied_to_config() {
+        use std::io::Write;
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        tmp.write_all(b"0123456789abcdef0123456789abcdef").unwrap();
+        tmp.flush().unwrap();
+
+        // SAFETY: serialized env test
+        set_env_var(
+            "SHARDLINE_CONFIG_SECRET_KEY_FILE",
+            tmp.path().to_str().unwrap(),
+        );
+        remove_env_var("SHARDLINE_CONFIG_SECRET_KEY");
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+
+        let result = super::load_server_config_from_env();
+        remove_env_var("SHARDLINE_CONFIG_SECRET_KEY_FILE");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+
+        let config = result.expect("config loads with a config secret key file");
+        assert_eq!(
+            config.config_secret_key(),
+            Some(b"0123456789abcdef0123456789abcdef".as_slice())
+        );
+    }
+
+    #[test]
+    fn server_config_with_config_secret_key_rejects_empty() {
+        let config = test_server_config();
+        let result = config.with_config_secret_key(Vec::new());
+        assert!(matches!(
+            result,
+            Err(super::ServerConfigError::EmptyConfigSecretKey)
+        ));
+    }
+
+    #[test]
+    fn server_config_with_config_secret_key_rejects_wrong_length() {
+        let config = test_server_config();
+        let result = config.with_config_secret_key(b"too-short".to_vec());
+        assert!(matches!(
+            result,
+            Err(super::ServerConfigError::ConfigSecretKeyLength {
+                expected,
+                observed,
+            }) if expected == usize::try_from(super::CONFIG_SECRET_KEY_BYTES).unwrap_or(0)
+                && observed == 9
+        ));
+    }
+
+    #[test]
+    fn server_config_with_config_secret_key_accepts_32_bytes() {
+        let config = test_server_config();
+        let config = config
+            .with_config_secret_key(b"0123456789abcdef0123456789abcdef".to_vec())
+            .expect("32-byte key is accepted");
+        assert_eq!(
+            config.config_secret_key(),
+            Some(b"0123456789abcdef0123456789abcdef".as_slice())
+        );
+    }
+
+    fn test_server_config() -> super::ServerConfig {
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+        super::ServerConfig::new(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+            "http://127.0.0.1:8080".to_owned(),
+            std::path::PathBuf::from("/tmp/shardline"),
+            std::num::NonZeroUsize::MIN,
+        )
+    }
+
     // ── load_non_zero_usize_env ────────────────────────────────────────────
 
     // ── load_non_zero_usize_env ────────────────────────────────────────────

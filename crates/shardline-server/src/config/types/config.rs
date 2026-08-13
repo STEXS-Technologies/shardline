@@ -71,6 +71,29 @@ pub struct ServerConfig {
 
 impl ServerConfig {
     /// Creates server configuration.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use shardline_server::ServerConfig;
+    /// use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    /// use std::num::NonZeroUsize;
+    ///
+    /// let config = ServerConfig::new(
+    ///     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+    ///     "http://127.0.0.1:8080".to_owned(),
+    ///     std::env::temp_dir(),
+    ///     NonZeroUsize::new(64 * 1024).expect("64 KiB chunk size is non-zero"),
+    /// );
+    ///
+    /// assert_eq!(config.bind_addr().port(), 8080);
+    /// assert_eq!(config.public_base_url(), "http://127.0.0.1:8080");
+    /// assert_eq!(config.root_dir(), std::env::temp_dir());
+    /// ```
+    ///
+    /// The resulting config is a local-deployment default: a local filesystem
+    /// metadata backend, a local object store, and the Xet protocol frontend.
+    /// Point [`serve`](crate::serve) at it to start the server.
     #[must_use]
     pub fn new(
         bind_addr: SocketAddr,

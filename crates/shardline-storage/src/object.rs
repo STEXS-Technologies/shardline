@@ -14,6 +14,15 @@ pub enum ObjectBody<'bytes> {
 
 impl<'bytes> ObjectBody<'bytes> {
     /// Creates a borrowed object body without copying bytes.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use shardline_storage::ObjectBody;
+    ///
+    /// let body = ObjectBody::from_slice(b"payload");
+    /// assert_eq!(body.as_slice(), b"payload");
+    /// ```
     #[must_use]
     pub const fn from_slice(bytes: &'bytes [u8]) -> Self {
         Self::Borrowed(bytes)
@@ -59,6 +68,17 @@ pub struct ObjectIntegrity {
 
 impl ObjectIntegrity {
     /// Creates object integrity metadata.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use shardline_protocol::ShardlineHash;
+    /// use shardline_storage::ObjectIntegrity;
+    ///
+    /// let integrity = ObjectIntegrity::new(ShardlineHash::from_bytes([7; 32]), 1024);
+    /// assert_eq!(integrity.hash().as_bytes(), &[7; 32]);
+    /// assert_eq!(integrity.length(), 1024);
+    /// ```
     #[must_use]
     pub const fn new(hash: ShardlineHash, length: u64) -> Self {
         Self { hash, length }

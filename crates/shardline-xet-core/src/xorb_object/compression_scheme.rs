@@ -11,9 +11,14 @@ use crate::error::CoreError;
 #[repr(u8)]
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Default)]
 pub enum CompressionScheme {
+    /// No compression: payloads are stored as-is.
     None = 0,
+    /// LZ4 frame compression.
     LZ4 = 1,
+    /// Byte-grouping (4-way interleave) followed by LZ4.
     ByteGrouping4LZ4 = 2,
+    /// Pick a concrete scheme automatically (`resolve_for_data` currently
+    /// resolves to [`CompressionScheme::LZ4`]).
     #[default]
     Auto = 99,
 }
@@ -60,6 +65,22 @@ impl TryFrom<u8> for CompressionScheme {
 impl FromStr for CompressionScheme {
     type Err = CoreError;
 
+    /// Parses a compression scheme name.
+    ///
+    /// Accepts `auto` (and empty), `none`, `lz4`, and `bg4-lz4`,
+    /// case-insensitively and with surrounding whitespace.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use shardline_xet_core::xorb_object::CompressionScheme;
+    ///
+    /// assert_eq!("lz4".parse::<CompressionScheme>()?, CompressionScheme::LZ4);
+    /// assert_eq!(" BG4-LZ4 ".parse::<CompressionScheme>()?, CompressionScheme::ByteGrouping4LZ4);
+    /// assert_eq!("".parse::<CompressionScheme>()?, CompressionScheme::Auto);
+    /// assert!("gzip".parse::<CompressionScheme>().is_err());
+    /// # Ok::<(), shardline_xet_core::CoreError>(())
+    /// ```
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         match s.trim().to_lowercase().as_str() {
             "" | "auto" => Ok(CompressionScheme::Auto),
@@ -82,6 +103,28 @@ impl CompressionScheme {
         }
     }
 
+    /// Compresses a byte slice under this scheme.
+    ///
+    /// `None` returns the input borrowed (no copy); `Auto` resolves to a
+    /// concrete scheme first.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use shardline_xet_core::xorb_object::CompressionScheme;
+    ///
+    /// let data = b"compressible payload compressible payload";
+    /// let scheme = CompressionScheme::LZ4;
+    ///
+    /// let compressed = scheme.compress_from_slice(data)?;
+    /// let restored = scheme.decompress_from_slice(&compressed)?;
+    /// assert_eq!(&*restored, data);
+    /// # Ok::<(), shardline_xet_core::CoreError>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError`] when the underlying compression library fails.
     pub fn compress_from_slice<'a>(&self, data: &'a [u8]) -> Result<Cow<'a, [u8]>, CoreError> {
         Ok(match self {
             CompressionScheme::Auto => {

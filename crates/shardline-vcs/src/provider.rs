@@ -17,6 +17,18 @@ pub enum ProviderKind {
 
 impl ProviderKind {
     /// Returns the corresponding repository-scope provider.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use shardline_protocol::RepositoryProvider;
+    /// use shardline_vcs::ProviderKind;
+    ///
+    /// assert_eq!(
+    ///     ProviderKind::GitLab.repository_provider(),
+    ///     RepositoryProvider::GitLab
+    /// );
+    /// ```
     #[must_use]
     pub const fn repository_provider(self) -> RepositoryProvider {
         match self {
@@ -29,6 +41,14 @@ impl ProviderKind {
     }
 
     /// Returns the stable lowercase provider name.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use shardline_vcs::ProviderKind;
+    ///
+    /// assert_eq!(ProviderKind::Codeberg.as_str(), "codeberg");
+    /// ```
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         self.repository_provider().as_str()

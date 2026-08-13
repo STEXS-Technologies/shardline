@@ -19,7 +19,7 @@ use crate::{
     xet_hash_hex_string,
 };
 
-/// In-memory implementation of [`IndexStore`].
+/// In-memory implementation of [`crate::IndexStore`].
 #[derive(Debug, Clone, Default)]
 pub struct MemoryIndexStore {
     state: Arc<Mutex<MemoryIndexState>>,
@@ -808,7 +808,7 @@ pub struct MemoryRecordLocator {
     content_hash: Option<String>,
 }
 
-/// In-memory implementation of [`RecordStore`].
+/// In-memory implementation of [`crate::RecordStore`].
 #[derive(Debug, Clone, Default)]
 pub struct MemoryRecordStore {
     state: Arc<Mutex<MemoryRecordState>>,

@@ -42,6 +42,11 @@ pub enum ServerObjectStoreError {
 }
 
 /// Unified object-store backend that delegates to local, S3, or blackhole storage.
+///
+/// Construct one of the three backends with [`ServerObjectStore::local`],
+/// [`ServerObjectStore::s3`], or [`ServerObjectStore::blackhole`], then use the
+/// [`ObjectStore`] trait methods ([`ObjectStore::put_if_absent`],
+/// [`ObjectStore::read_range`], [`ObjectStore::list_prefix`], ...) on it.
 #[derive(Debug, Clone)]
 pub enum ServerObjectStore {
     /// Local filesystem object store.
@@ -194,6 +199,23 @@ impl AsyncObjectStore for ServerObjectStore {
 impl ServerObjectStore {
     /// Creates a local filesystem object store rooted at the given path.
     ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use shardline_protocol::ShardlineHash;
+    /// use shardline_server_core::ServerObjectStore;
+    /// use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectStore};
+    ///
+    /// // Creates the root directory if it does not exist.
+    /// let store = ServerObjectStore::local("/var/lib/shardline/objects")?;
+    ///
+    /// let key = ObjectKey::parse("chunks/aa/bb/example.xorb")?;
+    /// let body = ObjectBody::from_slice(b"payload");
+    /// let integrity = ObjectIntegrity::new(ShardlineHash::from_bytes([7; 32]), 7);
+    /// ObjectStore::put_if_absent(&store, &key, body, &integrity)?;
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    ///
     /// # Errors
     ///
     /// Returns [`ServerObjectStoreError::Local`] if the local store cannot be created.
@@ -211,12 +233,51 @@ impl ServerObjectStore {
     }
 
     /// Creates a blackhole object store that discards all writes.
+    ///
+    /// Writes report success without touching the filesystem, reads return
+    /// `NotFound`, existence checks return `false`, and deletes report the
+    /// object as absent. Useful for dry runs and tests.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use shardline_protocol::ShardlineHash;
+    /// use shardline_server_core::ServerObjectStore;
+    /// use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectStore, PutOutcome};
+    ///
+    /// let store = ServerObjectStore::blackhole();
+    /// let key = ObjectKey::parse("chunks/aa/bb/example.xorb")?;
+    /// let body = ObjectBody::from_slice(b"payload");
+    /// let integrity = ObjectIntegrity::new(ShardlineHash::from_bytes([7; 32]), 7);
+    ///
+    /// assert_eq!(
+    ///     ObjectStore::put_if_absent(&store, &key, body, &integrity)?,
+    ///     PutOutcome::Inserted
+    /// );
+    /// assert!(!ObjectStore::contains(&store, &key)?);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     #[must_use]
     pub const fn blackhole() -> Self {
         Self::Blackhole
     }
 
     /// Stores an object, overwriting any existing object at the given key.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use shardline_protocol::ShardlineHash;
+    /// use shardline_server_core::ServerObjectStore;
+    /// use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey};
+    ///
+    /// let store = ServerObjectStore::blackhole();
+    /// let key = ObjectKey::parse("chunks/aa/bb/example.xorb")?;
+    /// let body = ObjectBody::from_slice(b"payload");
+    /// let integrity = ObjectIntegrity::new(ShardlineHash::from_bytes([7; 32]), 7);
+    /// store.put_overwrite(&key, body, &integrity)?;
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     ///
     /// # Errors
     ///
@@ -359,6 +420,15 @@ impl ServerObjectStore {
     ///
     /// Returns `Ok(())` when reachable, or `Err(message)` with the failure reason.
     ///
+    /// # Examples
+    ///
+    /// ```
+    /// use shardline_server_core::ServerObjectStore;
+    ///
+    /// // Blackhole stores always report as reachable.
+    /// assert!(ServerObjectStore::blackhole().probe().is_ok());
+    /// ```
+    ///
     /// # Errors
     ///
     /// Returns `Err` if the storage root is inaccessible, the S3 endpoint/bucket
@@ -458,7 +528,8 @@ pub fn read_full_object(
     store.read_full_object(object_key, length)
 }
 
-/// Operation-time record-store classification.
+/// Classifies whether a record locator points at the latest file revision or at
+/// one specific immutable version.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpsRecordKind {
     /// Latest record.

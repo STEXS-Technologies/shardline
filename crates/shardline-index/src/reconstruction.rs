@@ -12,6 +12,20 @@ pub struct ReconstructionTerm {
 
 impl ReconstructionTerm {
     /// Creates a reconstruction term.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use shardline_index::{ReconstructionTerm, StoredObjectId};
+    /// use shardline_protocol::{ChunkRange, ShardlineHash};
+    ///
+    /// let object_id = StoredObjectId::new(ShardlineHash::from_bytes([2; 32]));
+    /// let term = ReconstructionTerm::new(object_id, ChunkRange::new(0, 2)?, 128);
+    /// assert_eq!(term.object_id(), object_id);
+    /// assert_eq!(term.chunk_range(), ChunkRange::new(0, 2)?);
+    /// assert_eq!(term.unpacked_length(), 128);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     #[must_use]
     pub const fn new(
         object_id: StoredObjectId,
@@ -31,7 +45,7 @@ impl ReconstructionTerm {
         self.object_id
     }
 
-    /// Returns the Xet xorb referenced by this term.
+    /// Returns the container object (xorb) referenced by this term.
     #[must_use]
     pub const fn xorb_id(&self) -> StoredObjectId {
         self.object_id

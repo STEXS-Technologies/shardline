@@ -10,12 +10,14 @@ use std::{
 use axum::http::{HeaderMap, HeaderValue};
 use hmac::Mac;
 use serde_json::json;
+use serial_test::serial;
 use shardline_protocol::{SecretBytes, SecretString, TokenScope};
 use shardline_server_core::at_rest::AtRestCipher;
 use shardline_vcs::{
-    BuiltInProviderCatalog, BuiltInProviderError, GitHubAdapter, ProviderBoundaryError,
-    ProviderKind, ProviderRepositoryPolicy, ProviderSubject, ProviderTokenIssuer, RepositoryAccess,
-    RepositoryRef, RepositoryVisibility, RepositoryWebhookEventKind, configured_metadata,
+    AuthorizationRequest, BuiltInProviderCatalog, BuiltInProviderError, GitHubAdapter,
+    ProviderBoundaryError, ProviderKind, ProviderRepositoryPolicy, ProviderSubject,
+    ProviderTokenIssuer, RepositoryAccess, RepositoryRef, RepositoryVisibility,
+    RepositoryWebhookEventKind, RevisionRef, configured_metadata,
 };
 
 use super::{
@@ -572,6 +574,7 @@ fn provider_service_rejects_oversized_configuration_before_json_parsing() {
 }
 
 #[test]
+#[serial(provider_config_hook)]
 fn provider_service_rejects_configuration_growth_after_validation() {
     let config = tempfile::NamedTempFile::new();
     assert!(config.is_ok());
@@ -1874,4 +1877,209 @@ fn provider_config_legacy_plaintext_parses_with_and_without_key() {
     );
     let service = service.expect("legacy config with key");
     assert!(service.registry.provider("github").is_ok());
+}
+
+// ── from_config — repository metadata error paths ───────────────────────
+
+#[test]
+fn provider_config_rejects_invalid_clone_url() {
+    // `configured_metadata` fails on an empty clone URL, surfacing the error
+    // from `BuiltInProvider::from_config`.
+    let config = ProviderConfig {
+        kind: "github".to_owned(),
+        integration_subject: "github-app".to_owned(),
+        webhook_secret: Some(SecretString::from_secret("secret")),
+        repositories: vec![RepositoryPolicyConfig {
+            owner: "team".to_owned(),
+            name: "assets".to_owned(),
+            visibility: "private".to_owned(),
+            default_revision: "main".to_owned(),
+            clone_url: String::new(),
+            read_subjects: vec!["github-user-1".to_owned()],
+            write_subjects: vec!["github-user-1".to_owned()],
+        }],
+    };
+
+    let result = BuiltInProvider::from_config(config, None);
+    assert!(matches!(
+        result,
+        Err(ProviderServiceError::BuiltIn(
+            BuiltInProviderError::InvalidCloneUrl
+        ))
+    ));
+}
+
+#[test]
+fn provider_config_rejects_duplicate_repository() {
+    // Registering the same repository twice fails inside the catalog, surfacing
+    // the error from `BuiltInProvider::from_config`.
+    let repository = || RepositoryPolicyConfig {
+        owner: "team".to_owned(),
+        name: "assets".to_owned(),
+        visibility: "private".to_owned(),
+        default_revision: "main".to_owned(),
+        clone_url: "https://github.example/team/assets.git".to_owned(),
+        read_subjects: vec!["github-user-1".to_owned()],
+        write_subjects: vec!["github-user-1".to_owned()],
+    };
+    let config = ProviderConfig {
+        kind: "github".to_owned(),
+        integration_subject: "github-app".to_owned(),
+        webhook_secret: Some(SecretString::from_secret("secret")),
+        repositories: vec![repository(), repository()],
+    };
+
+    let result = BuiltInProvider::from_config(config, None);
+    assert!(matches!(
+        result,
+        Err(ProviderServiceError::BuiltIn(
+            BuiltInProviderError::DuplicateRepository
+        ))
+    ));
+}
+
+// ── BuiltInProvider adapter dispatch — non-GitHub provider kinds ────────
+
+fn provider_of_kind(kind: &str) -> BuiltInProvider {
+    let config = ProviderConfig {
+        kind: kind.to_owned(),
+        integration_subject: format!("{kind}-app"),
+        webhook_secret: Some(SecretString::from_secret(format!("{kind}-secret").as_str())),
+        repositories: vec![RepositoryPolicyConfig {
+            owner: "team".to_owned(),
+            name: "assets".to_owned(),
+            visibility: "private".to_owned(),
+            default_revision: "main".to_owned(),
+            clone_url: format!("https://{kind}.example/team/assets.git"),
+            read_subjects: vec!["github-user-1".to_owned()],
+            write_subjects: vec!["github-user-1".to_owned()],
+        }],
+    };
+    BuiltInProvider::from_config(config, None).expect("provider config builds")
+}
+
+fn provider_kind_from_str(kind: &str) -> ProviderKind {
+    match kind {
+        "gitea" => ProviderKind::Gitea,
+        "gitlab" => ProviderKind::GitLab,
+        "codeberg" => ProviderKind::Codeberg,
+        _ => ProviderKind::Generic,
+    }
+}
+
+#[test]
+fn provider_default_revision_resolves_for_each_kind() {
+    for kind in ["gitea", "gitlab", "codeberg", "generic"] {
+        let provider = provider_of_kind(kind);
+        let repository =
+            RepositoryRef::new(provider_kind_from_str(kind), "team", "assets").unwrap();
+        let revision = provider
+            .default_revision(&repository)
+            .expect("default revision resolves");
+        assert_eq!(revision.as_str(), "refs/heads/main");
+    }
+}
+
+#[test]
+fn provider_authorize_grants_allowed_subject_for_each_kind() {
+    for kind in ["gitea", "gitlab", "codeberg", "generic"] {
+        let provider = provider_of_kind(kind);
+        let repository =
+            RepositoryRef::new(provider_kind_from_str(kind), "team", "assets").unwrap();
+        let subject = ProviderSubject::new("github-user-1").unwrap();
+        let request = AuthorizationRequest::new(
+            subject,
+            repository,
+            RevisionRef::new("refs/heads/main").unwrap(),
+            RepositoryAccess::Read,
+        );
+        let grant = provider
+            .authorize(&request)
+            .expect("authorization evaluates");
+        assert!(grant.is_some(), "{kind} should grant the allowed subject");
+    }
+}
+
+fn hex_hmac_sha256(secret: &[u8], body: &[u8]) -> String {
+    let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(secret).unwrap();
+    mac.update(body);
+    hex::encode(mac.finalize().into_bytes())
+}
+
+#[test]
+fn provider_parse_webhook_handles_each_kind() {
+    // Gitea and Codeberg: hex HMAC-SHA256 signature, `ping` event.
+    for kind in ["gitea", "codeberg"] {
+        let provider = provider_of_kind(kind);
+        let body = br#"{"action":"ping"}"#;
+        let signature = hex_hmac_sha256(format!("{kind}-secret").as_bytes(), body);
+        let (event_header, delivery_header, signature_header) = match kind {
+            "gitea" => (
+                super::GITEA_EVENT_HEADER,
+                super::GITEA_DELIVERY_HEADER,
+                super::GITEA_SIGNATURE_HEADER,
+            ),
+            _ => (
+                super::CODEBERG_EVENT_HEADER,
+                super::CODEBERG_DELIVERY_HEADER,
+                super::CODEBERG_SIGNATURE_HEADER,
+            ),
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert(event_header, HeaderValue::from_static("ping"));
+        headers.insert(delivery_header, HeaderValue::from_static("delivery-1"));
+        headers.insert(signature_header, HeaderValue::from_str(&signature).unwrap());
+        let request = super::webhook_request(provider_kind_from_str(kind), &headers, body).unwrap();
+        let event = provider.parse_webhook(request).expect("webhook parses");
+        assert!(
+            event.is_none(),
+            "{kind} ping events yield no repository event"
+        );
+    }
+
+    // Generic: `sha256=`-prefixed HMAC-SHA256 signature, `ping` event.
+    let generic = provider_of_kind("generic");
+    let body = br#"{"action":"ping"}"#;
+    let signature = format!("sha256={}", hex_hmac_sha256(b"generic-secret", body));
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        super::GENERIC_EVENT_HEADER,
+        HeaderValue::from_static("ping"),
+    );
+    headers.insert(
+        super::GENERIC_DELIVERY_HEADER,
+        HeaderValue::from_static("delivery-1"),
+    );
+    headers.insert(
+        super::GENERIC_SIGNATURE_HEADER,
+        HeaderValue::from_str(&signature).unwrap(),
+    );
+    let request = super::webhook_request(ProviderKind::Generic, &headers, body).unwrap();
+    let event = generic.parse_webhook(request).expect("webhook parses");
+    assert!(event.is_none());
+
+    // GitLab: the configured secret IS the constant-time webhook token, and a
+    // `Push Hook` payload yields a revision-pushed event.
+    let gitlab = provider_of_kind("gitlab");
+    let body = br#"{"project":{"path_with_namespace":"team/assets"},"ref":"refs/heads/main"}"#;
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        super::GITLAB_EVENT_HEADER,
+        HeaderValue::from_static("Push Hook"),
+    );
+    headers.insert(
+        super::GITLAB_DELIVERY_HEADER,
+        HeaderValue::from_static("delivery-1"),
+    );
+    headers.insert(
+        super::GITLAB_SIGNATURE_HEADER,
+        HeaderValue::from_static("gitlab-secret"),
+    );
+    let request = super::webhook_request(ProviderKind::GitLab, &headers, body).unwrap();
+    let event = gitlab
+        .parse_webhook(request)
+        .expect("gitlab webhook parses")
+        .expect("push hook yields an event");
+    assert_eq!(event.repository().owner(), "team");
+    assert_eq!(event.repository().name(), "assets");
 }

@@ -12,10 +12,25 @@ pub use shardline_server_core::DEFAULT_LOCAL_GC_RETENTION_SECONDS;
 /// their file records.  A non-zero retention gives concurrent uploads time
 /// to finish before orphaned chunks are physically deleted.
 ///
-/// See [`run_gc_with_stores`] for the clamping logic.
+/// See [`crate::run_gc_with_stores`] for the clamping logic.
 pub const MINIMUM_GC_RETENTION_SECONDS: u64 = 3600; // 1 hour
 
 /// Local filesystem garbage-collection execution options.
+///
+/// Picks what a GC run does: discover orphan chunks only (`mark`), delete
+/// expired quarantine entries only (`sweep`), both, or neither (a pure dry run).
+///
+/// # Examples
+///
+/// ```
+/// use shardline_gc::{LocalGcOptions, MINIMUM_GC_RETENTION_SECONDS};
+///
+/// let dry_run = LocalGcOptions::dry_run();
+/// assert_eq!(dry_run.mode_name(), "dry-run");
+///
+/// let full = LocalGcOptions::mark_and_sweep(MINIMUM_GC_RETENTION_SECONDS);
+/// assert_eq!(full.mode_name(), "mark-and-sweep");
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LocalGcOptions {
     /// Whether to persist newly discovered orphan chunks into quarantine state.
@@ -90,6 +105,30 @@ impl LocalGcOptions {
 }
 
 /// Local filesystem garbage-collection report.
+///
+/// Summarizes one GC run: how many records were scanned, how many orphan
+/// chunks were discovered or deleted, and how much space was reclaimed. All
+/// fields are plain counters; a freshly defaulted report represents a run that
+/// found and changed nothing.
+///
+/// # Examples
+///
+/// ```
+/// use shardline_gc::LocalGcReport;
+///
+/// let report = LocalGcReport {
+///     scanned_records: 42,
+///     referenced_chunks: 100,
+///     orphan_chunks: 2,
+///     orphan_chunk_bytes: 8192,
+///     deleted_chunks: 2,
+///     deleted_bytes: 8192,
+///     ..LocalGcReport::default()
+/// };
+/// assert_eq!(report.deleted_chunks, 2);
+/// assert_eq!(report.deleted_bytes, 8192);
+/// assert_eq!(report.new_quarantine_candidates, 0);
+/// ```
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LocalGcReport {
     /// Number of file and file-version records scanned.

@@ -25,13 +25,23 @@
 //! - [`RepositoryScope`] ties provider-issued tokens to one repository and,
 //!   optionally, one revision.
 //!
-//! # Example
+//! # Quick start
+//!
+//! Parse a content hash and sign a scoped read token, then verify it. This
+//! example is fully offline — no network or storage is involved:
 //!
 //! ```
 //! use shardline_protocol::{
-//!     RepositoryProvider, RepositoryScope, TokenClaims, TokenScope, TokenSigner,
+//!     RepositoryProvider, RepositoryScope, ShardlineHash, TokenClaims, TokenScope, TokenSigner,
 //! };
 //!
+//! // A validated 32-byte hash with canonical lowercase hexadecimal text.
+//! let hash = ShardlineHash::parse_hex(
+//!     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+//! )?;
+//! assert_eq!(hash.hex_string().len(), 64);
+//!
+//! // Scope a bearer token to one repository (optionally one revision).
 //! let repository =
 //!     RepositoryScope::new(RepositoryProvider::GitHub, "acme", "assets", Some("main"))?;
 //! let claims = TokenClaims::new(
@@ -42,6 +52,7 @@
 //!     1_700_000_600,
 //! )?;
 //!
+//! // Sign, then verify against a fixed timestamp.
 //! let signer = TokenSigner::new(b"development-only-signing-key-32bytes")?;
 //! let token = signer.sign(&claims)?;
 //! let verified = signer.verify_at(&token, 1_700_000_000)?;

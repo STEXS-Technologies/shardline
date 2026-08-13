@@ -319,4 +319,37 @@ mod tests {
         );
         assert!(!is_ciphertext(&short));
     }
+
+    #[test]
+    fn decrypt_rejects_non_utf8_plaintext() {
+        // `encrypt` only accepts `&str`, so craft a structurally valid
+        // `sse1:` blob directly from the raw AES-256-GCM primitives whose
+        // plaintext is not valid UTF-8.
+        let cipher = AtRestCipher::new(test_key()).unwrap();
+        let aes = Aes256Gcm::new(GenericArray::<u8, U32>::from_slice(
+            cipher.key.expose_secret(),
+        ));
+        let nonce = GenericArray::<u8, U12>::from_slice(&[0x42u8; NONCE_LEN]);
+        let ciphertext = aes
+            .encrypt(
+                nonce,
+                Payload {
+                    msg: &[0xff, 0xfe, 0xfd],
+                    aad: b"org/model",
+                },
+            )
+            .unwrap();
+        let mut blob = nonce.to_vec();
+        blob.extend_from_slice(&ciphertext);
+        let stored = format!(
+            "{MAGIC_PREFIX}{}",
+            base64::engine::general_purpose::STANDARD.encode(&blob)
+        );
+
+        assert!(is_ciphertext(&stored));
+        assert!(matches!(
+            cipher.decrypt("org/model", &stored),
+            Err(CipherError::NotUtf8)
+        ));
+    }
 }

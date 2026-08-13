@@ -1,11 +1,12 @@
-//! Fork-format (v3) metadata-shard serialization and parsing (M3b).
+//! Serialize and parse Xet metadata shards — the manifest that maps files to
+//! the xorb chunk ranges that contain their data.
 //!
-//! The shardline server's `shardline-xet-core` fork serializes metadata shards
-//! with **format version 3** and `u64` entry fields, while the pinned upstream
+//! Shardline's server fork of `xet-core` serializes metadata shards with
+//! **format version 3** and `u64` entry fields, while the pinned upstream
 //! `xet-core-structures` 1.5.2 writes version 2 with `u32` fields (same
-//! divergence class as the xorb footer in M3a). sdx does not depend on the
-//! fork, so this module assembles and parses the fork's v3 layout directly
-//! (`docs/SDX_PLAN.md` §4.4.2 / §9-M3).
+//! divergence class as the xorb footer in the write path). sdx does not
+//! depend on the fork, so this module assembles and parses the fork's v3
+//! layout directly (`docs/SDX_PLAN.md` §4.4.2 / §9-M3).
 //!
 //! Byte layout (all little-endian scalars, `MDB_FILE_INFO_ENTRY_SIZE` /
 //! `MDB_XORB_INFO_ENTRY_SIZE` = 60 bytes for v3):
@@ -161,8 +162,37 @@ pub fn serialize_shard(files: &[ShardFileEntry], xorbs: &[ShardXorb]) -> Vec<u8>
     out
 }
 
-/// Parses the xorb sections of a fork-format shard, skipping the file
-/// sections. Used to import the shard returned by a global-dedup hit.
+/// Parses the xorb chunk tables from a serialized shard, skipping the file
+/// sections.
+///
+/// Used to import the shard returned by a global-dedup hit.
+///
+/// # Examples
+///
+/// Build a shard with [`serialize_shard`] and parse the xorb sections back:
+///
+/// ```rust
+/// use sdx::{MerkleHash, ShardXorb, ShardXorbChunk, serialize_shard};
+/// use sdx::shard::parse_shard_xorbs;
+///
+/// # fn main() -> Result<(), sdx::SdxError> {
+/// let xorbs = vec![ShardXorb {
+///     xorb_hash: MerkleHash::from([1u8; 32]),
+///     num_bytes_in_xorb: 16,
+///     chunks: vec![ShardXorbChunk {
+///         chunk_hash: MerkleHash::from([2u8; 32]),
+///         chunk_byte_range_start: 0,
+///         unpacked_segment_bytes: 16,
+///         flags: 0,
+///     }],
+/// }];
+///
+/// let bytes = serialize_shard(&[], &xorbs);
+/// let parsed = parse_shard_xorbs(&bytes)?;
+/// assert_eq!(parsed, xorbs);
+/// # Ok(())
+/// # }
+/// ```
 ///
 /// # Errors
 ///

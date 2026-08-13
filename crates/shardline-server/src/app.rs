@@ -153,6 +153,33 @@ impl Drop for ActiveProtocolRequestGuard<'_> {
 
 /// Builds the Shardline HTTP router.
 ///
+/// Initializes the configured metadata backend, object store, authentication,
+/// and reconstruction cache, then assembles the full Axum [`Router`] for the
+/// configured server role. This is the entry point for embedders that want to
+/// serve Shardline routes from their own process or test them in-process.
+///
+/// # Examples
+///
+/// ```no_run
+/// use shardline_server::{ServerConfig, app::router};
+/// use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+/// use std::num::NonZeroUsize;
+///
+/// #[tokio::main]
+/// async fn main() -> Result<(), Box<dyn std::error::Error>> {
+///     let config = ServerConfig::new(
+///         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+///         "http://127.0.0.1:8080".to_owned(),
+///         std::env::temp_dir(),
+///         NonZeroUsize::new(64 * 1024).expect("64 KiB chunk size is non-zero"),
+///     );
+///     let app = router(config).await?;
+///     let listener = tokio::net::TcpListener::bind("127.0.0.1:8080").await?;
+///     axum::serve(listener, app).await?;
+///     Ok(())
+/// }
+/// ```
+///
 /// # Errors
 ///
 /// Returns [`ServerError`] when the configured backend cannot initialize.
@@ -327,6 +354,23 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
 }
 
 /// Runs the Shardline HTTP server.
+///
+/// # Examples
+///
+/// ```no_run
+/// use shardline_server::{ServerConfig, serve};
+///
+/// #[tokio::main]
+/// async fn main() -> Result<(), Box<dyn std::error::Error>> {
+///     let config = ServerConfig::from_env()?;
+///     serve(config).await?;
+///     Ok(())
+/// }
+/// ```
+///
+/// This is a long-running function: it binds the configured address, initializes
+/// the router (including the metadata backend and object store), and serves
+/// until the process receives a shutdown signal.
 ///
 /// # Errors
 ///

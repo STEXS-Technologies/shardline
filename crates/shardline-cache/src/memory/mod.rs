@@ -30,6 +30,19 @@ pub struct MemoryReconstructionCache {
 
 impl MemoryReconstructionCache {
     /// Creates a bounded in-memory reconstruction cache.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use shardline_cache::MemoryReconstructionCache;
+    /// use std::num::{NonZeroU64, NonZeroUsize};
+    ///
+    /// // Entries expire after 60 seconds; at most 1_000 are kept.
+    /// let ttl = NonZeroU64::try_from(60)?;
+    /// let max_entries = NonZeroUsize::try_from(1_000)?;
+    /// let cache = MemoryReconstructionCache::new(ttl, max_entries);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     #[must_use]
     pub fn new(ttl_seconds: NonZeroU64, max_entries: NonZeroUsize) -> Self {
         Self {

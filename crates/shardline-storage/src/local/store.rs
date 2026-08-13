@@ -42,6 +42,24 @@ impl LocalObjectStore {
 
     /// Creates a local object store rooted at `root`.
     ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use shardline_protocol::ShardlineHash;
+    /// use shardline_storage::{
+    ///     LocalObjectStore, ObjectBody, ObjectIntegrity, ObjectKey, ObjectStore,
+    /// };
+    ///
+    /// // Creates `root` if it does not exist yet.
+    /// let store = LocalObjectStore::new("/var/lib/shardline/objects".into())?;
+    ///
+    /// let key = ObjectKey::parse("chunks/aa/bb/example.xorb")?;
+    /// let body = ObjectBody::from_slice(b"payload");
+    /// let integrity = ObjectIntegrity::new(ShardlineHash::from_bytes([7; 32]), 7);
+    /// ObjectStore::put_if_absent(&store, &key, body, &integrity)?;
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    ///
     /// # Errors
     ///
     /// Returns [`LocalObjectStoreError`] when the root directory cannot be created.

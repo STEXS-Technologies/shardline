@@ -1,4 +1,4 @@
-//! Server frontend types shared between crate extractions.
+//! Runtime protocol frontends served by the Shardline server.
 
 mod frontend;
 

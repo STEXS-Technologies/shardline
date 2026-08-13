@@ -1,4 +1,4 @@
-//! Full `xet://` URL parsing for the CLI lane (M6a).
+//! Full `xet://` URL parsing: repository identity plus an optional path.
 //!
 //! [`XetUrl`] parses `xet://<host>[:<port>]/<provider>/<owner>/<repo>/<revision>/<path...>`
 //! — the 4-segment repository identity plus an optional multi-segment path
@@ -6,7 +6,7 @@
 //!
 //! The internal builder parser (`crate::client::parse_endpoint`) remains the
 //! strict 4-segment parser used by [`XetClientBuilder`](crate::XetClientBuilder);
-//! [`XetUrl`] is the CLI-facing full parser, with [`XetUrl::endpoint_url`]
+//! [`XetUrl`] is the fuller CLI-facing parser, with [`XetUrl::endpoint_url`]
 //! producing the 4-segment form the builder requires.
 
 use url::Url;
@@ -40,6 +40,31 @@ impl XetUrl {
     /// four path segments (`provider/owner/repo/revision`, each non-empty).
     /// Everything after the revision becomes [`XetUrl::path`]. Query strings
     /// and fragments are rejected.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use sdx::XetUrl;
+    ///
+    /// # fn main() -> Result<(), sdx::SdxError> {
+    /// let url = XetUrl::parse(
+    ///     "xet://127.0.0.1:8080/github/team/assets/main/dir/file.txt",
+    /// )?;
+    ///
+    /// assert_eq!(url.provider, "github");
+    /// assert_eq!(url.owner, "team");
+    /// assert_eq!(url.repo, "assets");
+    /// assert_eq!(url.revision, "main");
+    /// assert_eq!(url.path, "dir/file.txt");
+    ///
+    /// // The 4-segment identity form accepted by `XetClientBuilder::endpoint`.
+    /// assert_eq!(
+    ///     url.endpoint_url(),
+    ///     "xet://127.0.0.1:8080/github/team/assets/main"
+    /// );
+    /// # Ok(())
+    /// # }
+    /// ```
     ///
     /// # Errors
     ///
@@ -160,10 +185,11 @@ impl XetUrl {
         )
     }
 
-    /// Returns a copy of this URL with `path` substituted as the new path
-    /// (used by `cp`/`sync` target derivation). The path is normalized by the
-    /// M5 tree API / server; leading and trailing slashes are stripped except a
-    /// single trailing slash that denotes a directory.
+    /// Returns a copy of this URL with `path` substituted as the new path,
+    /// preserving the repository identity (used to derive `cp`/`sync`
+    /// targets). Leading and trailing slashes are stripped except a single
+    /// trailing slash that denotes a directory; the server normalizes the path
+    /// on write.
     #[must_use]
     pub fn with_path(&self, path: &str) -> XetUrl {
         let path = path.trim_matches('/');

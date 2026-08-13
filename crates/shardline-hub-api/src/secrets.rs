@@ -69,3 +69,108 @@ pub fn upgrade_webhook_secrets(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use shardline_index::hub::{BoxedHubStore, HubRepoType};
+    use shardline_protocol::SecretBytes;
+
+    const TEST_KEY: [u8; 32] = *b"0123456789abcdef0123456789abcdef";
+
+    fn encrypted_store() -> (tempfile::TempDir, BoxedHubStore, WebhookSecretCipher) {
+        let ts = tempfile::tempdir().expect("temp dir");
+        shardline_index::hub::ensure_hub_tables(ts.path()).expect("hub tables");
+        let store = shardline_index::LocalIndexStore::open(ts.path().to_path_buf());
+        let boxed = BoxedHubStore::from_store(store);
+        boxed
+            .create_repo(HubRepoType::Model, "org/sweep", false)
+            .expect("create repo");
+        let cipher =
+            WebhookSecretCipher::new(SecretBytes::new(TEST_KEY.to_vec())).expect("valid key");
+        (ts, boxed, cipher)
+    }
+
+    #[test]
+    fn upgrade_webhook_secrets_encrypts_legacy_rows() {
+        let (_ts, store, cipher) = encrypted_store();
+        store
+            .create_webhook(
+                "org/sweep",
+                "https://example.com/hook",
+                &["push".to_owned()],
+                Some("legacy-plain"),
+            )
+            .expect("seed legacy webhook");
+
+        upgrade_webhook_secrets(&store, &cipher);
+
+        let webhooks = store.list_webhooks("org/sweep").expect("list webhooks");
+        assert_eq!(webhooks.len(), 1);
+        let stored = webhooks[0].secret.as_ref().expect("secret present");
+        assert!(
+            stored.expose_secret().starts_with(MAGIC_PREFIX),
+            "legacy plaintext must be re-encrypted at rest"
+        );
+        let decrypted = cipher
+            .decrypt("org/sweep", stored.expose_secret())
+            .expect("decrypt upgraded secret");
+        assert!(!decrypted.needs_upgrade);
+        assert_eq!(decrypted.secret.expose_secret(), "legacy-plain");
+    }
+
+    #[test]
+    fn upgrade_webhook_secrets_skips_ciphertext_rows() {
+        let (_ts, store, cipher) = encrypted_store();
+        let encrypted = cipher
+            .encrypt("org/sweep", "already-encrypted")
+            .expect("encrypt");
+        store
+            .create_webhook(
+                "org/sweep",
+                "https://example.com/hook",
+                &["push".to_owned()],
+                Some(&encrypted),
+            )
+            .expect("seed ciphertext webhook");
+
+        upgrade_webhook_secrets(&store, &cipher);
+
+        let webhooks = store.list_webhooks("org/sweep").expect("list webhooks");
+        assert_eq!(
+            webhooks[0]
+                .secret
+                .as_ref()
+                .expect("secret present")
+                .expose_secret(),
+            &encrypted,
+            "already-encrypted rows must be left untouched"
+        );
+    }
+
+    #[test]
+    fn upgrade_webhook_secrets_skips_rows_without_secret() {
+        let (_ts, store, cipher) = encrypted_store();
+        store
+            .create_webhook(
+                "org/sweep",
+                "https://example.com/hook",
+                &["push".to_owned()],
+                None,
+            )
+            .expect("seed secretless webhook");
+
+        upgrade_webhook_secrets(&store, &cipher);
+
+        let webhooks = store.list_webhooks("org/sweep").expect("list webhooks");
+        assert!(webhooks[0].secret.is_none());
+    }
+
+    #[test]
+    fn upgrade_webhook_secrets_empty_store_is_a_noop() {
+        let (_ts, store, cipher) = encrypted_store();
+        // No webhooks at all: the sweep must complete without error or panic.
+        upgrade_webhook_secrets(&store, &cipher);
+        assert_eq!(store.list_repos().expect("list repos").len(), 1);
+    }
+}
