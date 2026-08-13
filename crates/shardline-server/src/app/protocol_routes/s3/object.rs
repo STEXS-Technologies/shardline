@@ -203,11 +203,21 @@ pub(crate) async fn s3_get_object(
         return Err(S3Error::not_implemented());
     }
 
-    let total_length = match state.backend.object_length(&context.object_key).await {
-        Ok(length) => length,
+    // Resolve the object's length and record version in ONE atomic snapshot:
+    // the stream below is pinned to the same version, so a concurrent
+    // overwrite can never yield a torn read (old length, new stream) or a
+    // transient 404 — the old version stays readable until the new one is
+    // fully durable and the index row has moved.
+    let snapshot = match state
+        .backend
+        .s3_object_read_snapshot(&context.object_key)
+        .await
+    {
+        Ok(snapshot) => snapshot,
         Err(ServerError::NotFound) => return Err(S3Error::no_such_key(&context.key)),
         Err(error) => return Err(S3Error::from(error)),
     };
+    let total_length = snapshot.total_bytes;
     let range_header = headers.get(RANGE).and_then(|value| value.to_str().ok());
     let range = match range_header {
         Some(header) => {
@@ -222,7 +232,12 @@ pub(crate) async fn s3_get_object(
 
     let byte_stream = state
         .backend
-        .read_object_stream(&context.object_key, total_length, range)
+        .read_object_stream_pinned(
+            &context.object_key,
+            total_length,
+            range,
+            snapshot.record_content_hash.as_deref(),
+        )
         .await?;
     let mut response = if let Some(range) = range {
         metrics::record_range_request();
