@@ -1,6 +1,7 @@
 #![no_main]
 #![allow(
     clippy::arithmetic_side_effects,
+    clippy::expect_used,
     clippy::indexing_slicing,
     clippy::let_underscore_untyped,
     clippy::shadow_unrelated
@@ -90,7 +91,10 @@ fuzz_target!(|data: Vec<u8>| {
     // reachability (an index lookup) can resolve them — mirror that here.
     let object_id = StoredObjectId::new(hash);
     runtime
-        .block_on(AsyncIndexStore::insert_object(coordinator.index(), &object_id))
+        .block_on(AsyncIndexStore::insert_object(
+            coordinator.index(),
+            &object_id,
+        ))
         .expect("index registration should succeed");
     let reachable = runtime.block_on(ObjectReachability::is_object_reachable(
         &coordinator,
