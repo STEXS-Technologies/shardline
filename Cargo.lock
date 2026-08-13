@@ -3689,6 +3689,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "shardline-s3-adapter"
+version = "1.5.0"
+dependencies = [
+ "shardline-protocol",
+ "shardline-server-core",
+ "shardline-storage",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "shardline-server"
 version = "1.5.0"
 dependencies = [

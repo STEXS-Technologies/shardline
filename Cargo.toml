@@ -64,6 +64,7 @@ shardline-protocol-adapters = { version = "1.5.0", path = "crates/shardline-prot
 shardline-rebuild = { version = "1.5.0", path = "crates/shardline-rebuild" }
 shardline-provider-events = { version = "1.5.0", path = "crates/shardline-provider-events" }
 shardline-oci-adapter = { version = "1.5.0", path = "crates/shardline-oci-adapter" }
+shardline-s3-adapter = { version = "1.5.0", path = "crates/shardline-s3-adapter" }
 shardline-server = { version = "1.5.0", path = "crates/shardline-server" }
 shardline-server-core = { version = "1.5.0", path = "crates/shardline-server-core" }
 shardline-storage = { version = "1.5.0", path = "crates/shardline-storage" }
