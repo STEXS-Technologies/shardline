@@ -41,17 +41,17 @@ PUBLISH_ORDER=(
   shardline-index
   shardline-cas
   shardline-server-core
+  shardline-protocol-adapters   # MUST land before shardline-hub-api (hub-api depends on it)
   shardline-hub-api
   shardline-oci-adapter
-  shardline-protocol-adapters
-  shardline-xet-adapter   # MUST land before sdx (M5a route constants)
-  sdx                     # MUST be after shardline-xet-adapter
+  shardline-xet-adapter         # MUST land before sdx (M5a route constants)
   shardline-fsck
   shardline-gc
   shardline-provider-events
   shardline-rebuild
-  shardline-server
-  shardline              # CLI bin; depends on sdx, so last
+  shardline-server              # MUST land before sdx (sdx dev-depends on it for its test suite)
+  sdx                           # MUST be after shardline-xet-adapter AND shardline-server
+  shardline                     # CLI bin; depends on sdx, so last
 )
 
 MODE="dry-run"
