@@ -21,6 +21,7 @@ repository-scoped storage.
 | Bazel HTTP remote cache frontend | **Beta** | `ac`/`cas` read and write routes; `bazel`/`bazelisk` remote-cache flows in test matrix |
 | OCI Distribution frontend | **Stable** | Blob/manifest/tag routes and checked-in `skopeo`, Docker, Helm, and Podman client coverage |
 | Hugging Face Hub API | **Beta** | Model/dataset create, upload, download, delete; `hf` CLI workflows in test matrix |
+| S3 frontend (protocol) | **Beta** | S3-compatible object API — Put/Get(+Range)/Head/Delete, multipart upload, ListObjectsV2, bucket stubs; SigV4 access-key=token auth; validated against real clients (`mc`, pyarrow 25) in the real-client e2e suite and security-audited (`feat/s3-frontend`) |
 | Local filesystem storage | **Stable** | Checked-in adapter, concurrency, and operator workflow coverage |
 | S3-compatible storage | **Stable** | Checked-in object read/write/list and HTTP integration coverage |
 | Postgres metadata | **Stable** | Checked-in index, dedupe, concurrency, and operator workflow coverage |
