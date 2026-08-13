@@ -1,3 +1,7 @@
+use axum::http::{
+    HeaderMap,
+    header::{IF_MATCH, IF_NONE_MATCH},
+};
 use shardline_protocol::{ByteRange, parse_http_byte_range};
 
 use crate::error::S3Error;
@@ -200,6 +204,158 @@ pub fn parse_s3_range(header: Option<&str>, total: u64) -> Result<ByteRange, S3E
         return ByteRange::new(0, last_byte).map_err(|_error| S3Error::invalid_range());
     };
     parse_http_byte_range(header, total).map_err(|_error| S3Error::invalid_range())
+}
+
+/// The entity-tag set of an S3 conditional header.
+///
+/// [`EntityTagSet::parse`] is the single typed choke point between raw header
+/// values and the model; handlers never match strings themselves.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EntityTagSet {
+    /// `*` — matches any existing representation.
+    Any,
+    /// One or more quoted entity tags (weak `W/` prefixes are stripped per
+    /// RFC 9110 weak comparison).
+    Tags(Vec<String>),
+}
+
+/// A malformed S3 conditional-header (`If-Match` / `If-None-Match`) or
+/// `x-amz-copy-source` value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidS3HeaderValue;
+
+impl EntityTagSet {
+    /// Parses an `If-Match` / `If-None-Match` header value.
+    ///
+    /// The value is a comma-separated list of quoted entity tags, or the
+    /// single `*`. A `W/` weak prefix is stripped (conditional requests use
+    /// weak comparison; the stored ETag is the opaque content hash).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidS3HeaderValue`] when the header is empty, an item is
+    /// unquoted or empty, or `*` appears alongside concrete tags (which RFC
+    /// 9110 forbids).
+    pub fn parse(header: &str) -> Result<Self, InvalidS3HeaderValue> {
+        match header.trim() {
+            "" => Err(InvalidS3HeaderValue),
+            "*" => Ok(Self::Any),
+            value => {
+                let mut tags = Vec::new();
+                for item in value.split(',') {
+                    let item = item.trim();
+                    let item = item.strip_prefix("W/").unwrap_or(item);
+                    let Some(inner) = item.strip_prefix('"') else {
+                        return Err(InvalidS3HeaderValue);
+                    };
+                    let Some(inner) = inner.strip_suffix('"') else {
+                        return Err(InvalidS3HeaderValue);
+                    };
+                    if inner.is_empty() {
+                        return Err(InvalidS3HeaderValue);
+                    }
+                    tags.push(inner.to_owned());
+                }
+                if tags.is_empty() {
+                    return Err(InvalidS3HeaderValue);
+                }
+                Ok(Self::Tags(tags))
+            }
+        }
+    }
+}
+
+/// A parsed S3 conditional request header.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConditionalHeader {
+    /// `If-Match` — the stored ETag must match (strong).
+    IfMatch(EntityTagSet),
+    /// `If-None-Match` — the stored ETag must not match (weak).
+    IfNoneMatch(EntityTagSet),
+}
+
+impl ConditionalHeader {
+    /// Evaluates the precondition against the stored ETag (content hash).
+    ///
+    /// `stored_etag: None` means the object **does not exist**. Per RFC 9110:
+    ///
+    /// - `If-Match` passes when the object exists and any listed tag equals the
+    ///   stored ETag (`*` passes when the object exists at all);
+    /// - `If-None-Match` passes when no listed tag equals the stored ETag, or
+    ///   when the object does not exist (`*` passes only when the object does
+    ///   not exist).
+    #[must_use]
+    pub fn satisfied(&self, stored_etag: Option<&str>) -> bool {
+        match self {
+            Self::IfMatch(tags) => match tags {
+                EntityTagSet::Any => stored_etag.is_some(),
+                EntityTagSet::Tags(tags) => {
+                    stored_etag.is_some_and(|etag| tags.iter().any(|tag| tag == etag))
+                }
+            },
+            Self::IfNoneMatch(tags) => match tags {
+                EntityTagSet::Any => stored_etag.is_none(),
+                EntityTagSet::Tags(tags) => {
+                    stored_etag.is_none_or(|etag| !tags.iter().any(|tag| tag == etag))
+                }
+            },
+        }
+    }
+}
+
+/// Reads the S3 conditional headers (`If-Match` / `If-None-Match`) from a
+/// request's header map.
+///
+/// Per RFC 9110 precedence, `If-Match` wins over `If-None-Match` when both are
+/// present, so only the stronger condition is returned.
+#[must_use]
+pub fn read_conditional_headers(headers: &HeaderMap) -> Option<ConditionalHeader> {
+    if let Some(value) = headers.get(IF_MATCH).and_then(header_value_str) {
+        return EntityTagSet::parse(value)
+            .ok()
+            .map(ConditionalHeader::IfMatch);
+    }
+    headers
+        .get(IF_NONE_MATCH)
+        .and_then(header_value_str)
+        .and_then(|value| EntityTagSet::parse(value).ok())
+        .map(ConditionalHeader::IfNoneMatch)
+}
+
+/// Borrows a header value as a string when it is valid ASCII (HTTP headers are
+/// latin-1; a non-ASCII value is treated as absent).
+fn header_value_str(value: &axum::http::HeaderValue) -> Option<&str> {
+    value.to_str().ok()
+}
+
+/// A parsed `x-amz-copy-source` value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CopySource {
+    /// The source bucket (`{owner}.{name}`).
+    pub bucket: String,
+    /// The source object key.
+    pub key: String,
+}
+
+/// Parses an S3 `x-amz-copy-source` header value (`/{bucket}/{key}`, with the
+/// leading slash optional) into its typed bucket + key parts.
+///
+/// # Errors
+///
+/// Returns [`InvalidS3HeaderValue`] when the source has no `/` separator or
+/// either part is empty.
+pub fn parse_copy_source(source: &str) -> Result<CopySource, InvalidS3HeaderValue> {
+    let trimmed = source.trim_start_matches('/');
+    let Some((bucket, key)) = trimmed.split_once('/') else {
+        return Err(InvalidS3HeaderValue);
+    };
+    if bucket.is_empty() || key.is_empty() {
+        return Err(InvalidS3HeaderValue);
+    }
+    Ok(CopySource {
+        bucket: bucket.to_owned(),
+        key: key.to_owned(),
+    })
 }
 
 #[cfg(test)]
@@ -461,5 +617,119 @@ mod tests {
         // Whitespace padding is not accepted.
         let error = parse_s3_range(Some(" bytes=0-1"), 100).unwrap_err();
         assert_eq!(error.code, "InvalidRange");
+    }
+
+    // ── conditional headers ────────────────────────────────────────────────
+
+    #[test]
+    fn entity_tag_set_parses_single_and_multi_tag_lists() {
+        assert_eq!(
+            EntityTagSet::parse("\"abc123\"").unwrap(),
+            EntityTagSet::Tags(vec!["abc123".to_owned()])
+        );
+        assert_eq!(
+            EntityTagSet::parse("\"a\", \"b\",\"c\"").unwrap(),
+            EntityTagSet::Tags(vec!["a".to_owned(), "b".to_owned(), "c".to_owned()])
+        );
+    }
+
+    #[test]
+    fn entity_tag_set_strips_weak_prefix_and_star() {
+        assert_eq!(
+            EntityTagSet::parse("W/\"abc123\"").unwrap(),
+            EntityTagSet::Tags(vec!["abc123".to_owned()])
+        );
+        assert_eq!(EntityTagSet::parse(" * ").unwrap(), EntityTagSet::Any);
+    }
+
+    #[test]
+    fn entity_tag_set_rejects_malformed_values() {
+        for value in ["", "abc", "\"\"", "abc,", "*,\"a\"", "\"a\",*"] {
+            assert!(EntityTagSet::parse(value).is_err(), "value {value:?}");
+        }
+    }
+
+    #[test]
+    fn conditional_if_match_satisfied_only_when_stored_etag_matches() {
+        let match_tag = ConditionalHeader::IfMatch(EntityTagSet::Tags(vec!["hash-a".to_owned()]));
+        assert!(match_tag.satisfied(Some("hash-a")));
+        assert!(!match_tag.satisfied(Some("hash-b")));
+        assert!(!match_tag.satisfied(None), "missing object fails If-Match");
+
+        let match_any = ConditionalHeader::IfMatch(EntityTagSet::Any);
+        assert!(match_any.satisfied(Some("hash-a")));
+        assert!(
+            !match_any.satisfied(None),
+            "* fails when the object is missing"
+        );
+    }
+
+    #[test]
+    fn conditional_if_none_match_satisfied_on_missing_or_non_matching() {
+        let none_match_tag =
+            ConditionalHeader::IfNoneMatch(EntityTagSet::Tags(vec!["hash-a".to_owned()]));
+        assert!(none_match_tag.satisfied(Some("hash-b")));
+        assert!(!none_match_tag.satisfied(Some("hash-a")));
+        assert!(
+            none_match_tag.satisfied(None),
+            "missing object passes If-None-Match"
+        );
+
+        let none_match_any = ConditionalHeader::IfNoneMatch(EntityTagSet::Any);
+        assert!(none_match_any.satisfied(None));
+        assert!(
+            !none_match_any.satisfied(Some("hash-a")),
+            "* fails when the object exists"
+        );
+    }
+
+    #[test]
+    fn read_conditional_headers_prefers_if_match_over_if_none_match() {
+        let mut headers = HeaderMap::new();
+        headers.insert(IF_MATCH, "\"abc\"".parse().unwrap());
+        headers.insert(IF_NONE_MATCH, "*".parse().unwrap());
+        assert_eq!(
+            read_conditional_headers(&headers),
+            Some(ConditionalHeader::IfMatch(EntityTagSet::Tags(vec![
+                "abc".to_owned()
+            ])))
+        );
+
+        let mut headers = HeaderMap::new();
+        headers.insert(IF_NONE_MATCH, "*".parse().unwrap());
+        assert_eq!(
+            read_conditional_headers(&headers),
+            Some(ConditionalHeader::IfNoneMatch(EntityTagSet::Any))
+        );
+
+        let headers = HeaderMap::new();
+        assert_eq!(read_conditional_headers(&headers), None);
+    }
+
+    // ── x-amz-copy-source ──────────────────────────────────────────────────
+
+    #[test]
+    fn parse_copy_source_splits_bucket_and_key() {
+        assert_eq!(
+            parse_copy_source("/acme.models/data/model.pt").unwrap(),
+            CopySource {
+                bucket: "acme.models".to_owned(),
+                key: "data/model.pt".to_owned(),
+            }
+        );
+        assert_eq!(
+            parse_copy_source("acme.models/file.txt").unwrap(),
+            CopySource {
+                bucket: "acme.models".to_owned(),
+                key: "file.txt".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_copy_source_rejects_missing_or_empty_parts() {
+        for value in ["", "/", "acme.models", "/acme.models/", "acme.models/"] {
+            assert!(parse_copy_source(value).is_err(), "value {value:?}");
+        }
     }
 }

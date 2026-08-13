@@ -137,6 +137,54 @@ impl ListBucketResult {
     }
 }
 
+/// The `ListAllMyBucketsResult` (service-level `GET /`) response envelope.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListBucketsResult {
+    /// The bucket names owned by the caller (`{owner}.{name}`).
+    pub buckets: Vec<String>,
+}
+
+impl ListBucketsResult {
+    /// Serializes the result to the S3 `ListAllMyBucketsResult` XML envelope.
+    #[must_use]
+    pub fn to_xml(&self) -> String {
+        let mut xml = String::from(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+             <ListAllMyBucketsResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\n\
+             \x20 <Buckets>\n",
+        );
+        for bucket in &self.buckets {
+            xml.push_str("    <Bucket><Name>");
+            xml.push_str(&xml_escape(bucket));
+            xml.push_str("</Name></Bucket>\n");
+        }
+        xml.push_str("  </Buckets>\n</ListAllMyBucketsResult>\n");
+        xml
+    }
+}
+
+/// The `CopyObject` response envelope.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CopyObjectResult {
+    /// The BLAKE3 root content hash of the copied object; serialized quoted as
+    /// the S3 ETag (identical content → identical ETag).
+    pub etag: String,
+    /// `LastModified` in ISO-8601 format.
+    pub last_modified_iso8601: String,
+}
+
+impl CopyObjectResult {
+    /// Serializes the result to the S3 `CopyObjectResult` XML envelope.
+    #[must_use]
+    pub fn to_xml(&self) -> String {
+        format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<CopyObjectResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\n  <ETag>{}</ETag>\n  <LastModified>{}</LastModified>\n</CopyObjectResult>\n",
+            etag_header(&self.etag),
+            xml_escape(&self.last_modified_iso8601),
+        )
+    }
+}
+
 /// The `CompleteMultipartUpload` response envelope.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompleteMultipartUploadResult {
@@ -850,6 +898,38 @@ mod tests {
             super::parse_delete_object_keys("<Delete><Object><Key>a")
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn list_all_my_buckets_result_xml_golden() {
+        let result = ListBucketsResult {
+            buckets: vec!["acme.models".to_owned()],
+        };
+        assert_eq!(
+            result.to_xml(),
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+             <ListAllMyBucketsResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\n\
+             \x20 <Buckets>\n\
+             \x20\x20\x20\x20<Bucket><Name>acme.models</Name></Bucket>\n\
+             \x20 </Buckets>\n\
+             </ListAllMyBucketsResult>\n"
+        );
+    }
+
+    #[test]
+    fn copy_object_result_xml_golden() {
+        let result = CopyObjectResult {
+            etag: "ab12".to_owned(),
+            last_modified_iso8601: "2026-08-13T09:51:00Z".to_owned(),
+        };
+        assert_eq!(
+            result.to_xml(),
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+             <CopyObjectResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\n\
+             \x20 <ETag>\"ab12\"</ETag>\n\
+             \x20 <LastModified>2026-08-13T09:51:00Z</LastModified>\n\
+             </CopyObjectResult>\n"
         );
     }
 }

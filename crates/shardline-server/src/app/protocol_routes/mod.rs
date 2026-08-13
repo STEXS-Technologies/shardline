@@ -23,7 +23,7 @@ pub(crate) use oci::{
 };
 pub(crate) use s3::{
     s3_create_bucket, s3_delete_bucket, s3_delete_object, s3_get_bucket, s3_get_object,
-    s3_head_bucket, s3_head_object, s3_post_bucket, s3_post_object, s3_put_object,
+    s3_head_bucket, s3_head_object, s3_list_buckets, s3_post_bucket, s3_post_object, s3_put_object,
 };
 
 use super::MAX_PROTOCOL_QUERY_BYTES;

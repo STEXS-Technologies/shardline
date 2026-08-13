@@ -20,7 +20,10 @@ use axum::{
 };
 use shardline_index::S3ObjectEntry;
 use shardline_protocol::TokenScope;
-use shardline_s3_adapter::{S3Error, S3SubResource, classify, etag_header, parse_s3_range};
+use shardline_s3_adapter::{
+    CopyObjectResult, S3Error, S3SubResource, classify, etag_header, format_iso8601,
+    parse_copy_source, parse_s3_range, read_conditional_headers,
+};
 
 use crate::{
     ServerError,
@@ -31,8 +34,12 @@ use crate::{
 
 use super::{
     S3ObjectContext, acquire_object_upload_lock, authorize_s3, aws_chunked, format_http_date,
-    has_sub_resource, multipart, parse_s3_query, require_s3_object_context,
+    has_sub_resource, multipart, parse_s3_query, require_s3_object_context, s3_xml_content_type,
 };
+
+/// The `x-amz-copy-source` request header (not in axum's header constants).
+const COPY_SOURCE: axum::http::header::HeaderName =
+    axum::http::header::HeaderName::from_static("x-amz-copy-source");
 
 /// `PUT /{bucket}/{*key}` — stream the body through the CDC ingestor.
 ///
@@ -83,6 +90,16 @@ pub(crate) async fn s3_put_object(
         return Err(S3Error::not_implemented());
     }
 
+    // `CopyObject` is a PUT with the `x-amz-copy-source` header (S3's COPY is
+    // not a separate method): read the source within the caller's bucket and
+    // write it to this key.
+    if let Some(copy_source) = headers
+        .get(COPY_SOURCE)
+        .and_then(|value| value.to_str().ok())
+    {
+        return s3_copy_object(&state, claims, &context, copy_source, &headers).await;
+    }
+
     // Bodies larger than SHARDLINE_S3_MAX_PART_BYTES must use multipart.
     let max_bytes = usize::try_from(state.config.s3_max_part_bytes().get())
         .map_err(|_error| S3Error::internal())?;
@@ -122,14 +139,142 @@ pub(crate) async fn s3_put_object(
         body
     };
 
+    // Conditional requests (If-Match / If-None-Match) are evaluated against
+    // the CURRENT object BEFORE the write.
+    check_put_precondition(&state, &context, &headers).await?;
+
+    // Stream the new body FIRST (atomic upload-then-swap under the per-key
+    // lock). On failure nothing was committed, so the old record version
+    // remains the latest and the index row still points at it.
+    let uploaded = s3_upload_object_body(&state, &context, body).await?;
+
+    let etag = etag_header(&uploaded.content_hash);
+    let mut response = StatusCode::OK.into_response();
+    response.headers_mut().insert(
+        ETAG,
+        HeaderValue::from_str(&etag).map_err(|_error| S3Error::internal())?,
+    );
+    Ok(response)
+}
+
+/// `CopyObject` — `PUT /{bucket}/{*key}` with `x-amz-copy-source`.
+///
+/// Reads the source object (which must be in the caller's bound bucket) via
+/// the snapshot + read path and writes it to the destination key with the same
+/// atomic upload-then-swap as `PutObject`. The destination gets a fresh ETag
+/// equal to its content hash — identical content yields the identical ETag.
+/// Responds `200` with a `CopyObjectResult` envelope.
+async fn s3_copy_object(
+    state: &Arc<AppState>,
+    claims: Option<&shardline_protocol::RepositoryScope>,
+    destination: &S3ObjectContext,
+    copy_source: &str,
+    headers: &HeaderMap,
+) -> Result<Response, S3Error> {
+    let source = parse_copy_source(copy_source)
+        .map_err(|_error| S3Error::invalid_argument("Invalid x-amz-copy-source header"))?;
+    // The source must be inside the caller's bound bucket (which must equal the
+    // destination bucket under the C1 repo-binding model).
+    let source_context = require_s3_object_context(claims, &source.bucket, &source.key)?;
+
+    // Conditional requests apply to the destination (create-if-absent /
+    // replace-if-matching semantics) BEFORE any write.
+    check_put_precondition(state, destination, headers).await?;
+
+    // Read the source through the authoritative read path.
+    let bytes = match state.backend.read_object(&source_context.object_key).await {
+        Ok(bytes) => bytes,
+        Err(ServerError::NotFound) => return Err(S3Error::no_such_key(&source.key)),
+        Err(error) => return Err(S3Error::from(error)),
+    };
+
+    let uploaded = s3_upload_object_body(
+        state,
+        destination,
+        RequestBodyReader::from_bytes(axum::body::Bytes::from(bytes)),
+    )
+    .await?;
+
+    let now = i64::try_from(shardline_protocol::unix_now_seconds_lossy())
+        .map_err(|_error| S3Error::internal())?;
+    let xml = CopyObjectResult {
+        etag: uploaded.content_hash,
+        last_modified_iso8601: format_iso8601(now),
+    }
+    .to_xml();
+    Ok((
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, s3_xml_content_type())],
+        xml,
+    )
+        .into_response())
+}
+
+/// Evaluates the `If-Match` / `If-None-Match` headers against the object's
+/// CURRENT state, before a write mutates anything.
+///
+/// `If-Match` on a missing object is `404 NoSuchKey` (RFC 9110: a missing
+/// resource fails `If-Match`); a mismatch is `412 PreconditionFailed`.
+/// `If-None-Match` passes for a missing object (create-if-absent) and fails
+/// with `412` when the stored ETag matches (or `*` and the object exists).
+async fn check_put_precondition(
+    state: &Arc<AppState>,
+    context: &S3ObjectContext,
+    headers: &HeaderMap,
+) -> Result<(), S3Error> {
+    let existing = match state
+        .backend
+        .s3_object_read_snapshot(&context.object_key)
+        .await
+    {
+        Ok(snapshot) => snapshot.record_content_hash,
+        Err(ServerError::NotFound) => None,
+        Err(error) => return Err(S3Error::from(error)),
+    };
+    check_precondition(existing.as_deref(), headers, &context.key)
+}
+
+/// Evaluates the S3 conditional headers against a stored ETag.
+///
+/// `stored_etag: None` means the object does not exist.
+fn check_precondition(
+    stored_etag: Option<&str>,
+    headers: &HeaderMap,
+    key: &str,
+) -> Result<(), S3Error> {
+    let Some(condition) = read_conditional_headers(headers) else {
+        return Ok(());
+    };
+    if condition.satisfied(stored_etag) {
+        return Ok(());
+    }
+    if matches!(
+        condition,
+        shardline_s3_adapter::ConditionalHeader::IfMatch(_)
+    ) && stored_etag.is_none()
+    {
+        return Err(S3Error::no_such_key(key));
+    }
+    Err(S3Error::precondition_failed())
+}
+
+/// Streams a request body to an object key with the atomic upload-then-swap
+/// ordering, serialized under the per-key upload lock.
+///
+/// The body is streamed to a new record version FIRST (a mid-stream failure
+/// commits nothing), then the listing-index row is swapped and any stale
+/// direct object dropped. Used by `PutObject`, `CopyObject`, and multipart
+/// completion.
+async fn s3_upload_object_body(
+    state: &Arc<AppState>,
+    context: &S3ObjectContext,
+    body: RequestBodyReader,
+) -> Result<crate::model::UploadFileResponse, S3Error> {
     // Serialize concurrent overwrites of the same key; the swap below (index
     // upsert + stale-direct drop) is atomic with respect to other overwrites.
     let object_lock = acquire_object_upload_lock(context.object_key.as_str());
     let _object_guard = object_lock.lock().await;
 
-    // Stream the new body FIRST. On failure nothing was committed (the record
-    // commit only happens at ingest finish), so the old record version remains
-    // the latest and the index row still points at it.
     let start = Instant::now();
     let uploaded = match state
         .backend
@@ -159,9 +304,9 @@ pub(crate) async fn s3_put_object(
     state
         .backend
         .upsert_s3_object(&S3ObjectEntry {
-            scope_namespace: context.scope_namespace,
-            object_key: context.key,
-            file_id: uploaded.file_id,
+            scope_namespace: context.scope_namespace.clone(),
+            object_key: context.key.clone(),
+            file_id: uploaded.file_id.clone(),
             size_bytes: uploaded.total_bytes,
             content_hash: uploaded.content_hash.clone(),
             updated_at_unix_seconds: now,
@@ -171,14 +316,7 @@ pub(crate) async fn s3_put_object(
         .backend
         .delete_direct_object_if_present(&context.object_key)
         .await?;
-
-    let etag = etag_header(&uploaded.content_hash);
-    let mut response = StatusCode::OK.into_response();
-    response.headers_mut().insert(
-        ETAG,
-        HeaderValue::from_str(&etag).map_err(|_error| S3Error::internal())?,
-    );
-    Ok(response)
+    Ok(uploaded)
 }
 
 /// `GET /{bucket}/{*key}` — full or ranged read through the shared
@@ -218,6 +356,13 @@ pub(crate) async fn s3_get_object(
         Err(error) => return Err(S3Error::from(error)),
     };
     let total_length = snapshot.total_bytes;
+    // Conditional requests (If-Match / If-None-Match) evaluate against the
+    // stored ETag from the same snapshot before any bytes are served.
+    check_precondition(
+        snapshot.record_content_hash.as_deref(),
+        &headers,
+        &context.key,
+    )?;
     let range_header = headers.get(RANGE).and_then(|value| value.to_str().ok());
     let range = match range_header {
         Some(header) => {
@@ -267,6 +412,15 @@ pub(crate) async fn s3_get_object(
         LAST_MODIFIED,
         HeaderValue::from_str(&last_modified).map_err(|_error| S3Error::internal())?,
     );
+    // S3 serves the ETag (content hash) on GetObject too; the snapshot already
+    // carried it for the conditional evaluation above.
+    if let Some(content_hash) = snapshot.record_content_hash.as_deref() {
+        response.headers_mut().insert(
+            ETAG,
+            HeaderValue::from_str(&etag_header(content_hash))
+                .map_err(|_error| S3Error::internal())?,
+        );
+    }
     metrics::record_download("s3", total_length, 0.0, true);
     Ok(response)
 }
@@ -294,6 +448,17 @@ pub(crate) async fn s3_head_object(
         Err(ServerError::NotFound) => return Err(S3Error::no_such_key(&context.key)),
         Err(error) => return Err(S3Error::from(error)),
     };
+    // Conditional requests evaluate against the stored ETag before the headers
+    // are served.
+    check_precondition(
+        if content_hash.is_empty() {
+            None
+        } else {
+            Some(content_hash.as_str())
+        },
+        &headers,
+        &context.key,
+    )?;
     let last_modified = last_modified_for(&state, &context).await?;
 
     let mut response = StatusCode::OK.into_response();
@@ -353,6 +518,20 @@ pub(crate) async fn s3_delete_object(
     if !resources.is_empty() {
         return Err(S3Error::not_implemented());
     }
+
+    // Conditional requests evaluate against the CURRENT object; a missing
+    // object fails `If-Match` (404) and passes `If-None-Match` (delete is
+    // idempotent).
+    let existing = match state
+        .backend
+        .s3_object_read_snapshot(&context.object_key)
+        .await
+    {
+        Ok(snapshot) => snapshot.record_content_hash,
+        Err(ServerError::NotFound) => None,
+        Err(error) => return Err(S3Error::from(error)),
+    };
+    check_precondition(existing.as_deref(), &headers, &context.key)?;
 
     let _row_deleted = state
         .backend

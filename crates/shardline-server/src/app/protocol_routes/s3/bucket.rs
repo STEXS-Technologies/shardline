@@ -17,8 +17,8 @@ use axum::{
 };
 use shardline_protocol::TokenScope;
 use shardline_s3_adapter::{
-    MAX_S3_DELETE_KEYS, S3Error, S3SubResource, classify, parse_delete_object_keys,
-    require_s3_bucket_binding, s3_object_key,
+    ListBucketsResult, MAX_S3_DELETE_KEYS, S3Error, S3SubResource, classify, encode_bucket,
+    parse_delete_object_keys, require_s3_bucket_binding, s3_object_key,
 };
 
 use super::{authorize_s3, listing, parse_s3_query, s3_xml_content_type};
@@ -27,6 +27,35 @@ use crate::{
     protocol_support::scope_namespace,
     upload_ingest::{RequestBodyReader, read_body_to_bytes},
 };
+
+/// `GET /` — `ListBuckets` (service level).
+///
+/// The caller's token is bound to exactly one bucket (`{owner}.{name}` from
+/// the claims, via [`encode_bucket`]), so the response lists that single
+/// bucket. Missing claims (no auth provider, or a bearer-only request without
+/// credentials) is `403 AccessDenied`.
+#[tracing::instrument(skip(state, headers), fields(bucket))]
+pub(crate) async fn s3_list_buckets(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Response, S3Error> {
+    let auth = authorize_s3(&state, &headers, TokenScope::Read)?;
+    let claims = auth
+        .as_ref()
+        .map(scope_from_auth)
+        .ok_or_else(S3Error::access_denied)?;
+    let bucket = encode_bucket(claims.owner(), claims.name());
+    let xml = ListBucketsResult {
+        buckets: vec![bucket],
+    }
+    .to_xml();
+    Ok((
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, s3_xml_content_type())],
+        xml,
+    )
+        .into_response())
+}
 
 /// `PUT /{bucket}` — `CreateBucket` stub: a no-op `200` once the bucket
 /// decodes and binds to the token scope.
