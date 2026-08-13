@@ -73,7 +73,9 @@ use protocol_routes::{
     bazel_get, bazel_get_ac, bazel_get_cas, bazel_head, bazel_head_ac, bazel_head_cas, bazel_put,
     bazel_put_ac, bazel_put_cas, lfs_batch, lfs_delete_object, lfs_get_object, lfs_head_object,
     lfs_patch_object, lfs_put_object, lfs_verify_object, oci_api_dispatch, oci_dispatch,
-    oci_registry_token, oci_transfer_dispatch, oci_v2_root,
+    oci_registry_token, oci_transfer_dispatch, oci_v2_root, s3_create_bucket, s3_delete_bucket,
+    s3_delete_object, s3_get_bucket, s3_get_object, s3_head_bucket, s3_head_object, s3_post_object,
+    s3_put_object,
 };
 #[cfg(feature = "fuzzing")]
 pub(crate) use protocol_routes::{parse_oci_path, parse_upload_content_range};
@@ -323,11 +325,11 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
                 xet_frontend_enabled = true;
                 app = register_frontend_routes(app, *frontend, role, &state);
             }
-            ServerFrontend::Lfs | ServerFrontend::BazelHttp | ServerFrontend::Oci => {
+            ServerFrontend::Lfs
+            | ServerFrontend::BazelHttp
+            | ServerFrontend::Oci
+            | ServerFrontend::S3 => {
                 app = register_frontend_routes(app, *frontend, role, &state);
-            }
-            ServerFrontend::S3 => {
-                // S3 routes are registered in a later lane.
             }
         }
     }
@@ -468,8 +470,8 @@ fn register_frontend_routes(
         ServerFrontend::Lfs => register_lfs_routes(app, role),
         ServerFrontend::BazelHttp => register_bazel_routes(app, role),
         ServerFrontend::Oci => register_oci_routes(app, role),
+        ServerFrontend::S3 => register_s3_routes(app, role),
         ServerFrontend::Hub => app, // Hub routes are built separately
-        ServerFrontend::S3 => app,  // S3 routes are registered in a later lane
     }
 }
 
@@ -577,6 +579,32 @@ fn register_oci_routes(mut app: Router<Arc<AppState>>, role: ServerRole) -> Rout
         ServerRole::Transfer => {
             app = app.route("/v2/{*path}", axum::routing::any(oci_transfer_dispatch));
         }
+    }
+    app
+}
+
+/// Registers the S3 frontend routes.
+///
+/// S3 is an API-tier frontend (reads + writes touch records/ingest), so the
+/// routes are registered only when the role serves the API surface.
+fn register_s3_routes(mut app: Router<Arc<AppState>>, role: ServerRole) -> Router<Arc<AppState>> {
+    if role.serves_api() {
+        app = app
+            .route(
+                "/{bucket}",
+                axum::routing::put(s3_create_bucket)
+                    .get(s3_get_bucket)
+                    .head(s3_head_bucket)
+                    .delete(s3_delete_bucket),
+            )
+            .route(
+                "/{bucket}/{*key}",
+                axum::routing::get(s3_get_object)
+                    .head(s3_head_object)
+                    .put(s3_put_object)
+                    .post(s3_post_object)
+                    .delete(s3_delete_object),
+            );
     }
     app
 }

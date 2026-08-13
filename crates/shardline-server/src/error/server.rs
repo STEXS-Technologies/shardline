@@ -680,3 +680,85 @@ impl From<ParseStoredFileRecordError> for ServerError {
         }
     }
 }
+
+/// Classifies a [`ServerError`] into the S3 error envelope's coarse classes.
+///
+/// Lives in the server crate (not the adapter) so the S3 adapter never depends
+/// on `shardline-server`. The generic `From<E: S3ErrorClassify> for S3Error`
+/// in the adapter then produces the XML `<Error>` response:
+///
+/// - `RangeNotSatisfiable` → `416 InvalidRange`
+/// - `NotFound` → `404 NoSuchKey`
+/// - authorization failures → `403 AccessDenied`
+/// - everything else → `500 InternalError`
+impl shardline_s3_adapter::S3ErrorClassify for ServerError {
+    fn s3_class(&self) -> shardline_s3_adapter::S3ErrorClass {
+        use shardline_s3_adapter::S3ErrorClass;
+        match self {
+            Self::RangeNotSatisfiable => S3ErrorClass::RangeNotSatisfiable,
+            Self::NotFound => S3ErrorClass::NotFound,
+            Self::MissingAuthorization
+            | Self::InvalidAuthorizationHeader
+            | Self::InvalidToken(_)
+            | Self::InsufficientScope
+            | Self::ProviderDenied => S3ErrorClass::AccessDenied,
+            // All remaining variants are internal server errors with no S3
+            // meaning. Add new S3-mappable variants above this catch-all.
+            Self::Io(_)
+            | Self::Json(_)
+            | Self::RequestBodyRead(_)
+            | Self::RequestBodyTooLarge
+            | Self::RequestQueryTooLarge
+            | Self::RequestBodyFrameOutOfBounds
+            | Self::NumericConversion(_)
+            | Self::HashParse(_)
+            | Self::ObjectStore(_)
+            | Self::Index(_)
+            | Self::StoredFileMetadataTooLarge { .. }
+            | Self::StoredFileMetadataLengthMismatch
+            | Self::InvalidFileId
+            | Self::InvalidContentHash
+            | Self::InvalidXorbPrefix
+            | Self::XorbHashMismatch
+            | Self::InvalidSerializedXorb
+            | Self::InvalidSerializedShard(_)
+            | Self::MissingReferencedXorb
+            | Self::TooManyShardTerms
+            | Self::TooManyBatchReconstructionFileIds
+            | Self::UploadIntentConflict
+            | Self::Overflow
+            | Self::InvalidRangeHeader
+            | Self::SigningKeyError(_)
+            | Self::ProviderTokensDisabled
+            | Self::MissingProviderApiKey
+            | Self::InvalidProviderApiKey
+            | Self::MissingProviderSubject
+            | Self::InvalidProviderTokenRequest
+            | Self::MissingProviderWebhookAuthentication
+            | Self::InvalidProviderWebhookAuthentication
+            | Self::InvalidProviderWebhookPayload
+            | Self::UnknownProvider
+            | Self::Provider(_)
+            | Self::ReconstructionCache(_)
+            | Self::Config(_)
+            | Self::ExpectedBodyHashMismatch
+            | Self::InvalidDigest
+            | Self::InvalidRepositoryName
+            | Self::InvalidManifestReference
+            | Self::NotAcceptable
+            | Self::UnauthorizedChallenge(_)
+            | Self::InvalidUploadSession
+            | Self::TooManyUploadSessions
+            | Self::TooManyRegistryTokenRequests
+            | Self::MissingReconstructionCacheRedisUrl
+            | Self::TransferLimiterClosed
+            | Self::TransferLimiterTimedOut
+            | Self::WorkQueueSaturated
+            | Self::RequestTimedOut
+            | Self::BlockingTask(_)
+            | Self::InvalidPath
+            | Self::UnregisteredFile(_)
+            | Self::RevisionConflict => S3ErrorClass::Internal,
+        }
+    }
+}
