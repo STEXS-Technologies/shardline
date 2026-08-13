@@ -148,6 +148,21 @@ impl S3Error {
         }
     }
 
+    /// The request body XML did not validate against the S3 published schema
+    /// (`MalformedXML`, `400`). AWS S3 uses this for `DeleteObjects` bodies
+    /// that list no keys, more than `MAX_S3_DELETE_KEYS` keys, or otherwise
+    /// violate the published schema.
+    #[must_use]
+    pub fn malformed_xml() -> Self {
+        Self {
+            code: "MalformedXML",
+            message: "The XML you provided was not well-formed or did not validate against our \
+                      published schema."
+                .to_owned(),
+            status: StatusCode::BAD_REQUEST,
+        }
+    }
+
     /// Returns this error with a replaced message (keeps the code and status).
     #[must_use]
     pub fn with_message(mut self, message: String) -> Self {
@@ -352,6 +367,18 @@ mod tests {
         let error = S3Error::internal();
         assert_eq!(error.code, "InternalError");
         assert_eq!(error.status, StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn malformed_xml_constructor_maps_to_400() {
+        let error = S3Error::malformed_xml();
+        assert_eq!(error.code, "MalformedXML");
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert!(
+            error.message.contains("published schema"),
+            "{}",
+            error.message
+        );
     }
 
     #[tokio::test]

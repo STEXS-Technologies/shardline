@@ -67,6 +67,6 @@ pub use protocol_support::{
 };
 pub use types::{
     CompleteMultipartUploadResult, CompleteParts, Contents, HeadObjectHeaders,
-    InitiateMultipartUploadResult, ListBucketResult, PutObjectResponseHeaders, S3ErrorBody,
-    parse_complete_multipart_parts, parse_delete_object_keys,
+    InitiateMultipartUploadResult, ListBucketResult, MAX_S3_DELETE_KEYS, PutObjectResponseHeaders,
+    S3ErrorBody, parse_complete_multipart_parts, parse_delete_object_keys,
 };
