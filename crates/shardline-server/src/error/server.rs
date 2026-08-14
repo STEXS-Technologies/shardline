@@ -47,7 +47,7 @@ use crate::{
 ///
 /// # Design
 ///
-/// Each variant maps to exactly one HTTP status code via [`ServerError::status_code`].
+/// Each variant maps to exactly one HTTP status code via `ServerError::status_code`.
 /// Subsystem errors (e.g., [`LocalIndexStoreError`], [`S3ObjectStoreError`]) are
 /// converted via `From` implementations for ergonomic `?` usage.
 ///

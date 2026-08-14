@@ -7,7 +7,9 @@ These manifests target the scaled production deployment profile:
 - garbage collection runs as a separate `CronJob`
 - immutable object bytes live in S3-compatible storage
 - durable metadata lives in Postgres-compatible SQL
-- reconstruction cache uses the Redis protocol; the shipped manifests deploy Garnet
+- reconstruction cache uses the Redis protocol; the manifests reference an external
+  Redis-compatible endpoint that you must provide (the runtime secret carries a
+  placeholder URL at `garnet.example.com` — no cache service is deployed here)
 
 This package does not assume local object storage or local metadata.
 The pod state mount is only local runtime state in this profile, not the durable source
@@ -87,7 +89,8 @@ The runtime secret carries:
 The provider catalog secret carries the provider repository catalog JSON, including
 webhook secrets.
 
-The manifests use the placeholder image `registry.example.com/shardline:1.0.1`. Replace
+The manifests use the placeholder image `registry.example.com/shardline:1.0.1` (the
+`1.0.1` tag is an example, not the current workspace version). Replace
 it with the image tag you build or publish for your environment.
 
 The runtime egress policy is environment-specific and is therefore shipped as a
@@ -122,6 +125,11 @@ API routes:
 - `/shards`
 - `/v1/shards`
 - `/v1/stats`
+- S3 route family (API tier): `GET /` (`ListBuckets`), `/{bucket}` and `/{bucket}/`
+  (bucket-level operations), `/{bucket}/{*key}` (object data path)
+- Hub LFS objects: `/objects/batch`, `/lfs/objects/{oid}`
+- Hub Git Smart HTTP: `/{type}/{ns}/{repo}/info/refs`, `/{type}/{ns}/{repo}/HEAD`,
+  `/{type}/{ns}/{repo}/git-upload-pack`, `/{type}/{ns}/{repo}/git-receive-pack`
 
 Transfer routes:
 
@@ -133,7 +141,11 @@ Internal scrape route:
 
 - `/metrics`
 
-`ingress-nginx.yaml` provides one concrete `Ingress` example with those path splits.
+`ingress-nginx.yaml` provides one concrete `Ingress` example with the Xet route
+family splits. The S3 bucket/object paths (`/{bucket}`, `/{bucket}/{*key}`) and the
+Hub path-based routes are **API-tier** and must be sent to the API Service; the
+shipped example does not encode them (the S3 catch-all in particular needs explicit
+path mapping per bucket when both roles are exposed on one hostname).
 Clusters that use another gateway should keep the same path ownership while translating
 the object shape to their controller.
 The example also disables NGINX request and response buffering and sets the body-size
@@ -217,6 +229,10 @@ On failure, the script preserves Kubernetes diagnostics in a temporary directory
 `SHARDLINE_KIND_LOG_DIR` when set) before deleting the cluster.
 Set `SHARDLINE_KIND_CLUSTER_NAME` only when a predictable, still-disposable name is
 required; the script refuses to reuse an existing cluster.
+
+> **Test-only:** `SHARDLINE_KIND_LOG_DIR` and `SHARDLINE_KIND_CLUSTER_NAME` are
+> environment overrides for this disposable `kind` smoke test only. They are not
+> Shardline server configuration and have no effect on a deployed server.
 
 ## Runtime hardening
 

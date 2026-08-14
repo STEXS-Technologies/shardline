@@ -616,7 +616,7 @@ fn load_non_zero_usize_env(
 /// TOML config file values as defaults. Environment variables already set in
 /// the process take precedence over TOML values.
 ///
-/// This is a thin wrapper around [`load_server_config_from_env`] that pre-fills
+/// This is a thin wrapper around `load_server_config_from_env` that pre-fills
 /// environment variables from a parsed `shardline.toml` before delegating to
 /// the standard env-based loader.
 ///

@@ -144,11 +144,11 @@ That gives you:
 - a canonical repository URL to turn into `clone_url`
 - `default_revision` from `HEAD`
 
-For the live `stexs/stexs` repository this resolved to:
+For a Gitea repository such as `acme/assets`, the commands above resolve to:
 
-- `owner=stexs`
-- `name=stexs`
-- `clone_url=https://gitea.stexs.net/stexs/stexs.git`
+- `owner=acme`
+- `name=assets`
+- `clone_url=https://gitea.example/acme/assets.git`
 - `default_revision=main`
 
 Gitea from an existing clone:
@@ -417,6 +417,9 @@ Inputs:
   - `SHARDLINE_LIVE_GITEA_OWNER`
   - `SHARDLINE_LIVE_GITEA_BASE_URL`
   - `SHARDLINE_LIVE_GITEA_LOGIN_NAME`
+
+> **Note:** these `SHARDLINE_LIVE_*` variables are used by the project's live-bridge test
+> suite, not by operators. Production deployments do not need to set them.
 
 That smoke path proves the bridge behavior against real private repositories instead of
 only local fixtures:

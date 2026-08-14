@@ -5,7 +5,7 @@
 
 **Shardline is a protocol-neutral content-addressed storage engine, optimized for
 deduplicated model, dataset, container and build-artifact distribution, with Xet, OCI,
-Git LFS and cache-compatible frontends.**
+Git LFS, S3, HuggingFace Hub and cache-compatible frontends.**
 
 Shardline is a self-hostable content-addressed storage (CAS) server.
 It accepts immutable object uploads, deduplicates content, and serves range-aware
@@ -35,7 +35,7 @@ repository-scoped storage.
 - **Store and deduplicate** any binary content — datasets, model weights, build
   artifacts, media
 - **Multiple protocols** — Xet (default), Git LFS, Bazel HTTP remote cache, OCI
-  Distribution
+  Distribution, S3, and HuggingFace Hub
 - **HuggingFace Hub API** — drop-in alternative for `huggingface-cli` uploads and
   downloads
 - **Pluggable auth** — local HMAC, Ed25519, OIDC, JWKS, or passthrough provider adapters
@@ -98,11 +98,18 @@ Provider integration is optional.
 | [Deployment](docs/DEPLOYMENT.md) | Installation and configuration |
 | [Authentication](docs/AUTHENTICATION.md) | Pluggable auth providers (HMAC, Ed25519, OIDC, JWKS, passthrough) |
 | [HuggingFace Hub API](docs/HUGGINGFACE_HUB_API.md) | Hub API compatibility for huggingface-cli |
+| [S3 Frontend](docs/S3_FRONTEND.md) | S3-compatible object API for lakehouse and s3:// clients |
 | [Operations](docs/OPERATIONS.md) | Day-to-day operations runbook |
 | [CLI Reference](docs/CLI.md) | All commands and flags |
+| [Compatibility Status](docs/COMPATIBILITY_STATUS.md) | Surface maturity tiers and validated route coverage |
+| [Architecture](docs/ARCHITECTURE.md) | System design and runtime shape |
 | [Provider Setup](docs/PROVIDER_QUICKSTART.md) | GitHub/GitLab/Gitea/Codeberg integration |
 | [Client Configuration](docs/CLIENT_CONFIGURATION.md) | Configure git, LFS, and Xet clients |
 | [Protocols](docs/PROTOCOLS.md) | Supported protocol frontends |
+| [Fsck](docs/FSCK.md) | Verify object-store and metadata integrity |
+| [Garbage Collection](docs/GARBAGE_COLLECTION.md) | Reclaim unreachable objects safely |
+| [Backup Manifest](docs/BACKUP.md) | Export recovery artifacts |
+| [systemd](docs/SYSTEMD.md) | Linux service templates |
 | [Kubernetes](docs/k8s/README.md) | Production Kubernetes manifests |
 
 ## License
