@@ -405,6 +405,28 @@ async fn require_tcp(host: &str, port: u16) -> bool {
     )
 }
 
+/// Migrate the local dev Postgres via the in-process path (the server does not
+/// self-migrate). Reachable-but-unmigratable is a hard failure, not a skip.
+async fn ensure_dev_postgres_migrated(url: &str) {
+    let mut last = None;
+    for _ in 0..5 {
+        match sqlx::PgPool::connect(url).await {
+            Ok(pool) => {
+                shardline_server::apply_database_migrations(&pool)
+                    .await
+                    .unwrap();
+                pool.close().await;
+                return;
+            }
+            Err(e) => {
+                last = Some(e);
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+        }
+    }
+    panic!("failed to connect+migrate PG {url}: {last:?}");
+}
+
 // ===========================================================================
 // DRILL 1 — KILL-MID-UPLOAD
 // ===========================================================================
@@ -764,6 +786,10 @@ async fn drill3_postgres_kill_mid_upload_recovery() {
         eprintln!("SKIP: drill3_postgres_kill_mid_upload_recovery — 127.0.0.1:5432 unreachable");
         return;
     }
+    ensure_dev_postgres_migrated(
+        "postgres://shardline:shardline-dev-password@127.0.0.1:5432/shardline",
+    )
+    .await;
     let mut harness = DrillHarness::new(3600)
         .with_postgres("postgres://shardline:shardline-dev-password@127.0.0.1:5432/shardline");
     harness.spawn_server().await;
@@ -772,18 +798,7 @@ async fn drill3_postgres_kill_mid_upload_recovery() {
     let v1 = deterministic_bytes(64 * 1024 + 5, 3);
     let put = harness.s3_put_bytes(key, v1.clone()).await;
     let put_status = put.status().as_u16();
-    if put_status != 200 {
-        // PG is reachable but the metadata path is not functional (likely the
-        // schema is not migrated — the server does not self-migrate). Not a
-        // drill failure; report as an open item.
-        let body = put.text().await.unwrap_or_default();
-        eprintln!(
-            "SKIP: drill3_postgres_kill_mid_upload_recovery — PG metadata path not functional \
-             (seed PUT -> {put_status}, body={body:?}); likely missing schema migrations. \
-             Reported as an open item."
-        );
-        return;
-    }
+    assert_eq!(put_status, 200, "seed PUT after migrate");
 
     let chunks_before = count_chunk_files(&harness.root);
     let (tx, body) = slow_body();

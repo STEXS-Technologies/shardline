@@ -361,3 +361,12 @@ install_crate = "cargo-nextest@0.9.123"
 install_crate_args = ["--locked", "--force"]
 command = "cargo"
 args = ["nextest", "run", "-p", "shardline-server", "--test", "chaos_runner", "${@}"]
+
+[tasks.chaos-deployment]
+description = "Boot the shardline-chaos stack, migrate, and run real-deployment chaos drills"
+workspace = false
+command = "bash"
+args = [
+  "-c",
+  "cargo build -p shardline && docker compose -f docker-compose.chaos.yml -p shardline-chaos up -d && for c in chaos-postgres chaos-minio chaos-redis; do until [ \"$(docker inspect -f '{{.State.Health.Status}}' $c 2>/dev/null)\" = \"healthy\" ]; do sleep 1; done; done && target/debug/shardline db migrate up --database-url postgres://shardline:shardline-dev-password@127.0.0.1:15432/shardline && cargo test -p shardline-server --test deployment_chaos -- --nocapture && cargo test -p shardline-server --test fault_drills -- drill3 -- --nocapture && cargo test -p shardline-server --test fault_drills_extreme -- drill_extreme_4 -- --nocapture",
+]
