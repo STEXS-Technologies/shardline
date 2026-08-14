@@ -63,22 +63,9 @@ pub fn router(register_xet_token_routes: bool) -> Router<HubState> {
             "/api/{type}/{ns}/{repo}/tree/{rev}/{*path}",
             get(super::file_tree),
         )
-        .route(
-            "/{type}/{ns}/{repo}/resolve/{rev}/{*path}",
-            get(super::resolve_file),
-        )
-        .route(
-            "/{ns}/{repo}/resolve/{rev}/{*path}",
-            get(super::resolve_model_file),
-        )
         .route("/objects/batch", post(super::lfs_batch))
         .route("/lfs/objects/{oid}", put(super::lfs_upload))
         .route("/lfs/objects/{oid}", get(super::lfs_download))
-        // Git Smart HTTP endpoints
-        .route("/{type}/{ns}/{repo}/info/refs", get(info_refs))
-        .route("/{type}/{ns}/{repo}/HEAD", get(super::git_head))
-        .route("/{type}/{ns}/{repo}/git-upload-pack", post(upload_pack))
-        .route("/{type}/{ns}/{repo}/git-receive-pack", post(receive_pack))
         // Dataset viewer endpoints
         .route(
             "/api/datasets/{ns}/{repo}/parquet",
@@ -100,6 +87,21 @@ pub fn router(register_xet_token_routes: bool) -> Router<HubState> {
         .route(
             "/api/{type}/{ns}/{repo}/webhooks/{webhook_id}",
             delete(super::webhook_delete),
-        );
+        )
+        // Root-level Git Smart HTTP and file-resolve endpoints. These own the
+        // root path space and are matched before the S3 fallback router (which
+        // serves everything a registered route does not claim).
+        .route(
+            "/{type}/{ns}/{repo}/resolve/{rev}/{*path}",
+            get(super::resolve_file),
+        )
+        .route(
+            "/{ns}/{repo}/resolve/{rev}/{*path}",
+            get(super::resolve_model_file),
+        )
+        .route("/{type}/{ns}/{repo}/info/refs", get(info_refs))
+        .route("/{type}/{ns}/{repo}/HEAD", get(super::git_head))
+        .route("/{type}/{ns}/{repo}/git-upload-pack", post(upload_pack))
+        .route("/{type}/{ns}/{repo}/git-receive-pack", post(receive_pack));
     r
 }

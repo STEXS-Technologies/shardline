@@ -157,6 +157,10 @@ fn server_config_new_constructs_with_defaults() {
     );
     assert_eq!(config.auth_provider(), AuthProviderKind::Local);
     assert!(config.token_signing_key().is_none());
+    assert_eq!(
+        config.s3_max_part_bytes(),
+        NonZeroU64::new(1_073_741_824).unwrap()
+    );
 }
 
 #[test]
@@ -220,6 +224,55 @@ fn server_config_builder_with_max_request_body_bytes() {
         config.max_request_body_bytes(),
         NonZeroUsize::new(1_000_000).unwrap()
     );
+}
+
+#[test]
+fn server_config_builder_with_s3_max_part_bytes() {
+    let config = ServerConfig::new(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+        "http://localhost:8080".to_owned(),
+        PathBuf::from("/tmp/test"),
+        NonZeroUsize::new(4096).unwrap(),
+    )
+    .with_s3_max_part_bytes(NonZeroU64::new(1_073_741_824).unwrap())
+    .expect("default-size s3 max part bytes are accepted");
+    assert_eq!(
+        config.s3_max_part_bytes(),
+        NonZeroU64::new(1_073_741_824).unwrap()
+    );
+}
+
+#[test]
+fn server_config_builder_with_s3_max_part_bytes_accepts_one_mib_boundary() {
+    let config = ServerConfig::new(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+        "http://localhost:8080".to_owned(),
+        PathBuf::from("/tmp/test"),
+        NonZeroUsize::new(4096).unwrap(),
+    )
+    .with_s3_max_part_bytes(NonZeroU64::new(1_048_576).unwrap())
+    .expect("exactly one MiB is the minimum accepted part size");
+    assert_eq!(
+        config.s3_max_part_bytes(),
+        NonZeroU64::new(1_048_576).unwrap()
+    );
+}
+
+#[test]
+fn server_config_builder_with_s3_max_part_bytes_rejects_below_one_mib() {
+    let config = ServerConfig::new(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+        "http://localhost:8080".to_owned(),
+        PathBuf::from("/tmp/test"),
+        NonZeroUsize::new(4096).unwrap(),
+    );
+    let result = config.with_s3_max_part_bytes(NonZeroU64::new(1_048_575).unwrap());
+    assert!(matches!(
+        result,
+        Err(ServerConfigError::S3MaxPartBytesTooSmall {
+            minimum_bytes: 1_048_576
+        })
+    ));
 }
 
 #[test]
@@ -1071,6 +1124,32 @@ fn server_config_error_display_provider_tokens_require_signing_key() {
 fn server_config_error_display_chunk_size_too_large() {
     let err = ServerConfigError::ChunkSizeTooLarge;
     assert_eq!(err.to_string(), "chunk size must not exceed 1 GB");
+}
+
+#[test]
+fn server_config_error_display_s3_max_part_bytes_parse() {
+    let err = ServerConfigError::S3MaxPartBytes("not-a-number".parse::<u64>().unwrap_err());
+    assert_eq!(err.to_string(), "invalid s3 max part bytes");
+}
+
+#[test]
+fn server_config_error_display_zero_s3_max_part_bytes() {
+    let err = ServerConfigError::ZeroS3MaxPartBytes;
+    assert_eq!(
+        err.to_string(),
+        "s3 max part bytes must be greater than zero"
+    );
+}
+
+#[test]
+fn server_config_error_display_s3_max_part_bytes_too_small() {
+    let err = ServerConfigError::S3MaxPartBytesTooSmall {
+        minimum_bytes: 1_048_576,
+    };
+    assert_eq!(
+        err.to_string(),
+        "s3 max part bytes must be at least 1048576 bytes"
+    );
 }
 
 #[test]
@@ -2111,5 +2190,114 @@ fn byte_unit_rejects_unknown() {
     assert!(matches!(
         ByteUnit::from_str("xyz"),
         Err(ServerConfigError::ChunkSizeParse(_))
+    ));
+}
+
+#[test]
+fn server_config_builder_with_s3_upload_session_ttl_and_max_active() {
+    let config = ServerConfig::new(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+        "http://localhost:8080".to_owned(),
+        PathBuf::from("/tmp/test"),
+        NonZeroUsize::new(4096).unwrap(),
+    )
+    .with_s3_upload_session_ttl_seconds(NonZeroU64::new(7200).unwrap())
+    .expect("s3 upload session ttl")
+    .with_s3_upload_max_active_sessions(NonZeroUsize::new(64).unwrap())
+    .expect("s3 upload max active sessions");
+    assert_eq!(
+        config.s3_upload_session_ttl_seconds(),
+        NonZeroU64::new(7200).unwrap()
+    );
+    assert_eq!(
+        config.s3_upload_max_active_sessions(),
+        NonZeroUsize::new(64).unwrap()
+    );
+}
+
+#[test]
+fn server_config_defaults_for_s3_upload_sessions() {
+    let config = ServerConfig::new(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+        "http://localhost:8080".to_owned(),
+        PathBuf::from("/tmp/test"),
+        NonZeroUsize::new(4096).unwrap(),
+    );
+    assert_eq!(config.s3_upload_session_ttl_seconds().get(), 3600);
+    assert_eq!(config.s3_upload_max_active_sessions().get(), 1024);
+}
+
+#[test]
+fn server_config_s3_min_part_bytes_and_quotas() {
+    let config = ServerConfig::new(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+        "http://localhost:8080".to_owned(),
+        PathBuf::from("/tmp/test"),
+        NonZeroUsize::new(4096).unwrap(),
+    )
+    .with_s3_min_part_bytes(NonZeroU64::new(5_242_880).unwrap())
+    .expect("s3 min part bytes")
+    .with_s3_upload_session_max_bytes(NonZeroU64::new(1_099_511_627_776).unwrap())
+    .expect("s3 session max bytes")
+    .with_s3_upload_total_max_bytes(NonZeroU64::new(4_398_046_511_104).unwrap())
+    .expect("s3 total max bytes");
+    assert_eq!(config.s3_min_part_bytes().get(), 5_242_880);
+    assert_eq!(
+        config.s3_upload_session_max_bytes().get(),
+        1_099_511_627_776
+    );
+    assert_eq!(config.s3_upload_total_max_bytes().get(), 4_398_046_511_104);
+}
+
+#[test]
+fn server_config_s3_defaults_min_part_and_quotas() {
+    let config = ServerConfig::new(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+        "http://localhost:8080".to_owned(),
+        PathBuf::from("/tmp/test"),
+        NonZeroUsize::new(4096).unwrap(),
+    );
+    assert_eq!(
+        config.s3_min_part_bytes().get(),
+        5_242_880,
+        "S3 5 MiB minimum"
+    );
+    assert_eq!(
+        config.s3_upload_session_max_bytes().get(),
+        1_099_511_627_776,
+        "1 TiB session quota"
+    );
+    assert_eq!(
+        config.s3_upload_total_max_bytes().get(),
+        4_398_046_511_104,
+        "4 TiB aggregate quota"
+    );
+}
+
+#[test]
+fn server_config_default_chunk_size_is_power_of_two() {
+    let config = ServerConfig::new(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+        "http://localhost:8080".to_owned(),
+        PathBuf::from("/tmp/test"),
+        NonZeroUsize::new(65536).unwrap(),
+    );
+    // The env default is "64KiB" (65536), a power of two required by the CDC
+    // chunker; the builder default must stay power-of-two too.
+    assert!(config.chunk_size().get().is_power_of_two());
+    config.validate_runtime_requirements().unwrap();
+}
+
+#[test]
+fn validate_runtime_requirements_rejects_non_power_of_two_chunk_size() {
+    let config = ServerConfig::new(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+        "http://localhost:8080".to_owned(),
+        PathBuf::from("/tmp/test"),
+        NonZeroUsize::new(64000).unwrap(), // 64KB (decimal) — not a power of two
+    );
+    assert!(matches!(
+        config.validate_runtime_requirements(),
+        Err(ServerConfigError::ChunkSizeNotPowerOfTwo)
     ));
 }

@@ -2,6 +2,7 @@ mod bazel;
 mod helpers;
 mod lfs;
 pub(super) mod oci;
+mod s3;
 
 pub(crate) use bazel::{
     bazel_get, bazel_get_ac, bazel_get_cas, bazel_head, bazel_head_ac, bazel_head_cas, bazel_put,
@@ -19,6 +20,10 @@ pub(crate) use lfs::{
 pub(crate) use oci::parse_oci_path;
 pub(crate) use oci::{
     oci_api_dispatch, oci_dispatch, oci_registry_token, oci_transfer_dispatch, oci_v2_root,
+};
+pub(crate) use s3::{
+    s3_create_bucket, s3_delete_bucket, s3_delete_object, s3_get_bucket, s3_get_object,
+    s3_head_bucket, s3_head_object, s3_list_buckets, s3_post_bucket, s3_post_object, s3_put_object,
 };
 
 use super::MAX_PROTOCOL_QUERY_BYTES;

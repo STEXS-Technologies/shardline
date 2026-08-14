@@ -5,6 +5,7 @@ mod index_store;
 mod migration;
 mod record_store;
 mod records;
+mod s3_objects;
 mod store;
 #[cfg(test)]
 mod tests;

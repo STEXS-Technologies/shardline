@@ -13,7 +13,7 @@ use axum::{
     body::Body,
     http::{Request, StatusCode, header},
     middleware,
-    routing::{get, head, post},
+    routing::{get, head, post, put},
 };
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
@@ -85,7 +85,9 @@ async fn test_app_for_frontends_with_role(
     .with_server_frontends(frontends.to_vec())
     .expect("server frontends")
     .with_token_signing_key(b"0123456789abcdef0123456789abcdef".to_vec())
-    .expect("token signing key");
+    .expect("token signing key")
+    .with_s3_min_part_bytes(std::num::NonZeroU64::new(1).unwrap())
+    .expect("s3 min part bytes");
 
     config
         .validate_runtime_requirements()
@@ -239,6 +241,26 @@ async fn test_app_for_frontends_with_role(
                     );
                 }
             },
+            ServerFrontend::S3 => {
+                if state.role.serves_api() {
+                    app = app
+                        .route(
+                            "/{bucket}",
+                            put(super::protocol_routes::s3_create_bucket)
+                                .get(super::protocol_routes::s3_get_bucket)
+                                .head(super::protocol_routes::s3_head_bucket)
+                                .delete(super::protocol_routes::s3_delete_bucket),
+                        )
+                        .route(
+                            "/{bucket}/{*key}",
+                            get(super::protocol_routes::s3_get_object)
+                                .head(super::protocol_routes::s3_head_object)
+                                .put(super::protocol_routes::s3_put_object)
+                                .post(super::protocol_routes::s3_post_object)
+                                .delete(super::protocol_routes::s3_delete_object),
+                        );
+                }
+            }
             ServerFrontend::Hub => {
                 hub_state = Some(build_test_hub_state(tmp.path()).await);
             }
@@ -309,7 +331,9 @@ async fn test_app_with_auth(frontends: &[ServerFrontend]) -> (Router, TempDir) {
     .with_server_frontends(frontends.to_vec())
     .expect("server frontends")
     .with_token_signing_key(TEST_SIGNING_KEY.to_vec())
-    .expect("token signing key");
+    .expect("token signing key")
+    .with_s3_min_part_bytes(std::num::NonZeroU64::new(1).unwrap())
+    .expect("s3 min part bytes");
 
     config
         .validate_runtime_requirements()
@@ -463,6 +487,26 @@ async fn test_app_with_auth(frontends: &[ServerFrontend]) -> (Router, TempDir) {
                     );
                 }
             },
+            ServerFrontend::S3 => {
+                if state.role.serves_api() {
+                    app = app
+                        .route(
+                            "/{bucket}",
+                            put(super::protocol_routes::s3_create_bucket)
+                                .get(super::protocol_routes::s3_get_bucket)
+                                .head(super::protocol_routes::s3_head_bucket)
+                                .delete(super::protocol_routes::s3_delete_bucket),
+                        )
+                        .route(
+                            "/{bucket}/{*key}",
+                            get(super::protocol_routes::s3_get_object)
+                                .head(super::protocol_routes::s3_head_object)
+                                .put(super::protocol_routes::s3_put_object)
+                                .post(super::protocol_routes::s3_post_object)
+                                .delete(super::protocol_routes::s3_delete_object),
+                        );
+                }
+            }
             ServerFrontend::Hub => {
                 hub_state = Some(build_test_hub_state(tmp.path()).await);
             }
@@ -537,7 +581,9 @@ async fn test_app_with_provider_tokens(frontends: &[ServerFrontend]) -> (Router,
     .with_server_frontends(frontends.to_vec())
     .expect("server frontends")
     .with_token_signing_key(TEST_SIGNING_KEY.to_vec())
-    .expect("token signing key");
+    .expect("token signing key")
+    .with_s3_min_part_bytes(std::num::NonZeroU64::new(1).unwrap())
+    .expect("s3 min part bytes");
 
     config
         .validate_runtime_requirements()
@@ -723,6 +769,9 @@ async fn test_app_with_provider_tokens(frontends: &[ServerFrontend]) -> (Router,
                     );
                 }
             },
+            ServerFrontend::S3 => {
+                // S3 routes are registered in a later lane.
+            }
             ServerFrontend::Hub => {
                 hub_state = Some(build_test_hub_state(tmp.path()).await);
             }
@@ -1667,7 +1716,9 @@ async fn backward_compatibility_all_formats_readable() {
     .with_server_frontends(vec![ServerFrontend::BazelHttp])
     .expect("server frontends")
     .with_token_signing_key(b"0123456789abcdef0123456789abcdef".to_vec())
-    .expect("token signing key");
+    .expect("token signing key")
+    .with_s3_min_part_bytes(std::num::NonZeroU64::new(1).unwrap())
+    .expect("s3 min part bytes");
     config
         .validate_runtime_requirements()
         .expect("runtime requirements");
@@ -3808,6 +3859,187 @@ async fn lfs_batch_with_insufficient_scope() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_put_get_delete_roundtrip_through_full_router() {
+    let (app, _tmp) = test_app_with_auth(&[ServerFrontend::S3]).await;
+    let token = test_token(TokenScope::Write);
+    let auth = format!("AWS4-HMAC-SHA256 Credential={token}/20260813/us-east-1/s3/aws4_request");
+    let content = b"s3-e2e-roundtrip";
+
+    let put = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/test.test/data/e2e.pt")
+                .header(header::AUTHORIZATION, &auth)
+                .body(Body::from(content.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(put.status(), StatusCode::OK);
+
+    let get = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/test.test/data/e2e.pt")
+                .header(header::AUTHORIZATION, &auth)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get.status(), StatusCode::OK);
+    assert_eq!(body_bytes(get).await, content);
+
+    let delete = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/test.test/data/e2e.pt")
+                .header(header::AUTHORIZATION, &auth)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(delete.status(), StatusCode::NO_CONTENT);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_multipart_roundtrip_through_full_router() {
+    let (app, _tmp) = test_app_with_auth(&[ServerFrontend::S3]).await;
+    let token = test_token(TokenScope::Write);
+    let auth = format!("AWS4-HMAC-SHA256 Credential={token}/20260813/us-east-1/s3/aws4_request");
+
+    // CreateMultipartUpload.
+    let create = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/test.test/data/mp.pt?uploads")
+                .header(header::AUTHORIZATION, &auth)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create.status(), StatusCode::OK);
+    let create_xml = String::from_utf8(body_bytes(create).await).unwrap();
+    let open = "<UploadId>";
+    let upload_id_start = create_xml.find(open).unwrap() + open.len();
+    let upload_id_end = create_xml.find("</UploadId>").unwrap();
+    let upload_id = &create_xml[upload_id_start..upload_id_end];
+
+    // UploadPart (two parts).
+    let part1: &[u8] = b"e2e-part-one-";
+    let part2: &[u8] = b"second-part";
+    for (part_number, content) in [(1_u32, part1), (2, part2)] {
+        let put = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!(
+                        "/test.test/data/mp.pt?partNumber={part_number}&uploadId={upload_id}"
+                    ))
+                    .header(header::AUTHORIZATION, &auth)
+                    .body(Body::from(content.to_vec()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(put.status(), StatusCode::OK);
+        assert!(put.headers().contains_key(header::ETAG));
+    }
+
+    // CompleteMultipartUpload.
+    let complete_body = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+         <CompleteMultipartUpload xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\n\
+         \x20 <Part><PartNumber>1</PartNumber><ETag>\"{upload_id}-1\"</ETag></Part>\n\
+         \x20 <Part><PartNumber>2</PartNumber><ETag>\"{upload_id}-2\"</ETag></Part>\n\
+         </CompleteMultipartUpload>\n"
+    );
+    let complete = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/test.test/data/mp.pt?uploadId={upload_id}"))
+                .header(header::AUTHORIZATION, &auth)
+                .header(header::CONTENT_TYPE, "application/xml")
+                .body(Body::from(complete_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(complete.status(), StatusCode::OK);
+
+    // GET returns the assembled bytes.
+    let get = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/test.test/data/mp.pt")
+                .header(header::AUTHORIZATION, &auth)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get.status(), StatusCode::OK);
+    assert_eq!(body_bytes(get).await, [part1, part2].concat());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_list_objects_v2_through_full_router() {
+    let (app, _tmp) = test_app_with_auth(&[ServerFrontend::S3]).await;
+    let token = test_token(TokenScope::Write);
+    let auth = format!("AWS4-HMAC-SHA256 Credential={token}/20260813/us-east-1/s3/aws4_request");
+
+    for (key, content) in [("root.txt", b"1".to_vec()), ("dir/a.txt", b"2".to_vec())] {
+        let put = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/test.test/{key}"))
+                    .header(header::AUTHORIZATION, &auth)
+                    .body(Body::from(content))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(put.status(), StatusCode::OK);
+    }
+
+    // S3A delimiter shape through the full router: root.txt + dir/ rollup.
+    let list = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/test.test?list-type=2&delimiter=%2F")
+                .header(header::AUTHORIZATION, &auth)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(list.status(), StatusCode::OK);
+    let xml = String::from_utf8(body_bytes(list).await).unwrap();
+    assert!(xml.contains("<Key>root.txt</Key>"), "{xml}");
+    assert!(xml.contains("<Prefix>dir/</Prefix>"), "{xml}");
+    assert!(xml.contains("<IsTruncated>false</IsTruncated>"), "{xml}");
 }
 
 // ---------------------------------------------------------------------------

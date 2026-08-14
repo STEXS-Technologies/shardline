@@ -19,5 +19,8 @@ coverage_report/
 coverage.json
 coverage*.lcov
 coverage_html/
+# mc local-fallback artifacts from the S3 real-client e2e (safety net; the
+# harness isolates mc configs and asserts no s3test-* dirs are created).
+crates/shardline-server/s3test-*/
 .slim/deepwork/
 .opencode

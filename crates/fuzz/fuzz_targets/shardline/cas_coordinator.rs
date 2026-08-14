@@ -1,6 +1,7 @@
 #![no_main]
 #![allow(
     clippy::arithmetic_side_effects,
+    clippy::expect_used,
     clippy::indexing_slicing,
     clippy::let_underscore_untyped,
     clippy::shadow_unrelated
@@ -12,7 +13,7 @@ use libfuzzer_sys::fuzz_target;
 use shardline_cas::{CasCoordinator, CasLimits, ObjectReachability, paths::FUZZ_NAMESPACE_PREFIX};
 use shardline_storage::SyncObjectStoreBridge;
 
-use shardline_index::{MemoryIndexStore, StoredObjectId};
+use shardline_index::{AsyncIndexStore, MemoryIndexStore, StoredObjectId};
 use shardline_protocol::ShardlineHash;
 use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectStore, PutOutcome};
 
@@ -84,8 +85,17 @@ fuzz_target!(|data: Vec<u8>| {
         "idempotent store should return AlreadyExists, got {second:?}"
     );
 
-    // Test 4: is_object_reachable returns true for the stored object.
+    // Test 4: is_object_reachable returns true once the object is registered
+    // in the index. store_content_addressed_blob writes only the object store;
+    // production flows also register content-addressed objects in the index so
+    // reachability (an index lookup) can resolve them — mirror that here.
     let object_id = StoredObjectId::new(hash);
+    runtime
+        .block_on(AsyncIndexStore::insert_object(
+            coordinator.index(),
+            &object_id,
+        ))
+        .expect("index registration should succeed");
     let reachable = runtime.block_on(ObjectReachability::is_object_reachable(
         &coordinator,
         &object_id,

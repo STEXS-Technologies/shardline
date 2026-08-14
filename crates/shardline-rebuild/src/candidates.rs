@@ -321,6 +321,37 @@ mod tests {
         .expect("failed to insert raw version record");
     }
 
+    /// Pins a stored version record's `updated_at_unix_seconds` to an explicit
+    /// value.
+    ///
+    /// The tie-breaker tests must not race the wall clock: two
+    /// `write_version_record` calls stamp `unix_now_seconds_lossy()`, and under
+    /// load they can straddle a second boundary — silently giving the second
+    /// record a higher epoch so it wins even when the test wants the
+    /// content-hash tiebreaker to decide. Writing through the store (faithful
+    /// serialization + schema init) and then pinning the timestamps makes the
+    /// epoch/hash comparison fully deterministic.
+    fn pin_modified_since_epoch(
+        root: &std::path::Path,
+        record: &FileRecord,
+        modified_since_epoch_secs: u64,
+    ) {
+        let conn = open_db(root);
+        let key = version_record_key(&record.file_id, &record.content_hash);
+        let updated = conn
+            .execute(
+                "UPDATE shardline_file_records
+                    SET updated_at_unix_seconds = ?1
+                  WHERE record_key = ?2",
+                rusqlite::params![i64::try_from(modified_since_epoch_secs).unwrap(), &key],
+            )
+            .expect("failed to pin modified_since_epoch");
+        assert_eq!(
+            updated, 1,
+            "expected exactly one row to be pinned for {key}"
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn collect_candidate_valid_record_adds_candidate() {
         let dir = tempfile::tempdir().unwrap();
@@ -610,13 +641,15 @@ mod tests {
         let root = dir.path().to_path_buf();
         let store = LocalRecordStore::open(root.clone());
 
-        // First write a record with content_hash "b"
+        // Both records are pinned to the SAME `modified_since_epoch`, so the
+        // content-hash tiebreaker decides ("b" > "a") regardless of wall-clock
+        // drift between the two writes.
         let record_newer = make_file_record("older.txt", &"b".repeat(64));
         store.write_version_record(&record_newer).await.unwrap();
-
-        // Then write a record with content_hash "a" (older tiebreaker)
         let record_older = make_file_record("older.txt", &valid_hex_hash());
         store.write_version_record(&record_older).await.unwrap();
+        pin_modified_since_epoch(&root, &record_newer, 1_700_000_000);
+        pin_modified_since_epoch(&root, &record_older, 1_700_000_000);
 
         let mut candidates = HashMap::new();
         let mut report = empty_report();
@@ -645,67 +678,18 @@ mod tests {
         let root = dir.path().to_path_buf();
         let store = LocalRecordStore::open(root.clone());
 
-        // Write a valid record to initialize the database
-        let record = make_file_record("init.txt", &valid_hex_hash());
-        store.write_version_record(&record).await.unwrap();
-
-        // Insert two records with the same file_id but different timestamps.
-        // Record "a" has epoch 100 (processed first due to lower content_hash in key),
-        // Record "b" has epoch 1 (processed second due to higher content_hash in key).
-        // Since "a" is processed first and has higher epoch, it wins.
-        // When "b" is processed second, it's NOT newer so we hit the Some(_) => {} arm.
-        let conn = open_db(&root);
-        let json_a = serde_json::json!({
-            "file_id": "collide.txt",
-            "content_hash": "a".repeat(64),
-            "total_bytes": 0,
-            "chunk_size": 0,
-            "chunks": []
-        });
-        let json_b = serde_json::json!({
-            "file_id": "collide.txt",
-            "content_hash": "b".repeat(64),
-            "total_bytes": 0,
-            "chunk_size": 0,
-            "chunks": []
-        });
-
-        // Remove the init record
-        conn.execute("DELETE FROM shardline_file_records", [])
-            .unwrap();
-
-        // The record_key is built from length-prefixed components:
-        //   push_length_prefixed("version")    = "7:version"
-        //   push_length_prefixed("6:global")   = "8:6:global" (scope_key is 8 chars)
-        //   push_length_prefixed("collide.txt") = "11:collide.txt"
-        //   push_length_prefixed(content_hash)  = "64:aaaa..."
-        let record_key_a = format!("7:version8:6:global11:collide.txt64:{}", "a".repeat(64));
-        conn.execute(
-            "INSERT INTO shardline_file_records
-                (record_key, record_kind, scope_key, file_id, content_hash, record, updated_at_unix_seconds)
-             VALUES (?1, 'version', '6:global', 'collide.txt', ?2, ?3, 100)",
-            rusqlite::params![
-                &record_key_a,
-                &"a".repeat(64),
-                &serde_json::to_vec(&json_a).unwrap(),
-            ],
-        )
-        .unwrap();
-
-        // Insert record "b" with low epoch (1 second) - but higher content_hash
-        // so it sorts later in the listing
-        let record_key_b = format!("7:version8:6:global11:collide.txt64:{}", "b".repeat(64));
-        conn.execute(
-            "INSERT INTO shardline_file_records
-                (record_key, record_kind, scope_key, file_id, content_hash, record, updated_at_unix_seconds)
-             VALUES (?1, 'version', '6:global', 'collide.txt', ?2, ?3, 1)",
-            rusqlite::params![
-                &record_key_b,
-                &"b".repeat(64),
-                &serde_json::to_vec(&json_b).unwrap(),
-            ],
-        )
-        .unwrap();
+        // Two records with the same file_id and EXPLICIT epochs. Record "a" has
+        // the higher epoch (100) and — because its lower content hash sorts
+        // first — is processed first, so it wins; record "b" (epoch 1) is
+        // processed second and hits the `Some(_) => {}` arm (not newer). The
+        // explicit epochs make the comparison deterministic regardless of the
+        // wall clock.
+        let record_a = make_file_record("collide.txt", &"a".repeat(64));
+        store.write_version_record(&record_a).await.unwrap();
+        let record_b = make_file_record("collide.txt", &"b".repeat(64));
+        store.write_version_record(&record_b).await.unwrap();
+        pin_modified_since_epoch(&root, &record_a, 100);
+        pin_modified_since_epoch(&root, &record_b, 1);
 
         let mut candidates = HashMap::new();
         let mut report = empty_report();
@@ -718,7 +702,7 @@ mod tests {
 
         assert!(report.is_clean(), "report: {report:?}");
         assert_eq!(candidates.len(), 1);
-        // The candidate should have content_hash "a" (the one with higher epoch)
+        // The candidate should have content_hash "a" (the one with higher epoch).
         let candidate = candidates.values().next().unwrap();
         assert_eq!(candidate.record.content_hash, "a".repeat(64));
 

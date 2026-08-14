@@ -218,7 +218,11 @@ The included ingress maps these route families:
   `/v2/reconstructions`, `/shards`, `/v1/shards`, `/v1/stats`
 - transfer: `/v1/chunks`, `/v1/xorbs`, `/transfer/xorb`
 - hub: `/api/*`, `/{type}/{ns}/{repo}/info/refs`, `/{type}/{ns}/{repo}/HEAD`,
-  `/{type}/{ns}/{repo}/git-upload-pack`, `/{type}/{ns}/{repo}/git-receive-pack`
+  `/{type}/{ns}/{repo}/git-upload-pack`, `/{type}/{ns}/{repo}/git-receive-pack`,
+  `/objects/batch`, `/lfs/objects/{oid}`
+- s3: `GET /` (ListBuckets), `/{bucket}` bucket stubs, `/{bucket}/{*key}` object
+  data routes — served on the API role, so they also require path-based routing on
+  the ingress when S3 is enabled
 
 Provider integration remains optional in this profile.
 A scaled deployment can run as a direct Xet-compatible backend with only the CAS and
@@ -309,7 +313,7 @@ adapter = "memory"
 ttl_seconds = 30
 
 [auth]
-provider = "local-hmac"
+provider = "local"
 provider_token_issuer = "shardline"
 provider_token_ttl_seconds = 300
 ```
@@ -317,8 +321,8 @@ provider_token_ttl_seconds = 300
 Place credentials in a separate `.env` file:
 
 ```bash
-S3_ACCESS_KEY=minioadmin
-S3_SECRET_KEY=minioadmin
+SHARDLINE_S3_ACCESS_KEY_ID=shardline
+SHARDLINE_S3_SECRET_ACCESS_KEY=shardline-dev-password
 DATABASE_URL=postgres://shardline:change-me@postgres:5432/shardline
 SHARDLINE_TOKEN_SIGNING_KEY=change-me-for-local-only
 ```
@@ -360,9 +364,19 @@ SHARDLINE_PROVIDER_TOKEN_TTL_SECONDS=300
 SHARDLINE_RECONSTRUCTION_CACHE_ADAPTER=memory
 SHARDLINE_RECONSTRUCTION_CACHE_TTL_SECONDS=30
 SHARDLINE_RECONSTRUCTION_CACHE_MEMORY_MAX_ENTRIES=4096
-SHARDLINE_RECONSTRUCTION_CACHE_REDIS_URL=redis://default:dev_password@garnet:6379
+# Redis cache is opt-in: it requires your own Redis server. The shipped
+# docker-compose profile uses the memory adapter and runs no Redis service.
+# SHARDLINE_RECONSTRUCTION_CACHE_ADAPTER=redis
+# SHARDLINE_RECONSTRUCTION_CACHE_REDIS_URL=redis://default:change-me@redis.example.com:6379
 SHARDLINE_UPLOAD_MAX_IN_FLIGHT_CHUNKS=64
 SHARDLINE_TRANSFER_MAX_IN_FLIGHT_CHUNKS=64
+# S3 frontend upload limits (multipart sessions)
+SHARDLINE_S3_MAX_PART_BYTES=1073741824       # 1 GiB; minimum accepted value 1 MiB
+SHARDLINE_S3_MIN_PART_BYTES=5242880          # 5 MiB, S3's minimum non-final part size
+SHARDLINE_S3_UPLOAD_SESSION_MAX_BYTES=1099511627776   # 1 TiB per upload session
+SHARDLINE_S3_UPLOAD_TOTAL_MAX_BYTES=4398046511104     # 4 TiB across active sessions
+SHARDLINE_S3_UPLOAD_SESSION_TTL_SECONDS=3600          # 1 hour
+SHARDLINE_S3_UPLOAD_MAX_ACTIVE_SESSIONS=1024
 RUST_LOG=info
 ```
 
@@ -660,10 +674,12 @@ backend as `disabled` in readiness and config checks.
 
 In a split deployment behind a reverse proxy, route ownership is:
 
-- `api`: `/v1/reconstructions/*`, `/v1/providers/*`, `/v1/shards`, `/v1/stats`
+- `api`: `/v1/reconstructions/*`, `/v1/providers/*`, `/v1/shards`, `/v1/stats`,
+  plus the S3 frontend (`/`, `/{bucket}`, `/{bucket}/{*key}`) when enabled
 - `transfer`: `/v1/chunks/*`, `/v1/xorbs/*`, `/transfer/xorb/*`
 - `hub`: `/api/*`, `/{type}/{ns}/{repo}/info/refs`, `/{type}/{ns}/{repo}/HEAD`,
-  `/{type}/{ns}/{repo}/git-upload-pack`, `/{type}/{ns}/{repo}/git-receive-pack`
+  `/{type}/{ns}/{repo}/git-upload-pack`, `/{type}/{ns}/{repo}/git-receive-pack`,
+  `/objects/batch`, `/lfs/objects/{oid}`
 
 ## Hub API
 
@@ -681,15 +697,36 @@ Or pass `--frontend hub` to `shardline serve`.
 Once enabled, these routes are available:
 
 ```text
-GET  /api/{type}/{ns}/{repo}              — get repository info
-POST /api/{type}/{ns}/{repo}              — create repository
-GET  /api/{type}/{ns}/{repo}/revisions     — list revisions
-POST /api/{type}/{ns}/{repo}/revisions     — create revision
-GET  /api/{type}/{ns}/{repo}/revisions/{sha}/entries — list file entries
-POST /api/{type}/{ns}/{repo}/revisions/{sha}/entries — store file entries
-POST /api/{type}/{ns}/{repo}/lfs/objects   — store LFS objects
-POST /api/{type}/{ns}/{repo}/login          — token exchange
-GET  /api/whoami                            — current user info
+GET    /health                                       — health check
+GET    /api/whoami-v2                                — current user identity
+GET    /api/{type}/{ns}/{repo}/xet-read-token/{rev}  — Xet read token exchange
+GET    /api/{type}/{ns}/{repo}/xet-write-token/{rev} — Xet write token exchange
+POST   /api/repos/create                             — create a repository
+DELETE /api/repos/delete                             — delete a repository
+GET    /api/repos                                    — list repositories
+GET    /api/{type}/search                            — search repositories
+POST   /api/{type}/{ns}/{repo}                       — create repository (typed)
+GET    /api/{type}/{ns}/{repo}                       — get repository info
+DELETE /api/{type}/{ns}/{repo}                       — delete repository
+GET    /api/{type}/{ns}/{repo}/revisions             — list revisions
+GET    /api/{type}/{ns}/{repo}/revision/{rev}        — revision metadata and siblings
+GET    /api/{type}/{ns}/{repo}/modelcard             — fetch the model card
+POST   /api/validate-yaml                            — validate YAML
+POST   /api/{type}/{ns}/{repo}/preupload/{rev}       — pre-upload check
+POST   /api/{type}/{ns}/{repo}/commit/{rev}          — commit file changes
+GET    /api/{type}/{ns}/{repo}/tree/{rev}            — browse repository root
+GET    /api/{type}/{ns}/{repo}/tree/{rev}/{*path}    — browse a file tree
+GET    /{type}/{ns}/{repo}/resolve/{rev}/{*path}     — resolve and download a typed file
+GET    /{ns}/{repo}/resolve/{rev}/{*path}            — resolve and download a model file
+POST   /objects/batch                                — LFS batch request
+PUT    /lfs/objects/{oid}                            — upload an LFS object
+GET    /lfs/objects/{oid}                            — download an LFS object
+GET    /api/datasets/{ns}/{repo}/parquet             — dataset parquet preview
+GET    /api/datasets/{ns}/{repo}/first-rows          — dataset first rows
+GET    /api/datasets/{ns}/{repo}/viewer/{split}      — dataset viewer
+POST   /api/{type}/{ns}/{repo}/webhooks              — create a webhook
+GET    /api/{type}/{ns}/{repo}/webhooks              — list webhooks
+DELETE /api/{type}/{ns}/{repo}/webhooks/{id}         — delete a webhook
 ```
 
 ### Git Smart HTTP Endpoints

@@ -41,10 +41,14 @@ When `SHARDLINE_INDEX_POSTGRES_URL` is set, the command reads and updates lifecy
 metadata through the configured Postgres index adapter while still resolving live object
 state through the configured object-store adapter.
 
-The command exits with:
+The top-level `shardline repair` command exits with:
 
-- `0` when repair completed
+- `0` when repair completed and its final checks found no issues
+- `1` when repair completed but its final checks reported integrity issues
 - `2` when repair could not complete because of an operational failure
+
+`shardline repair lifecycle` exits with `0` when the lifecycle pass completed and `2`
+when it could not complete because of an operational failure.
 
 ## What It Repairs
 

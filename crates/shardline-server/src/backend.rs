@@ -6,7 +6,7 @@ use std::{
 
 use axum::body::Bytes;
 use sha2::{Digest, Sha256};
-use shardline_index::{RepoKey, RevisionRecord, TreeEntry, TreeKey};
+use shardline_index::{FileRecord, RepoKey, RevisionRecord, S3ObjectEntry, TreeEntry, TreeKey};
 use shardline_protocol::{ByteRange, RepositoryScope};
 use shardline_storage::{
     AsyncObjectStore, DeleteOutcome, ObjectBody, ObjectIntegrity, ObjectKey, ObjectMetadata,
@@ -36,6 +36,21 @@ use crate::{
 pub enum ServerBackend {
     Local(LocalBackend),
     Postgres(PostgresBackend),
+}
+
+/// A single atomic resolution of an S3 object's readable representation.
+///
+/// Produced by [`ServerBackend::s3_object_read_snapshot`]; the GET path
+/// streams via [`ServerBackend::read_object_stream_pinned`] with the same
+/// version so the length and the served bytes always agree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct S3ObjectReadSnapshot {
+    /// The object's logical length in bytes.
+    pub total_bytes: u64,
+    /// The immutable record version to stream from. `None` means the object is
+    /// served from a direct object at the protocol key and has no record to
+    /// pin.
+    pub record_content_hash: Option<String>,
 }
 
 /// Outcome of registering a path mapping.
@@ -227,6 +242,137 @@ impl ServerBackend {
             }
         }
         Ok(PutOutcome::Inserted)
+    }
+
+    /// Streams an S3 object body through the shared CDC ingestor into a record
+    /// under the protocol object's deterministic file id, returning the
+    /// upload response (file id, BLAKE3 root content hash, total bytes).
+    ///
+    /// S3 object keys are not sha256-addressed, so this mirrors
+    /// [`Self::put_sha256_addressed_object_stream_if_absent`] without the digest
+    /// constraint and always reports the freshly uploaded record.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError`] when streaming, chunk persistence, or metadata
+    /// persistence fails.
+    pub(crate) async fn put_s3_object_stream(
+        &self,
+        object_key: &ObjectKey,
+        body: RequestBodyReader,
+    ) -> Result<UploadFileResponse, ServerError> {
+        // Local metadata is SQLite-backed. Keep the record commit in one
+        // serialized operation so concurrent S3 uploads cannot race independent
+        // SQLite connections.
+        let _local_upload_guard = match self {
+            Self::Local(backend) => Some(backend.protocol_upload_lock.lock().await),
+            Self::Postgres(_) => None,
+        };
+        let file_id = protocol_object_file_id(object_key);
+        match self {
+            Self::Local(backend) => backend.upload_file_stream(&file_id, body, None, None).await,
+            Self::Postgres(backend) => backend.upload_file_stream(&file_id, body, None, None).await,
+        }
+    }
+
+    /// Loads the authoritative file-version record for a protocol object's
+    /// deterministic file id.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError::NotFound`] when no record exists, or the adapter
+    /// error when the record cannot be read.
+    pub(crate) async fn protocol_file_record(
+        &self,
+        file_id: &str,
+    ) -> Result<FileRecord, ServerError> {
+        match self {
+            Self::Local(backend) => backend.protocol_file_record(file_id).await,
+            Self::Postgres(backend) => backend.protocol_file_record(file_id).await,
+        }
+    }
+
+    /// Resolves the authoritative size and BLAKE3 content hash for a protocol
+    /// object, for the S3 `HeadObject` response.
+    ///
+    /// The size prefers the direct object length and falls back to the record
+    /// ([`Self::object_length`]); the content hash always comes from the
+    /// authoritative `FileRecord` (empty when only a direct object exists).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError::NotFound`] when neither a direct object nor a
+    /// record exists.
+    pub(crate) async fn s3_object_metadata(
+        &self,
+        object_key: &ObjectKey,
+    ) -> Result<(u64, String), ServerError> {
+        let file_id = protocol_object_file_id(object_key);
+        // One record read: size and content hash come from the same record
+        // snapshot, so a concurrent overwrite can never yield a torn HEAD
+        // (size from the old version, hash from the new).
+        match self.protocol_file_record(&file_id).await {
+            Ok(record) => Ok((record.total_bytes, record.content_hash)),
+            Err(ServerError::NotFound) => {
+                let size = self.object_length(object_key).await?;
+                Ok((size, String::new()))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Upserts one S3 object listing-index row.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError`] when the index write fails.
+    pub(crate) async fn upsert_s3_object(&self, entry: &S3ObjectEntry) -> Result<(), ServerError> {
+        match self {
+            Self::Local(backend) => backend.upsert_s3_object(entry).await,
+            Self::Postgres(backend) => backend.upsert_s3_object(entry).await,
+        }
+    }
+
+    /// Deletes one S3 object listing-index row, returning whether a row was removed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError`] when the index delete fails.
+    pub(crate) async fn delete_s3_object(
+        &self,
+        scope_namespace: &str,
+        object_key: &str,
+    ) -> Result<bool, ServerError> {
+        match self {
+            Self::Local(backend) => backend.delete_s3_object(scope_namespace, object_key).await,
+            Self::Postgres(backend) => backend.delete_s3_object(scope_namespace, object_key).await,
+        }
+    }
+
+    /// Scans S3 object listing rows for a scope namespace.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError`] when the index scan fails.
+    pub(crate) async fn scan_s3_objects(
+        &self,
+        scope_namespace: &str,
+        prefix: &str,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<S3ObjectEntry>, ServerError> {
+        match self {
+            Self::Local(backend) => {
+                backend
+                    .scan_s3_objects(scope_namespace, prefix, cursor, limit)
+                    .await
+            }
+            Self::Postgres(backend) => {
+                backend
+                    .scan_s3_objects(scope_namespace, prefix, cursor, limit)
+                    .await
+            }
+        }
     }
 
     pub(crate) async fn reconstruction(
@@ -596,8 +742,98 @@ impl ServerBackend {
         }
         let file_id = protocol_object_file_id(object_key);
         let (stream, record_length) = match self {
-            Self::Local(backend) => backend.read_file_stream(&file_id, range).await?,
-            Self::Postgres(backend) => backend.read_file_stream(&file_id, range).await?,
+            Self::Local(backend) => backend.read_file_stream(&file_id, None, range).await?,
+            Self::Postgres(backend) => backend.read_file_stream(&file_id, None, range).await?,
+        };
+        if record_length != total_length {
+            return Err(ServerError::ObjectStore(
+                ObjectStoreError::StoredLengthMismatch,
+            ));
+        }
+        crate::metrics::record_object_read_by_repr("file_read", total_length);
+        Ok(stream)
+    }
+
+    /// Resolves an S3 object's length and record version in ONE record read.
+    ///
+    /// The S3 GET path must resolve the length and the stream from the SAME
+    /// immutable record version. Resolving the length from the latest record
+    /// and then the stream from a *later* latest record can observe a
+    /// mid-overwrite state (old length, new stream) and fail with
+    /// [`ObjectStoreError::StoredLengthMismatch`]. This snapshot pins the
+    /// version; [`Self::read_object_stream_pinned`] then streams that exact
+    /// version.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError::NotFound`] when neither a direct object nor a
+    /// record exists.
+    pub(crate) async fn s3_object_read_snapshot(
+        &self,
+        object_key: &ObjectKey,
+    ) -> Result<S3ObjectReadSnapshot, ServerError> {
+        // Raw direct-object probe: unlike `object_length`, this does NOT fall
+        // back to the record, so the snapshot can tell direct-backed from
+        // record-backed objects (S3 objects are record-only).
+        let direct = match self {
+            Self::Local(backend) => backend.object_length(object_key).await,
+            Self::Postgres(backend) => backend.object_length(object_key).await,
+        };
+        match direct {
+            Ok(length) => Ok(S3ObjectReadSnapshot {
+                total_bytes: length,
+                record_content_hash: None,
+            }),
+            Err(ServerError::NotFound) => {
+                let file_id = protocol_object_file_id(object_key);
+                let record = self.protocol_file_record(&file_id).await?;
+                Ok(S3ObjectReadSnapshot {
+                    total_bytes: record.total_bytes,
+                    record_content_hash: Some(record.content_hash),
+                })
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Streams an S3 object pinned to a [`S3ObjectReadSnapshot`]'s version.
+    ///
+    /// When `content_hash` is `Some`, the stream is read from that **immutable
+    /// version record** (keyed by file id + content hash), so the served bytes
+    /// and length always match the snapshot — a concurrent overwrite commits a
+    /// new latest record but can never change the pinned version mid-read.
+    /// When `None`, the direct object at the protocol key is served (existing
+    /// [`Self::read_object_stream`] behavior).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError::NotFound`] when the pinned record is gone, or
+    /// [`ObjectStoreError::StoredLengthMismatch`] when the pinned version's
+    /// length disagrees with `total_length` (a genuine corruption signal).
+    pub(crate) async fn read_object_stream_pinned(
+        &self,
+        object_key: &ObjectKey,
+        total_length: u64,
+        range: Option<ByteRange>,
+        content_hash: Option<&str>,
+    ) -> Result<ServerByteStream, ServerError> {
+        let Some(hash) = content_hash else {
+            return self
+                .read_object_stream(object_key, total_length, range)
+                .await;
+        };
+        let file_id = protocol_object_file_id(object_key);
+        let (stream, record_length) = match self {
+            Self::Local(backend) => {
+                backend
+                    .read_file_stream(&file_id, Some(hash), range)
+                    .await?
+            }
+            Self::Postgres(backend) => {
+                backend
+                    .read_file_stream(&file_id, Some(hash), range)
+                    .await?
+            }
         };
         if record_length != total_length {
             return Err(ServerError::ObjectStore(
@@ -655,6 +891,23 @@ impl ServerBackend {
             Ok(DeleteOutcome::Deleted)
         } else {
             Ok(DeleteOutcome::NotFound)
+        }
+    }
+
+    /// Removes a stale **direct** object at the protocol key without touching
+    /// the file record.
+    ///
+    /// Used by the S3 overwrite path: the new body is streamed to a new record
+    /// version first (atomic), then any pre-existing direct object that would
+    /// shadow the record is dropped. The old record version is left for GC
+    /// (record stores are versioned; the index row points at the new version).
+    pub(crate) async fn delete_direct_object_if_present(
+        &self,
+        object_key: &ObjectKey,
+    ) -> Result<DeleteOutcome, ServerError> {
+        match self {
+            Self::Local(backend) => backend.delete_object_if_present(object_key).await,
+            Self::Postgres(backend) => backend.delete_object_if_present(object_key).await,
         }
     }
 

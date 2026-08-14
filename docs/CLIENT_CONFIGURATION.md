@@ -44,7 +44,18 @@ Quick verification:
 
 ## Token Delivery
 
-Shardline CLI commands read the bearer token from `SHARDLINE_TOKEN`.
+Token delivery depends on which side of the deployment you are configuring:
+
+- **Server and operator CLI.** The server signs and verifies tokens with a shared
+  signing key configured via `SHARDLINE_TOKEN_SIGNING_KEY` or
+  `SHARDLINE_TOKEN_SIGNING_KEY_FILE`. `shardline admin token` reads the same key
+  material through `--key-file` or `--key-env` to mint repository-scoped bearer
+  tokens. The operator CLI does not read `SHARDLINE_TOKEN`.
+- **Xet clients (`sdx` / `git-xet`).** Client tooling passes the minted token as
+  `SHARDLINE_TOKEN` (or `--token`), a provider API key as `SHARDLINE_API_KEY` (or
+  `--api-key`), or a token file as `SHARDLINE_TOKEN_FILE` (or `--token-file`).
+  See [Xet-Native File Management CLI](XET_NATIVE_CLI.md#authentication) for the
+  client-side credential precedence.
 
 Hosted provider integrations should inject repository-scoped tokens without requiring
 users to mint them manually.

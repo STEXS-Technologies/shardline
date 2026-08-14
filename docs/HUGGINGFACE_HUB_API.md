@@ -10,8 +10,8 @@ operations. Users and CI pipelines that already work with `huggingface-cli` or t
 REST API can point at a Shardline instance and upload, download, and manage model
 repositories without code changes.
 
-The frontend is implemented in the `shardline-hub-api` crate and is registered as a
-server frontend alongside the other protocol adapters.
+The Hub frontend is registered as a server frontend alongside the other protocol
+adapters.
 
 ## How to Enable
 
@@ -110,13 +110,19 @@ Hub metadata is persisted to the configured index store:
 - **Postgres** (production): same connection as the main index — 7th migration in the
   bundled set
 
-The `HubStore` trait in `shardline-index` defines the storage contract.
-`BoxedHubStore` provides type-erased access.
-When an auth provider is configured, Hub API routes use `HubAuth` (wrapping
-`Arc<dyn AuthProvider>`) for bearer token validation.
+Hub metadata storage goes through the same index store contract used by the rest of
+the server.
+When an auth provider is configured, Hub API routes validate bearer tokens against it,
+the same as every other frontend.
 
-The Hub API merges into the main Axum router at startup, sharing the same bind address
+The Hub API merges into the main HTTP router at startup, sharing the same bind address
 and TLS configuration as all other frontends.
+
+> **Internals note:** the Hub storage layer is defined by the `HubStore` trait in the
+> `shardline-index` crate, accessed type-erased as `BoxedHubStore`, and its routes
+> validate tokens through the `HubAuth` wrapper around the shared auth provider. These
+> names are implementation details; user documentation refers to the Hub metadata
+> store and the shared bearer-token auth.
 
 ## Limitations
 

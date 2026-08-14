@@ -357,6 +357,51 @@ pub enum ServerConfigError {
     /// The chunk size exceeds the maximum allowed value.
     #[error("chunk size must not exceed 1 GB")]
     ChunkSizeTooLarge,
+    /// The chunk size was not a power of two (the CDC chunker requires it).
+    #[error("chunk size must be a power of two (e.g. 64KiB = 65536 bytes)")]
+    ChunkSizeNotPowerOfTwo,
+    /// The maximum S3 multipart part size could not be parsed.
+    #[error("invalid s3 max part bytes")]
+    S3MaxPartBytes(ParseIntError),
+    /// The maximum S3 multipart part size was zero.
+    #[error("s3 max part bytes must be greater than zero")]
+    ZeroS3MaxPartBytes,
+    /// The maximum S3 multipart part size was below the 1 MiB floor.
+    #[error("s3 max part bytes must be at least {minimum_bytes} bytes")]
+    S3MaxPartBytesTooSmall {
+        /// The minimum accepted part size in bytes.
+        minimum_bytes: u64,
+    },
+    /// The S3 multipart upload-session TTL could not be parsed.
+    #[error("invalid s3 upload session ttl")]
+    S3UploadSessionTtl(ParseIntError),
+    /// The S3 multipart upload-session TTL was zero.
+    #[error("s3 upload session ttl must be greater than zero")]
+    ZeroS3UploadSessionTtlSeconds,
+    /// The S3 multipart upload live-session ceiling could not be parsed.
+    #[error("invalid s3 upload max active sessions")]
+    S3UploadMaxActiveSessions(ParseIntError),
+    /// The S3 multipart upload live-session ceiling was zero.
+    #[error("s3 upload max active sessions must be greater than zero")]
+    ZeroS3UploadMaxActiveSessions,
+    /// The S3 multipart minimum part size could not be parsed.
+    #[error("invalid s3 min part bytes")]
+    S3MinPartBytes(ParseIntError),
+    /// The S3 multipart minimum part size was zero.
+    #[error("s3 min part bytes must be greater than zero")]
+    ZeroS3MinPartBytes,
+    /// The S3 multipart session byte quota could not be parsed.
+    #[error("invalid s3 upload session max bytes")]
+    S3UploadSessionMaxBytes(ParseIntError),
+    /// The S3 multipart session byte quota was zero.
+    #[error("s3 upload session max bytes must be greater than zero")]
+    ZeroS3UploadSessionMaxBytes,
+    /// The S3 multipart aggregate byte quota could not be parsed.
+    #[error("invalid s3 upload total max bytes")]
+    S3UploadTotalMaxBytes(ParseIntError),
+    /// The S3 multipart aggregate byte quota was zero.
+    #[error("s3 upload total max bytes must be greater than zero")]
+    ZeroS3UploadTotalMaxBytes,
     /// The public base URL is not a valid URL.
     #[error("SHARDLINE_PUBLIC_BASE_URL is not a valid URL: {0}")]
     InvalidPublicBaseUrl(String),
