@@ -19,6 +19,10 @@ name = "role_split_e2e"
 path = "role_split_e2e.rs"
 
 [[test]]
+name = "rolling_upgrade_e2e"
+path = "rolling_upgrade_e2e.rs"
+
+[[test]]
 name = "git_xet_push_e2e"
 path = "git_xet_push_e2e.rs"
 

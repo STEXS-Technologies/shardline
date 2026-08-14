@@ -13,30 +13,25 @@ use crate::{
     models::*,
 };
 use shardline_index::hub::HubFileEntry;
-use shardline_protocol::{RepositoryScope, TokenScope};
+use shardline_server_core::AuthorizedRepository;
 
-use super::{
-    HubState, authorize_with_context, deliver_webhook_events, lfs_object_key,
-    require_repository_binding,
-};
+use super::{HubRepository, HubState, deliver_webhook_events, lfs_object_key};
 
 // ---- Preupload (requires Write) ----
 
 pub(crate) async fn preupload(
     State(state): State<HubState>,
-    headers: HeaderMap,
-    Path((_repo_type, ns, repo, rev)): Path<(String, String, String, String)>,
+    _repo: HubRepository<true>,
+    Path((_repo_type, ns, repo_name, rev)): Path<(String, String, String, String)>,
     Json(request): Json<PreuploadRequest>,
 ) -> Result<Json<PreuploadResponse>, HubApiError> {
-    let auth_ctx = authorize_with_context(&state, &headers, TokenScope::Write)?;
-    require_repository_binding(auth_ctx.as_ref(), &ns, &repo)?;
     const MAX_PREUPLOAD_FILES: usize = 10_000;
     if request.files.len() > MAX_PREUPLOAD_FILES {
         return Err(HubApiError::PathValidation(format!(
             "preupload request exceeds maximum of {MAX_PREUPLOAD_FILES} files"
         )));
     }
-    let name = format!("{ns}/{repo}");
+    let name = format!("{ns}/{repo_name}");
     let commit_sha = state
         .store
         .resolve_revision(&name, &rev)
@@ -71,7 +66,8 @@ pub(crate) async fn preupload(
 pub(crate) async fn commit(
     State(state): State<HubState>,
     headers: HeaderMap,
-    Path((_repo_type, ns, repo, rev)): Path<(String, String, String, String)>,
+    repo: HubRepository<true>,
+    Path((_repo_type, ns, repo_name, rev)): Path<(String, String, String, String)>,
     body: String,
 ) -> Result<Json<CommitResponse>, HubApiError> {
     // HF spec requires Content-Type to be application/x-ndjson or application/json.
@@ -86,9 +82,7 @@ pub(crate) async fn commit(
             "commit requires Content-Type: application/x-ndjson or application/json".to_owned(),
         ));
     }
-    let auth_ctx = authorize_with_context(&state, &headers, TokenScope::Write)?;
-    require_repository_binding(auth_ctx.as_ref(), &ns, &repo)?;
-    let name = format!("{ns}/{repo}");
+    let name = format!("{ns}/{repo_name}");
     let parent_sha = state
         .store
         .resolve_revision(&name, &rev)
@@ -104,8 +98,9 @@ pub(crate) async fn commit(
             return Err(e);
         }
     };
-    let repo_scope = auth_ctx.as_ref().map(|c| c.claims().repository());
-    match apply_commit(&state, &name, &parent_sha, &parsed, repo_scope).await {
+    // The extractor minted a Write-scoped capability; its repository scope
+    // namespaces the object-store writes so cross-tenant content stays isolated.
+    match apply_commit(&state, &name, &parent_sha, &parsed, repo.capability()).await {
         Ok(response) => {
             shardline_metrics::record_hub_api_request("commit", "POST", 200);
             shardline_metrics::record_hub_api_commit("ndjson");
@@ -124,7 +119,7 @@ pub(crate) async fn apply_commit(
     repo_id: &str,
     parent_sha: &str,
     parsed: &ParsedCommit,
-    repo_scope: Option<&RepositoryScope>,
+    auth: &AuthorizedRepository,
 ) -> Result<Json<CommitResponse>, HubApiError> {
     // HUB-004: Validate that the NDJSON body's parentCommit (if present) matches
     // the URL path's parent_sha. A mismatch indicates a stale or conflicting request.
@@ -155,7 +150,7 @@ pub(crate) async fn apply_commit(
 
                 // Store in ObjectStore, namespaced by repository so the same
                 // content in different repos maps to different storage objects.
-                let key = lfs_object_key(&sha, repo_scope)?;
+                let key = lfs_object_key(&sha, auth)?;
                 let body = ObjectBody::from_slice(content);
                 let integrity = ObjectIntegrity::new(
                     shardline_protocol::ShardlineHash::from_bytes(

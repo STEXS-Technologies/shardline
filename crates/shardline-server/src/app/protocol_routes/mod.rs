@@ -32,7 +32,6 @@ use super::MAX_PROTOCOL_QUERY_BYTES;
 use super::reconstruction_helpers::{byte_range_stream_response, full_byte_stream_response};
 use super::{
     AppState, MAX_LFS_BATCH_OBJECTS, MAX_OCI_MANIFEST_TAGS, MAX_OCI_TAG_LIST_PAGE_SIZE, authorize,
-    scope_from_auth,
 };
 
 #[cfg(test)]

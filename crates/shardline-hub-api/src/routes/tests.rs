@@ -967,7 +967,11 @@ fn store_test_content(td: &tempfile::TempDir, sha: &str, content: &[u8]) {
     let object_store = shardline_server_core::ServerObjectStore::local(td.path().join("lfs"))
         .expect("local object store");
     // Global namespace (None scope) — matches the permissive-mode read paths.
-    let key = crate::routes::lfs_object_key(sha, None).expect("valid key");
+    let key = crate::routes::lfs_object_key(
+        sha,
+        &shardline_server_core::AuthorizedRepository::anonymous_full_access(),
+    )
+    .expect("valid key");
     let body = ObjectBody::from_slice(content);
     let integrity = ObjectIntegrity::new(
         shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(content).as_bytes()),
@@ -1013,7 +1017,9 @@ async fn handler_whoami_anonymous_without_auth() {
 #[tokio::test]
 async fn handler_repo_list_empty() {
     let (_td, state) = make_test_state();
-    let result = repo_list(State(state), default_headers()).await.unwrap();
+    let result = repo_list(State(state.clone()), test_repo(&state, &default_headers()))
+        .await
+        .unwrap();
     assert!(result.repos.is_empty());
 }
 
@@ -1032,7 +1038,9 @@ async fn handler_repo_list_with_repos() {
         http_client: None,
         webhook_secret_cipher: None,
     };
-    let result = repo_list(State(state), default_headers()).await.unwrap();
+    let result = repo_list(State(state.clone()), test_repo(&state, &default_headers()))
+        .await
+        .unwrap();
     assert_eq!(result.repos.len(), 2);
 }
 
@@ -1044,8 +1052,8 @@ async fn handler_repo_list_with_repos() {
 async fn handler_repo_search_short_query_rejected() {
     let (_td, state) = make_test_state();
     let result = repo_search(
-        State(state),
-        default_headers(),
+        State(state.clone()),
+        test_repo(&state, &default_headers()),
         Path("models".to_string()),
         Query(RepoSearchQuery {
             q: "x".into(),
@@ -1068,8 +1076,8 @@ async fn handler_repo_search_short_query_rejected() {
 async fn handler_repo_search_invalid_type() {
     let (_td, state) = make_test_state();
     let result = repo_search(
-        State(state),
-        default_headers(),
+        State(state.clone()),
+        test_repo(&state, &default_headers()),
         Path("invalid".to_string()),
         Query(RepoSearchQuery {
             q: "test".into(),
@@ -1105,8 +1113,8 @@ async fn handler_repo_search_finds_matching() {
     };
     // The search uses LIKE 'q%' on repo_id, so prefix-match the full ID.
     let result = repo_search(
-        State(state),
-        default_headers(),
+        State(state.clone()),
+        test_repo(&state, &default_headers()),
         Path("models".to_string()),
         Query(RepoSearchQuery {
             q: "org/my-model".into(),
@@ -1191,7 +1199,9 @@ fn alice_headers() -> HeaderMap {
 #[tokio::test]
 async fn repo_list_hides_other_tenants_private_repos() {
     let (_td, state) = make_alice_auth_state();
-    let result = repo_list(State(state), alice_headers()).await.unwrap();
+    let result = repo_list(State(state.clone()), test_repo(&state, &alice_headers()))
+        .await
+        .unwrap();
     let ids: Vec<String> = result.repos.iter().map(|r| r.id.clone()).collect();
     // Alice's own private repo and bob's public repo remain visible.
     assert!(ids.iter().any(|id| id == "alice/own"));
@@ -1214,8 +1224,8 @@ async fn repo_search_hides_other_tenants_private_repos() {
     let (_td, state) = make_alice_auth_state();
     // Search for bob's private repo by its full ID.
     let result = repo_search(
-        State(state),
-        alice_headers(),
+        State(state.clone()),
+        test_repo(&state, &alice_headers()),
         Path("models".to_string()),
         Query(RepoSearchQuery {
             q: "bob/private-repo".into(),
@@ -1244,8 +1254,8 @@ async fn repo_search_hides_same_namespace_private_repos() {
     // Alice's token is scoped to alice/own; alice/other is the same namespace
     // but a different repository, so it must be hidden.
     let result = repo_search(
-        State(state),
-        alice_headers(),
+        State(state.clone()),
+        test_repo(&state, &alice_headers()),
         Path("models".to_string()),
         Query(RepoSearchQuery {
             q: "alice/other".into(),
@@ -1321,7 +1331,9 @@ async fn repo_list_hides_oidc_owner_same_namespace_private_repos() {
         axum::http::header::AUTHORIZATION,
         "Bearer oidc-token".parse().unwrap(),
     );
-    let result = repo_list(State(state), headers).await.unwrap();
+    let result = repo_list(State(state.clone()), test_repo(&state, &headers))
+        .await
+        .unwrap();
     let ids: Vec<String> = result.repos.iter().map(|r| r.id.clone()).collect();
     // The caller's own private repo and public repos remain visible.
     assert!(ids.iter().any(|id| id == "oidc/user1"));
@@ -1341,8 +1353,8 @@ async fn repo_list_hides_oidc_owner_same_namespace_private_repos() {
 async fn handler_repo_info_missing_repo() {
     let (_td, state) = make_test_state();
     let result = repo_info(
-        State(state),
-        default_headers(),
+        State(state.clone()),
+        test_repo(&state, &default_headers()),
         Path(("models".into(), "missing".into(), "nope".into())),
     )
     .await;
@@ -1363,8 +1375,8 @@ async fn handler_repo_info_returns_repo() {
         webhook_secret_cipher: None,
     };
     let result = repo_info(
-        State(state),
-        default_headers(),
+        State(state.clone()),
+        test_repo(&state, &default_headers()),
         Path(("models".into(), "org".into(), "existing".into())),
     )
     .await
@@ -1403,8 +1415,8 @@ async fn handler_repo_info_with_card_data() {
         webhook_secret_cipher: None,
     };
     let result = repo_info(
-        State(state),
-        default_headers(),
+        State(state.clone()),
+        test_repo(&state, &default_headers()),
         Path(("models".into(), "org".into(), "card-model".into())),
     )
     .await
@@ -1425,8 +1437,8 @@ async fn handler_repo_info_with_card_data() {
 async fn handler_repo_modelcard_missing_repo() {
     let (_td, state) = make_test_state();
     let result = repo_modelcard(
-        State(state),
-        default_headers(),
+        State(state.clone()),
+        test_repo(&state, &default_headers()),
         Path(("models".into(), "no".into(), "such".into())),
     )
     .await;
@@ -1447,8 +1459,8 @@ async fn handler_repo_modelcard_no_readme() {
         webhook_secret_cipher: None,
     };
     let result = repo_modelcard(
-        State(state),
-        default_headers(),
+        State(state.clone()),
+        test_repo(&state, &default_headers()),
         Path(("models".into(), "org".into(), "no-readme".into())),
     )
     .await;
@@ -1485,8 +1497,8 @@ async fn handler_repo_modelcard_with_readme() {
         webhook_secret_cipher: None,
     };
     let result = repo_modelcard(
-        State(state),
-        default_headers(),
+        State(state.clone()),
+        test_repo(&state, &default_headers()),
         Path(("models".into(), "org".into(), "my-model".into())),
     )
     .await
@@ -1520,8 +1532,8 @@ async fn handler_repo_revisions_with_revisions() {
         webhook_secret_cipher: None,
     };
     let result = repo_revisions(
-        State(state),
-        default_headers(),
+        State(state.clone()),
+        test_repo(&state, &default_headers()),
         Path(("models".into(), "org".into(), "has-revs".into())),
     )
     .await
@@ -1546,9 +1558,14 @@ async fn handler_repo_create_model() {
         private: false,
         visibility: None,
     };
-    let (status, json) = repo_create(State(state), default_headers(), Json(req))
-        .await
-        .unwrap();
+    let (status, json) = repo_create(
+        State(state.clone()),
+        default_headers(),
+        test_repo(&state, &default_headers()),
+        Json(req),
+    )
+    .await
+    .unwrap();
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(json.id, "ns/new-repo");
 }
@@ -1561,8 +1578,9 @@ async fn handler_repo_create_model() {
 async fn handler_repo_create_type_invalid_type() {
     let (_td, state) = make_test_state();
     let result = repo_create_type(
-        State(state),
+        State(state.clone()),
         default_headers(),
+        test_repo(&state, &default_headers()),
         Path(("invalid".into(), "ns".into(), "repo".into())),
         Json(serde_json::json!({})),
     )
@@ -1579,8 +1597,9 @@ async fn handler_repo_create_type_invalid_type() {
 async fn handler_repo_create_type_success() {
     let (_td, state) = make_test_state();
     let (status, json) = repo_create_type(
-        State(state),
+        State(state.clone()),
         default_headers(),
+        test_repo(&state, &default_headers()),
         Path(("models".into(), "ns".into(), "my-repo".into())),
         Json(serde_json::json!({})),
     )
@@ -1595,8 +1614,9 @@ async fn handler_repo_create_type_success() {
 async fn handler_repo_create_type_private() {
     let (_td, state) = make_test_state();
     let (_, json) = repo_create_type(
-        State(state),
+        State(state.clone()),
         default_headers(),
+        test_repo(&state, &default_headers()),
         Path(("datasets".into(), "ns".into(), "secret-data".into())),
         Json(serde_json::json!({"private": true})),
     )
@@ -1614,8 +1634,8 @@ async fn handler_repo_create_type_private() {
 async fn handler_repo_delete_missing_repo() {
     let (_td, state) = make_test_state();
     let result = repo_delete(
-        State(state),
-        default_headers(),
+        State(state.clone()),
+        test_repo(&state, &default_headers()),
         Path(("models".into(), "no".into(), "exist".into())),
     )
     .await;
@@ -1636,7 +1656,7 @@ async fn handler_repo_delete_success() {
     };
     let result = repo_delete(
         State(state.clone()),
-        default_headers(),
+        test_repo(&state, &default_headers()),
         Path(("models".into(), "org".into(), "to-delete".into())),
     )
     .await;
@@ -1660,8 +1680,8 @@ async fn handler_preupload_too_many_files() {
         })
         .collect();
     let result = preupload(
-        State(state),
-        default_headers(),
+        State(state.clone()),
+        test_repo(&state, &default_headers()),
         Path(("models".into(), "ns".into(), "r".into(), "main".into())),
         Json(PreuploadRequest {
             files,
@@ -1702,8 +1722,8 @@ async fn handler_preupload_checks_existence() {
         webhook_secret_cipher: None,
     };
     let result = preupload(
-        State(state),
-        default_headers(),
+        State(state.clone()),
+        test_repo(&state, &default_headers()),
         Path((
             "models".into(),
             "org".into(),
@@ -1741,8 +1761,9 @@ async fn handler_commit_wrong_content_type() {
     let (_td, state) = make_test_state();
     // No Content-Type header → rejection
     let result = commit(
-        State(state),
+        State(state.clone()),
         default_headers(),
+        test_repo(&state, &default_headers()),
         Path(("models".into(), "ns".into(), "r".into(), "main".into())),
         "{}".to_string(),
     )
@@ -1781,8 +1802,9 @@ async fn handler_commit_inline_file_success() {
 {"file":{"path":"README.md","content":"SGVsbG8gV29ybGQ="}}
 "#;
     let result = commit(
-        State(state),
+        State(state.clone()),
         ndjson_headers(),
+        test_repo(&state, &ndjson_headers()),
         Path((
             "models".into(),
             "org".into(),
@@ -1819,8 +1841,9 @@ async fn handler_commit_lfs_pointer_success() {
 "#
     );
     let result = commit(
-        State(state),
+        State(state.clone()),
         ndjson_headers(),
+        test_repo(&state, &ndjson_headers()),
         Path((
             "models".into(),
             "org".into(),
@@ -1861,8 +1884,9 @@ async fn handler_commit_delete_file() {
 {"deletedEntry":{"path":"old.txt"}}
 "#;
     let result = commit(
-        State(state),
+        State(state.clone()),
         ndjson_headers(),
+        test_repo(&state, &ndjson_headers()),
         Path((
             "models".into(),
             "org".into(),
@@ -1897,8 +1921,9 @@ async fn handler_commit_parent_mismatch() {
 {"file":{"path":"f.txt","content":"dGVzdA=="}}
 "#;
     let result = commit(
-        State(state),
+        State(state.clone()),
         ndjson_headers(),
+        test_repo(&state, &ndjson_headers()),
         Path((
             "models".into(),
             "org".into(),
@@ -1941,9 +1966,16 @@ async fn handler_apply_commit_inline_file() {
             content: b"world".to_vec(),
         }],
     };
-    let result = apply_commit(&state, "org/apply-test", "parent_apply", &parsed, None)
-        .await
-        .unwrap();
+    let repo = test_repo::<true, true>(&state, &HeaderMap::new());
+    let result = apply_commit(
+        &state,
+        "org/apply-test",
+        "parent_apply",
+        &parsed,
+        repo.capability(),
+    )
+    .await
+    .unwrap();
     assert!(!result.commit_id.is_empty());
     // Verify the file is stored
     let _files = state.store.get_files("parent_apply").unwrap();
@@ -1979,9 +2011,16 @@ async fn handler_apply_commit_lfs_pointer() {
             size: 2_000_000,
         }],
     };
-    let result = apply_commit(&state, "org/apply-lfs", "parent_lfs2", &parsed, None)
-        .await
-        .unwrap();
+    let repo = test_repo::<true, true>(&state, &HeaderMap::new());
+    let result = apply_commit(
+        &state,
+        "org/apply-lfs",
+        "parent_lfs2",
+        &parsed,
+        repo.capability(),
+    )
+    .await
+    .unwrap();
     let new_files = state.store.get_files(&result.commit_id).unwrap();
     assert_eq!(new_files.len(), 1);
     assert!(new_files[0].is_lfs);
@@ -2018,9 +2057,16 @@ async fn handler_apply_commit_delete() {
             path: "old.txt".into(),
         }],
     };
-    let result = apply_commit(&state, "org/apply-del", "parent_del2", &parsed, None)
-        .await
-        .unwrap();
+    let repo = test_repo::<true, true>(&state, &HeaderMap::new());
+    let result = apply_commit(
+        &state,
+        "org/apply-del",
+        "parent_del2",
+        &parsed,
+        repo.capability(),
+    )
+    .await
+    .unwrap();
     let new_files = state.store.get_files(&result.commit_id).unwrap();
     assert!(new_files.is_empty());
 }
@@ -2043,7 +2089,15 @@ async fn handler_apply_commit_parent_mismatch() {
         parent_commit: Some("different_sha".into()),
         instructions: vec![],
     };
-    let result = apply_commit(&state, "org/apply-mismatch", "actual_sha", &parsed, None).await;
+    let repo = test_repo::<true, true>(&state, &HeaderMap::new());
+    let result = apply_commit(
+        &state,
+        "org/apply-mismatch",
+        "actual_sha",
+        &parsed,
+        repo.capability(),
+    )
+    .await;
     assert!(result.is_err());
     let err = result.unwrap_err();
     assert!(
@@ -2087,8 +2141,8 @@ async fn handler_file_tree_basic() {
         webhook_secret_cipher: None,
     };
     let entries = file_tree(
-        State(state),
-        default_headers(),
+        State(state.clone()),
+        test_repo(&state, &default_headers()),
         Path((
             "models".into(),
             "org".into(),
@@ -2139,8 +2193,8 @@ async fn handler_file_tree_recursive() {
         webhook_secret_cipher: None,
     };
     let entries = file_tree(
-        State(state),
-        default_headers(),
+        State(state.clone()),
+        test_repo(&state, &default_headers()),
         Path((
             "models".into(),
             "org".into(),
@@ -2197,8 +2251,8 @@ async fn handler_file_tree_with_limit_and_cursor() {
         webhook_secret_cipher: None,
     };
     let entries = file_tree(
-        State(state),
-        default_headers(),
+        State(state.clone()),
+        test_repo(&state, &default_headers()),
         Path((
             "models".into(),
             "org".into(),
@@ -2254,8 +2308,8 @@ async fn handler_resolve_file_inline() {
         webhook_secret_cipher: None,
     };
     let result = resolve_file(
-        State(state),
-        default_headers(),
+        State(state.clone()),
+        test_repo(&state, &default_headers()),
         Path((
             "models".into(),
             "org".into(),
@@ -2290,8 +2344,8 @@ async fn handler_resolve_file_not_found() {
         webhook_secret_cipher: None,
     };
     let result = resolve_file(
-        State(state),
-        default_headers(),
+        State(state.clone()),
+        test_repo(&state, &default_headers()),
         Path((
             "models".into(),
             "org".into(),
@@ -2327,8 +2381,8 @@ fn make_lfs_state() -> (tempfile::TempDir, HubState) {
 async fn handler_lfs_batch_upload_new_object() {
     let (_td, state) = make_lfs_state();
     let result = lfs_batch(
-        State(state),
-        default_headers(),
+        State(state.clone()),
+        test_repo(&state, &default_headers()),
         Json(LfsBatchRequest {
             operation: LfsBatchOperation::Upload,
             ref_: LfsBatchRef {
@@ -2362,7 +2416,7 @@ async fn handler_lfs_batch_download_existing_object() {
     use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectStore};
     let key = crate::routes::lfs_object_key(
         "7171717171717171717171717171717171717171717171717171717171717171",
-        None,
+        &shardline_server_core::AuthorizedRepository::anonymous_full_access(),
     )
     .unwrap();
     let integrity = ObjectIntegrity::new(
@@ -2374,8 +2428,8 @@ async fn handler_lfs_batch_download_existing_object() {
         .put_if_absent(&key, ObjectBody::from_slice(b"some data"), &integrity)
         .unwrap();
     let result = lfs_batch(
-        State(state),
-        default_headers(),
+        State(state.clone()),
+        test_repo(&state, &default_headers()),
         Json(LfsBatchRequest {
             operation: LfsBatchOperation::Download,
             ref_: LfsBatchRef {
@@ -2400,8 +2454,8 @@ async fn handler_lfs_batch_download_existing_object() {
 async fn handler_lfs_batch_download_missing_object() {
     let (_td, state) = make_lfs_state();
     let result = lfs_batch(
-        State(state),
-        default_headers(),
+        State(state.clone()),
+        test_repo(&state, &default_headers()),
         Json(LfsBatchRequest {
             operation: LfsBatchOperation::Download,
             ref_: LfsBatchRef {
@@ -2432,7 +2486,7 @@ async fn handler_lfs_batch_verify_existing() {
     use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectStore};
     let key = crate::routes::lfs_object_key(
         "8282828282828282828282828282828282828282828282828282828282828282",
-        None,
+        &shardline_server_core::AuthorizedRepository::anonymous_full_access(),
     )
     .unwrap();
     let integrity = ObjectIntegrity::new(
@@ -2444,8 +2498,8 @@ async fn handler_lfs_batch_verify_existing() {
         .put_if_absent(&key, ObjectBody::from_slice(b"data"), &integrity)
         .unwrap();
     let result = lfs_batch(
-        State(state),
-        default_headers(),
+        State(state.clone()),
+        test_repo(&state, &default_headers()),
         Json(LfsBatchRequest {
             operation: LfsBatchOperation::Verify,
             ref_: LfsBatchRef {
@@ -2468,8 +2522,8 @@ async fn handler_lfs_batch_verify_existing() {
 async fn handler_lfs_batch_verify_missing() {
     let (_td, state) = make_lfs_state();
     let result = lfs_batch(
-        State(state),
-        default_headers(),
+        State(state.clone()),
+        test_repo(&state, &default_headers()),
         Json(LfsBatchRequest {
             operation: LfsBatchOperation::Verify,
             ref_: LfsBatchRef {
@@ -2496,8 +2550,8 @@ async fn handler_lfs_batch_verify_missing() {
 async fn handler_lfs_upload_invalid_oid() {
     let (_td, state) = make_test_state();
     let result = lfs_upload(
-        State(state),
-        default_headers(),
+        State(state.clone()),
+        test_repo(&state, &default_headers()),
         Path("bad-oid".to_string()),
         bytes::Bytes::from_static(b"data"),
     )
@@ -2516,7 +2570,7 @@ async fn handler_lfs_upload_success() {
     let oid = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     let result = lfs_upload(
         State(state.clone()),
-        default_headers(),
+        test_repo(&state, &default_headers()),
         Path(oid.to_string()),
         bytes::Bytes::from_static(b"some lfs data"),
     )
@@ -2525,7 +2579,11 @@ async fn handler_lfs_upload_success() {
     assert_eq!(result.unwrap(), StatusCode::OK);
     // Verify it's stored in the object store (global namespace).
     use shardline_storage::ObjectStore;
-    let key = crate::routes::lfs_object_key(oid, None).unwrap();
+    let key = crate::routes::lfs_object_key(
+        oid,
+        &shardline_server_core::AuthorizedRepository::anonymous_full_access(),
+    )
+    .unwrap();
     assert!(state.object_store.contains(&key).unwrap());
     let data = state
         .object_store
@@ -2542,8 +2600,8 @@ async fn handler_lfs_upload_success() {
 async fn handler_lfs_download_missing() {
     let (_td, state) = make_test_state();
     let result = lfs_download(
-        State(state),
-        default_headers(),
+        State(state.clone()),
+        test_repo(&state, &default_headers()),
         Path("b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5".to_string()),
     )
     .await;
@@ -2557,7 +2615,11 @@ async fn handler_lfs_download_success() {
     let oid = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     // Store an LFS object in the object store (global namespace).
     use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectStore};
-    let key = crate::routes::lfs_object_key(oid, None).unwrap();
+    let key = crate::routes::lfs_object_key(
+        oid,
+        &shardline_server_core::AuthorizedRepository::anonymous_full_access(),
+    )
+    .unwrap();
     let integrity = ObjectIntegrity::new(
         shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(b"download data").as_bytes()),
         13,
@@ -2566,10 +2628,13 @@ async fn handler_lfs_download_success() {
         .object_store
         .put_if_absent(&key, ObjectBody::from_slice(b"download data"), &integrity)
         .unwrap();
-    let (status, headers, data) =
-        lfs_download(State(state), default_headers(), Path(oid.to_string()))
-            .await
-            .unwrap();
+    let (status, headers, data) = lfs_download(
+        State(state.clone()),
+        test_repo(&state, &default_headers()),
+        Path(oid.to_string()),
+    )
+    .await
+    .unwrap();
     assert_eq!(status, StatusCode::OK);
     assert_eq!(data, b"download data");
     // Verify content-type header name
@@ -2593,8 +2658,8 @@ async fn handler_repo_revisions_has_initial() {
         webhook_secret_cipher: None,
     };
     let result = repo_revisions(
-        State(state),
-        default_headers(),
+        State(state.clone()),
+        test_repo(&state, &default_headers()),
         Path(("models".into(), "org".into(), "init-rev".into())),
     )
     .await
@@ -2618,8 +2683,8 @@ async fn handler_git_head_with_revision() {
         webhook_secret_cipher: None,
     };
     let result = git_head(
-        State(state),
-        default_headers(),
+        State(state.clone()),
+        test_repo(&state, &default_headers()),
         Path(("models".into(), "org".into(), "has-head".into())),
     )
     .await
@@ -2646,8 +2711,9 @@ async fn handler_commit_no_revision() {
     };
     // "nonexistent_rev" isn't a known ref or SHA → revision not found
     let result = commit(
-        State(state),
+        State(state.clone()),
         ndjson_headers(),
+        test_repo(&state, &ndjson_headers()),
         Path((
             "models".into(),
             "org".into(),
@@ -2692,8 +2758,8 @@ async fn handler_dataset_parquet_lists_files() {
         webhook_secret_cipher: None,
     };
     let result = dataset_parquet(
-        State(state),
-        default_headers(),
+        State(state.clone()),
+        test_repo(&state, &default_headers()),
         Path(("org".into(), "data".into())),
     )
     .await
@@ -2739,8 +2805,8 @@ async fn handler_dataset_parquet_csv_and_jsonl_included() {
         webhook_secret_cipher: None,
     };
     let result = dataset_parquet(
-        State(state),
-        default_headers(),
+        State(state.clone()),
+        test_repo(&state, &default_headers()),
         Path(("org".into(), "multi".into())),
     )
     .await
@@ -2766,8 +2832,8 @@ async fn handler_dataset_first_rows_empty_dataset() {
         webhook_secret_cipher: None,
     };
     let result = dataset_first_rows(
-        State(state),
-        default_headers(),
+        State(state.clone()),
+        test_repo(&state, &default_headers()),
         Path(("org".into(), "empty-ds".into())),
         Query(DatasetFirstRowsQuery {
             config: "default".into(),
@@ -2810,8 +2876,8 @@ async fn handler_dataset_first_rows_with_jsonl() {
         webhook_secret_cipher: None,
     };
     let result = dataset_first_rows(
-        State(state),
-        default_headers(),
+        State(state.clone()),
+        test_repo(&state, &default_headers()),
         Path(("org".into(), "jsonl-ds".into())),
         Query(DatasetFirstRowsQuery {
             config: "default".into(),
@@ -2860,8 +2926,8 @@ async fn handler_dataset_viewer_with_data() {
         webhook_secret_cipher: None,
     };
     let result = dataset_viewer(
-        State(state),
-        default_headers(),
+        State(state.clone()),
+        test_repo(&state, &default_headers()),
         Path(("org".into(), "viewer-ds".into(), "train".into())),
         Query(DatasetViewerQuery {
             config: "default".into(),
@@ -2906,8 +2972,8 @@ async fn handler_dataset_viewer_pagination() {
         webhook_secret_cipher: None,
     };
     let result = dataset_viewer(
-        State(state),
-        default_headers(),
+        State(state.clone()),
+        test_repo(&state, &default_headers()),
         Path(("org".into(), "viewer-pag".into(), "test".into())),
         Query(DatasetViewerQuery {
             config: "data".into(),
@@ -2940,8 +3006,8 @@ async fn handler_webhook_create_success() {
         webhook_secret_cipher: None,
     };
     let (status, resp) = webhook_create(
-        State(state),
-        default_headers(),
+        State(state.clone()),
+        test_repo(&state, &default_headers()),
         Path(("models".into(), "org".into(), "wh-test".into())),
         Json(WebhookCreateRequest {
             url: "https://example.com/hook".into(),
@@ -2969,8 +3035,8 @@ async fn handler_webhook_create_invalid_url() {
         webhook_secret_cipher: None,
     };
     let result = webhook_create(
-        State(state),
-        default_headers(),
+        State(state.clone()),
+        test_repo(&state, &default_headers()),
         Path(("models".into(), "org".into(), "wh-badurl".into())),
         Json(WebhookCreateRequest {
             url: "ftp://bad.com/hook".into(),
@@ -3001,8 +3067,8 @@ async fn handler_webhook_create_too_many_events() {
     };
     let events: Vec<String> = (0..51).map(|i| format!("event_{i}")).collect();
     let result = webhook_create(
-        State(state),
-        default_headers(),
+        State(state.clone()),
+        test_repo(&state, &default_headers()),
         Path(("models".into(), "org".into(), "wh-toomany".into())),
         Json(WebhookCreateRequest {
             url: "https://example.com/hook".into(),
@@ -3036,8 +3102,8 @@ async fn handler_webhook_list_empty() {
         webhook_secret_cipher: None,
     };
     let result = webhook_list(
-        State(state),
-        default_headers(),
+        State(state.clone()),
+        test_repo(&state, &default_headers()),
         Path(("models".into(), "org".into(), "wh-list-empty".into())),
     )
     .await
@@ -3074,8 +3140,8 @@ async fn handler_webhook_list_with_webhooks() {
         webhook_secret_cipher: None,
     };
     let result = webhook_list(
-        State(state),
-        default_headers(),
+        State(state.clone()),
+        test_repo(&state, &default_headers()),
         Path(("models".into(), "org".into(), "wh-list-full".into())),
     )
     .await
@@ -3109,7 +3175,7 @@ async fn handler_webhook_delete_success() {
     };
     let result = webhook_delete(
         State(state.clone()),
-        default_headers(),
+        test_repo(&state, &default_headers()),
         Path((
             "models".into(),
             "org".into(),
@@ -3191,9 +3257,16 @@ async fn handler_apply_commit_empty_instructions() {
         parent_commit: None,
         instructions: vec![],
     };
-    let result = apply_commit(&state, "org/empty-inst", "parent_empty", &parsed, None)
-        .await
-        .unwrap();
+    let repo = test_repo::<true, true>(&state, &HeaderMap::new());
+    let result = apply_commit(
+        &state,
+        "org/empty-inst",
+        "parent_empty",
+        &parsed,
+        repo.capability(),
+    )
+    .await
+    .unwrap();
     assert!(!result.commit_id.is_empty());
 }
 
@@ -3215,8 +3288,8 @@ async fn handler_dataset_parquet_non_dataset_repo_errors() {
         webhook_secret_cipher: None,
     };
     let result = dataset_parquet(
-        State(state),
-        default_headers(),
+        State(state.clone()),
+        test_repo(&state, &default_headers()),
         Path(("org".into(), "model-repo".into())),
     )
     .await;
@@ -3246,8 +3319,8 @@ async fn handler_dataset_first_rows_non_dataset_errors() {
         webhook_secret_cipher: None,
     };
     let result = dataset_first_rows(
-        State(state),
-        default_headers(),
+        State(state.clone()),
+        test_repo(&state, &default_headers()),
         Path(("org".into(), "model-ds".into())),
         Query(DatasetFirstRowsQuery {
             config: "default".into(),
@@ -3282,8 +3355,8 @@ async fn handler_dataset_viewer_non_dataset_errors() {
         webhook_secret_cipher: None,
     };
     let result = dataset_viewer(
-        State(state),
-        default_headers(),
+        State(state.clone()),
+        test_repo(&state, &default_headers()),
         Path(("org".into(), "model-view".into(), "train".into())),
         Query(DatasetViewerQuery {
             config: "default".into(),
@@ -3320,8 +3393,8 @@ async fn handler_repo_search_sort_by_last_modified_asc() {
         webhook_secret_cipher: None,
     };
     let result = repo_search(
-        State(state),
-        default_headers(),
+        State(state.clone()),
+        test_repo(&state, &default_headers()),
         Path("models".to_string()),
         Query(RepoSearchQuery {
             q: "org/".into(),
@@ -3353,8 +3426,8 @@ async fn handler_repo_search_sort_likes_noop() {
     };
     // "likes" sort is currently a no-op — just verify it doesn't error.
     let result = repo_search(
-        State(state),
-        default_headers(),
+        State(state.clone()),
+        test_repo(&state, &default_headers()),
         Path("models".to_string()),
         Query(RepoSearchQuery {
             q: "org/likes".into(),
@@ -3386,8 +3459,8 @@ async fn handler_repo_search_sort_downloads_noop() {
     };
     // "downloads" sort is currently a no-op — just verify it doesn't error.
     let result = repo_search(
-        State(state),
-        default_headers(),
+        State(state.clone()),
+        test_repo(&state, &default_headers()),
         Path("models".to_string()),
         Query(RepoSearchQuery {
             q: "org/dl".into(),
@@ -3422,8 +3495,8 @@ async fn handler_repo_search_unknown_sort_keeps_default_order() {
         webhook_secret_cipher: None,
     };
     let result = repo_search(
-        State(state),
-        default_headers(),
+        State(state.clone()),
+        test_repo(&state, &default_headers()),
         Path("models".to_string()),
         Query(RepoSearchQuery {
             q: "org/order".into(),
@@ -3446,8 +3519,8 @@ async fn handler_repo_search_unknown_sort_keeps_default_order() {
 async fn handler_repo_info_invalid_type() {
     let (_td, state) = make_test_state();
     let result = repo_info(
-        State(state),
-        default_headers(),
+        State(state.clone()),
+        test_repo(&state, &default_headers()),
         Path(("invalid_type".into(), "ns".into(), "repo".into())),
     )
     .await;
@@ -3486,8 +3559,8 @@ async fn handler_dataset_first_rows_content_not_inline() {
         webhook_secret_cipher: None,
     };
     let result = dataset_first_rows(
-        State(state),
-        default_headers(),
+        State(state.clone()),
+        test_repo(&state, &default_headers()),
         Path(("org".into(), "no-inline".into())),
         Query(DatasetFirstRowsQuery {
             config: "default".into(),
@@ -3517,8 +3590,8 @@ async fn handler_dataset_viewer_split_not_found() {
         webhook_secret_cipher: None,
     };
     let result = dataset_viewer(
-        State(state),
-        default_headers(),
+        State(state.clone()),
+        test_repo(&state, &default_headers()),
         Path(("org".into(), "no-split".into(), "nonexistent".into())),
         Query(DatasetViewerQuery {
             config: "default".into(),
@@ -3543,8 +3616,8 @@ async fn handler_dataset_viewer_split_not_found() {
 async fn handler_webhook_create_repo_not_found() {
     let (_td, state) = make_test_state();
     let result = webhook_create(
-        State(state),
-        default_headers(),
+        State(state.clone()),
+        test_repo(&state, &default_headers()),
         Path(("models".into(), "no".into(), "repo".into())),
         Json(WebhookCreateRequest {
             url: "https://example.com/hook".into(),
@@ -3584,8 +3657,8 @@ fn parse_yaml_frontmatter_line_without_colon_skipped_and_map_empty() {
 async fn handler_webhook_list_repo_not_found_returns_empty() {
     let (_td, state) = make_test_state();
     let result = webhook_list(
-        State(state),
-        default_headers(),
+        State(state.clone()),
+        test_repo(&state, &default_headers()),
         Path(("models".into(), "no".into(), "repo".into())),
     )
     .await
@@ -3601,8 +3674,8 @@ async fn handler_webhook_list_repo_not_found_returns_empty() {
 async fn handler_repo_revisions_missing_repo() {
     let (_td, state) = make_test_state();
     let result = repo_revisions(
-        State(state),
-        default_headers(),
+        State(state.clone()),
+        test_repo(&state, &default_headers()),
         Path(("models".into(), "no".into(), "such_repo".into())),
     )
     .await;
@@ -3638,8 +3711,8 @@ async fn handler_repo_revision_info_returns_siblings() {
         webhook_secret_cipher: None,
     };
     let result = repo_revision_info(
-        State(state),
-        default_headers(),
+        State(state.clone()),
+        test_repo(&state, &default_headers()),
         Path((
             "models".into(),
             "org".into(),
@@ -3660,8 +3733,8 @@ async fn handler_repo_revision_info_returns_siblings() {
 async fn handler_repo_revision_info_missing_repo() {
     let (_td, state) = make_test_state();
     let result = repo_revision_info(
-        State(state),
-        default_headers(),
+        State(state.clone()),
+        test_repo(&state, &default_headers()),
         Path(("models".into(), "no".into(), "repo".into(), "main".into())),
     )
     .await;
@@ -3685,8 +3758,8 @@ async fn handler_repo_delete_compat_success() {
         webhook_secret_cipher: None,
     };
     let result = repo_delete_compat(
-        State(state),
-        default_headers(),
+        State(state.clone()),
+        test_repo(&state, &default_headers()),
         Json(RepoDeleteRequest {
             repo_type: Some(RepoType::Model),
             name: "org/compat-del".to_owned(),
@@ -3711,8 +3784,8 @@ async fn handler_repo_delete_compat_with_organization() {
         webhook_secret_cipher: None,
     };
     let result = repo_delete_compat(
-        State(state),
-        default_headers(),
+        State(state.clone()),
+        test_repo(&state, &default_headers()),
         Json(RepoDeleteRequest {
             repo_type: Some(RepoType::Model),
             name: "compat-org".to_owned(),
@@ -3751,8 +3824,8 @@ async fn handler_file_tree_at_root_returns_files() {
         webhook_secret_cipher: None,
     };
     let entries = file_tree_at_root(
-        State(state),
-        default_headers(),
+        State(state.clone()),
+        test_repo(&state, &default_headers()),
         Path((
             "models".into(),
             "org".into(),
@@ -3788,8 +3861,8 @@ async fn handler_git_head_returns_ref() {
         webhook_secret_cipher: None,
     };
     let result = git_head(
-        State(state),
-        default_headers(),
+        State(state.clone()),
+        test_repo(&state, &default_headers()),
         Path(("models".into(), "org".into(), "git-head".into())),
     )
     .await
@@ -3802,8 +3875,8 @@ async fn handler_git_head_returns_ref() {
 async fn handler_git_head_nonexistent_repo_returns_zero_sha() {
     let (_td, state) = make_test_state();
     let result = git_head(
-        State(state),
-        default_headers(),
+        State(state.clone()),
+        test_repo(&state, &default_headers()),
         Path(("models".into(), "no".into(), "repo".into())),
     )
     .await
@@ -3826,9 +3899,14 @@ async fn handler_repo_create_with_organization() {
         private: false,
         visibility: None,
     };
-    let (status, json) = repo_create(State(state), default_headers(), Json(req))
-        .await
-        .unwrap();
+    let (status, json) = repo_create(
+        State(state.clone()),
+        default_headers(),
+        test_repo(&state, &default_headers()),
+        Json(req),
+    )
+    .await
+    .unwrap();
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(json.id, "org/my-repo");
 }
@@ -3852,7 +3930,13 @@ async fn handler_repo_create_conflict() {
         private: false,
         visibility: None,
     };
-    let result = repo_create(State(state), default_headers(), Json(req)).await;
+    let result = repo_create(
+        State(state.clone()),
+        default_headers(),
+        test_repo(&state, &default_headers()),
+        Json(req),
+    )
+    .await;
     assert!(result.is_ok());
     let (status, _json) = result.unwrap();
     assert_eq!(status, StatusCode::CONFLICT);
@@ -3953,8 +4037,8 @@ async fn handler_webhook_create_duplicate_url() {
         webhook_secret_cipher: None,
     };
     let result = webhook_create(
-        State(state),
-        default_headers(),
+        State(state.clone()),
+        test_repo(&state, &default_headers()),
         Path(("models".into(), "org".into(), "wh-dup".into())),
         Json(WebhookCreateRequest {
             url: "https://example.com/dup".into(),
@@ -3987,7 +4071,7 @@ async fn handler_lfs_upload_and_download_roundtrip() {
     // Upload
     let result = lfs_upload(
         State(state.clone()),
-        default_headers(),
+        test_repo(&state, &default_headers()),
         Path(oid.to_owned()),
         bytes::Bytes::from_static(data),
     )
@@ -3995,10 +4079,13 @@ async fn handler_lfs_upload_and_download_roundtrip() {
     assert_eq!(result.unwrap(), StatusCode::OK);
 
     // Download
-    let (status, _headers, downloaded) =
-        lfs_download(State(state), default_headers(), Path(oid.to_owned()))
-            .await
-            .unwrap();
+    let (status, _headers, downloaded) = lfs_download(
+        State(state.clone()),
+        test_repo(&state, &default_headers()),
+        Path(oid.to_owned()),
+    )
+    .await
+    .unwrap();
     assert_eq!(status, StatusCode::OK);
     assert_eq!(downloaded, data);
 }
@@ -4038,8 +4125,8 @@ async fn handler_dataset_parquet_finds_data_files() {
         webhook_secret_cipher: None,
     };
     let resp = dataset_parquet(
-        State(state),
-        default_headers(),
+        State(state.clone()),
+        test_repo(&state, &default_headers()),
         Path(("org".into(), "ds-parquet".into())),
     )
     .await
@@ -4081,8 +4168,8 @@ async fn handler_webhook_list_with_hooks() {
         webhook_secret_cipher: None,
     };
     let resp = webhook_list(
-        State(state),
-        default_headers(),
+        State(state.clone()),
+        test_repo(&state, &default_headers()),
         Path(("models".into(), "org".into(), "wh-list".into())),
     )
     .await

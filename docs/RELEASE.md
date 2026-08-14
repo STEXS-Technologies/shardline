@@ -41,6 +41,8 @@ crates.io requirements (`^1.5.0`), the release **must** go out bottom-up
 Verified from the `cargo metadata` dependency graph at `v1.5.0`. Each crate must be
 on crates.io at the new version before any crate that depends on it.
 
+> The order below is generated from the `cargo metadata` dependency graph by `scripts/publish-order.py` — no manual list.
+
 1. `shardline-metrics`
 2. `shardline-protocol`
 3. `shardline-test-support`

@@ -56,6 +56,8 @@ pub mod auth {
     pub use shardline_auth::*;
 }
 
+pub mod auth_capability;
+
 pub mod at_rest;
 pub mod object_store;
 pub mod ops;
@@ -69,6 +71,9 @@ mod tests;
 // ---------------------------------------------------------------------------
 // Re-exports from submodules
 // ---------------------------------------------------------------------------
+
+// Auth capabilities
+pub use auth_capability::{AuthorizedRepository, scope_allows};
 
 // Object store
 pub use object_store::{

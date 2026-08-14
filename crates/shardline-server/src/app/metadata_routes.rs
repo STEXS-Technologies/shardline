@@ -17,17 +17,19 @@ use axum::{
     Json,
     body::Body,
     extract::{Path, Query, State},
-    http::HeaderMap,
     response::{IntoResponse, Response},
 };
 use serde::{Deserialize, Serialize};
 use shardline_index::{RepoKey, RevisionRecord, TreeKey};
-use shardline_protocol::{TokenScope, unix_now_seconds_lossy};
+use shardline_protocol::unix_now_seconds_lossy;
+use shardline_server_core::AuthorizedRepository;
 
 use crate::{
     ServerError,
-    app::{AppState, authorize, endpoint_body_limit, scope_from_auth},
-    auth::AuthContext,
+    app::{
+        AppState, endpoint_body_limit,
+        reconstruction_routes::{XetRepository, XetWriteRepository},
+    },
     upload_ingest::{RequestBodyReader, read_body_to_bytes},
 };
 
@@ -186,37 +188,36 @@ fn validate_revision(rev: &str) -> Result<(), ServerError> {
 
 /// Cross-checks the authenticated scope against the full route scope, including revision.
 fn check_scope(
-    auth: Option<&AuthContext>,
+    auth: Option<&AuthorizedRepository>,
     provider: &str,
     owner: &str,
     repo: &str,
     rev: &str,
 ) -> Result<(), ServerError> {
-    if let Some(auth) = auth {
-        let scope = auth.claims().repository();
-        if scope.provider().as_str() != provider
-            || scope.owner() != owner
-            || scope.name() != repo
-            || scope.revision() != Some(rev)
-        {
-            return Err(ServerError::InsufficientScope);
-        }
+    if let Some(repository_scope) = auth.and_then(AuthorizedRepository::repository)
+        && (repository_scope.provider().as_str() != provider
+            || repository_scope.owner() != owner
+            || repository_scope.name() != repo
+            || repository_scope.revision() != Some(rev))
+    {
+        return Err(ServerError::InsufficientScope);
     }
     Ok(())
 }
 
 /// Cross-checks the authenticated scope against the route repository identity only.
 fn check_scope_repo(
-    auth: Option<&AuthContext>,
+    auth: Option<&AuthorizedRepository>,
     provider: &str,
     owner: &str,
     repo: &str,
 ) -> Result<(), ServerError> {
-    if let Some(auth) = auth {
-        let scope = auth.claims().repository();
-        if scope.provider().as_str() != provider || scope.owner() != owner || scope.name() != repo {
-            return Err(ServerError::InsufficientScope);
-        }
+    if let Some(repository_scope) = auth.and_then(AuthorizedRepository::repository)
+        && (repository_scope.provider().as_str() != provider
+            || repository_scope.owner() != owner
+            || repository_scope.name() != repo)
+    {
+        return Err(ServerError::InsufficientScope);
     }
     Ok(())
 }
@@ -259,11 +260,11 @@ fn derive_child(scan_prefix: &str, raw_path: &str) -> Option<(String, bool)> {
 pub(super) async fn tree_lookup(
     State(state): State<Arc<AppState>>,
     Path((provider, owner, repo, rev)): Path<(String, String, String, String)>,
-    headers: HeaderMap,
+    repo_capability: XetRepository,
     Query(query): Query<TreeLookupQuery>,
 ) -> Result<Response, ServerError> {
-    let auth = authorize(&state, &headers, TokenScope::Read)?;
-    check_scope(auth.as_ref(), &provider, &owner, &repo, &rev)?;
+    let auth = Some(repo_capability.capability());
+    check_scope(auth, &provider, &owner, &repo, &rev)?;
     validate_revision(&rev)?;
 
     if let Some(path) = query.path.as_deref() {
@@ -359,11 +360,11 @@ async fn build_list_response(
 pub(super) async fn register_path(
     State(state): State<Arc<AppState>>,
     Path((provider, owner, repo, rev, path)): Path<(String, String, String, String, String)>,
-    headers: HeaderMap,
+    repo_capability: XetWriteRepository,
     body: Body,
 ) -> Result<Json<RegisterResponse>, ServerError> {
-    let auth = authorize(&state, &headers, TokenScope::Write)?;
-    check_scope(auth.as_ref(), &provider, &owner, &repo, &rev)?;
+    let auth = Some(repo_capability.capability());
+    check_scope(auth, &provider, &owner, &repo, &rev)?;
     validate_revision(&rev)?;
     let path = normalize_path(&path, false)?;
 
@@ -377,7 +378,7 @@ pub(super) async fn register_path(
         serde_json::from_slice(&bytes).map_err(|_error| ServerError::InvalidPath)?;
 
     let key = TreeKey::new(&provider, &owner, &repo, &rev);
-    let scope = auth.as_ref().map(scope_from_auth);
+    let scope = repo_capability.capability().namespace();
     let outcome = state
         .backend
         .register_tree_path(&key, &path, &parsed.file_id, scope)
@@ -394,11 +395,11 @@ pub(super) async fn register_path(
 pub(super) async fn delete_path(
     State(state): State<Arc<AppState>>,
     Path((provider, owner, repo, rev, path)): Path<(String, String, String, String, String)>,
-    headers: HeaderMap,
+    repo_capability: XetWriteRepository,
     Query(query): Query<DeletePathQuery>,
 ) -> Result<Json<DeletePathResponse>, ServerError> {
-    let auth = authorize(&state, &headers, TokenScope::Write)?;
-    check_scope(auth.as_ref(), &provider, &owner, &repo, &rev)?;
+    let auth = Some(repo_capability.capability());
+    check_scope(auth, &provider, &owner, &repo, &rev)?;
     validate_revision(&rev)?;
     let path = normalize_path(&path, false)?;
     let recursive = query.recursive.unwrap_or(false);
@@ -417,10 +418,10 @@ pub(super) async fn delete_path(
 pub(super) async fn list_revisions(
     State(state): State<Arc<AppState>>,
     Path((provider, owner, repo)): Path<(String, String, String)>,
-    headers: HeaderMap,
+    repo_capability: XetRepository,
 ) -> Result<Json<RevisionsResponse>, ServerError> {
-    let auth = authorize(&state, &headers, TokenScope::Read)?;
-    check_scope_repo(auth.as_ref(), &provider, &owner, &repo)?;
+    let auth = Some(repo_capability.capability());
+    check_scope_repo(auth, &provider, &owner, &repo)?;
     let key = RepoKey::new(&provider, &owner, &repo);
     let revisions = state.backend.list_revisions(&key).await?;
     Ok(Json(RevisionsResponse {
@@ -438,10 +439,10 @@ pub(super) async fn list_revisions(
 pub(super) async fn create_revision(
     State(state): State<Arc<AppState>>,
     Path((provider, owner, repo, rev)): Path<(String, String, String, String)>,
-    headers: HeaderMap,
+    repo_capability: XetWriteRepository,
 ) -> Result<Json<RevisionJson>, ServerError> {
-    let auth = authorize(&state, &headers, TokenScope::Write)?;
-    check_scope(auth.as_ref(), &provider, &owner, &repo, &rev)?;
+    let auth = Some(repo_capability.capability());
+    check_scope(auth, &provider, &owner, &repo, &rev)?;
     validate_revision(&rev)?;
     let now = unix_now_seconds_lossy();
     let record = RevisionRecord {
@@ -466,10 +467,10 @@ pub(super) async fn create_revision(
 pub(super) async fn delete_revision(
     State(state): State<Arc<AppState>>,
     Path((provider, owner, repo, rev)): Path<(String, String, String, String)>,
-    headers: HeaderMap,
+    repo_capability: XetWriteRepository,
 ) -> Result<Json<DeleteRevisionResponse>, ServerError> {
-    let auth = authorize(&state, &headers, TokenScope::Write)?;
-    check_scope(auth.as_ref(), &provider, &owner, &repo, &rev)?;
+    let auth = Some(repo_capability.capability());
+    check_scope(auth, &provider, &owner, &repo, &rev)?;
     validate_revision(&rev)?;
     let key = RepoKey::new(&provider, &owner, &repo);
     let deleted = state.backend.delete_revision(&key, &rev).await?;

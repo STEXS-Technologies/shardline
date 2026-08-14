@@ -128,3 +128,6 @@ Provider root state, retention metadata, and quarantine metadata are lifecycle s
 not derived reconstruction state.
 Use `shardline fsck` to validate them and `shardline repair lifecycle` to prune stale
 lifecycle entries.
+
+For recovery runbooks that use rebuild after metadata loss, node loss, or cross-node
+moves, see [Disaster Recovery](DISASTER_RECOVERY.md).

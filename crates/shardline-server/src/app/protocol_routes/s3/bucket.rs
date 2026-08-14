@@ -15,36 +15,34 @@ use axum::{
     http::{HeaderMap, StatusCode, Uri},
     response::{IntoResponse, Response},
 };
-use shardline_protocol::TokenScope;
 use shardline_s3_adapter::{
     ListBucketsResult, MAX_S3_DELETE_KEYS, S3Error, S3SubResource, classify, encode_bucket,
-    parse_delete_object_keys, require_s3_bucket_binding, s3_object_key,
+    parse_delete_object_keys, s3_object_key,
 };
 
-use super::{authorize_s3, listing, parse_s3_query, s3_xml_content_type};
+use super::{S3Repository, listing, parse_s3_query, s3_xml_content_type};
 use crate::{
-    app::{AppState, scope_from_auth},
+    app::AppState,
     protocol_support::scope_namespace,
     upload_ingest::{RequestBodyReader, read_body_to_bytes},
 };
 
 /// `GET /` — `ListBuckets` (service level).
 ///
-/// The caller's token is bound to exactly one bucket (`{owner}.{name}` from
-/// the claims, via [`encode_bucket`]), so the response lists that single
-/// bucket. Missing claims (no auth provider, or a bearer-only request without
-/// credentials) is `403 AccessDenied`.
-#[tracing::instrument(skip(state, headers), fields(bucket))]
+/// The caller's capability is bound to exactly one bucket (`{owner}.{name}`
+/// from its repository scope, via [`encode_bucket`]), so the response lists
+/// that single bucket. A capability without a repository (permissive mode, or
+/// no credentials) is `403 AccessDenied`.
+#[tracing::instrument(skip(auth, _headers), fields(bucket))]
 pub(crate) async fn s3_list_buckets(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    auth: S3Repository,
+    _headers: HeaderMap,
 ) -> Result<Response, S3Error> {
-    let auth = authorize_s3(&state, &headers, TokenScope::Read)?;
-    let claims = auth
-        .as_ref()
-        .map(scope_from_auth)
+    let repository = auth
+        .capability()
+        .repository()
         .ok_or_else(S3Error::access_denied)?;
-    let bucket = encode_bucket(claims.owner(), claims.name());
+    let bucket = encode_bucket(repository.owner(), repository.name());
     let xml = ListBucketsResult {
         buckets: vec![bucket],
     }
@@ -58,36 +56,32 @@ pub(crate) async fn s3_list_buckets(
 }
 
 /// `PUT /{bucket}` — `CreateBucket` stub: a no-op `200` once the bucket
-/// decodes and binds to the token scope.
-#[tracing::instrument(skip(state, headers), fields(bucket))]
+/// decodes and binds to the capability (done by the [`S3Repository`]
+/// extractor).
+#[tracing::instrument(skip(_auth, _headers), fields(bucket))]
 pub(crate) async fn s3_create_bucket(
-    State(state): State<Arc<AppState>>,
-    Path(bucket): Path<String>,
+    _auth: S3Repository,
+    Path(_bucket): Path<String>,
     uri: Uri,
-    headers: HeaderMap,
+    _headers: HeaderMap,
 ) -> Result<Response, S3Error> {
-    let auth = authorize_s3(&state, &headers, TokenScope::Write)?;
-    let claims = auth.as_ref().map(scope_from_auth);
     let query = parse_s3_query(&uri)?;
     if !classify(&query).is_empty() {
         return Err(S3Error::not_implemented());
     }
-    require_s3_bucket_binding(claims, &bucket)?;
     Ok(StatusCode::OK.into_response())
 }
 
 /// `HEAD /{bucket}` — `HeadBucket` connect probe: `200` when the bucket
-/// decodes and binds, `404 NoSuchBucket` when undecodable, `403 AccessDenied`
-/// on claims mismatch.
-#[tracing::instrument(skip(state, headers), fields(bucket))]
+/// decodes and binds to the capability (the [`S3Repository`] extractor already
+/// rejected undecodable buckets with `404 NoSuchBucket` and mismatches with
+/// `403 AccessDenied`).
+#[tracing::instrument(skip(_auth, _headers), fields(bucket))]
 pub(crate) async fn s3_head_bucket(
-    State(state): State<Arc<AppState>>,
-    Path(bucket): Path<String>,
-    headers: HeaderMap,
+    _auth: S3Repository,
+    Path(_bucket): Path<String>,
+    _headers: HeaderMap,
 ) -> Result<Response, S3Error> {
-    let auth = authorize_s3(&state, &headers, TokenScope::Read)?;
-    let claims = auth.as_ref().map(scope_from_auth);
-    require_s3_bucket_binding(claims, &bucket)?;
     Ok(StatusCode::OK.into_response())
 }
 
@@ -100,17 +94,15 @@ pub(crate) async fn s3_head_bucket(
 /// which `s3cmd` and other legacy clients send for `ls` — and dispatches to
 /// [`s3_list_objects_v1`](listing::s3_list_objects_v1); `?list-type=1` and
 /// every other bucket sub-resource respond `501 NotImplemented`.
-#[tracing::instrument(skip(state, headers), fields(bucket))]
+#[tracing::instrument(skip(auth, state, headers), fields(bucket))]
 pub(crate) async fn s3_get_bucket(
+    auth: S3Repository,
     State(state): State<Arc<AppState>>,
     Path(bucket): Path<String>,
     uri: Uri,
     headers: HeaderMap,
 ) -> Result<Response, S3Error> {
-    let auth = authorize_s3(&state, &headers, TokenScope::Read)?;
-    let claims = auth.as_ref().map(scope_from_auth);
     let query = parse_s3_query(&uri)?;
-    require_s3_bucket_binding(claims, &bucket)?;
     let resources = classify(&query);
     if resources
         .iter()
@@ -122,27 +114,24 @@ pub(crate) async fn s3_get_bucket(
         .iter()
         .any(|resource| matches!(resource, S3SubResource::ListObjects))
     {
-        return listing::s3_list_objects_v2(State(state), Path(bucket), uri, headers).await;
+        return listing::s3_list_objects_v2(auth, State(state), Path(bucket), uri, headers).await;
     }
     if resources.is_empty() {
-        return listing::s3_list_objects_v1(State(state), Path(bucket), uri, headers).await;
+        return listing::s3_list_objects_v1(auth, State(state), Path(bucket), uri, headers).await;
     }
     Err(S3Error::not_implemented())
 }
 
 /// `DELETE /{bucket}` — `DeleteBucket` is explicitly out of scope:
 /// `501 NotImplemented`.
-#[tracing::instrument(skip(state, headers), fields(bucket))]
+#[tracing::instrument(skip(_auth, _headers), fields(bucket))]
 pub(crate) async fn s3_delete_bucket(
-    State(state): State<Arc<AppState>>,
-    Path(bucket): Path<String>,
+    _auth: S3Repository,
+    Path(_bucket): Path<String>,
     uri: Uri,
-    headers: HeaderMap,
+    _headers: HeaderMap,
 ) -> Result<Response, S3Error> {
-    let auth = authorize_s3(&state, &headers, TokenScope::Write)?;
-    let claims = auth.as_ref().map(scope_from_auth);
     let _query = parse_s3_query(&uri)?;
-    require_s3_bucket_binding(claims, &bucket)?;
     Err(S3Error::not_implemented())
 }
 
@@ -166,18 +155,16 @@ pub(crate) async fn s3_delete_bucket(
 ///   the batch, so a request never mutates state and then fails part-way; the
 ///   valid keys are deleted and the response is `200` with `<Deleted>` rows for
 ///   the successes and `<Error>` rows for the failures, in request order.
-#[tracing::instrument(skip(state, headers, body), fields(bucket))]
+#[tracing::instrument(skip(auth, state, _headers, body), fields(bucket))]
 pub(crate) async fn s3_post_bucket(
+    auth: S3Repository,
     State(state): State<Arc<AppState>>,
-    Path(bucket): Path<String>,
+    Path(_bucket): Path<String>,
     uri: Uri,
-    headers: HeaderMap,
+    _headers: HeaderMap,
     body: Body,
 ) -> Result<Response, S3Error> {
-    let auth = authorize_s3(&state, &headers, TokenScope::Write)?;
-    let claims = auth.as_ref().map(scope_from_auth);
     let query = parse_s3_query(&uri)?;
-    require_s3_bucket_binding(claims, &bucket)?;
     if !classify(&query)
         .iter()
         .any(|resource| matches!(resource, S3SubResource::DeleteObjects))
@@ -185,7 +172,7 @@ pub(crate) async fn s3_post_bucket(
         return Err(S3Error::not_implemented());
     }
 
-    let scope_namespace = scope_namespace(claims);
+    let scope_namespace = scope_namespace(auth.capability().namespace());
     let mut reader = RequestBodyReader::from_body(body, state.config.max_request_body_bytes())
         .map_err(S3Error::from)?;
     let bytes = read_body_to_bytes(&mut reader)

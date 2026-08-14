@@ -84,3 +84,7 @@ shardline repair
 
 For full restore, recover object storage and metadata from their native backup systems,
 then run `shardline repair` before returning traffic.
+
+For scenario-by-scenario recovery procedures built on these manifests — node loss,
+metadata loss, object-store loss, crash mid-upload, and cross-node moves — see
+[Disaster Recovery](DISASTER_RECOVERY.md).

@@ -531,9 +531,18 @@ async fn poc_f8_phantom_delete_serialized() {
     let url = format!("/{BUCKET}/{key}");
 
     // Resolve the per-key lock the handlers use and hold it ourselves,
-    // standing in for an in-flight PUT that is mid-upload/mid-swap.
-    let claims = RepositoryScope::new(RepositoryProvider::Generic, OWNER, NAME, None).unwrap();
-    let context = require_s3_object_context(Some(&claims), BUCKET, key).unwrap();
+    // standing in for an in-flight PUT that is mid-upload/mid-swap. Mint the
+    // same typed capability the S3Repository extractor would (verified-context
+    // seam) so the derived storage object key — and therefore the per-key
+    // lock — matches the handlers' exactly.
+    let repo = RepositoryScope::new(RepositoryProvider::Generic, OWNER, NAME, None).unwrap();
+    let claims = TokenClaims::new("shardline", "test", TokenScope::Write, repo, u64::MAX).unwrap();
+    let capability = shardline_server_core::AuthorizedRepository::from_verified_context(
+        shardline_server_core::AuthContext::new(claims),
+        TokenScope::Write,
+    )
+    .unwrap();
+    let context = require_s3_object_context(&capability, key).unwrap();
     let object_lock = acquire_object_upload_lock(context.object_key.as_str());
     let _test_guard = object_lock.lock().await;
 

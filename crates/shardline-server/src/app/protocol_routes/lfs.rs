@@ -8,22 +8,24 @@ use std::time::Instant;
 use axum::{
     Json,
     body::Body,
-    extract::{Path, State},
+    extract::{FromRequestParts, Path, State},
     http::{
         HeaderMap, StatusCode,
         header::{CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE},
+        request::Parts,
     },
     response::{IntoResponse, Response},
 };
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use shardline_protocol::TokenScope;
+use shardline_server_core::AuthorizedRepository;
 
 use futures_util::StreamExt;
 use shardline_storage::DeleteOutcome;
 
 use super::{MAX_LFS_BATCH_OBJECTS, direct_object_response};
-use crate::app::{AppState, authorize, scope_from_auth};
+use crate::app::{AppState, authorize};
 use crate::{
     LFS_CONTENT_TYPE, LfsBatchRequest, LfsBatchResponse, LfsObjectError, LfsObjectResponse,
     LfsOperation, ServerError, TransferAdapter,
@@ -43,6 +45,102 @@ const MAX_LFS_PATCH_RANGES: usize = 65_536;
 /// request an arbitrary `u64` offset (which would create a multi-TiB sparse
 /// staging file). One TiB is well above any legitimate dataset/model object.
 const MAX_LFS_OBJECT_SIZE: u64 = 1 << 40; // 1 TiB
+
+/// Runs the shared authorize chain and mints a typed [`AuthorizedRepository`]
+/// capability for LFS requests.
+///
+/// LFS URLs carry no repository segment, so the repository identity comes
+/// exclusively from the verified token claims (isolated via the token's
+/// `RepositoryScope` namespace). This reproduces today's chain in the same
+/// order: [`authorize`](crate::app::authorize) (permissive `Ok(None)` when no
+/// auth provider is configured) → mint: verified context → `from_verified_context`,
+/// `None` → `anonymous_full_access()`.
+fn authorize_repository(
+    state: &AppState,
+    headers: &HeaderMap,
+    required_scope: TokenScope,
+) -> Result<AuthorizedRepository, ServerError> {
+    authorize(state, headers, required_scope)?.map_or_else(
+        || Ok(AuthorizedRepository::anonymous_full_access()),
+        |ctx| {
+            // Bridge the server crate's own AuthContext (already verified)
+            // into the core AuthContext that the capability seam consumes.
+            let core_ctx = shardline_server_core::AuthContext::new(ctx.claims().clone());
+            AuthorizedRepository::from_verified_context(core_ctx, required_scope)
+                .map_err(ServerError::from)
+        },
+    )
+}
+
+/// Read-scoped LFS authorization capability, extracted from the request.
+///
+/// Because LFS URLs carry no repository path segment, the capability's
+/// namespace comes entirely from the verified token claims. The extractor
+/// reproduces today's authorize chain exactly: `authorize` (permissive
+/// `Ok(None)` when `state.auth` is `None`) → verified context → capability,
+/// or `anonymous_full_access()` for permissive mode.
+#[derive(Debug)]
+pub struct LfsRepository {
+    auth: AuthorizedRepository,
+}
+
+/// Write-scoped LFS authorization capability, extracted from the request.
+#[derive(Debug)]
+pub struct LfsWriteRepository {
+    auth: AuthorizedRepository,
+}
+
+impl LfsRepository {
+    /// Read-scoped construction from request headers.
+    fn read(state: &AppState, headers: &HeaderMap) -> Result<Self, ServerError> {
+        Ok(Self {
+            auth: authorize_repository(state, headers, TokenScope::Read)?,
+        })
+    }
+
+    /// The typed, verified authorization capability.
+    pub(crate) const fn capability(&self) -> &AuthorizedRepository {
+        &self.auth
+    }
+}
+
+impl LfsWriteRepository {
+    /// Write-scoped construction from request headers.
+    fn write(state: &AppState, headers: &HeaderMap) -> Result<Self, ServerError> {
+        Ok(Self {
+            auth: authorize_repository(state, headers, TokenScope::Write)?,
+        })
+    }
+
+    /// The typed, verified authorization capability.
+    pub(crate) const fn capability(&self) -> &AuthorizedRepository {
+        &self.auth
+    }
+}
+
+impl FromRequestParts<Arc<AppState>> for LfsRepository {
+    type Rejection = ServerError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
+        // Borrow (do not consume) the headers: handlers extract `HeaderMap`
+        // separately for CONTENT_LENGTH / CONTENT_RANGE / range parsing.
+        Self::read(state, &parts.headers)
+    }
+}
+
+impl FromRequestParts<Arc<AppState>> for LfsWriteRepository {
+    type Rejection = ServerError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
+        Self::write(state, &parts.headers)
+    }
+}
 
 /// Returns a 422 UNPROCESSABLE_ENTITY response for LFS validation errors.
 fn lfs_validation_response(message: &str) -> Response {
@@ -162,7 +260,9 @@ pub(crate) async fn lfs_batch(
         LfsOperation::Download => TokenScope::Read,
         LfsOperation::Upload => TokenScope::Write,
     };
-    let auth = authorize(&state, &headers, requested_scope)?;
+    // The batch operation field selects the scope; the capability is minted
+    // from the request headers exactly as the per-object handlers do.
+    let auth = authorize_repository(&state, &headers, requested_scope)?;
     if request.objects.len() > MAX_LFS_BATCH_OBJECTS {
         return Ok((
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -182,8 +282,6 @@ pub(crate) async fn lfs_batch(
             .into_response());
     }
 
-    let scope = auth.as_ref().map(scope_from_auth);
-
     // Determine the transfer adapter. Prefer "xet" when the client supports it
     // and the server has an auth provider to mint CAS tokens. Fall back to "basic".
     let adapters: Vec<Option<TransferAdapter>> = request
@@ -197,7 +295,7 @@ pub(crate) async fn lfs_batch(
         .collect();
     let supports_xet = adapters.contains(&Some(TransferAdapter::Xet));
     let supports_basic = adapters.contains(&Some(TransferAdapter::Basic));
-    let use_xet = supports_xet && state.auth.is_some() && auth.is_some();
+    let use_xet = supports_xet && state.auth.is_some() && auth.claims().is_some();
     let transfer = if use_xet {
         "xet"
     } else if request.transfers.is_empty() || supports_basic {
@@ -214,11 +312,11 @@ pub(crate) async fn lfs_batch(
     // Mint a CAS token when using xet transfer. The existing claims are
     // re-signed so git-xet receives a scoped token for the CAS layer.
     let cas_token = if use_xet {
-        auth.as_ref().and_then(|ctx| {
+        auth.claims().and_then(|claims| {
             state
                 .auth
                 .as_ref()
-                .and_then(|server_auth| server_auth.provider().mint_token(ctx.claims()).ok())
+                .and_then(|server_auth| server_auth.provider().mint_token(claims).ok())
         })
     } else {
         None
@@ -238,7 +336,7 @@ pub(crate) async fn lfs_batch(
 
     let mut objects = Vec::with_capacity(request.objects.len());
     for object in request.objects {
-        let object_key = match lfs_object_key(&object.oid, scope) {
+        let object_key = match lfs_object_key(&object.oid, &auth) {
             Ok(k) => k,
             Err(e) => {
                 tracing::debug!(error = %e, "LFS OID parsing failed");
@@ -272,7 +370,7 @@ pub(crate) async fn lfs_batch(
                     objects.push(LfsObjectResponse {
                         oid: object.oid,
                         size: length,
-                        authenticated: Some(auth.is_some()),
+                        authenticated: Some(auth.claims().is_some()),
                         actions: Some(action),
                         error: None,
                     });
@@ -320,7 +418,7 @@ pub(crate) async fn lfs_batch(
                 objects.push(LfsObjectResponse {
                     oid: object.oid,
                     size,
-                    authenticated: Some(auth.is_some()),
+                    authenticated: Some(auth.claims().is_some()),
                     actions,
                     error: None,
                 });
@@ -342,10 +440,10 @@ pub(crate) async fn lfs_batch(
 pub(crate) async fn lfs_get_object(
     State(state): State<Arc<AppState>>,
     Path(oid): Path<String>,
+    repo: LfsRepository,
     headers: HeaderMap,
 ) -> Result<Response, ServerError> {
-    let auth = authorize(&state, &headers, TokenScope::Read)?;
-    let object_key = match lfs_object_key(&oid, auth.as_ref().map(scope_from_auth)) {
+    let object_key = match lfs_object_key(&oid, repo.capability()) {
         Ok(k) => k,
         Err(e) => {
             tracing::debug!(error = %e, "LFS OID parsing failed");
@@ -364,14 +462,14 @@ pub(crate) async fn lfs_get_object(
     .await
 }
 
-#[tracing::instrument(skip(state, headers), fields(oid))]
+#[tracing::instrument(skip(state, _headers), fields(oid))]
 pub(crate) async fn lfs_head_object(
     State(state): State<Arc<AppState>>,
     Path(oid): Path<String>,
-    headers: HeaderMap,
+    repo: LfsRepository,
+    _headers: HeaderMap,
 ) -> Result<Response, ServerError> {
-    let auth = authorize(&state, &headers, TokenScope::Read)?;
-    let object_key = match lfs_object_key(&oid, auth.as_ref().map(scope_from_auth)) {
+    let object_key = match lfs_object_key(&oid, repo.capability()) {
         Ok(k) => k,
         Err(e) => {
             tracing::debug!(error = %e, "LFS OID parsing failed");
@@ -393,10 +491,10 @@ pub(crate) async fn lfs_head_object(
 pub(crate) async fn lfs_put_object(
     State(state): State<Arc<AppState>>,
     Path(oid): Path<String>,
+    repo: LfsWriteRepository,
     headers: HeaderMap,
     body: Body,
 ) -> Result<impl IntoResponse, ServerError> {
-    let auth = authorize(&state, &headers, TokenScope::Write)?;
     let _admit = state
         .admission
         .try_acquire(weights::XORB_UPLOAD)
@@ -407,7 +505,7 @@ pub(crate) async fn lfs_put_object(
     // regardless of Content-Type. Accept any Content-Type, including no
     // Content-Type, to interoperate with git-lfs and other LFS clients.
 
-    let object_key = match lfs_object_key(&oid, auth.as_ref().map(scope_from_auth)) {
+    let object_key = match lfs_object_key(&oid, repo.capability()) {
         Ok(k) => k,
         Err(e) => {
             tracing::debug!(error = %e, "LFS OID parsing failed");
@@ -431,14 +529,14 @@ pub(crate) async fn lfs_put_object(
     Ok(StatusCode::OK.into_response())
 }
 
-#[tracing::instrument(skip(state, headers))]
+#[tracing::instrument(skip(state, _headers))]
 pub(crate) async fn lfs_delete_object(
     State(state): State<Arc<AppState>>,
     Path(oid): Path<String>,
-    headers: HeaderMap,
+    repo: LfsWriteRepository,
+    _headers: HeaderMap,
 ) -> Result<impl IntoResponse, ServerError> {
-    let auth = authorize(&state, &headers, TokenScope::Write)?;
-    let object_key = match lfs_object_key(&oid, auth.as_ref().map(scope_from_auth)) {
+    let object_key = match lfs_object_key(&oid, repo.capability()) {
         Ok(k) => k,
         Err(e) => {
             tracing::debug!(error = %e, "LFS OID parsing failed");
@@ -460,11 +558,11 @@ pub(crate) async fn lfs_delete_object(
 pub(crate) async fn lfs_patch_object(
     State(state): State<Arc<AppState>>,
     Path(oid): Path<String>,
+    repo: LfsWriteRepository,
     headers: HeaderMap,
     body: Body,
 ) -> Result<impl IntoResponse, ServerError> {
-    let auth = authorize(&state, &headers, TokenScope::Write)?;
-    let object_key = match lfs_object_key(&oid, auth.as_ref().map(scope_from_auth)) {
+    let object_key = match lfs_object_key(&oid, repo.capability()) {
         Ok(k) => k,
         Err(e) => {
             tracing::debug!(error = %e, "LFS OID parsing failed");
@@ -628,14 +726,14 @@ pub(crate) async fn lfs_patch_object(
 /// Verifies that an object exists in the store and that its SHA-256 hash
 /// matches the requested OID.  Returns 200 OK on success, 404 if not found,
 /// or 422 if the hash does not match.
-#[tracing::instrument(skip(state, headers), fields(oid))]
+#[tracing::instrument(skip(state, _headers), fields(oid))]
 pub(crate) async fn lfs_verify_object(
     State(state): State<Arc<AppState>>,
     Path(oid): Path<String>,
-    headers: HeaderMap,
+    repo: LfsWriteRepository,
+    _headers: HeaderMap,
 ) -> Result<impl IntoResponse, ServerError> {
-    let auth = authorize(&state, &headers, TokenScope::Write)?;
-    let object_key = match lfs_object_key(&oid, auth.as_ref().map(scope_from_auth)) {
+    let object_key = match lfs_object_key(&oid, repo.capability()) {
         Ok(k) => k,
         Err(e) => {
             tracing::debug!(error = %e, "LFS OID parsing failed");
@@ -735,6 +833,7 @@ mod tests {
     use tower::ServiceExt;
 
     use crate::{ServerConfig, ServerFrontend, ServerRole, app::AppState, lfs_object_key};
+    use shardline_server_core::AuthorizedRepository;
 
     use super::{
         acquire_lfs_patch_lock, lfs_batch, lfs_delete_object, lfs_get_object, lfs_head_object,
@@ -2245,7 +2344,9 @@ mod tests {
         // under it.  The verify endpoint will read the bytes, re-hash them,
         // and find that sha256(content) != second_oid, triggering a 422.
         let second_oid = test_oid(b"different-content-only-for-key");
-        let object_key = lfs_object_key(&second_oid, None).expect("object key");
+        let object_key =
+            lfs_object_key(&second_oid, &AuthorizedRepository::anonymous_full_access())
+                .expect("object key");
         state
             .backend
             .put_object_bytes_if_absent(&object_key, content.to_vec())
@@ -2276,7 +2377,8 @@ mod tests {
         let (state, _tmp) = build_test_state().await;
         let app = lfs_router(state.clone());
         let oid = test_oid_constant();
-        let object_key = lfs_object_key(&oid, None).expect("object key");
+        let object_key = lfs_object_key(&oid, &AuthorizedRepository::anonymous_full_access())
+            .expect("object key");
 
         // Store an initial object with known size
         let content = b"0123456789abcdef";
@@ -2332,7 +2434,8 @@ mod tests {
         let oid = test_oid(content);
 
         // Store a small object under the correct OID key.
-        let object_key = lfs_object_key(&oid, None).expect("object key");
+        let object_key = lfs_object_key(&oid, &AuthorizedRepository::anonymous_full_access())
+            .expect("object key");
         state
             .backend
             .put_object_bytes_if_absent(&object_key, content.to_vec())

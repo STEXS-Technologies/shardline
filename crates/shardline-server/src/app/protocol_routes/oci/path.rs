@@ -22,6 +22,20 @@ pub(crate) enum OciPath {
     },
 }
 
+impl OciPath {
+    /// Returns the requested repository name carried by this parsed OCI path.
+    #[must_use]
+    pub(crate) fn repository(&self) -> &str {
+        match self {
+            OciPath::Blob { repository, .. }
+            | OciPath::BlobUploads { repository }
+            | OciPath::BlobUploadSession { repository, .. }
+            | OciPath::Manifest { repository, .. }
+            | OciPath::TagsList { repository } => repository,
+        }
+    }
+}
+
 pub(crate) fn parse_oci_path(path: &str) -> Result<OciPath, ServerError> {
     let path = path.trim_end_matches('/');
     if let Some(repository) = path.strip_suffix("/blobs/uploads") {

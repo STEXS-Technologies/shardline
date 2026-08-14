@@ -1,4 +1,5 @@
 use shardline_protocol::ByteRange;
+use shardline_server_core::AuthorizedRepository;
 use shardline_storage::ObjectStore;
 
 use crate::{error::HubApiError, routes::HubState};
@@ -16,7 +17,14 @@ pub fn resolve_file_from_store(
     commit_sha: &str,
     file_path: &str,
 ) -> Result<DownloadResult, HubApiError> {
-    resolve_file_from_store_scoped(state, commit_sha, file_path, None)
+    resolve_file_from_store_scoped(
+        state,
+        commit_sha,
+        file_path,
+        // Anonymous capability resolves to the global (unscoped) namespace,
+        // exactly matching the historical `None` scope argument.
+        &AuthorizedRepository::anonymous_full_access(),
+    )
 }
 
 /// Resolves a file download request, namespacing LFS object reads by the
@@ -32,7 +40,7 @@ pub fn resolve_file_from_store_scoped(
     state: &HubState,
     commit_sha: &str,
     file_path: &str,
-    repository_scope: Option<&shardline_protocol::RepositoryScope>,
+    auth: &AuthorizedRepository,
 ) -> Result<DownloadResult, HubApiError> {
     let files = state
         .store
@@ -43,7 +51,7 @@ pub fn resolve_file_from_store_scoped(
         .find(|f| f.path == file_path)
         .ok_or(HubApiError::NotFound)?;
 
-    let content = get_object_store_content(state, &file.sha, repository_scope);
+    let content = get_object_store_content(state, &file.sha, auth);
 
     if file.size <= MAX_INLINE_SIZE {
         Ok(DownloadResult::Inline {
@@ -73,9 +81,9 @@ const MAX_INLINE_SIZE: u64 = 1_048_576;
 fn get_object_store_content(
     state: &HubState,
     sha: &str,
-    repository_scope: Option<&shardline_protocol::RepositoryScope>,
+    auth: &AuthorizedRepository,
 ) -> Option<Vec<u8>> {
-    let key = crate::routes::lfs_object_key(sha, repository_scope).ok()?;
+    let key = crate::routes::lfs_object_key(sha, auth).ok()?;
     let size = state.object_store.metadata(&key).ok()??.length();
     let range_end = size.checked_sub(1)?;
     let range = ByteRange::new(0, range_end).ok()?;
@@ -336,7 +344,9 @@ mod tests {
         // Pre-load content into ObjectStore using the repository-namespaced key
         // (global namespace, matching the scope used by these tests).
         for (sha, data) in content {
-            let key = crate::routes::lfs_object_key(sha, None).expect("valid key");
+            let key =
+                crate::routes::lfs_object_key(sha, &AuthorizedRepository::anonymous_full_access())
+                    .expect("valid key");
             let body = ObjectBody::from_slice(data);
             let integrity = ObjectIntegrity::new(
                 shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(data).as_bytes()),

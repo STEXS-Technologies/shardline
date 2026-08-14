@@ -1,44 +1,48 @@
-use axum::http::HeaderMap;
 use axum::{
     extract::{Path, State},
     response::{IntoResponse, Redirect, Response},
 };
 
 use crate::{error::HubApiError, resolve};
-use shardline_protocol::TokenScope;
 
-use super::{HubState, authorize_with_context, require_repository_binding};
+use super::{HubRepository, HubState};
 
 // ---- File resolve (download, requires Read) ----
 
 pub(crate) async fn resolve_file(
     State(state): State<HubState>,
-    headers: HeaderMap,
-    Path((_repo_type, ns, repo, rev, file_path)): Path<(String, String, String, String, String)>,
+    repo: HubRepository,
+    Path((_repo_type, ns, repo_name, rev, file_path)): Path<(
+        String,
+        String,
+        String,
+        String,
+        String,
+    )>,
 ) -> Result<Response, HubApiError> {
-    resolve_file_for_repository(state, headers, ns, repo, rev, file_path).await
+    resolve_file_for_repository(state, repo, ns, repo_name, rev, file_path).await
 }
 
 pub(crate) async fn resolve_model_file(
     State(state): State<HubState>,
-    headers: HeaderMap,
-    Path((ns, repo, rev, file_path)): Path<(String, String, String, String)>,
+    repo: HubRepository,
+    Path((ns, repo_name, rev, file_path)): Path<(String, String, String, String)>,
 ) -> Result<Response, HubApiError> {
-    resolve_file_for_repository(state, headers, ns, repo, rev, file_path).await
+    resolve_file_for_repository(state, repo, ns, repo_name, rev, file_path).await
 }
 
 async fn resolve_file_for_repository(
     state: HubState,
-    headers: HeaderMap,
+    repo: HubRepository,
     ns: String,
-    repo: String,
+    repo_name: String,
     rev: String,
     file_path: String,
 ) -> Result<Response, HubApiError> {
     shardline_metrics::record_hub_api_request("resolve_file", "GET", 200);
-    let auth_ctx = authorize_with_context(&state, &headers, TokenScope::Read)?;
-    require_repository_binding(auth_ctx.as_ref(), &ns, &repo)?;
-    let name = format!("{ns}/{repo}");
+    // The extractor has already authorized the request and minted the
+    // capability; its repository scope namespaces the object-store reads.
+    let name = format!("{ns}/{repo_name}");
     let commit_sha = state
         .store
         .resolve_revision(&name, &rev)
@@ -48,7 +52,7 @@ async fn resolve_file_for_repository(
         &state,
         &commit_sha,
         &file_path,
-        auth_ctx.as_ref().map(|c| c.claims().repository()),
+        repo.capability(),
     )?;
 
     match result {

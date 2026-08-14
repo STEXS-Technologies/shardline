@@ -9,7 +9,6 @@ use axum::{
     response::Response,
 };
 use shardline_metrics::metrics;
-use shardline_protocol::TokenScope;
 
 use crate::{
     ServerError,
@@ -17,35 +16,34 @@ use crate::{
     oci_adapter::{
         abort_s3_multipart_upload_session, append_s3_multipart_upload_bytes, append_upload_bytes,
         create_upload_session, delete_upload_session, finalize_s3_multipart_upload_session,
-        lock_upload_sessions, oci_blob_key, oci_blob_location, read_upload_session,
-        touch_upload_session, upload_body_integrity, upload_body_path_for_session, upload_length,
-        upload_session_length, upload_session_location, validate_repository,
+        lock_upload_sessions, oci_blob_location, read_upload_session, touch_upload_session,
+        upload_body_integrity, upload_body_path_for_session, upload_length, upload_session_length,
+        upload_session_location, validate_repository,
     },
-    protocol_support::{parse_sha256_digest, scope_namespace, validate_oci_repository_scope},
+    protocol_support::{parse_sha256_digest, scope_namespace},
     upload_ingest::{RequestBodyReader, read_body_to_bytes},
 };
 
 use super::super::{
     AppState, ensure_upload_growth_within_limit, parse_query_map, parse_upload_content_range,
-    scope_from_auth,
 };
+use super::helpers::{OciRepository, oci_blob_key};
 use super::tags::oci_created_response;
-use super::token::oci_authorize;
 
-#[tracing::instrument(skip(state, headers, uri, body), fields(repository))]
+#[tracing::instrument(skip(state, _headers, uri, body, repo), fields(repository = %repo.repository()))]
 pub(crate) async fn oci_post_blob_upload(
     state: &Arc<AppState>,
-    headers: &HeaderMap,
+    _headers: &HeaderMap,
     uri: &Uri,
-    repository: &str,
+    repo: &OciRepository,
     body: Body,
 ) -> Result<Response, ServerError> {
-    let auth = oci_authorize(state, headers, Some(repository), TokenScope::Write)?;
     let _admit = state
         .admission
         .try_acquire(weights::XORB_UPLOAD)
         .ok_or(ServerError::WorkQueueSaturated)?;
-    let scope = auth.as_ref().map(scope_from_auth);
+    let repository = repo.repository();
+    let auth = repo.capability();
     validate_repository(repository)?;
     let query = parse_query_map(uri)?;
     // The OCI spec allows a `digest-algorithm` query parameter on blob upload
@@ -58,8 +56,8 @@ pub(crate) async fn oci_post_blob_upload(
     if let Some(mount_digest) = query.get("mount") {
         let digest_hex = parse_sha256_digest(mount_digest)?;
         let from = query.get("from").map(String::as_str).unwrap_or(repository);
-        let source_key = oci_blob_key(from, &digest_hex, scope)?;
-        let target_key = oci_blob_key(repository, &digest_hex, scope)?;
+        let source_key = oci_blob_key(from, &digest_hex, auth)?;
+        let target_key = oci_blob_key(repository, &digest_hex, auth)?;
         match state
             .backend
             .copy_object_if_absent(&source_key, &target_key)
@@ -79,7 +77,7 @@ pub(crate) async fn oci_post_blob_upload(
     if let Some(digest) = query.get("digest") {
         let digest_hex = parse_sha256_digest(digest)?;
         let body = RequestBodyReader::from_body(body, state.config.max_request_body_bytes())?;
-        let object_key = oci_blob_key(repository, &digest_hex, scope)?;
+        let object_key = oci_blob_key(repository, &digest_hex, auth)?;
         let _stored = state
             .backend
             .put_sha256_addressed_object_stream_if_absent(&object_key, &digest_hex, body)
@@ -95,7 +93,7 @@ pub(crate) async fn oci_post_blob_upload(
         state.config.root_dir(),
         Some(&state.backend),
         repository,
-        scope,
+        auth.namespace(),
         state.config.oci_upload_session_ttl_seconds(),
         state.config.oci_upload_max_active_sessions(),
         state.backend.uses_s3_object_store(),
@@ -112,25 +110,20 @@ pub(crate) async fn oci_post_blob_upload(
         })
 }
 
-#[tracing::instrument(
-    skip(state, auth_headers, headers, body),
-    fields(repository, session_id)
-)]
+#[tracing::instrument(skip(state, headers, body, repo), fields(repository = %repo.repository(), session_id))]
 pub(crate) async fn oci_patch_blob_upload(
     state: &Arc<AppState>,
-    auth_headers: &HeaderMap,
     headers: &HeaderMap,
-    repository: &str,
+    repo: &OciRepository,
     session_id: &str,
     body: Body,
 ) -> Result<Response, ServerError> {
-    let auth = oci_authorize(state, auth_headers, Some(repository), TokenScope::Write)?;
     let _admit = state
         .admission
         .try_acquire(weights::XORB_UPLOAD)
         .ok_or(ServerError::WorkQueueSaturated)?;
-    let scope = auth.as_ref().map(scope_from_auth);
-    validate_oci_repository_scope(repository, scope)?;
+    let repository = repo.repository();
+    let auth = repo.capability();
     let mut body = RequestBodyReader::from_body(body, state.config.max_request_body_bytes())?;
     let bytes = read_body_to_bytes(&mut body).await?;
     let _lock = lock_upload_sessions(state.config.root_dir()).await?;
@@ -140,7 +133,9 @@ pub(crate) async fn oci_patch_blob_upload(
         state.config.oci_upload_session_ttl_seconds(),
     )
     .await?;
-    if session.repository != repository || session.scope_namespace != scope_namespace(scope) {
+    if session.repository != repository
+        || session.scope_namespace != scope_namespace(auth.namespace())
+    {
         return Err(ServerError::NotFound);
     }
     let current_length = if let Some(length) = upload_session_length(&session) {
@@ -194,22 +189,21 @@ pub(crate) async fn oci_patch_blob_upload(
         })
 }
 
-#[tracing::instrument(skip(state, headers, uri, body), fields(repository, session_id))]
+#[tracing::instrument(skip(state, headers, uri, body, repo), fields(repository = %repo.repository(), session_id))]
 pub(crate) async fn oci_put_blob_upload(
     state: &Arc<AppState>,
     headers: &HeaderMap,
     uri: &Uri,
-    repository: &str,
+    repo: &OciRepository,
     session_id: &str,
     body: Body,
 ) -> Result<Response, ServerError> {
-    let auth = oci_authorize(state, headers, Some(repository), TokenScope::Write)?;
     let _admit = state
         .admission
         .try_acquire(weights::XORB_UPLOAD)
         .ok_or(ServerError::WorkQueueSaturated)?;
-    let scope = auth.as_ref().map(scope_from_auth);
-    validate_oci_repository_scope(repository, scope)?;
+    let repository = repo.repository();
+    let auth = repo.capability();
     let query = parse_query_map(uri)?;
     let digest = query.get("digest").ok_or(ServerError::InvalidDigest)?;
     let digest_hex = parse_sha256_digest(digest)?;
@@ -222,7 +216,9 @@ pub(crate) async fn oci_put_blob_upload(
         state.config.oci_upload_session_ttl_seconds(),
     )
     .await?;
-    if session.repository != repository || session.scope_namespace != scope_namespace(scope) {
+    if session.repository != repository
+        || session.scope_namespace != scope_namespace(auth.namespace())
+    {
         return Err(ServerError::NotFound);
     }
     let current_length = if let Some(length) = upload_session_length(&session) {
@@ -249,7 +245,7 @@ pub(crate) async fn oci_put_blob_upload(
         }
     }
     ensure_upload_growth_within_limit(state, current_length, final_bytes.len())?;
-    let object_key = oci_blob_key(repository, &digest_hex, scope)?;
+    let object_key = oci_blob_key(repository, &digest_hex, auth)?;
     if session.use_s3_multipart {
         let _stored = finalize_s3_multipart_upload_session(
             state.config.root_dir(),
@@ -288,16 +284,15 @@ pub(crate) async fn oci_put_blob_upload(
     )
 }
 
-#[tracing::instrument(skip(state, headers), fields(repository, session_id))]
+#[tracing::instrument(skip(state, _headers, repo), fields(repository = %repo.repository(), session_id))]
 pub(crate) async fn oci_get_blob_upload(
     state: &Arc<AppState>,
-    headers: &HeaderMap,
-    repository: &str,
+    _headers: &HeaderMap,
+    repo: &OciRepository,
     session_id: &str,
 ) -> Result<Response, ServerError> {
-    let auth = oci_authorize(state, headers, Some(repository), TokenScope::Write)?;
-    let scope = auth.as_ref().map(scope_from_auth);
-    validate_oci_repository_scope(repository, scope)?;
+    let repository = repo.repository();
+    let auth = repo.capability();
     let _lock = lock_upload_sessions(state.config.root_dir()).await?;
     let session = read_upload_session(
         state.config.root_dir(),
@@ -305,7 +300,9 @@ pub(crate) async fn oci_get_blob_upload(
         state.config.oci_upload_session_ttl_seconds(),
     )
     .await?;
-    if session.repository != repository || session.scope_namespace != scope_namespace(scope) {
+    if session.repository != repository
+        || session.scope_namespace != scope_namespace(auth.namespace())
+    {
         return Err(ServerError::NotFound);
     }
     let length = if let Some(length) = upload_session_length(&session) {
@@ -326,16 +323,15 @@ pub(crate) async fn oci_get_blob_upload(
         })
 }
 
-#[tracing::instrument(skip(state, headers), fields(repository, session_id))]
+#[tracing::instrument(skip(state, _headers, repo), fields(repository = %repo.repository(), session_id))]
 pub(crate) async fn oci_delete_blob_upload(
     state: &Arc<AppState>,
-    headers: &HeaderMap,
-    repository: &str,
+    _headers: &HeaderMap,
+    repo: &OciRepository,
     session_id: &str,
 ) -> Result<Response, ServerError> {
-    let auth = oci_authorize(state, headers, Some(repository), TokenScope::Write)?;
-    let scope = auth.as_ref().map(scope_from_auth);
-    validate_oci_repository_scope(repository, scope)?;
+    let repository = repo.repository();
+    let auth = repo.capability();
     let _lock = lock_upload_sessions(state.config.root_dir()).await?;
     let session = read_upload_session(
         state.config.root_dir(),
@@ -343,7 +339,9 @@ pub(crate) async fn oci_delete_blob_upload(
         state.config.oci_upload_session_ttl_seconds(),
     )
     .await?;
-    if session.repository != repository || session.scope_namespace != scope_namespace(scope) {
+    if session.repository != repository
+        || session.scope_namespace != scope_namespace(auth.namespace())
+    {
         return Err(ServerError::NotFound);
     }
     if session.use_s3_multipart {

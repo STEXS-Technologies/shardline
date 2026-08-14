@@ -73,7 +73,7 @@ fn entity_too_large() -> S3Error {
 /// `InitiateMultipartUploadResult` XML envelope carrying the opaque upload id.
 pub(super) async fn s3_create_multipart_upload(
     state: &Arc<AppState>,
-    context: &S3ObjectContext,
+    context: &S3ObjectContext<'_>,
     headers: &HeaderMap,
 ) -> Result<Response, S3Error> {
     // S3 user metadata is supplied at CreateMultipartUpload and applied to the
@@ -114,7 +114,7 @@ pub(super) async fn s3_create_multipart_upload(
 /// (matching S3, which validates at completion).
 pub(super) async fn s3_upload_part(
     state: &Arc<AppState>,
-    context: &S3ObjectContext,
+    context: &S3ObjectContext<'_>,
     part_number: u32,
     upload_id: &str,
     headers: &HeaderMap,
@@ -235,7 +235,7 @@ pub(super) async fn s3_upload_part(
 /// content hash — identical to a single `PutObject` of the same bytes).
 pub(super) async fn s3_complete_multipart_upload(
     state: &Arc<AppState>,
-    context: &S3ObjectContext,
+    context: &S3ObjectContext<'_>,
     upload_id: &str,
     body: Body,
 ) -> Result<Response, S3Error> {
@@ -375,7 +375,7 @@ pub(super) async fn s3_complete_multipart_upload(
 /// exists yet) and responds `204`. Unknown upload ids are `404 NoSuchUpload`.
 pub(super) async fn s3_abort_multipart_upload(
     state: &Arc<AppState>,
-    context: &S3ObjectContext,
+    context: &S3ObjectContext<'_>,
     upload_id: &str,
 ) -> Result<Response, S3Error> {
     let root = state.config.root_dir();

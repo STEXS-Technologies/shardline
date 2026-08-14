@@ -3413,6 +3413,7 @@ dependencies = [
 name = "shardline-bench"
 version = "1.5.0"
 dependencies = [
+ "bytes",
  "criterion",
  "libc",
  "reqwest 0.12.28",
@@ -3420,6 +3421,7 @@ dependencies = [
  "shardline-index",
  "shardline-protocol",
  "shardline-server-core",
+ "shardline-storage",
  "tokio",
 ]
 

@@ -408,6 +408,13 @@ pub enum ServerConfigError {
     /// A configuration file could not be loaded.
     #[error("configuration file error: {0}")]
     ConfigFileError(String),
+    /// Persistent secrets would be stored in plaintext in a production deployment mode.
+    #[error(
+        "production deployment mode requires at-rest secret encryption, but {surfaces}; \
+         set SHARDLINE_ALLOW_PLAINTEXT_SECRETS_IN_PRODUCTION=true only if you accept \
+         storing secrets unencrypted"
+    )]
+    PlaintextSecretsInProduction { surfaces: String },
     /// OIDC auth provider requires an issuer URL.
     #[error("oidc auth provider requires SHARDLINE_AUTH_OIDC_ISSUER")]
     MissingOidcIssuer,

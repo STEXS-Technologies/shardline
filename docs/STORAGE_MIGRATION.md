@@ -132,3 +132,15 @@ The command reports:
 Run `shardline backup manifest` against both source and destination configuration after
 a migration to compare object counts and byte totals before switching production
 traffic.
+
+## Migration Testing
+
+Every supported storage representation — local filesystem and S3-compatible object
+storage, SQLite and Postgres metadata — is covered by a verification procedure in
+[Storage Migration Testing](STORAGE_MIGRATION_TESTING.md). It includes the full
+`from × to` migration matrix with the exact commands for each combination, the
+dry-run counter comparison for `storage migrate`, and the `serve` + `fsck`
+verification step after every migration.
+
+For recovery scenarios that move payload bytes between stores (node loss, object-store
+loss, cross-node recovery), see [Disaster Recovery](DISASTER_RECOVERY.md).
