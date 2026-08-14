@@ -342,6 +342,14 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
     // converted via `.with_state()`.
     let mut hub_state: Option<shardline_hub_api::routes::HubState> = None;
     let mut xet_frontend_enabled = false;
+    // S3 is mounted as the app-level FALLBACK rather than merged into the main
+    // route trie: its `/{bucket}/{*key}` wildcard would otherwise conflict with
+    // any other frontend's root-level parameter routes (Hub's Git Smart HTTP
+    // and file-resolve routes) — matchit cannot host a wildcard and a parameter
+    // with children at the same position. As a fallback, every registered route
+    // (Hub/OCI/LFS/Xet/Bazel/metrics/healthz) wins, and S3 serves everything
+    // else, which is exactly the S3 catch-all contract.
+    let mut s3_router: Option<Router> = None;
     for frontend in state.config.server_frontends() {
         match frontend {
             ServerFrontend::Hub => {
@@ -351,10 +359,13 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
                 xet_frontend_enabled = true;
                 app = register_frontend_routes(app, *frontend, role, &state);
             }
-            ServerFrontend::Lfs
-            | ServerFrontend::BazelHttp
-            | ServerFrontend::Oci
-            | ServerFrontend::S3 => {
+            ServerFrontend::S3 => {
+                // Build the S3 router separately and apply the state at build
+                // time so it can be mounted as the app-level fallback service
+                // (an un-applied Router<Arc<AppState>> is not a Service).
+                s3_router = Some(register_s3_routes(Router::new(), role).with_state(state.clone()));
+            }
+            ServerFrontend::Lfs | ServerFrontend::BazelHttp | ServerFrontend::Oci => {
                 app = register_frontend_routes(app, *frontend, role, &state);
             }
         }
@@ -367,6 +378,14 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
     // Merge hub routes (Router<()>) into the main app (Router<()>).
     let app = if let Some(hs) = hub_state {
         app.merge(shardline_hub_api::hub_routes(hs, !xet_frontend_enabled))
+    } else {
+        app
+    };
+
+    // Mount S3 as the fallback AFTER every registered route (frontends, Hub,
+    // health/metrics): unmatched paths fall through to the S3 router.
+    let app = if let Some(s3_router) = s3_router {
+        app.fallback_service(s3_router)
     } else {
         app
     };

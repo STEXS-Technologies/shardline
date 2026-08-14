@@ -861,3 +861,173 @@ async fn poc_f11_metadata_consistent_with_bytes() {
         "ETag must be the hex MD5 of the served body (consistent with bytes)"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Frontend coexistence (regression: S3 + Hub used to panic at router build)
+// ---------------------------------------------------------------------------
+
+/// Builds a full app router with the given frontends (the same path the real
+/// server takes: every frontend's routes + the Hub merge). Any matchit route
+/// conflict panics here — exactly the failure this suite must catch.
+async fn build_router_with(frontends: Vec<ServerFrontend>) -> Router {
+    let tmp = TempDir::new().unwrap();
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        tmp.path().to_path_buf(),
+        NonZeroUsize::new(65536).unwrap(),
+    )
+    .with_server_role(ServerRole::All)
+    .with_server_frontends(frontends)
+    .expect("server frontends")
+    .with_token_signing_key(TEST_SIGNING_KEY.to_vec())
+    .expect("token signing key")
+    .with_reconstruction_cache_disabled();
+    config
+        .validate_runtime_requirements()
+        .expect("runtime requirements");
+    crate::app::router(config)
+        .await
+        .expect("app router must build")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn all_frontends_router_builds_and_serves() {
+    // Regression (2026-08-14): enabling S3 alongside the Hub frontend panicked
+    // at router build — matchit cannot host S3's `/{bucket}/{*key}` wildcard
+    // and Hub's root-level parameter routes (`/{type}/{ns}/{repo}/info|resolve`)
+    // at the same position. The router is now built with EVERY frontend
+    // (`ServerFrontend::ALL`), so ANY future frontend whose routes collide
+    // fails this test at build time with the conflicting route named.
+    let app = build_router_with(ServerFrontend::ALL.to_vec()).await;
+
+    // S3 full object roundtrip through the shared router.
+    let token = mint_token(TokenScope::Write, OWNER, NAME);
+    let put = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/{BUCKET}/coexist.txt"))
+                .header(header::AUTHORIZATION, sigv4_auth(&token))
+                .body(Body::from("coexist"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        put.status(),
+        StatusCode::OK,
+        "S3 PUT must work on the all-frontends router"
+    );
+    let get = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/{BUCKET}/coexist.txt"))
+                .header(header::AUTHORIZATION, sigv4_auth(&token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        get.status(),
+        StatusCode::OK,
+        "S3 GET must work on the all-frontends router"
+    );
+
+    // Every other frontend's representative route must be MOUNTED — any
+    // response other than the router's generic 404 proves the route survived
+    // the coexistence merge.
+    let probes: [(&str, &str, Body); 5] = [
+        ("Hub", "/api/whoami-v2", Body::empty()), // auth-required 401
+        ("Oci", "/v2/", Body::empty()),           // registry ping, auth-required 401
+        ("Lfs", "/v1/lfs/objects/batch", Body::from("{}")), // parse/auth error, not 404
+        ("Xet", "/v1/reconstructions/deadbeef", Body::empty()), // auth-required 401
+        (
+            "BazelHttp",
+            "/ac/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            Body::empty(), // auth-required 403
+        ),
+    ];
+    for (name, uri, body) in probes {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(if name == "Lfs" { "POST" } else { "GET" })
+                    .uri(uri)
+                    .body(body)
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "{name} route {uri} must be mounted on the all-frontends router (got {})",
+            response.status()
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn frontend_pairs_have_no_route_conflicts() {
+    // For EVERY pair of frontends the router must build without a matchit
+    // conflict. A future frontend whose routes collide with any other is
+    // caught here with the exact pair named. `ServerFrontend::ALL` is the
+    // single source of truth — extend it when adding a variant.
+    let all = ServerFrontend::ALL;
+    for i in 0..all.len() {
+        for j in (i + 1)..all.len() {
+            let pair = [all[i], all[j]];
+            let pair_label = format!("{pair:?}");
+            // block_in_place moves the thread into a blocking context so a
+            // fresh runtime can be built inside (a nested runtime on a
+            // multi-thread test runtime is forbidden); catch_unwind captures a
+            // genuine route-conflict panic per pair so the exact pair is named.
+            let result = tokio::task::block_in_place(|| {
+                std::panic::catch_unwind(|| {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+                    let tmp = TempDir::new().unwrap();
+                    let config = ServerConfig::new(
+                        "127.0.0.1:0".parse().unwrap(),
+                        "http://127.0.0.1:8080".to_owned(),
+                        tmp.path().to_path_buf(),
+                        NonZeroUsize::new(65536).unwrap(),
+                    )
+                    .with_server_role(ServerRole::All)
+                    .with_server_frontends(pair)
+                    .expect("server frontends")
+                    .with_token_signing_key(TEST_SIGNING_KEY.to_vec())
+                    .expect("token signing key")
+                    .with_reconstruction_cache_disabled();
+                    config
+                        .validate_runtime_requirements()
+                        .expect("runtime requirements");
+                    let _app = rt
+                        .block_on(crate::app::router(config))
+                        .expect("pair router must build");
+                })
+            });
+            let payload = result
+                .err()
+                .map(|any| {
+                    any.downcast_ref::<String>()
+                        .cloned()
+                        .or_else(|| any.downcast_ref::<&str>().map(|s| (*s).to_owned()))
+                        .unwrap_or_else(|| "opaque panic payload".to_owned())
+                })
+                .unwrap_or_default();
+            assert!(
+                payload.is_empty(),
+                "frontend pair {pair_label} fails at router build: {payload}"
+            );
+        }
+    }
+}

@@ -45,7 +45,14 @@ async fn native_huggingface_cli_model_and_dataset_flows_work_against_shardline()
         return;
     }
 
-    let result = exercise_huggingface_cli_flows().await;
+    let runtime = match start_hub_runtime().await {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            assert!(false, "hub runtime failed to start: {error}");
+            return;
+        }
+    };
+    let result = exercise_huggingface_cli_flows(&runtime).await;
     let error = result.as_ref().err().map(ToString::to_string);
     assert!(
         result.is_ok(),
@@ -53,8 +60,109 @@ async fn native_huggingface_cli_model_and_dataset_flows_work_against_shardline()
     );
 }
 
-async fn exercise_huggingface_cli_flows() -> Result<(), TestError> {
-    let runtime = start_hub_runtime().await?;
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_hf_cli_and_s3_clients_coexist_on_one_server() {
+    if !command_available("hf") || !command_available("mc") {
+        return;
+    }
+
+    // One server with the Hub AND S3 frontends enabled together: the real `hf`
+    // CLI flows and the real `mc` S3 flows must both work simultaneously.
+    let runtime = match start_runtime(&[ServerFrontend::Hub, ServerFrontend::S3]).await {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            assert!(false, "hub+s3 runtime failed to start: {error}");
+            return;
+        }
+    };
+    if let Err(error) = exercise_huggingface_cli_flows(&runtime).await {
+        panic!("hf CLI flows failed against the hub+s3 server: {error}");
+    }
+    if let Err(error) = exercise_mc_s3_flows(&runtime).await {
+        panic!("mc S3 flows failed against the hub+s3 server: {error}");
+    }
+}
+
+/// Exercises S3 with the real `mc` client against the same server the `hf` CLI
+/// just used (bucket = `{owner}.{name}` = `team.cli-model`, access-key = a
+/// generic-provider repo-scoped token).
+async fn exercise_mc_s3_flows(runtime: &HubRuntime) -> Result<(), TestError> {
+    let tmp = tempfile::tempdir()?;
+    let config_dir = tmp.path().join("mc-config");
+    create_dir_all(&config_dir)?;
+    let alias = "coexist";
+    let s3_token = bearer_token(
+        "github-user-1",
+        TokenScope::Write,
+        RepositoryProvider::Generic,
+        "team",
+        "cli-model",
+        Some("main"),
+    )?;
+    let bucket = "team.cli-model";
+
+    let output = Command::new("mc")
+        .arg("--config-dir")
+        .arg(&config_dir)
+        .args([
+            "alias",
+            "set",
+            alias,
+            &runtime.base_url,
+            s3_token.as_str(),
+            "dummy-secret",
+        ])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "mc alias set failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let output = Command::new("mc")
+        .arg("--config-dir")
+        .arg(&config_dir)
+        .args(["mb", &format!("{alias}/{bucket}")])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "mc mb failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let file = tmp.path().join("coexist.txt");
+    write(&file, b"s3 coexist payload\n")?;
+    let output = Command::new("mc")
+        .arg("--config-dir")
+        .arg(&config_dir)
+        .args([
+            "cp",
+            path_as_str(&file)?,
+            &format!("{alias}/{bucket}/coexist.txt"),
+        ])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "mc cp failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let output = Command::new("mc")
+        .arg("--config-dir")
+        .arg(&config_dir)
+        .args(["cat", &format!("{alias}/{bucket}/coexist.txt")])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "mc cat failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"s3 coexist payload\n");
+
+    Ok(())
+}
+
+async fn exercise_huggingface_cli_flows(runtime: &HubRuntime) -> Result<(), TestError> {
     let client_home = tempfile::tempdir()?;
     let working = tempfile::tempdir()?;
     let created_repo = "team/cli-created";
@@ -276,7 +384,7 @@ async fn exercise_huggingface_cli_flows() -> Result<(), TestError> {
     Ok(())
 }
 
-async fn start_hub_runtime() -> Result<HubRuntime, TestError> {
+async fn start_runtime(frontends: &[ServerFrontend]) -> Result<HubRuntime, TestError> {
     let storage = tempfile::tempdir()?;
     let hub_root = storage.path().join("hub");
     create_dir_all(&hub_root)?;
@@ -292,7 +400,7 @@ async fn start_hub_runtime() -> Result<HubRuntime, TestError> {
         NonZeroUsize::new(128).ok_or("test chunk size must be non-zero")?,
     )
     .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())?
-    .with_server_frontends([ServerFrontend::Hub])?
+    .with_server_frontends(frontends.iter().copied())?
     .with_provider_runtime(
         provider_config,
         b"test-api-key".to_vec(),
@@ -337,6 +445,10 @@ async fn start_hub_runtime() -> Result<HubRuntime, TestError> {
         _storage: storage,
         server,
     })
+}
+
+async fn start_hub_runtime() -> Result<HubRuntime, TestError> {
+    start_runtime(&[ServerFrontend::Hub]).await
 }
 
 fn run_hf<const N: usize>(
