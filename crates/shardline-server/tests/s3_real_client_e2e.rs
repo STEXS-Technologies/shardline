@@ -634,8 +634,10 @@ s3 = boto3.client(
         signature_version="s3v4",
         s3={"addressing_style": "path"},
         retries={"max_attempts": 1},
-        request_checksum_calculation="when_required",
-        response_checksum_validation="when_required",
+        # Note: request_checksum_calculation / response_checksum_validation are
+        # intentionally NOT set here: they only exist in newer botocore and the
+        # test must run against whatever boto3 CI resolves (the server ignores
+        # checksum headers and returns none, so defaults are fine).
     ),
 )
 B = "ac.assets"
