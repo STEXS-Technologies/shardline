@@ -12,6 +12,13 @@
 //! call order). Inherent tokio scheduling variance (completion order of
 //! concurrent ops) is tolerated because the ledger records only observed ACKs
 //! and no_torn_object accepts ANY previously-acked coherent version.
+//!
+//! Scale mode: `SHARDLINE_CHAOS_SCALE=1` enables the reduced local-dev
+//! schedule (fewer workers/keys/rounds pressure, rounds capped at 2 for fast
+//! iteration). LOCAL DEV ITERATION ONLY — it is NOT the CI default; CI runs
+//! the full schedule. Scale mode keeps the identical RNG call order/count as
+//! the full schedule (ranges collapse to fixed points), so determinism holds
+//! per (seed, mode).
 
 #![allow(
     clippy::indexing_slicing,
@@ -711,19 +718,22 @@ struct WorkloadSpec {
 
 impl WorkloadSpec {
     /// Generate one round's workload. ALL RNG draws happen here in a fixed
-    /// order so the schedule is fully determined by the seed.
-    fn generate(rng: &mut SplitMix64, round: usize) -> WorkloadSpec {
-        let key_count = rng.next_range(2, 4);
+    /// order so the schedule is fully determined by the seed. `p` supplies the
+    /// draw bounds (scale mode collapses them to fixed points; non-scaled
+    /// values are identical to the original constants, draw order/count
+    /// unchanged in both modes).
+    fn generate(rng: &mut SplitMix64, round: usize, p: &ScaleParams) -> WorkloadSpec {
+        let key_count = rng.next_range(p.key_count.0, p.key_count.1);
         let keys: Vec<String> = (0..key_count)
             .map(|i| format!("chaos-k{i}-r{round}"))
             .collect();
-        let op_count = rng.next_range(8, 14);
+        let op_count = rng.next_range(p.op_count.0, p.op_count.1);
 
         // First op is ALWAYS a StreamedPut on a fresh per-round key. This key is
         // excluded from Delete targets by construction (delete keys are drawn
         // from `keys`, which never contains the streamed key).
         let streamed_key = format!("chaos-stream-r{round}");
-        let stream_len = STALL_CHUNK * rng.next_range(2, 5); // 1-2 MiB
+        let stream_len = STALL_CHUNK * rng.next_range(p.stream_chunks.0, p.stream_chunks.1);
         let stream_payload = deterministic_bytes(stream_len, rng.next_u64());
         let stream_sha = sha256_hex(&stream_payload);
 
@@ -748,12 +758,14 @@ impl WorkloadSpec {
             };
             match kind {
                 OpKind::Multipart => {
-                    let part_count = rng.next_range(2, 4);
+                    let part_count = rng.next_range(p.multipart_parts.0, p.multipart_parts.1);
                     let mut parts = Vec::with_capacity(part_count);
                     let mut combined = Vec::new();
                     for _ in 0..part_count {
-                        let part =
-                            deterministic_bytes(CHUNK * rng.next_range(4, 16), rng.next_u64());
+                        let part = deterministic_bytes(
+                            CHUNK * rng.next_range(p.multipart_chunks.0, p.multipart_chunks.1),
+                            rng.next_u64(),
+                        );
                         combined.extend_from_slice(&part);
                         parts.push(part);
                     }
@@ -769,7 +781,7 @@ impl WorkloadSpec {
                 }
                 OpKind::RangeGet => {
                     let payload = deterministic_bytes(
-                        rng.next_range(MIN_PAYLOAD, MAX_PAYLOAD)
+                        rng.next_range(p.body_bytes.0, p.body_bytes.1)
                             .next_multiple_of(CHUNK),
                         rng.next_u64(),
                     );
@@ -792,7 +804,7 @@ impl WorkloadSpec {
                 }
                 OpKind::Put | OpKind::Get | OpKind::Delete | OpKind::StreamedPut => {
                     let payload = deterministic_bytes(
-                        rng.next_range(MIN_PAYLOAD, MAX_PAYLOAD)
+                        rng.next_range(p.body_bytes.0, p.body_bytes.1)
                             .next_multiple_of(CHUNK),
                         rng.next_u64(),
                     );
@@ -1636,6 +1648,58 @@ fn env_usize(name: &str, default: usize) -> usize {
     })
 }
 
+/// Scale mode is a LOCAL-DEV-ONLY reduced schedule (`SHARDLINE_CHAOS_SCALE=1`):
+/// fewer ops, single-chunk bodies, and the rounds cap is `min(rounds, 2)` so
+/// iteration is fast. It is NOT the CI default — CI runs the full schedule.
+fn chaos_scale_enabled() -> bool {
+    env::var("SHARDLINE_CHAOS_SCALE").as_deref() == Ok("1")
+}
+
+/// Inclusive RNG-draw bounds for every site in [`WorkloadSpec::generate`]. The
+/// non-scaled values reproduce today's constants exactly; the scaled values
+/// collapse ranges to fixed points so the draw order/count is identical in both
+/// modes (determinism holds per (seed, mode)).
+struct ScaleParams {
+    /// `next_range(lo, hi)` for the per-round key count.
+    key_count: (usize, usize),
+    /// `next_range(lo, hi)` for ops per round (excluding the StreamedPut).
+    op_count: (usize, usize),
+    /// `next_range(lo, hi)` for the StreamedPut length in STALL_CHUNK units.
+    stream_chunks: (usize, usize),
+    /// `next_range(lo, hi)` for Put/Get/Delete/RangeGet payload sizes.
+    body_bytes: (usize, usize),
+    /// `next_range(lo, hi)` for multipart part counts.
+    multipart_parts: (usize, usize),
+    /// `next_range(lo, hi)` for multipart part sizes in CHUNK units.
+    multipart_chunks: (usize, usize),
+    /// Seed-object payload size (non-scaled keeps MIN_PAYLOAD).
+    min_payload: usize,
+}
+
+const fn scale_params(scale: bool) -> ScaleParams {
+    if scale {
+        ScaleParams {
+            key_count: (2, 2),
+            op_count: (3, 5),
+            stream_chunks: (1, 1),
+            body_bytes: (8 * 1024, 64 * 1024),
+            multipart_parts: (2, 2),
+            multipart_chunks: (1, 1),
+            min_payload: 8 * 1024,
+        }
+    } else {
+        ScaleParams {
+            key_count: (2, 4),
+            op_count: (8, 14),
+            stream_chunks: (2, 5),
+            body_bytes: (MIN_PAYLOAD, MAX_PAYLOAD),
+            multipart_parts: (2, 4),
+            multipart_chunks: (4, 16),
+            min_payload: MIN_PAYLOAD,
+        }
+    }
+}
+
 // ===========================================================================
 // The round loop.
 // ===========================================================================
@@ -1644,7 +1708,10 @@ fn env_usize(name: &str, default: usize) -> usize {
 async fn chaos_runner() {
     let seed = env_u64("SHARDLINE_CHAOS_SEED", DEFAULT_CHAOS_SEED);
     let rounds = env_usize("SHARDLINE_CHAOS_ROUNDS", DEFAULT_CHAOS_ROUNDS);
-    eprintln!("chaos: seed={seed:#x} rounds={rounds}");
+    let scale = chaos_scale_enabled();
+    let p = scale_params(scale);
+    let rounds = if scale { rounds.min(2) } else { rounds };
+    eprintln!("chaos: seed={seed:#x} rounds={rounds} scale={scale}");
     let mut rng = SplitMix64::new(seed);
     let mut harness = ChaosHarness::new();
     harness.spawn_server().await;
@@ -1656,7 +1723,7 @@ async fn chaos_runner() {
     // and listing paths against pre-existing state. Workload ops never target
     // this key (round keys are `chaos-k*` / `chaos-stream*`).
     let seed_key = "chaos-seed-object";
-    let seed_bytes = deterministic_bytes(MIN_PAYLOAD, 0x5EED);
+    let seed_bytes = deterministic_bytes(p.min_payload, 0x5EED);
     let seed_sha = sha256_hex(&seed_bytes);
     let seed_resp = harness.s3_put_bytes(seed_key, seed_bytes.clone()).await;
     assert_eq!(seed_resp.status().as_u16(), 200, "seed object PUT");
@@ -1664,7 +1731,7 @@ async fn chaos_runner() {
 
     let run = async {
         for round in 0..rounds {
-            let spec = WorkloadSpec::generate(&mut rng, round);
+            let spec = WorkloadSpec::generate(&mut rng, round, &p);
             let injection = if round == 0 {
                 FailureInjection::None
             } else {
