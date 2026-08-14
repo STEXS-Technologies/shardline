@@ -2049,6 +2049,139 @@ fn strict_mode_rejects_missing_metrics_token() {
 }
 
 #[test]
+fn authenticated_mode_rejects_plaintext_hub_webhook_secrets() {
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        PathBuf::from("/tmp"),
+        NonZeroUsize::new(65536).unwrap(),
+    )
+    .with_deployment_mode(DeploymentMode::Authenticated)
+    .with_token_signing_key(b"0123456789abcdef0123456789abcdef".to_vec())
+    .unwrap()
+    .with_server_frontends([ServerFrontend::Hub])
+    .unwrap();
+    let result = config.validate_runtime_requirements();
+    assert!(matches!(
+        result,
+        Err(ServerConfigError::PlaintextSecretsInProduction { .. })
+    ));
+}
+
+#[test]
+fn authenticated_mode_allows_plaintext_secrets_with_explicit_override() {
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        PathBuf::from("/tmp"),
+        NonZeroUsize::new(65536).unwrap(),
+    )
+    .with_deployment_mode(DeploymentMode::Authenticated)
+    .with_allow_plaintext_secrets_in_production(true)
+    .with_token_signing_key(b"0123456789abcdef0123456789abcdef".to_vec())
+    .unwrap()
+    .with_server_frontends([ServerFrontend::Hub])
+    .unwrap();
+    assert!(config.validate_runtime_requirements().is_ok());
+}
+
+#[test]
+fn insecure_mode_allows_plaintext_hub_webhook_secrets() {
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        PathBuf::from("/tmp"),
+        NonZeroUsize::new(65536).unwrap(),
+    )
+    .with_deployment_mode(DeploymentMode::Insecure)
+    .with_server_frontends([ServerFrontend::Hub])
+    .unwrap();
+    assert!(config.validate_runtime_requirements().is_ok());
+}
+
+#[test]
+fn authenticated_mode_without_hub_or_provider_needs_no_encryption_keys() {
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        PathBuf::from("/tmp"),
+        NonZeroUsize::new(65536).unwrap(),
+    )
+    .with_deployment_mode(DeploymentMode::Authenticated)
+    .with_token_signing_key(b"0123456789abcdef0123456789abcdef".to_vec())
+    .unwrap()
+    .with_server_frontends([ServerFrontend::Xet])
+    .unwrap();
+    assert!(config.validate_runtime_requirements().is_ok());
+}
+
+#[test]
+fn authenticated_mode_accepts_hub_webhook_encryption_key() {
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        PathBuf::from("/tmp"),
+        NonZeroUsize::new(65536).unwrap(),
+    )
+    .with_deployment_mode(DeploymentMode::Authenticated)
+    .with_token_signing_key(b"0123456789abcdef0123456789abcdef".to_vec())
+    .unwrap()
+    .with_server_frontends([ServerFrontend::Hub])
+    .unwrap()
+    .with_hub_webhook_secret_key(b"0123456789abcdef0123456789abcdef".to_vec())
+    .unwrap();
+    assert!(config.validate_runtime_requirements().is_ok());
+}
+
+#[test]
+fn authenticated_mode_rejects_plaintext_provider_config_secrets() {
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        PathBuf::from("/tmp"),
+        NonZeroUsize::new(65536).unwrap(),
+    )
+    .with_deployment_mode(DeploymentMode::Authenticated)
+    .with_token_signing_key(b"0123456789abcdef0123456789abcdef".to_vec())
+    .unwrap()
+    .with_provider_runtime(
+        PathBuf::from("/tmp/provider.yaml"),
+        b"valid-api-key".to_vec(),
+        "issuer".to_owned(),
+        NonZeroU64::new(3600).unwrap(),
+    )
+    .unwrap();
+    let result = config.validate_runtime_requirements();
+    assert!(matches!(
+        result,
+        Err(ServerConfigError::PlaintextSecretsInProduction { .. })
+    ));
+}
+
+#[test]
+fn authenticated_mode_accepts_provider_config_encryption_key() {
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        PathBuf::from("/tmp"),
+        NonZeroUsize::new(65536).unwrap(),
+    )
+    .with_deployment_mode(DeploymentMode::Authenticated)
+    .with_token_signing_key(b"0123456789abcdef0123456789abcdef".to_vec())
+    .unwrap()
+    .with_config_secret_key(b"0123456789abcdef0123456789abcdef".to_vec())
+    .unwrap()
+    .with_provider_runtime(
+        PathBuf::from("/tmp/provider.yaml"),
+        b"valid-api-key".to_vec(),
+        "issuer".to_owned(),
+        NonZeroU64::new(3600).unwrap(),
+    )
+    .unwrap();
+    assert!(config.validate_runtime_requirements().is_ok());
+}
+
+#[test]
 fn route_policy_registry_has_all_expected_policies() {
     let mut registry = RoutePolicyRegistry::new();
     register_route_policies(&mut registry);

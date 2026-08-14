@@ -37,7 +37,9 @@ use crate::{
 };
 use shardline_index::{FileChunkRecord, FileRecord, LocalRecordStore, xet_hash_hex_string};
 use shardline_protocol::{RepositoryProvider, RepositoryScope, TokenClaims, TokenScope};
-use shardline_server_core::{AuthProvider, auth::Ed25519AuthProvider, auth::LocalHmacProvider};
+use shardline_server_core::{
+    AuthProvider, AuthorizedRepository, auth::Ed25519AuthProvider, auth::LocalHmacProvider,
+};
 use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectStore};
 use shardline_xet_core::merklehash::compute_data_hash;
 
@@ -1608,8 +1610,12 @@ async fn backward_compatibility_all_formats_readable() {
     // FixedChunkV1: raw uncompressed chunk + old-style record
     let fixed_content = b"fixed-chunk-old-format-data-0123456789";
     let fixed_hash = test_hash(fixed_content);
-    let fixed_key = crate::bazel_cache_object_key(crate::BazelCacheKind::Cas, &fixed_hash, None)
-        .expect("fixed key");
+    let fixed_key = crate::bazel_cache_object_key(
+        crate::BazelCacheKind::Cas,
+        &fixed_hash,
+        &AuthorizedRepository::anonymous_full_access(),
+    )
+    .expect("fixed key");
     let fixed_file_id = format!(
         "protocol-object-{}",
         hex::encode(Sha256::digest(fixed_key.as_str().as_bytes()))
@@ -1632,8 +1638,12 @@ async fn backward_compatibility_all_formats_readable() {
     // WholeFileV1: single object at the object key path
     let whole_content = b"whole-file-old-format-data-0123456789";
     let whole_hash = test_hash(whole_content);
-    let whole_key = crate::bazel_cache_object_key(crate::BazelCacheKind::Cas, &whole_hash, None)
-        .expect("whole key");
+    let whole_key = crate::bazel_cache_object_key(
+        crate::BazelCacheKind::Cas,
+        &whole_hash,
+        &AuthorizedRepository::anonymous_full_access(),
+    )
+    .expect("whole key");
     let whole_file_id = format!(
         "protocol-object-{}",
         hex::encode(Sha256::digest(whole_key.as_str().as_bytes()))
@@ -1856,8 +1866,12 @@ async fn gc_preserves_old_and_new_formats() {
     // 1. Create FixedChunkV1 record (old format, uncompressed chunk)
     let fixed_content = b"fixed-chunk-gc-test-data-0123456789";
     let fixed_hash = test_hash(fixed_content);
-    let fixed_key = crate::bazel_cache_object_key(crate::BazelCacheKind::Cas, &fixed_hash, None)
-        .expect("fixed key");
+    let fixed_key = crate::bazel_cache_object_key(
+        crate::BazelCacheKind::Cas,
+        &fixed_hash,
+        &AuthorizedRepository::anonymous_full_access(),
+    )
+    .expect("fixed key");
     let fixed_file_id = format!(
         "protocol-object-{}",
         hex::encode(Sha256::digest(fixed_key.as_str().as_bytes()))
@@ -1880,8 +1894,12 @@ async fn gc_preserves_old_and_new_formats() {
     // 2. Create WholeFileV1 record (single object at object key)
     let whole_content = b"whole-file-gc-test-data-0123456789";
     let whole_hash = test_hash(whole_content);
-    let whole_key = crate::bazel_cache_object_key(crate::BazelCacheKind::Cas, &whole_hash, None)
-        .expect("whole key");
+    let whole_key = crate::bazel_cache_object_key(
+        crate::BazelCacheKind::Cas,
+        &whole_hash,
+        &AuthorizedRepository::anonymous_full_access(),
+    )
+    .expect("whole key");
     let whole_file_id = format!(
         "protocol-object-{}",
         hex::encode(Sha256::digest(whole_key.as_str().as_bytes()))
@@ -1958,8 +1976,12 @@ async fn gc_preserves_old_and_new_formats() {
     let new_hash = test_hash(new_content);
     server_backend
         .put_sha256_addressed_object_stream_if_absent(
-            &crate::bazel_cache_object_key(crate::BazelCacheKind::Cas, &new_hash, None)
-                .expect("new key"),
+            &crate::bazel_cache_object_key(
+                crate::BazelCacheKind::Cas,
+                &new_hash,
+                &AuthorizedRepository::anonymous_full_access(),
+            )
+            .expect("new key"),
             &new_hash,
             crate::upload_ingest::RequestBodyReader::from_bytes(axum::body::Bytes::from_static(
                 new_content,
@@ -1988,8 +2010,12 @@ async fn gc_preserves_old_and_new_formats() {
         ("WholeFileV1", &whole_hash),
         ("XorbCdcV1", &new_hash),
     ] {
-        let key =
-            crate::bazel_cache_object_key(crate::BazelCacheKind::Cas, hash, None).expect("key");
+        let key = crate::bazel_cache_object_key(
+            crate::BazelCacheKind::Cas,
+            hash,
+            &AuthorizedRepository::anonymous_full_access(),
+        )
+        .expect("key");
         let read = server_backend.read_object(&key).await;
         assert!(read.is_ok(), "{label} readable: {read:?}");
         let bytes = read.expect("read_object");
@@ -10723,8 +10749,12 @@ async fn mixed_format_dedup_same_content() {
     // 1. Compute content hashes and object keys used by both formats.
     let content = b"dedup-test-content-that-should-be-identical-in-both-formats!";
     let hash = test_hash(content);
-    let object_key =
-        crate::bazel_cache_object_key(crate::BazelCacheKind::Cas, &hash, None).expect("object key");
+    let object_key = crate::bazel_cache_object_key(
+        crate::BazelCacheKind::Cas,
+        &hash,
+        &AuthorizedRepository::anonymous_full_access(),
+    )
+    .expect("object key");
 
     // The file_id matches what `protocol_object_file_id` computes in backend.rs.
     let file_id = format!(

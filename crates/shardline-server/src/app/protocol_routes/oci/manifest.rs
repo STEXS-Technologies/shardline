@@ -10,22 +10,21 @@ use axum::{
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use shardline_protocol::TokenScope;
+use shardline_server_core::AuthorizedRepository;
 use shardline_storage::DeleteOutcome;
 
 use crate::{
     ServerError,
-    oci_adapter::{
-        OciReference, oci_blob_key, oci_manifest_key, oci_manifest_location,
-        oci_manifest_media_type_key, oci_tag_key, parse_reference,
-    },
+    oci_adapter::{OciReference, oci_manifest_location, parse_reference},
     protocol_support::parse_sha256_digest,
     upload_ingest::{RequestBodyReader, read_body_to_bytes},
 };
 
-use super::super::{AppState, direct_object_response, parse_query_values, scope_from_auth};
+use super::super::{AppState, direct_object_response, parse_query_values};
+use super::helpers::{
+    OciRepository, oci_blob_key, oci_manifest_key, oci_manifest_media_type_key, oci_tag_key,
+};
 use super::tags::{delete_oci_tags_pointing_to_digest, update_oci_tags};
-use super::token::oci_authorize;
 
 pub(super) const OCI_IMAGE_MANIFEST_MEDIA_TYPE: &str = "application/vnd.oci.image.manifest.v1+json";
 pub(super) const OCI_IMAGE_INDEX_MEDIA_TYPE: &str = "application/vnd.oci.image.index.v1+json";
@@ -34,19 +33,19 @@ pub(super) const DOCKER_SCHEMA2_MANIFEST_MEDIA_TYPE: &str =
 pub(super) const DOCKER_SCHEMA2_MANIFEST_LIST_MEDIA_TYPE: &str =
     "application/vnd.docker.distribution.manifest.list.v2+json";
 
-#[tracing::instrument(skip(state, headers), fields(repository, reference))]
+#[tracing::instrument(skip(state, headers, repo), fields(repository = %repo.repository(), reference))]
 pub(crate) async fn oci_get_manifest(
     state: &Arc<AppState>,
     headers: &HeaderMap,
-    repository: &str,
+    repo: &OciRepository,
     reference: &str,
     head_only: bool,
 ) -> Result<Response, ServerError> {
-    let auth = oci_authorize(state, headers, Some(repository), TokenScope::Read)?;
-    let scope = auth.as_ref().map(scope_from_auth);
-    let digest_hex = resolve_manifest_digest(state, repository, reference, scope).await?;
-    let manifest_key = oci_manifest_key(repository, &digest_hex, scope)?;
-    let media_type_key = oci_manifest_media_type_key(repository, &digest_hex, scope)?;
+    let repository = repo.repository();
+    let auth = repo.capability();
+    let digest_hex = resolve_manifest_digest(state, repository, reference, auth).await?;
+    let manifest_key = oci_manifest_key(repository, &digest_hex, auth)?;
+    let media_type_key = oci_manifest_media_type_key(repository, &digest_hex, auth)?;
     let total_length = state.backend.object_length(&manifest_key).await?;
     let media_type =
         String::from_utf8(state.backend.read_object(&media_type_key).await?).map_err(|e| {
@@ -78,17 +77,17 @@ pub(crate) async fn oci_get_manifest(
     .await
 }
 
-#[tracing::instrument(skip(state, headers, uri, body), fields(repository, reference))]
+#[tracing::instrument(skip(state, headers, uri, body, repo), fields(repository = %repo.repository(), reference))]
 pub(crate) async fn oci_put_manifest(
     state: &Arc<AppState>,
     headers: &HeaderMap,
     uri: &Uri,
-    repository: &str,
+    repo: &OciRepository,
     reference: &str,
     body: Body,
 ) -> Result<Response, ServerError> {
-    let auth = oci_authorize(state, headers, Some(repository), TokenScope::Write)?;
-    let scope = auth.as_ref().map(scope_from_auth);
+    let repository = repo.repository();
+    let auth = repo.capability();
     let mut body = RequestBodyReader::from_body(body, state.config.max_request_body_bytes())?;
     let bytes = read_body_to_bytes(&mut body).await?;
     let digest_hex = hex::encode(Sha256::digest(&bytes));
@@ -103,9 +102,9 @@ pub(crate) async fn oci_put_manifest(
         .and_then(|value| value.to_str().ok())
         .unwrap_or(OCI_IMAGE_MANIFEST_MEDIA_TYPE)
         .to_owned();
-    validate_oci_manifest_document(state, repository, scope, &media_type, &bytes).await?;
-    let manifest_key = oci_manifest_key(repository, &digest_hex, scope)?;
-    let media_type_key = oci_manifest_media_type_key(repository, &digest_hex, scope)?;
+    validate_oci_manifest_document(state, repository, auth, &media_type, &bytes).await?;
+    let manifest_key = oci_manifest_key(repository, &digest_hex, auth)?;
+    let media_type_key = oci_manifest_media_type_key(repository, &digest_hex, auth)?;
     let _stored_manifest = state
         .backend
         // Manifests are authoritative, repository-enumerable metadata. Keep
@@ -128,7 +127,7 @@ pub(crate) async fn oci_put_manifest(
     accepted_tags.sort();
     accepted_tags.dedup();
     if !accepted_tags.is_empty() {
-        update_oci_tags(state, repository, scope, &accepted_tags, &digest_hex).await?;
+        update_oci_tags(state, repository, auth, &accepted_tags, &digest_hex).await?;
     }
 
     let mut builder = Response::builder()
@@ -148,17 +147,17 @@ pub(crate) async fn oci_put_manifest(
     })
 }
 
-#[tracing::instrument(skip(state, headers), fields(repository, reference))]
+#[tracing::instrument(skip(state, _headers, repo), fields(repository = %repo.repository(), reference))]
 pub(crate) async fn oci_delete_manifest(
     state: &Arc<AppState>,
-    headers: &HeaderMap,
-    repository: &str,
+    _headers: &HeaderMap,
+    repo: &OciRepository,
     reference: &str,
 ) -> Result<Response, ServerError> {
-    let auth = oci_authorize(state, headers, Some(repository), TokenScope::Write)?;
-    let scope = auth.as_ref().map(scope_from_auth);
-    let digest_hex = resolve_manifest_digest(state, repository, reference, scope).await?;
-    let manifest_key = oci_manifest_key(repository, &digest_hex, scope)?;
+    let repository = repo.repository();
+    let auth = repo.capability();
+    let digest_hex = resolve_manifest_digest(state, repository, reference, auth).await?;
+    let manifest_key = oci_manifest_key(repository, &digest_hex, auth)?;
     match state
         .backend
         .delete_object_if_present(&manifest_key)
@@ -168,12 +167,12 @@ pub(crate) async fn oci_delete_manifest(
         DeleteOutcome::NotFound => return Err(ServerError::NotFound),
     }
 
-    let media_type_key = oci_manifest_media_type_key(repository, &digest_hex, scope)?;
+    let media_type_key = oci_manifest_media_type_key(repository, &digest_hex, auth)?;
     let _deleted = state
         .backend
         .delete_object_if_present(&media_type_key)
         .await?;
-    delete_oci_tags_pointing_to_digest(state, repository, scope, &digest_hex).await?;
+    delete_oci_tags_pointing_to_digest(state, repository, auth, &digest_hex).await?;
 
     Response::builder()
         .status(StatusCode::ACCEPTED)
@@ -188,23 +187,21 @@ async fn resolve_manifest_digest(
     state: &Arc<AppState>,
     repository: &str,
     reference: &str,
-    repository_scope: Option<&shardline_protocol::RepositoryScope>,
+    auth: &AuthorizedRepository,
 ) -> Result<String, ServerError> {
     match parse_reference(reference)? {
         OciReference::Digest(digest_hex) => Ok(digest_hex),
-        OciReference::Tag(tag) => {
-            load_oci_tag_digest(state, repository, repository_scope, &tag).await
-        }
+        OciReference::Tag(tag) => load_oci_tag_digest(state, repository, auth, &tag).await,
     }
 }
 
 async fn load_oci_tag_digest(
     state: &Arc<AppState>,
     repository: &str,
-    repository_scope: Option<&shardline_protocol::RepositoryScope>,
+    auth: &AuthorizedRepository,
     tag: &str,
 ) -> Result<String, ServerError> {
-    let tag_key = oci_tag_key(repository, tag, repository_scope)?;
+    let tag_key = oci_tag_key(repository, tag, auth)?;
     let bytes = state.backend.read_object(&tag_key).await?;
     let digest_hex = String::from_utf8(bytes).map_err(|e| {
         tracing::warn!(error = %e, "invalid digest utf-8");
@@ -217,7 +214,7 @@ async fn load_oci_tag_digest(
 async fn validate_oci_manifest_document(
     state: &Arc<AppState>,
     repository: &str,
-    repository_scope: Option<&shardline_protocol::RepositoryScope>,
+    auth: &AuthorizedRepository,
     media_type: &str,
     bytes: &[u8],
 ) -> Result<(), ServerError> {
@@ -241,11 +238,10 @@ async fn validate_oci_manifest_document(
 
     match normalized_media_type {
         OCI_IMAGE_MANIFEST_MEDIA_TYPE | DOCKER_SCHEMA2_MANIFEST_MEDIA_TYPE => {
-            validate_oci_image_manifest_document(state, repository, repository_scope, &document)
-                .await
+            validate_oci_image_manifest_document(state, repository, auth, &document).await
         }
         OCI_IMAGE_INDEX_MEDIA_TYPE | DOCKER_SCHEMA2_MANIFEST_LIST_MEDIA_TYPE => {
-            validate_oci_image_index_document(state, repository, repository_scope, &document).await
+            validate_oci_image_index_document(state, repository, auth, &document).await
         }
         _ => Err(ServerError::InvalidManifestReference),
     }
@@ -261,14 +257,14 @@ fn validate_oci_schema_version(document: &Value) -> Result<(), ServerError> {
 async fn validate_oci_image_manifest_document(
     state: &Arc<AppState>,
     repository: &str,
-    repository_scope: Option<&shardline_protocol::RepositoryScope>,
+    auth: &AuthorizedRepository,
     document: &Value,
 ) -> Result<(), ServerError> {
     let config = document
         .get("config")
         .ok_or(ServerError::InvalidManifestReference)?;
     let config_digest_hex = validate_oci_descriptor(config)?;
-    ensure_oci_blob_exists(state, repository, repository_scope, &config_digest_hex).await?;
+    ensure_oci_blob_exists(state, repository, auth, &config_digest_hex).await?;
 
     let layers = document
         .get("layers")
@@ -276,7 +272,7 @@ async fn validate_oci_image_manifest_document(
         .ok_or(ServerError::InvalidManifestReference)?;
     for layer in layers {
         let digest_hex = validate_oci_descriptor(layer)?;
-        ensure_oci_blob_exists(state, repository, repository_scope, &digest_hex).await?;
+        ensure_oci_blob_exists(state, repository, auth, &digest_hex).await?;
     }
 
     Ok(())
@@ -285,7 +281,7 @@ async fn validate_oci_image_manifest_document(
 async fn validate_oci_image_index_document(
     state: &Arc<AppState>,
     repository: &str,
-    repository_scope: Option<&shardline_protocol::RepositoryScope>,
+    auth: &AuthorizedRepository,
     document: &Value,
 ) -> Result<(), ServerError> {
     let manifests = document
@@ -294,7 +290,7 @@ async fn validate_oci_image_index_document(
         .ok_or(ServerError::InvalidManifestReference)?;
     for manifest in manifests {
         let digest_hex = validate_oci_descriptor(manifest)?;
-        ensure_oci_manifest_exists(state, repository, repository_scope, &digest_hex).await?;
+        ensure_oci_manifest_exists(state, repository, auth, &digest_hex).await?;
     }
 
     Ok(())
@@ -325,10 +321,10 @@ fn validate_oci_descriptor(descriptor: &Value) -> Result<String, ServerError> {
 async fn ensure_oci_blob_exists(
     state: &Arc<AppState>,
     repository: &str,
-    repository_scope: Option<&shardline_protocol::RepositoryScope>,
+    auth: &AuthorizedRepository,
     digest_hex: &str,
 ) -> Result<(), ServerError> {
-    let object_key = oci_blob_key(repository, digest_hex, repository_scope)?;
+    let object_key = oci_blob_key(repository, digest_hex, auth)?;
     match state.backend.object_length(&object_key).await {
         Ok(_length) => Ok(()),
         Err(ServerError::NotFound) => Err(ServerError::InvalidManifestReference),
@@ -339,10 +335,10 @@ async fn ensure_oci_blob_exists(
 async fn ensure_oci_manifest_exists(
     state: &Arc<AppState>,
     repository: &str,
-    repository_scope: Option<&shardline_protocol::RepositoryScope>,
+    auth: &AuthorizedRepository,
     digest_hex: &str,
 ) -> Result<(), ServerError> {
-    let object_key = oci_manifest_key(repository, digest_hex, repository_scope)?;
+    let object_key = oci_manifest_key(repository, digest_hex, auth)?;
     match state.backend.object_length(&object_key).await {
         Ok(_length) => Ok(()),
         Err(ServerError::NotFound) => Err(ServerError::InvalidManifestReference),

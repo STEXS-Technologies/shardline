@@ -15,17 +15,13 @@ use axum::{
     http::{HeaderMap, StatusCode, Uri},
     response::{IntoResponse, Response},
 };
-use shardline_protocol::TokenScope;
 use shardline_s3_adapter::{
     ListBucketResult, ListBucketResultV1, S3Error, encode_continuation_token, group_page,
-    parse_list_objects_v1_params, parse_list_objects_v2_params, require_s3_bucket_binding,
+    parse_list_objects_v1_params, parse_list_objects_v2_params,
 };
 
-use super::{authorize_s3, parse_s3_query, s3_xml_content_type};
-use crate::{
-    app::{AppState, scope_from_auth},
-    protocol_support::scope_namespace,
-};
+use super::{S3Repository, parse_s3_query, s3_xml_content_type};
+use crate::{app::AppState, protocol_support::scope_namespace};
 
 /// `GET /{bucket}?list-type=2` — `ListObjectsV2`.
 ///
@@ -34,20 +30,17 @@ use crate::{
 /// `ListBucketResult` XML: `<Contents>` rows (Key / Size / quoted ETag /
 /// ISO-8601 LastModified), `<CommonPrefixes><Prefix>` rollups,
 /// `<IsTruncated>`, and `<NextContinuationToken>` when truncated.
-#[tracing::instrument(skip(state, headers), fields(bucket))]
+#[tracing::instrument(skip(auth, state, _headers), fields(bucket))]
 pub(crate) async fn s3_list_objects_v2(
+    auth: S3Repository,
     State(state): State<Arc<AppState>>,
-    Path(bucket): Path<String>,
+    Path(_bucket): Path<String>,
     uri: Uri,
-    headers: HeaderMap,
+    _headers: HeaderMap,
 ) -> Result<Response, S3Error> {
-    let auth = authorize_s3(&state, &headers, TokenScope::Read)?;
-    let claims = auth.as_ref().map(scope_from_auth);
-    require_s3_bucket_binding(claims, &bucket)?;
-
     let query = parse_s3_query(&uri)?;
     let params = parse_list_objects_v2_params(&query)?;
-    let scope_namespace = scope_namespace(claims);
+    let scope_namespace = scope_namespace(auth.capability().namespace());
 
     // Fetch one extra row to detect truncation.
     let fetch_limit = params
@@ -95,20 +88,17 @@ pub(crate) async fn s3_list_objects_v2(
 /// Identical index-backed paging to [`s3_list_objects_v2`] but driven by the
 /// v1 `marker` cursor and serialized into the v1 `ListBucketResult` envelope
 /// (`Name`/`Prefix`/`Marker`/`MaxKeys`/`Delimiter`/`IsTruncated`/`NextMarker`).
-#[tracing::instrument(skip(state, headers), fields(bucket))]
+#[tracing::instrument(skip(auth, state, _headers), fields(bucket))]
 pub(crate) async fn s3_list_objects_v1(
+    auth: S3Repository,
     State(state): State<Arc<AppState>>,
     Path(bucket): Path<String>,
     uri: Uri,
-    headers: HeaderMap,
+    _headers: HeaderMap,
 ) -> Result<Response, S3Error> {
-    let auth = authorize_s3(&state, &headers, TokenScope::Read)?;
-    let claims = auth.as_ref().map(scope_from_auth);
-    require_s3_bucket_binding(claims, &bucket)?;
-
     let query = parse_s3_query(&uri)?;
     let params = parse_list_objects_v1_params(&query)?;
-    let scope_namespace = scope_namespace(claims);
+    let scope_namespace = scope_namespace(auth.capability().namespace());
 
     // Fetch one extra row to detect truncation.
     let fetch_limit = params

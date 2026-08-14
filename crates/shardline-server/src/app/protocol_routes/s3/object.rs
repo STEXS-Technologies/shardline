@@ -25,22 +25,23 @@ use axum::{
 use futures_util::{Stream, StreamExt, stream};
 use md5::{Digest, Md5};
 use shardline_index::S3ObjectEntry;
-use shardline_protocol::TokenScope;
 use shardline_s3_adapter::{
     CopyObjectResult, S3Error, S3SubResource, classify, etag_header, format_iso8601,
-    parse_copy_source, parse_s3_range, read_conditional_headers,
+    parse_copy_source, parse_s3_range, read_conditional_headers, require_s3_bucket_binding,
 };
+use shardline_server_core::AuthorizedRepository;
 
 use crate::{
     ServerByteStream, ServerError,
-    app::{AppState, reconstruction_helpers, scope_from_auth},
+    app::{AppState, reconstruction_helpers},
     metrics,
     overflow::checked_add,
+    protocol_support::scope_namespace,
     upload_ingest::RequestBodyReader,
 };
 
 use super::{
-    S3ObjectContext, acquire_object_upload_lock, authorize_s3, aws_chunked, format_http_date,
+    S3ObjectContext, S3Repository, acquire_object_upload_lock, aws_chunked, format_http_date,
     has_sub_resource, multipart, parse_s3_query, require_s3_object_context, s3_xml_content_type,
 };
 
@@ -110,11 +111,18 @@ fn insert_user_metadata(response: &mut Response, metadata: &[(String, String)]) 
 /// Resolves the S3 listing-index row for an object (`None` when absent).
 async fn s3_object_entry(
     state: &Arc<AppState>,
-    context: &S3ObjectContext,
+    context: &S3ObjectContext<'_>,
 ) -> Result<Option<S3ObjectEntry>, S3Error> {
+    // The namespace is derived from the capability the context carries — the
+    // same derivation every other storage call got at context construction.
     let mut rows = state
         .backend
-        .scan_s3_objects(&context.scope_namespace, &context.key, None, 1)
+        .scan_s3_objects(
+            &scope_namespace(context.auth.namespace()),
+            &context.key,
+            None,
+            1,
+        )
         .await?;
     Ok(rows.pop())
 }
@@ -138,17 +146,16 @@ pub(super) fn md5_hasher_hex(hasher: &Arc<Mutex<Md5>>) -> String {
 /// disconnect) commits nothing — the old record version, index row, and direct
 /// object remain intact and readers never observe a transient 404. A per-key
 /// upload lock serializes concurrent overwrites of the same key.
-#[tracing::instrument(skip(state, headers, body), fields(bucket, key))]
+#[tracing::instrument(skip(auth, state, headers, body), fields(bucket, key))]
 pub(crate) async fn s3_put_object(
+    auth: S3Repository,
     State(state): State<Arc<AppState>>,
-    Path((bucket, key)): Path<(String, String)>,
+    Path((_bucket, key)): Path<(String, String)>,
     uri: Uri,
     headers: HeaderMap,
     body: Body,
 ) -> Result<Response, S3Error> {
-    let auth = authorize_s3(&state, &headers, TokenScope::Write)?;
-    let claims = auth.as_ref().map(scope_from_auth);
-    let context = require_s3_object_context(claims, &bucket, &key)?;
+    let context = require_s3_object_context(auth.capability(), &key)?;
 
     // `?partNumber=N&uploadId=U` dispatches to UploadPart; other sub-resources
     // (multipart create/completion and out-of-scope ops) are handled below or
@@ -184,7 +191,7 @@ pub(crate) async fn s3_put_object(
         .get(COPY_SOURCE)
         .and_then(|value| value.to_str().ok())
     {
-        return s3_copy_object(&state, claims, &context, copy_source, &headers).await;
+        return s3_copy_object(&state, auth.capability(), &context, copy_source, &headers).await;
     }
 
     // Bodies larger than SHARDLINE_S3_MAX_PART_BYTES must use multipart.
@@ -271,16 +278,19 @@ pub(crate) async fn s3_put_object(
 /// Responds `200` with a `CopyObjectResult` envelope.
 async fn s3_copy_object(
     state: &Arc<AppState>,
-    claims: Option<&shardline_protocol::RepositoryScope>,
-    destination: &S3ObjectContext,
+    capability: &AuthorizedRepository,
+    destination: &S3ObjectContext<'_>,
     copy_source: &str,
     headers: &HeaderMap,
 ) -> Result<Response, S3Error> {
     let source = parse_copy_source(copy_source)
         .map_err(|_error| S3Error::invalid_argument("Invalid x-amz-copy-source header"))?;
     // The source must be inside the caller's bound bucket (which must equal the
-    // destination bucket under the C1 repo-binding model).
-    let source_context = require_s3_object_context(claims, &source.bucket, &source.key)?;
+    // destination bucket under the C1 repo-binding model). The destination was
+    // bound by the S3Repository extractor; the source bucket lives in the
+    // copy-source header, so it is bound here against the capability.
+    require_s3_bucket_binding(capability.repository(), &source.bucket)?;
+    let source_context = require_s3_object_context(capability, &source.key)?;
 
     // Conditional requests apply to the destination (create-if-absent /
     // replace-if-matching semantics) BEFORE any write. Like PutObject this is
@@ -376,7 +386,7 @@ async fn s3_copy_object(
 /// with `412` when the stored ETag matches (or `*` and the object exists).
 async fn check_put_precondition(
     state: &Arc<AppState>,
-    context: &S3ObjectContext,
+    context: &S3ObjectContext<'_>,
     headers: &HeaderMap,
 ) -> Result<(), S3Error> {
     let existing = match s3_object_entry(state, context).await? {
@@ -468,7 +478,7 @@ fn bounded_byte_stream(
 /// committed row the loser sees the winner's ETag and fails with `412`.
 async fn s3_upload_object_body(
     state: &Arc<AppState>,
-    context: &S3ObjectContext,
+    context: &S3ObjectContext<'_>,
     body: RequestBodyReader,
     user_metadata: Vec<(String, String)>,
     hasher: Arc<Mutex<Md5>>,
@@ -545,16 +555,15 @@ async fn s3_upload_object_body(
 /// Serves `200` with the full body when no `Range` header is present, `206`
 /// with `Content-Range` for a satisfiable range, `416 InvalidRange` for an
 /// unsatisfiable one, and `404 NoSuchKey` when the object does not exist.
-#[tracing::instrument(skip(state, headers), fields(bucket, key))]
+#[tracing::instrument(skip(auth, state, headers), fields(bucket, key))]
 pub(crate) async fn s3_get_object(
+    auth: S3Repository,
     State(state): State<Arc<AppState>>,
-    Path((bucket, key)): Path<(String, String)>,
+    Path((_bucket, key)): Path<(String, String)>,
     uri: Uri,
     headers: HeaderMap,
 ) -> Result<Response, S3Error> {
-    let auth = authorize_s3(&state, &headers, TokenScope::Read)?;
-    let claims = auth.as_ref().map(scope_from_auth);
-    let context = require_s3_object_context(claims, &bucket, &key)?;
+    let context = require_s3_object_context(auth.capability(), &key)?;
 
     let query = parse_s3_query(&uri)?;
     if has_sub_resource(&query) {
@@ -660,16 +669,15 @@ pub(crate) async fn s3_get_object(
 
 /// `HEAD /{bucket}/{*key}` — size + ETag + Last-Modified through the
 /// authoritative record.
-#[tracing::instrument(skip(state, headers), fields(bucket, key))]
+#[tracing::instrument(skip(auth, state, headers), fields(bucket, key))]
 pub(crate) async fn s3_head_object(
+    auth: S3Repository,
     State(state): State<Arc<AppState>>,
-    Path((bucket, key)): Path<(String, String)>,
+    Path((_bucket, key)): Path<(String, String)>,
     uri: Uri,
     headers: HeaderMap,
 ) -> Result<Response, S3Error> {
-    let auth = authorize_s3(&state, &headers, TokenScope::Read)?;
-    let claims = auth.as_ref().map(scope_from_auth);
-    let context = require_s3_object_context(claims, &bucket, &key)?;
+    let context = require_s3_object_context(auth.capability(), &key)?;
 
     let query = parse_s3_query(&uri)?;
     if has_sub_resource(&query) {
@@ -730,16 +738,15 @@ pub(crate) async fn s3_head_object(
 /// Crash-safe ordering per the design: the listing-index row is dropped first
 /// (the snapshot is GC-inert and deleting it never touches chunks or records),
 /// then `delete_object_if_present` removes the direct object and record.
-#[tracing::instrument(skip(state, headers), fields(bucket, key))]
+#[tracing::instrument(skip(auth, state, headers), fields(bucket, key))]
 pub(crate) async fn s3_delete_object(
+    auth: S3Repository,
     State(state): State<Arc<AppState>>,
-    Path((bucket, key)): Path<(String, String)>,
+    Path((_bucket, key)): Path<(String, String)>,
     uri: Uri,
     headers: HeaderMap,
 ) -> Result<Response, S3Error> {
-    let auth = authorize_s3(&state, &headers, TokenScope::Write)?;
-    let claims = auth.as_ref().map(scope_from_auth);
-    let context = require_s3_object_context(claims, &bucket, &key)?;
+    let context = require_s3_object_context(auth.capability(), &key)?;
 
     // `?uploadId` dispatches to AbortMultipartUpload; other sub-resources are
     // out of scope.
@@ -787,17 +794,16 @@ pub(crate) async fn s3_delete_object(
 /// `POST /{bucket}/{*key}` — `CreateMultipartUpload`/`UploadPart` are Lane 4
 /// work; `PostObject` is out of scope. Everything is `501 NotImplemented`
 /// today.
-#[tracing::instrument(skip(state, headers), fields(bucket, key))]
+#[tracing::instrument(skip(auth, state, headers, body), fields(bucket, key))]
 pub(crate) async fn s3_post_object(
+    auth: S3Repository,
     State(state): State<Arc<AppState>>,
-    Path((bucket, key)): Path<(String, String)>,
+    Path((_bucket, key)): Path<(String, String)>,
     uri: Uri,
     headers: HeaderMap,
     body: Body,
 ) -> Result<Response, S3Error> {
-    let auth = authorize_s3(&state, &headers, TokenScope::Write)?;
-    let claims = auth.as_ref().map(scope_from_auth);
-    let context = require_s3_object_context(claims, &bucket, &key)?;
+    let context = require_s3_object_context(auth.capability(), &key)?;
 
     // `?uploads` → CreateMultipartUpload, `?uploadId` → CompleteMultipartUpload;
     // anything else (PostObject) is out of scope.

@@ -3,21 +3,19 @@ use std::{collections::BTreeSet, sync::Arc};
 use axum::{
     body::Body,
     http::{
-        HeaderMap, StatusCode,
+        StatusCode,
         header::{CONTENT_LENGTH, CONTENT_TYPE, LINK},
     },
     response::Response,
 };
-use shardline_protocol::TokenScope;
+use shardline_server_core::AuthorizedRepository;
 
-use crate::{
-    ServerError,
-    oci_adapter::{oci_tag_key, oci_tag_prefix, oci_tag_target_key, oci_tag_target_prefix},
-    protocol_support::validate_oci_tag,
+use crate::{ServerError, protocol_support::validate_oci_tag};
+
+use super::super::{AppState, parse_query_map};
+use super::helpers::{
+    OciRepository, oci_tag_key, oci_tag_prefix, oci_tag_target_key, oci_tag_target_prefix,
 };
-
-use super::super::{AppState, parse_query_map, scope_from_auth};
-use super::token::oci_authorize;
 
 struct OciTagListPage {
     tags: Vec<String>,
@@ -26,11 +24,10 @@ struct OciTagListPage {
 
 pub(crate) async fn oci_tags_list(
     state: &Arc<AppState>,
-    headers: &HeaderMap,
     uri: &axum::http::Uri,
-    repository: &str,
+    repo: &OciRepository,
 ) -> Result<Response, ServerError> {
-    let auth = oci_authorize(state, headers, Some(repository), TokenScope::Read)?;
+    let repository = repo.repository();
     let query = parse_query_map(uri)?;
     let page_size = parse_oci_tag_list_page_size(query.get("n").map(String::as_str))?;
     let last = query.get("last").map(String::as_str);
@@ -53,13 +50,7 @@ pub(crate) async fn oci_tags_list(
             .map_err(|_error| ServerError::Overflow);
     }
 
-    let tag_page = list_oci_tags(
-        state,
-        repository,
-        auth.as_ref().map(scope_from_auth),
-        page_size,
-        last,
-    )?;
+    let tag_page = list_oci_tags(state, repository, repo.capability(), page_size, last)?;
     let tags = tag_page.tags;
     let has_more = tag_page.has_more;
     let body = serde_json::to_vec(&serde_json::json!({
@@ -84,13 +75,13 @@ pub(crate) async fn oci_tags_list(
 fn list_oci_tags(
     state: &Arc<AppState>,
     repository: &str,
-    repository_scope: Option<&shardline_protocol::RepositoryScope>,
+    auth: &AuthorizedRepository,
     page_size: usize,
     last: Option<&str>,
 ) -> Result<OciTagListPage, ServerError> {
-    let prefix = oci_tag_prefix(repository, repository_scope)?;
+    let prefix = oci_tag_prefix(repository, auth)?;
     let start_after = last
-        .map(|tag| oci_tag_key(repository, tag, repository_scope))
+        .map(|tag| oci_tag_key(repository, tag, auth))
         .transpose()?;
     let objects = state.backend.list_object_flat_namespace_page(
         &prefix,
@@ -118,14 +109,14 @@ fn list_oci_tags(
 pub(crate) async fn update_oci_tags(
     state: &Arc<AppState>,
     repository: &str,
-    repository_scope: Option<&shardline_protocol::RepositoryScope>,
+    auth: &AuthorizedRepository,
     tags: &[String],
     digest_hex: &str,
 ) -> Result<(), ServerError> {
     let digest_bytes = digest_hex.as_bytes().to_vec();
     for tag in tags {
         validate_oci_tag(tag)?;
-        let tag_key = oci_tag_key(repository, tag, repository_scope)?;
+        let tag_key = oci_tag_key(repository, tag, auth)?;
         let previous_digest = match state.backend.read_object(&tag_key).await {
             Ok(bytes) => {
                 Some(String::from_utf8(bytes).map_err(|_error| ServerError::InvalidDigest)?)
@@ -133,7 +124,7 @@ pub(crate) async fn update_oci_tags(
             Err(ServerError::NotFound) => None,
             Err(error) => return Err(error),
         };
-        let target_key = oci_tag_target_key(repository, digest_hex, tag, repository_scope)?;
+        let target_key = oci_tag_target_key(repository, digest_hex, tag, auth)?;
         state
             .backend
             .put_object_bytes_overwrite(&target_key, Vec::new())
@@ -145,8 +136,7 @@ pub(crate) async fn update_oci_tags(
         if let Some(previous_digest) = previous_digest
             && previous_digest != digest_hex
         {
-            let previous_target =
-                oci_tag_target_key(repository, &previous_digest, tag, repository_scope)?;
+            let previous_target = oci_tag_target_key(repository, &previous_digest, tag, auth)?;
             let _deleted = state
                 .backend
                 .delete_object_if_present(&previous_target)
@@ -159,10 +149,10 @@ pub(crate) async fn update_oci_tags(
 pub(crate) async fn delete_oci_tags_pointing_to_digest(
     state: &Arc<AppState>,
     repository: &str,
-    repository_scope: Option<&shardline_protocol::RepositoryScope>,
+    auth: &AuthorizedRepository,
     digest_hex: &str,
 ) -> Result<(), ServerError> {
-    let prefix = oci_tag_target_prefix(repository, digest_hex, repository_scope)?;
+    let prefix = oci_tag_target_prefix(repository, digest_hex, auth)?;
     let mut target_keys = Vec::new();
     state.backend.visit_object_prefix(&prefix, |object| {
         target_keys.push(object.key().clone());
@@ -173,7 +163,7 @@ pub(crate) async fn delete_oci_tags_pointing_to_digest(
         let Some(tag) = target_key.as_str().rsplit('/').next() else {
             continue;
         };
-        let tag_key = oci_tag_key(repository, tag, repository_scope)?;
+        let tag_key = oci_tag_key(repository, tag, auth)?;
         match state.backend.read_object(&tag_key).await {
             Ok(bytes) => {
                 let stored_digest =

@@ -20,8 +20,10 @@ pub(crate) use self::commits::*;
 pub(crate) use self::dataset::*;
 pub(crate) use self::handlers::{git_head, whoami};
 pub(crate) use self::health::*;
+#[cfg(test)]
+pub(crate) use self::helpers::test_repo;
 pub(crate) use self::helpers::{
-    authorize, authorize_with_context, repo_type_path, require_repository_binding,
+    HubRepository, authorize, repo_type_path, require_repository_binding,
 };
 // Re-export the canonical LFS object-key builder from the shared protocol
 // adapters so sibling modules and `crate::routes::lfs_object_key` references

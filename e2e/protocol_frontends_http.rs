@@ -26,6 +26,7 @@ use shardline_server::{
     oci_manifest_key, oci_manifest_media_type_key, serve_with_listener,
     test_fixtures::{single_chunk_xorb, single_file_shard},
 };
+use shardline_server_core::{AuthContext, AuthorizedRepository};
 use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectStore};
 use support::{bearer_token, wait_for_health};
 
@@ -702,9 +703,20 @@ async fn all_frontends_share_digest_addressed_storage_and_keep_xet_and_hub_worki
     assert!(reconstruction.fetch_info.contains_key(&second_hash));
 
     let object_store = ServerObjectStore::local(runtime.storage_path().join("chunks"))?;
-    let lfs_key = lfs_object_key(&digest_hex, Some(&repository_scope))?;
-    let bazel_key =
-        bazel_cache_object_key(BazelCacheKind::Cas, &digest_hex, Some(&repository_scope))?;
+    // The repository identity for LFS/Bazel keys comes from the token claims;
+    // build a capability carrying the same RepositoryScope the tokens used.
+    let claims = shardline_protocol::TokenClaims::new(
+        "shardline",
+        "test",
+        TokenScope::Write,
+        repository_scope.clone(),
+        u64::MAX,
+    )
+    .map_err(|_e| ServerError::InvalidToken(shardline_protocol::TokenCodecError::InvalidFormat))?;
+    let capability = AuthorizedRepository::from_verified_context(AuthContext::new(claims), TokenScope::Write)
+        .map_err(|_e| ServerError::InsufficientScope)?;
+    let lfs_key = lfs_object_key(&digest_hex, &capability)?;
+    let bazel_key = bazel_cache_object_key(BazelCacheKind::Cas, &digest_hex, &capability)?;
     let oci_key = oci_blob_key("team/assets", &digest_hex, Some(&repository_scope))?;
     let lfs_path = object_store
         .local_path_for_key(&lfs_key)

@@ -9,7 +9,8 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use futures_util::{StreamExt, stream};
-use shardline_protocol::{ByteRange, RepositoryScope, parse_http_byte_range};
+use shardline_protocol::{ByteRange, parse_http_byte_range};
+use shardline_server_core::AuthorizedRepository;
 use tokio::sync::OwnedSemaphorePermit;
 
 use super::{AppState, MAX_BATCH_RECONSTRUCTION_FILE_IDS, MAX_BATCH_RECONSTRUCTION_QUERY_BYTES};
@@ -133,8 +134,9 @@ pub(super) async fn load_reconstruction_response(
     file_id: &str,
     content_hash: Option<&str>,
     requested_range: Option<ByteRange>,
-    repository_scope: Option<&RepositoryScope>,
+    auth: &AuthorizedRepository,
 ) -> Result<FileReconstructionResponse, ServerError> {
+    let repository_scope = auth.namespace();
     if let Some(requested_range) = requested_range {
         return state
             .backend
@@ -172,16 +174,10 @@ pub(super) async fn load_reconstruction_v2_response(
     file_id: &str,
     content_hash: Option<&str>,
     requested_range: Option<ByteRange>,
-    repository_scope: Option<&RepositoryScope>,
+    auth: &AuthorizedRepository,
 ) -> Result<FileReconstructionV2Response, ServerError> {
-    let response = load_reconstruction_response(
-        state,
-        file_id,
-        content_hash,
-        requested_range,
-        repository_scope,
-    )
-    .await?;
+    let response =
+        load_reconstruction_response(state, file_id, content_hash, requested_range, auth).await?;
     Ok(reconstruction_v2_from_v1(response))
 }
 
@@ -190,7 +186,7 @@ pub(super) async fn parse_reconstruction_request_range(
     headers: &HeaderMap,
     file_id: &str,
     content_hash: Option<&str>,
-    repository_scope: Option<&RepositoryScope>,
+    auth: &AuthorizedRepository,
 ) -> Result<Option<ByteRange>, ServerError> {
     let Some(header_value) = headers.get(RANGE) else {
         return Ok(None);
@@ -200,7 +196,7 @@ pub(super) async fn parse_reconstruction_request_range(
         .map_err(|_error| ServerError::InvalidRangeHeader)?;
     let total_bytes = state
         .backend
-        .file_total_bytes(file_id, content_hash, repository_scope)
+        .file_total_bytes(file_id, content_hash, auth.namespace())
         .await?;
     let range = parse_http_byte_range(header_value, total_bytes).map_err(ServerError::from)?;
     Ok(Some(range))

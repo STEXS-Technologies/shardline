@@ -7,9 +7,14 @@ repository.workspace = true
 homepage.workspace = true
 readme = "../../README.md"
 description = "Benchmarks and load testing for the Shardline server ecosystem."
+publish = false
 
 [[bench]]
 name = "reconstruction"
+harness = false
+
+[[bench]]
+name = "s3_io"
 harness = false
 
 [[bin]]
@@ -17,6 +22,7 @@ name = "load_test"
 path = "src/load_test.rs"
 
 [dependencies]
+bytes.workspace = true
 libc.workspace = true
 reqwest = { workspace = true, features = ["rustls-tls"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "sync", "signal"] }
@@ -24,6 +30,7 @@ serde_json.workspace = true
 shardline-index.workspace = true
 shardline-protocol.workspace = true
 shardline-server-core.workspace = true
+shardline-storage = { workspace = true, features = ["s3"] }
 
 [dev-dependencies]
 criterion.workspace = true

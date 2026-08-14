@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use axum::http::{HeaderMap, header::AUTHORIZATION};
 use shardline_protocol::{MAX_TOKEN_STRING_BYTES, TokenClaims, TokenCodecError, TokenScope};
-use shardline_server_core::{AuthError, AuthProvider};
+use shardline_server_core::{AuthError, AuthProvider, scope_allows};
 use subtle::ConstantTimeEq;
 
 use crate::ServerError;
@@ -154,13 +154,6 @@ pub(crate) fn authorize_static_bearer_token(
     }
 
     Err(ServerError::InvalidAuthorizationHeader)
-}
-
-const fn scope_allows(actual_scope: TokenScope, required_scope: TokenScope) -> bool {
-    match required_scope {
-        TokenScope::Read => actual_scope.allows_read(),
-        TokenScope::Write => actual_scope.allows_write(),
-    }
 }
 
 impl From<TokenCodecError> for ServerError {

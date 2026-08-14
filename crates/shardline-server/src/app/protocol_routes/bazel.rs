@@ -2,11 +2,12 @@ use std::sync::Arc;
 
 use axum::{
     body::Body,
-    extract::{Path, State},
-    http::{HeaderMap, StatusCode},
+    extract::{FromRequestParts, Path, State},
+    http::{HeaderMap, StatusCode, request::Parts},
     response::{IntoResponse, Response},
 };
 use shardline_protocol::TokenScope;
+use shardline_server_core::AuthorizedRepository;
 
 use crate::{
     BazelCacheKind, ServerError,
@@ -15,7 +16,103 @@ use crate::{
     upload_ingest::{RequestBodyReader, read_body_to_bytes},
 };
 
-use super::{AppState, authorize, direct_object_response, scope_from_auth};
+use super::{AppState, authorize, direct_object_response};
+
+/// Runs the shared authorize chain and mints a typed [`AuthorizedRepository`]
+/// capability for Bazel requests.
+///
+/// Bazel URLs carry no repository segment, so the repository identity comes
+/// exclusively from the verified token claims (isolated via the token's
+/// `RepositoryScope` namespace). This reproduces today's chain in the same
+/// order: [`authorize`] (permissive `Ok(None)` when no auth provider is
+/// configured) → mint: verified context → `from_verified_context`,
+/// `None` → `anonymous_full_access()`.
+fn authorize_repository(
+    state: &AppState,
+    headers: &HeaderMap,
+    required_scope: TokenScope,
+) -> Result<AuthorizedRepository, ServerError> {
+    authorize(state, headers, required_scope)?.map_or_else(
+        || Ok(AuthorizedRepository::anonymous_full_access()),
+        |ctx| {
+            // Bridge the server crate's own AuthContext (already verified)
+            // into the core AuthContext that the capability seam consumes.
+            let core_ctx = shardline_server_core::AuthContext::new(ctx.claims().clone());
+            AuthorizedRepository::from_verified_context(core_ctx, required_scope)
+                .map_err(ServerError::from)
+        },
+    )
+}
+
+/// Read-scoped Bazel authorization capability, extracted from the request.
+///
+/// Because Bazel URLs carry no repository path segment, the capability's
+/// namespace comes entirely from the verified token claims. The extractor
+/// reproduces today's authorize chain exactly: `authorize` (permissive
+/// `Ok(None)` when `state.auth` is `None`) → verified context → capability,
+/// or `anonymous_full_access()` for permissive mode.
+#[derive(Debug)]
+pub struct BazelRepository {
+    auth: AuthorizedRepository,
+}
+
+/// Write-scoped Bazel authorization capability, extracted from the request.
+#[derive(Debug)]
+pub struct BazelWriteRepository {
+    auth: AuthorizedRepository,
+}
+
+impl BazelRepository {
+    /// Read-scoped construction from request headers.
+    fn read(state: &AppState, headers: &HeaderMap) -> Result<Self, ServerError> {
+        Ok(Self {
+            auth: authorize_repository(state, headers, TokenScope::Read)?,
+        })
+    }
+
+    /// The typed, verified authorization capability.
+    pub(crate) const fn capability(&self) -> &AuthorizedRepository {
+        &self.auth
+    }
+}
+
+impl BazelWriteRepository {
+    /// Write-scoped construction from request headers.
+    fn write(state: &AppState, headers: &HeaderMap) -> Result<Self, ServerError> {
+        Ok(Self {
+            auth: authorize_repository(state, headers, TokenScope::Write)?,
+        })
+    }
+
+    /// The typed, verified authorization capability.
+    pub(crate) const fn capability(&self) -> &AuthorizedRepository {
+        &self.auth
+    }
+}
+
+impl FromRequestParts<Arc<AppState>> for BazelRepository {
+    type Rejection = ServerError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
+        // Borrow (do not consume) the headers: handlers extract `HeaderMap`
+        // separately for downstream processing.
+        Self::read(state, &parts.headers)
+    }
+}
+
+impl FromRequestParts<Arc<AppState>> for BazelWriteRepository {
+    type Rejection = ServerError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
+        Self::write(state, &parts.headers)
+    }
+}
 
 // ---------------------------------------------------------------------------
 // AC (Action Cache) handlers — /v1/bazel/cache/ac/{hash}
@@ -25,14 +122,10 @@ use super::{AppState, authorize, direct_object_response, scope_from_auth};
 pub(crate) async fn bazel_get_ac(
     State(state): State<Arc<AppState>>,
     Path(hash): Path<String>,
+    repo: BazelRepository,
     headers: HeaderMap,
 ) -> Result<Response, ServerError> {
-    let auth = authorize(&state, &headers, TokenScope::Read)?;
-    let object_key = bazel_cache_object_key(
-        BazelCacheKind::Ac,
-        &hash,
-        auth.as_ref().map(scope_from_auth),
-    )?;
+    let object_key = bazel_cache_object_key(BazelCacheKind::Ac, &hash, repo.capability())?;
     direct_object_response(
         &state,
         &headers,
@@ -44,23 +137,19 @@ pub(crate) async fn bazel_get_ac(
     .await
 }
 
-#[tracing::instrument(skip(state, headers, body), fields(hash))]
+#[tracing::instrument(skip(state, _headers, body), fields(hash))]
 pub(crate) async fn bazel_put_ac(
     State(state): State<Arc<AppState>>,
     Path(hash): Path<String>,
-    headers: HeaderMap,
+    repo: BazelWriteRepository,
+    _headers: HeaderMap,
     body: Body,
 ) -> Result<impl IntoResponse, ServerError> {
-    let auth = authorize(&state, &headers, TokenScope::Write)?;
     let _admit = state
         .admission
         .try_acquire(weights::XORB_UPLOAD)
         .ok_or(ServerError::WorkQueueSaturated)?;
-    let object_key = bazel_cache_object_key(
-        BazelCacheKind::Ac,
-        &hash,
-        auth.as_ref().map(scope_from_auth),
-    )?;
+    let object_key = bazel_cache_object_key(BazelCacheKind::Ac, &hash, repo.capability())?;
     let mut body = RequestBodyReader::from_body(body, state.config.max_request_body_bytes())?;
     let bytes = read_body_to_bytes(&mut body).await?;
     // Action Cache keys identify actions, not the serialized action result.
@@ -72,18 +161,14 @@ pub(crate) async fn bazel_put_ac(
     Ok(StatusCode::NO_CONTENT)
 }
 
-#[tracing::instrument(skip(state, headers), fields(hash))]
+#[tracing::instrument(skip(state, _headers), fields(hash))]
 pub(crate) async fn bazel_head_ac(
     State(state): State<Arc<AppState>>,
     Path(hash): Path<String>,
-    headers: HeaderMap,
+    repo: BazelRepository,
+    _headers: HeaderMap,
 ) -> Result<Response, ServerError> {
-    let auth = authorize(&state, &headers, TokenScope::Read)?;
-    let object_key = bazel_cache_object_key(
-        BazelCacheKind::Ac,
-        &hash,
-        auth.as_ref().map(scope_from_auth),
-    )?;
+    let object_key = bazel_cache_object_key(BazelCacheKind::Ac, &hash, repo.capability())?;
     let total_length = state.backend.object_length(&object_key).await?;
     Ok((
         StatusCode::OK,
@@ -106,14 +191,10 @@ pub(crate) async fn bazel_head_ac(
 pub(crate) async fn bazel_get_cas(
     State(state): State<Arc<AppState>>,
     Path(hash): Path<String>,
+    repo: BazelRepository,
     headers: HeaderMap,
 ) -> Result<Response, ServerError> {
-    let auth = authorize(&state, &headers, TokenScope::Read)?;
-    let object_key = bazel_cache_object_key(
-        BazelCacheKind::Cas,
-        &hash,
-        auth.as_ref().map(scope_from_auth),
-    )?;
+    let object_key = bazel_cache_object_key(BazelCacheKind::Cas, &hash, repo.capability())?;
     direct_object_response(
         &state,
         &headers,
@@ -125,23 +206,19 @@ pub(crate) async fn bazel_get_cas(
     .await
 }
 
-#[tracing::instrument(skip(state, headers, body), fields(hash))]
+#[tracing::instrument(skip(state, _headers, body), fields(hash))]
 pub(crate) async fn bazel_put_cas(
     State(state): State<Arc<AppState>>,
     Path(hash): Path<String>,
-    headers: HeaderMap,
+    repo: BazelWriteRepository,
+    _headers: HeaderMap,
     body: Body,
 ) -> Result<impl IntoResponse, ServerError> {
-    let auth = authorize(&state, &headers, TokenScope::Write)?;
     let _admit = state
         .admission
         .try_acquire(weights::XORB_UPLOAD)
         .ok_or(ServerError::WorkQueueSaturated)?;
-    let object_key = bazel_cache_object_key(
-        BazelCacheKind::Cas,
-        &hash,
-        auth.as_ref().map(scope_from_auth),
-    )?;
+    let object_key = bazel_cache_object_key(BazelCacheKind::Cas, &hash, repo.capability())?;
     let body = RequestBodyReader::from_body(body, state.config.max_request_body_bytes())?;
     let _stored = state
         .backend
@@ -150,18 +227,14 @@ pub(crate) async fn bazel_put_cas(
     Ok(StatusCode::NO_CONTENT)
 }
 
-#[tracing::instrument(skip(state, headers), fields(hash))]
+#[tracing::instrument(skip(state, _headers), fields(hash))]
 pub(crate) async fn bazel_head_cas(
     State(state): State<Arc<AppState>>,
     Path(hash): Path<String>,
-    headers: HeaderMap,
+    repo: BazelRepository,
+    _headers: HeaderMap,
 ) -> Result<Response, ServerError> {
-    let auth = authorize(&state, &headers, TokenScope::Read)?;
-    let object_key = bazel_cache_object_key(
-        BazelCacheKind::Cas,
-        &hash,
-        auth.as_ref().map(scope_from_auth),
-    )?;
+    let object_key = bazel_cache_object_key(BazelCacheKind::Cas, &hash, repo.capability())?;
     let total_length = state.backend.object_length(&object_key).await?;
     Ok((
         StatusCode::OK,
@@ -188,16 +261,12 @@ pub(crate) async fn bazel_head_cas(
 pub(crate) async fn bazel_get(
     State(state): State<Arc<AppState>>,
     Path(hash): Path<String>,
+    repo: BazelRepository,
     headers: HeaderMap,
 ) -> Result<Response, ServerError> {
-    let auth = authorize(&state, &headers, TokenScope::Read)?;
-
     // Try AC first, then CAS.
-    if let Ok(ac_key) = bazel_cache_object_key(
-        BazelCacheKind::Ac,
-        &hash,
-        auth.as_ref().map(scope_from_auth),
-    ) && state.backend.object_length(&ac_key).await.is_ok()
+    if let Ok(ac_key) = bazel_cache_object_key(BazelCacheKind::Ac, &hash, repo.capability())
+        && state.backend.object_length(&ac_key).await.is_ok()
     {
         return direct_object_response(
             &state,
@@ -210,11 +279,7 @@ pub(crate) async fn bazel_get(
         .await;
     }
 
-    let cas_key = bazel_cache_object_key(
-        BazelCacheKind::Cas,
-        &hash,
-        auth.as_ref().map(scope_from_auth),
-    )?;
+    let cas_key = bazel_cache_object_key(BazelCacheKind::Cas, &hash, repo.capability())?;
     direct_object_response(
         &state,
         &headers,
@@ -227,23 +292,19 @@ pub(crate) async fn bazel_get(
 }
 
 /// PUT /v1/bazel/{hash} — Upload blob to CAS.
-#[tracing::instrument(skip(state, headers, body), fields(hash))]
+#[tracing::instrument(skip(state, _headers, body), fields(hash))]
 pub(crate) async fn bazel_put(
     State(state): State<Arc<AppState>>,
     Path(hash): Path<String>,
-    headers: HeaderMap,
+    repo: BazelWriteRepository,
+    _headers: HeaderMap,
     body: Body,
 ) -> Result<impl IntoResponse, ServerError> {
-    let auth = authorize(&state, &headers, TokenScope::Write)?;
     let _admit = state
         .admission
         .try_acquire(weights::XORB_UPLOAD)
         .ok_or(ServerError::WorkQueueSaturated)?;
-    let object_key = bazel_cache_object_key(
-        BazelCacheKind::Cas,
-        &hash,
-        auth.as_ref().map(scope_from_auth),
-    )?;
+    let object_key = bazel_cache_object_key(BazelCacheKind::Cas, &hash, repo.capability())?;
     let body = RequestBodyReader::from_body(body, state.config.max_request_body_bytes())?;
     let _stored = state
         .backend
@@ -253,20 +314,16 @@ pub(crate) async fn bazel_put(
 }
 
 /// HEAD /v1/bazel/{hash} — Check existence (tries AC first, falls back to CAS).
-#[tracing::instrument(skip(state, headers), fields(hash))]
+#[tracing::instrument(skip(state, _headers), fields(hash))]
 pub(crate) async fn bazel_head(
     State(state): State<Arc<AppState>>,
     Path(hash): Path<String>,
-    headers: HeaderMap,
+    repo: BazelRepository,
+    _headers: HeaderMap,
 ) -> Result<Response, ServerError> {
-    let auth = authorize(&state, &headers, TokenScope::Read)?;
-
     // Try AC first, then CAS.
-    if let Ok(ac_key) = bazel_cache_object_key(
-        BazelCacheKind::Ac,
-        &hash,
-        auth.as_ref().map(scope_from_auth),
-    ) && let Ok(total_length) = state.backend.object_length(&ac_key).await
+    if let Ok(ac_key) = bazel_cache_object_key(BazelCacheKind::Ac, &hash, repo.capability())
+        && let Ok(total_length) = state.backend.object_length(&ac_key).await
     {
         return Ok((
             StatusCode::OK,
@@ -281,11 +338,7 @@ pub(crate) async fn bazel_head(
             .into_response());
     }
 
-    let cas_key = bazel_cache_object_key(
-        BazelCacheKind::Cas,
-        &hash,
-        auth.as_ref().map(scope_from_auth),
-    )?;
+    let cas_key = bazel_cache_object_key(BazelCacheKind::Cas, &hash, repo.capability())?;
     let total_length = state.backend.object_length(&cas_key).await?;
     Ok((
         StatusCode::OK,
@@ -319,6 +372,7 @@ mod tests {
         BazelCacheKind, ProtocolMetrics, ReconstructionCacheService, ServerBackend, ServerConfig,
         ServerFrontend, ServerRole, TransferLimiter, app::AppState, bazel_cache_object_key,
     };
+    use shardline_server_core::AuthorizedRepository;
 
     use super::{
         bazel_get, bazel_get_ac, bazel_get_cas, bazel_head, bazel_head_ac, bazel_head_cas,
@@ -800,7 +854,12 @@ mod tests {
     #[test]
     fn ac_hash_produces_key_with_ac_prefix() {
         let hash = "a".repeat(64);
-        let key = bazel_cache_object_key(BazelCacheKind::Ac, &hash, None).unwrap();
+        let key = bazel_cache_object_key(
+            BazelCacheKind::Ac,
+            &hash,
+            &AuthorizedRepository::anonymous_full_access(),
+        )
+        .unwrap();
         assert!(
             key.as_str().contains("/ac/"),
             "expected /ac/ in key: {}",
@@ -812,7 +871,12 @@ mod tests {
     #[test]
     fn cas_hash_produces_key_with_cas_prefix() {
         let hash = "b".repeat(64);
-        let key = bazel_cache_object_key(BazelCacheKind::Cas, &hash, None).unwrap();
+        let key = bazel_cache_object_key(
+            BazelCacheKind::Cas,
+            &hash,
+            &AuthorizedRepository::anonymous_full_access(),
+        )
+        .unwrap();
         assert!(
             key.as_str().contains("/cas/"),
             "expected /cas/ in key: {}",
@@ -824,7 +888,11 @@ mod tests {
     #[test]
     fn invalid_hash_returns_error() {
         assert!(matches!(
-            bazel_cache_object_key(BazelCacheKind::Ac, "short", None),
+            bazel_cache_object_key(
+                BazelCacheKind::Ac,
+                "short",
+                &AuthorizedRepository::anonymous_full_access()
+            ),
             Err(ProtocolError::InvalidContentHash)
         ));
     }
@@ -835,7 +903,7 @@ mod tests {
             bazel_cache_object_key(
                 BazelCacheKind::Cas,
                 "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
-                None,
+                &AuthorizedRepository::anonymous_full_access(),
             ),
             Err(ProtocolError::InvalidContentHash)
         ));
@@ -848,7 +916,11 @@ mod tests {
     #[test]
     fn empty_hash_returns_error() {
         assert!(matches!(
-            bazel_cache_object_key(BazelCacheKind::Ac, "", None),
+            bazel_cache_object_key(
+                BazelCacheKind::Ac,
+                "",
+                &AuthorizedRepository::anonymous_full_access()
+            ),
             Err(ProtocolError::InvalidContentHash)
         ));
     }
@@ -856,7 +928,11 @@ mod tests {
     #[test]
     fn uppercase_hex_returns_error() {
         assert!(matches!(
-            bazel_cache_object_key(BazelCacheKind::Ac, &"A".repeat(64), None),
+            bazel_cache_object_key(
+                BazelCacheKind::Ac,
+                &"A".repeat(64),
+                &AuthorizedRepository::anonymous_full_access()
+            ),
             Err(ProtocolError::InvalidContentHash)
         ));
     }

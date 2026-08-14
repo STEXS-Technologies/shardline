@@ -148,6 +148,11 @@ After restore:
 
 ## Operator Recovery
 
+For scenario-by-scenario walkthroughs of storage loss, metadata loss, crash, and
+cross-node recovery, see [Disaster Recovery](DISASTER_RECOVERY.md). To move a live
+deployment between versions one role class at a time, see
+[Rolling Upgrade](ROLLING_UPGRADE.md).
+
 Use these commands for recovery and verification:
 
 ```bash
@@ -225,6 +230,10 @@ Before calling a deployment production-ready:
 - API and transfer role split is validated
 - backups exist for metadata, object storage, and secrets
 - restore order is documented and rehearsed
+- the disaster-recovery runbook is rehearsed, including a restore drill
+  ([Disaster Recovery](DISASTER_RECOVERY.md))
+- the rolling-upgrade procedure is documented and rehearsed
+  ([Rolling Upgrade](ROLLING_UPGRADE.md))
 - `fsck`, `index rebuild`, lifecycle repair, and GC dry-run procedures are documented
 - ingress and egress scope are explicit
 - GC schedule and retention window match the operator recovery window

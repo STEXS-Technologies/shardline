@@ -5,7 +5,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use shardline_protocol::{SecretBytes, SecretString};
+use shardline_protocol::{SecretBytes, SecretString, parse_bool};
 
 use super::file::ShardlineTomlConfig;
 use super::secrets::{
@@ -449,6 +449,19 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
     if let Some(deployment_mode) = deployment_mode_from_env() {
         config = config.with_deployment_mode(deployment_mode);
     }
+
+    // Fail-safe override for the at-rest secret encryption gate: an invalid
+    // value keeps the gate armed (treated as false).
+    let allow_plaintext = var("SHARDLINE_ALLOW_PLAINTEXT_SECRETS_IN_PRODUCTION")
+        .ok()
+        .and_then(|v| parse_bool(&v))
+        .unwrap_or_else(|| {
+            tracing::warn!(
+                "invalid SHARDLINE_ALLOW_PLAINTEXT_SECRETS_IN_PRODUCTION value, treating as false"
+            );
+            false
+        });
+    config = config.with_allow_plaintext_secrets_in_production(allow_plaintext);
 
     // Validate Hub frontend requires auth configuration.
     if config.server_frontends().contains(&ServerFrontend::Hub)
@@ -1203,6 +1216,43 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
             config.config_secret_key(),
             Some(b"0123456789abcdef0123456789abcdef".as_slice())
         );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn allow_plaintext_secrets_in_production_from_env_true() {
+        // A valid boolean override configured via the environment must flow
+        // through the full loader into `ServerConfig`.
+        // SAFETY: serialized env test
+        set_env_var("SHARDLINE_ALLOW_PLAINTEXT_SECRETS_IN_PRODUCTION", "true");
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+
+        let result = super::load_server_config_from_env();
+        remove_env_var("SHARDLINE_ALLOW_PLAINTEXT_SECRETS_IN_PRODUCTION");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+
+        let config = result.expect("config loads with the plaintext override set");
+        assert!(config.allow_plaintext_secrets_in_production());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn allow_plaintext_secrets_in_production_from_env_invalid_is_false() {
+        // An invalid override value must fail safe and keep the gate armed.
+        // SAFETY: serialized env test
+        set_env_var("SHARDLINE_ALLOW_PLAINTEXT_SECRETS_IN_PRODUCTION", "banana");
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+
+        let result = super::load_server_config_from_env();
+        remove_env_var("SHARDLINE_ALLOW_PLAINTEXT_SECRETS_IN_PRODUCTION");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+
+        let config = result.expect("config loads with an invalid plaintext override");
+        assert!(!config.allow_plaintext_secrets_in_production());
     }
 
     #[test]

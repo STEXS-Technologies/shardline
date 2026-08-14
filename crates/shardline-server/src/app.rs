@@ -688,6 +688,9 @@ fn authorize(
     Ok(None)
 }
 
+/// Kept during the authorization-capability migration; not yet wired to a
+/// caller.
+#[allow(dead_code)]
 const fn scope_from_auth(auth: &AuthContext) -> &RepositoryScope {
     auth.claims().repository()
 }

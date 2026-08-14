@@ -2,7 +2,6 @@ use std::str::FromStr;
 use std::sync::LazyLock;
 use tokio::sync::Semaphore;
 
-use axum::http::HeaderMap;
 use axum::{
     Json,
     extract::{Path, State},
@@ -13,9 +12,9 @@ use crate::{error::HubApiError, models::*, types::WebhookScheme};
 // HubRepoType used in the webhook_create handler for repo lookup
 // (used implicitly via state.store methods)
 use shardline_index::hub::HubWebhook;
-use shardline_protocol::{SecretString, TokenScope};
+use shardline_protocol::SecretString;
 
-use super::{HubState, authorize_with_context, require_repository_binding};
+use super::{HubRepository, HubState};
 
 /// Delivers webhook events to registered URLs.
 ///
@@ -335,13 +334,13 @@ pub(crate) fn webhook_response_from_hub(
 /// Creates a webhook for a repository.
 pub(crate) async fn webhook_create(
     State(state): State<HubState>,
-    headers: HeaderMap,
+    _repo: HubRepository<true>,
     Path((_repo_type, ns, repo)): Path<(String, String, String)>,
     Json(request): Json<WebhookCreateRequest>,
 ) -> Result<(StatusCode, Json<WebhookResponse>), HubApiError> {
     shardline_metrics::record_hub_api_request("webhook_create", "POST", 201);
-    let auth_ctx = authorize_with_context(&state, &headers, TokenScope::Write)?;
-    require_repository_binding(auth_ctx.as_ref(), &ns, &repo)?;
+    // The extractor has already required Write scope and bound the token to
+    // this repository before the handler runs.
     if request.events.len() > MAX_WEBHOOK_EVENTS {
         return Err(HubApiError::PathValidation(format!(
             "webhook events exceeds maximum of {MAX_WEBHOOK_EVENTS}"
@@ -395,12 +394,10 @@ pub(crate) async fn webhook_create(
 /// Lists webhooks for a repository.
 pub(crate) async fn webhook_list(
     State(state): State<HubState>,
-    headers: HeaderMap,
+    _repo: HubRepository,
     Path((_repo_type, ns, repo)): Path<(String, String, String)>,
 ) -> Result<Json<WebhookListResponse>, HubApiError> {
     shardline_metrics::record_hub_api_request("webhook_list", "GET", 200);
-    let auth_ctx = authorize_with_context(&state, &headers, TokenScope::Read)?;
-    require_repository_binding(auth_ctx.as_ref(), &ns, &repo)?;
     let name = format!("{ns}/{repo}");
     let webhooks = state
         .store
@@ -415,12 +412,10 @@ pub(crate) async fn webhook_list(
 /// Deletes a webhook.
 pub(crate) async fn webhook_delete(
     State(state): State<HubState>,
-    headers: HeaderMap,
+    _repo: HubRepository<true>,
     Path((_repo_type, ns, repo, webhook_id)): Path<(String, String, String, String)>,
 ) -> Result<StatusCode, HubApiError> {
     shardline_metrics::record_hub_api_request("webhook_delete", "DELETE", 204);
-    let auth_ctx = authorize_with_context(&state, &headers, TokenScope::Write)?;
-    require_repository_binding(auth_ctx.as_ref(), &ns, &repo)?;
     let name = format!("{ns}/{repo}");
     state
         .store
@@ -434,6 +429,7 @@ pub(crate) async fn webhook_delete(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::routes::test_repo;
     use std::net::IpAddr;
 
     #[test]
@@ -683,7 +679,7 @@ mod tests {
         let plaintext = "s3cr3t-webhook-token";
         let (status, resp) = webhook_create(
             State(state.clone()),
-            axum::http::HeaderMap::new(),
+            test_repo(&state, &axum::http::HeaderMap::new()),
             Path(("models".into(), "org".into(), "enc".into())),
             Json(WebhookCreateRequest {
                 url: "https://example.com/hook".into(),

@@ -64,6 +64,7 @@ pub struct ServerConfig {
     pub(crate) index_postgres_url: Option<SecretString>,
     pub(crate) metrics_token: Option<SecretBytes>,
     pub(crate) deployment_mode: DeploymentMode,
+    pub(crate) allow_plaintext_secrets_in_production: bool,
     pub(crate) auth: AuthConfig,
     pub(crate) oci: OciConfig,
     pub(crate) cache: CacheConfig,
@@ -126,6 +127,7 @@ impl ServerConfig {
             index_postgres_url: None,
             metrics_token: None,
             deployment_mode: DeploymentMode::default(),
+            allow_plaintext_secrets_in_production: false,
             auth: AuthConfig {
                 token_signing_key: None,
                 hub_webhook_secret_key: None,
@@ -584,6 +586,24 @@ impl ServerConfig {
         self
     }
 
+    /// Returns whether plaintext persistent secrets are permitted in
+    /// non-insecure (production) deployment modes.
+    #[must_use]
+    pub const fn allow_plaintext_secrets_in_production(&self) -> bool {
+        self.allow_plaintext_secrets_in_production
+    }
+
+    /// Explicitly permits plaintext persistent secrets in non-insecure
+    /// deployment modes.
+    ///
+    /// This is an insecure override intended only for migrating an existing
+    /// deployment to at-rest secret encryption.
+    #[must_use]
+    pub const fn with_allow_plaintext_secrets_in_production(mut self, value: bool) -> Self {
+        self.allow_plaintext_secrets_in_production = value;
+        self
+    }
+
     /// Returns the optional provider configuration path.
     #[must_use]
     pub fn provider_config_path(&self) -> Option<&Path> {
@@ -1029,6 +1049,10 @@ impl ServerConfig {
     ///
     /// Returns [`ServerConfigError::ConfigFileError`] when the deployment mode
     /// constraints are not satisfied.
+    ///
+    /// Returns [`ServerConfigError::PlaintextSecretsInProduction`] when a
+    /// non-insecure deployment mode would persist secrets without at-rest
+    /// encryption keys.
     pub fn validate_runtime_requirements(&self) -> Result<(), ServerConfigError> {
         // The CDC chunker requires a power-of-two chunk size; a misconfigured
         // value must fail startup with a clear error instead of panicking on
@@ -1068,7 +1092,43 @@ impl ServerConfig {
 
         self.validate_deployment_mode_requirements()?;
 
+        self.validate_plaintext_secrets_in_production()?;
+
         Ok(())
+    }
+
+    /// Validates that persistent secrets are never stored unencrypted in a
+    /// production (non-insecure) deployment mode unless explicitly permitted.
+    fn validate_plaintext_secrets_in_production(&self) -> Result<(), ServerConfigError> {
+        if self.allow_plaintext_secrets_in_production
+            || self.deployment_mode == DeploymentMode::Insecure
+        {
+            return Ok(());
+        }
+        let surfaces = self.plaintext_secret_surfaces();
+        if surfaces.is_empty() {
+            return Ok(());
+        }
+        Err(ServerConfigError::PlaintextSecretsInProduction {
+            surfaces: surfaces.join("; "),
+        })
+    }
+
+    /// Returns the enabled surfaces whose persistent secrets would be stored
+    /// in plaintext because no at-rest encryption key is configured.
+    fn plaintext_secret_surfaces(&self) -> Vec<&'static str> {
+        let mut surfaces = Vec::new();
+        if self.server_frontends().contains(&ServerFrontend::Hub)
+            && self.auth.hub_webhook_secret_key.is_none()
+        {
+            surfaces.push("hub webhook signing secrets (set SHARDLINE_HUB_WEBHOOK_SECRET_KEY)");
+        }
+        if (self.provider.config_path.is_some() || self.provider.api_key.is_some())
+            && self.auth.config_secret_key.is_none()
+        {
+            surfaces.push("provider-config webhook secrets (set SHARDLINE_CONFIG_SECRET_KEY)");
+        }
+        surfaces
     }
 
     /// Validates deployment-mode-specific constraints.

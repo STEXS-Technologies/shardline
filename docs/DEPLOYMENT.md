@@ -396,6 +396,25 @@ The stats endpoint follows the same rule and requires a valid bearer token.
 `SHARDLINE_PROVIDER_CONFIG_FILE` and `SHARDLINE_PROVIDER_API_KEY_FILE` are optional.
 Leave them unset for a providerless deployment that serves clients directly.
 
+### Secret encryption at rest
+
+`Strict` and `Authenticated` deployment modes require at-rest encryption keys for
+every persistent-secret surface that is enabled:
+
+- Hub webhook signing secrets — set `SHARDLINE_HUB_WEBHOOK_SECRET_KEY` (32-byte
+  AES-256 key) when the hub frontend is enabled.
+- Provider-config webhook secrets — set `SHARDLINE_CONFIG_SECRET_KEY` (32-byte
+  AES-256 key) when a provider config or API key is configured.
+
+Startup **fails** in these modes when a persistent-secret surface is present
+without its key, instead of silently storing secrets in plaintext. Insecure mode
+(local development) is exempt.
+
+`SHARDLINE_ALLOW_PLAINTEXT_SECRETS_IN_PRODUCTION=true` is an explicit insecure
+override that re-enables plaintext storage. It is intended **only** for
+migrating an existing deployment to at-rest encryption and must not be used in
+production.
+
 ### Providerless Direct Xet Backend
 
 Use this mode when Shardline is the only backend you need and no provider bridge is
@@ -882,6 +901,15 @@ shardline health --server http://127.0.0.1:8080
 Health endpoints must not expose secrets, token claims, presigned URLs, or object keys
 for private data.
 
+### Rolling Upgrades
+
+To upgrade a running deployment without a full outage, upgrade one role class at a
+time — `api` and `transfer` separately in the scaled profile, one process for
+`--role all` — and poll `/healthz` and `/readyz` after each class. The readiness
+check reports the server role and configured backends, so each class can be confirmed
+ready before the next one moves. See [Rolling Upgrade](ROLLING_UPGRADE.md) for the
+full procedure, recommended order, and rollback steps.
+
 ## Metrics
 
 `GET /metrics` emits Prometheus text format.
@@ -909,6 +937,10 @@ Production backup requires both stores:
 
 - index database backup
 - object storage retention or backup
+
+For scenario-by-scenario recovery runbooks (node loss, metadata loss, object-store
+loss, crash mid-upload, cross-node moves), see
+[Disaster Recovery](DISASTER_RECOVERY.md).
 
 The index alone is not enough to restore data.
 Object bytes alone are not enough to serve reconstructions efficiently without
