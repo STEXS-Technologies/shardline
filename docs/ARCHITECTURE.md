@@ -4,8 +4,8 @@ Shardline is an open, self-hostable content-addressed storage backend with plugg
 protocol frontends. It uses a protocol-neutral CAS coordinator with explicit frontend
 adapters. The runtime hosts an explicit frontend set.
 Validated frontends in this repository today are Xet, Git LFS, Bazel HTTP remote cache,
-OCI Distribution, and HuggingFace Hub API (REST + Git Smart HTTP). They share the same
-storage, metadata, authorization, lifecycle, and operator surface while keeping
+OCI Distribution, HuggingFace Hub API (REST + Git Smart HTTP), and S3. They share the
+same storage, metadata, authorization, lifecycle, and operator surface while keeping
 protocol-specific request shaping and object handling in dedicated adapters.
 
 ## Goals
@@ -35,7 +35,7 @@ flowchart TD
     direction TD
     Client[Client]
     Router[Frontend router]
-    Frontends["<b>Frontend set</b><br/>Xet<br/>Git LFS<br/>Bazel HTTP cache<br/>OCI Distribution"]
+    Frontends["<b>Frontend set</b><br/>Xet<br/>Git LFS<br/>Bazel HTTP cache<br/>OCI Distribution<br/>HuggingFace Hub API<br/>S3"]
     Core["<b>Shared server core</b><br/>Auth and scope checks<br/>CAS coordinator<br/>Reconstruction planner<br/>Lifecycle and operator flows"]
     Adapters["<b>Adapters</b><br/>Index and record store<br/>Object store<br/>Reconstruction cache<br/>Provider adapters"]
   end
@@ -110,6 +110,8 @@ The current production server exposes multiple protocol route families:
 - HuggingFace Hub Git Smart HTTP: `GET /{type}/{ns}/{repo}/info/refs`,
   `GET /{type}/{ns}/{repo}/HEAD`, `POST /{type}/{ns}/{repo}/git-upload-pack`,
   `POST /{type}/{ns}/{repo}/git-receive-pack`
+- S3: `GET /` (`ListBuckets`), `PUT|GET|HEAD|POST|DELETE /{bucket}` and
+  `/{bucket}/`, `GET|HEAD|PUT|POST|DELETE /{bucket}/{*key}`
 
 When provider-backed token issuance is enabled, the server also exposes:
 
@@ -222,7 +224,7 @@ mark-and-sweep can collect unreferenced chunks.
 
 ## Source Layout
 
-The workspace contains 22 product crates organized in a layered dependency graph.
+The workspace contains 24 product crates organized in a layered dependency graph.
 
 ```mermaid
 flowchart TD
@@ -232,7 +234,7 @@ flowchart TD
     Leaf["<b>Leaf crates</b><br/>crates/shardline-protocol<br/>crates/shardline-metrics"]
     Foundation["<b>Foundation</b><br/>crates/shardline-storage<br/>crates/shardline-vcs<br/>crates/shardline-cache<br/>crates/shardline-test-support"]
     Middle["<b>Metadata and mapping</b><br/>crates/shardline-index<br/>crates/shardline-protocol-adapters<br/>crates/shardline-server-core<br/>crates/shardline-cas"]
-    Adapters["<b>Protocol adapters</b><br/>crates/shardline-xet-adapter<br/>crates/shardline-hub-api<br/>crates/shardline-oci-adapter"]
+    Adapters["<b>Protocol adapters</b><br/>crates/shardline-xet-adapter<br/>crates/shardline-hub-api<br/>crates/shardline-oci-adapter<br/>crates/shardline-s3-adapter<br/>crates/sdx"]
     Lifecycle["<b>Lifecycle services</b><br/>crates/shardline-fsck<br/>crates/shardline-gc<br/>crates/shardline-rebuild<br/>crates/shardline-provider-events"]
     Integration["<b>Integration surface</b><br/>crates/shardline-server<br/>crates/shardline"]
   end
@@ -295,10 +297,14 @@ flowchart TD
 
 - `shardline-xet-adapter`: xorb/shard parsing, reconstruction response building, upload
   storage
-- `shardline-hub-api`: HuggingFace Hub API compatibility — 15 REST routes + Git Smart
+- `shardline-hub-api`: HuggingFace Hub API compatibility — 30+ REST routes + Git Smart
   HTTP protocol
 - `shardline-oci-adapter`: OCI Distribution protocol — upload sessions, manifest/blob
   keys
+- `shardline-s3-adapter`: S3-compatible object-storage protocol — bucket and object
+  route family with the SigV4 access-key bridge
+- `sdx`: native Xet client library (chunking, xorb build/read, reconstruction, token
+  service, retry policy) consumed by the `shardline` CLI
 
 ### Layer 4 — Lifecycle services
 
@@ -311,11 +317,12 @@ flowchart TD
 
 - `shardline-server`: HTTP server, frontend routing, migrations, all protocol frontends
 - `shardline`: operator binary (serve, admin, fsck, gc, rebuild, repair, backup, storage
-  migrate, bench, health, and more)
+  migrate, bench, health, and more), including the `xet`/`sdx` file-management command
+  tree dispatched by symlink
 
 ### Layer 6 — Test infrastructure
 
-- `fuzz`: 31 fuzz targets for protocol parsers, storage boundaries, mutable Hub refs,
+- `fuzz`: 45 fuzz targets for protocol parsers, storage boundaries, mutable Hub refs,
   and frontends
 
 Crate boundaries keep protocol handling, server operation, storage, indexing, and
@@ -399,25 +406,29 @@ model on the data plane.
 The `AuthProvider` trait (defined in `shardline-auth`, re-exported from
 `shardline-server-core`) defines the authorization boundary:
 
-- `verify(token) -> AuthContext` — validate a bearer token and extract identity
-- `mint(context, repo_scope, ttl) -> String` — sign a new scoped token
+- `verify_token(token: &str) -> Result<TokenClaims, AuthError>` — validate a bearer
+  token and return its decoded claims
+- `mint_token(claims: &TokenClaims) -> Result<String, AuthError>` — sign a new scoped
+  token from claims
 
-Four adapter implementations are bundled:
+Five adapter implementations are bundled:
 
 - **LocalHmacProvider**: local HMAC-SHA256 signing key for providerless deployments
+- **Ed25519AuthProvider**: asymmetric-key signing and verification
 - **OIDC**: OpenID Connect discovery for cloud identity providers
 - **JWKS**: JSON Web Key Set for multi-issuer environments
 - **Passthrough**: trusts an upstream proxy's `Authorization` header
 
-CAS routes (Xet, LFS, Bazel, OCI) require tokens with valid issuer, repository scope,
-and read/write scope.
+CAS routes (Xet, LFS, Bazel, OCI, S3) require tokens with valid issuer, repository
+scope, and read/write scope; the S3 frontend bridges the SigV4 access key to the same
+bearer-token verifier and binds the bucket to the token's repository scope.
 The Hub API routes use the same trait — bearer tokens are validated via `HubAuth` which
 wraps `Arc<dyn AuthProvider>`. When no auth provider is configured, Hub API routes
 accept all requests anonymously.
 
 Provider-issued tokens (`shardline admin token` or provider webhook token exchange) go
-through the same `AuthProvider::mint` path, ensuring a single token format across all
-protocol frontends.
+through the same `AuthProvider::mint_token` path, ensuring a single token format across
+all protocol frontends.
 
 ## Observability
 
@@ -449,7 +460,7 @@ Token-gated in production via `SHARDLINE_METRICS_TOKEN_FILE`.
 
 ## Database Migrations
 
-Shardline ships 14 bundled migrations applied via `shardline db migrate up`:
+Shardline ships 16 bundled migrations applied via `shardline db migrate up`:
 
 1. `metadata_store` — core index and record tables
 2. `retention_holds` — GC retention hold tracking
@@ -465,6 +476,8 @@ Shardline ships 14 bundled migrations applied via `shardline db migrate up`:
 12. `drop_lfs_objects` — remove legacy LFS objects table
 13. `fix_indexes` — database index optimizations
 14. `upload_intents` — upload lifecycle intent tracking
+15. `tree_store` — Xet path-to-file_id and revision registry tables
+16. `s3_object_index` — S3 object-key registry tables
 
 SQLite uses `BLOB`/`INTEGER`; Postgres uses `BYTEA`/`BOOLEAN`/`BIGINT`. Migrations are
 stored in `migrations/` (Postgres) and `crates/shardline-index/migrations/` (SQLite).

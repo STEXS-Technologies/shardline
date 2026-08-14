@@ -2,8 +2,8 @@
 
 This document describes how to publish the Shardline workspace to crates.io for a
 coordinated release (all publishable crates move together to the same version, e.g.
-`v1.4.0`). Because every crate rewrites its in-workspace path dependencies to
-crates.io requirements (`^1.4.0`), the release **must** go out bottom-up
+`v1.5.0`). Because every crate rewrites its in-workspace path dependencies to
+crates.io requirements (`^1.5.0`), the release **must** go out bottom-up
 (dependencies first).
 
 ## Prerequisites
@@ -38,7 +38,7 @@ crates.io requirements (`^1.4.0`), the release **must** go out bottom-up
 
 ## Publish order (bottom-up, dependencies first)
 
-Verified from the `cargo metadata` dependency graph at `v1.4.0`. Each crate must be
+Verified from the `cargo metadata` dependency graph at `v1.5.0`. Each crate must be
 on crates.io at the new version before any crate that depends on it.
 
 1. `shardline-metrics`
@@ -58,12 +58,13 @@ on crates.io at the new version before any crate that depends on it.
 15. `shardline-protocol-adapters`
 16. `shardline-xet-adapter`  ← MUST land before `sdx`
 17. `sdx`                    ← depends on the adapter (tree/path/revision route constants)
-18. `shardline-fsck`
-19. `shardline-gc`
-20. `shardline-provider-events`
-21. `shardline-rebuild`
-22. `shardline-server`
-23. `shardline`              ← CLI binary; depends on `sdx`, so last
+18. `shardline-s3-adapter`   ← depends on `shardline-server-core`; MUST land before `shardline-server`
+19. `shardline-fsck`
+20. `shardline-gc`
+21. `shardline-provider-events`
+22. `shardline-rebuild`
+23. `shardline-server`       ← depends on `shardline-s3-adapter`
+24. `shardline`              ← CLI binary; depends on `sdx`, so last
 
 ### Excluded crates
 
@@ -71,20 +72,26 @@ on crates.io at the new version before any crate that depends on it.
 - `shardline-loom-tests` — `publish = false`
 - `shardline-bench` — benchmark/load-test crate, not part of the coordinated release
 
-## The `shardline-xet-adapter` → `sdx` constraint (critical)
+## The `shardline-xet-adapter` → `sdx` constraint
 
 `sdx` imports the tree/path/revision route constants (`XET_TREE_ROUTE`,
 `XET_PATH_ROUTE`, `XET_REVISIONS_ROUTE`, `XET_REVISION_ROUTE`) from
-`shardline-xet-adapter`. Those
-constants only exist on this branch; the published `shardline-xet-adapter@1.3.0` does
-not have them.
+`shardline-xet-adapter`, so the adapter must be published before `sdx`.
 
-Consequence: publishing `sdx` **before** `shardline-xet-adapter@1.4.0` fails — the sdx
-tarball resolves the adapter to the stale 1.3.0 (or, after the dep-req bump, cannot
-resolve `^1.4.0` at all) and fails to compile. Always publish the adapter first.
+> **Historical note (resolved):** during the `v1.4.0` release cycle these
+> constants existed only on the feature branch, and the published
+> `shardline-xet-adapter@1.3.0` did not have them — publishing `sdx` first failed
+> because its tarball resolved the adapter to the stale 1.3.0. The constants ship
+> in the `v1.5.0` adapter, so this is now just the ordinary dependency-order
+> constraint: publish the adapter first.
+
+Consequence: publishing `sdx` **before** `shardline-xet-adapter` fails — the sdx
+tarball cannot resolve `^X.Y.Z` for the adapter until that version is on crates.io.
+Always publish the adapter first.
 
 `sdx` is published at position 17; `shardline` (the CLI binary) depends on `sdx` and is
-therefore published last (position 23).
+therefore published last (position 24). `shardline-server` depends on
+`shardline-s3-adapter`, so that adapter (position 18) must land before it.
 
 ## Verification gates between publishes
 
@@ -117,7 +124,7 @@ isolation). `--allow-dirty` is required because the version-bump leaves uncommit
 ## Final `sdx` publish note
 
 `sdx` is a new crate (name was free on crates.io) and publishes at the workspace
-version `1.4.0`. Its dry-run can only pass after `shardline-xet-adapter@1.4.0` is
+version `1.5.0`. Its dry-run can only pass after `shardline-xet-adapter@1.5.0` is
 actually on crates.io. After publishing the adapter, re-run:
 
 ```bash

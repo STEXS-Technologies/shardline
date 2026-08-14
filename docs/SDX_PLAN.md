@@ -1,7 +1,27 @@
-# SDX — Xet Client Library and CLI: Implementation Plan
+# SDX — Xet Client Library and CLI: Implementation Status
 
-Status: Draft implementation plan for [issue #19](https://github.com/STEXS-Technologies/shardline/issues/19) —
-under review on branch `feat/sdx-native-file-management-cli`; **no implementation started**.
+**Status: implemented.** Issue [#19](https://github.com/STEXS-Technologies/shardline/issues/19)
+is shipped: the `sdx` library (crate `sdx`) and the `sdx` CLI are part of this
+workspace. The library covers client-side CDC chunking, xorb build/read
+(XorbWriter/XorbReader), v1/v2 reconstruction with fallback, shard build/upload,
+global-dedup queries, the read/write token service with transparent refresh,
+jittered retry/backoff, and streaming upload/download sessions with bounded memory.
+The CLI (`cp`, `sync`, `ls`, `rm`, `cat`, `info`, `branch`) is dispatched through
+the `shardline` binary via the `sdx` symlink (`argv[0]` detection), per
+`docs/XET_NATIVE_CLI.md`.
+
+This document is now a **what shipped + remaining notes** record rather than a
+forward-looking plan. Sections below keep the original design detail for maintainers;
+"Remaining" items (deferred `/v2/file-chunk-hashes`, signed-URL refresh probes) are
+called out where relevant.
+
+> **Internals note:** this is a maintainer-facing implementation record. Crate
+> identifiers, file/line references, and protocol constants (for example
+> `shardline-protocol/src/token.rs`, `SESSION_ID_HEADER`, `CdcChunker`) are retained
+> for engineers working on `sdx`. They are not part of the user-facing contract;
+> user and operator surfaces are documented in `docs/XET_NATIVE_CLI.md` and
+> `docs/ARCHITECTURE.md`.
+
 Companion design doc: `docs/XET_NATIVE_CLI.md` (CLI behavior, URL scheme, config, phased stubs).
 
 ## 1. Goal and scope
@@ -31,11 +51,13 @@ Naming: `sdx` (library + CLI name). The names one would reach for first are
 already taken in the ecosystem, so `sdx` is the chosen crate/CLI name.
 Everything in this repo, `docs/XET_NATIVE_CLI.md`, and issue #19 uses `sdx`.
 
-## 2. Current state (what already exists)
+## 2. Current state (what shipped)
 
 The **server side** of the Xet frontend is complete and protocol-conformant. The
-**client side does not exist at all** in this workspace — no Xet client library,
-no transfer commands, no XorbWriter/XorbReader client API.
+**client side now ships in this workspace**: `crates/sdx` provides the Xet client
+library, and the `sdx` CLI is wired into the `shardline` binary through the `sdx`
+symlink (`argv[0]` dispatch, see `crates/shardline/src/entry.rs` and the
+`crates/shardline/src/xet/` command tree).
 
 ### 2.1 Server endpoints the client will talk to
 
@@ -78,8 +100,9 @@ Registered in `crates/shardline-server/src/app.rs` (`register_xet_routes`,
   `TokenClaims {issuer, subject, scope: Read|Write, repository, expires_at}`;
   `Write ⊃ Read` (`shardline-protocol/src/token.rs:170-233`).
 - Pluggable providers: `LocalHmacProvider` (HMAC-SHA256), `Ed25519AuthProvider`
-  (asymmetric), `PassthroughProvider`, `OidcProvider`/`JwksProvider`
-  (`crates/shardline-auth/src/lib.rs:37-52`).
+  (asymmetric), `PassthroughProvider` (all in `crates/shardline-auth/src/lib.rs:37-52`);
+  OIDC/JWKS providers ship in the server crate (`crates/shardline-server/src/oidc_provider.rs`,
+  `crates/shardline-server/src/jwks_provider.rs`).
 - Token issuance auth: provider bootstrap key header `x-shardline-provider-key`;
   subject from `?subject=` → `x-shardline-provider-subject` → Basic username
   (`app/provider.rs:35,178-280`).
@@ -128,23 +151,25 @@ crate internals):
   `with_endpoint`, `with_token_info`, `with_token_refresh_url`,
   `with_custom_headers`.
 
-### 2.5 Server additions required for path addressing (part of issue #19)
+### 2.5 Server path-addressing endpoints (shipped)
 
-Audit finding (2026-08): the Xet frontend addresses content **only by 64-hex
-`file_id`** — there is no path→hash resolution, no listing, no branch, no
-deregistration endpoint. Per decision, issue #19 **includes server-side
-metadata endpoints** — the only server changes in this issue:
+Issue #19 added server-side metadata endpoints so the Xet frontend can address
+content by path in addition to the 64-hex `file_id`. These routes are registered in
+`crates/shardline-server/src/route_policy.rs` with the `XET_TREE_ROUTE` /
+`XET_PATH_ROUTE` / `XET_REVISIONS_ROUTE` / `XET_REVISION_ROUTE` constants
+(`crates/shardline-xet-adapter/src/frontend.rs:9-12`), and the `sdx` client calls
+them via the same constants (`crates/sdx/src/tree.rs`, `crates/sdx/src/revisions.rs`):
 
-| Capability | Endpoint (shape TBD, see §2.5) | Notes |
+| Capability | Endpoint | Notes |
 |---|---|---|
-| Path→file_id resolution | `GET .../tree/{rev}?path=...` | Resolves `xet://.../rev/path` to a 64-hex `file_id` for reconstruction; read-token auth; revision-scoped |
-| Listing | `GET .../tree/{rev}?prefix=...` | Directory listing for `ls` and `sync`; pagination |
-| Deregistration | `DELETE .../path/{rev}/{path}` | `rm`; semantics vs immutable CAS (mark-deleted vs remove record; GC interaction per `docs/reachability-model.md`) |
-| Branch/revision management | `GET/POST/DELETE .../revisions` | `branch --create/--delete`, `ls --branches`; depends on shardline's provider-scoped revision model (§11 Q4) |
+| Path→file_id resolution | `GET /api/{provider}/{owner}/{repo}/tree/{rev}` | Resolves `xet://.../rev/path` to a 64-hex `file_id` for reconstruction; read-token auth; revision-scoped |
+| Listing | `GET /api/{provider}/{owner}/{repo}/tree/{rev}?prefix=...` | Directory listing for `ls` and `sync`; `?limit=`/`?cursor=` pagination |
+| Path registration | `PUT /api/{provider}/{owner}/{repo}/path/{rev}/{*path}` | Registers a path→file_id mapping (used by upload finalize) |
+| Deregistration | `DELETE /api/{provider}/{owner}/{repo}/path/{rev}/{*path}` | `rm`; mark-deleted semantics; GC interaction per `docs/reachability-model.md` |
+| Revision list | `GET /api/{provider}/{owner}/{repo}/revisions` | `ls --branches` |
+| Revision create/delete | `POST|DELETE /api/{provider}/{owner}/{repo}/revisions/{rev}` | `branch --create/--delete`; provider-scoped revision model (§11 Q4) |
 
-Exact routes/shapes are designed alongside the metadata endpoints and client
-modules `tree.rs` /
-`revisions.rs`. Interop note: this path namespace is shardline-specific
+Interop note: this path namespace is shardline-specific
 (upstream resolves paths through git trees, which shardline does not serve);
 the client's file_id-level operations remain portable (§4.4.1).
 
@@ -152,63 +177,65 @@ the client's file_id-level operations remain portable (§4.4.1).
 
 | Feature | Official client surface | shardline server | sdx status |
 |---|---|---|---|
-| CDC chunking (gear-hash, 64 KiB target, 8–128 KiB bounds, mask `0xFFFF000000000000`) | `xet-data::deduplication::Chunker` | identical `CdcChunker` (server-internal only) | **missing** — client-side chunker needed |
-| BLAKE3 keyed hashing + Xet hex (byte-group reversal) | `xet-core-structures::merklehash` | `xet_hash.rs` + golden vectors | **missing** |
-| Xorb build/serialize (8-byte headers, LZ4/BG4, footer-less accepted) | `xet-core-structures::xorb_object` | validates + normalizes | **missing** — `XorbWriter` client API |
-| Xorb download + ranged fetch | `get_file_term_data`, 206/`multipart/byteranges` | `/transfer/xorb` 206 | **missing** — `XorbReader` client API |
-| v2 reconstruction (multi-range fetch descriptors) | `get_reconstruction` v2→v1 fallback | `/v2/reconstructions/{file_id}` | **missing** |
-| v1 reconstruction + batch | `get_reconstruction` v1, `batch_get_reconstruction` | `/v1/reconstructions`, batch | **missing** |
-| Global dedup query (`/v1/chunks/default-merkledb/{hash}`) | `query_for_global_dedup_shard` | exists | **missing** |
-| Shard build + upload (`/v1/shards`, fallback v1; `{result}`) | `upload_shard` | exists; v2 streaming not required | **missing** — `XorbStore`-adjacent client logic |
-| File chunk hashes for partial updates (`X-Range-Dirty`) | `get_file_chunk_hashes` | not served (shardline has no `/v2/file-chunk-hashes`) | **defer** — only needed for in-place partial overwrite |
-| Token issuance (read/write) + refresh | HF: `/api/{repo_type}s/{id}/xet-{read|write}-token/{rev}`; shardline: `/api/{provider}/{owner}/{repo}/xet-{read,write}-token/{rev}` | exists | **missing** — client token service |
-| Rate limiting / overload handling | RetryWrapper: jittered exp backoff, `retry_max_attempts=5`, `retry_base_delay=3s`, `retry_max_duration=6min` | concurrency admission only (429/503, see §6) | **missing** — §6 |
-| Session/request correlation headers | `SESSION_ID_HEADER`, `REQUEST_ID_HEADER` | tolerated | **missing** |
-| Adaptive concurrency | `ac_max_healthy_rtt` etc. | n/a | **missing** — upload/download concurrency |
-| Streaming download (bounded memory, prefetch) | `xet-data` `file_reconstruction`: `DownloadStream`/`UnorderedDownloadStream`, `DataWriter`/`SequentialWriter`/`UnorderedWriter`, `FileReconstructor` | ranged `/transfer/xorb` 206 | **missing** — §4.4 |
-| Streaming upload (incremental, no full-file buffering) | `xet-data` `processing`: `FileUploadSession`/`SingleFileCleaner`/`FileDeduper`; `hf-xet` `XetUploadStreamHandle` | chunked xorb upload (≤64 MiB body default) | **missing** — §4.4 |
-| In-memory payloads (`Bytes`, no disk) | `hf-xet` `XetUploadStreamHandle::write(Bytes)` + `download_to_bytes` | n/a (CAS is buffer-agnostic) | **missing** — §4.4 |
-| Credential/config management | `XetConfig`, token files | n/a | **missing** — §5.2 |
-| CLI cp/sync/ls/rm/cat/info/branch | pyxet-style surface (deprecated upstream) | n/a | **missing** — thin wrapper |
+| CDC chunking (gear-hash, 64 KiB target, 8–128 KiB bounds, mask `0xFFFF000000000000`) | `xet-data::deduplication::Chunker` | identical `CdcChunker` | **implemented** — client `Chunker` (`crates/sdx/src/chunker.rs`), byte-identity proven by tests |
+| BLAKE3 keyed hashing + Xet hex (byte-group reversal) | `xet-core-structures::merklehash` | `xet_hash.rs` + golden vectors | **implemented** — `crates/sdx/src/hash.rs` |
+| Xorb build/serialize (8-byte headers, LZ4/BG4, footer-less accepted) | `xet-core-structures::xorb_object` | validates + normalizes | **implemented** — `XorbWriter` (`crates/sdx/src/xorb_build.rs`) |
+| Xorb download + ranged fetch | `get_file_term_data`, 206/`multipart/byteranges` | `/transfer/xorb` 206 | **implemented** — `XorbReader` (`crates/sdx/src/xorb.rs`) |
+| v2 reconstruction (multi-range fetch descriptors) | `get_reconstruction` v2→v1 fallback | `/v2/reconstructions/{file_id}` | **implemented** — v2→v1 fallback (`crates/sdx/src/reconstruction.rs`) |
+| v1 reconstruction + batch | `get_reconstruction` v1, `batch_get_reconstruction` | `/v1/reconstructions`, batch | **implemented** |
+| Global dedup query (`/v1/chunks/default-merkledb/{hash}`) | `query_for_global_dedup_shard` | exists | **implemented** — `crates/sdx/src/dedup.rs` |
+| Shard build + upload (`/v1/shards`, fallback v1; `{result}`) | `upload_shard` | exists; v2 streaming not required | **implemented** — `crates/sdx/src/shard.rs` |
+| File chunk hashes for partial updates (`X-Range-Dirty`) | `get_file_chunk_hashes` | not served (shardline has no `/v2/file-chunk-hashes`) | **deferred** — only needed for in-place partial overwrite (see §11 Q1) |
+| Token issuance (read/write) + refresh | HF: `/api/{repo_type}s/{id}/xet-{read|write}-token/{rev}`; shardline: `/api/{provider}/{owner}/{repo}/xet-{read,write}-token/{rev}` | exists | **implemented** — token service with single-flight refresh (`crates/sdx/src/auth.rs`) |
+| Rate limiting / overload handling | RetryWrapper: jittered exp backoff, `retry_max_attempts=5`, `retry_base_delay=3s`, `retry_max_duration=6min` | concurrency admission only (429/503, see §6) | **implemented** — `RetryPolicy` (`crates/sdx/src/retry.rs`) |
+| Session/request correlation headers | `SESSION_ID_HEADER`, `REQUEST_ID_HEADER` | tolerated | **implemented** — `X-Xet-Session-Id` on every request (`crates/sdx/src/transfer.rs`) |
+| Adaptive concurrency | `ac_max_healthy_rtt` etc. | n/a | **implemented as fixed concurrency** — download/upload semaphore permits, tunable via `with_download_concurrency`/`with_upload_concurrency`; upstream's RTT-based adaptive controller is not replicated |
+| Streaming download (bounded memory, prefetch) | `xet-data` `file_reconstruction`: `DownloadStream`/`UnorderedDownloadStream`, `DataWriter`/`SequentialWriter`/`UnorderedWriter`, `FileReconstructor` | ranged `/transfer/xorb` 206 | **implemented** — pull-based streams with byte-denominated buffer semaphore (`crates/sdx/src/stream.rs`, `crates/sdx/src/session.rs`) |
+| Streaming upload (incremental, no full-file buffering) | `xet-data` `processing`: `FileUploadSession`/`SingleFileCleaner`/`FileDeduper`; `hf-xet` `XetUploadStreamHandle` | chunked xorb upload (≤64 MiB body default) | **implemented** — `upload_stream`/`upload_stream_handle` (`crates/sdx/src/upload.rs`) |
+| In-memory payloads (`Bytes`, no disk) | `hf-xet` `XetUploadStreamHandle::write(Bytes)` + `download_to_bytes` | n/a (CAS is buffer-agnostic) | **implemented** — `upload_bytes`/`download_bytes` |
+| Credential/config management | `XetConfig`, token files | n/a | **implemented** — `crates/sdx/src/config.rs`, `--token`/`--api-key`/`--token-file` |
+| CLI cp/sync/ls/rm/cat/info/branch | pyxet-style surface (deprecated upstream) | n/a | **implemented** — `sdx` symlink dispatch into the `shardline` binary (`crates/shardline/src/xet/`) |
 
-**Conclusion:** every client-side capability in the table above is **missing**;
-there is no prior client code in this workspace. The CAS/data-plane server
-routes need **no changes**; the only server work in issue #19 is the **new
-path/metadata endpoints** for path addressing (§2.5). `/v2/file-chunk-hashes`
-remains deferred (not part of #19).
+**Conclusion:** the client-side capability table above is **shipped**. The only
+deferred item is `/v2/file-chunk-hashes` (in-place partial overwrite, not part of
+#19). All CAS/data-plane server routes shipped unchanged; the server work in #19 was
+the path/metadata endpoints in §2.5.
 
 ## 4. Architecture
 
 ### 4.1 Crate layout
 
-New crate: **`crates/sdx`** (package name `sdx`). Dependencies:
+Shipped crate: **`crates/sdx`** (package name `sdx`). Dependencies (as built):
 
-- `shardline-protocol` — token types, hash types, ByteRange, SecretString
-- `shardline-xet-adapter` — XorbWriter/XorbReader/XorbStore contracts (add
-  client-facing constructors if the adapter stays clean; otherwise the sdx crate
-  implements them); reconstruction response building lives here
-  (`reconstruction.rs`), **not** `shardline-server-core`
-- `shardline-validation` — `ShardMetadataLimits` and validation limits (the
-  `shardline-server-core` dependency in earlier drafts was wrong)
-- `xet-core-structures` (**pinned exact version**, per §11 Q3/Q6) — Merkle hash,
-  `xorb_object` (`ByteGrouping4LZ4`), chunk-format constants; do **not**
-  reimplement BG4
-- `shardline-storage` — ObjectStore trait (contract only, not embedded)
-- `tokio`, `reqwest` (HTTP), `lz4_flex`, `blake3`, `clap` (CLI only), `serde`
+- `shardline-xet-adapter` — token route constants (`XET_READ_TOKEN_ROUTE` /
+  `XET_WRITE_TOKEN_ROUTE` / `XET_TREE_ROUTE` / `XET_PATH_ROUTE` /
+  `XET_REVISIONS_ROUTE` / `XET_REVISION_ROUTE`), which transitively bring in
+  `shardline-server-core` (an allowed dependency; the forbidden dependency is
+  `shardline-server`, which is **not** a library dependency of `sdx`)
+- `xet-core-structures` (**pinned exact version `=1.5.2`**, per §11 Q3/Q6) — Merkle
+  hash, `xorb_object` (`ByteGrouping4LZ4`), chunk-format constants; BG4 is not
+  reimplemented
+- `tokio`, `reqwest` (HTTP, rustls-tls), `serde`/`serde_json`, `toml` (config),
+  `url` (XetUrl parsing), `bytes`, `hex`, `percent-encoding`, `http-body`,
+  `crc32fast` (chunk-cache corruption detection), `tokio-util`, `futures-util`,
+  `async-trait`, `tracing`, `thiserror`
 
-Must **not** depend on `shardline-server`.
+Must **not** depend on `shardline-server`. `shardline-server` and
+`shardline-protocol` appear only as **dev-dependencies** for byte-identity and
+end-to-end tests (established workspace test pattern).
 
-**Chunker source decision:** the server's `CdcChunker`
-(`shardline-server/src/upload_ingest/cdc.rs`) is the one crate sdx is forbidden
-to depend on. sdx therefore uses the **upstream `xet-data` `Chunker`/`gearhash`**
-(dependency of the pinned `xet-core-structures`) — the same code the server
-claims byte-identity with — and proves byte-identity via E2E tests, not via
-shared code.
+**Chunker source decision (as built):** sdx implements its own client-side
+`Chunker` (`crates/sdx/src/chunker.rs`) that mirrors the server's `CdcChunker`
+algorithm verbatim, and its tests prove byte-identity against
+`shardline_server::upload_ingest::cdc::CdcChunker` directly. (The earlier plan
+proposed using the upstream `xet-data` `Chunker` instead; the shipped crate mirrors
+the server implementation so identity is proven by shared algorithm, not by a
+second implementation.)
 
 CLI surface lives in the existing CLI binary crate (`crates/shardline`; issue #19's
 `crates/cli` refers to this same surface), routed by `argv[0]` symlink detection per
-`docs/XET_NATIVE_CLI.md` (dispatch model). The CLI module adds the `xet` subcommand
-tree as a thin clap wrapper over `sdx`.
+`docs/XET_NATIVE_CLI.md` (dispatch model). The CLI module implements the `xet`
+subcommand tree as a thin clap wrapper over `sdx` (`crates/shardline/src/xet/`).
 
 ### 4.2 Module map (library)
 
@@ -618,9 +645,11 @@ Thin clap wrapper over the library (per `docs/XET_NATIVE_CLI.md`, with the
 - Packaging: shell completions, manpage, release archive with `sdx` symlink
   (per `docs/XET_NATIVE_CLI.md:499-521`).
 
-## 9. Work breakdown (milestones)
+## 9. Work breakdown (milestones — all completed)
 
-Mirrors `docs/XET_NATIVE_CLI.md` stub phases, with the library-first addition:
+Mirrors `docs/XET_NATIVE_CLI.md` stub phases, with the library-first addition.
+Every milestone below shipped; this section is retained as the implementation
+record.
 
 - **Crate scaffolding + hash/hex primitives.** `crates/sdx` skeleton,
   module map, BLAKE3 keyed hashing, Xet hex conversion, golden-vector unit tests
@@ -640,7 +669,7 @@ Mirrors `docs/XET_NATIVE_CLI.md` stub phases, with the library-first addition:
   E2E: download files uploaded via server ingest; byte-identical;
   **memory-bounded cat of a large file (e.g. 64 GiB synthetic) asserting
   resident RAM stays ≪ file size**.
-- **Write path (upload).** Client CDC chunker (verify byte-identity against
+- **Write path (upload).** Client CDC chunker (byte-identity against
   server `CdcChunker`), global dedup query + eligibility, xorb build/serialize/
   upload, shard build/upload (xorbs-before-shard), `UploadSession` +
   `upload_file` + idempotency. Streaming upload (mirror §4.4.2): push-style
@@ -653,11 +682,11 @@ Mirrors `docs/XET_NATIVE_CLI.md` stub phases, with the library-first addition:
   (assert in-flight RAM ≈ 8 MiB + ≤64 MiB xorb + tail)**; worst-case
   incompressible xorb (≥8192 tiny chunks) staying under the server body cap.
 - **Retry/backoff + concurrency.** `RetryPolicy`, jittered exponential
-  backoff, error classification, `Retry-After` honoring, adaptive/fixed
+  backoff, error classification, `Retry-After` honoring, fixed
   concurrency, session/request correlation headers. E2E: 503 saturation tests
   against admission-limited shardline; 429 no-`Retry-After` backoff (mock).
 - **Metadata operations + server path addressing.** Server (issue #19):
-  implement the §2.5 metadata endpoints (path→file_id, listing, deregistration,
+  implemented the §2.5 metadata endpoints (path→file_id, listing, deregistration,
   branch/revision) in `crates/shardline-server`. Client: `tree.rs`/
   `revisions.rs` against them; `ls`/`info`/`rm`/`branch`; `sync` (push-only);
   `cat` streaming.
@@ -666,6 +695,10 @@ Mirrors `docs/XET_NATIVE_CLI.md` stub phases, with the library-first addition:
 - **Cross-frontend conformance.** Run the full suite against a second
   Xet-compatible frontend (openxet or HF-style mock); conformance tests from
   `docs/PROTOCOL_CONFORMANCE.md` (`:136-157`).
+
+> **Remaining:** the cross-frontend conformance run against a second
+> Xet-compatible frontend is the only milestone-level item not yet demonstrated in
+> this workspace; everything else shipped.
 
 ## 10. Testing and verification
 
@@ -701,10 +734,10 @@ Mirrors `docs/XET_NATIVE_CLI.md` stub phases, with the library-first addition:
    (`Expires`/`Policy`/`Signature`/`Key-Pair-Id`) as an optional XetHub/S3
    probe only (refresh on 403); on shardline a 403 means token expiry
    (§4.4.1), not URL rotation.
-3. **Xorb writer parity:** shardline's xorb format is identical to upstream for
-   `default` namespace; verify `ByteGrouping4LZ4` client-side via the pinned
-   `xet-core-structures` (workspace declares 1.5.1, lock resolves 1.5.2; §4.1)
-   rather than reimplementing BG4.
+3. **Xorb writer parity (resolved):** shardline's xorb format is identical to
+   upstream for the `default` namespace; `ByteGrouping4LZ4` is handled client-side
+   via the pinned `xet-core-structures` (workspace declares 1.5.1, lock resolves
+   1.5.2; `sdx` pins `=1.5.2`, §4.1) rather than reimplementing BG4.
 4. **Revision semantics** (`xet://.../{revision}`): token issuance is
    revision-scoped; `branch` commands assume shardline's revision model
    (provider-scoped revisions). Confirm server behavior for non-`main`

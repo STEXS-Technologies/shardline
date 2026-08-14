@@ -5,7 +5,12 @@ minting. The server selects a concrete provider at startup based on configuratio
 
 ## The `AuthProvider` Trait
 
-Defined in `shardline-server-core`, the trait has two methods:
+> **Internals note:** the trait below is defined in the `shardline-server-core` crate.
+> Builders of custom token issuers need its exact contract; user documentation refers
+> to it simply as the pluggable auth-provider interface.
+
+Shardline uses a pluggable auth-provider interface for bearer-token verification and
+minting. The interface has two methods:
 
 ```rust
 pub trait AuthProvider: Send + Sync {

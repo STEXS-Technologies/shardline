@@ -74,7 +74,7 @@ access-key and Bearer auth forms.
 | `HeadBucket` | stub (S3A / object_store connect-probe) |
 | `GetBucketLocation` | stub → `us-east-1` (S3A / pyarrow region-probe) |
 | `CreateBucket` | no-op `200` (S3A missing-bucket probe) |
-| `ListObjectsV2` | index-backed (`shardline_s3_objects`); `prefix`/`delimiter`/`max-keys`/`continuation-token`/`start-after`; zero object-store reads — the index rows carry size/ETag/mtime |
+| `ListObjectsV2` | index-backed; `prefix`/`delimiter`/`max-keys`/`continuation-token`/`start-after`; zero object-store reads — the index rows carry size/ETag/mtime |
 | `DeleteObjects` (batch) | `POST /{bucket}?delete=`; ≤ 1000 distinct keys per request (`MalformedXML` beyond, `400`); invalid keys become per-key `<Error>` rows |
 | `CopyObject` | `PUT` with `x-amz-copy-source`; source must be in the caller's bound bucket; dest gets a fresh ETag (same content → same ETag) |
 | Conditional requests | `If-Match` / `If-None-Match` on Get/Put/Head/Delete; `412 PreconditionFailed` on mismatch (`404 NoSuchKey` when `If-Match` targets a missing object) |
@@ -164,10 +164,9 @@ durability guarantees:
   shared index (sqlite/postgres); chunks are durable in the configured storage
   backend. fsck validates the record↔chunk contract; GC reachability protects
   the chunks via the record.
-- **The S3 listing index (`shardline_s3_objects`) is a derived snapshot, GC
-  inert, and not a reachability source** — deleting a listing row never touches
-  chunks or records. Delete ordering is crash-safe: index row first, then
-  record+object (`delete_object_if_present`).
+- **The S3 listing index is a derived snapshot, GC inert, and not a
+  reachability source** — deleting a listing row never touches chunks or
+  records. Delete ordering is crash-safe: index row first, then record+object.
 - **Listing nuance** — `ListObjectsV2` serves the snapshot (size/hash/mtime from
   the index row); `HeadObject`/`GetObject` always resolve through the
   authoritative `FileRecord`. A listing row can lag the record until the next
@@ -178,3 +177,8 @@ durability guarantees:
 
 - Issue #15 · design review (oracle, 2026-08-13)
 - `docs/ARCHITECTURE.md` · `docs/COMPATIBILITY_STATUS.md`
+
+> **Internals note:** the S3 listing index is backed by the `shardline_s3_objects`
+> table in the configured index store (SQLite or Postgres). The table name is an
+> implementation detail; operators and user documentation refer to it as the S3
+> listing index.

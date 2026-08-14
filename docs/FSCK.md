@@ -35,7 +35,12 @@ The command exits with:
 The checker scans file records through the configured record-store adapter:
 
 - local deployments use SQLite-backed record rows in `.shardline/data/metadata.sqlite3`
-- Postgres-backed deployments use `shardline_file_records`
+- Postgres-backed deployments use the file-record table in the metadata database
+
+> **Internals**
+>
+> The Postgres file-record table is named `shardline_file_records`. Operators do not
+> need to reference it by name.
 
 Object validation is performed through the configured object-store adapter.
 

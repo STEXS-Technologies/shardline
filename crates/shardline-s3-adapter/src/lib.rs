@@ -5,11 +5,13 @@
 //! This crate provides the S3 frontend's protocol primitives:
 //!
 //! - bucket (`{owner}.{name}`) encoding and decoding and the storage
-//!   object-key layout (`protocols/s3/{scope_namespace}/{key}`) — [`key`];
-//! - the S3 XML wire models and error envelope — [`types`] and [`error`];
-//! - the SigV4 → bearer-token auth bridge and bucket-scope binding — [`auth`];
+//!   object-key layout (`protocols/s3/{scope_namespace}/{key}`) — [`S3ObjectKey`];
+//! - the S3 XML wire models and error envelope — [`ListBucketResult`] and
+//!   [`S3Error`];
+//! - the SigV4 → bearer-token auth bridge and bucket-scope binding —
+//!   [`AuthScheme`] and [`CredentialScope`];
 //! - the query-param sub-resource dispatch set, ETag formatting, and byte-range
-//!   parsing — [`protocol_support`].
+//!   parsing — [`S3SubResource`] and [`parse_s3_range`].
 //!
 //! # Quick start
 //!

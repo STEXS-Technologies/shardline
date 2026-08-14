@@ -51,11 +51,11 @@ Every provider adapter must support:
 - webhook verification and decoding
 - repository and revision identity normalization
 
-At minimum, the adapter contract needs:
+At minimum, the adapter contract needs to:
 
-- `check_access(request)`
-- `repository_metadata(repository)`
-- `parse_webhook(request)`
+- authorize a token request for the requested repository and revision
+- resolve repository metadata such as visibility and default branch
+- parse and normalize an incoming provider webhook
 
 ## Supported Provider Families
 

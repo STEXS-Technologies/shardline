@@ -72,7 +72,8 @@ use the number of online CPU threads reported by the host.
 Set the variable explicitly when comparing runs across machines or when profiling a
 fixed concurrency level.
 
-Each invocation allocates a fresh `run-XXXX/` directory under the configured storage
+Each invocation allocates a fresh `run-XXXX/` directory (a zero-padded counter, for
+example `run-0001`) under the configured storage
 root, which avoids manual cleanup between repeat benchmark and profiling runs.
 
 To focus one hot path while keeping the prerequisite setup untimed, pass one of:

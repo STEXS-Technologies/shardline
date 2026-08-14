@@ -30,67 +30,70 @@ The object adapter must provide:
 - deletion for garbage collection
 - metadata retrieval for object length and checksum where supported
 
-Current Rust shape:
-
-```rust
-pub trait ObjectStore {
-    type Error;
-
-    fn put_if_absent(
-        &self,
-        key: &ObjectKey,
-        body: ObjectBody<'_>,
-        expected: &ObjectIntegrity,
-    ) -> Result<PutOutcome, Self::Error>;
-
-    fn read_range(
-        &self,
-        key: &ObjectKey,
-        range: ByteRange,
-    ) -> Result<Vec<u8>, Self::Error>;
-
-    fn contains(&self, key: &ObjectKey) -> Result<bool, Self::Error>;
-
-    fn metadata(
-        &self,
-        key: &ObjectKey,
-    ) -> Result<Option<ObjectMetadata>, Self::Error>;
-
-    fn list_prefix(
-        &self,
-        prefix: &ObjectPrefix,
-    ) -> Result<Vec<ObjectMetadata>, Self::Error>;
-
-    fn visit_prefix<Visitor, VisitorError>(
-        &self,
-        prefix: &ObjectPrefix,
-        visitor: Visitor,
-    ) -> Result<(), VisitorError>
-    where
-        Self::Error: Into<VisitorError>,
-        Visitor: FnMut(ObjectMetadata) -> Result<(), VisitorError>;
-
-    fn delete_if_present(
-        &self,
-        key: &ObjectKey,
-    ) -> Result<DeleteOutcome, Self::Error>;
-}
-```
+> **Internals**
+>
+> The object adapter is implemented as a Rust trait named `ObjectStore`. Its current
+> method shape is:
+>
+> ```rust
+> pub trait ObjectStore {
+>     type Error;
+>
+>     fn put_if_absent(
+>         &self,
+>         key: &ObjectKey,
+>         body: ObjectBody<'_>,
+>         expected: &ObjectIntegrity,
+>     ) -> Result<PutOutcome, Self::Error>;
+>
+>     fn read_range(
+>         &self,
+>         key: &ObjectKey,
+>         range: ByteRange,
+>     ) -> Result<Vec<u8>, Self::Error>;
+>
+>     fn contains(&self, key: &ObjectKey) -> Result<bool, Self::Error>;
+>
+>     fn metadata(
+>         &self,
+>         key: &ObjectKey,
+>     ) -> Result<Option<ObjectMetadata>, Self::Error>;
+>
+>     fn list_prefix(
+>         &self,
+>         prefix: &ObjectPrefix,
+>     ) -> Result<Vec<ObjectMetadata>, Self::Error>;
+>
+>     fn visit_prefix<Visitor, VisitorError>(
+>         &self,
+>         prefix: &ObjectPrefix,
+>         visitor: Visitor,
+>     ) -> Result<(), VisitorError>
+>     where
+>         Self::Error: Into<VisitorError>,
+>         Visitor: FnMut(ObjectMetadata) -> Result<(), VisitorError>;
+>
+>     fn delete_if_present(
+>         &self,
+>         key: &ObjectKey,
+>     ) -> Result<DeleteOutcome, Self::Error>;
+> }
+> ```
 
 Presigned URLs and native async read streams still belong in production adapters, but
 inventory, metadata, bounded range reads, and idempotent delete are now part of the
 required lifecycle contract.
-Use `visit_prefix` for garbage collection, index rebuild, and operational stats so an
-adapter can page or stream inventory without forcing callers to allocate the full object
-listing first.
+Use the prefix visitor for garbage collection, index rebuild, and operational stats so
+an adapter can page or stream inventory without forcing callers to allocate the full
+object listing first.
 
 ## Local Filesystem Adapter
 
 The local adapter is required for development, small self-hosted deployments, and test
 fixtures.
 
-Shardline now ships a concrete local filesystem object adapter behind the `ObjectStore`
-contract.
+Shardline now ships a concrete local filesystem object adapter that implements the
+object-adapter contract described above.
 
 The local server backend already uses that adapter for chunk writes, chunk reads, chunk
 existence checks, and local chunk inventory.
@@ -167,17 +170,10 @@ The shipped Kubernetes manifests mount runtime secrets with `defaultMode: 0440` 
 `fsGroup: 999`; non-Kubernetes hosts should use equivalent owner/group scoping such as
 `0640` or stricter.
 
-The native Xet e2e suite can exercise an S3-compatible adapter when the test-specific
-environment is present:
-
-```text
-SHARDLINE_S3_E2E_BUCKET=shardline
-SHARDLINE_S3_E2E_REGION=us-east-1
-SHARDLINE_S3_E2E_ENDPOINT=http://127.0.0.1:19000
-SHARDLINE_S3_E2E_ACCESS_KEY_ID=shardline
-SHARDLINE_S3_E2E_SECRET_ACCESS_KEY=shardline-dev-password
-SHARDLINE_S3_E2E_ALLOW_HTTP=true
-```
+The project's end-to-end test suites exercise an S3-compatible adapter with their own
+test-only environment variables, which operators do not need to set.
+For production S3 configuration, use the operator variables above or the full deployment
+guidance in [Deployment](DEPLOYMENT.md).
 
 The server routes xorb upload, shard retention, xorb metadata validation, shard dedupe
 lookup, range transfer, and object inventory through the selected object adapter.
@@ -208,104 +204,107 @@ The index must support:
 - durable garbage collection quarantine state
 - token scope and repository mapping, if auth is stored locally
 
-Current synchronous Rust shape for local adapters:
-
-```rust
-// ReconstructionStore — lookup and reconstruction planning
-pub trait ReconstructionStore {
-    type Error;
-
-    fn reconstruction(
-        &self,
-        file_id: &FileId,
-    ) -> Result<Option<FileReconstruction>, Self::Error>;
-
-    fn list_reconstruction_file_ids(&self) -> Result<Vec<FileId>, Self::Error>;
-
-    fn delete_reconstruction(&self, file_id: &FileId) -> Result<bool, Self::Error>;
-
-    fn contains_object(&self, object_id: &StoredObjectId) -> Result<bool, Self::Error>;
-
-    fn contains_xorb(&self, xorb_id: &XorbId) -> Result<bool, Self::Error>;
-}
-
-// DedupeStore — deduplication mapping
-pub trait DedupeStore {
-    type Error;
-
-    fn dedupe_shard_mapping(
-        &self,
-        chunk_hash: &ShardlineHash,
-    ) -> Result<Option<DedupeShardMapping>, Self::Error>;
-
-    fn list_dedupe_shard_mappings(&self) -> Result<Vec<DedupeShardMapping>, Self::Error>;
-
-    fn delete_dedupe_shard_mapping(&self, chunk_hash: &ShardlineHash) -> Result<bool, Self::Error>;
-}
-
-// LifecycleStore — quarantine, retention, webhooks, provider state
-pub trait LifecycleStore {
-    type Error;
-
-    fn quarantine_candidate(
-        &self,
-        object_key: &ObjectKey,
-    ) -> Result<Option<QuarantineCandidate>, Self::Error>;
-
-    fn list_quarantine_candidates(
-        &self,
-    ) -> Result<Vec<QuarantineCandidate>, Self::Error>;
-
-    fn upsert_quarantine_candidate(
-        &self,
-        candidate: &QuarantineCandidate,
-    ) -> Result<(), Self::Error>;
-
-    fn delete_quarantine_candidate(
-        &self,
-        object_key: &ObjectKey,
-    ) -> Result<bool, Self::Error>;
-
-    fn retention_hold(&self, object_key: &ObjectKey) -> Result<Option<RetentionHold>, Self::Error>;
-
-    fn list_retention_holds(&self) -> Result<Vec<RetentionHold>, Self::Error>;
-
-    fn upsert_retention_hold(&self, hold: &RetentionHold) -> Result<(), Self::Error>;
-
-    fn delete_retention_hold(&self, object_key: &ObjectKey) -> Result<bool, Self::Error>;
-
-    fn record_webhook_delivery(&self, delivery: &WebhookDelivery) -> Result<bool, Self::Error>;
-
-    fn list_webhook_deliveries(&self) -> Result<Vec<WebhookDelivery>, Self::Error>;
-
-    fn delete_webhook_delivery(&self, delivery: &WebhookDelivery) -> Result<bool, Self::Error>;
-
-    fn provider_repository_state(
-        &self,
-        provider: RepositoryProvider,
-        owner: &str,
-        repo: &str,
-    ) -> Result<Option<ProviderRepositoryState>, Self::Error>;
-
-    fn list_provider_repository_states(&self) -> Result<Vec<ProviderRepositoryState>, Self::Error>;
-
-    fn upsert_provider_repository_state(
-        &self,
-        state: &ProviderRepositoryState,
-    ) -> Result<(), Self::Error>;
-
-    fn delete_provider_repository_state(
-        &self,
-        provider: RepositoryProvider,
-        owner: &str,
-        repo: &str,
-    ) -> Result<bool, Self::Error>;
-}
-
-// IndexStore — supertrait combining all three
-pub trait IndexStore: ReconstructionStore + DedupeStore + LifecycleStore {}
-```
-```
+> **Internals**
+>
+> The index stores are implemented as Rust traits (`ReconstructionStore`,
+> `DedupeStore`, and `LifecycleStore`, combined into an `IndexStore`). Their current
+> synchronous shape for local adapters is:
+>
+> ```rust
+> // ReconstructionStore — lookup and reconstruction planning
+> pub trait ReconstructionStore {
+>     type Error;
+>
+>     fn reconstruction(
+>         &self,
+>         file_id: &FileId,
+>     ) -> Result<Option<FileReconstruction>, Self::Error>;
+>
+>     fn list_reconstruction_file_ids(&self) -> Result<Vec<FileId>, Self::Error>;
+>
+>     fn delete_reconstruction(&self, file_id: &FileId) -> Result<bool, Self::Error>;
+>
+>     fn contains_object(&self, object_id: &StoredObjectId) -> Result<bool, Self::Error>;
+>
+>     fn contains_xorb(&self, xorb_id: &XorbId) -> Result<bool, Self::Error>;
+> }
+>
+> // DedupeStore — deduplication mapping
+> pub trait DedupeStore {
+>     type Error;
+>
+>     fn dedupe_shard_mapping(
+>         &self,
+>         chunk_hash: &ShardlineHash,
+>     ) -> Result<Option<DedupeShardMapping>, Self::Error>;
+>
+>     fn list_dedupe_shard_mappings(&self) -> Result<Vec<DedupeShardMapping>, Self::Error>;
+>
+>     fn delete_dedupe_shard_mapping(&self, chunk_hash: &ShardlineHash) -> Result<bool, Self::Error>;
+> }
+>
+> // LifecycleStore — quarantine, retention, webhooks, provider state
+> pub trait LifecycleStore {
+>     type Error;
+>
+>     fn quarantine_candidate(
+>         &self,
+>         object_key: &ObjectKey,
+>     ) -> Result<Option<QuarantineCandidate>, Self::Error>;
+>
+>     fn list_quarantine_candidates(
+>         &self,
+>     ) -> Result<Vec<QuarantineCandidate>, Self::Error>;
+>
+>     fn upsert_quarantine_candidate(
+>         &self,
+>         candidate: &QuarantineCandidate,
+>     ) -> Result<(), Self::Error>;
+>
+>     fn delete_quarantine_candidate(
+>         &self,
+>         object_key: &ObjectKey,
+>     ) -> Result<bool, Self::Error>;
+>
+>     fn retention_hold(&self, object_key: &ObjectKey) -> Result<Option<RetentionHold>, Self::Error>;
+>
+>     fn list_retention_holds(&self) -> Result<Vec<RetentionHold>, Self::Error>;
+>
+>     fn upsert_retention_hold(&self, hold: &RetentionHold) -> Result<(), Self::Error>;
+>
+>     fn delete_retention_hold(&self, object_key: &ObjectKey) -> Result<bool, Self::Error>;
+>
+>     fn record_webhook_delivery(&self, delivery: &WebhookDelivery) -> Result<bool, Self::Error>;
+>
+>     fn list_webhook_deliveries(&self) -> Result<Vec<WebhookDelivery>, Self::Error>;
+>
+>     fn delete_webhook_delivery(&self, delivery: &WebhookDelivery) -> Result<bool, Self::Error>;
+>
+>     fn provider_repository_state(
+>         &self,
+>         provider: RepositoryProvider,
+>         owner: &str,
+>         repo: &str,
+>     ) -> Result<Option<ProviderRepositoryState>, Self::Error>;
+>
+>     fn list_provider_repository_states(&self) -> Result<Vec<ProviderRepositoryState>, Self::Error>;
+>
+>     fn upsert_provider_repository_state(
+>         &self,
+>         state: &ProviderRepositoryState,
+>     ) -> Result<(), Self::Error>;
+>
+>     fn delete_provider_repository_state(
+>         &self,
+>         provider: RepositoryProvider,
+>         owner: &str,
+>         repo: &str,
+>     ) -> Result<bool, Self::Error>;
+> }
+>
+> // IndexStore — supertrait combining all three
+> pub trait IndexStore: ReconstructionStore + DedupeStore + LifecycleStore {}
+> ```
 
 That quarantine state is the durable source of truth for retention windows and staged
 deletion planning.
@@ -331,14 +330,17 @@ The Postgres-compatible adapter provides the durable async path for:
 - xorb presence lookup and idempotent insert
 - durable quarantine lookup, listing, upsert, and deletion
 
-The schema lives in `migrations/20260417000000_metadata_store.up.sql`.
+> **Internals**
+>
+> The Postgres schema is maintained as SQL migrations bundled with the binary; the
+> initial metadata schema lives in `migrations/20260417000000_metadata_store.up.sql`.
 
 ## Record Storage
 
 Record storage owns durable file-version records and visible latest-file records for
 deployments that use the local metadata layout.
 
-The file-record domain model and `RecordStore` port live with index contracts so server
+The file-record domain model and record-store port live with index contracts so server
 operations can consume metadata through an adapter boundary.
 
 Current adapters:
@@ -349,8 +351,8 @@ Current adapters:
 
 The local record adapter currently provides:
 
-- version-record inventory in `shardline_file_records`
-- latest-record inventory in `shardline_file_records`
+- version-record inventory
+- latest-record inventory
 - record reads for local integrity checks
 - live chunk-reference scanning for local garbage collection
 - atomic latest-record replacement for repair workflows
@@ -365,8 +367,12 @@ SQL and other record/index adapters should expose equivalent rebuild operations 
 their own metadata contracts instead of depending on local paths.
 
 The Postgres-compatible record adapter stores opaque record locators, visible latest
-records, immutable version records, repository scope keys, and JSON record bodies in
-`shardline_file_records`.
+records, immutable version records, repository scope keys, and JSON record bodies in the
+file-record table.
+
+> **Internals**
+>
+> The file-record table is named `shardline_file_records`.
 
 ## Index Consistency
 
@@ -412,4 +418,3 @@ Every index adapter must pass:
 - persist and replace quarantine candidates
 - list quarantine candidates for sweep planning
 - delete quarantine state after recovery or successful sweep
-```
