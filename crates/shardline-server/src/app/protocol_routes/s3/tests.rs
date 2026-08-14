@@ -1918,9 +1918,9 @@ async fn s3_failed_overwrite_keeps_old_object_and_index() {
         .unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(
-        shardline_s3_adapter::etag_header(&rows[0].content_hash),
+        shardline_s3_adapter::etag_header(&rows[0].etag),
         old_etag,
-        "index must still point at the old content hash"
+        "index must still point at the old etag"
     );
 }
 
@@ -2618,7 +2618,7 @@ async fn s3_put_if_none_match_on_missing_proceeds() {
         .await
         .unwrap();
     assert_eq!(put.status(), StatusCode::OK);
-    assert_eq!(get_etag(&app, "fresh.txt").await.len(), 66); // quoted 64-hex hash
+    assert_eq!(get_etag(&app, "fresh.txt").await.len(), 34); // quoted 32-hex MD5
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

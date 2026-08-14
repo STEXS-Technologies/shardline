@@ -13,8 +13,15 @@ pub struct S3ObjectEntry {
     pub file_id: String,
     /// Snapshot of the record's size in bytes at upsert time.
     pub size_bytes: u64,
-    /// The BLAKE3 root content hash (served as the opaque S3 ETag).
+    /// The BLAKE3 root content hash (used to pin reads to a record version).
     pub content_hash: String,
+    /// The S3 ETag served to clients: the hex MD5 of the object bytes for
+    /// single-part uploads (S3 convention; checksum-verifying clients such as
+    /// `s3cmd` depend on it). Multipart completions hash the assembled object.
+    pub etag: String,
+    /// S3 user metadata (`x-amz-meta-*`), stored as sorted `(name, value)`
+    /// pairs with the `x-amz-meta-` prefix stripped and names lowercased.
+    pub user_metadata: Vec<(String, String)>,
     /// Unix seconds when the row was last updated.
     pub updated_at_unix_seconds: i64,
 }
@@ -94,6 +101,8 @@ mod tests {
             file_id: "ab".repeat(32),
             size_bytes: 1234,
             content_hash: "cd".repeat(32),
+            etag: "ef".repeat(16),
+            user_metadata: vec![("purpose".to_owned(), "model".to_owned())],
             updated_at_unix_seconds: 1700000000,
         };
         assert_eq!(entry.scope_namespace, "global");

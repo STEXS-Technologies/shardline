@@ -1,13 +1,46 @@
-use std::{num::NonZeroUsize, pin::Pin};
+use std::{
+    num::NonZeroUsize,
+    pin::Pin,
+    sync::{Arc, Mutex},
+    task::{Context, Poll},
+};
 
 use axum::body::{Body, Bytes, HttpBody};
 use futures_util::stream::{self, Stream, StreamExt};
+use md5::{Digest, Md5};
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 use crate::{ServerError, overflow::checked_add};
 
 type BodyChunkResult = Result<Bytes, ServerError>;
 type BoxedBodyStream = Pin<Box<dyn Stream<Item = BodyChunkResult> + Send>>;
+
+/// Stream wrapper that feeds every chunk into a caller-shared MD5 hasher, so
+/// the S3 ETag (hex MD5 of the object bytes) can be computed while a body
+/// streams through the ingestor without buffering it.
+struct Md5Tee {
+    inner: BoxedBodyStream,
+    hasher: Arc<Mutex<Md5>>,
+}
+
+impl Stream for Md5Tee {
+    type Item = BodyChunkResult;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match self.inner.as_mut().poll_next(cx) {
+            Poll::Ready(Some(Ok(bytes))) => {
+                self.hasher
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .update(&bytes);
+                Poll::Ready(Some(Ok(bytes)))
+            }
+            Poll::Ready(Some(Err(error))) => Poll::Ready(Some(Err(error))),
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
 
 pub(super) enum ChunkBuffer {
     Pooled(Bytes),
@@ -71,6 +104,23 @@ impl RequestBodyReader {
             max_bytes: None,
             expected_total_bytes: None,
             read_bytes: 0,
+        }
+    }
+
+    /// Wraps the internal stream with an MD5 tee so the caller can compute the
+    /// S3 ETag (hex MD5 of the drained bytes) without buffering the body.
+    ///
+    /// The tee sits below the reader's own byte cap, so the existing size
+    /// enforcement is unaffected.
+    pub(crate) fn with_md5_tee(self, hasher: Arc<Mutex<Md5>>) -> Self {
+        Self {
+            stream: Box::pin(Md5Tee {
+                inner: self.stream,
+                hasher,
+            }),
+            max_bytes: self.max_bytes,
+            expected_total_bytes: self.expected_total_bytes,
+            read_bytes: self.read_bytes,
         }
     }
 

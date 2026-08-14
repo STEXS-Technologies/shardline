@@ -7,17 +7,22 @@
 //! authoritative record. `DeleteObject` drops the listing row first, then the
 //! record + direct object (crash-safe ordering).
 
-use std::{num::NonZeroUsize, sync::Arc, time::Instant};
+use std::{
+    num::NonZeroUsize,
+    sync::{Arc, Mutex},
+    time::Instant,
+};
 
 use axum::{
     body::Body,
     extract::{Path, State},
     http::{
-        HeaderMap, HeaderValue, StatusCode, Uri,
+        HeaderMap, HeaderName, HeaderValue, StatusCode, Uri,
         header::{ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_TYPE, ETAG, LAST_MODIFIED, RANGE},
     },
     response::{IntoResponse, Response},
 };
+use md5::{Digest, Md5};
 use shardline_index::S3ObjectEntry;
 use shardline_protocol::TokenScope;
 use shardline_s3_adapter::{
@@ -40,6 +45,86 @@ use super::{
 /// The `x-amz-copy-source` request header (not in axum's header constants).
 const COPY_SOURCE: axum::http::header::HeaderName =
     axum::http::header::HeaderName::from_static("x-amz-copy-source");
+
+/// The `x-amz-metadata-directive` request header (CopyObject semantics).
+const METADATA_DIRECTIVE: axum::http::header::HeaderName =
+    axum::http::header::HeaderName::from_static("x-amz-metadata-directive");
+
+/// S3 user-metadata request header prefix.
+const META_PREFIX: &str = "x-amz-meta-";
+
+// ---------------------------------------------------------------------------
+// User metadata, ETag (MD5) helpers.
+// ---------------------------------------------------------------------------
+
+/// Captures `x-amz-meta-*` request headers as sorted `(name, value)` pairs,
+/// stripped of the prefix with names lowercased (S3 canonicalization).
+pub(super) fn capture_user_metadata(headers: &HeaderMap) -> Vec<(String, String)> {
+    let mut metadata: Vec<(String, String)> = headers
+        .iter()
+        .filter_map(|(name, value)| {
+            let suffix = name.as_str().strip_prefix(META_PREFIX)?;
+            let value = value.to_str().ok()?.to_owned();
+            Some((suffix.to_ascii_lowercase(), value))
+        })
+        .collect();
+    metadata.sort();
+    metadata
+}
+
+/// The CopyObject `x-amz-metadata-directive` value.
+enum MetadataDirective {
+    /// Propagate the source object's user metadata (S3 default).
+    Copy,
+    /// Overwrite the destination's metadata with `x-amz-meta-*` headers.
+    Replace,
+}
+
+/// Resolves the CopyObject metadata directive; anything other than `REPLACE`
+/// (case-insensitive) is treated as `COPY`.
+fn metadata_directive(headers: &HeaderMap) -> MetadataDirective {
+    match headers
+        .get(&METADATA_DIRECTIVE)
+        .and_then(|value| value.to_str().ok())
+    {
+        Some(directive) if directive.eq_ignore_ascii_case("REPLACE") => MetadataDirective::Replace,
+        _ => MetadataDirective::Copy,
+    }
+}
+
+/// Inserts stored user metadata as `x-amz-meta-*` response headers.
+fn insert_user_metadata(response: &mut Response, metadata: &[(String, String)]) {
+    for (name, value) in metadata {
+        let Ok(value) = HeaderValue::from_str(value) else {
+            continue;
+        };
+        let Ok(header) = HeaderName::try_from(format!("{META_PREFIX}{name}")) else {
+            continue;
+        };
+        response.headers_mut().insert(header, value);
+    }
+}
+
+/// Resolves the S3 listing-index row for an object (`None` when absent).
+async fn s3_object_entry(
+    state: &Arc<AppState>,
+    context: &S3ObjectContext,
+) -> Result<Option<S3ObjectEntry>, S3Error> {
+    let mut rows = state
+        .backend
+        .scan_s3_objects(&context.scope_namespace, &context.key, None, 1)
+        .await?;
+    Ok(rows.pop())
+}
+
+/// Finalizes a shared MD5 tee hasher into an S3 ETag hex string.
+pub(super) fn md5_hasher_hex(hasher: &Arc<Mutex<Md5>>) -> String {
+    let mut guard = hasher
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let digest = guard.finalize_reset();
+    format!("{digest:x}")
+}
 
 /// `PUT /{bucket}/{*key}` — stream the body through the CDC ingestor.
 ///
@@ -143,16 +228,23 @@ pub(crate) async fn s3_put_object(
     // the CURRENT object BEFORE the write.
     check_put_precondition(&state, &context, &headers).await?;
 
+    // Capture S3 user metadata (x-amz-meta-*) and compute the ETag (hex MD5 of
+    // the object bytes) while the body streams — standard S3 semantics that
+    // checksum-verifying clients (s3cmd, the AWS SDKs) depend on.
+    let user_metadata = capture_user_metadata(&headers);
+    let hasher = Arc::new(Mutex::new(Md5::new()));
+    let body = body.with_md5_tee(hasher.clone());
+
     // Stream the new body FIRST (atomic upload-then-swap under the per-key
     // lock). On failure nothing was committed, so the old record version
     // remains the latest and the index row still points at it.
-    let uploaded = s3_upload_object_body(&state, &context, body).await?;
+    let (_uploaded, etag) =
+        s3_upload_object_body(&state, &context, body, user_metadata, hasher).await?;
 
-    let etag = etag_header(&uploaded.content_hash);
     let mut response = StatusCode::OK.into_response();
     response.headers_mut().insert(
         ETAG,
-        HeaderValue::from_str(&etag).map_err(|_error| S3Error::internal())?,
+        HeaderValue::from_str(&etag_header(&etag)).map_err(|_error| S3Error::internal())?,
     );
     Ok(response)
 }
@@ -181,6 +273,16 @@ async fn s3_copy_object(
     // replace-if-matching semantics) BEFORE any write.
     check_put_precondition(state, destination, headers).await?;
 
+    // Metadata directive: COPY (default) propagates the source's user metadata;
+    // REPLACE overrides it with the x-amz-meta-* headers of this request.
+    let user_metadata = match metadata_directive(headers) {
+        MetadataDirective::Replace => capture_user_metadata(headers),
+        MetadataDirective::Copy => s3_object_entry(state, &source_context)
+            .await?
+            .map(|entry| entry.user_metadata)
+            .unwrap_or_default(),
+    };
+
     // Read the source through the authoritative read path.
     let bytes = match state.backend.read_object(&source_context.object_key).await {
         Ok(bytes) => bytes,
@@ -188,17 +290,26 @@ async fn s3_copy_object(
         Err(error) => return Err(S3Error::from(error)),
     };
 
-    let uploaded = s3_upload_object_body(
+    // The destination gets a fresh ETag: hex MD5 of its bytes (identical
+    // content yields the identical ETag).
+    let hasher = Arc::new(Mutex::new(Md5::new()));
+    hasher
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .update(&bytes);
+    let (_uploaded, etag) = s3_upload_object_body(
         state,
         destination,
         RequestBodyReader::from_bytes(axum::body::Bytes::from(bytes)),
+        user_metadata,
+        hasher,
     )
     .await?;
 
     let now = i64::try_from(shardline_protocol::unix_now_seconds_lossy())
         .map_err(|_error| S3Error::internal())?;
     let xml = CopyObjectResult {
-        etag: uploaded.content_hash,
+        etag,
         last_modified_iso8601: format_iso8601(now),
     }
     .to_xml();
@@ -222,14 +333,9 @@ async fn check_put_precondition(
     context: &S3ObjectContext,
     headers: &HeaderMap,
 ) -> Result<(), S3Error> {
-    let existing = match state
-        .backend
-        .s3_object_read_snapshot(&context.object_key)
-        .await
-    {
-        Ok(snapshot) => snapshot.record_content_hash,
-        Err(ServerError::NotFound) => None,
-        Err(error) => return Err(S3Error::from(error)),
+    let existing = match s3_object_entry(state, context).await? {
+        Some(entry) => Some(entry.etag),
+        None => None,
     };
     check_precondition(existing.as_deref(), headers, &context.key)
 }
@@ -264,12 +370,15 @@ fn check_precondition(
 /// The body is streamed to a new record version FIRST (a mid-stream failure
 /// commits nothing), then the listing-index row is swapped and any stale
 /// direct object dropped. Used by `PutObject`, `CopyObject`, and multipart
-/// completion.
+/// completion. The shared MD5 tee hasher is finalized after the stream is
+/// drained into the S3 ETag, which is stored in the index row and returned.
 async fn s3_upload_object_body(
     state: &Arc<AppState>,
     context: &S3ObjectContext,
     body: RequestBodyReader,
-) -> Result<crate::model::UploadFileResponse, S3Error> {
+    user_metadata: Vec<(String, String)>,
+    hasher: Arc<Mutex<Md5>>,
+) -> Result<(crate::model::UploadFileResponse, String), S3Error> {
     // Serialize concurrent overwrites of the same key; the swap below (index
     // upsert + stale-direct drop) is atomic with respect to other overwrites.
     let object_lock = acquire_object_upload_lock(context.object_key.as_str());
@@ -296,6 +405,10 @@ async fn s3_upload_object_body(
     let elapsed = start.elapsed().as_secs_f64();
     metrics::record_upload("s3", uploaded.total_bytes, elapsed, true);
 
+    // The body stream has been fully drained: the shared hasher now holds the
+    // MD5 of the object bytes — the standard S3 ETag.
+    let etag = md5_hasher_hex(&hasher);
+
     // Swap: point the index at the new record version, then drop any stale
     // direct object that would shadow the record (the old record version is
     // left for GC — record stores are versioned).
@@ -309,6 +422,8 @@ async fn s3_upload_object_body(
             file_id: uploaded.file_id.clone(),
             size_bytes: uploaded.total_bytes,
             content_hash: uploaded.content_hash.clone(),
+            etag: etag.clone(),
+            user_metadata,
             updated_at_unix_seconds: now,
         })
         .await?;
@@ -316,7 +431,7 @@ async fn s3_upload_object_body(
         .backend
         .delete_direct_object_if_present(&context.object_key)
         .await?;
-    Ok(uploaded)
+    Ok((uploaded, etag))
 }
 
 /// `GET /{bucket}/{*key}` — full or ranged read through the shared
@@ -357,9 +472,10 @@ pub(crate) async fn s3_get_object(
     };
     let total_length = snapshot.total_bytes;
     // Conditional requests (If-Match / If-None-Match) evaluate against the
-    // stored ETag from the same snapshot before any bytes are served.
+    // stored S3 ETag (listing-index row) before any bytes are served.
+    let entry = s3_object_entry(&state, &context).await?;
     check_precondition(
-        snapshot.record_content_hash.as_deref(),
+        entry.as_ref().map(|entry| entry.etag.as_str()),
         &headers,
         &context.key,
     )?;
@@ -412,14 +528,14 @@ pub(crate) async fn s3_get_object(
         LAST_MODIFIED,
         HeaderValue::from_str(&last_modified).map_err(|_error| S3Error::internal())?,
     );
-    // S3 serves the ETag (content hash) on GetObject too; the snapshot already
-    // carried it for the conditional evaluation above.
-    if let Some(content_hash) = snapshot.record_content_hash.as_deref() {
+    // S3 serves the ETag (hex MD5) and user metadata on GetObject too.
+    if let Some(entry) = entry {
         response.headers_mut().insert(
             ETAG,
-            HeaderValue::from_str(&etag_header(content_hash))
+            HeaderValue::from_str(&etag_header(&entry.etag))
                 .map_err(|_error| S3Error::internal())?,
         );
+        insert_user_metadata(&mut response, &entry.user_metadata);
     }
     metrics::record_download("s3", total_length, 0.0, true);
     Ok(response)
@@ -443,19 +559,16 @@ pub(crate) async fn s3_head_object(
         return Err(S3Error::not_implemented());
     }
 
-    let (size, content_hash) = match state.backend.s3_object_metadata(&context.object_key).await {
+    let (size, _content_hash) = match state.backend.s3_object_metadata(&context.object_key).await {
         Ok(metadata) => metadata,
         Err(ServerError::NotFound) => return Err(S3Error::no_such_key(&context.key)),
         Err(error) => return Err(S3Error::from(error)),
     };
-    // Conditional requests evaluate against the stored ETag before the headers
-    // are served.
+    let entry = s3_object_entry(&state, &context).await?;
+    // Conditional requests evaluate against the stored S3 ETag before the
+    // headers are served.
     check_precondition(
-        if content_hash.is_empty() {
-            None
-        } else {
-            Some(content_hash.as_str())
-        },
+        entry.as_ref().map(|entry| entry.etag.as_str()),
         &headers,
         &context.key,
     )?;
@@ -475,12 +588,13 @@ pub(crate) async fn s3_head_object(
     response
         .headers_mut()
         .insert(ACCEPT_RANGES, HeaderValue::from_static("bytes"));
-    if !content_hash.is_empty() {
-        let etag = etag_header(&content_hash);
+    if let Some(entry) = entry {
+        let etag = etag_header(&entry.etag);
         response.headers_mut().insert(
             ETAG,
             HeaderValue::from_str(&etag).map_err(|_error| S3Error::internal())?,
         );
+        insert_user_metadata(&mut response, &entry.user_metadata);
     }
     response.headers_mut().insert(
         LAST_MODIFIED,
@@ -522,14 +636,9 @@ pub(crate) async fn s3_delete_object(
     // Conditional requests evaluate against the CURRENT object; a missing
     // object fails `If-Match` (404) and passes `If-None-Match` (delete is
     // idempotent).
-    let existing = match state
-        .backend
-        .s3_object_read_snapshot(&context.object_key)
-        .await
-    {
-        Ok(snapshot) => snapshot.record_content_hash,
-        Err(ServerError::NotFound) => None,
-        Err(error) => return Err(S3Error::from(error)),
+    let existing = match s3_object_entry(&state, &context).await? {
+        Some(entry) => Some(entry.etag),
+        None => None,
     };
     check_precondition(existing.as_deref(), &headers, &context.key)?;
 
@@ -567,7 +676,7 @@ pub(crate) async fn s3_post_object(
         .iter()
         .any(|resource| matches!(resource, S3SubResource::Uploads))
     {
-        return multipart::s3_create_multipart_upload(&state, &context).await;
+        return multipart::s3_create_multipart_upload(&state, &context, &headers).await;
     }
     if let Some(S3SubResource::UploadId(upload_id)) = resources
         .iter()

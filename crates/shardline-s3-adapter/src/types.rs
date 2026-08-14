@@ -137,6 +137,69 @@ impl ListBucketResult {
     }
 }
 
+/// The `ListObjects` (v1) response envelope.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListBucketResultV1 {
+    /// The listed object entries, in raw-key order.
+    pub contents: Vec<Contents>,
+    /// Common-prefix rollups (the `delimiter`/`prefix` grouping).
+    pub common_prefixes: Vec<String>,
+    /// The bucket name.
+    pub name: String,
+    /// The requested prefix filter.
+    pub prefix: String,
+    /// The requested resume marker (empty when none was sent).
+    pub marker: String,
+    /// The page row budget.
+    pub max_keys: usize,
+    /// The grouping delimiter (when one was requested).
+    pub delimiter: Option<String>,
+    /// Whether more keys exist beyond the returned page.
+    pub is_truncated: bool,
+    /// The raw key the next page resumes after (when truncated).
+    pub next_marker: Option<String>,
+}
+
+impl ListBucketResultV1 {
+    /// Serializes the result to the S3 `ListBucketResult` (v1) XML envelope.
+    #[must_use]
+    pub fn to_xml(&self) -> String {
+        let contents = self
+            .contents
+            .iter()
+            .map(Contents::to_xml)
+            .collect::<String>();
+        let common_prefixes = self
+            .common_prefixes
+            .iter()
+            .map(|prefix| {
+                format!(
+                    "  <CommonPrefixes>\n    <Prefix>{}</Prefix>\n  </CommonPrefixes>\n",
+                    xml_escape(prefix)
+                )
+            })
+            .collect::<String>();
+        let delimiter = self
+            .delimiter
+            .as_ref()
+            .map(|delimiter| format!("  <Delimiter>{}</Delimiter>\n", xml_escape(delimiter)))
+            .unwrap_or_default();
+        let next_marker = self
+            .next_marker
+            .as_ref()
+            .map(|marker| format!("  <NextMarker>{}</NextMarker>\n", xml_escape(marker)))
+            .unwrap_or_default();
+        format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<ListBucketResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\n  <Name>{}</Name>\n  <Prefix>{}</Prefix>\n  <Marker>{}</Marker>\n  <MaxKeys>{}</MaxKeys>\n{delimiter}{contents}{common_prefixes}  <IsTruncated>{}</IsTruncated>\n{next_marker}</ListBucketResult>\n",
+            xml_escape(&self.name),
+            xml_escape(&self.prefix),
+            xml_escape(&self.marker),
+            self.max_keys,
+            self.is_truncated,
+        )
+    }
+}
+
 /// The `ListAllMyBucketsResult` (service-level `GET /`) response envelope.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ListBucketsResult {

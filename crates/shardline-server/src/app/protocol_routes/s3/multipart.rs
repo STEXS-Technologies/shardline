@@ -16,13 +16,18 @@
 //! for the same session serialize. The adapter's `store_part_locked` /
 //! `delete_session_locked` variants are used to avoid re-acquiring the lock.
 
-use std::{num::NonZeroUsize, sync::Arc, time::Instant};
+use std::{
+    num::NonZeroUsize,
+    sync::{Arc, Mutex},
+    time::Instant,
+};
 
 use axum::{
     body::Body,
     http::{HeaderMap, HeaderValue, StatusCode, header::ETAG},
     response::{IntoResponse, Response},
 };
+use md5::{Digest, Md5};
 use shardline_index::S3ObjectEntry;
 use shardline_s3_adapter::{
     CompleteMultipartUploadResult, InitiateMultipartUploadResult, S3Error, create_session,
@@ -38,7 +43,9 @@ use crate::{
     upload_ingest::{RequestBodyReader, read_body_to_bytes},
 };
 
-use super::{S3ObjectContext, acquire_object_upload_lock, aws_chunked, s3_xml_content_type};
+use super::{
+    S3ObjectContext, acquire_object_upload_lock, aws_chunked, object, s3_xml_content_type,
+};
 
 /// Maps a local I/O failure to the S3 internal-error envelope.
 fn io_to_s3(error: std::io::Error) -> S3Error {
@@ -61,7 +68,11 @@ fn entity_too_large() -> S3Error {
 pub(super) async fn s3_create_multipart_upload(
     state: &Arc<AppState>,
     context: &S3ObjectContext,
+    headers: &HeaderMap,
 ) -> Result<Response, S3Error> {
+    // S3 user metadata is supplied at CreateMultipartUpload and applied to the
+    // completed object.
+    let user_metadata = object::capture_user_metadata(headers);
     let upload_id = create_session(
         state.config.root_dir(),
         &context.bucket,
@@ -70,6 +81,7 @@ pub(super) async fn s3_create_multipart_upload(
         state.config.s3_upload_session_ttl_seconds(),
         state.config.s3_upload_max_active_sessions(),
         state.config.s3_upload_total_max_bytes(),
+        user_metadata,
     )
     .await?;
     let xml = InitiateMultipartUploadResult {
@@ -210,6 +222,8 @@ pub(super) async fn s3_complete_multipart_upload(
     if session.key != context.key || session.scope_namespace != context.scope_namespace {
         return Err(S3Error::no_such_upload());
     }
+    // User metadata was captured at CreateMultipartUpload; apply it now.
+    let user_metadata = session.user_metadata.clone();
 
     // Parse the Complete request body (the client echoes the part
     // numbers/etags it uploaded; ETags are opaque and ignored).
@@ -259,7 +273,10 @@ pub(super) async fn s3_complete_multipart_upload(
 
     // Atomic overwrite (same as PutObject): stream the new record FIRST (a
     // failure commits nothing and the old object stays readable), then swap
-    // the index row and drop any stale direct object.
+    // the index row and drop any stale direct object. The MD5 tee computes the
+    // S3 ETag (hex MD5 of the assembled object) as the parts stream.
+    let hasher = Arc::new(Mutex::new(Md5::new()));
+    let parts_reader = parts_reader.with_md5_tee(hasher.clone());
     let start = Instant::now();
     let uploaded = state
         .backend
@@ -267,6 +284,7 @@ pub(super) async fn s3_complete_multipart_upload(
         .await?;
     let elapsed = start.elapsed().as_secs_f64();
     metrics::record_upload("s3", uploaded.total_bytes, elapsed, true);
+    let etag = object::md5_hasher_hex(&hasher);
 
     // The session is consumed by the completion; a failed cleanup is swept at
     // startup or on the next session creation.
@@ -282,6 +300,8 @@ pub(super) async fn s3_complete_multipart_upload(
             file_id: uploaded.file_id,
             size_bytes: uploaded.total_bytes,
             content_hash: uploaded.content_hash.clone(),
+            etag: etag.clone(),
+            user_metadata,
             updated_at_unix_seconds: now,
         })
         .await?;
@@ -293,7 +313,7 @@ pub(super) async fn s3_complete_multipart_upload(
     let xml = CompleteMultipartUploadResult {
         bucket: context.bucket.clone(),
         key: context.key.clone(),
-        etag: uploaded.content_hash,
+        etag,
     }
     .to_xml();
     Ok((

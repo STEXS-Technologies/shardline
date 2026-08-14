@@ -17,8 +17,19 @@ fn s3_object_entry_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<S3Objec
             )
         })?,
         content_hash: row.get("content_hash")?,
+        etag: row.get("etag")?,
+        user_metadata: serde_json::from_str(&row.get::<_, String>("user_metadata")?)
+            .unwrap_or_default(),
         updated_at_unix_seconds: row.get("updated_at_unix_seconds")?,
     })
+}
+
+/// Serializes S3 user metadata as JSON text for the index row.
+fn user_metadata_to_json(
+    user_metadata: &[(String, String)],
+) -> Result<String, LocalIndexStoreError> {
+    serde_json::to_string(user_metadata)
+        .map_err(|e| LocalIndexStoreError::Io(std::io::Error::other(e)))
 }
 
 fn upsert_s3_object_sql(
@@ -27,15 +38,17 @@ fn upsert_s3_object_sql(
 ) -> Result<(), LocalIndexStoreError> {
     connection.execute(
         "INSERT INTO shardline_s3_objects (
-            scope_namespace, object_key, file_id, size_bytes, content_hash,
-            updated_at_unix_seconds
+            scope_namespace, object_key, file_id, size_bytes, content_hash, etag,
+            user_metadata, updated_at_unix_seconds
          )
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
          ON CONFLICT (scope_namespace, object_key)
          DO UPDATE SET
             file_id = excluded.file_id,
             size_bytes = excluded.size_bytes,
             content_hash = excluded.content_hash,
+            etag = excluded.etag,
+            user_metadata = excluded.user_metadata,
             updated_at_unix_seconds = excluded.updated_at_unix_seconds",
         rusqlite::params![
             entry.scope_namespace,
@@ -43,6 +56,8 @@ fn upsert_s3_object_sql(
             entry.file_id,
             helpers::u64_to_i64(entry.size_bytes)?,
             entry.content_hash,
+            entry.etag,
+            user_metadata_to_json(&entry.user_metadata)?,
             entry.updated_at_unix_seconds,
         ],
     )?;
@@ -71,8 +86,8 @@ fn scan_s3_objects_sql(
     use rusqlite::types::Value;
 
     let mut sql = String::from(
-        "SELECT scope_namespace, object_key, file_id, size_bytes, content_hash,
-                updated_at_unix_seconds
+        "SELECT scope_namespace, object_key, file_id, size_bytes, content_hash, etag,
+                user_metadata, updated_at_unix_seconds
          FROM shardline_s3_objects
          WHERE scope_namespace = ?1 AND substr(object_key, 1, length(?2)) = ?2",
     );
@@ -194,6 +209,8 @@ mod tests {
             file_id: file_id.to_owned(),
             size_bytes,
             content_hash: "ab".repeat(32),
+            etag: "ab".repeat(32),
+            user_metadata: Vec::new(),
             updated_at_unix_seconds,
         }
     }

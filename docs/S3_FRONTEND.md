@@ -45,8 +45,9 @@ as out of scope until a real client need appears.
    S3's 7-day multipart lifecycle. `AbortMultipartUpload` discards the session.
 4. **GetObject Range / ETag / errors.** Range reuses the existing byte-range +
    reconstruction path (`parse_http_byte_range`, 206/416 semantics). ETag is the
-   **BLAKE3 root content hash** (opaque; identical for single-PUT and multipart
-   of the same bytes). Errors are an S3 XML envelope (`<Error><Code>…`);
+   **hex MD5 of the object bytes** (standard S3; identical for single-PUT and
+   multipart of the same bytes, so checksum-verifying clients like `s3cmd`
+   accept it). Errors are an S3 XML envelope (`<Error><Code>…`);
    codes: `NoSuchKey`, `NoSuchBucket`, `AccessDenied`, `InvalidRange`,
    `EntityTooSmall`, `InvalidPart`, `NoSuchUpload`, `NotImplemented`,
    `PreconditionFailed` (conditional mismatches), `MalformedXML`, `InternalError`.
@@ -91,7 +92,7 @@ of schedule (Spark rename-commit / `object_store::copy` shape).
 | Operation | Reconsider when |
 |---|---|
 | `ListParts` / `ListMultipartUploads` | a multipart-resume workflow |
-| `ListObjectsV1` | a legacy SDK (trivial V2 alias if ever needed) |
+| `ListObjectsV1` | implemented — a bare `GET /{bucket}` (no `list-type=2`) serves the v1 envelope (`marker`/`NextMarker`), the path `s3cmd ls` uses |
 | Multi-range `GetObject` (`bytes=a,b`) | a client using multi-range |
 | `PostObject` (form upload) | — |
 | Object tagging / attributes / restore / select / torrent / legal-hold / retention / ACL | — |
@@ -99,8 +100,12 @@ of schedule (Spark rename-commit / `object_store::copy` shape).
 
 ## Protocol deviations (documented)
 
-- **ETag** is the BLAKE3 root hash, not MD5 or the multipart composite — opaque
-  per the S3 spec; all six target clients treat it as opaque.
+- **ETag** is the hex MD5 of the object bytes — the S3 convention for
+  single-part PUTs, and the MD5 of the assembled bytes at multipart completion
+  — so checksum-verifying clients (`s3cmd`) and conditional requests behave
+  like AWS. User metadata (`x-amz-meta-*`) is captured on PutObject and
+  CreateMultipartUpload, propagated by CopyObject (`x-amz-metadata-directive`),
+  and returned on Head/GetObject.
 - **SigV4 signature is not verified** — the access key *is* the credential;
   production requires TLS.
 - **Bucket names** are `{owner}.{name}`; owners containing `.` are not addressable.
