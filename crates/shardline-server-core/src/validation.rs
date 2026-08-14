@@ -70,7 +70,12 @@ pub fn chunk_object_key(hash_hex: &str) -> Result<ObjectKey, ServerObjectStoreEr
 ///
 /// # Errors
 ///
-/// Returns [`ServerObjectStoreError::InvalidContentHash`] if the extracted hash fails validation.
+/// Never returns an error: a key that passes the structural gates but whose
+/// hash fails validation (for example an in-progress `.tmp-*` write artifact
+/// from temp-then-hardlink chunk writes) is reported as "no chunk hash"
+/// ([`Ok(None)`]) so scanning callers skip it instead of aborting. The
+/// [`Result`] wrapper is retained for API compatibility with callers that use
+/// `?`.
 pub fn chunk_hash_from_chunk_object_key_if_present(
     key: &ObjectKey,
 ) -> Result<Option<&str>, ServerObjectStoreError> {
@@ -90,9 +95,16 @@ pub fn chunk_hash_from_chunk_object_key_if_present(
     if !candidate_hash_hex.starts_with(prefix) {
         return Ok(None);
     }
-    shardline_validation::validate_content_hash_with(candidate_hash_hex, || {
+    if !shardline_validation::validate_content_hash_with(candidate_hash_hex, || {
         ServerObjectStoreError::InvalidContentHash
-    })?;
+    })
+    .is_ok()
+    {
+        // Passes the structural chunk gates but is not a finished chunk key:
+        // skip it so a GC orphan scan or fsck never aborts the whole pass over
+        // a transient `.tmp-*` artifact.
+        return Ok(None);
+    }
     Ok(Some(candidate_hash_hex))
 }
 
@@ -130,4 +142,52 @@ pub fn content_hash(
         hasher.update(&chunk.length.to_le_bytes());
     }
     hasher.finalize().to_hex().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
+
+    use super::chunk_hash_from_chunk_object_key_if_present;
+    use shardline_storage::ObjectKey;
+
+    #[test]
+    fn chunk_key_with_temp_suffix_is_not_a_chunk() {
+        // In-progress `.tmp-*` artifacts from temp-then-hardlink chunk writes
+        // pass the structural gates (2-hex prefix, hash starts with the
+        // prefix) but must be skipped (Ok(None)), never abort a GC orphan scan.
+        let key = ObjectKey::parse(
+            "aa/aa0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcd.tmp-12345-6",
+        )
+        .unwrap();
+        assert_eq!(
+            chunk_hash_from_chunk_object_key_if_present(&key).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn valid_chunk_key_returns_hash() {
+        let key =
+            ObjectKey::parse("aa/aa0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcd")
+                .unwrap();
+        assert_eq!(
+            chunk_hash_from_chunk_object_key_if_present(&key).unwrap(),
+            Some("aa0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcd")
+        );
+    }
+
+    #[test]
+    fn unrelated_key_returns_none() {
+        let key = ObjectKey::parse("xorbs/default/aa/bb/example.xorb").unwrap();
+        assert_eq!(
+            chunk_hash_from_chunk_object_key_if_present(&key).unwrap(),
+            None
+        );
+    }
 }

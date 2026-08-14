@@ -1500,15 +1500,14 @@ fn chunk_hash_from_chunk_key_if_present_single_segment() {
 }
 
 #[test]
-fn chunk_hash_from_chunk_key_if_present_invalid_hash_returns_error() {
-    // 64 chars starting with "aa" but 'z' is not hex → validation fails
+fn chunk_hash_from_chunk_key_if_present_invalid_hash_returns_none() {
+    // 64 chars starting with "aa" but 'z' is not hex → not a valid chunk hash:
+    // the key is skipped (Ok(None)), never an error, so a GC orphan scan does
+    // not abort on a transient or malformed key.
     let hash = format!("aa{}", "z".repeat(62));
     let key = ObjectKey::parse(&format!("aa/{hash}")).unwrap();
     let result = chunk_hash_from_chunk_object_key_if_present(&key);
-    assert!(matches!(
-        result,
-        Err(ServerObjectStoreError::InvalidContentHash)
-    ));
+    assert!(matches!(result, Ok(None)));
 }
 
 // ── read_full_object non-local path (blackhole, length > 0) ──────────
