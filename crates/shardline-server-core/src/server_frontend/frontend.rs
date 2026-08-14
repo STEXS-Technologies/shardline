@@ -18,6 +18,25 @@ pub enum ServerFrontend {
 }
 
 impl ServerFrontend {
+    /// Every frontend variant, in registration order.
+    ///
+    /// This is the single source of truth for "all frontends" used by the
+    /// frontend-coexistence tests: the router is built with every variant so
+    /// that ANY future frontend whose routes collide with another frontend's
+    /// (e.g. the S3 `/{bucket}/{*key}` wildcard versus a Hub root-level
+    /// parameter route) fails the suite immediately with the conflicting
+    /// pair named. **Add every new variant here.**
+    pub const ALL: [Self; 6] = [
+        Self::Xet,
+        Self::Lfs,
+        Self::BazelHttp,
+        Self::Oci,
+        Self::Hub,
+        Self::S3,
+    ];
+}
+
+impl ServerFrontend {
     /// Parses a frontend token.
     ///
     /// # Examples
