@@ -9,12 +9,18 @@
 //! `put_s3_object_stream`), producing a single `FileRecord` whose BLAKE3 root
 //! content hash equals a single `PutObject` of the same bytes.
 //!
-//! Every mutating operation holds the adapter's global session lock for its
-//! whole duration — the same pattern the OCI frontend uses — so a concurrent
-//! session sweep (which also takes that lock) can never remove the session
-//! directory mid-write, and concurrent `UploadPart`/`Complete`/`Abort` calls
-//! for the same session serialize. The adapter's `store_part_locked` /
-//! `delete_session_locked` variants are used to avoid re-acquiring the lock.
+//! Locking: the adapter's process-global session lock ([`lock_upload_sessions`])
+//! is held only for session validation and metadata/quota mutations — never
+//! across a network body stream, so a slow `UploadPart` or `Complete` cannot
+//! stall other tenants' session operations (F-10). Part-file writes and reads
+//! are instead serialized with the expiry sweep (which deletes session
+//! directories) and with each other by a per-session lock keyed by the upload
+//! id ([`acquire_session_part_lock`]): concurrent `UploadPart`s for the same
+//! session serialize there, `CompleteMultipartUpload` reads the part files
+//! under it, and the adapter's sweep takes it before removing a session
+//! directory. The adapter's `store_part_locked` / `delete_session_locked`
+//! variants are used to avoid re-acquiring the global lock for metadata
+//! mutations.
 
 use std::{
     num::NonZeroUsize,
@@ -30,9 +36,9 @@ use axum::{
 use md5::{Digest, Md5};
 use shardline_index::S3ObjectEntry;
 use shardline_s3_adapter::{
-    CompleteMultipartUploadResult, InitiateMultipartUploadResult, S3Error, create_session,
-    delete_session_locked, lock_upload_sessions, parse_complete_multipart_parts, part_file_path,
-    read_session, store_part_locked,
+    CompleteMultipartUploadResult, InitiateMultipartUploadResult, S3Error,
+    acquire_session_part_lock, create_session, delete_session_locked, lock_upload_sessions,
+    parse_complete_multipart_parts, part_file_path, read_session, store_part_locked,
 };
 use tokio::io::AsyncWriteExt;
 
@@ -117,8 +123,11 @@ pub(super) async fn s3_upload_part(
     let root = state.config.root_dir();
     let ttl = state.config.s3_upload_session_ttl_seconds();
 
-    // Hold the global session lock for the whole mutation so a concurrent
-    // sweep cannot remove the session directory mid-write (F-s3-4).
+    // Global session lock: session validation and the metadata/quota mutation
+    // (`store_part_locked`) below only. The lock is NOT held across the body
+    // stream — a slow part body must not stall other tenants' session
+    // operations (F-10); the part-file write is serialized per-session
+    // instead.
     let _session_lock = lock_upload_sessions(root).await?;
 
     // The session must exist, be unexpired, and belong to this bucket/key.
@@ -153,11 +162,26 @@ pub(super) async fn s3_upload_part(
         ));
     }
 
+    // Take the per-session lock while still holding the global lock (the
+    // sweep takes them in the same order), then drop the global lock before
+    // streaming: the part-file write below is protected from the sweep and
+    // from a concurrent Complete by the per-session lock alone, so other
+    // tenants' session operations are never blocked on this body (F-10).
+    let part_lock = acquire_session_part_lock(upload_id);
+    let _part_guard = part_lock.lock().await;
+    drop(_session_lock);
+
     // Stream the body to the part file (overwrite semantics).
     let part_path = part_file_path(root, upload_id, part_number)?;
-    let mut file = tokio::fs::File::create(&part_path)
-        .await
-        .map_err(io_to_s3)?;
+    let mut file = match tokio::fs::File::create(&part_path).await {
+        Ok(file) => file,
+        // The session directory was removed (sweep/Complete) after
+        // validation; report the session as gone rather than a 500.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(S3Error::no_such_upload());
+        }
+        Err(error) => return Err(io_to_s3(error)),
+    };
     let mut total_bytes = 0_u64;
     while let Some(chunk) = body.next_bytes().await? {
         total_bytes = total_bytes
@@ -167,6 +191,11 @@ pub(super) async fn s3_upload_part(
     }
     file.flush().await.map_err(io_to_s3)?;
 
+    // The file is fully written; release the per-session lock (never await
+    // the global lock while holding it) and do the metadata + quota
+    // accounting back under the global lock.
+    drop(_part_guard);
+    let _global_lock = lock_upload_sessions(root).await?;
     if let Err(error) = store_part_locked(
         root,
         upload_id,
@@ -213,9 +242,10 @@ pub(super) async fn s3_complete_multipart_upload(
     let root = state.config.root_dir();
     let ttl = state.config.s3_upload_session_ttl_seconds();
 
-    // Hold the global session lock so a concurrent UploadPart cannot write
-    // into a part file while completion is ingesting it, and a concurrent
-    // sweep cannot remove the session mid-completion.
+    // Global session lock: session validation, request parsing, and the
+    // part-set checks below (all bounded work). The part-file ingest itself is
+    // NOT run under this lock — it is serialized per-session so a slow
+    // completion cannot stall other tenants' session operations (F-10).
     let _session_lock = lock_upload_sessions(root).await?;
 
     let session = read_session(root, upload_id, ttl).await?;
@@ -254,6 +284,15 @@ pub(super) async fn s3_complete_multipart_upload(
         }
     }
 
+    // Take the per-session lock while still holding the global lock (the
+    // sweep takes them in the same order), then drop the global lock: a
+    // concurrent UploadPart for this session (and the expiry sweep) serialize
+    // on the per-session lock while we open and ingest the part files, so the
+    // ingest below cannot race a part write or a directory delete (F-10).
+    let part_lock = acquire_session_part_lock(upload_id);
+    let _part_guard = part_lock.lock().await;
+    drop(_session_lock);
+
     // Build one continuous stream from the part files, in order.
     let chunk_size = state.config.chunk_size().get();
     let mut part_files = Vec::with_capacity(session.parts.len());
@@ -285,6 +324,12 @@ pub(super) async fn s3_complete_multipart_upload(
     let elapsed = start.elapsed().as_secs_f64();
     metrics::record_upload("s3", uploaded.total_bytes, elapsed, true);
     let etag = object::md5_hasher_hex(&hasher);
+
+    // The ingest is done; release the per-session lock (never await the
+    // global lock while holding it) and consume the session under the global
+    // lock.
+    drop(_part_guard);
+    let _global_lock = lock_upload_sessions(root).await?;
 
     // The session is consumed by the completion; a failed cleanup is swept at
     // startup or on the next session creation.
@@ -336,14 +381,18 @@ pub(super) async fn s3_abort_multipart_upload(
     let root = state.config.root_dir();
     let ttl = state.config.s3_upload_session_ttl_seconds();
 
-    // Hold the global session lock so the session directory is not deleted
-    // while a concurrent UploadPart/Complete is writing to it (and vice versa).
+    // Hold the global session lock for validation and the delete, plus the
+    // per-session lock so the session directory is not removed while a
+    // concurrent UploadPart is mid-write into a part file (and vice versa);
+    // the sweep takes both locks in the same order.
     let _session_lock = lock_upload_sessions(root).await?;
 
     let session = read_session(root, upload_id, ttl).await?;
     if session.key != context.key || session.scope_namespace != context.scope_namespace {
         return Err(S3Error::no_such_upload());
     }
+    let part_lock = acquire_session_part_lock(upload_id);
+    let _part_guard = part_lock.lock().await;
     delete_session_locked(root, upload_id).await?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
