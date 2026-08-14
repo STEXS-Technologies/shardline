@@ -2,7 +2,7 @@
 
 Shardline is a protocol-neutral content-addressed storage engine, optimized for
 deduplicated model, dataset, container and build-artifact distribution, with Xet, OCI,
-Git LFS and cache-compatible frontends.
+Git LFS, S3, HuggingFace Hub and cache-compatible frontends.
 
 Use this index to find the shortest path for your task.
 If you are new to the project, start with deployment, then read the protocol or operator
@@ -26,6 +26,12 @@ docs that match your use case.
 ## Runtime And Contracts
 
 - [Protocol Frontends](PROTOCOLS.md)
+- [S3 Frontend](S3_FRONTEND.md)
+- [HuggingFace Hub API](HUGGINGFACE_HUB_API.md)
+- [Xet-Native File Management CLI](XET_NATIVE_CLI.md)
+- [Authentication](AUTHENTICATION.md)
+- [Object Reachability Model](reachability-model.md)
+- [CDC Chunking and Storage Representation](CDC_MIGRATION.md)
 - [Xet Protocol Conformance](PROTOCOL_CONFORMANCE.md)
 - [Storage Adapters](STORAGE_ADAPTERS.md)
 - [Cache Adapters](CACHE_ADAPTERS.md)
@@ -48,3 +54,9 @@ docs that match your use case.
 
 - [Performance](PERFORMANCE.md)
 - [Profiling](PROFILING.md)
+
+## Planning And Release
+
+- [Production-Readiness Plan](SHARDLINE_PRODUCTION_READINESS.md)
+- [SDX Client Plan](SDX_PLAN.md)
+- [Coordinated crates.io Release](RELEASE.md)

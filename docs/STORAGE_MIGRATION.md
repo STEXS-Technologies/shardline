@@ -93,6 +93,12 @@ production hosts. A direct credential variable and its matching `_FILE` variable
 mutually exclusive; the migration command rejects that configuration before building the
 S3 client.
 
+The source side supports the same credential-file indirection as the destination:
+`SHARDLINE_MIGRATE_FROM_S3_ACCESS_KEY_ID_FILE`,
+`SHARDLINE_MIGRATE_FROM_S3_SECRET_ACCESS_KEY_FILE`, and
+`SHARDLINE_MIGRATE_FROM_S3_SESSION_TOKEN_FILE` (with the same mutual-exclusion rule
+against their direct counterparts).
+
 Example: local state root to S3-compatible storage:
 
 ```bash

@@ -182,6 +182,24 @@ fn parse_serve_with_multiple_frontends() {
 }
 
 #[test]
+fn parse_serve_with_s3_frontend() {
+    let args = vec![
+        "shardline".to_owned(),
+        "serve".to_owned(),
+        "--frontend".to_owned(),
+        "s3".to_owned(),
+    ];
+
+    assert_eq!(
+        CliCommand::parse(args),
+        Ok(CliCommand::Serve {
+            role: None,
+            frontends: Some(vec![ServerFrontend::S3]),
+        })
+    );
+}
+
+#[test]
 fn parse_fsck() {
     let args = vec![
         "shardline".to_owned(),
@@ -1171,6 +1189,10 @@ fn cli_server_frontend_to_server_frontend() {
     assert_eq!(
         ServerFrontend::from(super::CliServerFrontend::Hub),
         ServerFrontend::Hub
+    );
+    assert_eq!(
+        ServerFrontend::from(super::CliServerFrontend::S3),
+        ServerFrontend::S3
     );
 }
 

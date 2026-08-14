@@ -67,12 +67,14 @@ Entries are lost on restart.
 Use the `redis` cache adapter when reconstruction cache state should survive process
 restarts or be shared across multiple Shardline instances.
 Shardline speaks the Redis protocol for its shared reconstruction cache.
-Garnet is one deployment option and is the one used in the shipped local and Kubernetes
-examples because it performs well for this workload.
+The shipped local example uses the in-memory adapter by default, and the Kubernetes
+manifests reference a Redis-compatible cache URL as a placeholder for you to fill in —
+they do not deploy a cache server. Redis-compatible servers such as Redis or Garnet are
+opt-in: bring your own server and point `SHARDLINE_RECONSTRUCTION_CACHE_REDIS_URL` at it.
 
 ```text
 SHARDLINE_RECONSTRUCTION_CACHE_ADAPTER=redis
-SHARDLINE_RECONSTRUCTION_CACHE_REDIS_URL=redis://default:dev_password@garnet:6379
+SHARDLINE_RECONSTRUCTION_CACHE_REDIS_URL=redis://default:replace-me@cache.example.com:6379
 SHARDLINE_RECONSTRUCTION_CACHE_TTL_SECONDS=30
 ```
 

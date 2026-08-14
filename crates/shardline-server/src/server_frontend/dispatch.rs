@@ -15,9 +15,13 @@ pub(crate) fn optional_chunk_container_keys(
             ServerFrontend::Xet => {
                 xet::push_optional_chunk_container_key(&mut object_keys, chunk_hash)?
             }
+            // S3 protocol keys are skipped by `scan_orphan_objects`'s
+            // unrecognized-key path and chunks are record-protected, so GC/fsck
+            // need no behavior change.
             ServerFrontend::Lfs
             | ServerFrontend::BazelHttp
             | ServerFrontend::Oci
+            | ServerFrontend::S3
             | ServerFrontend::Hub => {}
         }
     }
@@ -56,9 +60,11 @@ where
                     );
                 }
             }
+            // S3 chunks are record-protected, so GC/fsck need no behavior change.
             ServerFrontend::Lfs
             | ServerFrontend::BazelHttp
             | ServerFrontend::Oci
+            | ServerFrontend::S3
             | ServerFrontend::Hub => {}
         }
     }

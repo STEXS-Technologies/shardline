@@ -289,8 +289,8 @@ Each candidate stores:
 - when the chunk first became unreachable
 - when it becomes eligible for deletion
 
-Postgres-backed deployments store the same quarantine data in
-`shardline_quarantine_candidates`.
+Postgres-backed deployments store the same quarantine data in the quarantine-candidates
+table.
 
 Local deployments store retention holds under:
 
@@ -298,7 +298,13 @@ Local deployments store retention holds under:
 <root>/gc/retention-holds/
 ```
 
-Postgres-backed deployments store the same hold data in `shardline_retention_holds`.
+Postgres-backed deployments store the same hold data in the garbage-collection hold
+table.
+
+> **Internals**
+>
+> The Postgres tables are named `shardline_quarantine_candidates` and
+> `shardline_retention_holds`. Operators do not need to reference them by name.
 
 The collector:
 

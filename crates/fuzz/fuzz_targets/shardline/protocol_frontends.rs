@@ -33,9 +33,10 @@ fuzz_target!(|data: &[u8]| {
     }
 
     if summary.frontend_accepts {
+        // Must mirror ServerFrontend::parse (shardline-server-core) exactly.
         assert!(matches!(
             frontend,
-            "xet" | "lfs" | "bazel-http" | "oci" | "hub" | "metrics"
+            "xet" | "lfs" | "bazel-http" | "oci" | "hub" | "s3"
         ));
     }
 });

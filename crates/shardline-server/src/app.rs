@@ -73,7 +73,9 @@ use protocol_routes::{
     bazel_get, bazel_get_ac, bazel_get_cas, bazel_head, bazel_head_ac, bazel_head_cas, bazel_put,
     bazel_put_ac, bazel_put_cas, lfs_batch, lfs_delete_object, lfs_get_object, lfs_head_object,
     lfs_patch_object, lfs_put_object, lfs_verify_object, oci_api_dispatch, oci_dispatch,
-    oci_registry_token, oci_transfer_dispatch, oci_v2_root,
+    oci_registry_token, oci_transfer_dispatch, oci_v2_root, s3_create_bucket, s3_delete_bucket,
+    s3_delete_object, s3_get_bucket, s3_get_object, s3_head_bucket, s3_head_object,
+    s3_list_buckets, s3_post_bucket, s3_post_object, s3_put_object,
 };
 #[cfg(feature = "fuzzing")]
 pub(crate) use protocol_routes::{parse_oci_path, parse_upload_content_range};
@@ -272,6 +274,32 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
         protocol_metrics: ProtocolMetrics::default(),
     });
 
+    // Sweep expired S3 multipart upload sessions at startup (crash recovery);
+    // in-flight sweeps also run on every session creation.
+    if state
+        .config
+        .server_frontends()
+        .iter()
+        .any(|frontend| matches!(frontend, ServerFrontend::S3))
+    {
+        match shardline_s3_adapter::sweep_expired_sessions(
+            state.config.root_dir(),
+            state.config.s3_upload_session_ttl_seconds(),
+        )
+        .await
+        {
+            Ok(removed) => {
+                tracing::info!(
+                    removed,
+                    "s3 startup sweep removed expired multipart upload sessions"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, "s3 startup sweep of expired multipart upload sessions failed");
+            }
+        }
+    }
+
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods([
@@ -314,6 +342,14 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
     // converted via `.with_state()`.
     let mut hub_state: Option<shardline_hub_api::routes::HubState> = None;
     let mut xet_frontend_enabled = false;
+    // S3 is mounted as the app-level FALLBACK rather than merged into the main
+    // route trie: its `/{bucket}/{*key}` wildcard would otherwise conflict with
+    // any other frontend's root-level parameter routes (Hub's Git Smart HTTP
+    // and file-resolve routes) — matchit cannot host a wildcard and a parameter
+    // with children at the same position. As a fallback, every registered route
+    // (Hub/OCI/LFS/Xet/Bazel/metrics/healthz) wins, and S3 serves everything
+    // else, which is exactly the S3 catch-all contract.
+    let mut s3_router: Option<Router> = None;
     for frontend in state.config.server_frontends() {
         match frontend {
             ServerFrontend::Hub => {
@@ -322,6 +358,12 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
             ServerFrontend::Xet => {
                 xet_frontend_enabled = true;
                 app = register_frontend_routes(app, *frontend, role, &state);
+            }
+            ServerFrontend::S3 => {
+                // Build the S3 router separately and apply the state at build
+                // time so it can be mounted as the app-level fallback service
+                // (an un-applied Router<Arc<AppState>> is not a Service).
+                s3_router = Some(register_s3_routes(Router::new(), role).with_state(state.clone()));
             }
             ServerFrontend::Lfs | ServerFrontend::BazelHttp | ServerFrontend::Oci => {
                 app = register_frontend_routes(app, *frontend, role, &state);
@@ -336,6 +378,14 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
     // Merge hub routes (Router<()>) into the main app (Router<()>).
     let app = if let Some(hs) = hub_state {
         app.merge(shardline_hub_api::hub_routes(hs, !xet_frontend_enabled))
+    } else {
+        app
+    };
+
+    // Mount S3 as the fallback AFTER every registered route (frontends, Hub,
+    // health/metrics): unmatched paths fall through to the S3 router.
+    let app = if let Some(s3_router) = s3_router {
+        app.fallback_service(s3_router)
     } else {
         app
     };
@@ -465,6 +515,7 @@ fn register_frontend_routes(
         ServerFrontend::Lfs => register_lfs_routes(app, role),
         ServerFrontend::BazelHttp => register_bazel_routes(app, role),
         ServerFrontend::Oci => register_oci_routes(app, role),
+        ServerFrontend::S3 => register_s3_routes(app, role),
         ServerFrontend::Hub => app, // Hub routes are built separately
     }
 }
@@ -573,6 +624,48 @@ fn register_oci_routes(mut app: Router<Arc<AppState>>, role: ServerRole) -> Rout
         ServerRole::Transfer => {
             app = app.route("/v2/{*path}", axum::routing::any(oci_transfer_dispatch));
         }
+    }
+    app
+}
+
+/// Registers the S3 frontend routes.
+///
+/// S3 is an API-tier frontend (reads + writes touch records/ingest), so the
+/// routes are registered only when the role serves the API surface.
+///
+/// Bucket-level operations are registered on BOTH `/{bucket}` and `/{bucket}/`:
+/// real clients (mc, the AWS SDKs, pyarrow) canonicalize bucket paths with a
+/// trailing slash (`PUT /ac.assets/`, `GET /ac.assets/?location=`), and axum
+/// does not match `/{bucket}` against the trailing-slash form.
+fn register_s3_routes(mut app: Router<Arc<AppState>>, role: ServerRole) -> Router<Arc<AppState>> {
+    if role.serves_api() {
+        app = app
+            // Service-level `GET /` — `ListBuckets` (the caller's single bucket).
+            .route("/", axum::routing::get(s3_list_buckets))
+            .route(
+                "/{bucket}",
+                axum::routing::put(s3_create_bucket)
+                    .get(s3_get_bucket)
+                    .head(s3_head_bucket)
+                    .post(s3_post_bucket)
+                    .delete(s3_delete_bucket),
+            )
+            .route(
+                "/{bucket}/",
+                axum::routing::put(s3_create_bucket)
+                    .get(s3_get_bucket)
+                    .head(s3_head_bucket)
+                    .post(s3_post_bucket)
+                    .delete(s3_delete_bucket),
+            )
+            .route(
+                "/{bucket}/{*key}",
+                axum::routing::get(s3_get_object)
+                    .head(s3_head_object)
+                    .put(s3_put_object)
+                    .post(s3_post_object)
+                    .delete(s3_delete_object),
+            );
     }
     app
 }

@@ -126,8 +126,9 @@ Both targets measure the same deterministic suite:
 8. cross-repository upload reuse across repository scopes
 9. cached latest reconstruction after one cold cache fill
 
-Repeated runs allocate fresh `run-XXXX/iteration-YYYY/` directories under the requested
-storage root, so operators can compare runs without clearing the parent directory
+Repeated runs allocate fresh `run-XXXX/iteration-YYYY/` directories (zero-padded
+counters, for example `run-0001/iteration-0000/`) under the requested storage
+root, so operators can compare runs without clearing the parent directory
 between invocations.
 
 Supported knobs:

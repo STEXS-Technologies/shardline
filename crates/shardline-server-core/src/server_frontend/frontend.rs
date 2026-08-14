@@ -13,6 +13,27 @@ pub enum ServerFrontend {
     Oci,
     /// HuggingFace Hub API compatibility frontend.
     Hub,
+    /// S3-compatible object-storage frontend.
+    S3,
+}
+
+impl ServerFrontend {
+    /// Every frontend variant, in registration order.
+    ///
+    /// This is the single source of truth for "all frontends" used by the
+    /// frontend-coexistence tests: the router is built with every variant so
+    /// that ANY future frontend whose routes collide with another frontend's
+    /// (e.g. the S3 `/{bucket}/{*key}` wildcard versus a Hub root-level
+    /// parameter route) fails the suite immediately with the conflicting
+    /// pair named. **Add every new variant here.**
+    pub const ALL: [Self; 6] = [
+        Self::Xet,
+        Self::Lfs,
+        Self::BazelHttp,
+        Self::Oci,
+        Self::Hub,
+        Self::S3,
+    ];
 }
 
 impl ServerFrontend {
@@ -40,6 +61,7 @@ impl ServerFrontend {
             "bazel-http" => Ok(Self::BazelHttp),
             "oci" => Ok(Self::Oci),
             "hub" => Ok(Self::Hub),
+            "s3" => Ok(Self::S3),
             _ => Err(ServerFrontendParseError),
         }
     }
@@ -53,6 +75,7 @@ impl ServerFrontend {
             Self::BazelHttp => "bazel-http",
             Self::Oci => "oci",
             Self::Hub => "hub",
+            Self::S3 => "s3",
         }
     }
 }
@@ -97,6 +120,12 @@ mod tests {
     }
 
     #[test]
+    fn roundtrip_s3() {
+        let variant = ServerFrontend::S3;
+        assert_eq!(ServerFrontend::parse(variant.as_str()), Ok(variant));
+    }
+
+    #[test]
     fn parse_xet() {
         assert_eq!(ServerFrontend::parse("xet"), Ok(ServerFrontend::Xet));
     }
@@ -114,6 +143,11 @@ mod tests {
     #[test]
     fn parse_hub() {
         assert_eq!(ServerFrontend::parse("hub"), Ok(ServerFrontend::Hub));
+    }
+
+    #[test]
+    fn parse_s3() {
+        assert_eq!(ServerFrontend::parse("s3"), Ok(ServerFrontend::S3));
     }
 
     #[test]
@@ -141,6 +175,7 @@ mod tests {
         assert_eq!(ServerFrontend::BazelHttp.as_str(), "bazel-http");
         assert_eq!(ServerFrontend::Oci.as_str(), "oci");
         assert_eq!(ServerFrontend::Hub.as_str(), "hub");
+        assert_eq!(ServerFrontend::S3.as_str(), "s3");
     }
 
     #[test]

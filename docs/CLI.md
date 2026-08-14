@@ -58,7 +58,7 @@ shardline manpage --output ./shardline.1
 
 ## Global Flags
 
-These flags are available on every command and must be placed before the subcommand:
+These flags are available on every command, either before or after the subcommand:
 
 ```text
 --env-file <PATH>   Load a .env file into the process environment before
@@ -78,7 +78,13 @@ shardline serve --env-file .env.production
 shardline serve --config /etc/shardline/shardline.toml
 shardline serve --role api
 shardline serve --role transfer
+shardline serve --frontend xet --frontend hub
+shardline serve --frontend xet,lfs,bazel-http,oci,hub,s3
 ```
+
+`--frontend` selects the protocol frontends this process serves. Repeat the flag or
+pass a comma-separated list. `--role` pins the process to `all`, `api`, or `transfer`
+and only splits the selected frontend set across processes.
 
 Validate configuration:
 
@@ -126,8 +132,56 @@ Apply metadata migrations:
 
 ```bash
 shardline db migrate up
+shardline db migrate up --steps 2
+shardline db migrate up --database-url postgres://user:password@db.example.com:5432/shardline
+shardline db migrate down --steps 1
 shardline db migrate status
 ```
+
+`up` applies pending migrations, `down` reverts applied migrations (optionally limited
+by `--steps`), and `status` reports the applied and pending sets. `--database-url`
+overrides the configured Postgres metadata URL.
+
+Verify object-store and metadata integrity:
+
+```bash
+shardline fsck
+shardline fsck --root /var/lib/shardline
+```
+
+Rebuild mutable indexes from immutable version history:
+
+```bash
+shardline index rebuild
+shardline index rebuild --root /var/lib/shardline
+```
+
+Repair lifecycle metadata and webhook delivery state:
+
+```bash
+shardline repair
+shardline repair lifecycle
+shardline repair lifecycle --webhook-retention-seconds 604800
+```
+
+Export an adapter-neutral recovery manifest:
+
+```bash
+shardline backup manifest --output ./backup-manifest.json
+```
+
+Copy immutable objects between storage adapters:
+
+```bash
+shardline storage migrate --from local --to s3
+shardline storage migrate --from local --from-root /var/lib/shardline --to s3 --prefix my-prefix
+shardline storage migrate --from s3 --to local --to-root /mnt/cold-storage --dry-run
+```
+
+`storage migrate` inventories immutable payload objects under the source adapter and
+copies them into the destination. Use `--dry-run` to inventory without writing
+destination payloads. `--from-root` / `--to-root` supply the local state root when the
+corresponding adapter is `local`.
 
 Run garbage collection:
 
@@ -135,6 +189,7 @@ Run garbage collection:
 shardline gc
 shardline gc --mark
 shardline gc --mark --sweep --retention-seconds 86400
+shardline gc --mark --retention-report reports/gc-retention.json --orphan-inventory reports/gc-orphans.json
 ```
 
 Generate a validated systemd GC schedule:
@@ -144,6 +199,28 @@ shardline gc schedule install \
   --env-file /etc/shardline/shardline.env \
   --user shardline \
   --group shardline
+```
+
+Remove the generated systemd GC units:
+
+```bash
+shardline gc schedule uninstall
+shardline gc schedule uninstall --output-dir /etc/systemd/system --unit-prefix shardline-gc
+```
+
+Manage retention holds that protect object keys from garbage collection:
+
+```bash
+shardline hold set --object-key s3://team-assets/model.pt --reason "restore window" --ttl-seconds 604800
+shardline hold list
+shardline hold list --active-only
+shardline hold release --object-key s3://team-assets/model.pt
+```
+
+Probe a running server's health:
+
+```bash
+shardline health --server http://127.0.0.1:8080
 ```
 
 Run benchmarks:
@@ -163,5 +240,12 @@ shardline bench --mode ingest --iterations 5 --concurrency 16
   runtime adapters, including Postgres metadata and S3 object storage
 - `shardline gc schedule install` validates the target binary, env file, selected user
   and group, and referenced secret/config paths before writing units
+- `shardline gc`, `fsck`, `repair`, and `hold` read lifecycle and record metadata from
+  Postgres when `SHARDLINE_INDEX_POSTGRES_URL` is set, and inventory or delete payload
+  objects through the configured object-storage adapter
+- `shardline repair lifecycle --webhook-retention-seconds` bounds how long processed
+  webhook-delivery claims are retained before cleanup
+- `shardline storage migrate` inventories the source adapter before copying; use
+  `--dry-run` to review the inventory without writing destination payloads
 - `shardline completion` and `shardline manpage` are packaging and operator tools; they
   do not modify runtime state unless `--output` writes to a path you choose

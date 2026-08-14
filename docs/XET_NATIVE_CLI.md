@@ -1,34 +1,33 @@
 # Xet-Native File Management CLI
 
-> **Status:** Design proposal.
-> The `sdx` CLI described here is not yet implemented.
-> See [issue #19](https://github.com/STEXS-Technologies/shardline/issues/19) for the
-> current tracking issue.
+> **Status:** implemented.
+> The `sdx` CLI described here ships with the `shardline` binary and provides native
+> file transfer against any Xet-protocol server, including Shardline itself.
 
 The shardline server implements the Xet CAS protocol for chunk-level deduplicated object
 storage. The Hugging Face maintained `git-xet` (huggingface/xet-core) provides a Git LFS
 custom transfer agent that works with any server supporting the Xet protocol, including
-shardline. However, there is no standalone CLI for uploading and downloading files
-outside of a Git workflow.
+shardline. `sdx` is the standalone CLI for uploading and downloading files outside of a
+Git workflow.
 
-This document describes a file-transfer entrypoint `sdx` that provides native file
-management against any Xet-compatible server, including shardline itself.
+`sdx` is a file-transfer entrypoint that provides native file management against any
+Xet-compatible server, including shardline itself.
 
-## Goals
+## Scope
 
-- Provide a lightweight `cp`/`sync`/`ls`/`rm` interface for file transfer over the Xet
+- `sdx cp` / `sdx sync` / `sdx ls` / `sdx rm` / `sdx cat` / `sdx info` / `sdx branch`
+  provide a lightweight `cp`/`sync`/`ls`/`rm` interface for file transfer over the Xet
   CAS protocol.
-- Target any Xet-protocol server — not only shardline, but any server that implements
-  the Xet read-token, write-token, and xorb-transfer endpoints.
-- Reuse shardline's existing xorb chunking, CAS storage, and reconstruction logic from
-  `shardline-xet-adapter` and `shardline-server-core` rather than duplicating protocol
-  work.
-- Authenticate via the same provider-based token model: API key or bearer token to
-  server endpoint → scoped CAS token → content-addressed xorb transfer.
-- Support recursive directory upload, filtered download, incremental sync, and streaming
-  large files.
-- Ship as a single `shardline` binary — `sdx` is a symlink that invokes the same
-  binary, which detects `argv[0]` and routes to the `xet` subcommand automatically.
+- It targets any Xet-protocol server — not only shardline, but any server that
+  implements the Xet read-token, write-token, and xorb-transfer endpoints.
+- It reuses shardline's existing xorb chunking, CAS storage, and reconstruction logic as
+  a client library rather than duplicating protocol work.
+- It authenticates through the same provider-based token model: API key or bearer token
+  to the server endpoint → scoped CAS token → content-addressed xorb transfer.
+- It supports recursive directory upload, filtered download, incremental sync, and
+  streaming large files.
+- It ships as a single `shardline` binary — `sdx` is a symlink that invokes the same
+  binary, which detects `argv[0]` and routes to the `xet` command lane automatically.
 
 ## Non-Goals
 
@@ -36,12 +35,11 @@ management against any Xet-compatible server, including shardline itself.
   The CLI is a client only.
 - Replacing Git or Git LFS. The CLI targets direct file transfer, not version control
   workflows.
-- Building a FUSE mount point in the initial scope.
-  (The deprecated `pyxet` offered `xet mount`; this is a future consideration, not an
-  initial goal.)
+- Building a FUSE mount point.
+  (The deprecated `pyxet` offered `xet mount`; this is a future consideration, not a
+  current goal.)
 - Supporting every Xet-protocol variant in the wild.
-  The initial target is the endpoint and transfer surface that shardline itself
-  implements.
+  The target is the endpoint and transfer surface that shardline itself implements.
 
 ## Dispatch Model
 
@@ -66,10 +64,17 @@ flowchart TD
         Fsck[fsck]
         Gc[gc]
         Rebuild[index rebuild]
+        Repair[repair]
+        Backup[backup manifest]
+        StorageMigrate[storage migrate]
+        Hold[hold]
         Bench[bench]
         Admin[admin token]
         DbMigrate[db migrate]
         ConfigCheck[config check]
+        Health[health]
+        Completion[completion]
+        Manpage[manpage]
     end
 
     subgraph Xet[ ]
@@ -90,7 +95,7 @@ flowchart TD
   classDef dispatch fill:#fff3e0,stroke:#e0a050,color:#1f2937;
   class Binary binary;
   class Invocation dispatch;
-  class Serve,Fsck,Gc,Rebuild,Bench,Admin,DbMigrate,ConfigCheck operator;
+  class Serve,Fsck,Gc,Rebuild,Repair,Backup,StorageMigrate,Hold,Bench,Admin,DbMigrate,ConfigCheck,Health,Completion,Manpage operator;
   class Cp,Sync,Ls,Rm,Cat,Info,Branch xet;
   linkStyle default stroke:#111827,stroke-width:1.5px;
 ```
@@ -114,6 +119,9 @@ ln -s target/debug/shardline target/debug/sdx
 ./target/debug/sdx cp ./model.pt xet://...
 ```
 
+The same lane is also reachable as the `xet` escape-hatch subcommand on the operator
+binary (`shardline xet cp …`), which is how the manpage and shell completions expose it.
+
 ## Protocol Flow
 
 The CLI interacts with a Xet-protocol server through a three-step sequence:
@@ -132,15 +140,14 @@ sequenceDiagram
   CLI->>CLI: Split file into chunks → build xorb
 
   loop For each chunk
-    CLI->>CAS: PUT /transfer/xorb/{namespace}/{hash}
+    CLI->>CAS: GET /v1/chunks/default-merkledb/{hash} (skip existing chunks)
+    CAS-->>CLI: 200 or 404
+    CLI->>CAS: POST /v1/xorbs/default/{hash}
     CAS-->>CLI: 200 OK
   end
 
-  CLI->>CAS: PUT /transfer/xorb/{namespace}/{xorb-hash}
+  CLI->>CAS: POST /v1/shards (register file metadata)
   CAS-->>CLI: 200 OK
-
-  CLI->>Server: POST /v1/shards (optional: register file metadata)
-  Server-->>CLI: 200 OK
 
   User->>CLI: sdx cp xet://server/org/repo/main/file.bin .
   CLI->>Server: GET /api/{provider}/{owner}/{repo}/xet-read-token/{rev}?subject={subject}
@@ -196,19 +203,23 @@ Authorization: Bearer <accessToken>
 Xorb upload:
 
 ```
-PUT /transfer/xorb/{namespace}/{64-char-hex-hash}
+HEAD /v1/xorbs/default/{hash}            # skip when the xorb already exists
+POST /v1/xorbs/default/{hash}
 Authorization: Bearer <accessToken>
 Body: <xorb bytes>
 ```
 
+Chunk-level deduplication checks use `GET /v1/chunks/default-merkledb/{hash}`;
+a `404` means the chunk is not stored yet and is uploaded, while an existing chunk is
+skipped.
+
 The namespace is the server's repository-scoped prefix.
 For shardline, the namespace is derived from the repository scope.
-The CLI extracts it from the token or from the server's advertised namespace convention.
 
 ### Step 3 — Metadata Registration (Write Path)
 
-After uploading xorb bytes, the CLI can optionally register the file metadata with the
-server so the file becomes discoverable through the server's reconstruction API.
+After uploading xorb bytes, the CLI registers the file metadata with the server so the
+file becomes discoverable through the server's reconstruction API.
 
 ```
 POST /v1/shards
@@ -216,12 +227,9 @@ Authorization: Bearer <accessToken>
 Body: { shard metadata }
 ```
 
-This step is optional for pure CAS upload but required for the file to be
-reconstructable by other clients or by the server's index.
-The CLI should support both modes:
-
-- `--register` (default for write): register file metadata after upload
-- `--no-register`: raw CAS upload without index registration
+Registration is the default for writes. `--no-register` performs a data-only CAS upload
+that skips path-metadata registration; the file's chunks are still stored and fetchable
+by their content hash.
 
 ## URL Scheme
 
@@ -256,8 +264,8 @@ sdx info xet://127.0.0.1:8080/generic/myorg/myrepo/main/model.pt
 sdx rm xet://127.0.0.1:8080/generic/myorg/myrepo/main/model.pt
 ```
 
-The CLI should also accept a shorthand form when the server, auth, and default provider
-are configured:
+The CLI also accepts a shorthand form when the server, auth, and default provider are
+configured in the config file:
 
 ```bash
 sdx cp ./model.pt myorg/myrepo/main/
@@ -272,13 +280,15 @@ The CLI authenticates to the server via one of the following, checked in order:
 3. `--token-file` flag or `SHARDLINE_TOKEN_FILE` environment variable (path to file
    containing bearer token)
 4. `--config` flag or `SHARDLINE_CONFIG` environment variable pointing to a
-   configuration file
+   configuration file, whose `[auth]` section supplies the credential
 
-These are the same environment variables the `shardline` binary uses.
-Since `sdx` is the same binary invoked by symlink, it shares the configuration
-namespace.
-A user who already has `SHARDLINE_TOKEN` set for the operator tooling gets the
-same auth for file transfers without additional setup.
+Credential priority is: CLI flags > environment variables > config `[auth]` section.
+
+These are the client-side credential variables for the Xet file-transfer lane. They are
+distinct from the operator-CLI signing-key variables (`SHARDLINE_TOKEN_SIGNING_KEY` /
+`SHARDLINE_TOKEN_SIGNING_KEY_FILE`), which the server and `shardline admin token` use to
+sign and mint tokens — a token minted by the operator CLI is what you pass to `sdx` as
+`SHARDLINE_TOKEN` (or `--token`).
 
 When a provider API key is supplied, the CLI issues a
 `POST /v1/providers/{provider}/tokens` request to exchange it for a scoped CAS token.
@@ -286,9 +296,11 @@ When a bearer token is supplied, it is used directly as the `Authorization` head
 the token-issuance endpoints, and the server returns a short-lived CAS-scoped
 `accessToken`.
 
-The CLI should cache the CAS access token and transparently refresh it when it expires,
-using the original credentials.
+The CLI caches the CAS access token and transparently refreshes it when it approaches
+expiration (a 30-second refresh buffer), using the original credentials.
 This keeps long-lived transfers (large files, deep sync) from failing mid-operation.
+The `--subject` flag supplies the subject identifier the server requires on token
+issuance.
 
 ## File Operations
 
@@ -311,9 +323,9 @@ sdx cp xet://host/provider/owner/repo/rev/remote.bin ./local.bin
 sdx cp xet://host/provider/owner/repo/rev/data/ ./data/ --recursive
 ```
 
-The chunking and xorb construction uses the same `XorbWriter` from
-`shardline-xet-adapter` that the server uses for ingest.
-Reconstruction uses `XorbReader` and the same chunk-assembly logic.
+Remote-to-remote and local-to-local copies are rejected.
+
+The CLI uses the same content-defined chunking and xorb format as the server.
 This guarantees that files uploaded by the CLI are byte-identical to files uploaded
 through the server's own ingest paths and can be reconstructed by any Xet-compatible
 client.
@@ -325,14 +337,14 @@ Push-only directory synchronization modeled on `rsync` and `aws s3 sync`.
 ```bash
 # Push local directory to remote, uploading only changed files
 sdx sync ./data/ xet://host/provider/owner/repo/rev/data/
-
-# Pull remote directory to local
-sdx sync xet://host/provider/owner/repo/rev/data/ ./data/
 ```
 
-The sync implementation compares file sizes and modification times (local) against
-remote metadata. It skips unchanged files and processes only the delta.
-For each file that needs transfer, it reuses the same `cp` xorb pipeline.
+Pull sync is not supported: `sync` always uploads from a local source directory to a
+`xet://` remote destination. Use `sdx cp --recursive` to download a directory.
+
+The sync implementation compares file sizes (local) against remote metadata. It skips
+files whose remote entry already matches the local size and uploads the rest. For each
+file that needs transfer, it reuses the same `cp` xorb pipeline.
 
 ### `ls`
 
@@ -345,8 +357,8 @@ sdx ls xet://host/provider/owner/repo/ --branches
 ```
 
 Output mirrors familiar UNIX `ls` conventions.
-The `--long` flag includes file size, modification time, and content hash.
-The `--branches` flag lists available revisions.
+The `--long` flag includes the file size alongside the path.
+The `--branches` flag lists available revisions instead of directory contents.
 
 ### `rm`
 
@@ -357,9 +369,9 @@ sdx rm xet://host/provider/owner/repo/rev/file.bin
 sdx rm xet://host/provider/owner/repo/rev/data/ --recursive
 ```
 
-`sdx rm` deregisters the path→file_id mapping from the revision's tree store.
+`sdx rm` deregisters the path→file mapping from the revision's tree.
 It does **not** delete the file record or its CAS objects: the content remains
-reachable and reconstructable by its file_id, and storage is not reclaimed
+reachable and reconstructable by its content hash, and storage is not reclaimed
 (see `docs/reachability-model.md`).
 
 ### `cat`
@@ -384,8 +396,8 @@ sdx info xet://host/provider/owner/repo/rev/model.pt
 sdx info xet://host/provider/owner/repo/rev/
 ```
 
-Output includes file size, content hash, chunk count, chunk-level deduplication
-statistics, and modification time.
+For a file, output includes the path, file identifier, size, and last-updated time.
+For a directory or repository root, it reports the file count and total byte size.
 
 ### `branch`
 
@@ -406,11 +418,11 @@ The chunk-size boundary is configurable:
 sdx cp ./large.bin xet://host/... --chunk-size 65536
 ```
 
-Default chunk size matches the server default (`SHARDLINE_CHUNK_SIZE_BYTES`, typically
-64 KiB). The xorb format supports multiple compression modes:
+The default chunk size matches the server default (64 KiB, gear-hash content-defined
+chunking). The xorb format supports multiple compression modes:
 
 - `none`: raw bytes, no compression
-- `lz4`: LZ4 block compression (default for most workloads)
+- `lz4`: LZ4 block compression (default)
 - `bg4lz4`: bg4lz4 compression
 
 ```bash
@@ -422,11 +434,10 @@ When the CLI uploads a file, it:
 1. Chunks the file with content-defined chunking (gear-hash CDC, target configurable,
    default 64 KiB) matching the server's ingest chunker.
 2. Hashes each chunk with BLAKE3.
-3. Checks each chunk hash against the CAS server (idempotent put — existing chunks are
-   skipped).
+3. Checks each chunk hash against the CAS server (existing chunks are skipped).
 4. Builds a xorb from the chunk hashes and their pack offsets.
 5. Uploads the xorb to CAS.
-6. Optionally registers the file metadata with the server's index.
+6. Registers the file metadata with the server's index (unless `--no-register`).
 
 On download, it:
 
@@ -440,39 +451,6 @@ Existing chunks on the server are not re-uploaded, so uploading the same file tw
 idempotent and fast.
 Uploading a file that shares chunks with an existing file deduplicates at the chunk
 level automatically.
-
-## Crate Impact
-
-The `xet` subcommand will live in `crates/shardline/src/command/xet.rs` alongside the
-existing operator commands.
-No new crate is needed.
-The implementation draws on existing workspace crates as libraries:
-
-| Crate | Role |
-| --- | --- |
-| `shardline-protocol` | Token types (`RepositoryScope`, `TokenClaims`, `TokenSigner`), hash types (`ShardlineHash`), `ByteRange`, `SecretString` |
-| `shardline-xet-adapter` | `XorbWriter` for chunking and xorb construction, `XorbReader` for xorb parsing and chunk extraction, `XorbStore` trait for CAS storage operations |
-| `shardline-server-core` | Reconstruction planning, file validation limits |
-| `shardline-storage` | `ObjectStore` trait — the CLI may talk to CAS via HTTP rather than embedding a store, but the trait defines the contract |
-
-The CLI does not depend on `shardline-server`. It uses the protocol crate and the
-adapter crate as client-side libraries.
-The server dependency is limited to the HTTP API contract — `sdx` is a client, not an
-embedded server.
-
-## Remote Operation
-
-The CLI communicates with the server over HTTP(S). It does not require any server-side
-changes beyond the existing Xet protocol endpoints that shardline already implements.
-
-When the server supports it, the CLI should prefer presigned CAS URLs returned by the
-token endpoint or reconstruction response.
-Presigned URLs allow direct object-store access without proxying through the server's
-transfer layer, reducing latency for large files.
-
-The CLI falls back to the server-proxied transfer endpoint (`/transfer/xorb/...`) when
-presigned URLs are not available — for example, when the server uses a local filesystem
-adapter that cannot issue presigned URLs.
 
 ## Configuration
 
@@ -493,8 +471,7 @@ api_key = ""              # provider API key (or SHARDLINE_API_KEY)
 token_file = ""           # path to token file (or SHARDLINE_TOKEN_FILE)
 ```
 
-CLI flags override config file values.
-Config file values override environment variables.
+CLI flags override environment variables, which override config file values.
 
 ## Packaging
 
@@ -524,34 +501,19 @@ The install script creates the `sdx` symlink automatically.
 Package managers (rpm, deb, Homebrew) should declare the symlink as a package symlink,
 not a separate binary.
 
-## Stub Implementation Path
+## History and Status
 
-A minimal working implementation follows these phases:
+The `sdx` CLI was originally tracked as a design proposal in
+[issue #19](https://github.com/STEXS-Technologies/shardline/issues/19). The proposal
+staged the work in four phases — a read-only download CLI, a write/upload CLI,
+directory operations, and discovery/management (`rm`, `branch`, config, packaging).
+All four phases are now implemented: the `xet` command lane lives alongside the
+operator commands in the `shardline` binary, backed by the `sdx` client library, and
+ships with the manpage, shell completions, and the `sdx` symlink.
 
-**Phase 1 — Read-only CLI (download)**
-- Add `xet` subcommand to `crates/shardline/src/command/` with clap command tree.
-- Implement token issuance (read token from server).
-- Implement xorb download and chunk reconstruction.
-- Implement `cat` (stream reconstructed file to stdout).
-- Implement `cp <remote> <local>`.
-
-**Phase 2 — Write CLI (upload)**
-- Implement token issuance (write token from server).
-- Implement file chunking and xorb construction via `XorbWriter`.
-- Implement chunk-level idempotent CAS upload.
-- Implement `cp <local> <remote>`.
-
-**Phase 3 — Directory operations**
-- Implement recursive upload and download.
-- Implement `ls` and `info`.
-- Implement `sync`.
-
-**Phase 4 — Discovery and management**
-- Implement `rm` (metadata deregistration).
-- Implement `branch` (revision listing and management).
-- Implement config file support and credential caching with transparent token refresh.
-- Package completions, manpage, and release artifacts.
-
-Phase 1 depends only on the server's existing read endpoints.
-Phases 2–4 depend on the server's existing write and metadata endpoints.
-No server-side changes are required for any phase.
+> **Internals note:** the `xet` lane lives in `crates/shardline/src/xet/`, backed by the
+> `sdx` client library crate. It reuses the workspace protocol types (`RepositoryScope`,
+> `TokenClaims`, `TokenSigner`, `ShardlineHash`, `ByteRange`, `SecretString`) and the
+> xorb chunking/parsing code shared with the server. These crate and type names are
+> implementation details; the user-facing contract is the `sdx` command surface
+> described above.

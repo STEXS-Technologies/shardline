@@ -15,9 +15,12 @@ use super::secrets::{
 use super::{
     AuthProviderKind, CONFIG_SECRET_KEY_BYTES, DEFAULT_MAX_REQUEST_BODY_BYTES,
     DEFAULT_MAX_SHARD_FILES, DEFAULT_MAX_SHARD_RECONSTRUCTION_TERMS, DEFAULT_MAX_SHARD_XORB_CHUNKS,
-    DEFAULT_MAX_SHARD_XORBS, DeploymentMode, HUB_WEBHOOK_SECRET_KEY_BYTES, MAX_ED25519_KEY_BYTES,
-    MAX_METRICS_TOKEN_BYTES, MAX_TOKEN_SIGNING_KEY_BYTES, ObjectStorageAdapter, ServerConfig,
-    ServerConfigError, ShardMetadataLimits, default_transfer_max_in_flight_chunks,
+    DEFAULT_MAX_SHARD_XORBS, DEFAULT_S3_MAX_PART_BYTES, DEFAULT_S3_MIN_PART_BYTES,
+    DEFAULT_S3_UPLOAD_MAX_ACTIVE_SESSIONS, DEFAULT_S3_UPLOAD_SESSION_MAX_BYTES,
+    DEFAULT_S3_UPLOAD_SESSION_TTL_SECONDS, DEFAULT_S3_UPLOAD_TOTAL_MAX_BYTES, DeploymentMode,
+    HUB_WEBHOOK_SECRET_KEY_BYTES, MAX_ED25519_KEY_BYTES, MAX_METRICS_TOKEN_BYTES,
+    MAX_TOKEN_SIGNING_KEY_BYTES, ObjectStorageAdapter, ServerConfig, ServerConfigError,
+    ShardMetadataLimits, default_transfer_max_in_flight_chunks,
     default_upload_max_in_flight_chunks, parse_byte_size,
 };
 use crate::{
@@ -87,7 +90,7 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
     );
     let raw_chunk_size_str = var("SHARDLINE_CHUNK_SIZE")
         .or_else(|_| var("SHARDLINE_CHUNK_SIZE_BYTES"))
-        .unwrap_or_else(|_error| "64KB".to_owned());
+        .unwrap_or_else(|_error| "64KiB".to_owned());
     let raw_chunk_size = parse_byte_size(&raw_chunk_size_str)?;
     let Some(chunk_size) = NonZeroUsize::new(raw_chunk_size) else {
         return Err(ServerConfigError::ZeroChunkSize);
@@ -168,6 +171,50 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
         NonZeroUsize::new(raw_oci_registry_token_max_in_flight_requests)
     else {
         return Err(ServerConfigError::ZeroOciRegistryTokenMaxInFlightRequests);
+    };
+    let raw_s3_max_part_bytes = var("SHARDLINE_S3_MAX_PART_BYTES")
+        .unwrap_or_else(|_error| DEFAULT_S3_MAX_PART_BYTES.get().to_string())
+        .parse::<u64>()
+        .map_err(ServerConfigError::S3MaxPartBytes)?;
+    let Some(s3_max_part_bytes) = NonZeroU64::new(raw_s3_max_part_bytes) else {
+        return Err(ServerConfigError::ZeroS3MaxPartBytes);
+    };
+    let raw_s3_upload_session_ttl_seconds = var("SHARDLINE_S3_UPLOAD_SESSION_TTL_SECONDS")
+        .unwrap_or_else(|_error| DEFAULT_S3_UPLOAD_SESSION_TTL_SECONDS.get().to_string())
+        .parse::<u64>()
+        .map_err(ServerConfigError::S3UploadSessionTtl)?;
+    let Some(s3_upload_session_ttl_seconds) = NonZeroU64::new(raw_s3_upload_session_ttl_seconds)
+    else {
+        return Err(ServerConfigError::ZeroS3UploadSessionTtlSeconds);
+    };
+    let raw_s3_upload_max_active_sessions = var("SHARDLINE_S3_UPLOAD_MAX_ACTIVE_SESSIONS")
+        .unwrap_or_else(|_error| DEFAULT_S3_UPLOAD_MAX_ACTIVE_SESSIONS.get().to_string())
+        .parse::<usize>()
+        .map_err(ServerConfigError::S3UploadMaxActiveSessions)?;
+    let Some(s3_upload_max_active_sessions) = NonZeroUsize::new(raw_s3_upload_max_active_sessions)
+    else {
+        return Err(ServerConfigError::ZeroS3UploadMaxActiveSessions);
+    };
+    let raw_s3_min_part_bytes = var("SHARDLINE_S3_MIN_PART_BYTES")
+        .unwrap_or_else(|_error| DEFAULT_S3_MIN_PART_BYTES.get().to_string())
+        .parse::<u64>()
+        .map_err(ServerConfigError::S3MinPartBytes)?;
+    let Some(s3_min_part_bytes) = NonZeroU64::new(raw_s3_min_part_bytes) else {
+        return Err(ServerConfigError::ZeroS3MinPartBytes);
+    };
+    let raw_s3_upload_session_max_bytes = var("SHARDLINE_S3_UPLOAD_SESSION_MAX_BYTES")
+        .unwrap_or_else(|_error| DEFAULT_S3_UPLOAD_SESSION_MAX_BYTES.get().to_string())
+        .parse::<u64>()
+        .map_err(ServerConfigError::S3UploadSessionMaxBytes)?;
+    let Some(s3_upload_session_max_bytes) = NonZeroU64::new(raw_s3_upload_session_max_bytes) else {
+        return Err(ServerConfigError::ZeroS3UploadSessionMaxBytes);
+    };
+    let raw_s3_upload_total_max_bytes = var("SHARDLINE_S3_UPLOAD_TOTAL_MAX_BYTES")
+        .unwrap_or_else(|_error| DEFAULT_S3_UPLOAD_TOTAL_MAX_BYTES.get().to_string())
+        .parse::<u64>()
+        .map_err(ServerConfigError::S3UploadTotalMaxBytes)?;
+    let Some(s3_upload_total_max_bytes) = NonZeroU64::new(raw_s3_upload_total_max_bytes) else {
+        return Err(ServerConfigError::ZeroS3UploadTotalMaxBytes);
     };
     let reconstruction_cache_redis_url = var("SHARDLINE_RECONSTRUCTION_CACHE_REDIS_URL").ok();
     let reconstruction_cache_redis_tls = load_redis_tls_config_from_env()?;
@@ -307,6 +354,12 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
             reconstruction_cache_ttl_seconds,
             reconstruction_cache_memory_max_entries,
         )
+        .with_s3_max_part_bytes(s3_max_part_bytes)?
+        .with_s3_upload_session_ttl_seconds(s3_upload_session_ttl_seconds)?
+        .with_s3_upload_max_active_sessions(s3_upload_max_active_sessions)?
+        .with_s3_min_part_bytes(s3_min_part_bytes)?
+        .with_s3_upload_session_max_bytes(s3_upload_session_max_bytes)?
+        .with_s3_upload_total_max_bytes(s3_upload_total_max_bytes)?
         .with_admission_max_weight(admission_max_weight_from_env());
     config.cache.adapter = reconstruction_cache_adapter;
     config.cache.redis_url = reconstruction_cache_redis_url.map(SecretString::new);
@@ -334,10 +387,16 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
         config = config.with_config_secret_key(config_key)?;
     }
 
-    // Validate chunk size upper bound (1 GB).
+    // Validate chunk size bounds: the CDC chunker requires a power of two
+    // (see `upload_ingest::cdc::CdcChunker`), so a misconfigured value must
+    // fail startup with a clear error instead of panicking on the first
+    // upload. Upper bound is 1 GB.
     const MAX_CHUNK_SIZE: usize = 1_073_741_824;
     if chunk_size.get() > MAX_CHUNK_SIZE {
         return Err(ServerConfigError::ChunkSizeTooLarge);
+    }
+    if !chunk_size.get().is_power_of_two() {
+        return Err(ServerConfigError::ChunkSizeNotPowerOfTwo);
     }
 
     // Validate auth provider configuration.
@@ -557,7 +616,7 @@ fn load_non_zero_usize_env(
 /// TOML config file values as defaults. Environment variables already set in
 /// the process take precedence over TOML values.
 ///
-/// This is a thin wrapper around [`load_server_config_from_env`] that pre-fills
+/// This is a thin wrapper around `load_server_config_from_env` that pre-fills
 /// environment variables from a parsed `shardline.toml` before delegating to
 /// the standard env-based loader.
 ///
