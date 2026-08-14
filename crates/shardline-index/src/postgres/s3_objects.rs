@@ -10,8 +10,21 @@ fn s3_object_entry_from_row(row: &PgRow) -> Result<S3ObjectEntry, PostgresMetada
         file_id: row.try_get("file_id")?,
         size_bytes: i64_to_u64(row.try_get("size_bytes")?)?,
         content_hash: row.try_get("content_hash")?,
+        etag: row.try_get("etag")?,
+        user_metadata: row
+            .try_get::<String, _>("user_metadata")
+            .ok()
+            .and_then(|json| serde_json::from_str(&json).ok())
+            .unwrap_or_default(),
         updated_at_unix_seconds: row.try_get("updated_at_unix_seconds")?,
     })
+}
+
+/// Serializes S3 user metadata as JSON text for the index row.
+fn user_metadata_to_json(
+    user_metadata: &[(String, String)],
+) -> Result<String, PostgresMetadataStoreError> {
+    serde_json::to_string(user_metadata).map_err(PostgresMetadataStoreError::from)
 }
 
 #[async_trait::async_trait]
@@ -19,17 +32,20 @@ impl S3ObjectIndexStore for PostgresIndexStore {
     type Error = PostgresMetadataStoreError;
 
     async fn upsert_s3_object(&self, entry: &S3ObjectEntry) -> Result<(), Self::Error> {
+        let user_metadata_json = user_metadata_to_json(&entry.user_metadata)?;
         query(
             "INSERT INTO shardline_s3_objects (
-                scope_namespace, object_key, file_id, size_bytes, content_hash,
-                updated_at_unix_seconds
+                scope_namespace, object_key, file_id, size_bytes, content_hash, etag,
+                user_metadata, updated_at_unix_seconds
              )
-             VALUES ($1, $2, $3, $4, $5, $6)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
              ON CONFLICT (scope_namespace, object_key)
              DO UPDATE SET
                 file_id = EXCLUDED.file_id,
                 size_bytes = EXCLUDED.size_bytes,
                 content_hash = EXCLUDED.content_hash,
+                etag = EXCLUDED.etag,
+                user_metadata = EXCLUDED.user_metadata,
                 updated_at_unix_seconds = EXCLUDED.updated_at_unix_seconds",
         )
         .bind(&entry.scope_namespace)
@@ -37,6 +53,8 @@ impl S3ObjectIndexStore for PostgresIndexStore {
         .bind(&entry.file_id)
         .bind(u64_to_i64(entry.size_bytes)?)
         .bind(&entry.content_hash)
+        .bind(&entry.etag)
+        .bind(user_metadata_json)
         .bind(entry.updated_at_unix_seconds)
         .execute(&self.pool)
         .await?;
@@ -68,8 +86,8 @@ impl S3ObjectIndexStore for PostgresIndexStore {
         use std::fmt::Write as _;
 
         let mut sql = String::from(
-            "SELECT scope_namespace, object_key, file_id, size_bytes, content_hash,
-                    updated_at_unix_seconds
+            "SELECT scope_namespace, object_key, file_id, size_bytes, content_hash, etag,
+                    user_metadata, updated_at_unix_seconds
              FROM shardline_s3_objects
              WHERE scope_namespace = $1 AND substr(object_key, 1, length($2)) = $2",
         );
@@ -122,6 +140,8 @@ mod tests {
             file_id: file_id.to_owned(),
             size_bytes: 123,
             content_hash: "ab".repeat(32),
+            etag: "ab".repeat(32),
+            user_metadata: Vec::new(),
             updated_at_unix_seconds: 1000,
         }
     }

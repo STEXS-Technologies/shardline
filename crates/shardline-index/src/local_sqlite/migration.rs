@@ -6,7 +6,7 @@ pub(crate) struct LocalSqliteMigration {
     pub(crate) down_sql: &'static str,
 }
 
-pub(crate) const LOCAL_SQLITE_MIGRATIONS: [LocalSqliteMigration; 15] = [
+pub(crate) const LOCAL_SQLITE_MIGRATIONS: [LocalSqliteMigration; 16] = [
     LocalSqliteMigration {
         version: "20260417000000",
         name: "metadata_store",
@@ -102,5 +102,11 @@ pub(crate) const LOCAL_SQLITE_MIGRATIONS: [LocalSqliteMigration; 15] = [
         name: "s3_object_index",
         up_sql: include_str!("../../migrations/20260813000000_s3_object_index.up.sql"),
         down_sql: include_str!("../../migrations/20260813000000_s3_object_index.down.sql"),
+    },
+    LocalSqliteMigration {
+        version: "20260814000000",
+        name: "s3_object_etag_metadata",
+        up_sql: include_str!("../../migrations/20260814000000_s3_object_etag_metadata.up.sql"),
+        down_sql: include_str!("../../migrations/20260814000000_s3_object_etag_metadata.down.sql"),
     },
 ];

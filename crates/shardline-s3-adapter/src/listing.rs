@@ -32,6 +32,8 @@ enum ListParam {
     ContinuationToken,
     /// `start-after`.
     StartAfter,
+    /// `marker` (ListObjects v1).
+    Marker,
 }
 
 impl ListParam {
@@ -45,6 +47,7 @@ impl ListParam {
             "max-keys" => Some(Self::MaxKeys),
             "continuation-token" => Some(Self::ContinuationToken),
             "start-after" => Some(Self::StartAfter),
+            "marker" => Some(Self::Marker),
             _ => None,
         }
     }
@@ -112,6 +115,63 @@ impl ListObjectsV2Params {
     }
 }
 
+/// Parsed `ListObjects` (v1) request parameters.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListObjectsV1Params {
+    /// The raw-key prefix filter (empty lists every key).
+    pub prefix: String,
+    /// The grouping delimiter (for example `/`); `None` disables grouping.
+    pub delimiter: Option<Delimiter>,
+    /// The page row budget (`Contents` rows + `CommonPrefixes`), capped at
+    /// [`MAX_LIST_KEYS`].
+    pub max_keys: usize,
+    /// The raw key to start listing strictly after (v1 `marker`).
+    pub marker: Option<String>,
+}
+
+/// Parses the `ListObjects` (v1) query parameters from a decoded query map.
+///
+/// v1 lists — which `s3cmd` and other legacy clients send for `ls` — carry
+/// `marker` instead of `continuation-token`/`start-after` and no
+/// `list-type=2`.
+///
+/// # Errors
+///
+/// Returns [`S3Error::invalid_argument`] when `max-keys` is not a valid
+/// positive integer or the `delimiter` is more than one character.
+pub fn parse_list_objects_v1_params(
+    query: &[(String, String)],
+) -> Result<ListObjectsV1Params, S3Error> {
+    let mut params = ListObjectsV1Params {
+        prefix: String::new(),
+        delimiter: None,
+        max_keys: MAX_LIST_KEYS,
+        marker: None,
+    };
+    for (name, value) in query {
+        match ListParam::parse(name) {
+            Some(ListParam::Prefix) => params.prefix = value.clone(),
+            Some(ListParam::Delimiter) => params.delimiter = Delimiter::parse(value)?,
+            Some(ListParam::MaxKeys) => {
+                let parsed = value
+                    .parse::<usize>()
+                    .map_err(|_error| S3Error::invalid_argument("invalid max-keys"))?;
+                if parsed == 0 {
+                    return Err(S3Error::invalid_argument(
+                        "max-keys must be greater than zero",
+                    ));
+                }
+                params.max_keys = parsed.min(MAX_LIST_KEYS);
+            }
+            Some(ListParam::Marker) => params.marker = Some(value.clone()),
+            Some(ListParam::ContinuationToken) => {} // v2-only; ignored by v1
+            Some(ListParam::StartAfter) => {}        // v2-only; ignored by v1
+            None => {}
+        }
+    }
+    Ok(params)
+}
+
 /// One grouped page of a `ListObjectsV2` listing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ListPage {
@@ -168,6 +228,7 @@ pub fn parse_list_objects_v2_params(
                 params.continuation_token = Some(decode_continuation_token(value)?);
             }
             Some(ListParam::StartAfter) => params.start_after = Some(value.clone()),
+            Some(ListParam::Marker) => {} // v1-only; ignored by ListObjectsV2
             None => {}
         }
     }
@@ -252,7 +313,7 @@ fn contents_row(entry: &shardline_index::S3ObjectEntry, key: &str) -> Contents {
     Contents {
         key: key.to_owned(),
         size_bytes: entry.size_bytes,
-        etag: entry.content_hash.clone(),
+        etag: entry.etag.clone(),
         last_modified_iso8601: format_iso8601(entry.updated_at_unix_seconds),
     }
 }
@@ -317,6 +378,8 @@ mod tests {
             file_id: format!("f:{key}"),
             size_bytes: key.len() as u64,
             content_hash: format!("hash:{key}"),
+            etag: format!("etag:{key}"),
+            user_metadata: Vec::new(),
             updated_at_unix_seconds: 1_785_110_400,
         }
     }
@@ -445,7 +508,7 @@ mod tests {
         assert!(!page.is_truncated);
         let row = &page.contents[0];
         assert_eq!(row.size_bytes, "a.txt".len() as u64);
-        assert_eq!(row.etag, "hash:a.txt");
+        assert_eq!(row.etag, "etag:a.txt");
         assert_eq!(row.last_modified_iso8601, "2026-07-27T00:00:00Z");
     }
 

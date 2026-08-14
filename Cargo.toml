@@ -51,6 +51,7 @@ serial_test = "3.5.0"
 serde_json = "1.0"
 sha1 = "0.10"
 sha2 = { version = "0.10", features = ["compress"] }
+md-5 = { version = "0.10", features = ["std"] }
 shardline = { version = "1.5.0", path = "crates/shardline" }
 shardline-cache = { version = "1.5.0", path = "crates/shardline-cache" }
 shardline-cas = { version = "1.5.0", path = "crates/shardline-cas" }

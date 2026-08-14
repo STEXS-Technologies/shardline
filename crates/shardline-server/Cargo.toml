@@ -43,6 +43,7 @@ chrono.workspace = true
 shardline-storage = { workspace = true, features = ["s3"] }
 shardline-vcs.workspace = true
 shardline-xet-adapter.workspace = true
+md-5.workspace = true
 reqwest = { workspace = true, features = ["blocking", "json", "rustls-tls"] }
 sha2.workspace = true
 sqlx = { workspace = true, features = [

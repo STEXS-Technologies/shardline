@@ -95,9 +95,11 @@ pub(crate) async fn s3_head_bucket(
 ///
 /// `?location` serves the `GetBucketLocation` stub
 /// (`<LocationConstraint>us-east-1</LocationConstraint>`); `?list-type=2`
-/// dispatches to [`s3_list_objects_v2`](listing::s3_list_objects_v2);
-/// `?list-type=1` and every other bucket sub-resource respond
-/// `501 NotImplemented`.
+/// dispatches to [`s3_list_objects_v2`](listing::s3_list_objects_v2); a bare
+/// `GET /{bucket}` (no sub-resource) is the S3-default `ListObjects` v1 —
+/// which `s3cmd` and other legacy clients send for `ls` — and dispatches to
+/// [`s3_list_objects_v1`](listing::s3_list_objects_v1); `?list-type=1` and
+/// every other bucket sub-resource respond `501 NotImplemented`.
 #[tracing::instrument(skip(state, headers), fields(bucket))]
 pub(crate) async fn s3_get_bucket(
     State(state): State<Arc<AppState>>,
@@ -109,17 +111,21 @@ pub(crate) async fn s3_get_bucket(
     let claims = auth.as_ref().map(scope_from_auth);
     let query = parse_s3_query(&uri)?;
     require_s3_bucket_binding(claims, &bucket)?;
-    if classify(&query)
+    let resources = classify(&query);
+    if resources
         .iter()
         .any(|resource| matches!(resource, S3SubResource::Location))
     {
         return Ok(get_bucket_location_response());
     }
-    if classify(&query)
+    if resources
         .iter()
         .any(|resource| matches!(resource, S3SubResource::ListObjects))
     {
         return listing::s3_list_objects_v2(State(state), Path(bucket), uri, headers).await;
+    }
+    if resources.is_empty() {
+        return listing::s3_list_objects_v1(State(state), Path(bucket), uri, headers).await;
     }
     Err(S3Error::not_implemented())
 }

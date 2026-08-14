@@ -30,6 +30,8 @@ fn entry(key: &str) -> S3ObjectEntry {
         file_id: format!("f:{key}"),
         size_bytes: u64::try_from(key.len()).unwrap(),
         content_hash: format!("hash:{key}"),
+        etag: format!("etag:{key}"),
+        user_metadata: Vec::new(),
         updated_at_unix_seconds: 1_785_110_400,
     }
 }

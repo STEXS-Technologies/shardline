@@ -100,6 +100,11 @@ pub struct MultipartUploadSession {
     pub upload_id: String,
     /// Uploaded parts keyed by part number (order-preserving).
     pub parts: BTreeMap<u32, MultipartPart>,
+    /// S3 user metadata (`x-amz-meta-*`) supplied at CreateMultipartUpload,
+    /// stored as sorted `(name, value)` pairs and applied at completion.
+    /// `#[serde(default)]` keeps pre-existing session files readable.
+    #[serde(default)]
+    pub user_metadata: Vec<(String, String)>,
     /// Unix seconds when the session was created.
     pub created_at_unix_seconds: u64,
     /// Unix seconds of the last part write (diagnostics; expiry is anchored to
@@ -265,6 +270,7 @@ async fn acquire_session_file_lock(path: PathBuf) -> Result<S3FileLock, S3Sessio
 /// reached, [`S3SessionError::AggregateQuotaExceeded`] when the aggregate byte
 /// quota across active sessions is already exhausted, or
 /// [`S3SessionError::Io`]/[`S3SessionError::Json`] on persistence failure.
+#[allow(clippy::too_many_arguments)]
 pub async fn create_session(
     root: &Path,
     bucket: &str,
@@ -273,6 +279,7 @@ pub async fn create_session(
     ttl_seconds: NonZeroU64,
     max_active_sessions: NonZeroUsize,
     total_max_bytes: NonZeroU64,
+    user_metadata: Vec<(String, String)>,
 ) -> Result<String, S3SessionError> {
     let _lock = lock_upload_sessions(root).await?;
     let now_unix_seconds = unix_now_seconds_checked()?;
@@ -294,6 +301,7 @@ pub async fn create_session(
         scope_namespace: scope_namespace.to_owned(),
         upload_id: upload_id.clone(),
         parts: BTreeMap::new(),
+        user_metadata,
         created_at_unix_seconds: now_unix_seconds,
         last_touched_unix_seconds: now_unix_seconds,
     };
@@ -732,6 +740,7 @@ mod tests {
             ttl(3600),
             cap(16),
             quota(1 << 40),
+            Vec::new(),
         )
         .await
         .unwrap();
@@ -781,6 +790,7 @@ mod tests {
             ttl(3600),
             cap(16),
             quota(1 << 40),
+            Vec::new(),
         )
         .await
         .unwrap();
@@ -837,6 +847,7 @@ mod tests {
             ttl(3600),
             cap(16),
             quota(1 << 40),
+            Vec::new(),
         )
         .await
         .unwrap();
@@ -875,6 +886,7 @@ mod tests {
             ttl(3600),
             cap(16),
             quota(1 << 40),
+            Vec::new(),
         )
         .await
         .unwrap();
@@ -910,6 +922,7 @@ mod tests {
             ttl(3600),
             cap(2),
             quota(1 << 40),
+            Vec::new(),
         )
         .await
         .unwrap();
@@ -921,6 +934,7 @@ mod tests {
             ttl(3600),
             cap(2),
             quota(1 << 40),
+            Vec::new(),
         )
         .await
         .unwrap();
@@ -932,6 +946,7 @@ mod tests {
             ttl(3600),
             cap(2),
             quota(1 << 40),
+            Vec::new(),
         )
         .await;
         assert!(matches!(third, Err(S3SessionError::TooManySessions)));
@@ -946,6 +961,7 @@ mod tests {
             ttl(3600),
             cap(2),
             quota(1 << 40),
+            Vec::new(),
         )
         .await;
         assert!(third.is_ok());
@@ -963,6 +979,7 @@ mod tests {
             ttl(3600),
             cap(16),
             quota(1 << 40),
+            Vec::new(),
         )
         .await
         .unwrap();
@@ -974,6 +991,7 @@ mod tests {
             ttl(3600),
             cap(16),
             quota(1 << 40),
+            Vec::new(),
         )
         .await
         .unwrap();
@@ -1011,6 +1029,7 @@ mod tests {
             ttl(3600),
             cap(16),
             quota(1 << 40),
+            Vec::new(),
         )
         .await
         .unwrap();
@@ -1062,6 +1081,7 @@ mod tests {
             ttl(3600),
             cap(16),
             quota(200),
+            Vec::new(),
         )
         .await
         .unwrap();
@@ -1096,9 +1116,18 @@ mod tests {
     #[tokio::test]
     async fn create_session_rejects_exhausted_aggregate_quota() {
         let root = make_root().await;
-        let first = create_session(root.path(), "a", "1", "g", ttl(3600), cap(16), quota(200))
-            .await
-            .unwrap();
+        let first = create_session(
+            root.path(),
+            "a",
+            "1",
+            "g",
+            ttl(3600),
+            cap(16),
+            quota(200),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
         store_part(
             root.path(),
             &first,
@@ -1111,8 +1140,17 @@ mod tests {
         .await
         .unwrap();
         // The aggregate is exhausted: a new session is rejected.
-        let second =
-            create_session(root.path(), "a", "2", "g", ttl(3600), cap(16), quota(200)).await;
+        let second = create_session(
+            root.path(),
+            "a",
+            "2",
+            "g",
+            ttl(3600),
+            cap(16),
+            quota(200),
+            Vec::new(),
+        )
+        .await;
         assert!(matches!(
             second,
             Err(S3SessionError::AggregateQuotaExceeded)
@@ -1130,6 +1168,7 @@ mod tests {
             ttl(3600),
             cap(16),
             quota(1 << 40),
+            Vec::new(),
         )
         .await
         .unwrap();
