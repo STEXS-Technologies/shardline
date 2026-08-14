@@ -353,3 +353,11 @@ workspace = false
 install_crate = "sqlx-cli"
 command = "sqlx"
 args = ["${@}"]
+
+[tasks.chaos-test]
+description = "Run the deterministic chaos-testing orchestrator (fault injection + invariant checks)"
+workspace = false
+install_crate = "cargo-nextest@0.9.123"
+install_crate_args = ["--locked", "--force"]
+command = "cargo"
+args = ["nextest", "run", "-p", "shardline-server", "--test", "chaos_runner", "${@}"]
