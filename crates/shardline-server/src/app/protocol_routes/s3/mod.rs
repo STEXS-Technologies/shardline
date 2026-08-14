@@ -14,11 +14,14 @@ pub(super) mod multipart;
 pub(super) mod object;
 
 #[cfg(test)]
+mod poc_audit;
+
+#[cfg(test)]
 mod tests;
 
 use std::{
     collections::HashMap,
-    sync::{Arc, LazyLock, Mutex},
+    sync::{Arc, LazyLock, Mutex, Weak},
 };
 
 use axum::http::{HeaderMap, HeaderValue, Uri, header::AUTHORIZATION};
@@ -37,17 +40,51 @@ use crate::{ServerError, app::AppState, auth::AuthContext, protocol_support::sco
 /// version first, then the index row is swapped and any stale direct object
 /// dropped. The per-key lock prevents two concurrent overwrites of the same
 /// key from interleaving their swaps.
-static S3_OBJECT_UPLOAD_LOCKS: LazyLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
+///
+/// The map holds **weak** values: while any caller holds a guard, its strong
+/// [`Arc`] keeps the entry's weak handle alive so concurrent overwrites of the
+/// same key still serialize on the SAME mutex; once the last guard drops the
+/// entry dies and is evicted lazily on the next acquire (or opportunistically
+/// when a fresh lock is inserted). This bounds the map by the number of keys
+/// with an upload in flight instead of the number of distinct keys ever seen
+/// (F-9: unique-key PUTs must not leak an entry each).
+static S3_OBJECT_UPLOAD_LOCKS: LazyLock<Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Returns the per-key upload lock for an object, creating it on first use.
+///
+/// The returned strong [`Arc`] keeps the map entry alive for as long as the
+/// caller holds it (and its guard), so concurrent acquires for the same key
+/// return the SAME mutex. Once the last guard drops, the map's weak handle
+/// goes dead and is cleaned up on the next acquire for that key.
 pub(super) fn acquire_object_upload_lock(object_key: &str) -> Arc<tokio::sync::Mutex<()>> {
     let mut map = S3_OBJECT_UPLOAD_LOCKS
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    map.entry(object_key.to_owned())
-        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-        .clone()
+    // Fast path: a live weak handle exists (a guard is still being held for
+    // this key), so hand out the same strong Arc to preserve serialization.
+    if let Some(live) = map.get(object_key).and_then(Weak::upgrade) {
+        return live;
+    }
+    // No live handle: the previous entry (if any) has no holders left. Drop
+    // any other dead entries so the map cannot grow with finished keys (F-9),
+    // then install a fresh mutex and return its strong Arc — the only strong
+    // reference until a caller takes a guard.
+    map.retain(|_key, weak| weak.upgrade().is_some());
+    let fresh = Arc::new(tokio::sync::Mutex::new(()));
+    map.insert(object_key.to_owned(), Arc::downgrade(&fresh));
+    fresh
+}
+
+/// Returns the number of map entries whose strong lock is still alive (i.e.
+/// held by at least one guard). Test-only: asserts the map is bounded by
+/// in-flight uploads rather than by the number of distinct keys ever seen.
+#[cfg(test)]
+pub(super) fn live_upload_lock_count() -> usize {
+    let map = S3_OBJECT_UPLOAD_LOCKS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    map.values().filter(|weak| weak.upgrade().is_some()).count()
 }
 
 pub(crate) use bucket::{

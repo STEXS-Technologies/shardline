@@ -18,10 +18,10 @@
 //! components, so session paths cannot escape the upload root.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     num::{NonZeroU64, NonZeroUsize},
     path::{Path, PathBuf},
-    sync::LazyLock,
+    sync::{Arc, LazyLock, Weak},
 };
 
 use serde::{Deserialize, Serialize};
@@ -39,6 +39,50 @@ const MAX_UPLOAD_ID_BYTES: usize = 64;
 
 /// Serializes session-store mutations across the process.
 static S3_UPLOAD_SESSION_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+/// Per-upload-session part-write locks keyed by upload id (weak values).
+///
+/// The process-wide [`S3_UPLOAD_SESSION_LOCK`] must never be held across a
+/// network body stream (a slow `UploadPart` would stall every other tenant's
+/// session operation), but a part-file write still needs to be exclusive with
+/// the expiry sweep — which can delete the session directory — and with
+/// `CompleteMultipartUpload`, which reads the part files. This per-session
+/// lock provides that exclusivity without serializing unrelated sessions.
+///
+/// Entries hold weak references: the strong [`Arc`] returned by
+/// [`acquire_session_part_lock`] keeps a session's entry alive for as long as
+/// a guard is held (part write, completion ingest, or sweep delete), and dead
+/// entries are evicted on the next acquire, so the map is bounded by the
+/// number of sessions with work in flight (F-10).
+static S3_UPLOAD_SESSION_PART_LOCKS: LazyLock<std::sync::Mutex<HashMap<String, Weak<Mutex<()>>>>> =
+    LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+/// Returns the per-session part-write lock for an upload id, creating it on
+/// first use.
+///
+/// Concurrent callers for the SAME upload id (concurrent `UploadPart`s, a
+/// `CompleteMultipartUpload` reading part files, and the expiry sweep deleting
+/// a session directory) receive the SAME mutex while any of them holds a
+/// guard, so part files are never written, read, and removed concurrently.
+/// Lock-ordering rule: never await [`lock_upload_sessions`] while holding the
+/// guard returned here (the sweep takes both in the opposite order).
+pub fn acquire_session_part_lock(upload_id: &str) -> Arc<Mutex<()>> {
+    let mut map = S3_UPLOAD_SESSION_PART_LOCKS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // Fast path: a live weak handle exists (a guard is still held for this
+    // session), so return the same strong Arc to keep the write/read/delete
+    // serialized.
+    if let Some(live) = map.get(upload_id).and_then(Weak::upgrade) {
+        return live;
+    }
+    // No live handle: drop dead entries so the map cannot grow with finished
+    // sessions, then install a fresh mutex and return its strong Arc.
+    map.retain(|_id, weak| weak.upgrade().is_some());
+    let fresh = Arc::new(Mutex::new(()));
+    map.insert(upload_id.to_owned(), Arc::downgrade(&fresh));
+    fresh
+}
 
 /// S3 multipart upload session persistence failure.
 #[derive(Debug, Error)]
@@ -585,8 +629,15 @@ async fn sweep_expired_sessions_locked(
             Err(S3SessionError::NotFound) => true,
             Err(_error) => continue,
         };
-        if expired && delete_session_dir(&path).await.is_ok() {
-            removed = removed.saturating_add(1);
+        if expired {
+            // Serialize the delete against an in-flight part write for this
+            // session: an UploadPart holds this lock across its body stream
+            // (F-10), so we cannot remove the directory mid-write.
+            let part_lock = acquire_session_part_lock(file_name);
+            let _part_guard = part_lock.lock().await;
+            if delete_session_dir(&path).await.is_ok() {
+                removed = removed.saturating_add(1);
+            }
         }
     }
     Ok(removed)

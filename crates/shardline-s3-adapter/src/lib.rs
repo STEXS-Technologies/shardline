@@ -60,10 +60,10 @@ pub use listing::{
 };
 pub use multipart::{
     MAX_S3_PART_NUMBER, MultipartPart, MultipartUploadSession, S3SessionError, S3UploadSessionLock,
-    count_active_sessions, create_session, delete_session, delete_session_locked, is_expired,
-    lock_upload_sessions, new_upload_id, part_file_path, read_session, session_dir,
-    session_metadata_path, store_part, store_part_locked, sweep_expired_sessions, upload_dir,
-    validate_part_number, validate_upload_id,
+    acquire_session_part_lock, count_active_sessions, create_session, delete_session,
+    delete_session_locked, is_expired, lock_upload_sessions, new_upload_id, part_file_path,
+    read_session, session_dir, session_metadata_path, store_part, store_part_locked,
+    sweep_expired_sessions, upload_dir, validate_part_number, validate_upload_id,
 };
 pub use protocol_support::{
     ConditionalHeader, CopySource, EntityTagSet, InvalidS3HeaderValue, QueryMap, S3SubResource,
