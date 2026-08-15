@@ -216,6 +216,18 @@ pub enum ServerError {
     /// Too many OCI upload sessions are currently active.
     #[error("too many active oci upload sessions")]
     TooManyUploadSessions,
+    /// Too many LFS chunked-patch (PATCH) staging sessions are currently
+    /// active.
+    #[error("too many active lfs patch sessions")]
+    LfsPatchTooManySessions,
+    /// The aggregate staging-byte cap across active LFS chunked-patch
+    /// sessions was exceeded.
+    #[error("lfs patch staging byte quota exceeded")]
+    LfsPatchStoreFull,
+    /// The global cap on S3 multipart part files across active upload
+    /// sessions was exceeded.
+    #[error("too many active s3 upload part files")]
+    S3UploadTooManyParts,
     /// Too many OCI registry token exchanges are currently active.
     #[error("too many active oci registry token requests")]
     TooManyRegistryTokenRequests,
@@ -270,7 +282,9 @@ impl ServerError {
             Self::InsufficientScope => "DENIED",
             Self::NotAcceptable => "UNSUPPORTED",
             Self::ExpectedBodyHashMismatch => "DIGEST_INVALID",
-            Self::TooManyUploadSessions | Self::TooManyRegistryTokenRequests => "TOO_MANY_REQUESTS",
+            Self::TooManyUploadSessions
+            | Self::S3UploadTooManyParts
+            | Self::TooManyRegistryTokenRequests => "TOO_MANY_REQUESTS",
             // All remaining variants are internal server errors with no
             // OCI-specific code. Add new OCI-mappable variants above.
             Self::Io(_)
@@ -294,6 +308,8 @@ impl ServerError {
             | Self::TooManyShardTerms
             | Self::TooManyBatchReconstructionFileIds
             | Self::UploadIntentConflict
+            | Self::LfsPatchTooManySessions
+            | Self::LfsPatchStoreFull
             | Self::Overflow
             | Self::InvalidRangeHeader
             | Self::RangeNotSatisfiable
@@ -367,6 +383,9 @@ impl ServerError {
             Self::TooManyUploadSessions | Self::TooManyRegistryTokenRequests => {
                 StatusCode::TOO_MANY_REQUESTS
             }
+            Self::LfsPatchTooManySessions => StatusCode::TOO_MANY_REQUESTS,
+            Self::LfsPatchStoreFull => StatusCode::PAYLOAD_TOO_LARGE,
+            Self::S3UploadTooManyParts => StatusCode::TOO_MANY_REQUESTS,
             Self::UploadIntentConflict => StatusCode::CONFLICT,
             Self::InvalidPath | Self::UnregisteredFile(_) => StatusCode::BAD_REQUEST,
             Self::RevisionConflict => StatusCode::CONFLICT,
@@ -749,6 +768,9 @@ impl shardline_s3_adapter::S3ErrorClassify for ServerError {
             | Self::UnauthorizedChallenge(_)
             | Self::InvalidUploadSession
             | Self::TooManyUploadSessions
+            | Self::LfsPatchTooManySessions
+            | Self::LfsPatchStoreFull
+            | Self::S3UploadTooManyParts
             | Self::TooManyRegistryTokenRequests
             | Self::MissingReconstructionCacheRedisUrl
             | Self::TransferLimiterClosed

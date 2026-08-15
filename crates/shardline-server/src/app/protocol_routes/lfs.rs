@@ -1,13 +1,16 @@
 use std::collections::HashMap;
 use std::fs;
 use std::io::{Seek, SeekFrom, Write};
+use std::num::NonZeroU64;
+use std::path::Path as FsPath;
+use std::path::PathBuf;
 use std::str::FromStr;
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex, Weak};
 use std::time::Instant;
 
 use axum::{
     Json,
-    body::Body,
+    body::{Body, Bytes},
     extract::{FromRequestParts, Path, State},
     http::{
         HeaderMap, StatusCode,
@@ -16,6 +19,7 @@ use axum::{
     },
     response::{IntoResponse, Response},
 };
+use futures_util::stream;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use shardline_protocol::TokenScope;
@@ -32,6 +36,7 @@ use crate::{
     admission::weights,
     cas_headers::{ACCESS_TOKEN, TOKEN_EXPIRATION, URL},
     lfs_object_key, metrics,
+    overflow::checked_add,
     upload_ingest::{RequestBodyReader, read_body_to_bytes},
 };
 
@@ -153,16 +158,219 @@ fn lfs_validation_response(message: &str) -> Response {
 }
 
 /// Per-OID mutex map to serialize PATCH operations targeting the same temp file.
-static LFS_PATCH_LOCKS: LazyLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> =
+///
+/// The map holds **weak** values (mirroring the S3 per-key upload-lock map):
+/// while any caller holds a guard, its strong [`Arc`] keeps the entry's weak
+/// handle alive so concurrent PATCHes of the same OID still serialize on the
+/// SAME mutex; once the last guard drops the entry dies and is evicted lazily
+/// on the next acquire. This bounds the map by the number of OIDs with a
+/// PATCH in flight instead of the number of distinct OIDs ever seen (F-22).
+static LFS_PATCH_LOCKS: LazyLock<Mutex<HashMap<String, Weak<Mutex<()>>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 fn acquire_lfs_patch_lock(oid: &str) -> Arc<Mutex<()>> {
     // Recover from poisoning: if a previous lock-holder panicked, the map
     // contents are still valid (simple OID→lock mapping), so continue.
     let mut map = LFS_PATCH_LOCKS.lock().unwrap_or_else(|e| e.into_inner());
-    map.entry(oid.to_owned())
-        .or_insert_with(|| Arc::new(Mutex::new(())))
-        .clone()
+    // Fast path: a live weak handle exists (a guard is still being held for
+    // this OID), so hand out the same strong Arc to preserve serialization.
+    if let Some(live) = map.get(oid).and_then(Weak::upgrade) {
+        return live;
+    }
+    // No live handle: drop dead entries so the map cannot grow with finished
+    // OIDs (F-22), then install a fresh mutex and return its strong Arc.
+    map.retain(|_oid, weak| weak.upgrade().is_some());
+    let fresh = Arc::new(Mutex::new(()));
+    map.insert(oid.to_owned(), Arc::downgrade(&fresh));
+    fresh
+}
+
+/// Returns the number of map entries whose strong lock is still alive (i.e.
+/// held by at least one guard). Test-only: asserts the map is bounded by
+/// in-flight PATCHes rather than by the number of distinct OIDs ever seen.
+#[cfg(test)]
+fn live_lfs_patch_lock_count() -> usize {
+    let map = LFS_PATCH_LOCKS.lock().unwrap_or_else(|e| e.into_inner());
+    map.values().filter(|weak| weak.upgrade().is_some()).count()
+}
+
+/// The process-wide lock serializing LFS patch-store accounting (active
+/// session count + aggregate staging bytes) and the expiry sweep.
+///
+/// Never held across a network body stream: the PATCH body is fully buffered
+/// before any store mutation, so a slow client cannot stall other sessions
+/// (F-10 pattern). Lock order: this store lock is always taken before the
+/// per-OID lock — the sweep and every PATCH take both in the same order, so
+/// there is no deadlock (F-20).
+static LFS_PATCH_STORE_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+/// The staging directory for in-flight LFS chunked (PATCH) uploads.
+fn lfs_patch_dir(root: &FsPath) -> PathBuf {
+    root.join("tmp").join("lfs-patch")
+}
+
+/// The per-OID sidecar recording the patch session's last-touched Unix time;
+/// its presence marks an active (incomplete) patch session for the sweep.
+fn lfs_patch_meta_path(dir: &FsPath, oid: &str) -> PathBuf {
+    dir.join(format!("{oid}.meta"))
+}
+
+/// The current Unix time in seconds for the LFS patch store.
+fn lfs_patch_now_seconds() -> Result<u64, ServerError> {
+    shardline_server_core::unix_now_seconds_checked().map_err(|_error| ServerError::Overflow)
+}
+
+/// Reads the last-touched Unix time from a patch session's sidecar.
+fn read_patch_last_touched(dir: &FsPath, oid: &str) -> Result<u64, ServerError> {
+    let raw = fs::read_to_string(lfs_patch_meta_path(dir, oid))?;
+    raw.trim().parse::<u64>().map_err(|_error| {
+        ServerError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "invalid lfs patch meta",
+        ))
+    })
+}
+
+/// Atomically records (or refreshes) a patch session's last-touched time.
+fn touch_patch_session(dir: &FsPath, oid: &str, now_unix_seconds: u64) -> Result<(), ServerError> {
+    let path = lfs_patch_meta_path(dir, oid);
+    let temporary = path.with_extension("meta.tmp");
+    fs::write(&temporary, now_unix_seconds.to_string())?;
+    fs::rename(temporary, path)?;
+    Ok(())
+}
+
+/// Returns the `(active session count, aggregate staging bytes)` across the
+/// on-disk patch sessions. Caller must hold [`LFS_PATCH_STORE_LOCK`].
+fn patch_store_usage(dir: &FsPath) -> Result<(usize, u64), ServerError> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok((0, 0)),
+        Err(error) => return Err(error.into()),
+    };
+    let mut sessions = 0_usize;
+    let mut bytes = 0_u64;
+    for entry in entries {
+        let entry = entry?;
+        let file_name = entry.file_name();
+        let name = file_name.to_string_lossy();
+        let Some(oid) = name.strip_suffix(".meta") else {
+            continue;
+        };
+        sessions = sessions.saturating_add(1);
+        if let Ok(metadata) = fs::metadata(dir.join(oid)) {
+            bytes = checked_add(bytes, metadata.len())?;
+        }
+    }
+    Ok((sessions, bytes))
+}
+
+/// Removes patch sessions whose last-touched time is older than the TTL.
+///
+/// Caller must hold [`LFS_PATCH_STORE_LOCK`]. Each stale session's delete is
+/// serialized with an in-flight PATCH for the same OID (the per-OID lock), so
+/// the sweep never removes a staging file mid-write — mirroring how the S3
+/// multipart sweep takes the per-session lock (F-20).
+fn sweep_lfs_patch_sessions_locked(
+    dir: &FsPath,
+    ttl_seconds: NonZeroU64,
+    now_unix_seconds: u64,
+) -> Result<usize, ServerError> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error.into()),
+    };
+    let mut removed = 0_usize;
+    for entry in entries {
+        let entry = entry?;
+        let file_name = entry.file_name();
+        let name = file_name.to_string_lossy();
+        let Some(oid) = name.strip_suffix(".meta") else {
+            continue;
+        };
+        let stale = match read_patch_last_touched(dir, oid) {
+            Ok(touched) => touched.saturating_add(ttl_seconds.get()) <= now_unix_seconds,
+            // An unreadable sidecar is crash debris; treat it as stale.
+            Err(_error) => true,
+        };
+        if stale {
+            let oid_lock = acquire_lfs_patch_lock(oid);
+            let _guard = oid_lock
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let removed_data = fs::remove_file(dir.join(oid));
+            let removed_ranges = fs::remove_file(dir.join(format!("{oid}.ranges")));
+            let removed_meta = fs::remove_file(lfs_patch_meta_path(dir, oid));
+            tracing::trace!(
+                removed_data = removed_data.is_ok(),
+                removed_ranges = removed_ranges.is_ok(),
+                removed_meta = removed_meta.is_ok(),
+                "lfs patch sweep removed stale staging session"
+            );
+            removed = removed.saturating_add(1);
+        }
+    }
+    Ok(removed)
+}
+
+/// Sweeps expired LFS chunked-patch sessions (startup + on-PATCH crash
+/// recovery, mirroring how the S3 multipart sweep runs at startup and on
+/// session creation).
+pub(crate) fn sweep_lfs_patch_sessions(
+    root: &FsPath,
+    ttl_seconds: NonZeroU64,
+) -> Result<usize, ServerError> {
+    let _guard = LFS_PATCH_STORE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let now = lfs_patch_now_seconds()?;
+    sweep_lfs_patch_sessions_locked(&lfs_patch_dir(root), ttl_seconds, now)
+}
+
+/// Builds a bounded streaming reader over a local file, feeding it in
+/// fixed-size chunks with a hard total-byte ceiling.
+///
+/// F-21: the LFS chunked-upload promotion previously called `fs::read` on the
+/// assembled staging file, loading up to `MAX_LFS_OBJECT_SIZE` (1 TiB) into
+/// RAM. This streams it through the ingest path in bounded chunks instead, so
+/// peak memory stays O(chunk) not O(object); the SHA-256 verification still
+/// runs over the streamed bytes inside the backend ingest. The ceiling aborts
+/// with `RequestBodyTooLarge` if a corrupt staging file ever exceeds it.
+fn bounded_file_stream(
+    path: &FsPath,
+    chunk_size: usize,
+    max_bytes: u64,
+) -> Result<RequestBodyReader, ServerError> {
+    use std::io::Read as _;
+    let file = fs::File::open(path)?;
+    let stream = stream::unfold(
+        (file, 0_u64, max_bytes),
+        move |(mut file, mut read, max_bytes)| async move {
+            let mut buffer = vec![0_u8; chunk_size];
+            match file.read(&mut buffer) {
+                Ok(0) => None,
+                Ok(read_bytes) => {
+                    buffer.truncate(read_bytes);
+                    match checked_add(read, read_bytes as u64) {
+                        Ok(next) => {
+                            read = next;
+                            if read > max_bytes {
+                                return Some((
+                                    Err(ServerError::RequestBodyTooLarge),
+                                    (file, read, max_bytes),
+                                ));
+                            }
+                            Some((Ok(Bytes::from(buffer)), (file, read, max_bytes)))
+                        }
+                        Err(error) => Some((Err(error), (file, read, max_bytes))),
+                    }
+                }
+                Err(error) => Some((Err(ServerError::Io(error)), (file, read, max_bytes))),
+            }
+        },
+    );
+    Ok(RequestBodyReader::from_stream(stream))
 }
 
 fn record_lfs_patch_range(
@@ -673,44 +881,111 @@ pub(crate) async fn lfs_patch_object(
     let oid_for_closure = oid.clone();
     let object_key_for_closure = object_key.clone();
 
+    let max_active_sessions = state.config.lfs_patch_max_active_sessions();
+    let total_max_bytes = state.config.lfs_patch_total_max_bytes();
+    let patch_ttl_seconds = state.config.lfs_patch_ttl_seconds();
+    let stream_chunk_size = state.config.chunk_size().get();
+
     let elapsed = start.elapsed().as_secs_f64();
     metrics::record_upload("lfs", content_length, elapsed, true);
 
     tokio::task::spawn_blocking(move || {
+        let tmp_dir = lfs_patch_dir(&root_dir);
+        fs::create_dir_all(&tmp_dir).ok();
+        let tmp_path = tmp_dir.join(&oid_for_closure);
+        let ranges_path = tmp_dir.join(format!("{oid_for_closure}.ranges"));
+
+        // F-20: sweep expired sessions first (crash recovery), then enforce
+        // the active-session cap and the aggregate staging-byte cap BEFORE
+        // the chunk is written. The store lock is taken before the per-OID
+        // lock (the sweep takes the same two locks in the same order, so no
+        // deadlock), and the body was fully buffered above — the lock is
+        // never held across a network stream. The last-touched sidecar marks
+        // the session active from its first byte and is refreshed on every
+        // subsequent PATCH.
+        let now = lfs_patch_now_seconds()?;
+        let store_guard = LFS_PATCH_STORE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        sweep_lfs_patch_sessions_locked(&tmp_dir, patch_ttl_seconds, now)?;
+        let (active_sessions, used_bytes) = patch_store_usage(&tmp_dir)?;
+        if active_sessions >= max_active_sessions.get() {
+            return Err(ServerError::LfsPatchTooManySessions);
+        }
+        if checked_add(used_bytes, chunk_size)? > total_max_bytes.get() {
+            return Err(ServerError::LfsPatchStoreFull);
+        }
+
+        // Take the per-OID lock while still holding the store lock, then drop
+        // the store lock before the disk write: the per-OID lock alone
+        // serializes same-OID PATCHes and protects the staging files from the
+        // sweep (which holds the store lock and waits on the per-OID lock).
         let lock_arc = acquire_lfs_patch_lock(&oid_for_closure);
         // Recover from poisoning: the lock is a simple empty-token Mutex<()>,
         // so its state is trivially consistent even if a previous holder panicked.
         let _lock = lock_arc.lock().unwrap_or_else(|e| e.into_inner());
+        touch_patch_session(&tmp_dir, &oid_for_closure, now)?;
+        drop(store_guard);
 
-        let tmp_dir = root_dir.join("tmp").join("lfs-patch");
-        fs::create_dir_all(&tmp_dir).ok();
-        let tmp_path = tmp_dir.join(&oid_for_closure);
-        let ranges_path = tmp_dir.join(format!("{oid_for_closure}.ranges"));
-        {
-            let mut file = fs::OpenOptions::new()
-                .create(true)
-                .truncate(false)
-                .read(true)
-                .write(true)
-                .open(&tmp_path)?;
-            file.seek(SeekFrom::Start(offset))?;
-            file.write_all(&chunk_bytes)?;
-        }
+        // The staging write + promotion. A failure at any point removes the
+        // staging files this PATCH owns (F-21: promotion failure cleans its
+        // own temp; the F-20 sweep covers crashed-session leftovers).
+        let staged: Result<(), ServerError> = (|| {
+            {
+                let mut file = fs::OpenOptions::new()
+                    .create(true)
+                    .truncate(false)
+                    .read(true)
+                    .write(true)
+                    .open(&tmp_path)?;
+                file.seek(SeekFrom::Start(offset))?;
+                file.write_all(&chunk_bytes)?;
+            }
 
-        let end_exclusive = end.checked_add(1).ok_or(ServerError::Overflow)?;
-        if record_lfs_patch_range(&ranges_path, offset, end_exclusive, total)? {
-            let assembled: Vec<u8> = fs::read(&tmp_path)?;
-            let stored = tokio::runtime::Handle::current().block_on(
-                crate::ServerBackend::put_sha256_addressed_object_stream_if_absent(
-                    &backend,
-                    &object_key_for_closure,
+            let end_exclusive = end.checked_add(1).ok_or(ServerError::Overflow)?;
+            if record_lfs_patch_range(&ranges_path, offset, end_exclusive, total)? {
+                // F-21: promote with a bounded streaming read instead of
+                // loading the entire assembled object (up to 1 TiB) into RAM;
+                // the SHA-256 verification runs over the streamed bytes inside
+                // the backend ingest, and the stream is capped at
+                // MAX_LFS_OBJECT_SIZE (the declared-size check above stays).
+                let promotion_body =
+                    bounded_file_stream(&tmp_path, stream_chunk_size, MAX_LFS_OBJECT_SIZE)?;
+                let stored = tokio::runtime::Handle::current().block_on(
+                    crate::ServerBackend::put_sha256_addressed_object_stream_if_absent(
+                        &backend,
+                        &object_key_for_closure,
+                        &oid_for_closure,
+                        promotion_body,
+                    ),
+                );
+                // The session is consumed by the promotion: the staging files
+                // are removed whether the store commit succeeded or failed.
+                drop(fs::remove_file(&tmp_path));
+                drop(fs::remove_file(&ranges_path));
+                let _store_guard = LFS_PATCH_STORE_LOCK
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                drop(fs::remove_file(lfs_patch_meta_path(
+                    &tmp_dir,
                     &oid_for_closure,
-                    RequestBodyReader::from_bytes(assembled.into()),
-                ),
-            );
+                )));
+                stored?;
+            }
+            Ok(())
+        })();
+        if let Err(error) = staged {
+            // A failed staging step must not leave its own temp files behind.
             drop(fs::remove_file(&tmp_path));
             drop(fs::remove_file(&ranges_path));
-            stored?;
+            let _store_guard = LFS_PATCH_STORE_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            drop(fs::remove_file(lfs_patch_meta_path(
+                &tmp_dir,
+                &oid_for_closure,
+            )));
+            return Err(error);
         }
 
         Ok::<_, ServerError>(())
@@ -817,7 +1092,10 @@ fn parse_content_range(value: &str) -> Result<(u64, u64, u64), ()> {
 
 #[cfg(test)]
 mod tests {
-    use std::{num::NonZeroUsize, sync::Arc};
+    use std::{
+        num::{NonZeroU64, NonZeroUsize},
+        sync::Arc,
+    };
 
     use axum::{
         Router,
@@ -836,9 +1114,11 @@ mod tests {
     use shardline_server_core::AuthorizedRepository;
 
     use super::{
-        acquire_lfs_patch_lock, lfs_batch, lfs_delete_object, lfs_get_object, lfs_head_object,
+        LFS_PATCH_LOCKS, acquire_lfs_patch_lock, lfs_batch, lfs_delete_object, lfs_get_object,
+        lfs_head_object, lfs_patch_dir, lfs_patch_meta_path, lfs_patch_now_seconds,
         lfs_patch_object, lfs_put_object, lfs_validation_response, lfs_verify_object,
-        parse_content_range,
+        live_lfs_patch_lock_count, parse_content_range, sweep_lfs_patch_sessions,
+        touch_patch_session,
     };
 
     /// Test signing key matching the one used in e2e tests.
@@ -872,6 +1152,55 @@ mod tests {
         )
         .with_server_frontends([ServerFrontend::Lfs])
         .expect("server frontends");
+
+        let backend = crate::ServerBackend::from_config(&config)
+            .await
+            .expect("backend from config");
+
+        let transfer_limiter = crate::TransferLimiter::new(chunk_size, chunk_size);
+
+        let state = Arc::new(AppState {
+            config,
+            role: ServerRole::All,
+            backend,
+            auth: None,
+            provider_tokens: None,
+            reconstruction_cache: crate::ReconstructionCacheService::disabled(),
+            transfer_limiter,
+            oci_registry_token_limiter: Arc::new(tokio::sync::Semaphore::new(64)),
+            admission: crate::admission::WeightedAdmission::new(
+                std::num::NonZeroUsize::new(256).unwrap(),
+            ),
+            pools: crate::admission::ExecutionPools::default_sizes(),
+            protocol_metrics: crate::ProtocolMetrics::default(),
+        });
+
+        (state, tmp)
+    }
+
+    /// Builds a minimal [`AppState`] with explicit LFS chunked-patch store
+    /// limits (active-session cap, aggregate byte cap, staging TTL).
+    async fn build_test_state_with_lfs_options(
+        max_active_sessions: std::num::NonZeroUsize,
+        total_max_bytes: NonZeroU64,
+        ttl_seconds: NonZeroU64,
+    ) -> (Arc<AppState>, TempDir) {
+        let tmp = TempDir::new().expect("tempdir");
+        let chunk_size = NonZeroUsize::new(65536).unwrap();
+        let config = ServerConfig::new(
+            "127.0.0.1:0".parse().unwrap(),
+            "http://127.0.0.1:0".to_owned(),
+            tmp.path().to_path_buf(),
+            chunk_size,
+        )
+        .with_server_frontends([ServerFrontend::Lfs])
+        .expect("server frontends")
+        .with_lfs_patch_max_active_sessions(max_active_sessions)
+        .expect("lfs patch max active sessions")
+        .with_lfs_patch_total_max_bytes(total_max_bytes)
+        .expect("lfs patch total max bytes")
+        .with_lfs_patch_ttl_seconds(ttl_seconds)
+        .expect("lfs patch ttl");
 
         let backend = crate::ServerBackend::from_config(&config)
             .await
@@ -2476,6 +2805,316 @@ mod tests {
         assert_eq!(
             parsed["message"],
             "object too large for server-side verification"
+        );
+    }
+
+    // =========================================================================
+    // F-20 — LFS patch store: bounded sessions, aggregate byte cap, TTL sweep
+    // =========================================================================
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn patch_sweep_removes_stale_staging_sessions() {
+        let (state, _tmp) = build_test_state().await;
+        let dir = lfs_patch_dir(state.config.root_dir());
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let stale_oid = "a".repeat(64);
+        let fresh_oid = "b".repeat(64);
+        // A stale session: data + ranges + a backdated last-touched sidecar.
+        std::fs::write(dir.join(&stale_oid), b"stale-data").unwrap();
+        std::fs::write(dir.join(format!("{stale_oid}.ranges")), "10\n0 10\n").unwrap();
+        touch_patch_session(&dir, &stale_oid, 1).unwrap();
+        // A fresh session, touched just now.
+        std::fs::write(dir.join(&fresh_oid), b"fresh-data").unwrap();
+        std::fs::write(dir.join(format!("{fresh_oid}.ranges")), "10\n0 10\n").unwrap();
+        let now = lfs_patch_now_seconds().unwrap();
+        touch_patch_session(&dir, &fresh_oid, now).unwrap();
+
+        let ttl = state.config.lfs_patch_ttl_seconds();
+        let removed = sweep_lfs_patch_sessions(state.config.root_dir(), ttl).unwrap();
+        assert_eq!(removed, 1, "only the stale session is swept");
+
+        // The stale session's data, ranges, and sidecar are all gone.
+        assert!(!dir.join(&stale_oid).exists());
+        assert!(!dir.join(format!("{stale_oid}.ranges")).exists());
+        assert!(!lfs_patch_meta_path(&dir, &stale_oid).exists());
+        // The fresh session survives.
+        assert!(dir.join(&fresh_oid).exists());
+        assert!(lfs_patch_meta_path(&dir, &fresh_oid).exists());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn patch_object_rejects_when_active_session_cap_reached() {
+        let (state, _tmp) = build_test_state_with_lfs_options(
+            std::num::NonZeroUsize::new(2).unwrap(), // max 2 active sessions
+            NonZeroU64::new(1 << 40).unwrap(),
+            NonZeroU64::new(3600).unwrap(),
+        )
+        .await;
+        let root_dir = state.config.root_dir().to_path_buf();
+        let app = lfs_router(state);
+
+        // Two partial (in-flight) sessions consume both slots.
+        let oid1 = test_oid(b"cap-session-one-content");
+        let oid2 = test_oid(b"cap-session-two-content");
+        for oid in [&oid1, &oid2] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("PATCH")
+                        .uri(format!("/v1/lfs/objects/{oid}"))
+                        .header("content-range", "bytes 0-9/20")
+                        .header("content-length", 10)
+                        .body(Body::from(b"0123456789".to_vec()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+
+        // The third session hits the active-session cap (F-20).
+        let oid3 = test_oid(b"cap-session-three-content");
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(format!("/v1/lfs/objects/{oid3}"))
+                    .header("content-range", "bytes 0-9/20")
+                    .header("content-length", 10)
+                    .body(Body::from(b"0123456789".to_vec()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "a PATCH beyond the active-session cap must be rejected"
+        );
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let parsed: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(parsed["error"], "too many active lfs patch sessions");
+
+        // The rejected PATCH never wrote a staging file.
+        let dir = lfs_patch_dir(root_dir.as_path());
+        assert!(
+            !dir.join(&oid3).exists(),
+            "an over-cap PATCH must not write its chunk"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn patch_object_rejects_over_aggregate_byte_cap_before_write() {
+        let (state, _tmp) = build_test_state_with_lfs_options(
+            std::num::NonZeroUsize::new(4).unwrap(),
+            NonZeroU64::new(100).unwrap(), // 100-byte aggregate staging cap
+            NonZeroU64::new(3600).unwrap(),
+        )
+        .await;
+        let root_dir = state.config.root_dir().to_path_buf();
+        let app = lfs_router(state);
+
+        let oid1 = test_oid(b"aggregate-cap-first-session");
+        let chunk1 = vec![0x01_u8; 80];
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(format!("/v1/lfs/objects/{oid1}"))
+                    .header("content-range", format!("bytes 0-{}/200", chunk1.len() - 1))
+                    .header("content-length", chunk1.len())
+                    .body(Body::from(chunk1))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // A second session whose chunk would push the aggregate over the cap
+        // is rejected BEFORE the chunk is written (F-20).
+        let oid2 = test_oid(b"aggregate-cap-second-session");
+        let chunk2 = vec![0x02_u8; 30];
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(format!("/v1/lfs/objects/{oid2}"))
+                    .header("content-range", format!("bytes 0-{}/200", chunk2.len() - 1))
+                    .header("content-length", chunk2.len())
+                    .body(Body::from(chunk2))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let parsed: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(parsed["error"], "lfs patch staging byte quota exceeded");
+
+        // The rejected chunk never materialized a staging file.
+        let dir = lfs_patch_dir(root_dir.as_path());
+        assert!(
+            !dir.join(&oid2).exists(),
+            "an over-cap PATCH must not write its chunk"
+        );
+    }
+
+    // =========================================================================
+    // F-21 — LFS promotion streams in bounded chunks and cleans its temp
+    // =========================================================================
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn patch_promotion_leaves_no_staging_files() {
+        let (state, _tmp) = build_test_state().await;
+        let app = lfs_router(state.clone());
+
+        let chunk1 = b"streaming-promotion-part-AAAA"; // 27 bytes
+        let chunk2 = b"BBBB-part-two-last-final"; // 22 bytes
+        let full_content = [chunk1.as_slice(), chunk2.as_slice()].concat();
+        let oid = test_oid(&full_content);
+        let total = full_content.len() as u64;
+
+        // Two sequential PATCHes (order preserved) assemble and promote the
+        // object through the bounded streaming path (F-21).
+        for (offset, chunk) in [
+            (0_u64, chunk1.as_slice()),
+            (chunk1.len() as u64, chunk2.as_slice()),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("PATCH")
+                        .uri(format!("/v1/lfs/objects/{oid}"))
+                        .header(
+                            "content-range",
+                            format!(
+                                "bytes {offset}-{}/{}",
+                                offset + chunk.len() as u64 - 1,
+                                total
+                            ),
+                        )
+                        .header("content-length", chunk.len())
+                        .body(Body::from(chunk.to_vec()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+
+        // Byte-equivalence through the streamed promotion.
+        let get = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/v1/lfs/objects/{oid}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(get.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(get.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(body.as_ref(), full_content);
+
+        // The promotion consumed the staging files.
+        let dir = lfs_patch_dir(state.config.root_dir());
+        let entries = std::fs::read_dir(&dir)
+            .map(|read| read.count())
+            .unwrap_or(0);
+        assert_eq!(
+            entries, 0,
+            "a completed promotion must not leave staging files behind"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn patch_promotion_failure_cleans_staging_files() {
+        let (state, _tmp) = build_test_state().await;
+        let app = lfs_router(state.clone());
+
+        // The OID claims one content, but the assembled bytes differ: the
+        // promotion's SHA-256 verification fails, and the failed promotion
+        // must still clean its own staging files (F-21).
+        let oid = test_oid(b"expected-promotion-content");
+        let wrong = b"wrong-promotion-content";
+        let total = wrong.len() as u64;
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(format!("/v1/lfs/objects/{oid}"))
+                    .header("content-range", format!("bytes 0-{}/{}", total - 1, total))
+                    .header("content-length", wrong.len())
+                    .body(Body::from(wrong.to_vec()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "a hash-mismatched promotion must fail"
+        );
+
+        let dir = lfs_patch_dir(state.config.root_dir());
+        let entries = std::fs::read_dir(&dir)
+            .map(|read| read.count())
+            .unwrap_or(0);
+        assert_eq!(
+            entries, 0,
+            "a failed promotion must clean its staging files"
+        );
+    }
+
+    // =========================================================================
+    // F-22 — LFS per-OID lock map stays bounded (weak values + lazy eviction)
+    // =========================================================================
+
+    #[test]
+    fn acquire_lfs_patch_lock_evicts_dead_entries() {
+        let baseline_live = live_lfs_patch_lock_count();
+        let baseline_map = LFS_PATCH_LOCKS.lock().unwrap().len();
+
+        {
+            let _lock1 = acquire_lfs_patch_lock("evict-lock-a");
+            let _lock2 = acquire_lfs_patch_lock("evict-lock-b");
+            assert_eq!(
+                live_lfs_patch_lock_count(),
+                baseline_live + 2,
+                "held guards keep their entries alive"
+            );
+        }
+
+        // Both guards dropped: the strong Arcs are gone. The next acquire
+        // evicts the dead entries, so the live count returns toward baseline
+        // instead of growing 1:1 with the distinct OIDs (F-22). Slack for
+        // concurrently-running tests, mirroring the S3 lock-map test.
+        let _lock3 = acquire_lfs_patch_lock("evict-lock-c");
+        assert!(
+            live_lfs_patch_lock_count() <= baseline_live + 1,
+            "live locks must return toward baseline once guards drop: \
+             baseline {baseline_live} -> {}",
+            live_lfs_patch_lock_count()
+        );
+        assert!(
+            LFS_PATCH_LOCKS.lock().unwrap().len() <= baseline_map + 1,
+            "map must not retain dead per-OID entries: baseline {baseline_map} -> {}",
+            LFS_PATCH_LOCKS.lock().unwrap().len()
         );
     }
 }

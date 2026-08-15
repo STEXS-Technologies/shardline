@@ -300,6 +300,31 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
         }
     }
 
+    // Sweep expired LFS chunked-patch (PATCH) staging sessions at startup
+    // (crash recovery); in-flight sweeps also run on every PATCH, mirroring
+    // the S3 multipart sweep's startup + on-creation scheduling (F-20).
+    if state
+        .config
+        .server_frontends()
+        .iter()
+        .any(|frontend| matches!(frontend, ServerFrontend::Lfs))
+    {
+        match protocol_routes::sweep_lfs_patch_sessions(
+            state.config.root_dir(),
+            state.config.lfs_patch_ttl_seconds(),
+        ) {
+            Ok(removed) => {
+                tracing::info!(
+                    removed,
+                    "lfs startup sweep removed expired chunked-patch staging sessions"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, "lfs startup sweep of expired chunked-patch staging sessions failed");
+            }
+        }
+    }
+
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods([

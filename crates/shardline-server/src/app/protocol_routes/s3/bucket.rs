@@ -20,7 +20,9 @@ use shardline_s3_adapter::{
     parse_delete_object_keys, s3_object_key,
 };
 
-use super::{S3Repository, listing, parse_s3_query, s3_xml_content_type};
+use super::{
+    S3Repository, acquire_object_upload_lock, listing, parse_s3_query, s3_xml_content_type,
+};
 use crate::{
     app::AppState,
     protocol_support::scope_namespace,
@@ -155,6 +157,12 @@ pub(crate) async fn s3_delete_bucket(
 ///   the batch, so a request never mutates state and then fails part-way; the
 ///   valid keys are deleted and the response is `200` with `<Deleted>` rows for
 ///   the successes and `<Error>` rows for the failures, in request order.
+///
+/// Each key's delete pair runs under the per-key upload lock (the same
+/// [`acquire_object_upload_lock`] the single-object `DeleteObject` and the
+/// overwrite paths hold), so a concurrent PUT/Copy/Complete on the same key
+/// cannot have its just-committed record deleted out from under it (F-18). The
+/// request body is read and parsed in full before any lock is taken.
 #[tracing::instrument(skip(auth, state, _headers, body), fields(bucket))]
 pub(crate) async fn s3_post_bucket(
     auth: S3Repository,
@@ -185,16 +193,21 @@ pub(crate) async fn s3_post_bucket(
     }
 
     // Dedupe while preserving request order: duplicate `<Key>` entries collapse
-    // into a single delete (and a single `<Deleted>` row).
-    let mut distinct = Vec::with_capacity(keys.len());
-    let mut seen = std::collections::HashSet::with_capacity(keys.len());
+    // into a single delete (and a single `<Deleted>` row). The protocol cap is
+    // enforced DURING the dedupe loop, so a body listing more than
+    // `MAX_S3_DELETE_KEYS` distinct keys is rejected as soon as the cap is
+    // exceeded — never materializing a key list (or `seen` set) beyond the cap
+    // (F-23).
+    let dedupe_capacity = keys.len().min(MAX_S3_DELETE_KEYS + 1);
+    let mut distinct = Vec::with_capacity(dedupe_capacity);
+    let mut seen = std::collections::HashSet::with_capacity(dedupe_capacity);
     for key in keys {
         if seen.insert(key.clone()) {
+            if distinct.len() >= MAX_S3_DELETE_KEYS {
+                return Err(S3Error::malformed_xml());
+            }
             distinct.push(key);
         }
-    }
-    if distinct.len() > MAX_S3_DELETE_KEYS {
-        return Err(S3Error::malformed_xml());
     }
 
     // One pass, in request order: invalid keys become per-key `<Error>` rows
@@ -204,8 +217,19 @@ pub(crate) async fn s3_post_bucket(
     for key in distinct {
         match s3_object_key(&scope_namespace, &key) {
             Ok(object_key) => {
+                // Serialize the batch delete against in-flight overwrites
+                // (PutObject / CopyObject / multipart completion) of the same
+                // key, exactly like the single-object `DeleteObject` path: a
+                // concurrent PUT's upload-then-swap must never interleave with
+                // the delete pair (phantom delete / dangling index). The
+                // request body was fully read and parsed above, so the lock is
+                // taken per key in the delete loop — never across the body
+                // read (F-18).
+                //
                 // Crash-safe ordering (same as DeleteObject): index row first,
                 // then record + direct object.
+                let object_lock = acquire_object_upload_lock(object_key.as_str());
+                let _object_guard = object_lock.lock().await;
                 let _row_deleted = state
                     .backend
                     .delete_s3_object(&scope_namespace, &key)

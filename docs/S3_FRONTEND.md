@@ -37,12 +37,15 @@ as out of scope until a real client need appears.
    `CompleteMultipartUpload` feeds the parts sequentially through **one CDC
    pass**, producing a single `FileRecord` — preserving whole-object dedup and
    the single-record read model (GetObject + Range work unchanged). Part count
-   capped at 10,000. S3's **5 MiB minimum part size** applies to every part
-   except the final one (enforced at Complete, matching S3); per-session and
-   aggregate byte quotas (`SHARDLINE_S3_UPLOAD_SESSION_MAX_BYTES` /
-   `SHARDLINE_S3_UPLOAD_TOTAL_MAX_BYTES`) bound disk use; session expiry is
-   anchored to **initiation** (keep-alive parts do not extend it), matching
-   S3's 7-day multipart lifecycle. `AbortMultipartUpload` discards the session.
+   capped at 10,000. `UploadPart` accepts **any part size** (matching S3); the
+   **5 MiB minimum part size** is enforced at Complete for every part except
+   the last (the highest part number in the submitted list), also matching S3.
+   Per-session and aggregate byte quotas (`SHARDLINE_S3_UPLOAD_SESSION_MAX_BYTES` /
+   `SHARDLINE_S3_UPLOAD_TOTAL_MAX_BYTES`) and a global active-part-file cap
+   (`SHARDLINE_S3_UPLOAD_MAX_ACTIVE_PART_FILES`, checked before the part file
+   is written) bound disk use; session expiry is anchored to **initiation**
+   (keep-alive parts do not extend it), matching S3's 7-day multipart
+   lifecycle. `AbortMultipartUpload` discards the session.
 4. **GetObject Range / ETag / errors.** Range reuses the existing byte-range +
    reconstruction path (`parse_http_byte_range`, 206/416 semantics). ETag is the
    **hex MD5 of the object bytes** (standard S3; identical for single-PUT and
@@ -50,7 +53,8 @@ as out of scope until a real client need appears.
    accept it). Errors are an S3 XML envelope (`<Error><Code>…`);
    codes: `NoSuchKey`, `NoSuchBucket`, `AccessDenied`, `InvalidRange`,
    `EntityTooSmall`, `InvalidPart`, `NoSuchUpload`, `NotImplemented`,
-   `PreconditionFailed` (conditional mismatches), `MalformedXML`, `InternalError`.
+   `PreconditionFailed` (conditional mismatches), `MalformedXML`, `InternalError`,
+   `TooManyParts` (global active-part-file cap reached), `SlowDown`.
 
 ## Operation matrix
 

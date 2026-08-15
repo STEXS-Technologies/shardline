@@ -14,10 +14,12 @@ use tracing;
 
 use super::super::secrets::ensure_secret_size_within_limit;
 use super::defaults::{
-    CONFIG_SECRET_KEY_BYTES, DEFAULT_MAX_REQUEST_BODY_BYTES,
-    DEFAULT_OCI_REGISTRY_TOKEN_MAX_IN_FLIGHT_REQUESTS, DEFAULT_OCI_REGISTRY_TOKEN_TTL_SECONDS,
-    DEFAULT_OCI_UPLOAD_MAX_ACTIVE_SESSIONS, DEFAULT_OCI_UPLOAD_SESSION_TTL_SECONDS,
-    DEFAULT_PARALLELISM_FALLBACK, DEFAULT_S3_MAX_PART_BYTES, DEFAULT_S3_MIN_PART_BYTES,
+    CONFIG_SECRET_KEY_BYTES, DEFAULT_LFS_PATCH_MAX_ACTIVE_SESSIONS,
+    DEFAULT_LFS_PATCH_TOTAL_MAX_BYTES, DEFAULT_LFS_PATCH_TTL_SECONDS,
+    DEFAULT_MAX_REQUEST_BODY_BYTES, DEFAULT_OCI_REGISTRY_TOKEN_MAX_IN_FLIGHT_REQUESTS,
+    DEFAULT_OCI_REGISTRY_TOKEN_TTL_SECONDS, DEFAULT_OCI_UPLOAD_MAX_ACTIVE_SESSIONS,
+    DEFAULT_OCI_UPLOAD_SESSION_TTL_SECONDS, DEFAULT_PARALLELISM_FALLBACK,
+    DEFAULT_S3_MAX_PART_BYTES, DEFAULT_S3_MIN_PART_BYTES, DEFAULT_S3_UPLOAD_MAX_ACTIVE_PART_FILES,
     DEFAULT_S3_UPLOAD_MAX_ACTIVE_SESSIONS, DEFAULT_S3_UPLOAD_SESSION_MAX_BYTES,
     DEFAULT_S3_UPLOAD_SESSION_TTL_SECONDS, DEFAULT_S3_UPLOAD_TOTAL_MAX_BYTES,
     HUB_WEBHOOK_SECRET_KEY_BYTES, MAX_DEFAULT_TRANSFER_MAX_IN_FLIGHT_CHUNKS,
@@ -82,6 +84,10 @@ pub struct ServerConfig {
     pub(crate) s3_upload_max_active_sessions: NonZeroUsize,
     pub(crate) s3_upload_session_max_bytes: NonZeroU64,
     pub(crate) s3_upload_total_max_bytes: NonZeroU64,
+    pub(crate) s3_upload_max_active_part_files: NonZeroUsize,
+    pub(crate) lfs_patch_ttl_seconds: NonZeroU64,
+    pub(crate) lfs_patch_max_active_sessions: NonZeroUsize,
+    pub(crate) lfs_patch_total_max_bytes: NonZeroU64,
 }
 
 impl ServerConfig {
@@ -173,6 +179,10 @@ impl ServerConfig {
             s3_upload_max_active_sessions: DEFAULT_S3_UPLOAD_MAX_ACTIVE_SESSIONS,
             s3_upload_session_max_bytes: DEFAULT_S3_UPLOAD_SESSION_MAX_BYTES,
             s3_upload_total_max_bytes: DEFAULT_S3_UPLOAD_TOTAL_MAX_BYTES,
+            s3_upload_max_active_part_files: DEFAULT_S3_UPLOAD_MAX_ACTIVE_PART_FILES,
+            lfs_patch_ttl_seconds: DEFAULT_LFS_PATCH_TTL_SECONDS,
+            lfs_patch_max_active_sessions: DEFAULT_LFS_PATCH_MAX_ACTIVE_SESSIONS,
+            lfs_patch_total_max_bytes: DEFAULT_LFS_PATCH_TOTAL_MAX_BYTES,
         }
     }
 
@@ -742,8 +752,9 @@ impl ServerConfig {
         Ok(self)
     }
 
-    /// Returns the S3 multipart minimum part size in bytes (S3's 5 MiB rule for
-    /// all but the final part).
+    /// Returns the S3 multipart minimum part size in bytes (S3's 5 MiB rule
+    /// for all but the last part, enforced at `CompleteMultipartUpload` only —
+    /// `UploadPart` accepts any body size, matching S3).
     #[must_use]
     pub const fn s3_min_part_bytes(&self) -> NonZeroU64 {
         self.s3_min_part_bytes
@@ -799,6 +810,91 @@ impl ServerConfig {
         s3_upload_total_max_bytes: NonZeroU64,
     ) -> Result<Self, ServerConfigError> {
         self.s3_upload_total_max_bytes = s3_upload_total_max_bytes;
+        Ok(self)
+    }
+
+    /// Returns the global cap on part files stored across all active S3
+    /// multipart upload sessions.
+    #[must_use]
+    pub const fn s3_upload_max_active_part_files(&self) -> NonZeroUsize {
+        self.s3_upload_max_active_part_files
+    }
+
+    /// Overrides the global cap on part files stored across all active S3
+    /// multipart upload sessions.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerConfigError::S3UploadMaxActivePartFiles`] when the
+    /// value is zero.
+    pub const fn with_s3_upload_max_active_part_files(
+        mut self,
+        s3_upload_max_active_part_files: NonZeroUsize,
+    ) -> Result<Self, ServerConfigError> {
+        self.s3_upload_max_active_part_files = s3_upload_max_active_part_files;
+        Ok(self)
+    }
+
+    /// Returns the LFS chunked-patch (PATCH) staging TTL in seconds.
+    #[must_use]
+    pub const fn lfs_patch_ttl_seconds(&self) -> NonZeroU64 {
+        self.lfs_patch_ttl_seconds
+    }
+
+    /// Overrides the LFS chunked-patch (PATCH) staging TTL in seconds.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerConfigError::LfsPatchTtl`] when the value is zero.
+    pub const fn with_lfs_patch_ttl_seconds(
+        mut self,
+        lfs_patch_ttl_seconds: NonZeroU64,
+    ) -> Result<Self, ServerConfigError> {
+        self.lfs_patch_ttl_seconds = lfs_patch_ttl_seconds;
+        Ok(self)
+    }
+
+    /// Returns the maximum number of concurrently active LFS chunked-patch
+    /// sessions.
+    #[must_use]
+    pub const fn lfs_patch_max_active_sessions(&self) -> NonZeroUsize {
+        self.lfs_patch_max_active_sessions
+    }
+
+    /// Overrides the maximum number of concurrently active LFS chunked-patch
+    /// sessions.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerConfigError::LfsPatchMaxActiveSessions`] when the value
+    /// is zero.
+    pub const fn with_lfs_patch_max_active_sessions(
+        mut self,
+        lfs_patch_max_active_sessions: NonZeroUsize,
+    ) -> Result<Self, ServerConfigError> {
+        self.lfs_patch_max_active_sessions = lfs_patch_max_active_sessions;
+        Ok(self)
+    }
+
+    /// Returns the aggregate byte cap across active LFS chunked-patch
+    /// sessions.
+    #[must_use]
+    pub const fn lfs_patch_total_max_bytes(&self) -> NonZeroU64 {
+        self.lfs_patch_total_max_bytes
+    }
+
+    /// Overrides the aggregate byte cap across active LFS chunked-patch
+    /// sessions.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerConfigError::LfsPatchTotalMaxBytes`] when the value is
+    /// zero.
+    pub const fn with_lfs_patch_total_max_bytes(
+        mut self,
+        lfs_patch_total_max_bytes: NonZeroU64,
+    ) -> Result<Self, ServerConfigError> {
+        self.lfs_patch_total_max_bytes = lfs_patch_total_max_bytes;
         Ok(self)
     }
 
