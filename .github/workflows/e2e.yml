@@ -13,7 +13,7 @@ concurrency:
 jobs:
   e2e:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
     steps:
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -24,52 +24,24 @@ jobs:
       - name: Build shardline binary
         run: cargo build --release
 
-      - name: Install real clients (mc, hf CLI)
+      - name: Install real clients (mc, hf CLI, pyarrow, AWS CLI, boto3, s3cmd, rclone)
         run: |
           sudo curl -fsSLo /usr/local/bin/mc \
             https://dl.min.io/client/mc/release/linux-amd64/archive/mc.RELEASE.2025-08-13T08-35-41Z
           sudo chmod +x /usr/local/bin/mc
           mc --version
-          pip3 install --break-system-packages huggingface_hub
+          pip3 install --break-system-packages huggingface_hub pyarrow awscli boto3 s3cmd
           hf --version
-
-      - name: Run e2e tests
-        run: cargo make test-e2e
-
-  s3-real-client:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - name: Checkout
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-
-      - name: Setup Rust CI toolchain and tools
-        uses: ./.github/actions/rust-ci-setup
-
-      - name: Install MinIO client (mc)
-        run: |
-          sudo curl -fsSLo /usr/local/bin/mc \
-            https://dl.min.io/client/mc/release/linux-amd64/archive/mc.RELEASE.2025-08-13T08-35-41Z
-          sudo chmod +x /usr/local/bin/mc
-          mc --version
-
-      - name: Install pyarrow
-        run: |
-          pip3 install --break-system-packages pyarrow
           python3 -c "import pyarrow; print('pyarrow', pyarrow.__version__)"
-
-      - name: Install AWS CLI, boto3, and s3cmd
-        run: |
-          pip3 install --break-system-packages awscli boto3 s3cmd
           aws --version
           python3 -c "import boto3; print('boto3', boto3.__version__)"
           s3cmd --version
-
-      - name: Install rclone
-        run: |
           sudo apt-get update
           sudo apt-get install -y rclone
           rclone --version
+
+      - name: Run e2e tests
+        run: cargo make test-e2e
 
       - name: Run S3 real-client e2e tests
         run: cargo nextest run -p shardline-server --test s3_real_client_e2e --no-tests=pass
