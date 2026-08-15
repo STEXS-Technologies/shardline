@@ -95,6 +95,7 @@ async fn start_protocol_runtime_with_max_request_body(
     )
     .with_max_request_body_bytes(max_request_body_bytes)
     .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())?
+    .with_deployment_mode(shardline_server::DeploymentMode::Insecure)
     .with_server_frontends(frontends.iter().copied())?;
     let server = spawn(async move { serve_with_listener(config, listener).await });
     wait_for_health(&base_url).await?;
@@ -124,6 +125,7 @@ async fn start_protocol_runtime_with_oci_limits(
     .with_oci_upload_session_ttl_seconds(oci_upload_session_ttl_seconds)
     .with_oci_upload_max_active_sessions(oci_upload_max_active_sessions)
     .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())?
+    .with_deployment_mode(shardline_server::DeploymentMode::Insecure)
     .with_server_frontends(frontends.iter().copied())?;
     let server = spawn(async move { serve_with_listener(config, listener).await });
     wait_for_health(&base_url).await?;
@@ -153,6 +155,7 @@ async fn start_protocol_runtime_with_oci_token_limits(
     .with_oci_registry_token_ttl_seconds(oci_registry_token_ttl_seconds)
     .with_oci_registry_token_max_in_flight_requests(oci_registry_token_max_in_flight_requests)
     .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())?
+    .with_deployment_mode(shardline_server::DeploymentMode::Insecure)
     .with_server_frontends(frontends.iter().copied())?;
     let server = spawn(async move { serve_with_listener(config, listener).await });
     wait_for_health(&base_url).await?;
@@ -179,6 +182,7 @@ async fn start_protocol_runtime_on_shared_root(
         NonZeroUsize::new(128).unwrap_or(NonZeroUsize::MIN),
     ))
     .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())?
+    .with_deployment_mode(shardline_server::DeploymentMode::Insecure)
     .with_server_frontends(frontends.iter().copied())?;
     let server = spawn(async move { serve_with_listener(config, listener).await });
     wait_for_health(&base_url).await?;
