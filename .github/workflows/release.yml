@@ -29,12 +29,6 @@ jobs:
   release:
     runs-on: ubuntu-latest
     timeout-minutes: 120
-    env:
-      # CRATE_PACKAGES is NOT maintained by hand. It is derived from the
-      # cargo-metadata dependency graph (dependency-first topological order,
-      # runtime AND dev edges included; e.g. sdx dev-depends on shardline-server,
-      # which broke the v1.5.0 release) by scripts/publish-order.py in the
-      # "Derive publish order from cargo metadata" step below.
     steps:
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -108,6 +102,10 @@ jobs:
           echo "image=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/shardline" >> "${GITHUB_OUTPUT}"
 
       - name: Derive publish order from cargo metadata
+        # CRATE_PACKAGES is derived from the cargo-metadata dependency graph
+        # (dependency-first topological order, runtime AND dev edges included;
+        # e.g. sdx dev-depends on shardline-server, which broke the v1.5.0
+        # release) by scripts/publish-order.py.
         if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.publish == 'true')
         shell: bash
         run: |
