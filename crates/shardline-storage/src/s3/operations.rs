@@ -241,7 +241,17 @@ impl S3ObjectStore {
             raw_key
         };
         let key = ObjectKey::parse(key).map_err(|_error| S3ObjectStoreError::InvalidListedKey)?;
-        Ok(ObjectMetadata::new(key, metadata.size, None))
+        // The S3 LastModified is observed by the backend, so it is immune to
+        // writer/GC wall-clock divergence; attach it when available.
+        let backend_modified_unix_nanos = metadata
+            .last_modified
+            .timestamp_nanos_opt()
+            .and_then(|nanos| u64::try_from(nanos).ok());
+        let mut metadata = ObjectMetadata::new(key, metadata.size, None);
+        if let Some(modified_unix_nanos) = backend_modified_unix_nanos {
+            metadata = metadata.with_modified(modified_unix_nanos);
+        }
+        Ok(metadata)
     }
 
     /// Stores bytes at a key, replacing any existing object.

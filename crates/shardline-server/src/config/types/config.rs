@@ -1153,19 +1153,27 @@ impl ServerConfig {
         surfaces
     }
 
-    /// Returns true when this config will actually produce an auth provider.
+    /// Returns true when this config will actually produce a REAL auth
+    /// provider.
     ///
     /// Mirrors `build_auth_provider`: the Local provider with no token signing
-    /// key maps to permissive mode (`None`), while every other configured
-    /// provider kind (Local with a key, Oidc, Jwks, Passthrough, Ed25519)
-    /// yields a real provider that `authorize()` enforces.
+    /// key maps to permissive mode (`None`). Passthrough is also NOT a real
+    /// provider here: it trusts every inbound token (authenticated in name
+    /// only — the actual control is the loopback-bind requirement enforced in
+    /// [`Self::validate_runtime_requirements`]) and is handled separately as
+    /// the trusted-proxy carve-out for [`DeploymentMode::Authenticated`].
+    /// Every other configured provider kind (Local with a key, Oidc, Jwks,
+    /// Ed25519) yields a real provider that `authorize()` enforces.
     pub(crate) fn auth_provider_is_configured(&self) -> bool {
+        if self.auth.auth_provider == AuthProviderKind::Passthrough {
+            return false;
+        }
         !(self.auth.auth_provider == AuthProviderKind::Local
             && self.auth.token_signing_key.is_none())
     }
 
     /// Validates deployment-mode-specific constraints.
-    fn validate_deployment_mode_requirements(&self) -> Result<(), ServerConfigError> {
+    pub(crate) fn validate_deployment_mode_requirements(&self) -> Result<(), ServerConfigError> {
         match self.deployment_mode {
             DeploymentMode::Strict => {
                 // Passthrough auth is forbidden in strict mode
@@ -1188,20 +1196,26 @@ impl ServerConfig {
                 }
             }
             DeploymentMode::Authenticated => {
-                // Some auth provider must be configured; without one the mode
-                // fails open to anonymous full access.
-                if !self.auth_provider_is_configured() {
-                    return Err(ServerConfigError::ConfigFileError(
-                        "authenticated deployment mode requires a configured auth provider \
-                         (set SHARDLINE_TOKEN_SIGNING_KEY_FILE or an OIDC/JWKS/Ed25519 provider)"
-                            .into(),
-                    ));
-                }
                 if self.auth.auth_provider == AuthProviderKind::Passthrough {
-                    // Passthrough is allowed in authenticated mode but warn
+                    // Passthrough trusts every inbound token (authenticated in
+                    // name only); the real control is the loopback-bind
+                    // requirement enforced in `validate_runtime_requirements`.
+                    // This is the explicit trusted-proxy carve-out: warn but do
+                    // not treat Passthrough as a configured auth provider.
                     tracing::warn!(
                         "authenticated mode with passthrough auth: only use behind a trusted proxy"
                     );
+                } else if !self.auth_provider_is_configured() {
+                    // Some real auth provider must be configured; without one
+                    // the mode fails open to anonymous full access. Passthrough
+                    // does NOT satisfy this requirement (it is handled by the
+                    // carve-out above).
+                    return Err(ServerConfigError::ConfigFileError(
+                        "authenticated deployment mode requires a configured auth provider \
+                         (set SHARDLINE_TOKEN_SIGNING_KEY_FILE or an OIDC/JWKS/Ed25519 provider; \
+                         the passthrough provider does not satisfy this requirement)"
+                            .into(),
+                    ));
                 }
             }
             DeploymentMode::Insecure => {

@@ -176,20 +176,30 @@ where
         // Reap stranded chunk temp artifacts. `scan_orphan_objects` skips
         // `.tmp-*` keys (so an in-progress write never aborts the pass), which
         // previously left abandoned temps from killed/crashed writers in place
-        // forever. A temp older than an hour is never an in-flight write
-        // (temp-then-hardlink writes finish in seconds-to-minutes), so it is
-        // safe to remove and count in the report.
-        let stale_temps = scan_stale_temporary_chunk_artifacts(object_store, now_unix_seconds)?;
-        for (temp_key, temp_bytes) in stale_temps {
-            object_store
-                .delete_if_present(&temp_key)
-                .map_err(GcError::ObjectStore)?;
-            report.reaped_stale_temporary_chunks =
-                shardline_server_core::checked_add(report.reaped_stale_temporary_chunks, 1)?;
-            report.reaped_stale_temporary_bytes = shardline_server_core::checked_add(
-                report.reaped_stale_temporary_bytes,
-                temp_bytes,
-            )?;
+        // forever. The age bound is applied to the GC-observed mtime (with a
+        // writer-embedded-nanos fallback), so a live in-flight write is never
+        // reaped even under writer/GC wall-clock divergence. As defense in
+        // depth, if this GC host's own clock appears to be behind the newest
+        // writer-embedded temp timestamp (a backwards clock step), skip temp
+        // reaping entirely for this run.
+        let temp_scan = scan_stale_temporary_chunk_artifacts(object_store, now_unix_seconds)?;
+        if temp_reaping_clock_is_skewed(now_unix_seconds, temp_scan.max_embedded_temp_nanos) {
+            tracing::warn!(
+                "GC wall clock ({now_unix_seconds}s) is behind the newest writer-embedded \
+                 temp timestamp; skipping chunk temp reaping this run"
+            );
+        } else {
+            for (temp_key, temp_bytes) in temp_scan.stale {
+                object_store
+                    .delete_if_present(&temp_key)
+                    .map_err(GcError::ObjectStore)?;
+                report.reaped_stale_temporary_chunks =
+                    shardline_server_core::checked_add(report.reaped_stale_temporary_chunks, 1)?;
+                report.reaped_stale_temporary_bytes = shardline_server_core::checked_add(
+                    report.reaped_stale_temporary_bytes,
+                    temp_bytes,
+                )?;
+            }
         }
     }
 
@@ -201,6 +211,27 @@ where
         &quarantine_entries,
         now_unix_seconds,
     ))
+}
+
+/// Returns true when the GC host's wall clock appears to be behind the newest
+/// writer-embedded temp timestamp observed in the object store — i.e. the GC
+/// clock has likely stepped backwards relative to the writers.
+///
+/// When this fires, `now_unix_seconds` is not a trustworthy reference point for
+/// the temp age bound, so temp reaping is skipped for the run rather than risk
+/// misclassifying artifacts. A small slack absorbs the writer rounding its
+/// creation time up to the next second plus normal jitter.
+#[must_use]
+pub(crate) fn temp_reaping_clock_is_skewed(
+    now_unix_seconds: u64,
+    max_embedded_temp_nanos: Option<u128>,
+) -> bool {
+    let Some(max_embedded_nanos) = max_embedded_temp_nanos else {
+        return false;
+    };
+    let now_nanos = u128::from(now_unix_seconds) * 1_000_000_000;
+    const CLOCK_SLACK_NANOS: u128 = 60 * 1_000_000_000;
+    now_nanos.saturating_add(CLOCK_SLACK_NANOS) < max_embedded_nanos
 }
 
 async fn validate_gc_index_integrity<IndexAdapter>(
@@ -396,5 +427,46 @@ pub(crate) fn orphan_inventory_entry(
             first_seen_unreachable_at_unix_seconds: None,
             delete_after_unix_seconds: None,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::temp_reaping_clock_is_skewed;
+
+    #[test]
+    fn temp_reaping_clock_skewed_when_gc_clock_behind_embedded_nanos() {
+        // GC clock is 2h behind the newest writer-embedded temp timestamp
+        // (a backwards step on the GC host): reaping must be skipped.
+        let now_secs = 2_000_000_000_u64;
+        let future_nanos = u128::from(now_secs + 2 * 3600) * 1_000_000_000;
+        assert!(temp_reaping_clock_is_skewed(now_secs, Some(future_nanos)));
+    }
+
+    #[test]
+    fn temp_reaping_clock_not_skewed_within_slack() {
+        // A temp embedded a few seconds ahead (writer rounding / jitter) is
+        // within the slack and must NOT disable reaping.
+        let now_secs = 2_000_000_000_u64;
+        let near_future_nanos = u128::from(now_secs + 5) * 1_000_000_000;
+        assert!(!temp_reaping_clock_is_skewed(
+            now_secs,
+            Some(near_future_nanos)
+        ));
+    }
+
+    #[test]
+    fn temp_reaping_clock_not_skewed_when_embedded_is_past() {
+        // All embedded timestamps are in the past relative to the GC clock: a
+        // normal, trustworthy run.
+        let now_secs = 2_000_000_000_u64;
+        let past_nanos = u128::from(now_secs - 10) * 1_000_000_000;
+        assert!(!temp_reaping_clock_is_skewed(now_secs, Some(past_nanos)));
+    }
+
+    #[test]
+    fn temp_reaping_clock_not_skewed_without_observed_temps() {
+        // No chunk temp artifacts observed at all: nothing to guard against.
+        assert!(!temp_reaping_clock_is_skewed(2_000_000_000_u64, None));
     }
 }

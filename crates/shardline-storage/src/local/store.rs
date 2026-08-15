@@ -22,7 +22,7 @@ use super::{
         self, ensure_file_matches_bytes, ensure_files_match, open_existing_object_file,
         verify_file_integrity,
     },
-    metadata::{self, ensure_regular_file_metadata, object_file_metadata},
+    metadata::{self, ensure_regular_file_metadata, modified_unix_nanos, object_file_metadata},
     util::verify_integrity,
     walk::{self, read_dir_if_exists},
 };
@@ -200,9 +200,15 @@ impl LocalObjectStore {
             if start_after.is_some_and(|offset| key.as_str() <= offset.as_str()) {
                 continue;
             }
-            let metadata = fs::symlink_metadata(entry.path()).map_err(LocalObjectStoreError::Io)?;
-            ensure_regular_file_metadata(&metadata)?;
-            children.push(ObjectMetadata::new(key, metadata.len(), None));
+            let fs_metadata =
+                fs::symlink_metadata(entry.path()).map_err(LocalObjectStoreError::Io)?;
+            ensure_regular_file_metadata(&fs_metadata)?;
+            let mut metadata = ObjectMetadata::new(key, fs_metadata.len(), None);
+            // Observed mtime is backend truth; attach it when available.
+            if let Some(modified) = modified_unix_nanos(&fs_metadata) {
+                metadata = metadata.with_modified(modified);
+            }
+            children.push(metadata);
         }
         children.sort_by(|left, right| left.key().as_str().cmp(right.key().as_str()));
         children.truncate(limit);
@@ -273,10 +279,15 @@ impl ObjectStore for LocalObjectStore {
     fn metadata(&self, key: &ObjectKey) -> Result<Option<ObjectMetadata>, Self::Error> {
         let path = self.key_path(key);
         metadata::ensure_parent_directories_are_not_symlinked(&self.root, &path)?;
-        let Some(metadata) = object_file_metadata(&path)? else {
+        let Some(fs_metadata) = object_file_metadata(&path)? else {
             return Ok(None);
         };
-        Ok(Some(ObjectMetadata::new(key.clone(), metadata.len(), None)))
+        let mut metadata = ObjectMetadata::new(key.clone(), fs_metadata.len(), None);
+        // Observed mtime is backend truth; attach it when available.
+        if let Some(modified) = modified_unix_nanos(&fs_metadata) {
+            metadata = metadata.with_modified(modified);
+        }
+        Ok(Some(metadata))
     }
 
     fn list_prefix(&self, prefix: &ObjectPrefix) -> Result<Vec<ObjectMetadata>, Self::Error> {

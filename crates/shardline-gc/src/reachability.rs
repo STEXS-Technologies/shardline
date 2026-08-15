@@ -281,6 +281,13 @@ pub(super) fn managed_object_hash_or_object_key(
 /// Temp-then-hardlink chunk writes complete in seconds-to-minutes, so a
 /// `.tmp-*` artifact older than an hour is a stranded remnant of a
 /// killed/crashed writer — never an in-flight write.
+///
+/// The age bound is applied to the GC-OBSERVED last-modified time of the
+/// artifact (with a fallback to the writer-embedded unix-nanos in the key when
+/// the backend exposes no mtime). Because the observed mtime is backend truth,
+/// divergence between the writer's wall clock and the GC host's wall clock
+/// (NTP step, VM pause/resume, a slow write exceeding an hour) cannot make a
+/// live in-flight write look stale and get it reaped mid-write.
 pub(super) const STALE_TEMP_ARTIFACT_AGE_SECONDS: u64 = 60 * 60;
 
 /// Returns the embedded unix-nanoseconds creation timestamp of a chunk temp
@@ -321,34 +328,66 @@ fn chunk_temp_artifact_unix_nanos(key: &ObjectKey) -> Option<u128> {
     nanos_str.parse::<u128>().ok()
 }
 
+/// Result of scanning the object store for stranded chunk temp artifacts.
+pub(super) struct StaleTempScan {
+    /// `(key, length)` pairs older than [`STALE_TEMP_ARTIFACT_AGE_SECONDS`].
+    pub(super) stale: Vec<(ObjectKey, u64)>,
+    /// The newest writer-embedded creation timestamp observed across ALL chunk
+    /// temp artifacts (fresh and stale alike), used by the runner's
+    /// backward-clock guard. `None` when no chunk temp artifacts were seen.
+    pub(super) max_embedded_temp_nanos: Option<u128>,
+}
+
 /// Scans the object store for stranded chunk temp artifacts older than
-/// [`STALE_TEMP_ARTIFACT_AGE_SECONDS`] and returns them (key + length) so the
-/// GC sweep can remove them.
+/// [`STALE_TEMP_ARTIFACT_AGE_SECONDS`].
+///
+/// The age bound is applied to the GC-OBSERVED last-modified time of each
+/// artifact ([`ObjectMetadata::modified_unix_nanos`]) when the backend exposes
+/// one, falling back to the writer-embedded unix-nanos in the key. The
+/// observed mtime is backend truth, so a live in-flight write (whose mtime is
+/// fresh) is never reaped even when the writer-embedded timestamp looks
+/// ancient due to wall-clock divergence between the writer and the GC host.
 ///
 /// # Errors
 ///
 /// Returns [`GcError`] when the object store cannot be enumerated.
-pub(super) fn scan_stale_temporary_chunk_artifacts(
-    object_store: &ServerObjectStore,
+pub(super) fn scan_stale_temporary_chunk_artifacts<Store>(
+    object_store: &Store,
     now_unix_seconds: u64,
-) -> Result<Vec<(ObjectKey, u64)>, GcError> {
+) -> Result<StaleTempScan, GcError>
+where
+    Store: ObjectStore,
+    Store::Error: Into<GcError>,
+{
     let mut stale = Vec::new();
+    let mut max_embedded_temp_nanos: Option<u128> = None;
     let cutoff_unix_nanos =
         u128::from(now_unix_seconds.saturating_sub(STALE_TEMP_ARTIFACT_AGE_SECONDS))
             * 1_000_000_000;
     let prefix = ObjectPrefix::parse("").map_err(|_error| GcError::InvalidContentHash)?;
     object_store.visit_prefix(&prefix, |metadata| {
         let key = metadata.key();
-        let Some(created_unix_nanos) = chunk_temp_artifact_unix_nanos(key) else {
+        let Some(embedded_unix_nanos) = chunk_temp_artifact_unix_nanos(key) else {
             return Ok(());
         };
-        if created_unix_nanos >= cutoff_unix_nanos {
+        max_embedded_temp_nanos = Some(
+            max_embedded_temp_nanos.map_or(embedded_unix_nanos, |max| max.max(embedded_unix_nanos)),
+        );
+        // Prefer the GC-observed mtime (backend truth, immune to writer/GC
+        // clock divergence); fall back to the writer-embedded nanos.
+        let effective_created_nanos = metadata
+            .modified_unix_nanos()
+            .map_or(embedded_unix_nanos, u128::from);
+        if effective_created_nanos >= cutoff_unix_nanos {
             return Ok(());
         }
         stale.push((key.clone(), metadata.length()));
         Ok::<(), GcError>(())
     })?;
-    Ok(stale)
+    Ok(StaleTempScan {
+        stale,
+        max_embedded_temp_nanos,
+    })
 }
 
 #[cfg(test)]
@@ -979,5 +1018,150 @@ mod tests {
                 )
             );
         });
+    }
+
+    // ── scan_stale_temporary_chunk_artifacts tests ──────────────────────
+
+    const TEMP_TEST_HASH: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    /// A mock object store exposing controllable metadata (including
+    /// backend-observed mtimes) for a fixed set of keys.
+    struct MockTempStore {
+        objects: Vec<(String, u64, Option<u64>)>,
+    }
+
+    impl MockTempStore {
+        fn new(objects: Vec<(&str, u64, Option<u64>)>) -> Self {
+            Self {
+                objects: objects
+                    .into_iter()
+                    .map(|(key, length, modified)| (key.to_owned(), length, modified))
+                    .collect(),
+            }
+        }
+    }
+
+    #[allow(clippy::unreachable)]
+    impl ObjectStore for MockTempStore {
+        type Error = std::io::Error;
+
+        fn put_if_absent(
+            &self,
+            _key: &ObjectKey,
+            _body: ObjectBody<'_>,
+            _integrity: &ObjectIntegrity,
+        ) -> Result<PutOutcome, Self::Error> {
+            unreachable!("not used in tests")
+        }
+
+        fn read_range(
+            &self,
+            _key: &ObjectKey,
+            _range: shardline_protocol::ByteRange,
+        ) -> Result<Vec<u8>, Self::Error> {
+            unreachable!("not used in tests")
+        }
+
+        fn contains(&self, key: &ObjectKey) -> Result<bool, Self::Error> {
+            Ok(self.objects.iter().any(|(k, _, _)| k == key.as_str()))
+        }
+
+        fn metadata(&self, key: &ObjectKey) -> Result<Option<ObjectMetadata>, Self::Error> {
+            Ok(self.objects.iter().find(|(k, _, _)| k == key.as_str()).map(
+                |(k, length, modified)| {
+                    let mut metadata =
+                        ObjectMetadata::new(ObjectKey::parse(k).unwrap(), *length, None);
+                    if let Some(modified) = modified {
+                        metadata = metadata.with_modified(*modified);
+                    }
+                    metadata
+                },
+            ))
+        }
+
+        fn list_prefix(&self, _prefix: &ObjectPrefix) -> Result<Vec<ObjectMetadata>, Self::Error> {
+            Ok(self
+                .objects
+                .iter()
+                .map(|(k, length, modified)| {
+                    let mut metadata =
+                        ObjectMetadata::new(ObjectKey::parse(k).unwrap(), *length, None);
+                    if let Some(modified) = modified {
+                        metadata = metadata.with_modified(*modified);
+                    }
+                    metadata
+                })
+                .collect())
+        }
+
+        fn delete_if_present(&self, _key: &ObjectKey) -> Result<DeleteOutcome, Self::Error> {
+            unreachable!("not used in tests")
+        }
+    }
+
+    fn temp_key(nanos: u128, counter: u64) -> String {
+        let prefix = &TEMP_TEST_HASH[..2];
+        format!("{prefix}/{TEMP_TEST_HASH}.tmp-{nanos}-{counter}")
+    }
+
+    #[test]
+    fn stale_temp_scan_skips_live_temp_with_fresh_observed_mtime() {
+        // Clock-divergence case: the writer-embedded nanos are ancient (the
+        // writer's clock is behind the GC clock by >1h) but the GC-observed
+        // mtime is fresh because the write is still in flight. The temp must
+        // NOT be reaped.
+        let now_secs = 2_000_000_000_u64;
+        let old_embedded = u128::from(now_secs - 2 * 3600) * 1_000_000_000;
+        let fresh_mtime = u64::try_from(u128::from(now_secs - 10) * 1_000_000_000).unwrap();
+        let key = temp_key(old_embedded, 0);
+        let store = MockTempStore::new(vec![(key.as_str(), 42, Some(fresh_mtime))]);
+
+        let scan = scan_stale_temporary_chunk_artifacts(&store, now_secs).unwrap();
+
+        assert!(
+            scan.stale.is_empty(),
+            "live in-flight temp with a fresh observed mtime must not be reaped"
+        );
+        assert_eq!(scan.max_embedded_temp_nanos, Some(old_embedded));
+    }
+
+    #[test]
+    fn stale_temp_scan_reaps_temp_with_old_embedded_and_old_observed_mtime() {
+        // A stranded temp: old embedded nanos AND an old observed mtime. It is
+        // an orphaned remnant of a killed/crashed writer and must be reaped.
+        let now_secs = 2_000_000_000_u64;
+        let old_nanos = u128::from(now_secs - 2 * 3600) * 1_000_000_000;
+        let old_mtime = u64::try_from(old_nanos).unwrap();
+        let key = temp_key(old_nanos, 0);
+        let store = MockTempStore::new(vec![(key.as_str(), 42, Some(old_mtime))]);
+
+        let scan = scan_stale_temporary_chunk_artifacts(&store, now_secs).unwrap();
+
+        assert_eq!(scan.stale.len(), 1);
+        assert_eq!(scan.stale[0].0.as_str(), key);
+        assert_eq!(scan.stale[0].1, 42);
+    }
+
+    #[test]
+    fn stale_temp_scan_falls_back_to_embedded_nanos_without_mtime() {
+        // Backends without an observed mtime (None) fall back to the
+        // writer-embedded nanos exactly as before: old embedded → stale, fresh
+        // embedded → kept.
+        let now_secs = 2_000_000_000_u64;
+        let old_embedded = u128::from(now_secs - 2 * 3600) * 1_000_000_000;
+        let fresh_embedded = u128::from(now_secs) * 1_000_000_000;
+        let stale_key = temp_key(old_embedded, 0);
+        let fresh_key = temp_key(fresh_embedded, 1);
+        let store = MockTempStore::new(vec![
+            (stale_key.as_str(), 42, None),
+            (fresh_key.as_str(), 7, None),
+        ]);
+
+        let scan = scan_stale_temporary_chunk_artifacts(&store, now_secs).unwrap();
+
+        assert_eq!(scan.stale.len(), 1, "only the old temp should be stale");
+        assert_eq!(scan.stale[0].0.as_str(), stale_key);
+        assert_eq!(scan.stale[0].1, 42);
+        assert_eq!(scan.max_embedded_temp_nanos, Some(fresh_embedded));
     }
 }

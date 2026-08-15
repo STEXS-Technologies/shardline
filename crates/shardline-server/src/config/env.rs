@@ -5,7 +5,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use shardline_protocol::{SecretBytes, SecretString, parse_bool};
+use shardline_protocol::{SecretBytes, SecretString};
 
 use super::file::ShardlineTomlConfig;
 use super::secrets::{
@@ -450,17 +450,24 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
         config = config.with_deployment_mode(deployment_mode);
     }
 
-    // Fail-safe override for the at-rest secret encryption gate: an invalid
-    // value keeps the gate armed (treated as false).
-    let allow_plaintext = var("SHARDLINE_ALLOW_PLAINTEXT_SECRETS_IN_PRODUCTION")
+    // Fail-safe override for the at-rest secret encryption gate: only the
+    // exact documented value `true` (case-insensitive) disarms the gate.
+    // Unlike the generic boolean parser, the aliases `1`/`yes`/`on` are NOT
+    // accepted — a stray or legacy value must keep the gate armed (treated as
+    // false), matching the fail-closed deployment-mode parse.
+    let allow_plaintext = match var("SHARDLINE_ALLOW_PLAINTEXT_SECRETS_IN_PRODUCTION")
         .ok()
-        .and_then(|v| parse_bool(&v))
-        .unwrap_or_else(|| {
+        .as_deref()
+    {
+        Some(value) if value.eq_ignore_ascii_case("true") => true,
+        Some(value) if value.eq_ignore_ascii_case("false") => false,
+        Some(_) | None => {
             tracing::warn!(
                 "invalid SHARDLINE_ALLOW_PLAINTEXT_SECRETS_IN_PRODUCTION value, treating as false"
             );
             false
-        });
+        }
+    };
     config = config.with_allow_plaintext_secrets_in_production(allow_plaintext);
 
     // Validate Hub frontend requires auth configuration.
@@ -526,8 +533,9 @@ pub(crate) fn admission_max_weight_from_env() -> NonZeroUsize {
 /// Returns `Ok(None)` when the variable is unset (the caller keeps the
 /// insecure default, which is fine for local/dev). A set-but-invalid value is
 /// a startup error, matching the fail-closed sibling gate
-/// `SHARDLINE_ALLOW_PLAINTEXT_SECRETS_IN_PRODUCTION` (invalid => false) rather
-/// than a silent fallback to the insecure default.
+/// `SHARDLINE_ALLOW_PLAINTEXT_SECRETS_IN_PRODUCTION` (only the exact value
+/// `true` disarms it; anything else, including `1`/`yes`/`on`, is treated as
+/// false) rather than a silent fallback to the insecure default.
 ///
 /// # Errors
 ///
@@ -1273,6 +1281,87 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
 
         let config = result.expect("config loads with an invalid plaintext override");
         assert!(!config.allow_plaintext_secrets_in_production());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn allow_plaintext_secrets_in_production_from_env_uppercase_true() {
+        // The exact documented value is matched case-insensitively.
+        // SAFETY: serialized env test
+        set_env_var("SHARDLINE_ALLOW_PLAINTEXT_SECRETS_IN_PRODUCTION", "TRUE");
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+
+        let result = super::load_server_config_from_env();
+        remove_env_var("SHARDLINE_ALLOW_PLAINTEXT_SECRETS_IN_PRODUCTION");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+
+        let config = result.expect("config loads with the plaintext override set");
+        assert!(config.allow_plaintext_secrets_in_production());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn allow_plaintext_secrets_in_production_from_env_one_is_false() {
+        // A stray `1` must NOT disarm the gate (generic boolean alias).
+        // SAFETY: serialized env test
+        set_env_var("SHARDLINE_ALLOW_PLAINTEXT_SECRETS_IN_PRODUCTION", "1");
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+
+        let result = super::load_server_config_from_env();
+        remove_env_var("SHARDLINE_ALLOW_PLAINTEXT_SECRETS_IN_PRODUCTION");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+
+        let config = result.expect("config loads with a legacy plaintext override");
+        assert!(
+            !config.allow_plaintext_secrets_in_production(),
+            "the generic true-alias `1` must not disarm the plaintext gate"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn allow_plaintext_secrets_in_production_from_env_yes_is_false() {
+        // A stray `yes` must NOT disarm the gate (generic boolean alias).
+        // SAFETY: serialized env test
+        set_env_var("SHARDLINE_ALLOW_PLAINTEXT_SECRETS_IN_PRODUCTION", "yes");
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+
+        let result = super::load_server_config_from_env();
+        remove_env_var("SHARDLINE_ALLOW_PLAINTEXT_SECRETS_IN_PRODUCTION");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+
+        let config = result.expect("config loads with a legacy plaintext override");
+        assert!(
+            !config.allow_plaintext_secrets_in_production(),
+            "the generic true-alias `yes` must not disarm the plaintext gate"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn allow_plaintext_secrets_in_production_from_env_on_is_false() {
+        // A stray `on` must NOT disarm the gate (generic boolean alias).
+        // SAFETY: serialized env test
+        set_env_var("SHARDLINE_ALLOW_PLAINTEXT_SECRETS_IN_PRODUCTION", "on");
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+
+        let result = super::load_server_config_from_env();
+        remove_env_var("SHARDLINE_ALLOW_PLAINTEXT_SECRETS_IN_PRODUCTION");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+
+        let config = result.expect("config loads with a legacy plaintext override");
+        assert!(
+            !config.allow_plaintext_secrets_in_production(),
+            "the generic true-alias `on` must not disarm the plaintext gate"
+        );
     }
 
     #[test]
