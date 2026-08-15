@@ -796,8 +796,19 @@ fn gc_sweep_reaps_stale_temporary_chunk_artifacts_only() {
         let fresh_key = format!(
             "aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.tmp-{fresh_nanos}-1"
         );
-        std::fs::write(dir.path().join(&stale_key), b"stale").unwrap();
+        let stale_path = dir.path().join(&stale_key);
+        std::fs::write(&stale_path, b"stale").unwrap();
         std::fs::write(dir.path().join(&fresh_key), b"fresh").unwrap();
+        // The reaper now prefers the GC-observed mtime (backend truth): age the
+        // stale temp's on-disk mtime so it is genuinely old by both clocks.
+        let aged_mtime =
+            std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 3600);
+        std::fs::File::options()
+            .write(true)
+            .open(&stale_path)
+            .unwrap()
+            .set_modified(aged_mtime)
+            .unwrap();
 
         // A live referenced chunk (finished key, no temp suffix) must never be
         // touched by the reaper.

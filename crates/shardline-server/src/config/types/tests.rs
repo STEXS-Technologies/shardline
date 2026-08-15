@@ -2160,10 +2160,39 @@ fn authenticated_mode_without_auth_provider_is_a_startup_error() {
         NonZeroUsize::new(65536).unwrap(),
     )
     .with_deployment_mode(DeploymentMode::Authenticated);
-    let result = config.validate_runtime_requirements();
     assert!(
-        result.is_err(),
+        config.validate_runtime_requirements().is_err(),
         "authenticated mode without an auth provider must fail startup"
+    );
+    // The deployment-mode check itself must name passthrough as NOT a
+    // substitute for a real auth provider.
+    let error = config
+        .validate_deployment_mode_requirements()
+        .expect_err("the deployment-mode requirement must reject a missing provider");
+    let display = error.to_string();
+    assert!(
+        display.contains("passthrough provider does not satisfy this requirement"),
+        "the error must make clear that passthrough is not a substitute: {display}"
+    );
+}
+
+#[test]
+fn authenticated_mode_with_passthrough_is_accepted_as_trusted_proxy_carve_out() {
+    // Passthrough is handled EXPLICITLY as the trusted-proxy carve-out: the
+    // "requires a configured auth provider" check must not fire, because the
+    // loopback-bind requirement (enforced in validate_runtime_requirements) is
+    // what actually controls a passthrough deployment.
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        PathBuf::from("/tmp"),
+        NonZeroUsize::new(65536).unwrap(),
+    )
+    .with_deployment_mode(DeploymentMode::Authenticated)
+    .with_auth_provider(AuthProviderKind::Passthrough);
+    assert!(
+        config.validate_runtime_requirements().is_ok(),
+        "authenticated mode with passthrough must be accepted on a loopback bind"
     );
 }
 
@@ -2198,6 +2227,25 @@ fn insecure_mode_anonymous_warning_only_fires_without_auth_provider() {
         "a signing key configures a real auth provider"
     );
     assert!(with_provider.validate_runtime_requirements().is_ok());
+}
+
+#[test]
+fn auth_provider_is_configured_is_false_for_passthrough() {
+    // Passthrough trusts every inbound token (authenticated in name only), so
+    // it must NOT count as a configured auth provider for the Authenticated
+    // mode requirement. The real control is the loopback-bind requirement.
+    let passthrough = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        PathBuf::from("/tmp"),
+        NonZeroUsize::new(65536).unwrap(),
+    )
+    .with_deployment_mode(DeploymentMode::Insecure)
+    .with_auth_provider(AuthProviderKind::Passthrough);
+    assert!(
+        !passthrough.auth_provider_is_configured(),
+        "passthrough must not count as a configured auth provider"
+    );
 }
 
 #[test]
