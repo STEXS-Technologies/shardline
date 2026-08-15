@@ -64,6 +64,11 @@ pub struct ServerConfig {
     pub(crate) index_postgres_url: Option<SecretString>,
     pub(crate) metrics_token: Option<SecretBytes>,
     pub(crate) deployment_mode: DeploymentMode,
+    /// Whether the deployment mode was explicitly selected (e.g. via
+    /// `SHARDLINE_DEPLOYMENT_MODE`), as opposed to the built-in insecure
+    /// default. Used by the plaintext-secret gate: an explicit Insecure choice
+    /// opts out, while the implicit default still fails loud.
+    pub(crate) deployment_mode_explicitly_set: bool,
     pub(crate) allow_plaintext_secrets_in_production: bool,
     pub(crate) auth: AuthConfig,
     pub(crate) oci: OciConfig,
@@ -127,6 +132,7 @@ impl ServerConfig {
             index_postgres_url: None,
             metrics_token: None,
             deployment_mode: DeploymentMode::default(),
+            deployment_mode_explicitly_set: false,
             allow_plaintext_secrets_in_production: false,
             auth: AuthConfig {
                 token_signing_key: None,
@@ -580,9 +586,14 @@ impl ServerConfig {
     }
 
     /// Overrides the deployment security mode.
+    ///
+    /// Marks the mode as explicitly selected so the plaintext-secret gate can
+    /// distinguish "operator chose Insecure" from "insecure default left in
+    /// place" (see [`Self::validate_plaintext_secrets_in_production`]).
     #[must_use]
     pub const fn with_deployment_mode(mut self, mode: DeploymentMode) -> Self {
         self.deployment_mode = mode;
+        self.deployment_mode_explicitly_set = true;
         self
     }
 
@@ -1099,10 +1110,21 @@ impl ServerConfig {
 
     /// Validates that persistent secrets are never stored unencrypted in a
     /// production (non-insecure) deployment mode unless explicitly permitted.
+    ///
+    /// The plaintext gate is armed whenever persistent secrets are present
+    /// without an at-rest encryption key UNLESS the operator explicitly opted
+    /// out: either `SHARDLINE_ALLOW_PLAINTEXT_SECRETS_IN_PRODUCTION` is set, or
+    /// the deployment mode was EXPLICITLY set to Insecure. Because the default
+    /// (unset) mode is Insecure, the default case — secrets configured with no
+    /// encryption key and no mode override — fails loud instead of silently
+    /// persisting secrets in plaintext.
     fn validate_plaintext_secrets_in_production(&self) -> Result<(), ServerConfigError> {
-        if self.allow_plaintext_secrets_in_production
-            || self.deployment_mode == DeploymentMode::Insecure
-        {
+        if self.allow_plaintext_secrets_in_production {
+            return Ok(());
+        }
+        let explicitly_insecure =
+            self.deployment_mode == DeploymentMode::Insecure && self.deployment_mode_explicitly_set;
+        if explicitly_insecure {
             return Ok(());
         }
         let surfaces = self.plaintext_secret_surfaces();
@@ -1131,6 +1153,17 @@ impl ServerConfig {
         surfaces
     }
 
+    /// Returns true when this config will actually produce an auth provider.
+    ///
+    /// Mirrors `build_auth_provider`: the Local provider with no token signing
+    /// key maps to permissive mode (`None`), while every other configured
+    /// provider kind (Local with a key, Oidc, Jwks, Passthrough, Ed25519)
+    /// yields a real provider that `authorize()` enforces.
+    pub(crate) fn auth_provider_is_configured(&self) -> bool {
+        !(self.auth.auth_provider == AuthProviderKind::Local
+            && self.auth.token_signing_key.is_none())
+    }
+
     /// Validates deployment-mode-specific constraints.
     fn validate_deployment_mode_requirements(&self) -> Result<(), ServerConfigError> {
         match self.deployment_mode {
@@ -1155,7 +1188,15 @@ impl ServerConfig {
                 }
             }
             DeploymentMode::Authenticated => {
-                // Some auth provider must be configured (not None)
+                // Some auth provider must be configured; without one the mode
+                // fails open to anonymous full access.
+                if !self.auth_provider_is_configured() {
+                    return Err(ServerConfigError::ConfigFileError(
+                        "authenticated deployment mode requires a configured auth provider \
+                         (set SHARDLINE_TOKEN_SIGNING_KEY_FILE or an OIDC/JWKS/Ed25519 provider)"
+                            .into(),
+                    ));
+                }
                 if self.auth.auth_provider == AuthProviderKind::Passthrough {
                     // Passthrough is allowed in authenticated mode but warn
                     tracing::warn!(
@@ -1164,10 +1205,14 @@ impl ServerConfig {
                 }
             }
             DeploymentMode::Insecure => {
-                // Allow everything — warn that this is not for production
-                tracing::warn!(
-                    "insecure deployment mode: all requests are allowed without authentication"
-                );
+                // Warn only when no auth provider is configured: with a provider
+                // present, authorize() still enforces authentication despite
+                // the insecure mode.
+                if !self.auth_provider_is_configured() {
+                    tracing::warn!(
+                        "insecure deployment mode: all requests are allowed without authentication"
+                    );
+                }
             }
         }
         Ok(())

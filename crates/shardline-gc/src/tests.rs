@@ -777,6 +777,58 @@ async fn run_gc_helper(
 }
 
 #[test]
+fn gc_sweep_reaps_stale_temporary_chunk_artifacts_only() {
+    use shardline_protocol::unix_now_seconds_lossy;
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("aa")).unwrap();
+
+        let now_secs = unix_now_seconds_lossy();
+        // > 1 hour old: stranded remnant of a killed/crashed writer.
+        let stale_nanos = u128::from(now_secs - 2 * 3600) * 1_000_000_000;
+        // Fresh: created "now", must be left alone (an in-flight write).
+        let fresh_nanos = u128::from(now_secs) * 1_000_000_000;
+        let stale_key = format!(
+            "aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.tmp-{stale_nanos}-0"
+        );
+        let fresh_key = format!(
+            "aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.tmp-{fresh_nanos}-1"
+        );
+        std::fs::write(dir.path().join(&stale_key), b"stale").unwrap();
+        std::fs::write(dir.path().join(&fresh_key), b"fresh").unwrap();
+
+        // A live referenced chunk (finished key, no temp suffix) must never be
+        // touched by the reaper.
+        let live_hash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let live_key = ObjectKey::parse(&format!("bb/{live_hash}")).unwrap();
+        let object_store = ServerObjectStore::local(dir.path()).unwrap();
+        put_object(&object_store, &live_key, b"live-data");
+
+        let index_store = MemoryIndexStore::new();
+        let diagnostics = run_gc_helper(&object_store, &index_store, LocalGcOptions::sweep_only())
+            .await
+            .unwrap();
+
+        assert_eq!(diagnostics.report.reaped_stale_temporary_chunks, 1);
+        assert_eq!(diagnostics.report.reaped_stale_temporary_bytes, 5);
+        assert!(
+            std::fs::metadata(dir.path().join(&stale_key)).is_err(),
+            "stale temp artifact must be reaped"
+        );
+        assert!(
+            std::fs::metadata(dir.path().join(&fresh_key)).is_ok(),
+            "fresh temp artifact must be left alone"
+        );
+        assert!(
+            object_store.contains(&live_key).unwrap(),
+            "live chunk must never be touched"
+        );
+    });
+}
+
+#[test]
 fn validate_integrity_missing_quarantine_object_auto_released() {
     // When a quarantine candidate references an object that doesn't exist
     // in the object store, the candidate should be auto-released.

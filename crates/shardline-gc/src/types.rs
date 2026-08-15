@@ -152,6 +152,11 @@ pub struct LocalGcReport {
     pub deleted_chunks: u64,
     /// Number of bytes reclaimed during this run.
     pub deleted_bytes: u64,
+    /// Number of stranded chunk temp artifacts (stale `.tmp-*` files) reaped
+    /// during this run's sweep.
+    pub reaped_stale_temporary_chunks: u64,
+    /// Number of bytes reclaimed by reaping stale chunk temp artifacts.
+    pub reaped_stale_temporary_bytes: u64,
 }
 
 /// One active retention-window entry after a GC run.

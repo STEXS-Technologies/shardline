@@ -174,6 +174,7 @@ impl TestServer {
             ServerFrontend::Xet,
         ])
         .unwrap()
+        .with_deployment_mode(shardline_server::DeploymentMode::Insecure)
         .with_token_signing_key(TEST_SIGNING_KEY.to_vec())
         .unwrap()
         .with_reconstruction_cache_disabled();
@@ -228,6 +229,7 @@ async fn oci_oneshot_app() -> (Router, TempDir) {
     .with_server_role(ServerRole::All)
     .with_server_frontends([ServerFrontend::Oci])
     .unwrap()
+    .with_deployment_mode(shardline_server::DeploymentMode::Insecure)
     .with_token_signing_key(TEST_SIGNING_KEY.to_vec())
     .unwrap()
     .with_reconstruction_cache_disabled();

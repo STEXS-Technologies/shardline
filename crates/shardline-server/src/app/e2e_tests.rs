@@ -84,6 +84,7 @@ async fn test_app_for_frontends_with_role(
         chunk_size,
     )
     .with_server_role(role)
+    .with_deployment_mode(crate::DeploymentMode::Insecure)
     .with_server_frontends(frontends.to_vec())
     .expect("server frontends")
     .with_token_signing_key(b"0123456789abcdef0123456789abcdef".to_vec())
@@ -10544,6 +10545,7 @@ async fn ed25519_protects_every_application_route_family() {
         ServerFrontend::Hub,
     ])
     .unwrap()
+    .with_deployment_mode(crate::DeploymentMode::Insecure)
     .with_metrics_token(b"metrics-secret".to_vec())
     .unwrap()
     .with_auth_provider(crate::config::AuthProviderKind::Ed25519)

@@ -276,6 +276,81 @@ pub(super) fn managed_object_hash_or_object_key(
     }
 }
 
+/// Upper bound (seconds) for a chunk temp artifact before GC reaps it.
+///
+/// Temp-then-hardlink chunk writes complete in seconds-to-minutes, so a
+/// `.tmp-*` artifact older than an hour is a stranded remnant of a
+/// killed/crashed writer — never an in-flight write.
+pub(super) const STALE_TEMP_ARTIFACT_AGE_SECONDS: u64 = 60 * 60;
+
+/// Returns the embedded unix-nanoseconds creation timestamp of a chunk temp
+/// artifact key (`<2hex>/<64hex>.tmp-<unix_nanos>-<counter>`), or `None` when
+/// the key is not a chunk temp artifact.
+///
+/// Applies the same structural chunk gates as
+/// `chunk_hash_from_chunk_object_key_if_present` (two-hex prefix directory,
+/// single-segment layout, candidate hash starting with the prefix, 64 hex
+/// characters before the temp suffix) so only genuine chunk temp artifacts are
+/// ever matched.
+fn chunk_temp_artifact_unix_nanos(key: &ObjectKey) -> Option<u128> {
+    let mut segments = key.as_str().split('/');
+    let prefix = segments.next()?;
+    let candidate = segments.next()?;
+    if segments.next().is_some() {
+        return None;
+    }
+    if prefix.len() != 2 || !prefix.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    if !candidate.starts_with(prefix) {
+        return None;
+    }
+    // candidate = <64hex>.tmp-<unix_nanos>-<counter>
+    let (hash_part, temp_suffix) = candidate.split_once(".tmp-")?;
+    if hash_part.len() != 64 || !hash_part.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    let (nanos_str, counter_str) = temp_suffix.rsplit_once('-')?;
+    if nanos_str.is_empty()
+        || counter_str.is_empty()
+        || !nanos_str.bytes().all(|byte| byte.is_ascii_digit())
+        || !counter_str.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    nanos_str.parse::<u128>().ok()
+}
+
+/// Scans the object store for stranded chunk temp artifacts older than
+/// [`STALE_TEMP_ARTIFACT_AGE_SECONDS`] and returns them (key + length) so the
+/// GC sweep can remove them.
+///
+/// # Errors
+///
+/// Returns [`GcError`] when the object store cannot be enumerated.
+pub(super) fn scan_stale_temporary_chunk_artifacts(
+    object_store: &ServerObjectStore,
+    now_unix_seconds: u64,
+) -> Result<Vec<(ObjectKey, u64)>, GcError> {
+    let mut stale = Vec::new();
+    let cutoff_unix_nanos =
+        u128::from(now_unix_seconds.saturating_sub(STALE_TEMP_ARTIFACT_AGE_SECONDS))
+            * 1_000_000_000;
+    let prefix = ObjectPrefix::parse("").map_err(|_error| GcError::InvalidContentHash)?;
+    object_store.visit_prefix(&prefix, |metadata| {
+        let key = metadata.key();
+        let Some(created_unix_nanos) = chunk_temp_artifact_unix_nanos(key) else {
+            return Ok(());
+        };
+        if created_unix_nanos >= cutoff_unix_nanos {
+            return Ok(());
+        }
+        stale.push((key.clone(), metadata.length()));
+        Ok::<(), GcError>(())
+    })?;
+    Ok(stale)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {

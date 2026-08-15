@@ -9,6 +9,19 @@
 //! [`AuthorizedRepository::verify_and_authorize`], which re-verifies the bearer
 //! token against an [`AuthProvider`] and enforces the required scope before a
 //! capability can exist.
+//!
+//! # Seal seam (convention-enforced, not type-enforced)
+//!
+//! The seal is a *convention*, not a type-level guarantee: [`Self::from_verified_context`]
+//! is `#[doc(hidden)] pub` and [`AuthContext::new`] is `pub const` over bare claims,
+//! so any crate that depends on `shardline-server-core` *could* call the seam
+//! directly and mint a capability. There is deliberately **no** cross-crate marker
+//! type that would let `from_verified_context` reject an `AuthContext` it cannot
+//! prove came from a provider verification. All current call sites feed only
+//! provider-verified contexts (produced by `ServerAuth::authorize` /
+//! `authorize_s3` after `AuthProvider::verify_token`), so the seam is not
+//! exploitable today, but it is a residual risk to close with a type-level seal
+//! (a marker only the auth layer can mint) in a future refactor.
 
 use shardline_auth::{AuthContext, AuthError, AuthProvider};
 use shardline_protocol::{RepositoryScope, TokenClaims, TokenScope};
@@ -36,9 +49,18 @@ use shardline_protocol::{RepositoryScope, TokenClaims, TokenScope};
 /// let repo = RepositoryScope::new(RepositoryProvider::GitHub, "acme", "assets", None).unwrap();
 /// let claims = TokenClaims::new("issuer", "subject", TokenScope::Read, repo, u64::MAX).unwrap();
 /// let forged = AuthContext::new(claims);
-/// // No conversion from a forgeable AuthContext exists:
+/// // No conversion from a forgeable AuthContext exists, so a capability cannot
+/// // be minted through the ordinary type system:
 /// let _capability: AuthorizedRepository = forged.into();
 /// ```
+///
+/// Note that this compile-fail guarantee only blocks `From<AuthContext>`
+/// conversions. The `#[doc(hidden)]` seam [`Self::from_verified_context`]
+/// accepts an `AuthContext` directly and is contract-enforced rather than
+/// type-enforced: it MUST only be called with a context produced by an
+/// auth-provider verification. Minting a capability from unverified,
+/// handler-constructed claims — or any other code path — is a vulnerability,
+/// not a supported API (see the module docs on the seal seam).
 ///
 /// The remaining constructors ([`Self::from_verified_context`] and
 /// [`Self::anonymous_full_access`]) are `#[doc(hidden)]` seams consumed by the
@@ -91,10 +113,19 @@ impl AuthorizedRepository {
     /// a context whose granted scope does not cover `required_scope` yields
     /// [`AuthError::InsufficientScope`].
     ///
-    /// # Contract
+    /// # Contract — do not violate
     ///
-    /// The context must originate from an auth-provider verification, never from
-    /// handler-constructed data.
+    /// The caller MUST supply a context produced by an auth-provider
+    /// verification (`AuthProvider::verify_token`). Minting a capability from
+    /// unverified claims — for example by constructing [`AuthContext`] with
+    /// [`AuthContext::new`] over bare [`TokenClaims`] and passing it here — is
+    /// a vulnerability: it forges authorization for a repository the caller
+    /// was never granted. This contract is convention-enforced only (there is
+    /// no cross-crate marker that would reject an unverified context at
+    /// compile time); every call site in this repository feeds a
+    /// provider-verified context. Do not add new call sites that cannot
+    /// guarantee provider verification, and close the seam with a type-level
+    /// seal if the contract ever needs machine enforcement.
     ///
     /// # Errors
     ///

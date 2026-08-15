@@ -887,6 +887,7 @@ async fn build_router_with(frontends: Vec<ServerFrontend>) -> Router {
         NonZeroUsize::new(65536).unwrap(),
     )
     .with_server_role(ServerRole::All)
+    .with_deployment_mode(crate::DeploymentMode::Insecure)
     .with_server_frontends(frontends)
     .expect("server frontends")
     .with_token_signing_key(TEST_SIGNING_KEY.to_vec())
@@ -1011,6 +1012,7 @@ async fn frontend_pairs_have_no_route_conflicts() {
                         NonZeroUsize::new(65536).unwrap(),
                     )
                     .with_server_role(ServerRole::All)
+                    .with_deployment_mode(crate::DeploymentMode::Insecure)
                     .with_server_frontends(pair)
                     .expect("server frontends")
                     .with_token_signing_key(TEST_SIGNING_KEY.to_vec())

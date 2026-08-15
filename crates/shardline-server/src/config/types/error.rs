@@ -408,6 +408,14 @@ pub enum ServerConfigError {
     /// A configuration file could not be loaded.
     #[error("configuration file error: {0}")]
     ConfigFileError(String),
+    /// The `SHARDLINE_DEPLOYMENT_MODE` environment variable was set to an
+    /// unknown value. Fail closed instead of falling back to the insecure
+    /// default, mirroring the sibling fail-closed behavior of
+    /// `SHARDLINE_ALLOW_PLAINTEXT_SECRETS_IN_PRODUCTION`.
+    #[error(
+        "unknown SHARDLINE_DEPLOYMENT_MODE value '{value}'; expected one of: insecure, authenticated, strict"
+    )]
+    InvalidDeploymentMode { value: String },
     /// Persistent secrets would be stored in plaintext in a production deployment mode.
     #[error(
         "production deployment mode requires at-rest secret encryption, but {surfaces}; \

@@ -446,7 +446,7 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
         config = config.with_metrics_token(metrics_token)?;
     }
 
-    if let Some(deployment_mode) = deployment_mode_from_env() {
+    if let Some(deployment_mode) = deployment_mode_from_env()? {
         config = config.with_deployment_mode(deployment_mode);
     }
 
@@ -522,15 +522,25 @@ pub(crate) fn admission_max_weight_from_env() -> NonZeroUsize {
 }
 
 /// Parses the `SHARDLINE_DEPLOYMENT_MODE` environment variable.
-pub(crate) fn deployment_mode_from_env() -> Option<DeploymentMode> {
-    let value = var("SHARDLINE_DEPLOYMENT_MODE").ok()?;
-    let Some(mode) = DeploymentMode::parse(&value) else {
-        tracing::warn!(
-            "unknown SHARDLINE_DEPLOYMENT_MODE value '{value}', falling back to default"
-        );
-        return None;
+///
+/// Returns `Ok(None)` when the variable is unset (the caller keeps the
+/// insecure default, which is fine for local/dev). A set-but-invalid value is
+/// a startup error, matching the fail-closed sibling gate
+/// `SHARDLINE_ALLOW_PLAINTEXT_SECRETS_IN_PRODUCTION` (invalid => false) rather
+/// than a silent fallback to the insecure default.
+///
+/// # Errors
+///
+/// Returns [`ServerConfigError::InvalidDeploymentMode`] when the variable is
+/// set to an unsupported value.
+pub(crate) fn deployment_mode_from_env() -> Result<Option<DeploymentMode>, ServerConfigError> {
+    let Ok(value) = var("SHARDLINE_DEPLOYMENT_MODE") else {
+        return Ok(None);
     };
-    Some(mode)
+    let Some(mode) = DeploymentMode::parse(&value) else {
+        return Err(ServerConfigError::InvalidDeploymentMode { value });
+    };
+    Ok(Some(mode))
 }
 
 fn parse_server_frontends_env(value: &str) -> Result<Vec<ServerFrontend>, ServerConfigError> {
@@ -983,16 +993,26 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
             ("Strict", super::DeploymentMode::Strict),
         ] {
             set_env_var("SHARDLINE_DEPLOYMENT_MODE", value);
-            assert_eq!(super::deployment_mode_from_env(), Some(expected));
+            assert_eq!(super::deployment_mode_from_env().unwrap(), Some(expected));
         }
         remove_env_var("SHARDLINE_DEPLOYMENT_MODE");
     }
 
     #[test]
     #[serial_test::serial]
-    fn deployment_mode_from_env_falls_back_for_unknown_value() {
+    fn deployment_mode_from_env_is_unset_when_variable_missing() {
+        remove_env_var("SHARDLINE_DEPLOYMENT_MODE");
+        assert_eq!(super::deployment_mode_from_env().unwrap(), None);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn deployment_mode_from_env_rejects_unknown_value() {
         set_env_var("SHARDLINE_DEPLOYMENT_MODE", "nonsense");
-        assert_eq!(super::deployment_mode_from_env(), None);
+        assert!(matches!(
+            super::deployment_mode_from_env(),
+            Err(super::ServerConfigError::InvalidDeploymentMode { .. })
+        ));
         remove_env_var("SHARDLINE_DEPLOYMENT_MODE");
     }
 
