@@ -242,6 +242,7 @@ async fn build_test_router(frontends: &[ServerFrontend], role: ServerRole) -> (R
     .with_server_frontends(frontends.to_vec())
     .unwrap()
     .with_server_role(role)
+    .with_deployment_mode(crate::DeploymentMode::Insecure)
     .with_token_signing_key(vec![0u8; 32])
     .unwrap();
 

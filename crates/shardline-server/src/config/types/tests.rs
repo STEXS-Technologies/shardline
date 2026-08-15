@@ -2100,6 +2100,107 @@ fn insecure_mode_allows_plaintext_hub_webhook_secrets() {
 }
 
 #[test]
+fn default_insecure_mode_rejects_plaintext_hub_webhook_secrets_without_key() {
+    // The DEFAULT (unset) mode is Insecure, but that implicit default must NOT
+    // disarm the plaintext-secret gate: secrets configured without an
+    // encryption key and without an explicit mode/override choice fail loud.
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        PathBuf::from("/tmp"),
+        NonZeroUsize::new(65536).unwrap(),
+    )
+    .with_server_frontends([ServerFrontend::Hub])
+    .unwrap();
+    let result = config.validate_runtime_requirements();
+    assert!(matches!(
+        result,
+        Err(ServerConfigError::PlaintextSecretsInProduction { .. })
+    ));
+}
+
+#[test]
+fn default_insecure_mode_allows_plaintext_secrets_with_explicit_override() {
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        PathBuf::from("/tmp"),
+        NonZeroUsize::new(65536).unwrap(),
+    )
+    .with_allow_plaintext_secrets_in_production(true)
+    .with_server_frontends([ServerFrontend::Hub])
+    .unwrap();
+    assert!(config.validate_runtime_requirements().is_ok());
+}
+
+#[test]
+fn explicit_insecure_mode_allows_plaintext_hub_webhook_secrets() {
+    // An EXPLICITLY selected Insecure mode is the operator's informed choice
+    // and disarms the plaintext gate, matching the pre-existing behavior.
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        PathBuf::from("/tmp"),
+        NonZeroUsize::new(65536).unwrap(),
+    )
+    .with_deployment_mode(DeploymentMode::Insecure)
+    .with_server_frontends([ServerFrontend::Hub])
+    .unwrap();
+    assert!(config.validate_runtime_requirements().is_ok());
+}
+
+#[test]
+fn authenticated_mode_without_auth_provider_is_a_startup_error() {
+    // Authenticated mode with no auth provider configured would fail open to
+    // anonymous full access; the mode must be rejected at startup.
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        PathBuf::from("/tmp"),
+        NonZeroUsize::new(65536).unwrap(),
+    )
+    .with_deployment_mode(DeploymentMode::Authenticated);
+    let result = config.validate_runtime_requirements();
+    assert!(
+        result.is_err(),
+        "authenticated mode without an auth provider must fail startup"
+    );
+}
+
+#[test]
+fn insecure_mode_anonymous_warning_only_fires_without_auth_provider() {
+    // The "all requests are allowed without authentication" warning is gated on
+    // there being NO configured auth provider: with a provider present,
+    // authorize() enforces authentication despite the insecure mode.
+    let no_provider = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        PathBuf::from("/tmp"),
+        NonZeroUsize::new(65536).unwrap(),
+    )
+    .with_deployment_mode(DeploymentMode::Insecure);
+    assert!(
+        !no_provider.auth_provider_is_configured(),
+        "Local provider without a signing key is permissive mode"
+    );
+
+    let with_provider = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        PathBuf::from("/tmp"),
+        NonZeroUsize::new(65536).unwrap(),
+    )
+    .with_deployment_mode(DeploymentMode::Insecure)
+    .with_token_signing_key(b"0123456789abcdef0123456789abcdef".to_vec())
+    .unwrap();
+    assert!(
+        with_provider.auth_provider_is_configured(),
+        "a signing key configures a real auth provider"
+    );
+    assert!(with_provider.validate_runtime_requirements().is_ok());
+}
+
+#[test]
 fn authenticated_mode_without_hub_or_provider_needs_no_encryption_keys() {
     let config = ServerConfig::new(
         "127.0.0.1:0".parse().unwrap(),

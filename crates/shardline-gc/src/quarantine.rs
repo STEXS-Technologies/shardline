@@ -352,6 +352,8 @@ mod tests {
                 released_quarantine_candidates: 0,
                 deleted_chunks: 0,
                 deleted_bytes: 0,
+                reaped_stale_temporary_chunks: 0,
+                reaped_stale_temporary_bytes: 0,
             };
 
             reconcile_quarantine_entries(
@@ -407,6 +409,8 @@ mod tests {
                 released_quarantine_candidates: 0,
                 deleted_chunks: 0,
                 deleted_bytes: 0,
+                reaped_stale_temporary_chunks: 0,
+                reaped_stale_temporary_bytes: 0,
             };
 
             reconcile_quarantine_entries(
@@ -487,6 +491,8 @@ mod tests {
                 released_quarantine_candidates: 0,
                 deleted_chunks: 0,
                 deleted_bytes: 0,
+                reaped_stale_temporary_chunks: 0,
+                reaped_stale_temporary_bytes: 0,
             };
 
             reconcile_quarantine_entries(
@@ -561,6 +567,8 @@ mod tests {
                 released_quarantine_candidates: 0,
                 deleted_chunks: 0,
                 deleted_bytes: 0,
+                reaped_stale_temporary_chunks: 0,
+                reaped_stale_temporary_bytes: 0,
             };
 
             reconcile_quarantine_entries(
@@ -690,6 +698,8 @@ mod tests {
                 released_quarantine_candidates: 0,
                 deleted_chunks: 0,
                 deleted_bytes: 0,
+                reaped_stale_temporary_chunks: 0,
+                reaped_stale_temporary_bytes: 0,
             };
 
             sweep_quarantine_entries(
@@ -840,6 +850,8 @@ mod tests {
                 released_quarantine_candidates: 0,
                 deleted_chunks: 0,
                 deleted_bytes: 0,
+                reaped_stale_temporary_chunks: 0,
+                reaped_stale_temporary_bytes: 0,
             };
 
             sweep_quarantine_entries(
@@ -902,6 +914,8 @@ mod tests {
                 released_quarantine_candidates: 0,
                 deleted_chunks: 0,
                 deleted_bytes: 0,
+                reaped_stale_temporary_chunks: 0,
+                reaped_stale_temporary_bytes: 0,
             };
 
             sweep_quarantine_entries(
@@ -1067,6 +1081,8 @@ mod tests {
                 released_quarantine_candidates: 0,
                 deleted_chunks: 0,
                 deleted_bytes: 0,
+                reaped_stale_temporary_chunks: 0,
+                reaped_stale_temporary_bytes: 0,
             };
 
             reconcile_quarantine_entries(
@@ -1130,6 +1146,8 @@ mod tests {
                 released_quarantine_candidates: 0,
                 deleted_chunks: 0,
                 deleted_bytes: 0,
+                reaped_stale_temporary_chunks: 0,
+                reaped_stale_temporary_bytes: 0,
             };
 
             // Empty orphan_objects → the stale entry should be released.

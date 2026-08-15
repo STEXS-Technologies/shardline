@@ -21,6 +21,7 @@ use crate::{
     reachability::{
         OrphanObject, ReachabilityAccumulator, collect_referenced_object_keys,
         managed_object_hash_or_object_key, scan_orphan_objects,
+        scan_stale_temporary_chunk_artifacts,
     },
     types::{
         GcOrphanInventoryEntry, GcOrphanQuarantineState, GcRetentionReportEntry,
@@ -141,6 +142,8 @@ where
         released_quarantine_candidates: 0,
         deleted_chunks: 0,
         deleted_bytes: 0,
+        reaped_stale_temporary_chunks: 0,
+        reaped_stale_temporary_bytes: 0,
     };
 
     if options.mark {
@@ -169,6 +172,25 @@ where
         )
         .await?;
         shardline_metrics::record_gc_sweep_duration(sweep_start.elapsed());
+
+        // Reap stranded chunk temp artifacts. `scan_orphan_objects` skips
+        // `.tmp-*` keys (so an in-progress write never aborts the pass), which
+        // previously left abandoned temps from killed/crashed writers in place
+        // forever. A temp older than an hour is never an in-flight write
+        // (temp-then-hardlink writes finish in seconds-to-minutes), so it is
+        // safe to remove and count in the report.
+        let stale_temps = scan_stale_temporary_chunk_artifacts(object_store, now_unix_seconds)?;
+        for (temp_key, temp_bytes) in stale_temps {
+            object_store
+                .delete_if_present(&temp_key)
+                .map_err(GcError::ObjectStore)?;
+            report.reaped_stale_temporary_chunks =
+                shardline_server_core::checked_add(report.reaped_stale_temporary_chunks, 1)?;
+            report.reaped_stale_temporary_bytes = shardline_server_core::checked_add(
+                report.reaped_stale_temporary_bytes,
+                temp_bytes,
+            )?;
+        }
     }
 
     report.active_quarantine_candidates = u64::try_from(quarantine_entries.len())?;
