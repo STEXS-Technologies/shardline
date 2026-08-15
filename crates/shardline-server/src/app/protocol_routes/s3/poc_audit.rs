@@ -1042,3 +1042,111 @@ async fn frontend_pairs_have_no_route_conflicts() {
         }
     }
 }
+
+// =========================================================================
+// F-18 — DeleteObjects batch delete takes no per-key lock (bucket.rs).
+// The batch path deleted each key's index row + direct object without
+// serializing against in-flight PUT/Copy/Complete, so a concurrent overwrite
+// of the same key could have its just-committed record deleted (phantom
+// delete / dangling index) even though the single-object DELETE path took
+// the lock.
+// FIX: `s3_post_bucket` acquires the same per-key upload lock around each
+// key's delete pair, releasing it after each key (the body is read+parsed
+// before any lock is taken, so no deadlock across the body read).
+// CONTROL: hold the per-key lock ourselves (standing in for an in-flight PUT)
+// and issue a batch DELETE containing that key: it must BLOCK on the lock and
+// only complete after release.
+// =========================================================================
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn poc_f18_deleteobjects_serialized_with_put() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state);
+
+    let key = "phantom/batch-serialized.bin";
+    let batch_url = format!("/{BUCKET}?delete=");
+
+    // Resolve the same per-key lock the handlers use (mirrors
+    // poc_f8_phantom_delete_serialized) and hold it, standing in for an
+    // in-flight PUT that is mid-upload/mid-swap on this key.
+    let repo = RepositoryScope::new(RepositoryProvider::Generic, OWNER, NAME, None).unwrap();
+    let claims = TokenClaims::new("shardline", "test", TokenScope::Write, repo, u64::MAX).unwrap();
+    let capability = shardline_server_core::AuthorizedRepository::from_verified_context(
+        shardline_server_core::AuthContext::new(claims),
+        TokenScope::Write,
+    )
+    .unwrap();
+    let context = require_s3_object_context(&capability, key).unwrap();
+    let object_lock = acquire_object_upload_lock(context.object_key.as_str());
+    let _test_guard = object_lock.lock().await;
+
+    // A batch containing the locked key, issued while the writer holds the
+    // per-key lock.
+    let del_app = app.clone();
+    let batch_body = format!(
+        "<Delete><Object><Key>{key}</Key></Object><Object><Key>other-{key}</Key></Object></Delete>"
+    );
+    let del_req = Request::builder()
+        .method("POST")
+        .uri(batch_url.clone())
+        .header(
+            header::AUTHORIZATION,
+            sigv4_auth(&mint_token(TokenScope::Write, OWNER, NAME)),
+        )
+        .header(header::CONTENT_TYPE, "application/xml")
+        .body(Body::from(batch_body))
+        .unwrap();
+    let delete_task = tokio::spawn(async move { del_app.oneshot(del_req).await.unwrap().status() });
+
+    // With the fix the batch DELETE must be blocked on the per-key lock for
+    // the locked key (it cannot delete that key while the writer holds the
+    // lock). With the bug it completes immediately because it shares no lock
+    // with the writer.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert!(
+        !delete_task.is_finished(),
+        "DeleteObjects must block on the per-key upload lock while a writer holds it (F-18)"
+    );
+
+    // Release the lock (the in-flight PUT commits); the batch then runs and
+    // completes with its serialized 200, and the object is gone.
+    drop(_test_guard);
+    let delete_status = delete_task.await.unwrap();
+    assert_eq!(
+        delete_status,
+        StatusCode::OK,
+        "serialized DeleteObjects must complete 200"
+    );
+    let get = app
+        .clone()
+        .oneshot(get_request(format!("/{BUCKET}/{key}")))
+        .await
+        .unwrap();
+    assert_eq!(
+        get.status(),
+        StatusCode::NOT_FOUND,
+        "object deleted after the serialized batch delete"
+    );
+
+    // The batch must not deadlock across multiple keys: a second batch over
+    // fresh keys completes without any lock held.
+    let ok = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(batch_url)
+                .header(
+                    header::AUTHORIZATION,
+                    sigv4_auth(&mint_token(TokenScope::Write, OWNER, NAME)),
+                )
+                .header(header::CONTENT_TYPE, "application/xml")
+                .body(Body::from(
+                    "<Delete><Object><Key>a.txt</Key></Object><Object><Key>b.txt</Key></Object></Delete>"
+                        .to_owned(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(ok.status(), StatusCode::OK, "multi-key batch completes");
+}

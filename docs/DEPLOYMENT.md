@@ -372,9 +372,10 @@ SHARDLINE_UPLOAD_MAX_IN_FLIGHT_CHUNKS=64
 SHARDLINE_TRANSFER_MAX_IN_FLIGHT_CHUNKS=64
 # S3 frontend upload limits (multipart sessions)
 SHARDLINE_S3_MAX_PART_BYTES=1073741824       # 1 GiB; minimum accepted value 1 MiB
-SHARDLINE_S3_MIN_PART_BYTES=5242880          # 5 MiB, S3's minimum non-final part size
+SHARDLINE_S3_MIN_PART_BYTES=5242880          # 5 MiB, S3's minimum non-final part size (checked at Complete only)
 SHARDLINE_S3_UPLOAD_SESSION_MAX_BYTES=1099511627776   # 1 TiB per upload session
 SHARDLINE_S3_UPLOAD_TOTAL_MAX_BYTES=4398046511104     # 4 TiB across active sessions
+SHARDLINE_S3_UPLOAD_MAX_ACTIVE_PART_FILES=200000      # global cap on part files across active sessions
 SHARDLINE_S3_UPLOAD_SESSION_TTL_SECONDS=3600          # 1 hour
 SHARDLINE_S3_UPLOAD_MAX_ACTIVE_SESSIONS=1024
 RUST_LOG=info

@@ -161,6 +161,63 @@ fn server_config_new_constructs_with_defaults() {
         config.s3_max_part_bytes(),
         NonZeroU64::new(1_073_741_824).unwrap()
     );
+    assert_eq!(
+        config.lfs_patch_ttl_seconds(),
+        NonZeroU64::new(3_600).unwrap()
+    );
+    assert_eq!(
+        config.lfs_patch_max_active_sessions(),
+        NonZeroUsize::new(1_024).unwrap()
+    );
+    assert_eq!(
+        config.lfs_patch_total_max_bytes(),
+        NonZeroU64::new(4_398_046_511_104).unwrap()
+    );
+    assert_eq!(
+        config.s3_upload_max_active_part_files(),
+        NonZeroUsize::new(200_000).unwrap()
+    );
+}
+
+#[test]
+fn server_config_builder_with_s3_part_file_cap() {
+    let config = ServerConfig::new(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+        "http://localhost:8080".to_owned(),
+        PathBuf::from("/tmp/test"),
+        NonZeroUsize::new(4096).unwrap(),
+    )
+    .with_s3_upload_max_active_part_files(NonZeroUsize::new(16).unwrap())
+    .unwrap();
+    assert_eq!(
+        config.s3_upload_max_active_part_files(),
+        NonZeroUsize::new(16).unwrap()
+    );
+}
+
+#[test]
+fn server_config_builder_with_lfs_patch_limits() {
+    let config = ServerConfig::new(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+        "http://localhost:8080".to_owned(),
+        PathBuf::from("/tmp/test"),
+        NonZeroUsize::new(4096).unwrap(),
+    )
+    .with_lfs_patch_ttl_seconds(NonZeroU64::new(60).unwrap())
+    .unwrap()
+    .with_lfs_patch_max_active_sessions(NonZeroUsize::new(8).unwrap())
+    .unwrap()
+    .with_lfs_patch_total_max_bytes(NonZeroU64::new(1 << 30).unwrap())
+    .unwrap();
+    assert_eq!(config.lfs_patch_ttl_seconds(), NonZeroU64::new(60).unwrap());
+    assert_eq!(
+        config.lfs_patch_max_active_sessions(),
+        NonZeroUsize::new(8).unwrap()
+    );
+    assert_eq!(
+        config.lfs_patch_total_max_bytes(),
+        NonZeroU64::new(1 << 30).unwrap()
+    );
 }
 
 #[test]

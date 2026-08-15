@@ -13,9 +13,11 @@ use super::secrets::{
     load_redis_tls_config_from_env, load_s3_object_store_config_from_env, read_secret_file_bytes,
 };
 use super::{
-    AuthProviderKind, CONFIG_SECRET_KEY_BYTES, DEFAULT_MAX_REQUEST_BODY_BYTES,
-    DEFAULT_MAX_SHARD_FILES, DEFAULT_MAX_SHARD_RECONSTRUCTION_TERMS, DEFAULT_MAX_SHARD_XORB_CHUNKS,
-    DEFAULT_MAX_SHARD_XORBS, DEFAULT_S3_MAX_PART_BYTES, DEFAULT_S3_MIN_PART_BYTES,
+    AuthProviderKind, CONFIG_SECRET_KEY_BYTES, DEFAULT_LFS_PATCH_MAX_ACTIVE_SESSIONS,
+    DEFAULT_LFS_PATCH_TOTAL_MAX_BYTES, DEFAULT_LFS_PATCH_TTL_SECONDS,
+    DEFAULT_MAX_REQUEST_BODY_BYTES, DEFAULT_MAX_SHARD_FILES,
+    DEFAULT_MAX_SHARD_RECONSTRUCTION_TERMS, DEFAULT_MAX_SHARD_XORB_CHUNKS, DEFAULT_MAX_SHARD_XORBS,
+    DEFAULT_S3_MAX_PART_BYTES, DEFAULT_S3_MIN_PART_BYTES, DEFAULT_S3_UPLOAD_MAX_ACTIVE_PART_FILES,
     DEFAULT_S3_UPLOAD_MAX_ACTIVE_SESSIONS, DEFAULT_S3_UPLOAD_SESSION_MAX_BYTES,
     DEFAULT_S3_UPLOAD_SESSION_TTL_SECONDS, DEFAULT_S3_UPLOAD_TOTAL_MAX_BYTES, DeploymentMode,
     HUB_WEBHOOK_SECRET_KEY_BYTES, MAX_ED25519_KEY_BYTES, MAX_METRICS_TOKEN_BYTES,
@@ -216,6 +218,37 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
     let Some(s3_upload_total_max_bytes) = NonZeroU64::new(raw_s3_upload_total_max_bytes) else {
         return Err(ServerConfigError::ZeroS3UploadTotalMaxBytes);
     };
+    let raw_s3_upload_max_active_part_files = var("SHARDLINE_S3_UPLOAD_MAX_ACTIVE_PART_FILES")
+        .unwrap_or_else(|_error| DEFAULT_S3_UPLOAD_MAX_ACTIVE_PART_FILES.get().to_string())
+        .parse::<usize>()
+        .map_err(ServerConfigError::S3UploadMaxActivePartFiles)?;
+    let Some(s3_upload_max_active_part_files) =
+        NonZeroUsize::new(raw_s3_upload_max_active_part_files)
+    else {
+        return Err(ServerConfigError::ZeroS3UploadMaxActivePartFiles);
+    };
+    let raw_lfs_patch_ttl_seconds = var("SHARDLINE_LFS_PATCH_TTL_SECONDS")
+        .unwrap_or_else(|_error| DEFAULT_LFS_PATCH_TTL_SECONDS.get().to_string())
+        .parse::<u64>()
+        .map_err(ServerConfigError::LfsPatchTtl)?;
+    let Some(lfs_patch_ttl_seconds) = NonZeroU64::new(raw_lfs_patch_ttl_seconds) else {
+        return Err(ServerConfigError::ZeroLfsPatchTtlSeconds);
+    };
+    let raw_lfs_patch_max_active_sessions = var("SHARDLINE_LFS_PATCH_MAX_ACTIVE_SESSIONS")
+        .unwrap_or_else(|_error| DEFAULT_LFS_PATCH_MAX_ACTIVE_SESSIONS.get().to_string())
+        .parse::<usize>()
+        .map_err(ServerConfigError::LfsPatchMaxActiveSessions)?;
+    let Some(lfs_patch_max_active_sessions) = NonZeroUsize::new(raw_lfs_patch_max_active_sessions)
+    else {
+        return Err(ServerConfigError::ZeroLfsPatchMaxActiveSessions);
+    };
+    let raw_lfs_patch_total_max_bytes = var("SHARDLINE_LFS_PATCH_TOTAL_MAX_BYTES")
+        .unwrap_or_else(|_error| DEFAULT_LFS_PATCH_TOTAL_MAX_BYTES.get().to_string())
+        .parse::<u64>()
+        .map_err(ServerConfigError::LfsPatchTotalMaxBytes)?;
+    let Some(lfs_patch_total_max_bytes) = NonZeroU64::new(raw_lfs_patch_total_max_bytes) else {
+        return Err(ServerConfigError::ZeroLfsPatchTotalMaxBytes);
+    };
     let reconstruction_cache_redis_url = var("SHARDLINE_RECONSTRUCTION_CACHE_REDIS_URL").ok();
     let reconstruction_cache_redis_tls = load_redis_tls_config_from_env()?;
     let index_postgres_url = var("SHARDLINE_INDEX_POSTGRES_URL").ok();
@@ -360,6 +393,10 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
         .with_s3_min_part_bytes(s3_min_part_bytes)?
         .with_s3_upload_session_max_bytes(s3_upload_session_max_bytes)?
         .with_s3_upload_total_max_bytes(s3_upload_total_max_bytes)?
+        .with_s3_upload_max_active_part_files(s3_upload_max_active_part_files)?
+        .with_lfs_patch_ttl_seconds(lfs_patch_ttl_seconds)?
+        .with_lfs_patch_max_active_sessions(lfs_patch_max_active_sessions)?
+        .with_lfs_patch_total_max_bytes(lfs_patch_total_max_bytes)?
         .with_admission_max_weight(admission_max_weight_from_env());
     config.cache.adapter = reconstruction_cache_adapter;
     config.cache.redis_url = reconstruction_cache_redis_url.map(SecretString::new);

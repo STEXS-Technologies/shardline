@@ -402,6 +402,30 @@ pub enum ServerConfigError {
     /// The S3 multipart aggregate byte quota was zero.
     #[error("s3 upload total max bytes must be greater than zero")]
     ZeroS3UploadTotalMaxBytes,
+    /// The S3 multipart global active-part-file cap could not be parsed.
+    #[error("invalid s3 upload max active part files")]
+    S3UploadMaxActivePartFiles(ParseIntError),
+    /// The S3 multipart global active-part-file cap was zero.
+    #[error("s3 upload max active part files must be greater than zero")]
+    ZeroS3UploadMaxActivePartFiles,
+    /// The LFS chunked-patch staging TTL could not be parsed.
+    #[error("invalid lfs patch ttl")]
+    LfsPatchTtl(ParseIntError),
+    /// The LFS chunked-patch staging TTL was zero.
+    #[error("lfs patch ttl must be greater than zero")]
+    ZeroLfsPatchTtlSeconds,
+    /// The LFS chunked-patch live-session ceiling could not be parsed.
+    #[error("invalid lfs patch max active sessions")]
+    LfsPatchMaxActiveSessions(ParseIntError),
+    /// The LFS chunked-patch live-session ceiling was zero.
+    #[error("lfs patch max active sessions must be greater than zero")]
+    ZeroLfsPatchMaxActiveSessions,
+    /// The LFS chunked-patch aggregate byte cap could not be parsed.
+    #[error("invalid lfs patch total max bytes")]
+    LfsPatchTotalMaxBytes(ParseIntError),
+    /// The LFS chunked-patch aggregate byte cap was zero.
+    #[error("lfs patch total max bytes must be greater than zero")]
+    ZeroLfsPatchTotalMaxBytes,
     /// The public base URL is not a valid URL.
     #[error("SHARDLINE_PUBLIC_BASE_URL is not a valid URL: {0}")]
     InvalidPublicBaseUrl(String),

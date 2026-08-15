@@ -116,6 +116,108 @@ async fn build_test_state_with_options(
     (state, tmp)
 }
 
+/// Like [`build_test_state_with_options`] but with an explicit global
+/// active-part-file cap (used by the F-19 part-file-cap hardening test).
+async fn build_test_state_with_s3_part_file_cap(
+    max_active_part_files: NonZeroUsize,
+) -> (Arc<AppState>, TempDir) {
+    let tmp = TempDir::new().expect("tempdir");
+    let chunk_size = NonZeroUsize::new(65536).unwrap();
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        tmp.path().to_path_buf(),
+        chunk_size,
+    )
+    .with_server_frontends([ServerFrontend::S3])
+    .expect("server frontends")
+    .with_token_signing_key(TEST_SIGNING_KEY.to_vec())
+    .expect("token signing key")
+    .with_s3_min_part_bytes(NonZeroU64::new(1).unwrap())
+    .expect("s3 min part bytes")
+    .with_s3_upload_session_max_bytes(NonZeroU64::new(1 << 40).unwrap())
+    .expect("s3 session max bytes")
+    .with_s3_upload_max_active_part_files(max_active_part_files)
+    .expect("s3 max active part files");
+
+    let backend = crate::ServerBackend::from_config(&config)
+        .await
+        .expect("backend from config");
+
+    let auth = crate::auth::ServerAuth::new(TEST_SIGNING_KEY).expect("ServerAuth");
+
+    let state = Arc::new(AppState {
+        config,
+        role: ServerRole::All,
+        backend,
+        auth: Some(auth),
+        provider_tokens: None,
+        reconstruction_cache: ReconstructionCacheService::disabled(),
+        transfer_limiter: TransferLimiter::new(chunk_size, NonZeroUsize::new(64).unwrap()),
+        oci_registry_token_limiter: Arc::new(tokio::sync::Semaphore::new(64)),
+        admission: crate::admission::WeightedAdmission::new(
+            std::num::NonZeroUsize::new(256).unwrap(),
+        ),
+        pools: crate::admission::ExecutionPools::default_sizes(),
+        protocol_metrics: ProtocolMetrics::default(),
+    });
+
+    (state, tmp)
+}
+
+/// Like [`build_test_state_with_options`] but with explicit S3 minimum AND
+/// maximum part sizes (used by the Complete-time min-size tests, whose
+/// conforming parts must exceed the 5 MiB minimum while staying under the
+/// max part cap).
+async fn build_test_state_with_part_sizes(
+    min_part_bytes: NonZeroU64,
+    max_part_bytes: NonZeroU64,
+    session_max_bytes: NonZeroU64,
+) -> (Arc<AppState>, TempDir) {
+    let tmp = TempDir::new().expect("tempdir");
+    let chunk_size = NonZeroUsize::new(65536).unwrap();
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        tmp.path().to_path_buf(),
+        chunk_size,
+    )
+    .with_server_frontends([ServerFrontend::S3])
+    .expect("server frontends")
+    .with_token_signing_key(TEST_SIGNING_KEY.to_vec())
+    .expect("token signing key")
+    .with_s3_max_part_bytes(max_part_bytes)
+    .expect("s3 max part bytes")
+    .with_s3_min_part_bytes(min_part_bytes)
+    .expect("s3 min part bytes")
+    .with_s3_upload_session_max_bytes(session_max_bytes)
+    .expect("s3 session max bytes");
+
+    let backend = crate::ServerBackend::from_config(&config)
+        .await
+        .expect("backend from config");
+
+    let auth = crate::auth::ServerAuth::new(TEST_SIGNING_KEY).expect("ServerAuth");
+
+    let state = Arc::new(AppState {
+        config,
+        role: ServerRole::All,
+        backend,
+        auth: Some(auth),
+        provider_tokens: None,
+        reconstruction_cache: ReconstructionCacheService::disabled(),
+        transfer_limiter: TransferLimiter::new(chunk_size, NonZeroUsize::new(64).unwrap()),
+        oci_registry_token_limiter: Arc::new(tokio::sync::Semaphore::new(64)),
+        admission: crate::admission::WeightedAdmission::new(
+            std::num::NonZeroUsize::new(256).unwrap(),
+        ),
+        pools: crate::admission::ExecutionPools::default_sizes(),
+        protocol_metrics: ProtocolMetrics::default(),
+    });
+
+    (state, tmp)
+}
+
 /// Mints a token scoped to `owner.name` with the test signing key.
 fn mint_token(scope: TokenScope, owner: &str, name: &str) -> String {
     let provider = LocalHmacProvider::new(TEST_SIGNING_KEY).unwrap();
@@ -2064,7 +2166,10 @@ async fn s3_overwrite_stress_readers_never_see_torn_or_absent_object() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn s3_complete_non_final_small_part_returns_entity_too_small() {
-    // The S3 5 MiB minimum applies to every part except the final one.
+    // F-19 rework: UploadPart accepts ANY body size (matching real S3, which
+    // validates the 5 MiB minimum only at CompleteMultipartUpload). A small
+    // NON-final part is accepted at UploadPart but rejected at Complete with
+    // EntityTooSmall.
     let (state, _tmp) = build_test_state_with_options(
         NonZeroU64::new(5_242_880).unwrap(), // 5 MiB minimum
         NonZeroU64::new(1 << 40).unwrap(),
@@ -2073,7 +2178,8 @@ async fn s3_complete_non_final_small_part_returns_entity_too_small() {
     let app = s3_router(state);
 
     let upload_id = create_upload_id(&app).await;
-    // Part 1 is tiny and NOT final (part 2 is); part 2 (final) may be small.
+    // Both parts are tiny (way below the 5 MiB minimum); UploadPart must
+    // accept them (a real 10 MiB / 8 MiB + 2 MiB client shape).
     assert_eq!(
         upload_part(&app, &upload_id, 1, b"tiny-non-final")
             .await
@@ -2085,22 +2191,102 @@ async fn s3_complete_non_final_small_part_returns_entity_too_small() {
         StatusCode::OK
     );
 
+    // Part 1 is NOT the last part (part 2 is), so Complete rejects it.
     let complete = complete_upload(&app, &upload_id, complete_body(&upload_id, &[1, 2])).await;
     assert_eq!(complete.status(), StatusCode::BAD_REQUEST);
     let body = String::from_utf8(body_bytes(complete).await).unwrap();
     assert!(body.contains("<Code>EntityTooSmall</Code>"), "{body}");
+}
 
-    // A single-part upload (the part IS final) has no minimum.
-    let single = create_upload_id(&app).await;
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_complete_accepts_small_last_part() {
+    // F-19 rework: the real-world multipart shape — e.g. a 10 MiB file with
+    // 8 MiB parts: part 1 = 8 MiB, part 2 = 2 MiB (final) — must complete.
+    // A small LAST part (the highest part number) is accepted at Complete,
+    // whatever its number.
+    let (state, _tmp) = build_test_state_with_part_sizes(
+        NonZeroU64::new(5_242_880).unwrap(), // 5 MiB minimum
+        NonZeroU64::new(1 << 30).unwrap(),   // 1 GiB max part
+        NonZeroU64::new(1 << 40).unwrap(),
+    )
+    .await;
+    let app = s3_router(state);
+    let auth = sigv4_auth(&mint_token(TokenScope::Read, OWNER, NAME));
+
+    let upload_id = create_upload_id(&app).await;
+    let part1 = vec![0x11_u8; 5_242_880]; // ≥ 5 MiB minimum
+    let part2 = vec![0x22_u8; 2 * 1024 * 1024]; // final part: small is fine
+    let assembled = [part1.clone(), part2.clone()].concat();
     assert_eq!(
-        upload_part(&app, &single, 1, b"only-part").await.status(),
+        upload_part(&app, &upload_id, 1, &part1).await.status(),
         StatusCode::OK
     );
-    let complete = complete_upload(&app, &single, complete_body(&single, &[1])).await;
     assert_eq!(
-        complete.status(),
-        StatusCode::OK,
-        "single final part has no minimum"
+        upload_part(&app, &upload_id, 2, &part2).await.status(),
+        StatusCode::OK
+    );
+
+    let complete = complete_upload(&app, &upload_id, complete_body(&upload_id, &[1, 2])).await;
+    assert_eq!(complete.status(), StatusCode::OK);
+
+    // The assembled object is byte-identical to the parts.
+    let get = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/{BUCKET}/{KEY}"))
+                .header(header::AUTHORIZATION, &auth)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get.status(), StatusCode::OK);
+    assert_eq!(body_bytes(get).await, assembled);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_upload_part_file_cap_rejects_before_any_file_materializes() {
+    // F-19: the global active-part-file cap bounds the part-FILE count
+    // directly (UploadPart accepts any size, so the byte quotas cannot bound
+    // it). A new part beyond the cap is rejected BEFORE its file is written —
+    // no file materializes on disk — and the rejection is a clean 429.
+    let (state, _tmp) = build_test_state_with_s3_part_file_cap(NonZeroUsize::new(2).unwrap()).await;
+    let root = state.config.root_dir().to_path_buf();
+    let app = s3_router(state);
+
+    let upload_id = create_upload_id(&app).await;
+    for part in [1_u32, 2] {
+        assert_eq!(
+            upload_part(&app, &upload_id, part, b"in-cap-part")
+                .await
+                .status(),
+            StatusCode::OK
+        );
+    }
+
+    // The third part file would exceed the cap of 2.
+    let over = upload_part(&app, &upload_id, 3, b"over-cap-part").await;
+    assert_eq!(over.status(), StatusCode::TOO_MANY_REQUESTS);
+    let body = String::from_utf8(body_bytes(over).await).unwrap();
+    assert!(body.contains("<Code>TooManyParts</Code>"), "{body}");
+
+    // The rejected part never materialized a file on disk.
+    assert!(
+        !shardline_s3_adapter::part_file_path(&root, &upload_id, 3)
+            .unwrap()
+            .exists(),
+        "an over-cap part must not leave a part file behind"
+    );
+
+    // The session stays usable: deleting one part's slot frees the cap, and
+    // overwriting an existing part number does not consume a new slot.
+    assert_eq!(
+        upload_part(&app, &upload_id, 1, b"overwrite-ok")
+            .await
+            .status(),
+        StatusCode::OK
     );
 }
 
@@ -2111,6 +2297,7 @@ async fn s3_upload_part_exceeding_session_quota_returns_error() {
         NonZeroU64::new(200).unwrap(), // 200-byte per-session quota
     )
     .await;
+    let root = state.config.root_dir().to_path_buf();
     let app = s3_router(state);
 
     let upload_id = create_upload_id(&app).await;
@@ -2125,6 +2312,15 @@ async fn s3_upload_part_exceeding_session_quota_returns_error() {
     assert_eq!(over.status(), StatusCode::BAD_REQUEST);
     let body = String::from_utf8(body_bytes(over).await).unwrap();
     assert!(body.contains("<Code>EntityTooLarge</Code>"), "{body}");
+
+    // F-19: the quota is enforced BEFORE the write, so the rejected part's
+    // file never materializes on disk.
+    assert!(
+        !shardline_s3_adapter::part_file_path(&root, &upload_id, 2)
+            .unwrap()
+            .exists(),
+        "an over-quota part must not leave a part file behind"
+    );
 
     // The rejected part must not have orphaned a part file: completing with
     // only part 1 works.
@@ -2352,6 +2548,64 @@ async fn s3_delete_objects_duplicate_keys_collapse_to_one_delete() {
             "key {key} must be deleted"
         );
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_delete_objects_cap_enforced_on_distinct_keys_during_dedupe() {
+    // F-23: the MAX_S3_DELETE_KEYS cap is enforced DURING the dedupe loop, on
+    // the DISTINCT key count — duplicate `<Key>` entries never count toward
+    // the cap, and the handler never materializes a key list beyond it. A
+    // body with exactly 1000 distinct keys plus many duplicates of them is
+    // accepted (the duplicates collapse and the request deletes 1000 keys).
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state);
+
+    // 1000 distinct keys, each repeated twice (2000 `<Object>` entries).
+    let distinct: Vec<String> = (0..shardline_s3_adapter::MAX_S3_DELETE_KEYS)
+        .map(|index| format!("cap-dedupe/key-{index:04}.txt"))
+        .collect();
+    let mut body = String::from("<?xml version=\"1.0\"?><Delete>");
+    for key in &distinct {
+        body.push_str(&format!("<Object><Key>{key}</Key></Object>"));
+        body.push_str(&format!("<Object><Key>{key}</Key></Object>"));
+    }
+    body.push_str("</Delete>");
+    let post = app
+        .clone()
+        .oneshot(delete_objects_request(format!("/{BUCKET}?delete="), body))
+        .await
+        .unwrap();
+    assert_eq!(
+        post.status(),
+        StatusCode::OK,
+        "duplicates must collapse and never trip the distinct-key cap"
+    );
+    let response_body = String::from_utf8(body_bytes(post).await).unwrap();
+    assert_eq!(
+        response_body.matches("<Deleted>").count(),
+        shardline_s3_adapter::MAX_S3_DELETE_KEYS,
+        "exactly the 1000 distinct keys are deleted"
+    );
+
+    // 1000 distinct keys + ONE extra distinct key → rejected (the 1001st
+    // distinct key trips the cap as soon as it is seen, never beyond it).
+    let mut body = String::from("<?xml version=\"1.0\"?><Delete>");
+    for key in &distinct {
+        body.push_str(&format!("<Object><Key>{key}</Key></Object>"));
+    }
+    body.push_str("<Object><Key>cap-dedupe/overflow.txt</Key></Object>");
+    body.push_str("</Delete>");
+    let post = app
+        .clone()
+        .oneshot(delete_objects_request(format!("/{BUCKET}?delete="), body))
+        .await
+        .unwrap();
+    assert_eq!(post.status(), StatusCode::BAD_REQUEST);
+    let response_body = String::from_utf8(body_bytes(post).await).unwrap();
+    assert!(
+        response_body.contains("<Code>MalformedXML</Code>"),
+        "{response_body}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
