@@ -200,6 +200,7 @@ async fn try_start_hub_server() -> Result<ServerGuard, Box<dyn std::error::Error
     )
     .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())?
     .with_server_frontends([ServerFrontend::Hub].iter().copied())?
+    .with_deployment_mode(shardline_server::DeploymentMode::Insecure)
     .with_provider_runtime(
         config_path,
         b"test-api-key".to_vec(),
@@ -238,6 +239,7 @@ async fn start_hub_server_with_signing_key(
         NonZeroUsize::new(128).unwrap(),
     )
     .with_token_signing_key(signing_key.to_vec())?
+    .with_deployment_mode(shardline_server::DeploymentMode::Insecure)
     .with_server_frontends([ServerFrontend::Hub])?;
     let server = tokio::spawn(async move { serve_with_listener(config, listener).await });
     if let Err(error) = wait_for_health(&base_url).await {

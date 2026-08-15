@@ -98,6 +98,7 @@ async fn exercise_git_xet_push_flow() -> Result<(), TestError> {
         NonZeroUsize::new(65_536).ok_or("chunk size")?,
     )
     .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())?
+    .with_deployment_mode(shardline_server::DeploymentMode::Insecure)
     .with_provider_runtime(
         provider_config,
         b"provider-bootstrap".to_vec(),
@@ -355,6 +356,7 @@ async fn exercise_git_xet_clone_flow() -> Result<(), TestError> {
         NonZeroUsize::new(65_536).ok_or("chunk size")?,
     )
     .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())?
+    .with_deployment_mode(shardline_server::DeploymentMode::Insecure)
     .with_provider_runtime(
         provider_config,
         b"provider-bootstrap".to_vec(),
@@ -772,6 +774,7 @@ async fn exercise_git_xet_multi_repo_flow() -> Result<(), TestError> {
         NonZeroUsize::new(65_536).ok_or("chunk size")?,
     )
     .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())?
+    .with_deployment_mode(shardline_server::DeploymentMode::Insecure)
     .with_provider_runtime(
         provider_config,
         b"provider-bootstrap".to_vec(),

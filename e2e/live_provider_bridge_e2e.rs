@@ -75,6 +75,7 @@ async fn exercise_live_provider_bridge_flow(config: LiveBridgeConfig) -> Result<
         NonZeroUsize::new(65_536).ok_or("chunk size")?,
     )
     .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())?
+    .with_deployment_mode(shardline_server::DeploymentMode::Insecure)
     .with_provider_runtime(
         provider_config,
         LIVE_PROVIDER_BOOTSTRAP_KEY.as_bytes().to_vec(),

@@ -56,6 +56,7 @@ async fn start_mixed_protocol_runtime() -> Result<MixedProtocolRuntime, Box<dyn 
         NonZeroUsize::new(128).unwrap_or(NonZeroUsize::MIN),
     )
     .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())?
+    .with_deployment_mode(shardline_server::DeploymentMode::Insecure)
     .with_server_frontends([
         ServerFrontend::Xet,
         ServerFrontend::Lfs,

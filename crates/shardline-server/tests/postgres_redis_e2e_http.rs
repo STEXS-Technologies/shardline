@@ -171,6 +171,7 @@ async fn test_server_with_redis_cache_hub_lfs() {
     .with_server_role(ServerRole::All)
     .with_server_frontends([ServerFrontend::Hub, ServerFrontend::Lfs])
     .unwrap()
+    .with_deployment_mode(shardline_server::DeploymentMode::Insecure)
     .with_token_signing_key(TEST_SIGNING_KEY.to_vec())
     .unwrap()
     .with_index_postgres_url(pg_url.to_owned())

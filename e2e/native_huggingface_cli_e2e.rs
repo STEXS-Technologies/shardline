@@ -401,6 +401,7 @@ async fn start_runtime(frontends: &[ServerFrontend]) -> Result<HubRuntime, TestE
     )
     .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())?
     .with_server_frontends(frontends.iter().copied())?
+    .with_deployment_mode(shardline_server::DeploymentMode::Insecure)
     .with_provider_runtime(
         provider_config,
         b"test-api-key".to_vec(),
