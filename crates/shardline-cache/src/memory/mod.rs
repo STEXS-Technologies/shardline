@@ -20,6 +20,11 @@ mod tests;
 
 use inner::{CacheInner, MemoryEntry};
 
+/// How long a `get`/`get_or_load` caller tolerates an in-flight loader before
+/// declaring it orphaned and cleaning up its loading latch. Bounds the wait for
+/// the same orphaned-loader condition in both `get` and `get_or_load`.
+const LOADER_STALL_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Bounded in-memory reconstruction cache adapter.
 #[derive(Debug, Clone)]
 pub struct MemoryReconstructionCache {
@@ -135,16 +140,56 @@ impl MemoryReconstructionCache {
             }
         } else {
             // Someone else is loading — wait for them.
-            notify.notified().await;
-            let inner = self.inner.read().await;
-            let now = Instant::now();
-            if let Some(entry) = inner.entries.get(key)
-                && entry.expires_at > now
-            {
-                Ok(Some(entry.payload.as_ref().clone()))
-            } else {
-                Ok(None)
+            //
+            // `tokio::sync::Notify` does not retain a permit: if the loader
+            // finishes and fires `notify_waiters()` before this waiter has
+            // polled its `notified()` future, the wakeup is LOST and a bare
+            // `notify.notified().await` would hang forever. Re-check the cache
+            // and loading map after every wakeup (and before the first wait),
+            // looping to re-arm the notification while the loader is still
+            // running. Wakes are bounded by LOADER_STALL_TIMEOUT so an
+            // orphaned loader (one that never notifies) cannot hang the caller.
+            loop {
+                {
+                    let inner = self.inner.read().await;
+                    let now = Instant::now();
+                    if let Some(entry) = inner.entries.get(key)
+                        && entry.expires_at > now
+                    {
+                        return Ok(Some(entry.payload.as_ref().clone()));
+                    }
+                    if !inner.loading.contains_key(key) {
+                        // The loading latch vanished without a stored value
+                        // (the loader failed or was cancelled). Report the miss
+                        // so the caller can retry; the loader that did run was
+                        // the only party allowed to put() + notify.
+                        break;
+                    }
+                }
+
+                tokio::select! {
+                    () = notify.notified() => {}
+                    () = tokio::time::sleep(LOADER_STALL_TIMEOUT) => {
+                        // The loader may have finished and stored a value right
+                        // before this timeout (a lost wakeup). Re-check before
+                        // declaring it orphaned.
+                        let inner = self.inner.read().await;
+                        let now = Instant::now();
+                        if let Some(entry) = inner.entries.get(key)
+                            && entry.expires_at > now
+                        {
+                            return Ok(Some(entry.payload.as_ref().clone()));
+                        }
+                        drop(inner);
+                        // The loader is orphaned: release its latch so later
+                        // callers can retry immediately, then report the miss.
+                        let mut write_guard = self.inner.write().await;
+                        write_guard.loading.remove(key);
+                        break;
+                    }
+                }
             }
+            Ok(None)
         }
     }
 }
@@ -188,7 +233,7 @@ impl AsyncReconstructionCache for MemoryReconstructionCache {
                 // entry and let the next caller retry.
                 tokio::select! {
                     () = notify.notified() => {}
-                    () = tokio::time::sleep(Duration::from_secs(30)) => {
+                    () = tokio::time::sleep(LOADER_STALL_TIMEOUT) => {
                         let mut write_guard = self.inner.write().await;
                         write_guard.loading.remove(key);
                         return Ok(None);

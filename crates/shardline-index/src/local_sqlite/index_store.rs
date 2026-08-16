@@ -369,6 +369,19 @@ impl LifecycleStore for LocalIndexStore {
         Ok(changed > 0)
     }
 
+    fn purge_webhook_deliveries_older_than(
+        &self,
+        older_than_unix_seconds: u64,
+    ) -> Result<u64, Self::Error> {
+        let connection = self.open_connection()?;
+        let changed = connection.execute(
+            "DELETE FROM shardline_webhook_deliveries
+             WHERE processed_at_unix_seconds < ?1",
+            params![u64_to_i64(older_than_unix_seconds)?],
+        )?;
+        Ok(u64::try_from(changed).unwrap_or(u64::MAX))
+    }
+
     fn provider_repository_state(
         &self,
         provider: RepositoryProvider,
@@ -1045,6 +1058,74 @@ mod tests {
         assert!(
             !LifecycleStore::delete_webhook_delivery(&store, &delivery)
                 .expect("second delete should succeed")
+        );
+    }
+
+    #[test]
+    fn webhook_delivery_purge_removes_only_rows_older_than_cutoff() {
+        let store = make_store();
+        let old = WebhookDelivery::new(
+            RepositoryProvider::GitHub,
+            "owner".into(),
+            "repo".into(),
+            "delivery-old".into(),
+            100,
+        )
+        .unwrap();
+        let fresh = WebhookDelivery::new(
+            RepositoryProvider::GitHub,
+            "owner".into(),
+            "repo".into(),
+            "delivery-fresh".into(),
+            900,
+        )
+        .unwrap();
+        LifecycleStore::record_webhook_delivery(&store, &old).unwrap();
+        LifecycleStore::record_webhook_delivery(&store, &fresh).unwrap();
+
+        let purged = LifecycleStore::purge_webhook_deliveries_older_than(&store, 500)
+            .expect("purge should succeed");
+        assert_eq!(purged, 1, "only the row older than the cutoff is purged");
+        let remaining = LifecycleStore::list_webhook_deliveries(&store).unwrap();
+        assert_eq!(
+            remaining.len(),
+            1,
+            "rows inside the retention window must survive the purge"
+        );
+        assert_eq!(remaining[0].delivery_id(), "delivery-fresh");
+        assert_eq!(remaining[0].processed_at_unix_seconds(), 900);
+        // Dedup semantics stay intact: the surviving claim still dedups.
+        assert!(
+            !LifecycleStore::record_webhook_delivery(&store, &fresh).unwrap(),
+            "surviving claim must still dedup after the purge"
+        );
+    }
+
+    #[test]
+    fn webhook_delivery_purge_is_idempotent_and_counts_rows() {
+        let store = make_store();
+        let delivery = WebhookDelivery::new(
+            RepositoryProvider::GitHub,
+            "owner".into(),
+            "repo".into(),
+            "delivery-purge".into(),
+            100,
+        )
+        .unwrap();
+        LifecycleStore::record_webhook_delivery(&store, &delivery).unwrap();
+
+        assert_eq!(
+            LifecycleStore::purge_webhook_deliveries_older_than(&store, 200).unwrap(),
+            1
+        );
+        assert_eq!(
+            LifecycleStore::purge_webhook_deliveries_older_than(&store, 200).unwrap(),
+            0
+        );
+        assert!(
+            LifecycleStore::list_webhook_deliveries(&store)
+                .unwrap()
+                .is_empty()
         );
     }
 

@@ -14,8 +14,8 @@ use super::secrets::{
 };
 use super::{
     AuthProviderKind, CONFIG_SECRET_KEY_BYTES, DEFAULT_LFS_PATCH_MAX_ACTIVE_SESSIONS,
-    DEFAULT_LFS_PATCH_TOTAL_MAX_BYTES, DEFAULT_LFS_PATCH_TTL_SECONDS,
-    DEFAULT_MAX_REQUEST_BODY_BYTES, DEFAULT_MAX_SHARD_FILES,
+    DEFAULT_LFS_PATCH_MAX_SEEK_AHEAD_BYTES, DEFAULT_LFS_PATCH_TOTAL_MAX_BYTES,
+    DEFAULT_LFS_PATCH_TTL_SECONDS, DEFAULT_MAX_REQUEST_BODY_BYTES, DEFAULT_MAX_SHARD_FILES,
     DEFAULT_MAX_SHARD_RECONSTRUCTION_TERMS, DEFAULT_MAX_SHARD_XORB_CHUNKS, DEFAULT_MAX_SHARD_XORBS,
     DEFAULT_S3_MAX_PART_BYTES, DEFAULT_S3_MIN_PART_BYTES, DEFAULT_S3_UPLOAD_MAX_ACTIVE_PART_FILES,
     DEFAULT_S3_UPLOAD_MAX_ACTIVE_SESSIONS, DEFAULT_S3_UPLOAD_SESSION_MAX_BYTES,
@@ -249,6 +249,14 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
     let Some(lfs_patch_total_max_bytes) = NonZeroU64::new(raw_lfs_patch_total_max_bytes) else {
         return Err(ServerConfigError::ZeroLfsPatchTotalMaxBytes);
     };
+    let raw_lfs_patch_max_seek_ahead_bytes = var("SHARDLINE_LFS_PATCH_MAX_SEEK_AHEAD_BYTES")
+        .unwrap_or_else(|_error| DEFAULT_LFS_PATCH_MAX_SEEK_AHEAD_BYTES.get().to_string())
+        .parse::<u64>()
+        .map_err(ServerConfigError::LfsPatchMaxSeekAheadBytes)?;
+    let Some(lfs_patch_max_seek_ahead_bytes) = NonZeroU64::new(raw_lfs_patch_max_seek_ahead_bytes)
+    else {
+        return Err(ServerConfigError::ZeroLfsPatchMaxSeekAheadBytes);
+    };
     let reconstruction_cache_redis_url = var("SHARDLINE_RECONSTRUCTION_CACHE_REDIS_URL").ok();
     let reconstruction_cache_redis_tls = load_redis_tls_config_from_env()?;
     let index_postgres_url = var("SHARDLINE_INDEX_POSTGRES_URL").ok();
@@ -347,23 +355,22 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
             observed_bytes: observed,
         },
     )?;
-    let metrics_token = match var("SHARDLINE_METRICS_TOKEN_FILE") {
-        Ok(path) => Some(read_secret_file_bytes(
-            Path::new(&path),
-            MAX_METRICS_TOKEN_BYTES,
-            false,
-            ServerConfigError::MetricsToken,
-            |observed_bytes, maximum_bytes| ServerConfigError::MetricsTokenTooLarge {
-                observed_bytes,
-                maximum_bytes,
-            },
-            |expected_bytes, observed_bytes| ServerConfigError::MetricsTokenLengthMismatch {
-                expected_bytes,
-                observed_bytes,
-            },
-        )?),
-        Err(_error) => None,
-    };
+    let metrics_token = load_secret_from_env_or_file_with_conflict_check(
+        ("SHARDLINE_METRICS_TOKEN", "SHARDLINE_METRICS_TOKEN_FILE"),
+        MAX_METRICS_TOKEN_BYTES,
+        false,
+        ServerConfigError::EmptyMetricsToken,
+        |env, file_env| ServerConfigError::SecretSourceConflict { env, file_env },
+        ServerConfigError::MetricsToken,
+        |observed, maximum| ServerConfigError::MetricsTokenTooLarge {
+            observed_bytes: observed,
+            maximum_bytes: maximum,
+        },
+        |expected, observed| ServerConfigError::MetricsTokenLengthMismatch {
+            expected_bytes: expected,
+            observed_bytes: observed,
+        },
+    )?;
     let provider_config_path = var("SHARDLINE_PROVIDER_CONFIG_FILE")
         .ok()
         .map(PathBuf::from);
@@ -397,6 +404,7 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
         .with_lfs_patch_ttl_seconds(lfs_patch_ttl_seconds)?
         .with_lfs_patch_max_active_sessions(lfs_patch_max_active_sessions)?
         .with_lfs_patch_total_max_bytes(lfs_patch_total_max_bytes)?
+        .with_lfs_patch_max_seek_ahead_bytes(lfs_patch_max_seek_ahead_bytes)?
         .with_admission_max_weight(admission_max_weight_from_env());
     config.cache.adapter = reconstruction_cache_adapter;
     config.cache.redis_url = reconstruction_cache_redis_url.map(SecretString::new);
@@ -441,6 +449,7 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
         &var("SHARDLINE_AUTH_PROVIDER").unwrap_or_else(|_error| "local".to_owned()),
     )?;
     let auth_oidc_issuer = var("SHARDLINE_AUTH_OIDC_ISSUER").ok();
+    let auth_oidc_audience = var("SHARDLINE_AUTH_OIDC_AUDIENCE").ok();
     let auth_jwks_url = var("SHARDLINE_AUTH_JWKS_URL").ok();
     let auth_jwks_issuer = var("SHARDLINE_AUTH_JWKS_ISSUER").ok();
     match auth_provider {
@@ -466,6 +475,9 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
     config = config.with_auth_provider(auth_provider);
     if let Some(issuer) = auth_oidc_issuer {
         config = config.with_auth_oidc_issuer(issuer);
+    }
+    if let Some(audience) = auth_oidc_audience {
+        config = config.with_auth_oidc_audience(audience);
     }
     if let Some(url) = auth_jwks_url {
         config = config.with_auth_jwks_url(url);
@@ -798,6 +810,7 @@ pub fn load_server_config_from_env_with_toml(
         }
         if let Some(oidc) = &auth.oidc {
             set_if_unset("SHARDLINE_AUTH_OIDC_ISSUER", oidc.issuer_url.clone());
+            set_if_unset("SHARDLINE_AUTH_OIDC_AUDIENCE", oidc.audience.clone());
         }
         if let Some(ed25519) = &auth.ed25519 {
             set_if_unset(
@@ -1149,6 +1162,53 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
         let config = result.unwrap();
         assert!(config.metrics_token().is_some());
 
+        remove_env_var("SHARDLINE_METRICS_TOKEN_FILE");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn load_server_config_metrics_token_from_direct_env() {
+        // SHARDLINE_METRICS_TOKEN (direct) must be honored for parity with the
+        // other secret knobs, not just the _FILE indirection.
+        set_env_var("SHARDLINE_METRICS_TOKEN", "direct-metrics-token");
+        remove_env_var("SHARDLINE_METRICS_TOKEN_FILE");
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+        let result = super::load_server_config_from_env();
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+        let config = result.unwrap();
+        assert_eq!(
+            config.metrics_token(),
+            Some(b"direct-metrics-token".as_slice()),
+            "SHARDLINE_METRICS_TOKEN must flow into the config"
+        );
+
+        remove_env_var("SHARDLINE_METRICS_TOKEN");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn load_server_config_metrics_token_rejects_both_sources() {
+        // Both the direct and file-indirection env vars set -> source conflict,
+        // matching every other secret knob.
+        set_env_var("SHARDLINE_METRICS_TOKEN", "direct-metrics-token");
+        set_env_var(
+            "SHARDLINE_METRICS_TOKEN_FILE",
+            "/tmp/does-not-need-to-exist",
+        );
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+        let result = super::load_server_config_from_env();
+        assert!(matches!(
+            result,
+            Err(super::ServerConfigError::SecretSourceConflict { .. })
+        ));
+
+        remove_env_var("SHARDLINE_METRICS_TOKEN");
         remove_env_var("SHARDLINE_METRICS_TOKEN_FILE");
         remove_env_var("SHARDLINE_ROOT_DIR");
         remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
@@ -1970,6 +2030,51 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
             Err(super::ServerConfigError::MissingOidcIssuer)
         ));
         remove_env_var("SHARDLINE_AUTH_PROVIDER");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn load_server_config_oidc_audience_from_env() {
+        set_env_var("SHARDLINE_AUTH_PROVIDER", "oidc");
+        set_env_var("SHARDLINE_AUTH_OIDC_ISSUER", "https://accounts.example.com");
+        set_env_var("SHARDLINE_AUTH_OIDC_AUDIENCE", "shardline-web");
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+        let result = super::load_server_config_from_env();
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+        let config = result.unwrap();
+        assert_eq!(
+            config.auth_oidc_audience(),
+            Some("shardline-web"),
+            "SHARDLINE_AUTH_OIDC_AUDIENCE must flow into the config"
+        );
+        remove_env_var("SHARDLINE_AUTH_PROVIDER");
+        remove_env_var("SHARDLINE_AUTH_OIDC_ISSUER");
+        remove_env_var("SHARDLINE_AUTH_OIDC_AUDIENCE");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn load_server_config_oidc_audience_unset_by_default() {
+        set_env_var("SHARDLINE_AUTH_PROVIDER", "oidc");
+        set_env_var("SHARDLINE_AUTH_OIDC_ISSUER", "https://accounts.example.com");
+        remove_env_var("SHARDLINE_AUTH_OIDC_AUDIENCE");
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+        let result = super::load_server_config_from_env();
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+        let config = result.unwrap();
+        assert_eq!(
+            config.auth_oidc_audience(),
+            None,
+            "audience must default to unset (permissive aud validation)"
+        );
+        remove_env_var("SHARDLINE_AUTH_PROVIDER");
+        remove_env_var("SHARDLINE_AUTH_OIDC_ISSUER");
         remove_env_var("SHARDLINE_ROOT_DIR");
         remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
     }

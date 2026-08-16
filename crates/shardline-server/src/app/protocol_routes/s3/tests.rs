@@ -2900,6 +2900,36 @@ async fn s3_put_if_none_match_on_existing_returns_412() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_put_if_none_match_on_absent_key_with_prefix_sibling_proceeds() {
+    // F-33: the exact key `a` is absent but a sibling key `a/b` has it as a
+    // string prefix. The entry lookup must resolve the exact row only — NOT
+    // the lexicographically-smallest sibling — so the create-if-absent PUT
+    // (If-None-Match: *) proceeds instead of a spurious 412 against the
+    // sibling's ETag.
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state);
+
+    seed_object(&app, "a/b").await;
+    assert_eq!(
+        object_status(&app, "a").await,
+        StatusCode::NOT_FOUND,
+        "the exact key must be absent despite the prefix sibling"
+    );
+
+    let put = app
+        .clone()
+        .oneshot(conditional_put_request(
+            format!("/{BUCKET}/a"),
+            b"created".to_vec(),
+            Some(("if-none-match", "*")),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(put.status(), StatusCode::OK);
+    assert_eq!(get_etag(&app, "a").await.len(), 34); // quoted 32-hex MD5
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn s3_put_if_match_mismatch_checked_before_write() {
     let (state, _tmp) = build_test_state().await;
     let app = s3_router(state);

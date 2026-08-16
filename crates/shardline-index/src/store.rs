@@ -153,6 +153,16 @@ macro_rules! impl_async_lifecycle_delegation {
             Box::pin(async move { LifecycleStore::delete_webhook_delivery(&store, &delivery) })
         }
 
+        fn purge_webhook_deliveries_older_than<'operation>(
+            &'operation self,
+            older_than_unix_seconds: u64,
+        ) -> IndexStoreFuture<'operation, u64, Self::Error> {
+            let store = self.clone();
+            Box::pin(async move {
+                LifecycleStore::purge_webhook_deliveries_older_than(&store, older_than_unix_seconds)
+            })
+        }
+
         fn provider_repository_state<'operation>(
             &'operation self,
             provider: RepositoryProvider,
@@ -389,6 +399,35 @@ pub trait LifecycleStore {
     /// Returns the adapter error when persistence fails.
     fn delete_webhook_delivery(&self, delivery: &WebhookDelivery) -> Result<bool, Self::Error>;
 
+    /// Deletes every processed provider webhook delivery claim recorded strictly
+    /// before `older_than_unix_seconds`, returning how many rows were removed.
+    ///
+    /// This bounds the replay-dedup table: a delivery claim is only needed
+    /// within the retention window, so old claims can be purged without
+    /// weakening `ON CONFLICT DO NOTHING` dedup for deliveries still inside it.
+    ///
+    /// The default implementation scans and deletes one row at a time; adapters
+    /// with a timestamp index (Postgres, SQLite) override it with a single
+    /// range `DELETE`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the adapter error when the scan or deletion fails.
+    fn purge_webhook_deliveries_older_than(
+        &self,
+        older_than_unix_seconds: u64,
+    ) -> Result<u64, Self::Error> {
+        let mut purged = 0_u64;
+        for delivery in self.list_webhook_deliveries()? {
+            if delivery.processed_at_unix_seconds() < older_than_unix_seconds
+                && self.delete_webhook_delivery(&delivery)?
+            {
+                purged = purged.saturating_add(1);
+            }
+        }
+        Ok(purged)
+    }
+
     /// Loads durable provider-derived lifecycle state for one repository.
     ///
     /// # Errors
@@ -601,6 +640,17 @@ pub trait AsyncIndexStore {
         &'operation self,
         delivery: &'operation WebhookDelivery,
     ) -> IndexStoreFuture<'operation, bool, Self::Error>;
+
+    /// Deletes every processed provider webhook delivery claim recorded strictly
+    /// before `older_than_unix_seconds`, returning how many rows were removed.
+    ///
+    /// Bounds the replay-dedup table: claims older than the retention window
+    /// are purged without weakening `ON CONFLICT DO NOTHING` dedup for
+    /// deliveries still inside it.
+    fn purge_webhook_deliveries_older_than<'operation>(
+        &'operation self,
+        older_than_unix_seconds: u64,
+    ) -> IndexStoreFuture<'operation, u64, Self::Error>;
 
     /// Loads durable provider-derived lifecycle state for one repository.
     fn provider_repository_state<'operation>(

@@ -46,6 +46,7 @@
 //!     rebuilt_dedupe_shard_mappings: 0,
 //!     unchanged_dedupe_shard_mappings: 0,
 //!     removed_stale_dedupe_shard_mappings: 0,
+//!     preserved_latest_records_unreadable_version: Vec::new(),
 //!     issues: vec![issue],
 //! };
 //! assert!(!report.is_clean());

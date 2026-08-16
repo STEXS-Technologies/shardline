@@ -316,6 +316,11 @@ pub enum ServerConfigError {
         /// Observed secret file length in bytes after bounded read.
         observed_bytes: u64,
     },
+    /// Strict deployment mode requires a metrics bearer token.
+    #[error(
+        "strict deployment mode requires a metrics token (set SHARDLINE_METRICS_TOKEN or SHARDLINE_METRICS_TOKEN_FILE)"
+    )]
+    MissingMetricsToken,
     /// The selected role uses the local HMAC provider and would expose CAS routes
     /// without bearer-token verification.
     #[error("served shardline routes require shardline token signing key configuration")]
@@ -426,6 +431,12 @@ pub enum ServerConfigError {
     /// The LFS chunked-patch aggregate byte cap was zero.
     #[error("lfs patch total max bytes must be greater than zero")]
     ZeroLfsPatchTotalMaxBytes,
+    /// The LFS chunked-patch seek-ahead bound could not be parsed.
+    #[error("invalid lfs patch max seek ahead bytes")]
+    LfsPatchMaxSeekAheadBytes(ParseIntError),
+    /// The LFS chunked-patch seek-ahead bound was zero.
+    #[error("lfs patch max seek ahead bytes must be greater than zero")]
+    ZeroLfsPatchMaxSeekAheadBytes,
     /// The public base URL is not a valid URL.
     #[error("SHARDLINE_PUBLIC_BASE_URL is not a valid URL: {0}")]
     InvalidPublicBaseUrl(String),

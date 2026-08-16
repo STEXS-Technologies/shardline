@@ -172,3 +172,19 @@ pub(crate) const DEFAULT_LFS_PATCH_TOTAL_MAX_BYTES: NonZeroU64 =
         Some(value) => value,
         None => NonZeroU64::MIN,
     };
+
+/// Default maximum distance an LFS chunked-patch (PATCH) `Content-Range` may
+/// start ahead of the session's current high-water mark (64 MiB, matching the
+/// default maximum request-body size).
+///
+/// The chunked-upload path only accepts sequential growth (mirroring the S3
+/// multipart path): a chunk may begin at most this far beyond the last
+/// recorded end-of-range. Together with allocated-block staging accounting this
+/// closes the sparse-file write amplification hole, where a handful of 1-byte
+/// writes at multi-TiB offsets would otherwise create huge logical staging
+/// files while consuming almost no disk (F-30).
+pub(crate) const DEFAULT_LFS_PATCH_MAX_SEEK_AHEAD_BYTES: NonZeroU64 =
+    match NonZeroU64::new(67_108_864) {
+        Some(value) => value,
+        None => NonZeroU64::MIN,
+    };

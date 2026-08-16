@@ -381,6 +381,23 @@ impl LocalBackend {
             .map_err(ServerError::from)
     }
 
+    /// Resolves exactly one S3 object listing row by its full raw key (no
+    /// prefix matching).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError`] when the index lookup fails.
+    pub(crate) async fn scan_s3_object_exact(
+        &self,
+        scope_namespace: &str,
+        object_key: &str,
+    ) -> Result<Option<S3ObjectEntry>, ServerError> {
+        self.index_store
+            .scan_s3_object_exact(scope_namespace, object_key)
+            .await
+            .map_err(ServerError::from)
+    }
+
     /// Resolves a single canonical path to its tree entry, if any.
     ///
     /// # Errors

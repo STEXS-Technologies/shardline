@@ -207,6 +207,57 @@ impl TestServer {
     }
 }
 
+impl TestServer {
+    /// Starts a permissive no-provider server (no auth provider configured at
+    /// all), used to assert the documented anonymous full-access behavior:
+    /// with no auth, Hub routes are a no-op binding check and every request
+    /// proceeds as `anonymous_full_access`.
+    async fn start_permissive() -> Self {
+        let tmp = TempDir::new().unwrap();
+        let chunk_size = NonZeroUsize::new(65536).unwrap();
+        let config = ServerConfig::new(
+            "127.0.0.1:0".parse().unwrap(),
+            "http://127.0.0.1:8080".to_owned(),
+            tmp.path().to_path_buf(),
+            chunk_size,
+        )
+        .with_server_role(ServerRole::All)
+        .with_server_frontends([
+            ServerFrontend::S3,
+            ServerFrontend::Lfs,
+            ServerFrontend::BazelHttp,
+            ServerFrontend::Oci,
+            ServerFrontend::Hub,
+            ServerFrontend::Xet,
+        ])
+        .unwrap()
+        .with_deployment_mode(shardline_server::DeploymentMode::Insecure)
+        .with_reconstruction_cache_disabled();
+
+        let app = app::router(config).await.unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let base_url = format!("http://{addr}");
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    shutdown_rx.await.ok();
+                })
+                .await
+                .ok();
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        Self {
+            shutdown: Some(shutdown_tx),
+            base_url,
+            _tmp: tmp,
+        }
+    }
+}
+
 impl Drop for TestServer {
     fn drop(&mut self) {
         if let Some(tx) = self.shutdown.take() {
@@ -648,6 +699,7 @@ async fn matrix_oci_cases_a_through_e() {
         resp.status()
     );
     let resp = app
+        .clone()
         .oneshot(
             axum::http::Request::builder()
                 .method("GET")
@@ -663,6 +715,257 @@ async fn matrix_oci_cases_a_through_e() {
         .await
         .unwrap();
     assert_eq!(body.as_ref(), content.as_slice());
+
+    // --- Blob-session PATCH: init a session, then drive (c)/(d)/(e). ---
+    let init_uri = format!("/v2/{repo_a}/blobs/uploads/");
+    let init = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri(&init_uri)
+                .header("Authorization", bearer(&token_a_write))
+                .header("Content-Type", "application/octet-stream")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        init.status().is_success(),
+        "oci session init should succeed, got {}",
+        init.status()
+    );
+    let session_location = init
+        .headers()
+        .get("location")
+        .expect("session init must return a Location header")
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let patch_uri = session_location;
+
+    // (c) cross-tenant PATCH on repo A's session.
+    let resp = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("PATCH")
+                .uri(&patch_uri)
+                .header("Authorization", bearer(&token_b_write))
+                .header("Content-Type", "application/octet-stream")
+                .body(Body::from(content.clone()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_denied_client_error(resp.status(), "(c)", "oci blob-session PATCH cross-tenant");
+    // (d) Read-scoped token on a PATCH.
+    let resp = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("PATCH")
+                .uri(&patch_uri)
+                .header("Authorization", bearer(&token_a_read))
+                .header("Content-Type", "application/octet-stream")
+                .body(Body::from(content.clone()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_denied_403(resp.status(), "(d)", "oci blob-session PATCH read-scope");
+    // (e) valid Write token PATCH succeeds.
+    let resp = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("PATCH")
+                .uri(&patch_uri)
+                .header("Authorization", bearer(&token_a_write))
+                .header("Content-Type", "application/octet-stream")
+                .body(Body::from(content.clone()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        resp.status().is_success(),
+        "oci (e) blob-session PATCH should succeed, got {}",
+        resp.status()
+    );
+
+    // --- Manifest PUT / DELETE: cross-tenant deny + no side effect. ---
+    let manifest_doc = serde_json::json!({
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "config": {
+            "mediaType": "application/vnd.oci.image.config.v1+json",
+            "size": content.len(),
+            "digest": format!("sha256:{digest}")
+        },
+        "layers": [{
+            "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+            "size": content.len(),
+            "digest": format!("sha256:{digest}")
+        }]
+    })
+    .to_string();
+    let manifest_uri = format!("/v2/{repo_a}/manifests/latest");
+
+    // (c) cross-tenant manifest PUT.
+    let resp = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("PUT")
+                .uri(&manifest_uri)
+                .header("Authorization", bearer(&token_b_write))
+                .header("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+                .body(Body::from(manifest_doc.clone()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_denied_client_error(resp.status(), "(c)", "oci manifest PUT cross-tenant");
+    // (d) Read-scoped token on a manifest PUT.
+    let resp = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("PUT")
+                .uri(&manifest_uri)
+                .header("Authorization", bearer(&token_a_read))
+                .header("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+                .body(Body::from(manifest_doc.clone()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_denied_403(resp.status(), "(d)", "oci manifest PUT read-scope");
+
+    // No side effect from the denied manifest writes: the tag must be absent.
+    let resp = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri(&manifest_uri)
+                .header("Authorization", bearer(&token_a_write))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        axum::http::StatusCode::NOT_FOUND,
+        "oci: denied manifest PUT must not publish the tag"
+    );
+
+    // (e) valid Write token publishes the manifest.
+    let resp = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("PUT")
+                .uri(&manifest_uri)
+                .header("Authorization", bearer(&token_a_write))
+                .header("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+                .body(Body::from(manifest_doc))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        resp.status().is_success(),
+        "oci (e) manifest PUT should succeed, got {}",
+        resp.status()
+    );
+    let resp = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri(&manifest_uri)
+                .header("Authorization", bearer(&token_a_write))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        axum::http::StatusCode::OK,
+        "oci: published manifest must be readable"
+    );
+
+    // (c) cross-tenant manifest DELETE is denied and leaves the tag intact.
+    let resp = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("DELETE")
+                .uri(&manifest_uri)
+                .header("Authorization", bearer(&token_b_write))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_denied_client_error(resp.status(), "(c)", "oci manifest DELETE cross-tenant");
+    let resp = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri(&manifest_uri)
+                .header("Authorization", bearer(&token_a_write))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        axum::http::StatusCode::OK,
+        "oci: denied manifest DELETE must not remove the tag"
+    );
+
+    // (e) valid Write token deletes the manifest.
+    let resp = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("DELETE")
+                .uri(&manifest_uri)
+                .header("Authorization", bearer(&token_a_write))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        resp.status().is_success(),
+        "oci (e) manifest DELETE should succeed, got {}",
+        resp.status()
+    );
+    let resp = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri(&manifest_uri)
+                .header("Authorization", bearer(&token_a_write))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        axum::http::StatusCode::NOT_FOUND,
+        "oci: deleted manifest tag must be gone"
+    );
 }
 
 // ===========================================================================
@@ -814,6 +1117,292 @@ async fn matrix_hub_cases_a_through_e() {
         .await
         .unwrap();
     assert_eq!(resp.status(), axum::http::StatusCode::OK);
+}
+
+// ===========================================================================
+// Hub git smart-HTTP receive-pack — deny no-side-effect invariant
+//
+// POST /{type}/{ns}/{repo}/git-receive-pack requires a Write token whose
+// repository scope matches the URL pair. A cross-tenant push must be denied
+// (4xx) with zero side effects on the target repository.
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn matrix_hub_git_smart_http_receive_pack_cross_tenant() {
+    let server = TestServer::start().await;
+    let client = reqwest::Client::new();
+
+    let repo_a = format!("{OWNER_A}/receive-repo");
+    let create_url = server.url("/api/repos/create");
+    let receive_url = server.url(&format!("/models/{repo_a}/git-receive-pack"));
+    let revisions_url = server.url(&format!("/api/models/{repo_a}/revisions"));
+    let token_a_write = mint_token(TokenScope::Write, OWNER_A, "receive-repo");
+    let token_a_read = mint_token(TokenScope::Read, OWNER_A, "receive-repo");
+    let token_b_write = mint_token(TokenScope::Write, OWNER_B, NAME_B);
+
+    let create = client
+        .post(&create_url)
+        .header("Authorization", bearer(&token_a_write))
+        .header("Content-Type", "application/json")
+        .body(
+            serde_json::json!({"type": "model", "name": repo_a.clone(), "private": false})
+                .to_string(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        create.status().is_success(),
+        "receive-repo create failed: {}",
+        create.status()
+    );
+
+    // (a) no credentials.
+    let resp = client
+        .post(&receive_url)
+        .header("Content-Type", "application/x-git-receive-pack-request")
+        .body(Vec::new())
+        .send()
+        .await
+        .unwrap();
+    assert_denied_401(resp.status(), "(a)", "hub receive-pack");
+    // (b) invalid credentials.
+    let resp = client
+        .post(&receive_url)
+        .header("Authorization", bearer(GARBAGE_TOKEN))
+        .header("Content-Type", "application/x-git-receive-pack-request")
+        .body(Vec::new())
+        .send()
+        .await
+        .unwrap();
+    assert_denied_401(resp.status(), "(b)", "hub receive-pack");
+    // (c) cross-tenant: repo B's Write token pushes to repo A.
+    let resp = client
+        .post(&receive_url)
+        .header("Authorization", bearer(&token_b_write))
+        .header("Content-Type", "application/x-git-receive-pack-request")
+        .body(Vec::new())
+        .send()
+        .await
+        .unwrap();
+    assert_denied_client_error(resp.status(), "(c)", "hub receive-pack cross-tenant");
+    // (d) Read-scoped token on a write.
+    let resp = client
+        .post(&receive_url)
+        .header("Authorization", bearer(&token_a_read))
+        .header("Content-Type", "application/x-git-receive-pack-request")
+        .body(Vec::new())
+        .send()
+        .await
+        .unwrap();
+    assert_denied_403(resp.status(), "(d)", "hub receive-pack read-scope");
+
+    // No side effect: every denied push left the repository without refs.
+    let resp = client
+        .get(&revisions_url)
+        .header("Authorization", bearer(&token_a_write))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), axum::http::StatusCode::OK);
+    let body = resp.text().await.unwrap();
+    assert!(
+        !body.contains("receive-pack") && !body.contains("refs/heads"),
+        "hub: denied receive-pack pushes must not create refs, got {body}"
+    );
+
+    // (e) control: repo A's own Write token reaches the handler (200 report;
+    // an empty update set is a benign no-op push).
+    let resp = client
+        .post(&receive_url)
+        .header("Authorization", bearer(&token_a_write))
+        .header("Content-Type", "application/x-git-receive-pack-request")
+        .body(Vec::new())
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        resp.status().is_success(),
+        "hub (e) receive-pack should reach the handler, got {}",
+        resp.status()
+    );
+}
+
+// ===========================================================================
+// Hub verb-collision repo cell — a repository named `commit` must bind to the
+// correct (ns, repo) pair so cross-tenant denial stays effective and the
+// owning tenant's commits succeed.
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn matrix_hub_verb_collision_repo_named_commit() {
+    let server = TestServer::start().await;
+    let client = reqwest::Client::new();
+
+    let repo_collision = format!("{OWNER_A}/commit");
+    let create_url = server.url("/api/repos/create");
+    // Repo "commit": /api/models/{ns}/commit/commit/{rev} — the second "commit"
+    // is the route verb, the repo itself collides with it.
+    let commit_url = server.url(&format!("/api/models/{repo_collision}/commit/main"));
+    let revisions_url = server.url(&format!("/api/models/{repo_collision}/revisions"));
+    let token_a_write = mint_token(TokenScope::Write, OWNER_A, "commit");
+    let token_a_read = mint_token(TokenScope::Read, OWNER_A, "commit");
+    let token_b_write = mint_token(TokenScope::Write, OWNER_B, NAME_B);
+
+    let create = client
+        .post(&create_url)
+        .header("Authorization", bearer(&token_a_write))
+        .header("Content-Type", "application/json")
+        .body(
+            serde_json::json!({"type": "model", "name": repo_collision.clone(), "private": false})
+                .to_string(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        create.status().is_success(),
+        "verb-collision repo create failed: {}",
+        create.status()
+    );
+
+    // (c) cross-tenant: repo B's token must be denied on the verb-collision
+    // repo — if the (ns, repo) pair were misparsed, the binding would enforce
+    // against the wrong pair.
+    let content_b64 = base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        b"verb-collision cross-tenant content",
+    );
+    let ndjson = format!(
+        "{{\"header\":{{\"message\":\"x-tenant commit\",\"parentCommit\":\"\"}}}}\n\
+         {{\"file\":{{\"path\":\"secret.txt\",\"content\":\"{content_b64}\"}}}}"
+    );
+    let resp = client
+        .post(&commit_url)
+        .header("Authorization", bearer(&token_b_write))
+        .header("Content-Type", "application/x-ndjson")
+        .body(ndjson)
+        .send()
+        .await
+        .unwrap();
+    assert_denied_client_error(
+        resp.status(),
+        "(c)",
+        "hub verb-collision commit cross-tenant",
+    );
+
+    // No side effect: the verb-collision repo has no content from the denial.
+    let resp = client
+        .get(&revisions_url)
+        .header("Authorization", bearer(&token_a_write))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), axum::http::StatusCode::OK);
+    let body = resp.text().await.unwrap();
+    assert!(
+        !body.contains("x-tenant commit") && !body.contains("secret.txt"),
+        "hub: denied cross-tenant commit must not touch the verb-collision repo"
+    );
+
+    // (e) the owning tenant's Write token commits successfully to the
+    // verb-collision repo, proving the binding resolves to (tenant-a, commit).
+    let ndjson_ok = format!(
+        "{{\"header\":{{\"message\":\"own verb-collision commit\",\"parentCommit\":\"\"}}}}\n\
+         {{\"file\":{{\"path\":\"ok.txt\",\"content\":\"{content_b64}\"}}}}"
+    );
+    let resp = client
+        .post(&commit_url)
+        .header("Authorization", bearer(&token_a_write))
+        .header("Content-Type", "application/x-ndjson")
+        .body(ndjson_ok.clone())
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        resp.status().is_success(),
+        "hub (e) verb-collision repo commit should succeed, got {}",
+        resp.status()
+    );
+
+    // (d) Read-scoped token on the same write route is denied.
+    let resp = client
+        .post(&commit_url)
+        .header("Authorization", bearer(&token_a_read))
+        .header("Content-Type", "application/x-ndjson")
+        .body(ndjson_ok)
+        .send()
+        .await
+        .unwrap();
+    assert_denied_403(resp.status(), "(d)", "hub verb-collision commit read-scope");
+}
+
+// ===========================================================================
+// Permissive no-provider cell — with NO auth provider configured, Hub routes
+// are a documented no-op binding check: every request proceeds as anonymous
+// full access (development deployments without auth keep working).
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn matrix_permissive_no_provider_full_access() {
+    let server = TestServer::start_permissive().await;
+    let client = reqwest::Client::new();
+
+    let repo_a = format!("{OWNER_A}/{NAME_A}");
+    let create_url = server.url("/api/repos/create");
+    let info_url = server.url(&format!("/api/models/{repo_a}"));
+    let commit_url = server.url(&format!("/api/models/{repo_a}/commit/main"));
+    let whoami_url = server.url("/api/whoami-v2");
+
+    // No Authorization header anywhere: permissive mode grants full access.
+    let create = client
+        .post(&create_url)
+        .header("Content-Type", "application/json")
+        .body(
+            serde_json::json!({"type": "model", "name": repo_a.clone(), "private": false})
+                .to_string(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        create.status().is_success(),
+        "permissive repo create should succeed without auth, got {}",
+        create.status()
+    );
+    let info = client.get(&info_url).send().await.unwrap();
+    assert_eq!(
+        info.status(),
+        axum::http::StatusCode::OK,
+        "permissive repo read should succeed without auth"
+    );
+    let content_b64 = base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        b"permissive-mode content",
+    );
+    let ndjson = format!(
+        "{{\"header\":{{\"message\":\"anon commit\",\"parentCommit\":\"\"}}}}\n\
+         {{\"file\":{{\"path\":\"anon.txt\",\"content\":\"{content_b64}\"}}}}"
+    );
+    let commit = client
+        .post(&commit_url)
+        .header("Content-Type", "application/x-ndjson")
+        .body(ndjson)
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        commit.status().is_success(),
+        "permissive commit should succeed without auth, got {}",
+        commit.status()
+    );
+    let whoami = client.get(&whoami_url).send().await.unwrap();
+    assert_eq!(whoami.status(), axum::http::StatusCode::OK);
+    let json: serde_json::Value = whoami.json().await.unwrap();
+    assert_eq!(
+        json["name"], "anonymous",
+        "permissive whoami must report the anonymous identity"
+    );
 }
 
 // ===========================================================================

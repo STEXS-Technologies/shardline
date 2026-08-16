@@ -199,6 +199,11 @@ impl Clone for AdmissionCounters {
 
 /// Standard request weights for admission control.
 pub mod weights {
+    /// Weight for a lightweight xorb/chunk read (a repository-reference
+    /// metadata scan). Read handlers enumerate the repo's latest + version
+    /// records per request (O(N) in record count), so they are admission-gated
+    /// like the upload/reconstruction paths to bound concurrent scans.
+    pub const XORB_READ: u64 = 1;
     /// Weight for a xorb upload (stores chunks + metadata).
     pub const XORB_UPLOAD: u64 = 4;
     /// Weight for a shard upload (parsing + metadata commit).

@@ -201,10 +201,26 @@ fn s3_store_default_config_uses_standard_s3_endpoint() {
 }
 
 #[test]
-fn is_temp_upload_key_matches_standard_temp_format() {
-    assert!(is_temp_upload_key("uploads/obj.tmp.42"));
-    assert!(is_temp_upload_key("obj.tmp.0"));
-    assert!(is_temp_upload_key("obj.tmp.999999"));
+fn is_temp_upload_key_matches_generated_overwrite_temp_format() {
+    // Grammar (a): `<base>.tmp.<counter>.<pid>.<nanos>` with all three
+    // trailing dot-separated groups decimal digits — the exact shape
+    // `put_overwrite` / `temp_key_for` generate.
+    assert!(is_temp_upload_key(
+        "uploads/obj.tmp.0.12345.1750000000000000000"
+    ));
+    assert!(is_temp_upload_key("obj.tmp.42.9.1750000000000000000"));
+    assert!(is_temp_upload_key("a/b/c.tmp.999999.1.1750000000000000000"));
+}
+
+#[test]
+fn is_temp_upload_key_matches_generated_stream_upload_temp_prefix() {
+    // Grammar (b): the reserved `__tmp/shardline-stream-upload/` prefix with a
+    // `<nanos>-<pid>-<counter>` tail — the exact shape
+    // `temporary_upload_location` generates.
+    assert!(is_temp_upload_key(
+        "__tmp/shardline-stream-upload/1750000000000000000-42-7"
+    ));
+    assert!(is_temp_upload_key("__tmp/shardline-stream-upload/0-1-2"));
 }
 
 #[test]
@@ -213,6 +229,21 @@ fn is_temp_upload_key_rejects_non_temp() {
     assert!(!is_temp_upload_key("obj.tmp."));
     assert!(!is_temp_upload_key("obj.tmp.abc"));
     assert!(!is_temp_upload_key("obj.tmpx.42"));
+}
+
+#[test]
+fn is_temp_upload_key_does_not_shadow_user_keys() {
+    // F-49: dots are legal in user keys. `data.tmp.1` is one digit group (not
+    // the three-group generated suffix), `report.tmp.2026.1` is two groups,
+    // and a mid-key `.tmp.<digits>` / non-digit tail never matches — none of
+    // these may be filtered from listings or GC enumeration.
+    assert!(!is_temp_upload_key("data.tmp.1"));
+    assert!(!is_temp_upload_key("report.tmp.2026.1"));
+    assert!(!is_temp_upload_key("prefix/obj.tmp.123/suffix"));
+    assert!(!is_temp_upload_key("obj.tmp.42extra"));
+    assert!(!is_temp_upload_key("obj.tmp.42.tmp.99"));
+    assert!(!is_temp_upload_key(".tmp.42"));
+    assert!(!is_temp_upload_key("a/.tmp.42"));
 }
 
 #[test]
@@ -653,7 +684,7 @@ fn is_temp_upload_key_rejects_no_digits_after_tmp() {
 #[test]
 fn is_temp_upload_key_rejects_multiple_tmp_as_middle_segment() {
     assert!(!is_temp_upload_key("obj.tmp.tmp.42"));
-    assert!(is_temp_upload_key("obj.tmp.42.tmp.99"));
+    assert!(!is_temp_upload_key("obj.tmp.42.tmp.99"));
 }
 
 #[test]
@@ -664,28 +695,35 @@ fn is_temp_upload_key_rejects_without_tmp_suffix() {
 }
 
 #[test]
-fn is_temp_upload_key_accepts_middle_of_key() {
-    assert!(is_temp_upload_key("prefix/obj.tmp.123/suffix"));
-}
-
-#[test]
-fn is_temp_upload_key_accepts_tmp_at_start_of_key() {
-    assert!(is_temp_upload_key(".tmp.42"));
-}
-
-#[test]
-fn is_temp_upload_key_accepts_tmp_at_start_of_segment() {
-    assert!(is_temp_upload_key("a/.tmp.42"));
-}
-
-#[test]
-fn is_temp_upload_key_accepts_when_digit_followed_by_extra() {
-    assert!(is_temp_upload_key("obj.tmp.42extra"));
+fn is_temp_upload_key_rejects_partial_grammar_matches() {
+    // One or two trailing digit groups, a `.tmp.` in the middle of the key, or
+    // a bare `.tmp.<digits>` with no base are NOT the generated three-group
+    // suffix — none may be filtered from listings (F-49).
+    assert!(!is_temp_upload_key("prefix/obj.tmp.123/suffix"));
+    assert!(!is_temp_upload_key(".tmp.42"));
+    assert!(!is_temp_upload_key("a/.tmp.42"));
+    assert!(!is_temp_upload_key("obj.tmp.42extra"));
+    assert!(!is_temp_upload_key("obj.tmp.42"));
+    assert!(!is_temp_upload_key("obj.tmp.42.99"));
 }
 
 #[test]
 fn is_temp_upload_key_rejects_tmp_alone_after_prefix() {
     assert!(!is_temp_upload_key("prefix.tmp."));
+}
+
+#[test]
+fn is_temp_upload_key_rejects_stream_upload_prefix_with_wrong_shape() {
+    // The reserved prefix must carry the exact `<nanos>-<pid>-<counter>` tail;
+    // other names under it (e.g. a user-created file) are not filtered.
+    assert!(!is_temp_upload_key("__tmp/shardline-stream-upload/"));
+    assert!(!is_temp_upload_key(
+        "__tmp/shardline-stream-upload/notes.txt"
+    ));
+    assert!(!is_temp_upload_key(
+        "__tmp/shardline-stream-upload/42-abc-7"
+    ));
+    assert!(!is_temp_upload_key("__tmp/other/1750000000000000000-42-7"));
 }
 
 // ── S3ObjectStoreConfig Debug with missing credentials ─────────────────
@@ -940,6 +978,7 @@ mod minio_tests {
 
     use super::super::{
         BeginMultipartUploadResult, S3ObjectStore, S3ObjectStoreConfig, S3ObjectStoreError,
+        temp_key_for,
     };
     use crate::{
         DeleteOutcome, ObjectBody, ObjectIntegrity, ObjectKey, ObjectPrefix,
@@ -1208,6 +1247,110 @@ mod minio_tests {
 
         let idempotent = store.copy_object_if_absent(&src, &dst);
         assert!(matches!(idempotent, Ok(PutOutcome::AlreadyExists)));
+    }
+
+    /// Seeds an object via the store (through the key prefix).
+    fn put_test_object(store: &S3ObjectStore, key: &str, data: &[u8]) {
+        let key = ObjectKey::parse(key).unwrap();
+        let integrity = ObjectIntegrity::new(super::super::chunk_hash(data), data.len() as u64);
+        store
+            .put_if_absent(&key, ObjectBody::from_slice(data), &integrity)
+            .unwrap();
+    }
+
+    fn unix_now_seconds() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_secs())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn minio_sweep_stale_temp_keys_reaps_only_generated_temps() {
+        // F-48/F-49: the age-bounded temp sweep must delete ONLY keys matching
+        // the exact generated-temp grammars, and only when they are older than
+        // the age bound. `now + 2h` pushes every freshly written object past
+        // the 1h cutoff, so all matching temps are stale.
+        let stack = match ensure_minio() {
+            Some(s) => s,
+            None => return,
+        };
+        let prefix = stack.unique_s3_key_prefix("test-temp-sweep-stale");
+        let store = build_s3_store(&stack, Some(&prefix));
+
+        // Grammar (a): the overwrite/multipart temp suffix.
+        let overwrite_temp = temp_key_for(&ObjectKey::parse("data/model.xorb").unwrap()).unwrap();
+        put_test_object(&store, overwrite_temp.as_str(), b"temp-a");
+        // Grammar (b): the stream-upload temp path.
+        put_test_object(
+            &store,
+            "__tmp/shardline-stream-upload/1750000000000000000-42-7",
+            b"temp-b",
+        );
+        // User objects: a `.tmp.<digits>`-suffixed key (not the generated
+        // shape) and an ordinary key must survive.
+        put_test_object(&store, "data.tmp.1", b"user-a");
+        put_test_object(&store, "notes.txt", b"user-b");
+
+        let (reaped, reaped_bytes) = store
+            .sweep_stale_temp_keys(unix_now_seconds().saturating_add(2 * 3600))
+            .unwrap();
+        assert_eq!(reaped, 2, "only the two generated temps are stale");
+        assert_eq!(reaped_bytes, 12, "5 + 7 bytes reclaimed");
+
+        assert!(!store.contains(&overwrite_temp).unwrap());
+        assert!(
+            !store
+                .contains(
+                    &ObjectKey::parse("__tmp/shardline-stream-upload/1750000000000000000-42-7")
+                        .unwrap()
+                )
+                .unwrap()
+        );
+        assert!(
+            store
+                .contains(&ObjectKey::parse("data.tmp.1").unwrap())
+                .unwrap(),
+            "user key data.tmp.1 must never be reaped"
+        );
+        assert!(
+            store
+                .contains(&ObjectKey::parse("notes.txt").unwrap())
+                .unwrap()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn minio_sweep_stale_temp_keys_keeps_fresh_temps() {
+        // A live in-flight upload has a fresh LastModified: sweeping with the
+        // real clock must NOT reap it.
+        let stack = match ensure_minio() {
+            Some(s) => s,
+            None => return,
+        };
+        let prefix = stack.unique_s3_key_prefix("test-temp-sweep-fresh");
+        let store = build_s3_store(&stack, Some(&prefix));
+
+        let overwrite_temp = temp_key_for(&ObjectKey::parse("data/model.xorb").unwrap()).unwrap();
+        put_test_object(&store, overwrite_temp.as_str(), b"in-flight");
+        put_test_object(
+            &store,
+            "__tmp/shardline-stream-upload/1750000000000000001-7-42",
+            b"streaming",
+        );
+
+        let (reaped, reaped_bytes) = store.sweep_stale_temp_keys(unix_now_seconds()).unwrap();
+        assert_eq!(reaped, 0, "fresh temps must be kept");
+        assert_eq!(reaped_bytes, 0);
+
+        assert!(store.contains(&overwrite_temp).unwrap());
+        assert!(
+            store
+                .contains(
+                    &ObjectKey::parse("__tmp/shardline-stream-upload/1750000000000000001-7-42")
+                        .unwrap()
+                )
+                .unwrap()
+        );
     }
 }
 

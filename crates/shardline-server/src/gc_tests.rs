@@ -21,7 +21,7 @@ use crate::{
     LocalBackend, ShardMetadataLimits,
     chunk_store::chunk_object_key,
     gc::{
-        GcError, GcOrphanQuarantineState, LocalGcOptions, quarantine_record_path, quarantine_root,
+        GcOrphanQuarantineState, LocalGcOptions, quarantine_record_path, quarantine_root,
         run_local_gc, run_local_gc_diagnostics,
     },
     local_backend::chunk_hash,
@@ -447,11 +447,12 @@ async fn exercise_gc_sweep_only_deletes_expired_quarantine_candidates() -> Resul
     let orphan_path = write_orphan_chunk(storage.path(), &orphan_hash, b"orphan").await?;
     let index_store = LocalIndexStore::open(storage.path().to_path_buf());
     let object_key = chunk_object_key(&orphan_hash)?;
+    let now_unix_seconds = unix_now_seconds_lossy();
     index_store.upsert_quarantine_candidate(&QuarantineCandidate::new(
         object_key.clone(),
         6,
-        1,
-        1,
+        now_unix_seconds.saturating_sub(7_200),
+        now_unix_seconds.saturating_sub(7_200),
     )?)?;
 
     let report = run_local_gc(storage.path().to_path_buf(), LocalGcOptions::sweep_only()).await?;
@@ -670,11 +671,12 @@ async fn exercise_gc_dry_run_keeps_expired_retention_holds() -> Result<(), Box<d
     write_orphan_chunk(storage.path(), &orphan_hash, b"orphan").await?;
     let object_key = chunk_object_key(&orphan_hash)?;
     let index_store = LocalIndexStore::new(storage.path().to_path_buf())?;
+    let now_unix_seconds = unix_now_seconds_lossy();
     let expired_hold = RetentionHold::new(
         object_key.clone(),
         "expired provider deletion grace".to_owned(),
-        1,
-        Some(1),
+        now_unix_seconds.saturating_sub(7_200),
+        Some(now_unix_seconds.saturating_sub(3_600)),
     )?;
     index_store.upsert_retention_hold(&expired_hold)?;
 
@@ -710,11 +712,12 @@ async fn exercise_gc_mutating_run_prunes_expired_retention_holds() -> Result<(),
     write_orphan_chunk(storage.path(), &orphan_hash, b"orphan").await?;
     let object_key = chunk_object_key(&orphan_hash)?;
     let index_store = LocalIndexStore::new(storage.path().to_path_buf())?;
+    let now_unix_seconds = unix_now_seconds_lossy();
     let expired_hold = RetentionHold::new(
         object_key.clone(),
         "expired provider deletion grace".to_owned(),
-        1,
-        Some(1),
+        now_unix_seconds.saturating_sub(7_200),
+        Some(now_unix_seconds.saturating_sub(3_600)),
     )?;
     index_store.upsert_retention_hold(&expired_hold)?;
 
@@ -1033,17 +1036,16 @@ async fn exercise_gc_fails_closed_on_missing_quarantined_object_metadata()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn gc_fails_closed_on_active_hold_quarantine_conflict() {
-    let result = exercise_gc_fails_closed_on_active_hold_quarantine_conflict().await;
+async fn gc_repairs_active_hold_quarantine_conflict() {
+    let result = exercise_gc_repairs_active_hold_quarantine_conflict().await;
     let error = result.as_ref().err().map(ToString::to_string);
     assert!(
         result.is_ok(),
-        "gc should fail closed on active hold/quarantine conflict: {error:?}"
+        "gc should repair the active hold/quarantine conflict: {error:?}"
     );
 }
 
-async fn exercise_gc_fails_closed_on_active_hold_quarantine_conflict() -> Result<(), Box<dyn Error>>
-{
+async fn exercise_gc_repairs_active_hold_quarantine_conflict() -> Result<(), Box<dyn Error>> {
     let storage = tempfile::tempdir()?;
     let index_store = LocalIndexStore::new(storage.path().to_path_buf())?;
     let object_key = chunk_object_key(&"cd".repeat(32))?;
@@ -1069,15 +1071,31 @@ async fn exercise_gc_fails_closed_on_active_hold_quarantine_conflict() -> Result
     index_store.upsert_retention_hold(&hold)?;
     index_store.upsert_quarantine_candidate(&candidate)?;
 
-    let result = run_local_gc(
+    let report = run_local_gc(
         storage.path().to_path_buf(),
         LocalGcOptions::mark_and_sweep(0),
     )
-    .await;
-    assert!(matches!(result, Err(GcError::InvalidLifecycleMetadata(_))));
-    assert!(LifecycleStore::retention_hold(&index_store, &object_key)?.is_some());
-    assert!(LifecycleStore::quarantine_candidate(&index_store, &object_key)?.is_some());
-    assert!(fs::try_exists(&object_path).await?);
+    .await?;
+    // F-43: held+quarantined is now repaired instead of failing closed: the
+    // quarantine entry is released, the active hold keeps protecting the data,
+    // and the sweep never deletes the held object (F-42 delete-time hold check).
+    ensure_eq(
+        &report.deleted_chunks,
+        &0,
+        "held data must not be deleted by the sweep",
+    )?;
+    ensure(
+        LifecycleStore::retention_hold(&index_store, &object_key)?.is_some(),
+        "the active hold must survive the run",
+    )?;
+    ensure(
+        LifecycleStore::quarantine_candidate(&index_store, &object_key)?.is_none(),
+        "the held quarantine entry should be released (repaired, not wedged)",
+    )?;
+    ensure(
+        fs::try_exists(&object_path).await?,
+        "held object must survive the run",
+    )?;
 
     Ok(())
 }
@@ -1142,13 +1160,14 @@ async fn exercise_gc_reads_legacy_quarantine_manifest_format() -> Result<(), Box
     let orphan_hash = "de".repeat(32);
     let orphan_path = write_orphan_chunk(storage.path(), &orphan_hash, b"orphan").await?;
     let quarantine_path = quarantine_record_path(&quarantine_root(storage.path()), &orphan_hash);
+    let now_unix_seconds = unix_now_seconds_lossy();
     write_quarantine_manifest(
         &quarantine_path,
         &QuarantineRecord {
             hash: orphan_hash.clone(),
             bytes: 6,
-            first_seen_unreachable_at_unix_seconds: 1,
-            delete_after_unix_seconds: 1,
+            first_seen_unreachable_at_unix_seconds: now_unix_seconds.saturating_sub(7_200),
+            delete_after_unix_seconds: now_unix_seconds.saturating_sub(7_200),
         },
     )
     .await?;

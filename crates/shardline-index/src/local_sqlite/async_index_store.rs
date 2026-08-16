@@ -376,6 +376,20 @@ impl AsyncIndexStore for LocalIndexStore {
         })
     }
 
+    fn purge_webhook_deliveries_older_than<'operation>(
+        &'operation self,
+        older_than_unix_seconds: u64,
+    ) -> IndexStoreFuture<'operation, u64, Self::Error> {
+        let store = self.clone();
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || {
+                LifecycleStore::purge_webhook_deliveries_older_than(&store, older_than_unix_seconds)
+            })
+            .await
+            .map_err(|e| LocalIndexStoreError::Io(std::io::Error::other(e)))?
+        })
+    }
+
     fn provider_repository_state<'operation>(
         &'operation self,
         provider: RepositoryProvider,

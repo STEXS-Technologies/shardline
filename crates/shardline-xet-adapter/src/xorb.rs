@@ -1,17 +1,35 @@
 use std::{
     error::Error as StdError,
     future::Future,
-    io::{Error as IoError, Read, Seek, SeekFrom},
+    io::{Cursor, Error as IoError, Read, Seek, SeekFrom},
     num::TryFromIntError,
+    sync::atomic::Ordering,
 };
 
 use shardline_protocol::ShardlineHash;
 use shardline_xet_core::{
     error::CoreError,
     merklehash::{MerkleHash, compute_data_hash},
-    xorb_object::{XorbObject, deserialize_chunk},
+    xorb_object::{
+        XorbObject, constants::MAX_CHUNK_SIZE, deserialize_chunk, deserialize_chunk_header,
+    },
 };
 use thiserror::Error;
+
+use crate::error::XetAdapterError;
+
+/// Maximum total unpacked (decompressed) bytes accepted for a single serialized
+/// xorb, checked BEFORE any decompression happens.
+///
+/// A chunk header's `uncompressed_length` is capped at `MAX_CHUNK_SIZE`
+/// (16 MiB), but nothing previously bounded the *sum* across all chunks of a
+/// client-supplied xorb: a ~64 MiB request can declare ~1000 max-size chunks,
+/// i.e. ~16 GiB of decompressed output (a decompression bomb that exhausts
+/// memory or amplifies storage). A legitimately serialized xorb holds at most
+/// one `XORB_BLOCK_SIZE` (16 MiB) of unpacked data, so 4 GiB is ~256x headroom
+/// for any legitimate multi-block upload while rejecting multi-GiB bombs before
+/// allocation or decompression work.
+pub const MAX_XORB_UNPACKED_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 
 /// Validated metadata for one chunk inside a serialized xorb.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -184,6 +202,8 @@ pub enum XorbInvalidFormatError {
     ChunkPayloadHashMismatch,
     #[error("serialized xorb decoded chunk length disagreed with footer metadata")]
     DecodedChunkLengthMismatch,
+    #[error("serialized xorb declared unpacked length exceeded the maximum allowed size")]
+    UnpackedLengthExceedsCap,
     #[error("xorb core parser rejected malformed data")]
     CoreMalformedData,
     #[error("xorb core parser rejected serialized data")]
@@ -241,6 +261,13 @@ pub fn validate_serialized_xorb<R: Read + Seek>(
     let parsed = XorbObject::deserialize(reader).map_err(|error| map_core_error(&error))?;
     if parsed.info.xorb_hash != expected_merkle_hash {
         return Err(XorbParseError::HashMismatch);
+    }
+    // Bound the total declared unpacked bytes BEFORE any decompression: the
+    // footer has been parsed but no chunk payload has been decompressed yet, so
+    // a multi-chunk decompression bomb is rejected here rather than during
+    // `validate_xorb_object`'s full per-chunk decompression pass.
+    if declared_unpacked_length(&parsed) > MAX_XORB_UNPACKED_BYTES {
+        return Err(XorbInvalidFormatError::UnpackedLengthExceedsCap.into());
     }
     reader
         .seek(SeekFrom::Start(0))
@@ -434,6 +461,57 @@ where
     Ok(())
 }
 
+/// Computes the total declared unpacked length of a parsed xorb footer without
+/// decompressing any chunk payload.
+///
+/// Footers that omit per-chunk unpacked offsets (v0-compatible xorbs) fall back
+/// to `num_chunks * MAX_CHUNK_SIZE`, which is a sound upper bound because every
+/// chunk header caps its declared `uncompressed_length` at `MAX_CHUNK_SIZE`.
+fn declared_unpacked_length(parsed: &XorbObject) -> u64 {
+    if let Some(last) = parsed.info.unpacked_chunk_offsets.last() {
+        return *last;
+    }
+    parsed
+        .info
+        .num_chunks
+        .saturating_mul(MAX_CHUNK_SIZE.load(Ordering::Relaxed))
+}
+
+/// Scans the chunk headers of a serialized xorb byte stream and returns the
+/// total declared uncompressed length, without decompressing any chunk payload.
+///
+/// Stops at the footer ident (`XETBLOB`) or at end-of-input, mirroring the
+/// chunk loop in `reconstruct_xorb_with_footer`. Used to reject a decompression
+/// bomb BEFORE the reconstruct pass allocates its output.
+pub(crate) fn declared_unpacked_length_of_serialized(bytes: &[u8]) -> Result<u64, XetAdapterError> {
+    let mut cursor = Cursor::new(bytes);
+    let mut total: u64 = 0;
+    loop {
+        if cursor.position() as usize >= bytes.len() {
+            break;
+        }
+        let header = match deserialize_chunk_header(&mut cursor) {
+            Ok(header) => header,
+            Err(CoreError::ChunkHeaderParse) => break,
+            Err(error) => return Err(XetAdapterError::from(map_core_error(&error))),
+        };
+        total = total
+            .checked_add(u64::from(header.get_uncompressed_length()))
+            .ok_or(XetAdapterError::Overflow)?;
+        let compressed_len = u64::from(header.get_compressed_length());
+        let Some(next_position) = cursor.position().checked_add(compressed_len) else {
+            return Ok(total);
+        };
+        if next_position > bytes.len() as u64 {
+            // Truncated payload: let the reconstruct pass surface the precise
+            // error. The bytes seen so far were already accounted for.
+            break;
+        }
+        cursor.seek(SeekFrom::Current(compressed_len as i64))?;
+    }
+    Ok(total)
+}
+
 fn validated_chunk_footer_at(
     validated: &XorbObject,
     index: usize,
@@ -490,13 +568,14 @@ mod tests {
     use shardline_xet_core::{
         merklehash::{compute_data_hash, xorb_hash},
         xorb_object::{
-            CompressionScheme, xorb_format_test_utils::serialized_xorb_object_from_components,
+            CompressionScheme, XorbObject, XorbObjectInfoV1,
+            xorb_format_test_utils::serialized_xorb_object_from_components,
         },
     };
 
     use super::{
-        DecodedXorbChunk, ValidatedXorb, ValidatedXorbChunk, XorbInvalidFormatError,
-        XorbParseError, XorbVisitError, decode_serialized_xorb_chunks,
+        DecodedXorbChunk, MAX_XORB_UNPACKED_BYTES, ValidatedXorb, ValidatedXorbChunk,
+        XorbInvalidFormatError, XorbParseError, XorbVisitError, decode_serialized_xorb_chunks,
         merkle_hash_to_shardline_hash, try_for_each_serialized_xorb_chunk,
         validate_serialized_xorb,
     };
@@ -564,6 +643,7 @@ mod tests {
             ),
             (XorbInvalidFormatError::ChunkPayloadHashMismatch, "hash"),
             (XorbInvalidFormatError::DecodedChunkLengthMismatch, "length"),
+            (XorbInvalidFormatError::UnpackedLengthExceedsCap, "unpacked"),
             (XorbInvalidFormatError::CoreMalformedData, "malformed"),
             (XorbInvalidFormatError::CoreRejectedData, "rejected"),
             (XorbInvalidFormatError::XorbHashConversionFailed, "merkle"),
@@ -1104,6 +1184,103 @@ mod tests {
         let result = validate_serialized_xorb(&mut reader, hash);
         // Should fail - this is not a valid xorb format
         assert!(result.is_err(), "expected error for garbage data");
+    }
+
+    // ── decompression-bomb rejection ────────────────────────────────────
+
+    #[test]
+    fn validate_serialized_xorb_rejects_declared_unpacked_bomb() {
+        // A structurally valid xorb whose footer declares an unpacked total
+        // above MAX_XORB_UNPACKED_BYTES must be rejected right after the footer
+        // is parsed — before any chunk payload is decompressed.
+        let data = b"hello".to_vec();
+        let chunk_hash = compute_data_hash(&data);
+        let xorb_hash = xorb_hash(&[(chunk_hash, u64::try_from(data.len()).unwrap_or(0))]);
+        let serialized = serialized_xorb_object_from_components(
+            &xorb_hash,
+            data.clone(),
+            vec![(chunk_hash, u64::try_from(data.len()).unwrap_or(0))],
+            CompressionScheme::None,
+        )
+        .unwrap();
+        let expected_hash = merkle_hash_to_shardline_hash(xorb_hash);
+
+        // Sanity: the legit xorb validates.
+        let mut reader = Cursor::new(serialized.serialized_data.as_slice());
+        assert!(validate_serialized_xorb(&mut reader, expected_hash).is_ok());
+
+        // Forge the footer's unpacked chunk offset so the declared total
+        // exceeds the cap.
+        let mut parsed =
+            XorbObject::deserialize(&mut Cursor::new(serialized.serialized_data.as_slice()))
+                .unwrap();
+        *parsed.info.unpacked_chunk_offsets.last_mut().unwrap() = MAX_XORB_UNPACKED_BYTES + 1;
+        parsed.info.fill_in_boundary_offsets();
+        let footer_start = serialized.serialized_data.len() as u64
+            - parsed.info_length
+            - std::mem::size_of::<u64>() as u64;
+        let mut forged = serialized.serialized_data[..footer_start as usize].to_vec();
+        let info_len = parsed.info.serialize(&mut forged).unwrap();
+        forged.extend_from_slice(&(info_len as u64).to_le_bytes());
+
+        let mut reader = Cursor::new(forged);
+        let result = validate_serialized_xorb(&mut reader, expected_hash);
+        assert!(
+            matches!(
+                result,
+                Err(XorbParseError::InvalidFormat(
+                    XorbInvalidFormatError::UnpackedLengthExceedsCap
+                ))
+            ),
+            "expected UnpackedLengthExceedsCap, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn validate_serialized_xorb_rejects_high_ratio_bomb_chunk() {
+        // A single chunk whose compressed frame expands far beyond its declared
+        // uncompressed length: decompression is aborted at the declared length,
+        // so the whole xorb is rejected instead of materializing megabytes.
+        use shardline_xet_core::xorb_object::{XorbChunkHeader, write_chunk_header};
+
+        let bomb_payload = vec![0u8; 4 * 1024 * 1024];
+        let compressed = CompressionScheme::LZ4
+            .compress_from_slice(&bomb_payload)
+            .unwrap();
+        assert!(
+            compressed.len() < bomb_payload.len(),
+            "repetitive payload must compress well"
+        );
+
+        let mut content = Vec::new();
+        let header = XorbChunkHeader::new(CompressionScheme::LZ4, compressed.len() as u32, 64);
+        write_chunk_header(&mut content, &header).unwrap();
+        content.extend_from_slice(&compressed);
+
+        // Footer declaring one 64-byte chunk (matching the lying header).
+        let mut info = XorbObjectInfoV1::default();
+        info.xorb_hash = xorb_hash(&[]);
+        info.num_chunks = 1;
+        info.chunk_hashes = vec![compute_data_hash(&bomb_payload)];
+        info.chunk_boundary_offsets = vec![content.len() as u64];
+        info.unpacked_chunk_offsets = vec![64];
+        info.fill_in_boundary_offsets();
+
+        let mut serialized = content;
+        let (_obj, _) = XorbObject::serialize_given_info(&mut serialized, info.clone()).unwrap();
+        let expected_hash = merkle_hash_to_shardline_hash(info.xorb_hash);
+
+        let mut reader = Cursor::new(serialized);
+        let result = validate_serialized_xorb(&mut reader, expected_hash);
+        assert!(
+            matches!(
+                result,
+                Err(XorbParseError::InvalidFormat(
+                    XorbInvalidFormatError::StructuralValidationFailed
+                ))
+            ),
+            "expected StructuralValidationFailed for bomb chunk, got {result:?}"
+        );
     }
 
     #[test]

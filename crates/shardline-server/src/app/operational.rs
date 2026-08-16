@@ -73,6 +73,14 @@ pub(super) async fn read_chunk(
     Path(hash): Path<String>,
     repo: XetRepository,
 ) -> Result<Response, ServerError> {
+    // Acquire an admission permit before the repository-reference metadata
+    // scan: `repository_references_xorb` enumerates the repo's latest + version
+    // records (O(N) in record count) with no LIMIT, so reads are gated like the
+    // upload/reconstruction paths to bound concurrent per-request scans.
+    let _admit = state
+        .admission
+        .try_acquire(weights::XORB_READ)
+        .ok_or(ServerError::WorkQueueSaturated)?;
     validate_hash_path(&hash)?;
 
     // Do not query repository references for an object that is absent. Besides
@@ -137,6 +145,11 @@ pub(super) async fn head_xorb(
     Path(hash): Path<String>,
     repo: XetRepository,
 ) -> Result<impl IntoResponse, ServerError> {
+    // Admission gate for the repository-reference metadata scan (see read_chunk).
+    let _admit = state
+        .admission
+        .try_acquire(weights::XORB_READ)
+        .ok_or(ServerError::WorkQueueSaturated)?;
     validate_hash_path(&hash)?;
     let total_length = state.backend.xorb_length(&hash).await?;
     if let Some(namespace) = repo.capability().namespace() {
@@ -158,6 +171,11 @@ pub(super) async fn read_xorb_transfer(
     repo: XetRepository,
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, ServerError> {
+    // Admission gate for the repository-reference metadata scan (see read_chunk).
+    let _admit = state
+        .admission
+        .try_acquire(weights::XORB_READ)
+        .ok_or(ServerError::WorkQueueSaturated)?;
     validate_xorb_transfer_namespace(&prefix)?;
     validate_hash_path(&hash)?;
     let total_length = state.backend.xorb_length(&hash).await?;

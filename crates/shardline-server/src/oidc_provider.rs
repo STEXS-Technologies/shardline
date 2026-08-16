@@ -1407,6 +1407,83 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
     }
 
     #[test]
+    fn verify_token_with_wrong_audience_fails() {
+        use jsonwebtoken::{EncodingKey, Header, encode};
+        use std::collections::BTreeMap;
+
+        // Token targeted at a different audience than the configured one must
+        // be rejected when the provider validates `aud`.
+        let mut claims = BTreeMap::new();
+        claims.insert("iss", serde_json::json!("https://issuer.example.com"));
+        claims.insert("sub", serde_json::json!("aud-user"));
+        claims.insert("aud", serde_json::json!("some-other-app"));
+        claims.insert("exp", serde_json::json!(9999999999u64));
+        claims.insert("iat", serde_json::json!(1000000000u64));
+
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some("test-key-1".to_owned());
+
+        let encoding_key =
+            EncodingKey::from_rsa_pem(TEST_RSA_PEM.as_bytes()).expect("valid RSA PEM");
+        let token = encode(&header, &claims, &encoding_key).expect("should sign token");
+
+        let provider = make_provider(
+            "https://issuer.example.com",
+            Some("my-audience".to_owned()),
+            Some(CachedJwks {
+                keys: Arc::new(vec![test_rsa_jwk("test-key-1")]),
+                fetched_at: Instant::now(),
+            }),
+        );
+
+        let result = provider.verify_token(&token);
+        assert!(
+            result.is_err(),
+            "token with a mismatched aud claim must be rejected when audience is configured"
+        );
+    }
+
+    #[test]
+    fn verify_token_without_audience_config_accepts_token_without_aud() {
+        use jsonwebtoken::{EncodingKey, Header, encode};
+        use std::collections::BTreeMap;
+
+        // When no audience is configured (the default), the provider does NOT
+        // add an `aud` requirement, so a token that omits the `aud` claim
+        // verifies — the permissive behavior existing deployments rely on.
+        // (jsonwebtoken's default `validate_aud` only inspects the claim when
+        // it is present; operators who want `aud` validated should set
+        // SHARDLINE_AUTH_OIDC_AUDIENCE.)
+        let mut claims = BTreeMap::new();
+        claims.insert("iss", serde_json::json!("https://issuer.example.com"));
+        claims.insert("sub", serde_json::json!("aud-user"));
+        claims.insert("exp", serde_json::json!(9999999999u64));
+        claims.insert("iat", serde_json::json!(1000000000u64));
+
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some("test-key-1".to_owned());
+
+        let encoding_key =
+            EncodingKey::from_rsa_pem(TEST_RSA_PEM.as_bytes()).expect("valid RSA PEM");
+        let token = encode(&header, &claims, &encoding_key).expect("should sign token");
+
+        let provider = make_provider(
+            "https://issuer.example.com",
+            None,
+            Some(CachedJwks {
+                keys: Arc::new(vec![test_rsa_jwk("test-key-1")]),
+                fetched_at: Instant::now(),
+            }),
+        );
+
+        let result = provider.verify_token(&token);
+        assert!(
+            result.is_ok(),
+            "a token without an aud claim must verify when no audience is configured, got {result:?}"
+        );
+    }
+
+    #[test]
     fn verify_token_with_expired_jwt_fails() {
         use jsonwebtoken::{EncodingKey, Header, encode};
         use std::collections::BTreeMap;

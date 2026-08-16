@@ -375,6 +375,31 @@ impl ServerBackend {
         }
     }
 
+    /// Resolves exactly one S3 object listing row by its full raw key (no
+    /// prefix matching), for the S3 frontend's conditional-object semantics.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError`] when the index lookup fails.
+    pub(crate) async fn scan_s3_object_exact(
+        &self,
+        scope_namespace: &str,
+        object_key: &str,
+    ) -> Result<Option<S3ObjectEntry>, ServerError> {
+        match self {
+            Self::Local(backend) => {
+                backend
+                    .scan_s3_object_exact(scope_namespace, object_key)
+                    .await
+            }
+            Self::Postgres(backend) => {
+                backend
+                    .scan_s3_object_exact(scope_namespace, object_key)
+                    .await
+            }
+        }
+    }
+
     pub(crate) async fn reconstruction(
         &self,
         file_id: &str,
@@ -1231,6 +1256,7 @@ fn server_error_to_oci(error: ServerError) -> shardline_oci_adapter::OciAdapterE
         | ServerError::TooManyRegistryTokenRequests
         | ServerError::LfsPatchTooManySessions
         | ServerError::LfsPatchStoreFull
+        | ServerError::LfsPatchRangeNotSatisfiable
         | ServerError::S3UploadTooManyParts
         | ServerError::UploadIntentConflict
         | ServerError::MissingReconstructionCacheRedisUrl

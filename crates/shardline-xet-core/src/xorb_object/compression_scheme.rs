@@ -170,9 +170,97 @@ impl CompressionScheme {
         })
     }
 
+    /// Decompresses `reader` into `writer` while enforcing a `declared_len`
+    /// ceiling on the decompressed output.
+    ///
+    /// The limit is enforced DURING decompression, not after: the write side is
+    /// capped so a chunk whose header lies about its `uncompressed_length` (or a
+    /// crafted compressed frame that expands far beyond the declaration) aborts
+    /// as soon as the declared size is exceeded, instead of growing an unbounded
+    /// buffer first. Returns the number of bytes written to `writer`.
+    pub fn decompress_from_reader_bounded<R: Read, W: Write>(
+        &self,
+        reader: &mut R,
+        writer: &mut W,
+        declared_len: u64,
+    ) -> Result<u64, CoreError> {
+        match self {
+            CompressionScheme::Auto => Err(CoreError::MalformedData(
+                "Cannot decompress with Auto scheme".to_string(),
+            )),
+            CompressionScheme::None => copy_limited(reader, writer, declared_len),
+            CompressionScheme::LZ4 => {
+                lz4_decompress_from_reader_limited(reader, writer, declared_len)
+            }
+            CompressionScheme::ByteGrouping4LZ4 => {
+                bg4_lz4_decompress_from_reader_limited(reader, writer, declared_len)
+            }
+        }
+    }
+
     pub fn choose_from_data(_data: &[u8]) -> Self {
         CompressionScheme::LZ4
     }
+}
+
+/// Marker substring used by the write-side decompression ceiling so limit
+/// errors can be re-mapped to [`CoreError::MalformedData`] at the boundary.
+pub(crate) const DECOMPRESSION_LIMIT_EXCEEDED: &str =
+    "decompressed chunk exceeded the declared uncompressed length";
+
+/// Writer wrapper that fails once `limit` bytes have been written.
+///
+/// Used to enforce a chunk header's declared `uncompressed_length` during
+/// decompression so a lying header cannot drive unbounded output/allocation.
+pub(crate) struct LimitedWriter<W: Write> {
+    inner: W,
+    written: u64,
+    limit: u64,
+}
+
+impl<W: Write> LimitedWriter<W> {
+    pub(crate) fn new(inner: W, limit: u64) -> Self {
+        Self {
+            inner,
+            written: 0,
+            limit,
+        }
+    }
+}
+
+impl<W: Write> Write for LimitedWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let remaining = self.limit.saturating_sub(self.written);
+        if u64::try_from(buf.len()).unwrap_or(u64::MAX) > remaining {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                DECOMPRESSION_LIMIT_EXCEEDED,
+            ));
+        }
+        let written = self.inner.write(buf)?;
+        self.written = self.written.saturating_add(written as u64);
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+fn map_limit_io_error(error: std::io::Error) -> CoreError {
+    if error.to_string().contains(DECOMPRESSION_LIMIT_EXCEEDED) {
+        return CoreError::MalformedData(DECOMPRESSION_LIMIT_EXCEEDED.to_string());
+    }
+    CoreError::Io(error)
+}
+
+fn copy_limited<R: Read, W: Write>(
+    reader: &mut R,
+    writer: &mut W,
+    declared_len: u64,
+) -> Result<u64, CoreError> {
+    let mut limited = LimitedWriter::new(writer, declared_len);
+    copy(reader, &mut limited).map_err(map_limit_io_error)
 }
 
 pub fn lz4_compress_from_slice(data: &[u8]) -> Result<Vec<u8>, CoreError> {
@@ -195,6 +283,16 @@ fn lz4_decompress_from_reader<R: Read, W: Write>(
     Ok(copy(&mut dec, writer)?)
 }
 
+fn lz4_decompress_from_reader_limited<R: Read, W: Write>(
+    reader: &mut R,
+    writer: &mut W,
+    declared_len: u64,
+) -> Result<u64, CoreError> {
+    let mut dec = FrameDecoder::new(reader);
+    let mut limited = LimitedWriter::new(writer, declared_len);
+    copy(&mut dec, &mut limited).map_err(map_limit_io_error)
+}
+
 fn bg4_lz4_compress_from_slice(data: &[u8]) -> Result<Vec<u8>, CoreError> {
     let grouped = bg4_split(data);
     let mut enc = FrameEncoder::new(Vec::new());
@@ -214,6 +312,30 @@ fn bg4_lz4_decompress_from_reader<R: Read, W: Write>(
 ) -> Result<u64, CoreError> {
     let mut grouped = vec![];
     FrameDecoder::new(reader).read_to_end(&mut grouped)?;
+    let regrouped = bg4_regroup(&grouped);
+    writer.write_all(&regrouped)?;
+    Ok(regrouped.len() as u64)
+}
+
+fn bg4_lz4_decompress_from_reader_limited<R: Read, W: Write>(
+    reader: &mut R,
+    writer: &mut W,
+    declared_len: u64,
+) -> Result<u64, CoreError> {
+    // BG4 regrouping is length-preserving: the intermediate `grouped` buffer is
+    // exactly the size of the final output, so cap the frame read at
+    // `declared_len + 1` to bound intermediate allocation as well as the final
+    // writer output. A frame that produces more than `declared_len` bytes is
+    // rejected as malformed.
+    let mut grouped = vec![];
+    FrameDecoder::new(reader)
+        .take(declared_len.saturating_add(1))
+        .read_to_end(&mut grouped)?;
+    if u64::try_from(grouped.len()).unwrap_or(u64::MAX) > declared_len {
+        return Err(CoreError::MalformedData(
+            DECOMPRESSION_LIMIT_EXCEEDED.to_string(),
+        ));
+    }
     let regrouped = bg4_regroup(&grouped);
     writer.write_all(&regrouped)?;
     Ok(regrouped.len() as u64)

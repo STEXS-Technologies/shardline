@@ -247,20 +247,159 @@ const REPO_VERB_SEGMENTS: &[&str] = &[
 /// whose isolation comes from the token claims rather than a URL binding.
 fn extract_repo_path(path: &str) -> Option<(String, String)> {
     let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
-    // `(ns, repo)` is the pair immediately preceding a known verb segment.
-    for window in segments.windows(3) {
-        let [ns, repo, verb] = window else { continue };
-        if REPO_VERB_SEGMENTS.contains(verb) {
-            return Some((ns.to_string(), repo.to_string()));
-        }
-    }
-    // `/api/{type}/{ns}/{repo}` — the path ends at the repository. The segment
-    // before the pair must be a repo type to distinguish this from pathless
-    // route families (`/lfs/objects/{oid}`, `/api/repos`, ...).
+    // `/api/{type}/{ns}/{repo}` — the path ends at the repository. Prefer this
+    // shape FIRST: it is the single source of truth for a repository that ends
+    // the path, and it must win even when the repo's name collides with a route
+    // verb (e.g. `/api/models/ns/commit` is the repository `ns/commit`, NOT a
+    // commit of `models/ns`). The segment before the pair must be a repo type
+    // to distinguish this from pathless route families (`/lfs/objects/{oid}`,
+    // `/api/repos`, ...).
     if let [repo_type, ns, repo] = segments.get(segments.len().checked_sub(3)?..)?
         && REPO_TYPE_SEGMENTS.contains(repo_type)
     {
         return Some((ns.to_string(), repo.to_string()));
     }
+    // `(ns, repo)` is the pair immediately preceding a known verb segment. This
+    // is only reached when the path does NOT end at the repository. Scan
+    // BACKWARD and take the LAST verb-followed window: the router's verbs
+    // always directly follow the `(ns, repo)` pair, so the last window wins
+    // even when an earlier window would also end in a verb — e.g. a repo named
+    // `commit` at `/api/models/ns/commit/commit/{rev}` must bind to
+    // `ns/commit`, not to `models/ns` from the `[models, ns, commit]` window.
+    for window in segments.windows(3).rev() {
+        let [ns, repo, verb] = window else { continue };
+        if REPO_VERB_SEGMENTS.contains(verb) {
+            return Some((ns.to_string(), repo.to_string()));
+        }
+    }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extract_repo_path;
+
+    #[test]
+    fn extract_repo_path_repo_named_like_verb_is_parsed_as_repository() {
+        // A repository whose name collides with a route verb must parse as the
+        // last-3 [type, ns, repo] shape, not as a verb-window over the type.
+        for (path, expected) in [
+            ("/api/models/ns/commit", ("ns", "commit")),
+            ("/api/models/ns/tree", ("ns", "tree")),
+            ("/api/models/ns/webhooks", ("ns", "webhooks")),
+            ("/api/models/ns/resolve", ("ns", "resolve")),
+            ("/api/models/ns/HEAD", ("ns", "HEAD")),
+            ("/api/models/ns/info", ("ns", "info")),
+            ("/api/models/ns/revisions", ("ns", "revisions")),
+            (
+                "/api/models/ns/git-receive-pack",
+                ("ns", "git-receive-pack"),
+            ),
+            ("/api/datasets/ns/parquet", ("ns", "parquet")),
+        ] {
+            let parsed = extract_repo_path(path);
+            assert_eq!(
+                parsed,
+                Some((expected.0.to_owned(), expected.1.to_owned())),
+                "path {path} must bind to {expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn extract_repo_path_verb_after_non_repo_type_segment() {
+        // A path that ends at the repository (no trailing verb) still binds to
+        // the last-3 shape, even when the repo-type segment is the pair head.
+        assert_eq!(
+            extract_repo_path("/api/models/ns/my-repo"),
+            Some(("ns".to_owned(), "my-repo".to_owned()))
+        );
+        assert_eq!(
+            extract_repo_path("/api/datasets/ns/my-repo"),
+            Some(("ns".to_owned(), "my-repo".to_owned()))
+        );
+    }
+
+    #[test]
+    fn extract_repo_path_verb_window_still_works_for_trailing_verbs() {
+        // When the path continues past the repository with a real verb, the
+        // verb-window rule still resolves the (ns, repo) pair.
+        assert_eq!(
+            extract_repo_path("/api/models/ns/my-repo/commit/abc123"),
+            Some(("ns".to_owned(), "my-repo".to_owned()))
+        );
+        assert_eq!(
+            extract_repo_path("/api/models/ns/my-repo/tree/main/path/file.txt"),
+            Some(("ns".to_owned(), "my-repo".to_owned()))
+        );
+        assert_eq!(
+            extract_repo_path("/api/datasets/ns/my-repo/parquet"),
+            Some(("ns".to_owned(), "my-repo".to_owned()))
+        );
+        assert_eq!(
+            extract_repo_path("/api/models/ns/my-repo/webhooks"),
+            Some(("ns".to_owned(), "my-repo".to_owned()))
+        );
+        // Root-level model resolve.
+        assert_eq!(
+            extract_repo_path("/ns/my-repo/resolve/some/name"),
+            Some(("ns".to_owned(), "my-repo".to_owned()))
+        );
+    }
+
+    #[test]
+    fn extract_repo_path_verb_collision_nested_route_binds_to_repository() {
+        // A repo named `commit` used through a route whose verb is also
+        // `commit` (`/api/models/{ns}/{repo}/commit/{rev}`): the LAST
+        // verb-followed window is `[ns, commit, commit]`, not the type-prefixed
+        // `[models, ns, commit]` window.
+        assert_eq!(
+            extract_repo_path("/api/models/ns/commit/commit/main"),
+            Some(("ns".to_owned(), "commit".to_owned()))
+        );
+        assert_eq!(
+            extract_repo_path("/api/models/ns/tree/tree/main/a/b"),
+            Some(("ns".to_owned(), "tree".to_owned()))
+        );
+        assert_eq!(
+            extract_repo_path("/api/models/ns/webhooks/webhooks/abc"),
+            Some(("ns".to_owned(), "webhooks".to_owned()))
+        );
+        assert_eq!(
+            extract_repo_path("/api/models/ns/revisions/revisions"),
+            Some(("ns".to_owned(), "revisions".to_owned()))
+        );
+        // Root-level git smart-HTTP for a repo named `commit`.
+        assert_eq!(
+            extract_repo_path("/models/ns/commit/git-receive-pack"),
+            Some(("ns".to_owned(), "commit".to_owned()))
+        );
+    }
+
+    #[test]
+    fn extract_repo_path_repo_named_like_repo_type_segment() {
+        // A repo literally named "models" must still bind as the last pair.
+        assert_eq!(
+            extract_repo_path("/api/models/ns/models"),
+            Some(("ns".to_owned(), "models".to_owned()))
+        );
+        assert_eq!(
+            extract_repo_path("/api/models/ns/models/revisions"),
+            Some(("ns".to_owned(), "models".to_owned()))
+        );
+    }
+
+    #[test]
+    fn extract_repo_path_pathless_routes_return_none() {
+        for path in [
+            "/objects/batch",
+            "/lfs/objects/0123456789abcdef0123456789abcdef",
+            "/api/repos",
+            "/api/models/search",
+            "/api/repos/create",
+            "/api/repos/delete",
+        ] {
+            assert_eq!(extract_repo_path(path), None, "path {path} is pathless");
+        }
+    }
 }

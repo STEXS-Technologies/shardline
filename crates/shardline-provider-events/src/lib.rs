@@ -62,6 +62,7 @@
 //! with explicit record, index, and object-store adapters.
 
 use std::num::TryFromIntError;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::Error as JsonError;
 use shardline_index::{
@@ -74,6 +75,19 @@ use shardline_server_core::{ParseStoredFileRecordError, ServerObjectStoreError};
 use shardline_vcs::{ProviderKind, RepositoryWebhookEvent, RepositoryWebhookEventKind};
 use shardline_xet_adapter::XetAdapterError;
 use thiserror::Error;
+
+/// Default retention window for the provider webhook delivery replay-dedup
+/// table. Delivery claims older than this are purged to bound metadata-store
+/// growth; replay dedup within the window is unaffected.
+pub const WEBHOOK_DELIVERY_RETENTION_SECONDS: u64 = 30 * 24 * 60 * 60;
+
+/// Minimum interval between opportunistic dedup-table purges.
+const WEBHOOK_DELIVERY_PURGE_INTERVAL_SECONDS: u64 = 60 * 60;
+
+/// Last time (unix seconds) the delivery-dedup table was purged, so the purge
+/// runs at most once per [`WEBHOOK_DELIVERY_PURGE_INTERVAL_SECONDS`] per
+/// process instead of on every webhook event.
+static LAST_WEBHOOK_DELIVERY_PURGE_AT_UNIX_SECONDS: AtomicU64 = AtomicU64::new(0);
 
 mod outcome;
 mod records;
@@ -217,6 +231,51 @@ fn duplicate_webhook_outcome(event: &RepositoryWebhookEvent) -> ProviderWebhookO
     }
 }
 
+/// Opportunistically purges webhook-delivery dedup rows older than the
+/// retention window, at most once per
+/// [`WEBHOOK_DELIVERY_PURGE_INTERVAL_SECONDS`].
+///
+/// Runs on the delivery-record path so the table stays bounded without a
+/// dedicated scheduler task. Best-effort: failures are logged and ignored so
+/// a purge hiccup never fails a webhook that has already been applied.
+async fn purge_expired_webhook_deliveries<IndexAdapter>(index_store: &IndexAdapter)
+where
+    IndexAdapter: AsyncIndexStore,
+    IndexAdapter::Error: Into<ProviderEventsError>,
+{
+    let now = unix_now_seconds_lossy();
+    let last_purge = LAST_WEBHOOK_DELIVERY_PURGE_AT_UNIX_SECONDS.load(Ordering::Relaxed);
+    if now.saturating_sub(last_purge) < WEBHOOK_DELIVERY_PURGE_INTERVAL_SECONDS {
+        return;
+    }
+    // Claim the purge slot before running it so concurrent webhook events do
+    // not all issue a range DELETE in the same interval.
+    if LAST_WEBHOOK_DELIVERY_PURGE_AT_UNIX_SECONDS
+        .compare_exchange(last_purge, now, Ordering::Relaxed, Ordering::Relaxed)
+        .is_err()
+    {
+        return;
+    }
+    let older_than = now.saturating_sub(WEBHOOK_DELIVERY_RETENTION_SECONDS);
+    match index_store
+        .purge_webhook_deliveries_older_than(older_than)
+        .await
+    {
+        Ok(purged) if purged > 0 => {
+            tracing::info!(
+                purged,
+                older_than_unix_seconds = older_than,
+                "purged expired provider webhook delivery dedup rows"
+            );
+        }
+        Ok(_) => {}
+        Err(error) => {
+            let error: ProviderEventsError = error.into();
+            tracing::warn!("failed to purge expired provider webhook delivery dedup rows: {error}");
+        }
+    }
+}
+
 /// Applies a normalized provider webhook to Shardline lifecycle state.
 ///
 /// # Errors
@@ -249,6 +308,7 @@ where
     {
         return Ok(duplicate_webhook_outcome(event));
     }
+    purge_expired_webhook_deliveries(index_store).await;
 
     let outcome = match event.kind() {
         RepositoryWebhookEventKind::RepositoryDeleted => {

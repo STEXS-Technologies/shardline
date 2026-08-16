@@ -15,18 +15,18 @@ use tracing;
 use super::super::secrets::ensure_secret_size_within_limit;
 use super::defaults::{
     CONFIG_SECRET_KEY_BYTES, DEFAULT_LFS_PATCH_MAX_ACTIVE_SESSIONS,
-    DEFAULT_LFS_PATCH_TOTAL_MAX_BYTES, DEFAULT_LFS_PATCH_TTL_SECONDS,
-    DEFAULT_MAX_REQUEST_BODY_BYTES, DEFAULT_OCI_REGISTRY_TOKEN_MAX_IN_FLIGHT_REQUESTS,
-    DEFAULT_OCI_REGISTRY_TOKEN_TTL_SECONDS, DEFAULT_OCI_UPLOAD_MAX_ACTIVE_SESSIONS,
-    DEFAULT_OCI_UPLOAD_SESSION_TTL_SECONDS, DEFAULT_PARALLELISM_FALLBACK,
-    DEFAULT_S3_MAX_PART_BYTES, DEFAULT_S3_MIN_PART_BYTES, DEFAULT_S3_UPLOAD_MAX_ACTIVE_PART_FILES,
-    DEFAULT_S3_UPLOAD_MAX_ACTIVE_SESSIONS, DEFAULT_S3_UPLOAD_SESSION_MAX_BYTES,
-    DEFAULT_S3_UPLOAD_SESSION_TTL_SECONDS, DEFAULT_S3_UPLOAD_TOTAL_MAX_BYTES,
-    HUB_WEBHOOK_SECRET_KEY_BYTES, MAX_DEFAULT_TRANSFER_MAX_IN_FLIGHT_CHUNKS,
-    MAX_DEFAULT_UPLOAD_MAX_IN_FLIGHT_CHUNKS, MAX_ED25519_KEY_BYTES, MAX_METRICS_TOKEN_BYTES,
-    MAX_PROVIDER_API_KEY_BYTES, MAX_TOKEN_SIGNING_KEY_BYTES,
-    MIN_DEFAULT_TRANSFER_MAX_IN_FLIGHT_CHUNKS, MIN_DEFAULT_UPLOAD_MAX_IN_FLIGHT_CHUNKS,
-    MIN_S3_MAX_PART_BYTES,
+    DEFAULT_LFS_PATCH_MAX_SEEK_AHEAD_BYTES, DEFAULT_LFS_PATCH_TOTAL_MAX_BYTES,
+    DEFAULT_LFS_PATCH_TTL_SECONDS, DEFAULT_MAX_REQUEST_BODY_BYTES,
+    DEFAULT_OCI_REGISTRY_TOKEN_MAX_IN_FLIGHT_REQUESTS, DEFAULT_OCI_REGISTRY_TOKEN_TTL_SECONDS,
+    DEFAULT_OCI_UPLOAD_MAX_ACTIVE_SESSIONS, DEFAULT_OCI_UPLOAD_SESSION_TTL_SECONDS,
+    DEFAULT_PARALLELISM_FALLBACK, DEFAULT_S3_MAX_PART_BYTES, DEFAULT_S3_MIN_PART_BYTES,
+    DEFAULT_S3_UPLOAD_MAX_ACTIVE_PART_FILES, DEFAULT_S3_UPLOAD_MAX_ACTIVE_SESSIONS,
+    DEFAULT_S3_UPLOAD_SESSION_MAX_BYTES, DEFAULT_S3_UPLOAD_SESSION_TTL_SECONDS,
+    DEFAULT_S3_UPLOAD_TOTAL_MAX_BYTES, HUB_WEBHOOK_SECRET_KEY_BYTES,
+    MAX_DEFAULT_TRANSFER_MAX_IN_FLIGHT_CHUNKS, MAX_DEFAULT_UPLOAD_MAX_IN_FLIGHT_CHUNKS,
+    MAX_ED25519_KEY_BYTES, MAX_METRICS_TOKEN_BYTES, MAX_PROVIDER_API_KEY_BYTES,
+    MAX_TOKEN_SIGNING_KEY_BYTES, MIN_DEFAULT_TRANSFER_MAX_IN_FLIGHT_CHUNKS,
+    MIN_DEFAULT_UPLOAD_MAX_IN_FLIGHT_CHUNKS, MIN_S3_MAX_PART_BYTES,
 };
 use super::enums::{
     AuthConfig, AuthProviderKind, CacheConfig, DeploymentMode, ObjectStorageAdapter, OciConfig,
@@ -88,6 +88,7 @@ pub struct ServerConfig {
     pub(crate) lfs_patch_ttl_seconds: NonZeroU64,
     pub(crate) lfs_patch_max_active_sessions: NonZeroUsize,
     pub(crate) lfs_patch_total_max_bytes: NonZeroU64,
+    pub(crate) lfs_patch_max_seek_ahead_bytes: NonZeroU64,
 }
 
 impl ServerConfig {
@@ -146,6 +147,7 @@ impl ServerConfig {
                 config_secret_key: None,
                 auth_provider: AuthProviderKind::Local,
                 auth_oidc_issuer: None,
+                auth_oidc_audience: None,
                 auth_jwks_url: None,
                 auth_jwks_issuer: None,
                 ed25519_private_key: None,
@@ -183,6 +185,7 @@ impl ServerConfig {
             lfs_patch_ttl_seconds: DEFAULT_LFS_PATCH_TTL_SECONDS,
             lfs_patch_max_active_sessions: DEFAULT_LFS_PATCH_MAX_ACTIVE_SESSIONS,
             lfs_patch_total_max_bytes: DEFAULT_LFS_PATCH_TOTAL_MAX_BYTES,
+            lfs_patch_max_seek_ahead_bytes: DEFAULT_LFS_PATCH_MAX_SEEK_AHEAD_BYTES,
         }
     }
 
@@ -524,6 +527,12 @@ impl ServerConfig {
     #[must_use]
     pub fn auth_oidc_issuer(&self) -> Option<&str> {
         self.auth.auth_oidc_issuer.as_deref()
+    }
+
+    /// Returns the optional OIDC audience (`aud` claim) validated for tokens.
+    #[must_use]
+    pub fn auth_oidc_audience(&self) -> Option<&str> {
+        self.auth.auth_oidc_audience.as_deref()
     }
 
     /// Returns the optional JWKS endpoint URL.
@@ -898,6 +907,30 @@ impl ServerConfig {
         Ok(self)
     }
 
+    /// Returns the maximum distance an LFS chunked-patch (PATCH)
+    /// `Content-Range` may start ahead of the session's current high-water
+    /// mark.
+    #[must_use]
+    pub const fn lfs_patch_max_seek_ahead_bytes(&self) -> NonZeroU64 {
+        self.lfs_patch_max_seek_ahead_bytes
+    }
+
+    /// Overrides the maximum distance an LFS chunked-patch (PATCH)
+    /// `Content-Range` may start ahead of the session's current high-water
+    /// mark.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerConfigError::LfsPatchMaxSeekAheadBytes`] when the value
+    /// is zero.
+    pub const fn with_lfs_patch_max_seek_ahead_bytes(
+        mut self,
+        lfs_patch_max_seek_ahead_bytes: NonZeroU64,
+    ) -> Result<Self, ServerConfigError> {
+        self.lfs_patch_max_seek_ahead_bytes = lfs_patch_max_seek_ahead_bytes;
+        Ok(self)
+    }
+
     /// Sets the target xorb container size in bytes.
     ///
     /// Once accumulated chunk data reaches this threshold, the upload
@@ -1062,6 +1095,18 @@ impl ServerConfig {
     #[must_use]
     pub fn with_auth_oidc_issuer(mut self, issuer: String) -> Self {
         self.auth.auth_oidc_issuer = Some(issuer);
+        self
+    }
+
+    /// Sets the OIDC audience (`aud` claim) validated for tokens issued by the
+    /// OIDC auth provider.
+    ///
+    /// When set, tokens whose `aud` claim does not match are rejected. When
+    /// unset, the `aud` claim is not validated (see the startup warning in
+    /// [`crate::app::build_auth_provider`]).
+    #[must_use]
+    pub fn with_auth_oidc_audience(mut self, audience: String) -> Self {
+        self.auth.auth_oidc_audience = Some(audience);
         self
     }
 
@@ -1284,11 +1329,12 @@ impl ServerConfig {
                         "strict deployment mode requires a token signing key".into(),
                     ));
                 }
-                // Metrics token should be configured
+                // Metrics token is required: without it /metrics serves the
+                // platform's runtime state to any unauthenticated caller,
+                // which the strict-mode contract forbids (enums.rs documents
+                // the metrics token as required).
                 if self.metrics_token().is_none() {
-                    tracing::warn!(
-                        "strict deployment mode recommends configuring SHARDLINE_METRICS_TOKEN_FILE"
-                    );
+                    return Err(ServerConfigError::MissingMetricsToken);
                 }
             }
             DeploymentMode::Authenticated => {

@@ -174,6 +174,10 @@ fn server_config_new_constructs_with_defaults() {
         NonZeroU64::new(4_398_046_511_104).unwrap()
     );
     assert_eq!(
+        config.lfs_patch_max_seek_ahead_bytes(),
+        NonZeroU64::new(67_108_864).unwrap()
+    );
+    assert_eq!(
         config.s3_upload_max_active_part_files(),
         NonZeroUsize::new(200_000).unwrap()
     );
@@ -208,6 +212,8 @@ fn server_config_builder_with_lfs_patch_limits() {
     .with_lfs_patch_max_active_sessions(NonZeroUsize::new(8).unwrap())
     .unwrap()
     .with_lfs_patch_total_max_bytes(NonZeroU64::new(1 << 30).unwrap())
+    .unwrap()
+    .with_lfs_patch_max_seek_ahead_bytes(NonZeroU64::new(1 << 20).unwrap())
     .unwrap();
     assert_eq!(config.lfs_patch_ttl_seconds(), NonZeroU64::new(60).unwrap());
     assert_eq!(
@@ -217,6 +223,10 @@ fn server_config_builder_with_lfs_patch_limits() {
     assert_eq!(
         config.lfs_patch_total_max_bytes(),
         NonZeroU64::new(1 << 30).unwrap()
+    );
+    assert_eq!(
+        config.lfs_patch_max_seek_ahead_bytes(),
+        NonZeroU64::new(1 << 20).unwrap()
     );
 }
 
@@ -660,6 +670,26 @@ fn server_config_builder_with_auth_oidc_issuer() {
         config.auth_oidc_issuer(),
         Some("https://accounts.example.com")
     );
+}
+
+#[test]
+fn server_config_builder_with_auth_oidc_audience() {
+    let config = ServerConfig::new(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+        "http://localhost:8080".to_owned(),
+        PathBuf::from("/tmp/test"),
+        NonZeroUsize::new(4096).unwrap(),
+    )
+    .with_auth_oidc_audience("shardline-web".to_owned());
+    assert_eq!(config.auth_oidc_audience(), Some("shardline-web"));
+    // Unset by default.
+    let default = ServerConfig::new(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+        "http://localhost:8080".to_owned(),
+        PathBuf::from("/tmp/test"),
+        NonZeroUsize::new(4096).unwrap(),
+    );
+    assert_eq!(default.auth_oidc_audience(), None);
 }
 
 #[test]
@@ -2022,9 +2052,11 @@ fn strict_mode_succeeds_with_all_required() {
     )
     .with_deployment_mode(DeploymentMode::Strict)
     .with_token_signing_key(b"0123456789abcdef0123456789abcdef".to_vec())
+    .unwrap()
+    .with_metrics_token(b"metrics-token".to_vec())
     .unwrap();
     let result = config.validate_runtime_requirements();
-    // With signing key set, strict mode should succeed
+    // With the signing key AND metrics token set, strict mode should succeed
     assert!(result.is_ok());
 }
 
@@ -2087,8 +2119,9 @@ fn deployment_mode_insecure_allows_missing_signing_key() {
 
 #[test]
 fn strict_mode_rejects_missing_metrics_token() {
-    // This verifies the warn! is issued (can't easily test warns, but at least
-    // the validation doesn't fail — it only warns)
+    // Strict mode documents the metrics token as required: a missing token
+    // must fail validation loud (matching the signing-key enforcement style)
+    // so /metrics is never served unauthenticated in strict mode.
     let config = ServerConfig::new(
         "127.0.0.1:0".parse().unwrap(),
         "http://127.0.0.1:8080".to_owned(),
@@ -2100,8 +2133,28 @@ fn strict_mode_rejects_missing_metrics_token() {
     .unwrap();
     let result = config.validate_runtime_requirements();
     assert!(
+        matches!(result, Err(ServerConfigError::MissingMetricsToken)),
+        "strict mode without a metrics token must fail validation, got {result:?}"
+    );
+}
+
+#[test]
+fn strict_mode_accepts_metrics_token() {
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        std::path::PathBuf::from("/tmp/test_strict_metrics"),
+        NonZeroUsize::new(65536).unwrap(),
+    )
+    .with_deployment_mode(DeploymentMode::Strict)
+    .with_token_signing_key(b"0123456789abcdef0123456789abcdef".to_vec())
+    .unwrap()
+    .with_metrics_token(b"metrics-token".to_vec())
+    .unwrap();
+    let result = config.validate_runtime_requirements();
+    assert!(
         result.is_ok(),
-        "strict mode with signing key should pass even without metrics token"
+        "strict mode with a metrics token should pass validation"
     );
 }
 

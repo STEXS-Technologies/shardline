@@ -4363,10 +4363,10 @@ fn reconstruct_xorb_with_footer_zero_compressed_length_errors() {
     // Don't add data (compressed_length=0 so no data follows)
     let mut output = Vec::new();
     let result = reconstruct_xorb_with_footer(&mut output, &chunk);
-    // 0 compressed length will try to decompress empty slice with None scheme -> succeeds but hash is of empty
-    assert!(result.is_ok());
-    let (obj, _) = result.unwrap();
-    assert_eq!(obj.info.num_chunks, 1);
+    // The header declares 100 uncompressed bytes but carries none: the declared
+    // uncompressed length is enforced during decompression, so this malformed
+    // chunk is rejected instead of being accepted as an empty chunk.
+    assert!(result.is_err());
 }
 
 #[test]

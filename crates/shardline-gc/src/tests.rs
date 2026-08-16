@@ -972,47 +972,115 @@ fn validate_integrity_active_retention_hold_missing_object_errors() {
 }
 
 #[test]
-fn validate_integrity_active_retention_hold_conflicts_with_quarantine_errors() {
-    // An active retention hold for an object that is also quarantined should error.
+fn held_quarantined_object_is_repaired_not_wedged() {
+    // Regression test for F-43: a hold placed on an already-quarantined object
+    // used to abort every subsequent GC run with ActiveRetentionHoldQuarantined
+    // at run start — before the code that would release the stale quarantine
+    // entry — wedging GC until hold expiry (forever for release_after=None).
+    //
+    // Held+quarantined is now a repairable state: the run proceeds, the stale
+    // quarantine candidate is released (the hold keeps the data), the object
+    // survives, and a subsequent run is clean.
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
-        let dir = std::env::temp_dir().join(format!("gc-test-act-con-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("gc-test-f43-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("chunks")).unwrap();
         let object_store = ServerObjectStore::local(&dir).unwrap();
         let index_store = MemoryIndexStore::new();
+        let record_store = MemoryRecordStore::new();
 
         let now = shardline_protocol::unix_now_seconds_lossy();
         let hash = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
         let prefix = &hash[..2];
         let key = ObjectKey::parse(&format!("{prefix}/{hash}")).unwrap();
 
-        // Put the object so quarantine passes length check.
+        // Put the object so the quarantine length check passes.
         put_object(&object_store, &key, b"test data");
 
-        // Add both a retention hold and a quarantine candidate for the same key.
-        let hold =
-            RetentionHold::new(key.clone(), "test hold".to_owned(), now, Some(now + 3600)).unwrap();
-        index_store.upsert_retention_hold(&hold).await.unwrap();
-
-        let candidate = QuarantineCandidate::new(key, 9, now, now + 3600).unwrap();
+        // Quarantine X first…
+        let candidate = QuarantineCandidate::new(key.clone(), 9, now - 100, now + 3600).unwrap();
         index_store
             .upsert_quarantine_candidate(&candidate)
             .await
             .unwrap();
 
-        let result = run_gc_helper(&object_store, &index_store, LocalGcOptions::dry_run()).await;
-        assert!(result.is_err(), "active hold + quarantine should error");
-        let err = result.unwrap_err();
+        // …then hold X (a permanent hold, release_after = None — the case that
+        // previously wedged GC indefinitely).
+        let hold = RetentionHold::new(key.clone(), "permanent hold".to_owned(), now, None).unwrap();
+        index_store.upsert_retention_hold(&hold).await.unwrap();
+
+        // The run must complete (no abort) and repair the quarantine state.
+        let result = run_gc_with_stores(
+            &record_store,
+            &index_store,
+            &object_store,
+            &[ServerFrontend::Xet],
+            LocalGcOptions::mark_only(86400),
+        )
+        .await;
         assert!(
-            matches!(
-                err,
-                GcError::InvalidLifecycleMetadata(
-                    InvalidLifecycleMetadataError::ActiveRetentionHoldQuarantined { .. }
-                )
-            ),
-            "expected ActiveRetentionHoldQuarantined, got: {err:?}"
+            result.is_ok(),
+            "held+quarantined must not abort the run: {:?}",
+            result
         );
+        let diagnostics = result.unwrap();
+        assert_eq!(
+            diagnostics.report.released_quarantine_candidates, 1,
+            "the stale quarantine candidate must be released"
+        );
+        // The held object survives.
+        assert!(
+            object_store.contains(&key).unwrap(),
+            "held object must survive the repair run"
+        );
+
+        // Quarantine state is gone from the index…
+        let mut quarantine_found = false;
+        index_store
+            .visit_quarantine_candidates(|_c| {
+                quarantine_found = true;
+                Ok::<(), GcError>(())
+            })
+            .await
+            .unwrap();
+        assert!(!quarantine_found, "quarantine candidate must be released");
+
+        // …and the hold is still present.
+        let mut hold_found = false;
+        index_store
+            .visit_retention_holds(|h| {
+                if h.object_key() == &key {
+                    hold_found = true;
+                }
+                Ok::<(), GcError>(())
+            })
+            .await
+            .unwrap();
+        assert!(hold_found, "retention hold must survive the repair run");
+
+        // A subsequent run is also clean: no abort, no re-quarantine, object intact.
+        let result2 = run_gc_with_stores(
+            &record_store,
+            &index_store,
+            &object_store,
+            &[ServerFrontend::Xet],
+            LocalGcOptions::mark_only(86400),
+        )
+        .await;
+        assert!(
+            result2.is_ok(),
+            "subsequent run must also complete: {:?}",
+            result2
+        );
+        let diagnostics2 = result2.unwrap();
+        assert_eq!(diagnostics2.report.active_quarantine_candidates, 0);
+        assert_eq!(diagnostics2.report.released_quarantine_candidates, 0);
+        assert!(
+            object_store.contains(&key).unwrap(),
+            "held object must still survive after the subsequent run"
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
     });
 }

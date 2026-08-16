@@ -47,6 +47,7 @@ where
         rebuilt_dedupe_shard_mappings: 0,
         unchanged_dedupe_shard_mappings: 0,
         removed_stale_dedupe_shard_mappings: 0,
+        preserved_latest_records_unreadable_version: Vec::new(),
         issues: Vec::new(),
     };
     let mut candidates = HashMap::new();
@@ -78,26 +79,40 @@ where
         report.rebuilt_latest_records = checked_increment(report.rebuilt_latest_records)?;
     }
 
-    let mut stale_latest_paths = Vec::new();
-    RecordTraversal::visit_latest_record_locators(record_store, |path| {
-        if !desired_latest_paths.contains(&path) {
-            stale_latest_paths.push(path);
+    // Remove stale latest records — those with no corresponding version record.
+    //
+    // Gated on run cleanliness (like `prune_stale_reconstructions`): when any
+    // version record failed to parse or validate, the candidate set is
+    // incomplete, so a latest record excluded from `desired_latest_paths` may
+    // belong to a file whose version record is unreadable rather than to a
+    // deleted file. Deleting it then would destroy a valid, authoritative
+    // latest record (index loss + GC orphans for a fully intact file). A dirty
+    // run therefore keeps every existing latest record; the removal is
+    // deferred to a clean run. The per-file "kept because version unreadable"
+    // notes are surfaced in
+    // `report.preserved_latest_records_unreadable_version`.
+    if report.is_clean() {
+        let mut stale_latest_paths = Vec::new();
+        RecordTraversal::visit_latest_record_locators(record_store, |path| {
+            if !desired_latest_paths.contains(&path) {
+                stale_latest_paths.push(path);
+            }
+
+            Ok::<(), RebuildError>(())
+        })
+        .await?;
+        for path in stale_latest_paths {
+            RecordMutation::delete_record_locator(record_store, &path)
+                .await
+                .map_err(Into::into)?;
+            report.removed_stale_latest_records =
+                checked_increment(report.removed_stale_latest_records)?;
         }
 
-        Ok::<(), RebuildError>(())
-    })
-    .await?;
-    for path in stale_latest_paths {
-        RecordMutation::delete_record_locator(record_store, &path)
+        RecordMutation::prune_empty_latest_records(record_store)
             .await
             .map_err(Into::into)?;
-        report.removed_stale_latest_records =
-            checked_increment(report.removed_stale_latest_records)?;
     }
-
-    RecordMutation::prune_empty_latest_records(record_store)
-        .await
-        .map_err(Into::into)?;
 
     let desired_reconstructions = desired_reconstruction_file_ids(candidates.values());
     prune_stale_reconstructions(index_store, &desired_reconstructions, &mut report).await?;

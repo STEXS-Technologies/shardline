@@ -1493,6 +1493,19 @@ impl AsyncIndexStore for FailFirstRetentionHoldIndexStore {
         )
     }
 
+    fn purge_webhook_deliveries_older_than<'operation>(
+        &'operation self,
+        older_than_unix_seconds: u64,
+    ) -> IndexStoreFuture<'operation, u64, Self::Error> {
+        Box::pin(async move {
+            AsyncIndexStore::purge_webhook_deliveries_older_than(
+                &self.inner,
+                older_than_unix_seconds,
+            )
+            .await
+        })
+    }
+
     fn provider_repository_state<'operation>(
         &'operation self,
         provider: RepositoryProvider,

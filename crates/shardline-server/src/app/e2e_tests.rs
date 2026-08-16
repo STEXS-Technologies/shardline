@@ -1250,6 +1250,107 @@ async fn reconstruction_not_found() {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
+// ── Read-path admission gating ──────────────────────────────────────────
+//
+// `read_chunk`, `head_xorb`, and `read_xorb_transfer` each run an O(N)
+// repository-reference metadata scan (`repository_references_xorb` enumerates
+// the repo's latest + version records) with no LIMIT and no cache. They must be
+// admission-gated like the upload/reconstruction paths so a request flood
+// cannot drive unbounded per-request scans. When the admission gate is
+// saturated, every read handler rejects with 503 SERVICE_UNAVAILABLE.
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn read_paths_are_admission_gated() {
+    let tmp = TempDir::new().unwrap();
+    let chunk_size = NonZeroUsize::new(65536).unwrap();
+    let object_store = ServerObjectStore::local(tmp.path().join("chunks")).unwrap();
+    let backend = LocalBackend::new_with_object_store_and_upload_parallelism_with_frontends(
+        tmp.path().to_path_buf(),
+        "http://127.0.0.1:8080".to_owned(),
+        chunk_size,
+        NonZeroUsize::new(64).unwrap(),
+        object_store,
+        &[ServerFrontend::Xet],
+    )
+    .await
+    .unwrap();
+
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        tmp.path().to_path_buf(),
+        chunk_size,
+    )
+    .with_server_role(ServerRole::All)
+    .with_server_frontends(vec![ServerFrontend::Xet])
+    .unwrap();
+
+    // Saturated gate: max weight is the read weight and the only permit is held.
+    let state = Arc::new(AppState {
+        config,
+        role: ServerRole::All,
+        backend: ServerBackend::Local(backend),
+        auth: None,
+        provider_tokens: None,
+        reconstruction_cache: ReconstructionCacheService::disabled(),
+        transfer_limiter: TransferLimiter::new(chunk_size, NonZeroUsize::new(64).unwrap()),
+        oci_registry_token_limiter: Arc::new(tokio::sync::Semaphore::new(100)),
+        admission: crate::admission::WeightedAdmission::new(
+            std::num::NonZeroUsize::new(1).unwrap(),
+        ),
+        pools: crate::admission::ExecutionPools::default_sizes(),
+        protocol_metrics: ProtocolMetrics::default(),
+    });
+    let _held_permit = state
+        .admission
+        .try_acquire(crate::admission::weights::XORB_READ)
+        .expect("held permit");
+
+    let app = Router::new()
+        .route(
+            "/v1/chunks/default/{hash}",
+            get(super::operational::read_chunk),
+        )
+        .route(
+            "/v1/xorbs/default/{hash}",
+            head(super::operational::head_xorb),
+        )
+        .route(
+            "/transfer/xorb/{prefix}/{hash}",
+            get(super::operational::read_xorb_transfer),
+        )
+        .with_state(Arc::clone(&state));
+
+    let hash = "a".repeat(64);
+    let requests = [
+        Request::builder()
+            .method("GET")
+            .uri(format!("/v1/chunks/default/{hash}"))
+            .body(Body::empty())
+            .unwrap(),
+        Request::builder()
+            .method("HEAD")
+            .uri(format!("/v1/xorbs/default/{hash}"))
+            .body(Body::empty())
+            .unwrap(),
+        Request::builder()
+            .method("GET")
+            .uri(format!("/transfer/xorb/default/{hash}"))
+            .header(header::RANGE, "bytes=0-")
+            .body(Body::empty())
+            .unwrap(),
+    ];
+
+    for request in requests {
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "read handler must be admission-gated"
+        );
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn batch_reconstruction_empty() {
     let (app, _tmp) = test_app(&[ServerFrontend::Xet]).await;

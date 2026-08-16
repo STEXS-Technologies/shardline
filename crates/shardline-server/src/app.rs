@@ -865,7 +865,14 @@ async fn build_auth_provider(config: &ServerConfig) -> Result<Option<ServerAuth>
             let issuer = config
                 .auth_oidc_issuer()
                 .ok_or_else(|| ServerError::Config(ServerConfigError::InvalidAuthProvider))?;
-            let provider = OidcProvider::new(issuer, None)
+            let audience = config.auth_oidc_audience();
+            if audience.is_none() {
+                tracing::warn!(
+                    "OIDC auth provider has no SHARDLINE_AUTH_OIDC_AUDIENCE configured; the \
+                     token aud claim is not validated"
+                );
+            }
+            let provider = OidcProvider::new(issuer, audience.map(str::to_owned))
                 .await
                 .map_err(|_e| ServerError::Config(ServerConfigError::InvalidAuthProvider))?;
             Ok(Some(ServerAuth::from_provider(Box::new(provider))))

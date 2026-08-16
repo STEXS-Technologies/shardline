@@ -21,7 +21,7 @@ pub use operations::S3ObjectStore;
 pub use types::{BeginMultipartUploadResult, S3ByteStream, S3MultipartUploadWriter};
 
 pub(crate) use types::{
-    LARGE_COPY_CHUNK_BYTES, MAX_SINGLE_COPY_BYTES, STREAM_COMPARE_CHUNK_BYTES,
-    STREAM_UPLOAD_CHUNK_BYTES, TEMP_UPLOAD_COUNTER, is_temp_upload_key, normalize_prefix,
-    temp_key_for,
+    LARGE_COPY_CHUNK_BYTES, MAX_SINGLE_COPY_BYTES, S3_TEMP_ARTIFACT_AGE_SECONDS,
+    STREAM_COMPARE_CHUNK_BYTES, STREAM_UPLOAD_CHUNK_BYTES, TEMP_UPLOAD_COUNTER, is_temp_upload_key,
+    normalize_prefix, temp_key_for,
 };

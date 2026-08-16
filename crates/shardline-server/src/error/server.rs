@@ -224,6 +224,10 @@ pub enum ServerError {
     /// sessions was exceeded.
     #[error("lfs patch staging byte quota exceeded")]
     LfsPatchStoreFull,
+    /// An LFS chunked-patch (PATCH) `Content-Range` start seeks beyond the
+    /// session's sequential-growth high-water mark.
+    #[error("lfs patch content-range seeks beyond the session high-water mark")]
+    LfsPatchRangeNotSatisfiable,
     /// The global cap on S3 multipart part files across active upload
     /// sessions was exceeded.
     #[error("too many active s3 upload part files")]
@@ -310,6 +314,7 @@ impl ServerError {
             | Self::UploadIntentConflict
             | Self::LfsPatchTooManySessions
             | Self::LfsPatchStoreFull
+            | Self::LfsPatchRangeNotSatisfiable
             | Self::Overflow
             | Self::InvalidRangeHeader
             | Self::RangeNotSatisfiable
@@ -385,6 +390,7 @@ impl ServerError {
             }
             Self::LfsPatchTooManySessions => StatusCode::TOO_MANY_REQUESTS,
             Self::LfsPatchStoreFull => StatusCode::PAYLOAD_TOO_LARGE,
+            Self::LfsPatchRangeNotSatisfiable => StatusCode::RANGE_NOT_SATISFIABLE,
             Self::S3UploadTooManyParts => StatusCode::TOO_MANY_REQUESTS,
             Self::UploadIntentConflict => StatusCode::CONFLICT,
             Self::InvalidPath | Self::UnregisteredFile(_) => StatusCode::BAD_REQUEST,
@@ -506,7 +512,8 @@ impl From<XetAdapterError> for ServerError {
             XetAdapterError::InvalidContentHash => Self::InvalidContentHash,
             XetAdapterError::InvalidXorbPrefix => Self::InvalidXorbPrefix,
             XetAdapterError::XorbHashMismatch => Self::XorbHashMismatch,
-            XetAdapterError::InvalidSerializedXorb => Self::InvalidSerializedXorb,
+            XetAdapterError::InvalidSerializedXorb
+            | XetAdapterError::XorbUnpackedLengthExceedsCap => Self::InvalidSerializedXorb,
             XetAdapterError::InvalidSerializedShard(e) => Self::InvalidSerializedShard(e),
             XetAdapterError::MissingReferencedXorb => Self::MissingReferencedXorb,
             XetAdapterError::TooManyShardTerms => Self::TooManyShardTerms,
@@ -714,7 +721,9 @@ impl shardline_s3_adapter::S3ErrorClassify for ServerError {
     fn s3_class(&self) -> shardline_s3_adapter::S3ErrorClass {
         use shardline_s3_adapter::S3ErrorClass;
         match self {
-            Self::RangeNotSatisfiable => S3ErrorClass::RangeNotSatisfiable,
+            Self::RangeNotSatisfiable | Self::LfsPatchRangeNotSatisfiable => {
+                S3ErrorClass::RangeNotSatisfiable
+            }
             Self::NotFound => S3ErrorClass::NotFound,
             Self::MissingAuthorization
             | Self::InvalidAuthorizationHeader
