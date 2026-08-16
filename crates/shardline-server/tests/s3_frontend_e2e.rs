@@ -791,13 +791,14 @@ async fn s3_duckdb_listing_pagination_and_empty() {
 /// `shardline admin token --issuer shardline --subject s3test --scope write
 /// --provider generic --owner ac --repo assets --ttl-seconds 3600 --key-file
 /// <file>` where the key file carries the standard `echo $KEY > file` trailing
-/// newline. Both the CLI and the server strip one trailing line terminator, so
-/// the same 32-byte key signs and verifies; without the strip the minted token
-/// is rejected with a signature mismatch.
+/// newline. The CLI's `--key-file` path strips one trailing line terminator
+/// (`shardline::admin::read_signing_key_bytes`), so the effective 32-byte key
+/// matches the server's configured `TEST_SIGNING_KEY`; without the strip the
+/// minted token is rejected with a signature mismatch.
 fn cli_equivalent_mint(key_file: &std::path::Path) -> String {
     let raw = std::fs::read(key_file).unwrap();
-    // Mirror `shardline::admin::read_signing_key_bytes` (and the server's
-    // `SHARDLINE_TOKEN_SIGNING_KEY_FILE` reader): strip one trailing `\n`.
+    // Mirror `shardline::admin::read_signing_key_bytes`: strip one trailing
+    // `\n` before signing.
     let key_bytes = raw.strip_suffix(b"\n").unwrap_or(&raw);
     let signer = shardline_protocol::TokenSigner::new(key_bytes).unwrap();
     let repository =
@@ -817,9 +818,9 @@ fn cli_equivalent_mint(key_file: &std::path::Path) -> String {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn s3_frontend_authenticates_cli_minted_token() {
-    // The operator writes the key the standard way (trailing newline); the
-    // server resolves the SAME file through SHARDLINE_TOKEN_SIGNING_KEY_FILE and
-    // strips the newline, so the effective 32-byte key is the harness key.
+    // The operator writes the key the standard way (trailing newline); the CLI
+    // strips that terminator before signing, so the minted token is signed with
+    // the same 32-byte key the server is configured with (TEST_SIGNING_KEY).
     let tmp = TempDir::new().unwrap();
     let key_file = tmp.path().join("signing.key");
     std::fs::write(&key_file, b"0123456789abcdef0123456789abcdef\n").unwrap();

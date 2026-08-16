@@ -93,7 +93,12 @@ where
 /// `scan_orphan_objects` skips it, the temp reaper's `.tmp-` grammar cannot
 /// match it, and the S3 temp sweep only matches temp-upload keys. It can never
 /// be mistaken for — or reaped as — a managed object.
-const LAST_GC_CLOCK_ANCHOR_KEY: &str = "gc/last-gc-clock-anchor";
+/// The reserved object key for the persisted last-GC-clock anchor.
+///
+/// `pub(super)` (visible to the whole crate) so the stale-temp reaper in
+/// `reachability` can recognize a stranded `<anchor>.tmp-*` write artifact
+/// (F-99).
+pub(super) const LAST_GC_CLOCK_ANCHOR_KEY: &str = "gc/last-gc-clock-anchor";
 
 fn last_gc_clock_anchor_key() -> Result<ObjectKey, GcError> {
     ObjectKey::parse(LAST_GC_CLOCK_ANCHOR_KEY).map_err(|_error| GcError::InvalidContentHash)

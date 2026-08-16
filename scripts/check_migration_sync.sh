@@ -15,9 +15,38 @@ SQLITE_REGISTRY="$REPO_ROOT/crates/shardline-index/src/local_sqlite/migration.rs
 # layouts are handled.
 registered_up_filenames() {
   local registry="$1"
-  grep -o '"[^"]*\.up\.sql"' "$registry" \
+  local names
+  names=$(grep -o '"[^"]*\.up\.sql"' "$registry" \
     | tr -d '"' \
-    | xargs -I{} basename {}
+    | xargs -I{} basename {} \
+    || true)
+  if [ -z "$names" ]; then
+    echo "ERROR: No .up.sql registrations found in $registry" >&2
+    exit 1
+  fi
+  printf '%s\n' "$names"
+}
+
+# Extracts the `version:` string literals from a `*MIGRATIONS` registration
+# array. A registration entry's version field is the value recorded in the
+# migration history table and compared against applied migrations, so it must
+# agree with the version embedded in the registered filename — mutating only
+# the version field (filename unchanged) would otherwise go undetected. The
+# extraction is scoped to the array body (from the `*MIGRATIONS: [` opener to
+# the closing `];`) so `version:` literals in the file's test code or other
+# structs are not counted.
+registered_versions() {
+  local registry="$1"
+  local versions
+  versions=$(sed -n '/MIGRATIONS: \[/,/^];/p' "$registry" \
+    | grep -o 'version: "[^"]*"' \
+    | sed 's/version: "//; s/"$//' \
+    || true)
+  if [ -z "$versions" ]; then
+    echo "ERROR: No version: literals found in $registry" >&2
+    exit 1
+  fi
+  printf '%s\n' "$versions"
 }
 
 pg_versions=$(ls "$PG_DIR"/*.up.sql 2>/dev/null | xargs -I{} basename {} | sed 's/_.*//' | sort)
@@ -83,6 +112,32 @@ if [ -n "$registration_errors" ]; then
   echo "ERROR: Migration registration lists are out of sync with the migration files!"
   echo ""
   echo -e "$registration_errors"
+  exit 1
+fi
+
+# Diff each registry's `version:` literals against the versions embedded in its
+# registered filenames. The filename-only checks above cannot see a mutation of
+# only the version field, so a registration whose version disagrees with its
+# on-disk filename fails here.
+pg_registered_versions=$(registered_versions "$PG_REGISTRY" | sort)
+sqlite_registered_versions=$(registered_versions "$SQLITE_REGISTRY" | sort)
+pg_filename_versions=$(registered_up_filenames "$PG_REGISTRY" | sed 's/_.*//' | sort)
+sqlite_filename_versions=$(registered_up_filenames "$SQLITE_REGISTRY" | sed 's/_.*//' | sort)
+
+version_field_errors=""
+version_mismatch_pg=$(comm -3 <(echo "$pg_registered_versions") <(echo "$pg_filename_versions"))
+version_mismatch_sqlite=$(comm -3 <(echo "$sqlite_registered_versions") <(echo "$sqlite_filename_versions"))
+if [ -n "$version_mismatch_pg" ]; then
+  version_field_errors+="Postgres version: literals disagree with the registered filenames (database_migration.rs):\n$version_mismatch_pg\n"
+fi
+if [ -n "$version_mismatch_sqlite" ]; then
+  version_field_errors+="SQLite version: literals disagree with the registered filenames (local_sqlite/migration.rs):\n$version_mismatch_sqlite\n"
+fi
+
+if [ -n "$version_field_errors" ]; then
+  echo "ERROR: Migration version fields do not match their registered filenames!"
+  echo ""
+  echo -e "$version_field_errors"
   exit 1
 fi
 

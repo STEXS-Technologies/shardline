@@ -136,8 +136,10 @@ must mint with the **same** key material.
 
 - Server: `SHARDLINE_AUTH_PROVIDER=local` plus either
   `SHARDLINE_TOKEN_SIGNING_KEY=<32+ byte key>` **or**
-  `SHARDLINE_TOKEN_SIGNING_KEY_FILE=/path/to/key` (the file form strips one
-  trailing line terminator — the standard `echo $KEY > file` artifact).
+  `SHARDLINE_TOKEN_SIGNING_KEY_FILE=/path/to/key`. The signing key is
+  variable-length and binary-capable, so the file bytes are used verbatim —
+  there is no trailing-newline stripping. Write the key file without a trailing
+  newline (`printf` rather than `echo $KEY > file`).
 - CLI mint (note `--ttl-seconds`, and that a key source is required):
 
   ```sh
@@ -152,8 +154,9 @@ must mint with the **same** key material.
   `Authorization: Bearer <token>` or as the SigV4 form
   `Authorization: AWS4-HMAC-SHA256 Credential=<token>/<date>/<region>/s3/aws4_request`
   (the signature is not verified). `--key-env`/`--key-file` and the server's
-  env/file source must resolve to the same bytes — when the key lives in a
-  file, both sides strip the trailing newline identically.
+  env/file source must resolve to the same bytes — the CLI strips one trailing
+  line terminator from a `--key-file`, so a key file shared with the server must
+  not end in a newline (write it with `printf`, not `echo $KEY > file`).
 
 ## Durability & integrity
 

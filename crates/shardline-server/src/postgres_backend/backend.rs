@@ -284,10 +284,21 @@ impl PostgresBackend {
 
     /// Validates the referenced file record and upserts a path mapping.
     ///
+    /// Auto-creates the revision registry row for `key` when it does not yet
+    /// exist, enforcing the same per-repo revision cap as `create_revision`
+    /// (F-89): a genuinely new revision is rejected with
+    /// [`ServerError::TooManyRevisions`] once the repo holds
+    /// `max_revisions_per_repo` rows, while a refresh of an existing revision
+    /// stays allowed at capacity. The count/exists-then-insert pair is not
+    /// serialized here, so concurrent `register_tree_path` calls can overshoot
+    /// the cap by the number of concurrent writers at the boundary (the cap is
+    /// a bound on growth, not a hard invariant).
+    ///
     /// # Errors
     ///
     /// Returns [`ServerError::UnregisteredFile`] when no record exists in the revision
-    /// scope, [`ServerError::InvalidContentHash`] for a malformed `file_id`, or the
+    /// scope, [`ServerError::InvalidContentHash`] for a malformed `file_id`,
+    /// [`ServerError::TooManyRevisions`] at the per-repo revision cap, or the
     /// adapter error when persistence fails.
     pub(crate) async fn register_tree_path(
         &self,
@@ -295,6 +306,7 @@ impl PostgresBackend {
         path: &str,
         file_id: &str,
         repository_scope: Option<&shardline_protocol::RepositoryScope>,
+        max_revisions_per_repo: NonZeroUsize,
     ) -> Result<crate::backend::RegisterPathOutcome, ServerError> {
         validate_content_hash(file_id)?;
         let record = match self.read_record(file_id, None, repository_scope).await {
@@ -304,6 +316,22 @@ impl PostgresBackend {
             }
             Err(error) => return Err(error),
         };
+        // F-89: register_path auto-creates the revision registry row, so the
+        // F-75 per-repo cap must be enforced here too — not only in
+        // create_revision. Only a genuinely NEW revision counts against the
+        // cap; a refresh of an existing revision (upsert 'created' == false)
+        // is still allowed at capacity.
+        let repo_key = RepoKey::new(&key.provider, &key.owner, &key.repo);
+        let cap = u64::try_from(max_revisions_per_repo.get()).unwrap_or(u64::MAX);
+        if self.count_revisions(&repo_key).await? >= cap
+            && self
+                .index_store
+                .revision(&repo_key, &key.revision)
+                .await?
+                .is_none()
+        {
+            return Err(ServerError::TooManyRevisions);
+        }
         let now = unix_now_seconds_lossy();
         let revision_record = RevisionRecord {
             provider: key.provider.clone(),

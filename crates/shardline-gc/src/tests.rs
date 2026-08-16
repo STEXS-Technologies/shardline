@@ -34,6 +34,7 @@ use crate::reachability::OrphanObject;
 use crate::runner::{
     build_gc_diagnostics, orphan_inventory_entry, quarantine_record_path, quarantine_root,
     retention_report_entry, run_gc_with_stores, run_local_gc, run_local_gc_diagnostics,
+    set_gc_now_unix_seconds_override,
 };
 use crate::types::{
     GcOrphanQuarantineState, LocalGcDiagnostics, LocalGcOptions, LocalGcReport,
@@ -930,6 +931,116 @@ fn gc_sweep_reaps_stranded_xorb_and_shard_temps_but_never_live_objects() {
         assert!(
             object_store.contains(&shard_live_key).unwrap(),
             "live shard must never be touched"
+        );
+    });
+}
+
+#[test]
+fn gc_sweep_reaps_stranded_xorb_chunks_and_anchor_temps_but_never_live() {
+    // F-99 regression: the xorb chunk-cache sidecar
+    // (`_xorb_chunks/{prefix}/{hash}`, written by
+    // `xorb_store::visit_stored_xorb_chunk_hashes`) and the last-GC-clock
+    // anchor (`gc/last-gc-clock-anchor`, written by
+    // `write_last_gc_clock_anchor`) are ALSO written via temp-then-hardlink, so
+    // a crash between the temp write and the hardlink strands
+    // `_xorb_chunks/{prefix}/{hash}.tmp-...` and
+    // `gc/last-gc-clock-anchor.tmp-...` files that the old managed-object-only
+    // reaper grammar never matched (F-67 residual). The extended reaper must
+    // reap them after the age bound while leaving the LIVE sidecar, the LIVE
+    // anchor, and live managed objects untouched.
+    use shardline_protocol::unix_now_seconds_lossy;
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let dir = tempfile::tempdir().unwrap();
+        let hash = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+        let prefix = &hash[..2];
+        std::fs::create_dir_all(dir.path().join("_xorb_chunks").join(prefix)).unwrap();
+        std::fs::create_dir_all(dir.path().join("gc")).unwrap();
+
+        let now_secs = unix_now_seconds_lossy();
+        // > 1 hour old: stranded remnants of killed/crashed writers.
+        let stale_nanos = u128::from(now_secs - 2 * 3600) * 1_000_000_000;
+        let sidecar_temp_key = format!("_xorb_chunks/{prefix}/{hash}.tmp-{stale_nanos}-0");
+        let anchor_temp_key = format!("gc/last-gc-clock-anchor.tmp-{stale_nanos}-1");
+        let sidecar_temp_path = dir.path().join(&sidecar_temp_key);
+        let anchor_temp_path = dir.path().join(&anchor_temp_key);
+        std::fs::write(&sidecar_temp_path, b"stale-sidecar").unwrap();
+        std::fs::write(&anchor_temp_path, b"stale-anchor").unwrap();
+        // The reaper prefers the GC-observed mtime (backend truth): age both
+        // temps' on-disk mtimes so they are genuinely old by both clocks.
+        let aged_mtime = std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 3600);
+        std::fs::File::options()
+            .write(true)
+            .open(&sidecar_temp_path)
+            .unwrap()
+            .set_modified(aged_mtime)
+            .unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&anchor_temp_path)
+            .unwrap()
+            .set_modified(aged_mtime)
+            .unwrap();
+
+        // Live keys (finished, no temp suffix) must never be touched by the
+        // reaper, however old their mtimes are.
+        let object_store = ServerObjectStore::local(dir.path()).unwrap();
+        let sidecar_live_key = ObjectKey::parse(&format!("_xorb_chunks/{prefix}/{hash}")).unwrap();
+        put_object(&object_store, &sidecar_live_key, b"live-sidecar");
+        let anchor_live_key = ObjectKey::parse("gc/last-gc-clock-anchor").unwrap();
+        put_object(&object_store, &anchor_live_key, b"live-anchor");
+        let chunk_live_key = ObjectKey::parse(&format!("{prefix}/{hash}")).unwrap();
+        put_object(&object_store, &chunk_live_key, b"live-chunk");
+        // Age the live sidecar and anchor mtimes: only the `.tmp-` suffix
+        // distinguishes them from the stranded temps, so this proves the
+        // reaper matches on key shape, never on age alone.
+        for live_path in [
+            dir.path().join(format!("_xorb_chunks/{prefix}/{hash}")),
+            dir.path().join("gc/last-gc-clock-anchor"),
+        ] {
+            std::fs::File::options()
+                .write(true)
+                .open(&live_path)
+                .unwrap()
+                .set_modified(aged_mtime)
+                .unwrap();
+        }
+
+        let index_store = MemoryIndexStore::new();
+        let diagnostics = run_gc_helper(&object_store, &index_store, LocalGcOptions::sweep_only())
+            .await
+            .unwrap();
+
+        // Both stranded temps are reaped.
+        assert_eq!(
+            diagnostics.report.reaped_stale_temporary_chunks, 2,
+            "both stranded sidecar and anchor temps must be reaped"
+        );
+        assert_eq!(
+            diagnostics.report.reaped_stale_temporary_bytes, 25,
+            "13 bytes of stale-sidecar + 12 bytes of stale-anchor"
+        );
+        assert!(
+            std::fs::metadata(&sidecar_temp_path).is_err(),
+            "stranded sidecar temp must be reaped"
+        );
+        assert!(
+            std::fs::metadata(&anchor_temp_path).is_err(),
+            "stranded anchor temp must be reaped"
+        );
+        // Live keys are untouched.
+        assert!(
+            object_store.contains(&sidecar_live_key).unwrap(),
+            "live xorb chunk-cache sidecar must never be touched"
+        );
+        assert!(
+            object_store.contains(&anchor_live_key).unwrap(),
+            "live last-GC-clock anchor must never be touched"
+        );
+        assert!(
+            object_store.contains(&chunk_live_key).unwrap(),
+            "live chunk must never be touched"
         );
     });
 }
@@ -1894,6 +2005,203 @@ fn mark_or_sweep_run_on_writable_store_persists_gc_clock_anchor() {
             "a mark run must persist the last-GC-clock anchor"
         );
     });
+}
+
+// ── F-88: the forward-clock guard must defer the quarantine mark too ──
+
+const F88_CANDIDATE_HASH: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const F88_ORPHAN_HASH: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+/// Puts a chunk object and returns its key.
+fn put_gc_chunk(object_store: &ServerObjectStore, hash: &str, data: &[u8]) -> ObjectKey {
+    let prefix = &hash[..2];
+    let key = ObjectKey::parse(&format!("{prefix}/{hash}")).unwrap();
+    put_object(object_store, &key, data);
+    key
+}
+
+/// Returns true when a quarantine candidate exists for `object_key`.
+async fn has_quarantine_candidate(index_store: &MemoryIndexStore, object_key: &ObjectKey) -> bool {
+    let mut found = false;
+    index_store
+        .visit_quarantine_candidates(|candidate| {
+            if candidate.object_key() == object_key {
+                found = true;
+            }
+            Ok::<(), GcError>(())
+        })
+        .await
+        .unwrap();
+    found
+}
+
+/// Runs two mark-and-sweep cycles under a forward-jumped clock and then one
+/// cycle under the corrected (real) clock, asserting the F-88 invariants:
+///
+/// * run 1 (jumped): the guard fires — NOTHING is marked (no untracked orphan
+///   is stamped with the jumped clock), nothing is swept, the anchor is not
+///   written.
+/// * run 2 (jumped): the guard is STILL armed (the jumped clock never entered
+///   the creation reference) — the pre-jump candidate A is preserved.
+/// * run 3 (real): the guard clears and the deployment self-heals — the
+///   untracked orphan B is finally quarantined with the REAL clock and the
+///   anchor is written; A (delete_after = real + 6d) is still not expired.
+async fn run_forward_clock_two_run_scenario(include_untracked_orphan: bool) {
+    let real_now = 2_000_000_000_u64;
+    // A >1-day forward jump (10 days): beyond the 86400s guard slack.
+    let jumped_now = real_now + 10 * 86_400;
+
+    let dir = tempfile::tempdir().unwrap();
+    let object_store = ServerObjectStore::local(dir.path()).unwrap();
+    let index_store = MemoryIndexStore::new();
+    let anchor_key = ObjectKey::parse("gc/last-gc-clock-anchor").unwrap();
+
+    // Pre-jump state: candidate A quarantined 1 day ago with a 7-day retention
+    // (delete_after = real_now + 6 days). The object exists on disk and is
+    // unreferenced (empty record store), so the sweep would delete it if the
+    // guard were silent.
+    let data_a = b"A-data";
+    let key_a = put_gc_chunk(&object_store, F88_CANDIDATE_HASH, data_a);
+    let candidate_a = QuarantineCandidate::new(
+        key_a.clone(),
+        u64::try_from(data_a.len()).unwrap_or(0),
+        real_now - 86_400,
+        real_now + 6 * 86_400,
+    )
+    .unwrap();
+    index_store
+        .upsert_quarantine_candidate(&candidate_a)
+        .await
+        .unwrap();
+
+    // EXPLOIT (b): an untracked orphan B present before the jump. Pre-fix,
+    // run 1's mark stamped B with the jumped clock, disarming the guard.
+    let key_b = if include_untracked_orphan {
+        Some(put_gc_chunk(&object_store, F88_ORPHAN_HASH, b"B-data"))
+    } else {
+        None
+    };
+
+    let options = LocalGcOptions::mark_and_sweep(MINIMUM_GC_RETENTION_SECONDS);
+
+    // Run 1 + run 2 under the jumped clock.
+    set_gc_now_unix_seconds_override(Some(jumped_now));
+    let run1 = run_gc_helper(&object_store, &index_store, options)
+        .await
+        .unwrap();
+    let run2 = run_gc_helper(&object_store, &index_store, options)
+        .await
+        .unwrap();
+    set_gc_now_unix_seconds_override(None);
+
+    // Run 1: the guard fired → mark deferred → no new candidates stamped with
+    // the jumped clock; sweep skipped → nothing deleted; fired run's `now` is
+    // never written as the anchor.
+    assert_eq!(run1.report.deleted_chunks, 0, "run 1 must not delete");
+    assert_eq!(
+        run1.report.new_quarantine_candidates, 0,
+        "run 1 must not stamp any candidate with the jumped clock"
+    );
+    assert_eq!(run1.report.active_quarantine_candidates, 1);
+    assert!(
+        object_store.contains(&key_a).unwrap(),
+        "candidate A must survive run 1"
+    );
+    if let Some(key_b) = &key_b {
+        assert!(
+            !has_quarantine_candidate(&index_store, key_b).await,
+            "run 1 must not stamp the untracked orphan B with the jumped clock"
+        );
+    }
+    assert!(
+        !object_store.contains(&anchor_key).unwrap(),
+        "a fired run must never persist the last-GC-clock anchor"
+    );
+
+    // Run 2: the guard must STILL be armed — the jumped clock never entered
+    // the creation-timestamp reference, so candidate A is preserved instead of
+    // being deleted ~6 days before its real retention elapsed.
+    assert_eq!(run2.report.deleted_chunks, 0, "run 2 must not delete");
+    assert_eq!(run2.report.new_quarantine_candidates, 0);
+    assert_eq!(run2.report.active_quarantine_candidates, 1);
+    assert!(
+        object_store.contains(&key_a).unwrap(),
+        "candidate A must survive run 2 — the guard stayed armed"
+    );
+    if let Some(key_b) = &key_b {
+        assert!(
+            !has_quarantine_candidate(&index_store, key_b).await,
+            "run 2 must still not stamp B"
+        );
+    }
+    assert!(
+        !object_store.contains(&anchor_key).unwrap(),
+        "a fired run must never persist the last-GC-clock anchor"
+    );
+
+    // Run 3 under the corrected clock: self-healing. The guard clears, the
+    // untracked orphan B is finally quarantined with the REAL clock (proving
+    // the jumped timestamp never became the anchor/reference), the anchor is
+    // written, and A — whose real retention has not elapsed — is still there.
+    set_gc_now_unix_seconds_override(Some(real_now));
+    let run3 = run_gc_helper(&object_store, &index_store, options)
+        .await
+        .unwrap();
+    set_gc_now_unix_seconds_override(None);
+
+    assert_eq!(run3.report.deleted_chunks, 0, "A is not yet expired");
+    assert!(
+        object_store.contains(&key_a).unwrap(),
+        "candidate A must survive the corrected-clock run"
+    );
+    assert!(
+        object_store.contains(&anchor_key).unwrap(),
+        "a trusted run must persist the last-GC-clock anchor"
+    );
+    if let Some(key_b) = &key_b {
+        assert_eq!(run3.report.new_quarantine_candidates, 1);
+        // The stamped first_seen must be the REAL clock — the jumped clock
+        // must never have become the reference.
+        let mut first_seen = None;
+        index_store
+            .visit_quarantine_candidates(|candidate| {
+                if candidate.object_key() == key_b {
+                    first_seen = Some(candidate.first_seen_unreachable_at_unix_seconds());
+                }
+                Ok::<(), GcError>(())
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            first_seen,
+            Some(real_now),
+            "B must be stamped with the real clock, not the jumped one"
+        );
+    } else {
+        assert_eq!(run3.report.new_quarantine_candidates, 0);
+    }
+}
+
+#[test]
+fn forward_clock_guard_defers_mark_control_no_new_orphan() {
+    // F-88 CONTROL (a): a pre-jump candidate A with NO new orphan. Two runs
+    // under a jumped clock must both fire the guard: A is preserved
+    // (deleted_chunks = 0 both runs), no candidate is ever stamped with the
+    // jumped time, and the guard stays armed.
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(run_forward_clock_two_run_scenario(false));
+}
+
+#[test]
+fn forward_clock_guard_defers_mark_exploit_untracked_orphan() {
+    // F-88 EXPLOIT (b): candidate A + an untracked orphan B. Pre-fix, run 1's
+    // mark stamped B's first_seen with the jumped clock, which disarmed the
+    // guard for run 2 and let the sweep delete A ~6 days before its real
+    // retention elapsed. Post-fix the mark is deferred on a fired guard: B is
+    // never stamped with the jumped time, A is preserved (deleted_chunks = 0
+    // in run 2), and only a later trusted run stamps B with the real clock.
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(run_forward_clock_two_run_scenario(true));
 }
 
 // ── run_local_gc with a pre-populated local SQLite store ──────────────

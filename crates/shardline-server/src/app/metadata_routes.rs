@@ -386,6 +386,11 @@ pub(super) async fn register_path(
     let auth = Some(repo_capability.capability());
     check_scope(auth, &provider, &owner, &repo, &rev)?;
     validate_revision(&rev)?;
+    // register_path auto-creates a revision registry row (F-89), so the same
+    // provider/owner/repo segment controls as create_revision apply here.
+    validate_repo_segment(&provider)?;
+    validate_repo_segment(&owner)?;
+    validate_repo_segment(&repo)?;
     let path = normalize_path(&path, false)?;
 
     let max_bytes = endpoint_body_limit(
@@ -399,9 +404,17 @@ pub(super) async fn register_path(
 
     let key = TreeKey::new(&provider, &owner, &repo, &rev);
     let scope = repo_capability.capability().namespace();
+    // Thread the F-75 per-repo revision cap into the backend so the auto-create
+    // in register_tree_path enforces the same bound as create_revision (F-89).
     let outcome = state
         .backend
-        .register_tree_path(&key, &path, &parsed.file_id, scope)
+        .register_tree_path(
+            &key,
+            &path,
+            &parsed.file_id,
+            scope,
+            state.config.max_revisions_per_repo(),
+        )
         .await?;
     Ok(Json(RegisterResponse {
         path: outcome.entry.path,

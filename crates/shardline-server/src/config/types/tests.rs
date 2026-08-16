@@ -1856,6 +1856,19 @@ fn server_config_error_display_missing_jwks_url() {
 }
 
 #[test]
+fn server_config_error_display_jwks_url_must_use_https() {
+    let err = ServerConfigError::JwksUrlMustUseHttps {
+        url: "http://keys.example.com/jwks".to_owned(),
+    };
+    let display = err.to_string();
+    assert!(display.contains("https"), "message: {display}");
+    assert!(
+        display.contains("http://keys.example.com/jwks"),
+        "message: {display}"
+    );
+}
+
+#[test]
 fn server_config_error_display_missing_ed25519_key() {
     let err = ServerConfigError::MissingEd25519Key;
     assert!(err.to_string().contains("ed25519 auth provider requires"));

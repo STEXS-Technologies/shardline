@@ -903,6 +903,46 @@ fn bundled_sqlite_migrations_match_on_disk_files() {
     );
 }
 
+/// SQLite has no uniqueness constraint on the applied migration version — the
+/// history insert is an `ON CONFLICT ... DO NOTHING` — so a duplicated version
+/// in [`LOCAL_SQLITE_MIGRATIONS`] is skipped silently at apply time and never
+/// applied, while the PG path would reject the duplicate history row. Mirror of
+/// `bundled_migrations_have_unique_versions` in `database_migration.rs`.
+#[test]
+fn bundled_sqlite_migrations_have_unique_versions() {
+    assert!(!LOCAL_SQLITE_MIGRATIONS.is_empty());
+    let mut versions: Vec<&str> = LOCAL_SQLITE_MIGRATIONS
+        .iter()
+        .map(|migration| migration.version)
+        .collect();
+    versions.sort_unstable();
+    versions.dedup();
+    assert_eq!(
+        versions.len(),
+        LOCAL_SQLITE_MIGRATIONS.len(),
+        "LOCAL_SQLITE_MIGRATIONS contains a duplicate version"
+    );
+}
+
+/// The array order IS the SQLite apply order, so a mis-ordering silently
+/// reorders schema application — e.g. applying `drop_lfs_objects` before
+/// `hub_api` would no-op the drop at runtime — while the PG path sorts applied
+/// migrations by version. Mirror of `bundled_database_migrations_are_monotonic`
+/// in `database_migration.rs`.
+#[test]
+fn bundled_sqlite_migrations_are_monotonic() {
+    assert!(!LOCAL_SQLITE_MIGRATIONS.is_empty());
+    assert!(LOCAL_SQLITE_MIGRATIONS.windows(2).all(|window| {
+        let Some(first) = window.first() else {
+            return false;
+        };
+        let Some(second) = window.get(1) else {
+            return false;
+        };
+        first.version < second.version
+    }));
+}
+
 fn sample_state_machine_records() -> Result<Vec<FileRecord>, Box<dyn Error>> {
     let scope_a = RepositoryScope::new(
         RepositoryProvider::GitHub,

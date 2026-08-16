@@ -634,6 +634,107 @@ async fn get_waits_for_slow_loader_beyond_total_bound_instead_of_stealing_latch(
     }
 }
 
+// ── get_or_load: a never-completing loader cannot wedge a waiter beyond the
+//    bounded total (F-100) ────────────────────────────────────────────────
+//
+// The F-78 deadline extension lets a loader that keeps refreshing its aliveness
+// stamp extend every waiter's bound by 60s forever. A loader that never
+// completes but stays pollable (so its heartbeat keeps the stamp fresh) must
+// not pin waiters beyond the documented total: LOADER_ORPHAN_TOTAL_TIMEOUT ×
+// (1 + LOADER_ORPHAN_EXTENSION_CAP), after which the waiter releases the latch
+// and reports a miss.
+
+#[tokio::test(start_paused = true)]
+async fn get_or_load_waiter_escapes_never_completing_loader_within_total_bound() {
+    use std::sync::Arc;
+
+    let cache = Arc::new(MemoryReconstructionCache::new(
+        NonZeroU64::new(3600).unwrap_or(NonZeroU64::MIN),
+        NonZeroUsize::new(100).unwrap_or(NonZeroUsize::MIN),
+    ));
+    let key = ReconstructionCacheKey::latest("wedged-loader", None);
+    let load_count = std::sync::Arc::new(AtomicU64::new(0));
+
+    // Caller 1: a loader that never completes but stays pollable (yields via
+    // 1s sleeps), so run_loader_with_heartbeat keeps its aliveness stamp fresh
+    // forever.
+    let cache_1 = Arc::clone(&cache);
+    let key_1 = key.clone();
+    let load_count_1 = Arc::clone(&load_count);
+    let loader_task = tokio::spawn(async move {
+        cache_1
+            .get_or_load(&key_1, || {
+                load_count_1.fetch_add(1, Ordering::Relaxed);
+                Box::pin(async {
+                    loop {
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                    }
+                    #[allow(unreachable_code)]
+                    Ok::<_, ReconstructionCacheError>(b"never".to_vec())
+                })
+            })
+            .await
+    });
+
+    // Give the loader time to register its latch.
+    tokio::time::advance(Duration::from_millis(100)).await;
+
+    // Caller 2: a waiter that must escape within the bounded total even though
+    // the wedged loader's aliveness stamp never goes stale.
+    let cache_2 = Arc::clone(&cache);
+    let key_2 = key.clone();
+    let load_count_2 = Arc::clone(&load_count);
+    let waiter_task = tokio::spawn(async move {
+        cache_2
+            .get_or_load(&key_2, || {
+                load_count_2.fetch_add(1, Ordering::Relaxed);
+                Box::pin(async {
+                    panic!("waiter must not run a second load inside the adapter");
+                    #[allow(unreachable_code)]
+                    Ok::<_, ReconstructionCacheError>(vec![])
+                })
+            })
+            .await
+    });
+
+    // Poll the waiter once so it registers its wait (deadline ≈ now + 60s).
+    tokio::task::yield_now().await;
+
+    // Advance in 60s stages, yielding between stages. `tokio::time::advance`
+    // only marks timer-woken tasks ready; the yield polls them so the wedged
+    // loader's heartbeat keeps the stamp fresh AND the waiter's extension loop
+    // progresses one interval per stage. After (1 + cap) stages the waiter's
+    // extension cap saturates and it must give up and report a miss.
+    let total_secs = (super::LOADER_ORPHAN_EXTENSION_CAP as u64 + 1)
+        * super::LOADER_ORPHAN_TOTAL_TIMEOUT.as_secs();
+    for _ in 0..=super::LOADER_ORPHAN_EXTENSION_CAP + 1 {
+        tokio::time::advance(Duration::from_secs(60)).await;
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        waiter_task.is_finished(),
+        "waiter must escape within the bounded total ({total_secs}s)"
+    );
+
+    let waiter_result = tokio::time::timeout(Duration::from_secs(5), waiter_task).await;
+    match waiter_result {
+        Ok(Ok(Ok(None))) => {}
+        Ok(Ok(Ok(Some(_)))) => panic!("waiter should not observe a value from the wedged loader"),
+        Ok(Ok(Err(e))) => panic!("waiter returned an unexpected error: {e}"),
+        Ok(Err(_join)) => panic!("waiter task panicked"),
+        Err(_) => panic!("waiter stayed wedged past the bounded total"),
+    }
+
+    assert_eq!(
+        load_count.load(Ordering::Relaxed),
+        1,
+        "the adapter-level waiter must not run its own load"
+    );
+
+    // The wedged loader never completes; abort it so the test can finish.
+    loader_task.abort();
+}
+
 // ── get_or_load: cache hit (fast path) ────────────────────────────────
 
 #[allow(clippy::shadow_unrelated)]

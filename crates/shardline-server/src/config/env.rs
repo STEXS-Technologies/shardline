@@ -272,7 +272,10 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
             "SHARDLINE_TOKEN_SIGNING_KEY_FILE",
         ),
         MAX_TOKEN_SIGNING_KEY_BYTES,
-        true,
+        // Variable-length, binary-capable key: never strip a trailing newline
+        // (the loader's contract) — stripping would silently truncate the key
+        // material when the file's last byte is 0x0A.
+        false,
         ServerConfigError::EmptyTokenSigningKey,
         |env, file_env| ServerConfigError::SecretSourceConflict { env, file_env },
         ServerConfigError::TokenSigningKey,
@@ -489,8 +492,19 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
             Some(_) => {}
         },
         AuthProviderKind::Jwks => {
-            if auth_jwks_url.is_none() {
-                return Err(ServerConfigError::MissingJwksUrl);
+            // Regression (F-95): JWKS key transport must be encrypted
+            // (RFC 8414 §2), mirroring the OIDC issuer gate above. Plain-http
+            // is tolerated only for loopback hosts so local development and
+            // test tooling (which cannot serve TLS) keep working; non-loopback
+            // http is a startup error rather than a silent downgrade.
+            match auth_jwks_url.as_deref() {
+                None => return Err(ServerConfigError::MissingJwksUrl),
+                Some(url) if !is_secure_jwks_url(url) => {
+                    return Err(ServerConfigError::JwksUrlMustUseHttps {
+                        url: url.to_owned(),
+                    });
+                }
+                Some(_) => {}
             }
         }
         AuthProviderKind::Ed25519 => {
@@ -643,6 +657,30 @@ fn is_https_url(value: &str) -> bool {
     url::Url::parse(value).is_ok_and(|parsed| parsed.scheme() == "https")
 }
 
+/// Returns true when `value` is an https URL, or an http URL whose host is
+/// loopback (`127.0.0.1`, `::1`, or `localhost`).
+///
+/// JWKS key transport must be encrypted (RFC 8414 §2); plain-http is
+/// tolerated only for loopback hosts so local development and test tooling
+/// (which cannot serve TLS) keep working. Non-loopback http is rejected.
+fn is_secure_jwks_url(value: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(value) else {
+        return false;
+    };
+    if parsed.scheme() == "https" {
+        return true;
+    }
+    if parsed.scheme() != "http" {
+        return false;
+    }
+    match parsed.host() {
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        Some(url::Host::Domain(domain)) => domain.eq_ignore_ascii_case("localhost"),
+        None => false,
+    }
+}
+
 fn parse_server_frontends_env(value: &str) -> Result<Vec<ServerFrontend>, ServerConfigError> {
     let mut parsed = Vec::new();
     for token in value.split(',').map(str::trim) {
@@ -671,8 +709,9 @@ fn parse_server_frontends_env(value: &str) -> Result<Vec<ServerFrontend>, Server
 ///
 /// When `strip_trailing_newline` is `true`, a single trailing line terminator
 /// is stripped from a file-sourced value. Enable it only for fixed-length keys
-/// (e.g. the 32-byte Hub webhook secret); variable-length secrets must pass
-/// `false` so a trailing newline is never silently altered.
+/// (e.g. the 32-byte Hub webhook secret); variable-length secrets (e.g. the
+/// token signing key) must pass `false` so a trailing newline is never silently
+/// altered.
 // The shared loader legitimately carries several error-mapping callbacks; the
 // additional `strip_trailing_newline` flag keeps it one argument over clippy's
 // default threshold.
@@ -1462,6 +1501,75 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
             config.config_secret_key(),
             Some(b"0123456789abcdef0123456789abcdef".as_slice())
         );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn token_signing_key_file_ending_in_newline_preserves_full_key_bytes() {
+        // Regression (F-97): the token signing key is a variable-length,
+        // binary-capable secret, so a file whose final byte is 0x0A must load
+        // VERBATIM — the effective key must equal the file bytes, never a
+        // silently truncated 31-byte prefix.
+        use std::io::Write;
+        let key_bytes = b"0123456789abcdef0123456789abcde\n"; // 32 bytes, last is 0x0A
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        tmp.write_all(key_bytes).unwrap();
+        tmp.flush().unwrap();
+
+        // SAFETY: serialized env test
+        set_env_var(
+            "SHARDLINE_TOKEN_SIGNING_KEY_FILE",
+            tmp.path().to_str().unwrap(),
+        );
+        remove_env_var("SHARDLINE_TOKEN_SIGNING_KEY");
+        // Clear any auth-provider override a previous serial test left behind.
+        remove_env_var("SHARDLINE_AUTH_PROVIDER");
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+
+        let result = super::load_server_config_from_env();
+        remove_env_var("SHARDLINE_TOKEN_SIGNING_KEY_FILE");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+
+        let config = result.expect("config loads with a trailing-newline token key file");
+        assert_eq!(
+            config.token_signing_key(),
+            Some(key_bytes.as_slice()),
+            "the token signing key must be preserved verbatim (effective key == file bytes)"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn config_secret_key_file_ending_in_newline_is_still_rejected() {
+        // The fixed-length (32-byte) config secret key keeps the strip: a
+        // 32-byte file ending in 0x0A loads as a 31-byte key and is rejected by
+        // the exact-length check — loudly, never silently accepted.
+        use std::io::Write;
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        tmp.write_all(b"0123456789abcdef0123456789abcde\n").unwrap(); // 32 bytes, last is 0x0A
+        tmp.flush().unwrap();
+
+        // SAFETY: serialized env test
+        set_env_var(
+            "SHARDLINE_CONFIG_SECRET_KEY_FILE",
+            tmp.path().to_str().unwrap(),
+        );
+        remove_env_var("SHARDLINE_CONFIG_SECRET_KEY");
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+
+        let result = super::load_server_config_from_env();
+        remove_env_var("SHARDLINE_CONFIG_SECRET_KEY_FILE");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+
+        assert!(matches!(
+            result,
+            Err(super::ServerConfigError::ConfigSecretKeyLength { expected, observed })
+                if expected == 32 && observed == 31
+        ));
     }
 
     #[test]
@@ -2408,6 +2516,74 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
             Err(super::ServerConfigError::MissingJwksUrl)
         ));
         remove_env_var("SHARDLINE_AUTH_PROVIDER");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn load_server_config_jwks_rejects_http_url() {
+        // Regression (F-95): JWKS key transport must be https (RFC 8414 §2).
+        // A plain-http non-loopback SHARDLINE_AUTH_JWKS_URL is a startup error
+        // rather than a silent downgrade of key transport.
+        set_env_var("SHARDLINE_AUTH_PROVIDER", "jwks");
+        set_env_var(
+            "SHARDLINE_AUTH_JWKS_URL",
+            "http://keys.example.com/.well-known/jwks",
+        );
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+        let result = super::load_server_config_from_env();
+        assert!(matches!(
+            result,
+            Err(super::ServerConfigError::JwksUrlMustUseHttps { .. })
+        ));
+        remove_env_var("SHARDLINE_AUTH_PROVIDER");
+        remove_env_var("SHARDLINE_AUTH_JWKS_URL");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn load_server_config_jwks_accepts_https_url() {
+        set_env_var("SHARDLINE_AUTH_PROVIDER", "jwks");
+        set_env_var(
+            "SHARDLINE_AUTH_JWKS_URL",
+            "https://keys.example.com/.well-known/jwks",
+        );
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+        let result = super::load_server_config_from_env();
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+        let config = result.unwrap();
+        assert_eq!(
+            config.auth_jwks_url(),
+            Some("https://keys.example.com/.well-known/jwks"),
+            "an https JWKS URL must be accepted"
+        );
+        remove_env_var("SHARDLINE_AUTH_PROVIDER");
+        remove_env_var("SHARDLINE_AUTH_JWKS_URL");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn load_server_config_jwks_accepts_loopback_http_url() {
+        // Loopback http is tolerated so local development and test tooling
+        // (which cannot serve TLS) keep working.
+        set_env_var("SHARDLINE_AUTH_PROVIDER", "jwks");
+        set_env_var(
+            "SHARDLINE_AUTH_JWKS_URL",
+            "http://127.0.0.1:8080/.well-known/jwks",
+        );
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+        let result = super::load_server_config_from_env();
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+        remove_env_var("SHARDLINE_AUTH_PROVIDER");
+        remove_env_var("SHARDLINE_AUTH_JWKS_URL");
         remove_env_var("SHARDLINE_ROOT_DIR");
         remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
     }

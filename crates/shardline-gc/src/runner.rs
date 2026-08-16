@@ -5,6 +5,44 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[cfg(test)]
+use std::cell::Cell;
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only wall-clock pin for [`run_gc_with_stores`], mirroring the
+    /// `COLLECT_CALL_COUNT` thread-local in `reachability`: each `#[test]`
+    /// runs on its own thread, so a test that pins the clock cannot perturb the
+    /// `run_gc_with_stores` calls of other tests. `None` (the default)
+    /// preserves production behavior: the real system clock.
+    static TEST_NOW_UNIX_SECONDS_OVERRIDE: Cell<Option<u64>> = const { Cell::new(None) };
+}
+
+/// Test-only: pins the wall clock consulted by [`run_gc_with_stores`] for the
+/// calling test thread, so a regression test can simulate a forward clock jump
+/// between two consecutive runs (F-88). Pass `None` to restore the real clock.
+#[cfg(test)]
+pub(crate) fn set_gc_now_unix_seconds_override(now_unix_seconds: Option<u64>) {
+    TEST_NOW_UNIX_SECONDS_OVERRIDE.with(|slot| slot.set(now_unix_seconds));
+}
+
+/// Returns the wall clock for this GC run: the test override when one is pinned
+/// on this thread, otherwise the real system clock.
+#[cfg(test)]
+#[must_use]
+fn gc_now_unix_seconds() -> u64 {
+    TEST_NOW_UNIX_SECONDS_OVERRIDE
+        .with(|slot| slot.get())
+        .unwrap_or_else(unix_now_seconds_lossy)
+}
+
+/// Returns the wall clock for this GC run.
+#[cfg(not(test))]
+#[must_use]
+fn gc_now_unix_seconds() -> u64 {
+    unix_now_seconds_lossy()
+}
+
 use shardline_index::{AsyncIndexStore, LocalIndexStore, LocalRecordStore, QuarantineCandidate};
 use shardline_protocol::unix_now_seconds_lossy;
 use shardline_server_core::{
@@ -96,7 +134,7 @@ where
 {
     let mark_start = std::time::Instant::now();
     let mut reachability = ReachabilityAccumulator::default();
-    let now_unix_seconds = unix_now_seconds_lossy();
+    let now_unix_seconds = gc_now_unix_seconds();
 
     let retention_seconds = options.retention_seconds;
 
@@ -111,15 +149,15 @@ where
     validate_gc_index_integrity(index_store, object_store, now_unix_seconds).await?;
     shardline_metrics::record_gc_mark_duration(mark_start.elapsed());
 
-    // Forward-clock sanity guard (F-45, hardened by F-57): a forward NTP step /
-    // VM time-sync-after-pause makes every quarantine candidate eligible AND
-    // every time-bounded hold inactive, which would mass-delete recoverable
-    // data and strip all hold protection in one pass. When `now` jumps forward
-    // beyond a slack relative to the newest trustworthy wall-clock observation
-    // (the newest stored lifecycle CREATION timestamp and the persisted
-    // last-GC-clock anchor), skip the sweep and hold pruning for this run
-    // (warn), mirroring the backwards `temp_reaping_clock_is_skewed` guard for
-    // the reaper.
+    // Forward-clock sanity guard (F-45, hardened by F-57 and F-88): a forward
+    // NTP step / VM time-sync-after-pause makes every quarantine candidate
+    // eligible AND every time-bounded hold inactive, which would mass-delete
+    // recoverable data and strip all hold protection in one pass. When `now`
+    // jumps forward beyond a slack relative to the newest trustworthy
+    // wall-clock observation (the newest stored lifecycle CREATION timestamp
+    // and the persisted last-GC-clock anchor), skip the sweep and hold pruning
+    // for this run (warn), mirroring the backwards `temp_reaping_clock_is_skewed`
+    // guard for the reaper.
     //
     // The reference is creation-timestamps-only: `delete_after` (=
     // `first_seen` + retention) and hold `release_after` are future-dated on
@@ -128,6 +166,19 @@ where
     // weeks (the F-57 bypass). The anchor keeps the reference as fresh as the
     // last trusted GC run so a low-churn deployment does not spuriously age the
     // creation-only reference past the slack.
+    //
+    // F-88 hardening: a fired guard ALSO DEFERS THE MARK
+    // (`reconcile_quarantine_entries`) for the run. The mark stamps new
+    // quarantine candidates' `first_seen_unreachable_at` with `now`, so a
+    // jumped clock would write the jumped timestamp into the creation
+    // reference — the next run's guard would then see a "fresh" creation
+    // timestamp and go silent, letting the sweep delete pre-jump candidates up
+    // to (jump − slack) before their real retention elapsed and permanently
+    // poisoning the anchor with the jumped clock. Untrusted-clock timestamps
+    // must never enter the creation reference: a fired run stamps nothing,
+    // marks nothing, and deletes nothing, so the guard stays armed until a
+    // later trusted run (self-healing via the anchor and via server-side
+    // lifecycle events) refreshes the reference.
     let newest_stored_creation_timestamp =
         read_newest_stored_creation_timestamp(index_store).await?;
     let last_gc_clock_anchor = read_last_gc_clock_anchor(object_store)?;
@@ -139,7 +190,8 @@ where
     if retention_clock_is_skewed_forward {
         tracing::warn!(
             "GC wall clock ({now_unix_seconds}s) jumped forward relative to the newest stored \
-             lifecycle creation timestamp; skipping the quarantine sweep and hold pruning this run"
+             lifecycle creation timestamp; deferring the quarantine mark, sweep, and hold \
+             pruning this run (a jumped clock must never stamp quarantine timestamps)"
         );
     } else if options.mark || options.sweep {
         // The forward guard cleared: this run's wall clock is trustworthy
@@ -210,7 +262,16 @@ where
         reaped_stale_temporary_bytes: 0,
     };
 
-    if options.mark {
+    // The mark is gated on the same `!retention_clock_is_skewed_forward`
+    // condition as the sweep below (F-88): `reconcile_quarantine_entries`
+    // stamps new candidates' `first_seen_unreachable_at` with
+    // `now_unix_seconds`, so a fired run's jumped `now` must never enter the
+    // creation-timestamp reference that keeps the guard armed. Deferring the
+    // whole mark (not just the stamping) also defers the stale-entry release
+    // repair by one run — a safe, data-preserving choice while the clock is
+    // untrustworthy (held data is already protected: with the guard fired,
+    // `hold_activity_now` is 0, so every hold is treated as active).
+    if options.mark && !retention_clock_is_skewed_forward {
         reconcile_quarantine_entries(
             index_store,
             &orphan_objects,

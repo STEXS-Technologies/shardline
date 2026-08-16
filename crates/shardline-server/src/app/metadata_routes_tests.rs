@@ -171,6 +171,10 @@ fn path_url(path: &str) -> String {
     format!("/api/{PROVIDER}/{OWNER}/{REPO}/path/{REV}/{path}")
 }
 
+fn path_url_for_rev(rev: &str, path: &str) -> String {
+    format!("/api/{PROVIDER}/{OWNER}/{REPO}/path/{rev}/{path}")
+}
+
 async fn get_body(response: axum::response::Response) -> Value {
     let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
         .await
@@ -300,6 +304,113 @@ async fn register_unregistered_file_returns_400() {
         body["error"],
         format!("file is not registered in revision {REV}")
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn register_path_respects_per_repo_revision_cap() {
+    // F-89 regression: register_path auto-creates the revision registry row, so
+    // it must enforce the same per-repo cap as create_revision. One valid file
+    // id is enough to mint unlimited revision rows via PUT.
+    let cap = NonZeroUsize::new(3).unwrap();
+    let (app, tmp) = build_app_with_cap(false, cap).await;
+    let id = file_id(4);
+    write_record(tmp.path(), &id, 100, None).await;
+
+    // The first `cap` distinct revisions are accepted.
+    for rev in ["one", "two", "three"] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(path_url_for_rev(rev, "data/model.pt"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(json!({ "fileId": id }).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "{rev} should be accepted"
+        );
+    }
+
+    // The next distinct revision is rejected with 409 once the repo is at
+    // capacity, exactly like create_revision.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(path_url_for_rev("four", "data/model.pt"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(json!({ "fileId": id }).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = get_body(response).await;
+    assert_eq!(
+        body["error"],
+        "revision registry is full for this repository"
+    );
+
+    // The registry holds exactly `cap` rows — no tree rows leaked either.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/api/{PROVIDER}/{OWNER}/{REPO}/revisions"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        get_body(response).await["revisions"]
+            .as_array()
+            .unwrap()
+            .len(),
+        cap.get()
+    );
+
+    // Re-registering an EXISTING revision (a refresh) is still allowed at the
+    // cap: it refreshes the tree entry without growing the registry.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(path_url_for_rev("one", "data/model.pt"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(json!({ "fileId": id }).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = get_body(response).await;
+    assert_eq!(body["created"], false);
+
+    // A different repository has its own independent cap.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/api/{PROVIDER}/{OWNER}/other/path/solo/f.txt"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(json!({ "fileId": id }).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
 }
 
 // ── Listing (§1.2) ─────────────────────────────────────────────────────────

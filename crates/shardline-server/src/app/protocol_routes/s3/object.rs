@@ -494,6 +494,16 @@ fn bounded_byte_stream(
 ///    the lock. When it fires the just-committed record is the LOSER's — it is
 ///    purged (version record + latest alias) so no latest-record consumer ever
 ///    serves the loser's bytes and its chunks are not retained as reachable.
+///
+/// The purge is F-92-guarded: it deletes the LOSER's committed version only
+/// while the latest alias still points at it (see
+/// `delete_file_reference_if_latest`). The per-key lock is an in-process
+/// HashMap, so in a multi-replica Postgres deployment it does NOT serialize
+/// conditional writers on different replicas — a replica can commit the
+/// WINNER's record and swap the row between this request's pre-check and
+/// post-check. An unconditional purge would then read the latest alias (now the
+/// winner) and delete the winner's acknowledged write; the guard turns the
+/// purge into a no-op in exactly that interleaving.
 async fn s3_upload_object_body(
     state: &Arc<AppState>,
     context: &S3ObjectContext<'_>,
@@ -552,16 +562,31 @@ async fn s3_upload_object_body(
     // authoritative today). When it fires the just-committed record is the
     // loser's — purge its version so no latest-record consumer serves the
     // loser's bytes and no orphan record (or reachable chunks) remains (F-86).
+    //
+    // F-92 guard: purge the LOSER's committed version, not whatever the latest
+    // alias now points at. The per-key lock is process-local, so in a
+    // multi-replica Postgres deployment a concurrent replica may have committed
+    // the WINNER's record (and swapped the row) between the pre-check above and
+    // this post-check; `delete_file_reference_if_latest` re-reads the latest
+    // alias and only deletes while it still equals the just-committed (loser)
+    // content hash. If the latest alias has moved to the winner the purge is a
+    // no-op and the winner's acknowledged write survives; the loser's record is
+    // left as a non-latest version, which GC eventually reclaims.
     if let Some(precondition) = precondition
         && let Err(error) = check_put_precondition(state, context, precondition).await
     {
         let file_id = uploaded.file_id.clone();
-        match state.backend.delete_file_reference(&file_id).await {
+        let content_hash = uploaded.content_hash.clone();
+        match state
+            .backend
+            .delete_file_reference_if_latest(&file_id, &content_hash)
+            .await
+        {
             Ok(true) => {
-                tracing::debug!(file_id, "purged conditional-write loser record");
+                tracing::debug!(file_id, %content_hash, "purged conditional-write loser record");
             }
             Ok(false) => {
-                tracing::debug!(file_id, "conditional-write loser record already gone");
+                tracing::debug!(file_id, %content_hash, "conditional-write loser record already gone or superseded by another version");
             }
             Err(purge_error) => {
                 tracing::warn!(file_id, %purge_error, "failed to purge conditional-write loser record");

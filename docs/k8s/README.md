@@ -44,8 +44,8 @@ docs/k8s/production-scaled/
 ## Configuration
 
 Server settings are defined in `configmap.yaml` as a `shardline.toml` file mounted at
-`/etc/shardline/shardline.toml`. Shardline automatically detects this path, so no
-`--config` flag is needed.
+`/etc/shardline/shardline.toml`. When no `--config` flag is given, Shardline
+automatically detects this path, so pods need no explicit `--config` flag.
 Credentials and secrets remain in the runtime secret as env vars or mounted files.
 
 ```bash
@@ -53,10 +53,21 @@ kubectl apply -f docs/k8s/production-scaled/configmap.yaml
 ```
 
 Use `--config` and `--env-file` with the CLI locally to match the production
-configuration during development:
+configuration during development. An explicit `--config` overrides auto-detection,
+and it must point at the TOML document itself, not at the ConfigMap manifest that
+wraps it (`configmap.yaml` is a Kubernetes object; the TOML content lives under its
+`data.shardline.toml` key). Extract that content to a local file first:
 
 ```bash
-shardline --config docs/k8s/production-scaled/configmap.yaml serve
+kubectl get cm shardline-config -o jsonpath='{.data.shardline\.toml}' > shardline.toml
+shardline --config shardline.toml serve
+```
+
+Bash supports process substitution, so the same recipe works without the
+intermediate file when you prefer:
+
+```bash
+shardline --config <(kubectl get cm shardline-config -o jsonpath='{.data.shardline\.toml}') serve
 ```
 
 ## Prerequisites

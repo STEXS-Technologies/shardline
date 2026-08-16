@@ -27,9 +27,9 @@ use super::{HubRepository, HubState, authorize, lfs_object_key, repo_type_path};
 pub(crate) async fn repo_create(
     State(state): State<HubState>,
     headers: HeaderMap,
-    _repo: HubRepository<true>,
+    repo: HubRepository<true>,
     Json(request): Json<RepoCreateRequest>,
-) -> Result<(StatusCode, Json<RepoResponse>), HubApiError> {
+) -> Result<(StatusCode, Json<serde_json::Value>), HubApiError> {
     let full_name = request.organization.as_deref().map_or_else(
         || request.name.clone(),
         |organization| format!("{organization}/{}", request.name),
@@ -42,22 +42,42 @@ pub(crate) async fn repo_create(
     // has already required Write scope (and, on this pathless route, performed
     // no repository binding).
     let repo_type: HubRepoType = request.repo_type.into();
-    // `huggingface_hub` calls this endpoint before every upload with
-    // `exist_ok=True`, but does not transmit that flag. It accepts the
-    // established 409 conflict response when it contains the existing
-    // repository URL, so preserve the HTTP conflict contract and return the
-    // compatibility body the native client needs.
     if let Some(existing) = state
         .store
         .get_repo(&full_name)
         .map_err(|e| HubApiError::CasError(e.to_string()))?
     {
+        // `huggingface_hub` calls this endpoint before every upload with
+        // `exist_ok=True`, but does not transmit that flag. It accepts the
+        // established 409 conflict response when it contains the existing
+        // repository URL, so the compatibility body is preserved for the
+        // caller's OWN repository. For any other repository it must NEVER be
+        // returned: the full RepoResponse would disclose the victim's
+        // id/private/url/last_modified to a caller with no access, the same
+        // cross-tenant privacy boundary enforced on repo_list/repo_search
+        // (`repo_visible_to_owner`). A caller that does not own the existing
+        // repository gets a minimal conflict body with no repository metadata.
+        let caller_repo_id = repo.capability().claims().map(|claims| {
+            let r = claims.repository();
+            format!("{}/{}", r.owner(), r.name())
+        });
+        if caller_repo_id.as_deref() == Some(existing.repo_id.as_str()) {
+            return Ok((
+                StatusCode::CONFLICT,
+                Json(serde_json::to_value(repo_response_for_request(
+                    &headers, &existing,
+                ))?),
+            ));
+        }
         return Ok((
             StatusCode::CONFLICT,
-            Json(repo_response_for_request(&headers, &existing)),
+            Json(serde_json::json!({
+                "name": full_name,
+                "message": "repository already exists",
+            })),
         ));
     }
-    let repo = state
+    let created = state
         .store
         .create_repo(
             repo_type,
@@ -68,7 +88,9 @@ pub(crate) async fn repo_create(
     shardline_metrics::record_hub_api_request("repo_create", "POST", 201);
     Ok((
         StatusCode::CREATED,
-        Json(repo_response_for_request(&headers, &repo)),
+        Json(serde_json::to_value(repo_response_for_request(
+            &headers, &created,
+        ))?),
     ))
 }
 

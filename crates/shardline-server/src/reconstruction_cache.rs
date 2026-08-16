@@ -23,6 +23,12 @@ use crate::{
 type SharedReconstructionCache = Arc<dyn AsyncReconstructionCache>;
 const MAX_RECONSTRUCTION_CACHE_PAYLOAD_BYTES: u64 = 67_108_864;
 
+/// Interval at which the service layer refreshes the loading latch's aliveness
+/// stamp while its loader is running (F-90). Kept well below the memory
+/// adapter's aliveness grace so a waiter at the orphan bound always observes a
+/// fresh stamp for a live loader.
+const LOADER_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
+
 /// Benchmarks one cold reconstruction load followed by one hot cache hit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReconstructionCacheBenchReport {
@@ -132,7 +138,11 @@ impl ReconstructionCacheService {
         }
 
         shardline_metrics::record_reconstruction_cache_miss();
-        let response = match load().await {
+        // Run the loader with a heartbeat that refreshes the loading latch the
+        // adapter registered during get() (F-90): a slow-but-alive load must
+        // never be mistaken for a dead one at a concurrent waiter's orphan
+        // bound, or the latch is stolen and a second reconstruction starts.
+        let response = match self.run_load_with_heartbeat(key, load).await {
             Ok(response) => response,
             Err(error) => {
                 // The adapter may have registered an in-flight loading latch for
@@ -147,8 +157,42 @@ impl ReconstructionCacheService {
         let payload = to_vec(&response)?;
         if payload_within_bound(&payload) {
             let _ignored = self.adapter.put(key, &payload).await;
+        } else {
+            // The payload exceeds the cache bound, so the put() is skipped —
+            // but the loading latch registered during get() must still be
+            // cleared, otherwise it lingers until a waiter steals it at the
+            // orphan bound (F-91). Delete restores the cache to its pre-get()
+            // state.
+            self.adapter.delete(key).await.ok();
         }
         Ok(response)
+    }
+
+    /// Runs `load` while refreshing the loading latch's aliveness stamp at
+    /// intervals, mirroring the memory adapter's own loader heartbeat so the
+    /// production service-layer path gets the same protection (F-90).
+    async fn run_load_with_heartbeat<Load, LoadFuture>(
+        &self,
+        key: &ReconstructionCacheKey,
+        load: Load,
+    ) -> Result<FileReconstructionResponse, ServerError>
+    where
+        Load: FnOnce() -> LoadFuture,
+        LoadFuture: Future<Output = Result<FileReconstructionResponse, ServerError>>,
+    {
+        let mut loader_future = std::pin::pin!(load());
+        let mut heartbeat = tokio::time::interval(LOADER_HEARTBEAT_INTERVAL);
+        loop {
+            tokio::select! {
+                result = &mut loader_future => return result,
+                _ = heartbeat.tick() => {
+                    // Refresh the latch the adapter registered during get(), so
+                    // a concurrent waiter at the orphan bound sees a fresh
+                    // stamp instead of stealing the latch of a live loader.
+                    let _ignored = self.adapter.touch_loading(key).await;
+                }
+            }
+        }
     }
 
     pub(crate) fn version_key(
@@ -1201,5 +1245,260 @@ mod tests {
                 .and_then(|r| r.terms.first().map(|t| t.hash.clone())),
             Some("slow-chunk-61".to_owned())
         );
+    }
+
+    // ── get_or_load — slow (>60s) loader through the SERVICE layer keeps its
+    //    latch (F-90) ──────────────────────────────────────────────────────
+    //
+    // The F-78 heartbeat was wired only into the memory adapter's get_or_load,
+    // which the production service layer does not use: it runs
+    // adapter.get() -> load().await -> put() and never refreshed the latch's
+    // aliveness stamp. A >60s reconstruction therefore had its latch stolen at
+    // the orphan bound and a second full reconstruction started (loads = 2).
+    // The service layer now heartbeats the latch itself while its loader runs,
+    // so BOTH requests going through ReconstructionCacheService::get_or_load
+    // dedup on the single reconstruction.
+
+    #[tokio::test(start_paused = true)]
+    async fn cache_service_dedups_slow_loads_through_service_layer() {
+        let ttl_seconds = NonZeroU64::new(60).unwrap_or(NonZeroU64::MIN);
+        let memory = MemoryReconstructionCache::new(
+            ttl_seconds,
+            NonZeroUsize::new(8).unwrap_or(NonZeroUsize::MIN),
+        );
+        let adapter: SharedReconstructionCache = Arc::new(memory);
+        let cache = Arc::new(ReconstructionCacheService::for_tests("memory", adapter));
+        let key = Arc::new(ReconstructionCacheKey::latest(
+            "slow-service-layer.bin",
+            None,
+        ));
+        let loader_calls = std::sync::Arc::new(AtomicUsize::new(0));
+
+        // R1: a 61s reconstruction through the service layer (past the 60s
+        // total orphan bound). The service layer heartbeats the latch while
+        // the loader runs.
+        let cache_1 = Arc::clone(&cache);
+        let key_1 = Arc::clone(&key);
+        let loader_calls_1 = Arc::clone(&loader_calls);
+        let task1 = tokio::spawn(async move {
+            cache_1
+                .get_or_load(&key_1, || {
+                    loader_calls_1.fetch_add(1, Ordering::SeqCst);
+                    async {
+                        tokio::time::sleep(Duration::from_secs(61)).await;
+                        Ok(sample_response("slow-chunk-service"))
+                    }
+                })
+                .await
+        });
+
+        // Give R1 time to register its latch and start its 61s sleep.
+        tokio::time::advance(Duration::from_millis(100)).await;
+
+        // R2: a concurrent service-layer request must keep waiting past the
+        // 60s orphan bound instead of reporting a miss and starting a second
+        // reconstruction.
+        let cache_2 = Arc::clone(&cache);
+        let key_2 = Arc::clone(&key);
+        let loader_calls_2 = Arc::clone(&loader_calls);
+        let task2 = tokio::spawn(async move {
+            cache_2
+                .get_or_load(&key_2, || {
+                    loader_calls_2.fetch_add(1, Ordering::SeqCst);
+                    // If this ever runs, the `loader_calls == 1` assertion
+                    // below fails (a second reconstruction was started).
+                    async { Ok(sample_response("should-not-run")) }
+                })
+                .await
+        });
+
+        // A tiny advance so R2 registers its wait (deadline ≈ 60.1s).
+        tokio::time::advance(Duration::from_millis(1)).await;
+
+        // Cross R2's 60s deadline while R1's loader is still alive: the
+        // service-layer heartbeat keeps the latch's stamp fresh, so R2 must
+        // extend its wait instead of stealing the latch.
+        tokio::time::advance(Duration::from_secs(60)).await;
+        assert!(
+            !task2.is_finished(),
+            "waiter must not give up at the orphan bound while the service-layer loader is alive"
+        );
+
+        // Advance through the loader's completion at 61s: the value is stored
+        // and R2 observes it.
+        tokio::time::advance(Duration::from_secs(2)).await;
+
+        let result1 = task1.await.expect("task 1 panicked");
+        let result2 = task2.await.expect("task 2 panicked");
+        assert!(result1.is_ok(), "loader should succeed");
+        assert!(result2.is_ok(), "waiter should succeed");
+        assert_eq!(
+            loader_calls.load(Ordering::SeqCst),
+            1,
+            "concurrent reconstructions must be deduplicated"
+        );
+        assert_eq!(
+            result2
+                .ok()
+                .and_then(|r| r.terms.first().map(|t| t.hash.clone())),
+            Some("slow-chunk-service".to_owned())
+        );
+    }
+
+    // ── get_or_load — cold-cache concurrent requests dedup on one load
+    //    (F-91) ───────────────────────────────────────────────────────────
+    //
+    // get() previously returned Ok(None) on a cold miss WITHOUT registering a
+    // loading latch, so N concurrent service-layer requests for an uncached
+    // key each ran their own reconstruction (measured: loads = 3 for 3
+    // requests). get() now registers a latch on the cold-miss path so
+    // concurrent callers wait for the single in-flight load.
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn cache_service_cold_miss_concurrent_requests_run_loader_once() {
+        let ttl_seconds = NonZeroU64::new(60).unwrap_or(NonZeroU64::MIN);
+        let memory = MemoryReconstructionCache::new(
+            ttl_seconds,
+            NonZeroUsize::new(8).unwrap_or(NonZeroUsize::MIN),
+        );
+        let adapter: SharedReconstructionCache = Arc::new(memory);
+        let cache = Arc::new(ReconstructionCacheService::for_tests("memory", adapter));
+        let key = Arc::new(ReconstructionCacheKey::latest("cold-dedup.bin", None));
+        let loader_calls = std::sync::Arc::new(AtomicUsize::new(0));
+
+        // N concurrent cold requests released at once against an empty cache.
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(4));
+        let mut handles = Vec::new();
+        for _ in 0..3 {
+            let cache = Arc::clone(&cache);
+            let key = Arc::clone(&key);
+            let loader_calls = Arc::clone(&loader_calls);
+            let barrier = Arc::clone(&barrier);
+            handles.push(tokio::spawn(async move {
+                barrier.wait().await;
+                cache
+                    .get_or_load(&key, || {
+                        loader_calls.fetch_add(1, Ordering::SeqCst);
+                        async {
+                            tokio::time::sleep(Duration::from_millis(300)).await;
+                            Ok(sample_response("cold-shared"))
+                        }
+                    })
+                    .await
+            }));
+        }
+
+        // Release all requests at once.
+        barrier.wait().await;
+
+        for handle in handles {
+            let result = handle.await.expect("task panicked");
+            assert!(result.is_ok(), "request should succeed");
+            assert_eq!(
+                result
+                    .ok()
+                    .and_then(|r| r.terms.first().map(|t| t.hash.clone())),
+                Some("cold-shared".to_owned()),
+                "every concurrent request must observe the single load's value"
+            );
+        }
+
+        assert_eq!(
+            loader_calls.load(Ordering::SeqCst),
+            1,
+            "cold-cache concurrent requests must dedup on a single reconstruction"
+        );
+    }
+
+    // ── get_or_load — a wedged-but-pollable loader cannot pin waiters beyond
+    //    the bounded total (F-100) ─────────────────────────────────────────
+    //
+    // The F-78 deadline extension let a loader that keeps refreshing its
+    // aliveness stamp extend every waiter's bound by 60s forever. The service
+    // layer heartbeats the latch itself, so a never-completing loader stays
+    // "alive" indefinitely — the extension cap bounds the total wait to
+    // (1 + cap) × 60s, after which the waiter escapes, releases the latch, and
+    // runs its own reconstruction.
+
+    #[tokio::test(start_paused = true)]
+    async fn cache_service_waiter_escapes_wedged_loader_and_loads_itself() {
+        let ttl_seconds = NonZeroU64::new(60).unwrap_or(NonZeroU64::MIN);
+        let memory = MemoryReconstructionCache::new(
+            ttl_seconds,
+            NonZeroUsize::new(8).unwrap_or(NonZeroUsize::MIN),
+        );
+        let adapter: SharedReconstructionCache = Arc::new(memory);
+        let cache = Arc::new(ReconstructionCacheService::for_tests("memory", adapter));
+        let key = Arc::new(ReconstructionCacheKey::latest("wedged-service.bin", None));
+        let loader_calls = std::sync::Arc::new(AtomicUsize::new(0));
+
+        // R1: a loader that never completes but stays pollable (yields via 1s
+        // sleeps), so the service-layer heartbeat keeps its latch fresh
+        // forever.
+        let cache_1 = Arc::clone(&cache);
+        let key_1 = Arc::clone(&key);
+        let loader_calls_1 = Arc::clone(&loader_calls);
+        let wedged_task = tokio::spawn(async move {
+            cache_1
+                .get_or_load(&key_1, || {
+                    loader_calls_1.fetch_add(1, Ordering::SeqCst);
+                    async {
+                        loop {
+                            tokio::time::sleep(Duration::from_secs(1)).await;
+                        }
+                        #[allow(unreachable_code)]
+                        Ok(sample_response("never"))
+                    }
+                })
+                .await
+        });
+
+        // Give R1 time to register its latch.
+        tokio::time::advance(Duration::from_millis(100)).await;
+
+        // R2: a concurrent service-layer request that must escape the wedged
+        // latch at the bounded total and complete its own reconstruction.
+        let cache_2 = Arc::clone(&cache);
+        let key_2 = Arc::clone(&key);
+        let loader_calls_2 = Arc::clone(&loader_calls);
+        let waiter_task = tokio::spawn(async move {
+            cache_2
+                .get_or_load(&key_2, || {
+                    loader_calls_2.fetch_add(1, Ordering::SeqCst);
+                    async { Ok(sample_response("r2-value")) }
+                })
+                .await
+        });
+
+        // Poll the waiter once so it registers its wait (deadline ≈ now + 60s).
+        tokio::task::yield_now().await;
+
+        // Advance in 60s stages, yielding between stages. `tokio::time::advance`
+        // only marks timer-woken tasks ready; the yield polls them so R1's
+        // service-layer heartbeat keeps the stamp fresh AND R2's extension loop
+        // progresses one interval per stage. After (1 + cap) stages — 60s × 5 =
+        // 300s, matching the server's 300s request budget — the extension cap
+        // saturates and R2 must escape, run its own load, and complete.
+        for _ in 0..=5 {
+            tokio::time::advance(Duration::from_secs(60)).await;
+            tokio::task::yield_now().await;
+        }
+
+        let result2 = waiter_task.await.expect("task 2 panicked");
+        assert!(result2.is_ok(), "waiter should complete its own load");
+        assert_eq!(
+            result2
+                .ok()
+                .and_then(|r| r.terms.first().map(|t| t.hash.clone())),
+            Some("r2-value".to_owned())
+        );
+        assert_eq!(
+            loader_calls.load(Ordering::SeqCst),
+            2,
+            "the waiter must run its own reconstruction after escaping the wedged latch"
+        );
+
+        // R1 is still wedged; abort it so the test can finish.
+        wedged_task.abort();
     }
 }
