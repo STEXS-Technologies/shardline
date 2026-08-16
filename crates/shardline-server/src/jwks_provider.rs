@@ -88,6 +88,9 @@ pub enum JwksProviderError {
     /// The JWKS endpoint could not be reached.
     #[error("failed to fetch JWKS keys: {0}")]
     JwksFetch(String),
+    /// The JWKS URL uses an insecure scheme (non-https, non-loopback).
+    #[error("jwks url must use https (loopback http allowed for development), got {0}")]
+    InsecureUrl(String),
 }
 
 impl JwksProvider {
@@ -97,6 +100,15 @@ impl JwksProvider {
     ///
     /// Returns [`JwksProviderError`] when the JWKS endpoint is unreachable.
     pub async fn new(jwks_url: &str, issuer: &str) -> Result<Self, JwksProviderError> {
+        // Regression (F-95): JWKS key transport must be encrypted (RFC 8414
+        // §2). Enforce the scheme gate here too, mirroring the config-load
+        // gate in `load_server_config_from_env`, so a programmatic caller can
+        // never construct a provider that fetches signing keys over plain-http
+        // (loopback http is tolerated for local development / test tooling).
+        if !is_secure_jwks_url(jwks_url) {
+            return Err(JwksProviderError::InsecureUrl(jwks_url.to_owned()));
+        }
+
         let client = Client::builder()
             .timeout(Duration::from_secs(10))
             .build()
@@ -467,6 +479,30 @@ fn parse_cache_max_age(headers: &reqwest::header::HeaderMap) -> Option<Duration>
     None
 }
 
+/// Returns true when `url` is an https URL, or an http URL whose host is
+/// loopback (`127.0.0.1`, `::1`, or `localhost`).
+///
+/// JWKS key transport must be encrypted (RFC 8414 §2); plain-http is
+/// tolerated only for loopback hosts so local development and test tooling
+/// (which cannot serve TLS) keep working. Non-loopback http is rejected.
+fn is_secure_jwks_url(url: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(url) else {
+        return false;
+    };
+    if parsed.scheme() == "https" {
+        return true;
+    }
+    if parsed.scheme() != "http" {
+        return false;
+    }
+    match parsed.host() {
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        Some(url::Host::Domain(domain)) => domain.eq_ignore_ascii_case("localhost"),
+        None => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -488,6 +524,15 @@ mod tests {
         let msg = format!("{e}");
         assert!(!msg.is_empty());
         assert!(msg.contains("JWKS"));
+    }
+
+    #[test]
+    fn jwks_provider_error_insecure_url_display_non_empty() {
+        let e = JwksProviderError::InsecureUrl("http://keys.example.com/jwks".into());
+        let msg = format!("{e}");
+        assert!(!msg.is_empty());
+        assert!(msg.contains("https"), "message: {msg}");
+        assert!(msg.contains("keys.example.com"), "message: {msg}");
     }
 
     // ── Jwk deserialization ──────────────────────────────────────────────
@@ -905,7 +950,55 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
         }
     }
 
+    // ── is_secure_jwks_url (F-95) ────────────────────────────────────────
+
+    #[test]
+    fn is_secure_jwks_url_accepts_https() {
+        assert!(is_secure_jwks_url("https://keys.example.com/jwks"));
+        assert!(is_secure_jwks_url("https://keys.example.com:8443/jwks"));
+    }
+
+    #[test]
+    fn is_secure_jwks_url_accepts_loopback_http() {
+        assert!(is_secure_jwks_url("http://127.0.0.1:8080/jwks"));
+        assert!(is_secure_jwks_url("http://localhost:8080/jwks"));
+        assert!(is_secure_jwks_url("http://[::1]:8080/jwks"));
+    }
+
+    #[test]
+    fn is_secure_jwks_url_rejects_non_https_non_loopback() {
+        assert!(!is_secure_jwks_url("http://keys.example.com/jwks"));
+        assert!(!is_secure_jwks_url("http://attacker.example.com/jwks"));
+        assert!(!is_secure_jwks_url("ftp://keys.example.com/jwks"));
+        assert!(!is_secure_jwks_url("not-a-url"));
+        assert!(!is_secure_jwks_url(""));
+    }
+
     // ── JwksProvider::new error path ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn new_with_insecure_http_url_returns_insecure_url_error() {
+        // Regression (F-95): a non-https, non-loopback JWKS URL must be
+        // rejected by the provider itself, before any HTTP client is built or
+        // request is made.
+        let result = JwksProvider::new(
+            "http://keys.example.com/.well-known/jwks",
+            "https://example.com",
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "a plain-http non-loopback JWKS URL must be rejected before any fetch"
+        );
+        if let Err(err) = result {
+            assert!(
+                matches!(err, JwksProviderError::InsecureUrl(_)),
+                "expected InsecureUrl error, got {err:?}"
+            );
+            let msg = err.to_string();
+            assert!(msg.contains("https"), "message: {msg}");
+        }
+    }
 
     #[tokio::test]
     async fn new_with_unreachable_url_returns_error() {

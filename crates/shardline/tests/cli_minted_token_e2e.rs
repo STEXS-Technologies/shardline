@@ -118,11 +118,10 @@ fn cli_claims_without_env_key_source_requires_explicit_source() {
 #[test]
 fn cli_key_file_with_trailing_newline_verifies_against_server_key() {
     // The standard `echo $KEY > file` artifact: a trailing newline in the key
-    // file. The server strips one trailing line terminator from
-    // `SHARDLINE_TOKEN_SIGNING_KEY_FILE` (see `read_secret_file_bytes` with
-    // `strip_trailing_newline = true`); the CLI's `--key-file` path must
-    // produce the identical key, or the server rejects the minted token with a
-    // signature mismatch.
+    // file. The CLI's `--key-file` path strips one trailing line terminator
+    // (`shardline::admin::read_signing_key_bytes`), so the effective key is the
+    // 32-byte value the server is configured with; without the strip the
+    // minted token is rejected with a signature mismatch.
     let tmp = tempfile::tempdir().unwrap();
     let key_path = tmp.path().join("signing.key");
     std::fs::write(&key_path, b"0123456789abcdef0123456789abcdef\n").unwrap();

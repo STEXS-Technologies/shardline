@@ -936,10 +936,7 @@ impl ServerBackend {
             Self::Postgres(backend) => backend.delete_object_if_present(object_key).await,
         }?;
         let file_id = protocol_object_file_id(object_key);
-        let record_deleted = match self {
-            Self::Local(backend) => backend.delete_file_reference(&file_id).await?,
-            Self::Postgres(backend) => backend.delete_file_reference(&file_id).await?,
-        };
+        let record_deleted = self.delete_file_reference(&file_id).await?;
         if direct == DeleteOutcome::Deleted || record_deleted {
             Ok(DeleteOutcome::Deleted)
         } else {
@@ -967,18 +964,57 @@ impl ServerBackend {
     /// Deletes a protocol file's latest reference and its immutable version
     /// record.
     ///
-    /// Used by the S3 conditional-write path (F-86) to purge a record that was
-    /// committed but whose index-row swap is rejected by the authoritative
-    /// post-commit precondition re-check. The record is the LATEST version at
-    /// purge time (the purge runs under the per-key upload lock, and the record
-    /// store's latest alias points at the just-committed record), so deleting
-    /// the reference removes exactly the loser's version: every latest-record
-    /// consumer stops serving the loser's bytes and the loser's chunks are no
-    /// longer marked reachable.
+    /// Unconditional: whatever the latest alias currently points at is removed.
+    /// Used by `DeleteObject`, where removing the object's current state is the
+    /// intended semantics. The S3 conditional-write purge must NOT use this —
+    /// it needs the guarded [`Self::delete_file_reference_if_latest`] so a
+    /// multi-replica race can never delete the winner's record (F-92).
     pub(crate) async fn delete_file_reference(&self, file_id: &str) -> Result<bool, ServerError> {
         match self {
             Self::Local(backend) => backend.delete_file_reference(file_id).await,
             Self::Postgres(backend) => backend.delete_file_reference(file_id).await,
+        }
+    }
+
+    /// Deletes a protocol file's latest reference and its immutable version
+    /// record — but ONLY when the latest record is still the expected version.
+    ///
+    /// Used by the S3 conditional-write path (F-86) to purge a record that was
+    /// committed but whose index-row swap is rejected by the authoritative
+    /// post-commit precondition re-check. Under the single-process per-key
+    /// upload lock the record store's latest alias points at the
+    /// just-committed LOSER record, so deleting the reference removes exactly
+    /// the loser's version: every latest-record consumer stops serving the
+    /// loser's bytes and the loser's chunks are no longer marked reachable.
+    ///
+    /// The guard is the F-92 fix: the per-key lock is an in-process HashMap, so
+    /// in a MULTI-REPLICA Postgres deployment it does not serialize conditional
+    /// writers on different replicas. A concurrent replica can commit the
+    /// WINNER's record and swap the row between this request's pre-check and
+    /// post-check; re-reading the latest here and comparing it against the
+    /// loser's committed content hash makes the purge a no-op when the latest
+    /// alias has already moved to the winner. Deleting unconditionally would
+    /// remove the winner's acknowledged write (its version record + latest
+    /// alias), leaving the swapped row pointing at a deleted version — every
+    /// subsequent GET/HEAD/CopyObject 404s and GC reclaims the winner's chunks.
+    /// When the guard skips, the loser's record is simply left as a non-latest
+    /// version, which GC eventually reclaims.
+    pub(crate) async fn delete_file_reference_if_latest(
+        &self,
+        file_id: &str,
+        expected_content_hash: &str,
+    ) -> Result<bool, ServerError> {
+        match self {
+            Self::Local(backend) => {
+                backend
+                    .delete_file_reference_if_latest(file_id, expected_content_hash)
+                    .await
+            }
+            Self::Postgres(backend) => {
+                backend
+                    .delete_file_reference_if_latest(file_id, expected_content_hash)
+                    .await
+            }
         }
     }
 
@@ -1012,10 +1048,19 @@ impl ServerBackend {
         path: &str,
         file_id: &str,
         scope: Option<&RepositoryScope>,
+        max_revisions_per_repo: NonZeroUsize,
     ) -> Result<RegisterPathOutcome, ServerError> {
         match self {
-            Self::Local(backend) => backend.register_tree_path(key, path, file_id, scope).await,
-            Self::Postgres(backend) => backend.register_tree_path(key, path, file_id, scope).await,
+            Self::Local(backend) => {
+                backend
+                    .register_tree_path(key, path, file_id, scope, max_revisions_per_repo)
+                    .await
+            }
+            Self::Postgres(backend) => {
+                backend
+                    .register_tree_path(key, path, file_id, scope, max_revisions_per_repo)
+                    .await
+            }
         }
     }
 

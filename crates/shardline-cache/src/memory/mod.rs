@@ -32,10 +32,26 @@ use inner::{CacheInner, LoadingEntry, MemoryEntry};
 /// elapses with no value stored. Before releasing, the waiter re-checks the
 /// loader's aliveness stamp ([`LoadingEntry::last_seen_alive`]): a loader that
 /// refreshes its stamp while running is slow but alive, so the waiter extends
-/// its bound instead of stealing the latch (F-78). A genuinely-dead loader
-/// (panicked without putting/notifying) leaves a stale stamp and still cannot
-/// wedge waiters forever.
+/// its bound instead of stealing the latch (F-78).
+///
+/// The extension is capped at [`LOADER_ORPHAN_EXTENSION_CAP`] consecutive
+/// intervals (F-100): a slow-but-progressing loader keeps its latch, but a
+/// loader that never completes — while still yielding so its heartbeat keeps
+/// its stamp fresh — cannot pin waiters beyond `(1 + cap) × 60s`. This
+/// preserves the "cannot wedge waiters forever" guarantee even when the
+/// aliveness stamp never goes stale.
 const LOADER_ORPHAN_TOTAL_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Maximum number of consecutive alive-extension intervals a waiter grants to
+/// a loader that keeps refreshing its aliveness stamp at the orphan bound.
+///
+/// Combined with [`LOADER_ORPHAN_TOTAL_TIMEOUT`] this caps the total time a
+/// waiter tolerates an in-flight latch at `(1 + 4) × 60s = 300s`, matching the
+/// server's `admission::timeouts::REQUEST_TOTAL` request budget: a request that
+/// waited that long for a loader is about to be cut off by the server anyway,
+/// and a wedged-but-pollable loader must not pin its waiters past that point
+/// (F-100).
+const LOADER_ORPHAN_EXTENSION_CAP: u32 = 4;
 
 /// Interval at which an in-flight loader refreshes its aliveness stamp while
 /// still running. Smaller than [`LOADER_ALIVE_GRACE`] so a waiter that wakes
@@ -198,8 +214,9 @@ impl MemoryReconstructionCache {
     /// At the deadline the waiter re-checks the loader's aliveness stamp before
     /// releasing the latch: a loader that refreshes its stamp while running is
     /// slow but alive, so the waiter extends its bound and keeps waiting; only
-    /// a stale stamp (genuinely dead loader) causes the latch to be stolen
-    /// (F-78).
+    /// a stale stamp (genuinely dead loader) — or a saturated
+    /// [`LOADER_ORPHAN_EXTENSION_CAP`] (a wedged-but-pollable loader, F-100) —
+    /// causes the latch to be stolen (F-78).
     async fn wait_for_loader(
         &self,
         key: &ReconstructionCacheKey,
@@ -208,6 +225,10 @@ impl MemoryReconstructionCache {
         let mut deadline = Instant::now()
             .checked_add(LOADER_ORPHAN_TOTAL_TIMEOUT)
             .unwrap_or_else(Instant::now);
+        // Consecutive alive-extensions granted so far. Capped by
+        // LOADER_ORPHAN_EXTENSION_CAP so a never-completing loader whose stamp
+        // stays fresh cannot pin waiters past the bounded total (F-100).
+        let mut alive_extensions: u32 = 0;
         loop {
             {
                 let inner = self.inner.read().await;
@@ -244,7 +265,9 @@ impl MemoryReconstructionCache {
                     // at intervals, so a fresh stamp means it is slow but alive.
                     // Extend the wait instead of stealing its latch (F-78); the
                     // latch is only released when the stamp has gone stale
-                    // (the loader genuinely died without putting or notifying).
+                    // (the loader genuinely died without putting or notifying)
+                    // or the extension cap is saturated (the loader is alive
+                    // but wedged — F-100).
                     let loader_alive = inner.loading.get(key).is_some_and(|loading| {
                         now.saturating_duration_since(
                             *loading
@@ -254,17 +277,20 @@ impl MemoryReconstructionCache {
                         ) <= LOADER_ALIVE_GRACE
                     });
                     drop(inner);
-                    if loader_alive {
+                    if loader_alive && alive_extensions < LOADER_ORPHAN_EXTENSION_CAP {
+                        alive_extensions = alive_extensions.saturating_add(1);
                         deadline = now
                             .checked_add(LOADER_ORPHAN_TOTAL_TIMEOUT)
                             .unwrap_or(now);
                         continue;
                     }
-                    // The total orphan bound elapsed with no stored value and no
-                    // recent aliveness: the loader is presumed dead (panicked
-                    // without notifying). Release the latch so later callers can
-                    // retry promptly, and wake sibling waiters so they observe
-                    // the release too.
+                    // The total orphan bound elapsed with no stored value and
+                    // either no recent aliveness (the loader is presumed dead —
+                    // panicked without putting or notifying) or the extension
+                    // cap was reached (a wedged-but-pollable loader that keeps
+                    // its stamp fresh but never completes, F-100). Release the
+                    // latch so later callers can retry promptly, and wake
+                    // sibling waiters so they observe the release too.
                     let mut write_guard = self.inner.write().await;
                     write_guard.loading.remove(key);
                     drop(write_guard);
@@ -313,15 +339,18 @@ impl AsyncReconstructionCache for MemoryReconstructionCache {
     ) -> ReconstructionCacheFuture<'operation, Option<Vec<u8>>> {
         Box::pin(async move {
             let now = Instant::now();
+            // Fast path: serve a live cached entry without a write lock.
             {
                 let inner = self.inner.read().await;
                 if let Some(entry) = inner.entries.get(key)
                     && entry.expires_at > now
                 {
                     return Ok(Some(entry.payload.as_ref().clone()));
-                } else if !inner.loading.contains_key(key) {
-                    return Ok(None);
                 }
+                // No early return on a miss: a cold miss (or an expired entry)
+                // falls through to the write-lock path, which registers a
+                // loading latch so concurrent callers deduplicate on the load
+                // the caller is about to run (F-91).
             }
 
             let mut inner = self.inner.write().await;
@@ -339,10 +368,18 @@ impl AsyncReconstructionCache for MemoryReconstructionCache {
                 // stolen after a single stall interval: a slow-but-alive loader
                 // keeps its latch so the caller's load() stays deduplicated
                 // (F-68), and the waiter extends past the total bound while the
-                // loader's aliveness stamp stays fresh (F-78).
+                // loader's aliveness stamp stays fresh (F-78), up to the
+                // extension cap (F-100).
                 return Ok(self.wait_for_loader(key, notify).await);
             }
 
+            // No cached entry and no in-flight loader: register a loading latch
+            // for the caller's upcoming load. The caller is expected to put()
+            // (which stores the value and releases the latch) or delete()
+            // (which releases the latch on failure) — otherwise the latch
+            // lingers until a waiter steals it at the orphan bound. Without
+            // this latch, N concurrent callers would each run their own load
+            // with no deduplication (F-91).
             let loading = LoadingEntry::new(Arc::new(Notify::new()));
             inner.loading.insert(key.clone(), loading);
 
@@ -402,6 +439,23 @@ impl AsyncReconstructionCache for MemoryReconstructionCache {
                 loading.notify.notify_waiters();
             }
             Ok(removed)
+        })
+    }
+
+    fn touch_loading<'operation>(
+        &'operation self,
+        key: &'operation ReconstructionCacheKey,
+    ) -> ReconstructionCacheFuture<'operation, bool> {
+        Box::pin(async move {
+            let inner = self.inner.read().await;
+            let Some(loading) = inner.loading.get(key) else {
+                return Ok(false);
+            };
+            *loading
+                .last_seen_alive
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Instant::now();
+            Ok(true)
         })
     }
 }

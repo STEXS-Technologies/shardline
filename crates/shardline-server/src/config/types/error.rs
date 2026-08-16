@@ -473,6 +473,10 @@ pub enum ServerConfigError {
     /// JWKS auth provider requires a JWKS URL.
     #[error("jwks auth provider requires SHARDLINE_AUTH_JWKS_URL")]
     MissingJwksUrl,
+    /// The JWKS URL must use https (RFC 8414 §2); plain-http is tolerated
+    /// only for loopback hosts (local development / test tooling).
+    #[error("jwks auth provider requires an https SHARDLINE_AUTH_JWKS_URL, got {url}")]
+    JwksUrlMustUseHttps { url: String },
     /// Hub frontend requires an auth provider to be configured.
     #[error(
         "hub frontend requires auth configuration (SHARDLINE_AUTH_PROVIDER with token signing key or oidc/jwks)"

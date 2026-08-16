@@ -492,30 +492,77 @@ fn is_secure_url(url: &str) -> bool {
     }
 }
 
-/// Returns true when `jwks_uri` may serve keys for `issuer`: the URL's host
-/// matches the issuer's host, or it is listed in `jwks_host_allowlist`.
+/// Scheme-default port for a URL scheme, or `None` for unknown schemes.
+fn scheme_default_port(scheme: &str) -> Option<u16> {
+    match scheme {
+        "https" => Some(443),
+        "http" => Some(80),
+        _ => None,
+    }
+}
+
+/// Returns the (lowercased host, effective port) origin of `url`.
+///
+/// The effective port is the explicit port when present, otherwise the
+/// scheme-default port (443 for https, 80 for http).
+fn effective_origin(url: &str) -> Option<(String, u16)> {
+    let parsed = url::Url::parse(url).ok()?;
+    let host = parsed.host_str()?.to_lowercase();
+    let port = parsed
+        .port()
+        .or_else(|| scheme_default_port(parsed.scheme()))?;
+    Some((host, port))
+}
+
+/// Returns true when `jwks_uri` may serve keys for `issuer`: the URL's origin
+/// (host + effective port) matches the issuer's origin, or is listed in
+/// `jwks_host_allowlist`.
 ///
 /// Host comparison is case-insensitive (RFC 3986 §3.2.2). The allowlist is
 /// the documented escape hatch for IdPs that legitimately serve JWKS from a
 /// different host than the issuer (e.g. Google serves keys from
 /// `www.googleapis.com` while the issuer is `accounts.google.com`); when it
-/// is empty, only the issuer's own host is accepted (fail-closed).
+/// is empty, only the issuer's own origin is accepted (fail-closed).
+///
+/// Regression (F-96): the ORIGIN is bound, not just the host. A discovery
+/// document that echoes the pinned issuer host on an arbitrary port (e.g.
+/// `https://<issuer-host>:8443/jwks`) is rejected — an explicit port equal to
+/// the scheme default (443/https, 80/http) is treated the same as an absent
+/// port, and an explicit mismatched port is rejected. Allowlist entries may
+/// carry ports (`host:port`); a portless entry pins the scheme-default port.
 fn jwks_host_is_allowed(jwks_uri: &str, issuer: &str, jwks_host_allowlist: &[String]) -> bool {
-    let Some(jwks_host) = url::Url::parse(jwks_uri)
-        .ok()
-        .and_then(|parsed| parsed.host_str().map(str::to_lowercase))
+    let Ok(jwks_parsed) = url::Url::parse(jwks_uri) else {
+        return false;
+    };
+    let Some(jwks_host) = jwks_parsed.host_str().map(str::to_lowercase) else {
+        return false;
+    };
+    let Some(jwks_port) = jwks_parsed
+        .port()
+        .or_else(|| scheme_default_port(jwks_parsed.scheme()))
     else {
         return false;
     };
-    let issuer_host = url::Url::parse(issuer)
-        .ok()
-        .and_then(|parsed| parsed.host_str().map(str::to_lowercase));
-    if issuer_host.as_deref() == Some(jwks_host.as_str()) {
+
+    if effective_origin(issuer).as_ref() == Some(&(jwks_host.clone(), jwks_port)) {
         return true;
     }
-    jwks_host_allowlist
-        .iter()
-        .any(|allowed| allowed.eq_ignore_ascii_case(&jwks_host))
+
+    jwks_host_allowlist.iter().any(|allowed| {
+        // Allowlist entries are `host` or `host:port`; synthesize a URL
+        // under the jwks_uri's scheme so host parsing (including bracketed
+        // IPv6) and scheme-default port resolution are uniform.
+        let Ok(entry) = url::Url::parse(&format!("{}://{allowed}", jwks_parsed.scheme())) else {
+            return false;
+        };
+        let Some(entry_host) = entry.host_str().map(str::to_lowercase) else {
+            return false;
+        };
+        let Some(entry_port) = entry.port().or_else(|| scheme_default_port(entry.scheme())) else {
+            return false;
+        };
+        entry_host == jwks_host && entry_port == jwks_port
+    })
 }
 
 #[cfg(test)]
@@ -991,6 +1038,77 @@ mod tests {
             "https://accounts.example.com/.well-known/jwks",
             "not-a-url",
             &[],
+        ));
+    }
+
+    #[test]
+    fn jwks_host_allowed_accepts_issuer_host_explicit_scheme_default_port() {
+        // F-96: an explicit port equal to the scheme default (443 for https)
+        // is treated the same as an absent port.
+        assert!(jwks_host_is_allowed(
+            "https://accounts.example.com:443/.well-known/jwks",
+            "https://accounts.example.com",
+            &[],
+        ));
+        assert!(jwks_host_is_allowed(
+            "https://accounts.example.com/.well-known/jwks",
+            "https://accounts.example.com:443",
+            &[],
+        ));
+    }
+
+    #[test]
+    fn jwks_host_allowed_rejects_same_host_non_default_port() {
+        // F-96 regression: the port is part of the pinned origin. A discovery
+        // document that echoes the issuer host on an arbitrary port
+        // (same-host SSRF / port-scan oracle) must be rejected.
+        assert!(!jwks_host_is_allowed(
+            "https://accounts.example.com:8443/.well-known/jwks",
+            "https://accounts.example.com",
+            &[],
+        ));
+    }
+
+    #[test]
+    fn jwks_host_allowed_accepts_issuer_host_matching_non_default_port() {
+        // When the pinned issuer itself uses a non-default port, the jwks_uri
+        // must carry the exact same port.
+        assert!(jwks_host_is_allowed(
+            "https://accounts.example.com:8443/.well-known/jwks",
+            "https://accounts.example.com:8443",
+            &[],
+        ));
+        assert!(!jwks_host_is_allowed(
+            "https://accounts.example.com/.well-known/jwks",
+            "https://accounts.example.com:8443",
+            &[],
+        ));
+    }
+
+    #[test]
+    fn jwks_host_allowed_accepts_allowlisted_host_with_port() {
+        // Allowlist entries may carry ports; the port is compared exactly.
+        assert!(jwks_host_is_allowed(
+            "https://www.googleapis.com:8443/oauth2/v3/certs",
+            "https://accounts.google.com",
+            &["www.googleapis.com:8443".to_owned()],
+        ));
+    }
+
+    #[test]
+    fn jwks_host_allowed_portless_allowlist_entry_pins_scheme_default_port() {
+        // A portless allowlist entry pins the scheme-default port, so a
+        // non-default port on an allowlisted host is rejected rather than
+        // silently accepted.
+        assert!(!jwks_host_is_allowed(
+            "https://www.googleapis.com:8443/oauth2/v3/certs",
+            "https://accounts.google.com",
+            &["www.googleapis.com".to_owned()],
+        ));
+        assert!(jwks_host_is_allowed(
+            "https://www.googleapis.com/oauth2/v3/certs",
+            "https://accounts.google.com",
+            &["www.googleapis.com".to_owned()],
         ));
     }
 
@@ -2103,8 +2221,18 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
     async fn new_with_jwks_host_in_allowlist_succeeds() {
         // Regression (F-83): a `jwks_uri` on a cross-host domain is rejected
         // by default but accepted when the host is in the allowlist.
+        //
+        // Updated for F-96: allowlist entries bind the ORIGIN, so the entry
+        // must carry the port of the (random-port) wiremock server — a
+        // portless entry would pin the scheme-default port and correctly be
+        // rejected.
         let mock_server = wiremock::MockServer::start().await;
         let base_url = mock_server.uri();
+
+        let port = url::Url::parse(&base_url)
+            .ok()
+            .and_then(|parsed| parsed.port())
+            .expect("wiremock URL carries a port");
 
         // The same wiremock server is reachable via "localhost", but the host
         // string differs from the issuer's "127.0.0.1", so the allowlist is
@@ -2133,7 +2261,7 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
             .mount(&mock_server)
             .await;
 
-        let allowlist = vec!["localhost".to_owned()];
+        let allowlist = vec![format!("localhost:{port}")];
         let provider = OidcProvider::new(&base_url, None, &allowlist)
             .await
             .expect("an allowlisted jwks host must be accepted");

@@ -237,6 +237,16 @@ const MAX_WEBHOOK_URL_LEN: usize = 2048;
 /// Maximum number of events per webhook.
 const MAX_WEBHOOK_EVENTS: usize = 50;
 
+/// Maximum number of webhooks per repository.
+///
+/// Bounds the per-repo fan-out of [`deliver_webhook_events`]: without a cap, a
+/// Write-scoped caller could register an unbounded number of webhooks to a slow
+/// endpoint and, on every commit, spawn one delivery task per webhook — each
+/// holding one permit of the process-global `WEBHOOK_DELIVERY_SEMAPHORE` (16
+/// total) for up to the client timeout — starving every other tenant's webhook
+/// deliveries and driving unbounded task/memory growth.
+const MAX_WEBHOOKS_PER_REPO: usize = 50;
+
 /// Validates a webhook URL to prevent SSRF attacks.
 ///
 /// Checks:
@@ -362,6 +372,13 @@ pub(crate) async fn webhook_create(
         return Err(HubApiError::Conflict(format!(
             "webhook with URL {} already exists for repo {name}",
             request.url
+        )));
+    }
+    // Enforce the per-repo webhook count cap (F-94): an unbounded registration
+    // count would let a single repo starve the global delivery semaphore.
+    if existing.len() >= MAX_WEBHOOKS_PER_REPO {
+        return Err(HubApiError::PathValidation(format!(
+            "webhook count for repo {name} exceeds maximum of {MAX_WEBHOOKS_PER_REPO}"
         )));
     }
     // Encrypt the signing secret at rest when a cipher is configured.
@@ -671,6 +688,66 @@ mod tests {
             webhook_secret_cipher: Some(cipher),
         };
         (ts, state)
+    }
+
+    #[tokio::test]
+    async fn webhook_create_rejects_beyond_per_repo_cap() {
+        let ts = tempfile::tempdir().unwrap();
+        shardline_index::hub::ensure_hub_tables(ts.path()).unwrap();
+        let store = shardline_index::LocalIndexStore::open(ts.path().to_path_buf());
+        let boxed = BoxedHubStore::from_store(store);
+        boxed
+            .create_repo(HubRepoType::Model, "org/cap", false)
+            .unwrap();
+        let object_store = ServerObjectStore::local(ts.path().join("lfs")).unwrap();
+        let state = HubState {
+            store: boxed,
+            object_store,
+            auth: None,
+            http_client: None,
+            webhook_secret_cipher: None,
+        };
+        let headers = axum::http::HeaderMap::new();
+
+        // Registering up to the cap succeeds.
+        for i in 0..MAX_WEBHOOKS_PER_REPO {
+            let (status, _resp) = webhook_create(
+                State(state.clone()),
+                test_repo(&state, &headers),
+                Path(("models".into(), "org".into(), "cap".into())),
+                Json(WebhookCreateRequest {
+                    url: format!("https://example.com/hook/{i}"),
+                    events: vec!["push".into()],
+                    secret: None,
+                }),
+            )
+            .await
+            .expect("webhook within the per-repo cap should be accepted");
+            assert_eq!(status, StatusCode::CREATED);
+        }
+
+        // One more webhook is rejected by the per-repo cap.
+        let result = webhook_create(
+            State(state.clone()),
+            test_repo(&state, &headers),
+            Path(("models".into(), "org".into(), "cap".into())),
+            Json(WebhookCreateRequest {
+                url: "https://example.com/hook/over-cap".into(),
+                events: vec!["push".into()],
+                secret: None,
+            }),
+        )
+        .await;
+        let err = result.expect_err("webhook beyond the per-repo cap should be rejected");
+        assert!(
+            matches!(&err, HubApiError::PathValidation(msg) if msg.contains("maximum")),
+            "expected PathValidation for exceeding the per-repo cap, got {err:?}"
+        );
+        assert_eq!(
+            state.store.list_webhooks("org/cap").unwrap().len(),
+            MAX_WEBHOOKS_PER_REPO,
+            "no webhook beyond the cap may be stored"
+        );
     }
 
     #[tokio::test]

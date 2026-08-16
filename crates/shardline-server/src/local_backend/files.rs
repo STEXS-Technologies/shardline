@@ -54,6 +54,34 @@ impl LocalBackend {
         Ok(true)
     }
 
+    /// Guarded purge for the S3 conditional-write path (F-92): deletes the
+    /// file's latest reference + version record only when the latest record is
+    /// still `expected_content_hash` (the just-committed LOSER version).
+    ///
+    /// The per-key S3 upload lock is process-local, so in a multi-replica
+    /// Postgres deployment the latest alias can move to the WINNER's record
+    /// before this purge runs. Deleting unconditionally would then destroy the
+    /// winner's acknowledged write; skipping (returning `Ok(false)`) leaves the
+    /// loser as a non-latest version that GC eventually reclaims.
+    pub(crate) async fn delete_file_reference_if_latest(
+        &self,
+        file_id: &str,
+        expected_content_hash: &str,
+    ) -> Result<bool, ServerError> {
+        let record = match self.read_record(file_id, None, None).await {
+            Ok(record) => record,
+            Err(ServerError::NotFound) => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        if record.content_hash != expected_content_hash {
+            return Ok(false);
+        }
+        self.record_store
+            .delete_file_version_metadata(&record)
+            .await?;
+        Ok(true)
+    }
+
     pub(crate) async fn read_file_stream(
         &self,
         file_id: &str,
@@ -638,5 +666,165 @@ mod tests {
             .read_chunk_for_file_version(&unreferenced_hash, "a.bin", &uploaded.content_hash, None)
             .await;
         assert!(matches!(result, Err(crate::ServerError::NotFound)));
+    }
+
+    // ---------------------------------------------------------------------
+    // F-92 — the F-86 conditional-write purge must never delete the WINNER's
+    // record in a multi-replica race.
+    //
+    // The F-86 purge (s3_upload_object_body -> delete_file_reference) deletes
+    // whatever the record store's LATEST alias points at. That is safe only
+    // under the per-process per-key upload lock (an in-process HashMap), where
+    // the latest alias is guaranteed to be the just-committed LOSER. In a
+    // multi-replica Postgres deployment (documented/supported: HPA scaling,
+    // SHARDLINE_INDEX_POSTGRES_URL) the lock does NOT serialize across
+    // replicas. Interleaving:
+    //
+    //   A: pre-check passes; commits recordA (latest=A)
+    //   B: pre-check passes; commits recordB (latest=B)
+    //   A: post-check passes; swaps the row (row=etagA/hashA)
+    //   B: post-check fails (row etagA); unconditional purge reads LATEST
+    //      (now recordA, the WINNER) and deletes its version + latest alias ->
+    //      the row (hashA) points at a deleted version -> every GET/HEAD/
+    //      CopyObject 404s; post-GC the winner's chunks are reclaimed.
+    //
+    // The in-process harness cannot reproduce the interleaving end-to-end
+    // through the S3 routes (both replicas share the one process-local lock,
+    // so conditional writers serialize). The unit tests below simulate the
+    // record-store state the losing replica would observe — the latest alias
+    // moved to the winner's record — and assert the guarded purge
+    // (`delete_file_reference_if_latest`) becomes a no-op instead of deleting
+    // the winner's acknowledged write. The loser's record is left as a
+    // non-latest version, which GC eventually reclaims.
+    // ---------------------------------------------------------------------
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn delete_file_reference_if_latest_skips_when_latest_moved_to_winner() {
+        let tmp = tempfile::tempdir().unwrap();
+        let backend = LocalBackend::new(
+            tmp.path().to_path_buf(),
+            "http://127.0.0.1:8080".to_owned(),
+            NonZeroUsize::new(65536).unwrap_or(NonZeroUsize::MIN),
+        )
+        .await
+        .unwrap();
+
+        // WINNER: the first upload commits its record as the latest alias.
+        let winner = backend
+            .upload_file(
+                "race.bin",
+                axum::body::Bytes::from_static(b"winner-content"),
+                None,
+            )
+            .await
+            .unwrap();
+        // LOSER: the second upload commits its record; it is now the latest.
+        let loser = backend
+            .upload_file(
+                "race.bin",
+                axum::body::Bytes::from_static(b"loser-content"),
+                None,
+            )
+            .await
+            .unwrap();
+
+        // Simulate the multi-replica interleaving: the WINNER's commit lands
+        // AFTER the loser's (on a second replica the per-key lock does not
+        // serialize), so the latest alias points back at the winner's record
+        // while the loser's conditional post-check is still in flight.
+        let winner_record = backend
+            .file_record("race.bin", Some(&winner.content_hash), None)
+            .await
+            .unwrap();
+        backend
+            .record_store
+            .commit_file_version_metadata(&winner_record)
+            .await
+            .unwrap();
+        assert_eq!(
+            backend
+                .file_record("race.bin", None, None)
+                .await
+                .unwrap()
+                .content_hash,
+            winner.content_hash,
+            "precondition: the latest alias now points at the winner's record"
+        );
+
+        // The LOSER's post-check fires; the purge must NOT delete the winner's
+        // acknowledged write because the latest alias no longer points at the
+        // loser's committed version.
+        assert!(
+            !backend
+                .delete_file_reference_if_latest("race.bin", &loser.content_hash)
+                .await
+                .unwrap(),
+            "the purge must skip once the latest alias has moved to the winner (F-92)"
+        );
+
+        // The winner's LATEST alias and its immutable VERSION record survive:
+        // the S3 row (pinned to the winner's content hash) keeps resolving.
+        let latest = backend.file_record("race.bin", None, None).await.unwrap();
+        assert_eq!(
+            latest.content_hash, winner.content_hash,
+            "the winner's record must remain the latest after the loser's purge"
+        );
+        let winner_version = backend
+            .file_record("race.bin", Some(&winner.content_hash), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            winner_version.content_hash, winner.content_hash,
+            "the winner's immutable version record must survive the loser's purge"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn delete_file_reference_if_latest_purges_when_latest_is_the_loser() {
+        // Single-process F-86 semantics preserved: while the latest alias still
+        // points at the just-committed (loser) record, the guarded purge
+        // removes exactly that version + alias — the same outcome as the
+        // unconditional delete.
+        let tmp = tempfile::tempdir().unwrap();
+        let backend = LocalBackend::new(
+            tmp.path().to_path_buf(),
+            "http://127.0.0.1:8080".to_owned(),
+            NonZeroUsize::new(65536).unwrap_or(NonZeroUsize::MIN),
+        )
+        .await
+        .unwrap();
+
+        let uploaded = backend
+            .upload_file(
+                "purge-me.bin",
+                axum::body::Bytes::from_static(b"loser-content"),
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            backend
+                .delete_file_reference_if_latest("purge-me.bin", &uploaded.content_hash)
+                .await
+                .unwrap(),
+            "the guarded purge deletes while the latest alias is still the loser's"
+        );
+        assert!(
+            matches!(
+                backend.file_record("purge-me.bin", None, None).await,
+                Err(crate::ServerError::NotFound)
+            ),
+            "the latest alias must be gone after the purge"
+        );
+        assert!(
+            matches!(
+                backend
+                    .file_record("purge-me.bin", Some(&uploaded.content_hash), None)
+                    .await,
+                Err(crate::ServerError::NotFound)
+            ),
+            "the loser's immutable version record must be gone after the purge"
+        );
     }
 }

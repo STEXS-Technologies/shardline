@@ -67,6 +67,34 @@ impl super::PostgresBackend {
         Ok(true)
     }
 
+    /// Guarded purge for the S3 conditional-write path (F-92): deletes the
+    /// file's latest reference + version record only when the latest record is
+    /// still `expected_content_hash` (the just-committed LOSER version).
+    ///
+    /// The per-key S3 upload lock is process-local, so in a multi-replica
+    /// Postgres deployment the latest alias can move to the WINNER's record
+    /// before this purge runs. Deleting unconditionally would then destroy the
+    /// winner's acknowledged write; skipping (returning `Ok(false)`) leaves the
+    /// loser as a non-latest version that GC eventually reclaims.
+    pub(crate) async fn delete_file_reference_if_latest(
+        &self,
+        file_id: &str,
+        expected_content_hash: &str,
+    ) -> Result<bool, ServerError> {
+        let record = match self.read_record(file_id, None, None).await {
+            Ok(record) => record,
+            Err(ServerError::NotFound) => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        if record.content_hash != expected_content_hash {
+            return Ok(false);
+        }
+        self.record_store
+            .delete_file_version_metadata(&record)
+            .await?;
+        Ok(true)
+    }
+
     pub(crate) async fn read_file_stream(
         &self,
         file_id: &str,

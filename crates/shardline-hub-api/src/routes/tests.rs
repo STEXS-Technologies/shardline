@@ -1135,14 +1135,32 @@ async fn handler_repo_search_finds_matching() {
 // ------------------------------------------------------------------
 
 /// Builds a `HubState` with a mock auth provider that always authenticates a
-/// caller with repository scope `alice/own` (owner `alice`).
+/// caller with repository scope `alice/own` (owner `alice`) and Read scope.
 fn make_alice_auth_state() -> (tempfile::TempDir, HubState) {
+    use shardline_protocol::TokenScope as ProtoScope;
+    make_scoped_alice_auth_state(ProtoScope::Read)
+}
+
+/// Like `make_alice_auth_state`, but the minted token grants Write scope, which
+/// the repo-create and webhook-create handlers require.
+fn make_write_alice_auth_state() -> (tempfile::TempDir, HubState) {
+    use shardline_protocol::TokenScope as ProtoScope;
+    make_scoped_alice_auth_state(ProtoScope::Write)
+}
+
+/// Shared builder for an auth-configured `HubState` whose mock provider always
+/// verifies a token scoped to `alice/own` with the given token scope.
+fn make_scoped_alice_auth_state(
+    scope: shardline_protocol::TokenScope,
+) -> (tempfile::TempDir, HubState) {
     use shardline_protocol::{
         RepositoryProvider, RepositoryScope, TokenClaims, TokenScope as ProtoScope,
     };
     use shardline_server_core::{AuthError, AuthProvider};
 
-    struct AliceProvider;
+    struct AliceProvider {
+        scope: ProtoScope,
+    }
     impl AuthProvider for AliceProvider {
         fn verify_token(
             &self,
@@ -1150,7 +1168,7 @@ fn make_alice_auth_state() -> (tempfile::TempDir, HubState) {
         ) -> Result<TokenClaims, shardline_server_core::AuthError> {
             let repo = RepositoryScope::new(RepositoryProvider::Generic, "alice", "own", None)
                 .map_err(|_err| AuthError::InvalidToken)?;
-            let claims = TokenClaims::new("issuer", "alice", ProtoScope::Read, repo, u64::MAX)
+            let claims = TokenClaims::new("issuer", "alice", self.scope, repo, u64::MAX)
                 .map_err(|_err| AuthError::InvalidToken)?;
             Ok(claims)
         }
@@ -1180,7 +1198,7 @@ fn make_alice_auth_state() -> (tempfile::TempDir, HubState) {
     let state = HubState {
         store,
         object_store,
-        auth: Some(HubAuth::new(Box::new(AliceProvider))),
+        auth: Some(HubAuth::new(Box::new(AliceProvider { scope }))),
         http_client: None,
         webhook_secret_cipher: None,
     };
@@ -1567,7 +1585,7 @@ async fn handler_repo_create_model() {
     .await
     .unwrap();
     assert_eq!(status, StatusCode::CREATED);
-    assert_eq!(json.id, "ns/new-repo");
+    assert_eq!(json["id"], "ns/new-repo");
 }
 
 // ------------------------------------------------------------------
@@ -3908,7 +3926,7 @@ async fn handler_repo_create_with_organization() {
     .await
     .unwrap();
     assert_eq!(status, StatusCode::CREATED);
-    assert_eq!(json.id, "org/my-repo");
+    assert_eq!(json["id"], "org/my-repo");
 }
 
 #[tokio::test]
@@ -3938,8 +3956,83 @@ async fn handler_repo_create_conflict() {
     )
     .await;
     assert!(result.is_ok());
-    let (status, _json) = result.unwrap();
+    let (status, json) = result.unwrap();
     assert_eq!(status, StatusCode::CONFLICT);
+    // Anonymous (permissive-mode) callers have no identity, so even their
+    // conflict body must not disclose the existing repository's metadata.
+    let obj = json.as_object().expect("conflict body is an object");
+    for key in ["id", "private", "url", "last_modified"] {
+        assert!(
+            !obj.contains_key(key),
+            "conflict body leaked repository metadata key '{key}': {json:?}"
+        );
+    }
+    assert_eq!(obj["message"], "repository already exists");
+}
+
+#[tokio::test]
+async fn repo_create_conflict_other_tenant_returns_minimal_body() {
+    // Alice's Write-scoped token is bound to alice/own; the victim
+    // bob/private-repo already exists and is private.
+    let (_td, state) = make_write_alice_auth_state();
+    let req = RepoCreateRequest {
+        repo_type: RepoType::Model,
+        name: "bob/private-repo".to_owned(),
+        organization: None,
+        private: false,
+        visibility: None,
+    };
+    let (status, json) = repo_create(
+        State(state.clone()),
+        alice_headers(),
+        test_repo(&state, &alice_headers()),
+        Json(req),
+    )
+    .await
+    .unwrap();
+    assert_eq!(status, StatusCode::CONFLICT);
+    // The victim's RepoResponse must not leak: no id/private/url/last_modified
+    // keys in the conflict body, matching the cross-tenant privacy filter on
+    // repo_list/repo_search.
+    let obj = json.as_object().expect("conflict body is an object");
+    for key in ["id", "private", "url", "last_modified"] {
+        assert!(
+            !obj.contains_key(key),
+            "other-tenant conflict leaked victim metadata key '{key}': {json:?}"
+        );
+    }
+    assert_eq!(obj["message"], "repository already exists");
+}
+
+#[tokio::test]
+async fn repo_create_conflict_own_repo_keeps_full_body() {
+    // alice/own is Alice's own (private) repository, so the conflict body keeps
+    // the rich compatibility shape the native client needs (including the URL).
+    let (_td, state) = make_write_alice_auth_state();
+    let req = RepoCreateRequest {
+        repo_type: RepoType::Model,
+        name: "alice/own".to_owned(),
+        organization: None,
+        private: true,
+        visibility: None,
+    };
+    let (status, json) = repo_create(
+        State(state.clone()),
+        alice_headers(),
+        test_repo(&state, &alice_headers()),
+        Json(req),
+    )
+    .await
+    .unwrap();
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(json["id"], "alice/own");
+    assert_eq!(json["private"], true);
+    assert!(
+        json["url"]
+            .as_str()
+            .is_some_and(|url| url.ends_with("/alice/own")),
+        "own-repo conflict body should keep the repository URL: {json:?}"
+    );
 }
 
 // ------------------------------------------------------------------
