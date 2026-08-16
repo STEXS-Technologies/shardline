@@ -886,9 +886,13 @@ async fn build_auth_provider(config: &ServerConfig) -> Result<Option<ServerAuth>
                      (set SHARDLINE_AUTH_OIDC_AUDIENCE to require a specific audience)"
                 );
             }
-            let provider = OidcProvider::new(issuer, audience.map(str::to_owned))
-                .await
-                .map_err(|_e| ServerError::Config(ServerConfigError::InvalidAuthProvider))?;
+            let provider = OidcProvider::new(
+                issuer,
+                audience.map(str::to_owned),
+                config.auth_oidc_jwks_host_allowlist().unwrap_or(&[]),
+            )
+            .await
+            .map_err(|_e| ServerError::Config(ServerConfigError::InvalidAuthProvider))?;
             Ok(Some(ServerAuth::from_provider(Box::new(provider))))
         }
         AuthProviderKind::Jwks => {

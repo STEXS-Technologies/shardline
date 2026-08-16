@@ -77,13 +77,16 @@ where
 
 /// Reserved object key for the persisted last-GC-clock anchor.
 ///
-/// Written on every GC run whose wall clock the forward guard deemed
-/// trustworthy, it records that run's `now` so a forward jump occurring between
-/// two consecutive runs is detected even when no lifecycle activity has
-/// refreshed the creation-timestamp reference (low-churn deployments). Without
-/// the anchor, a healthy deployment where GC runs more often than lifecycle
-/// activity happens would age the creation-only reference past the clock slack
-/// and spuriously disable the sweep and temp reaping.
+/// Written on every store-mutating GC run (mark and/or sweep) whose wall clock
+/// the forward guard deemed trustworthy; a pure dry run remains read-only and
+/// never writes it, and a failed write is tolerated (the anchor is an
+/// optimization, not a correctness requirement). It records that run's `now` so
+/// a forward jump occurring between two consecutive runs is detected even when
+/// no lifecycle activity has refreshed the creation-timestamp reference
+/// (low-churn deployments). Without the anchor, a healthy deployment where GC
+/// runs more often than lifecycle activity happens would age the creation-only
+/// reference past the clock slack and spuriously disable the sweep and temp
+/// reaping.
 ///
 /// The `gc/` namespace is not a managed object namespace (the reachability
 /// scans never recognize it), so the anchor is invisible to every GC path:
@@ -101,7 +104,7 @@ fn last_gc_clock_anchor_key() -> Result<ObjectKey, GcError> {
 ///
 /// Returns `None` when no anchor has been persisted yet. An unreadable or
 /// malformed anchor (for example a torn write) is treated as absent — it is
-/// logged and will be overwritten by this run's anchor write.
+/// logged and will be overwritten by a later store-mutating run's anchor write.
 pub(super) fn read_last_gc_clock_anchor(
     object_store: &ServerObjectStore,
 ) -> Result<Option<u64>, GcError> {
@@ -125,9 +128,16 @@ pub(super) fn read_last_gc_clock_anchor(
 
 /// Persists the supplied wall clock as the last-GC-clock anchor.
 ///
-/// Called on every run whose clock the forward guard deemed trustworthy (the
-/// guard did not fire). A fired run's `now` is suspect — the sweep and hold
-/// pruning were skipped for that reason — so it is never stamped as an anchor.
+/// Called on every run that mutates the object store (mark and/or sweep) whose
+/// clock the forward guard deemed trustworthy (the guard did not fire). A pure
+/// dry run never calls this — dry runs must remain read-only. A fired run's
+/// `now` is suspect — the sweep and hold pruning were skipped for that reason —
+/// so it is never stamped as an anchor.
+///
+/// A write failure must be tolerated by the caller (warn and continue): the
+/// anchor is an optimization, not a correctness requirement, and the forward
+/// guard safely falls back to the creation-timestamp-only reference (the
+/// pre-anchor behavior) when no anchor is persisted.
 pub(super) fn write_last_gc_clock_anchor(
     object_store: &ServerObjectStore,
     now_unix_seconds: u64,

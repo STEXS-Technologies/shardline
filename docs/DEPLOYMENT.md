@@ -860,6 +860,12 @@ SHARDLINE_AUTH_PROVIDER=oidc
 SHARDLINE_AUTH_OIDC_ISSUER=https://accounts.google.com
 ```
 
+The discovery document's `jwks_uri` must be hosted on the issuer's own host and
+the discovery fetch never follows redirects. IdPs that serve keys from a
+different host (e.g. Google serves JWKS from `www.googleapis.com`) must list
+that host in `SHARDLINE_AUTH_OIDC_JWKS_HOST_ALLOWLIST` (comma-separated).
+`SHARDLINE_AUTH_OIDC_AUDIENCE` optionally requires a specific `aud` claim.
+
 ### JWKS
 
 Validate tokens against a JSON Web Key Set endpoint:

@@ -132,6 +132,7 @@ pub struct AuthConfig {
     pub auth_provider: AuthProviderKind,
     pub auth_oidc_issuer: Option<String>,
     pub auth_oidc_audience: Option<String>,
+    pub auth_oidc_jwks_host_allowlist: Option<Vec<String>>,
     pub auth_jwks_url: Option<String>,
     pub auth_jwks_issuer: Option<String>,
     pub ed25519_private_key: Option<SecretBytes>,

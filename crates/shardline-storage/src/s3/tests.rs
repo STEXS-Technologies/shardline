@@ -202,14 +202,24 @@ fn s3_store_default_config_uses_standard_s3_endpoint() {
 
 #[test]
 fn is_temp_upload_key_matches_generated_overwrite_temp_format() {
-    // Grammar (a): `<base>.tmp.<counter>.<pid>.<nanos>` with all three
-    // trailing dot-separated groups decimal digits — the exact shape
-    // `put_overwrite` / `temp_key_for` generate.
+    // Grammar (a): the reserved `__tmp/shardline-overwrite/` prefix followed by
+    // `<key-digest>.<counter>.<pid>.<nanos>` — exactly four dot-separated
+    // groups, a 64-hex key digest and three all-digit groups — the exact shape
+    // `put_overwrite` / `temp_key_for` generate (F-80). The digest is 32 "ab"
+    // (64 hex chars) below.
     assert!(is_temp_upload_key(
-        "uploads/obj.tmp.0.12345.1750000000000000000"
+        "__tmp/shardline-overwrite/abababababababababababababababababababababababababababababababab.0.12345.1750000000000000000"
     ));
-    assert!(is_temp_upload_key("obj.tmp.42.9.1750000000000000000"));
-    assert!(is_temp_upload_key("a/b/c.tmp.999999.1.1750000000000000000"));
+    assert!(is_temp_upload_key(
+        "__tmp/shardline-overwrite/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.42.9.1750000000000000000"
+    ));
+    // A genuinely generated key round-trips through the predicate.
+    let generated = temp_key_for(&ObjectKey::parse("uploads/obj").unwrap()).unwrap();
+    assert!(
+        is_temp_upload_key(generated.as_str()),
+        "generated temp must match: {}",
+        generated.as_str()
+    );
 }
 
 #[test]
@@ -234,9 +244,9 @@ fn is_temp_upload_key_rejects_non_temp() {
 #[test]
 fn is_temp_upload_key_does_not_shadow_user_keys() {
     // F-49: dots are legal in user keys. `data.tmp.1` is one digit group (not
-    // the three-group generated suffix), `report.tmp.2026.1` is two groups,
-    // and a mid-key `.tmp.<digits>` / non-digit tail never matches — none of
-    // these may be filtered from listings or GC enumeration.
+    // the generated four-group reserved shape), `report.tmp.2026.1` is two
+    // groups, and a mid-key `.tmp.<digits>` / non-digit tail never matches —
+    // none of these may be filtered from listings or GC enumeration.
     assert!(!is_temp_upload_key("data.tmp.1"));
     assert!(!is_temp_upload_key("report.tmp.2026.1"));
     assert!(!is_temp_upload_key("prefix/obj.tmp.123/suffix"));
@@ -248,24 +258,52 @@ fn is_temp_upload_key_does_not_shadow_user_keys() {
 
 #[test]
 fn is_temp_upload_key_rejects_user_keys_that_look_like_generated_temps() {
-    // F-56: the pre-fix grammar matched ANY three all-digit trailing groups,
-    // so user keys whose suffixes are date stamps / version tags collided
-    // with the generated `<base>.tmp.<counter>.<pid>.<nanos>` shape — they
-    // were shadowed from listings and deleted by the GC sweep after 1h. None
-    // of these may be treated as temps: the pid must fit `u32` and the nanos
-    // must be a plausible unix-nanosecond timestamp (`>= 10^15`).
+    // F-56/F-80: the pre-fix grammar matched ANY `<base>.tmp.<digits>.<digits>.<digits>`
+    // tail whose groups had the generated numeric shapes, so user keys whose
+    // suffixes are date stamps / version tags / numeric OCI tags collided with
+    // the generated temp grammar — they were shadowed from listings and
+    // deleted by the GC sweep after 1h. The F-80 fix moved the generated temps
+    // into the RESERVED `__tmp/shardline-overwrite/` namespace, so NONE of
+    // these — including keys shaped EXACTLY like the old generated temps — may
+    // be treated as temps.
     assert!(!is_temp_upload_key("report.tmp.2026.01.15"));
     assert!(!is_temp_upload_key("backup.tmp.2026.08.16"));
     assert!(!is_temp_upload_key("data.tmp.001.002.003"));
     assert!(!is_temp_upload_key("photos.tmp.1.2.3"));
     assert!(!is_temp_upload_key("v1.tmp.2026.01.15"));
     assert!(!is_temp_upload_key("uploads/report.tmp.2026.01.15"));
-    // A pid beyond u32 range is never a generated pid.
+    // The exact old generated shapes (`<base>.tmp.<u64>.<u32>.<nanos>=10^15..10^20`)
+    // are now indistinguishable from user keys — they must never match.
+    assert!(!is_temp_upload_key("data.tmp.1.1.1750000000000000000"));
+    assert!(!is_temp_upload_key(
+        "user/report.tmp.2026.1.1234567890123456"
+    ));
+    assert!(!is_temp_upload_key("v1.tmp.123.456.1750000000000000000"));
+    // A pid beyond u32 range is never a generated pid (kept as defense).
     assert!(!is_temp_upload_key(
         "data.tmp.1.4294967296.1750000000000000000"
     ));
     // A 15-digit (sub-10^15) nanos is not a plausible epoch clock value.
     assert!(!is_temp_upload_key("data.tmp.1.2.999999999999999"));
+}
+
+#[test]
+fn is_temp_upload_key_rejects_overwrite_prefix_with_wrong_shape() {
+    // The reserved overwrite prefix must carry the exact
+    // `<key-digest>.<counter>.<pid>.<nanos>` tail; other names under it (e.g.
+    // a hand-placed lookalike) are not filtered.
+    assert!(!is_temp_upload_key("__tmp/shardline-overwrite/"));
+    assert!(!is_temp_upload_key("__tmp/shardline-overwrite/notes.txt"));
+    // A short / non-hex key digest or a missing digit group never matches.
+    assert!(!is_temp_upload_key("__tmp/shardline-overwrite/abcd.1.2.3"));
+    assert!(!is_temp_upload_key(
+        "__tmp/shardline-overwrite/zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz.1.2.3"
+    ));
+    assert!(!is_temp_upload_key(
+        "__tmp/shardline-overwrite/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.1.2"
+    ));
+    // A key under a different `__tmp/` sub-namespace never matches.
+    assert!(!is_temp_upload_key("__tmp/other/1.2.3"));
 }
 
 #[test]
@@ -645,7 +683,7 @@ fn s3_config_with_virtual_hosted_style() {
 // ── temp_key_for ──────────────────────────────────────────────────────
 
 #[test]
-fn temp_key_for_appends_tmp_suffix_with_digits() {
+fn temp_key_for_reserved_prefix_shape() {
     let key = ObjectKey::parse("test/object.xorb").unwrap();
     let result: Result<ObjectKey, S3ObjectStoreError> = temp_key_for(&key);
     assert!(result.is_ok());
@@ -653,10 +691,21 @@ fn temp_key_for_appends_tmp_suffix_with_digits() {
         return;
     };
     let temp_str: &str = temp.as_str();
-    assert!(temp_str.starts_with("test/object.xorb.tmp."));
-    // Verify there are digits after .tmp.
-    let after_dot_tmp: Option<&str> = temp_str.find(".tmp.").map(|pos| &temp_str[pos + 5..]);
-    assert!(after_dot_tmp.is_some_and(|s: &str| !s.is_empty()));
+    // F-80: the temp lives in the reserved `__tmp/shardline-overwrite/`
+    // namespace (never under the base key, so a user key cannot collide with
+    // it) and carries the exact generated shape — and the predicate round-trips.
+    assert!(
+        temp_str.starts_with("__tmp/shardline-overwrite/"),
+        "temp must use the reserved namespace: {temp_str}"
+    );
+    assert!(
+        is_temp_upload_key(temp_str),
+        "generated temp must match: {temp_str}"
+    );
+    // The tail is `<key-digest>.<counter>.<pid>.<nanos>`: four dot-separated
+    // groups after the prefix.
+    let tail = &temp_str["__tmp/shardline-overwrite/".len()..];
+    assert_eq!(tail.split('.').count(), 4, "tail shape: {tail}");
 }
 
 #[test]
@@ -1288,10 +1337,10 @@ mod minio_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn minio_sweep_stale_temp_keys_reaps_only_generated_temps() {
-        // F-48/F-49: the age-bounded temp sweep must delete ONLY keys matching
-        // the exact generated-temp grammars, and only when they are older than
-        // the age bound. `now + 2h` pushes every freshly written object past
-        // the 1h cutoff, so all matching temps are stale.
+        // F-48/F-49/F-80: the age-bounded temp sweep must delete ONLY keys
+        // matching the exact generated-temp grammars, and only when they are
+        // older than the age bound. `now + 2h` pushes every freshly written
+        // object past the 1h cutoff, so all matching temps are stale.
         let stack = match ensure_minio() {
             Some(s) => s,
             None => return,
@@ -1299,7 +1348,7 @@ mod minio_tests {
         let prefix = stack.unique_s3_key_prefix("test-temp-sweep-stale");
         let store = build_s3_store(&stack, Some(&prefix));
 
-        // Grammar (a): the overwrite/multipart temp suffix.
+        // Grammar (a): the overwrite/multipart temp key (reserved namespace).
         let overwrite_temp = temp_key_for(&ObjectKey::parse("data/model.xorb").unwrap()).unwrap();
         put_test_object(&store, overwrite_temp.as_str(), b"temp-a");
         // Grammar (b): the stream-upload temp path.
@@ -1308,10 +1357,14 @@ mod minio_tests {
             "__tmp/shardline-stream-upload/1750000000000000000-42-7",
             b"temp-b",
         );
-        // User objects: a `.tmp.<digits>`-suffixed key (not the generated
-        // shape) and an ordinary key must survive.
-        put_test_object(&store, "data.tmp.1", b"user-a");
-        put_test_object(&store, "notes.txt", b"user-b");
+        // User objects: keys shaped exactly like the OLD generated temps
+        // (`data.tmp.1.1.1750000000000000000`, OCI tag
+        // `v1.tmp.123.456.1750000000000000000`), a `.tmp.<digits>`-suffixed
+        // key, and an ordinary key must all survive (F-80).
+        put_test_object(&store, "data.tmp.1.1.1750000000000000000", b"user-a");
+        put_test_object(&store, "v1.tmp.123.456.1750000000000000000", b"user-b");
+        put_test_object(&store, "data.tmp.1", b"user-c");
+        put_test_object(&store, "notes.txt", b"user-d");
 
         let (reaped, reaped_bytes) = store
             .sweep_stale_temp_keys(unix_now_seconds().saturating_add(2 * 3600))
@@ -1328,17 +1381,19 @@ mod minio_tests {
                 )
                 .unwrap()
         );
-        assert!(
-            store
-                .contains(&ObjectKey::parse("data.tmp.1").unwrap())
-                .unwrap(),
-            "user key data.tmp.1 must never be reaped"
-        );
-        assert!(
-            store
-                .contains(&ObjectKey::parse("notes.txt").unwrap())
-                .unwrap()
-        );
+        for user_key in [
+            "data.tmp.1.1.1750000000000000000",
+            "v1.tmp.123.456.1750000000000000000",
+            "data.tmp.1",
+            "notes.txt",
+        ] {
+            assert!(
+                store
+                    .contains(&ObjectKey::parse(user_key).unwrap())
+                    .unwrap(),
+                "user key {user_key} must never be reaped (F-80)"
+            );
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1377,13 +1432,15 @@ mod minio_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn minio_collision_shaped_user_keys_are_listed_and_never_swept() {
-        // F-56: user keys whose suffixes are three all-digit groups (date
+        // F-56/F-80: user keys whose suffixes are three all-digit groups (date
         // stamps, version tags) previously collided with the loose
         // "<base>.tmp.<digits>.<digits>.<digits>" grammar: they were shadowed
         // from visit_prefix / list_flat_namespace_page AND reaped by the
-        // age-bounded GC sweep after 1h. The tightened predicate matches only
-        // the genuinely generated shapes, so these keys must stay listable
-        // and survive the sweep.
+        // age-bounded GC sweep after 1h. The F-80 fix moved the generated
+        // overwrite temps into the RESERVED `__tmp/shardline-overwrite/`
+        // namespace, so the predicate matches only that namespace — these keys
+        // (including keys shaped exactly like the old generated temps) must
+        // stay listable and survive the sweep.
         let stack = match ensure_minio() {
             Some(s) => s,
             None => return,
@@ -1398,12 +1455,16 @@ mod minio_tests {
             "user/data.tmp.001.002.003",
             "user/photos.tmp.1.2.3",
             "user/v1.tmp.2026.01.15",
+            // F-80: exact OLD generated-temp shapes — still plain user keys.
+            "user/data.tmp.1.1.1750000000000000000",
+            "user/v1.tmp.123.456.1750000000000000000",
         ];
         for key in collision_keys {
             put_test_object(&store, key, b"user-data");
         }
         // A genuinely generated temp over a collision-shaped base: must remain
-        // a temp (its suffix is the generated counter/pid/nanos shape).
+        // a temp (it lives in the reserved `__tmp/shardline-overwrite/`
+        // namespace).
         let overwrite_temp =
             temp_key_for(&ObjectKey::parse("user/report.tmp.2026.01.15").unwrap()).unwrap();
         put_test_object(&store, overwrite_temp.as_str(), b"temp-data");
@@ -1593,20 +1654,22 @@ fn s3_error_source_invalid_key_prefix() {
 
 #[test]
 fn temp_key_for_overflow_key_rejected() {
-    // Create a key near the maximum length so that adding the temp suffix overflows
+    // A very long base key no longer overflows: the F-80 temp shape is a fixed
+    // reserved-prefix key (`__tmp/shardline-overwrite/<key-digest>.…`),
+    // independent of the base key's length, so it always parses.
     let long_base = "a".repeat(4090);
     let key = ObjectKey::parse(&long_base);
     assert!(key.is_ok());
     let Ok(key) = key else { return };
 
-    // temp_key_for adds ".tmp.{counter}.{pid}.{nanos}" which may exceed max length
     let result = temp_key_for(&key);
-    // Depending on counter/pid/nanos this might overflow, but should not panic
-    if let Err(error) = &result {
-        assert!(matches!(error, S3ObjectStoreError::InvalidListedKey));
-    } else if let Ok(temp) = &result {
-        assert!(temp.as_str().len() > long_base.len());
-    }
+    let temp = result.expect("temp_key_for must not overflow on a long base key");
+    assert!(
+        temp.as_str().starts_with("__tmp/shardline-overwrite/"),
+        "temp must use the reserved namespace: {}",
+        temp.as_str()
+    );
+    assert!(is_temp_upload_key(temp.as_str()));
 }
 
 // ── verify_file_length with non-existent file ─────────────────────────

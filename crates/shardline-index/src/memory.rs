@@ -643,6 +643,18 @@ impl TreeStore for MemoryIndexStore {
         Ok(self.lock_state()?.revisions.get(&search).cloned())
     }
 
+    async fn count_revisions(&self, key: &RepoKey) -> Result<u64, Self::Error> {
+        let state = self.lock_state()?;
+        let count = state
+            .revisions
+            .iter()
+            .filter(|(k, _)| {
+                k.provider == key.provider && k.owner == key.owner && k.repo == key.repo
+            })
+            .count();
+        Ok(u64::try_from(count).unwrap_or(u64::MAX))
+    }
+
     async fn list_revisions(
         &self,
         key: &RepoKey,

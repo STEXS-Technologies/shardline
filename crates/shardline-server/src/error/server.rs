@@ -265,6 +265,9 @@ pub enum ServerError {
     /// The revision already exists.
     #[error("revision already exists")]
     RevisionConflict,
+    /// The per-repo revision-registry cap was reached.
+    #[error("revision registry is full for this repository")]
+    TooManyRevisions,
 }
 
 impl ServerError {
@@ -341,7 +344,8 @@ impl ServerError {
             | Self::BlockingTask(_)
             | Self::InvalidPath
             | Self::UnregisteredFile(_)
-            | Self::RevisionConflict => "INTERNAL",
+            | Self::RevisionConflict
+            | Self::TooManyRevisions => "INTERNAL",
         }
     }
 
@@ -394,7 +398,7 @@ impl ServerError {
             Self::S3UploadTooManyParts => StatusCode::TOO_MANY_REQUESTS,
             Self::UploadIntentConflict => StatusCode::CONFLICT,
             Self::InvalidPath | Self::UnregisteredFile(_) => StatusCode::BAD_REQUEST,
-            Self::RevisionConflict => StatusCode::CONFLICT,
+            Self::RevisionConflict | Self::TooManyRevisions => StatusCode::CONFLICT,
             Self::TransferLimiterClosed
             | Self::TransferLimiterTimedOut
             | Self::WorkQueueSaturated
@@ -789,7 +793,8 @@ impl shardline_s3_adapter::S3ErrorClassify for ServerError {
             | Self::BlockingTask(_)
             | Self::InvalidPath
             | Self::UnregisteredFile(_)
-            | Self::RevisionConflict => S3ErrorClass::Internal,
+            | Self::RevisionConflict
+            | Self::TooManyRevisions => S3ErrorClass::Internal,
         }
     }
 }

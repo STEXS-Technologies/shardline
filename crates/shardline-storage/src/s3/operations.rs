@@ -271,18 +271,12 @@ impl S3ObjectStore {
         let location = self.location_for_key(key)?;
         let bytes = body.into_bytes();
 
-        // Write to a temp key first to avoid destroying the existing object
-        // on partial multipart failure. Only copy to the live key after the
-        // new content is fully durable.
-        let counter = TEMP_UPLOAD_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let now_nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let pid = std::process::id();
-        let temp_suffix = format!("tmp.{counter}.{pid}.{now_nanos}");
-        let temp_key = ObjectKey::parse(&format!("{}.{temp_suffix}", key.as_str()))
-            .map_err(|_err| S3ObjectStoreError::InvalidListedKey)?;
+        // Write to a reserved temp key first to avoid destroying the existing
+        // object on partial multipart failure. Only copy to the live key after
+        // the new content is fully durable. The reserved `__tmp/` namespace
+        // keeps the temp key from ever colliding with (or shadowing) a user
+        // key (F-80).
+        let temp_key = super::temp_key_for(key)?;
         let temp_location = self.location_for_key(&temp_key)?;
         self.block_on(
             self.inner
@@ -662,15 +656,17 @@ impl S3ObjectStore {
     /// Reaps S3 temp-upload artifacts whose observed `LastModified` is older
     /// than `S3_TEMP_ARTIFACT_AGE_SECONDS`.
     ///
-    /// S3 temp keys (`<key>.tmp.<counter>.<pid>.<nanos>` and
-    /// `__tmp/shardline-stream-upload/<nanos>-<pid>-<counter>`) are normally
-    /// deleted immediately after promotion, but a crash between the temp write
-    /// and the copy/delete strands them forever (F-48). The normal listing
-    /// paths skip temp keys, so this sweep does its own raw enumeration and
-    /// deletes only keys matching the exact generated-temp grammars
+    /// S3 temp keys (`__tmp/shardline-overwrite/<key-digest>.<counter>.<pid>.<nanos>`
+    /// and `__tmp/shardline-stream-upload/<nanos>-<pid>-<counter>`) are
+    /// normally deleted immediately after promotion, but a crash between the
+    /// temp write and the copy/delete strands them forever (F-48). The normal
+    /// listing paths skip temp keys, so this sweep does its own raw enumeration
+    /// and deletes only keys matching the exact generated-temp grammars
     /// (`is_temp_upload_key`) whose `LastModified` — S3 backend truth, immune
     /// to writer/GC wall-clock divergence — is older than the age bound. User
-    /// objects are never matched. Returns `(reaped_count, reaped_bytes)`.
+    /// objects are never matched (both grammars live in the reserved `__tmp/`
+    /// namespace user keys cannot reach; F-80). Returns
+    /// `(reaped_count, reaped_bytes)`.
     ///
     /// # Errors
     ///

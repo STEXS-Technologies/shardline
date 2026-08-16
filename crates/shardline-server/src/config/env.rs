@@ -15,15 +15,15 @@ use super::secrets::{
 use super::{
     AuthProviderKind, CONFIG_SECRET_KEY_BYTES, DEFAULT_LFS_PATCH_MAX_ACTIVE_SESSIONS,
     DEFAULT_LFS_PATCH_MAX_SEEK_AHEAD_BYTES, DEFAULT_LFS_PATCH_TOTAL_MAX_BYTES,
-    DEFAULT_LFS_PATCH_TTL_SECONDS, DEFAULT_MAX_REQUEST_BODY_BYTES, DEFAULT_MAX_SHARD_FILES,
-    DEFAULT_MAX_SHARD_RECONSTRUCTION_TERMS, DEFAULT_MAX_SHARD_XORB_CHUNKS, DEFAULT_MAX_SHARD_XORBS,
-    DEFAULT_S3_MAX_PART_BYTES, DEFAULT_S3_MIN_PART_BYTES, DEFAULT_S3_UPLOAD_MAX_ACTIVE_PART_FILES,
-    DEFAULT_S3_UPLOAD_MAX_ACTIVE_SESSIONS, DEFAULT_S3_UPLOAD_SESSION_MAX_BYTES,
-    DEFAULT_S3_UPLOAD_SESSION_TTL_SECONDS, DEFAULT_S3_UPLOAD_TOTAL_MAX_BYTES, DeploymentMode,
-    HUB_WEBHOOK_SECRET_KEY_BYTES, MAX_ED25519_KEY_BYTES, MAX_METRICS_TOKEN_BYTES,
-    MAX_TOKEN_SIGNING_KEY_BYTES, ObjectStorageAdapter, ServerConfig, ServerConfigError,
-    ShardMetadataLimits, default_transfer_max_in_flight_chunks,
-    default_upload_max_in_flight_chunks, parse_byte_size,
+    DEFAULT_LFS_PATCH_TTL_SECONDS, DEFAULT_MAX_REQUEST_BODY_BYTES, DEFAULT_MAX_REVISIONS_PER_REPO,
+    DEFAULT_MAX_SHARD_FILES, DEFAULT_MAX_SHARD_RECONSTRUCTION_TERMS, DEFAULT_MAX_SHARD_XORB_CHUNKS,
+    DEFAULT_MAX_SHARD_XORBS, DEFAULT_S3_MAX_PART_BYTES, DEFAULT_S3_MIN_PART_BYTES,
+    DEFAULT_S3_UPLOAD_MAX_ACTIVE_PART_FILES, DEFAULT_S3_UPLOAD_MAX_ACTIVE_SESSIONS,
+    DEFAULT_S3_UPLOAD_SESSION_MAX_BYTES, DEFAULT_S3_UPLOAD_SESSION_TTL_SECONDS,
+    DEFAULT_S3_UPLOAD_TOTAL_MAX_BYTES, DeploymentMode, HUB_WEBHOOK_SECRET_KEY_BYTES,
+    MAX_ED25519_KEY_BYTES, MAX_METRICS_TOKEN_BYTES, MAX_TOKEN_SIGNING_KEY_BYTES,
+    ObjectStorageAdapter, ServerConfig, ServerConfigError, ShardMetadataLimits,
+    default_transfer_max_in_flight_chunks, default_upload_max_in_flight_chunks, parse_byte_size,
 };
 use crate::{
     reconstruction_cache::ReconstructionCacheAdapter, server_frontend::ServerFrontend,
@@ -90,6 +90,12 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
             || ServerConfigError::ZeroMaxShardXorbChunks,
         )?,
     );
+    let max_revisions_per_repo = load_non_zero_usize_env(
+        "SHARDLINE_MAX_REVISIONS_PER_REPO",
+        DEFAULT_MAX_REVISIONS_PER_REPO,
+        ServerConfigError::MaxRevisionsPerRepo,
+        || ServerConfigError::ZeroMaxRevisionsPerRepo,
+    )?;
     let raw_chunk_size_str = var("SHARDLINE_CHUNK_SIZE")
         .or_else(|_| var("SHARDLINE_CHUNK_SIZE_BYTES"))
         .unwrap_or_else(|_error| "64KiB".to_owned());
@@ -405,6 +411,7 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
         .with_lfs_patch_max_active_sessions(lfs_patch_max_active_sessions)?
         .with_lfs_patch_total_max_bytes(lfs_patch_total_max_bytes)?
         .with_lfs_patch_max_seek_ahead_bytes(lfs_patch_max_seek_ahead_bytes)?
+        .with_max_revisions_per_repo(max_revisions_per_repo)?
         .with_admission_max_weight(admission_max_weight_from_env());
     config.cache.adapter = reconstruction_cache_adapter;
     config.cache.redis_url = reconstruction_cache_redis_url.map(SecretString::new);
@@ -456,6 +463,19 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
         .ok()
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty());
+    // Comma-separated allowlist of extra hosts (besides the issuer's own host)
+    // whose JWKS endpoints the OIDC discovery document may advertise. Defaults
+    // to requiring the issuer's host (fail-closed for unknown cross-hosts).
+    let auth_oidc_jwks_host_allowlist = var("SHARDLINE_AUTH_OIDC_JWKS_HOST_ALLOWLIST")
+        .ok()
+        .map(|value| {
+            value
+                .split(',')
+                .map(|host| host.trim().to_owned())
+                .filter(|host| !host.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .filter(|hosts| !hosts.is_empty());
     let auth_jwks_url = var("SHARDLINE_AUTH_JWKS_URL").ok();
     let auth_jwks_issuer = var("SHARDLINE_AUTH_JWKS_ISSUER").ok();
     match auth_provider {
@@ -488,6 +508,9 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
     }
     if let Some(audience) = auth_oidc_audience {
         config = config.with_auth_oidc_audience(audience);
+    }
+    if let Some(hosts) = auth_oidc_jwks_host_allowlist {
+        config = config.with_auth_oidc_jwks_host_allowlist(hosts);
     }
     if let Some(url) = auth_jwks_url {
         config = config.with_auth_jwks_url(url);
@@ -831,6 +854,12 @@ pub fn load_server_config_from_env_with_toml(
         if let Some(oidc) = &auth.oidc {
             set_if_unset("SHARDLINE_AUTH_OIDC_ISSUER", oidc.issuer_url.clone());
             set_if_unset("SHARDLINE_AUTH_OIDC_AUDIENCE", oidc.audience.clone());
+            if let Some(hosts) = &oidc.jwks_host_allowlist {
+                set_if_unset(
+                    "SHARDLINE_AUTH_OIDC_JWKS_HOST_ALLOWLIST",
+                    Some(hosts.join(",")),
+                );
+            }
         }
         if let Some(ed25519) = &auth.ed25519 {
             set_if_unset(
@@ -1227,9 +1256,81 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
             result,
             Err(super::ServerConfigError::SecretSourceConflict { .. })
         ));
-
         remove_env_var("SHARDLINE_METRICS_TOKEN");
         remove_env_var("SHARDLINE_METRICS_TOKEN_FILE");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+    }
+
+    // ── SHARDLINE_MAX_REVISIONS_PER_REPO ───────────────────────────────────
+
+    #[test]
+    #[serial_test::serial]
+    fn load_server_config_max_revisions_per_repo_from_env() {
+        set_env_var("SHARDLINE_MAX_REVISIONS_PER_REPO", "77");
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+        let result = super::load_server_config_from_env();
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+        let config = result.unwrap();
+        assert_eq!(
+            config.max_revisions_per_repo(),
+            std::num::NonZeroUsize::new(77).unwrap()
+        );
+
+        remove_env_var("SHARDLINE_MAX_REVISIONS_PER_REPO");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn load_server_config_max_revisions_per_repo_defaults() {
+        remove_env_var("SHARDLINE_MAX_REVISIONS_PER_REPO");
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+        let result = super::load_server_config_from_env();
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+        let config = result.unwrap();
+        assert_eq!(
+            config.max_revisions_per_repo(),
+            super::DEFAULT_MAX_REVISIONS_PER_REPO
+        );
+
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn load_server_config_max_revisions_per_repo_rejects_zero() {
+        set_env_var("SHARDLINE_MAX_REVISIONS_PER_REPO", "0");
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+        let result = super::load_server_config_from_env();
+        assert!(matches!(
+            result,
+            Err(super::ServerConfigError::ZeroMaxRevisionsPerRepo)
+        ));
+
+        remove_env_var("SHARDLINE_MAX_REVISIONS_PER_REPO");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn load_server_config_max_revisions_per_repo_rejects_unparsable() {
+        set_env_var("SHARDLINE_MAX_REVISIONS_PER_REPO", "not-a-number");
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+        let result = super::load_server_config_from_env();
+        assert!(matches!(
+            result,
+            Err(super::ServerConfigError::MaxRevisionsPerRepo(_))
+        ));
+
+        remove_env_var("SHARDLINE_MAX_REVISIONS_PER_REPO");
         remove_env_var("SHARDLINE_ROOT_DIR");
         remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
     }
@@ -2171,6 +2272,85 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
         remove_env_var("SHARDLINE_AUTH_PROVIDER");
         remove_env_var("SHARDLINE_AUTH_OIDC_ISSUER");
         remove_env_var("SHARDLINE_AUTH_OIDC_AUDIENCE");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn load_server_config_oidc_jwks_host_allowlist_from_env() {
+        set_env_var("SHARDLINE_AUTH_PROVIDER", "oidc");
+        set_env_var("SHARDLINE_AUTH_OIDC_ISSUER", "https://accounts.example.com");
+        set_env_var(
+            "SHARDLINE_AUTH_OIDC_JWKS_HOST_ALLOWLIST",
+            "www.googleapis.com, api.example.com",
+        );
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+        let result = super::load_server_config_from_env();
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+        let config = result.unwrap();
+        assert_eq!(
+            config.auth_oidc_jwks_host_allowlist(),
+            Some(
+                &[
+                    "www.googleapis.com".to_owned(),
+                    "api.example.com".to_owned()
+                ][..]
+            ),
+            "SHARDLINE_AUTH_OIDC_JWKS_HOST_ALLOWLIST must flow into the config"
+        );
+        remove_env_var("SHARDLINE_AUTH_PROVIDER");
+        remove_env_var("SHARDLINE_AUTH_OIDC_ISSUER");
+        remove_env_var("SHARDLINE_AUTH_OIDC_JWKS_HOST_ALLOWLIST");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn load_server_config_oidc_jwks_host_allowlist_unset_by_default() {
+        set_env_var("SHARDLINE_AUTH_PROVIDER", "oidc");
+        set_env_var("SHARDLINE_AUTH_OIDC_ISSUER", "https://accounts.example.com");
+        remove_env_var("SHARDLINE_AUTH_OIDC_JWKS_HOST_ALLOWLIST");
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+        let result = super::load_server_config_from_env();
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+        let config = result.unwrap();
+        assert_eq!(
+            config.auth_oidc_jwks_host_allowlist(),
+            None,
+            "the jwks host allowlist must default to unset (issuer host only)"
+        );
+        remove_env_var("SHARDLINE_AUTH_PROVIDER");
+        remove_env_var("SHARDLINE_AUTH_OIDC_ISSUER");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn load_server_config_oidc_jwks_host_allowlist_trims_and_skips_empty() {
+        set_env_var("SHARDLINE_AUTH_PROVIDER", "oidc");
+        set_env_var("SHARDLINE_AUTH_OIDC_ISSUER", "https://accounts.example.com");
+        set_env_var(
+            "SHARDLINE_AUTH_OIDC_JWKS_HOST_ALLOWLIST",
+            "  ,,www.googleapis.com,,  ",
+        );
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+        let result = super::load_server_config_from_env();
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+        let config = result.unwrap();
+        assert_eq!(
+            config.auth_oidc_jwks_host_allowlist(),
+            Some(&["www.googleapis.com".to_owned()][..]),
+            "empty entries must be skipped and hosts trimmed"
+        );
+        remove_env_var("SHARDLINE_AUTH_PROVIDER");
+        remove_env_var("SHARDLINE_AUTH_OIDC_ISSUER");
+        remove_env_var("SHARDLINE_AUTH_OIDC_JWKS_HOST_ALLOWLIST");
         remove_env_var("SHARDLINE_ROOT_DIR");
         remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
     }

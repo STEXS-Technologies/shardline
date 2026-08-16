@@ -51,6 +51,17 @@ pub(crate) const DEFAULT_MAX_SHARD_XORB_CHUNKS: NonZeroUsize = match NonZeroUsiz
     None => NonZeroUsize::MIN,
 };
 
+/// Default per-repo revision-registry cap (10k rows ≈ 250KB in SQLite).
+///
+/// `create_revision` rejects new revision names once a repository has reached
+/// this many registered revisions, bounding the unbounded-registry growth
+/// surface (F-75) even in providerless/permissive deployments where every
+/// revision insert is a distinct row.
+pub(crate) const DEFAULT_MAX_REVISIONS_PER_REPO: NonZeroUsize = match NonZeroUsize::new(10_000) {
+    Some(value) => value,
+    None => NonZeroUsize::MIN,
+};
+
 pub(crate) const MAX_TOKEN_SIGNING_KEY_BYTES: u64 = 1_048_576;
 pub(crate) const MAX_ED25519_KEY_BYTES: u64 = 16_384;
 /// AES-256 webhook secret encryption keys are exactly 32 bytes.

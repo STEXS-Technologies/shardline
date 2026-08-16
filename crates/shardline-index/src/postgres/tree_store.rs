@@ -236,6 +236,20 @@ impl TreeStore for PostgresIndexStore {
         row.as_ref().map(revision_record_from_row).transpose()
     }
 
+    async fn count_revisions(&self, key: &RepoKey) -> Result<u64, Self::Error> {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)
+             FROM shardline_revisions
+             WHERE provider = $1 AND owner = $2 AND repo = $3",
+        )
+        .bind(&key.provider)
+        .bind(&key.owner)
+        .bind(&key.repo)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(u64::try_from(count).unwrap_or(u64::MAX))
+    }
+
     async fn list_revisions(
         &self,
         key: &RepoKey,

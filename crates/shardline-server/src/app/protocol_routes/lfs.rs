@@ -1255,8 +1255,6 @@ pub(crate) async fn lfs_patch_object(
         // Recover from poisoning: the lock is a simple empty-token Mutex<()>,
         // so its state is trivially consistent even if a previous holder panicked.
         let lock = lock_arc.lock().unwrap_or_else(|e| e.into_inner());
-        touch_patch_session(&tmp_dir, &oid_for_closure, now)?;
-        drop(store_guard);
 
         // Pre-write checks under the per-OID lock. A concurrent same-OID PATCH
         // may have already covered [0,total) and be promoting the object; and
@@ -1264,6 +1262,22 @@ pub(crate) async fn lfs_patch_object(
         // session's current high-water mark so a fresh session cannot jump to
         // a multi-TiB sparse offset (F-30).
         let (high_water_mark, already_complete) = inspect_lfs_patch_ranges(&ranges_path, total)?;
+        // F-77: the seek bound is enforced BEFORE the session sidecar is
+        // created (or its TTL refreshed). A rejected seek must not leave a
+        // zero-byte "ghost" session ({oid}.meta with no data or ranges) behind:
+        // the active-session cap counts every .meta as a session, so an
+        // attacker could occupy every slot with byte-cost-free ghosts that stay
+        // refreshable forever (each 416 re-touches last-touched). The fresh
+        // in-memory range state this check loaded is evicted so it cannot leak
+        // either; an existing session's disk state is reloaded on its next
+        // PATCH. A completed session ([0,total) covered) is exempt: it goes
+        // down the F-59 re-arm path below regardless of this request's offset.
+        if !already_complete && offset > checked_add(high_water_mark, max_seek_ahead_bytes.get())? {
+            evict_lfs_patch_ranges(&ranges_path);
+            return Err(ServerError::LfsPatchRangeNotSatisfiable);
+        }
+        touch_patch_session(&tmp_dir, &oid_for_closure, now)?;
+        drop(store_guard);
         if already_complete {
             // F-59: a session whose ranges cover [0,total) but whose object is
             // not yet in the store is the crash-left state of a promotion that
@@ -1300,9 +1314,6 @@ pub(crate) async fn lfs_patch_object(
                 )?;
             }
             return Ok(());
-        }
-        if offset > checked_add(high_water_mark, max_seek_ahead_bytes.get())? {
-            return Err(ServerError::LfsPatchRangeNotSatisfiable);
         }
 
         // The staging write + range record run under the per-OID lock; the
@@ -3882,6 +3893,93 @@ mod tests {
         assert!(
             matches!(error, ServerError::Io(ref io_error) if io_error.kind() == std::io::ErrorKind::InvalidData),
             "inconsistent totals must be rejected with InvalidData, got: {error}"
+        );
+    }
+
+    // =========================================================================
+    // F-77 — a rejected seek must not leave a ghost patch session
+    // =========================================================================
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn patch_rejected_seek_leaves_no_ghost_session() {
+        // F-77: a PATCH whose Content-Range start jumps beyond the
+        // sequential-growth seek bound returns 416 but must NOT leave a
+        // zero-byte "ghost" session behind — no {oid}.meta, no staging files.
+        // Every .meta counts as a session against the active-session cap, so a
+        // ghost alone would exhaust a slot while costing zero bytes against the
+        // aggregate byte cap, and each repeated 416 re-touches its last-touched
+        // time, keeping the ghost refreshable (immune to the TTL sweep) for the
+        // whole cap lifetime.
+        //
+        // With the active-session cap at 1, a rejected 416 must not occupy the
+        // slot: a subsequent NEW-session PATCH still succeeds (200).
+        let (state, _tmp) = build_test_state_with_lfs_options(
+            std::num::NonZeroUsize::new(1).unwrap(), // cap: 1 active session
+            NonZeroU64::new(1 << 40).unwrap(),
+            NonZeroU64::new(3600).unwrap(),
+        )
+        .await;
+        let root_dir = state.config.root_dir().to_path_buf();
+        let app = lfs_router(state);
+        let dir = lfs_patch_dir(root_dir.as_path());
+
+        let oid = test_oid(b"ghost-session-content");
+        let total = 1_u64 << 30; // 1 GiB declared
+        // Just past the default 64 MiB seek bound (a fresh session's high-water
+        // mark is 0), so the PATCH is rejected as range-not-satisfiable.
+        let offset = (1_u64 << 26) + 1;
+
+        // Repeated 416s: none of them may materialize a session.
+        for _ in 0..3 {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("PATCH")
+                        .uri(format!("/v1/lfs/objects/{oid}"))
+                        .header("content-range", format!("bytes {offset}-{offset}/{total}"))
+                        .header("content-length", 1)
+                        .body(Body::from(vec![0x01]))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::RANGE_NOT_SATISFIABLE,
+                "a PATCH seeking past the session high-water mark + slack must be rejected"
+            );
+            assert!(
+                !lfs_patch_meta_path(&dir, &oid).exists(),
+                "a rejected seek must not create the {oid}.meta sidecar"
+            );
+            let (active_sessions, used_bytes) = patch_store_usage(&dir).unwrap();
+            assert_eq!(
+                active_sessions, 0,
+                "no ghost session may be charged against the active-session cap"
+            );
+            assert_eq!(used_bytes, 0, "no ghost session may hold staging bytes");
+        }
+
+        // The slot is still free: a brand-new session succeeds under the cap
+        // of 1, which a ghost would otherwise have consumed.
+        let oid_ok = test_oid(b"ghost-slot-still-free-content");
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(format!("/v1/lfs/objects/{oid_ok}"))
+                    .header("content-range", "bytes 0-9/20")
+                    .header("content-length", 10)
+                    .body(Body::from(b"0123456789".to_vec()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "a rejected seek must not consume the active-session slot"
         );
     }
 

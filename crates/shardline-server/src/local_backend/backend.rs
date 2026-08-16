@@ -523,6 +523,15 @@ impl LocalBackend {
         Ok(self.index_store.upsert_revision(rev).await?)
     }
 
+    /// Counts the revision registry rows for a repository.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError`] when the index count fails.
+    pub(crate) async fn count_revisions(&self, key: &RepoKey) -> Result<u64, ServerError> {
+        Ok(self.index_store.count_revisions(key).await?)
+    }
+
     /// Deletes a revision and all of its tree entries, returning whether the revision
     /// previously existed.
     ///
