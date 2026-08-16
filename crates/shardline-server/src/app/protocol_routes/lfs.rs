@@ -4074,10 +4074,15 @@ mod tests {
         {
             let _lock1 = acquire_lfs_patch_lock("evict-lock-a");
             let _lock2 = acquire_lfs_patch_lock("evict-lock-b");
-            assert_eq!(
-                live_lfs_patch_lock_count(),
-                baseline_live + 2,
-                "held guards keep their entries alive"
+            // The map is process-global and tests run in parallel, so a
+            // sibling test may legitimately hold an extra live lock (e.g.
+            // patch_promotion_and_sweep_complete_without_deadlock sleeps
+            // while holding one). Assert the invariant rather than an exact
+            // count: both guards held here must keep their entries alive.
+            let live = live_lfs_patch_lock_count();
+            assert!(
+                live >= baseline_live + 2,
+                "held guards keep their entries alive: baseline {baseline_live} -> {live}"
             );
         }
 
