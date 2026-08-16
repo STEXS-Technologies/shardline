@@ -115,16 +115,20 @@ async fn s3_object_entry(
 ) -> Result<Option<S3ObjectEntry>, S3Error> {
     // The namespace is derived from the capability the context carries — the
     // same derivation every other storage call got at context construction.
-    let mut rows = state
+    //
+    // Exact-key lookup, NOT the prefix scan: `scan_s3_objects` matches
+    // `object_key` as a string PREFIX for listing pagination, so when the
+    // exact key is absent a longer sibling key with it as a string prefix
+    // (e.g. `a` vs `a/b`) would be returned as the object — breaking
+    // conditional semantics (F-33): If-None-Match:* would spuriously 412 a
+    // create-if-absent PUT against the sibling's ETag. The table's unique
+    // `(scope_namespace, object_key)` primary key makes the exact lookup hit
+    // the index directly.
+    state
         .backend
-        .scan_s3_objects(
-            &scope_namespace(context.auth.namespace()),
-            &context.key,
-            None,
-            1,
-        )
-        .await?;
-    Ok(rows.pop())
+        .scan_s3_object_exact(&scope_namespace(context.auth.namespace()), &context.key)
+        .await
+        .map_err(S3Error::from)
 }
 
 /// Finalizes a shared MD5 tee hasher into an S3 ETag hex string.

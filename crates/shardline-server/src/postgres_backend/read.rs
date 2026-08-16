@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use shardline_index::{
     FileRecord, FileRecordStorageLayout, PostgresMetadataStoreError, RecordStore, RecordTraversal,
     RepositoryRecordScope, S3ObjectEntry, S3ObjectIndexStore,
@@ -467,6 +469,23 @@ impl super::PostgresBackend {
             .await
             .map_err(ServerError::from)
     }
+
+    /// Resolves exactly one S3 object listing row by its full raw key (no
+    /// prefix matching).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError`] when the index lookup fails.
+    pub(crate) async fn scan_s3_object_exact(
+        &self,
+        scope_namespace: &str,
+        object_key: &str,
+    ) -> Result<Option<S3ObjectEntry>, ServerError> {
+        self.index_store
+            .scan_s3_object_exact(scope_namespace, object_key)
+            .await
+            .map_err(ServerError::from)
+    }
 }
 
 pub(crate) async fn repository_references_hash_in_scope<RecordAdapter>(
@@ -528,6 +547,10 @@ pub(crate) fn connect_postgres_metadata_pool(
 ) -> Result<sqlx::PgPool, ServerError> {
     sqlx::postgres::PgPoolOptions::new()
         .max_connections(max_connections)
+        // A bounded acquire timeout keeps a saturated shared pool from hanging
+        // requests for the sqlx default (30s): the caller gets a clean error
+        // instead of a stuck 500 after a long stall.
+        .acquire_timeout(Duration::from_secs(10))
         .connect_lazy(index_postgres_url)
         .map_err(PostgresMetadataStoreError::from)
         .map_err(ServerError::from)

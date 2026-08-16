@@ -26,6 +26,9 @@ pub async fn apply_provider_webhook(
 ) -> Result<ProviderWebhookOutcome, ServerError> {
     let object_store = object_store_from_config(config)?;
     if let Some(index_postgres_url) = config.index_postgres_url() {
+        // Process-wide shared pool: sized like the server's own metadata pool
+        // (16 connections) so concurrent webhook applications share one
+        // adequately-sized pool instead of exhausting a tiny one.
         let pool = connect_postgres_metadata_pool(index_postgres_url, 4)?;
         let record_store = PostgresRecordStore::new(pool.clone());
         let index_store = PostgresIndexStore::new(pool);

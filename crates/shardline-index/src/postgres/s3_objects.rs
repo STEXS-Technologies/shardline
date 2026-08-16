@@ -110,6 +110,29 @@ impl S3ObjectIndexStore for PostgresIndexStore {
         let rows = q.fetch_all(&self.pool).await?;
         rows.iter().map(s3_object_entry_from_row).collect()
     }
+
+    async fn scan_s3_object_exact(
+        &self,
+        scope_namespace: &str,
+        object_key: &str,
+    ) -> Result<Option<S3ObjectEntry>, Self::Error> {
+        let rows = query(
+            "SELECT scope_namespace, object_key, file_id, size_bytes, content_hash, etag,
+                    user_metadata, updated_at_unix_seconds
+             FROM shardline_s3_objects
+             WHERE scope_namespace = $1 AND object_key = $2
+             LIMIT 1",
+        )
+        .bind(scope_namespace)
+        .bind(object_key)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .iter()
+            .map(s3_object_entry_from_row)
+            .collect::<Result<Vec<_>, _>>()?
+            .pop())
+    }
 }
 
 #[cfg(test)]
@@ -273,6 +296,44 @@ mod tests {
             .await
             .expect("scan");
         assert_eq!(more.len(), 2);
+
+        cleanup(&pool, &scope).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pg_s3_object_exact_requires_full_key_match() {
+        let Some(pool) = connect_postgres().await else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let scope = format!("s3-exact-{}", std::process::id());
+        let store = PostgresIndexStore::new(pool.clone());
+        for (key, id) in [("a/b", 1), ("a/b/c", 2)] {
+            S3ObjectIndexStore::upsert_s3_object(&store, &entry(&scope, key, &format!("f{id}")))
+                .await
+                .expect("upsert");
+        }
+
+        // F-33: a prefix-sibling must never satisfy the exact lookup.
+        let exact = S3ObjectIndexStore::scan_s3_object_exact(&store, &scope, "a")
+            .await
+            .expect("exact lookup");
+        assert!(
+            exact.is_none(),
+            "a prefix-sibling must never satisfy an exact lookup"
+        );
+
+        let found = S3ObjectIndexStore::scan_s3_object_exact(&store, &scope, "a/b")
+            .await
+            .expect("exact lookup");
+        assert_eq!(found.expect("exact row").object_key, "a/b");
+
+        // The prefix scan still lists the siblings (listing unchanged).
+        let rows = S3ObjectIndexStore::scan_s3_objects(&store, &scope, "a", None, 100)
+            .await
+            .expect("scan");
+        let keys: Vec<&str> = rows.iter().map(|row| row.object_key.as_str()).collect();
+        assert_eq!(keys, vec!["a/b", "a/b/c"]);
 
         cleanup(&pool, &scope).await;
     }

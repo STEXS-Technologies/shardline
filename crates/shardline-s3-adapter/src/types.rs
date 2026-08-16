@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 
 use axum::http::{
     HeaderMap, HeaderValue,
@@ -525,16 +525,27 @@ pub const MAX_S3_DELETE_KEYS: usize = 1000;
 ///
 /// The body is the S3
 /// `<Delete><Object><Key>k</Key></Object>…</Delete>` envelope. Only `Key`
-/// element text is read (the `Quiet` flag is ignored); every key is returned
-/// in document order (duplicates preserved). Empty keys are skipped.
+/// element text is read (the `Quiet` flag is ignored); keys are returned in
+/// first-occurrence document order with duplicates collapsed (the handler's
+/// dedupe pass becomes a no-op over the returned list). Empty keys are skipped.
+///
+/// The [`MAX_S3_DELETE_KEYS`] protocol cap is enforced **during** parsing: the
+/// first *distinct* key beyond the cap aborts with `MalformedXML` (`400`)
+/// before it is ever buffered, so the returned list — and the dedupe set used
+/// to enforce the cap — never grow beyond the cap. A hostile body of millions
+/// of duplicate `<Key>` entries therefore consumes at most `cap` owned keys of
+/// memory instead of amplifying every entry into an owned `String` (F-32);
+/// the cap is only tripped by a genuine `cap + 1`-th distinct key.
 ///
 /// # Errors
 ///
 /// Returns [`crate::S3Error::invalid_part`] when the body contains an
-/// unterminated tag.
+/// unterminated tag, or [`crate::S3Error::malformed_xml`] when the body lists
+/// more than [`MAX_S3_DELETE_KEYS`] distinct keys.
 pub fn parse_delete_object_keys(body: &str) -> Result<Vec<String>, crate::S3Error> {
     let mut scanner = CompleteXmlScanner::new(body);
-    let mut keys = Vec::new();
+    let mut keys = Vec::with_capacity(MAX_S3_DELETE_KEYS.min(32));
+    let mut seen = HashSet::with_capacity(MAX_S3_DELETE_KEYS.min(32));
     let mut pending_key: Option<String> = None;
     loop {
         match scanner.next_event()? {
@@ -553,6 +564,16 @@ pub fn parse_delete_object_keys(body: &str) -> Result<Vec<String>, crate::S3Erro
                     && let Some(raw_key) = pending_key.take()
                     && !raw_key.is_empty()
                 {
+                    // Dedupe while parsing: duplicates collapse to one key and
+                    // never count toward the cap. A NEW key beyond the cap is
+                    // rejected before it is buffered, bounding both `keys` and
+                    // `seen` at the cap (F-32).
+                    if !seen.insert(raw_key.clone()) {
+                        continue;
+                    }
+                    if keys.len() >= MAX_S3_DELETE_KEYS {
+                        return Err(crate::S3Error::malformed_xml());
+                    }
                     keys.push(raw_key);
                 }
             }
@@ -961,6 +982,41 @@ mod tests {
             super::parse_delete_object_keys("<Delete><Object><Key>a")
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn parse_delete_object_keys_cap_enforced_on_distinct_keys_during_parse() {
+        // Exactly MAX_S3_DELETE_KEYS distinct keys parse fine, in order.
+        let objects = (0..super::MAX_S3_DELETE_KEYS)
+            .map(|index| format!("<Object><Key>cap/key-{index:04}.txt</Key></Object>"))
+            .collect::<String>();
+        let mut body = format!("<Delete>{objects}</Delete>");
+        let keys = super::parse_delete_object_keys(&body).unwrap();
+        assert_eq!(keys.len(), super::MAX_S3_DELETE_KEYS);
+        assert_eq!(keys[0], "cap/key-0000.txt");
+
+        // The (MAX+1)-th DISTINCT key is rejected mid-parse with MalformedXML
+        // (400) before it is ever buffered — the Vec never exceeds the cap.
+        body.insert_str(
+            body.len() - "</Delete>".len(),
+            "<Object><Key>cap/overflow.txt</Key></Object>",
+        );
+        let error = super::parse_delete_object_keys(&body).unwrap_err();
+        assert_eq!(error.code, "MalformedXML");
+        assert_eq!(error.status, axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn parse_delete_object_keys_duplicates_never_trip_the_cap() {
+        // F-32: a hostile body of repeated duplicate keys must not amplify
+        // memory — millions of identical entries collapse to a single key,
+        // never growing the parsed list (or the dedupe set) beyond the cap.
+        let duplicates = "<Object><Key>x</Key></Object>".repeat(super::MAX_S3_DELETE_KEYS + 10);
+        let body = format!("<Delete>{duplicates}</Delete>");
+        assert_eq!(
+            super::parse_delete_object_keys(&body).unwrap(),
+            vec!["x".to_owned()]
         );
     }
 

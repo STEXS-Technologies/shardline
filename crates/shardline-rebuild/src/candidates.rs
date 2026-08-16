@@ -55,6 +55,9 @@ where
                 location,
                 IndexRebuildIssueDetail::OversizedVersionRecordMetadata,
             )?;
+            report
+                .preserved_latest_records_unreadable_version
+                .push(record_store.locator_display(&path));
             return Ok(());
         }
         Err(shardline_server_core::ParseStoredFileRecordError::Json(_)) => {
@@ -64,6 +67,9 @@ where
                 location,
                 IndexRebuildIssueDetail::RecordJsonInvalid,
             )?;
+            report
+                .preserved_latest_records_unreadable_version
+                .push(record_store.locator_display(&path));
             return Ok(());
         }
     };
@@ -77,6 +83,9 @@ where
                 file_id: record.file_id,
             },
         )?;
+        report
+            .preserved_latest_records_unreadable_version
+            .push(record_store.locator_display(&path));
         return Ok(());
     }
 
@@ -89,6 +98,9 @@ where
                 content_hash: record.content_hash,
             },
         )?;
+        report
+            .preserved_latest_records_unreadable_version
+            .push(record_store.locator_display(&path));
         return Ok(());
     }
 
@@ -99,6 +111,9 @@ where
             record_store.locator_display(&path),
             IndexRebuildIssueDetail::InvalidRepositoryScope,
         )?;
+        report
+            .preserved_latest_records_unreadable_version
+            .push(record_store.locator_display(&path));
         return Ok(());
     }
 
@@ -112,6 +127,9 @@ where
                 expected_locator: record_store.locator_display(&expected_path),
             },
         )?;
+        report
+            .preserved_latest_records_unreadable_version
+            .push(record_store.locator_display(&path));
         return Ok(());
     }
 
@@ -122,6 +140,9 @@ where
             record_store.locator_display(&path),
             reconstruction_plan_error_detail(&error),
         )?;
+        report
+            .preserved_latest_records_unreadable_version
+            .push(record_store.locator_display(&path));
         return Ok(());
     }
 
@@ -278,6 +299,7 @@ mod tests {
             rebuilt_dedupe_shard_mappings: 0,
             unchanged_dedupe_shard_mappings: 0,
             removed_stale_dedupe_shard_mappings: 0,
+            preserved_latest_records_unreadable_version: Vec::new(),
             issues: Vec::new(),
         }
     }

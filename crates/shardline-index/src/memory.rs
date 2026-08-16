@@ -1737,6 +1737,55 @@ mod tests {
         assert!(deliveries.is_empty());
     }
 
+    #[test]
+    fn memory_index_store_purge_webhook_deliveries_older_than() {
+        let store = MemoryIndexStore::new();
+        let old = WebhookDelivery::new(
+            RepositoryProvider::GitHub,
+            "team".to_owned(),
+            "assets".to_owned(),
+            "delivery-old".to_owned(),
+            100,
+        )
+        .unwrap();
+        let fresh = WebhookDelivery::new(
+            RepositoryProvider::GitHub,
+            "team".to_owned(),
+            "assets".to_owned(),
+            "delivery-fresh".to_owned(),
+            500,
+        )
+        .unwrap();
+        assert!(store.record_webhook_delivery(&old).unwrap());
+        assert!(store.record_webhook_delivery(&fresh).unwrap());
+
+        // Purge everything strictly older than 400: the old claim is removed,
+        // the fresh one survives (dedup within the retention window is intact).
+        let purged = store.purge_webhook_deliveries_older_than(400).unwrap();
+        assert_eq!(purged, 1);
+        let remaining = store.list_webhook_deliveries().unwrap();
+        assert_eq!(remaining, vec![fresh]);
+    }
+
+    #[test]
+    fn memory_index_store_purge_webhook_deliveries_is_idempotent() {
+        let store = MemoryIndexStore::new();
+        let delivery = WebhookDelivery::new(
+            RepositoryProvider::GitHub,
+            "team".to_owned(),
+            "assets".to_owned(),
+            "delivery-1".to_owned(),
+            100,
+        )
+        .unwrap();
+        assert!(store.record_webhook_delivery(&delivery).unwrap());
+
+        assert_eq!(store.purge_webhook_deliveries_older_than(200).unwrap(), 1);
+        // A second purge has nothing left to remove.
+        assert_eq!(store.purge_webhook_deliveries_older_than(200).unwrap(), 0);
+        assert!(store.list_webhook_deliveries().unwrap().is_empty());
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn memory_index_store_async_interface() {
         use crate::AsyncIndexStore;

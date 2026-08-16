@@ -523,6 +523,22 @@ impl AsyncIndexStore for super::PostgresIndexStore {
         })
     }
 
+    fn purge_webhook_deliveries_older_than<'operation>(
+        &'operation self,
+        older_than_unix_seconds: u64,
+    ) -> IndexStoreFuture<'operation, u64, Self::Error> {
+        Box::pin(async move {
+            let result = query(
+                "DELETE FROM shardline_webhook_deliveries
+                 WHERE processed_at_unix_seconds < $1",
+            )
+            .bind(u64_to_i64(older_than_unix_seconds)?)
+            .execute(&self.pool)
+            .await?;
+            Ok(result.rows_affected())
+        })
+    }
+
     fn provider_repository_state<'operation>(
         &'operation self,
         provider: RepositoryProvider,

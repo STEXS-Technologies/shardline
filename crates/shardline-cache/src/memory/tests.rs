@@ -1283,6 +1283,118 @@ async fn get_or_load_waiter_gets_notified_value() {
     );
 }
 
+// ── get_or_load: fast loader + many waiters never hangs (lost wakeup) ──
+//
+// A loader that finishes almost instantly can fire `notify_waiters()` before a
+// concurrent waiter has registered its `notified()` future. tokio's `Notify`
+// keeps no permit, so that wakeup is lost and a bare `notified().await` would
+// hang forever. The waiter loop must re-check the cache/loading state before
+// (and after) waiting so every waiter observes the stored value. Assert no
+// waiter exceeds a short bound.
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn get_or_load_fast_loader_never_hangs_waiters() {
+    use std::sync::Arc;
+
+    let cache = Arc::new(MemoryReconstructionCache::new(
+        NonZeroU64::new(3600).unwrap_or(NonZeroU64::MIN),
+        NonZeroUsize::new(100).unwrap_or(NonZeroUsize::MIN),
+    ));
+    let key = ReconstructionCacheKey::latest("fast-loader", None);
+    let load_count = std::sync::Arc::new(AtomicU64::new(0));
+
+    let mut handles = Vec::new();
+    for _ in 0..32 {
+        let cache = Arc::clone(&cache);
+        let key = key.clone();
+        let load_count = std::sync::Arc::clone(&load_count);
+        handles.push(tokio::spawn(async move {
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                cache.get_or_load(&key, || {
+                    load_count.fetch_add(1, Ordering::Relaxed);
+                    Box::pin(async { Ok::<_, ReconstructionCacheError>(b"fast".to_vec()) })
+                }),
+            )
+            .await
+        }));
+    }
+
+    for handle in handles {
+        match handle.await.unwrap() {
+            Ok(Ok(Some(data))) => assert_eq!(data, b"fast".to_vec()),
+            Ok(Ok(None)) => panic!("waiter observed a miss despite a successful loader"),
+            Ok(Err(e)) => panic!("get_or_load returned an unexpected error: {e}"),
+            Err(_) => panic!("waiter hung beyond the 5s bound"),
+        }
+    }
+
+    assert_eq!(
+        load_count.load(Ordering::Relaxed),
+        1,
+        "exactly one loader should have run"
+    );
+}
+
+// ── get_or_load: waiter on an orphaned latch does not hang forever ─────
+//
+// When the exclusive loader dies without ever putting/notifying, the loading
+// latch it left behind would block a waiter forever under a bare
+// `notified().await`. The bounded waiter loop must declare the loader orphaned,
+// release the latch, and return a miss within LOADER_STALL_TIMEOUT (30s).
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn get_or_load_waiter_does_not_hang_on_orphaned_latch() {
+    use std::sync::Arc;
+
+    let cache = Arc::new(MemoryReconstructionCache::new(
+        NonZeroU64::new(3600).unwrap_or(NonZeroU64::MIN),
+        NonZeroUsize::new(100).unwrap_or(NonZeroUsize::MIN),
+    ));
+    let key = ReconstructionCacheKey::latest("orphaned-latch", None);
+
+    // Seed an orphaned loading latch, as left behind by a loader that never
+    // put()s or notifies.
+    {
+        let mut inner = cache.inner.write().await;
+        inner
+            .loading
+            .insert(key.clone(), Arc::new(tokio::sync::Notify::new()));
+    }
+
+    // A waiter must not block past the internal LOADER_STALL_TIMEOUT; bound the
+    // observation well above that so a hang is still detectable.
+    let result = tokio::time::timeout(
+        Duration::from_secs(35),
+        cache.get_or_load(&key, || {
+            Box::pin(async { Ok::<_, ReconstructionCacheError>(b"retry".to_vec()) })
+        }),
+    )
+    .await;
+
+    match result {
+        Ok(Ok(None)) => {
+            // The waiter gave up on the orphaned latch and reported a miss.
+        }
+        Ok(Ok(Some(_))) => panic!("unexpected value from an orphaned latch"),
+        Ok(Err(e)) => panic!("get_or_load returned an unexpected error: {e}"),
+        Err(_) => panic!("waiter hung on the orphaned latch beyond the stall timeout"),
+    }
+
+    // A subsequent call retries and succeeds promptly.
+    let retry = tokio::time::timeout(
+        Duration::from_secs(5),
+        cache.get_or_load(&key, || {
+            Box::pin(async { Ok::<_, ReconstructionCacheError>(b"retry".to_vec()) })
+        }),
+    )
+    .await;
+    match retry {
+        Ok(retry_result) => assert_eq!(retry_result.unwrap(), Some(b"retry".to_vec())),
+        Err(_) => panic!("retry stalled after latch cleanup"),
+    }
+}
+
 // ── get_or_load expired entry cleanup in write-lock re-check ──────────
 //
 // When the re-check after write lock finds an entry that was stored

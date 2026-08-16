@@ -44,6 +44,14 @@ use crate::{
 /// Objects above this threshold are rejected with a 413 to prevent OOM.
 const MAX_LFS_VERIFY_BYTES: u64 = 1_073_741_824; // 1 GiB
 const MAX_LFS_PATCH_RANGES: usize = 65_536;
+/// Journal appends tolerated before an LFS patch session's ranges file is
+/// compacted back to its canonical merged form.
+///
+/// Range records append a line in O(1); the full read-merge-atomic-rewrite
+/// only runs every [`LFS_PATCH_RANGES_COMPACTION_THRESHOLD`] appends, so a
+/// large disjoint range set costs O(1) per PATCH instead of the old O(n log n)
+/// rewrite-per-PATCH amplification (F-30).
+const LFS_PATCH_RANGES_COMPACTION_THRESHOLD: usize = 1024;
 /// Maximum declared LFS object size accepted by the chunked PATCH path (1 TiB).
 ///
 /// Bounds the declared `total` from a `Content-Range` header so a caller cannot
@@ -165,6 +173,12 @@ fn lfs_validation_response(message: &str) -> Response {
 /// SAME mutex; once the last guard drops the entry dies and is evicted lazily
 /// on the next acquire. This bounds the map by the number of OIDs with a
 /// PATCH in flight instead of the number of distinct OIDs ever seen (F-22).
+///
+/// Lock order (F-31): a guard is taken while the store lock is held (or alone)
+/// and is dropped before the promotion; the store lock is never re-acquired
+/// while a guard is held. The guard is only held for the short staging
+/// write + range-record section, so the sweep (which waits on it under the
+/// store lock) can never be starved for long.
 static LFS_PATCH_LOCKS: LazyLock<Mutex<HashMap<String, Weak<Mutex<()>>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
@@ -199,10 +213,52 @@ fn live_lfs_patch_lock_count() -> usize {
 ///
 /// Never held across a network body stream: the PATCH body is fully buffered
 /// before any store mutation, so a slow client cannot stall other sessions
-/// (F-10 pattern). Lock order: this store lock is always taken before the
-/// per-OID lock — the sweep and every PATCH take both in the same order, so
-/// there is no deadlock (F-20).
+/// (F-10 pattern).
+///
+/// Lock order (F-31): the store lock is acquired FIRST, before the per-OID
+/// lock, exactly like the sweep; it is dropped before the staging write. It is
+/// NEVER re-acquired while a per-OID lock is held — the promotion and error
+/// paths drop the per-OID guard before taking the store lock for the `.meta`
+/// removal. The per-OID lock is therefore always the inner lock, and no code
+/// path acquires store→per-OID and per-OID→store in the same run.
 static LFS_PATCH_STORE_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+/// In-memory merged-range bookkeeping for active LFS patch sessions.
+///
+/// Each session's ranges are kept merged in memory (a hole-map) and persisted
+/// as an append-only journal — `+{start} {end}` lines appended after the
+/// canonical `{total}` header and canonical merged `{start} {end}` lines. The
+/// journal is compacted back to canonical form every
+/// [`LFS_PATCH_RANGES_COMPACTION_THRESHOLD`] appends, so a large disjoint
+/// range set costs O(1) per PATCH instead of a full read-sort-merge-rewrite
+/// (F-30). The file is crash-recoverable: on first access (after a restart)
+/// the canonical and journal lines are merged back into the in-memory set.
+///
+/// The map's mutex is only ever taken while holding a per-OID lock (and never
+/// while holding the store lock), making it the innermost lock in the PATCH
+/// path. Entries are evicted when a session is promoted or swept.
+static LFS_PATCH_RANGES: LazyLock<Mutex<HashMap<PathBuf, PatchRangesState>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// The merged range bookkeeping for one LFS patch session.
+#[derive(Debug, Clone, Default)]
+struct PatchRangesState {
+    /// The declared object size from the `Content-Range` total.
+    total: u64,
+    /// Sorted, disjoint, merged ranges covering the assembled staging file.
+    ranges: Vec<(u64, u64)>,
+    /// Journal appends since the last compaction.
+    journal_lines: usize,
+}
+
+#[cfg(test)]
+static LFS_PATCH_RANGES_COMPACTIONS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+#[cfg(test)]
+fn lfs_patch_ranges_compactions() -> u64 {
+    LFS_PATCH_RANGES_COMPACTIONS.load(std::sync::atomic::Ordering::Relaxed)
+}
 
 /// The staging directory for in-flight LFS chunked (PATCH) uploads.
 fn lfs_patch_dir(root: &FsPath) -> PathBuf {
@@ -240,6 +296,23 @@ fn touch_patch_session(dir: &FsPath, oid: &str, now_unix_seconds: u64) -> Result
     Ok(())
 }
 
+/// Returns the on-disk footprint of a staging file.
+///
+/// On Unix this counts ALLOCATED blocks (`st_blocks * 512`), so a sparse file
+/// created by seeking past the end costs its real disk footprint against the
+/// aggregate staging cap instead of its logical size (F-30). Elsewhere the
+/// logical length is the only portable estimate.
+#[cfg(unix)]
+fn staging_file_allocated_bytes(metadata: &std::fs::Metadata) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    metadata.blocks().saturating_mul(512)
+}
+
+#[cfg(not(unix))]
+fn staging_file_allocated_bytes(metadata: &std::fs::Metadata) -> u64 {
+    metadata.len()
+}
+
 /// Returns the `(active session count, aggregate staging bytes)` across the
 /// on-disk patch sessions. Caller must hold [`LFS_PATCH_STORE_LOCK`].
 fn patch_store_usage(dir: &FsPath) -> Result<(usize, u64), ServerError> {
@@ -259,7 +332,9 @@ fn patch_store_usage(dir: &FsPath) -> Result<(usize, u64), ServerError> {
         };
         sessions = sessions.saturating_add(1);
         if let Ok(metadata) = fs::metadata(dir.join(oid)) {
-            bytes = checked_add(bytes, metadata.len())?;
+            // F-30: count the file's ALLOCATED size (sparse files cost their
+            // real disk footprint), never its logical size.
+            bytes = checked_add(bytes, staging_file_allocated_bytes(&metadata))?;
         }
     }
     Ok((sessions, bytes))
@@ -300,8 +375,12 @@ fn sweep_lfs_patch_sessions_locked(
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             let removed_data = fs::remove_file(dir.join(oid));
-            let removed_ranges = fs::remove_file(dir.join(format!("{oid}.ranges")));
+            let ranges_path = dir.join(format!("{oid}.ranges"));
+            let removed_ranges = fs::remove_file(&ranges_path);
             let removed_meta = fs::remove_file(lfs_patch_meta_path(dir, oid));
+            // Drop the session's in-memory range bookkeeping so a later PATCH
+            // for the same OID re-derives it from the (now absent) file.
+            evict_lfs_patch_ranges(&ranges_path);
             tracing::trace!(
                 removed_data = removed_data.is_ok(),
                 removed_ranges = removed_ranges.is_ok(),
@@ -373,85 +452,259 @@ fn bounded_file_stream(
     Ok(RequestBodyReader::from_stream(stream))
 }
 
-fn record_lfs_patch_range(
-    ranges_path: &std::path::Path,
-    start: u64,
-    end_exclusive: u64,
-    total: u64,
-) -> Result<bool, ServerError> {
-    let mut ranges = Vec::new();
-    if ranges_path.exists() {
-        let stored = fs::read_to_string(ranges_path)?;
-        let mut lines = stored.lines();
-        let stored_total = lines
-            .next()
-            .and_then(|line| line.parse::<u64>().ok())
-            .ok_or_else(|| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "invalid LFS patch range metadata",
-                )
-            })?;
-        if stored_total != total {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "inconsistent LFS patch total length",
-            )
-            .into());
+/// Inserts `(start, end_exclusive)` into a sorted, disjoint merged range list,
+/// merging overlapping and adjacent neighbors so the list stays canonical.
+fn insert_merged_range(ranges: &mut Vec<(u64, u64)>, start: u64, end_exclusive: u64) {
+    // First range whose end reaches `start` (overlaps the new range or is
+    // adjacent to it); every earlier range ends strictly before `start`.
+    let merge_start = ranges.partition_point(|&(_range_start, range_end)| range_end < start);
+    let mut merge_end = merge_start;
+    let mut merged_end = end_exclusive;
+    for &(_range_start, range_end) in ranges.iter().skip(merge_start) {
+        if _range_start > merged_end {
+            break;
         }
-        for line in lines {
-            let (range_start, range_end) = line.split_once(' ').ok_or_else(|| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "invalid LFS patch range entry",
-                )
-            })?;
-            let range_start = range_start.parse::<u64>().map_err(|_error| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "invalid LFS patch range start",
-                )
-            })?;
-            let range_end = range_end.parse::<u64>().map_err(|_error| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "invalid LFS patch range end",
-                )
-            })?;
-            ranges.push((range_start, range_end));
-        }
+        merged_end = merged_end.max(range_end);
+        merge_end = merge_end.saturating_add(1);
     }
-    ranges.push((start, end_exclusive));
-    ranges.sort_unstable_by_key(|range| range.0);
+    let merged_start = match ranges.get(merge_start) {
+        Some(&(_range_start, _range_end)) => start.min(_range_start),
+        None => start,
+    };
+    ranges.splice(merge_start..merge_end, [(merged_start, merged_end)]);
+}
 
-    let mut merged: Vec<(u64, u64)> = Vec::with_capacity(ranges.len());
-    for (range_start, range_end) in ranges {
-        if let Some(last) = merged.last_mut()
-            && range_start <= last.1
-        {
-            last.1 = last.1.max(range_end);
-        } else {
-            merged.push((range_start, range_end));
-        }
-    }
-    if merged.len() > MAX_LFS_PATCH_RANGES {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "too many disjoint LFS patch ranges",
-        )
-        .into());
-    }
-
-    let mut encoded = format!("{total}\n");
-    for (range_start, range_end) in &merged {
+/// Writes a session's range bookkeeping in its canonical (fully merged) form.
+///
+/// The first line carries the declared total; every subsequent line is a
+/// merged `{start} {end}` range with no journal prefix. The write is atomic
+/// (temporary file + rename) so a crash never leaves a torn file.
+fn write_lfs_patch_ranges_file(
+    ranges_path: &FsPath,
+    state: &PatchRangesState,
+) -> Result<(), ServerError> {
+    let mut encoded = format!("{}\n", state.total);
+    for (range_start, range_end) in &state.ranges {
         use std::fmt::Write as _;
         writeln!(encoded, "{range_start} {range_end}").map_err(|_error| ServerError::Overflow)?;
     }
     let temporary_ranges_path = ranges_path.with_extension("ranges.tmp");
     fs::write(&temporary_ranges_path, encoded)?;
     fs::rename(temporary_ranges_path, ranges_path)?;
+    Ok(())
+}
 
-    Ok(merged.as_slice() == [(0, total)])
+/// Appends a journal line recording a newly written range.
+///
+/// The append is O(1): the canonical merged form is only rewritten by periodic
+/// compaction, so a large disjoint range set does not trigger a
+/// read-sort-merge-rewrite per PATCH (F-30). A fresh session's first append
+/// writes the `{total}` header line first.
+fn append_lfs_patch_range_journal(
+    ranges_path: &FsPath,
+    total: u64,
+    start: u64,
+    end_exclusive: u64,
+) -> Result<(), ServerError> {
+    let fresh = !ranges_path.exists();
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(ranges_path)?;
+    use std::io::Write as _;
+    if fresh {
+        writeln!(file, "{total}").map_err(|_error| ServerError::Overflow)?;
+    }
+    writeln!(file, "+{start} {end_exclusive}").map_err(|_error| ServerError::Overflow)?;
+    Ok(())
+}
+
+/// Loads (and, when a journal is present, compacts) a session's range
+/// bookkeeping from disk.
+///
+/// The file layout is a `{total}` header line, followed by canonical merged
+/// range lines `{start} {end}` and journal lines `+{start} {end}` appended
+/// since the last compaction. Canonical and journal lines are merged into one
+/// sorted disjoint set. A missing file yields a fresh empty session.
+fn load_lfs_patch_ranges_from_disk(
+    ranges_path: &FsPath,
+    total: u64,
+) -> Result<PatchRangesState, ServerError> {
+    let mut raw = match fs::read_to_string(ranges_path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(PatchRangesState {
+                total,
+                ..PatchRangesState::default()
+            });
+        }
+        Err(error) => return Err(error.into()),
+    };
+    // A file not ending in a newline was truncated mid-append (crash debris);
+    // drop the partial trailing line rather than failing the whole session.
+    if !raw.ends_with('\n') {
+        match raw.rfind('\n') {
+            Some(last_newline) => raw.truncate(last_newline.saturating_add(1)),
+            None => raw.clear(),
+        }
+    }
+    let mut lines = raw.lines();
+    let stored_total = lines
+        .next()
+        .and_then(|line| line.parse::<u64>().ok())
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid LFS patch range metadata",
+            )
+        })?;
+    if stored_total != total {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "inconsistent LFS patch total length",
+        )
+        .into());
+    }
+    let mut state = PatchRangesState {
+        total,
+        ..PatchRangesState::default()
+    };
+    for line in lines {
+        let range_entry = match line.strip_prefix('+') {
+            Some(journal) => {
+                state.journal_lines = state.journal_lines.saturating_add(1);
+                journal
+            }
+            None => line,
+        };
+        let (range_start, range_end) = range_entry.split_once(' ').ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid LFS patch range entry",
+            )
+        })?;
+        let range_start = range_start.parse::<u64>().map_err(|_error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid LFS patch range start",
+            )
+        })?;
+        let range_end = range_end.parse::<u64>().map_err(|_error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid LFS patch range end",
+            )
+        })?;
+        insert_merged_range(&mut state.ranges, range_start, range_end);
+    }
+    if state.ranges.len() > MAX_LFS_PATCH_RANGES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "too many disjoint LFS patch ranges",
+        )
+        .into());
+    }
+    // Compact a non-empty journal back to canonical form so crash recovery
+    // never has to re-read an unbounded journal more than once per session.
+    if state.journal_lines > 0 {
+        write_lfs_patch_ranges_file(ranges_path, &state)?;
+        state.journal_lines = 0;
+    }
+    Ok(state)
+}
+
+/// Drops a session's in-memory range bookkeeping.
+///
+/// Called after promotion consumes the session, after the sweep removes it, or
+/// when a staging failure tears the session down. Safe without a per-OID lock
+/// in the promotion path because the concurrent sweep is blocked on the store
+/// lock (F-31); otherwise the caller holds the per-OID lock.
+fn evict_lfs_patch_ranges(ranges_path: &FsPath) {
+    let mut map = LFS_PATCH_RANGES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    map.remove(ranges_path);
+}
+
+/// Returns an `InvalidData` IO error for a range-bookkeeping inconsistency.
+fn lfs_patch_ranges_inconsistent_total() -> ServerError {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        "inconsistent LFS patch total length",
+    )
+    .into()
+}
+
+/// Inspects a session's merged-range bookkeeping for the pre-write checks.
+///
+/// Returns `(high_water_mark, already_complete)` where the high-water mark is
+/// the maximum recorded range end (0 for a fresh session) and
+/// `already_complete` is whether the merged ranges already cover `[0, total)`.
+/// Caller must hold the session's per-OID lock (so the loaded state cannot be
+/// mutated or evicted in between).
+fn inspect_lfs_patch_ranges(ranges_path: &FsPath, total: u64) -> Result<(u64, bool), ServerError> {
+    let mut map = LFS_PATCH_RANGES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let state = match map.entry(ranges_path.to_owned()) {
+        std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+        std::collections::hash_map::Entry::Vacant(entry) => {
+            entry.insert(load_lfs_patch_ranges_from_disk(ranges_path, total)?)
+        }
+    };
+    if state.total != total {
+        return Err(lfs_patch_ranges_inconsistent_total());
+    }
+    let high_water_mark = state
+        .ranges
+        .last()
+        .map_or(0, |&(_range_start, range_end)| range_end);
+    let already_complete = state.ranges.as_slice() == [(0, total)];
+    Ok((high_water_mark, already_complete))
+}
+
+/// Records a newly written range in the session's bookkeeping and returns
+/// whether the merged ranges now cover `[0, total)` exactly (the promotion
+/// trigger).
+///
+/// The merge happens in memory; the disk gets an O(1) journal append with a
+/// full compaction every [`LFS_PATCH_RANGES_COMPACTION_THRESHOLD`] appends
+/// (F-30). Caller must hold the session's per-OID lock.
+fn record_lfs_patch_range(
+    ranges_path: &FsPath,
+    start: u64,
+    end_exclusive: u64,
+    total: u64,
+) -> Result<bool, ServerError> {
+    let mut map = LFS_PATCH_RANGES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let state = match map.entry(ranges_path.to_owned()) {
+        std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+        std::collections::hash_map::Entry::Vacant(entry) => {
+            entry.insert(load_lfs_patch_ranges_from_disk(ranges_path, total)?)
+        }
+    };
+    if state.total != total {
+        return Err(lfs_patch_ranges_inconsistent_total());
+    }
+    insert_merged_range(&mut state.ranges, start, end_exclusive);
+    if state.ranges.len() > MAX_LFS_PATCH_RANGES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "too many disjoint LFS patch ranges",
+        )
+        .into());
+    }
+    append_lfs_patch_range_journal(ranges_path, total, start, end_exclusive)?;
+    state.journal_lines = state.journal_lines.saturating_add(1);
+    if state.journal_lines >= LFS_PATCH_RANGES_COMPACTION_THRESHOLD {
+        write_lfs_patch_ranges_file(ranges_path, state)?;
+        state.journal_lines = 0;
+        #[cfg(test)]
+        LFS_PATCH_RANGES_COMPACTIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    Ok(state.ranges.as_slice() == [(0, total)])
 }
 
 #[tracing::instrument(skip(state, headers, request))]
@@ -770,6 +1023,11 @@ pub(crate) async fn lfs_patch_object(
     headers: HeaderMap,
     body: Body,
 ) -> Result<impl IntoResponse, ServerError> {
+    let _admit = state
+        .admission
+        .try_acquire(weights::XORB_UPLOAD)
+        .ok_or(ServerError::WorkQueueSaturated)?;
+
     let object_key = match lfs_object_key(&oid, repo.capability()) {
         Ok(k) => k,
         Err(e) => {
@@ -884,6 +1142,7 @@ pub(crate) async fn lfs_patch_object(
     let max_active_sessions = state.config.lfs_patch_max_active_sessions();
     let total_max_bytes = state.config.lfs_patch_total_max_bytes();
     let patch_ttl_seconds = state.config.lfs_patch_ttl_seconds();
+    let max_seek_ahead_bytes = state.config.lfs_patch_max_seek_ahead_bytes();
     let stream_chunk_size = state.config.chunk_size().get();
 
     let elapsed = start.elapsed().as_secs_f64();
@@ -897,12 +1156,17 @@ pub(crate) async fn lfs_patch_object(
 
         // F-20: sweep expired sessions first (crash recovery), then enforce
         // the active-session cap and the aggregate staging-byte cap BEFORE
-        // the chunk is written. The store lock is taken before the per-OID
-        // lock (the sweep takes the same two locks in the same order, so no
-        // deadlock), and the body was fully buffered above — the lock is
-        // never held across a network stream. The last-touched sidecar marks
+        // the chunk is written. The body was fully buffered above, so no lock
+        // is ever held across a network stream. The last-touched sidecar marks
         // the session active from its first byte and is refreshed on every
         // subsequent PATCH.
+        //
+        // F-31: the store lock is acquired first (the sweep takes the same two
+        // locks in the same order) and dropped before the staging write; it is
+        // NEVER re-acquired while a per-OID lock is held. The per-OID guard is
+        // scoped to the pre-write checks + staging write + range record, then
+        // released before the promotion; the promotion cleanup re-acquires the
+        // store lock only with no per-OID guard held.
         let now = lfs_patch_now_seconds()?;
         let store_guard = LFS_PATCH_STORE_LOCK
             .lock()
@@ -923,14 +1187,33 @@ pub(crate) async fn lfs_patch_object(
         let lock_arc = acquire_lfs_patch_lock(&oid_for_closure);
         // Recover from poisoning: the lock is a simple empty-token Mutex<()>,
         // so its state is trivially consistent even if a previous holder panicked.
-        let _lock = lock_arc.lock().unwrap_or_else(|e| e.into_inner());
+        let lock = lock_arc.lock().unwrap_or_else(|e| e.into_inner());
         touch_patch_session(&tmp_dir, &oid_for_closure, now)?;
         drop(store_guard);
 
-        // The staging write + promotion. A failure at any point removes the
-        // staging files this PATCH owns (F-21: promotion failure cleans its
-        // own temp; the F-20 sweep covers crashed-session leftovers).
-        let staged: Result<(), ServerError> = (|| {
+        // Pre-write checks under the per-OID lock. A concurrent same-OID PATCH
+        // may have already covered [0,total) and be promoting the object; and
+        // the sequential-growth seek bound must be enforced against the
+        // session's current high-water mark so a fresh session cannot jump to
+        // a multi-TiB sparse offset (F-30).
+        let (high_water_mark, already_complete) = inspect_lfs_patch_ranges(&ranges_path, total)?;
+        if already_complete {
+            // This PATCH's data is already accounted for by the concurrent
+            // promotion; report success without writing another chunk.
+            return Ok(());
+        }
+        if offset > checked_add(high_water_mark, max_seek_ahead_bytes.get())? {
+            return Err(ServerError::LfsPatchRangeNotSatisfiable);
+        }
+
+        // The staging write + range record run under the per-OID lock; the
+        // promotion (bounded streaming + backend ingest + store-lock cleanup)
+        // runs AFTER the per-OID guard is released (F-31). A failure at any
+        // point removes the staging files this PATCH owns (F-21: promotion
+        // failure cleans its own temp; the F-20 sweep covers crashed-session
+        // leftovers).
+        let end_exclusive = end.checked_add(1).ok_or(ServerError::Overflow)?;
+        let write_result: Result<bool, ServerError> = (|| {
             {
                 let mut file = fs::OpenOptions::new()
                     .create(true)
@@ -941,26 +1224,15 @@ pub(crate) async fn lfs_patch_object(
                 file.seek(SeekFrom::Start(offset))?;
                 file.write_all(&chunk_bytes)?;
             }
-
-            let end_exclusive = end.checked_add(1).ok_or(ServerError::Overflow)?;
-            if record_lfs_patch_range(&ranges_path, offset, end_exclusive, total)? {
-                // F-21: promote with a bounded streaming read instead of
-                // loading the entire assembled object (up to 1 TiB) into RAM;
-                // the SHA-256 verification runs over the streamed bytes inside
-                // the backend ingest, and the stream is capped at
-                // MAX_LFS_OBJECT_SIZE (the declared-size check above stays).
-                let promotion_body =
-                    bounded_file_stream(&tmp_path, stream_chunk_size, MAX_LFS_OBJECT_SIZE)?;
-                let stored = tokio::runtime::Handle::current().block_on(
-                    crate::ServerBackend::put_sha256_addressed_object_stream_if_absent(
-                        &backend,
-                        &object_key_for_closure,
-                        &oid_for_closure,
-                        promotion_body,
-                    ),
-                );
-                // The session is consumed by the promotion: the staging files
-                // are removed whether the store commit succeeded or failed.
+            record_lfs_patch_range(&ranges_path, offset, end_exclusive, total)
+        })();
+        drop(lock);
+        let promote = match write_result {
+            Ok(promote) => promote,
+            Err(error) => {
+                // A failed staging step must not leave its own temp files
+                // behind. The per-OID guard has already been dropped, so the
+                // store lock may be taken safely for the meta removal (F-31).
                 drop(fs::remove_file(&tmp_path));
                 drop(fs::remove_file(&ranges_path));
                 let _store_guard = LFS_PATCH_STORE_LOCK
@@ -970,12 +1242,33 @@ pub(crate) async fn lfs_patch_object(
                     &tmp_dir,
                     &oid_for_closure,
                 )));
-                stored?;
+                drop(_store_guard);
+                evict_lfs_patch_ranges(&ranges_path);
+                return Err(error);
             }
-            Ok(())
-        })();
-        if let Err(error) = staged {
-            // A failed staging step must not leave its own temp files behind.
+        };
+
+        if promote {
+            // F-21: promote with a bounded streaming read instead of loading
+            // the entire assembled object (up to 1 TiB) into RAM; the SHA-256
+            // verification runs over the streamed bytes inside the backend
+            // ingest, and the stream is capped at MAX_LFS_OBJECT_SIZE (the
+            // declared-size check above stays).
+            let promotion = (|| {
+                let promotion_body =
+                    bounded_file_stream(&tmp_path, stream_chunk_size, MAX_LFS_OBJECT_SIZE)?;
+                tokio::runtime::Handle::current().block_on(
+                    crate::ServerBackend::put_sha256_addressed_object_stream_if_absent(
+                        &backend,
+                        &object_key_for_closure,
+                        &oid_for_closure,
+                        promotion_body,
+                    ),
+                )
+            })();
+            // The session is consumed by the promotion: the staging files are
+            // removed whether the store commit succeeded or failed. The store
+            // lock is taken here with NO per-OID guard held (F-31).
             drop(fs::remove_file(&tmp_path));
             drop(fs::remove_file(&ranges_path));
             let _store_guard = LFS_PATCH_STORE_LOCK
@@ -985,7 +1278,9 @@ pub(crate) async fn lfs_patch_object(
                 &tmp_dir,
                 &oid_for_closure,
             )));
-            return Err(error);
+            drop(_store_guard);
+            evict_lfs_patch_ranges(&ranges_path);
+            promotion?;
         }
 
         Ok::<_, ServerError>(())
@@ -1110,14 +1405,17 @@ mod tests {
     use tempfile::TempDir;
     use tower::ServiceExt;
 
-    use crate::{ServerConfig, ServerFrontend, ServerRole, app::AppState, lfs_object_key};
+    use crate::{
+        ServerConfig, ServerError, ServerFrontend, ServerRole, app::AppState, lfs_object_key,
+    };
     use shardline_server_core::AuthorizedRepository;
 
     use super::{
-        LFS_PATCH_LOCKS, acquire_lfs_patch_lock, lfs_batch, lfs_delete_object, lfs_get_object,
-        lfs_head_object, lfs_patch_dir, lfs_patch_meta_path, lfs_patch_now_seconds,
-        lfs_patch_object, lfs_put_object, lfs_validation_response, lfs_verify_object,
-        live_lfs_patch_lock_count, parse_content_range, sweep_lfs_patch_sessions,
+        LFS_PATCH_LOCKS, acquire_lfs_patch_lock, evict_lfs_patch_ranges, inspect_lfs_patch_ranges,
+        lfs_batch, lfs_delete_object, lfs_get_object, lfs_head_object, lfs_patch_dir,
+        lfs_patch_meta_path, lfs_patch_now_seconds, lfs_patch_object, lfs_patch_ranges_compactions,
+        lfs_put_object, lfs_validation_response, lfs_verify_object, live_lfs_patch_lock_count,
+        parse_content_range, patch_store_usage, record_lfs_patch_range, sweep_lfs_patch_sessions,
         touch_patch_session,
     };
 
@@ -3078,6 +3376,281 @@ mod tests {
         assert_eq!(
             entries, 0,
             "a failed promotion must clean its staging files"
+        );
+    }
+
+    // =========================================================================
+    // F-30 — sparse-file accounting, sequential-growth seek bound, incremental
+    // range bookkeeping
+    // =========================================================================
+
+    #[cfg(unix)]
+    #[test]
+    fn patch_store_usage_counts_allocated_not_logical_bytes() {
+        // A 1-byte write at a huge offset creates a SPARSE file: logical size
+        // 1 GiB+, allocated footprint a few KiB. The aggregate staging cap
+        // must count the ALLOCATED size so a handful of such writes can never
+        // exhaust it (F-30).
+        let tmp = TempDir::new().expect("tempdir");
+        let dir = tmp.path().join("lfs-patch");
+        std::fs::create_dir_all(&dir).unwrap();
+        let oid = "a".repeat(64);
+        std::fs::write(dir.join(format!("{oid}.meta")), "1").unwrap();
+        {
+            use std::io::{Seek, SeekFrom, Write as _};
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(dir.join(&oid))
+                .unwrap();
+            file.seek(SeekFrom::Start(1 << 30)).unwrap();
+            file.write_all(b"x").unwrap();
+        }
+        let (_sessions, bytes) = patch_store_usage(&dir).unwrap();
+        let allocated = {
+            use std::os::unix::fs::MetadataExt;
+            std::fs::metadata(dir.join(&oid)).unwrap().blocks() * 512
+        };
+        assert!(
+            bytes < (1 << 30),
+            "a sparse staging file must count allocated bytes, not its logical size: {bytes}"
+        );
+        assert_eq!(
+            bytes, allocated,
+            "usage must equal the file's allocated block footprint"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn patch_object_rejects_out_of_bounds_seek() {
+        // F-30: a PATCH whose Content-Range start jumps far beyond the session
+        // high-water mark (here: offset 2^40-1, i.e. the sparse-file attack
+        // against a fresh session) is rejected instead of creating a
+        // multi-TiB sparse staging file.
+        let (state, _tmp) = build_test_state().await;
+        let app = lfs_router(state);
+        let oid = test_oid(b"seek-out-of-bounds-content");
+        let total = 1_u64 << 40;
+        let offset = total - 1;
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(format!("/v1/lfs/objects/{oid}"))
+                    .header("content-range", format!("bytes {offset}-{offset}/{total}"))
+                    .header("content-length", 1)
+                    .body(Body::from(vec![0x01]))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::RANGE_NOT_SATISFIABLE,
+            "a PATCH seeking to 2^40-1 on a fresh session must be rejected"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn patch_object_rejects_seek_far_beyond_high_water_mark() {
+        // F-30: even after a session has grown sequentially, a seek far beyond
+        // its high-water mark + slack is rejected.
+        let (state, _tmp) = build_test_state().await;
+        let app = lfs_router(state);
+        let oid = test_oid(b"seek-past-high-water-content");
+        let total = 1_u64 << 40;
+
+        let first = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(format!("/v1/lfs/objects/{oid}"))
+                    .header("content-range", "bytes 0-9/1099511627776")
+                    .header("content-length", 10)
+                    .body(Body::from(b"0123456789".to_vec()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+
+        let offset = total - 1;
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(format!("/v1/lfs/objects/{oid}"))
+                    .header("content-range", format!("bytes {offset}-{offset}/{total}"))
+                    .header("content-length", 1)
+                    .body(Body::from(vec![0x01]))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::RANGE_NOT_SATISFIABLE,
+            "a PATCH seeking past the session high-water mark + slack must be rejected"
+        );
+    }
+
+    #[test]
+    fn patch_ranges_disjoint_set_is_incremental() {
+        // F-30: recording a large disjoint range set must not rewrite the
+        // whole ranges file per PATCH. The compaction counter proves the
+        // journal + periodic-compaction design keeps amortized work bounded:
+        // 20k appends trigger only ~20 compactions (every 1024 appends), never
+        // a full read-sort-merge-rewrite per PATCH.
+        let tmp = TempDir::new().expect("tempdir");
+        let ranges_path = tmp.path().join("disjoint.ranges");
+        let total = 2_000_000_u64;
+        let compactions_before = lfs_patch_ranges_compactions();
+        let mut offset = 0_u64;
+        for _ in 0..20_000 {
+            let start = offset;
+            let end = start + 10;
+            let promote = record_lfs_patch_range(&ranges_path, start, end, total).unwrap();
+            assert!(!promote, "disjoint ranges with gaps must never promote");
+            offset = end + 10; // leave a 10-byte gap between ranges
+        }
+        let compactions = lfs_patch_ranges_compactions() - compactions_before;
+        assert!(
+            compactions < 64,
+            "a 20k disjoint-range set must compact rarely (observed {compactions})"
+        );
+
+        // The in-memory bookkeeping still exposes the exact merged state.
+        let (high_water, complete) = inspect_lfs_patch_ranges(&ranges_path, total).unwrap();
+        assert_eq!(
+            high_water,
+            offset - 10,
+            "high-water must track the last end"
+        );
+        assert!(!complete, "gaps must never read as complete coverage");
+
+        // Crash recovery: evicting the entry and re-loading from the on-disk
+        // file must reproduce the same high-water mark.
+        evict_lfs_patch_ranges(&ranges_path);
+        let (high_water_after_reload, _) = inspect_lfs_patch_ranges(&ranges_path, total).unwrap();
+        assert_eq!(high_water_after_reload, offset - 10);
+    }
+
+    #[test]
+    fn patch_ranges_sequential_growth_promotes_incrementally() {
+        // The merged-[0,total) promotion trigger must survive the incremental
+        // format: sequential growth promotes exactly when the last range
+        // reaches total, and out-of-order arrival still merges to full
+        // coverage.
+        let tmp = TempDir::new().expect("tempdir");
+        let ranges_path = tmp.path().join("sequential.ranges");
+        let total = 100_u64;
+        for (start, end) in [(0, 40), (40, 70)] {
+            let promote = record_lfs_patch_range(&ranges_path, start, end, total).unwrap();
+            assert!(!promote, "partial coverage must not promote");
+        }
+        let promote = record_lfs_patch_range(&ranges_path, 70, 100, total).unwrap();
+        assert!(promote, "sequential growth to total must trigger promotion");
+
+        // A second session receiving the tail before the head.
+        let backfill = tmp.path().join("backfill.ranges");
+        assert!(!record_lfs_patch_range(&backfill, 40, 100, 100).unwrap());
+        let promote = record_lfs_patch_range(&backfill, 0, 40, 100).unwrap();
+        assert!(
+            promote,
+            "out-of-order ranges must still merge to full coverage"
+        );
+    }
+
+    #[test]
+    fn patch_ranges_rejects_inconsistent_total() {
+        // A client changing the declared total mid-session is rejected.
+        let tmp = TempDir::new().expect("tempdir");
+        let ranges_path = tmp.path().join("mismatch.ranges");
+        record_lfs_patch_range(&ranges_path, 0, 10, 100).unwrap();
+        let error = record_lfs_patch_range(&ranges_path, 10, 20, 200).unwrap_err();
+        assert!(
+            matches!(error, ServerError::Io(ref io_error) if io_error.kind() == std::io::ErrorKind::InvalidData),
+            "inconsistent totals must be rejected with InvalidData, got: {error}"
+        );
+    }
+
+    // =========================================================================
+    // F-31 — promotion cleanup and the sweep share a consistent lock order
+    // =========================================================================
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn patch_promotion_and_sweep_complete_without_deadlock() {
+        // F-31: the promotion cleanup must never re-acquire the store lock
+        // while holding a per-OID lock, and the sweep must never be starved by
+        // a live session. Drive a sweep and a promotion-triggering PATCH
+        // concurrently while the test holds the stale session's per-OID lock
+        // (mimicking a PATCH that is mid-promotion): the sweep blocks on the
+        // per-OID lock while holding the store lock, and the PATCH parks
+        // behind the store lock. Both must finish within a hard bound — an
+        // inverted lock order would hang them forever.
+        let (state, _tmp) = build_test_state().await;
+        let dir = lfs_patch_dir(state.config.root_dir());
+        std::fs::create_dir_all(&dir).unwrap();
+        let content = b"lock-order-promotion-content";
+        let oid = test_oid(content);
+        // A stale session for the same OID the PATCH targets.
+        std::fs::write(dir.join(&oid), b"stale-data").unwrap();
+        std::fs::write(dir.join(format!("{oid}.ranges")), "10\n0 10\n").unwrap();
+        touch_patch_session(&dir, &oid, 1).unwrap();
+
+        // Mimic a mid-promotion PATCH: hold the target session's per-OID lock
+        // so the sweep must wait on it while holding the store lock.
+        let oid_lock = acquire_lfs_patch_lock(&oid);
+        let guard = oid_lock.lock().unwrap();
+
+        let root = state.config.root_dir().to_path_buf();
+        let ttl = state.config.lfs_patch_ttl_seconds();
+        let app = lfs_router(state);
+
+        let sweep_task = tokio::spawn(async move {
+            tokio::time::timeout(std::time::Duration::from_secs(10), async move {
+                sweep_lfs_patch_sessions(&root, ttl).unwrap()
+            })
+            .await
+            .expect("sweep must complete within the deadline")
+        });
+
+        let patch_task = tokio::spawn(async move {
+            tokio::time::timeout(std::time::Duration::from_secs(10), async move {
+                app.oneshot(
+                    Request::builder()
+                        .method("PATCH")
+                        .uri(format!("/v1/lfs/objects/{oid}"))
+                        .header(
+                            "content-range",
+                            format!("bytes 0-{}/{}", content.len() - 1, content.len()),
+                        )
+                        .header("content-length", content.len())
+                        .body(Body::from(content.to_vec()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            })
+            .await
+            .expect("PATCH must complete within the deadline")
+        });
+
+        // Let both tasks reach their parked state (sweep on the per-OID lock,
+        // PATCH on the store lock) without awaiting while the guard is held,
+        // then release the per-OID guard so both can drain.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        drop(guard);
+
+        let removed = sweep_task.await.unwrap();
+        let patch = patch_task.await.unwrap();
+        assert_eq!(removed, 1, "the stale session must be swept");
+        assert_eq!(
+            patch.status(),
+            StatusCode::OK,
+            "the PATCH must not be starved by the sweep"
         );
     }
 

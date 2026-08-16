@@ -15,8 +15,8 @@ use shardline_storage::ObjectStore;
 use crate::{
     error::GcError,
     quarantine::{
-        read_active_retention_hold_object_keys, read_quarantine_entries,
-        reconcile_quarantine_entries, sweep_quarantine_entries,
+        read_active_retention_hold_object_keys, read_newest_stored_lifecycle_timestamp,
+        read_quarantine_entries, reconcile_quarantine_entries, sweep_quarantine_entries,
     },
     reachability::{
         OrphanObject, ReachabilityAccumulator, collect_referenced_object_keys,
@@ -111,10 +111,37 @@ where
     validate_gc_index_integrity(index_store, object_store, now_unix_seconds).await?;
     shardline_metrics::record_gc_mark_duration(mark_start.elapsed());
 
-    let prune_expired_retention_holds = options.mark || options.sweep;
+    // Forward-clock sanity guard (F-45): a forward NTP step / VM
+    // time-sync-after-pause makes every quarantine candidate eligible AND every
+    // time-bounded hold inactive, which would mass-delete recoverable data and
+    // strip all hold protection in one pass. When `now` jumps forward beyond a
+    // slack relative to the newest stored lifecycle timestamp, skip the sweep
+    // and hold pruning for this run (warn), mirroring the backwards
+    // `temp_reaping_clock_is_skewed` guard for the reaper.
+    let retention_clock_is_skewed_forward = retention_clock_is_skewed_forward(
+        now_unix_seconds,
+        read_newest_stored_lifecycle_timestamp(index_store).await?,
+    );
+    if retention_clock_is_skewed_forward {
+        tracing::warn!(
+            "GC wall clock ({now_unix_seconds}s) jumped forward relative to the newest stored \
+             lifecycle timestamp; skipping the quarantine sweep and hold pruning this run"
+        );
+    }
+
+    let prune_expired_retention_holds =
+        (options.mark || options.sweep) && !retention_clock_is_skewed_forward;
+    // When the clock is untrustworthy (forward jump suspected), `now` is not
+    // usable for hold activity: treat every hold as active (now = 0) so held
+    // data is never quarantined or swept, and skip expired-hold pruning.
+    let hold_activity_now = if retention_clock_is_skewed_forward {
+        0
+    } else {
+        now_unix_seconds
+    };
     let active_retention_hold_object_keys = read_active_retention_hold_object_keys(
         index_store,
-        now_unix_seconds,
+        hold_activity_now,
         prune_expired_retention_holds,
     )
     .await?;
@@ -159,45 +186,90 @@ where
     }
 
     if options.sweep {
-        let sweep_start = std::time::Instant::now();
-        sweep_quarantine_entries(
-            record_store,
-            object_store,
-            index_store,
-            frontends,
-            &orphan_objects,
-            now_unix_seconds,
-            &mut quarantine_entries,
-            &mut report,
-        )
-        .await?;
-        shardline_metrics::record_gc_sweep_duration(sweep_start.elapsed());
-
-        // Reap stranded chunk temp artifacts. `scan_orphan_objects` skips
-        // `.tmp-*` keys (so an in-progress write never aborts the pass), which
-        // previously left abandoned temps from killed/crashed writers in place
-        // forever. The age bound is applied to the GC-observed mtime (with a
-        // writer-embedded-nanos fallback), so a live in-flight write is never
-        // reaped even under writer/GC wall-clock divergence. As defense in
-        // depth, if this GC host's own clock appears to be behind the newest
-        // writer-embedded temp timestamp (a backwards clock step), skip temp
-        // reaping entirely for this run.
-        let temp_scan = scan_stale_temporary_chunk_artifacts(object_store, now_unix_seconds)?;
-        if temp_reaping_clock_is_skewed(now_unix_seconds, temp_scan.max_embedded_temp_nanos) {
+        if retention_clock_is_skewed_forward {
+            // The forward-clock guard fired above: the sweep's eligibility
+            // (`delete_after <= now`) and the temp-reaper age bounds both
+            // depend on a trustworthy `now`. Skipping the whole sweep block
+            // (quarantine sweep + chunk temp reaping + S3 temp reaping) is the
+            // safe, data-preserving choice.
             tracing::warn!(
-                "GC wall clock ({now_unix_seconds}s) is behind the newest writer-embedded \
-                 temp timestamp; skipping chunk temp reaping this run"
+                "skipping the quarantine sweep and temp reaping this run: GC wall clock \
+                 ({now_unix_seconds}s) jumped forward relative to stored lifecycle timestamps"
             );
         } else {
-            for (temp_key, temp_bytes) in temp_scan.stale {
-                object_store
-                    .delete_if_present(&temp_key)
-                    .map_err(GcError::ObjectStore)?;
-                report.reaped_stale_temporary_chunks =
-                    shardline_server_core::checked_add(report.reaped_stale_temporary_chunks, 1)?;
+            let sweep_start = std::time::Instant::now();
+            sweep_quarantine_entries(
+                record_store,
+                object_store,
+                index_store,
+                frontends,
+                &orphan_objects,
+                now_unix_seconds,
+                &mut quarantine_entries,
+                &mut report,
+            )
+            .await?;
+            shardline_metrics::record_gc_sweep_duration(sweep_start.elapsed());
+
+            // Reap stranded chunk temp artifacts. `scan_orphan_objects` skips
+            // `.tmp-*` keys (so an in-progress write never aborts the pass), which
+            // previously left abandoned temps from killed/crashed writers in place
+            // forever. The age bound is applied to the GC-observed mtime (with a
+            // writer-embedded-nanos fallback), so a live in-flight write is never
+            // reaped even under writer/GC wall-clock divergence. As defense in
+            // depth, if this GC host's own clock appears to be behind the newest
+            // writer-embedded temp timestamp (a backwards clock step), skip temp
+            // reaping entirely for this run.
+            let temp_scan = scan_stale_temporary_chunk_artifacts(object_store, now_unix_seconds)?;
+            if temp_reaping_clock_is_skewed(now_unix_seconds, temp_scan.max_embedded_temp_nanos) {
+                tracing::warn!(
+                    "GC wall clock ({now_unix_seconds}s) is behind the newest writer-embedded \
+                     temp timestamp; skipping chunk temp reaping this run"
+                );
+            } else {
+                for (temp_key, temp_bytes) in temp_scan.stale {
+                    object_store
+                        .delete_if_present(&temp_key)
+                        .map_err(GcError::ObjectStore)?;
+                    report.reaped_stale_temporary_chunks = shardline_server_core::checked_add(
+                        report.reaped_stale_temporary_chunks,
+                        1,
+                    )?;
+                    report.reaped_stale_temporary_bytes = shardline_server_core::checked_add(
+                        report.reaped_stale_temporary_bytes,
+                        temp_bytes,
+                    )?;
+                }
+            }
+
+            // Reap stranded S3 temp-upload artifacts when the backing object
+            // store is the S3 backend (F-48). This sits inside the non-skewed
+            // branch: the age bound is computed from GC's `now`, so a forward
+            // clock jump (guard above) would make the cutoff too old and could
+            // reap live artifacts. The chunk-temp reaper above only matches
+            // local `.tmp-*` keys, and the S3 listing paths skip temp keys
+            // entirely, so crash-stranded `<key>.tmp.<counter>.<pid>.<nanos>`
+            // and `__tmp/shardline-stream-upload/...` keys would otherwise
+            // accumulate forever. `sweep_stale_temp_keys` does its own raw
+            // enumeration and applies the age bound to the S3-observed
+            // LastModified (backend truth), so a live in-flight upload is
+            // never reaped.
+            if let ServerObjectStore::S3(store) = object_store {
+                let (reaped, reaped_bytes) = store.sweep_stale_temp_keys(now_unix_seconds)?;
+                if reaped != 0 {
+                    tracing::info!(
+                        reaped,
+                        reaped_bytes,
+                        "reaped stale S3 temp upload artifacts"
+                    );
+                }
+                report.reaped_stale_temporary_chunks = shardline_server_core::checked_add(
+                    report.reaped_stale_temporary_chunks,
+                    u64::try_from(reaped)?,
+                )?;
                 report.reaped_stale_temporary_bytes = shardline_server_core::checked_add(
                     report.reaped_stale_temporary_bytes,
-                    temp_bytes,
+                    reaped_bytes,
                 )?;
             }
         }
@@ -232,6 +304,35 @@ pub(crate) fn temp_reaping_clock_is_skewed(
     let now_nanos = u128::from(now_unix_seconds) * 1_000_000_000;
     const CLOCK_SLACK_NANOS: u128 = 60 * 1_000_000_000;
     now_nanos.saturating_add(CLOCK_SLACK_NANOS) < max_embedded_nanos
+}
+
+/// Returns true when the GC wall clock appears to have jumped FORWARD relative
+/// to the newest lifecycle timestamp stored in the index (quarantine
+/// `delete_after`/`first_seen` and retention-hold `held_at`/`release_after`).
+///
+/// The mirror of [`temp_reaping_clock_is_skewed`] for the forward direction: a
+/// forward NTP step or a VM time-sync-after-pause makes every quarantine
+/// candidate look expired (mass deletion of recoverable data) and every
+/// time-bounded hold look inactive (hold protection gone) in a single pass.
+/// When this fires, `now_unix_seconds` is not a trustworthy reference for the
+/// sweep's eligibility and hold-activity decisions, so the sweep and hold
+/// pruning are skipped for the run rather than risk deleting held/recoverable
+/// data.
+///
+/// A slack absorbs the normal gap between lifecycle activity and the sweep on
+/// an active deployment (including `delete_after` timestamps that are retention
+/// in the future). The guard errs toward preserving data: when no lifecycle
+/// entry is recent enough, reclamation is deferred rather than risked.
+#[must_use]
+pub(crate) const fn retention_clock_is_skewed_forward(
+    now_unix_seconds: u64,
+    newest_stored_lifecycle_timestamp: Option<u64>,
+) -> bool {
+    let Some(newest_stored) = newest_stored_lifecycle_timestamp else {
+        return false;
+    };
+    const CLOCK_FORWARD_SLACK_SECONDS: u64 = 86_400;
+    now_unix_seconds > newest_stored.saturating_add(CLOCK_FORWARD_SLACK_SECONDS)
 }
 
 async fn validate_gc_index_integrity<IndexAdapter>(
@@ -316,12 +417,22 @@ where
                     );
                 }
                 if quarantined_object_keys.contains(hold.object_key().as_str()) {
-                    return Err(
-                        InvalidLifecycleMetadataError::ActiveRetentionHoldQuarantined {
-                            object_key: hold.object_key().as_str().to_owned(),
-                        }
-                        .into(),
+                    // A held+quarantined object is a REPAIRABLE state, not a
+                    // hard abort. A hold and a quarantine entry on the same key
+                    // are contradictory: the hold keeps the data, and the
+                    // quarantine entry is stale. Let the run proceed so
+                    // `reconcile_quarantine_entries` (mark) or the sweep
+                    // releases the stale entry; erroring here gated run start
+                    // (before that repair code) and wedged every subsequent GC
+                    // run until the hold expired — permanently for holds with
+                    // `release_after = None`.
+                    tracing::warn!(
+                        "retention hold and quarantine entry both present for {}; \
+                         releasing the stale quarantine candidate this run \
+                         (the hold keeps the data)",
+                        hold.object_key().as_str(),
                     );
+                    return Ok(());
                 }
             }
 
@@ -432,7 +543,7 @@ pub(crate) fn orphan_inventory_entry(
 
 #[cfg(test)]
 mod tests {
-    use super::temp_reaping_clock_is_skewed;
+    use super::{retention_clock_is_skewed_forward, temp_reaping_clock_is_skewed};
 
     #[test]
     fn temp_reaping_clock_skewed_when_gc_clock_behind_embedded_nanos() {
@@ -468,5 +579,50 @@ mod tests {
     fn temp_reaping_clock_not_skewed_without_observed_temps() {
         // No chunk temp artifacts observed at all: nothing to guard against.
         assert!(!temp_reaping_clock_is_skewed(2_000_000_000_u64, None));
+    }
+
+    #[test]
+    fn retention_clock_skewed_forward_when_now_beyond_stored_timestamps() {
+        // Stored lifecycle timestamps are ~3 days old while the GC wall clock
+        // reads now — a forward NTP step / VM time-sync-after-pause. The sweep
+        // and hold pruning must be skipped.
+        let now_secs = 2_000_000_000_u64;
+        let stale_stored = now_secs - 3 * 86_400;
+        assert!(retention_clock_is_skewed_forward(
+            now_secs,
+            Some(stale_stored)
+        ));
+    }
+
+    #[test]
+    fn retention_clock_not_skewed_forward_within_slack() {
+        // A stored lifecycle timestamp a few hours old (the normal gap between
+        // lifecycle activity and the sweep on an active deployment) is within
+        // the slack and must NOT disable the sweep.
+        let now_secs = 2_000_000_000_u64;
+        let recent_stored = now_secs - 3600;
+        assert!(!retention_clock_is_skewed_forward(
+            now_secs,
+            Some(recent_stored)
+        ));
+    }
+
+    #[test]
+    fn retention_clock_not_skewed_forward_when_stored_is_future_dated() {
+        // A candidate created moments ago has a `delete_after` retention in the
+        // future — a normal, trustworthy active run.
+        let now_secs = 2_000_000_000_u64;
+        let future_stored = now_secs + 86_400;
+        assert!(!retention_clock_is_skewed_forward(
+            now_secs,
+            Some(future_stored)
+        ));
+    }
+
+    #[test]
+    fn retention_clock_not_skewed_forward_without_stored_timestamps() {
+        // No quarantine candidates or retention holds observed at all: nothing
+        // to guard against.
+        assert!(!retention_clock_is_skewed_forward(2_000_000_000_u64, None));
     }
 }

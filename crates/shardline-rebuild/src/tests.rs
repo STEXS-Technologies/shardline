@@ -18,6 +18,7 @@ fn empty_report() -> IndexRebuildReport {
         rebuilt_dedupe_shard_mappings: 0,
         unchanged_dedupe_shard_mappings: 0,
         removed_stale_dedupe_shard_mappings: 0,
+        preserved_latest_records_unreadable_version: Vec::new(),
         issues: Vec::new(),
     }
 }
@@ -892,6 +893,106 @@ async fn run_index_rebuild_removes_stale_latest_records() {
     assert_eq!(report.removed_stale_latest_records, 1);
     assert_eq!(report.rebuilt_latest_records, 1);
     assert_eq!(report.unchanged_latest_records, 0);
+}
+
+// ---- F-44: an unreadable version record must not delete the file's latest record ----
+
+#[tokio::test(flavor = "multi_thread")]
+async fn run_index_rebuild_keeps_latest_record_when_version_record_unreadable() {
+    use shardline_index::{MemoryIndexStore, RecordMutation, RecordTraversal};
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let object_root = root.join("chunks");
+    std::fs::create_dir_all(&object_root).unwrap();
+    let object_store = ServerObjectStore::local(&object_root).unwrap();
+    let record_store = shardline_index::LocalRecordStore::open(root.clone());
+    let index_store = MemoryIndexStore::new();
+
+    // A valid version record so the rebuild has a real candidate.
+    let chunks = Vec::new();
+    let content_hash = shardline_server_core::content_hash(0, 0, &chunks);
+    let good_record = shardline_index::FileRecord {
+        file_id: "good.txt".to_owned(),
+        content_hash,
+        total_bytes: 0,
+        chunk_size: 0,
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
+        repository_scope: None,
+        chunks,
+    };
+    record_store
+        .write_version_record(&good_record)
+        .await
+        .unwrap();
+
+    // The authoritative, fully intact latest record for the file whose version
+    // record is about to be corrupted. It must survive the rebuild.
+    let intact_record = shardline_index::FileRecord {
+        file_id: "bad.json".to_owned(),
+        content_hash: "a".repeat(64),
+        total_bytes: 0,
+        chunk_size: 0,
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
+        repository_scope: None,
+        chunks: Vec::new(),
+    };
+    record_store
+        .write_latest_record(&intact_record)
+        .await
+        .unwrap();
+
+    // Inject a non-JSON (corrupt) version record for "bad.json" directly into
+    // the SQLite database — the same row a torn write would leave behind.
+    let conn = rusqlite::Connection::open(root.join("metadata.sqlite3")).unwrap();
+    let file_id = "bad.json";
+    let len_fid = file_id.len();
+    let record_key = format!(
+        "7:version8:6:global{len_fid}:{file_id}64:{}",
+        "a".repeat(64)
+    );
+    let bad_bytes = b"this is not valid json at all {{}}";
+    conn.execute(
+        "INSERT INTO shardline_file_records
+            (record_key, record_kind, scope_key, file_id, content_hash, record, updated_at_unix_seconds)
+         VALUES (?1, 'version', '6:global', ?2, ?3, ?4, 1000)",
+        rusqlite::params![&record_key, file_id, "a".repeat(64).as_str(), &bad_bytes[..]],
+    )
+    .unwrap();
+
+    let report = run_index_rebuild_with_stores(
+        &record_store,
+        &index_store,
+        &object_store,
+        shardline_server_core::DEFAULT_SHARD_METADATA_LIMITS,
+    )
+    .await
+    .unwrap();
+
+    // The run reports the unreadable version record…
+    assert!(!report.is_clean(), "expected issues, got: {report:?}");
+    assert_eq!(
+        report.issues[0].kind,
+        IndexRebuildIssueKind::InvalidVersionRecordJson
+    );
+    // …surfaces the per-file "kept because version unreadable" note…
+    assert_eq!(report.preserved_latest_records_unreadable_version.len(), 1);
+    assert!(
+        report.preserved_latest_records_unreadable_version[0].contains("bad.json"),
+        "note should name the unreadable file: {:?}",
+        report.preserved_latest_records_unreadable_version
+    );
+    // …and removes NO stale latest records.
+    assert_eq!(report.removed_stale_latest_records, 0);
+
+    // The authoritative latest record is still present after the run.
+    let latest_bytes = RecordTraversal::read_latest_record_bytes(&record_store, &intact_record)
+        .await
+        .unwrap();
+    assert!(
+        latest_bytes.is_some(),
+        "the latest record for a file with an unreadable version record must survive the rebuild"
+    );
 }
 
 // ---- prune_stale_reconstructions full path ----

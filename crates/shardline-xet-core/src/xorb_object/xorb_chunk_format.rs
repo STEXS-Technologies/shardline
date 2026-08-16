@@ -182,13 +182,29 @@ fn deserialize_chunk_with_header_to_writer<R: Read, W: Write>(
     writer: &mut W,
     header: XorbChunkHeader,
 ) -> Result<(usize, u32), CoreError> {
-    let mut compressed_data_reader = reader.take(header.get_compressed_length().into());
+    // The header has already been validated (`compressed_length` is capped at
+    // 2 * MAX_CHUNK_SIZE), but clamp the read ceiling anyway so a header that
+    // was constructed without validation cannot drive an oversized take().
+    let max_chunk = MAX_CHUNK_SIZE.load(Ordering::Relaxed) as usize;
+    let compressed_len = header.get_compressed_length() as usize;
+    let take_len = compressed_len.min(max_chunk.saturating_mul(2)) as u64;
+    let mut compressed_data_reader = reader.take(take_len);
 
+    let declared_uncompressed_len = u64::from(header.get_uncompressed_length());
+    // Enforce the declared uncompressed length DURING decompression, not after:
+    // the bounded decompressor aborts as soon as the output would exceed the
+    // header's declaration, so a lying header (or a crafted compressed frame
+    // that expands far beyond the declaration) cannot drive unbounded
+    // allocation. Per-chunk output is therefore capped at <= MAX_CHUNK_SIZE.
     let uncompressed_len = header
         .get_compression_scheme()?
-        .decompress_from_reader(&mut compressed_data_reader, writer)?;
+        .decompress_from_reader_bounded(
+            &mut compressed_data_reader,
+            writer,
+            declared_uncompressed_len,
+        )?;
 
-    if uncompressed_len != header.get_uncompressed_length() as u64 {
+    if uncompressed_len != declared_uncompressed_len {
         return Err(CoreError::MalformedData(
             "chunk is corrupted, uncompressed bytes len doesn't agree with chunk header"
                 .to_string(),
@@ -405,6 +421,79 @@ mod tests {
         buf.extend_from_slice(data);
         let mut r = Cursor::new(buf);
         assert!(deserialize_chunk(&mut r).is_err());
+    }
+
+    #[test]
+    fn deserialize_chunk_bomb_exceeding_declared_length_rejected_early() {
+        // A highly compressible payload that expands far beyond the header's
+        // declared uncompressed length. The compressed frame is tiny, but
+        // decompressing it would materialize megabytes unless the declared
+        // length is enforced DURING decompression.
+        let payload = vec![0u8; 4 * 1024 * 1024];
+        let compressed = CompressionScheme::LZ4
+            .compress_from_slice(&payload)
+            .unwrap();
+        assert!(
+            compressed.len() < payload.len(),
+            "repetitive payload must compress well"
+        );
+        let declared_len = 64u32; // far smaller than the real 4 MiB
+
+        let mut chunk = Vec::new();
+        let header = XorbChunkHeader::new(
+            CompressionScheme::LZ4,
+            compressed.len() as u32,
+            declared_len,
+        );
+        write_chunk_header(&mut chunk, &header).unwrap();
+        chunk.extend_from_slice(&compressed);
+
+        let mut reader = Cursor::new(chunk);
+        let mut writer = Vec::new();
+        let result = deserialize_chunk_to_writer(&mut reader, &mut writer);
+
+        // The lying header is rejected with bounded allocation: decompression
+        // aborts as soon as the declared length is exceeded instead of
+        // materializing the full 4 MiB.
+        assert!(
+            matches!(result, Err(CoreError::MalformedData(_))),
+            "expected MalformedData for bomb chunk, got {result:?}"
+        );
+        assert!(
+            writer.len() <= declared_len as usize,
+            "writer received {} bytes but the declared length was {declared_len}",
+            writer.len()
+        );
+    }
+
+    #[test]
+    fn deserialize_chunk_bomb_at_max_declared_length_rejected() {
+        // A chunk whose header declares MAX_CHUNK_SIZE but whose frame expands
+        // beyond it must be rejected rather than allocating past the cap.
+        let payload = vec![0xABu8; 20 * 1024 * 1024];
+        let compressed = CompressionScheme::LZ4
+            .compress_from_slice(&payload)
+            .unwrap();
+        let declared_len = MAX_CHUNK_SIZE.load(Ordering::Relaxed) as u32;
+
+        let mut chunk = Vec::new();
+        let header = XorbChunkHeader::new(
+            CompressionScheme::LZ4,
+            compressed.len() as u32,
+            declared_len,
+        );
+        write_chunk_header(&mut chunk, &header).unwrap();
+        chunk.extend_from_slice(&compressed);
+
+        let mut reader = Cursor::new(chunk);
+        let mut writer = Vec::new();
+        let result = deserialize_chunk_to_writer(&mut reader, &mut writer);
+
+        assert!(
+            result.is_err(),
+            "bomb beyond MAX_CHUNK_SIZE must be rejected"
+        );
+        assert!(writer.len() <= declared_len as usize);
     }
 
     #[test]

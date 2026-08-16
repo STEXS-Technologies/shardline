@@ -96,6 +96,9 @@ pub fn print_index_rebuild_summary(report: &LocalIndexRebuildReport) {
         "removed_stale_latest_records: {}",
         report.removed_stale_latest_records
     );
+    for location in &report.preserved_latest_records_unreadable_version {
+        println!("kept_latest_record_unreadable_version: {}", location);
+    }
     println!(
         "scanned_reconstructions: {}",
         report.scanned_reconstructions
@@ -485,6 +488,7 @@ mod tests {
             rebuilt_dedupe_shard_mappings: 0,
             unchanged_dedupe_shard_mappings: 0,
             removed_stale_dedupe_shard_mappings: 0,
+            preserved_latest_records_unreadable_version: vec![],
             issues: vec![],
         }
     }

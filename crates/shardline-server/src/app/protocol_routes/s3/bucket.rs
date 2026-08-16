@@ -193,11 +193,11 @@ pub(crate) async fn s3_post_bucket(
     }
 
     // Dedupe while preserving request order: duplicate `<Key>` entries collapse
-    // into a single delete (and a single `<Deleted>` row). The protocol cap is
-    // enforced DURING the dedupe loop, so a body listing more than
-    // `MAX_S3_DELETE_KEYS` distinct keys is rejected as soon as the cap is
-    // exceeded — never materializing a key list (or `seen` set) beyond the cap
-    // (F-23).
+    // into a single delete (and a single `<Deleted>` row). The parser already
+    // collapsed duplicates and enforced the protocol cap DURING parsing (F-32),
+    // so this list holds at most `MAX_S3_DELETE_KEYS` distinct keys; the loop
+    // below remains as defense in depth for any future parser caller — never
+    // materializing a key list (or `seen` set) beyond the cap (F-23).
     let dedupe_capacity = keys.len().min(MAX_S3_DELETE_KEYS + 1);
     let mut distinct = Vec::with_capacity(dedupe_capacity);
     let mut seen = std::collections::HashSet::with_capacity(dedupe_capacity);

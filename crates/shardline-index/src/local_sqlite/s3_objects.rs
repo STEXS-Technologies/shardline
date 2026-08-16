@@ -114,6 +114,25 @@ fn scan_s3_objects_sql(
     collect_rows(rows)
 }
 
+fn scan_s3_object_exact_sql(
+    connection: &Connection,
+    scope_namespace: &str,
+    object_key: &str,
+) -> Result<Option<S3ObjectEntry>, LocalIndexStoreError> {
+    let mut statement = connection.prepare(
+        "SELECT scope_namespace, object_key, file_id, size_bytes, content_hash, etag,
+                user_metadata, updated_at_unix_seconds
+         FROM shardline_s3_objects
+         WHERE scope_namespace = ?1 AND object_key = ?2
+         LIMIT 1",
+    )?;
+    let rows = statement.query_map(
+        rusqlite::params![scope_namespace, object_key],
+        s3_object_entry_from_row,
+    )?;
+    Ok(collect_rows(rows)?.pop())
+}
+
 #[async_trait::async_trait]
 impl S3ObjectIndexStore for LocalIndexStore {
     type Error = LocalIndexStoreError;
@@ -165,6 +184,22 @@ impl S3ObjectIndexStore for LocalIndexStore {
                 cursor.as_deref(),
                 limit,
             )
+        })
+        .await
+        .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
+    }
+
+    async fn scan_s3_object_exact(
+        &self,
+        scope_namespace: &str,
+        object_key: &str,
+    ) -> Result<Option<S3ObjectEntry>, Self::Error> {
+        let store = self.clone();
+        let scope_namespace = scope_namespace.to_owned();
+        let object_key = object_key.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let connection = store.open_connection()?;
+            scan_s3_object_exact_sql(&connection, &scope_namespace, &object_key)
         })
         .await
         .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
@@ -370,6 +405,47 @@ mod tests {
         assert_eq!(
             scan(&store, "global", "100", None, 100).await,
             vec!["100%done", "100_plus", "100done"]
+        );
+    }
+
+    #[tokio::test]
+    async fn scan_s3_object_exact_requires_full_key_match() {
+        // F-33: `scan_s3_objects` matches object_key as a string PREFIX, so a
+        // sibling key with the target as a prefix must never satisfy the
+        // exact-key lookup. Only the row with the exact raw key is returned.
+        let store = make_store();
+        for (key, id) in [("a/b", 1), ("a/b/c", 2)] {
+            S3ObjectIndexStore::upsert_s3_object(&store, &entry("global", key, &file_id(id), 0, 0))
+                .await
+                .unwrap();
+        }
+
+        let exact = S3ObjectIndexStore::scan_s3_object_exact(&store, "global", "a")
+            .await
+            .unwrap();
+        assert!(
+            exact.is_none(),
+            "a prefix-sibling must never satisfy an exact lookup"
+        );
+
+        let found = S3ObjectIndexStore::scan_s3_object_exact(&store, "global", "a/b")
+            .await
+            .unwrap();
+        assert_eq!(found.expect("exact row").object_key, "a/b");
+
+        // Exact lookup is scope-namespace isolated.
+        assert!(
+            S3ObjectIndexStore::scan_s3_object_exact(&store, "other-scope", "a/b")
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        // The prefix scan still lists the siblings (listing semantics
+        // unchanged).
+        assert_eq!(
+            scan(&store, "global", "a", None, 100).await,
+            vec!["a/b", "a/b/c"]
         );
     }
 

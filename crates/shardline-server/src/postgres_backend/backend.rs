@@ -115,6 +115,18 @@ impl PostgresBackend {
         &self.public_base_url
     }
 
+    /// Returns the Postgres metadata index store (shares the backend's pool).
+    #[must_use]
+    pub(crate) const fn index_store(&self) -> &PostgresIndexStore {
+        &self.index_store
+    }
+
+    /// Returns the Postgres record store (shares the backend's pool).
+    #[must_use]
+    pub(crate) const fn record_store(&self) -> &PostgresRecordStore {
+        &self.record_store
+    }
+
     pub(crate) const fn object_backend_name(&self) -> &'static str {
         self.object_store.backend_name()
     }

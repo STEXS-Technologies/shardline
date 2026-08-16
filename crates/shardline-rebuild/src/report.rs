@@ -12,21 +12,23 @@ use super::types::{IndexRebuildIssue, IndexRebuildIssueDetail, IndexRebuildIssue
 /// ```
 /// use shardline_rebuild::IndexRebuildReport;
 ///
-/// let report = IndexRebuildReport {
-///     scanned_version_records: 100,
-///     scanned_retained_shards: 5,
-///     rebuilt_latest_records: 0,
-///     unchanged_latest_records: 100,
-///     removed_stale_latest_records: 0,
-///     scanned_reconstructions: 5,
-///     unchanged_reconstructions: 5,
-///     removed_stale_reconstructions: 0,
-///     rebuilt_dedupe_shard_mappings: 0,
-///     unchanged_dedupe_shard_mappings: 0,
-///     removed_stale_dedupe_shard_mappings: 0,
-///     issues: Vec::new(),
-/// };
-/// assert!(report.is_clean());
+///     let report = IndexRebuildReport {
+///         scanned_version_records: 100,
+///         scanned_retained_shards: 5,
+///         rebuilt_latest_records: 0,
+///         unchanged_latest_records: 100,
+///         removed_stale_latest_records: 0,
+///         scanned_reconstructions: 5,
+///         unchanged_reconstructions: 5,
+///         removed_stale_reconstructions: 0,
+///         rebuilt_dedupe_shard_mappings: 0,
+///         unchanged_dedupe_shard_mappings: 0,
+///         removed_stale_dedupe_shard_mappings: 0,
+///         preserved_latest_records_unreadable_version: Vec::new(),
+///         issues: Vec::new(),
+///     };
+///     assert!(report.is_clean());
+///     assert!(report.preserved_latest_records_unreadable_version.is_empty());
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexRebuildReport {
@@ -52,6 +54,12 @@ pub struct IndexRebuildReport {
     pub unchanged_dedupe_shard_mappings: u64,
     /// Number of stale dedupe-shard mappings removed because no retained shard contained them.
     pub removed_stale_dedupe_shard_mappings: u64,
+    /// Locator displays of version records that could not be parsed. Their
+    /// existing latest records were preserved ("kept because version
+    /// unreadable"): the stale-latest-record deletion phase is skipped when the
+    /// run is not clean, so an unreadable version row can never cause a fully
+    /// intact latest record — and the file it indexes — to be deleted.
+    pub preserved_latest_records_unreadable_version: Vec<String>,
     /// Collected non-fatal rebuild issues.
     pub issues: Vec<IndexRebuildIssue>,
 }
