@@ -162,6 +162,19 @@ fn put_request(uri: String, body: Vec<u8>) -> axum::http::Request<Body> {
         .unwrap()
 }
 
+fn copy_request(uri: String, copy_source: String) -> axum::http::Request<Body> {
+    Request::builder()
+        .method("PUT")
+        .uri(uri)
+        .header(
+            header::AUTHORIZATION,
+            sigv4_auth(&mint_token(TokenScope::Write, OWNER, NAME)),
+        )
+        .header("x-amz-copy-source", copy_source)
+        .body(Body::empty())
+        .unwrap()
+}
+
 fn get_request(uri: String) -> axum::http::Request<Body> {
     Request::builder()
         .method("GET")
@@ -949,6 +962,381 @@ async fn poc_f70_get_etag_matches_served_bytes_under_concurrent_overwrite() {
     assert_eq!(
         mismatches, 0,
         "no GET may serve an ETag that is not the MD5 of the served bytes"
+    );
+}
+
+// =========================================================================
+// F-79 — CopyObject source read is torn across row metadata and latest-record
+// content (FIXED: object.rs resolves the source's user metadata, size, and
+// record version in ONE `s3_object_read_snapshot` — the listing-index row is
+// the single commit point, so the copied metadata always belongs to the copied
+// bytes. A concurrent source PUT commits its new record BEFORE swapping the
+// row, so the old flow paired old-row metadata with new-record bytes; the
+// snapshot now pins to the row's version, serving old-row+old-record or
+// new-row+new-record — never a mix).
+//
+// EXPLOIT (fixed): racing a source overwrite (new content + new metadata)
+// against a CopyObject must never produce a destination whose x-amz-meta-*
+// describes a DIFFERENT version than the bytes it carries.
+// =========================================================================
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn poc_f79_copyobject_metadata_matches_copied_bytes_under_concurrent_overwrite() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state);
+
+    let source = "torn/f79-source.bin";
+    let seed_body = "seed-version";
+
+    // Seed the source with content + matching metadata.
+    let mut seed_req = put_request(format!("/{BUCKET}/{source}"), seed_body.as_bytes().to_vec());
+    seed_req
+        .headers_mut()
+        .insert("x-amz-meta-ver", "seed".parse().unwrap());
+    let seed = app.clone().oneshot(seed_req).await.unwrap();
+    assert_eq!(seed.status(), StatusCode::OK, "seed PUT");
+
+    let iterations = 40;
+    let mut mismatches = 0_u32;
+    for round in 0..iterations {
+        // Overwrite the source with DIFFERENT content + a metadata marker every
+        // round, racing a CopyObject of the source: the copied object's
+        // x-amz-meta-ver must describe exactly the bytes it carries.
+        let payload = format!("overwrite-version-{round}");
+        let meta_value = format!("round-{round}");
+        let dest = format!("torn/f79-dest-{round}.bin");
+
+        let put = app.clone();
+        let mut put_req = put_request(format!("/{BUCKET}/{source}"), payload.clone().into_bytes());
+        put_req
+            .headers_mut()
+            .insert("x-amz-meta-ver", meta_value.parse().unwrap());
+        let copy = app.clone();
+        let copy_req = copy_request(format!("/{BUCKET}/{dest}"), format!("/{BUCKET}/{source}"));
+
+        let (put_task, copy_task) = tokio::join!(
+            tokio::spawn(async move { put.oneshot(put_req).await.unwrap().status() }),
+            tokio::spawn(async move { copy.oneshot(copy_req).await.unwrap().status() }),
+        );
+        assert_eq!(
+            put_task.unwrap(),
+            StatusCode::OK,
+            "round {round}: source PUT"
+        );
+        assert_eq!(copy_task.unwrap(), StatusCode::OK, "round {round}: COPY");
+
+        // The destination's metadata must describe exactly the version its
+        // bytes came from: the seed state or any completed overwrite round
+        // (the copy may legitimately observe the pre- or post-overwrite state)
+        // — but never old metadata with new bytes or vice versa.
+        let get = app
+            .clone()
+            .oneshot(get_request(format!("/{BUCKET}/{dest}")))
+            .await
+            .unwrap();
+        assert_eq!(get.status(), StatusCode::OK, "round {round}: GET dest");
+        let meta = get
+            .headers()
+            .get("x-amz-meta-ver")
+            .map(|value| value.to_str().unwrap().to_owned())
+            .unwrap_or_else(|| "<none>".to_owned());
+        let bytes = String::from_utf8(body_bytes(get).await).unwrap();
+        let expected_meta = if let Some(round_of) = bytes.strip_prefix("overwrite-version-") {
+            format!("round-{round_of}")
+        } else if bytes == seed_body {
+            "seed".to_owned()
+        } else {
+            // Bytes no source version ever held — a torn read.
+            mismatches = mismatches.saturating_add(1);
+            continue;
+        };
+        if meta != expected_meta {
+            mismatches = mismatches.saturating_add(1);
+        }
+    }
+
+    println!(
+        "F-79 delta (fixed): {iterations} racing source-overwrite/CopyObject rounds\n\
+         \x20 FIXED   destinations whose x-amz-meta-ver does not describe the copied bytes: {mismatches}\n\
+         \x20 (source metadata + size + version resolved in ONE snapshot)"
+    );
+    assert_eq!(
+        mismatches, 0,
+        "the copied object's metadata must always match its bytes' version (F-79)"
+    );
+}
+
+// =========================================================================
+// F-86 — A failed conditional S3 PUT (412) committed the loser's record as
+// LATEST (FIXED: object.rs re-evaluates the precondition under the per-key
+// lock BEFORE the body is streamed or any record committed, so a losing
+// conditional PUT returns 412 with NO write side effect — the loser's record
+// is never committed and its chunks are never written. The post-commit
+// re-check is kept for the F-8 TOCTOU guarantee and, when it fires, purges the
+// just-committed loser record so no latest-record consumer serves it).
+//
+// EXPLOIT (fixed): (1) a losing conditional PUT must leave the LATEST record
+// as the winner's content (record-vs-row divergence gone) and (2) a racing
+// pair of create-if-absent PUTs must leave the winner's record as latest.
+// =========================================================================
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn poc_f86_losing_conditional_put_leaves_winner_latest() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state.clone());
+
+    let repo = RepositoryScope::new(RepositoryProvider::Generic, OWNER, NAME, None).unwrap();
+    let namespace = crate::protocol_support::scope_namespace(Some(&repo));
+
+    // Resolves the storage object key the way the handlers derive it, so the
+    // snapshot below reads the SAME protocol file the object's record lives at.
+    fn resolve_context(key: &str) -> (String, shardline_storage::ObjectKey) {
+        let repo = RepositoryScope::new(RepositoryProvider::Generic, OWNER, NAME, None).unwrap();
+        let claims =
+            TokenClaims::new("shardline", "test", TokenScope::Write, repo, u64::MAX).unwrap();
+        let capability = shardline_server_core::AuthorizedRepository::from_verified_context(
+            shardline_server_core::AuthContext::new(claims),
+            TokenScope::Write,
+        )
+        .unwrap();
+        let context = require_s3_object_context(&capability, key).unwrap();
+        (context.scope_namespace, context.object_key)
+    }
+
+    // --- Scenario 1 (deterministic): a losing conditional PUT. ---
+    let key = "cond/f86-loser.bin";
+
+    // WINNER: an unconditional PUT establishes the object + row.
+    let winner = app
+        .clone()
+        .oneshot(put_request(
+            format!("/{BUCKET}/{key}"),
+            b"winner-content".to_vec(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(winner.status(), StatusCode::OK);
+    let winner_etag = winner
+        .headers()
+        .get(header::ETAG)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+
+    // Row + latest-record state before the losing conditional PUT.
+    let (_ns, object_key) = resolve_context(key);
+    let row_before = state
+        .backend
+        .scan_s3_object_exact(&namespace, key)
+        .await
+        .unwrap()
+        .expect("winner row");
+    let snapshot_before = state
+        .backend
+        .s3_object_read_snapshot(&namespace, key, &object_key)
+        .await
+        .unwrap();
+
+    // LOSER: If-None-Match:* (create-if-absent) on the existing object with
+    // DIFFERENT content → 412.
+    let loser = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/{BUCKET}/{key}"))
+                .header(
+                    header::AUTHORIZATION,
+                    sigv4_auth(&mint_token(TokenScope::Write, OWNER, NAME)),
+                )
+                .header(header::IF_NONE_MATCH, "*")
+                .header(header::CONTENT_TYPE, "application/octet-stream")
+                .body(Body::from(b"loser-content".to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(loser.status(), StatusCode::PRECONDITION_FAILED);
+
+    // The row is untouched (still the winner's)…
+    let row_after = state
+        .backend
+        .scan_s3_object_exact(&namespace, key)
+        .await
+        .unwrap()
+        .expect("winner row");
+    assert_eq!(
+        row_after.content_hash, row_before.content_hash,
+        "row must still pin the winner's version"
+    );
+    assert_eq!(
+        row_after.etag, row_before.etag,
+        "row etag must be unchanged"
+    );
+    assert_eq!(row_after.size_bytes, row_before.size_bytes);
+
+    // …and the LATEST record is still the winner's: the loser's record was
+    // never committed (the body was rejected before any streaming, so its
+    // chunks were never written either — no orphan, no leak).
+    let snapshot_after = state
+        .backend
+        .s3_object_read_snapshot(&namespace, key, &object_key)
+        .await
+        .unwrap();
+    assert_eq!(
+        snapshot_after.record_content_hash,
+        Some(row_before.content_hash.clone()),
+        "latest record must be the winner's content, not the loser's (F-86)"
+    );
+    assert_eq!(snapshot_after.total_bytes, row_before.size_bytes);
+    assert_eq!(
+        snapshot_after.record_content_hash, snapshot_before.record_content_hash,
+        "the 412 must not perturb the latest record"
+    );
+
+    // GET still serves the winner's bytes + ETag.
+    let get = app
+        .clone()
+        .oneshot(get_request(format!("/{BUCKET}/{key}")))
+        .await
+        .unwrap();
+    assert_eq!(get.status(), StatusCode::OK);
+    let get_etag = get
+        .headers()
+        .get(header::ETAG)
+        .map(|value| value.to_str().unwrap().to_owned());
+    assert_eq!(body_bytes(get).await, b"winner-content");
+    assert_eq!(
+        get_etag.as_deref(),
+        Some(winner_etag.as_str()),
+        "GET must serve the winner's ETag after the losing 412"
+    );
+
+    // The record store is still healthy: a MATCHING conditional PUT succeeds
+    // and becomes the new latest.
+    let replace = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/{BUCKET}/{key}"))
+                .header(
+                    header::AUTHORIZATION,
+                    sigv4_auth(&mint_token(TokenScope::Write, OWNER, NAME)),
+                )
+                .header(header::IF_MATCH, &winner_etag)
+                .header(header::CONTENT_TYPE, "application/octet-stream")
+                .body(Body::from(b"third-version".to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        replace.status(),
+        StatusCode::OK,
+        "matching conditional PUT must succeed"
+    );
+    let get2 = app
+        .clone()
+        .oneshot(get_request(format!("/{BUCKET}/{key}")))
+        .await
+        .unwrap();
+    assert_eq!(body_bytes(get2).await, b"third-version");
+
+    // --- Scenario 2 (racing, mirrors the F-8 PoC): two create-if-absent PUTs
+    // with different bodies on a fresh key. Exactly one wins; the LATEST
+    // record must be the winner's content and the row must pin it. ---
+    let iterations = 20;
+    let mut violations = 0_u32;
+    for round in 0..iterations {
+        let race_key = format!("cond/f86-race-{round}.bin");
+        let url = format!("/{BUCKET}/{race_key}");
+        let body_a = format!("race-a-{round}").into_bytes();
+        let body_b = format!("race-b-{round}").into_bytes();
+
+        fn create_if_absent(url: String, body: Vec<u8>) -> axum::http::Request<Body> {
+            Request::builder()
+                .method("PUT")
+                .uri(url)
+                .header(
+                    header::AUTHORIZATION,
+                    sigv4_auth(&mint_token(TokenScope::Write, OWNER, NAME)),
+                )
+                .header(header::IF_NONE_MATCH, "*")
+                .header(header::CONTENT_TYPE, "application/octet-stream")
+                .body(Body::from(body))
+                .unwrap()
+        }
+
+        let app_a = app.clone();
+        let app_b = app.clone();
+        let req_a = create_if_absent(url.clone(), body_a.clone());
+        let req_b = create_if_absent(url.clone(), body_b.clone());
+        let (ta, tb) = tokio::join!(
+            tokio::spawn(async move { app_a.oneshot(req_a).await.unwrap().status() }),
+            tokio::spawn(async move { app_b.oneshot(req_b).await.unwrap().status() }),
+        );
+        let (sa, sb) = (ta.unwrap(), tb.unwrap());
+        let n_ok = [sa, sb].iter().filter(|s| **s == StatusCode::OK).count();
+        let n_412 = [sa, sb]
+            .iter()
+            .filter(|s| **s == StatusCode::PRECONDITION_FAILED)
+            .count();
+        if !(n_ok == 1 && n_412 == 1) {
+            violations = violations.saturating_add(1);
+            continue;
+        }
+
+        // The LATEST record must be the winner's content — the row (which the
+        // winner swapped) pins a version, and the latest record must match it.
+        let (_ns, race_object_key) = resolve_context(&race_key);
+        let race_row = state
+            .backend
+            .scan_s3_object_exact(&namespace, &race_key)
+            .await
+            .unwrap()
+            .expect("winner row");
+        let race_snapshot = state
+            .backend
+            .s3_object_read_snapshot(&namespace, &race_key, &race_object_key)
+            .await
+            .unwrap();
+        if race_snapshot.record_content_hash.as_deref() != Some(race_row.content_hash.as_str()) {
+            violations = violations.saturating_add(1);
+            continue;
+        }
+
+        // The served bytes + ETag are one consistent commit point.
+        let get = app
+            .clone()
+            .oneshot(get_request(format!("/{BUCKET}/{race_key}")))
+            .await
+            .unwrap();
+        assert_eq!(get.status(), StatusCode::OK);
+        let etag = get
+            .headers()
+            .get(header::ETAG)
+            .map(|value| value.to_str().unwrap().to_owned());
+        let bytes = body_bytes(get).await;
+        assert!(
+            bytes == body_a || bytes == body_b,
+            "round {round}: served bytes must be one of the raced bodies"
+        );
+        if let Some(etag) = etag
+            && etag != format!("\"{:x}\"", md5::Md5::digest(&bytes))
+        {
+            violations = violations.saturating_add(1);
+        }
+    }
+
+    println!(
+        "F-86 delta (fixed): losing conditional PUT leaves the winner's record as LATEST\n\
+         \x20 FIXED   racing rounds with one 200 + one 412 AND row==latest record: {}\n\
+         \x20 rounds with violations (bad statuses, row!=latest, or ETag!=MD5): {violations}",
+        iterations - violations
+    );
+    assert_eq!(
+        violations, 0,
+        "every losing conditional PUT must leave the LATEST record as the winner's content (F-86)"
     );
 }
 

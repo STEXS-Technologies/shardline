@@ -196,6 +196,16 @@ fn validate_revision(rev: &str) -> Result<(), ServerError> {
     Ok(())
 }
 
+/// Validates a provider/owner/repo path segment, mirroring the revision-name
+/// controls so the per-row amplification of the revision registry cannot be
+/// inflated with oversized identity segments (F-75).
+fn validate_repo_segment(segment: &str) -> Result<(), ServerError> {
+    if segment.is_empty() || segment.len() > 512 || segment.chars().any(char::is_control) {
+        return Err(ServerError::InvalidPath);
+    }
+    Ok(())
+}
+
 /// Cross-checks the authenticated scope against the full route scope, including revision.
 fn check_scope(
     auth: Option<&AuthorizedRepository>,
@@ -471,6 +481,20 @@ pub(super) async fn create_revision(
     let auth = Some(repo_capability.capability());
     check_scope(auth, &provider, &owner, &repo, &rev)?;
     validate_revision(&rev)?;
+    // Bound the per-row amplification of the revision registry (F-75): the
+    // provider/owner/repo identity is stored verbatim in every revision row,
+    // so enforce the same length/charset controls as the revision name.
+    validate_repo_segment(&provider)?;
+    validate_repo_segment(&owner)?;
+    validate_repo_segment(&repo)?;
+    // Per-repo revision-registry cap (F-75): reject new names once the repo
+    // is at capacity. The count-then-insert race at the boundary is accepted;
+    // the cap is a bound on growth, not a hard invariant.
+    let key = RepoKey::new(&provider, &owner, &repo);
+    let count = state.backend.count_revisions(&key).await?;
+    if count >= u64::try_from(state.config.max_revisions_per_repo().get()).unwrap_or(u64::MAX) {
+        return Err(ServerError::TooManyRevisions);
+    }
     let now = unix_now_seconds_lossy();
     let record = RevisionRecord {
         provider: provider.clone(),

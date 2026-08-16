@@ -56,6 +56,21 @@ fn mint_token(token_scope: TokenScope, owner: &str, repo: &str, rev: &str) -> St
 }
 
 async fn build_app(auth_enabled: bool) -> (Router, TempDir) {
+    let cap = NonZeroUsize::new(10_000).unwrap();
+    build_app_with_config(auth_enabled, cap).await
+}
+
+async fn build_app_with_cap(
+    auth_enabled: bool,
+    max_revisions_per_repo: NonZeroUsize,
+) -> (Router, TempDir) {
+    build_app_with_config(auth_enabled, max_revisions_per_repo).await
+}
+
+async fn build_app_with_config(
+    auth_enabled: bool,
+    max_revisions_per_repo: NonZeroUsize,
+) -> (Router, TempDir) {
     let tmp = TempDir::new().unwrap();
     let chunk_size = NonZeroUsize::new(65536).unwrap();
     let object_store = ServerObjectStore::local(tmp.path().join("chunks")).unwrap();
@@ -78,6 +93,8 @@ async fn build_app(auth_enabled: bool) -> (Router, TempDir) {
     )
     .with_server_role(ServerRole::All)
     .with_server_frontends(vec![ServerFrontend::Xet])
+    .unwrap()
+    .with_max_revisions_per_repo(max_revisions_per_repo)
     .unwrap()
     .with_token_signing_key(TEST_SIGNING_KEY.to_vec())
     .unwrap();
@@ -1011,4 +1028,213 @@ async fn create_revision_rejects_invalid_revision() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn create_revision_rejects_oversize_owner_repo_provider_segments() {
+    let (app, _tmp) = build_app(false).await;
+    let long_segment = "o".repeat(513);
+
+    // Oversize owner segment is rejected with 400.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/generic/{long_segment}/{REPO}/revisions/{REV}"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    // Oversize repo segment is rejected with 400.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/generic/{OWNER}/{long_segment}/revisions/{REV}"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    // Oversize provider segment is rejected with 400.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/{long_segment}/{OWNER}/{REPO}/revisions/{REV}"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    // Control characters in an owner segment are rejected with 400.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/generic/bad%0Aowner/{REPO}/revisions/{REV}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    // A valid identity still creates at the same boundary length as the
+    // revision name (512 bytes) — the segment cap mirrors validate_revision.
+    let boundary_segment = "b".repeat(512);
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/generic/{boundary_segment}/{REPO}/revisions/{REV}"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // A revision registry row is created under the long but valid identity.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/api/generic/{boundary_segment}/{REPO}/revisions"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        get_body(response).await["revisions"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn create_revision_rejects_beyond_per_repo_cap() {
+    let cap = NonZeroUsize::new(3).unwrap();
+    let (app, _tmp) = build_app_with_cap(false, cap).await;
+    let base = format!("/api/{PROVIDER}/{OWNER}/{REPO}/revisions");
+
+    // The first `cap` distinct names are accepted.
+    for name in ["one", "two", "three"] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("{base}/{name}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "{name} should be accepted"
+        );
+    }
+
+    // The next distinct name is rejected once the repo is at capacity.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("{base}/four"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = get_body(response).await;
+    assert_eq!(
+        body["error"],
+        "revision registry is full for this repository"
+    );
+
+    // An upsert of an existing name is still allowed at the cap (it does not
+    // grow the registry), matching the count-before-insert design.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("{base}/one"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT, "same-name upsert");
+
+    // A different repository with its own cap is unaffected.
+    let other_base = format!("/api/{PROVIDER}/{OWNER}/other/revisions");
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("{other_base}/solo"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Deleting a revision frees a slot for a new name.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("{base}/one"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("{base}/four"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK, "slot freed by delete");
 }

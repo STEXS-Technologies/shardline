@@ -290,6 +290,14 @@ impl JwksProvider {
         let mut validation = Validation::new(algorithm);
         validation.set_issuer(&[self.issuer.as_str()]);
 
+        // JwksProvider has no audience configuration, so jsonwebtoken's
+        // `validate_aud` default of `true` would reject every token that
+        // carries an `aud` claim (InvalidAudience) — OIDC Core / RFC 9068
+        // make `aud` required in real IdP tokens. Explicitly disable aud
+        // validation, matching OidcProvider's documented permissive default
+        // when no audience is configured.
+        validation.validate_aud = false;
+
         let token = format!("{header_b64}.{payload_b64}.{signature_b64}");
         let token_data = decode::<serde_json::Value>(&token, &decoding_key, &validation)
             .map_err(|e| AuthError::ProviderError(format!("JWT verification failed: {e}")))?;
@@ -1643,6 +1651,46 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
         let token_claims = result.unwrap();
         assert_eq!(token_claims.subject(), "admin-user");
         assert_eq!(token_claims.scope(), TokenScope::Write);
+    }
+
+    #[test]
+    fn verify_token_with_aud_claim_succeeds() {
+        use jsonwebtoken::{EncodingKey, Header, encode};
+        use std::collections::BTreeMap;
+
+        // Regression (F-81): JwksProvider has no audience configuration, and
+        // jsonwebtoken's `validate_aud` defaults to true with no audience set,
+        // which rejects any token that carries an `aud` claim
+        // (InvalidAudience). OIDC Core / RFC 9068 require `aud` in real IdP
+        // tokens, so every aud-bearing token was rejected. The provider must
+        // disable aud validation so the permissive default is true.
+        let mut claims = BTreeMap::new();
+        claims.insert("iss", serde_json::json!("https://example.com"));
+        claims.insert("sub", serde_json::json!("aud-user"));
+        claims.insert("aud", serde_json::json!("some-oidc-client"));
+        claims.insert("exp", serde_json::json!(9999999999u64));
+        claims.insert("iat", serde_json::json!(1000000000u64));
+
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some("test-key-1".to_owned());
+
+        let encoding_key =
+            EncodingKey::from_rsa_pem(TEST_RSA_PEM.as_bytes()).expect("valid RSA PEM");
+        let token = encode(&header, &claims, &encoding_key).expect("should sign token");
+
+        let provider = make_provider(Some(CachedJwks {
+            keys: Arc::new(vec![test_rsa_jwk("test-key-1")]),
+            etag: None,
+            refresh_interval: DEFAULT_JWKS_REFRESH_INTERVAL,
+        }));
+
+        let result = provider.verify_token(&token);
+        assert!(
+            result.is_ok(),
+            "an aud-bearing token must verify when no audience is configured, got {result:?}"
+        );
+        let token_claims = result.unwrap();
+        assert_eq!(token_claims.subject(), "aud-user");
     }
 
     #[test]

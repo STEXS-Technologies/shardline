@@ -113,6 +113,10 @@ pub enum OidcProviderError {
     /// The JWKS endpoint URL advertised by the discovery document must use https.
     #[error("OIDC JWKS endpoint must use https: {0}")]
     InsecureJwksUrl(String),
+    /// The discovery document's `jwks_uri` host is neither the issuer's host
+    /// nor present in the configured host allowlist.
+    #[error("OIDC JWKS endpoint host is not the issuer host and not allowlisted: {0}")]
+    DiscoveryJwksHostNotAllowed(String),
     /// The JWKS endpoint could not be reached.
     #[error("failed to fetch JWKS keys: {0}")]
     JwksFetch(String),
@@ -122,13 +126,27 @@ impl OidcProvider {
     /// Creates a new OIDC provider by fetching the issuer's discovery document
     /// and starting a background task to periodically refresh JWKS keys.
     ///
+    /// `jwks_host_allowlist` lists additional hosts (besides the issuer's own
+    /// host) whose JWKS endpoints the discovery document may point at; some
+    /// IdPs legitimately cross-host JWKS onto a different domain (e.g. Google
+    /// serves keys from `www.googleapis.com` while the issuer is
+    /// `accounts.google.com`).
+    ///
     /// # Errors
     ///
     /// Returns [`OidcProviderError`] when the discovery endpoint is unreachable
     /// or the response is malformed.
-    pub async fn new(issuer: &str, audience: Option<String>) -> Result<Self, OidcProviderError> {
+    pub async fn new(
+        issuer: &str,
+        audience: Option<String>,
+        jwks_host_allowlist: &[String],
+    ) -> Result<Self, OidcProviderError> {
         let client = Client::builder()
             .timeout(Duration::from_secs(10))
+            // Never follow redirects on the discovery or JWKS fetches: a
+            // redirect could land on an attacker-controlled host that echoes
+            // the pinned issuer while serving its own keys.
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|e| OidcProviderError::HttpClient(e.to_string()))?;
 
@@ -155,6 +173,16 @@ impl OidcProvider {
         let jwks_url = discovery.jwks_uri;
         if !is_secure_url(&jwks_url) {
             return Err(OidcProviderError::InsecureJwksUrl(jwks_url));
+        }
+        // Regression (F-83): the issuer pin above compares the discovery
+        // `issuer` STRING to the configured issuer, and the https check only
+        // proves transport security — neither binds the JWKS endpoint to the
+        // pinned issuer. A compromised discovery endpoint could echo the
+        // configured issuer while pointing `jwks_uri` at attacker-controlled
+        // keys. Require the `jwks_uri` host to be the issuer's host, or an
+        // explicit allowlist entry for IdPs that legitimately cross-host JWKS.
+        if !jwks_host_is_allowed(&jwks_url, issuer, jwks_host_allowlist) {
+            return Err(OidcProviderError::DiscoveryJwksHostNotAllowed(jwks_url));
         }
         let jwks: JwksResponse = client
             .get(&jwks_url)
@@ -296,6 +324,14 @@ impl OidcProvider {
         validation.set_issuer(&[self.issuer.as_str()]);
         if let Some(ref audience) = self.audience {
             validation.set_audience(&[audience.as_str()]);
+            // Regression (F-82): jsonwebtoken's `validate_audience` treats a
+            // token with a MISSING `aud` claim as valid when an audience IS
+            // configured — the `(TryParse::NotPresent, Some(_))` pair falls
+            // through every match arm and returns Ok. Requiring the claim's
+            // presence restores the intended boundary: a token that omits
+            // `aud` entirely must not authenticate when the operator pinned
+            // an audience.
+            validation.required_spec_claims.insert("aud".to_owned());
         } else {
             // jsonwebtoken's `validate_aud` defaults to `true` and, when no
             // audience is configured, rejects every token that carries an
@@ -454,6 +490,32 @@ fn is_secure_url(url: &str) -> bool {
         Some(url::Host::Domain(domain)) => domain.eq_ignore_ascii_case("localhost"),
         None => false,
     }
+}
+
+/// Returns true when `jwks_uri` may serve keys for `issuer`: the URL's host
+/// matches the issuer's host, or it is listed in `jwks_host_allowlist`.
+///
+/// Host comparison is case-insensitive (RFC 3986 §3.2.2). The allowlist is
+/// the documented escape hatch for IdPs that legitimately serve JWKS from a
+/// different host than the issuer (e.g. Google serves keys from
+/// `www.googleapis.com` while the issuer is `accounts.google.com`); when it
+/// is empty, only the issuer's own host is accepted (fail-closed).
+fn jwks_host_is_allowed(jwks_uri: &str, issuer: &str, jwks_host_allowlist: &[String]) -> bool {
+    let Some(jwks_host) = url::Url::parse(jwks_uri)
+        .ok()
+        .and_then(|parsed| parsed.host_str().map(str::to_lowercase))
+    else {
+        return false;
+    };
+    let issuer_host = url::Url::parse(issuer)
+        .ok()
+        .and_then(|parsed| parsed.host_str().map(str::to_lowercase));
+    if issuer_host.as_deref() == Some(jwks_host.as_str()) {
+        return true;
+    }
+    jwks_host_allowlist
+        .iter()
+        .any(|allowed| allowed.eq_ignore_ascii_case(&jwks_host))
 }
 
 #[cfg(test)]
@@ -868,6 +930,70 @@ mod tests {
         assert!(is_secure_url("http://[::1]:8080/jwks"));
     }
 
+    // ── jwks_host_is_allowed (F-83) ──────────────────────────────────────
+
+    #[test]
+    fn jwks_host_allowed_accepts_issuer_host() {
+        assert!(jwks_host_is_allowed(
+            "https://accounts.example.com/.well-known/jwks",
+            "https://accounts.example.com",
+            &[],
+        ));
+    }
+
+    #[test]
+    fn jwks_host_allowed_rejects_foreign_host_without_allowlist() {
+        assert!(!jwks_host_is_allowed(
+            "https://attacker.example.com/jwks",
+            "https://accounts.example.com",
+            &[],
+        ));
+    }
+
+    #[test]
+    fn jwks_host_allowed_accepts_allowlisted_host() {
+        // Google legitimately cross-hosts JWKS onto www.googleapis.com while
+        // the issuer is accounts.google.com — the allowlist is the escape
+        // hatch for such setups.
+        assert!(jwks_host_is_allowed(
+            "https://www.googleapis.com/oauth2/v3/certs",
+            "https://accounts.google.com",
+            &["www.googleapis.com".to_owned()],
+        ));
+    }
+
+    #[test]
+    fn jwks_host_allowed_allowlist_matching_is_case_insensitive() {
+        assert!(jwks_host_is_allowed(
+            "https://www.googleapis.com/oauth2/v3/certs",
+            "https://accounts.google.com",
+            &["WWW.GOOGLEAPIS.COM".to_owned()],
+        ));
+    }
+
+    #[test]
+    fn jwks_host_allowed_rejects_host_not_in_allowlist() {
+        assert!(!jwks_host_is_allowed(
+            "https://evil.example.com/jwks",
+            "https://accounts.example.com",
+            &["trusted.example.com".to_owned()],
+        ));
+    }
+
+    #[test]
+    fn jwks_host_allowed_rejects_unparsable_urls() {
+        assert!(!jwks_host_is_allowed(
+            "not-a-url",
+            "https://accounts.example.com",
+            &[],
+        ));
+        assert!(!jwks_host_is_allowed(
+            "https://accounts.example.com/.well-known/jwks",
+            "not-a-url",
+            &[],
+        ));
+    }
+
     // ── OidcProvider construction helpers ────────────────────────────────
 
     fn make_provider(
@@ -894,7 +1020,7 @@ mod tests {
 
     #[tokio::test]
     async fn new_with_unreachable_issuer_returns_error() {
-        let result = OidcProvider::new("http://127.0.0.1:1", None).await;
+        let result = OidcProvider::new("http://127.0.0.1:1", None, &[]).await;
         assert!(result.is_err(), "expected Err for unreachable issuer");
         if let Err(err) = result {
             assert!(
@@ -909,7 +1035,7 @@ mod tests {
 
     #[tokio::test]
     async fn new_with_unreachable_issuer_error_message_non_empty() {
-        let result = OidcProvider::new("http://127.0.0.1:1", None).await;
+        let result = OidcProvider::new("http://127.0.0.1:1", None, &[]).await;
         assert!(result.is_err());
         if let Err(err) = result {
             let msg = format!("{}", err);
@@ -1325,6 +1451,20 @@ mod tests {
     }
 
     #[test]
+    fn oidc_provider_error_display_jwks_host_not_allowed() {
+        let e = OidcProviderError::DiscoveryJwksHostNotAllowed(
+            "https://evil.example.com/jwks".to_owned(),
+        );
+        let msg = format!("{e}");
+        assert!(msg.contains("host"), "message: {msg}");
+        assert!(msg.contains("allowlist"), "message: {msg}");
+        assert!(
+            msg.contains("https://evil.example.com/jwks"),
+            "message: {msg}"
+        );
+    }
+
+    #[test]
     fn oidc_provider_error_display_jwks() {
         let e = OidcProviderError::JwksFetch("500".into());
         assert_eq!(format!("{e}"), "failed to fetch JWKS keys: 500");
@@ -1567,6 +1707,47 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
     }
 
     #[test]
+    fn verify_token_with_configured_audience_and_missing_aud_fails() {
+        use jsonwebtoken::{EncodingKey, Header, encode};
+        use std::collections::BTreeMap;
+
+        // Regression (F-82): jsonwebtoken's `validate_audience` accepts a
+        // token with a MISSING `aud` claim even when an audience IS
+        // configured, silently degrading the audience boundary to
+        // signature+issuer-only. The provider requires the `aud` claim's
+        // presence when the audience is configured, so a token that omits it
+        // must be rejected (MissingRequiredClaim).
+        let mut claims = BTreeMap::new();
+        claims.insert("iss", serde_json::json!("https://issuer.example.com"));
+        claims.insert("sub", serde_json::json!("aud-user"));
+        // no aud claim
+        claims.insert("exp", serde_json::json!(9999999999u64));
+        claims.insert("iat", serde_json::json!(1000000000u64));
+
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some("test-key-1".to_owned());
+
+        let encoding_key =
+            EncodingKey::from_rsa_pem(TEST_RSA_PEM.as_bytes()).expect("valid RSA PEM");
+        let token = encode(&header, &claims, &encoding_key).expect("should sign token");
+
+        let provider = make_provider(
+            "https://issuer.example.com",
+            Some("my-audience".to_owned()),
+            Some(CachedJwks {
+                keys: Arc::new(vec![test_rsa_jwk("test-key-1")]),
+                fetched_at: Instant::now(),
+            }),
+        );
+
+        let result = provider.verify_token(&token);
+        assert!(
+            matches!(result, Err(AuthError::ProviderError(ref msg)) if msg.contains("aud")),
+            "a token with a missing aud claim must be rejected when audience is configured, got {result:?}"
+        );
+    }
+
+    #[test]
     fn verify_token_without_audience_config_accepts_token_without_aud() {
         use jsonwebtoken::{EncodingKey, Header, encode};
         use std::collections::BTreeMap;
@@ -1722,7 +1903,7 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
             .mount(&mock_server)
             .await;
 
-        let provider = OidcProvider::new(&base_url, None)
+        let provider = OidcProvider::new(&base_url, None, &[])
             .await
             .expect("OIDC provider creation should succeed");
 
@@ -1764,7 +1945,7 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
             .mount(&mock_server)
             .await;
 
-        let provider = OidcProvider::new(&base_url, Some("my-app".to_owned()))
+        let provider = OidcProvider::new(&base_url, Some("my-app".to_owned()), &[])
             .await
             .expect("OIDC provider creation with audience should succeed");
 
@@ -1797,7 +1978,7 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
             .mount(&mock_server)
             .await;
 
-        let result = OidcProvider::new(&base_url, None).await;
+        let result = OidcProvider::new(&base_url, None, &[]).await;
         let err = result.err().expect("expected Err, got Ok(provider)");
         assert!(
             matches!(err, OidcProviderError::DiscoveryIssuerMismatch { .. }),
@@ -1825,11 +2006,166 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
             .mount(&mock_server)
             .await;
 
-        let result = OidcProvider::new(&base_url, None).await;
+        let result = OidcProvider::new(&base_url, None, &[]).await;
         let err = result.err().expect("expected Err, got Ok(provider)");
         assert!(
             matches!(err, OidcProviderError::InsecureJwksUrl(_)),
             "expected InsecureJwksUrl, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn new_with_discovery_redirect_not_followed() {
+        // Regression (F-83): the discovery fetch must never follow redirects.
+        // A redirect to an attacker-controlled host would let the attacker
+        // serve a document that echoes the pinned issuer while pointing
+        // `jwks_uri` at attacker keys. The redirect target must never even
+        // be contacted.
+        let target = wiremock::MockServer::start().await;
+        let discovery = wiremock::MockServer::start().await;
+
+        // The redirect target would happily serve a valid discovery doc; it
+        // must never receive the request.
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path(
+                "/.well-known/openid-configuration",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "jwks_uri": format!("{}/oauth/jwks", target.uri()),
+                    "issuer": discovery.uri(),
+                })),
+            )
+            .mount(&target)
+            .await;
+
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path(
+                "/.well-known/openid-configuration",
+            ))
+            .respond_with(wiremock::ResponseTemplate::new(302).insert_header(
+                "Location",
+                format!("{}/.well-known/openid-configuration", target.uri()),
+            ))
+            .mount(&discovery)
+            .await;
+
+        let result = OidcProvider::new(&discovery.uri(), None, &[]).await;
+        assert!(
+            result.is_err(),
+            "a redirected discovery fetch must not be followed"
+        );
+        let received = target.received_requests().await.unwrap_or_default();
+        assert!(
+            received.is_empty(),
+            "the redirect target must never be contacted, got {received:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn new_with_jwks_host_matching_issuer_succeeds() {
+        // Regression (F-83): a `jwks_uri` whose host equals the configured
+        // issuer's host is allowed without any allowlist entry.
+        let mock_server = wiremock::MockServer::start().await;
+        let base_url = mock_server.uri();
+
+        let jwks_url = format!("{base_url}/oauth/jwks");
+        let discovery_json = serde_json::json!({
+            "jwks_uri": jwks_url,
+            "issuer": base_url,
+        });
+        let jwks_json = serde_json::json!({
+            "keys": [{"kid": "k1", "kty": "RSA", "n": "n", "e": "e"}]
+        });
+
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path(
+                "/.well-known/openid-configuration",
+            ))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(discovery_json))
+            .mount(&mock_server)
+            .await;
+
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/oauth/jwks"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(jwks_json))
+            .mount(&mock_server)
+            .await;
+
+        let provider = OidcProvider::new(&base_url, None, &[])
+            .await
+            .expect("same-host jwks_uri must be accepted");
+        let guard = provider.cached_keys.lock().expect("lock not poisoned");
+        assert!(guard.as_ref().is_some());
+    }
+
+    #[tokio::test]
+    async fn new_with_jwks_host_in_allowlist_succeeds() {
+        // Regression (F-83): a `jwks_uri` on a cross-host domain is rejected
+        // by default but accepted when the host is in the allowlist.
+        let mock_server = wiremock::MockServer::start().await;
+        let base_url = mock_server.uri();
+
+        // The same wiremock server is reachable via "localhost", but the host
+        // string differs from the issuer's "127.0.0.1", so the allowlist is
+        // what makes this legal.
+        let cross_host_url = base_url.replace("127.0.0.1", "localhost");
+        let jwks_url = format!("{cross_host_url}/oauth/jwks");
+        let discovery_json = serde_json::json!({
+            "jwks_uri": jwks_url,
+            "issuer": base_url,
+        });
+        let jwks_json = serde_json::json!({
+            "keys": [{"kid": "k1", "kty": "RSA", "n": "n", "e": "e"}]
+        });
+
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path(
+                "/.well-known/openid-configuration",
+            ))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(discovery_json))
+            .mount(&mock_server)
+            .await;
+
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/oauth/jwks"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(jwks_json))
+            .mount(&mock_server)
+            .await;
+
+        let allowlist = vec!["localhost".to_owned()];
+        let provider = OidcProvider::new(&base_url, None, &allowlist)
+            .await
+            .expect("an allowlisted jwks host must be accepted");
+        let guard = provider.cached_keys.lock().expect("lock not poisoned");
+        assert!(guard.as_ref().is_some());
+    }
+
+    #[tokio::test]
+    async fn new_with_jwks_host_not_allowed_fails() {
+        // Regression (F-83): a `jwks_uri` whose host is neither the issuer's
+        // host nor allowlisted must be rejected before any keys are fetched.
+        let mock_server = wiremock::MockServer::start().await;
+        let base_url = mock_server.uri();
+
+        let discovery_json = serde_json::json!({
+            "jwks_uri": "https://attacker.example.com/jwks",
+            "issuer": base_url,
+        });
+
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path(
+                "/.well-known/openid-configuration",
+            ))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(discovery_json))
+            .mount(&mock_server)
+            .await;
+
+        let result = OidcProvider::new(&base_url, None, &[]).await;
+        let err = result.err().expect("expected Err, got Ok(provider)");
+        assert!(
+            matches!(err, OidcProviderError::DiscoveryJwksHostNotAllowed(_)),
+            "expected DiscoveryJwksHostNotAllowed, got {err:?}"
         );
     }
 
@@ -1879,7 +2215,7 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
             .mount(&mock_server)
             .await;
 
-        let provider = OidcProvider::new(&base_url, None)
+        let provider = OidcProvider::new(&base_url, None, &[])
             .await
             .expect("OIDC provider creation should succeed");
 
@@ -1932,7 +2268,7 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
             .mount(&mock_server)
             .await;
 
-        let provider = OidcProvider::new(&base_url, None)
+        let provider = OidcProvider::new(&base_url, None, &[])
             .await
             .expect("OIDC provider creation should succeed");
 

@@ -94,14 +94,37 @@ pub(crate) const LARGE_COPY_CHUNK_BYTES: u64 = 64 * 1024 * 1024; // 64 MiB
 /// Upper bound (seconds) for an S3 temp-upload artifact before it is reaped
 /// by `S3ObjectStore::sweep_stale_temp_keys`.
 ///
-/// Temp-then-copy uploads complete in seconds-to-minutes, so a `.tmp.` or
-/// `__tmp/shardline-stream-upload/` artifact older than an hour is a stranded
-/// remnant of a killed/crashed writer — never an in-flight write.
+/// Temp-then-copy uploads complete in seconds-to-minutes, so a
+/// `__tmp/shardline-overwrite/` or `__tmp/shardline-stream-upload/` artifact
+/// older than an hour is a stranded remnant of a killed/crashed writer —
+/// never an in-flight write.
 pub(crate) const S3_TEMP_ARTIFACT_AGE_SECONDS: u64 = 60 * 60;
 pub(crate) static TEMP_UPLOAD_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-/// Generates a unique temp key derived from a canonical key using a monotonic
-/// counter and nanosecond timestamp.
+/// The reserved namespace for overwrite/content-addressed temp artifacts.
+///
+/// User keys can never reach it: every user key lives under a managed prefix
+/// (`protocols/...`, `oci/...`, `xorbs/...`), and S3 object keys in particular
+/// live under `protocols/s3/{scope_namespace}/{key}` — they can never start
+/// with `__tmp/`. Restricting the generated temps to this namespace
+/// eliminates the shape-collision class entirely: `is_temp_upload_key` matches
+/// ONLY the reserved namespace, so a user key that merely *resembles* a
+/// generated temp (e.g. `data.tmp.1.1.1750000000000000000`, date stamps, OCI
+/// version tags) is never shadowed from listings and never reaped by the GC
+/// sweep (F-56 / F-80).
+pub(crate) const OVERWRITE_TEMP_KEY_PREFIX: &str = "__tmp/shardline-overwrite/";
+
+/// Generates a unique temp key in the reserved `__tmp/shardline-overwrite/`
+/// namespace, derived from a canonical key using a monotonic counter and
+/// nanosecond timestamp.
+///
+/// The generated shape is
+/// `__tmp/shardline-overwrite/<key-digest>.<counter>.<pid>.<nanos>` where the
+/// key digest is the lowercase hex BLAKE3 hash of the base key (so a stranded
+/// temp stays traceable to its base), the counter is a monotonic `u64`, the
+/// pid is a `u32`, and the nanos is a unix-nanosecond timestamp. The key
+/// digest makes the artifact unique per base key; the counter keeps it unique
+/// across subsequent temps for the same base.
 pub(crate) fn temp_key_for(key: &ObjectKey) -> Result<ObjectKey, S3ObjectStoreError> {
     let counter = TEMP_UPLOAD_COUNTER.fetch_add(1, Ordering::Relaxed);
     let now_nanos = SystemTime::now()
@@ -109,9 +132,9 @@ pub(crate) fn temp_key_for(key: &ObjectKey) -> Result<ObjectKey, S3ObjectStoreEr
         .unwrap_or_default()
         .as_nanos();
     let pid = std::process::id();
-    let suffix = format!("tmp.{counter}.{pid}.{now_nanos}");
-    ObjectKey::parse(&format!("{}.{suffix}", key.as_str()))
-        .map_err(|_err| S3ObjectStoreError::InvalidListedKey)
+    let key_digest = blake3::hash(key.as_str().as_bytes());
+    let relative = format!("{OVERWRITE_TEMP_KEY_PREFIX}{key_digest}.{counter}.{pid}.{now_nanos}");
+    ObjectKey::parse(&relative).map_err(|_err| S3ObjectStoreError::InvalidListedKey)
 }
 
 /// Returns `true` if `key` matches one of the EXACT temp-upload grammars this
@@ -119,39 +142,36 @@ pub(crate) fn temp_key_for(key: &ObjectKey) -> Result<ObjectKey, S3ObjectStoreEr
 /// whose key merely contains `.tmp.<digits>` (dots are legal in S3 keys, e.g.
 /// `data.tmp.1`) is not shadowed from listings or GC enumeration (F-49).
 ///
-/// The generated grammars are:
-/// (a) `<base>.tmp.<counter>.<pid>.<nanos>` — the `put_overwrite` and
-///     content-addressed multipart temp suffix ([`temp_key_for`]), where the
-///     counter is a monotonic `u64`, the pid is a `u32`, and the nanos is a
-///     plausible unix-nanosecond timestamp (`>= 10^15`); and
+/// The generated grammars are both inside the RESERVED `__tmp/` namespace that
+/// user keys can never reach:
+/// (a) `__tmp/shardline-overwrite/<key-digest>.<counter>.<pid>.<nanos>` — the
+///     `put_overwrite` and content-addressed multipart temp key
+///     ([`temp_key_for`]), where the key digest is 64 lowercase hex chars and
+///     the three trailing groups are decimal digit groups; and
 /// (b) `__tmp/shardline-stream-upload/<nanos>-<pid>-<counter>` — the
-///     stream-upload temp path ([`temporary_upload_location`]), inside the
-///     reserved `__tmp/` namespace.
+///     stream-upload temp path ([`temporary_upload_location`]).
+///
+/// Because the reserved prefix is the discriminator (F-80), the numeric-range
+/// heuristics of the old `<base>.tmp.<counter>.<pid>.<nanos>` grammar are
+/// gone: a user key shaped exactly like the old generated temps — e.g.
+/// `data.tmp.1.1.1750000000000000000`, `report.tmp.2026.01.15`, or an OCI tag
+/// `v1.tmp.123.456.1750000000000000000` — never matches and is never swept.
 pub(crate) fn is_temp_upload_key(key: &str) -> bool {
     is_overwrite_temp_key(key) || is_stream_upload_temp_key(key)
 }
 
-/// Matches grammar (a): `<base>.tmp.<counter>.<pid>.<nanos>` with a
-/// non-empty `<base>`. The final `.tmp.` is the delimiter (a base key may
-/// itself contain `.tmp.`), and the three trailing groups must match the
-/// EXACT generated shapes — not just any three decimal groups: the counter
-/// must fit `u64`, the pid must fit `u32` (it comes from
-/// [`std::process::id`]), and the nanos must be a plausible unix-nanosecond
-/// timestamp (`10^15 <= nanos < 10^20`; the epoch clock's value since early
-/// 1970, and generated values are ~1.7e18 today, staying 19-digit for ~300
-/// years). User keys whose suffixes are three all-digit groups — date stamps
-/// like `report.tmp.2026.01.15` / `backup.tmp.2026.08.16`, version tags like
-/// `data.tmp.001.002.003`, `photos.tmp.1.2.3`, or OCI tags like
-/// `v1.tmp.2026.01.15` — never match the generated shapes, so they are not
-/// shadowed from listings and never reaped by the GC sweep (F-56).
+/// Matches grammar (a): the reserved `__tmp/shardline-overwrite/` prefix
+/// followed by `<key-digest>.<counter>.<pid>.<nanos>` — exactly four
+/// dot-separated groups, a 64-hex key digest and three all-digit groups. The
+/// reserved prefix is the discriminator: no user key can start with it, so the
+/// tail check only tightens the match against hand-placed lookalikes; it never
+/// classifies a user key.
 fn is_overwrite_temp_key(key: &str) -> bool {
-    let Some((base, suffix)) = key.rsplit_once(".tmp.") else {
+    let Some(rest) = key.strip_prefix(OVERWRITE_TEMP_KEY_PREFIX) else {
         return false;
     };
-    if base.is_empty() {
-        return false;
-    }
-    let mut groups = suffix.split('.');
+    let mut groups = rest.split('.');
+    let key_digest = groups.next();
     let counter = groups.next();
     let pid = groups.next();
     let nanos = groups.next();
@@ -159,37 +179,19 @@ fn is_overwrite_temp_key(key: &str) -> bool {
         return false;
     }
     matches!(
-        (counter, pid, nanos),
-        (Some(counter), Some(pid), Some(nanos))
-            if is_all_digits(counter)
+        (key_digest, counter, pid, nanos),
+        (Some(key_digest), Some(counter), Some(pid), Some(nanos))
+            if is_64_hex(key_digest)
+                && is_all_digits(counter)
                 && is_all_digits(pid)
                 && is_all_digits(nanos)
-                && is_plausible_u64(counter)
-                && is_plausible_u32(pid)
-                && is_plausible_unix_nanos(nanos)
     )
 }
 
-/// True when `value` is a decimal number within `u64` range — the generated
-/// counter comes from a monotonic `u64` atomic.
-fn is_plausible_u64(value: &str) -> bool {
-    value.parse::<u64>().is_ok()
-}
-
-/// True when `value` is a decimal number within `u32` range — the generated
-/// pid is [`std::process::id`], a `u32`.
-fn is_plausible_u32(value: &str) -> bool {
-    value.parse::<u32>().is_ok()
-}
-
-/// True when `value` is a plausible unix-nanosecond timestamp: `10^15 <=
-/// nanos < 10^20` — the value [`SystemTime::now`] has held since early 1970.
-/// 16-digit dates like `2026.01.15` parse as decimal but fall below `10^15`.
-fn is_plausible_unix_nanos(value: &str) -> bool {
-    matches!(
-        value.parse::<u128>(),
-        Ok(nanos) if (1_000_000_000_000_000..100_000_000_000_000_000_000).contains(&nanos)
-    )
+/// True when `value` is exactly 64 ASCII hex characters — the shape
+/// [`blake3::Hash`] formats to (lowercase hex).
+fn is_64_hex(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 /// Matches grammar (b): the reserved `__tmp/shardline-stream-upload/` prefix

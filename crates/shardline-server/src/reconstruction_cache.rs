@@ -1105,4 +1105,101 @@ mod tests {
             Some("slow-chunk".to_owned())
         );
     }
+
+    // ── get_or_load — slow (>60s) loader keeps its latch past the total
+    //    orphan bound (F-78) ──────────────────────────────────────────────
+    //
+    // F-68 moved the latch-steal boundary to a 60s total orphan bound, but a
+    // reconstruction longer than 60s STILL had its latch stolen: the waiter's
+    // deadline fired while the loader was alive, the latch was released, and
+    // the service layer treated the resulting miss as a second full load()
+    // (measured: loads total 2). The adapter's loader now refreshes an
+    // aliveness stamp at intervals, and the waiter extends its wait at the
+    // deadline instead of stealing.
+
+    #[tokio::test(start_paused = true)]
+    async fn cache_service_waits_for_slow_in_flight_loader_beyond_total_bound_without_second_load()
+    {
+        let ttl_seconds = NonZeroU64::new(60).unwrap_or(NonZeroU64::MIN);
+        let memory = MemoryReconstructionCache::new(
+            ttl_seconds,
+            NonZeroUsize::new(8).unwrap_or(NonZeroUsize::MIN),
+        );
+        let adapter: SharedReconstructionCache = Arc::new(memory.clone());
+        let cache = Arc::new(ReconstructionCacheService::for_tests("memory", adapter));
+        let key = Arc::new(ReconstructionCacheKey::latest("slow-service-61s.bin", None));
+        let loader_calls = std::sync::Arc::new(AtomicUsize::new(0));
+
+        // R1: the adapter's get_or_load registers the loading latch and runs a
+        // 61s reconstruction — past the 60s total orphan bound. The adapter
+        // heartbeats the latch while the loader is in flight.
+        let memory_1 = memory.clone();
+        let key_1 = Arc::clone(&key);
+        let loader_calls_1 = Arc::clone(&loader_calls);
+        let task1 = tokio::spawn(async move {
+            memory_1
+                .get_or_load(&key_1, || {
+                    loader_calls_1.fetch_add(1, Ordering::SeqCst);
+                    Box::pin(async {
+                        tokio::time::sleep(Duration::from_secs(61)).await;
+                        let payload = serde_json::to_vec(&sample_response("slow-chunk-61"))
+                            .expect("serialize sample response");
+                        Ok::<_, ReconstructionCacheError>(payload)
+                    })
+                })
+                .await
+        });
+
+        // Give R1 time to register its latch and start its 61s sleep.
+        tokio::time::advance(Duration::from_millis(100)).await;
+
+        // R2: a concurrent service request finds the latch and must keep
+        // waiting past the 60s orphan bound instead of reporting a miss and
+        // starting a second reconstruction.
+        let cache_2 = Arc::clone(&cache);
+        let key_2 = Arc::clone(&key);
+        let loader_calls_2 = Arc::clone(&loader_calls);
+        let task2 = tokio::spawn(async move {
+            cache_2
+                .get_or_load(&key_2, || {
+                    loader_calls_2.fetch_add(1, Ordering::SeqCst);
+                    // If this ever runs, the `loader_calls == 1` assertion
+                    // below fails (a second reconstruction was started).
+                    async { Ok(sample_response("should-not-run")) }
+                })
+                .await
+        });
+
+        // A tiny advance so R2 registers its wait (deadline ≈ 60.1s).
+        tokio::time::advance(Duration::from_millis(1)).await;
+
+        // Cross R2's 60s deadline while R1's loader is still alive: the
+        // loader's aliveness stamp stays fresh, so R2 must extend its wait
+        // instead of stealing the latch.
+        tokio::time::advance(Duration::from_secs(60)).await;
+        assert!(
+            !task2.is_finished(),
+            "waiter must not give up at the orphan bound while the loader is alive"
+        );
+
+        // Advance through the loader's completion at 61s: the value is stored
+        // and R2 observes it.
+        tokio::time::advance(Duration::from_secs(2)).await;
+
+        let result1 = task1.await.expect("task 1 panicked");
+        let result2 = task2.await.expect("task 2 panicked");
+        assert!(result1.is_ok(), "loader should succeed");
+        assert!(result2.is_ok(), "waiter should succeed");
+        assert_eq!(
+            loader_calls.load(Ordering::SeqCst),
+            1,
+            "concurrent reconstructions must be deduplicated"
+        );
+        assert_eq!(
+            result2
+                .ok()
+                .and_then(|r| r.terms.first().map(|t| t.hash.clone())),
+            Some("slow-chunk-61".to_owned())
+        );
+    }
 }

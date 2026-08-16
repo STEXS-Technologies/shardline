@@ -16,7 +16,7 @@ use super::super::secrets::ensure_secret_size_within_limit;
 use super::defaults::{
     CONFIG_SECRET_KEY_BYTES, DEFAULT_LFS_PATCH_MAX_ACTIVE_SESSIONS,
     DEFAULT_LFS_PATCH_MAX_SEEK_AHEAD_BYTES, DEFAULT_LFS_PATCH_TOTAL_MAX_BYTES,
-    DEFAULT_LFS_PATCH_TTL_SECONDS, DEFAULT_MAX_REQUEST_BODY_BYTES,
+    DEFAULT_LFS_PATCH_TTL_SECONDS, DEFAULT_MAX_REQUEST_BODY_BYTES, DEFAULT_MAX_REVISIONS_PER_REPO,
     DEFAULT_OCI_REGISTRY_TOKEN_MAX_IN_FLIGHT_REQUESTS, DEFAULT_OCI_REGISTRY_TOKEN_TTL_SECONDS,
     DEFAULT_OCI_UPLOAD_MAX_ACTIVE_SESSIONS, DEFAULT_OCI_UPLOAD_SESSION_TTL_SECONDS,
     DEFAULT_PARALLELISM_FALLBACK, DEFAULT_S3_MAX_PART_BYTES, DEFAULT_S3_MIN_PART_BYTES,
@@ -89,6 +89,7 @@ pub struct ServerConfig {
     pub(crate) lfs_patch_max_active_sessions: NonZeroUsize,
     pub(crate) lfs_patch_total_max_bytes: NonZeroU64,
     pub(crate) lfs_patch_max_seek_ahead_bytes: NonZeroU64,
+    pub(crate) max_revisions_per_repo: NonZeroUsize,
 }
 
 impl ServerConfig {
@@ -148,6 +149,7 @@ impl ServerConfig {
                 auth_provider: AuthProviderKind::Local,
                 auth_oidc_issuer: None,
                 auth_oidc_audience: None,
+                auth_oidc_jwks_host_allowlist: None,
                 auth_jwks_url: None,
                 auth_jwks_issuer: None,
                 ed25519_private_key: None,
@@ -186,6 +188,7 @@ impl ServerConfig {
             lfs_patch_max_active_sessions: DEFAULT_LFS_PATCH_MAX_ACTIVE_SESSIONS,
             lfs_patch_total_max_bytes: DEFAULT_LFS_PATCH_TOTAL_MAX_BYTES,
             lfs_patch_max_seek_ahead_bytes: DEFAULT_LFS_PATCH_MAX_SEEK_AHEAD_BYTES,
+            max_revisions_per_repo: DEFAULT_MAX_REVISIONS_PER_REPO,
         }
     }
 
@@ -533,6 +536,18 @@ impl ServerConfig {
     #[must_use]
     pub fn auth_oidc_audience(&self) -> Option<&str> {
         self.auth.auth_oidc_audience.as_deref()
+    }
+
+    /// Returns the allowlist of hosts (besides the issuer's own host) whose
+    /// JWKS endpoints the OIDC discovery document may advertise via `jwks_uri`.
+    ///
+    /// Some IdPs legitimately cross-host their JWKS endpoint onto a different
+    /// domain than the issuer (e.g. Google serves keys from
+    /// `www.googleapis.com` while the issuer is `accounts.google.com`). When
+    /// unset, only the issuer's own host is accepted (fail-closed).
+    #[must_use]
+    pub fn auth_oidc_jwks_host_allowlist(&self) -> Option<&[String]> {
+        self.auth.auth_oidc_jwks_host_allowlist.as_deref()
     }
 
     /// Returns the optional JWKS endpoint URL.
@@ -931,6 +946,28 @@ impl ServerConfig {
         Ok(self)
     }
 
+    /// Returns the per-repo revision-registry cap: `create_revision` rejects
+    /// new revision names once a repository has reached this many registered
+    /// revisions.
+    #[must_use]
+    pub const fn max_revisions_per_repo(&self) -> NonZeroUsize {
+        self.max_revisions_per_repo
+    }
+
+    /// Overrides the per-repo revision-registry cap.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerConfigError::ZeroMaxRevisionsPerRepo`] when the value
+    /// is zero.
+    pub const fn with_max_revisions_per_repo(
+        mut self,
+        max_revisions_per_repo: NonZeroUsize,
+    ) -> Result<Self, ServerConfigError> {
+        self.max_revisions_per_repo = max_revisions_per_repo;
+        Ok(self)
+    }
+
     /// Sets the target xorb container size in bytes.
     ///
     /// Once accumulated chunk data reaches this threshold, the upload
@@ -1107,6 +1144,14 @@ impl ServerConfig {
     #[must_use]
     pub fn with_auth_oidc_audience(mut self, audience: String) -> Self {
         self.auth.auth_oidc_audience = Some(audience);
+        self
+    }
+
+    /// Sets the allowlist of hosts (besides the issuer's own host) whose JWKS
+    /// endpoints the OIDC discovery document may advertise via `jwks_uri`.
+    #[must_use]
+    pub fn with_auth_oidc_jwks_host_allowlist(mut self, hosts: Vec<String>) -> Self {
+        self.auth.auth_oidc_jwks_host_allowlist = Some(hosts);
         self
     }
 

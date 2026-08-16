@@ -53,6 +53,10 @@ impl fmt::Debug for AuthConfig {
             .field("auth_provider", &self.auth_provider)
             .field("auth_oidc_issuer", &self.auth_oidc_issuer)
             .field("auth_oidc_audience", &self.auth_oidc_audience)
+            .field(
+                "auth_oidc_jwks_host_allowlist",
+                &self.auth_oidc_jwks_host_allowlist,
+            )
             .field("auth_jwks_url", &self.auth_jwks_url)
             .field("auth_jwks_issuer", &self.auth_jwks_issuer)
             .field(

@@ -230,7 +230,10 @@ async fn delete_clears_orphaned_loading_latch_and_wakes_waiter() {
     // Seed an orphaned loading latch, as left behind by a failed loader.
     {
         let mut inner = cache.inner.write().await;
-        inner.loading.insert(key.clone(), Arc::new(Notify::new()));
+        inner.loading.insert(
+            key.clone(),
+            super::inner::LoadingEntry::new(Arc::new(Notify::new())),
+        );
     }
 
     // A get() on the orphaned latch would otherwise wait the full 30s stall.
@@ -471,6 +474,164 @@ async fn get_or_load_slow_loader_dedup_concurrent_waiter() {
         1,
         "loader must only run once"
     );
+}
+
+// ── get_or_load: a 61s loader (past the 60s total orphan bound) is not ──
+// orphaned — the loader's heartbeat keeps its latch alive (F-78)
+//
+// F-68 moved the latch-steal boundary to a 60s total orphan bound, but a
+// reconstruction longer than that was STILL stolen: the waiter's deadline fired
+// while the loader was alive, the latch was released, and the service layer
+// started a second full load. The loader now refreshes an aliveness stamp at
+// intervals, and the waiter extends its wait at the deadline while the stamp
+// is fresh instead of stealing the latch.
+
+#[tokio::test(start_paused = true)]
+async fn get_or_load_slow_loader_beyond_total_bound_keeps_latch() {
+    use std::sync::Arc;
+
+    let cache = Arc::new(MemoryReconstructionCache::new(
+        NonZeroU64::new(3600).unwrap_or(NonZeroU64::MIN),
+        NonZeroUsize::new(100).unwrap_or(NonZeroUsize::MIN),
+    ));
+    let key = ReconstructionCacheKey::latest("slow-beyond-bound", None);
+    let load_count = std::sync::Arc::new(AtomicU64::new(0));
+
+    // Caller 1: becomes the exclusive loader, taking 61s — past the 60s total
+    // orphan bound.
+    let cache_1 = Arc::clone(&cache);
+    let key_1 = key.clone();
+    let load_count_1 = std::sync::Arc::clone(&load_count);
+    let loader_task = tokio::spawn(async move {
+        cache_1
+            .get_or_load(&key_1, || {
+                load_count_1.fetch_add(1, Ordering::Relaxed);
+                Box::pin(async {
+                    tokio::time::sleep(Duration::from_secs(61)).await;
+                    Ok::<_, ReconstructionCacheError>(b"shared-beyond".to_vec())
+                })
+            })
+            .await
+    });
+
+    // Give the loader time to register its latch and start its 61s sleep.
+    tokio::time::advance(Duration::from_millis(100)).await;
+
+    // Caller 2: must keep waiting past the total orphan bound instead of
+    // stealing the latch and running a second load.
+    let cache_2 = Arc::clone(&cache);
+    let key_2 = key.clone();
+    let load_count_2 = std::sync::Arc::clone(&load_count);
+    let waiter_task = tokio::spawn(async move {
+        cache_2
+            .get_or_load(&key_2, || {
+                load_count_2.fetch_add(1, Ordering::Relaxed);
+                Box::pin(async {
+                    panic!("waiter must not run a second load");
+                    #[allow(unreachable_code)]
+                    Ok::<_, ReconstructionCacheError>(vec![])
+                })
+            })
+            .await
+    });
+
+    // A tiny advance so the waiter registers its wait (deadline ≈ 60.1s).
+    tokio::time::advance(Duration::from_millis(1)).await;
+
+    // Cross the waiter's 60s deadline while the loader is still alive: the
+    // loader's heartbeat keeps its aliveness stamp fresh, so the waiter must
+    // extend its wait instead of stealing the latch.
+    tokio::time::advance(Duration::from_secs(60)).await;
+    assert!(
+        !waiter_task.is_finished(),
+        "waiter must not steal the latch of a live loader at the orphan bound"
+    );
+
+    // Advance through the loader's completion at 61s: the value is stored and
+    // the waiter observes it.
+    tokio::time::advance(Duration::from_secs(2)).await;
+
+    let loader_result = loader_task.await.unwrap();
+    assert_eq!(loader_result.unwrap(), Some(b"shared-beyond".to_vec()));
+
+    let waiter_result = tokio::time::timeout(Duration::from_secs(5), waiter_task).await;
+    match waiter_result {
+        Ok(Ok(Ok(value))) => assert_eq!(value, Some(b"shared-beyond".to_vec())),
+        Ok(Ok(Err(e))) => panic!("waiter returned an unexpected error: {e}"),
+        Ok(Err(_join)) => panic!("waiter task panicked"),
+        Err(_) => panic!("waiter stalled despite the loader completing"),
+    }
+
+    assert_eq!(
+        load_count.load(Ordering::Relaxed),
+        1,
+        "loader must only run once"
+    );
+}
+
+// ── get: a get() waiter on a 61s loader extends instead of stealing ────
+// (F-78)
+
+#[tokio::test(start_paused = true)]
+async fn get_waits_for_slow_loader_beyond_total_bound_instead_of_stealing_latch() {
+    use std::sync::Arc;
+
+    let cache = Arc::new(MemoryReconstructionCache::new(
+        NonZeroU64::new(3600).unwrap_or(NonZeroU64::MIN),
+        NonZeroUsize::new(100).unwrap_or(NonZeroUsize::MIN),
+    ));
+    let key = ReconstructionCacheKey::latest("slow-get-beyond", None);
+
+    // Loader takes 61s — longer than the 60s total orphan bound.
+    let cache_1 = Arc::clone(&cache);
+    let key_1 = key.clone();
+    let loader_task = tokio::spawn(async move {
+        cache_1
+            .get_or_load(&key_1, || {
+                Box::pin(async {
+                    tokio::time::sleep(Duration::from_secs(61)).await;
+                    Ok::<_, ReconstructionCacheError>(b"slow-get-data".to_vec())
+                })
+            })
+            .await
+    });
+
+    // Give the loader time to register its latch and start its 61s sleep.
+    tokio::time::advance(Duration::from_millis(100)).await;
+
+    // A concurrent get() must wait for the loader, not steal the latch at the
+    // 60s total orphan bound.
+    let cache_2 = Arc::clone(&cache);
+    let key_2 = key.clone();
+    let get_task = tokio::spawn(async move { cache_2.get(&key_2).await });
+
+    // A tiny advance so the waiter registers its wait (deadline ≈ 60.1s).
+    tokio::time::advance(Duration::from_millis(1)).await;
+
+    // Cross the waiter's 60s deadline while the loader is still alive: the
+    // loader's heartbeat keeps its aliveness stamp fresh, so the waiter must
+    // extend its wait instead of stealing the latch.
+    tokio::time::advance(Duration::from_secs(60)).await;
+    assert!(
+        !get_task.is_finished(),
+        "get() must not give up at the total orphan bound while the loader is alive"
+    );
+
+    // Advance through the loader's completion at 61s: the value is stored and
+    // the waiter observes it.
+    tokio::time::advance(Duration::from_secs(2)).await;
+
+    let loader_result = loader_task.await.unwrap();
+    assert_eq!(loader_result.unwrap(), Some(b"slow-get-data".to_vec()));
+
+    let get_result = tokio::time::timeout(Duration::from_secs(5), get_task).await;
+    match get_result {
+        Ok(Ok(Ok(Some(data)))) => assert_eq!(data, b"slow-get-data".to_vec()),
+        Ok(Ok(Ok(None))) => panic!("get() should have returned the loader's value"),
+        Ok(Ok(Err(e))) => panic!("get() returned an unexpected error: {e}"),
+        Ok(Err(_join)) => panic!("get() task panicked"),
+        Err(_) => panic!("get() stalled despite the loader completing"),
+    }
 }
 
 // ── get_or_load: cache hit (fast path) ────────────────────────────────
@@ -1440,12 +1601,14 @@ async fn get_or_load_waiter_does_not_hang_on_orphaned_latch() {
     let key = ReconstructionCacheKey::latest("orphaned-latch", None);
 
     // Seed an orphaned loading latch, as left behind by a loader that never
-    // put()s or notifies.
+    // put()s or notifies. Its aliveness stamp is never refreshed, so a waiter
+    // at the orphan bound must declare it dead and release it.
     {
         let mut inner = cache.inner.write().await;
-        inner
-            .loading
-            .insert(key.clone(), Arc::new(tokio::sync::Notify::new()));
+        inner.loading.insert(
+            key.clone(),
+            super::inner::LoadingEntry::new(Arc::new(tokio::sync::Notify::new())),
+        );
     }
 
     // A waiter must not block past the total orphan bound; advance time past

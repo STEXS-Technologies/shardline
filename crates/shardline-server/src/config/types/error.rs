@@ -118,6 +118,12 @@ pub enum ServerConfigError {
     /// The maximum shard xorb chunk record count was zero.
     #[error("max shard xorb chunk record count must be greater than zero")]
     ZeroMaxShardXorbChunks,
+    /// The per-repo revision-registry cap could not be parsed.
+    #[error("invalid max revisions per repo")]
+    MaxRevisionsPerRepo(ParseIntError),
+    /// The per-repo revision-registry cap was zero.
+    #[error("max revisions per repo must be greater than zero")]
+    ZeroMaxRevisionsPerRepo,
     /// The chunk size was zero.
     #[error("chunk size must be greater than zero")]
     ZeroChunkSize,

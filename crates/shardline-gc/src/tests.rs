@@ -1784,6 +1784,118 @@ async fn run_local_gc_diagnostics_with_orphan_chunks() {
     assert_eq!(diagnostics.orphan_inventory[0].bytes, 28);
 }
 
+// ── last-GC-clock anchor gating + write tolerance (F-76) ───────────────
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dry_run_on_read_only_store_tolerates_anchor_write_failure() {
+    // F-76 regression: the F-57 anchor write propagated errors via `?`, so a
+    // dry run against a read-only object store (chmod 0555 chunks dir;
+    // least-privilege S3 cron role) aborted with an object-store
+    // PermissionDenied error and produced NO report — even though pre-F-57 the
+    // identical dry run completed all-reads. The anchor is an optimization, not
+    // a correctness requirement: a failed write must be tolerated (warn and
+    // continue) and the run must still return Ok with a full report.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().to_path_buf();
+    std::fs::create_dir_all(root.join("chunks")).unwrap();
+    let chunks_dir = root.join("chunks");
+
+    // chmod 0555: reads (metadata, listing) succeed, writes (the anchor put,
+    // which must create chunks/gc/) fail with PermissionDenied.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&chunks_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+    }
+
+    let result = run_local_gc_diagnostics(root.clone(), LocalGcOptions::dry_run()).await;
+
+    // Restore write permission so tempdir cleanup can remove the tree.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&chunks_dir, std::fs::Permissions::from_mode(0o755));
+    }
+
+    assert!(
+        result.is_ok(),
+        "dry-run on a read-only store must succeed despite the anchor write failing: {:?}",
+        result
+    );
+    let diagnostics = result.unwrap();
+    assert_eq!(diagnostics.report.scanned_records, 0);
+    assert_eq!(diagnostics.report.orphan_chunks, 0);
+    assert_eq!(diagnostics.report.deleted_chunks, 0);
+    assert!(diagnostics.retention_report.is_empty());
+    assert!(diagnostics.orphan_inventory.is_empty());
+}
+
+#[test]
+fn dry_run_on_writable_store_does_not_persist_gc_clock_anchor() {
+    // F-76 regression: the F-57 anchor write was unconditional (not gated on
+    // mark||sweep), so the documented "pure dry run" (mark=false, sweep=false,
+    // "changes nothing") CREATED chunks/gc/last-gc-clock-anchor — mutating the
+    // object store. A pure dry run must remain read-only: it still READS the
+    // anchor for the forward-clock guard, but never writes it.
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let dir = tempfile::tempdir().unwrap();
+        let object_store = ServerObjectStore::local(dir.path().join("chunks")).unwrap();
+        let index_store = MemoryIndexStore::new();
+
+        let diagnostics = run_gc_helper(&object_store, &index_store, LocalGcOptions::dry_run())
+            .await
+            .unwrap();
+
+        assert_eq!(diagnostics.report.deleted_chunks, 0);
+        assert!(
+            !object_store
+                .contains(&ObjectKey::parse("gc/last-gc-clock-anchor").unwrap())
+                .unwrap(),
+            "a pure dry run must not persist the last-GC-clock anchor"
+        );
+    });
+}
+
+#[test]
+fn mark_or_sweep_run_on_writable_store_persists_gc_clock_anchor() {
+    // F-76: a run that mutates the object store (mark and/or sweep) must
+    // persist the last-GC-clock anchor so a forward jump between two consecutive
+    // runs is detectable even on a low-churn deployment (F-57).
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let dir = tempfile::tempdir().unwrap();
+        let object_store = ServerObjectStore::local(dir.path().join("chunks")).unwrap();
+        let index_store = MemoryIndexStore::new();
+        let anchor_key = ObjectKey::parse("gc/last-gc-clock-anchor").unwrap();
+
+        // sweep-only is a store-mutating run.
+        let sweep_diagnostics =
+            run_gc_helper(&object_store, &index_store, LocalGcOptions::sweep_only())
+                .await
+                .unwrap();
+        assert_eq!(sweep_diagnostics.report.deleted_chunks, 0);
+        assert!(
+            object_store.contains(&anchor_key).unwrap(),
+            "a sweep run must persist the last-GC-clock anchor"
+        );
+
+        // mark-only is also a store-mutating run.
+        let mark_diagnostics = run_gc_helper(
+            &object_store,
+            &index_store,
+            LocalGcOptions::mark_only(DEFAULT_LOCAL_GC_RETENTION_SECONDS),
+        )
+        .await
+        .unwrap();
+        assert_eq!(mark_diagnostics.report.new_quarantine_candidates, 0);
+        assert!(
+            object_store.contains(&anchor_key).unwrap(),
+            "a mark run must persist the last-GC-clock anchor"
+        );
+    });
+}
+
 // ── run_local_gc with a pre-populated local SQLite store ──────────────
 
 #[tokio::test(flavor = "multi_thread")]

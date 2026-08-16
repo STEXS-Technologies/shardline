@@ -141,14 +141,29 @@ where
             "GC wall clock ({now_unix_seconds}s) jumped forward relative to the newest stored \
              lifecycle creation timestamp; skipping the quarantine sweep and hold pruning this run"
         );
-    } else {
+    } else if options.mark || options.sweep {
         // The forward guard cleared: this run's wall clock is trustworthy
         // (within the slack of every stored creation timestamp and the previous
         // anchor), so persist it as the new last-GC-clock anchor. A fired run's
         // `now` is suspect and is never stamped — the anchor stays at the last
         // TRUSTED observation, which is exactly what makes a between-runs jump
         // detectable on a low-churn deployment.
-        write_last_gc_clock_anchor(object_store, now_unix_seconds)?;
+        //
+        // Only runs that actually mutate the object store (mark and/or sweep)
+        // persist the anchor; a pure dry run must remain read-only. A failed
+        // anchor write is tolerated (warn and continue): the anchor is an
+        // optimization, not a correctness requirement, and the forward guard
+        // falls back to the creation-timestamp-only reference on later runs —
+        // the safe pre-anchor behavior. This keeps read-only stores (chmod 0555
+        // chunks dir; least-privilege S3 cron roles) fully operational: they
+        // still get complete GC diagnostics and passes instead of aborting with
+        // a PermissionDenied error (F-76).
+        if let Err(error) = write_last_gc_clock_anchor(object_store, now_unix_seconds) {
+            tracing::warn!(
+                "failed to persist the last-GC-clock anchor at gc/last-gc-clock-anchor \
+                 ({error}); continuing with the creation-timestamp-only reference"
+            );
+        }
     }
 
     let prune_expired_retention_holds =

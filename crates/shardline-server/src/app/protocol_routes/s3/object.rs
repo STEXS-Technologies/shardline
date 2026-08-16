@@ -302,27 +302,25 @@ async fn s3_copy_object(
     // per-key lock in `s3_upload_object_body`, right before the index swap.
     check_put_precondition(state, destination, headers).await?;
 
-    // Metadata directive: COPY (default) propagates the source's user metadata;
-    // REPLACE overrides it with the x-amz-meta-* headers of this request.
-    let user_metadata = match metadata_directive(headers) {
-        MetadataDirective::Replace => capture_user_metadata(headers),
-        MetadataDirective::Copy => s3_object_entry(state, &source_context)
-            .await?
-            .map(|entry| entry.user_metadata)
-            .unwrap_or_default(),
-    };
-
     // The copy is subject to the SAME per-request byte ceiling as PutObject
-    // (SHARDLINE_S3_MAX_PART_BYTES): resolve the source's length in ONE pinned
-    // snapshot and reject an over-cap source with EntityTooLarge BEFORE any
-    // bytes are read or written — exactly like a direct over-cap PUT.
+    // (SHARDLINE_S3_MAX_PART_BYTES): resolve the source's length AND metadata
+    // in ONE pinned snapshot and reject an over-cap source with EntityTooLarge
+    // BEFORE any bytes are read or written — exactly like a direct over-cap
+    // PUT. The snapshot is the source's single commit point (F-70/F-79): its
+    // user metadata, size, and record version are paired in one resolution, so
+    // a concurrent source overwrite can never pair OLD-row metadata with
+    // NEW-record bytes (a PUT commits its new record before swapping the row).
     let max_bytes = usize::try_from(state.config.s3_max_part_bytes().get())
         .map_err(|_error| S3Error::internal())?;
     let max_bytes = NonZeroUsize::new(max_bytes).ok_or_else(S3Error::internal)?;
     let max_bytes_u64 = u64::try_from(max_bytes.get()).map_err(|_error| S3Error::internal())?;
     let snapshot = match state
         .backend
-        .s3_object_read_snapshot(&source_context.object_key)
+        .s3_object_read_snapshot(
+            &source_context.scope_namespace,
+            &source_context.key,
+            &source_context.object_key,
+        )
         .await
     {
         Ok(snapshot) => snapshot,
@@ -336,6 +334,15 @@ async fn s3_copy_object(
             status: StatusCode::PAYLOAD_TOO_LARGE,
         });
     }
+
+    // Metadata directive: COPY (default) propagates the source's user metadata
+    // — resolved from the SAME snapshot as the source bytes, so the copied
+    // metadata always belongs to the copied content (F-79); REPLACE overrides
+    // it with the x-amz-meta-* headers of this request.
+    let user_metadata = match metadata_directive(headers) {
+        MetadataDirective::Replace => capture_user_metadata(headers),
+        MetadataDirective::Copy => snapshot.user_metadata,
+    };
 
     // Stream the source through the same pinned read path as GetObject (no
     // unbounded full-object `read_object` buffer), bounded mid-stream by the
@@ -474,12 +481,19 @@ fn bounded_byte_stream(
 /// which is stored in the index row and returned.
 ///
 /// When `precondition` is `Some`, the `If-Match` / `If-None-Match` headers are
-/// RE-EVALUATED here — under the per-key lock, after the body streamed but
-/// before the index swap. The handlers' early check is only a fast-path
-/// rejection: without this re-check a concurrent conditional writer that lost
-/// the race would have passed the check against the pre-write state and both
-/// requests would succeed (check-then-act TOCTOU). By re-checking against the
-/// committed row the loser sees the winner's ETag and fails with `412`.
+/// evaluated in TWO places under the per-key lock:
+///
+/// 1. BEFORE the body is streamed or any record committed (F-86): the row is
+///    only mutated by holders of this same lock (PutObject / CopyObject /
+///    multipart completion / DeleteObject), so a failing check here returns
+///    412 with NO write side effect — the losing record is never committed,
+///    never becomes the LATEST version, and its chunks are never written. The
+///    handlers' early check is only a fast-path rejection.
+/// 2. AFTER the body streamed but BEFORE the index swap (the F-8 TOCTOU
+///    guarantee): belt-and-suspenders in case a future row mutation bypasses
+///    the lock. When it fires the just-committed record is the LOSER's — it is
+///    purged (version record + latest alias) so no latest-record consumer ever
+///    serves the loser's bytes and its chunks are not retained as reachable.
 async fn s3_upload_object_body(
     state: &Arc<AppState>,
     context: &S3ObjectContext<'_>,
@@ -492,6 +506,20 @@ async fn s3_upload_object_body(
     // upsert + stale-direct drop) is atomic with respect to other overwrites.
     let object_lock = acquire_object_upload_lock(context.object_key.as_str());
     let _object_guard = object_lock.lock().await;
+
+    // F-86: the authoritative conditional pre-check, under the per-key lock
+    // and BEFORE the body is read or any record committed. The row is only
+    // mutated by holders of this same lock, so a check that passes here cannot
+    // be invalidated before the swap below; a failing check returns 412
+    // without committing anything (the loser's record never becomes the LATEST
+    // version and its chunks are never written). Guarded to skip the extra row
+    // read for unconditional PUTs, whose post-commit re-check below is a
+    // trivially-passing no-op.
+    if let Some(precondition) = precondition
+        && read_conditional_headers(precondition).is_some()
+    {
+        check_put_precondition(state, context, precondition).await?;
+    }
 
     let start = Instant::now();
     let uploaded = match state
@@ -519,13 +547,27 @@ async fn s3_upload_object_body(
     let etag = md5_hasher_hex(&hasher);
 
     // Re-evaluate the conditional precondition NOW, under the per-key lock and
-    // after the body streamed but BEFORE the index swap: a concurrent
-    // conditional writer that won the race has already committed its row, so a
-    // loser sees the winner's ETag here and 412s instead of both writes
-    // succeeding. The pre-upload check in the handlers was against the
-    // pre-write state and cannot serialize concurrent writers.
-    if let Some(precondition) = precondition {
-        check_put_precondition(state, context, precondition).await?;
+    // after the body streamed but BEFORE the index swap: belt-and-suspenders
+    // for the F-8 check-then-act guarantee (the pre-check above is
+    // authoritative today). When it fires the just-committed record is the
+    // loser's — purge its version so no latest-record consumer serves the
+    // loser's bytes and no orphan record (or reachable chunks) remains (F-86).
+    if let Some(precondition) = precondition
+        && let Err(error) = check_put_precondition(state, context, precondition).await
+    {
+        let file_id = uploaded.file_id.clone();
+        match state.backend.delete_file_reference(&file_id).await {
+            Ok(true) => {
+                tracing::debug!(file_id, "purged conditional-write loser record");
+            }
+            Ok(false) => {
+                tracing::debug!(file_id, "conditional-write loser record already gone");
+            }
+            Err(purge_error) => {
+                tracing::warn!(file_id, %purge_error, "failed to purge conditional-write loser record");
+            }
+        }
+        return Err(error);
     }
 
     // Swap: point the index at the new record version, then drop any stale
@@ -602,7 +644,11 @@ pub(crate) async fn s3_get_object(
         None => {
             let snapshot = match state
                 .backend
-                .s3_object_read_snapshot(&context.object_key)
+                .s3_object_read_snapshot(
+                    &context.scope_namespace,
+                    &context.key,
+                    &context.object_key,
+                )
                 .await
             {
                 Ok(snapshot) => snapshot,

@@ -251,6 +251,20 @@ fn revision_sql(
         .map_err(LocalIndexStoreError::from)
 }
 
+fn count_revisions_sql(
+    connection: &Connection,
+    key: &RepoKey,
+) -> Result<u64, LocalIndexStoreError> {
+    let count: i64 = connection.query_row(
+        "SELECT COUNT(*)
+         FROM shardline_revisions
+         WHERE provider = ?1 AND owner = ?2 AND repo = ?3",
+        params![key.provider, key.owner, key.repo],
+        |row| row.get(0),
+    )?;
+    Ok(u64::try_from(count).unwrap_or(u64::MAX))
+}
+
 fn list_revisions_sql(
     connection: &Connection,
     key: &RepoKey,
@@ -399,6 +413,17 @@ impl TreeStore for LocalIndexStore {
         tokio::task::spawn_blocking(move || {
             let connection = store.open_connection()?;
             revision_sql(&connection, &key, &rev)
+        })
+        .await
+        .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
+    }
+
+    async fn count_revisions(&self, key: &RepoKey) -> Result<u64, Self::Error> {
+        let store = self.clone();
+        let key = key.clone();
+        tokio::task::spawn_blocking(move || {
+            let connection = store.open_connection()?;
+            count_revisions_sql(&connection, &key)
         })
         .await
         .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
@@ -769,5 +794,57 @@ mod tests {
                 .await
                 .unwrap()
         );
+    }
+
+    #[tokio::test]
+    async fn count_revisions_counts_only_the_matching_repo() {
+        let store = make_store();
+        assert_eq!(
+            TreeStore::count_revisions(&store, &repo_key())
+                .await
+                .unwrap(),
+            0
+        );
+        for n in 0..5u8 {
+            let rev = RevisionRecord {
+                provider: "github".to_owned(),
+                owner: "owner".to_owned(),
+                repo: "repo".to_owned(),
+                revision: format!("rev-{n:02}"),
+                created_at_unix_seconds: u64::from(n),
+                updated_at_unix_seconds: u64::from(n),
+            };
+            assert!(TreeStore::upsert_revision(&store, &rev).await.unwrap());
+        }
+        assert_eq!(
+            TreeStore::count_revisions(&store, &repo_key())
+                .await
+                .unwrap(),
+            5
+        );
+
+        // A same-name upsert does not grow the count; a different repo is not
+        // counted against this repository.
+        let refreshed = RevisionRecord {
+            provider: "github".to_owned(),
+            owner: "owner".to_owned(),
+            repo: "repo".to_owned(),
+            revision: "rev-00".to_owned(),
+            created_at_unix_seconds: 9,
+            updated_at_unix_seconds: 9,
+        };
+        assert!(
+            !TreeStore::upsert_revision(&store, &refreshed)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            TreeStore::count_revisions(&store, &repo_key())
+                .await
+                .unwrap(),
+            5
+        );
+        let other = RepoKey::new("github", "owner", "other-repo");
+        assert_eq!(TreeStore::count_revisions(&store, &other).await.unwrap(), 0);
     }
 }

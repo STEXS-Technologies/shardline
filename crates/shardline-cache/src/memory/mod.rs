@@ -1,7 +1,7 @@
 use std::{
     future::Future,
     num::{NonZeroU64, NonZeroUsize},
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
@@ -18,7 +18,7 @@ mod inner;
 #[cfg(test)]
 mod tests;
 
-use inner::{CacheInner, MemoryEntry};
+use inner::{CacheInner, LoadingEntry, MemoryEntry};
 
 /// TOTAL time a waiter tolerates a loading latch that never stores a value
 /// before declaring its loader orphaned and releasing the latch.
@@ -29,10 +29,25 @@ use inner::{CacheInner, MemoryEntry};
 /// layer treats `Ok(None)` as a miss and starts a second load). The waiter
 /// therefore waits through the full bound — re-examining the cache whenever the
 /// loader's `Notify` fires — and only releases the latch once THIS total bound
-/// elapses with no value stored. A slow-but-alive loader keeps its latch, while
-/// a genuinely-dead loader (panicked without putting/notifying) still cannot
+/// elapses with no value stored. Before releasing, the waiter re-checks the
+/// loader's aliveness stamp ([`LoadingEntry::last_seen_alive`]): a loader that
+/// refreshes its stamp while running is slow but alive, so the waiter extends
+/// its bound instead of stealing the latch (F-78). A genuinely-dead loader
+/// (panicked without putting/notifying) leaves a stale stamp and still cannot
 /// wedge waiters forever.
 const LOADER_ORPHAN_TOTAL_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Interval at which an in-flight loader refreshes its aliveness stamp while
+/// still running. Smaller than [`LOADER_ALIVE_GRACE`] so a waiter that wakes
+/// at the orphan bound always observes a fresh stamp for a live loader.
+const LOADER_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
+
+/// How stale a loading latch's aliveness stamp may be before a waiter at the
+/// orphan bound declares the loader dead and releases the latch. Larger than
+/// the heartbeat interval so a loader that just missed a tick is not stolen
+/// from, while a genuinely-dead latch (never heartbeated) is still cleared at
+/// the first orphan bound.
+const LOADER_ALIVE_GRACE: Duration = Duration::from_secs(10);
 
 /// Bounded in-memory reconstruction cache adapter.
 #[derive(Debug, Clone)]
@@ -96,7 +111,7 @@ impl MemoryReconstructionCache {
         }
 
         // Try to become the exclusive loader for this key.
-        let (should_load, notify) = {
+        let (should_load, notify, last_seen_alive) = {
             let mut inner = self.inner.write().await;
             let now = Instant::now();
 
@@ -111,29 +126,38 @@ impl MemoryReconstructionCache {
             // Use separate branches on .is_some() to avoid the clippy
             // option_if_let_else lint (which flags both `if let Some`
             // and `match { Some, None }` on Option).
-            let (should_load, notify) = if inner.loading.contains_key(key) {
+            let (should_load, notify, last_seen_alive) = if inner.loading.contains_key(key) {
                 // SAFETY: contains_key was just checked — get() returns Some.
                 // Use unwrap_or_else with a non-panicking default to avoid
                 // denied lints while satisfying the type system.
-                let dummy = Arc::new(Notify::new());
+                let dummy = LoadingEntry::new(Arc::new(Notify::new()));
                 let existing = inner.loading.get(key).unwrap_or(&dummy);
-                (false, Arc::clone(existing))
+                (
+                    false,
+                    Arc::clone(&existing.notify),
+                    Arc::clone(&existing.last_seen_alive),
+                )
             } else {
-                let new_notify = Arc::new(Notify::new());
-                inner.loading.insert(key.clone(), Arc::clone(&new_notify));
+                let loading = LoadingEntry::new(Arc::new(Notify::new()));
+                let notify = Arc::clone(&loading.notify);
+                let last_seen_alive = Arc::clone(&loading.last_seen_alive);
+                inner.loading.insert(key.clone(), loading);
                 // Clean up any expired entry so the loader can store fresh data.
                 if let Some(entry) = inner.entries.get(key)
                     && entry.expires_at <= now
                 {
                     inner.remove(key);
                 }
-                (true, new_notify)
+                (true, notify, last_seen_alive)
             };
-            (should_load, notify)
+            (should_load, notify, last_seen_alive)
         };
 
         if should_load {
-            let result = loader().await;
+            // Run the loader while refreshing the latch's aliveness stamp at
+            // intervals, so a slow-but-alive loader is never mistaken for a
+            // dead one at the orphan bound (F-78).
+            let result = run_loader_with_heartbeat(last_seen_alive, loader).await;
             match result {
                 Ok(payload) => {
                     self.put(key, &payload).await?;
@@ -150,7 +174,9 @@ impl MemoryReconstructionCache {
         } else {
             // Someone else is loading — wait for them (bounded). `wait_for_loader`
             // re-enters for a second interval instead of stealing the latch while
-            // a slow-but-alive loader may still be running (F-68).
+            // a slow-but-alive loader may still be running (F-68), and only
+            // releases the latch once the loader's aliveness stamp goes stale
+            // (F-78).
             Ok(self.wait_for_loader(key, notify).await)
         }
     }
@@ -168,12 +194,18 @@ impl MemoryReconstructionCache {
     /// would hang forever. The loop therefore re-checks the cache and loading
     /// map after every wakeup (and before the first wait), re-arming the
     /// notification while the loader is still running.
+    ///
+    /// At the deadline the waiter re-checks the loader's aliveness stamp before
+    /// releasing the latch: a loader that refreshes its stamp while running is
+    /// slow but alive, so the waiter extends its bound and keeps waiting; only
+    /// a stale stamp (genuinely dead loader) causes the latch to be stolen
+    /// (F-78).
     async fn wait_for_loader(
         &self,
         key: &ReconstructionCacheKey,
         notify: Arc<Notify>,
     ) -> Option<Vec<u8>> {
-        let deadline = Instant::now()
+        let mut deadline = Instant::now()
             .checked_add(LOADER_ORPHAN_TOTAL_TIMEOUT)
             .unwrap_or_else(Instant::now);
         loop {
@@ -208,17 +240,63 @@ impl MemoryReconstructionCache {
                     {
                         return Some(entry.payload.as_ref().clone());
                     }
+                    // Aliveness re-check: a running loader refreshes its stamp
+                    // at intervals, so a fresh stamp means it is slow but alive.
+                    // Extend the wait instead of stealing its latch (F-78); the
+                    // latch is only released when the stamp has gone stale
+                    // (the loader genuinely died without putting or notifying).
+                    let loader_alive = inner.loading.get(key).is_some_and(|loading| {
+                        now.saturating_duration_since(
+                            *loading
+                                .last_seen_alive
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+                        ) <= LOADER_ALIVE_GRACE
+                    });
                     drop(inner);
-                    // The total orphan bound elapsed and no value arrived. The
-                    // loader is presumed dead (panicked without notifying):
-                    // release the latch so later callers can retry promptly,
-                    // and wake sibling waiters so they observe the release too.
+                    if loader_alive {
+                        deadline = now
+                            .checked_add(LOADER_ORPHAN_TOTAL_TIMEOUT)
+                            .unwrap_or(now);
+                        continue;
+                    }
+                    // The total orphan bound elapsed with no stored value and no
+                    // recent aliveness: the loader is presumed dead (panicked
+                    // without notifying). Release the latch so later callers can
+                    // retry promptly, and wake sibling waiters so they observe
+                    // the release too.
                     let mut write_guard = self.inner.write().await;
                     write_guard.loading.remove(key);
                     drop(write_guard);
                     notify.notify_waiters();
                     return None;
                 }
+            }
+        }
+    }
+}
+
+/// Runs a loader future while refreshing the loading latch's aliveness stamp
+/// at intervals. The waiter at the orphan bound re-checks the stamp: a fresh
+/// stamp proves the loader is slow but alive and the wait must be extended; a
+/// stale stamp means the loader died without putting or notifying (F-78).
+async fn run_loader_with_heartbeat<F, Fut>(
+    last_seen_alive: Arc<Mutex<Instant>>,
+    loader: F,
+) -> Result<Vec<u8>, ReconstructionCacheError>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<Vec<u8>, ReconstructionCacheError>>,
+{
+    let mut loader_future = std::pin::pin!(loader());
+    let mut heartbeat = tokio::time::interval(LOADER_HEARTBEAT_INTERVAL);
+    loop {
+        tokio::select! {
+            result = &mut loader_future => return result,
+            _ = heartbeat.tick() => {
+                *last_seen_alive
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = Instant::now();
             }
         }
     }
@@ -254,18 +332,19 @@ impl AsyncReconstructionCache for MemoryReconstructionCache {
                 return Ok(Some(entry.payload.as_ref().clone()));
             }
 
-            if let Some(notify) = inner.loading.get(key) {
-                let notify = Arc::clone(notify);
+            if let Some(loading) = inner.loading.get(key) {
+                let notify = Arc::clone(&loading.notify);
                 drop(inner);
                 // Wait for the in-flight loader (bounded). The latch is NOT
                 // stolen after a single stall interval: a slow-but-alive loader
                 // keeps its latch so the caller's load() stays deduplicated
-                // (F-68).
+                // (F-68), and the waiter extends past the total bound while the
+                // loader's aliveness stamp stays fresh (F-78).
                 return Ok(self.wait_for_loader(key, notify).await);
             }
 
-            let notify = Arc::new(Notify::new());
-            inner.loading.insert(key.clone(), Arc::clone(&notify));
+            let loading = LoadingEntry::new(Arc::new(Notify::new()));
+            inner.loading.insert(key.clone(), loading);
 
             let should_remove = inner
                 .entries
@@ -301,8 +380,8 @@ impl AsyncReconstructionCache for MemoryReconstructionCache {
                     seq,
                 },
             );
-            if let Some(notify) = inner.loading.remove(key) {
-                notify.notify_waiters();
+            if let Some(loading) = inner.loading.remove(key) {
+                loading.notify.notify_waiters();
             }
             Ok(())
         })
@@ -319,8 +398,8 @@ impl AsyncReconstructionCache for MemoryReconstructionCache {
             // explicitly gone, so waiting callers must wake and observe an
             // absence rather than block until the adapter's stall timeout. This
             // is what lets a failed loader's concurrency latch be cleaned up.
-            if let Some(notify) = inner.loading.remove(key) {
-                notify.notify_waiters();
+            if let Some(loading) = inner.loading.remove(key) {
+                loading.notify.notify_waiters();
             }
             Ok(removed)
         })

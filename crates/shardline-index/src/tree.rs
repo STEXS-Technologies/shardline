@@ -198,6 +198,17 @@ pub trait TreeStore: Send + Sync {
         rev: &str,
     ) -> Result<Option<RevisionRecord>, Self::Error>;
 
+    /// Counts the revision registry rows for a repository.
+    ///
+    /// Used to enforce the per-repo revision-registry cap (F-75) before an
+    /// insert: the count-then-insert race at the boundary is acceptable, the
+    /// cap is a bound not a hard invariant.
+    ///
+    /// # Errors
+    ///
+    /// Returns the adapter error when the count fails.
+    async fn count_revisions(&self, key: &RepoKey) -> Result<u64, Self::Error>;
+
     /// Lists revisions for a repository ordered by revision name, resuming
     /// after `cursor` (keyset on the revision name) and returning at most
     /// `limit` rows.

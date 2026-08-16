@@ -181,6 +181,26 @@ fn server_config_new_constructs_with_defaults() {
         config.s3_upload_max_active_part_files(),
         NonZeroUsize::new(200_000).unwrap()
     );
+    assert_eq!(
+        config.max_revisions_per_repo(),
+        NonZeroUsize::new(10_000).unwrap()
+    );
+}
+
+#[test]
+fn server_config_builder_with_max_revisions_per_repo() {
+    let config = ServerConfig::new(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+        "http://localhost:8080".to_owned(),
+        PathBuf::from("/tmp/test"),
+        NonZeroUsize::new(4096).unwrap(),
+    )
+    .with_max_revisions_per_repo(NonZeroUsize::new(4).unwrap())
+    .unwrap();
+    assert_eq!(
+        config.max_revisions_per_repo(),
+        NonZeroUsize::new(4).unwrap()
+    );
 }
 
 #[test]
@@ -690,6 +710,37 @@ fn server_config_builder_with_auth_oidc_audience() {
         NonZeroUsize::new(4096).unwrap(),
     );
     assert_eq!(default.auth_oidc_audience(), None);
+}
+
+#[test]
+fn server_config_builder_with_auth_oidc_jwks_host_allowlist() {
+    let config = ServerConfig::new(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+        "http://localhost:8080".to_owned(),
+        PathBuf::from("/tmp/test"),
+        NonZeroUsize::new(4096).unwrap(),
+    )
+    .with_auth_oidc_jwks_host_allowlist(vec![
+        "www.googleapis.com".to_owned(),
+        "api.example.com".to_owned(),
+    ]);
+    assert_eq!(
+        config.auth_oidc_jwks_host_allowlist(),
+        Some(
+            &[
+                "www.googleapis.com".to_owned(),
+                "api.example.com".to_owned()
+            ][..]
+        )
+    );
+    // Unset by default.
+    let default = ServerConfig::new(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+        "http://localhost:8080".to_owned(),
+        PathBuf::from("/tmp/test"),
+        NonZeroUsize::new(4096).unwrap(),
+    );
+    assert_eq!(default.auth_oidc_jwks_host_allowlist(), None);
 }
 
 #[test]
@@ -1464,6 +1515,21 @@ fn server_config_error_display_zero_max_shard_xorb_chunks() {
     assert_eq!(
         err.to_string(),
         "max shard xorb chunk record count must be greater than zero"
+    );
+}
+
+#[test]
+fn server_config_error_display_max_revisions_per_repo() {
+    let err = ServerConfigError::MaxRevisionsPerRepo("not-a-number".parse::<usize>().unwrap_err());
+    assert_eq!(err.to_string(), "invalid max revisions per repo");
+}
+
+#[test]
+fn server_config_error_display_zero_max_revisions_per_repo() {
+    let err = ServerConfigError::ZeroMaxRevisionsPerRepo;
+    assert_eq!(
+        err.to_string(),
+        "max revisions per repo must be greater than zero"
     );
 }
 
