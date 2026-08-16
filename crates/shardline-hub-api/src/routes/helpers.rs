@@ -6,7 +6,7 @@ use crate::error::HubApiError;
 use crate::models::RepoType;
 use shardline_index::hub::HubRepoType;
 use shardline_protocol::TokenScope;
-use shardline_server_core::{AuthContext, AuthorizedRepository};
+use shardline_server_core::{AuthorizedRepository, VerifiedAuthContext};
 
 use super::HubState;
 
@@ -27,7 +27,7 @@ pub(crate) fn authorize(
 /// configured.
 ///
 /// Returns `Ok(None)` in permissive mode (no auth configured) and
-/// `Ok(Some(AuthContext))` when a valid token was presented. This lets
+/// `Ok(Some(VerifiedAuthContext))` when a valid token was presented. This lets
 /// repo-scoped handlers enforce a token→repository binding in addition to the
 /// scope check performed by [`authorize`].
 ///
@@ -39,7 +39,7 @@ pub(crate) fn authorize_with_context(
     state: &HubState,
     headers: &HeaderMap,
     required_scope: TokenScope,
-) -> Result<Option<AuthContext>, HubApiError> {
+) -> Result<Option<VerifiedAuthContext>, HubApiError> {
     if let Some(auth) = &state.auth {
         Ok(Some(auth.authorize(headers, required_scope)?))
     } else {
@@ -64,7 +64,7 @@ pub(crate) fn authorize_with_context(
 /// Returns [`HubApiError::Forbidden`] (HTTP 403) when the token's repository
 /// does not match the requested `(ns, repo)`.
 pub(crate) fn require_repository_binding(
-    auth_ctx: Option<&AuthContext>,
+    auth_ctx: Option<&VerifiedAuthContext>,
     ns: &str,
     repo: &str,
 ) -> Result<(), HubApiError> {

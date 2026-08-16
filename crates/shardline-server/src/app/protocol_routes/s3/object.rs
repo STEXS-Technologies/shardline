@@ -525,6 +525,15 @@ async fn s3_upload_object_body(
     // version and its chunks are never written). Guarded to skip the extra row
     // read for unconditional PUTs, whose post-commit re-check below is a
     // trivially-passing no-op.
+    //
+    // Multi-replica caveat: the per-key lock (acquire_object_upload_lock) is
+    // PROCESS-LOCAL. On two replicas sharing a Postgres index, a concurrent
+    // conditional writer on the OTHER replica holds a different lock, so BOTH
+    // can pass this pre-check and both commit — create-if-absent is not atomic
+    // across replicas (last-writer-wins; the post-commit re-check below 412s
+    // the loser). The loser's record is a non-latest orphan until the next
+    // write of the key, then GC-reclaimed; the F-92 purge below only deletes
+    // the loser's OWN version, so the winner's record survives either way.
     if let Some(precondition) = precondition
         && read_conditional_headers(precondition).is_some()
     {

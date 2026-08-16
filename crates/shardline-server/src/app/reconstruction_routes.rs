@@ -50,12 +50,11 @@ fn authorize_repository(
     authorize(state, headers, required_scope)?.map_or_else(
         || Ok(AuthorizedRepository::anonymous_full_access()),
         |ctx| {
-            // Bridge the server crate's own AuthContext (already verified) into
-            // the core AuthContext that the capability seam consumes. No token
-            // is re-verified here; from_verified_context only re-applies the
-            // scope gate idempotently.
-            let core_ctx = shardline_server_core::AuthContext::new(ctx.claims().clone());
-            AuthorizedRepository::from_verified_context(core_ctx, required_scope)
+            // The verified context (minted by the auth layer's
+            // `verify_verified`) flows straight into the capability seam. No
+            // token is re-verified here; `from_verified_context` only
+            // re-applies the scope gate idempotently.
+            AuthorizedRepository::from_verified_context(ctx, required_scope)
                 .map_err(ServerError::from)
         },
     )

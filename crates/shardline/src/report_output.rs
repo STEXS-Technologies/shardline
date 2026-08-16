@@ -272,6 +272,10 @@ pub fn print_local_gc_summary(report: &LocalGcReport) {
     );
     println!("deleted_chunks: {}", report.deleted_chunks);
     println!("deleted_bytes: {}", report.deleted_bytes);
+    println!(
+        "pruned_revisions_over_cap: {}",
+        report.pruned_revisions_over_cap
+    );
 }
 
 pub fn print_local_gc_cli_summary(
@@ -651,6 +655,7 @@ mod tests {
             deleted_bytes: 0,
             reaped_stale_temporary_chunks: 0,
             reaped_stale_temporary_bytes: 0,
+            pruned_revisions_over_cap: 0,
         }
     }
 

@@ -531,6 +531,23 @@ impl AsyncIndexStore for MemoryIndexStore {
         Box::pin(async move { DedupeStore::delete_dedupe_shard_mapping(self, chunk_hash) })
     }
 
+    fn prune_revisions_over_cap<'operation>(
+        &'operation self,
+        key: &'operation RepoKey,
+        max_revisions: usize,
+    ) -> IndexStoreFuture<'operation, u64, Self::Error> {
+        let store = self.clone();
+        let key = key.clone();
+        Box::pin(
+            async move { TreeStore::prune_revisions_over_cap(&store, &key, max_revisions).await },
+        )
+    }
+
+    fn list_revision_repo_keys(&self) -> IndexStoreFuture<'_, Vec<RepoKey>, Self::Error> {
+        let store = self.clone();
+        Box::pin(async move { TreeStore::list_revision_repo_keys(&store).await })
+    }
+
     impl_async_lifecycle_delegation!(MemoryIndexStore);
 }
 
@@ -688,6 +705,59 @@ impl TreeStore for MemoryIndexStore {
                 && k.revision == rev)
         });
         Ok(u64::from(removed))
+    }
+
+    async fn prune_revisions_over_cap(
+        &self,
+        key: &RepoKey,
+        max_revisions: usize,
+    ) -> Result<u64, Self::Error> {
+        let mut state = self.lock_state()?;
+        // Collect this repo's rows and sort oldest-created-first (created-at,
+        // then revision name as the deterministic tiebreaker) — the same
+        // eviction order the SQL backends use.
+        let mut rows: Vec<(MemoryRevisionKey, u64, String)> = state
+            .revisions
+            .iter()
+            .filter(|(k, _)| {
+                k.provider == key.provider && k.owner == key.owner && k.repo == key.repo
+            })
+            .map(|(k, v)| (k.clone(), v.created_at_unix_seconds, v.revision.clone()))
+            .collect();
+        rows.sort_by(
+            |(_, left_created, left_revision), (_, right_created, right_revision)| {
+                left_created
+                    .cmp(right_created)
+                    .then_with(|| left_revision.cmp(right_revision))
+            },
+        );
+        let Some(over_cap) = rows.len().checked_sub(max_revisions) else {
+            return Ok(0);
+        };
+        let removed = u64::try_from(over_cap).unwrap_or(u64::MAX);
+        for (pruned_key, _, _) in rows.into_iter().take(over_cap) {
+            let pruned_revision = pruned_key.revision.clone();
+            state.revisions.remove(&pruned_key);
+            state.tree_entries.retain(|k, _| {
+                !(k.provider == key.provider
+                    && k.owner == key.owner
+                    && k.repo == key.repo
+                    && k.revision == pruned_revision)
+            });
+        }
+        Ok(removed)
+    }
+
+    async fn list_revision_repo_keys(&self) -> Result<Vec<RepoKey>, Self::Error> {
+        let state = self.lock_state()?;
+        let mut keys: Vec<RepoKey> = state
+            .revisions
+            .keys()
+            .map(|k| RepoKey::new(&k.provider, &k.owner, &k.repo))
+            .collect();
+        keys.sort();
+        keys.dedup();
+        Ok(keys)
     }
 }
 

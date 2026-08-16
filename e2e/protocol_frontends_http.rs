@@ -26,7 +26,9 @@ use shardline_server::{
     oci_manifest_key, oci_manifest_media_type_key, serve_with_listener,
     test_fixtures::{single_chunk_xorb, single_file_shard},
 };
-use shardline_server_core::{AuthContext, AuthorizedRepository};
+use shardline_server_core::{
+    AuthProvider, AuthorizedRepository, LocalHmacProvider,
+};
 use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectStore};
 use support::{bearer_token, wait_for_health};
 
@@ -708,7 +710,9 @@ async fn all_frontends_share_digest_addressed_storage_and_keep_xet_and_hub_worki
 
     let object_store = ServerObjectStore::local(runtime.storage_path().join("chunks"))?;
     // The repository identity for LFS/Bazel keys comes from the token claims;
-    // build a capability carrying the same RepositoryScope the tokens used.
+    // build a capability carrying the same RepositoryScope the tokens used by
+    // verifying the claims through a real provider (the capability seal is
+    // type-enforced: only a provider verification can mint the context).
     let claims = shardline_protocol::TokenClaims::new(
         "shardline",
         "test",
@@ -717,7 +721,11 @@ async fn all_frontends_share_digest_addressed_storage_and_keep_xet_and_hub_worki
         u64::MAX,
     )
     .map_err(|_e| ServerError::InvalidToken(shardline_protocol::TokenCodecError::InvalidFormat))?;
-    let capability = AuthorizedRepository::from_verified_context(AuthContext::new(claims), TokenScope::Write)
+    let provider = LocalHmacProvider::new(b"test-signing-key-32-bytes-long!!")
+        .map_err(ServerError::from)?;
+    let token = provider.mint_token(&claims).map_err(ServerError::from)?;
+    let ctx = provider.verify_verified(&token).map_err(ServerError::from)?;
+    let capability = AuthorizedRepository::from_verified_context(ctx, TokenScope::Write)
         .map_err(|_e| ServerError::InsufficientScope)?;
     let lfs_key = lfs_object_key(&digest_hex, &capability)?;
     let bazel_key = bazel_cache_object_key(BazelCacheKind::Cas, &digest_hex, &capability)?;

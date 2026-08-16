@@ -89,9 +89,11 @@ impl OciRepository {
 
         let capability = match auth {
             Some(context) => {
-                let core_context =
-                    shardline_server_core::AuthContext::new(context.claims().clone());
-                AuthorizedRepository::from_verified_context(core_context, required_scope)
+                // The verified context (minted by the auth layer's
+                // `verify_verified`) flows straight into the capability seam;
+                // `from_verified_context` only re-applies the scope gate
+                // idempotently.
+                AuthorizedRepository::from_verified_context(context, required_scope)
                     .map_err(ServerError::from)?
             }
             None => AuthorizedRepository::anonymous_full_access(),

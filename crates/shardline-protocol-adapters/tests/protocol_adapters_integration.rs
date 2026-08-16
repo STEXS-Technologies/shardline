@@ -17,7 +17,7 @@ use shardline_protocol_adapters::{
     BazelCacheKind, ProtocolError, bazel_cache_object_key, lfs_object_key, scope_namespace,
     validate_content_hash,
 };
-use shardline_server_core::{AuthContext, AuthorizedRepository};
+use shardline_server_core::{AuthProvider, AuthorizedRepository, LocalHmacProvider};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -30,12 +30,15 @@ fn valid_oid() -> String {
 
 /// Builds a capability carrying the given repository scope (or a permissive
 /// anonymous capability when `None`), mirroring how the auth layer mints
-/// capabilities from verified token claims.
+/// capabilities: the claims are verified through a real provider so the
+/// type-level seal is satisfied.
 fn test_capability(scope: Option<RepositoryScope>) -> AuthorizedRepository {
     scope.map_or_else(AuthorizedRepository::anonymous_full_access, |repo| {
         let claims = TokenClaims::new("local", "test", TokenScope::Write, repo, u64::MAX).unwrap();
-        AuthorizedRepository::from_verified_context(AuthContext::new(claims), TokenScope::Write)
-            .unwrap()
+        let provider = LocalHmacProvider::new(b"test-signing-key-32-bytes-long!!").unwrap();
+        let token = provider.mint_token(&claims).unwrap();
+        let ctx = provider.verify_verified(&token).unwrap();
+        AuthorizedRepository::from_verified_context(ctx, TokenScope::Write).unwrap()
     })
 }
 

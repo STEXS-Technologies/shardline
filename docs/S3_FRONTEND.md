@@ -185,6 +185,41 @@ durability guarantees:
   write of that key (same model as the Xet `TreeStore`); reads are always
   correct.
 
+## Multi-replica consistency
+
+The S3 frontend serializes overwrites of the same object key with a **per-key
+in-process lock** (`acquire_object_upload_lock`: a weak-valued `HashMap` of
+tokio mutexes). That lock is **process-local** — it serializes writers only
+within one server process, so the guarantees below are single-process.
+
+In a multi-replica Postgres deployment (HPA-scaled `api` replicas sharing
+`SHARDLINE_INDEX_POSTGRES_URL`), each replica holds its *own* per-key lock:
+
+- **Conditional-write `create-if-absent` is NOT atomic across replicas.** Two
+  replicas can both pass the `If-None-Match: *` pre-check and both commit
+  their records — the outcome is last-writer-wins, and the post-commit
+  re-check returns `412 PreconditionFailed` to the loser. The loser's record
+  becomes a **non-latest orphan** until the next write of that key, then is
+  reclaimed by GC. Reads are always correct (the listing row / latest alias
+  resolves through the authoritative `FileRecord`), but the strict S3
+  create-if-absent *atomicity* guarantee does not hold across replicas.
+- **The F-92 purge is safe under the race.** When the post-commit re-check
+  fires, the purge deletes only the loser's **own** committed version
+  (verified against the latest alias before deleting), so it can never destroy
+  the winner's acknowledged record — bounded, last-writer-wins semantics.
+
+Batch delete (`DeleteObjects`, F-18), the upload-lock serialization (F-8
+check-then-act), and the purge guard (F-86/F-92) are all single-process-safe
+and remain correct within one replica; the residual multi-replica behavior is
+exactly the both-commit/last-writer-wins case above.
+
+**Recommended deployments** for strict S3 create-if-absent semantics:
+
+- run **one replica per logical store**, or
+- front the S3 routes with an external distributed lock (e.g. a
+  Redis-compatible mutex keyed by object key) when conditional writes must be
+  atomic across replicas.
+
 ## References
 
 - Issue #15 · design review (oracle, 2026-08-13)

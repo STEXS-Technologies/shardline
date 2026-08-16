@@ -5641,6 +5641,7 @@ async fn lfs_objects_survive_gc_when_referenced() {
         mark: true,
         sweep: true,
         retention_seconds: 0,
+        max_revisions_per_repo: None,
     };
     let _report = shardline_server::run_gc(
         ServerConfig::new(
@@ -7999,6 +8000,7 @@ async fn health_check_during_gc() {
                 mark: true,
                 sweep: true,
                 retention_seconds: 0,
+                max_revisions_per_repo: None,
             },
         )
         .await
@@ -8236,6 +8238,7 @@ async fn gc_does_not_remove_referenced_chunks() {
             mark: true,
             sweep: true,
             retention_seconds: 0,
+            max_revisions_per_repo: None,
         },
     )
     .await
@@ -10339,6 +10342,7 @@ async fn upload_during_gc() {
                 // window, so exercise concurrent reachability marking here.
                 sweep: false,
                 retention_seconds: 0,
+                max_revisions_per_repo: None,
             },
         )
         .await

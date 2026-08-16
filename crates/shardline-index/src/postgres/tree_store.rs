@@ -312,6 +312,80 @@ impl TreeStore for PostgresIndexStore {
         transaction.commit().await?;
         Ok(result.rows_affected())
     }
+
+    async fn prune_revisions_over_cap(
+        &self,
+        key: &RepoKey,
+        max_revisions: usize,
+    ) -> Result<u64, Self::Error> {
+        let count = self.count_revisions(key).await?;
+        let cap = u64::try_from(max_revisions).unwrap_or(u64::MAX);
+        let Some(prune_limit) = count.checked_sub(cap) else {
+            return Ok(0);
+        };
+        if prune_limit == 0 {
+            return Ok(0);
+        }
+        let limit_i64 = u64_to_i64(prune_limit)?;
+        // Both subqueries select the same oldest rows (oldest-created first,
+        // revision name as the deterministic tiebreaker): the tree-entry
+        // delete does not touch `shardline_revisions`, so the second subquery
+        // still sees the full pre-prune row set.
+        let mut transaction = self.pool.begin().await?;
+        query(
+            "DELETE FROM shardline_tree_entries
+             WHERE provider = $1 AND owner = $2 AND repo = $3
+               AND revision IN (
+                   SELECT revision FROM shardline_revisions
+                   WHERE provider = $1 AND owner = $2 AND repo = $3
+                   ORDER BY created_at_unix_seconds, revision
+                   LIMIT $4
+               )",
+        )
+        .bind(&key.provider)
+        .bind(&key.owner)
+        .bind(&key.repo)
+        .bind(limit_i64)
+        .execute(&mut *transaction)
+        .await?;
+        let result = query(
+            "DELETE FROM shardline_revisions
+             WHERE provider = $1 AND owner = $2 AND repo = $3
+               AND revision IN (
+                   SELECT revision FROM shardline_revisions
+                   WHERE provider = $1 AND owner = $2 AND repo = $3
+                   ORDER BY created_at_unix_seconds, revision
+                   LIMIT $4
+               )",
+        )
+        .bind(&key.provider)
+        .bind(&key.owner)
+        .bind(&key.repo)
+        .bind(limit_i64)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(result.rows_affected())
+    }
+
+    async fn list_revision_repo_keys(&self) -> Result<Vec<RepoKey>, Self::Error> {
+        let rows = query(
+            "SELECT DISTINCT provider, owner, repo
+             FROM shardline_revisions
+             ORDER BY provider, owner, repo",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter()
+            .map(|row| {
+                Ok(RepoKey {
+                    provider: row.try_get("provider")?,
+                    owner: row.try_get("owner")?,
+                    repo: row.try_get("repo")?,
+                })
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -457,5 +531,145 @@ mod tests {
                 .expect("revision")
                 .is_none()
         );
+    }
+
+    /// Exercises the F-75 GC-side prune: oldest-created rows beyond the cap
+    /// are evicted (created-at ordering, not name ordering), tree rows
+    /// cascade, and other repos are untouched.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pg_prune_revisions_over_cap_removes_oldest_down_to_cap() {
+        let Some(pool) = connect_postgres().await else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let store = PostgresIndexStore::new(pool);
+        let cap = 2usize;
+        // created_at deliberately NOT aligned with name order.
+        for (n, created_at) in [("rev-a", 100u64), ("rev-b", 200), ("rev-c", 300)] {
+            let rev = RevisionRecord {
+                provider: "github".to_owned(),
+                owner: "owner".to_owned(),
+                repo: "repo".to_owned(),
+                revision: n.to_owned(),
+                created_at_unix_seconds: created_at,
+                updated_at_unix_seconds: created_at,
+            };
+            assert!(
+                TreeStore::upsert_revision(&store, &rev)
+                    .await
+                    .expect("upsert")
+            );
+        }
+        let removed = TreeStore::prune_revisions_over_cap(&store, &repo_key(), cap)
+            .await
+            .expect("prune");
+        assert_eq!(removed, 1);
+        let remaining = TreeStore::list_revisions(&store, &repo_key(), None, 100)
+            .await
+            .expect("list");
+        let names: Vec<&str> = remaining.iter().map(|r| r.revision.as_str()).collect();
+        // Only the two newest-created rows survive regardless of name order.
+        assert_eq!(names, vec!["rev-b", "rev-c"]);
+        // Clean up so the shared test database stays tidy for other runs.
+        for name in names {
+            let _ = TreeStore::delete_revision(&store, &repo_key(), name)
+                .await
+                .expect("cleanup");
+        }
+    }
+
+    /// The prune is a no-op at/below the cap and does not touch other repos.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pg_prune_revisions_over_cap_at_cap_and_other_repo_untouched() {
+        let Some(pool) = connect_postgres().await else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let store = PostgresIndexStore::new(pool);
+        let other = RepoKey::new("github", "owner", "other-repo");
+        let cap = 5usize;
+        for n in 0..3u8 {
+            let rev = RevisionRecord {
+                provider: "github".to_owned(),
+                owner: "owner".to_owned(),
+                repo: "repo".to_owned(),
+                revision: format!("rev-{n:02}"),
+                created_at_unix_seconds: u64::from(n),
+                updated_at_unix_seconds: u64::from(n),
+            };
+            assert!(
+                TreeStore::upsert_revision(&store, &rev)
+                    .await
+                    .expect("upsert")
+            );
+        }
+        let other_rev = RevisionRecord {
+            provider: "github".to_owned(),
+            owner: "owner".to_owned(),
+            repo: "other-repo".to_owned(),
+            revision: "main".to_owned(),
+            created_at_unix_seconds: 1,
+            updated_at_unix_seconds: 1,
+        };
+        assert!(
+            TreeStore::upsert_revision(&store, &other_rev)
+                .await
+                .expect("upsert")
+        );
+        // Below the cap: nothing to prune.
+        let removed = TreeStore::prune_revisions_over_cap(&store, &repo_key(), cap)
+            .await
+            .expect("prune");
+        assert_eq!(removed, 0);
+        // The other repo is untouched.
+        assert_eq!(TreeStore::count_revisions(&store, &other).await.unwrap(), 1);
+        // Clean up.
+        for n in 0..3u8 {
+            let _ = TreeStore::delete_revision(&store, &repo_key(), &format!("rev-{n:02}"))
+                .await
+                .expect("cleanup");
+        }
+        let _ = TreeStore::delete_revision(&store, &other, "main")
+            .await
+            .expect("cleanup other");
+    }
+
+    /// Lists the distinct repos present in the revision registry.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pg_list_revision_repo_keys_returns_distinct_repos() {
+        let Some(pool) = connect_postgres().await else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let store = PostgresIndexStore::new(pool);
+        let repo = repo_key();
+        let other = RepoKey::new("github", "owner", "other-repo");
+        for key in [&repo, &repo, &other] {
+            let rev = RevisionRecord {
+                provider: key.provider.clone(),
+                owner: key.owner.clone(),
+                repo: key.repo.clone(),
+                revision: "main".to_owned(),
+                created_at_unix_seconds: 1,
+                updated_at_unix_seconds: 1,
+            };
+            assert!(
+                TreeStore::upsert_revision(&store, &rev)
+                    .await
+                    .expect("upsert")
+            );
+        }
+        let keys = TreeStore::list_revision_repo_keys(&store)
+            .await
+            .expect("list repo keys");
+        assert!(keys.contains(&repo));
+        assert!(keys.contains(&other));
+        // Clean up.
+        let _ = TreeStore::delete_revision(&store, &repo, "main")
+            .await
+            .expect("cleanup");
+        let _ = TreeStore::delete_revision(&store, &other, "main")
+            .await
+            .expect("cleanup other");
     }
 }
