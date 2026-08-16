@@ -475,6 +475,18 @@ pub enum ServerConfigError {
         /// The rejected bind address.
         bind_addr: SocketAddr,
     },
+    /// The implicit (unset) Insecure deployment mode on a non-loopback bind
+    /// with no auth provider would boot a fully unauthenticated server.
+    #[error(
+        "no SHARDLINE_DEPLOYMENT_MODE set and no auth provider configured: refusing to boot an \
+         unauthenticated server on the non-loopback address {bind_addr}. Set \
+         SHARDLINE_DEPLOYMENT_MODE (insecure/authenticated/strict) explicitly, configure an auth \
+         provider, or bind a loopback address"
+    )]
+    InsecureDefaultRequiresExplicitOptIn {
+        /// The rejected non-loopback bind address.
+        bind_addr: SocketAddr,
+    },
     /// A secret was provided through both direct env and file indirection.
     #[error("secret source conflict: both {env} and {file_env} are set")]
     SecretSourceConflict {

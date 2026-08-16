@@ -900,6 +900,67 @@ fn server_config_validate_runtime_requirements_accepts_passthrough_on_loopback()
 }
 
 #[test]
+fn default_insecure_mode_rejects_non_loopback_bind_without_auth() {
+    // F-41: the implicit (unset) Insecure default on a non-loopback bind with
+    // no auth provider would boot a fully unauthenticated server.
+    let config = ServerConfig::new(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 8080),
+        "http://localhost:8080".to_owned(),
+        PathBuf::from("/tmp/test"),
+        NonZeroUsize::new(4096).unwrap(),
+    );
+    assert!(!config.deployment_mode_explicitly_set);
+    let result = config.validate_runtime_requirements();
+    assert!(matches!(
+        result,
+        Err(ServerConfigError::InsecureDefaultRequiresExplicitOptIn { .. })
+    ));
+}
+
+#[test]
+fn default_insecure_mode_accepts_loopback_bind_without_auth() {
+    // Local dev / test servers bind loopback: the implicit Insecure default
+    // stays valid there.
+    let config = ServerConfig::new(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+        "http://localhost:8080".to_owned(),
+        PathBuf::from("/tmp/test"),
+        NonZeroUsize::new(4096).unwrap(),
+    );
+    assert!(config.validate_runtime_requirements().is_ok());
+}
+
+#[test]
+fn explicit_insecure_mode_accepts_non_loopback_bind_without_auth() {
+    // The operator explicitly chose the Insecure mode: allowed (the warning
+    // about unauthenticated access still fires).
+    let config = ServerConfig::new(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 8080),
+        "http://localhost:8080".to_owned(),
+        PathBuf::from("/tmp/test"),
+        NonZeroUsize::new(4096).unwrap(),
+    )
+    .with_deployment_mode(DeploymentMode::Insecure);
+    assert!(config.deployment_mode_explicitly_set);
+    assert!(config.validate_runtime_requirements().is_ok());
+}
+
+#[test]
+fn default_insecure_mode_accepts_non_loopback_bind_with_auth_provider() {
+    // An auth provider enforces authentication even in Insecure mode, so a
+    // non-loopback bind with the implicit default is not unauthenticated.
+    let config = ServerConfig::new(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 8080),
+        "http://localhost:8080".to_owned(),
+        PathBuf::from("/tmp/test"),
+        NonZeroUsize::new(4096).unwrap(),
+    )
+    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
+    .unwrap();
+    assert!(config.validate_runtime_requirements().is_ok());
+}
+
+#[test]
 fn server_config_validate_runtime_requirements_accepts_ed25519_without_hmac_key() {
     // Ed25519 provider should NOT require the HMAC signing key.
     let config = ServerConfig::new(
