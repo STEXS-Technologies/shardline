@@ -574,16 +574,15 @@ pub(crate) async fn s3_get_object(
         return Err(S3Error::not_implemented());
     }
 
-    // Fetch the S3 listing-index row FIRST, then pin the record snapshot for
-    // the stream. Ordering matters: the ETag / user-metadata / Last-Modified
-    // headers and the streamed bytes must come from the same logical commit
-    // point. Reading the entry AFTER the snapshot can pair new metadata with
-    // the old bytes (or vice versa) when a concurrent overwrite commits
-    // between the two reads. The stream below is pinned to the snapshot's
-    // record version, so the served bytes always match the entry captured at
-    // this same moment; a concurrent overwrite commits a new row + record
-    // together and readers simply observe the pre- or post-overwrite state,
-    // never a mix of the two.
+    // The S3 listing-index row is the object's single commit point: its ETag /
+    // user-metadata / Last-Modified and its record version (content hash +
+    // size) are resolved in ONE read, and the stream below is pinned to that
+    // exact immutable record version. A concurrent PUT commits a new record
+    // FIRST and swaps the row SECOND, so the row read before the swap pairs
+    // the OLD row with the OLD record — the reader observes the pre- or
+    // post-overwrite state, never a mix of old-row metadata with new-record
+    // bytes (F-70). Only when no row exists is the latest record snapshot used
+    // as a fallback (there is then no row metadata to pair).
     let entry = s3_object_entry(&state, &context).await?;
     // Conditional requests (If-Match / If-None-Match) evaluate against the
     // stored S3 ETag (listing-index row) before any bytes are served.
@@ -593,21 +592,26 @@ pub(crate) async fn s3_get_object(
         &context.key,
     )?;
 
-    // Resolve the object's length and record version in ONE atomic snapshot:
-    // the stream below is pinned to the same version, so a concurrent
-    // overwrite can never yield a torn read (old length, new stream) or a
-    // transient 404 — the old version stays readable until the new one is
-    // fully durable and the index row has moved.
-    let snapshot = match state
-        .backend
-        .s3_object_read_snapshot(&context.object_key)
-        .await
-    {
-        Ok(snapshot) => snapshot,
-        Err(ServerError::NotFound) => return Err(S3Error::no_such_key(&context.key)),
-        Err(error) => return Err(S3Error::from(error)),
+    // Resolve the object's length and record version from the SAME row whose
+    // ETag / metadata are served below: the stream is pinned to the row's
+    // version, so a concurrent overwrite can never yield a torn read (old
+    // length, new stream) — the old version stays readable until the new one
+    // is fully durable and the index row has moved.
+    let (total_length, pinned_hash) = match &entry {
+        Some(row) => (row.size_bytes, Some(row.content_hash.clone())),
+        None => {
+            let snapshot = match state
+                .backend
+                .s3_object_read_snapshot(&context.object_key)
+                .await
+            {
+                Ok(snapshot) => snapshot,
+                Err(ServerError::NotFound) => return Err(S3Error::no_such_key(&context.key)),
+                Err(error) => return Err(S3Error::from(error)),
+            };
+            (snapshot.total_bytes, snapshot.record_content_hash)
+        }
     };
-    let total_length = snapshot.total_bytes;
     let range_header = headers.get(RANGE).and_then(|value| value.to_str().ok());
     let range = match range_header {
         Some(header) => {
@@ -626,7 +630,7 @@ pub(crate) async fn s3_get_object(
             &context.object_key,
             total_length,
             range,
-            snapshot.record_content_hash.as_deref(),
+            pinned_hash.as_deref(),
         )
         .await?;
     let mut response = if let Some(range) = range {
@@ -688,10 +692,12 @@ pub(crate) async fn s3_head_object(
         return Err(S3Error::not_implemented());
     }
 
-    // Same ordering as GetObject: the listing-index row is captured FIRST so
-    // the ETag / user-metadata / Last-Modified headers and the size resolved
-    // below all come from the same logical commit point (a concurrent
-    // overwrite is observed either before or after its swap, never torn).
+    // Same single-commit-point resolution as GetObject (F-70): the size comes
+    // from the SAME row whose ETag / user-metadata / Last-Modified are served
+    // below, so a concurrent PUT that committed a new record but has not yet
+    // swapped the row is simply not visible — the headers and the size are
+    // never a mix of two overwrite states. Only when no row exists is the
+    // authoritative record metadata used (with no row metadata to pair).
     let entry = s3_object_entry(&state, &context).await?;
     // Conditional requests evaluate against the stored S3 ETag before the
     // headers are served.
@@ -701,10 +707,17 @@ pub(crate) async fn s3_head_object(
         &context.key,
     )?;
 
-    let (size, _content_hash) = match state.backend.s3_object_metadata(&context.object_key).await {
-        Ok(metadata) => metadata,
-        Err(ServerError::NotFound) => return Err(S3Error::no_such_key(&context.key)),
-        Err(error) => return Err(S3Error::from(error)),
+    let size = match &entry {
+        Some(row) => row.size_bytes,
+        None => {
+            let (size, _content_hash) =
+                match state.backend.s3_object_metadata(&context.object_key).await {
+                    Ok(metadata) => metadata,
+                    Err(ServerError::NotFound) => return Err(S3Error::no_such_key(&context.key)),
+                    Err(error) => return Err(S3Error::from(error)),
+                };
+            size
+        }
     };
     let last_modified = last_modified_from_entry(entry.as_ref());
 

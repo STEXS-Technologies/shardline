@@ -198,12 +198,23 @@ pub trait TreeStore: Send + Sync {
         rev: &str,
     ) -> Result<Option<RevisionRecord>, Self::Error>;
 
-    /// Lists every revision for a repository ordered by revision name.
+    /// Lists revisions for a repository ordered by revision name, resuming
+    /// after `cursor` (keyset on the revision name) and returning at most
+    /// `limit` rows.
+    ///
+    /// The limit is enforced by the backend (SQL `LIMIT`) so the response is
+    /// never an unbounded `Vec`: a repository with 100k revisions must not be
+    /// buffered in full by a single listing.
     ///
     /// # Errors
     ///
     /// Returns the adapter error when the inventory lookup fails.
-    async fn list_revisions(&self, key: &RepoKey) -> Result<Vec<RevisionRecord>, Self::Error>;
+    async fn list_revisions(
+        &self,
+        key: &RepoKey,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<RevisionRecord>, Self::Error>;
 
     /// Deletes a revision registry row **and** every tree entry for that
     /// revision, returning the number of revision rows removed (0 or 1).

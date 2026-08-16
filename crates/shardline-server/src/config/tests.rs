@@ -1127,9 +1127,42 @@ fn read_secret_file_bytes_rejects_growth_after_validation_without_retaining_appe
         },
     );
 
-    let expected = b"test-signing-key-32-bytes-long!!-rotated";
-    assert!(bytes.is_ok());
-    assert_eq!(bytes.unwrap().expose_secret(), expected);
+    // The file grew between the pre-read stat and the read (the hook appended
+    // bytes), so the content is mixed and must be rejected rather than accepted.
+    assert!(matches!(
+        bytes,
+        Err(super::ServerConfigError::TokenSigningKeyLengthMismatch { .. })
+    ));
+}
+
+#[test]
+fn read_secret_file_bytes_rejects_oversized_before_buffering() {
+    let mut tmp = tempfile::NamedTempFile::new().unwrap();
+    let oversized = vec![b'x'; 1_000_000];
+    tmp.write_all(&oversized).unwrap();
+    tmp.flush().unwrap();
+
+    // A tiny bound: the file is rejected from the pre-read stat, before any of
+    // the million bytes are buffered.
+    let bytes = super::read_secret_file_bytes(
+        tmp.path(),
+        50,
+        false,
+        super::ServerConfigError::TokenSigningKey,
+        |observed_bytes, maximum_bytes| super::ServerConfigError::TokenSigningKeyTooLarge {
+            observed_bytes,
+            maximum_bytes,
+        },
+        |expected_bytes, observed_bytes| super::ServerConfigError::TokenSigningKeyLengthMismatch {
+            expected_bytes,
+            observed_bytes,
+        },
+    );
+
+    assert!(matches!(
+        bytes,
+        Err(super::ServerConfigError::TokenSigningKeyTooLarge { .. })
+    ));
 }
 
 #[test]

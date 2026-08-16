@@ -257,14 +257,37 @@ pub(super) fn read_secret_file_bytes(
     strip_trailing_newline: bool,
     read_error: impl Fn(IoError) -> ServerConfigError + Copy,
     error: impl Fn(u64, u64) -> ServerConfigError + Copy,
-    _length_mismatch_error: impl Fn(u64, u64) -> ServerConfigError + Copy,
+    length_mismatch_error: impl Fn(u64, u64) -> ServerConfigError + Copy,
 ) -> Result<SecretBytes, ServerConfigError> {
     let mut file = open_secret_file(path).map_err(read_error)?;
+
+    // Stat BEFORE reading so an oversized secret file is rejected without ever
+    // being buffered into memory (bounded read). Fixed-length key files may
+    // legitimately carry up to two extra bytes (`\r\n` line terminator) that
+    // are stripped after the read, so allow that headroom when stripping.
+    let size_bound = if strip_trailing_newline {
+        maximum_bytes.saturating_add(2)
+    } else {
+        maximum_bytes
+    };
+    let initial_len = file.metadata().map_err(read_error)?.len();
+    if initial_len > size_bound {
+        return Err(error(initial_len, maximum_bytes));
+    }
 
     run_before_secret_file_read_hook_for_tests(path);
 
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes).map_err(read_error)?;
+
+    // Detect a length change between the pre-read stat and the read itself
+    // (the file was rotated or appended underneath us): the length-mismatch
+    // defense is only meaningful when it is actually enforced, so invoke the
+    // callback instead of accepting the mixed content.
+    let observed_len = file.metadata().map_err(read_error)?.len();
+    if observed_len != initial_len {
+        return Err(length_mismatch_error(initial_len, observed_len));
+    }
     if strip_trailing_newline {
         bytes = strip_one_trailing_newline(bytes);
     }

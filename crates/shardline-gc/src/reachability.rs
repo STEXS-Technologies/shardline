@@ -276,11 +276,11 @@ pub(super) fn managed_object_hash_or_object_key(
     }
 }
 
-/// Upper bound (seconds) for a chunk temp artifact before GC reaps it.
+/// Upper bound (seconds) for a managed-object temp artifact before GC reaps it.
 ///
-/// Temp-then-hardlink chunk writes complete in seconds-to-minutes, so a
-/// `.tmp-*` artifact older than an hour is a stranded remnant of a
-/// killed/crashed writer — never an in-flight write.
+/// Temp-then-hardlink object writes (chunks, xorb containers, and shards)
+/// complete in seconds-to-minutes, so a `.tmp-*` artifact older than an hour is
+/// a stranded remnant of a killed/crashed writer — never an in-flight write.
 ///
 /// The age bound is applied to the GC-OBSERVED last-modified time of the
 /// artifact (with a fallback to the writer-embedded unix-nanos in the key when
@@ -290,33 +290,31 @@ pub(super) fn managed_object_hash_or_object_key(
 /// live in-flight write look stale and get it reaped mid-write.
 pub(super) const STALE_TEMP_ARTIFACT_AGE_SECONDS: u64 = 60 * 60;
 
-/// Returns the embedded unix-nanoseconds creation timestamp of a chunk temp
-/// artifact key (`<2hex>/<64hex>.tmp-<unix_nanos>-<counter>`), or `None` when
-/// the key is not a chunk temp artifact.
+/// Returns the embedded unix-nanoseconds creation timestamp of a temporary
+/// artifact key: `<managed-base>.tmp-<unix_nanos>-<counter>` where
+/// `<managed-base>` is a managed object key and `.tmp-<unix_nanos>-<counter>`
+/// is the temp-then-hardlink suffix produced by
+/// `write_anchored_temporary_file_shared` for EVERY local object write
+/// (chunks, xorb containers, and shards alike). Returns `None` when the key is
+/// not a managed-object temp artifact.
 ///
-/// Applies the same structural chunk gates as
-/// `chunk_hash_from_chunk_object_key_if_present` (two-hex prefix directory,
-/// single-segment layout, candidate hash starting with the prefix, 64 hex
-/// characters before the temp suffix) so only genuine chunk temp artifacts are
-/// ever matched.
-fn chunk_temp_artifact_unix_nanos(key: &ObjectKey) -> Option<u128> {
-    let mut segments = key.as_str().split('/');
-    let prefix = segments.next()?;
-    let candidate = segments.next()?;
-    if segments.next().is_some() {
-        return None;
-    }
-    if prefix.len() != 2 || !prefix.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return None;
-    }
-    if !candidate.starts_with(prefix) {
-        return None;
-    }
-    // candidate = <64hex>.tmp-<unix_nanos>-<counter>
-    let (hash_part, temp_suffix) = candidate.split_once(".tmp-")?;
-    if hash_part.len() != 64 || !hash_part.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return None;
-    }
+/// The base is validated with [`managed_object_hash`], so the accepted key
+/// space mirrors exactly the managed objects the orphan scan recognizes: chunk
+/// `<2hex>/<64hex>`, `xorbs/default/<2hex>/<hash>.xorb`, and
+/// `shards/<2hex>/<hash>.shard` (F-67). This is important for two reasons:
+///
+/// * A matching key can never be a live object: the `.tmp-` suffix is only
+///   ever present on temp-then-hardlink write artifacts, and the final object
+///   is hard-linked/renamed to the suffix-free key. A crash between the temp
+///   write and the hardlink strands `<managed-base>.tmp-...`, which is exactly
+///   the artifact this predicate exists to reap.
+/// * It cannot match a user-controlled key: the managed namespaces above are
+///   server-internal, while user keys (for example S3 frontend objects under
+///   `protocols/s3/{scope}/{key}`) never parse as a managed object key, so a
+///   user object that merely ends in `.tmp-<digits>-<digits>` is never reaped.
+fn temporary_artifact_unix_nanos(key: &ObjectKey, frontends: &[ServerFrontend]) -> Option<u128> {
+    // `<managed-base>.tmp-<unix_nanos>-<counter>`
+    let (base, temp_suffix) = key.as_str().rsplit_once(".tmp-")?;
     let (nanos_str, counter_str) = temp_suffix.rsplit_once('-')?;
     if nanos_str.is_empty()
         || counter_str.is_empty()
@@ -325,21 +323,39 @@ fn chunk_temp_artifact_unix_nanos(key: &ObjectKey) -> Option<u128> {
     {
         return None;
     }
+    // The base must be exactly a managed object key (chunk, xorb, or shard);
+    // mirroring `managed_object_hash` keeps the reaper's key space identical to
+    // the managed key space the rest of GC operates on.
+    let Ok(base_key) = ObjectKey::parse(base) else {
+        return None;
+    };
+    if !managed_object_hash(&base_key, frontends).ok()?.is_some() {
+        return None;
+    }
     nanos_str.parse::<u128>().ok()
 }
 
-/// Result of scanning the object store for stranded chunk temp artifacts.
+/// Result of scanning the object store for stranded managed-object temp
+/// artifacts.
 pub(super) struct StaleTempScan {
     /// `(key, length)` pairs older than [`STALE_TEMP_ARTIFACT_AGE_SECONDS`].
     pub(super) stale: Vec<(ObjectKey, u64)>,
-    /// The newest writer-embedded creation timestamp observed across ALL chunk
-    /// temp artifacts (fresh and stale alike), used by the runner's
-    /// backward-clock guard. `None` when no chunk temp artifacts were seen.
+    /// The newest writer-embedded creation timestamp observed across ALL temp
+    /// artifacts (fresh and stale alike), used by the runner's backward-clock
+    /// guard. `None` when no temp artifacts were seen.
     pub(super) max_embedded_temp_nanos: Option<u128>,
 }
 
-/// Scans the object store for stranded chunk temp artifacts older than
+/// Scans the object store for stranded managed-object temp artifacts older than
 /// [`STALE_TEMP_ARTIFACT_AGE_SECONDS`].
+///
+/// The temp shape `<managed-base>.tmp-<unix_nanos>-<counter>` is produced by
+/// `write_anchored_temporary_file_shared` for EVERY local object write (chunk
+/// `<2hex>/<64hex>`, xorb `xorbs/default/<2hex>/<hash>.xorb`, and shard
+/// `shards/<2hex>/<hash>.shard`), so a crash between the temp write and the
+/// hardlink strands `<managed-base>.tmp-...` that no other GC path can see —
+/// `scan_orphan_objects` skips temp keys entirely and
+/// `managed_object_hash` rejects them (F-67). This reaper closes that gap.
 ///
 /// The age bound is applied to the GC-OBSERVED last-modified time of each
 /// artifact ([`ObjectMetadata::modified_unix_nanos`]) when the backend exposes
@@ -351,8 +367,9 @@ pub(super) struct StaleTempScan {
 /// # Errors
 ///
 /// Returns [`GcError`] when the object store cannot be enumerated.
-pub(super) fn scan_stale_temporary_chunk_artifacts<Store>(
+pub(super) fn scan_stale_temporary_artifacts<Store>(
     object_store: &Store,
+    frontends: &[ServerFrontend],
     now_unix_seconds: u64,
 ) -> Result<StaleTempScan, GcError>
 where
@@ -367,7 +384,7 @@ where
     let prefix = ObjectPrefix::parse("").map_err(|_error| GcError::InvalidContentHash)?;
     object_store.visit_prefix(&prefix, |metadata| {
         let key = metadata.key();
-        let Some(embedded_unix_nanos) = chunk_temp_artifact_unix_nanos(key) else {
+        let Some(embedded_unix_nanos) = temporary_artifact_unix_nanos(key, frontends) else {
             return Ok(());
         };
         max_embedded_temp_nanos = Some(
@@ -1020,7 +1037,7 @@ mod tests {
         });
     }
 
-    // ── scan_stale_temporary_chunk_artifacts tests ──────────────────────
+    // ── scan_stale_temporary_artifacts tests ────────────────────────────
 
     const TEMP_TEST_HASH: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
@@ -1116,7 +1133,8 @@ mod tests {
         let key = temp_key(old_embedded, 0);
         let store = MockTempStore::new(vec![(key.as_str(), 42, Some(fresh_mtime))]);
 
-        let scan = scan_stale_temporary_chunk_artifacts(&store, now_secs).unwrap();
+        let scan =
+            scan_stale_temporary_artifacts(&store, &[ServerFrontend::Xet], now_secs).unwrap();
 
         assert!(
             scan.stale.is_empty(),
@@ -1135,7 +1153,8 @@ mod tests {
         let key = temp_key(old_nanos, 0);
         let store = MockTempStore::new(vec![(key.as_str(), 42, Some(old_mtime))]);
 
-        let scan = scan_stale_temporary_chunk_artifacts(&store, now_secs).unwrap();
+        let scan =
+            scan_stale_temporary_artifacts(&store, &[ServerFrontend::Xet], now_secs).unwrap();
 
         assert_eq!(scan.stale.len(), 1);
         assert_eq!(scan.stale[0].0.as_str(), key);
@@ -1157,11 +1176,138 @@ mod tests {
             (fresh_key.as_str(), 7, None),
         ]);
 
-        let scan = scan_stale_temporary_chunk_artifacts(&store, now_secs).unwrap();
+        let scan =
+            scan_stale_temporary_artifacts(&store, &[ServerFrontend::Xet], now_secs).unwrap();
 
         assert_eq!(scan.stale.len(), 1, "only the old temp should be stale");
         assert_eq!(scan.stale[0].0.as_str(), stale_key);
         assert_eq!(scan.stale[0].1, 42);
         assert_eq!(scan.max_embedded_temp_nanos, Some(fresh_embedded));
+    }
+
+    // ── scan_stale_temporary_artifacts: managed xorb/shard temps (F-67) ──
+
+    const XORB_TEMP_TEST_HASH: &str =
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    fn xorb_temp_key(nanos: u128, counter: u64) -> String {
+        let prefix = &XORB_TEMP_TEST_HASH[..2];
+        format!("xorbs/default/{prefix}/{XORB_TEMP_TEST_HASH}.xorb.tmp-{nanos}-{counter}")
+    }
+
+    fn shard_temp_key(nanos: u128, counter: u64) -> String {
+        let prefix = &XORB_TEMP_TEST_HASH[..2];
+        format!("shards/{prefix}/{XORB_TEMP_TEST_HASH}.shard.tmp-{nanos}-{counter}")
+    }
+
+    #[test]
+    fn stale_temp_scan_reaps_stranded_xorb_and_shard_temps() {
+        // F-67 regression: ALL local object writes (chunks, xorb containers,
+        // shards) go through temp-then-hardlink and get the `.tmp-<nanos>-
+        // <counter>` suffix. A crash between the temp write and the hardlink
+        // strands xorbs/...xorb.tmp-... and shards/...shard.tmp-... which the
+        // old chunk-only grammar never matched (and which managed_object_hash
+        // rejects, so no other GC path reaps them). The extended reaper must
+        // reap them after the age bound.
+        let now_secs = 2_000_000_000_u64;
+        let old_nanos = u128::from(now_secs - 2 * 3600) * 1_000_000_000;
+        let old_mtime = u64::try_from(old_nanos).unwrap();
+        let xorb_key = xorb_temp_key(old_nanos, 0);
+        let shard_key = shard_temp_key(old_nanos, 1);
+        let store = MockTempStore::new(vec![
+            (xorb_key.as_str(), 512, Some(old_mtime)),
+            (shard_key.as_str(), 64, Some(old_mtime)),
+        ]);
+
+        let scan =
+            scan_stale_temporary_artifacts(&store, &[ServerFrontend::Xet], now_secs).unwrap();
+
+        let mut reaped = scan
+            .stale
+            .iter()
+            .map(|(key, _bytes)| key.as_str())
+            .collect::<Vec<_>>();
+        reaped.sort_unstable();
+        assert_eq!(reaped, vec![shard_key.as_str(), xorb_key.as_str()]);
+        assert_eq!(
+            scan.max_embedded_temp_nanos,
+            Some(old_nanos),
+            "the backward-clock guard must observe the xorb/shard temps too"
+        );
+    }
+
+    #[test]
+    fn stale_temp_scan_leaves_live_xorb_and_shard_objects_untouched() {
+        // F-67 safety: live xorb and shard objects (no `.tmp-` suffix) share
+        // the managed namespace with the stranded temps and must never be
+        // classified as reaping candidates.
+        let now_secs = 2_000_000_000_u64;
+        let old_embedded = u128::from(now_secs - 2 * 3600) * 1_000_000_000;
+        let old_mtime = u64::try_from(old_embedded).unwrap();
+        let xorb_live = format!(
+            "xorbs/default/{}/{}.xorb",
+            &XORB_TEMP_TEST_HASH[..2],
+            XORB_TEMP_TEST_HASH
+        );
+        let shard_live = format!(
+            "shards/{}/{}.shard",
+            &XORB_TEMP_TEST_HASH[..2],
+            XORB_TEMP_TEST_HASH
+        );
+        let chunk_live = format!("{}/{}", &XORB_TEMP_TEST_HASH[..2], XORB_TEMP_TEST_HASH);
+        let store = MockTempStore::new(vec![
+            (xorb_live.as_str(), 512, Some(old_mtime)),
+            (shard_live.as_str(), 64, Some(old_mtime)),
+            (chunk_live.as_str(), 32, Some(old_mtime)),
+        ]);
+
+        let scan =
+            scan_stale_temporary_artifacts(&store, &[ServerFrontend::Xet], now_secs).unwrap();
+
+        assert!(
+            scan.stale.is_empty(),
+            "live managed objects must never be reaped"
+        );
+        assert!(
+            scan.max_embedded_temp_nanos.is_none(),
+            "live managed objects must not feed the backward-clock guard"
+        );
+    }
+
+    #[test]
+    fn stale_temp_scan_ignores_non_managed_temp_like_keys() {
+        // A user-controlled key that merely ends in `.tmp-<digits>-<digits>`
+        // must never be reaped: its base is not a managed object key (these are
+        // server-internal namespaces; user keys live under e.g.
+        // `protocols/s3/{scope}/{key}`). Also a managed-shaped base with a
+        // malformed hash must not match.
+        let now_secs = 2_000_000_000_u64;
+        let old_embedded = u128::from(now_secs - 2 * 3600) * 1_000_000_000;
+        let old_mtime = u64::try_from(old_embedded).unwrap();
+        let user_key = format!("protocols/s3/abc123/user-file.tmp-{old_embedded}-0");
+        let non_managed_key = format!("lfs/repo/objects/somefile.tmp-{old_embedded}-1");
+        let short_hash_xorb = format!("xorbs/default/aa/abcd.xorb.tmp-{old_embedded}-2");
+        let upper_xorb = format!(
+            "xorbs/default/aa/{}.xorb.tmp-{old_embedded}-3",
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        );
+        let store = MockTempStore::new(vec![
+            (user_key.as_str(), 10, Some(old_mtime)),
+            (non_managed_key.as_str(), 11, Some(old_mtime)),
+            (short_hash_xorb.as_str(), 12, Some(old_mtime)),
+            (upper_xorb.as_str(), 13, Some(old_mtime)),
+        ]);
+
+        let scan =
+            scan_stale_temporary_artifacts(&store, &[ServerFrontend::Xet], now_secs).unwrap();
+
+        assert!(
+            scan.stale.is_empty(),
+            "non-managed temp-like keys must never be reaped"
+        );
+        assert!(
+            scan.max_embedded_temp_nanos.is_none(),
+            "non-managed temp-like keys must not feed the backward-clock guard either"
+        );
     }
 }

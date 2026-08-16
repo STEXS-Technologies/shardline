@@ -1027,4 +1027,82 @@ mod tests {
         assert!(response1.is_ok(), "get_or_load 1 should succeed");
         assert!(response2.is_ok(), "get_or_load 2 should succeed");
     }
+
+    // ── get_or_load — slow (>30s) loader keeps its latch (F-68) ─────────
+    //
+    // Reconstruction of large files from S3-backed CAS routinely exceeds the
+    // memory adapter's old 30s stall interval. A concurrent service-layer
+    // request must keep waiting for the in-flight loader instead of giving up
+    // at 30s, reporting a miss, and starting a second full reconstruction.
+
+    #[tokio::test(start_paused = true)]
+    async fn cache_service_waits_for_slow_in_flight_loader_without_second_load() {
+        let ttl_seconds = NonZeroU64::new(60).unwrap_or(NonZeroU64::MIN);
+        let memory = MemoryReconstructionCache::new(
+            ttl_seconds,
+            NonZeroUsize::new(8).unwrap_or(NonZeroUsize::MIN),
+        );
+        let adapter: SharedReconstructionCache = Arc::new(memory.clone());
+        let cache = Arc::new(ReconstructionCacheService::for_tests("memory", adapter));
+        let key = Arc::new(ReconstructionCacheKey::latest("slow-service.bin", None));
+        let loader_calls = std::sync::Arc::new(AtomicUsize::new(0));
+
+        // R1: the adapter's get_or_load registers the loading latch and runs a
+        // 35s reconstruction (longer than the old 30s stall interval).
+        let memory_1 = memory.clone();
+        let key_1 = Arc::clone(&key);
+        let loader_calls_1 = Arc::clone(&loader_calls);
+        let task1 = tokio::spawn(async move {
+            memory_1
+                .get_or_load(&key_1, || {
+                    loader_calls_1.fetch_add(1, Ordering::SeqCst);
+                    Box::pin(async {
+                        tokio::time::sleep(Duration::from_secs(35)).await;
+                        let payload = serde_json::to_vec(&sample_response("slow-chunk"))
+                            .expect("serialize sample response");
+                        Ok::<_, ReconstructionCacheError>(payload)
+                    })
+                })
+                .await
+        });
+
+        // Give R1 time to register its latch.
+        tokio::time::advance(Duration::from_millis(100)).await;
+
+        // R2: the service layer's get() finds the latch and must wait for R1
+        // instead of returning a miss at 30s and starting a second load.
+        let cache_2 = Arc::clone(&cache);
+        let key_2 = Arc::clone(&key);
+        let loader_calls_2 = Arc::clone(&loader_calls);
+        let task2 = tokio::spawn(async move {
+            cache_2
+                .get_or_load(&key_2, || {
+                    loader_calls_2.fetch_add(1, Ordering::SeqCst);
+                    // If this ever runs, the `loader_calls == 1` assertion
+                    // below fails (a second reconstruction was started).
+                    async { Ok(sample_response("should-not-run")) }
+                })
+                .await
+        });
+
+        // Advance past the 30s stall interval and through the loader's 35s
+        // completion: the waiter re-enters instead of giving up.
+        tokio::time::advance(Duration::from_secs(36)).await;
+
+        let result1 = task1.await.expect("task 1 panicked");
+        let result2 = task2.await.expect("task 2 panicked");
+        assert!(result1.is_ok(), "loader should succeed");
+        assert!(result2.is_ok(), "waiter should succeed");
+        assert_eq!(
+            loader_calls.load(Ordering::SeqCst),
+            1,
+            "concurrent reconstructions must be deduplicated"
+        );
+        assert_eq!(
+            result2
+                .ok()
+                .and_then(|r| r.terms.first().map(|t| t.hash.clone())),
+            Some("slow-chunk".to_owned())
+        );
+    }
 }

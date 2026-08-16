@@ -198,6 +198,33 @@ async fn store_push_objects(
 
     let files = walk_git_tree(&tree_sha_arr, &sha_to_obj, "")?;
 
+    // Determine parent SHA for revision creation.
+    //
+    // This MUST happen before any file-entry / LFS-object persistence: a
+    // non-fast-forward push is rejected outright, and a rejected push must not
+    // leave write side effects behind (orphaned file entries keyed by a commit
+    // SHA no revision will ever reference, and LFS objects nobody will read).
+    let parent = if old_sha == "0000000000000000000000000000000000000000" {
+        None
+    } else {
+        // Non-fast-forward check: if the ref already exists and the client's
+        // old_sha doesn't match the current ref value, reject the push.
+        match state.store.resolve_revision(repo_id, ref_name) {
+            Ok(Some(current)) if current != old_sha => {
+                return Err(SmartHttpError::NonFastForward(format!(
+                    "non-fast-forward (current: {current}, expected: {old_sha})"
+                )));
+            }
+            Ok(None) if old_sha != "0000000000000000000000000000000000000000" => {
+                return Err(SmartHttpError::NonFastForward(
+                    "non-fast-forward".to_owned(),
+                ));
+            }
+            _ => {}
+        }
+        Some(old_sha)
+    };
+
     // Store file entries for this commit.
     state
         .store
@@ -239,28 +266,6 @@ async fn store_push_objects(
                 .map_err(|e| SmartHttpError::StoreLfsObject(e.to_string()))?;
         }
     }
-
-    // Determine parent SHA for revision creation.
-    let parent = if old_sha == "0000000000000000000000000000000000000000" {
-        None
-    } else {
-        // Non-fast-forward check: if the ref already exists and the client's
-        // old_sha doesn't match the current ref value, reject the push.
-        match state.store.resolve_revision(repo_id, ref_name) {
-            Ok(Some(current)) if current != old_sha => {
-                return Err(SmartHttpError::NonFastForward(format!(
-                    "non-fast-forward (current: {current}, expected: {old_sha})"
-                )));
-            }
-            Ok(None) if old_sha != "0000000000000000000000000000000000000000" => {
-                return Err(SmartHttpError::NonFastForward(
-                    "non-fast-forward".to_owned(),
-                ));
-            }
-            _ => {}
-        }
-        Some(old_sha)
-    };
 
     // Create revision in the store.
     state

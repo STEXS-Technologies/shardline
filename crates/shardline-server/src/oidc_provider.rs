@@ -71,6 +71,12 @@ impl Clone for CachedJwks {
 
 #[derive(Debug, Deserialize)]
 struct OidcDiscovery {
+    /// The issuer identifier from the discovery document (RFC 8414 §2). It
+    /// must exactly match the configured issuer or the provider refuses to
+    /// start, so a (partially) compromised discovery endpoint cannot redirect
+    /// the server to attacker-controlled JWKS keys while the issuer pin still
+    /// passes.
+    issuer: String,
     jwks_uri: String,
 }
 
@@ -101,6 +107,12 @@ pub enum OidcProviderError {
     /// OIDC discovery endpoint could not be reached.
     #[error("failed to fetch OIDC discovery document: {0}")]
     DiscoveryFetch(String),
+    /// The discovery document's `issuer` does not match the configured issuer.
+    #[error("OIDC discovery document issuer mismatch: expected {expected}, got {actual}")]
+    DiscoveryIssuerMismatch { expected: String, actual: String },
+    /// The JWKS endpoint URL advertised by the discovery document must use https.
+    #[error("OIDC JWKS endpoint must use https: {0}")]
+    InsecureJwksUrl(String),
     /// The JWKS endpoint could not be reached.
     #[error("failed to fetch JWKS keys: {0}")]
     JwksFetch(String),
@@ -130,7 +142,20 @@ impl OidcProvider {
             .await
             .map_err(|e| OidcProviderError::DiscoveryFetch(e.to_string()))?;
 
+        // Fail closed against a (partially) compromised discovery endpoint:
+        // the discovery document must identify the same issuer we are pinned
+        // to, and it must not be able to point JWKS fetching at a plain-http
+        // endpoint outside of local development.
+        if discovery.issuer != issuer {
+            return Err(OidcProviderError::DiscoveryIssuerMismatch {
+                expected: issuer.to_owned(),
+                actual: discovery.issuer,
+            });
+        }
         let jwks_url = discovery.jwks_uri;
+        if !is_secure_url(&jwks_url) {
+            return Err(OidcProviderError::InsecureJwksUrl(jwks_url));
+        }
         let jwks: JwksResponse = client
             .get(&jwks_url)
             .send()
@@ -271,6 +296,14 @@ impl OidcProvider {
         validation.set_issuer(&[self.issuer.as_str()]);
         if let Some(ref audience) = self.audience {
             validation.set_audience(&[audience.as_str()]);
+        } else {
+            // jsonwebtoken's `validate_aud` defaults to `true` and, when no
+            // audience is configured, rejects every token that carries an
+            // `aud` claim (InvalidAudience). OIDC Core / RFC 9068 make `aud`
+            // required in ID/access tokens, so the default (unset audience)
+            // shape would reject every real IdP token. Explicitly disable aud
+            // validation to make the documented permissive default true.
+            validation.validate_aud = false;
         }
 
         let token = format!("{header_b64}.{payload_b64}.{signature_b64}");
@@ -399,6 +432,30 @@ fn base64_decode_url(input: &str) -> Result<Vec<u8>, base64::DecodeError> {
     URL_SAFE_NO_PAD.decode(input)
 }
 
+/// Returns true when `url` uses the https scheme or points at a loopback
+/// address.
+///
+/// OIDC issuers and JWKS endpoints must be served over https (RFC 8414 §2).
+/// Loopback http is tolerated so local development and test tooling (which
+/// cannot serve TLS) keep working; non-loopback http is always rejected.
+fn is_secure_url(url: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(url) else {
+        return false;
+    };
+    if parsed.scheme() == "https" {
+        return true;
+    }
+    if parsed.scheme() != "http" {
+        return false;
+    }
+    match parsed.host() {
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        Some(url::Host::Domain(domain)) => domain.eq_ignore_ascii_case("localhost"),
+        None => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -523,6 +580,7 @@ mod tests {
         let disco: OidcDiscovery =
             serde_json::from_value(json).expect("should deserialize discovery doc");
         assert_eq!(disco.jwks_uri, "https://example.com/.well-known/jwks");
+        assert_eq!(disco.issuer, "https://example.com");
     }
 
     #[test]
@@ -533,6 +591,19 @@ mod tests {
         });
         let result: Result<OidcDiscovery, _> = serde_json::from_value(json);
         assert!(result.is_err(), "missing jwks_uri should fail");
+    }
+
+    #[test]
+    fn oidc_discovery_deserialize_missing_issuer() {
+        let json = json!({
+            "jwks_uri": "https://example.com/.well-known/jwks"
+            // no issuer
+        });
+        let result: Result<OidcDiscovery, _> = serde_json::from_value(json);
+        assert!(
+            result.is_err(),
+            "missing issuer should fail (RFC 8414 requires it)"
+        );
     }
 
     #[test]
@@ -548,6 +619,7 @@ mod tests {
         let disco: OidcDiscovery =
             serde_json::from_value(json).expect("should ignore extra fields");
         assert_eq!(disco.jwks_uri, "https://example.com/jwks");
+        assert_eq!(disco.issuer, "https://example.com");
     }
 
     // ── JwksResponse deserialization edge cases ──────────────────────────
@@ -769,6 +841,31 @@ mod tests {
     fn base64_decode_url_empty_string() {
         let result = base64_decode_url("").unwrap();
         assert!(result.is_empty());
+    }
+
+    // ── is_secure_url ─────────────────────────────────────────────────────
+
+    #[test]
+    fn is_secure_url_accepts_https() {
+        assert!(is_secure_url("https://accounts.example.com"));
+        assert!(is_secure_url(
+            "https://accounts.example.com/.well-known/jwks"
+        ));
+    }
+
+    #[test]
+    fn is_secure_url_rejects_non_https_non_loopback() {
+        assert!(!is_secure_url("http://accounts.example.com"));
+        assert!(!is_secure_url("http://attacker.example.com/jwks"));
+        assert!(!is_secure_url("ftp://example.com/jwks"));
+        assert!(!is_secure_url("not-a-url"));
+    }
+
+    #[test]
+    fn is_secure_url_accepts_loopback_http() {
+        assert!(is_secure_url("http://127.0.0.1:8080/jwks"));
+        assert!(is_secure_url("http://localhost:8080/jwks"));
+        assert!(is_secure_url("http://[::1]:8080/jwks"));
     }
 
     // ── OidcProvider construction helpers ────────────────────────────────
@@ -1202,6 +1299,32 @@ mod tests {
     }
 
     #[test]
+    fn oidc_provider_error_display_discovery_issuer_mismatch() {
+        let e = OidcProviderError::DiscoveryIssuerMismatch {
+            expected: "https://accounts.example.com".to_owned(),
+            actual: "https://evil.example.com".to_owned(),
+        };
+        let msg = format!("{e}");
+        assert!(msg.contains("issuer mismatch"), "message: {msg}");
+        assert!(
+            msg.contains("https://accounts.example.com"),
+            "message: {msg}"
+        );
+        assert!(msg.contains("https://evil.example.com"), "message: {msg}");
+    }
+
+    #[test]
+    fn oidc_provider_error_display_insecure_jwks_url() {
+        let e = OidcProviderError::InsecureJwksUrl("http://attacker.example.com/jwks".to_owned());
+        let msg = format!("{e}");
+        assert!(msg.contains("https"), "message: {msg}");
+        assert!(
+            msg.contains("http://attacker.example.com/jwks"),
+            "message: {msg}"
+        );
+    }
+
+    #[test]
     fn oidc_provider_error_display_jwks() {
         let e = OidcProviderError::JwksFetch("500".into());
         assert_eq!(format!("{e}"), "failed to fetch JWKS keys: 500");
@@ -1448,12 +1571,15 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
         use jsonwebtoken::{EncodingKey, Header, encode};
         use std::collections::BTreeMap;
 
-        // When no audience is configured (the default), the provider does NOT
-        // add an `aud` requirement, so a token that omits the `aud` claim
+        // When no audience is configured (the default), the provider disables
+        // aud validation entirely, so a token that omits the `aud` claim
         // verifies — the permissive behavior existing deployments rely on.
-        // (jsonwebtoken's default `validate_aud` only inspects the claim when
-        // it is present; operators who want `aud` validated should set
-        // SHARDLINE_AUTH_OIDC_AUDIENCE.)
+        // Note: jsonwebtoken's default `validate_aud` is *true* and would
+        // reject any token carrying an `aud` claim when no audience is
+        // configured, which is exactly why the provider sets
+        // `validate_aud = false` in that case (see the aud-bearing regression
+        // test below). Operators who want `aud` validated should set
+        // SHARDLINE_AUTH_OIDC_AUDIENCE.
         let mut claims = BTreeMap::new();
         claims.insert("iss", serde_json::json!("https://issuer.example.com"));
         claims.insert("sub", serde_json::json!("aud-user"));
@@ -1481,6 +1607,49 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
             result.is_ok(),
             "a token without an aud claim must verify when no audience is configured, got {result:?}"
         );
+    }
+
+    #[test]
+    fn verify_token_with_aud_claim_and_no_audience_config_succeeds() {
+        use jsonwebtoken::{EncodingKey, Header, encode};
+        use std::collections::BTreeMap;
+
+        // Regression (F-54): with no audience configured (the default),
+        // jsonwebtoken's `validate_aud` defaults to true and rejects any token
+        // carrying an `aud` claim (InvalidAudience) when no audience is set.
+        // OIDC Core / RFC 9068 require `aud` in ID/access tokens, so every
+        // real IdP token was rejected on the default shape. The provider must
+        // disable aud validation so the documented permissive default is true.
+        let mut claims = BTreeMap::new();
+        claims.insert("iss", serde_json::json!("https://issuer.example.com"));
+        claims.insert("sub", serde_json::json!("aud-user"));
+        claims.insert("aud", serde_json::json!("some-oidc-client"));
+        claims.insert("exp", serde_json::json!(9999999999u64));
+        claims.insert("iat", serde_json::json!(1000000000u64));
+
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some("test-key-1".to_owned());
+
+        let encoding_key =
+            EncodingKey::from_rsa_pem(TEST_RSA_PEM.as_bytes()).expect("valid RSA PEM");
+        let token = encode(&header, &claims, &encoding_key).expect("should sign token");
+
+        let provider = make_provider(
+            "https://issuer.example.com",
+            None,
+            Some(CachedJwks {
+                keys: Arc::new(vec![test_rsa_jwk("test-key-1")]),
+                fetched_at: Instant::now(),
+            }),
+        );
+
+        let result = provider.verify_token(&token);
+        assert!(
+            result.is_ok(),
+            "an aud-bearing token must verify when no audience is configured, got {result:?}"
+        );
+        let token_claims = result.unwrap();
+        assert_eq!(token_claims.subject(), "aud-user");
     }
 
     #[test]
@@ -1572,6 +1741,7 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
         let jwks_url = format!("{base_url}/oauth/jwks");
         let discovery_json = serde_json::json!({
             "jwks_uri": jwks_url,
+            "issuer": base_url,
         });
 
         let jwks_json = serde_json::json!({
@@ -1605,6 +1775,64 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
         assert!(guard.is_some());
     }
 
+    #[tokio::test]
+    async fn new_with_discovery_issuer_mismatch_fails() {
+        // Regression (F-64): a discovery document that does not identify the
+        // configured issuer must be rejected before any JWKS keys are fetched,
+        // so a (partially) compromised discovery endpoint cannot redirect the
+        // server to attacker-controlled keys while the issuer pin still passes.
+        let mock_server = wiremock::MockServer::start().await;
+        let base_url = mock_server.uri();
+
+        let discovery_json = serde_json::json!({
+            "jwks_uri": format!("{base_url}/oauth/jwks"),
+            "issuer": "https://accounts.example.com",
+        });
+
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path(
+                "/.well-known/openid-configuration",
+            ))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(discovery_json))
+            .mount(&mock_server)
+            .await;
+
+        let result = OidcProvider::new(&base_url, None).await;
+        let err = result.err().expect("expected Err, got Ok(provider)");
+        assert!(
+            matches!(err, OidcProviderError::DiscoveryIssuerMismatch { .. }),
+            "expected DiscoveryIssuerMismatch, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn new_with_non_https_jwks_uri_fails() {
+        // Regression (F-64): the discovery document must not be able to point
+        // JWKS fetching at a plain-http endpoint outside local development.
+        let mock_server = wiremock::MockServer::start().await;
+        let base_url = mock_server.uri();
+
+        let discovery_json = serde_json::json!({
+            "jwks_uri": "http://attacker.example.com/jwks",
+            "issuer": base_url,
+        });
+
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path(
+                "/.well-known/openid-configuration",
+            ))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(discovery_json))
+            .mount(&mock_server)
+            .await;
+
+        let result = OidcProvider::new(&base_url, None).await;
+        let err = result.err().expect("expected Err, got Ok(provider)");
+        assert!(
+            matches!(err, OidcProviderError::InsecureJwksUrl(_)),
+            "expected InsecureJwksUrl, got {err:?}"
+        );
+    }
+
     // ── start_background_refresh ────────────────────────────────────────
 
     #[tokio::test]
@@ -1630,6 +1858,7 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
         let jwks_url = format!("{base_url}/oauth/jwks");
         let discovery_json = serde_json::json!({
             "jwks_uri": jwks_url,
+            "issuer": base_url,
         });
 
         let jwks_json = serde_json::json!({

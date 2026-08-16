@@ -122,7 +122,8 @@ pub(crate) fn temp_key_for(key: &ObjectKey) -> Result<ObjectKey, S3ObjectStoreEr
 /// The generated grammars are:
 /// (a) `<base>.tmp.<counter>.<pid>.<nanos>` — the `put_overwrite` and
 ///     content-addressed multipart temp suffix ([`temp_key_for`]), where the
-///     trailing three dot-separated groups are all decimal digits; and
+///     counter is a monotonic `u64`, the pid is a `u32`, and the nanos is a
+///     plausible unix-nanosecond timestamp (`>= 10^15`); and
 /// (b) `__tmp/shardline-stream-upload/<nanos>-<pid>-<counter>` — the
 ///     stream-upload temp path ([`temporary_upload_location`]), inside the
 ///     reserved `__tmp/` namespace.
@@ -130,11 +131,19 @@ pub(crate) fn is_temp_upload_key(key: &str) -> bool {
     is_overwrite_temp_key(key) || is_stream_upload_temp_key(key)
 }
 
-/// Matches grammar (a): `<base>.tmp.<digits>.<digits>.<digits>` with a
+/// Matches grammar (a): `<base>.tmp.<counter>.<pid>.<nanos>` with a
 /// non-empty `<base>`. The final `.tmp.` is the delimiter (a base key may
-/// itself contain `.tmp.`), and the three trailing groups must all be decimal
-/// digits — `data.tmp.1` (one group) and `report.tmp.2026.1` (two groups) do
-/// not match the generated shape.
+/// itself contain `.tmp.`), and the three trailing groups must match the
+/// EXACT generated shapes — not just any three decimal groups: the counter
+/// must fit `u64`, the pid must fit `u32` (it comes from
+/// [`std::process::id`]), and the nanos must be a plausible unix-nanosecond
+/// timestamp (`10^15 <= nanos < 10^20`; the epoch clock's value since early
+/// 1970, and generated values are ~1.7e18 today, staying 19-digit for ~300
+/// years). User keys whose suffixes are three all-digit groups — date stamps
+/// like `report.tmp.2026.01.15` / `backup.tmp.2026.08.16`, version tags like
+/// `data.tmp.001.002.003`, `photos.tmp.1.2.3`, or OCI tags like
+/// `v1.tmp.2026.01.15` — never match the generated shapes, so they are not
+/// shadowed from listings and never reaped by the GC sweep (F-56).
 fn is_overwrite_temp_key(key: &str) -> bool {
     let Some((base, suffix)) = key.rsplit_once(".tmp.") else {
         return false;
@@ -152,7 +161,34 @@ fn is_overwrite_temp_key(key: &str) -> bool {
     matches!(
         (counter, pid, nanos),
         (Some(counter), Some(pid), Some(nanos))
-            if is_all_digits(counter) && is_all_digits(pid) && is_all_digits(nanos)
+            if is_all_digits(counter)
+                && is_all_digits(pid)
+                && is_all_digits(nanos)
+                && is_plausible_u64(counter)
+                && is_plausible_u32(pid)
+                && is_plausible_unix_nanos(nanos)
+    )
+}
+
+/// True when `value` is a decimal number within `u64` range — the generated
+/// counter comes from a monotonic `u64` atomic.
+fn is_plausible_u64(value: &str) -> bool {
+    value.parse::<u64>().is_ok()
+}
+
+/// True when `value` is a decimal number within `u32` range — the generated
+/// pid is [`std::process::id`], a `u32`.
+fn is_plausible_u32(value: &str) -> bool {
+    value.parse::<u32>().is_ok()
+}
+
+/// True when `value` is a plausible unix-nanosecond timestamp: `10^15 <=
+/// nanos < 10^20` — the value [`SystemTime::now`] has held since early 1970.
+/// 16-digit dates like `2026.01.15` parse as decimal but fall below `10^15`.
+fn is_plausible_unix_nanos(value: &str) -> bool {
+    matches!(
+        value.parse::<u128>(),
+        Ok(nanos) if (1_000_000_000_000_000..100_000_000_000_000_000_000).contains(&nanos)
     )
 }
 

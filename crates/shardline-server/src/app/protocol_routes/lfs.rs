@@ -707,6 +707,63 @@ fn record_lfs_patch_range(
     Ok(state.ranges.as_slice() == [(0, total)])
 }
 
+/// Consumes a completed LFS patch session's staging files.
+///
+/// Removes the assembled data file, the range bookkeeping, and the last-touched
+/// sidecar. Called after a promotion (whether it succeeded or failed) and when
+/// a completed session's object is already present in the store (F-59). The
+/// store lock is taken here with NO per-OID guard held; the caller must have
+/// dropped the per-OID lock first (F-31).
+fn consume_lfs_patch_session(tmp_path: &FsPath, ranges_path: &FsPath, tmp_dir: &FsPath, oid: &str) {
+    drop(fs::remove_file(tmp_path));
+    drop(fs::remove_file(ranges_path));
+    let _store_guard = LFS_PATCH_STORE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    drop(fs::remove_file(lfs_patch_meta_path(tmp_dir, oid)));
+    drop(_store_guard);
+    evict_lfs_patch_ranges(ranges_path);
+}
+
+/// Promotes a completed LFS patch session into the permanent store.
+///
+/// F-21: promote with a bounded streaming read instead of loading the entire
+/// assembled object (up to 1 TiB) into RAM; the SHA-256 verification runs over
+/// the streamed bytes inside the backend ingest, and the stream is capped at
+/// [`MAX_LFS_OBJECT_SIZE`] (the declared-size check stays). The session is
+/// consumed by the promotion: the staging files are removed whether the store
+/// commit succeeded or failed.
+///
+/// The backend ingest is idempotent — an already-stored object is re-verified
+/// and reported as `AlreadyExists` without a second write — so this is safe to
+/// re-run for a session whose ranges cover `[0, total)` but whose object was
+/// never committed (F-59). The store lock is only taken inside
+/// [`consume_lfs_patch_session`], with NO per-OID guard held (F-31); the
+/// caller must have dropped the per-OID lock first.
+fn promote_lfs_patch_session(
+    tmp_path: &FsPath,
+    ranges_path: &FsPath,
+    tmp_dir: &FsPath,
+    oid: &str,
+    backend: &crate::ServerBackend,
+    object_key: &shardline_storage::ObjectKey,
+    stream_chunk_size: usize,
+) -> Result<(), ServerError> {
+    let promotion = (|| {
+        let promotion_body = bounded_file_stream(tmp_path, stream_chunk_size, MAX_LFS_OBJECT_SIZE)?;
+        tokio::runtime::Handle::current().block_on(
+            crate::ServerBackend::put_sha256_addressed_object_stream_if_absent(
+                backend,
+                object_key,
+                oid,
+                promotion_body,
+            ),
+        )
+    })();
+    consume_lfs_patch_session(tmp_path, ranges_path, tmp_dir, oid);
+    promotion.map(|_outcome| ())
+}
+
 #[tracing::instrument(skip(state, headers, request))]
 pub(crate) async fn lfs_batch(
     State(state): State<Arc<AppState>>,
@@ -1173,7 +1230,17 @@ pub(crate) async fn lfs_patch_object(
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         sweep_lfs_patch_sessions_locked(&tmp_dir, patch_ttl_seconds, now)?;
         let (active_sessions, used_bytes) = patch_store_usage(&tmp_dir)?;
-        if active_sessions >= max_active_sessions.get() {
+        // F-60: a continuation of an EXISTING session (its `.meta` sidecar is
+        // already on disk, marking it active) must not be charged against the
+        // active-session cap. Charging continuations made the cap a
+        // chunked-PATCH denial of service: a writer holding every slot with
+        // tiny sessions would permanently reject continuations of those very
+        // sessions — and every other in-progress multi-chunk upload — with 429
+        // mid-stream. Only NEW sessions consume a slot; the aggregate byte cap
+        // below still applies to continuations, so a writer cannot bypass the
+        // byte limits by reusing one OID.
+        let is_continuation = lfs_patch_meta_path(&tmp_dir, &oid_for_closure).exists();
+        if !is_continuation && active_sessions >= max_active_sessions.get() {
             return Err(ServerError::LfsPatchTooManySessions);
         }
         if checked_add(used_bytes, chunk_size)? > total_max_bytes.get() {
@@ -1198,8 +1265,40 @@ pub(crate) async fn lfs_patch_object(
         // a multi-TiB sparse offset (F-30).
         let (high_water_mark, already_complete) = inspect_lfs_patch_ranges(&ranges_path, total)?;
         if already_complete {
-            // This PATCH's data is already accounted for by the concurrent
-            // promotion; report success without writing another chunk.
+            // F-59: a session whose ranges cover [0,total) but whose object is
+            // not yet in the store is the crash-left state of a promotion that
+            // never finished — the window between `record_lfs_patch_range`
+            // returning the promotion trigger and the store commit spans the
+            // entire bounded-stream ingest of up to 1 TiB. Early-returning here
+            // reported success forever (PATCH 200, HEAD/verify 404) without
+            // promoting, leaving the staging files to the TTL sweep. Re-arm
+            // the promotion instead: it consumes the staging files whether it
+            // succeeds or fails, and if the object was already committed (a
+            // concurrent same-OID promotion, or a crash after the commit but
+            // before the cleanup) the backend ingest is an idempotent no-op.
+            drop(lock);
+            let object_present = match tokio::runtime::Handle::current()
+                .block_on(backend.object_length(&object_key_for_closure))
+            {
+                Ok(_length) => true,
+                Err(ServerError::NotFound) => false,
+                Err(error) => return Err(error),
+            };
+            if object_present {
+                // The object made it into the store; only the staging cleanup
+                // was lost (or a concurrent promotion owns the commit).
+                consume_lfs_patch_session(&tmp_path, &ranges_path, &tmp_dir, &oid_for_closure);
+            } else {
+                promote_lfs_patch_session(
+                    &tmp_path,
+                    &ranges_path,
+                    &tmp_dir,
+                    &oid_for_closure,
+                    &backend,
+                    &object_key_for_closure,
+                    stream_chunk_size,
+                )?;
+            }
             return Ok(());
         }
         if offset > checked_add(high_water_mark, max_seek_ahead_bytes.get())? {
@@ -1253,34 +1352,19 @@ pub(crate) async fn lfs_patch_object(
             // the entire assembled object (up to 1 TiB) into RAM; the SHA-256
             // verification runs over the streamed bytes inside the backend
             // ingest, and the stream is capped at MAX_LFS_OBJECT_SIZE (the
-            // declared-size check above stays).
-            let promotion = (|| {
-                let promotion_body =
-                    bounded_file_stream(&tmp_path, stream_chunk_size, MAX_LFS_OBJECT_SIZE)?;
-                tokio::runtime::Handle::current().block_on(
-                    crate::ServerBackend::put_sha256_addressed_object_stream_if_absent(
-                        &backend,
-                        &object_key_for_closure,
-                        &oid_for_closure,
-                        promotion_body,
-                    ),
-                )
-            })();
-            // The session is consumed by the promotion: the staging files are
-            // removed whether the store commit succeeded or failed. The store
-            // lock is taken here with NO per-OID guard held (F-31).
-            drop(fs::remove_file(&tmp_path));
-            drop(fs::remove_file(&ranges_path));
-            let _store_guard = LFS_PATCH_STORE_LOCK
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            drop(fs::remove_file(lfs_patch_meta_path(
+            // declared-size check above stays). The session is consumed by the
+            // promotion (staging files removed whether the store commit
+            // succeeded or failed); the store lock is taken inside with NO
+            // per-OID guard held (F-31).
+            promote_lfs_patch_session(
+                &tmp_path,
+                &ranges_path,
                 &tmp_dir,
                 &oid_for_closure,
-            )));
-            drop(_store_guard);
-            evict_lfs_patch_ranges(&ranges_path);
-            promotion?;
+                &backend,
+                &object_key_for_closure,
+                stream_chunk_size,
+            )?;
         }
 
         Ok::<_, ServerError>(())
@@ -3266,6 +3350,157 @@ mod tests {
         );
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn patch_continuations_exempt_from_active_session_cap() {
+        // F-60: the active-session cap must only charge NEW sessions. With the
+        // cap full, a continuation of an existing session still succeeds while
+        // a brand-new session is rejected — otherwise one writer could hold all
+        // slots with tiny sessions and permanently block the chunked-PATCH
+        // feature (every continuation of those sessions would be rejected with
+        // 429 mid-stream). The aggregate byte cap below still binds
+        // continuations (see patch_continuation_still_binds_aggregate_byte_cap).
+        let (state, _tmp) = build_test_state_with_lfs_options(
+            std::num::NonZeroUsize::new(2).unwrap(), // max 2 active sessions
+            NonZeroU64::new(1 << 40).unwrap(),
+            NonZeroU64::new(3600).unwrap(),
+        )
+        .await;
+        let app = lfs_router(state);
+
+        // Two partial sessions consume both slots.
+        let content_a = b"0123456789abcdefghij"; // 20 bytes
+        let oid_a = test_oid(content_a);
+        let oid_b = test_oid(b"continuation-cap-session-b");
+        for oid in [&oid_a, &oid_b] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("PATCH")
+                        .uri(format!("/v1/lfs/objects/{oid}"))
+                        .header("content-range", "bytes 0-9/20")
+                        .header("content-length", 10)
+                        .body(Body::from(b"0123456789".to_vec()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+
+        // A brand-new session still hits the active-session cap.
+        let oid_new = test_oid(b"continuation-cap-new-session");
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(format!("/v1/lfs/objects/{oid_new}"))
+                    .header("content-range", "bytes 0-9/20")
+                    .header("content-length", 10)
+                    .body(Body::from(b"0123456789".to_vec()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "a new session beyond the active-session cap must be rejected"
+        );
+
+        // A continuation of an EXISTING session succeeds despite the cap; it
+        // completes [0,20) and promotes, so the OID must match the assembled
+        // bytes.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(format!("/v1/lfs/objects/{oid_a}"))
+                    .header("content-range", "bytes 10-19/20")
+                    .header("content-length", 10)
+                    .body(Body::from(b"abcdefghij".to_vec()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "a continuation of an existing session must not be rejected by the active-session cap"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn patch_continuation_still_binds_aggregate_byte_cap() {
+        // F-60: exempting continuations from the active-session cap must not
+        // weaken the aggregate staging-BYTE cap — a writer cannot bypass the
+        // byte limits by reusing a single OID. A continuation that would push
+        // the aggregate over the cap is still rejected BEFORE the chunk is
+        // written (F-20).
+        let (state, _tmp) = build_test_state_with_lfs_options(
+            std::num::NonZeroUsize::new(4).unwrap(),
+            NonZeroU64::new(100).unwrap(), // 100-byte aggregate staging cap
+            NonZeroU64::new(3600).unwrap(),
+        )
+        .await;
+        let root_dir = state.config.root_dir().to_path_buf();
+        let app = lfs_router(state);
+
+        let oid = test_oid(b"continuation-byte-cap-content");
+        let chunk1 = vec![0x01_u8; 80];
+        let chunk1_len = chunk1.len() as u64;
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(format!("/v1/lfs/objects/{oid}"))
+                    .header("content-range", format!("bytes 0-{}/200", chunk1.len() - 1))
+                    .header("content-length", chunk1.len())
+                    .body(Body::from(chunk1))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // A continuation of the SAME session whose chunk would push the
+        // aggregate over the cap is rejected.
+        let chunk2 = vec![0x02_u8; 30];
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(format!("/v1/lfs/objects/{oid}"))
+                    .header(
+                        "content-range",
+                        format!("bytes 80-{}/200", 80 + chunk2.len() - 1),
+                    )
+                    .header("content-length", chunk2.len())
+                    .body(Body::from(chunk2))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let parsed: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(parsed["error"], "lfs patch staging byte quota exceeded");
+
+        // The rejected continuation never extended the staging file.
+        let dir = lfs_patch_dir(root_dir.as_path());
+        let data_len = std::fs::metadata(dir.join(&oid)).unwrap().len();
+        assert_eq!(
+            data_len, chunk1_len,
+            "an over-cap continuation must not write its chunk"
+        );
+    }
+
     // =========================================================================
     // F-21 — LFS promotion streams in bounded chunks and cleans its temp
     // =========================================================================
@@ -3376,6 +3611,80 @@ mod tests {
         assert_eq!(
             entries, 0,
             "a failed promotion must clean its staging files"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn patch_retry_re_promotes_crash_completed_session() {
+        // F-59: a crash between the promotion trigger and the store commit
+        // leaves {oid} data + {oid}.ranges showing [0,total) + a fresh
+        // {oid}.meta on disk with the object ABSENT from the store. A retried
+        // PATCH must re-arm the promotion instead of early-returning 200
+        // forever (the old behavior left PATCH 200 / HEAD 404 until the TTL
+        // sweep): the retry returns 200, the object is now present (HEAD 200),
+        // and the staging files are consumed.
+        let (state, _tmp) = build_test_state().await;
+        let app = lfs_router(state.clone());
+        let content = b"crash-reloaded-promotion-content";
+        let oid = test_oid(content);
+        let total = content.len() as u64;
+
+        // Seed the crash-left state: data + complete ranges + fresh sidecar,
+        // with NO object in the store.
+        let dir = lfs_patch_dir(state.config.root_dir());
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(&oid), content).unwrap();
+        std::fs::write(
+            dir.join(format!("{oid}.ranges")),
+            format!("{total}\n0 {total}\n"),
+        )
+        .unwrap();
+        let now = lfs_patch_now_seconds().unwrap();
+        touch_patch_session(&dir, &oid, now).unwrap();
+
+        // The client retries the chunk; the server must re-promote the
+        // crash-completed session.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(format!("/v1/lfs/objects/{oid}"))
+                    .header("content-range", format!("bytes 0-{}/{}", total - 1, total))
+                    .header("content-length", content.len())
+                    .body(Body::from(content.to_vec()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "a retried PATCH on a crash-completed session must report success"
+        );
+
+        // The re-promotion stored the object and consumed the staging files.
+        let head = app
+            .oneshot(
+                Request::builder()
+                    .method("HEAD")
+                    .uri(format!("/v1/lfs/objects/{oid}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            head.status(),
+            StatusCode::OK,
+            "the object must be present after the re-promotion"
+        );
+        let entries = std::fs::read_dir(&dir)
+            .map(|read| read.count())
+            .unwrap_or(0);
+        assert_eq!(
+            entries, 0,
+            "the re-promotion must consume the crash-left staging files"
         );
     }
 

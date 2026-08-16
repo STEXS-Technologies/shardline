@@ -236,19 +236,40 @@ impl TreeStore for PostgresIndexStore {
         row.as_ref().map(revision_record_from_row).transpose()
     }
 
-    async fn list_revisions(&self, key: &RepoKey) -> Result<Vec<RevisionRecord>, Self::Error> {
-        let rows = query(
+    async fn list_revisions(
+        &self,
+        key: &RepoKey,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<RevisionRecord>, Self::Error> {
+        use std::fmt::Write as _;
+
+        let mut sql = String::from(
             "SELECT provider, owner, repo, revision, created_at_unix_seconds,
                     updated_at_unix_seconds
              FROM shardline_revisions
-             WHERE provider = $1 AND owner = $2 AND repo = $3
-             ORDER BY revision",
-        )
-        .bind(&key.provider)
-        .bind(&key.owner)
-        .bind(&key.repo)
-        .fetch_all(&self.pool)
-        .await?;
+             WHERE provider = $1 AND owner = $2 AND repo = $3",
+        );
+        let mut index = 4usize;
+        if cursor.is_some() {
+            write!(sql, " AND revision > ${index}")
+                .map_err(|e| PostgresMetadataStoreError::IntegerOutOfRange(e.to_string()))?;
+            index = index.saturating_add(1);
+        }
+        let limit_i64 = u64_to_i64(u64::try_from(limit).unwrap_or(u64::MAX))?;
+        sql.push_str(" ORDER BY revision");
+        write!(sql, " LIMIT ${index}")
+            .map_err(|e| PostgresMetadataStoreError::IntegerOutOfRange(e.to_string()))?;
+
+        let mut q = query(&sql)
+            .bind(&key.provider)
+            .bind(&key.owner)
+            .bind(&key.repo);
+        if let Some(cursor) = cursor {
+            q = q.bind(cursor);
+        }
+        q = q.bind(limit_i64);
+        let rows = q.fetch_all(&self.pool).await?;
         rows.iter().map(revision_record_from_row).collect()
     }
 
@@ -404,7 +425,7 @@ mod tests {
             .expect("present");
         assert_eq!(loaded.revision, "feature");
 
-        let listed = TreeStore::list_revisions(&store, &repo_key())
+        let listed = TreeStore::list_revisions(&store, &repo_key(), None, 100)
             .await
             .expect("list");
         assert_eq!(listed.len(), 1);

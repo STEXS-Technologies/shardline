@@ -461,6 +461,9 @@ pub enum ServerConfigError {
     /// OIDC auth provider requires an issuer URL.
     #[error("oidc auth provider requires SHARDLINE_AUTH_OIDC_ISSUER")]
     MissingOidcIssuer,
+    /// The OIDC issuer URL must use https (RFC 8414 §2).
+    #[error("oidc auth provider requires an https SHARDLINE_AUTH_OIDC_ISSUER, got {issuer}")]
+    OidcIssuerMustUseHttps { issuer: String },
     /// JWKS auth provider requires a JWKS URL.
     #[error("jwks auth provider requires SHARDLINE_AUTH_JWKS_URL")]
     MissingJwksUrl,

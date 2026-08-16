@@ -15,13 +15,13 @@ use shardline_storage::ObjectStore;
 use crate::{
     error::GcError,
     quarantine::{
-        read_active_retention_hold_object_keys, read_newest_stored_lifecycle_timestamp,
-        read_quarantine_entries, reconcile_quarantine_entries, sweep_quarantine_entries,
+        read_active_retention_hold_object_keys, read_last_gc_clock_anchor,
+        read_newest_stored_creation_timestamp, read_quarantine_entries,
+        reconcile_quarantine_entries, sweep_quarantine_entries, write_last_gc_clock_anchor,
     },
     reachability::{
         OrphanObject, ReachabilityAccumulator, collect_referenced_object_keys,
-        managed_object_hash_or_object_key, scan_orphan_objects,
-        scan_stale_temporary_chunk_artifacts,
+        managed_object_hash_or_object_key, scan_orphan_objects, scan_stale_temporary_artifacts,
     },
     types::{
         GcOrphanInventoryEntry, GcOrphanQuarantineState, GcRetentionReportEntry,
@@ -111,22 +111,44 @@ where
     validate_gc_index_integrity(index_store, object_store, now_unix_seconds).await?;
     shardline_metrics::record_gc_mark_duration(mark_start.elapsed());
 
-    // Forward-clock sanity guard (F-45): a forward NTP step / VM
-    // time-sync-after-pause makes every quarantine candidate eligible AND every
-    // time-bounded hold inactive, which would mass-delete recoverable data and
-    // strip all hold protection in one pass. When `now` jumps forward beyond a
-    // slack relative to the newest stored lifecycle timestamp, skip the sweep
-    // and hold pruning for this run (warn), mirroring the backwards
-    // `temp_reaping_clock_is_skewed` guard for the reaper.
+    // Forward-clock sanity guard (F-45, hardened by F-57): a forward NTP step /
+    // VM time-sync-after-pause makes every quarantine candidate eligible AND
+    // every time-bounded hold inactive, which would mass-delete recoverable
+    // data and strip all hold protection in one pass. When `now` jumps forward
+    // beyond a slack relative to the newest trustworthy wall-clock observation
+    // (the newest stored lifecycle CREATION timestamp and the persisted
+    // last-GC-clock anchor), skip the sweep and hold pruning for this run
+    // (warn), mirroring the backwards `temp_reaping_clock_is_skewed` guard for
+    // the reaper.
+    //
+    // The reference is creation-timestamps-only: `delete_after` (=
+    // `first_seen` + retention) and hold `release_after` are future-dated on
+    // any deployment with an active hold or a retention longer than the slack,
+    // and including them would blind the guard to forward jumps of days to
+    // weeks (the F-57 bypass). The anchor keeps the reference as fresh as the
+    // last trusted GC run so a low-churn deployment does not spuriously age the
+    // creation-only reference past the slack.
+    let newest_stored_creation_timestamp =
+        read_newest_stored_creation_timestamp(index_store).await?;
+    let last_gc_clock_anchor = read_last_gc_clock_anchor(object_store)?;
     let retention_clock_is_skewed_forward = retention_clock_is_skewed_forward(
         now_unix_seconds,
-        read_newest_stored_lifecycle_timestamp(index_store).await?,
+        newest_stored_creation_timestamp,
+        last_gc_clock_anchor,
     );
     if retention_clock_is_skewed_forward {
         tracing::warn!(
             "GC wall clock ({now_unix_seconds}s) jumped forward relative to the newest stored \
-             lifecycle timestamp; skipping the quarantine sweep and hold pruning this run"
+             lifecycle creation timestamp; skipping the quarantine sweep and hold pruning this run"
         );
+    } else {
+        // The forward guard cleared: this run's wall clock is trustworthy
+        // (within the slack of every stored creation timestamp and the previous
+        // anchor), so persist it as the new last-GC-clock anchor. A fired run's
+        // `now` is suspect and is never stamped — the anchor stays at the last
+        // TRUSTED observation, which is exactly what makes a between-runs jump
+        // detectable on a low-churn deployment.
+        write_last_gc_clock_anchor(object_store, now_unix_seconds)?;
     }
 
     let prune_expired_retention_holds =
@@ -220,7 +242,8 @@ where
             // depth, if this GC host's own clock appears to be behind the newest
             // writer-embedded temp timestamp (a backwards clock step), skip temp
             // reaping entirely for this run.
-            let temp_scan = scan_stale_temporary_chunk_artifacts(object_store, now_unix_seconds)?;
+            let temp_scan =
+                scan_stale_temporary_artifacts(object_store, frontends, now_unix_seconds)?;
             if temp_reaping_clock_is_skewed(now_unix_seconds, temp_scan.max_embedded_temp_nanos) {
                 tracing::warn!(
                     "GC wall clock ({now_unix_seconds}s) is behind the newest writer-embedded \
@@ -307,8 +330,9 @@ pub(crate) fn temp_reaping_clock_is_skewed(
 }
 
 /// Returns true when the GC wall clock appears to have jumped FORWARD relative
-/// to the newest lifecycle timestamp stored in the index (quarantine
-/// `delete_after`/`first_seen` and retention-hold `held_at`/`release_after`).
+/// to the newest trustworthy wall-clock observation: the newest CREATION
+/// timestamp stored in the index (quarantine `first_seen_unreachable_at`,
+/// retention-hold `held_at`) and the persisted last-GC-clock anchor.
 ///
 /// The mirror of [`temp_reaping_clock_is_skewed`] for the forward direction: a
 /// forward NTP step or a VM time-sync-after-pause makes every quarantine
@@ -319,16 +343,37 @@ pub(crate) fn temp_reaping_clock_is_skewed(
 /// pruning are skipped for the run rather than risk deleting held/recoverable
 /// data.
 ///
+/// Future-dated lifecycle fields (`delete_after = first_seen + retention` and
+/// hold `release_after`) are deliberately EXCLUDED from the reference: an
+/// active hold or a retention longer than the clock slack keeps those fields
+/// in the future, which would blind the guard to forward jumps of up to
+/// (newest future timestamp - real now + slack) — days to weeks — and let the
+/// sweep delete candidates before their real retention elapsed (F-57).
+///
+/// The anchor is the wall clock of the last GC run whose clock the guard
+/// trusted. It keeps the reference as fresh as the last trusted run, so a
+/// deployment where GC runs more often than lifecycle activity happens
+/// (low churn) does not spuriously age the creation-only reference past the
+/// slack; it also makes a forward jump that occurs between two consecutive runs
+/// detectable even when no lifecycle activity occurred in between.
+///
 /// A slack absorbs the normal gap between lifecycle activity and the sweep on
-/// an active deployment (including `delete_after` timestamps that are retention
-/// in the future). The guard errs toward preserving data: when no lifecycle
-/// entry is recent enough, reclamation is deferred rather than risked.
+/// an active deployment. The guard errs toward preserving data: when no
+/// lifecycle entry or anchor is recent enough, reclamation is deferred rather
+/// than risked.
 #[must_use]
 pub(crate) const fn retention_clock_is_skewed_forward(
     now_unix_seconds: u64,
-    newest_stored_lifecycle_timestamp: Option<u64>,
+    newest_stored_creation_timestamp: Option<u64>,
+    last_gc_clock_anchor: Option<u64>,
 ) -> bool {
-    let Some(newest_stored) = newest_stored_lifecycle_timestamp else {
+    let reference = match (newest_stored_creation_timestamp, last_gc_clock_anchor) {
+        (Some(creation), Some(anchor)) => Some(if creation > anchor { creation } else { anchor }),
+        (Some(creation), None) => Some(creation),
+        (None, Some(anchor)) => Some(anchor),
+        (None, None) => None,
+    };
+    let Some(newest_stored) = reference else {
         return false;
     };
     const CLOCK_FORWARD_SLACK_SECONDS: u64 = 86_400;
@@ -583,46 +628,112 @@ mod tests {
 
     #[test]
     fn retention_clock_skewed_forward_when_now_beyond_stored_timestamps() {
-        // Stored lifecycle timestamps are ~3 days old while the GC wall clock
-        // reads now — a forward NTP step / VM time-sync-after-pause. The sweep
-        // and hold pruning must be skipped.
+        // Stored lifecycle creation timestamps are ~3 days old while the GC
+        // wall clock reads now — a forward NTP step / VM time-sync-after-pause.
+        // The sweep and hold pruning must be skipped.
         let now_secs = 2_000_000_000_u64;
         let stale_stored = now_secs - 3 * 86_400;
         assert!(retention_clock_is_skewed_forward(
             now_secs,
-            Some(stale_stored)
+            Some(stale_stored),
+            None
         ));
     }
 
     #[test]
     fn retention_clock_not_skewed_forward_within_slack() {
-        // A stored lifecycle timestamp a few hours old (the normal gap between
+        // A stored creation timestamp a few hours old (the normal gap between
         // lifecycle activity and the sweep on an active deployment) is within
         // the slack and must NOT disable the sweep.
         let now_secs = 2_000_000_000_u64;
         let recent_stored = now_secs - 3600;
         assert!(!retention_clock_is_skewed_forward(
             now_secs,
-            Some(recent_stored)
+            Some(recent_stored),
+            None
         ));
     }
 
     #[test]
-    fn retention_clock_not_skewed_forward_when_stored_is_future_dated() {
-        // A candidate created moments ago has a `delete_after` retention in the
-        // future — a normal, trustworthy active run.
+    fn retention_clock_fires_on_forward_jump_despite_future_dated_hold() {
+        // F-57 regression: the guard reference must be CREATION timestamps
+        // only. The proven bypass put a candidate 1 day old (7-day retention)
+        // alongside an active hold with release_after = +30 days; the old
+        // guard's reference (max incl. delete_after/release_after) sat 30 days
+        // in the future, so a 10-day forward jump left it SILENT and the sweep
+        // deleted the candidate ~6 days before its real retention elapsed.
+        // With the creation-only reference (newest creation = first_seen, which
+        // is <= real now for a healthy clock) the same jump must fire and skip
+        // the sweep.
+        let real_now = 2_000_000_000_u64;
+        let first_seen = real_now - 86_400; // candidate is 1 day old
+        let jumped_now = real_now + 10 * 86_400; // 10-day forward jump
+        let _release_after = real_now + 30 * 86_400; // the future-dated hold field
+
+        assert!(
+            retention_clock_is_skewed_forward(jumped_now, Some(first_seen), None),
+            "a >1-day forward jump must fire even when the hold release_after is \
+             future-dated — the reference must be creation timestamps only"
+        );
+    }
+
+    #[test]
+    fn retention_clock_forward_jump_fires_identically_without_future_dated_entries() {
+        // Control for the F-57 regression: with the same forward jump but no
+        // future-dated entries at all (newest creation = first_seen, no hold),
+        // the guard fires exactly as before the fix — the creation-only
+        // reference is unchanged for deployments without future-dated rows.
+        let real_now = 2_000_000_000_u64;
+        let first_seen = real_now - 86_400; // candidate is 1 day old
+        let jumped_now = real_now + 10 * 86_400; // 10-day forward jump
+        assert!(retention_clock_is_skewed_forward(
+            jumped_now,
+            Some(first_seen),
+            None
+        ));
+    }
+
+    #[test]
+    fn retention_clock_not_skewed_forward_when_anchor_is_recent() {
+        // Low-churn deployment: the newest lifecycle CREATION timestamp is 5
+        // days old (no recent lifecycle activity), but the persisted last-GC
+        // anchor was written by a trusted run an hour ago. The anchor keeps the
+        // reference fresh, so a healthy deployment that runs GC more often than
+        // lifecycle activity happens must NOT have its sweep disabled.
         let now_secs = 2_000_000_000_u64;
-        let future_stored = now_secs + 86_400;
+        let stale_creation = now_secs - 5 * 86_400;
+        let recent_anchor = now_secs - 3600;
         assert!(!retention_clock_is_skewed_forward(
             now_secs,
-            Some(future_stored)
+            Some(stale_creation),
+            Some(recent_anchor)
+        ));
+    }
+
+    #[test]
+    fn retention_clock_skewed_forward_when_jump_since_last_trusted_anchor() {
+        // A forward jump of more than the slack since the last trusted GC run
+        // fires even when no lifecycle activity refreshed the creation
+        // timestamps in between (the anchor's purpose): the sweep must be
+        // skipped.
+        let now_secs = 2_000_000_000_u64;
+        let stale_creation = now_secs - 3 * 86_400;
+        let stale_anchor = now_secs - 2 * 86_400;
+        assert!(retention_clock_is_skewed_forward(
+            now_secs,
+            Some(stale_creation),
+            Some(stale_anchor)
         ));
     }
 
     #[test]
     fn retention_clock_not_skewed_forward_without_stored_timestamps() {
-        // No quarantine candidates or retention holds observed at all: nothing
-        // to guard against.
-        assert!(!retention_clock_is_skewed_forward(2_000_000_000_u64, None));
+        // No quarantine candidates, retention holds, or persisted anchor at
+        // all: nothing to guard against.
+        assert!(!retention_clock_is_skewed_forward(
+            2_000_000_000_u64,
+            None,
+            None
+        ));
     }
 }

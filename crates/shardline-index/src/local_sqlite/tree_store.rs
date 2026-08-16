@@ -254,18 +254,39 @@ fn revision_sql(
 fn list_revisions_sql(
     connection: &Connection,
     key: &RepoKey,
+    cursor: Option<&str>,
+    limit: usize,
 ) -> Result<Vec<RevisionRecord>, LocalIndexStoreError> {
-    let mut statement = connection.prepare(
+    use rusqlite::types::Value;
+    use std::fmt::Write as _;
+
+    let mut sql = String::from(
         "SELECT provider, owner, repo, revision, created_at_unix_seconds,
                 updated_at_unix_seconds
          FROM shardline_revisions
-         WHERE provider = ?1 AND owner = ?2 AND repo = ?3
-         ORDER BY revision",
-    )?;
-    let rows = statement.query_map(
-        params![key.provider, key.owner, key.repo],
-        revision_record_from_row,
-    )?;
+         WHERE provider = ?1 AND owner = ?2 AND repo = ?3",
+    );
+    let mut args: Vec<Value> = vec![
+        Value::Text(key.provider.clone()),
+        Value::Text(key.owner.clone()),
+        Value::Text(key.repo.clone()),
+    ];
+    let mut index = 4usize;
+    if let Some(cursor) = cursor {
+        write!(sql, " AND revision > ?{index}")
+            .map_err(|e| LocalIndexStoreError::Io(std::io::Error::other(e)))?;
+        args.push(Value::Text(cursor.to_owned()));
+        index = index.saturating_add(1);
+    }
+    let limit_i64 =
+        i64::try_from(limit).map_err(|e| LocalIndexStoreError::IntegerOutOfRange(e.to_string()))?;
+    sql.push_str(" ORDER BY revision");
+    write!(sql, " LIMIT ?{index}")
+        .map_err(|e| LocalIndexStoreError::Io(std::io::Error::other(e)))?;
+    args.push(Value::Integer(limit_i64));
+
+    let mut statement = connection.prepare(&sql)?;
+    let rows = statement.query_map(params_from_iter(args.iter()), revision_record_from_row)?;
     collect_rows(rows)
 }
 
@@ -383,12 +404,18 @@ impl TreeStore for LocalIndexStore {
         .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
     }
 
-    async fn list_revisions(&self, key: &RepoKey) -> Result<Vec<RevisionRecord>, Self::Error> {
+    async fn list_revisions(
+        &self,
+        key: &RepoKey,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<RevisionRecord>, Self::Error> {
         let store = self.clone();
         let key = key.clone();
+        let cursor = cursor.map(ToOwned::to_owned);
         tokio::task::spawn_blocking(move || {
             let connection = store.open_connection()?;
-            list_revisions_sql(&connection, &key)
+            list_revisions_sql(&connection, &key, cursor.as_deref(), limit)
         })
         .await
         .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
@@ -589,7 +616,7 @@ mod tests {
             .unwrap();
         assert_eq!(loaded, rev);
 
-        let listed = TreeStore::list_revisions(&store, &repo_key())
+        let listed = TreeStore::list_revisions(&store, &repo_key(), None, 100)
             .await
             .unwrap();
         assert_eq!(listed.len(), 1);
@@ -683,11 +710,42 @@ mod tests {
                 .is_none()
         );
         assert!(
-            TreeStore::list_revisions(&store, &repo_key())
+            TreeStore::list_revisions(&store, &repo_key(), None, 100)
                 .await
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn list_revisions_respects_limit_and_cursor() {
+        let store = make_store();
+        for n in 0..5u8 {
+            let rev = RevisionRecord {
+                provider: "github".to_owned(),
+                owner: "owner".to_owned(),
+                repo: "repo".to_owned(),
+                revision: format!("rev-{n:02}"),
+                created_at_unix_seconds: u64::from(n),
+                updated_at_unix_seconds: u64::from(n),
+            };
+            assert!(TreeStore::upsert_revision(&store, &rev).await.unwrap());
+        }
+
+        // A bounded listing returns at most `limit` rows, ordered by revision.
+        let first = TreeStore::list_revisions(&store, &repo_key(), None, 3)
+            .await
+            .unwrap();
+        let names: Vec<&str> = first.iter().map(|r| r.revision.as_str()).collect();
+        assert_eq!(names, vec!["rev-00", "rev-01", "rev-02"]);
+
+        // The cursor resumes after the last returned revision name.
+        let cursor = first.last().unwrap().revision.clone();
+        let rest = TreeStore::list_revisions(&store, &repo_key(), Some(&cursor), 100)
+            .await
+            .unwrap();
+        let names: Vec<&str> = rest.iter().map(|r| r.revision.as_str()).collect();
+        assert_eq!(names, vec!["rev-03", "rev-04"]);
     }
 
     #[tokio::test]

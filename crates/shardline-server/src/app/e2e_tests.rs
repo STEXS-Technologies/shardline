@@ -1351,6 +1351,89 @@ async fn read_paths_are_admission_gated() {
     }
 }
 
+// ── /v1/stats admission gating (F-62) ───────────────────────────────────
+//
+// `stats` walks every object in the store (a full dir walk or paginated S3
+// LIST) plus a full latest-record traversal, with no LIMIT and no cache. It
+// must be admission-gated like the read paths: when the admission gate is
+// saturated the handler rejects with 503, and a normal (unsaturated) gate
+// serves the aggregate.
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stats_route_is_admission_gated() {
+    let tmp = TempDir::new().unwrap();
+    let chunk_size = NonZeroUsize::new(65536).unwrap();
+    let object_store = ServerObjectStore::local(tmp.path().join("chunks")).unwrap();
+    let backend = LocalBackend::new_with_object_store_and_upload_parallelism_with_frontends(
+        tmp.path().to_path_buf(),
+        "http://127.0.0.1:8080".to_owned(),
+        chunk_size,
+        NonZeroUsize::new(64).unwrap(),
+        object_store,
+        &[ServerFrontend::Xet],
+    )
+    .await
+    .unwrap();
+
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        tmp.path().to_path_buf(),
+        chunk_size,
+    )
+    .with_server_role(ServerRole::All)
+    .with_server_frontends(vec![ServerFrontend::Xet])
+    .unwrap();
+
+    // Saturated gate: max weight equals the stats weight and the only permit
+    // is held, so a whole-store stats scan cannot run.
+    let state = Arc::new(AppState {
+        config,
+        role: ServerRole::All,
+        backend: ServerBackend::Local(backend),
+        auth: None,
+        provider_tokens: None,
+        reconstruction_cache: ReconstructionCacheService::disabled(),
+        transfer_limiter: TransferLimiter::new(chunk_size, NonZeroUsize::new(64).unwrap()),
+        oci_registry_token_limiter: Arc::new(tokio::sync::Semaphore::new(100)),
+        admission: crate::admission::WeightedAdmission::new(
+            std::num::NonZeroUsize::new(crate::admission::weights::STATS as usize).unwrap(),
+        ),
+        pools: crate::admission::ExecutionPools::default_sizes(),
+        protocol_metrics: ProtocolMetrics::default(),
+    });
+    let _held_permit = state
+        .admission
+        .try_acquire(crate::admission::weights::STATS)
+        .expect("held permit");
+
+    let app = Router::new()
+        .route("/v1/stats", get(super::operational::stats))
+        .with_state(Arc::clone(&state));
+
+    let request = Request::builder()
+        .method("GET")
+        .uri("/v1/stats")
+        .body(Body::empty())
+        .unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "stats must be admission-gated"
+    );
+
+    // Release the permit: the same gate now admits the scan and returns 200.
+    drop(_held_permit);
+    let request = Request::builder()
+        .method("GET")
+        .uri("/v1/stats")
+        .body(Body::empty())
+        .unwrap();
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn batch_reconstruction_empty() {
     let (app, _tmp) = test_app(&[ServerFrontend::Xet]).await;

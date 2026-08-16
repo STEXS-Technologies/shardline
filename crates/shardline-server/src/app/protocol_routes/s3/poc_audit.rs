@@ -1,4 +1,5 @@
-//! PoC audit tests for the S3 frontend (finding candidates F-7..F-11).
+//! PoC audit tests for the S3 frontend (finding candidates F-7..F-11, F-18,
+//! F-70).
 //!
 //! Each test drives the in-process S3 router and asserts a measured
 //! exploit-vs-control delta. Helpers (auth + state build) are duplicated here
@@ -868,6 +869,86 @@ async fn poc_f11_metadata_consistent_with_bytes() {
         etag,
         format!("\"{:x}\"", md5::Md5::digest(b"version-1")),
         "ETag must be the hex MD5 of the served body (consistent with bytes)"
+    );
+}
+
+// =========================================================================
+// F-70 — Torn GET under a concurrent overwrite (FIXED: object.rs GET/HEAD now
+// resolve the object's length / record version / ETag / user-metadata /
+// Last-Modified from the SAME listing-index row and pin the stream to that
+// row's immutable record version, so the served pair is one logical commit
+// point).
+// A PUT commits the new record BEFORE swapping the index row, so a GET that
+// read the row before the swap and the (separately-resolved) record snapshot
+// after it used to pair old-row metadata with new-record bytes —
+// checksum-verifying clients reject a response whose ETag != MD5(body). With
+// the fix a pre-swap read serves the OLD row + OLD record (consistent), and a
+// post-swap read serves the NEW row + NEW record (consistent) — never a mix.
+// =========================================================================
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn poc_f70_get_etag_matches_served_bytes_under_concurrent_overwrite() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state);
+
+    let key = "torn/f70-race.bin";
+    let seed = app
+        .clone()
+        .oneshot(put_request(
+            format!("/{BUCKET}/{key}"),
+            b"seed-version".to_vec(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(seed.status(), StatusCode::OK, "seed PUT");
+
+    let iterations = 40;
+    let mut mismatches = 0_u32;
+    for round in 0..iterations {
+        // Overwrite with DIFFERENT content every round, racing a GET against
+        // the swap: the served pair (ETag + bytes) must always be one
+        // consistent commit point.
+        let payload = format!("overwrite-version-{round}");
+        let put = app.clone();
+        let put_req = put_request(format!("/{BUCKET}/{key}"), payload.into_bytes());
+        let get = app.clone();
+        let get_req = get_request(format!("/{BUCKET}/{key}"));
+
+        let (put_task, get_task) = tokio::join!(
+            tokio::spawn(async move { put.oneshot(put_req).await.unwrap().status() }),
+            tokio::spawn(async move {
+                let response = get.oneshot(get_req).await.unwrap();
+                let status = response.status();
+                // Capture the ETag header BEFORE consuming the body.
+                let etag = response
+                    .headers()
+                    .get(header::ETAG)
+                    .map(|value| value.to_str().unwrap().to_owned());
+                let bytes = body_bytes(response).await;
+                (status, etag, bytes)
+            })
+        );
+        let put_status = put_task.unwrap();
+        let (get_status, etag, bytes) = get_task.unwrap();
+        assert_eq!(put_status, StatusCode::OK, "round {round}: PUT");
+        assert_eq!(get_status, StatusCode::OK, "round {round}: GET");
+        let Some(etag) = etag else {
+            // No index row at read time → no ETag served; nothing to verify.
+            continue;
+        };
+        let expected = format!("\"{:x}\"", md5::Md5::digest(&bytes));
+        if etag != expected {
+            mismatches = mismatches.saturating_add(1);
+        }
+    }
+
+    println!(
+        "F-70 delta (fixed): {iterations} racing PUT/GET rounds on one key\n\
+         \x20 FIXED   responses whose ETag != MD5(served bytes): {mismatches}\n\
+         \x20 (length / version pin / headers all resolved from the same row)"
+    );
+    assert_eq!(
+        mismatches, 0,
+        "no GET may serve an ETag that is not the MD5 of the served bytes"
     );
 }
 

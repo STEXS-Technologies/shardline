@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use shardline_index::{AsyncIndexStore, QuarantineCandidate, RecordStore};
-use shardline_storage::{ObjectKey, ObjectStore};
+use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectStore};
 use shardline_xet_adapter::xorb_hash_from_object_key_if_present;
 
 use crate::{
@@ -9,7 +9,7 @@ use crate::{
     reachability::{OrphanObject, ReachabilityAccumulator, collect_referenced_object_keys},
     types::LocalGcReport,
 };
-use shardline_server_core::{ServerObjectStore, checked_add, checked_increment};
+use shardline_server_core::{ServerObjectStore, checked_add, checked_increment, chunk_hash};
 
 pub(super) async fn read_quarantine_entries<IndexAdapter>(
     index_store: &IndexAdapter,
@@ -29,17 +29,25 @@ where
     Ok(entries_by_object_key)
 }
 
-/// Returns the newest lifecycle timestamp stored in the index: the maximum of
-/// every quarantine candidate's `delete_after`/`first_seen_unreachable_at` and
-/// every retention hold's `held_at`/`release_after`.
+/// Returns the newest CREATION timestamp stored in the index: the maximum of
+/// every quarantine candidate's `first_seen_unreachable_at` and every retention
+/// hold's `held_at`.
 ///
-/// This is the reference point for the forward-clock guard: in a healthy
-/// deployment these timestamps are created by the same wall clock the GC reads,
-/// so a GC `now` far ahead of the newest stored timestamp indicates a forward
-/// NTP step / VM time-sync-after-pause rather than genuine elapsed time.
+/// This is the reference point for the forward-clock guard: creation
+/// timestamps are written by the same wall clock the GC reads at
+/// lifecycle-event time, so a GC `now` far ahead of the newest stored creation
+/// timestamp indicates a forward NTP step / VM time-sync-after-pause rather
+/// than genuine elapsed time.
+///
+/// Future-dated lifecycle fields (`delete_after = first_seen + retention` and
+/// hold `release_after`) are deliberately EXCLUDED: any deployment with an
+/// active hold or a retention longer than the clock slack keeps those fields
+/// in the future, which previously blinded the guard to forward jumps of up to
+/// (newest future timestamp - real now + slack) — days to weeks — and let the
+/// sweep delete candidates before their real retention elapsed (F-57).
 ///
 /// Returns `None` when the index holds no lifecycle entries at all.
-pub(super) async fn read_newest_stored_lifecycle_timestamp<IndexAdapter>(
+pub(super) async fn read_newest_stored_creation_timestamp<IndexAdapter>(
     index_store: &IndexAdapter,
 ) -> Result<Option<u64>, GcError>
 where
@@ -49,9 +57,7 @@ where
     let mut newest_stored: Option<u64> = None;
     index_store
         .visit_quarantine_candidates(|candidate| {
-            let candidate_newest = candidate
-                .delete_after_unix_seconds()
-                .max(candidate.first_seen_unreachable_at_unix_seconds());
+            let candidate_newest = candidate.first_seen_unreachable_at_unix_seconds();
             newest_stored =
                 Some(newest_stored.map_or(candidate_newest, |newest| newest.max(candidate_newest)));
             Ok::<(), GcError>(())
@@ -59,9 +65,7 @@ where
         .await?;
     index_store
         .visit_retention_holds(|hold| {
-            let hold_newest = hold
-                .held_at_unix_seconds()
-                .max(hold.release_after_unix_seconds().unwrap_or(0));
+            let hold_newest = hold.held_at_unix_seconds();
             newest_stored =
                 Some(newest_stored.map_or(hold_newest, |newest| newest.max(hold_newest)));
             Ok::<(), GcError>(())
@@ -69,6 +73,73 @@ where
         .await?;
 
     Ok(newest_stored)
+}
+
+/// Reserved object key for the persisted last-GC-clock anchor.
+///
+/// Written on every GC run whose wall clock the forward guard deemed
+/// trustworthy, it records that run's `now` so a forward jump occurring between
+/// two consecutive runs is detected even when no lifecycle activity has
+/// refreshed the creation-timestamp reference (low-churn deployments). Without
+/// the anchor, a healthy deployment where GC runs more often than lifecycle
+/// activity happens would age the creation-only reference past the clock slack
+/// and spuriously disable the sweep and temp reaping.
+///
+/// The `gc/` namespace is not a managed object namespace (the reachability
+/// scans never recognize it), so the anchor is invisible to every GC path:
+/// `scan_orphan_objects` skips it, the temp reaper's `.tmp-` grammar cannot
+/// match it, and the S3 temp sweep only matches temp-upload keys. It can never
+/// be mistaken for — or reaped as — a managed object.
+const LAST_GC_CLOCK_ANCHOR_KEY: &str = "gc/last-gc-clock-anchor";
+
+fn last_gc_clock_anchor_key() -> Result<ObjectKey, GcError> {
+    ObjectKey::parse(LAST_GC_CLOCK_ANCHOR_KEY).map_err(|_error| GcError::InvalidContentHash)
+}
+
+/// Reads the persisted last-GC-clock anchor: the wall clock recorded by the
+/// most recent GC run whose clock the forward guard trusted.
+///
+/// Returns `None` when no anchor has been persisted yet. An unreadable or
+/// malformed anchor (for example a torn write) is treated as absent — it is
+/// logged and will be overwritten by this run's anchor write.
+pub(super) fn read_last_gc_clock_anchor(
+    object_store: &ServerObjectStore,
+) -> Result<Option<u64>, GcError> {
+    let key = last_gc_clock_anchor_key()?;
+    let Some(metadata) = object_store.metadata(&key)? else {
+        return Ok(None);
+    };
+    let body = object_store.read_full_object(&key, metadata.length())?;
+    let parsed = std::str::from_utf8(&body)
+        .ok()
+        .and_then(|text| text.trim().parse::<u64>().ok());
+    if parsed.is_none() {
+        tracing::warn!(
+            "ignoring unreadable last-GC-clock anchor at {LAST_GC_CLOCK_ANCHOR_KEY} ({} bytes); \
+             it will be overwritten this run",
+            body.len(),
+        );
+    }
+    Ok(parsed)
+}
+
+/// Persists the supplied wall clock as the last-GC-clock anchor.
+///
+/// Called on every run whose clock the forward guard deemed trustworthy (the
+/// guard did not fire). A fired run's `now` is suspect — the sweep and hold
+/// pruning were skipped for that reason — so it is never stamped as an anchor.
+pub(super) fn write_last_gc_clock_anchor(
+    object_store: &ServerObjectStore,
+    now_unix_seconds: u64,
+) -> Result<(), GcError> {
+    let key = last_gc_clock_anchor_key()?;
+    let body = now_unix_seconds.to_string();
+    let integrity = ObjectIntegrity::new(
+        chunk_hash(body.as_bytes()),
+        u64::try_from(body.len()).unwrap_or(0),
+    );
+    object_store.put_overwrite(&key, ObjectBody::Borrowed(body.as_bytes()), &integrity)?;
+    Ok(())
 }
 
 pub(super) async fn read_active_retention_hold_object_keys<IndexAdapter>(
@@ -1689,5 +1760,159 @@ mod tests {
             assert!(holds.contains(active_key.as_str()));
             assert!(holds.contains(permanent_key.as_str()));
         });
+    }
+
+    // ── read_newest_stored_creation_timestamp (F-57) ────────────────────
+
+    #[test]
+    fn newest_stored_creation_timestamp_excludes_future_dated_fields() {
+        // F-57 regression: the forward-clock guard reference must be creation
+        // timestamps only. A candidate 1 day old with a 7-day retention has
+        // `delete_after` 6 days in the future, and an active hold's
+        // `release_after` can be 30 days out; including either would put the
+        // reference in the future and blind the guard to a forward jump of
+        // days to weeks. The reader must return the newest CREATION timestamp
+        // (max first_seen / held_at) only.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let index_store = MemoryIndexStore::new();
+            let real_now = 2_000_000_000_u64;
+
+            // Candidate created 1 day ago with a 7-day retention →
+            // delete_after = real_now + 6 days (future-dated).
+            let candidate_key = ObjectKey::parse(
+                "aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            )
+            .unwrap();
+            let candidate = QuarantineCandidate::new(
+                candidate_key.clone(),
+                512,
+                real_now - 86_400,
+                real_now + 6 * 86_400,
+            )
+            .unwrap();
+            index_store
+                .upsert_quarantine_candidate(&candidate)
+                .await
+                .unwrap();
+
+            // Hold placed an hour ago with release_after = +30 days
+            // (future-dated).
+            let hold_key = ObjectKey::parse(
+                "bb/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            )
+            .unwrap();
+            let hold = shardline_index::RetentionHold::new(
+                hold_key.clone(),
+                "operator hold".to_owned(),
+                real_now - 3600,
+                Some(real_now + 30 * 86_400),
+            )
+            .unwrap();
+            index_store.upsert_retention_hold(&hold).await.unwrap();
+
+            let newest_creation = read_newest_stored_creation_timestamp(&index_store)
+                .await
+                .unwrap();
+
+            assert_eq!(
+                newest_creation,
+                Some(real_now - 3600),
+                "the newest CREATION timestamp is the hold's held_at; \
+                 delete_after/release_after must never enter the reference"
+            );
+        });
+    }
+
+    #[test]
+    fn newest_stored_creation_timestamp_empty_store_returns_none() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let index_store = MemoryIndexStore::new();
+            assert_eq!(
+                read_newest_stored_creation_timestamp(&index_store)
+                    .await
+                    .unwrap(),
+                None
+            );
+        });
+    }
+
+    #[test]
+    fn newest_stored_creation_timestamp_ignores_future_release_after_hold() {
+        // A hold with an infinite/remote release_after must not move the
+        // reference into the future; only held_at counts.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let index_store = MemoryIndexStore::new();
+            let now = 1_000_000_u64;
+            let hold_key = ObjectKey::parse(
+                "cc/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            )
+            .unwrap();
+            let hold = shardline_index::RetentionHold::new(
+                hold_key.clone(),
+                "infinite hold".to_owned(),
+                now - 500,
+                Some(now + 1_000_000_000),
+            )
+            .unwrap();
+            index_store.upsert_retention_hold(&hold).await.unwrap();
+
+            let newest_creation = read_newest_stored_creation_timestamp(&index_store)
+                .await
+                .unwrap();
+            assert_eq!(newest_creation, Some(now - 500));
+        });
+    }
+
+    // ── last-GC-clock anchor (F-57) ─────────────────────────────────────
+
+    #[test]
+    fn last_gc_clock_anchor_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let object_store = ServerObjectStore::local(dir.path().join("chunks")).unwrap();
+
+        // No anchor persisted yet.
+        assert_eq!(
+            read_last_gc_clock_anchor(&object_store).unwrap(),
+            None,
+            "a fresh store has no anchor"
+        );
+
+        let now = 2_000_000_000_u64;
+        write_last_gc_clock_anchor(&object_store, now).unwrap();
+
+        assert_eq!(
+            read_last_gc_clock_anchor(&object_store).unwrap(),
+            Some(now),
+            "the anchor must round-trip"
+        );
+
+        // Overwriting with a newer trusted clock is the normal per-run update.
+        write_last_gc_clock_anchor(&object_store, now + 86_400).unwrap();
+        assert_eq!(
+            read_last_gc_clock_anchor(&object_store).unwrap(),
+            Some(now + 86_400)
+        );
+    }
+
+    #[test]
+    fn last_gc_clock_anchor_malformed_reads_as_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let object_store = ServerObjectStore::local(dir.path().join("chunks")).unwrap();
+
+        // A torn/corrupt anchor (valid integrity, non-numeric body) must be
+        // treated as absent rather than aborting the run; it will be
+        // overwritten by the next anchor write.
+        let key = last_gc_clock_anchor_key().unwrap();
+        let body = b"not-a-timestamp";
+        let integrity =
+            ObjectIntegrity::new(chunk_hash(body), u64::try_from(body.len()).unwrap_or(0));
+        object_store
+            .put_overwrite(&key, ObjectBody::Borrowed(body), &integrity)
+            .unwrap();
+
+        assert_eq!(read_last_gc_clock_anchor(&object_store).unwrap(), None);
     }
 }

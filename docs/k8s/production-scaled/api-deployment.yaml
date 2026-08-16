@@ -70,6 +70,8 @@ spec:
               value: /run/secrets/shardline/provider-api-key
             - name: SHARDLINE_PROVIDER_CONFIG_FILE
               value: /etc/shardline/providers/providers.json
+            - name: SHARDLINE_CONFIG_SECRET_KEY_FILE
+              value: /run/secrets/shardline/config-secret-key
           volumeMounts:
             - name: config
               mountPath: /etc/shardline
@@ -120,6 +122,8 @@ spec:
               value: /run/secrets/shardline/provider-api-key
             - name: SHARDLINE_PROVIDER_CONFIG_FILE
               value: /etc/shardline/providers/providers.json
+            - name: SHARDLINE_CONFIG_SECRET_KEY_FILE
+              value: /run/secrets/shardline/config-secret-key
           volumeMounts:
             - name: config
               mountPath: /etc/shardline
@@ -183,6 +187,8 @@ spec:
                 path: metrics-token
               - key: provider-api-key
                 path: provider-api-key
+              - key: config-secret-key
+                path: config-secret-key
               - key: s3-access-key-id
                 path: s3-access-key-id
               - key: s3-secret-access-key

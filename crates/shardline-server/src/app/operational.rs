@@ -264,6 +264,15 @@ pub(super) async fn stats(
     State(state): State<Arc<AppState>>,
     repo: XetRepository,
 ) -> Result<impl IntoResponse, ServerError> {
+    // Admission gate for the whole-store scan: `stats` visits every object in
+    // the store (local: full dir walk; S3: paginated LIST) plus a full
+    // latest-record traversal, with no LIMIT and no cache. Concurrent scans are
+    // bounded like the read/upload/reconstruction paths so a request flood
+    // cannot drive unbounded per-request store I/O.
+    let _admit = state
+        .admission
+        .try_acquire(weights::STATS)
+        .ok_or(ServerError::WorkQueueSaturated)?;
     Ok(Json(state.backend.stats().await?))
 }
 
