@@ -15,8 +15,8 @@ use shardline_index::{
     AsyncIndexStore, FileChunkRecord, FileRecord, FileRecordInvariantError, LocalIndexStore,
     LocalRecordStore, MemoryIndexStore, MemoryIndexStoreError, MemoryRecordStore,
     MemoryRecordStoreError, PostgresMetadataStoreError, QuarantineCandidate,
-    QuarantineCandidateError, RecordMutation, RetentionHold, RetentionHoldError,
-    WebhookDeliveryError,
+    QuarantineCandidateError, RecordMutation, RepoKey, RetentionHold, RetentionHoldError,
+    RevisionRecord, TreeStore, WebhookDeliveryError,
 };
 use shardline_server_core::{
     InvalidLifecycleMetadataError, ServerObjectStore, ServerObjectStoreError,
@@ -775,6 +775,110 @@ async fn run_gc_helper(
         options,
     )
     .await
+}
+
+/// Seeds `count` revision registry rows for a repo with monotonically
+/// increasing created-at timestamps (aligned with the name order).
+async fn seed_revisions(index_store: &MemoryIndexStore, repo: &RepoKey, count: u64) {
+    for n in 0..count {
+        let rev = RevisionRecord {
+            provider: repo.provider.clone(),
+            owner: repo.owner.clone(),
+            repo: repo.repo.clone(),
+            revision: format!("rev-{n:03}"),
+            created_at_unix_seconds: 1_000_000_u64.saturating_add(n),
+            updated_at_unix_seconds: 1_000_000_u64.saturating_add(n),
+        };
+        assert!(TreeStore::upsert_revision(index_store, &rev).await.unwrap());
+    }
+}
+
+/// F-75 residual: a GC run with the revision-cap prune enabled evicts the
+/// oldest over-cap rows (report count + store now holds exactly the cap).
+#[test]
+fn gc_prunes_revisions_over_cap_and_reports_count() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let dir = tempfile::tempdir().unwrap();
+        let object_store = ServerObjectStore::local(dir.path()).unwrap();
+        let index_store = MemoryIndexStore::new();
+        let repo = RepoKey::new("github", "owner", "repo");
+        let cap = 3usize;
+
+        seed_revisions(&index_store, &repo, 7).await;
+        // A second repo well under the cap must be untouched.
+        let other = RepoKey::new("github", "owner", "other-repo");
+        seed_revisions(&index_store, &other, 1).await;
+        assert_eq!(
+            TreeStore::count_revisions(&index_store, &repo)
+                .await
+                .unwrap(),
+            7
+        );
+
+        let options = LocalGcOptions {
+            mark: true,
+            sweep: false,
+            retention_seconds: 86_400,
+            max_revisions_per_repo: Some(cap),
+        };
+        let diagnostics = run_gc_helper(&object_store, &index_store, options)
+            .await
+            .expect("gc run");
+
+        // The report exposes the prune count and the store now holds the cap.
+        assert_eq!(diagnostics.report.pruned_revisions_over_cap, 4);
+        assert_eq!(
+            TreeStore::count_revisions(&index_store, &repo)
+                .await
+                .unwrap(),
+            u64::try_from(cap).unwrap()
+        );
+        // Oldest-created rows were evicted first: rev-000..rev-003 are gone,
+        // rev-004..rev-006 survive.
+        let remaining = TreeStore::list_revisions(&index_store, &repo, None, 100)
+            .await
+            .unwrap();
+        let names: Vec<&str> = remaining.iter().map(|r| r.revision.as_str()).collect();
+        assert_eq!(names, vec!["rev-004", "rev-005", "rev-006"]);
+        // The under-cap repo is untouched.
+        assert_eq!(
+            TreeStore::count_revisions(&index_store, &other)
+                .await
+                .unwrap(),
+            1
+        );
+    });
+}
+
+/// The prune is disabled when `max_revisions_per_repo` is `None`: an over-cap
+/// repo is left alone and the report count stays zero.
+#[test]
+fn gc_without_revision_cap_does_not_prune() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let dir = tempfile::tempdir().unwrap();
+        let object_store = ServerObjectStore::local(dir.path()).unwrap();
+        let index_store = MemoryIndexStore::new();
+        let repo = RepoKey::new("github", "owner", "repo");
+        seed_revisions(&index_store, &repo, 5).await;
+
+        let diagnostics = run_gc_helper(
+            &object_store,
+            &index_store,
+            LocalGcOptions::mark_only(86_400),
+        )
+        .await
+        .expect("gc run");
+
+        assert_eq!(diagnostics.report.pruned_revisions_over_cap, 0);
+        assert_eq!(
+            TreeStore::count_revisions(&index_store, &repo)
+                .await
+                .unwrap(),
+            5
+        );
+    });
 }
 
 #[test]

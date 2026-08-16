@@ -38,12 +38,12 @@ use tokio::net::TcpListener;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot};
 use tower_http::cors::{Any, CorsLayer};
 
-use shardline_server_core::auth::Ed25519AuthProvider;
+use shardline_server_core::{VerifiedAuthContext, auth::Ed25519AuthProvider};
 
 use crate::{
     ServerConfig, ServerError,
     admission::{ExecutionPools, WeightedAdmission, timeouts},
-    auth::{AuthContext, ServerAuth},
+    auth::ServerAuth,
     backend::ServerBackend,
     config::{
         AuthProviderKind, DeploymentMode, ServerConfigError, env::bounded_pool_size_from_env,
@@ -699,7 +699,7 @@ fn authorize(
     state: &AppState,
     headers: &HeaderMap,
     required_scope: TokenScope,
-) -> Result<Option<AuthContext>, ServerError> {
+) -> Result<Option<VerifiedAuthContext>, ServerError> {
     if let Some(auth) = &state.auth {
         return Ok(Some(auth.authorize(headers, required_scope)?));
     }
@@ -716,7 +716,7 @@ fn authorize(
 /// Kept during the authorization-capability migration; not yet wired to a
 /// caller.
 #[allow(dead_code)]
-const fn scope_from_auth(auth: &AuthContext) -> &RepositoryScope {
+const fn scope_from_auth(auth: &VerifiedAuthContext) -> &RepositoryScope {
     auth.claims().repository()
 }
 

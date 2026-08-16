@@ -9,12 +9,11 @@ use axum::{
 };
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use shardline_protocol::{MAX_TOKEN_STRING_BYTES, TokenClaims, TokenScope};
-use shardline_server_core::AuthProvider;
+use shardline_server_core::{AuthProvider, VerifiedAuthContext};
 
 use crate::{
-    ServerError, auth::AuthContext, clock::unix_now_seconds_checked,
-    model::OciRegistryTokenResponse, oci_adapter::validate_repository,
-    protocol_support::validate_oci_repository_scope,
+    ServerError, clock::unix_now_seconds_checked, model::OciRegistryTokenResponse,
+    oci_adapter::validate_repository, protocol_support::validate_oci_repository_scope,
 };
 
 use super::super::{AppState, authorize, parse_query_values};
@@ -123,7 +122,7 @@ pub(super) fn oci_authorize(
     headers: &HeaderMap,
     repository: Option<&str>,
     required_scope: TokenScope,
-) -> Result<Option<AuthContext>, ServerError> {
+) -> Result<Option<VerifiedAuthContext>, ServerError> {
     match authorize(state, headers, required_scope) {
         Ok(auth) => Ok(auth),
         Err(ServerError::MissingAuthorization)

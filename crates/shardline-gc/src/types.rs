@@ -39,6 +39,11 @@ pub struct LocalGcOptions {
     pub sweep: bool,
     /// Retention window applied to newly created quarantine candidates.
     pub retention_seconds: u64,
+    /// Per-repo revision-registry cap enforced by the GC-time prune
+    /// (F-75 residual): when `Some`, each GC run (gated on `mark || sweep`)
+    /// evicts the oldest revision rows beyond this cap for every repository
+    /// present in the revision registry. `None` disables the prune.
+    pub max_revisions_per_repo: Option<usize>,
 }
 
 impl Default for LocalGcOptions {
@@ -47,6 +52,7 @@ impl Default for LocalGcOptions {
             mark: false,
             sweep: false,
             retention_seconds: DEFAULT_LOCAL_GC_RETENTION_SECONDS,
+            max_revisions_per_repo: None,
         }
     }
 }
@@ -59,6 +65,7 @@ impl LocalGcOptions {
             mark: false,
             sweep: false,
             retention_seconds: DEFAULT_LOCAL_GC_RETENTION_SECONDS,
+            max_revisions_per_repo: None,
         }
     }
 
@@ -69,6 +76,7 @@ impl LocalGcOptions {
             mark: true,
             sweep: false,
             retention_seconds,
+            max_revisions_per_repo: None,
         }
     }
 
@@ -79,6 +87,7 @@ impl LocalGcOptions {
             mark: false,
             sweep: true,
             retention_seconds: DEFAULT_LOCAL_GC_RETENTION_SECONDS,
+            max_revisions_per_repo: None,
         }
     }
 
@@ -89,6 +98,7 @@ impl LocalGcOptions {
             mark: true,
             sweep: true,
             retention_seconds,
+            max_revisions_per_repo: None,
         }
     }
 
@@ -157,6 +167,9 @@ pub struct LocalGcReport {
     pub reaped_stale_temporary_chunks: u64,
     /// Number of bytes reclaimed by reaping stale chunk temp artifacts.
     pub reaped_stale_temporary_bytes: u64,
+    /// Number of over-cap revision registry rows pruned by this run's GC-time
+    /// revision-cap enforcement (F-75 residual), across every repository.
+    pub pruned_revisions_over_cap: u64,
 }
 
 /// One active retention-window entry after a GC run.

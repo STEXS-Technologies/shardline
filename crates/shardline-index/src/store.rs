@@ -5,7 +5,8 @@ use shardline_storage::ObjectKey;
 
 use crate::{
     DedupeShardMapping, FileId, FileReconstruction, ProviderRepositoryState, QuarantineCandidate,
-    RetentionHold, StoredObjectId, WebhookDelivery, XorbId, hub::HubStore, record::RecordStore,
+    RepoKey, RetentionHold, StoredObjectId, WebhookDelivery, XorbId, hub::HubStore,
+    record::RecordStore,
 };
 
 macro_rules! visit_items {
@@ -684,6 +685,24 @@ pub trait AsyncIndexStore {
         owner: &'operation str,
         repo: &'operation str,
     ) -> IndexStoreFuture<'operation, bool, Self::Error>;
+
+    /// Prunes the OLDEST revision registry rows for a repository beyond
+    /// `max_revisions` (the F-75 per-repo cap), cascading to their tree
+    /// entries, and returns how many revision rows were removed.
+    ///
+    /// Delegates to the adapter's [`crate::TreeStore`] implementation; the
+    /// eviction order is oldest-created-first (`created_at_unix_seconds`,
+    /// then revision name as tiebreaker). The garbage collector calls this
+    /// once per repository reported by [`Self::list_revision_repo_keys`].
+    fn prune_revisions_over_cap<'operation>(
+        &'operation self,
+        key: &'operation RepoKey,
+        max_revisions: usize,
+    ) -> IndexStoreFuture<'operation, u64, Self::Error>;
+
+    /// Lists the distinct repositories present in the revision registry,
+    /// ordered by (provider, owner, repo).
+    fn list_revision_repo_keys(&self) -> IndexStoreFuture<'_, Vec<RepoKey>, Self::Error>;
 }
 
 /// A complete repository providing all storage capabilities.

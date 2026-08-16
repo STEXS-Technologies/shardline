@@ -260,6 +260,7 @@ where
         deleted_bytes: 0,
         reaped_stale_temporary_chunks: 0,
         reaped_stale_temporary_bytes: 0,
+        pruned_revisions_over_cap: 0,
     };
 
     // The mark is gated on the same `!retention_clock_is_skewed_forward`
@@ -371,6 +372,35 @@ where
                     reaped_bytes,
                 )?;
             }
+        }
+    }
+
+    // GC-time enforcement of the F-75 per-repo revision cap: the cap only
+    // bounds inserts (create_revision / register_tree_path), so without a
+    // prune the revision registry would only ever shrink via manual
+    // delete_revision. When configured, evict the OLDEST rows beyond the cap
+    // for every repository that holds revision rows, and surface the count in
+    // the report.
+    //
+    // Gated on `mark || sweep` (a pure dry run stays read-only), consistent
+    // with the last-GC-clock-anchor write above. The forward-clock guard does
+    // NOT gate this step: the prune orders by stored `created_at_unix_seconds`
+    // (data, not the wall clock) and consults no `now`, so a jumped clock
+    // cannot make it delete more than a healthy clock would.
+    if (options.mark || options.sweep)
+        && let Some(max_revisions_per_repo) = options.max_revisions_per_repo
+    {
+        let repo_keys = index_store
+            .list_revision_repo_keys()
+            .await
+            .map_err(Into::into)?;
+        for key in repo_keys {
+            let pruned = index_store
+                .prune_revisions_over_cap(&key, max_revisions_per_repo)
+                .await
+                .map_err(Into::into)?;
+            report.pruned_revisions_over_cap =
+                shardline_server_core::checked_add(report.pruned_revisions_over_cap, pruned)?;
         }
     }
 

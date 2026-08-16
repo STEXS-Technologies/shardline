@@ -34,6 +34,62 @@ impl AuthContext {
     }
 }
 
+/// Verified request authorization context, mintable **only** by the auth layer.
+///
+/// Unlike [`AuthContext`] — a plain value type whose [`AuthContext::new`] is
+/// `pub const` over bare [`TokenClaims`] — a `VerifiedAuthContext` cannot be
+/// hand-constructed outside `shardline-auth`: its constructor is `pub(crate)`
+/// and there is no public `From`/`Into` conversion from [`AuthContext`] or
+/// [`TokenClaims`]. The only way to obtain one is through a provider's
+/// verification ([`crate::AuthProvider::verify_verified`]), so its presence
+/// proves claims actually passed through the auth layer.
+///
+/// Capability minting in `shardline-server-core`
+/// ([`shardline_server_core::auth_capability::AuthorizedRepository::from_verified_context`])
+/// consumes only this type, which makes the capability seal **type-enforced**:
+/// a forged `AuthContext` can never reach the seam.
+#[derive(Debug, Clone)]
+pub struct VerifiedAuthContext {
+    ctx: AuthContext,
+}
+
+impl VerifiedAuthContext {
+    /// Wraps claims that a provider just verified.
+    ///
+    /// `pub(crate)` on purpose: only code inside `shardline-auth` (the
+    /// [`crate::AuthProvider::verify_verified`] trait boundary) may construct
+    /// this type. External crates must go through a provider verification.
+    pub(crate) const fn from_verified_claims(claims: TokenClaims) -> Self {
+        Self {
+            ctx: AuthContext::new(claims),
+        }
+    }
+
+    /// Consumes the context, returning the verified claims.
+    #[must_use]
+    pub fn into_claims(self) -> TokenClaims {
+        self.ctx.claims
+    }
+
+    /// Returns the verified claims.
+    #[must_use]
+    pub const fn claims(&self) -> &TokenClaims {
+        self.ctx.claims()
+    }
+
+    /// Returns the authenticated subject.
+    #[must_use]
+    pub fn subject(&self) -> &str {
+        self.ctx.subject()
+    }
+
+    /// Returns the granted scope.
+    #[must_use]
+    pub const fn scope(&self) -> TokenScope {
+        self.ctx.scope()
+    }
+}
+
 /// Authentication provider failure.
 #[derive(Debug, Error)]
 pub enum AuthError {
@@ -80,6 +136,18 @@ mod tests {
         assert_eq!(ctx.claims(), &claims);
         assert_eq!(ctx.subject(), "sub");
         assert_eq!(ctx.scope(), TokenScope::Read);
+    }
+
+    #[test]
+    fn verified_auth_context_accessors_and_into_claims() {
+        let repo = RepositoryScope::new(RepositoryProvider::GitHub, "o", "r", None).unwrap();
+        let claims = TokenClaims::new("iss", "sub", TokenScope::Read, repo, 100).unwrap();
+        let ctx = VerifiedAuthContext::from_verified_claims(claims.clone());
+
+        assert_eq!(ctx.claims(), &claims);
+        assert_eq!(ctx.subject(), "sub");
+        assert_eq!(ctx.scope(), TokenScope::Read);
+        assert_eq!(ctx.into_claims(), claims);
     }
 
     #[test]

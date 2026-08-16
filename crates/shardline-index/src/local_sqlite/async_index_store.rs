@@ -4,8 +4,8 @@ use shardline_storage::ObjectKey;
 use super::{LocalIndexStore, LocalIndexStoreError};
 use crate::{
     AsyncIndexStore, DedupeShardMapping, DedupeStore, FileId, FileReconstruction, IndexStoreFuture,
-    LifecycleStore, ProviderRepositoryState, QuarantineCandidate, ReconstructionStore,
-    RetentionHold, StoredObjectId, WebhookDelivery,
+    LifecycleStore, ProviderRepositoryState, QuarantineCandidate, ReconstructionStore, RepoKey,
+    RetentionHold, StoredObjectId, TreeStore, WebhookDelivery,
 };
 
 impl AsyncIndexStore for LocalIndexStore {
@@ -470,6 +470,23 @@ impl AsyncIndexStore for LocalIndexStore {
             .await
             .map_err(|e| LocalIndexStoreError::Io(std::io::Error::other(e)))?
         })
+    }
+
+    fn prune_revisions_over_cap<'operation>(
+        &'operation self,
+        key: &'operation RepoKey,
+        max_revisions: usize,
+    ) -> IndexStoreFuture<'operation, u64, Self::Error> {
+        let store = self.clone();
+        let key = key.clone();
+        Box::pin(
+            async move { TreeStore::prune_revisions_over_cap(&store, &key, max_revisions).await },
+        )
+    }
+
+    fn list_revision_repo_keys(&self) -> IndexStoreFuture<'_, Vec<RepoKey>, Self::Error> {
+        let store = self.clone();
+        Box::pin(async move { TreeStore::list_revision_repo_keys(&store).await })
     }
 }
 

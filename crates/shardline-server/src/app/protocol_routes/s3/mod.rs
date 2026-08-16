@@ -34,10 +34,10 @@ use shardline_protocol::TokenScope;
 use shardline_s3_adapter::{
     QueryMap, S3Error, encode_bucket, extract_access_key, require_s3_bucket_binding, s3_object_key,
 };
-use shardline_server_core::AuthorizedRepository;
+use shardline_server_core::{AuthorizedRepository, VerifiedAuthContext};
 use shardline_storage::ObjectKey;
 
-use crate::{ServerError, app::AppState, auth::AuthContext, protocol_support::scope_namespace};
+use crate::{ServerError, app::AppState, protocol_support::scope_namespace};
 
 /// Serializes overwrite operations (`PutObject` and multipart completion)
 /// per storage object key.
@@ -123,7 +123,7 @@ pub(super) fn authorize_s3(
     state: &AppState,
     headers: &HeaderMap,
     required_scope: TokenScope,
-) -> Result<Option<AuthContext>, S3Error> {
+) -> Result<Option<VerifiedAuthContext>, S3Error> {
     if let Some(auth) = &state.auth {
         let access_key = extract_access_key(headers).ok_or_else(S3Error::access_denied)?;
         let mut bearer_headers = HeaderMap::new();
@@ -197,9 +197,11 @@ impl S3Repository {
 
         let inner = match auth {
             Some(context) => {
-                let core_context =
-                    shardline_server_core::AuthContext::new(context.claims().clone());
-                AuthorizedRepository::from_verified_context(core_context, required_scope)
+                // The verified context (minted by the auth layer's
+                // `verify_verified`) flows straight into the capability seam;
+                // `from_verified_context` only re-applies the scope gate
+                // idempotently.
+                AuthorizedRepository::from_verified_context(context, required_scope)
                     .map_err(|error| S3Error::from(ServerError::from(error)))?
             }
             None => AuthorizedRepository::anonymous_full_access(),

@@ -14,7 +14,7 @@ use crate::{
     routes::{HubState, require_repository_binding},
     types::GitSmartHttpService,
 };
-use shardline_server_core::AuthContext;
+use shardline_server_core::VerifiedAuthContext;
 
 /// Query parameters for `GET /info/refs`.
 #[derive(Debug, Deserialize)]
@@ -49,7 +49,7 @@ pub(super) fn authorize_write(state: &HubState, headers: &HeaderMap) -> Result<(
 pub(super) fn authorize_read_with_context(
     state: &HubState,
     headers: &HeaderMap,
-) -> Result<Option<AuthContext>, HubApiError> {
+) -> Result<Option<VerifiedAuthContext>, HubApiError> {
     if let Some(ref auth) = state.auth {
         Ok(Some(auth.authorize(headers, TokenScope::Read)?))
     } else {
@@ -62,7 +62,7 @@ pub(super) fn authorize_read_with_context(
 pub(super) fn authorize_write_with_context(
     state: &HubState,
     headers: &HeaderMap,
-) -> Result<Option<AuthContext>, HubApiError> {
+) -> Result<Option<VerifiedAuthContext>, HubApiError> {
     if let Some(ref auth) = state.auth {
         Ok(Some(auth.authorize(headers, TokenScope::Write)?))
     } else {

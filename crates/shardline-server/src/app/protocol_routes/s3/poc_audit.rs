@@ -113,6 +113,15 @@ fn mint_token(scope: TokenScope, owner: &str, name: &str) -> String {
     provider.mint_token(&claims).unwrap()
 }
 
+/// Mints and re-verifies `claims` through a real provider, producing the same
+/// `VerifiedAuthContext` the auth layer hands to the capability seam (the seal
+/// now type-enforces that a forged `AuthContext` cannot reach it).
+fn verified_context(claims: &TokenClaims) -> shardline_server_core::VerifiedAuthContext {
+    let provider = LocalHmacProvider::new(TEST_SIGNING_KEY).unwrap();
+    let token = provider.mint_token(claims).unwrap();
+    provider.verify_verified(&token).unwrap()
+}
+
 fn sigv4_auth(token: &str) -> String {
     format!(
         "AWS4-HMAC-SHA256 Credential={token}/20260813/us-east-1/s3/aws4_request, \
@@ -552,7 +561,7 @@ async fn poc_f8_phantom_delete_serialized() {
     let repo = RepositoryScope::new(RepositoryProvider::Generic, OWNER, NAME, None).unwrap();
     let claims = TokenClaims::new("shardline", "test", TokenScope::Write, repo, u64::MAX).unwrap();
     let capability = shardline_server_core::AuthorizedRepository::from_verified_context(
-        shardline_server_core::AuthContext::new(claims),
+        verified_context(&claims),
         TokenScope::Write,
     )
     .unwrap();
@@ -1093,7 +1102,7 @@ async fn poc_f86_losing_conditional_put_leaves_winner_latest() {
         let claims =
             TokenClaims::new("shardline", "test", TokenScope::Write, repo, u64::MAX).unwrap();
         let capability = shardline_server_core::AuthorizedRepository::from_verified_context(
-            shardline_server_core::AuthContext::new(claims),
+            verified_context(&claims),
             TokenScope::Write,
         )
         .unwrap();
@@ -1540,7 +1549,7 @@ async fn poc_f18_deleteobjects_serialized_with_put() {
     let repo = RepositoryScope::new(RepositoryProvider::Generic, OWNER, NAME, None).unwrap();
     let claims = TokenClaims::new("shardline", "test", TokenScope::Write, repo, u64::MAX).unwrap();
     let capability = shardline_server_core::AuthorizedRepository::from_verified_context(
-        shardline_server_core::AuthContext::new(claims),
+        verified_context(&claims),
         TokenScope::Write,
     )
     .unwrap();

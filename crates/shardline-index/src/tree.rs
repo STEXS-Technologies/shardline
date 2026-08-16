@@ -236,6 +236,54 @@ pub trait TreeStore: Send + Sync {
     ///
     /// Returns the adapter error when deletion fails.
     async fn delete_revision(&self, key: &RepoKey, rev: &str) -> Result<u64, Self::Error>;
+
+    /// Prunes the OLDEST revision registry rows for a repository that sit
+    /// beyond `max_revisions`, returning how many revision rows were removed.
+    ///
+    /// This is the GC-side counterpart of the F-75 per-repo revision cap: the
+    /// cap only bounds inserts (`create_revision` / `register_tree_path`), so
+    /// without a prune the registry would only ever shrink via manual
+    /// `delete_revision`. Each run of the garbage collector calls this once
+    /// per repository that holds revision rows.
+    ///
+    /// The eviction order is oldest-created-first: `created_at_unix_seconds`,
+    /// then revision name as the deterministic tiebreaker. Note that
+    /// `created_at_unix_seconds` is refreshed on every revision touch (the
+    /// upsert writes it on conflict), so this is effectively a
+    /// least-recently-touched eviction order — the desirable choice for a
+    /// bounded revision registry. `list_revisions` keeps its own
+    /// name-ordered pagination; this method deliberately does NOT share that
+    /// order, because a lexicographic prune would evict arbitrary revisions
+    /// rather than the least-recently-used ones.
+    ///
+    /// Pruned revisions also lose their tree entries (same cascade as
+    /// `delete_revision`), so over-cap tree rows are bounded too. File
+    /// records and CAS objects are untouched. The cap is a soft bound: a
+    /// repo with `<= max_revisions` rows is untouched and `0` is returned,
+    /// and a repo at/over the cap is pruned down to exactly `max_revisions`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the adapter error when the count or deletion fails.
+    async fn prune_revisions_over_cap(
+        &self,
+        key: &RepoKey,
+        max_revisions: usize,
+    ) -> Result<u64, Self::Error>;
+
+    /// Lists the distinct repositories present in the revision registry,
+    /// ordered by (provider, owner, repo).
+    ///
+    /// The garbage collector uses this to discover which repositories to
+    /// prune on a run: the revision registry is the authoritative source of
+    /// over-cap rows, so enumeration comes from the index store rather than
+    /// the record store (whose locators are adapter-opaque to the generic GC
+    /// runner).
+    ///
+    /// # Errors
+    ///
+    /// Returns the adapter error when the inventory lookup fails.
+    async fn list_revision_repo_keys(&self) -> Result<Vec<RepoKey>, Self::Error>;
 }
 
 #[cfg(test)]

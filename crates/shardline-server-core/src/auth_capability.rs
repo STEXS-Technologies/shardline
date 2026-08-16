@@ -10,20 +10,23 @@
 //! token against an [`AuthProvider`] and enforces the required scope before a
 //! capability can exist.
 //!
-//! # Seal seam (convention-enforced, not type-enforced)
+//! # Seal seam (type-enforced)
 //!
-//! The seal is a *convention*, not a type-level guarantee: [`Self::from_verified_context`]
-//! is `#[doc(hidden)] pub` and [`AuthContext::new`] is `pub const` over bare claims,
-//! so any crate that depends on `shardline-server-core` *could* call the seam
-//! directly and mint a capability. There is deliberately **no** cross-crate marker
-//! type that would let `from_verified_context` reject an `AuthContext` it cannot
-//! prove came from a provider verification. All current call sites feed only
-//! provider-verified contexts (produced by `ServerAuth::authorize` /
-//! `authorize_s3` after `AuthProvider::verify_token`), so the seam is not
-//! exploitable today, but it is a residual risk to close with a type-level seal
-//! (a marker only the auth layer can mint) in a future refactor.
+//! The seal is a *type-level guarantee*, not a convention:
+//! [`Self::from_verified_context`] consumes a [`VerifiedAuthContext`] — a type
+//! that **only** the auth layer can mint. Its constructor is `pub(crate)`
+//! inside `shardline-auth`, and the sole production path to one is
+//! [`AuthProvider::verify_verified`], which wraps claims a provider just
+//! verified. A forged [`AuthContext`] (bare `TokenClaims` through
+//! [`AuthContext::new`]) cannot be converted to a [`VerifiedAuthContext`], so
+//! the seam is unreachable with unverified claims: no crate outside the auth
+//! layer can mint a capability from a hand-constructed context.
 
-use shardline_auth::{AuthContext, AuthError, AuthProvider};
+// `AuthContext` is referenced only by intra-doc links below (it is the
+// forgeable value type the seal protects against); rustc does not count
+// doc-link usage for the unused-imports lint, so keep it explicitly.
+#[allow(unused_imports)]
+use shardline_auth::{AuthContext, AuthError, AuthProvider, VerifiedAuthContext};
 use shardline_protocol::{RepositoryScope, TokenClaims, TokenScope};
 
 /// A verified, scope-checked capability authorizing access to a single repository.
@@ -37,30 +40,34 @@ use shardline_protocol::{RepositoryScope, TokenClaims, TokenScope};
 /// # Sealing
 ///
 /// This type is sealed by construction: its fields are private and the only
-/// non-hidden constructor is [`Self::verify_and_authorize`]. `AuthContext::new`
-/// (which is `pub const` and takes bare claims) therefore cannot be used to mint a
-/// capability — there is no `From<AuthContext>` or `From<TokenClaims>`
-/// implementation, so any attempt is rejected at compile time:
+/// non-hidden constructor is [`Self::verify_and_authorize`]. The
+/// [`Self::from_verified_context`] seam takes a [`VerifiedAuthContext`], which
+/// **only the auth layer can mint** (see the module docs), so
+/// `AuthContext::new` (which is `pub const` and takes bare claims) cannot be
+/// used to mint a capability — there is no `From<AuthContext>` or
+/// `From<TokenClaims>` conversion into a `VerifiedAuthContext`, so any attempt
+/// is rejected at compile time:
 ///
 /// ```compile_fail
-/// use shardline_server_core::{AuthContext, auth_capability::AuthorizedRepository};
+/// use shardline_server_core::{AuthContext, auth::VerifiedAuthContext};
 /// use shardline_protocol::{RepositoryProvider, RepositoryScope, TokenClaims, TokenScope};
 ///
 /// let repo = RepositoryScope::new(RepositoryProvider::GitHub, "acme", "assets", None).unwrap();
 /// let claims = TokenClaims::new("issuer", "subject", TokenScope::Read, repo, u64::MAX).unwrap();
 /// let forged = AuthContext::new(claims);
-/// // No conversion from a forgeable AuthContext exists, so a capability cannot
-/// // be minted through the ordinary type system:
-/// let _capability: AuthorizedRepository = forged.into();
+/// // A forged AuthContext is a valid value type, but there is deliberately no
+/// // conversion to VerifiedAuthContext — only a provider's verification (code
+/// // inside shardline-auth) can mint one, so the capability seam is
+/// // unreachable from a forged context:
+/// let _verified: VerifiedAuthContext = forged.into();
 /// ```
 ///
-/// Note that this compile-fail guarantee only blocks `From<AuthContext>`
-/// conversions. The `#[doc(hidden)]` seam [`Self::from_verified_context`]
-/// accepts an `AuthContext` directly and is contract-enforced rather than
-/// type-enforced: it MUST only be called with a context produced by an
-/// auth-provider verification. Minting a capability from unverified,
-/// handler-constructed claims — or any other code path — is a vulnerability,
-/// not a supported API (see the module docs on the seal seam).
+/// This compile-fail guarantee is the **type-enforced** replacement for the
+/// old convention-only seal: the `#[doc(hidden)]` seam
+/// [`Self::from_verified_context`] now consumes a [`VerifiedAuthContext`], so a
+/// hand-constructed [`AuthContext`] — or any other code path that skips a
+/// provider verification — cannot produce a capability (see the module docs on
+/// the seal seam).
 ///
 /// The remaining constructors ([`Self::from_verified_context`] and
 /// [`Self::anonymous_full_access`]) are `#[doc(hidden)]` seams consumed by the
@@ -105,27 +112,23 @@ impl AuthorizedRepository {
         })
     }
 
-    /// Auth-layer extractor seam: builds a capability from an [`AuthContext`]
-    /// that ALREADY came out of a real auth-provider verification (via
-    /// `ServerAuth::authorize` / `authorize_s3`).
+    /// Auth-layer extractor seam: builds a capability from a
+    /// [`VerifiedAuthContext`] that ALREADY came out of a real auth-provider
+    /// verification (via [`AuthProvider::verify_verified`], reached through
+    /// `ServerAuth::authorize` / `authorize_s3` / the Hub authorize helpers).
     ///
     /// Applies the same [`scope_allows`] gate as [`Self::verify_and_authorize`];
     /// a context whose granted scope does not cover `required_scope` yields
     /// [`AuthError::InsufficientScope`].
     ///
-    /// # Contract — do not violate
+    /// # Type-level seal
     ///
-    /// The caller MUST supply a context produced by an auth-provider
-    /// verification (`AuthProvider::verify_token`). Minting a capability from
-    /// unverified claims — for example by constructing [`AuthContext`] with
-    /// [`AuthContext::new`] over bare [`TokenClaims`] and passing it here — is
-    /// a vulnerability: it forges authorization for a repository the caller
-    /// was never granted. This contract is convention-enforced only (there is
-    /// no cross-crate marker that would reject an unverified context at
-    /// compile time); every call site in this repository feeds a
-    /// provider-verified context. Do not add new call sites that cannot
-    /// guarantee provider verification, and close the seam with a type-level
-    /// seal if the contract ever needs machine enforcement.
+    /// This seam takes a [`VerifiedAuthContext`] rather than an [`AuthContext`]:
+    /// a `VerifiedAuthContext` can only be constructed by code inside
+    /// `shardline-auth` (a provider's [`AuthProvider::verify_verified`]), so a
+    /// forged [`AuthContext`] built with [`AuthContext::new`] over bare
+    /// [`TokenClaims`] cannot be converted to one and can never reach this
+    /// seam. This is a compile-time guarantee, not a convention.
     ///
     /// # Errors
     ///
@@ -133,10 +136,10 @@ impl AuthorizedRepository {
     /// does not cover `required_scope`.
     #[doc(hidden)]
     pub fn from_verified_context(
-        ctx: AuthContext,
+        ctx: VerifiedAuthContext,
         required_scope: TokenScope,
     ) -> Result<Self, AuthError> {
-        let claims = ctx.claims;
+        let claims = ctx.into_claims();
         if !scope_allows(claims.scope(), required_scope) {
             return Err(AuthError::InsufficientScope);
         }
@@ -237,7 +240,7 @@ pub const fn scope_allows(actual_scope: TokenScope, required_scope: TokenScope) 
 
 #[cfg(test)]
 mod tests {
-    use shardline_auth::{AuthContext, AuthError, AuthProvider, LocalHmacProvider};
+    use shardline_auth::{AuthError, AuthProvider, LocalHmacProvider, VerifiedAuthContext};
     use shardline_protocol::{RepositoryProvider, RepositoryScope, TokenClaims, TokenScope};
 
     use super::{AuthorizedRepository, scope_allows};
@@ -255,13 +258,12 @@ mod tests {
         provider.mint_token(&claims(scope)).unwrap()
     }
 
-    /// Verifies a freshly minted token and wraps it in an `AuthContext`, mirroring
-    /// the auth-provider verification step performed by the server's authorize
+    /// Verifies a freshly minted token through the provider, mirroring the
+    /// auth-provider verification step performed by the server's authorize
     /// paths before `from_verified_context` is reached.
-    fn verified_context(provider: &LocalHmacProvider, scope: TokenScope) -> AuthContext {
+    fn verified_context(provider: &LocalHmacProvider, scope: TokenScope) -> VerifiedAuthContext {
         let token = mint(provider, scope);
-        let claims = provider.verify_token(&token).expect("token verifies");
-        AuthContext::new(claims)
+        provider.verify_verified(&token).expect("token verifies")
     }
 
     // ── verify_and_authorize ─────────────────────────────────────────────

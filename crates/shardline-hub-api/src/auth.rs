@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use axum::http::{HeaderMap, header::AUTHORIZATION};
 use shardline_protocol::{MAX_TOKEN_STRING_BYTES, TokenScope};
-use shardline_server_core::{AuthContext, AuthError, AuthProvider};
+use shardline_server_core::{AuthError, AuthProvider, VerifiedAuthContext};
 
 use crate::error::HubApiError;
 
@@ -27,7 +27,9 @@ impl HubAuth {
         Self { provider }
     }
 
-    /// Validates the `Authorization` header and returns verified claims.
+    /// Validates the `Authorization` header and returns a
+    /// [`VerifiedAuthContext`] — a type only the auth layer can mint, proving
+    /// the claims came from a provider verification.
     ///
     /// # Errors
     ///
@@ -37,7 +39,7 @@ impl HubAuth {
         &self,
         headers: &HeaderMap,
         required_scope: TokenScope,
-    ) -> Result<AuthContext, HubApiError> {
+    ) -> Result<VerifiedAuthContext, HubApiError> {
         let header = headers
             .get(AUTHORIZATION)
             .ok_or(HubApiError::Unauthorized)?;
@@ -46,11 +48,11 @@ impl HubAuth {
             HubApiError::InvalidToken
         })?;
         let token = parse_bearer_token(header)?;
-        let claims = self.provider.verify_token(token)?;
-        if !scope_allows(claims.scope(), required_scope) {
+        let ctx = self.provider.verify_verified(token)?;
+        if !scope_allows(ctx.scope(), required_scope) {
             return Err(HubApiError::Forbidden);
         }
-        Ok(AuthContext::new(claims))
+        Ok(ctx)
     }
 
     /// Returns a reference to the underlying provider.
