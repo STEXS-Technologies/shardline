@@ -1361,6 +1361,21 @@ impl ServerConfig {
                 }
             }
             DeploymentMode::Insecure => {
+                // Refuse to boot a fully unauthenticated server on a
+                // non-loopback address when the Insecure mode is only the
+                // implicit (unset) default and no auth provider is configured:
+                // an operator who did not explicitly choose the mode likely
+                // intends a production deployment. Explicit
+                // SHARDLINE_DEPLOYMENT_MODE=insecure, a loopback bind, or a
+                // configured auth provider each make the intent unambiguous.
+                if !self.deployment_mode_explicitly_set
+                    && !self.auth_provider_is_configured()
+                    && !self.bind_addr.ip().is_loopback()
+                {
+                    return Err(ServerConfigError::InsecureDefaultRequiresExplicitOptIn {
+                        bind_addr: self.bind_addr,
+                    });
+                }
                 // Warn only when no auth provider is configured: with a provider
                 // present, authorize() still enforces authentication despite
                 // the insecure mode.
