@@ -20,10 +20,19 @@ mod tests;
 
 use inner::{CacheInner, MemoryEntry};
 
-/// How long a `get`/`get_or_load` caller tolerates an in-flight loader before
-/// declaring it orphaned and cleaning up its loading latch. Bounds the wait for
-/// the same orphaned-loader condition in both `get` and `get_or_load`.
-const LOADER_STALL_TIMEOUT: Duration = Duration::from_secs(30);
+/// TOTAL time a waiter tolerates a loading latch that never stores a value
+/// before declaring its loader orphaned and releasing the latch.
+///
+/// A short single-interval wait is NOT enough to declare a loader orphaned:
+/// reconstructions of large files routinely exceed 30s, and stealing the latch
+/// while a still-running loader is alive breaks the dedup contract (the service
+/// layer treats `Ok(None)` as a miss and starts a second load). The waiter
+/// therefore waits through the full bound — re-examining the cache whenever the
+/// loader's `Notify` fires — and only releases the latch once THIS total bound
+/// elapses with no value stored. A slow-but-alive loader keeps its latch, while
+/// a genuinely-dead loader (panicked without putting/notifying) still cannot
+/// wedge waiters forever.
+const LOADER_ORPHAN_TOTAL_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Bounded in-memory reconstruction cache adapter.
 #[derive(Debug, Clone)]
@@ -139,57 +148,78 @@ impl MemoryReconstructionCache {
                 }
             }
         } else {
-            // Someone else is loading — wait for them.
-            //
-            // `tokio::sync::Notify` does not retain a permit: if the loader
-            // finishes and fires `notify_waiters()` before this waiter has
-            // polled its `notified()` future, the wakeup is LOST and a bare
-            // `notify.notified().await` would hang forever. Re-check the cache
-            // and loading map after every wakeup (and before the first wait),
-            // looping to re-arm the notification while the loader is still
-            // running. Wakes are bounded by LOADER_STALL_TIMEOUT so an
-            // orphaned loader (one that never notifies) cannot hang the caller.
-            loop {
+            // Someone else is loading — wait for them (bounded). `wait_for_loader`
+            // re-enters for a second interval instead of stealing the latch while
+            // a slow-but-alive loader may still be running (F-68).
+            Ok(self.wait_for_loader(key, notify).await)
+        }
+    }
+
+    /// Waits for an in-flight loader of `key` to store a value.
+    ///
+    /// Returns `Some(payload)` when the loader stores a value, and `None` when
+    /// the loading latch disappears without one (loader failed, was cancelled,
+    /// or the key was deleted) or the total orphan bound elapses with the latch
+    /// still present.
+    ///
+    /// `tokio::sync::Notify` does not retain a permit: if the loader finishes
+    /// and fires `notify_waiters()` before this waiter has polled its
+    /// `notified()` future, the wakeup is LOST and a bare `notified().await`
+    /// would hang forever. The loop therefore re-checks the cache and loading
+    /// map after every wakeup (and before the first wait), re-arming the
+    /// notification while the loader is still running.
+    async fn wait_for_loader(
+        &self,
+        key: &ReconstructionCacheKey,
+        notify: Arc<Notify>,
+    ) -> Option<Vec<u8>> {
+        let deadline = Instant::now()
+            .checked_add(LOADER_ORPHAN_TOTAL_TIMEOUT)
+            .unwrap_or_else(Instant::now);
+        loop {
+            {
+                let inner = self.inner.read().await;
+                let now = Instant::now();
+                if let Some(entry) = inner.entries.get(key)
+                    && entry.expires_at > now
                 {
+                    return Some(entry.payload.as_ref().clone());
+                }
+                if !inner.loading.contains_key(key) {
+                    // The loading latch vanished without a stored value (the
+                    // loader failed or was cancelled, or the key was deleted).
+                    // Report the miss so the caller can retry; the loader that
+                    // ran was the only party allowed to put() + notify.
+                    return None;
+                }
+            }
+
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            tokio::select! {
+                () = notify.notified() => {}
+                () = tokio::time::sleep(remaining) => {
+                    // Re-check before giving up: the loader may have finished
+                    // and stored a value right before the deadline (a lost
+                    // wakeup).
                     let inner = self.inner.read().await;
                     let now = Instant::now();
                     if let Some(entry) = inner.entries.get(key)
                         && entry.expires_at > now
                     {
-                        return Ok(Some(entry.payload.as_ref().clone()));
+                        return Some(entry.payload.as_ref().clone());
                     }
-                    if !inner.loading.contains_key(key) {
-                        // The loading latch vanished without a stored value
-                        // (the loader failed or was cancelled). Report the miss
-                        // so the caller can retry; the loader that did run was
-                        // the only party allowed to put() + notify.
-                        break;
-                    }
-                }
-
-                tokio::select! {
-                    () = notify.notified() => {}
-                    () = tokio::time::sleep(LOADER_STALL_TIMEOUT) => {
-                        // The loader may have finished and stored a value right
-                        // before this timeout (a lost wakeup). Re-check before
-                        // declaring it orphaned.
-                        let inner = self.inner.read().await;
-                        let now = Instant::now();
-                        if let Some(entry) = inner.entries.get(key)
-                            && entry.expires_at > now
-                        {
-                            return Ok(Some(entry.payload.as_ref().clone()));
-                        }
-                        drop(inner);
-                        // The loader is orphaned: release its latch so later
-                        // callers can retry immediately, then report the miss.
-                        let mut write_guard = self.inner.write().await;
-                        write_guard.loading.remove(key);
-                        break;
-                    }
+                    drop(inner);
+                    // The total orphan bound elapsed and no value arrived. The
+                    // loader is presumed dead (panicked without notifying):
+                    // release the latch so later callers can retry promptly,
+                    // and wake sibling waiters so they observe the release too.
+                    let mut write_guard = self.inner.write().await;
+                    write_guard.loading.remove(key);
+                    drop(write_guard);
+                    notify.notify_waiters();
+                    return None;
                 }
             }
-            Ok(None)
         }
     }
 }
@@ -227,26 +257,11 @@ impl AsyncReconstructionCache for MemoryReconstructionCache {
             if let Some(notify) = inner.loading.get(key) {
                 let notify = Arc::clone(notify);
                 drop(inner);
-                // If the loader fails, the Notify is never fired and
-                // subsequent get() calls for this key would hang forever.
-                // Use a timeout so we can clean up the orphaned loading
-                // entry and let the next caller retry.
-                tokio::select! {
-                    () = notify.notified() => {}
-                    () = tokio::time::sleep(LOADER_STALL_TIMEOUT) => {
-                        let mut write_guard = self.inner.write().await;
-                        write_guard.loading.remove(key);
-                        return Ok(None);
-                    }
-                }
-
-                let read_inner = self.inner.read().await;
-                if let Some(entry) = read_inner.entries.get(key)
-                    && entry.expires_at > Instant::now()
-                {
-                    return Ok(Some(entry.payload.as_ref().clone()));
-                }
-                return Ok(None);
+                // Wait for the in-flight loader (bounded). The latch is NOT
+                // stolen after a single stall interval: a slow-but-alive loader
+                // keeps its latch so the caller's load() stays deduplicated
+                // (F-68).
+                return Ok(self.wait_for_loader(key, notify).await);
             }
 
             let notify = Arc::new(Notify::new());

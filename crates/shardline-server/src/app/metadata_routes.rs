@@ -118,6 +118,16 @@ pub(super) struct RevisionJson {
 #[derive(Debug, Serialize)]
 pub(super) struct RevisionsResponse {
     revisions: Vec<RevisionJson>,
+    #[serde(rename = "nextCursor")]
+    next_cursor: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct RevisionsQuery {
+    #[serde(rename = "limit")]
+    limit: Option<usize>,
+    #[serde(rename = "cursor")]
+    cursor: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -419,11 +429,27 @@ pub(super) async fn list_revisions(
     State(state): State<Arc<AppState>>,
     Path((provider, owner, repo)): Path<(String, String, String)>,
     repo_capability: XetRepository,
+    Query(query): Query<RevisionsQuery>,
 ) -> Result<Json<RevisionsResponse>, ServerError> {
     let auth = Some(repo_capability.capability());
     check_scope_repo(auth, &provider, &owner, &repo)?;
+    // Bounded listing mirroring the tree listing: a limit (default 1000,
+    // capped at MAX_TREE_LIST_LIMIT) plus an optional keyset cursor, so a repo
+    // with 100k revisions cannot force one request to buffer the whole
+    // registry. Fetch limit+1 rows to detect a next page.
+    let limit = parse_limit(query.limit)?;
     let key = RepoKey::new(&provider, &owner, &repo);
-    let revisions = state.backend.list_revisions(&key).await?;
+    let revisions = state
+        .backend
+        .list_revisions(&key, query.cursor.as_deref(), limit.saturating_add(1))
+        .await?;
+    let has_more = revisions.len() > limit;
+    let revisions: Vec<_> = revisions.into_iter().take(limit).collect();
+    let next_cursor = if has_more {
+        revisions.last().map(|record| record.revision.clone())
+    } else {
+        None
+    };
     Ok(Json(RevisionsResponse {
         revisions: revisions
             .into_iter()
@@ -433,6 +459,7 @@ pub(super) async fn list_revisions(
                 updated_at: record.updated_at_unix_seconds,
             })
             .collect(),
+        next_cursor,
     }))
 }
 

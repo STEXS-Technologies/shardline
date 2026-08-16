@@ -16,8 +16,8 @@ use tower::ServiceExt;
 use super::{
     MAX_BATCH_RECONSTRUCTION_FILE_IDS, MAX_BATCH_RECONSTRUCTION_QUERY_BYTES,
     MAX_PROVIDER_BASIC_AUTH_HEADER_BYTES, MAX_PROVIDER_NAME_BYTES, MAX_PROVIDER_SUBJECT_BYTES,
-    MAX_PROVIDER_WEBHOOK_BODY_BYTES, bounded_api_body_limit, extract_provider_subject,
-    latest_lifecycle_signal_at, parse_batch_reconstruction_query,
+    MAX_PROVIDER_WEBHOOK_BODY_BYTES, bounded_api_body_limit, build_webhook_delivery_client,
+    extract_provider_subject, latest_lifecycle_signal_at, parse_batch_reconstruction_query,
     reconciled_provider_repository_state, router, security_headers_middleware,
     serve_with_listener_until, validate_provider_name_path,
 };
@@ -1037,6 +1037,93 @@ async fn hub_frontend_builds_router_with_xet_frontend() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
+}
+
+// ── build_webhook_delivery_client — redirects disabled (F-58) ──────────
+
+/// The webhook delivery client must NOT follow redirects: an attacker-
+/// controlled webhook URL could answer 301/302/307/308 with a `Location`
+/// pointing at a private/loopback/metadata address that was never validated.
+/// Following such a redirect would carry the webhook POST into the internal
+/// network (SSRF bypass), so a 3xx response must be surfaced as a non-success
+/// status instead of being followed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn webhook_delivery_client_does_not_follow_redirects() {
+    use axum::routing::post;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    // A loopback "internal" target that must never be reached.
+    let internal_hits = Arc::new(AtomicUsize::new(0));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let internal_url = format!("http://{addr}/internal");
+
+    let hits = internal_hits.clone();
+    let redirect_302_url = internal_url.clone();
+    let redirect_307_url = internal_url.clone();
+    let app = Router::new()
+        .route(
+            "/redirect-302",
+            post(move || {
+                let internal_url = redirect_302_url.clone();
+                async move { (StatusCode::FOUND, [(header::LOCATION, internal_url)]) }
+            }),
+        )
+        .route(
+            "/redirect-307",
+            post(move || {
+                let internal_url = redirect_307_url.clone();
+                async move {
+                    (
+                        StatusCode::TEMPORARY_REDIRECT,
+                        [(header::LOCATION, internal_url)],
+                    )
+                }
+            }),
+        )
+        .route(
+            "/internal",
+            post(move || {
+                let hits = hits.clone();
+                async move {
+                    hits.fetch_add(1, Ordering::SeqCst);
+                    StatusCode::OK
+                }
+            }),
+        );
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let client = build_webhook_delivery_client().expect("webhook delivery client");
+    let base = format!("http://{addr}");
+
+    // Both a 302 and a 307 (which preserves the POST method and body) must be
+    // surfaced as a redirect status, not followed to the loopback target.
+    for path in ["/redirect-302", "/redirect-307"] {
+        let resp = client
+            .post(format!("{base}{path}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(r#"{"event":"push"}"#)
+            .send()
+            .await
+            .expect("POST to redirecting endpoint");
+        assert!(
+            resp.status().is_redirection(),
+            "3xx must be surfaced as a redirect status, got {}",
+            resp.status()
+        );
+    }
+
+    // Give any (incorrect) follow-up a moment to arrive, then assert the
+    // loopback target was never contacted.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        internal_hits.load(Ordering::SeqCst),
+        0,
+        "loopback redirect target must never be reached"
+    );
+    server.abort();
 }
 
 // ── endpoint_body_limit ─────────────────────────────────────────────────

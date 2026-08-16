@@ -210,6 +210,14 @@ pub mod weights {
     pub const SHARD_UPLOAD: u64 = 8;
     /// Weight for a file reconstruction (complex multi-chunk read).
     pub const RECONSTRUCTION: u64 = 16;
+    /// Weight for a whole-store stats scan.
+    ///
+    /// `stats` walks EVERY object in the store (a full dir walk or paginated S3
+    /// LIST) plus a full latest-record traversal, with no LIMIT and no cache.
+    /// The scan is O(N) in store size (measured ~2.7µs/object), so concurrent
+    /// scans are admission-bounded like the read/upload/reconstruction paths to
+    /// prevent a request flood from driving unbounded store I/O.
+    pub const STATS: u64 = 8;
     /// Weight for a batch operation (reconstruction batch, LFS batch).
     pub const BATCH_OPERATION: u64 = 32;
 }

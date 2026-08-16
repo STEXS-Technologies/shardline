@@ -348,7 +348,8 @@ impl PostgresBackend {
             .await?)
     }
 
-    /// Lists the revision registry for a repository.
+    /// Lists the revision registry for a repository, resuming after `cursor`
+    /// and returning at most `limit` rows (bounded in the index backend).
     ///
     /// # Errors
     ///
@@ -356,8 +357,10 @@ impl PostgresBackend {
     pub(crate) async fn list_revisions(
         &self,
         key: &RepoKey,
+        cursor: Option<&str>,
+        limit: usize,
     ) -> Result<Vec<RevisionRecord>, ServerError> {
-        Ok(self.index_store.list_revisions(key).await?)
+        Ok(self.index_store.list_revisions(key, cursor, limit).await?)
     }
 
     /// Creates a revision registry row, returning whether it was newly created.

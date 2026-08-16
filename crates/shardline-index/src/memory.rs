@@ -643,15 +643,25 @@ impl TreeStore for MemoryIndexStore {
         Ok(self.lock_state()?.revisions.get(&search).cloned())
     }
 
-    async fn list_revisions(&self, key: &RepoKey) -> Result<Vec<RevisionRecord>, Self::Error> {
+    async fn list_revisions(
+        &self,
+        key: &RepoKey,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<RevisionRecord>, Self::Error> {
         let state = self.lock_state()?;
+        // MemoryRevisionKey orders by (provider, owner, repo, revision), so a
+        // filtered BTreeMap iteration is already ordered by revision name and a
+        // keyset cursor on the revision name resumes correctly.
         Ok(state
             .revisions
             .iter()
             .filter(|(k, _)| {
                 k.provider == key.provider && k.owner == key.owner && k.repo == key.repo
             })
+            .filter(|(k, _)| !cursor.is_some_and(|c| k.revision.as_str() <= c))
             .map(|(_, v)| v.clone())
+            .take(limit)
             .collect())
     }
 

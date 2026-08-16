@@ -448,16 +448,26 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
     let auth_provider = AuthProviderKind::parse(
         &var("SHARDLINE_AUTH_PROVIDER").unwrap_or_else(|_error| "local".to_owned()),
     )?;
-    let auth_oidc_issuer = var("SHARDLINE_AUTH_OIDC_ISSUER").ok();
-    let auth_oidc_audience = var("SHARDLINE_AUTH_OIDC_AUDIENCE").ok();
+    let auth_oidc_issuer = var("SHARDLINE_AUTH_OIDC_ISSUER")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
+    let auth_oidc_audience = var("SHARDLINE_AUTH_OIDC_AUDIENCE")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
     let auth_jwks_url = var("SHARDLINE_AUTH_JWKS_URL").ok();
     let auth_jwks_issuer = var("SHARDLINE_AUTH_JWKS_ISSUER").ok();
     match auth_provider {
-        AuthProviderKind::Oidc => {
-            if auth_oidc_issuer.is_none() {
-                return Err(ServerConfigError::MissingOidcIssuer);
+        AuthProviderKind::Oidc => match auth_oidc_issuer.as_deref() {
+            None => return Err(ServerConfigError::MissingOidcIssuer),
+            Some(issuer) if !is_https_url(issuer) => {
+                return Err(ServerConfigError::OidcIssuerMustUseHttps {
+                    issuer: issuer.to_owned(),
+                });
             }
-        }
+            Some(_) => {}
+        },
         AuthProviderKind::Jwks => {
             if auth_jwks_url.is_none() {
                 return Err(ServerConfigError::MissingJwksUrl);
@@ -598,6 +608,16 @@ pub(crate) fn deployment_mode_from_env() -> Result<Option<DeploymentMode>, Serve
         return Err(ServerConfigError::InvalidDeploymentMode { value });
     };
     Ok(Some(mode))
+}
+
+/// Returns true when `value` parses as a URL using the https scheme.
+///
+/// OIDC issuers must be served over https (RFC 8414 §2); a misconfigured
+/// http issuer is rejected at startup instead of silently downgrading token
+/// validation. Note this check is intentionally strict (no loopback
+/// exemption): production OIDC issuers must always be https.
+fn is_https_url(value: &str) -> bool {
+    url::Url::parse(value).is_ok_and(|parsed| parsed.scheme() == "https")
 }
 
 fn parse_server_frontends_env(value: &str) -> Result<Vec<ServerFrontend>, ServerConfigError> {
@@ -2072,6 +2092,123 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
             config.auth_oidc_audience(),
             None,
             "audience must default to unset (permissive aud validation)"
+        );
+        remove_env_var("SHARDLINE_AUTH_PROVIDER");
+        remove_env_var("SHARDLINE_AUTH_OIDC_ISSUER");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn load_server_config_oidc_audience_empty_behaves_as_unset() {
+        // Regression (F-55): SHARDLINE_AUTH_OIDC_AUDIENCE="" must behave
+        // exactly like the variable being unset. An empty string used to flow
+        // through as `Some("")`, silently enabling aud validation against an
+        // empty audience (every aud-bearing token rejected) while the startup
+        // aud warning never fired. `config.auth_oidc_audience() == None` is
+        // precisely the condition that triggers the app.rs startup warning and
+        // the permissive (validate_aud disabled) provider behavior.
+        set_env_var("SHARDLINE_AUTH_PROVIDER", "oidc");
+        set_env_var("SHARDLINE_AUTH_OIDC_ISSUER", "https://accounts.example.com");
+        set_env_var("SHARDLINE_AUTH_OIDC_AUDIENCE", "");
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+        let result = super::load_server_config_from_env();
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+        let config = result.unwrap();
+        assert_eq!(
+            config.auth_oidc_audience(),
+            None,
+            "an empty audience must behave exactly like unset"
+        );
+        remove_env_var("SHARDLINE_AUTH_PROVIDER");
+        remove_env_var("SHARDLINE_AUTH_OIDC_ISSUER");
+        remove_env_var("SHARDLINE_AUTH_OIDC_AUDIENCE");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn load_server_config_oidc_audience_whitespace_only_behaves_as_unset() {
+        set_env_var("SHARDLINE_AUTH_PROVIDER", "oidc");
+        set_env_var("SHARDLINE_AUTH_OIDC_ISSUER", "https://accounts.example.com");
+        set_env_var("SHARDLINE_AUTH_OIDC_AUDIENCE", "   ");
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+        let result = super::load_server_config_from_env();
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+        let config = result.unwrap();
+        assert_eq!(
+            config.auth_oidc_audience(),
+            None,
+            "a whitespace-only audience must behave exactly like unset"
+        );
+        remove_env_var("SHARDLINE_AUTH_PROVIDER");
+        remove_env_var("SHARDLINE_AUTH_OIDC_ISSUER");
+        remove_env_var("SHARDLINE_AUTH_OIDC_AUDIENCE");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn load_server_config_oidc_audience_whitespace_is_trimmed() {
+        set_env_var("SHARDLINE_AUTH_PROVIDER", "oidc");
+        set_env_var("SHARDLINE_AUTH_OIDC_ISSUER", "https://accounts.example.com");
+        set_env_var("SHARDLINE_AUTH_OIDC_AUDIENCE", "  shardline-web  ");
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+        let result = super::load_server_config_from_env();
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+        let config = result.unwrap();
+        assert_eq!(
+            config.auth_oidc_audience(),
+            Some("shardline-web"),
+            "surrounding whitespace around the audience must be trimmed"
+        );
+        remove_env_var("SHARDLINE_AUTH_PROVIDER");
+        remove_env_var("SHARDLINE_AUTH_OIDC_ISSUER");
+        remove_env_var("SHARDLINE_AUTH_OIDC_AUDIENCE");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn load_server_config_oidc_rejects_http_issuer() {
+        // Regression (F-64): OIDC issuers must be https (RFC 8414 §2). A
+        // plain-http issuer is a startup error rather than a silent downgrade.
+        set_env_var("SHARDLINE_AUTH_PROVIDER", "oidc");
+        set_env_var("SHARDLINE_AUTH_OIDC_ISSUER", "http://accounts.example.com");
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+        let result = super::load_server_config_from_env();
+        assert!(matches!(
+            result,
+            Err(super::ServerConfigError::OidcIssuerMustUseHttps { .. })
+        ));
+        remove_env_var("SHARDLINE_AUTH_PROVIDER");
+        remove_env_var("SHARDLINE_AUTH_OIDC_ISSUER");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn load_server_config_oidc_accepts_https_issuer() {
+        set_env_var("SHARDLINE_AUTH_PROVIDER", "oidc");
+        set_env_var("SHARDLINE_AUTH_OIDC_ISSUER", "https://accounts.example.com");
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+        let result = super::load_server_config_from_env();
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+        let config = result.unwrap();
+        assert_eq!(
+            config.auth_oidc_issuer(),
+            Some("https://accounts.example.com"),
+            "an https issuer must be accepted"
         );
         remove_env_var("SHARDLINE_AUTH_PROVIDER");
         remove_env_var("SHARDLINE_AUTH_OIDC_ISSUER");

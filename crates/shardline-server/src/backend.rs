@@ -988,10 +988,12 @@ impl ServerBackend {
     pub(crate) async fn list_revisions(
         &self,
         key: &RepoKey,
+        cursor: Option<&str>,
+        limit: usize,
     ) -> Result<Vec<RevisionRecord>, ServerError> {
         match self {
-            Self::Local(backend) => backend.list_revisions(key).await,
-            Self::Postgres(backend) => backend.list_revisions(key).await,
+            Self::Local(backend) => backend.list_revisions(key, cursor, limit).await,
+            Self::Postgres(backend) => backend.list_revisions(key, cursor, limit).await,
         }
     }
 

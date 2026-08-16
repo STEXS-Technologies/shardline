@@ -247,6 +247,28 @@ fn is_temp_upload_key_does_not_shadow_user_keys() {
 }
 
 #[test]
+fn is_temp_upload_key_rejects_user_keys_that_look_like_generated_temps() {
+    // F-56: the pre-fix grammar matched ANY three all-digit trailing groups,
+    // so user keys whose suffixes are date stamps / version tags collided
+    // with the generated `<base>.tmp.<counter>.<pid>.<nanos>` shape — they
+    // were shadowed from listings and deleted by the GC sweep after 1h. None
+    // of these may be treated as temps: the pid must fit `u32` and the nanos
+    // must be a plausible unix-nanosecond timestamp (`>= 10^15`).
+    assert!(!is_temp_upload_key("report.tmp.2026.01.15"));
+    assert!(!is_temp_upload_key("backup.tmp.2026.08.16"));
+    assert!(!is_temp_upload_key("data.tmp.001.002.003"));
+    assert!(!is_temp_upload_key("photos.tmp.1.2.3"));
+    assert!(!is_temp_upload_key("v1.tmp.2026.01.15"));
+    assert!(!is_temp_upload_key("uploads/report.tmp.2026.01.15"));
+    // A pid beyond u32 range is never a generated pid.
+    assert!(!is_temp_upload_key(
+        "data.tmp.1.4294967296.1750000000000000000"
+    ));
+    // A 15-digit (sub-10^15) nanos is not a plausible epoch clock value.
+    assert!(!is_temp_upload_key("data.tmp.1.2.999999999999999"));
+}
+
+#[test]
 fn validated_external_range_zero_length_rejected() {
     // ByteRange(5, 3) has start > end, which is invalid
     let result = shardline_protocol::ByteRange::new(5, 3);
@@ -1351,6 +1373,93 @@ mod minio_tests {
                 )
                 .unwrap()
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn minio_collision_shaped_user_keys_are_listed_and_never_swept() {
+        // F-56: user keys whose suffixes are three all-digit groups (date
+        // stamps, version tags) previously collided with the loose
+        // "<base>.tmp.<digits>.<digits>.<digits>" grammar: they were shadowed
+        // from visit_prefix / list_flat_namespace_page AND reaped by the
+        // age-bounded GC sweep after 1h. The tightened predicate matches only
+        // the genuinely generated shapes, so these keys must stay listable
+        // and survive the sweep.
+        let stack = match ensure_minio() {
+            Some(s) => s,
+            None => return,
+        };
+        let prefix = stack.unique_s3_key_prefix("test-temp-collisions");
+        let store = build_s3_store(&stack, Some(&prefix));
+        let ns_prefix = ObjectPrefix::parse("user/").unwrap();
+
+        let collision_keys = [
+            "user/report.tmp.2026.01.15",
+            "user/backup.tmp.2026.08.16",
+            "user/data.tmp.001.002.003",
+            "user/photos.tmp.1.2.3",
+            "user/v1.tmp.2026.01.15",
+        ];
+        for key in collision_keys {
+            put_test_object(&store, key, b"user-data");
+        }
+        // A genuinely generated temp over a collision-shaped base: must remain
+        // a temp (its suffix is the generated counter/pid/nanos shape).
+        let overwrite_temp =
+            temp_key_for(&ObjectKey::parse("user/report.tmp.2026.01.15").unwrap()).unwrap();
+        put_test_object(&store, overwrite_temp.as_str(), b"temp-data");
+
+        // Shadowing: visit_prefix must visit every collision key (only the
+        // generated temp is skipped).
+        let mut visited = Vec::new();
+        let result: Result<(), S3ObjectStoreError> = store.visit_prefix(&ns_prefix, |meta| {
+            visited.push(meta.key().clone());
+            Ok(())
+        });
+        assert!(result.is_ok());
+        for key in collision_keys {
+            assert!(
+                visited.iter().any(|visited| visited.as_str() == key),
+                "visit_prefix must list user key {key} (not shadowed by the temp grammar)"
+            );
+        }
+        assert!(
+            !visited
+                .iter()
+                .any(|visited| visited.as_str() == overwrite_temp.as_str()),
+            "the generated temp must stay shadowed from listings"
+        );
+
+        // Shadowing: list_flat_namespace_page must include every collision key.
+        let page = store
+            .list_flat_namespace_page(&ns_prefix, None, 100)
+            .unwrap();
+        for key in collision_keys {
+            assert!(
+                page.iter().any(|meta| meta.key().as_str() == key),
+                "list_flat_namespace_page must list user key {key} (not shadowed)"
+            );
+        }
+        assert!(
+            !page
+                .iter()
+                .any(|meta| meta.key().as_str() == overwrite_temp.as_str()),
+            "the generated temp must stay shadowed from list_flat_namespace_page"
+        );
+
+        // Sweep: with `now` pushed 2h past the 1h age bound, only the
+        // generated temp is reaped — every collision-shaped user key survives.
+        let (reaped, reaped_bytes) = store
+            .sweep_stale_temp_keys(unix_now_seconds().saturating_add(2 * 3600))
+            .unwrap();
+        assert_eq!(reaped, 1, "only the generated temp is swept (F-56)");
+        assert_eq!(reaped_bytes, 9, "b\"temp-data\".len() reclaimed");
+        assert!(!store.contains(&overwrite_temp).unwrap());
+        for key in collision_keys {
+            assert!(
+                store.contains(&ObjectKey::parse(key).unwrap()).unwrap(),
+                "sweep must never delete user key {key} (F-56)"
+            );
+        }
     }
 }
 

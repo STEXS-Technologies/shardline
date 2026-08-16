@@ -593,6 +593,84 @@ async fn list_revisions_returns_created() {
         .map(|r| r["name"].as_str().unwrap())
         .collect();
     assert_eq!(names, vec!["one", "two"]);
+    assert_eq!(body["nextCursor"], Value::Null);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn list_revisions_is_bounded_and_paginates() {
+    let (app, _tmp) = build_app(false).await;
+    let base = format!("/api/{PROVIDER}/{OWNER}/{REPO}/revisions");
+    for name in ["a", "b", "c", "d", "e"] {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("{base}/{name}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+    }
+
+    // A bounded listing returns at most `limit` rows plus a nextCursor.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("{base}?limit=3"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = get_body(response).await;
+    let names: Vec<&str> = body["revisions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, vec!["a", "b", "c"]);
+    let cursor = body["nextCursor"].as_str().unwrap().to_owned();
+
+    // The cursor resumes after the last returned revision name.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("{base}?limit=3&cursor={cursor}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = get_body(response).await;
+    let names: Vec<&str> = body["revisions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, vec!["d", "e"]);
+    assert_eq!(body["nextCursor"], Value::Null);
+
+    // An out-of-range limit is rejected like the tree listing.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("{base}?limit=0"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

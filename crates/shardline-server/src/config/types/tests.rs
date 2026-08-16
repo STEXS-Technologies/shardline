@@ -1768,6 +1768,19 @@ fn server_config_error_display_missing_oidc_issuer() {
 }
 
 #[test]
+fn server_config_error_display_oidc_issuer_must_use_https() {
+    let err = ServerConfigError::OidcIssuerMustUseHttps {
+        issuer: "http://accounts.example.com".to_owned(),
+    };
+    let display = err.to_string();
+    assert!(display.contains("https"), "message: {display}");
+    assert!(
+        display.contains("http://accounts.example.com"),
+        "message: {display}"
+    );
+}
+
+#[test]
 fn server_config_error_display_missing_jwks_url() {
     let err = ServerConfigError::MissingJwksUrl;
     assert_eq!(

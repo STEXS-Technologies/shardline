@@ -765,16 +765,7 @@ fn build_hub_state(
         )?;
 
     // Build an HTTP client for outbound webhook delivery.
-    let http_client = match reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()
-    {
-        Ok(client) => Some(client),
-        Err(e) => {
-            tracing::warn!("failed to build HTTP client for webhook delivery: {e}");
-            None
-        }
-    };
+    let http_client = build_webhook_delivery_client();
 
     // Thread an at-rest cipher for webhook signing secrets when configured.
     let webhook_secret_cipher = app_state.config.hub_webhook_secret_key().map_or_else(
@@ -835,6 +826,28 @@ fn endpoint_body_limit(
         .ok_or(ServerError::Overflow)
 }
 
+/// Builds the HTTP client used for outbound webhook delivery.
+///
+/// Redirects are deliberately disabled: an attacker-controlled webhook URL
+/// could answer with a 301/302/307/308 pointing at a private, loopback, or
+/// metadata address that was never validated. Following such a redirect would
+/// carry the webhook payload (and the server's credentials) into the internal
+/// network — an SSRF bypass. A 3xx response is therefore surfaced as a
+/// non-success status and the delivery fails instead of being followed.
+fn build_webhook_delivery_client() -> Option<reqwest::Client> {
+    match reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+    {
+        Ok(client) => Some(client),
+        Err(e) => {
+            tracing::warn!("failed to build HTTP client for webhook delivery: {e}");
+            None
+        }
+    }
+}
+
 /// Acquires a semaphore permit for a chunk transfer.
 ///
 /// # Errors
@@ -869,7 +882,8 @@ async fn build_auth_provider(config: &ServerConfig) -> Result<Option<ServerAuth>
             if audience.is_none() {
                 tracing::warn!(
                     "OIDC auth provider has no SHARDLINE_AUTH_OIDC_AUDIENCE configured; the \
-                     token aud claim is not validated"
+                     token aud claim is not validated and any aud-bearing token is accepted \
+                     (set SHARDLINE_AUTH_OIDC_AUDIENCE to require a specific audience)"
                 );
             }
             let provider = OidcProvider::new(issuer, audience.map(str::to_owned))

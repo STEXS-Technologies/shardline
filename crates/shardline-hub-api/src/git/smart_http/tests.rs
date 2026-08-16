@@ -1821,6 +1821,105 @@ async fn receive_pack_malformed_pack_data_returns_ng_refs() {
     assert!(result.is_ok());
 }
 
+// --- receive_pack non-fast-forward rejection has NO write side effects (F-61) ---
+
+#[tokio::test]
+async fn receive_pack_non_fast_forward_denied_leaves_no_side_effects() {
+    use shardline_index::hub::HubRepoType;
+    use shardline_server_core::AuthorizedRepository;
+    use shardline_storage::ObjectStore;
+
+    let (_tmp, state) = make_hub_state();
+    state
+        .store
+        .create_repo(HubRepoType::Model, "org/rp-nff", false)
+        .unwrap();
+    // The repo already has `main` -> empty-tree SHA (created by create_repo).
+    let current_sha = "4b825dc642cb6eb9a060e54bf899d69f8f5ce8e3";
+    assert_eq!(
+        state
+            .store
+            .resolve_revision("org/rp-nff", "refs/heads/main")
+            .unwrap(),
+        Some(current_sha.to_owned()),
+        "precondition: refs/heads/main exists at the empty-tree sha"
+    );
+
+    // Build a valid pack: LFS pointer blob + tree + commit. The commit's tree
+    // references an LFS file so a buggy handler would store both file entries
+    // AND an LFS object before rejecting.
+    let lfs_oid = "a".repeat(64); // valid sha256 hex
+    let lfs_blob = build_lfs_pointer_blob(&lfs_oid, 100);
+    let lfs_blob_sha = lfs_blob.sha1();
+    let tree = crate::git::pack::create_tree_object(&[(0o100644, "model.bin", &lfs_blob_sha)]);
+    let tree_sha = tree.sha1();
+    let commit = crate::git::pack::create_commit_object(
+        &tree_sha,
+        None,
+        "Test <test@test.com>",
+        "non-fast-forward attempt",
+    );
+    let new_sha = hex::encode(commit.sha1());
+    let pack = crate::git::pack::generate_pack(&[lfs_blob, tree, commit]).unwrap();
+
+    // old_sha differs from the current ref value -> non-fast-forward.
+    let old_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let cmd = format!("{old_sha} {new_sha} refs/heads/main\n");
+    let encoded = format!("{:04x}{}", cmd.len() + 4, cmd);
+    let mut body = encoded.into_bytes();
+    body.extend_from_slice(b"0000");
+    body.extend_from_slice(&pack);
+
+    let response = receive_pack(
+        State(state.clone()),
+        Path(("models".into(), "org".into(), "rp-nff".into())),
+        axum::http::HeaderMap::new(),
+        bytes::Bytes::from(body),
+    )
+    .await
+    .expect("receive_pack returns a report response");
+    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read report body");
+    let report = String::from_utf8(body_bytes.to_vec()).expect("report is utf-8");
+    assert!(
+        report.contains("ng"),
+        "non-fast-forward push must be rejected: {report}"
+    );
+
+    // Deny-no-side-effect: no file entries were persisted for new_sha...
+    let files = state
+        .store
+        .get_files(&new_sha)
+        .expect("get_files should not error");
+    assert!(
+        files.is_empty(),
+        "non-fast-forward rejection must not store file entries, got {files:?}"
+    );
+
+    // ...and no LFS object was stored under the LFS key for the file's OID.
+    let key =
+        crate::routes::lfs_object_key(&lfs_oid, &AuthorizedRepository::anonymous_full_access())
+            .expect("valid LFS object key");
+    assert!(
+        !state
+            .object_store
+            .contains(&key)
+            .expect("contains should not error"),
+        "non-fast-forward rejection must not store LFS objects"
+    );
+
+    // The ref must still point at the old value (nothing was created).
+    assert_eq!(
+        state
+            .store
+            .resolve_revision("org/rp-nff", "refs/heads/main")
+            .unwrap(),
+        Some(current_sha.to_owned()),
+        "ref must be unchanged after a rejected push"
+    );
+}
+
 // --- walk_git_tree with truncated SHA (error path, line ~1163) ---
 
 #[test]

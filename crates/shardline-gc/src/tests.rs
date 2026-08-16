@@ -840,6 +840,101 @@ fn gc_sweep_reaps_stale_temporary_chunk_artifacts_only() {
 }
 
 #[test]
+fn gc_sweep_reaps_stranded_xorb_and_shard_temps_but_never_live_objects() {
+    // F-67 regression: ALL local object writes (chunks, xorb containers, and
+    // shards) go through temp-then-hardlink and get the `.tmp-<nanos>-<counter>`
+    // suffix. A crash between the temp write and the hardlink strands
+    // xorbs/default/<p>/<hash>.xorb.tmp-... and shards/<p>/<hash>.shard.tmp-...
+    // files, which the old chunk-only reaper grammar never matched — and which
+    // managed_object_hash rejects, so every other GC path skipped them too.
+    // The extended reaper must reap them after the age bound while leaving
+    // live chunk/xorb/shard objects untouched.
+    use shardline_protocol::unix_now_seconds_lossy;
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let dir = tempfile::tempdir().unwrap();
+        let hash = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+        let prefix = &hash[..2];
+        std::fs::create_dir_all(dir.path().join("xorbs/default").join(prefix)).unwrap();
+        std::fs::create_dir_all(dir.path().join("shards").join(prefix)).unwrap();
+        std::fs::create_dir_all(dir.path().join(prefix)).unwrap();
+
+        let now_secs = unix_now_seconds_lossy();
+        // > 1 hour old: stranded remnants of killed/crashed writers.
+        let stale_nanos = u128::from(now_secs - 2 * 3600) * 1_000_000_000;
+        let xorb_temp_key = format!("xorbs/default/{prefix}/{hash}.xorb.tmp-{stale_nanos}-0");
+        let shard_temp_key = format!("shards/{prefix}/{hash}.shard.tmp-{stale_nanos}-1");
+        let xorb_temp_path = dir.path().join(&xorb_temp_key);
+        let shard_temp_path = dir.path().join(&shard_temp_key);
+        std::fs::write(&xorb_temp_path, b"stale-xorb").unwrap();
+        std::fs::write(&shard_temp_path, b"stale-shard").unwrap();
+        // The reaper prefers the GC-observed mtime (backend truth): age both
+        // temps' on-disk mtimes so they are genuinely old by both clocks.
+        let aged_mtime = std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 3600);
+        std::fs::File::options()
+            .write(true)
+            .open(&xorb_temp_path)
+            .unwrap()
+            .set_modified(aged_mtime)
+            .unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&shard_temp_path)
+            .unwrap()
+            .set_modified(aged_mtime)
+            .unwrap();
+
+        // Live managed objects (finished keys, no temp suffix) must never be
+        // touched by the reaper.
+        let object_store = ServerObjectStore::local(dir.path()).unwrap();
+        let chunk_key = ObjectKey::parse(&format!("{prefix}/{hash}")).unwrap();
+        put_object(&object_store, &chunk_key, b"live-chunk");
+        let xorb_live_key =
+            ObjectKey::parse(&format!("xorbs/default/{prefix}/{hash}.xorb")).unwrap();
+        put_object(&object_store, &xorb_live_key, b"live-xorb");
+        let shard_live_key = ObjectKey::parse(&format!("shards/{prefix}/{hash}.shard")).unwrap();
+        put_object(&object_store, &shard_live_key, b"live-shard");
+
+        let index_store = MemoryIndexStore::new();
+        let diagnostics = run_gc_helper(&object_store, &index_store, LocalGcOptions::sweep_only())
+            .await
+            .unwrap();
+
+        // Both stranded managed-object temps are reaped.
+        assert_eq!(
+            diagnostics.report.reaped_stale_temporary_chunks, 2,
+            "both stranded xorb and shard temps must be reaped"
+        );
+        assert_eq!(
+            diagnostics.report.reaped_stale_temporary_bytes, 21,
+            "10 bytes of stale-xorb + 11 bytes of stale-shard"
+        );
+        assert!(
+            std::fs::metadata(&xorb_temp_path).is_err(),
+            "stranded xorb temp must be reaped"
+        );
+        assert!(
+            std::fs::metadata(&shard_temp_path).is_err(),
+            "stranded shard temp must be reaped"
+        );
+        // Live objects are untouched.
+        assert!(
+            object_store.contains(&chunk_key).unwrap(),
+            "live chunk must never be touched"
+        );
+        assert!(
+            object_store.contains(&xorb_live_key).unwrap(),
+            "live xorb must never be touched"
+        );
+        assert!(
+            object_store.contains(&shard_live_key).unwrap(),
+            "live shard must never be touched"
+        );
+    });
+}
+
+#[test]
 fn validate_integrity_missing_quarantine_object_auto_released() {
     // When a quarantine candidate references an object that doesn't exist
     // in the object store, the candidate should be auto-released.
