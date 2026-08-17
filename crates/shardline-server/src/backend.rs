@@ -519,6 +519,16 @@ impl ServerBackend {
         }
     }
 
+    pub(crate) async fn stats_scoped(
+        &self,
+        scope: &RepositoryScope,
+    ) -> Result<ServerStatsResponse, ServerError> {
+        match self {
+            Self::Local(backend) => backend.stats_scoped(scope).await,
+            Self::Postgres(backend) => backend.stats_scoped(scope).await,
+        }
+    }
+
     pub(crate) async fn ready(&self) -> Result<(), ServerError> {
         match self {
             Self::Local(backend) => backend.ready().await,

@@ -63,6 +63,36 @@ pub(crate) fn visit_object_prefix(
     object_store.visit_prefix(prefix, &mut visitor)
 }
 
+/// Counts the deduplicated chunk pool: every object whose key matches the
+/// chunk layout (`{xx}/{64-hex}`), summing their lengths.
+///
+/// The chunk pool is shared CAS infrastructure: it is not attributable to any
+/// single repository, so both the whole-store and the repository-scoped stats
+/// views report it unchanged.
+///
+/// # Errors
+///
+/// Returns [`ServerError`] when the object inventory cannot be traversed.
+pub(crate) fn whole_store_chunk_stats(
+    object_store: &ServerObjectStore,
+) -> Result<(u64, u64), ServerError> {
+    let prefix = ObjectPrefix::parse("").map_err(|_error| ServerError::InvalidContentHash)?;
+    let mut chunks = 0_u64;
+    let mut chunk_bytes = 0_u64;
+    visit_object_prefix(object_store, &prefix, |metadata| {
+        let is_chunk =
+            crate::chunk_store::chunk_hash_from_chunk_object_key_if_present(metadata.key())?
+                .is_some();
+        if is_chunk {
+            chunks = crate::overflow::checked_increment(chunks)?;
+            chunk_bytes = crate::overflow::checked_add(chunk_bytes, metadata.length())?;
+        }
+
+        Ok(())
+    })?;
+    Ok((chunks, chunk_bytes))
+}
+
 pub(crate) fn read_full_object(
     object_store: &ServerObjectStore,
     object_key: &ObjectKey,
