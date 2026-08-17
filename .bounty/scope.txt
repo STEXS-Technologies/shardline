@@ -1,0 +1,31 @@
+# Shardline S3 frontend hunt — in-scope surface (feat/s3-frontend @ 9159eb6)
+# Source paths (read-only audit) + local loopback host for in-process probing.
+
+# ---- S3 protocol routes (server) ----
+crates/shardline-server/src/app/protocol_routes/s3/
+crates/shardline-server/src/app/protocol_routes/s3/mod.rs
+crates/shardline-server/src/app/protocol_routes/s3/object.rs
+crates/shardline-server/src/app/protocol_routes/s3/multipart.rs
+crates/shardline-server/src/app/protocol_routes/s3/listing.rs
+crates/shardline-server/src/app/protocol_routes/s3/bucket.rs
+crates/shardline-server/src/app/protocol_routes/s3/aws_chunked.rs
+
+# ---- S3 adapter (protocol parsing/classification/auth) ----
+crates/shardline-s3-adapter/
+
+# ---- S3 index layer (listing/etag/metadata storage) ----
+crates/shardline-index/src/s3_objects.rs
+crates/shardline-index/src/local_sqlite/s3_objects.rs
+crates/shardline-index/src/postgres/s3_objects.rs
+crates/shardline-index/src/local_sqlite/migration.rs
+
+# ---- Body ingest used by S3 uploads ----
+crates/shardline-server/src/upload_ingest/
+
+# ---- S3 auth + token scope helpers ----
+crates/shardline-server-core/src/server_frontend/
+crates/shardline-server/src/app/protocol_routes/s3/../s3/  (authorize_s3)
+
+# ---- Local in-process test target (loopback) ----
+127.0.0.1
+localhost

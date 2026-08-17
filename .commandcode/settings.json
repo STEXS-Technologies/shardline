@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Shell(gh:*)",
+      "Shell(cargo:*)",
+      "Shell(tee:*)",
+      "Shell(if:*)",
+      "Shell(then:*)",
+      "Shell(else:*)",
+      "Shell(fi:*)",
+      "Shell(grep:*)"
+    ],
+    "deny": [],
+    "defaultMode": "default"
+  }
+}

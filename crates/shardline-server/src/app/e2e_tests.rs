@@ -1434,6 +1434,81 @@ async fn stats_route_is_admission_gated() {
     assert_eq!(response.status(), StatusCode::OK);
 }
 
+/// Authenticated callers see only their own repository's volume.
+///
+/// `/v1/stats` is repository-scoped when token auth is configured: a repo-A
+/// token must not learn repo-B's (or the whole deployment's) file count.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stats_returns_repository_scoped_numbers_for_authenticated_callers() {
+    let tmp = TempDir::new().expect("tempdir");
+    let chunk_size = NonZeroUsize::new(65536).expect("chunk size");
+
+    // Pre-populate the storage root with one file in repo A only.
+    let repo_a = RepositoryScope::new(RepositoryProvider::Generic, "owner-a", "repo-a", None)
+        .expect("valid repo scope");
+    let backend = LocalBackend::new(
+        tmp.path().to_path_buf(),
+        "http://127.0.0.1:8080".to_owned(),
+        chunk_size,
+    )
+    .await
+    .expect("local backend");
+    backend
+        .upload_file(
+            "a.bin",
+            axum::body::Bytes::from_static(b"repo-a-payload"),
+            Some(&repo_a),
+        )
+        .await
+        .expect("upload to repo a");
+
+    // The router opens the same storage root with token auth configured.
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().expect("bind addr"),
+        "http://127.0.0.1:8080".to_owned(),
+        tmp.path().to_path_buf(),
+        chunk_size,
+    )
+    .with_server_role(ServerRole::All)
+    .with_server_frontends(vec![ServerFrontend::Xet])
+    .expect("server frontends")
+    .with_token_signing_key(TEST_SIGNING_KEY.to_vec())
+    .expect("token signing key");
+    let app = crate::app::router(config).await.expect("router");
+
+    let token_a = _test_token_with_scope_and_repo(TokenScope::Read, "owner-a", "repo-a");
+    let token_b = _test_token_with_scope_and_repo(TokenScope::Read, "owner-b", "repo-b");
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/stats")
+                .header("Authorization", format!("Bearer {token_a}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = body_json(response).await;
+    assert_eq!(json["files"], 1, "repo-a token sees repo-a's file");
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/stats")
+                .header("Authorization", format!("Bearer {token_b}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = body_json(response).await;
+    assert_eq!(json["files"], 0, "repo-b token does not see repo-a's file");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn batch_reconstruction_empty() {
     let (app, _tmp) = test_app(&[ServerFrontend::Xet]).await;

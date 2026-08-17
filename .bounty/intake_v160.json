@@ -1,0 +1,69 @@
+{
+  "schema_version": "1.0",
+  "target": {
+    "name": "Shardline v1.6.0 hardening changes (chore/v1.6.0-preparation @ 8070377, PR #38)",
+    "type": "web2",
+    "location": "local source: /home/ac/projects/shardline (chore/v1.6.0-preparation)",
+    "repository": "workstation:STEXS-Technologies/shardline.git",
+    "chain": null
+  },
+  "authorization": {
+    "scope_file": "/home/ac/projects/shardline/.bounty/scope_v160.txt",
+    "active_testing": true,
+    "max_rps": 20,
+    "request_budget": 400,
+    "production_rules": "Local source audit of the NEW v1.6.0 changes only. All live testing runs against an in-process router or the local deployment stack (compose MinIO/Postgres/Redis) on loopback. No external targets, no production instances. Read-only for finder lanes; PoC execution only through the sandboxed bounty validation runner."
+  },
+  "deployed_pin": {
+    "status": "verified",
+    "identifiers": [
+      "branch chore/v1.6.0-preparation",
+      "commit 171a375",
+      "PR #38 (open, base main)"
+    ],
+    "evidence": ["pushed to origin 2026-08-15; all gates green (cargo make ci exit 0, coverage 93.68% >= 93.10%, migration-sync 17 versions, e2e + sdx suites green)"]
+  },
+  "impact_rules": {
+    "source": "Self-hosted S3-compatible + multi-protocol storage server; severity mapping for the v1.6.0 red-team engagement",
+    "severity_mapping": {
+      "critical": [
+        "Forgeable or bypassable authorization capability (unauthorized read/write/delete of any repo-scoped data)",
+        "Authentication bypass in the capability extractors (S3/LFS/OCI/Hub/Xet/Bazel)",
+        "Fail-loud secret-encryption gate bypass allowing production plaintext secrets",
+        "Supply-chain compromise via the release tooling (publish-order generator, publish scripts)"
+      ],
+      "high": [
+        "Cross-tenant access via capability scope confusion (permissive-mode anonymous capability, extractor seam)",
+        "GC data-loss or wedge from the chunk-hash validation change",
+        "Migration registration gaps causing silent PG-backed data failures",
+        "Request smuggling or path traversal reintroduced by the route-handler migration"
+      ],
+      "medium": [
+        "Capability contract violations (scope escalation, namespace confusion)",
+        "Chaos/drill harness code bugs with safety impact",
+        "Config/env override weaknesses",
+        "Resource-exhaustion DoS in the new code paths"
+      ],
+      "low": [
+        "Hardening gaps, error-envelope details, non-destructive robustness issues"
+      ]
+    }
+  },
+  "exclusions": [
+    "The S3 frontend core surface already audited in the earlier S3 hunt (findings F-7..F-11, all fixed), EXCEPT the new v1.6.0 changes to those routes (the capability extractor migration)",
+    "Pre-existing non-v1.6.0 code",
+    "Docs-only changes"
+  ],
+  "accounts": [
+    {"id": "token-mint", "role": "test", "note": "LocalHmac-minted bearer tokens for repo scopes (ac.assets / team.cli-*), used by the drill/e2e harnesses; access-key=token for SigV4"}
+  ],
+  "known_findings": [
+    "S3 hunt F-7..F-11 (CopyObject ceiling, conditional TOCTOU, lock-map leak, lock convoy, torn metadata) — all fixed, do NOT re-report",
+    "GC abort on chunk temp files (.tmp-*) — fixed (chunk_hash returns Ok(None))",
+    "Postgres migration registration gap (s3_object_etag_metadata missing from SHARDLINE_MIGRATIONS) — fixed",
+    "Report-only: xorb transfer route serves corrupt bytes without content validation; /v1/reconstructions/{file_id} requires 64-hex file ids",
+    "F-12 fail-loud gate (deployment-mode fail-open parse + default-Insecure disarm + Authenticated-without-provider + warning text) — FIXED in this cycle; audit the FIX for new edge cases, do NOT re-report",
+    "F-13 GC stale-temp reaper (stranded .tmp-* files now reaped after 1h) — FIXED; audit the reaper for new edge cases (fresh-temp protection, reaper racing an active write), do NOT re-report",
+    "F-14 capability seal (from_verified_context / AuthContext::new are public, convention-enforced) — documented; a type-level seal is a follow-up, do NOT re-report"
+  ]
+}

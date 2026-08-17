@@ -1,0 +1,70 @@
+## Description
+
+This PR completes the v1.6.0 hardening cycle and adds repository-scoped storage statistics for authenticated callers. It strengthens authorization boundaries, production secret handling, failure testing, operations documentation, and release automation while preserving existing permissive/global behavior.
+
+## Changes
+
+- `crates/shardline-server/src/app/operational.rs`: scope `/v1/stats` file counts to the authenticated repository; retain whole-store totals for callers without a repository capability.
+- `crates/shardline-server/src/record_store.rs`, `object_store.rs`, and backend stats modules: count repository records and protocol namespace objects, while reporting the shared CAS chunk pool globally.
+- Local and Postgres backend tests plus authenticated route coverage verify repository isolation and shared chunk accounting.
+- Existing hardening work adds typed authorization capabilities, fail-loud production secret encryption checks, fault/chaos coverage, operational runbooks, performance baselines, and metadata-driven publishing.
+- Affected crates: `shardline-server`, `shardline-server-core`, `shardline-hub-api`, `shardline-protocol-adapters`, `shardline-gc`, `shardline`, and benchmark/release tooling.
+- No migration or rollout step is required for the scoped stats change.
+
+## Motivation
+
+Business or operator motivation: operators need useful per-repository storage visibility without exposing another repository's file counts.
+
+Technical motivation: authenticated stats requests must use the repository capability already established by authorization, while deduplicated CAS chunks remain deployment-wide shared infrastructure.
+
+Alternative approaches considered: attributing shared chunks to repositories was rejected because deletes and deduplication remove reliable ownership information; permissive callers continue using the existing whole-store aggregate.
+
+## Scope and impact
+
+- Affected crates: `shardline-server` and the hardening/release components listed above.
+- Protocol or API changes: authenticated `/v1/stats` responses now return repository-scoped file counts; unauthenticated/permissive responses remain global.
+- Backward compatibility: permissive/global behavior is preserved; no public client API break.
+- Performance impact: scoped stats perform repository metadata traversal and namespace-prefixed object listing; shared chunk inventory is traversed once per request.
+- Security impact: authenticated callers no longer receive other repositories' file counts.
+- Operational impact: no new deployment setting or migration is required.
+
+## Testing
+
+- [x] Unit tests
+- [x] Integration tests
+- [x] Manual verification
+- [x] Performance checks (if applicable)
+- [x] Security checks (if applicable)
+
+Commands/results:
+
+```bash
+cargo fmt --all -- --check
+cargo check -p shardline-server
+cargo test -p shardline-server stats_scoped_reports_only_the_requested_repository
+cargo test -p shardline-server stats_returns_repository_scoped_numbers_for_authenticated_callers
+```
+
+All commands pass locally. The PR CI rerun is in progress after an earlier coverage job hit a timing-sensitive existing fault-drill cancellation assertion; the focused stats tests were not involved.
+
+## Related issues and documentation
+
+- Fixes:
+- Related:
+- Architecture docs: `docs/ARCHITECTURE.md`
+- Protocol docs: `docs/PROTOCOL_CONFORMANCE.md`
+- Security/invariants docs: `docs/SECURITY_AND_INVARIANTS.md`
+- Operations/runbook updates: `docs/DISASTER_RECOVERY.md`, `docs/ROLLING_UPGRADE.md`, `docs/STORAGE_MIGRATION_TESTING.md`
+
+## Reviewer checklist
+
+- [x] Code follows project standards and crate-boundary constraints
+- [x] Tests added or updated and passing
+- [x] Documentation updated where behavior or config changed
+- [x] No undocumented breaking change
+- [x] Performance trade-offs documented where relevant
+- [x] Security considerations addressed where relevant
+
+## Additional notes
+
+The shared CAS chunk pool is intentionally reported as whole-store storage in both global and repository-scoped responses because deduplication makes per-repository ownership unavailable. Unrelated generated audit and test artifacts remain untracked locally and are not part of the implementation diff.

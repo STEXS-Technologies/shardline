@@ -1,0 +1,66 @@
+{
+  "schema_version": "1.0",
+  "target": {
+    "name": "Shardline S3 frontend (self-hosted content-addressed storage server)",
+    "type": "web2",
+    "location": "local source: /home/ac/projects/shardline (feat/s3-frontend)",
+    "repository": "workstation:STEXS-Technologies/shardline.git",
+    "chain": null
+  },
+  "authorization": {
+    "scope_file": "/home/ac/projects/shardline/.bounty/scope.txt",
+    "active_testing": true,
+    "max_rps": 20,
+    "request_budget": 400,
+    "production_rules": "Local source audit of the S3 frontend only. All live testing runs against an in-process router on a random 127.0.0.1 port (the repo's TestServer pattern). No external targets, no production instances. Read-only for finder lanes; PoC execution only through the sandboxed bounty validation runner."
+  },
+  "deployed_pin": {
+    "status": "verified",
+    "identifiers": [
+      "branch feat/s3-frontend",
+      "commit 9159eb6 (S3 interop hardening: MD5 ETags, user metadata, ListObjects v1, client-breadth real-client e2e)",
+      "prior: 416c30b (PLANNED ops), 0a9460e, 493bcda, ba125aa"
+    ],
+    "evidence": ["pushed to origin/feat/s3-frontend 2026-08-14; all gates green (cargo make ci exit 0)"]
+  },
+  "impact_rules": {
+    "source": "Self-hosted S3-compatible object-storage server; severity mapping for this engagement",
+    "severity_mapping": {
+      "critical": [
+        "Unauthenticated or cross-tenant read/write/delete of arbitrary objects (data exfiltration or destruction)",
+        "Authentication bypass (SigV4 access-key=token or Bearer bridge) allowing access to any bucket/object",
+        "Path traversal in bucket or key routing escaping the storage root or scope namespace"
+      ],
+      "high": [
+        "Cross-tenant object access/overwrite via token scope confusion or bucket-name collisions",
+        "Upload/part/session quota bypass allowing unbounded storage consumption",
+        "Request smuggling / body-desync via AWS-chunked framing (poisoned request splitting)",
+        "Race/TOCTOU on object overwrite or multipart session leading to torn or corrupt data",
+        "XML entity expansion / injection in listing or CompleteMultipartUpload parsing"
+      ],
+      "medium": [
+        "User-metadata or header injection (CRLF, x-amz-meta-*)",
+        "Conditional-request (If-Match/If-None-Match) logic errors",
+        "Resource-exhaustion DoS (unbounded sessions, parts, listing)",
+        "Information disclosure via ETag/Last-Modified/metadata leakage"
+      ],
+      "low": [
+        "Hardening gaps (missing security headers, error-envelope details)",
+        "Non-destructive robustness issues with no data impact"
+      ]
+    }
+  },
+  "exclusions": [
+    "All non-S3 protocol frontends (Xet, LFS, Bazel, OCI, Hub, metrics)",
+    "CLI / operator commands except where they mint the S3 token path",
+    "Storage adapter backends (local/S3/Postgres) except the shardline_s3_objects index layer used by the S3 listing",
+    "Docs-only changes"
+  ],
+  "accounts": [
+    {"id": "token-mint", "role": "test", "note": "LocalHmacProvider token for {owner}.{name}=ac.assets used by the real-client e2e harness; access-key=token, secret arbitrary"}
+  ],
+  "known_findings": [
+    "adv-1 (2026-08-13) audit findings — all FIXED on this branch, do NOT re-report: atomic-overwrite race (fixed via S3ObjectReadSnapshot + read_object_stream_pinned), CLI admin-token key-file newline-strip bug (401), DeleteObjects hardening, chunk-size 64KB default panic + non-power-of-two validation",
+    "S3 interop gaps fixed 2026-08-14 (features, not bugs): ETag semantics (content-hash -> MD5), user metadata persistence, ListObjects v1"
+  ]
+}
