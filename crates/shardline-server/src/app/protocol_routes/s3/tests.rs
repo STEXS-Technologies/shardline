@@ -2678,6 +2678,56 @@ async fn s3_delete_objects_invalid_keys_yield_per_key_errors_and_valid_keys_dele
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_delete_objects_entity_encoded_key_is_decoded_and_deleted() {
+    // F-113: a client XML-escapes a key containing `&` in the body — the
+    // stored key `a&b` arrives as `<Key>a&amp;b</Key>`. The parser must decode
+    // the entity so the lookup hits the real key; otherwise the delete no-ops
+    // and the response reports a FALSE `<Deleted>` success for an object that
+    // is still stored.
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state);
+
+    // Seed the object under its real key (`&` is legal in a path segment).
+    seed_object(&app, "a&b").await;
+    assert_eq!(object_status(&app, "a&b").await, StatusCode::OK);
+
+    // Batch-delete it with the entity-encoded `<Key>` (as a real S3 client
+    // would send it).
+    let body = "<?xml version=\"1.0\"?><Delete>\
+                <Object><Key>a&amp;b</Key></Object>\
+                </Delete>";
+    let post = app
+        .clone()
+        .oneshot(delete_objects_request(
+            format!("/{BUCKET}?delete="),
+            body.to_owned(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(post.status(), StatusCode::OK);
+    let response_body = String::from_utf8(body_bytes(post).await).unwrap();
+
+    // The response reports a truthful `<Deleted>` row for the decoded key
+    // (re-escaped for XML output), and no `<Error>` row.
+    assert!(
+        response_body.contains("<Deleted><Key>a&amp;b</Key></Deleted>"),
+        "response must report the decoded key as Deleted: {response_body}"
+    );
+    assert_eq!(
+        response_body.matches("<Error>").count(),
+        0,
+        "{response_body}"
+    );
+
+    // The object is actually gone — no false success.
+    assert_eq!(
+        object_status(&app, "a&b").await,
+        StatusCode::NOT_FOUND,
+        "the entity-encoded key must delete the stored object"
+    );
+}
+
 // =========================================================================
 // ListBuckets (GET /)
 // =========================================================================

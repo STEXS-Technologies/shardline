@@ -138,6 +138,15 @@ impl ReconstructionCacheService {
         }
 
         shardline_metrics::record_reconstruction_cache_miss();
+        // If THIS caller's future is dropped mid-load (client disconnect,
+        // request timeout, shutdown), the loading latch the adapter registered
+        // during get() must be released synchronously — otherwise the next
+        // caller for the same key stalls for the full orphan bound and the
+        // adapter's loading map grows without bound (F-112).
+        let _latch_release = LoadingLatchReleaseGuard {
+            adapter: Arc::clone(&self.adapter),
+            key: key.clone(),
+        };
         // Run the loader with a heartbeat that refreshes the loading latch the
         // adapter registered during get() (F-90): a slow-but-alive load must
         // never be mistaken for a dead one at a concurrent waiter's orphan
@@ -201,6 +210,27 @@ impl ReconstructionCacheService {
         repository_scope: Option<&RepositoryScope>,
     ) -> ReconstructionCacheKey {
         ReconstructionCacheKey::version(file_id, content_hash, repository_scope)
+    }
+}
+
+/// Releases the loading latch the adapter registered during `get()` when the
+/// service-layer caller's future is dropped mid-load (F-112).
+///
+/// The memory adapter registers a loading latch on a cold `get()` miss and
+/// removes it on `put()`/`delete()`. If the caller is dropped in between
+/// (client disconnect, request timeout, shutdown), neither runs — without this
+/// guard the latch would linger for the full orphan bound, stalling the next
+/// caller and leaking loading-map entries. `Drop` runs synchronously, so the
+/// release is a synchronous adapter method (a no-op for adapters without
+/// loading latches, e.g. Redis and Disabled).
+struct LoadingLatchReleaseGuard {
+    adapter: SharedReconstructionCache,
+    key: ReconstructionCacheKey,
+}
+
+impl Drop for LoadingLatchReleaseGuard {
+    fn drop(&mut self) {
+        self.adapter.release_loading(&self.key);
     }
 }
 
@@ -1070,6 +1100,88 @@ mod tests {
         let response2 = result2.unwrap();
         assert!(response1.is_ok(), "get_or_load 1 should succeed");
         assert!(response2.is_ok(), "get_or_load 2 should succeed");
+    }
+
+    // ── get_or_load — caller cancellation releases the loading latch (F-112) ─
+
+    #[tokio::test(start_paused = true)]
+    async fn cache_service_get_or_load_caller_drop_releases_loading_latch() {
+        let ttl_seconds = NonZeroU64::new(60).unwrap_or(NonZeroU64::MIN);
+        let memory = MemoryReconstructionCache::new(
+            ttl_seconds,
+            NonZeroUsize::new(8).unwrap_or(NonZeroUsize::MIN),
+        );
+        let adapter: SharedReconstructionCache = Arc::new(memory);
+        let cache = Arc::new(ReconstructionCacheService::for_tests("memory", adapter));
+        let key = Arc::new(ReconstructionCacheKey::latest(
+            "service-caller-drop.bin",
+            None,
+        ));
+        let loader_calls = std::sync::Arc::new(AtomicUsize::new(0));
+
+        // R1: a reconstruction through the service layer whose loader never
+        // completes on its own — the caller stays in flight until we drop it.
+        let (never_tx, never_rx) = tokio::sync::oneshot::channel::<()>();
+        let _keep_sender_alive = never_tx;
+        let cache_1 = Arc::clone(&cache);
+        let key_1 = Arc::clone(&key);
+        let loader_calls_1 = Arc::clone(&loader_calls);
+        let task1 = tokio::spawn(async move {
+            cache_1
+                .get_or_load(&key_1, || {
+                    loader_calls_1.fetch_add(1, Ordering::SeqCst);
+                    Box::pin(async move {
+                        let _ = never_rx.await;
+                        Ok(sample_response("cancelled"))
+                    })
+                })
+                .await
+        });
+
+        // Let R1 start its load (the adapter's get() has registered the latch).
+        tokio::time::advance(Duration::from_millis(10)).await;
+        assert_eq!(
+            loader_calls.load(Ordering::SeqCst),
+            1,
+            "first reconstruction must start before cancellation"
+        );
+
+        // Drop the caller future mid-load (client disconnect / timeout).
+        task1.abort();
+        tokio::time::advance(Duration::from_millis(1)).await;
+        let _ = task1.await;
+
+        // R2: a next caller for the same key must NOT stall for the full
+        // orphan bound — it runs its own load promptly. Advance past the 5s
+        // probe bound so a leaked zombie latch surfaces as a timeout instead
+        // of hanging the test.
+        let cache_2 = Arc::clone(&cache);
+        let key_2 = Arc::clone(&key);
+        let loader_calls_2 = Arc::clone(&loader_calls);
+        let retry = tokio::spawn(async move {
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                cache_2.get_or_load(&key_2, || {
+                    loader_calls_2.fetch_add(1, Ordering::SeqCst);
+                    Box::pin(async { Ok(sample_response("retry")) })
+                }),
+            )
+            .await
+        });
+        tokio::time::advance(Duration::from_secs(5)).await;
+        let retried = retry.await.expect("retry task panicked");
+        let response = retried.expect("next caller stalled on a zombie loading latch (F-112)");
+        let response = response.expect("next caller returned an unexpected error");
+        assert_eq!(
+            response.terms.first().map(|term| term.hash.as_str()),
+            Some("retry"),
+            "next caller must load its own value after a cancelled caller"
+        );
+        assert_eq!(
+            loader_calls.load(Ordering::SeqCst),
+            2,
+            "the retry must run its own load (the cancelled load's latch is gone)"
+        );
     }
 
     // ── get_or_load — slow (>30s) loader keeps its latch (F-68) ─────────

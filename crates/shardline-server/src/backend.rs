@@ -1049,16 +1049,31 @@ impl ServerBackend {
         file_id: &str,
         scope: Option<&RepositoryScope>,
         max_revisions_per_repo: NonZeroUsize,
+        max_tree_entries_per_repo: NonZeroUsize,
     ) -> Result<RegisterPathOutcome, ServerError> {
         match self {
             Self::Local(backend) => {
                 backend
-                    .register_tree_path(key, path, file_id, scope, max_revisions_per_repo)
+                    .register_tree_path(
+                        key,
+                        path,
+                        file_id,
+                        scope,
+                        max_revisions_per_repo,
+                        max_tree_entries_per_repo,
+                    )
                     .await
             }
             Self::Postgres(backend) => {
                 backend
-                    .register_tree_path(key, path, file_id, scope, max_revisions_per_repo)
+                    .register_tree_path(
+                        key,
+                        path,
+                        file_id,
+                        scope,
+                        max_revisions_per_repo,
+                        max_tree_entries_per_repo,
+                    )
                     .await
             }
         }

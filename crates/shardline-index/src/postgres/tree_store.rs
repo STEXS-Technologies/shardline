@@ -250,6 +250,20 @@ impl TreeStore for PostgresIndexStore {
         Ok(u64::try_from(count).unwrap_or(u64::MAX))
     }
 
+    async fn count_tree_entries(&self, key: &RepoKey) -> Result<u64, Self::Error> {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)
+             FROM shardline_tree_entries
+             WHERE provider = $1 AND owner = $2 AND repo = $3",
+        )
+        .bind(&key.provider)
+        .bind(&key.owner)
+        .bind(&key.repo)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(u64::try_from(count).unwrap_or(u64::MAX))
+    }
+
     async fn list_revisions(
         &self,
         key: &RepoKey,
@@ -671,5 +685,64 @@ mod tests {
         let _ = TreeStore::delete_revision(&store, &other, "main")
             .await
             .expect("cleanup other");
+    }
+
+    /// Counts tree-entry rows per repo (F-103 cap gate) across revisions.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pg_count_tree_entries_counts_only_the_matching_repo() {
+        let Some(pool) = connect_postgres().await else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let store = PostgresIndexStore::new(pool);
+        let repo = repo_key();
+        let other = RepoKey::new("github", "owner", "other-repo");
+        assert_eq!(
+            TreeStore::count_tree_entries(&store, &repo)
+                .await
+                .expect("count"),
+            0
+        );
+        // Distinct paths across multiple revisions all count against the repo.
+        for (revision, path) in [("main", "a.txt"), ("main", "b.txt"), ("feature", "c.txt")] {
+            assert!(
+                TreeStore::upsert_tree_entry(&store, &entry(revision, path))
+                    .await
+                    .expect("upsert")
+                    .created
+            );
+        }
+        assert_eq!(
+            TreeStore::count_tree_entries(&store, &repo)
+                .await
+                .expect("count"),
+            3
+        );
+        // A same-path upsert does not grow the count; a different repo is not
+        // counted against this repository.
+        assert!(
+            !TreeStore::upsert_tree_entry(&store, &entry("main", "a.txt"))
+                .await
+                .expect("upsert")
+                .created
+        );
+        assert_eq!(
+            TreeStore::count_tree_entries(&store, &repo)
+                .await
+                .expect("count"),
+            3
+        );
+        assert_eq!(
+            TreeStore::count_tree_entries(&store, &other)
+                .await
+                .expect("count other"),
+            0
+        );
+        // Clean up so the shared test database stays tidy for other runs.
+        for revision in ["main", "feature"] {
+            let _ = TreeStore::delete_revision(&store, &repo, revision)
+                .await
+                .expect("cleanup");
+        }
     }
 }

@@ -265,6 +265,20 @@ fn count_revisions_sql(
     Ok(u64::try_from(count).unwrap_or(u64::MAX))
 }
 
+fn count_tree_entries_sql(
+    connection: &Connection,
+    key: &RepoKey,
+) -> Result<u64, LocalIndexStoreError> {
+    let count: i64 = connection.query_row(
+        "SELECT COUNT(*)
+         FROM shardline_tree_entries
+         WHERE provider = ?1 AND owner = ?2 AND repo = ?3",
+        params![key.provider, key.owner, key.repo],
+        |row| row.get(0),
+    )?;
+    Ok(u64::try_from(count).unwrap_or(u64::MAX))
+}
+
 fn list_revisions_sql(
     connection: &Connection,
     key: &RepoKey,
@@ -484,6 +498,17 @@ impl TreeStore for LocalIndexStore {
         tokio::task::spawn_blocking(move || {
             let connection = store.open_connection()?;
             count_revisions_sql(&connection, &key)
+        })
+        .await
+        .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
+    }
+
+    async fn count_tree_entries(&self, key: &RepoKey) -> Result<u64, Self::Error> {
+        let store = self.clone();
+        let key = key.clone();
+        tokio::task::spawn_blocking(move || {
+            let connection = store.open_connection()?;
+            count_tree_entries_sql(&connection, &key)
         })
         .await
         .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
@@ -939,6 +964,52 @@ mod tests {
         );
         let other = RepoKey::new("github", "owner", "other-repo");
         assert_eq!(TreeStore::count_revisions(&store, &other).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn count_tree_entries_counts_only_the_matching_repo() {
+        let store = make_store();
+        assert_eq!(
+            TreeStore::count_tree_entries(&store, &repo_key())
+                .await
+                .unwrap(),
+            0
+        );
+        // Distinct paths across multiple revisions all count against the repo.
+        for (revision, path) in [("main", "a.txt"), ("main", "b.txt"), ("feature", "c.txt")] {
+            assert!(
+                TreeStore::upsert_tree_entry(&store, &entry(revision, path, &file_id(1), 10, 100))
+                    .await
+                    .unwrap()
+                    .created
+            );
+        }
+        assert_eq!(
+            TreeStore::count_tree_entries(&store, &repo_key())
+                .await
+                .unwrap(),
+            3
+        );
+
+        // A same-path upsert does not grow the count; a different repo is not
+        // counted against this repository.
+        assert!(
+            !TreeStore::upsert_tree_entry(&store, &entry("main", "a.txt", &file_id(2), 20, 200))
+                .await
+                .unwrap()
+                .created
+        );
+        assert_eq!(
+            TreeStore::count_tree_entries(&store, &repo_key())
+                .await
+                .unwrap(),
+            3
+        );
+        let other = RepoKey::new("github", "owner", "other-repo");
+        assert_eq!(
+            TreeStore::count_tree_entries(&store, &other).await.unwrap(),
+            0
+        );
     }
 
     async fn insert_revision_record(

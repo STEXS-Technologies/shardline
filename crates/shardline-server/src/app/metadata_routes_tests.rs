@@ -67,9 +67,34 @@ async fn build_app_with_cap(
     build_app_with_config(auth_enabled, max_revisions_per_repo).await
 }
 
+async fn build_app_with_tree_cap(
+    auth_enabled: bool,
+    max_tree_entries_per_repo: NonZeroUsize,
+) -> (Router, TempDir) {
+    build_app_with_caps(
+        auth_enabled,
+        NonZeroUsize::new(10_000).unwrap(),
+        max_tree_entries_per_repo,
+    )
+    .await
+}
+
 async fn build_app_with_config(
     auth_enabled: bool,
     max_revisions_per_repo: NonZeroUsize,
+) -> (Router, TempDir) {
+    build_app_with_caps(
+        auth_enabled,
+        max_revisions_per_repo,
+        NonZeroUsize::new(10_000).unwrap(),
+    )
+    .await
+}
+
+async fn build_app_with_caps(
+    auth_enabled: bool,
+    max_revisions_per_repo: NonZeroUsize,
+    max_tree_entries_per_repo: NonZeroUsize,
 ) -> (Router, TempDir) {
     let tmp = TempDir::new().unwrap();
     let chunk_size = NonZeroUsize::new(65536).unwrap();
@@ -95,6 +120,8 @@ async fn build_app_with_config(
     .with_server_frontends(vec![ServerFrontend::Xet])
     .unwrap()
     .with_max_revisions_per_repo(max_revisions_per_repo)
+    .unwrap()
+    .with_max_tree_entries_per_repo(max_tree_entries_per_repo)
     .unwrap()
     .with_token_signing_key(TEST_SIGNING_KEY.to_vec())
     .unwrap();
@@ -396,6 +423,91 @@ async fn register_path_respects_per_repo_revision_cap() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = get_body(response).await;
     assert_eq!(body["created"], false);
+
+    // A different repository has its own independent cap.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/api/{PROVIDER}/{OWNER}/other/path/solo/f.txt"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(json!({ "fileId": id }).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn register_path_respects_per_repo_tree_entry_cap() {
+    // F-103 regression: one valid file_id can be registered under arbitrarily
+    // many distinct paths, so register_path must enforce a per-repo tree-entry
+    // cap. F-108: the cap also governs the refresh path — at capacity a
+    // re-registration of an existing path is rejected too, mirroring
+    // create_revision's count-before-insert gate.
+    let cap = NonZeroUsize::new(3).unwrap();
+    let (app, tmp) = build_app_with_tree_cap(false, cap).await;
+    let id = file_id(4);
+    write_record(tmp.path(), &id, 100, None).await;
+
+    // The first `cap` distinct paths under the same revision are accepted.
+    for path in ["a.txt", "b.txt", "c.txt"] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(path_url(path))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(json!({ "fileId": id }).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "{path} should be accepted"
+        );
+    }
+
+    // The next distinct path is rejected with 409 once the repo is at capacity.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(path_url("d.txt"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(json!({ "fileId": id }).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = get_body(response).await;
+    assert_eq!(
+        body["error"],
+        "revision registry is full for this repository"
+    );
+
+    // F-108: re-registering an EXISTING path at the cap is rejected too, so
+    // register_path and create_revision agree at capacity.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(path_url("a.txt"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(json!({ "fileId": id }).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
 
     // A different repository has its own independent cap.
     let response = app

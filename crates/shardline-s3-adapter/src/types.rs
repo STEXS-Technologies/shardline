@@ -27,6 +27,65 @@ fn xml_escape(value: &str) -> String {
     out
 }
 
+/// Decodes the five standard XML character references (`&amp;`, `&lt;`,
+/// `&gt;`, `&quot;`, `&apos;`) in a `DeleteObjects` `<Key>` value.
+///
+/// S3 clients must XML-escape a key containing `&`, `<`, `>`, or quotes in the
+/// request body (a stored key `a&b` arrives as `<Key>a&amp;b</Key>`). The
+/// bounded scanner yields element text verbatim, so without decoding the key
+/// would be looked up as the literal `a&amp;b`, never match the stored `a&b`,
+/// and the response would report a false `<Deleted>` success for an object
+/// that was not deleted (F-113).
+///
+/// A single left-to-right pass decodes each reference exactly once, so a
+/// literal sequence like `&amp;lt;` (an escaped `&lt;` text) becomes `&lt;`
+/// and is never double-decoded into `<`. Sequences that are not one of the
+/// five named references are left verbatim — the scanner is lenient by design
+/// and raw `&` text in a body is tolerated as before. Returns the input
+/// unchanged when it contains no `&`, so the common case allocates nothing.
+fn decode_xml_entities(value: &str) -> String {
+    if !value.contains('&') {
+        return value.to_owned();
+    }
+    let mut decoded = String::with_capacity(value.len());
+    let mut rest = value;
+    loop {
+        let Some(amp) = rest.find('&') else {
+            decoded.push_str(rest);
+            return decoded;
+        };
+        decoded.push_str(&rest[..amp]);
+        let after_amp = &rest[amp.saturating_add(1)..];
+        let Some(semi) = after_amp.find(';') else {
+            // No terminating `;`: the `&` is literal trailing text.
+            decoded.push('&');
+            decoded.push_str(after_amp);
+            return decoded;
+        };
+        let name = &after_amp[..semi];
+        let replacement = match name {
+            "amp" => Some('&'),
+            "lt" => Some('<'),
+            "gt" => Some('>'),
+            "quot" => Some('"'),
+            "apos" => Some('\''),
+            _ => None,
+        };
+        match replacement {
+            Some(ch) => {
+                decoded.push(ch);
+                rest = &after_amp[semi.saturating_add(1)..];
+            }
+            None => {
+                // Not a recognized reference: keep the `&` verbatim and keep
+                // scanning after it so a later `&amp;` still decodes.
+                decoded.push('&');
+                rest = after_amp;
+            }
+        }
+    }
+}
+
 /// The S3 error envelope body (`<Error><Code>…</Code>…`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct S3ErrorBody {
@@ -529,13 +588,21 @@ pub const MAX_S3_DELETE_KEYS: usize = 1000;
 /// first-occurrence document order with duplicates collapsed (the handler's
 /// dedupe pass becomes a no-op over the returned list). Empty keys are skipped.
 ///
+/// Each `<Key>` value is decoded through [`decode_xml_entities`] before it is
+/// returned: S3 clients XML-escape keys containing `&`, `<`, `>`, or quotes
+/// (a stored key `a&b` arrives as `<Key>a&amp;b</Key>`), and the decoded key
+/// is what the handler looks up, deletes, and reports in the `<DeleteResult>`
+/// — so a decoded key is never reported as a false `<Deleted>` success (F-113).
+///
 /// The [`MAX_S3_DELETE_KEYS`] protocol cap is enforced **during** parsing: the
 /// first *distinct* key beyond the cap aborts with `MalformedXML` (`400`)
 /// before it is ever buffered, so the returned list — and the dedupe set used
 /// to enforce the cap — never grow beyond the cap. A hostile body of millions
 /// of duplicate `<Key>` entries therefore consumes at most `cap` owned keys of
 /// memory instead of amplifying every entry into an owned `String` (F-32);
-/// the cap is only tripped by a genuine `cap + 1`-th distinct key.
+/// the cap is only tripped by a genuine `cap + 1`-th distinct key. Dedupe and
+/// the cap operate on the *decoded* keys, so two encodings of the same key
+/// collapse into a single delete.
 ///
 /// # Errors
 ///
@@ -564,17 +631,23 @@ pub fn parse_delete_object_keys(body: &str) -> Result<Vec<String>, crate::S3Erro
                     && let Some(raw_key) = pending_key.take()
                     && !raw_key.is_empty()
                 {
+                    // The scanner yields text verbatim, so decode the standard
+                    // XML character references before the key is looked up —
+                    // otherwise an entity-encoded key never matches the stored
+                    // object and the response would report a false `<Deleted>`
+                    // success (F-113).
+                    let key = decode_xml_entities(&raw_key);
                     // Dedupe while parsing: duplicates collapse to one key and
                     // never count toward the cap. A NEW key beyond the cap is
                     // rejected before it is buffered, bounding both `keys` and
                     // `seen` at the cap (F-32).
-                    if !seen.insert(raw_key.clone()) {
+                    if !seen.insert(key.clone()) {
                         continue;
                     }
                     if keys.len() >= MAX_S3_DELETE_KEYS {
                         return Err(crate::S3Error::malformed_xml());
                     }
-                    keys.push(raw_key);
+                    keys.push(key);
                 }
             }
             XmlEvent::End => break,
@@ -1017,6 +1090,58 @@ mod tests {
         assert_eq!(
             super::parse_delete_object_keys(&body).unwrap(),
             vec!["x".to_owned()]
+        );
+    }
+
+    #[test]
+    fn parse_delete_object_keys_decodes_xml_entities() {
+        // F-113: a client XML-escapes a key containing `&`, `<`, `>`, or
+        // quotes in the body (a stored key `a&b` arrives as `<Key>a&amp;b</Key>`).
+        // The parser must decode the five standard character references so the
+        // decoded key is what gets looked up, deleted, and reported — never a
+        // literal `a&amp;b` that matches nothing and yields a false success.
+        let body = "<?xml version=\"1.0\"?><Delete>\
+                    <Object><Key>a&amp;b</Key></Object>\
+                    <Object><Key>c&lt;d</Key></Object>\
+                    <Object><Key>e&gt;f</Key></Object>\
+                    <Object><Key>g&quot;h</Key></Object>\
+                    <Object><Key>i&apos;j</Key></Object>\
+                    </Delete>";
+        assert_eq!(
+            super::parse_delete_object_keys(body).unwrap(),
+            vec!["a&b", "c<d", "e>f", "g\"h", "i'j"]
+        );
+    }
+
+    #[test]
+    fn parse_delete_object_keys_entity_decoding_is_single_pass() {
+        // `&amp;lt;` is an escaped literal `&lt;` text: it must decode to the
+        // two-character sequence `&lt;`, never be double-decoded into `<`.
+        // Unknown `&…;` sequences are left verbatim, and a raw `&` without a
+        // terminating `;` is literal text.
+        let body = "<Delete>\
+                    <Object><Key>a&amp;lt;b</Key></Object>\
+                    <Object><Key>c&unknown;d</Key></Object>\
+                    <Object><Key>e&f</Key></Object>\
+                    </Delete>";
+        assert_eq!(
+            super::parse_delete_object_keys(body).unwrap(),
+            vec!["a&lt;b", "c&unknown;d", "e&f"]
+        );
+    }
+
+    #[test]
+    fn parse_delete_object_keys_entity_encodings_of_one_key_collapse() {
+        // Two encodings of the same stored key (`a&b` written both escaped and
+        // raw) must collapse into a single delete — dedupe runs on the decoded
+        // key, so the pair never counts twice toward the cap.
+        let body = "<Delete>\
+                    <Object><Key>a&amp;b</Key></Object>\
+                    <Object><Key>a&b</Key></Object>\
+                    </Delete>";
+        assert_eq!(
+            super::parse_delete_object_keys(body).unwrap(),
+            vec!["a&b".to_owned()]
         );
     }
 
