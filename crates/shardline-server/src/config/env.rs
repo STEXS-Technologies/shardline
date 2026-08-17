@@ -17,13 +17,14 @@ use super::{
     DEFAULT_LFS_PATCH_MAX_SEEK_AHEAD_BYTES, DEFAULT_LFS_PATCH_TOTAL_MAX_BYTES,
     DEFAULT_LFS_PATCH_TTL_SECONDS, DEFAULT_MAX_REQUEST_BODY_BYTES, DEFAULT_MAX_REVISIONS_PER_REPO,
     DEFAULT_MAX_SHARD_FILES, DEFAULT_MAX_SHARD_RECONSTRUCTION_TERMS, DEFAULT_MAX_SHARD_XORB_CHUNKS,
-    DEFAULT_MAX_SHARD_XORBS, DEFAULT_S3_MAX_PART_BYTES, DEFAULT_S3_MIN_PART_BYTES,
-    DEFAULT_S3_UPLOAD_MAX_ACTIVE_PART_FILES, DEFAULT_S3_UPLOAD_MAX_ACTIVE_SESSIONS,
-    DEFAULT_S3_UPLOAD_SESSION_MAX_BYTES, DEFAULT_S3_UPLOAD_SESSION_TTL_SECONDS,
-    DEFAULT_S3_UPLOAD_TOTAL_MAX_BYTES, DeploymentMode, HUB_WEBHOOK_SECRET_KEY_BYTES,
-    MAX_ED25519_KEY_BYTES, MAX_METRICS_TOKEN_BYTES, MAX_TOKEN_SIGNING_KEY_BYTES,
-    ObjectStorageAdapter, ServerConfig, ServerConfigError, ShardMetadataLimits,
-    default_transfer_max_in_flight_chunks, default_upload_max_in_flight_chunks, parse_byte_size,
+    DEFAULT_MAX_SHARD_XORBS, DEFAULT_MAX_TREE_ENTRIES_PER_REPO, DEFAULT_S3_MAX_PART_BYTES,
+    DEFAULT_S3_MIN_PART_BYTES, DEFAULT_S3_UPLOAD_MAX_ACTIVE_PART_FILES,
+    DEFAULT_S3_UPLOAD_MAX_ACTIVE_SESSIONS, DEFAULT_S3_UPLOAD_SESSION_MAX_BYTES,
+    DEFAULT_S3_UPLOAD_SESSION_TTL_SECONDS, DEFAULT_S3_UPLOAD_TOTAL_MAX_BYTES, DeploymentMode,
+    HUB_WEBHOOK_SECRET_KEY_BYTES, MAX_ED25519_KEY_BYTES, MAX_METRICS_TOKEN_BYTES,
+    MAX_TOKEN_SIGNING_KEY_BYTES, ObjectStorageAdapter, ServerConfig, ServerConfigError,
+    ShardMetadataLimits, default_transfer_max_in_flight_chunks,
+    default_upload_max_in_flight_chunks, parse_byte_size,
 };
 use crate::{
     reconstruction_cache::ReconstructionCacheAdapter, server_frontend::ServerFrontend,
@@ -95,6 +96,12 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
         DEFAULT_MAX_REVISIONS_PER_REPO,
         ServerConfigError::MaxRevisionsPerRepo,
         || ServerConfigError::ZeroMaxRevisionsPerRepo,
+    )?;
+    let max_tree_entries_per_repo = load_non_zero_usize_env(
+        "SHARDLINE_MAX_TREE_ENTRIES_PER_REPO",
+        DEFAULT_MAX_TREE_ENTRIES_PER_REPO,
+        ServerConfigError::MaxTreeEntriesPerRepo,
+        || ServerConfigError::ZeroMaxTreeEntriesPerRepo,
     )?;
     let raw_chunk_size_str = var("SHARDLINE_CHUNK_SIZE")
         .or_else(|_| var("SHARDLINE_CHUNK_SIZE_BYTES"))
@@ -415,6 +422,7 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
         .with_lfs_patch_total_max_bytes(lfs_patch_total_max_bytes)?
         .with_lfs_patch_max_seek_ahead_bytes(lfs_patch_max_seek_ahead_bytes)?
         .with_max_revisions_per_repo(max_revisions_per_repo)?
+        .with_max_tree_entries_per_repo(max_tree_entries_per_repo)?
         .with_admission_max_weight(admission_max_weight_from_env());
     config.cache.adapter = reconstruction_cache_adapter;
     config.cache.redis_url = reconstruction_cache_redis_url.map(SecretString::new);
@@ -551,18 +559,25 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
     // Unlike the generic boolean parser, the aliases `1`/`yes`/`on` are NOT
     // accepted — a stray or legacy value must keep the gate armed (treated as
     // false), matching the fail-closed deployment-mode parse.
+    //
+    // The fail-loud WARN fires ONLY when the override is explicitly set to a
+    // plaintext value (`true`): that is the state where the operator has
+    // disarmed the at-rest encryption gate. The unset state (the normal case)
+    // and an explicit `false` are silent — a spurious WARN on every normal
+    // boot would train operators to ignore the fail-loud signal (F-110).
     let allow_plaintext = match var("SHARDLINE_ALLOW_PLAINTEXT_SECRETS_IN_PRODUCTION")
         .ok()
         .as_deref()
     {
-        Some(value) if value.eq_ignore_ascii_case("true") => true,
-        Some(value) if value.eq_ignore_ascii_case("false") => false,
-        Some(_) | None => {
+        Some(value) if value.eq_ignore_ascii_case("true") => {
             tracing::warn!(
-                "invalid SHARDLINE_ALLOW_PLAINTEXT_SECRETS_IN_PRODUCTION value, treating as false"
+                "SHARDLINE_ALLOW_PLAINTEXT_SECRETS_IN_PRODUCTION=true: at-rest secret \
+                 encryption is disabled; persistent secrets will be stored in plaintext"
             );
-            false
+            true
         }
+        Some(value) if value.eq_ignore_ascii_case("false") => false,
+        Some(_) | None => false,
     };
     config = config.with_allow_plaintext_secrets_in_production(allow_plaintext);
 
@@ -1374,6 +1389,79 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
         remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
     }
 
+    // ── SHARDLINE_MAX_TREE_ENTRIES_PER_REPO ────────────────────────────────
+
+    #[test]
+    #[serial_test::serial]
+    fn load_server_config_max_tree_entries_per_repo_from_env() {
+        set_env_var("SHARDLINE_MAX_TREE_ENTRIES_PER_REPO", "77");
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+        let result = super::load_server_config_from_env();
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+        let config = result.unwrap();
+        assert_eq!(
+            config.max_tree_entries_per_repo(),
+            std::num::NonZeroUsize::new(77).unwrap()
+        );
+
+        remove_env_var("SHARDLINE_MAX_TREE_ENTRIES_PER_REPO");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn load_server_config_max_tree_entries_per_repo_defaults() {
+        remove_env_var("SHARDLINE_MAX_TREE_ENTRIES_PER_REPO");
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+        let result = super::load_server_config_from_env();
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+        let config = result.unwrap();
+        assert_eq!(
+            config.max_tree_entries_per_repo(),
+            super::DEFAULT_MAX_TREE_ENTRIES_PER_REPO
+        );
+
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn load_server_config_max_tree_entries_per_repo_rejects_zero() {
+        set_env_var("SHARDLINE_MAX_TREE_ENTRIES_PER_REPO", "0");
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+        let result = super::load_server_config_from_env();
+        assert!(matches!(
+            result,
+            Err(super::ServerConfigError::ZeroMaxTreeEntriesPerRepo)
+        ));
+
+        remove_env_var("SHARDLINE_MAX_TREE_ENTRIES_PER_REPO");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn load_server_config_max_tree_entries_per_repo_rejects_unparsable() {
+        set_env_var("SHARDLINE_MAX_TREE_ENTRIES_PER_REPO", "not-a-number");
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+        let result = super::load_server_config_from_env();
+        assert!(matches!(
+            result,
+            Err(super::ServerConfigError::MaxTreeEntriesPerRepo(_))
+        ));
+
+        remove_env_var("SHARDLINE_MAX_TREE_ENTRIES_PER_REPO");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+    }
+
     // ── env-provided secrets are never newline-trimmed ─────────────────────
 
     #[test]
@@ -1687,6 +1775,140 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
         assert!(
             !config.allow_plaintext_secrets_in_production(),
             "the generic true-alias `on` must not disarm the plaintext gate"
+        );
+    }
+
+    /// Minimal test subscriber that records WARN-level event messages so the
+    /// fail-loud gates can be asserted on (F-110 regression tests).
+    #[derive(Default)]
+    struct CapturingSubscriber {
+        warnings: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl tracing::Subscriber for CapturingSubscriber {
+        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+
+        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::Id {
+            tracing::Id::from_u64(1)
+        }
+
+        fn record(&self, _span: &tracing::Id, _values: &tracing::span::Record<'_>) {}
+
+        fn record_follows_from(&self, _span: &tracing::Id, _follows: &tracing::Id) {}
+
+        fn event(&self, event: &tracing::Event<'_>) {
+            if *event.metadata().level() == tracing::Level::WARN {
+                let mut visitor = MessageVisitor::default();
+                event.record(&mut visitor);
+                self.warnings.lock().unwrap().push(visitor.message);
+            }
+        }
+
+        fn enter(&self, _span: &tracing::Id) {}
+
+        fn exit(&self, _span: &tracing::Id) {}
+    }
+
+    #[derive(Default)]
+    struct MessageVisitor {
+        message: String,
+    }
+
+    impl tracing::field::Visit for MessageVisitor {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            if field.name() == "message" {
+                self.message = format!("{value:?}");
+            }
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn allow_plaintext_secrets_in_production_unset_is_silent() {
+        // Regression (F-110): the unset state (the normal case) must NOT emit
+        // the fail-loud WARN. The old gate warned on every boot unless the var
+        // was explicitly set to a non-plaintext value, training operators to
+        // ignore the fail-loud signal.
+        // SAFETY: serialized env test
+        let subscriber = CapturingSubscriber::default();
+        let warnings = subscriber.warnings.clone();
+        tracing::subscriber::with_default(subscriber, || {
+            remove_env_var("SHARDLINE_ALLOW_PLAINTEXT_SECRETS_IN_PRODUCTION");
+            set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+            set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+
+            let result = super::load_server_config_from_env();
+            remove_env_var("SHARDLINE_ROOT_DIR");
+            remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+
+            let config = result.expect("config loads with the override unset");
+            assert!(!config.allow_plaintext_secrets_in_production());
+        });
+        let warnings = warnings.lock().unwrap();
+        assert!(
+            warnings.is_empty(),
+            "the unset plaintext override must be silent, got warnings: {warnings:?}"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn allow_plaintext_secrets_in_production_true_warns() {
+        // Regression (F-110): an explicit plaintext override (`true`) is the
+        // one state that MUST emit the fail-loud WARN — the operator has
+        // disarmed the at-rest secret-encryption gate.
+        // SAFETY: serialized env test
+        let subscriber = CapturingSubscriber::default();
+        let warnings = subscriber.warnings.clone();
+        tracing::subscriber::with_default(subscriber, || {
+            set_env_var("SHARDLINE_ALLOW_PLAINTEXT_SECRETS_IN_PRODUCTION", "true");
+            set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+            set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+
+            let result = super::load_server_config_from_env();
+            remove_env_var("SHARDLINE_ALLOW_PLAINTEXT_SECRETS_IN_PRODUCTION");
+            remove_env_var("SHARDLINE_ROOT_DIR");
+            remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+
+            let config = result.expect("config loads with the plaintext override set");
+            assert!(config.allow_plaintext_secrets_in_production());
+        });
+        let warnings = warnings.lock().unwrap();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("SHARDLINE_ALLOW_PLAINTEXT_SECRETS_IN_PRODUCTION")),
+            "an explicit plaintext override must emit the fail-loud WARN, got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn allow_plaintext_secrets_in_production_false_is_silent() {
+        // Regression (F-110): an explicit non-plaintext (`false`) override must
+        // be silent — the gate stays armed and no fail-loud WARN is needed.
+        // SAFETY: serialized env test
+        let subscriber = CapturingSubscriber::default();
+        let warnings = subscriber.warnings.clone();
+        tracing::subscriber::with_default(subscriber, || {
+            set_env_var("SHARDLINE_ALLOW_PLAINTEXT_SECRETS_IN_PRODUCTION", "false");
+            set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+            set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+
+            let result = super::load_server_config_from_env();
+            remove_env_var("SHARDLINE_ALLOW_PLAINTEXT_SECRETS_IN_PRODUCTION");
+            remove_env_var("SHARDLINE_ROOT_DIR");
+            remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+
+            let config = result.expect("config loads with the plaintext override disabled");
+            assert!(!config.allow_plaintext_secrets_in_production());
+        });
+        let warnings = warnings.lock().unwrap();
+        assert!(
+            warnings.is_empty(),
+            "an explicit non-plaintext override must be silent, got warnings: {warnings:?}"
         );
     }
 

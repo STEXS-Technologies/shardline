@@ -17,16 +17,17 @@ use super::defaults::{
     CONFIG_SECRET_KEY_BYTES, DEFAULT_LFS_PATCH_MAX_ACTIVE_SESSIONS,
     DEFAULT_LFS_PATCH_MAX_SEEK_AHEAD_BYTES, DEFAULT_LFS_PATCH_TOTAL_MAX_BYTES,
     DEFAULT_LFS_PATCH_TTL_SECONDS, DEFAULT_MAX_REQUEST_BODY_BYTES, DEFAULT_MAX_REVISIONS_PER_REPO,
-    DEFAULT_OCI_REGISTRY_TOKEN_MAX_IN_FLIGHT_REQUESTS, DEFAULT_OCI_REGISTRY_TOKEN_TTL_SECONDS,
-    DEFAULT_OCI_UPLOAD_MAX_ACTIVE_SESSIONS, DEFAULT_OCI_UPLOAD_SESSION_TTL_SECONDS,
-    DEFAULT_PARALLELISM_FALLBACK, DEFAULT_S3_MAX_PART_BYTES, DEFAULT_S3_MIN_PART_BYTES,
-    DEFAULT_S3_UPLOAD_MAX_ACTIVE_PART_FILES, DEFAULT_S3_UPLOAD_MAX_ACTIVE_SESSIONS,
-    DEFAULT_S3_UPLOAD_SESSION_MAX_BYTES, DEFAULT_S3_UPLOAD_SESSION_TTL_SECONDS,
-    DEFAULT_S3_UPLOAD_TOTAL_MAX_BYTES, HUB_WEBHOOK_SECRET_KEY_BYTES,
-    MAX_DEFAULT_TRANSFER_MAX_IN_FLIGHT_CHUNKS, MAX_DEFAULT_UPLOAD_MAX_IN_FLIGHT_CHUNKS,
-    MAX_ED25519_KEY_BYTES, MAX_METRICS_TOKEN_BYTES, MAX_PROVIDER_API_KEY_BYTES,
-    MAX_TOKEN_SIGNING_KEY_BYTES, MIN_DEFAULT_TRANSFER_MAX_IN_FLIGHT_CHUNKS,
-    MIN_DEFAULT_UPLOAD_MAX_IN_FLIGHT_CHUNKS, MIN_S3_MAX_PART_BYTES,
+    DEFAULT_MAX_TREE_ENTRIES_PER_REPO, DEFAULT_OCI_REGISTRY_TOKEN_MAX_IN_FLIGHT_REQUESTS,
+    DEFAULT_OCI_REGISTRY_TOKEN_TTL_SECONDS, DEFAULT_OCI_UPLOAD_MAX_ACTIVE_SESSIONS,
+    DEFAULT_OCI_UPLOAD_SESSION_TTL_SECONDS, DEFAULT_PARALLELISM_FALLBACK,
+    DEFAULT_S3_MAX_PART_BYTES, DEFAULT_S3_MIN_PART_BYTES, DEFAULT_S3_UPLOAD_MAX_ACTIVE_PART_FILES,
+    DEFAULT_S3_UPLOAD_MAX_ACTIVE_SESSIONS, DEFAULT_S3_UPLOAD_SESSION_MAX_BYTES,
+    DEFAULT_S3_UPLOAD_SESSION_TTL_SECONDS, DEFAULT_S3_UPLOAD_TOTAL_MAX_BYTES,
+    HUB_WEBHOOK_SECRET_KEY_BYTES, MAX_DEFAULT_TRANSFER_MAX_IN_FLIGHT_CHUNKS,
+    MAX_DEFAULT_UPLOAD_MAX_IN_FLIGHT_CHUNKS, MAX_ED25519_KEY_BYTES, MAX_METRICS_TOKEN_BYTES,
+    MAX_PROVIDER_API_KEY_BYTES, MAX_TOKEN_SIGNING_KEY_BYTES,
+    MIN_DEFAULT_TRANSFER_MAX_IN_FLIGHT_CHUNKS, MIN_DEFAULT_UPLOAD_MAX_IN_FLIGHT_CHUNKS,
+    MIN_S3_MAX_PART_BYTES,
 };
 use super::enums::{
     AuthConfig, AuthProviderKind, CacheConfig, DeploymentMode, ObjectStorageAdapter, OciConfig,
@@ -90,6 +91,7 @@ pub struct ServerConfig {
     pub(crate) lfs_patch_total_max_bytes: NonZeroU64,
     pub(crate) lfs_patch_max_seek_ahead_bytes: NonZeroU64,
     pub(crate) max_revisions_per_repo: NonZeroUsize,
+    pub(crate) max_tree_entries_per_repo: NonZeroUsize,
 }
 
 impl ServerConfig {
@@ -189,6 +191,7 @@ impl ServerConfig {
             lfs_patch_total_max_bytes: DEFAULT_LFS_PATCH_TOTAL_MAX_BYTES,
             lfs_patch_max_seek_ahead_bytes: DEFAULT_LFS_PATCH_MAX_SEEK_AHEAD_BYTES,
             max_revisions_per_repo: DEFAULT_MAX_REVISIONS_PER_REPO,
+            max_tree_entries_per_repo: DEFAULT_MAX_TREE_ENTRIES_PER_REPO,
         }
     }
 
@@ -965,6 +968,28 @@ impl ServerConfig {
         max_revisions_per_repo: NonZeroUsize,
     ) -> Result<Self, ServerConfigError> {
         self.max_revisions_per_repo = max_revisions_per_repo;
+        Ok(self)
+    }
+
+    /// Returns the per-repo tree-entry cap: `register_path` rejects new path
+    /// mappings once a repository has reached this many tree-entry rows
+    /// (across every revision).
+    #[must_use]
+    pub const fn max_tree_entries_per_repo(&self) -> NonZeroUsize {
+        self.max_tree_entries_per_repo
+    }
+
+    /// Overrides the per-repo tree-entry cap.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerConfigError::ZeroMaxTreeEntriesPerRepo`] when the value
+    /// is zero.
+    pub const fn with_max_tree_entries_per_repo(
+        mut self,
+        max_tree_entries_per_repo: NonZeroUsize,
+    ) -> Result<Self, ServerConfigError> {
+        self.max_tree_entries_per_repo = max_tree_entries_per_repo;
         Ok(self)
     }
 

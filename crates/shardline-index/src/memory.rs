@@ -672,6 +672,18 @@ impl TreeStore for MemoryIndexStore {
         Ok(u64::try_from(count).unwrap_or(u64::MAX))
     }
 
+    async fn count_tree_entries(&self, key: &RepoKey) -> Result<u64, Self::Error> {
+        let state = self.lock_state()?;
+        let count = state
+            .tree_entries
+            .iter()
+            .filter(|(k, _)| {
+                k.provider == key.provider && k.owner == key.owner && k.repo == key.repo
+            })
+            .count();
+        Ok(u64::try_from(count).unwrap_or(u64::MAX))
+    }
+
     async fn list_revisions(
         &self,
         key: &RepoKey,
@@ -2893,6 +2905,65 @@ mod tests {
             AsyncIndexStore::contains_xorb(&store, &xorb_id)
                 .await
                 .unwrap()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn memory_tree_store_count_tree_entries_counts_only_the_matching_repo() {
+        use crate::{RepoKey, TreeEntry, TreeKey, TreeStore};
+        let store = MemoryIndexStore::new();
+        let repo = RepoKey::new("github", "owner", "repo");
+        let other = RepoKey::new("github", "owner", "other-repo");
+        assert_eq!(
+            TreeStore::count_tree_entries(&store, &repo).await.unwrap(),
+            0
+        );
+        let entry = |revision: &str, path: &str| TreeEntry {
+            provider: "github".to_owned(),
+            owner: "owner".to_owned(),
+            repo: "repo".to_owned(),
+            revision: revision.to_owned(),
+            path: path.to_owned(),
+            file_id: "ab".repeat(32),
+            size_bytes: 10,
+            updated_at_unix_seconds: 100,
+        };
+        // Distinct paths across multiple revisions all count against the repo.
+        for (revision, path) in [("main", "a.txt"), ("main", "b.txt"), ("feature", "c.txt")] {
+            assert!(
+                TreeStore::upsert_tree_entry(&store, &entry(revision, path))
+                    .await
+                    .unwrap()
+                    .created
+            );
+        }
+        assert_eq!(
+            TreeStore::count_tree_entries(&store, &repo).await.unwrap(),
+            3
+        );
+        // A same-path upsert does not grow the count; a different repo is not
+        // counted against this repository.
+        assert!(
+            !TreeStore::upsert_tree_entry(&store, &entry("main", "a.txt"))
+                .await
+                .unwrap()
+                .created
+        );
+        assert_eq!(
+            TreeStore::count_tree_entries(&store, &repo).await.unwrap(),
+            3
+        );
+        assert_eq!(
+            TreeStore::count_tree_entries(&store, &other).await.unwrap(),
+            0
+        );
+        // The key round-trips through the same repo filter used by the count.
+        let key = TreeKey::new("github", "owner", "repo", "main");
+        assert!(
+            TreeStore::tree_entry(&store, &key, "a.txt")
+                .await
+                .unwrap()
+                .is_some()
         );
     }
 }

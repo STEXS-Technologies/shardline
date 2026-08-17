@@ -54,7 +54,6 @@ pub(super) struct CacheInner {
     pub(super) entries: HashMap<ReconstructionCacheKey, MemoryEntry>,
     pub(super) eviction_order: BTreeMap<EvictionKey, ReconstructionCacheKey>,
     pub(super) next_seq: u64,
-    pub(super) loading: HashMap<ReconstructionCacheKey, LoadingEntry>,
 }
 
 impl CacheInner {
@@ -63,7 +62,6 @@ impl CacheInner {
             entries: HashMap::new(),
             eviction_order: BTreeMap::new(),
             next_seq: 0,
-            loading: HashMap::new(),
         }
     }
 

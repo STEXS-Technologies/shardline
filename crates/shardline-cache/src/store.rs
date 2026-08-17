@@ -46,4 +46,15 @@ pub trait AsyncReconstructionCache: Send + Sync {
     ) -> ReconstructionCacheFuture<'operation, bool> {
         Box::pin(async { Ok(false) })
     }
+
+    /// Releases any in-flight loading latch for `key`, if the adapter keeps one.
+    ///
+    /// The service layer registers a loading latch via [`Self::get`] on a cold
+    /// miss and releases it via [`Self::put`] or [`Self::delete`]. If the
+    /// caller's future is dropped mid-load (client disconnect, request timeout,
+    /// shutdown), neither runs — this synchronous release lets the caller's
+    /// `Drop` guard clean up the latch so the next caller does not stall for
+    /// the full orphan bound and the loading map does not grow without bound
+    /// (F-112). Adapters without local loading latches (Redis, Disabled) no-op.
+    fn release_loading(&self, _key: &ReconstructionCacheKey) {}
 }

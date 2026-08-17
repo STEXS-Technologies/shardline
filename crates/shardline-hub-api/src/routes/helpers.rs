@@ -1,4 +1,4 @@
-use axum::extract::FromRequestParts;
+use axum::extract::{FromRequestParts, RawPathParams};
 use axum::http::HeaderMap;
 use axum::http::request::Parts;
 
@@ -127,10 +127,11 @@ impl<const WRITE: bool, const BIND: bool> HubRepository<WRITE, BIND> {
     }
 
     /// Runs the extractor chain against already-parsed request parts.
-    fn from_request(parts: &mut Parts, state: &HubState) -> Result<Self, HubApiError> {
+    async fn from_request(parts: &mut Parts, state: &HubState) -> Result<Self, HubApiError> {
         let required_scope = Self::required_scope();
-        // 1. (ns, repo) from the request path segments, when the route has them.
-        let ns_repo = extract_repo_path(parts.uri.path());
+        // 1. (ns, repo) from the router's matched path params — the single
+        //    source of truth for the repository the handler will read from.
+        let ns_repo = extract_repo_path_params(parts, state).await;
         // 2. Authorize (permissive `Ok(None)` when no auth is configured).
         let auth_ctx = authorize_with_context(state, &parts.headers, required_scope)?;
         // 3. Enforce the token→repository binding (no-op when auth is None,
@@ -185,7 +186,7 @@ impl<const WRITE: bool, const BIND: bool> FromRequestParts<HubState>
         parts: &mut Parts,
         state: &HubState,
     ) -> Result<Self, Self::Rejection> {
-        Self::from_request(parts, state)
+        Self::from_request(parts, state).await
     }
 }
 
@@ -254,7 +255,17 @@ fn extract_repo_path(path: &str) -> Option<(String, String)> {
     // commit of `models/ns`). The segment before the pair must be a repo type
     // to distinguish this from pathless route families (`/lfs/objects/{oid}`,
     // `/api/repos`, ...).
-    if let [repo_type, ns, repo] = segments.get(segments.len().checked_sub(3)?..)?
+    //
+    // The rule only applies when the path ENDS at the repository — exactly
+    // `/{type}/{ns}/{repo}` (3 segments) or `/api/{type}/{ns}/{repo}` (4
+    // segments). A deep `{*path}` tail (tree/resolve) must never shift which
+    // three segments are interpreted as `[type, ns, repo]`: e.g.
+    // `/api/models/bob/own/tree/main/datasets/alice/own` must bind to
+    // `bob/own`, not to the trailing `[datasets, alice, own]` (F-104).
+    let ends_at_repo =
+        segments.len() == 3 || (segments.len() == 4 && segments.first() == Some(&"api"));
+    if ends_at_repo
+        && let [repo_type, ns, repo] = segments.get(segments.len().checked_sub(3)?..)?
         && REPO_TYPE_SEGMENTS.contains(repo_type)
     {
         return Some((ns.to_string(), repo.to_string()));
@@ -275,9 +286,53 @@ fn extract_repo_path(path: &str) -> Option<(String, String)> {
     None
 }
 
+/// Extracts the `(ns, repo)` pair from the router's matched path params.
+///
+/// The router's `Path` params are the single source of truth for the
+/// repository a handler will read from: they are derived from the route
+/// pattern (`{ns}/{repo}`), so a deep `{*path}` tail (tree/resolve) can
+/// never shift which segments are interpreted as the repository pair. This
+/// replaces the URI re-parse in [`extract_repo_path`], which misparsed deep
+/// tails whose last three segments happened to look like `[type, ns, repo]`
+/// (F-104).
+///
+/// Returns `None` for pathless routes (no `ns`/`repo` params), whose
+/// isolation comes from the token claims rather than a URL binding.
+async fn extract_repo_path_params(parts: &mut Parts, state: &HubState) -> Option<(String, String)> {
+    let params = match RawPathParams::from_request_parts(parts, state).await {
+        Ok(params) => params,
+        // No matched params (pathless route) or a param with invalid UTF-8:
+        // fall back to the URI re-parse, which returns `None` for pathless
+        // routes and is only reached when the router matched no `ns`/`repo`.
+        Err(_) => return extract_repo_path(parts.uri.path()),
+    };
+    let mut ns = None;
+    let mut repo = None;
+    for (key, value) in &params {
+        match key {
+            "ns" => ns = Some(value.to_owned()),
+            "repo" => repo = Some(value.to_owned()),
+            _ => {}
+        }
+    }
+    match (ns, repo) {
+        (Some(ns), Some(repo)) => Some((ns, repo)),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::extract_repo_path;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode, header::AUTHORIZATION};
+    use shardline_index::hub::{BoxedHubStore, HubFileEntry, HubRepoType};
+    use shardline_protocol::{RepositoryProvider, RepositoryScope, TokenClaims, TokenScope};
+    use shardline_server_core::{AuthError, AuthProvider};
+    use tower::ServiceExt;
+
+    use crate::auth::HubAuth;
+    use crate::routes::HubState;
 
     #[test]
     fn extract_repo_path_repo_named_like_verb_is_parsed_as_repository() {
@@ -401,5 +456,140 @@ mod tests {
         ] {
             assert_eq!(extract_repo_path(path), None, "path {path} is pathless");
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // F-104 regression: a deep `{*path}` tail must never shift which three
+    // segments are interpreted as `[type, ns, repo]`.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn extract_repo_path_deep_tail_does_not_shift_repo_pair() {
+        // The tree route's tail `datasets/alice/own` must not rebind the
+        // request to `alice/own`: the repository is `bob/own`.
+        assert_eq!(
+            extract_repo_path("/api/models/bob/own/tree/main/datasets/alice/own"),
+            Some(("bob".to_owned(), "own".to_owned()))
+        );
+        // Same for the root-level resolve route.
+        assert_eq!(
+            extract_repo_path("/models/bob/own/resolve/main/datasets/foo/bar"),
+            Some(("bob".to_owned(), "own".to_owned()))
+        );
+        // A repo literally named `models` still binds as the last pair when the
+        // path ends at the repository (F-37 behavior preserved).
+        assert_eq!(
+            extract_repo_path("/api/models/alice/models"),
+            Some(("alice".to_owned(), "models".to_owned()))
+        );
+    }
+
+    /// Auth provider that verifies any token as scoped to `ns/repo` with Read
+    /// scope — the minimal surface the repo-binding regression tests need.
+    struct ScopedProvider {
+        ns: &'static str,
+        repo: &'static str,
+    }
+
+    impl AuthProvider for ScopedProvider {
+        fn verify_token(&self, _token: &str) -> Result<TokenClaims, AuthError> {
+            let repo = RepositoryScope::new(RepositoryProvider::Generic, self.ns, self.repo, None)
+                .map_err(|_err| AuthError::InvalidToken)?;
+            TokenClaims::new("issuer", self.ns, TokenScope::Read, repo, u64::MAX)
+                .map_err(|_err| AuthError::InvalidToken)
+        }
+        fn mint_token(&self, _claims: &TokenClaims) -> Result<String, AuthError> {
+            Ok("test-token".into())
+        }
+    }
+
+    /// Builds an auth-configured `HubState` whose provider scopes every token
+    /// to `ns/repo`, with that repository created and holding one revision.
+    fn scoped_state(ns: &'static str, repo: &'static str) -> (tempfile::TempDir, HubState) {
+        let ts = tempfile::tempdir().expect("tempdir");
+        let root = ts.path();
+        shardline_index::hub::ensure_hub_tables(root).expect("ensure hub tables");
+        let store = shardline_index::LocalIndexStore::open(root.to_path_buf());
+        let boxed = BoxedHubStore::from_store(store);
+        let repo_id = format!("{ns}/{repo}");
+        boxed
+            .create_repo(HubRepoType::Model, &repo_id, false)
+            .expect("create repo");
+        let parent = "4b825dc642cb6eb9a060e54bf899d69f8f5ce8e3";
+        boxed
+            .create_revision(&repo_id, Some(parent), "sha1", "main", "first")
+            .expect("create revision");
+        boxed
+            .store_files(
+                "sha1",
+                &[HubFileEntry {
+                    path: "README.md".into(),
+                    size: 100,
+                    sha: "sha_readme".into(),
+                    is_lfs: false,
+                }],
+            )
+            .expect("store files");
+        let object_store = shardline_server_core::ServerObjectStore::local(root.join("lfs"))
+            .expect("local object store");
+        let state = HubState {
+            store: boxed,
+            object_store,
+            auth: Some(HubAuth::new(Box::new(ScopedProvider { ns, repo }))),
+            http_client: None,
+            webhook_secret_cipher: None,
+        };
+        (ts, state)
+    }
+
+    /// Runs `GET {uri}` through the real Hub router and returns the status.
+    async fn get_status(state: HubState, uri: &str) -> StatusCode {
+        let app = crate::routes::router::router(true).with_state(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(uri)
+                    .header(AUTHORIZATION, "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        response.status()
+    }
+
+    #[tokio::test]
+    async fn deep_tree_tail_cannot_bypass_cross_tenant_binding() {
+        // F-104 exploit: a Read token for `alice/own` must NOT read `bob/own`
+        // by appending a deep tail whose last three segments look like a
+        // `[type, ns, repo]` triple (`datasets/alice/own`). The extractor must
+        // bind to the route's `bob/own`, so the cross-tenant read is denied.
+        let (_td, state) = scoped_state("alice", "own");
+        let status = get_status(state, "/api/models/bob/own/tree/main/datasets/alice/own").await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn deep_tree_tail_legit_owner_read_succeeds() {
+        // F-104 regression: a Read token for `bob/own` reading `bob/own` with a
+        // deep tail must NOT be spuriously 403'd by the tail being misparsed as
+        // a different repository.
+        let (_td, state) = scoped_state("bob", "own");
+        let status = get_status(state, "/api/models/bob/own/tree/main/datasets/foo/bar").await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn repo_named_like_repo_type_word_still_binds() {
+        // F-37 regression: a repository whose name collides with a repo-type
+        // word (`models`) must still bind to `alice/models` — both when the
+        // path ends at the repository and when a deep tail follows.
+        let (_td, state) = scoped_state("alice", "models");
+        let status = get_status(state, "/api/models/alice/models").await;
+        assert_eq!(status, StatusCode::OK);
+        let (_td, state) = scoped_state("alice", "models");
+        let status = get_status(state, "/api/models/alice/models/tree/main/datasets/foo/bar").await;
+        assert_eq!(status, StatusCode::OK);
     }
 }

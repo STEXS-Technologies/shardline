@@ -62,6 +62,22 @@ pub(crate) const DEFAULT_MAX_REVISIONS_PER_REPO: NonZeroUsize = match NonZeroUsi
     None => NonZeroUsize::MIN,
 };
 
+/// Default per-repo tree-entry cap (100k rows ≈ 4MB+ in SQLite).
+///
+/// `register_path` rejects new path mappings once a repository has reached
+/// this many tree-entry rows, bounding the unbounded tree-entry growth
+/// surface (F-103) even in providerless/permissive deployments where one
+/// valid file_id can be registered under arbitrarily many distinct paths.
+/// Unlike the F-89 revision cap (which exempts a refresh of an existing
+/// revision), the tree-entry cap rejects at capacity regardless of whether
+/// the path already exists, mirroring `create_revision`'s count-before-insert
+/// gate (F-108).
+pub(crate) const DEFAULT_MAX_TREE_ENTRIES_PER_REPO: NonZeroUsize = match NonZeroUsize::new(100_000)
+{
+    Some(value) => value,
+    None => NonZeroUsize::MIN,
+};
+
 pub(crate) const MAX_TOKEN_SIGNING_KEY_BYTES: u64 = 1_048_576;
 pub(crate) const MAX_ED25519_KEY_BYTES: u64 = 16_384;
 /// AES-256 webhook secret encryption keys are exactly 32 bytes.

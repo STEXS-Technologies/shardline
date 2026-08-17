@@ -229,8 +229,8 @@ async fn delete_clears_orphaned_loading_latch_and_wakes_waiter() {
 
     // Seed an orphaned loading latch, as left behind by a failed loader.
     {
-        let mut inner = cache.inner.write().await;
-        inner.loading.insert(
+        let mut loading = cache.loading.lock().unwrap();
+        loading.insert(
             key.clone(),
             super::inner::LoadingEntry::new(Arc::new(Notify::new())),
         );
@@ -988,6 +988,78 @@ async fn get_loading_coalescing_loader_failure_returns_none() {
     let _ = task_loader.await;
 }
 
+// ── get_or_load: caller cancellation releases the loading latch (F-112) ──
+//
+// When the exclusive loader's caller is dropped mid-load (client disconnect,
+// request timeout, shutdown), the loading latch it registered must be released
+// synchronously. Without this, the next caller for the same key stalls for the
+// full 60s orphan bound and the loading map grows with zombie entries (each
+// holding a pending load task). A Drop guard removes the latch on caller-drop.
+
+#[tokio::test(start_paused = true)]
+async fn get_or_load_caller_drop_releases_loading_latch() {
+    let cache = std::sync::Arc::new(MemoryReconstructionCache::new(
+        NonZeroU64::new(3600).unwrap_or(NonZeroU64::MIN),
+        NonZeroUsize::new(100).unwrap_or(NonZeroUsize::MIN),
+    ));
+    let key = ReconstructionCacheKey::latest("caller-drop", None);
+
+    // R1: become the exclusive loader. The loader future never completes on
+    // its own — it waits for a signal that is never sent, so the caller stays
+    // in flight until we drop its future.
+    let (never_tx, never_rx) = tokio::sync::oneshot::channel::<()>();
+    let _keep_sender_alive = never_tx;
+    let cache_loader = std::sync::Arc::clone(&cache);
+    let key_loader = key.clone();
+    let loader_task = tokio::spawn(async move {
+        cache_loader
+            .get_or_load(&key_loader, || {
+                Box::pin(async move {
+                    let _ = never_rx.await;
+                    Ok::<_, ReconstructionCacheError>(b"loaded".to_vec())
+                })
+            })
+            .await
+    });
+
+    // Let the loader task register its loading latch.
+    tokio::time::advance(Duration::from_millis(10)).await;
+    assert!(
+        cache.loading.lock().unwrap().contains_key(&key),
+        "loader must register its loading latch before cancellation"
+    );
+
+    // Drop the caller future mid-load (client disconnect / timeout).
+    loader_task.abort();
+    tokio::time::advance(Duration::from_millis(1)).await;
+    let _ = loader_task.await;
+
+    // The latch must be gone immediately — not after the 60s orphan bound.
+    assert!(
+        !cache.loading.lock().unwrap().contains_key(&key),
+        "cancelled loader must release its loading latch (F-112)"
+    );
+
+    // A next caller must NOT stall for the full orphan bound; it loads
+    // promptly. Advance past the 5s probe bound so a leaked zombie latch
+    // surfaces as a timeout instead of hanging the test.
+    let cache_retry = std::sync::Arc::clone(&cache);
+    let retry = tokio::spawn(async move {
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            cache_retry.get_or_load(&key, || {
+                Box::pin(async { Ok::<_, ReconstructionCacheError>(b"retry".to_vec()) })
+            }),
+        )
+        .await
+    });
+    tokio::time::advance(Duration::from_secs(5)).await;
+    match retry.await.unwrap() {
+        Ok(result) => assert_eq!(result.unwrap(), Some(b"retry".to_vec())),
+        Err(_) => panic!("next caller stalled on a zombie loading latch (F-112)"),
+    }
+}
+
 // ── put: update existing entry does not evict ──────────────────────────
 
 #[tokio::test]
@@ -1705,8 +1777,8 @@ async fn get_or_load_waiter_does_not_hang_on_orphaned_latch() {
     // put()s or notifies. Its aliveness stamp is never refreshed, so a waiter
     // at the orphan bound must declare it dead and release it.
     {
-        let mut inner = cache.inner.write().await;
-        inner.loading.insert(
+        let mut loading = cache.loading.lock().unwrap();
+        loading.insert(
             key.clone(),
             super::inner::LoadingEntry::new(Arc::new(tokio::sync::Notify::new())),
         );

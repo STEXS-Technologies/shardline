@@ -294,12 +294,18 @@ impl PostgresBackend {
     /// the cap by the number of concurrent writers at the boundary (the cap is
     /// a bound on growth, not a hard invariant).
     ///
+    /// Also enforces the per-repo tree-entry cap (F-103/F-108): once the repo
+    /// holds `max_tree_entries_per_repo` tree-entry rows, the registration is
+    /// rejected with [`ServerError::TooManyRevisions`] regardless of whether
+    /// the path already exists, mirroring `create_revision`'s count-before-insert
+    /// gate (a refresh at capacity is rejected too, so both paths agree at cap).
+    ///
     /// # Errors
     ///
     /// Returns [`ServerError::UnregisteredFile`] when no record exists in the revision
     /// scope, [`ServerError::InvalidContentHash`] for a malformed `file_id`,
-    /// [`ServerError::TooManyRevisions`] at the per-repo revision cap, or the
-    /// adapter error when persistence fails.
+    /// [`ServerError::TooManyRevisions`] at the per-repo revision or tree-entry cap,
+    /// or the adapter error when persistence fails.
     pub(crate) async fn register_tree_path(
         &self,
         key: &TreeKey,
@@ -307,6 +313,7 @@ impl PostgresBackend {
         file_id: &str,
         repository_scope: Option<&shardline_protocol::RepositoryScope>,
         max_revisions_per_repo: NonZeroUsize,
+        max_tree_entries_per_repo: NonZeroUsize,
     ) -> Result<crate::backend::RegisterPathOutcome, ServerError> {
         validate_content_hash(file_id)?;
         let record = match self.read_record(file_id, None, repository_scope).await {
@@ -330,6 +337,16 @@ impl PostgresBackend {
                 .await?
                 .is_none()
         {
+            return Err(ServerError::TooManyRevisions);
+        }
+        // F-103/F-108: per-repo tree-entry cap. Unlike the F-89 revision cap
+        // (which exempts a refresh of an existing revision), the tree-entry
+        // gate rejects at capacity regardless of whether the path already
+        // exists — a refresh at cap would otherwise bypass the bound the same
+        // way create_revision's same-name upsert cannot, so both paths stay
+        // consistent under one gate.
+        let tree_cap = u64::try_from(max_tree_entries_per_repo.get()).unwrap_or(u64::MAX);
+        if self.index_store.count_tree_entries(&repo_key).await? >= tree_cap {
             return Err(ServerError::TooManyRevisions);
         }
         let now = unix_now_seconds_lossy();

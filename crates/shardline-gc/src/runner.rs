@@ -146,7 +146,17 @@ where
         &mut reachability,
     )
     .await?;
-    validate_gc_index_integrity(index_store, object_store, now_unix_seconds).await?;
+    validate_gc_index_integrity(
+        index_store,
+        object_store,
+        now_unix_seconds,
+        // The missing-object auto-release is a store mutation, so it is gated
+        // on a store-mutating run (`mark || sweep`): a pure dry run promises
+        // no mutation (F-76) and must not delete index rows even as a repair
+        // (F-111). The missing-object DETECTION stays read-only either way.
+        options.mark || options.sweep,
+    )
+    .await?;
     shardline_metrics::record_gc_mark_duration(mark_start.elapsed());
 
     // Forward-clock sanity guard (F-45, hardened by F-57 and F-88): a forward
@@ -383,11 +393,20 @@ where
     // the report.
     //
     // Gated on `mark || sweep` (a pure dry run stays read-only), consistent
-    // with the last-GC-clock-anchor write above. The forward-clock guard does
-    // NOT gate this step: the prune orders by stored `created_at_unix_seconds`
-    // (data, not the wall clock) and consults no `now`, so a jumped clock
-    // cannot make it delete more than a healthy clock would.
+    // with the last-GC-clock-anchor write above, and additionally on the same
+    // forward-clock guard the sweep uses (F-107). The prune orders by stored
+    // `created_at_unix_seconds` and evicts the smallest-created rows, but those
+    // timestamps are written by the SERVER wall clock at register_tree_path
+    // (refreshed on touch). A backward server step (NTP correction, VM
+    // pause/resume, stale-clock restart, multi-replica with one replica
+    // behind) stamps the newest revision with the SMALLEST created_at, so an
+    // ungated prune would evict the NEWEST revision and cascade its tree
+    // entries. Gating on the guard keeps a fired run all-or-nothing read-only
+    // (F-88) and preserves the newest revision whenever the stored creation
+    // reference reads untrustworthy. Normal (guard-cleared) runs prune as
+    // before.
     if (options.mark || options.sweep)
+        && !retention_clock_is_skewed_forward
         && let Some(max_revisions_per_repo) = options.max_revisions_per_repo
     {
         let repo_keys = index_store
@@ -490,6 +509,7 @@ async fn validate_gc_index_integrity<IndexAdapter>(
     index_store: &IndexAdapter,
     object_store: &ServerObjectStore,
     now_unix_seconds: u64,
+    auto_release_missing_quarantine_objects: bool,
 ) -> Result<(), GcError>
 where
     IndexAdapter: AsyncIndexStore + Sync,
@@ -539,8 +559,17 @@ where
         .await?;
 
     // Auto-release quarantine entries whose objects were deleted externally.
-    for key in &missing_object_keys {
-        let _result = index_store.delete_quarantine_candidate(key).await;
+    //
+    // Gated on a store-mutating run (`mark || sweep`, threaded from the runner
+    // as `auto_release_missing_quarantine_objects`): a pure dry run promises
+    // no mutation (F-76), so it must not delete index rows even as a repair —
+    // the run stays read-only and the next store-mutating run performs the
+    // auto-release (F-111). The detection above stays read-only either way, so
+    // dry runs still surface the warnings as diagnostics.
+    if auto_release_missing_quarantine_objects {
+        for key in &missing_object_keys {
+            let _result = index_store.delete_quarantine_candidate(key).await;
+        }
     }
 
     index_store

@@ -124,6 +124,12 @@ pub enum ServerConfigError {
     /// The per-repo revision-registry cap was zero.
     #[error("max revisions per repo must be greater than zero")]
     ZeroMaxRevisionsPerRepo,
+    /// The per-repo tree-entry cap could not be parsed.
+    #[error("invalid max tree entries per repo")]
+    MaxTreeEntriesPerRepo(ParseIntError),
+    /// The per-repo tree-entry cap was zero.
+    #[error("max tree entries per repo must be greater than zero")]
+    ZeroMaxTreeEntriesPerRepo,
     /// The chunk size was zero.
     #[error("chunk size must be greater than zero")]
     ZeroChunkSize,

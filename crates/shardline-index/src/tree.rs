@@ -209,6 +209,17 @@ pub trait TreeStore: Send + Sync {
     /// Returns the adapter error when the count fails.
     async fn count_revisions(&self, key: &RepoKey) -> Result<u64, Self::Error>;
 
+    /// Counts the tree-entry rows for a repository (across every revision).
+    ///
+    /// Used to enforce the per-repo tree-entry cap (F-103) before an insert:
+    /// the count-then-insert race at the boundary is acceptable, the cap is a
+    /// bound not a hard invariant.
+    ///
+    /// # Errors
+    ///
+    /// Returns the adapter error when the count fails.
+    async fn count_tree_entries(&self, key: &RepoKey) -> Result<u64, Self::Error>;
+
     /// Lists revisions for a repository ordered by revision name, resuming
     /// after `cursor` (keyset on the revision name) and returning at most
     /// `limit` rows.

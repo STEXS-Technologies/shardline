@@ -185,6 +185,10 @@ fn server_config_new_constructs_with_defaults() {
         config.max_revisions_per_repo(),
         NonZeroUsize::new(10_000).unwrap()
     );
+    assert_eq!(
+        config.max_tree_entries_per_repo(),
+        NonZeroUsize::new(100_000).unwrap()
+    );
 }
 
 #[test]
@@ -199,6 +203,22 @@ fn server_config_builder_with_max_revisions_per_repo() {
     .unwrap();
     assert_eq!(
         config.max_revisions_per_repo(),
+        NonZeroUsize::new(4).unwrap()
+    );
+}
+
+#[test]
+fn server_config_builder_with_max_tree_entries_per_repo() {
+    let config = ServerConfig::new(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+        "http://localhost:8080".to_owned(),
+        PathBuf::from("/tmp/test"),
+        NonZeroUsize::new(4096).unwrap(),
+    )
+    .with_max_tree_entries_per_repo(NonZeroUsize::new(4).unwrap())
+    .unwrap();
+    assert_eq!(
+        config.max_tree_entries_per_repo(),
         NonZeroUsize::new(4).unwrap()
     );
 }
@@ -1530,6 +1550,22 @@ fn server_config_error_display_zero_max_revisions_per_repo() {
     assert_eq!(
         err.to_string(),
         "max revisions per repo must be greater than zero"
+    );
+}
+
+#[test]
+fn server_config_error_display_max_tree_entries_per_repo() {
+    let err =
+        ServerConfigError::MaxTreeEntriesPerRepo("not-a-number".parse::<usize>().unwrap_err());
+    assert_eq!(err.to_string(), "invalid max tree entries per repo");
+}
+
+#[test]
+fn server_config_error_display_zero_max_tree_entries_per_repo() {
+    let err = ServerConfigError::ZeroMaxTreeEntriesPerRepo;
+    assert_eq!(
+        err.to_string(),
+        "max tree entries per repo must be greater than zero"
     );
 }
 

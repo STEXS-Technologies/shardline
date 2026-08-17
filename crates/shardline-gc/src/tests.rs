@@ -881,6 +881,115 @@ fn gc_without_revision_cap_does_not_prune() {
     });
 }
 
+/// F-107: the F-75 revision-cap prune is gated on the same forward-clock guard
+/// the sweep uses. A backward server step (NTP correction, VM pause/resume,
+/// stale-clock restart, multi-replica with one replica behind) stamps the
+/// newest revision with the SMALLEST `created_at`, so an ungated prune's
+/// oldest-created-first ordering would evict the NEWEST revision and cascade
+/// its tree entries. When the guard fires, the prune must be skipped (a fired
+/// run is all-or-nothing read-only — F-88) and the newest revision preserved.
+#[test]
+fn gc_prune_skipped_when_forward_clock_guard_fired() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let dir = tempfile::tempdir().unwrap();
+        let object_store = ServerObjectStore::local(dir.path()).unwrap();
+        let index_store = MemoryIndexStore::new();
+        let repo = RepoKey::new("github", "owner", "repo");
+        let cap = 3usize;
+
+        // Seed 4 revisions whose newest row (rev-003) carries a created_at
+        // BEHIND the three older rows — the fingerprint of a backward server
+        // clock writing a new revision. The prune's oldest-created-first
+        // ordering would then select rev-003 (the NEWEST revision) as the
+        // eviction candidate.
+        for (name, created) in [
+            ("rev-000", 1_000_000_u64),
+            ("rev-001", 1_000_001),
+            ("rev-002", 1_000_002),
+            ("rev-003", 999_999), // newest revision, smallest created_at
+        ] {
+            let rev = RevisionRecord {
+                provider: repo.provider.clone(),
+                owner: repo.owner.clone(),
+                repo: repo.repo.clone(),
+                revision: name.to_owned(),
+                created_at_unix_seconds: created,
+                updated_at_unix_seconds: created,
+            };
+            assert!(
+                TreeStore::upsert_revision(&index_store, &rev)
+                    .await
+                    .unwrap()
+            );
+        }
+        assert_eq!(
+            TreeStore::count_revisions(&index_store, &repo)
+                .await
+                .unwrap(),
+            4
+        );
+
+        // Arm the forward-clock guard: a quarantine candidate whose first_seen
+        // is old relative to the pinned GC clock makes the creation reference
+        // stale, so a jumped `now` fires the guard (the same way a behind-clock
+        // replica's lifecycle stamps leave the healthy GC clock looking
+        // jumped). The object exists (matching length) so the candidate is not
+        // auto-released and stays in the reference.
+        let data = b"candidate data for the prune guard test";
+        let key = put_gc_chunk(&object_store, F88_CANDIDATE_HASH, data);
+        let candidate = QuarantineCandidate::new(
+            key,
+            u64::try_from(data.len()).unwrap_or(0),
+            1_000_000,
+            2_000_000,
+        )
+        .unwrap();
+        index_store
+            .upsert_quarantine_candidate(&candidate)
+            .await
+            .unwrap();
+
+        let options = LocalGcOptions {
+            mark: true,
+            sweep: false,
+            retention_seconds: 86_400,
+            max_revisions_per_repo: Some(cap),
+        };
+
+        // Pin the GC clock far ahead of the newest stored creation timestamp
+        // (a forward jump beyond the guard slack) so the guard fires.
+        set_gc_now_unix_seconds_override(Some(2_000_000_000));
+        let diagnostics = run_gc_helper(&object_store, &index_store, options)
+            .await
+            .expect("gc run");
+        set_gc_now_unix_seconds_override(None);
+
+        // The fired run must be all-or-nothing read-only: the prune is skipped,
+        // the newest revision survives, and the store stays at 4 rows.
+        assert_eq!(
+            diagnostics.report.pruned_revisions_over_cap, 0,
+            "a guard-fired run must not prune revisions"
+        );
+        assert_eq!(
+            TreeStore::count_revisions(&index_store, &repo)
+                .await
+                .unwrap(),
+            4
+        );
+        let remaining = TreeStore::list_revisions(&index_store, &repo, None, 100)
+            .await
+            .unwrap();
+        assert!(
+            remaining
+                .iter()
+                .map(|r| r.revision.as_str())
+                .any(|r| r == "rev-003"),
+            "the newest revision must survive a guard-fired run"
+        );
+    });
+}
+
 #[test]
 fn gc_sweep_reaps_stale_temporary_chunk_artifacts_only() {
     use shardline_protocol::unix_now_seconds_lossy;
@@ -1152,7 +1261,7 @@ fn gc_sweep_reaps_stranded_xorb_chunks_and_anchor_temps_but_never_live() {
 #[test]
 fn validate_integrity_missing_quarantine_object_auto_released() {
     // When a quarantine candidate references an object that doesn't exist
-    // in the object store, the candidate should be auto-released.
+    // in the object store, a store-mutating run auto-releases the candidate.
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
         let dir = tempfile::tempdir().unwrap();
@@ -1169,8 +1278,13 @@ fn validate_integrity_missing_quarantine_object_auto_released() {
             .await
             .unwrap();
 
-        // No object exists in the store → auto-release.
-        let result = run_gc_helper(&object_store, &index_store, LocalGcOptions::dry_run()).await;
+        // No object exists in the store → auto-release on a mutating run.
+        let result = run_gc_helper(
+            &object_store,
+            &index_store,
+            LocalGcOptions::mark_only(86_400),
+        )
+        .await;
         assert!(
             result.is_ok(),
             "auto-release should not error: {:?}",
@@ -1189,6 +1303,49 @@ fn validate_integrity_missing_quarantine_object_auto_released() {
         assert!(
             !found,
             "quarantine candidate should have been auto-released"
+        );
+    });
+}
+
+#[test]
+fn validate_integrity_missing_quarantine_object_not_released_in_dry_run() {
+    // F-111: a pure dry run promises no mutation (F-76), so it must NOT
+    // auto-release quarantine candidates whose objects are missing — the
+    // missing-object detection still runs (read-only) and warns, but the
+    // index store is left untouched.
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("chunks")).unwrap();
+        let object_store = ServerObjectStore::local(dir.path()).unwrap();
+        let index_store = MemoryIndexStore::new();
+
+        let key =
+            ObjectKey::parse("aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                .unwrap();
+        let candidate = QuarantineCandidate::new(key, 100, 1_000_000, 2_000_000).unwrap();
+        index_store
+            .upsert_quarantine_candidate(&candidate)
+            .await
+            .unwrap();
+
+        // No object exists in the store → detected, but a dry-run must not
+        // mutate the index store.
+        let result = run_gc_helper(&object_store, &index_store, LocalGcOptions::dry_run()).await;
+        assert!(result.is_ok(), "dry-run should not error: {:?}", result);
+
+        // Candidate must STILL be present after the dry-run.
+        let mut found = false;
+        index_store
+            .visit_quarantine_candidates(|_c| {
+                found = true;
+                Ok::<(), GcError>(())
+            })
+            .await
+            .unwrap();
+        assert!(
+            found,
+            "dry-run must not auto-release a missing-object candidate"
         );
     });
 }

@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     future::Future,
     num::{NonZeroU64, NonZeroUsize},
     sync::{Arc, Mutex},
@@ -71,6 +72,13 @@ pub struct MemoryReconstructionCache {
     ttl: Duration,
     max_entries: NonZeroUsize,
     inner: Arc<RwLock<CacheInner>>,
+    /// In-flight loading latches, keyed by reconstruction key.
+    ///
+    /// Kept behind a *synchronous* mutex (rather than inside [`CacheInner`]'s
+    /// async `RwLock`) so a `Drop` guard can release a latch synchronously
+    /// when a caller's future is dropped mid-load — an async lock cannot be
+    /// acquired from `Drop` (F-112).
+    loading: Arc<Mutex<HashMap<ReconstructionCacheKey, LoadingEntry>>>,
 }
 
 impl MemoryReconstructionCache {
@@ -94,6 +102,7 @@ impl MemoryReconstructionCache {
             ttl: Duration::from_secs(ttl_seconds.get()),
             max_entries,
             inner: Arc::new(RwLock::new(CacheInner::new())),
+            loading: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -138,26 +147,31 @@ impl MemoryReconstructionCache {
                 return Ok(Some(entry.payload.as_ref().clone()));
             }
 
-            // Check if someone else is already loading this key.
-            // Use separate branches on .is_some() to avoid the clippy
-            // option_if_let_else lint (which flags both `if let Some`
-            // and `match { Some, None }` on Option).
-            let (should_load, notify, last_seen_alive) = if inner.loading.contains_key(key) {
+            // Check if someone else is already loading this key. The loading
+            // map lives behind a synchronous mutex so the loader's Drop guard
+            // can release a latch synchronously on caller cancellation
+            // (F-112). Use separate branches on contains_key() to avoid the
+            // clippy option_if_let_else lint.
+            let mut loading = self
+                .loading
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if loading.contains_key(key) {
                 // SAFETY: contains_key was just checked — get() returns Some.
                 // Use unwrap_or_else with a non-panicking default to avoid
                 // denied lints while satisfying the type system.
                 let dummy = LoadingEntry::new(Arc::new(Notify::new()));
-                let existing = inner.loading.get(key).unwrap_or(&dummy);
+                let existing = loading.get(key).unwrap_or(&dummy);
                 (
                     false,
                     Arc::clone(&existing.notify),
                     Arc::clone(&existing.last_seen_alive),
                 )
             } else {
-                let loading = LoadingEntry::new(Arc::new(Notify::new()));
-                let notify = Arc::clone(&loading.notify);
-                let last_seen_alive = Arc::clone(&loading.last_seen_alive);
-                inner.loading.insert(key.clone(), loading);
+                let new = LoadingEntry::new(Arc::new(Notify::new()));
+                let notify = Arc::clone(&new.notify);
+                let last_seen_alive = Arc::clone(&new.last_seen_alive);
+                loading.insert(key.clone(), new);
                 // Clean up any expired entry so the loader can store fresh data.
                 if let Some(entry) = inner.entries.get(key)
                     && entry.expires_at <= now
@@ -165,14 +179,24 @@ impl MemoryReconstructionCache {
                     inner.remove(key);
                 }
                 (true, notify, last_seen_alive)
-            };
-            (should_load, notify, last_seen_alive)
+            }
         };
 
         if should_load {
-            // Run the loader while refreshing the latch's aliveness stamp at
-            // intervals, so a slow-but-alive loader is never mistaken for a
-            // dead one at the orphan bound (F-78).
+            // F-112: if the caller's future is dropped mid-load (client
+            // disconnect, request timeout, shutdown), the loading latch must
+            // be released. The Drop guard removes it synchronously on
+            // cancellation, so a zombie latch never stalls the next caller for
+            // the full orphan bound and the loading map never grows without
+            // bound. Normal completion is unaffected — put() (success) or the
+            // guard (error) releases the latch, and while the caller is alive
+            // the latch persists so concurrent callers still coalesce on this
+            // one load (F-90).
+            let _latch_guard = LoadingLatchGuard {
+                loading: Arc::clone(&self.loading),
+                key: key.clone(),
+                notify: Arc::clone(&notify),
+            };
             let result = run_loader_with_heartbeat(last_seen_alive, loader).await;
             match result {
                 Ok(payload) => {
@@ -180,10 +204,8 @@ impl MemoryReconstructionCache {
                     Ok(Some(payload))
                 }
                 Err(e) => {
-                    // Clean up the loading entry so future callers can retry.
-                    let mut inner = self.inner.write().await;
-                    inner.loading.remove(key);
-                    notify.notify_waiters();
+                    // The guard above releases the loading latch and wakes
+                    // waiters on the way out.
                     Err(e)
                 }
             }
@@ -238,7 +260,12 @@ impl MemoryReconstructionCache {
                 {
                     return Some(entry.payload.as_ref().clone());
                 }
-                if !inner.loading.contains_key(key) {
+                if !self
+                    .loading
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .contains_key(key)
+                {
                     // The loading latch vanished without a stored value (the
                     // loader failed or was cancelled, or the key was deleted).
                     // Report the miss so the caller can retry; the loader that
@@ -268,14 +295,20 @@ impl MemoryReconstructionCache {
                     // (the loader genuinely died without putting or notifying)
                     // or the extension cap is saturated (the loader is alive
                     // but wedged — F-100).
-                    let loader_alive = inner.loading.get(key).is_some_and(|loading| {
-                        now.saturating_duration_since(
-                            *loading
-                                .last_seen_alive
-                                .lock()
-                                .unwrap_or_else(|poisoned| poisoned.into_inner()),
-                        ) <= LOADER_ALIVE_GRACE
-                    });
+                    let loader_alive = {
+                        let loading = self
+                            .loading
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        loading.get(key).is_some_and(|entry| {
+                            now.saturating_duration_since(
+                                *entry
+                                    .last_seen_alive
+                                    .lock()
+                                    .unwrap_or_else(|poisoned| poisoned.into_inner()),
+                            ) <= LOADER_ALIVE_GRACE
+                        })
+                    };
                     drop(inner);
                     if loader_alive && alive_extensions < LOADER_ORPHAN_EXTENSION_CAP {
                         alive_extensions = alive_extensions.saturating_add(1);
@@ -291,10 +324,16 @@ impl MemoryReconstructionCache {
                     // its stamp fresh but never completes, F-100). Release the
                     // latch so later callers can retry promptly, and wake
                     // sibling waiters so they observe the release too.
-                    let mut write_guard = self.inner.write().await;
-                    write_guard.loading.remove(key);
-                    drop(write_guard);
-                    notify.notify_waiters();
+                    let released = {
+                        let mut loading = self
+                            .loading
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        loading.remove(key).map(|entry| entry.notify)
+                    };
+                    if let Some(released) = released {
+                        released.notify_waiters();
+                    }
                     return None;
                 }
             }
@@ -325,6 +364,47 @@ where
                     .unwrap_or_else(|poisoned| poisoned.into_inner()) = Instant::now();
             }
         }
+    }
+}
+
+/// Drop guard that releases a loading latch when the loader future is dropped.
+///
+/// A caller that is cancelled mid-load (client disconnect, request timeout,
+/// shutdown) drops its future without ever reaching `put()`/`delete()`. The
+/// latch registered by [`MemoryReconstructionCache::get_or_load`] would then
+/// linger until a waiter steals it at the orphan bound — stalling the next
+/// caller for the full bound and growing the loading map without bound under
+/// caller churn. The guard removes the latch synchronously from `Drop`, so
+/// cancellation releases it immediately (F-112).
+///
+/// Normal completion is unaffected: `put()` removes the latch on success, and
+/// the guard's drop is a no-op once the latch is gone. The guard only ever
+/// removes the latch it registered — identified by its [`Notify`] — so a newer
+/// generation of loading for the same key is never torn down.
+struct LoadingLatchGuard {
+    loading: Arc<Mutex<HashMap<ReconstructionCacheKey, LoadingEntry>>>,
+    key: ReconstructionCacheKey,
+    notify: Arc<Notify>,
+}
+
+impl Drop for LoadingLatchGuard {
+    fn drop(&mut self) {
+        let mut loading = self
+            .loading
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(entry) = loading.get(&self.key) else {
+            // The latch was already released by put()/delete()/a waiter steal.
+            return;
+        };
+        if !Arc::ptr_eq(&entry.notify, &self.notify) {
+            // A newer loading generation holds the latch; leave it intact so
+            // its callers keep coalescing on it.
+            return;
+        }
+        loading.remove(&self.key);
+        drop(loading);
+        self.notify.notify_waiters();
     }
 }
 
@@ -361,8 +441,14 @@ impl AsyncReconstructionCache for MemoryReconstructionCache {
                 return Ok(Some(entry.payload.as_ref().clone()));
             }
 
-            if let Some(loading) = inner.loading.get(key) {
-                let notify = Arc::clone(&loading.notify);
+            let existing_notify = {
+                let loading = self
+                    .loading
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                loading.get(key).map(|entry| Arc::clone(&entry.notify))
+            };
+            if let Some(notify) = existing_notify {
                 drop(inner);
                 // Wait for the in-flight loader (bounded). The latch is NOT
                 // stolen after a single stall interval: a slow-but-alive loader
@@ -377,11 +463,15 @@ impl AsyncReconstructionCache for MemoryReconstructionCache {
             // for the caller's upcoming load. The caller is expected to put()
             // (which stores the value and releases the latch) or delete()
             // (which releases the latch on failure) — otherwise the latch
-            // lingers until a waiter steals it at the orphan bound. Without
-            // this latch, N concurrent callers would each run their own load
-            // with no deduplication (F-91).
+            // lingers until a waiter steals it at the orphan bound or a Drop
+            // guard in the caller's future releases it on cancellation
+            // (F-112). Without this latch, N concurrent callers would each run
+            // their own load with no deduplication (F-91).
             let loading = LoadingEntry::new(Arc::new(Notify::new()));
-            inner.loading.insert(key.clone(), loading);
+            self.loading
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .insert(key.clone(), loading);
 
             let should_remove = inner
                 .entries
@@ -417,8 +507,15 @@ impl AsyncReconstructionCache for MemoryReconstructionCache {
                     seq,
                 },
             );
-            if let Some(loading) = inner.loading.remove(key) {
-                loading.notify.notify_waiters();
+            let released = {
+                let mut loading = self
+                    .loading
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                loading.remove(key)
+            };
+            if let Some(released) = released {
+                released.notify.notify_waiters();
             }
             Ok(())
         })
@@ -435,8 +532,15 @@ impl AsyncReconstructionCache for MemoryReconstructionCache {
             // explicitly gone, so waiting callers must wake and observe an
             // absence rather than block until the adapter's stall timeout. This
             // is what lets a failed loader's concurrency latch be cleaned up.
-            if let Some(loading) = inner.loading.remove(key) {
-                loading.notify.notify_waiters();
+            let released = {
+                let mut loading = self
+                    .loading
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                loading.remove(key)
+            };
+            if let Some(released) = released {
+                released.notify.notify_waiters();
             }
             Ok(removed)
         })
@@ -447,15 +551,31 @@ impl AsyncReconstructionCache for MemoryReconstructionCache {
         key: &'operation ReconstructionCacheKey,
     ) -> ReconstructionCacheFuture<'operation, bool> {
         Box::pin(async move {
-            let inner = self.inner.read().await;
-            let Some(loading) = inner.loading.get(key) else {
+            let loading = self
+                .loading
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let Some(entry) = loading.get(key) else {
                 return Ok(false);
             };
-            *loading
+            *entry
                 .last_seen_alive
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()) = Instant::now();
             Ok(true)
         })
+    }
+
+    fn release_loading(&self, key: &ReconstructionCacheKey) {
+        let released = {
+            let mut loading = self
+                .loading
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            loading.remove(key)
+        };
+        if let Some(released) = released {
+            released.notify.notify_waiters();
+        }
     }
 }

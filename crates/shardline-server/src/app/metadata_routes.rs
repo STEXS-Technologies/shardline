@@ -404,8 +404,9 @@ pub(super) async fn register_path(
 
     let key = TreeKey::new(&provider, &owner, &repo, &rev);
     let scope = repo_capability.capability().namespace();
-    // Thread the F-75 per-repo revision cap into the backend so the auto-create
-    // in register_tree_path enforces the same bound as create_revision (F-89).
+    // Thread the F-75 per-repo revision cap and the F-103 per-repo tree-entry
+    // cap into the backend so the auto-create in register_tree_path enforces
+    // the same bounds as create_revision (F-89) plus the tree-entry bound.
     let outcome = state
         .backend
         .register_tree_path(
@@ -414,6 +415,7 @@ pub(super) async fn register_path(
             &parsed.file_id,
             scope,
             state.config.max_revisions_per_repo(),
+            state.config.max_tree_entries_per_repo(),
         )
         .await?;
     Ok(Json(RegisterResponse {
