@@ -203,6 +203,7 @@ impl ServerBackend {
         object_key: &ObjectKey,
         digest_hex: &str,
         body: RequestBodyReader,
+        repository_scope: Option<&RepositoryScope>,
     ) -> Result<PutOutcome, ServerError> {
         // Local metadata is SQLite-backed. Keep the existence probe, intent
         // transitions, and atomic record commit in one serialized operation so
@@ -227,7 +228,10 @@ impl ServerBackend {
             Err(error) => return Err(error),
         }
         let file_id = protocol_object_file_id(object_key);
-        match self.file_total_bytes(&file_id, None, None).await {
+        match self
+            .file_total_bytes(&file_id, None, repository_scope)
+            .await
+        {
             Ok(_length) => {
                 verify_sha256_body(body, digest_hex).await?;
                 return Ok(PutOutcome::AlreadyExists);
@@ -238,12 +242,12 @@ impl ServerBackend {
         match self {
             Self::Local(backend) => {
                 backend
-                    .upload_file_stream(&file_id, body, None, Some(digest_hex))
+                    .upload_file_stream(&file_id, body, repository_scope, Some(digest_hex))
                     .await?;
             }
             Self::Postgres(backend) => {
                 backend
-                    .upload_file_stream(&file_id, body, None, Some(digest_hex))
+                    .upload_file_stream(&file_id, body, repository_scope, Some(digest_hex))
                     .await?;
             }
         }
@@ -594,6 +598,7 @@ impl ServerBackend {
             object_key,
             digest_hex,
             RequestBodyReader::from_bytes(bytes.into()),
+            None,
         )
         .await
     }
@@ -632,6 +637,7 @@ impl ServerBackend {
                         destination,
                         digest_hex,
                         RequestBodyReader::from_stream(source_stream),
+                        None,
                     )
                     .await;
             }
@@ -711,11 +717,20 @@ impl ServerBackend {
             object_key,
             digest_hex,
             RequestBodyReader::from_stream(stream),
+            None,
         )
         .await
     }
 
     pub(crate) async fn object_length(&self, object_key: &ObjectKey) -> Result<u64, ServerError> {
+        self.object_length_scoped(object_key, None).await
+    }
+
+    pub(crate) async fn object_length_scoped(
+        &self,
+        object_key: &ObjectKey,
+        repository_scope: Option<&RepositoryScope>,
+    ) -> Result<u64, ServerError> {
         let direct = match self {
             Self::Local(backend) => backend.object_length(object_key).await,
             Self::Postgres(backend) => backend.object_length(object_key).await,
@@ -723,7 +738,7 @@ impl ServerBackend {
         match direct {
             Ok(length) => Ok(length),
             Err(ServerError::NotFound) => {
-                self.file_total_bytes(&protocol_object_file_id(object_key), None, None)
+                self.file_total_bytes(&protocol_object_file_id(object_key), None, repository_scope)
                     .await
             }
             Err(error) => Err(error),
@@ -2165,6 +2180,7 @@ mod tests {
                 &first_key,
                 &first_digest,
                 RequestBodyReader::from_bytes(first.clone().into()),
+                None,
             )
             .await
             .unwrap();
@@ -2173,6 +2189,7 @@ mod tests {
                 &second_key,
                 &second_digest,
                 RequestBodyReader::from_bytes(second.clone().into()),
+                None,
             )
             .await
             .unwrap();
@@ -2254,6 +2271,7 @@ mod tests {
                         &key,
                         &digest,
                         RequestBodyReader::from_bytes(body.into()),
+                        None,
                     )
                     .await
             }

@@ -80,7 +80,7 @@ pub(crate) async fn oci_post_blob_upload(
         let object_key = oci_blob_key(repository, &digest_hex, auth)?;
         let _stored = state
             .backend
-            .put_sha256_addressed_object_stream_if_absent(&object_key, &digest_hex, body)
+            .put_sha256_addressed_object_stream_if_absent(&object_key, &digest_hex, body, None)
             .await?;
         metrics().protocol.record_oci_upload();
         return oci_created_response(
