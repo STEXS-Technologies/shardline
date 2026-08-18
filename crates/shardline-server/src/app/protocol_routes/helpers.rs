@@ -17,12 +17,16 @@ pub(crate) async fn direct_object_response(
     content_type: &str,
     content_digest: Option<String>,
     protocol: &str,
+    repository_scope: Option<&shardline_protocol::RepositoryScope>,
 ) -> Result<Response, ServerError> {
-    let total_length = state.backend.object_length(object_key).await?;
+    let total_length = state
+        .backend
+        .object_length_scoped(object_key, repository_scope)
+        .await?;
     let range = parse_optional_range(headers, total_length)?;
     let byte_stream = state
         .backend
-        .read_object_stream(object_key, total_length, range)
+        .read_object_stream_scoped(object_key, total_length, range, repository_scope)
         .await?;
     let mut response = if let Some(range) = range {
         metrics::record_range_request();
