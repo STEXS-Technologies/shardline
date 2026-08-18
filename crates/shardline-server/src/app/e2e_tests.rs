@@ -2246,6 +2246,7 @@ async fn gc_preserves_old_and_new_formats() {
             crate::upload_ingest::RequestBodyReader::from_bytes(axum::body::Bytes::from_static(
                 new_content,
             )),
+            None,
         )
         .await
         .expect("new upload");
@@ -11090,6 +11091,7 @@ async fn mixed_format_dedup_same_content() {
             crate::upload_ingest::RequestBodyReader::from_bytes(axum::body::Bytes::from_static(
                 content,
             )),
+            None,
         )
         .await
         .expect("cas upload");
