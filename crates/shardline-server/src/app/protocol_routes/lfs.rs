@@ -1077,7 +1077,11 @@ pub(crate) async fn lfs_delete_object(
             return Ok(lfs_validation_response("invalid oid"));
         }
     };
-    match state.backend.delete_object_if_present(&object_key).await? {
+    match state
+        .backend
+        .delete_object_if_present_scoped(&object_key, repo.capability().repository())
+        .await?
+    {
         DeleteOutcome::Deleted => Ok(StatusCode::ACCEPTED.into_response()),
         DeleteOutcome::NotFound => Err(ServerError::NotFound),
     }
