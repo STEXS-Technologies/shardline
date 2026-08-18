@@ -741,6 +741,7 @@ fn consume_lfs_patch_session(tmp_path: &FsPath, ranges_path: &FsPath, tmp_dir: &
 /// never committed (F-59). The store lock is only taken inside
 /// [`consume_lfs_patch_session`], with NO per-OID guard held (F-31); the
 /// caller must have dropped the per-OID lock first.
+#[allow(clippy::too_many_arguments)]
 fn promote_lfs_patch_session(
     tmp_path: &FsPath,
     ranges_path: &FsPath,
