@@ -983,6 +983,7 @@ pub(crate) async fn lfs_get_object(
         "application/octet-stream",
         Some(format!("sha256:{oid}")),
         "lfs",
+        repo.capability().repository(),
     )
     .await
 }

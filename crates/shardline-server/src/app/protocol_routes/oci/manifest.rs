@@ -73,6 +73,7 @@ pub(crate) async fn oci_get_manifest(
         &media_type,
         Some(format!("sha256:{digest_hex}")),
         "oci",
+        None,
     )
     .await
 }

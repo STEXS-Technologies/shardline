@@ -134,6 +134,7 @@ pub(crate) async fn bazel_get_ac(
         "application/octet-stream",
         None,
         "bazel",
+        None,
     )
     .await
 }
@@ -203,6 +204,7 @@ pub(crate) async fn bazel_get_cas(
         "application/octet-stream",
         None,
         "bazel",
+        None,
     )
     .await
 }
@@ -276,6 +278,7 @@ pub(crate) async fn bazel_get(
             "application/octet-stream",
             None,
             "bazel",
+            None,
         )
         .await;
     }
@@ -288,6 +291,7 @@ pub(crate) async fn bazel_get(
         "application/octet-stream",
         None,
         "bazel",
+        None,
     )
     .await
 }

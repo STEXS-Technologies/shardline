@@ -774,6 +774,17 @@ impl ServerBackend {
         total_length: u64,
         range: Option<ByteRange>,
     ) -> Result<ServerByteStream, ServerError> {
+        self.read_object_stream_scoped(object_key, total_length, range, None)
+            .await
+    }
+
+    pub(crate) async fn read_object_stream_scoped(
+        &self,
+        object_key: &ObjectKey,
+        total_length: u64,
+        range: Option<ByteRange>,
+        repository_scope: Option<&RepositoryScope>,
+    ) -> Result<ServerByteStream, ServerError> {
         let direct_length = match self {
             Self::Local(backend) => backend.object_length(object_key).await,
             Self::Postgres(backend) => backend.object_length(object_key).await,
@@ -798,8 +809,16 @@ impl ServerBackend {
         }
         let file_id = protocol_object_file_id(object_key);
         let (stream, record_length) = match self {
-            Self::Local(backend) => backend.read_file_stream(&file_id, None, range).await?,
-            Self::Postgres(backend) => backend.read_file_stream(&file_id, None, range).await?,
+            Self::Local(backend) => {
+                backend
+                    .read_file_stream_scoped(&file_id, None, range, repository_scope)
+                    .await?
+            }
+            Self::Postgres(backend) => {
+                backend
+                    .read_file_stream_scoped(&file_id, None, range, repository_scope)
+                    .await?
+            }
         };
         if record_length != total_length {
             return Err(ServerError::ObjectStore(

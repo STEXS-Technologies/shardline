@@ -101,9 +101,22 @@ impl super::PostgresBackend {
         content_hash: Option<&str>,
         range: Option<ByteRange>,
     ) -> Result<(ServerByteStream, u64), ServerError> {
+        self.read_file_stream_scoped(file_id, content_hash, range, None)
+            .await
+    }
+
+    pub(crate) async fn read_file_stream_scoped(
+        &self,
+        file_id: &str,
+        content_hash: Option<&str>,
+        range: Option<ByteRange>,
+        repository_scope: Option<&RepositoryScope>,
+    ) -> Result<(ServerByteStream, u64), ServerError> {
         // With a content hash the read is pinned to that immutable version
         // record; without one it resolves the latest record.
-        let record = self.read_record(file_id, content_hash, None).await?;
+        let record = self
+            .read_record(file_id, content_hash, repository_scope)
+            .await?;
         let total_bytes = record.total_bytes;
         crate::metrics::record_object_read_by_repr(record.storage_repr.as_str(), total_bytes);
         let stream = file_record_byte_stream(self.object_store(), record, range).await?;
