@@ -1460,7 +1460,12 @@ pub(crate) async fn lfs_verify_object(
     let mut hasher = Sha256::new();
     let mut byte_stream = match state
         .backend
-        .read_object_stream(&object_key, total_length, None)
+        .read_object_stream_scoped(
+            &object_key,
+            total_length,
+            None,
+            repo.capability().repository(),
+        )
         .await
     {
         Ok(stream) => stream,
