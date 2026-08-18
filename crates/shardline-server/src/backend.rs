@@ -975,12 +975,31 @@ impl ServerBackend {
         &self,
         object_key: &ObjectKey,
     ) -> Result<DeleteOutcome, ServerError> {
+        self.delete_object_if_present_scoped(object_key, None).await
+    }
+
+    pub(crate) async fn delete_object_if_present_scoped(
+        &self,
+        object_key: &ObjectKey,
+        repository_scope: Option<&RepositoryScope>,
+    ) -> Result<DeleteOutcome, ServerError> {
         let direct = match self {
             Self::Local(backend) => backend.delete_object_if_present(object_key).await,
             Self::Postgres(backend) => backend.delete_object_if_present(object_key).await,
         }?;
         let file_id = protocol_object_file_id(object_key);
-        let record_deleted = self.delete_file_reference(&file_id).await?;
+        let record_deleted = match self {
+            Self::Local(backend) => {
+                backend
+                    .delete_file_reference_scoped(&file_id, repository_scope)
+                    .await?
+            }
+            Self::Postgres(backend) => {
+                backend
+                    .delete_file_reference_scoped(&file_id, repository_scope)
+                    .await?
+            }
+        };
         if direct == DeleteOutcome::Deleted || record_deleted {
             Ok(DeleteOutcome::Deleted)
         } else {
@@ -1013,13 +1032,6 @@ impl ServerBackend {
     /// intended semantics. The S3 conditional-write purge must NOT use this —
     /// it needs the guarded [`Self::delete_file_reference_if_latest`] so a
     /// multi-replica race can never delete the winner's record (F-92).
-    pub(crate) async fn delete_file_reference(&self, file_id: &str) -> Result<bool, ServerError> {
-        match self {
-            Self::Local(backend) => backend.delete_file_reference(file_id).await,
-            Self::Postgres(backend) => backend.delete_file_reference(file_id).await,
-        }
-    }
-
     /// Deletes a protocol file's latest reference and its immutable version
     /// record — but ONLY when the latest record is still the expected version.
     ///

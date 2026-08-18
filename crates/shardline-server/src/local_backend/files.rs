@@ -42,8 +42,12 @@ impl LocalBackend {
         Ok(true)
     }
 
-    pub(crate) async fn delete_file_reference(&self, file_id: &str) -> Result<bool, ServerError> {
-        let record = match self.read_record(file_id, None, None).await {
+    pub(crate) async fn delete_file_reference_scoped(
+        &self,
+        file_id: &str,
+        repository_scope: Option<&RepositoryScope>,
+    ) -> Result<bool, ServerError> {
+        let record = match self.read_record(file_id, None, repository_scope).await {
             Ok(record) => record,
             Err(ServerError::NotFound) => return Ok(false),
             Err(error) => return Err(error),
