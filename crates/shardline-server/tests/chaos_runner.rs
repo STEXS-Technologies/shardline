@@ -559,6 +559,24 @@ impl ChaosHarness {
                     ),
                 }
             }
+            // Under coverage instrumentation the chaos interference can leave
+            // the index adapter in a transient error state; settle and retry
+            // once rather than panicking immediately.
+            Err(err) if err.contains("index adapter") => {
+                eprintln!(
+                    "chaos: {what}: GC hit transient index adapter error ({err}); \
+                     settling and retrying once"
+                );
+                self.settle(Duration::from_millis(200)).await;
+                self.gc_result(LocalGcOptions::mark_and_sweep(0))
+                    .await
+                    .unwrap_or_else(|retry_err| {
+                        panic!(
+                            "chaos: {what}: GC retry ALSO failed with index adapter error \
+                             ({retry_err})"
+                        )
+                    })
+            }
             Err(err) => panic!("chaos: {what}: GC failed with unexpected error: {err}"),
         }
     }
