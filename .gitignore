@@ -24,3 +24,11 @@ coverage_html/
 crates/shardline-server/s3test-*/
 .slim/deepwork/
 .opencode
+# Harness artifacts (must never be committed).
+.bounty/
+.bounty-*
+.ptt.json.lock
+.tmp_test_space/
+.commandcode/
+token.txt
+proptest-regressions/
