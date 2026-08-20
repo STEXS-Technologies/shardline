@@ -3,14 +3,15 @@
 [![Status](https://img.shields.io/badge/status-stable-1f6feb)](docs/COMPATIBILITY_STATUS.md)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-green)](#license)
 
-**Shardline is a self-hostable content-addressed storage backend for anyone who wants
-durable, efficient versioning of large files.**
+**Shardline is a self-hostable content-addressed storage backend for anyone’s storage
+needs, with deduplication and durable versioning built in.**
 
-It accepts immutable object uploads, deduplicates unchanged content between versions,
-and serves range-aware downloads. Use it for your own storage needs with the frontend
-that fits your workflow—Xet, OCI, Git LFS, S3, Hugging Face Hub, cache clients, or the
-native API. Run it standalone, or pair it with GitHub, GitLab, or Gitea when you want
-repository-scoped storage.
+It accepts immutable object uploads, deduplicates content, and serves range-aware
+downloads. It is especially useful when versioning large files, where unchanged content
+can be reused instead of uploaded repeatedly. Use the frontend that fits your
+workflow—Xet, OCI, Git LFS, S3, Hugging Face Hub, cache clients, or the native API—or
+run it standalone for your own storage needs. Pair it with GitHub, GitLab, or Gitea when
+you want repository-scoped storage.
 
 ## Surface Maturity
 
