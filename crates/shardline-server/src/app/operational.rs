@@ -273,15 +273,7 @@ pub(super) async fn stats(
         .admission
         .try_acquire(weights::STATS)
         .ok_or(ServerError::WorkQueueSaturated)?;
-    // Authenticated callers get a repository-scoped view (their own repo's
-    // file volume only, derived from the record store plus the namespace-
-    // prefixed protocol objects); permissive-mode callers (no capability
-    // scope) get the whole-store aggregate.
-    let response = match repo.capability().repository() {
-        Some(scope) => state.backend.stats_scoped(scope).await?,
-        None => state.backend.stats().await?,
-    };
-    Ok(Json(response))
+    Ok(Json(state.backend.stats().await?))
 }
 
 pub(super) async fn metrics(

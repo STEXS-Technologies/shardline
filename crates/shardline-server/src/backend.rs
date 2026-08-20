@@ -203,7 +203,6 @@ impl ServerBackend {
         object_key: &ObjectKey,
         digest_hex: &str,
         body: RequestBodyReader,
-        repository_scope: Option<&RepositoryScope>,
     ) -> Result<PutOutcome, ServerError> {
         // Local metadata is SQLite-backed. Keep the existence probe, intent
         // transitions, and atomic record commit in one serialized operation so
@@ -228,10 +227,7 @@ impl ServerBackend {
             Err(error) => return Err(error),
         }
         let file_id = protocol_object_file_id(object_key);
-        match self
-            .file_total_bytes(&file_id, None, repository_scope)
-            .await
-        {
+        match self.file_total_bytes(&file_id, None, None).await {
             Ok(_length) => {
                 verify_sha256_body(body, digest_hex).await?;
                 return Ok(PutOutcome::AlreadyExists);
@@ -242,12 +238,12 @@ impl ServerBackend {
         match self {
             Self::Local(backend) => {
                 backend
-                    .upload_file_stream(&file_id, body, repository_scope, Some(digest_hex))
+                    .upload_file_stream(&file_id, body, None, Some(digest_hex))
                     .await?;
             }
             Self::Postgres(backend) => {
                 backend
-                    .upload_file_stream(&file_id, body, repository_scope, Some(digest_hex))
+                    .upload_file_stream(&file_id, body, None, Some(digest_hex))
                     .await?;
             }
         }
@@ -523,16 +519,6 @@ impl ServerBackend {
         }
     }
 
-    pub(crate) async fn stats_scoped(
-        &self,
-        scope: &RepositoryScope,
-    ) -> Result<ServerStatsResponse, ServerError> {
-        match self {
-            Self::Local(backend) => backend.stats_scoped(scope).await,
-            Self::Postgres(backend) => backend.stats_scoped(scope).await,
-        }
-    }
-
     pub(crate) async fn ready(&self) -> Result<(), ServerError> {
         match self {
             Self::Local(backend) => backend.ready().await,
@@ -598,7 +584,6 @@ impl ServerBackend {
             object_key,
             digest_hex,
             RequestBodyReader::from_bytes(bytes.into()),
-            None,
         )
         .await
     }
@@ -637,7 +622,6 @@ impl ServerBackend {
                         destination,
                         digest_hex,
                         RequestBodyReader::from_stream(source_stream),
-                        None,
                     )
                     .await;
             }
@@ -717,20 +701,11 @@ impl ServerBackend {
             object_key,
             digest_hex,
             RequestBodyReader::from_stream(stream),
-            None,
         )
         .await
     }
 
     pub(crate) async fn object_length(&self, object_key: &ObjectKey) -> Result<u64, ServerError> {
-        self.object_length_scoped(object_key, None).await
-    }
-
-    pub(crate) async fn object_length_scoped(
-        &self,
-        object_key: &ObjectKey,
-        repository_scope: Option<&RepositoryScope>,
-    ) -> Result<u64, ServerError> {
         let direct = match self {
             Self::Local(backend) => backend.object_length(object_key).await,
             Self::Postgres(backend) => backend.object_length(object_key).await,
@@ -738,7 +713,7 @@ impl ServerBackend {
         match direct {
             Ok(length) => Ok(length),
             Err(ServerError::NotFound) => {
-                self.file_total_bytes(&protocol_object_file_id(object_key), None, repository_scope)
+                self.file_total_bytes(&protocol_object_file_id(object_key), None, None)
                     .await
             }
             Err(error) => Err(error),
@@ -774,17 +749,6 @@ impl ServerBackend {
         total_length: u64,
         range: Option<ByteRange>,
     ) -> Result<ServerByteStream, ServerError> {
-        self.read_object_stream_scoped(object_key, total_length, range, None)
-            .await
-    }
-
-    pub(crate) async fn read_object_stream_scoped(
-        &self,
-        object_key: &ObjectKey,
-        total_length: u64,
-        range: Option<ByteRange>,
-        repository_scope: Option<&RepositoryScope>,
-    ) -> Result<ServerByteStream, ServerError> {
         let direct_length = match self {
             Self::Local(backend) => backend.object_length(object_key).await,
             Self::Postgres(backend) => backend.object_length(object_key).await,
@@ -809,16 +773,8 @@ impl ServerBackend {
         }
         let file_id = protocol_object_file_id(object_key);
         let (stream, record_length) = match self {
-            Self::Local(backend) => {
-                backend
-                    .read_file_stream_scoped(&file_id, None, range, repository_scope)
-                    .await?
-            }
-            Self::Postgres(backend) => {
-                backend
-                    .read_file_stream_scoped(&file_id, None, range, repository_scope)
-                    .await?
-            }
+            Self::Local(backend) => backend.read_file_stream(&file_id, None, range).await?,
+            Self::Postgres(backend) => backend.read_file_stream(&file_id, None, range).await?,
         };
         if record_length != total_length {
             return Err(ServerError::ObjectStore(
@@ -975,31 +931,12 @@ impl ServerBackend {
         &self,
         object_key: &ObjectKey,
     ) -> Result<DeleteOutcome, ServerError> {
-        self.delete_object_if_present_scoped(object_key, None).await
-    }
-
-    pub(crate) async fn delete_object_if_present_scoped(
-        &self,
-        object_key: &ObjectKey,
-        repository_scope: Option<&RepositoryScope>,
-    ) -> Result<DeleteOutcome, ServerError> {
         let direct = match self {
             Self::Local(backend) => backend.delete_object_if_present(object_key).await,
             Self::Postgres(backend) => backend.delete_object_if_present(object_key).await,
         }?;
         let file_id = protocol_object_file_id(object_key);
-        let record_deleted = match self {
-            Self::Local(backend) => {
-                backend
-                    .delete_file_reference_scoped(&file_id, repository_scope)
-                    .await?
-            }
-            Self::Postgres(backend) => {
-                backend
-                    .delete_file_reference_scoped(&file_id, repository_scope)
-                    .await?
-            }
-        };
+        let record_deleted = self.delete_file_reference(&file_id).await?;
         if direct == DeleteOutcome::Deleted || record_deleted {
             Ok(DeleteOutcome::Deleted)
         } else {
@@ -1032,6 +969,13 @@ impl ServerBackend {
     /// intended semantics. The S3 conditional-write purge must NOT use this —
     /// it needs the guarded [`Self::delete_file_reference_if_latest`] so a
     /// multi-replica race can never delete the winner's record (F-92).
+    pub(crate) async fn delete_file_reference(&self, file_id: &str) -> Result<bool, ServerError> {
+        match self {
+            Self::Local(backend) => backend.delete_file_reference(file_id).await,
+            Self::Postgres(backend) => backend.delete_file_reference(file_id).await,
+        }
+    }
+
     /// Deletes a protocol file's latest reference and its immutable version
     /// record — but ONLY when the latest record is still the expected version.
     ///
@@ -2211,7 +2155,6 @@ mod tests {
                 &first_key,
                 &first_digest,
                 RequestBodyReader::from_bytes(first.clone().into()),
-                None,
             )
             .await
             .unwrap();
@@ -2220,7 +2163,6 @@ mod tests {
                 &second_key,
                 &second_digest,
                 RequestBodyReader::from_bytes(second.clone().into()),
-                None,
             )
             .await
             .unwrap();
@@ -2302,7 +2244,6 @@ mod tests {
                         &key,
                         &digest,
                         RequestBodyReader::from_bytes(body.into()),
-                        None,
                     )
                     .await
             }

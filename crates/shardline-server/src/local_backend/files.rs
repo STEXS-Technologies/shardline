@@ -42,12 +42,8 @@ impl LocalBackend {
         Ok(true)
     }
 
-    pub(crate) async fn delete_file_reference_scoped(
-        &self,
-        file_id: &str,
-        repository_scope: Option<&RepositoryScope>,
-    ) -> Result<bool, ServerError> {
-        let record = match self.read_record(file_id, None, repository_scope).await {
+    pub(crate) async fn delete_file_reference(&self, file_id: &str) -> Result<bool, ServerError> {
+        let record = match self.read_record(file_id, None, None).await {
             Ok(record) => record,
             Err(ServerError::NotFound) => return Ok(false),
             Err(error) => return Err(error),
@@ -92,22 +88,9 @@ impl LocalBackend {
         content_hash: Option<&str>,
         range: Option<ByteRange>,
     ) -> Result<(ServerByteStream, u64), ServerError> {
-        self.read_file_stream_scoped(file_id, content_hash, range, None)
-            .await
-    }
-
-    pub(crate) async fn read_file_stream_scoped(
-        &self,
-        file_id: &str,
-        content_hash: Option<&str>,
-        range: Option<ByteRange>,
-        repository_scope: Option<&RepositoryScope>,
-    ) -> Result<(ServerByteStream, u64), ServerError> {
         // With a content hash the read is pinned to that immutable version
         // record; without one it resolves the latest record.
-        let record = self
-            .read_record(file_id, content_hash, repository_scope)
-            .await?;
+        let record = self.read_record(file_id, content_hash, None).await?;
         let total_bytes = record.total_bytes;
         crate::metrics::record_object_read_by_repr(record.storage_repr.as_str(), total_bytes);
         let stream = file_record_byte_stream(self.object_store(), record, range).await?;
