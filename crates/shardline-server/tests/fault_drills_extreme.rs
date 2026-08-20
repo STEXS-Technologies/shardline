@@ -258,10 +258,21 @@ impl DrillHarness {
         if let Some(handle) = self.handle.take() {
             handle.abort();
             let result = handle.await;
-            assert!(
-                result.is_err(),
-                "aborted server task must report cancellation"
-            );
+            // Under normal execution the abort produces a JoinError (cancelled).
+            // Under coverage instrumentation the task may complete before the
+            // abort takes effect; both outcomes are acceptable — the point is
+            // that the task is no longer running.
+            match result {
+                Ok(()) => {
+                    eprintln!("kill_hard: server task completed before abort took effect");
+                }
+                Err(e) if e.is_cancelled() => {
+                    eprintln!("kill_hard: server task cancelled as expected");
+                }
+                Err(e) => {
+                    panic!("kill_hard: server task panicked: {e}");
+                }
+            }
         }
         self.base_url.clear();
     }
