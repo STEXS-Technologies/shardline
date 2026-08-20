@@ -8,6 +8,9 @@ spec:
     spec:
       containers:
         - name: shardline
+          env:
+            - name: SHARDLINE_DEPLOYMENT_MODE
+              value: insecure
           resources:
             requests:
               cpu: 100m
