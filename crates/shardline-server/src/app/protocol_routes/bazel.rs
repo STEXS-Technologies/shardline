@@ -134,7 +134,6 @@ pub(crate) async fn bazel_get_ac(
         "application/octet-stream",
         None,
         "bazel",
-        None,
     )
     .await
 }
@@ -204,7 +203,6 @@ pub(crate) async fn bazel_get_cas(
         "application/octet-stream",
         None,
         "bazel",
-        None,
     )
     .await
 }
@@ -225,7 +223,7 @@ pub(crate) async fn bazel_put_cas(
     let body = RequestBodyReader::from_body(body, state.config.max_request_body_bytes())?;
     let _stored = state
         .backend
-        .put_sha256_addressed_object_stream_if_absent(&object_key, &hash, body, None)
+        .put_sha256_addressed_object_stream_if_absent(&object_key, &hash, body)
         .await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -278,7 +276,6 @@ pub(crate) async fn bazel_get(
             "application/octet-stream",
             None,
             "bazel",
-            None,
         )
         .await;
     }
@@ -291,7 +288,6 @@ pub(crate) async fn bazel_get(
         "application/octet-stream",
         None,
         "bazel",
-        None,
     )
     .await
 }
@@ -313,7 +309,7 @@ pub(crate) async fn bazel_put(
     let body = RequestBodyReader::from_body(body, state.config.max_request_body_bytes())?;
     let _stored = state
         .backend
-        .put_sha256_addressed_object_stream_if_absent(&object_key, &hash, body, None)
+        .put_sha256_addressed_object_stream_if_absent(&object_key, &hash, body)
         .await?;
     Ok(StatusCode::NO_CONTENT)
 }

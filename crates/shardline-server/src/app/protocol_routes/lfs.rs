@@ -741,7 +741,6 @@ fn consume_lfs_patch_session(tmp_path: &FsPath, ranges_path: &FsPath, tmp_dir: &
 /// never committed (F-59). The store lock is only taken inside
 /// [`consume_lfs_patch_session`], with NO per-OID guard held (F-31); the
 /// caller must have dropped the per-OID lock first.
-#[allow(clippy::too_many_arguments)]
 fn promote_lfs_patch_session(
     tmp_path: &FsPath,
     ranges_path: &FsPath,
@@ -750,7 +749,6 @@ fn promote_lfs_patch_session(
     backend: &crate::ServerBackend,
     object_key: &shardline_storage::ObjectKey,
     stream_chunk_size: usize,
-    repository_scope: Option<&shardline_protocol::RepositoryScope>,
 ) -> Result<(), ServerError> {
     let promotion = (|| {
         let promotion_body = bounded_file_stream(tmp_path, stream_chunk_size, MAX_LFS_OBJECT_SIZE)?;
@@ -760,7 +758,6 @@ fn promote_lfs_patch_session(
                 object_key,
                 oid,
                 promotion_body,
-                repository_scope,
             ),
         )
     })();
@@ -865,10 +862,7 @@ pub(crate) async fn lfs_batch(
                 return Ok(lfs_validation_response("invalid oid"));
             }
         };
-        let object_length = state
-            .backend
-            .object_length_scoped(&object_key, auth.repository())
-            .await;
+        let object_length = state.backend.object_length(&object_key).await;
         match operation {
             LfsOperation::Download => match object_length {
                 Ok(length) => {
@@ -983,7 +977,6 @@ pub(crate) async fn lfs_get_object(
         "application/octet-stream",
         Some(format!("sha256:{oid}")),
         "lfs",
-        repo.capability().repository(),
     )
     .await
 }
@@ -1002,10 +995,7 @@ pub(crate) async fn lfs_head_object(
             return Ok(lfs_validation_response("invalid oid"));
         }
     };
-    let total_length = state
-        .backend
-        .object_length_scoped(&object_key, repo.capability().repository())
-        .await?;
+    let total_length = state.backend.object_length(&object_key).await?;
     Ok((
         StatusCode::OK,
         [
@@ -1050,12 +1040,7 @@ pub(crate) async fn lfs_put_object(
     let body = RequestBodyReader::from_body(body, state.config.max_request_body_bytes())?;
     let _stored = state
         .backend
-        .put_sha256_addressed_object_stream_if_absent(
-            &object_key,
-            &oid,
-            body,
-            repo.capability().repository(),
-        )
+        .put_sha256_addressed_object_stream_if_absent(&object_key, &oid, body)
         .await?;
     let elapsed = start.elapsed().as_secs_f64();
     metrics::record_upload("lfs", content_length, elapsed, true);
@@ -1077,11 +1062,7 @@ pub(crate) async fn lfs_delete_object(
             return Ok(lfs_validation_response("invalid oid"));
         }
     };
-    match state
-        .backend
-        .delete_object_if_present_scoped(&object_key, repo.capability().repository())
-        .await?
-    {
+    match state.backend.delete_object_if_present(&object_key).await? {
         DeleteOutcome::Deleted => Ok(StatusCode::ACCEPTED.into_response()),
         DeleteOutcome::NotFound => Err(ServerError::NotFound),
     }
@@ -1190,11 +1171,7 @@ pub(crate) async fn lfs_patch_object(
             .into_response());
     }
 
-    match state
-        .backend
-        .object_length_scoped(&object_key, repo.capability().repository())
-        .await
-    {
+    match state.backend.object_length(&object_key).await {
         Ok(_length) => {
             return Ok((
                 StatusCode::CONFLICT,
@@ -1219,7 +1196,6 @@ pub(crate) async fn lfs_patch_object(
     let backend = state.backend.clone();
     let oid_for_closure = oid.clone();
     let object_key_for_closure = object_key.clone();
-    let repository_scope = repo.capability().repository().cloned();
 
     let max_active_sessions = state.config.lfs_patch_max_active_sessions();
     let total_max_bytes = state.config.lfs_patch_total_max_bytes();
@@ -1316,9 +1292,9 @@ pub(crate) async fn lfs_patch_object(
             // concurrent same-OID promotion, or a crash after the commit but
             // before the cleanup) the backend ingest is an idempotent no-op.
             drop(lock);
-            let object_present = match tokio::runtime::Handle::current().block_on(
-                backend.object_length_scoped(&object_key_for_closure, repository_scope.as_ref()),
-            ) {
+            let object_present = match tokio::runtime::Handle::current()
+                .block_on(backend.object_length(&object_key_for_closure))
+            {
                 Ok(_length) => true,
                 Err(ServerError::NotFound) => false,
                 Err(error) => return Err(error),
@@ -1336,7 +1312,6 @@ pub(crate) async fn lfs_patch_object(
                     &backend,
                     &object_key_for_closure,
                     stream_chunk_size,
-                    repository_scope.as_ref(),
                 )?;
             }
             return Ok(());
@@ -1401,7 +1376,6 @@ pub(crate) async fn lfs_patch_object(
                 &backend,
                 &object_key_for_closure,
                 stream_chunk_size,
-                repository_scope.as_ref(),
             )?;
         }
 
@@ -1434,11 +1408,7 @@ pub(crate) async fn lfs_verify_object(
     };
 
     // Check object existence and size before reading.
-    let total_length = match state
-        .backend
-        .object_length_scoped(&object_key, repo.capability().repository())
-        .await
-    {
+    let total_length = match state.backend.object_length(&object_key).await {
         Ok(len) => len,
         Err(ServerError::NotFound) => {
             return Ok(StatusCode::NOT_FOUND.into_response());
@@ -1460,12 +1430,7 @@ pub(crate) async fn lfs_verify_object(
     let mut hasher = Sha256::new();
     let mut byte_stream = match state
         .backend
-        .read_object_stream_scoped(
-            &object_key,
-            total_length,
-            None,
-            repo.capability().repository(),
-        )
+        .read_object_stream(&object_key, total_length, None)
         .await
     {
         Ok(stream) => stream,
@@ -4102,7 +4067,6 @@ mod tests {
     // =========================================================================
 
     #[test]
-    #[serial_test::serial]
     fn acquire_lfs_patch_lock_evicts_dead_entries() {
         let baseline_live = live_lfs_patch_lock_count();
         let baseline_map = LFS_PATCH_LOCKS.lock().unwrap().len();

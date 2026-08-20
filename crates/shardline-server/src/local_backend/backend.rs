@@ -4,15 +4,17 @@ use shardline_index::{
     FileChunkRecord, LocalIndexStore, LocalRecordStore, ReconstructionStore, RecordTraversal,
     RepoKey, RevisionRecord, S3ObjectEntry, S3ObjectIndexStore, TreeEntry, TreeKey, TreeStore,
 };
-use shardline_protocol::{RepositoryScope, unix_now_seconds_lossy};
-use shardline_storage::ObjectStore;
+use shardline_protocol::unix_now_seconds_lossy;
+use shardline_storage::{ObjectPrefix, ObjectStore};
 
 use crate::{
     ServerError, ServerFrontend,
+    chunk_store::chunk_hash_from_chunk_object_key_if_present,
     config::default_upload_max_in_flight_chunks,
     local_path::ensure_directory_path_components_are_not_symlinked,
     model::ServerStatsResponse,
-    object_store::{ServerObjectStore, whole_store_chunk_stats},
+    object_store::{ServerObjectStore, visit_object_prefix},
+    overflow::{checked_add, checked_increment},
     validation::validate_content_hash,
 };
 
@@ -168,7 +170,18 @@ impl LocalBackend {
     /// Returns [`ServerError`] when local metadata cannot be traversed.
     pub async fn stats(&self) -> Result<ServerStatsResponse, ServerError> {
         let object_store = self.object_store();
-        let (chunks, chunk_bytes) = whole_store_chunk_stats(&object_store)?;
+        let prefix = ObjectPrefix::parse("").map_err(|_error| ServerError::InvalidContentHash)?;
+        let mut chunks = 0_u64;
+        let mut chunk_bytes = 0_u64;
+        visit_object_prefix(&object_store, &prefix, |metadata| {
+            let is_chunk = chunk_hash_from_chunk_object_key_if_present(metadata.key())?.is_some();
+            if is_chunk {
+                chunks = checked_increment(chunks)?;
+                chunk_bytes = checked_add(chunk_bytes, metadata.length())?;
+            }
+
+            Ok(())
+        })?;
         let files = u64::try_from(
             RecordTraversal::list_latest_record_locators(&self.record_store)
                 .await?
@@ -180,23 +193,6 @@ impl LocalBackend {
             chunk_bytes,
             files,
         })
-    }
-
-    /// Returns repository-scoped storage stats for one repository.
-    ///
-    /// Files are attributed per repository (repo-scoped records plus the
-    /// namespace-prefixed protocol objects written by the LFS/OCI/S3/bazel
-    /// frontends); the chunk pool is dedup-shared CAS infrastructure and is
-    /// reported whole-store.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ServerError`] when the repository's metadata cannot be traversed.
-    pub async fn stats_scoped(
-        &self,
-        scope: &RepositoryScope,
-    ) -> Result<ServerStatsResponse, ServerError> {
-        crate::record_store::scoped_stats(&self.record_store, &self.object_store(), scope).await
     }
 
     pub(crate) fn object_store(&self) -> ServerObjectStore {
