@@ -28,7 +28,9 @@ pub fn parse_xet_hash_hex(value: &str) -> Result<ShardlineHash, HashParseError> 
     let decoded =
         hex::decode(value).map_err(|e| HashParseError::InvalidCharacter(e.to_string()))?;
     let reordered = decoded
-        .chunks_exact(XET_HASH_GROUP_BYTES)
+        .as_chunks::<XET_HASH_GROUP_BYTES>()
+        .0
+        .iter()
         .flat_map(|chunk| chunk.iter().rev().copied())
         .collect::<Vec<u8>>();
     let bytes = <[u8; 32]>::try_from(reordered).map_err(|vec| {
@@ -44,7 +46,7 @@ pub fn parse_xet_hash_hex(value: &str) -> Result<ShardlineHash, HashParseError> 
 pub fn xet_hash_hex_string(hash: impl Borrow<ShardlineHash>) -> String {
     let hash = hash.borrow();
     let mut encoded = Vec::with_capacity(HASH_HEX_LENGTH);
-    for chunk in hash.as_bytes().chunks_exact(XET_HASH_GROUP_BYTES) {
+    for chunk in hash.as_bytes().as_chunks::<XET_HASH_GROUP_BYTES>().0 {
         for byte in chunk.iter().rev() {
             append_lower_hex_byte(&mut encoded, *byte);
         }

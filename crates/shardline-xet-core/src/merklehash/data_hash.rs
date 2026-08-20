@@ -52,8 +52,8 @@ impl From<[u64; 4]> for DataHash {
 impl From<[u8; 32]> for DataHash {
     fn from(value: [u8; 32]) -> Self {
         let mut inner = [0u64; 4];
-        for (i, chunk) in value.chunks_exact(8).enumerate() {
-            inner[i] = u64::from_le_bytes(chunk.try_into().expect("slice len is 8"));
+        for (i, chunk) in value.as_chunks::<8>().0.iter().enumerate() {
+            inner[i] = u64::from_le_bytes(*chunk);
         }
         DataHash(inner)
     }
