@@ -4,6 +4,134 @@ All notable changes to Shardline are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.6.0] - 2026-08-20
+
+Major release that adds a full S3-compatible frontend and closes the hardening
+cycle with an authz-capability system, fail-loud crypto boot, extreme fault
+drills, and a comprehensive adversarial audit. **No breaking API changes** — the
+S3 frontend is additive (coexists with Hub/Git/LFS/OCI/Bazel), the authz
+capability system is opt-in, and existing deployments need no migration.
+
+### Added
+- **S3-compatible frontend** — full S3 API surface mounted as a coexisting
+  frontend alongside Hub/Git/LFS/OCI/Bazel: `ListBuckets`, `ListObjectsV2`
+  (index-backed), multipart upload, conditional requests (`If-Match` /
+  `If-None-Match`), `CopyObject`, `DeleteObjects`, standard MD5 ETags, user
+  metadata, and real-client end-to-end coverage (boto3 + MinIO).
+- **Authz capability system** — repository-scoped capability tokens for the
+  server's internal authorization layer; per-repo token binding is enforced on
+  all repository-scoped routes.
+- **Fail-loud crypto boot** — the server now refuses to start when required
+  cryptographic primitives (SHA-256, Ed25519, AES-256-GCM) are unavailable,
+  instead of silently falling back to insecure defaults.
+- **Extreme fault drills and chaos runner** — a new `fault_drills_extreme` test
+  suite and a `chaos_runner` that exercise kill-hard, cache-drop, GC-under-
+  interference, quarantine-junk, and multi-node chaos scenarios under real-
+  infrastructure conditions.
+- **Perf and ops baseline** — `cargo bench` harness for throughput and latency
+  regression detection.
+- **Metadata-driven publish order** — `scripts/publish-order.py` derives the
+  crates.io publish DAG from `Cargo.toml` `[dependencies]` instead of a
+  hand-maintained list.
+- **CI: S3 real-client end-to-end** — boto3 real-client test suite merged into
+  the main end-to-end job; S3-compatible tests run against a live MinIO
+  container.
+
+### Changed
+- **End-to-end and integration test harnesses** now opt into explicit
+  `Insecure` mode for local test servers, making the security boundary explicit
+  in CI.
+- **CI: S3 real-client job** merged into the unified end-to-end job (single
+  matrix entry instead of a separate workflow).
+- **User-facing docs** rewritten for clarity; rustdoc private-link warnings
+  fixed.
+- **GC sweep performance** (continued from 1.5.0) — quarantine candidate
+  resolution is now O(1) per candidate with a re-verified reachability
+  snapshot.
+
+### Fixed
+- **Protocol adapter type-level seal** — `AuthorizedRepository`,
+  `RepositoryScope`, and `ObjectKey` are now sealed types; external crates
+  cannot construct or forge them.
+- **Startup fails loud on insecure default** — the server now returns a
+  startup error instead of silently running in permissive mode when no auth
+  provider is configured.
+- **GC quarantine stale-reference skip** — quarantine candidates that reference
+  re-referenced objects are now correctly skipped during sweep.
+- **Multi-replica caveats documented** — limitations of running multiple
+  Shardline instances against a single metadata store (no distributed locking;
+  intended for single-node or read-replica topologies).
+- **LFS patch lock de-flake** — `acquire_lfs_patch_lock_evicts_dead_entries`
+  no longer races under parallel CI runs.
+- **Chaos runner index adapter tolerance** — transient index-adapter errors
+  during GC under coverage instrumentation are now settled and retried instead
+  of panicking.
+- **Fault drills kill-hard pre-completion** — `kill_hard` now accepts both
+  task cancellation and pre-completion outcomes under slow coverage execution.
+- **S3 `CopyObject` content-length ceiling** — `CopyObject` now enforces the
+  same maximum object size as uploads instead of allowing unbounded copies.
+- **S3 conditional-request TOCTOU** — conditional overwrite now uses a single
+  immutable read snapshot, closing the time-of-check-to-time-of-use race.
+- **S3 lock-map leak on failed multipart abort** — the in-memory lock map is
+  now cleaned up when a multipart abort fails, preventing a slow memory leak.
+- **S3 session-lock convoy under concurrent abort** — concurrent abort calls
+  no longer serialize on the same session lock, eliminating the convoy under
+  parallel workloads.
+- **S3 torn metadata on atomic overwrite** — metadata updates are now written
+  atomically, preventing partial reads during concurrent overwrites.
+- **S3 `DeleteObjects` hardening** — batch delete now validates per-key
+  authorization and handles partial failures correctly.
+- **Fuzz harness oracles** — three pre-existing harness oracles repaired by
+  the S3 smoke campaign.
+
+### Security
+An adversarial hardening cycle covering the full server surface found and fixed
+the following. The core Xet/LFS/OCI/Bazel frontends were audited and verified
+sound.
+- **[Critical] Cross-tenant authorization bypass on Hub API routes** —
+  repository-scoped Hub API handlers did not enforce token-to-URL binding, so
+  any authenticated user could read, modify, or push to any other tenant's
+  repository. Fixed by requiring the token's `owner`/`name` to match the
+  request path on all repository-scoped routes.
+- **[Critical] Hub API LFS global namespace — cross-tenant content poisoning**
+  — Hub API LFS objects were stored under a bare global key with no per-repo
+  namespace, allowing content substitution via first-writer-wins. Fixed by
+  namespacing LFS keys per-repo via `scope_namespace`.
+- **[High] Hub API `repo_list` / `repo_search` cross-tenant private repo leak**
+  — the global list and search endpoints returned private repos from every
+  tenant. Fixed by filtering by caller ownership.
+- **[High] `apply_delta` unbounded output growth (receive-pack OOM)** — a
+  crafted pack delta could grow the result vector to ~32 TB transient
+  allocation. Fixed by checking copy-instruction bounds against the declared
+  target size.
+- **[High] GC quarantine sweep used a stale orphan snapshot** — an object
+  re-referenced after the snapshot could be deleted while the index still
+  referenced it. Fixed by re-verifying reachability against current index
+  state immediately before each delete.
+- **[Medium] Reconstruction-cache loader-failure latch leak** — a failed load
+  left the key `loading` forever, stalling every later requester. Fixed by
+  clearing the latch on the error path.
+- **[Medium] `sdx` path registration mangled spaces into `+`** — path segments
+  were form-encoded; now RFC-3986 pchar percent-encoded, so path operations
+  round-trip consistently.
+- **[Medium] Receive-pack silently dropped bundled LFS content** when a pushed
+  pointer blob was not byte-identical to the canonical pointer. Fixed by
+  matching content by SHA-256 digest and failing loudly when referenced LFS
+  content is absent.
+- **[Medium] S3 multipart session-lock convoy** — concurrent abort calls
+  serialized on the same session lock. Fixed by using non-blocking lock
+  acquisition.
+- **[Medium] S3 torn metadata on atomic overwrite** — metadata writes were not
+  atomic. Fixed with a write-then-swap pattern.
+- **[Low] Git pack parser accepted truncated zlib streams** — `decompress_zlib`
+  now requires `StreamEnd`, and `parse_pack_data` rejects a header whose
+  `num_objects` is not fully consumed.
+- **[Low] Zero-length suffix byte-range** returned a bogus 1-byte range instead
+  of `Unsatisfiable`. Fixed to be consistent with the non-suffix branch.
+- **[Low] Upload-intent transitions were not idempotent** — two concurrent
+  callers sharing one intent could spuriously 500. Fixed by treating
+  at-or-past-target state as success.
+
 ## [1.5.0] - 2026-08-11
 
 Minor release that hardens parsing boundaries with newtypes, caps untrusted
