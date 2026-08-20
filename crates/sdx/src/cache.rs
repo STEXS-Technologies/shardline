@@ -503,16 +503,12 @@ fn read_entry(path: &Path) -> Result<Option<CachedXorbRange>, SdxError> {
             "cache offsets out of bounds",
         ))
     })?;
-    let chunk_offsets: Option<Vec<u32>> = offsets_bytes
-        .chunks_exact(4)
-        .map(|window| window.try_into().ok().map(u32::from_le_bytes))
+    let chunk_offsets: Vec<u32> = offsets_bytes
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|window| u32::from_le_bytes(*window))
         .collect();
-    let chunk_offsets = chunk_offsets.ok_or_else(|| {
-        SdxError::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "cache offsets are truncated",
-        ))
-    })?;
     let data_start = offsets_end;
     let data_end = offsets_end
         .checked_add(usize::try_from(header.data_len).unwrap_or(usize::MAX))

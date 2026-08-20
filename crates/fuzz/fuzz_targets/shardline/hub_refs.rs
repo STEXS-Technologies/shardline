@@ -30,7 +30,7 @@ fuzz_target!(|data: &[u8]| {
     let mut expected_refs = BTreeMap::from([("main".to_owned(), INITIAL_SHA.to_owned())]);
     let mut latest_branch_commits = BTreeMap::new();
 
-    for (step, instruction) in data.chunks_exact(3).take(96).enumerate() {
+    for (step, instruction) in data.as_chunks::<3>().0.iter().take(96).enumerate() {
         let branch = format!("feature-{}", instruction[0] % 8);
         match instruction[1] % 4 {
             // Create, advance, or recreate a branch from immutable history.

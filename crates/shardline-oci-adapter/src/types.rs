@@ -89,14 +89,11 @@ impl SerializableSha256State {
             }
         }
 
-        let mut chunks = remaining.chunks_exact(64);
-        for chunk in &mut chunks {
-            let block: [u8; 64] = chunk
-                .try_into()
-                .map_err(|_error| OciAdapterError::Overflow)?;
-            self.compress_block(&block);
+        let (full_chunks, remainder) = remaining.as_chunks::<64>();
+        for chunk in full_chunks {
+            self.compress_block(chunk);
         }
-        self.buffer.extend_from_slice(chunks.remainder());
+        self.buffer.extend_from_slice(remainder);
         Ok(())
     }
 
@@ -121,15 +118,12 @@ impl SerializableSha256State {
             .checked_mul(8)
             .ok_or(OciAdapterError::Overflow)?;
         buffer.extend_from_slice(&bit_length.to_be_bytes());
-        for chunk in buffer.chunks_exact(64) {
-            let block: [u8; 64] = chunk
-                .try_into()
-                .map_err(|_error| OciAdapterError::Overflow)?;
-            let generic = GenericArray::clone_from_slice(&block);
+        for chunk in buffer.as_chunks::<64>().0 {
+            let generic = GenericArray::clone_from_slice(chunk);
             compress256(&mut state, &[generic]);
         }
         let mut output = [0_u8; 32];
-        for (chunk, value) in output.chunks_exact_mut(4).zip(state.iter()) {
+        for (chunk, value) in output.as_chunks_mut::<4>().0.iter_mut().zip(state.iter()) {
             chunk.copy_from_slice(&value.to_be_bytes());
         }
         Ok(output)
