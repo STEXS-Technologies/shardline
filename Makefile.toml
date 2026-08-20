@@ -117,6 +117,12 @@ workspace = false
 command = "bash"
 args = ["scripts/verify-release-binary.sh"]
 
+[tasks.publish-order]
+description = "Print the derived crates.io publish order (bottom-up, from cargo metadata)"
+workspace = false
+command = "python3"
+args = ["scripts/publish-order.py"]
+
 [tasks.clippy]
 description = "Run clippy with strict rules on the shardline workspace"
 workspace = false
@@ -167,6 +173,30 @@ description = "Run the shardline zero-storage ingest benchmark suite"
 workspace = false
 command = "bash"
 args = ["scripts/shardline/perf.sh", "e2e", "--mode", "ingest", "${@}"]
+
+[tasks.minio-up]
+description = "Ensure the local MinIO service and bucket bootstrap (shardline) are running"
+workspace = false
+command = "bash"
+args = ["-c", "docker compose up -d minio minio-init"]
+
+[tasks.shardline-bench-s3]
+description = "Run the S3 I/O performance baseline (put/get + multipart) against local MinIO"
+workspace = false
+dependencies = ["minio-up"]
+command = "cargo"
+args = ["bench", "-p", "shardline-bench", "--bench", "s3_io", "--", "--noplot", "${@}"]
+
+[tasks.shardline-bench-reconstruction]
+description = "Run the shardline reconstruction throughput baseline"
+workspace = false
+command = "cargo"
+args = ["bench", "-p", "shardline-bench", "--bench", "reconstruction", "--", "--noplot", "${@}"]
+
+[tasks.shardline-bench-baseline]
+description = "Run the full performance baseline (reconstruction + S3 I/O)"
+workspace = false
+dependencies = ["shardline-bench-reconstruction", "shardline-bench-s3"]
 
 [tasks.shardline-perf-e2e]
 description = "Record a perf profile for the optimized shardline end-to-end benchmark suite"
@@ -323,3 +353,20 @@ workspace = false
 install_crate = "sqlx-cli"
 command = "sqlx"
 args = ["${@}"]
+
+[tasks.chaos-test]
+description = "Run the deterministic chaos-testing orchestrator (fault injection + invariant checks)"
+workspace = false
+install_crate = "cargo-nextest@0.9.123"
+install_crate_args = ["--locked", "--force"]
+command = "cargo"
+args = ["nextest", "run", "-p", "shardline-server", "--test", "chaos_runner", "${@}"]
+
+[tasks.chaos-deployment]
+description = "Boot the shardline-chaos stack, migrate, and run real-deployment chaos drills"
+workspace = false
+command = "bash"
+args = [
+  "-c",
+  "cargo build -p shardline && docker compose -f docker-compose.chaos.yml -p shardline-chaos up -d && for c in chaos-postgres chaos-minio chaos-redis; do until [ \"$(docker inspect -f '{{.State.Health.Status}}' $c 2>/dev/null)\" = \"healthy\" ]; do sleep 1; done; done && target/debug/shardline db migrate up --database-url postgres://shardline:shardline-dev-password@127.0.0.1:15432/shardline && cargo test -p shardline-server --test deployment_chaos -- --nocapture && cargo test -p shardline-server --test fault_drills -- drill3 -- --nocapture && cargo test -p shardline-server --test fault_drills_extreme -- drill_extreme_4 -- --nocapture",
+]

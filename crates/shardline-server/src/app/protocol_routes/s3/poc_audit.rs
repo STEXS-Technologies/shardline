@@ -1,4 +1,5 @@
-//! PoC audit tests for the S3 frontend (finding candidates F-7..F-11).
+//! PoC audit tests for the S3 frontend (finding candidates F-7..F-11, F-18,
+//! F-70).
 //!
 //! Each test drives the in-process S3 router and asserts a measured
 //! exploit-vs-control delta. Helpers (auth + state build) are duplicated here
@@ -112,6 +113,15 @@ fn mint_token(scope: TokenScope, owner: &str, name: &str) -> String {
     provider.mint_token(&claims).unwrap()
 }
 
+/// Mints and re-verifies `claims` through a real provider, producing the same
+/// `VerifiedAuthContext` the auth layer hands to the capability seam (the seal
+/// now type-enforces that a forged `AuthContext` cannot reach it).
+fn verified_context(claims: &TokenClaims) -> shardline_server_core::VerifiedAuthContext {
+    let provider = LocalHmacProvider::new(TEST_SIGNING_KEY).unwrap();
+    let token = provider.mint_token(claims).unwrap();
+    provider.verify_verified(&token).unwrap()
+}
+
 fn sigv4_auth(token: &str) -> String {
     format!(
         "AWS4-HMAC-SHA256 Credential={token}/20260813/us-east-1/s3/aws4_request, \
@@ -158,6 +168,19 @@ fn put_request(uri: String, body: Vec<u8>) -> axum::http::Request<Body> {
         )
         .header(header::CONTENT_TYPE, "application/octet-stream")
         .body(Body::from(body))
+        .unwrap()
+}
+
+fn copy_request(uri: String, copy_source: String) -> axum::http::Request<Body> {
+    Request::builder()
+        .method("PUT")
+        .uri(uri)
+        .header(
+            header::AUTHORIZATION,
+            sigv4_auth(&mint_token(TokenScope::Write, OWNER, NAME)),
+        )
+        .header("x-amz-copy-source", copy_source)
+        .body(Body::empty())
         .unwrap()
 }
 
@@ -531,9 +554,18 @@ async fn poc_f8_phantom_delete_serialized() {
     let url = format!("/{BUCKET}/{key}");
 
     // Resolve the per-key lock the handlers use and hold it ourselves,
-    // standing in for an in-flight PUT that is mid-upload/mid-swap.
-    let claims = RepositoryScope::new(RepositoryProvider::Generic, OWNER, NAME, None).unwrap();
-    let context = require_s3_object_context(Some(&claims), BUCKET, key).unwrap();
+    // standing in for an in-flight PUT that is mid-upload/mid-swap. Mint the
+    // same typed capability the S3Repository extractor would (verified-context
+    // seam) so the derived storage object key — and therefore the per-key
+    // lock — matches the handlers' exactly.
+    let repo = RepositoryScope::new(RepositoryProvider::Generic, OWNER, NAME, None).unwrap();
+    let claims = TokenClaims::new("shardline", "test", TokenScope::Write, repo, u64::MAX).unwrap();
+    let capability = shardline_server_core::AuthorizedRepository::from_verified_context(
+        verified_context(&claims),
+        TokenScope::Write,
+    )
+    .unwrap();
+    let context = require_s3_object_context(&capability, key).unwrap();
     let object_lock = acquire_object_upload_lock(context.object_key.as_str());
     let _test_guard = object_lock.lock().await;
 
@@ -862,6 +894,461 @@ async fn poc_f11_metadata_consistent_with_bytes() {
     );
 }
 
+// =========================================================================
+// F-70 — Torn GET under a concurrent overwrite (FIXED: object.rs GET/HEAD now
+// resolve the object's length / record version / ETag / user-metadata /
+// Last-Modified from the SAME listing-index row and pin the stream to that
+// row's immutable record version, so the served pair is one logical commit
+// point).
+// A PUT commits the new record BEFORE swapping the index row, so a GET that
+// read the row before the swap and the (separately-resolved) record snapshot
+// after it used to pair old-row metadata with new-record bytes —
+// checksum-verifying clients reject a response whose ETag != MD5(body). With
+// the fix a pre-swap read serves the OLD row + OLD record (consistent), and a
+// post-swap read serves the NEW row + NEW record (consistent) — never a mix.
+// =========================================================================
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn poc_f70_get_etag_matches_served_bytes_under_concurrent_overwrite() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state);
+
+    let key = "torn/f70-race.bin";
+    let seed = app
+        .clone()
+        .oneshot(put_request(
+            format!("/{BUCKET}/{key}"),
+            b"seed-version".to_vec(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(seed.status(), StatusCode::OK, "seed PUT");
+
+    let iterations = 40;
+    let mut mismatches = 0_u32;
+    for round in 0..iterations {
+        // Overwrite with DIFFERENT content every round, racing a GET against
+        // the swap: the served pair (ETag + bytes) must always be one
+        // consistent commit point.
+        let payload = format!("overwrite-version-{round}");
+        let put = app.clone();
+        let put_req = put_request(format!("/{BUCKET}/{key}"), payload.into_bytes());
+        let get = app.clone();
+        let get_req = get_request(format!("/{BUCKET}/{key}"));
+
+        let (put_task, get_task) = tokio::join!(
+            tokio::spawn(async move { put.oneshot(put_req).await.unwrap().status() }),
+            tokio::spawn(async move {
+                let response = get.oneshot(get_req).await.unwrap();
+                let status = response.status();
+                // Capture the ETag header BEFORE consuming the body.
+                let etag = response
+                    .headers()
+                    .get(header::ETAG)
+                    .map(|value| value.to_str().unwrap().to_owned());
+                let bytes = body_bytes(response).await;
+                (status, etag, bytes)
+            })
+        );
+        let put_status = put_task.unwrap();
+        let (get_status, etag, bytes) = get_task.unwrap();
+        assert_eq!(put_status, StatusCode::OK, "round {round}: PUT");
+        assert_eq!(get_status, StatusCode::OK, "round {round}: GET");
+        let Some(etag) = etag else {
+            // No index row at read time → no ETag served; nothing to verify.
+            continue;
+        };
+        let expected = format!("\"{:x}\"", md5::Md5::digest(&bytes));
+        if etag != expected {
+            mismatches = mismatches.saturating_add(1);
+        }
+    }
+
+    println!(
+        "F-70 delta (fixed): {iterations} racing PUT/GET rounds on one key\n\
+         \x20 FIXED   responses whose ETag != MD5(served bytes): {mismatches}\n\
+         \x20 (length / version pin / headers all resolved from the same row)"
+    );
+    assert_eq!(
+        mismatches, 0,
+        "no GET may serve an ETag that is not the MD5 of the served bytes"
+    );
+}
+
+// =========================================================================
+// F-79 — CopyObject source read is torn across row metadata and latest-record
+// content (FIXED: object.rs resolves the source's user metadata, size, and
+// record version in ONE `s3_object_read_snapshot` — the listing-index row is
+// the single commit point, so the copied metadata always belongs to the copied
+// bytes. A concurrent source PUT commits its new record BEFORE swapping the
+// row, so the old flow paired old-row metadata with new-record bytes; the
+// snapshot now pins to the row's version, serving old-row+old-record or
+// new-row+new-record — never a mix).
+//
+// EXPLOIT (fixed): racing a source overwrite (new content + new metadata)
+// against a CopyObject must never produce a destination whose x-amz-meta-*
+// describes a DIFFERENT version than the bytes it carries.
+// =========================================================================
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn poc_f79_copyobject_metadata_matches_copied_bytes_under_concurrent_overwrite() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state);
+
+    let source = "torn/f79-source.bin";
+    let seed_body = "seed-version";
+
+    // Seed the source with content + matching metadata.
+    let mut seed_req = put_request(format!("/{BUCKET}/{source}"), seed_body.as_bytes().to_vec());
+    seed_req
+        .headers_mut()
+        .insert("x-amz-meta-ver", "seed".parse().unwrap());
+    let seed = app.clone().oneshot(seed_req).await.unwrap();
+    assert_eq!(seed.status(), StatusCode::OK, "seed PUT");
+
+    let iterations = 40;
+    let mut mismatches = 0_u32;
+    for round in 0..iterations {
+        // Overwrite the source with DIFFERENT content + a metadata marker every
+        // round, racing a CopyObject of the source: the copied object's
+        // x-amz-meta-ver must describe exactly the bytes it carries.
+        let payload = format!("overwrite-version-{round}");
+        let meta_value = format!("round-{round}");
+        let dest = format!("torn/f79-dest-{round}.bin");
+
+        let put = app.clone();
+        let mut put_req = put_request(format!("/{BUCKET}/{source}"), payload.clone().into_bytes());
+        put_req
+            .headers_mut()
+            .insert("x-amz-meta-ver", meta_value.parse().unwrap());
+        let copy = app.clone();
+        let copy_req = copy_request(format!("/{BUCKET}/{dest}"), format!("/{BUCKET}/{source}"));
+
+        let (put_task, copy_task) = tokio::join!(
+            tokio::spawn(async move { put.oneshot(put_req).await.unwrap().status() }),
+            tokio::spawn(async move { copy.oneshot(copy_req).await.unwrap().status() }),
+        );
+        assert_eq!(
+            put_task.unwrap(),
+            StatusCode::OK,
+            "round {round}: source PUT"
+        );
+        assert_eq!(copy_task.unwrap(), StatusCode::OK, "round {round}: COPY");
+
+        // The destination's metadata must describe exactly the version its
+        // bytes came from: the seed state or any completed overwrite round
+        // (the copy may legitimately observe the pre- or post-overwrite state)
+        // — but never old metadata with new bytes or vice versa.
+        let get = app
+            .clone()
+            .oneshot(get_request(format!("/{BUCKET}/{dest}")))
+            .await
+            .unwrap();
+        assert_eq!(get.status(), StatusCode::OK, "round {round}: GET dest");
+        let meta = get
+            .headers()
+            .get("x-amz-meta-ver")
+            .map(|value| value.to_str().unwrap().to_owned())
+            .unwrap_or_else(|| "<none>".to_owned());
+        let bytes = String::from_utf8(body_bytes(get).await).unwrap();
+        let expected_meta = if let Some(round_of) = bytes.strip_prefix("overwrite-version-") {
+            format!("round-{round_of}")
+        } else if bytes == seed_body {
+            "seed".to_owned()
+        } else {
+            // Bytes no source version ever held — a torn read.
+            mismatches = mismatches.saturating_add(1);
+            continue;
+        };
+        if meta != expected_meta {
+            mismatches = mismatches.saturating_add(1);
+        }
+    }
+
+    println!(
+        "F-79 delta (fixed): {iterations} racing source-overwrite/CopyObject rounds\n\
+         \x20 FIXED   destinations whose x-amz-meta-ver does not describe the copied bytes: {mismatches}\n\
+         \x20 (source metadata + size + version resolved in ONE snapshot)"
+    );
+    assert_eq!(
+        mismatches, 0,
+        "the copied object's metadata must always match its bytes' version (F-79)"
+    );
+}
+
+// =========================================================================
+// F-86 — A failed conditional S3 PUT (412) committed the loser's record as
+// LATEST (FIXED: object.rs re-evaluates the precondition under the per-key
+// lock BEFORE the body is streamed or any record committed, so a losing
+// conditional PUT returns 412 with NO write side effect — the loser's record
+// is never committed and its chunks are never written. The post-commit
+// re-check is kept for the F-8 TOCTOU guarantee and, when it fires, purges the
+// just-committed loser record so no latest-record consumer serves it).
+//
+// EXPLOIT (fixed): (1) a losing conditional PUT must leave the LATEST record
+// as the winner's content (record-vs-row divergence gone) and (2) a racing
+// pair of create-if-absent PUTs must leave the winner's record as latest.
+// =========================================================================
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn poc_f86_losing_conditional_put_leaves_winner_latest() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state.clone());
+
+    let repo = RepositoryScope::new(RepositoryProvider::Generic, OWNER, NAME, None).unwrap();
+    let namespace = crate::protocol_support::scope_namespace(Some(&repo));
+
+    // Resolves the storage object key the way the handlers derive it, so the
+    // snapshot below reads the SAME protocol file the object's record lives at.
+    fn resolve_context(key: &str) -> (String, shardline_storage::ObjectKey) {
+        let repo = RepositoryScope::new(RepositoryProvider::Generic, OWNER, NAME, None).unwrap();
+        let claims =
+            TokenClaims::new("shardline", "test", TokenScope::Write, repo, u64::MAX).unwrap();
+        let capability = shardline_server_core::AuthorizedRepository::from_verified_context(
+            verified_context(&claims),
+            TokenScope::Write,
+        )
+        .unwrap();
+        let context = require_s3_object_context(&capability, key).unwrap();
+        (context.scope_namespace, context.object_key)
+    }
+
+    // --- Scenario 1 (deterministic): a losing conditional PUT. ---
+    let key = "cond/f86-loser.bin";
+
+    // WINNER: an unconditional PUT establishes the object + row.
+    let winner = app
+        .clone()
+        .oneshot(put_request(
+            format!("/{BUCKET}/{key}"),
+            b"winner-content".to_vec(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(winner.status(), StatusCode::OK);
+    let winner_etag = winner
+        .headers()
+        .get(header::ETAG)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+
+    // Row + latest-record state before the losing conditional PUT.
+    let (_ns, object_key) = resolve_context(key);
+    let row_before = state
+        .backend
+        .scan_s3_object_exact(&namespace, key)
+        .await
+        .unwrap()
+        .expect("winner row");
+    let snapshot_before = state
+        .backend
+        .s3_object_read_snapshot(&namespace, key, &object_key)
+        .await
+        .unwrap();
+
+    // LOSER: If-None-Match:* (create-if-absent) on the existing object with
+    // DIFFERENT content → 412.
+    let loser = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/{BUCKET}/{key}"))
+                .header(
+                    header::AUTHORIZATION,
+                    sigv4_auth(&mint_token(TokenScope::Write, OWNER, NAME)),
+                )
+                .header(header::IF_NONE_MATCH, "*")
+                .header(header::CONTENT_TYPE, "application/octet-stream")
+                .body(Body::from(b"loser-content".to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(loser.status(), StatusCode::PRECONDITION_FAILED);
+
+    // The row is untouched (still the winner's)…
+    let row_after = state
+        .backend
+        .scan_s3_object_exact(&namespace, key)
+        .await
+        .unwrap()
+        .expect("winner row");
+    assert_eq!(
+        row_after.content_hash, row_before.content_hash,
+        "row must still pin the winner's version"
+    );
+    assert_eq!(
+        row_after.etag, row_before.etag,
+        "row etag must be unchanged"
+    );
+    assert_eq!(row_after.size_bytes, row_before.size_bytes);
+
+    // …and the LATEST record is still the winner's: the loser's record was
+    // never committed (the body was rejected before any streaming, so its
+    // chunks were never written either — no orphan, no leak).
+    let snapshot_after = state
+        .backend
+        .s3_object_read_snapshot(&namespace, key, &object_key)
+        .await
+        .unwrap();
+    assert_eq!(
+        snapshot_after.record_content_hash,
+        Some(row_before.content_hash.clone()),
+        "latest record must be the winner's content, not the loser's (F-86)"
+    );
+    assert_eq!(snapshot_after.total_bytes, row_before.size_bytes);
+    assert_eq!(
+        snapshot_after.record_content_hash, snapshot_before.record_content_hash,
+        "the 412 must not perturb the latest record"
+    );
+
+    // GET still serves the winner's bytes + ETag.
+    let get = app
+        .clone()
+        .oneshot(get_request(format!("/{BUCKET}/{key}")))
+        .await
+        .unwrap();
+    assert_eq!(get.status(), StatusCode::OK);
+    let get_etag = get
+        .headers()
+        .get(header::ETAG)
+        .map(|value| value.to_str().unwrap().to_owned());
+    assert_eq!(body_bytes(get).await, b"winner-content");
+    assert_eq!(
+        get_etag.as_deref(),
+        Some(winner_etag.as_str()),
+        "GET must serve the winner's ETag after the losing 412"
+    );
+
+    // The record store is still healthy: a MATCHING conditional PUT succeeds
+    // and becomes the new latest.
+    let replace = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/{BUCKET}/{key}"))
+                .header(
+                    header::AUTHORIZATION,
+                    sigv4_auth(&mint_token(TokenScope::Write, OWNER, NAME)),
+                )
+                .header(header::IF_MATCH, &winner_etag)
+                .header(header::CONTENT_TYPE, "application/octet-stream")
+                .body(Body::from(b"third-version".to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        replace.status(),
+        StatusCode::OK,
+        "matching conditional PUT must succeed"
+    );
+    let get2 = app
+        .clone()
+        .oneshot(get_request(format!("/{BUCKET}/{key}")))
+        .await
+        .unwrap();
+    assert_eq!(body_bytes(get2).await, b"third-version");
+
+    // --- Scenario 2 (racing, mirrors the F-8 PoC): two create-if-absent PUTs
+    // with different bodies on a fresh key. Exactly one wins; the LATEST
+    // record must be the winner's content and the row must pin it. ---
+    let iterations = 20;
+    let mut violations = 0_u32;
+    for round in 0..iterations {
+        let race_key = format!("cond/f86-race-{round}.bin");
+        let url = format!("/{BUCKET}/{race_key}");
+        let body_a = format!("race-a-{round}").into_bytes();
+        let body_b = format!("race-b-{round}").into_bytes();
+
+        fn create_if_absent(url: String, body: Vec<u8>) -> axum::http::Request<Body> {
+            Request::builder()
+                .method("PUT")
+                .uri(url)
+                .header(
+                    header::AUTHORIZATION,
+                    sigv4_auth(&mint_token(TokenScope::Write, OWNER, NAME)),
+                )
+                .header(header::IF_NONE_MATCH, "*")
+                .header(header::CONTENT_TYPE, "application/octet-stream")
+                .body(Body::from(body))
+                .unwrap()
+        }
+
+        let app_a = app.clone();
+        let app_b = app.clone();
+        let req_a = create_if_absent(url.clone(), body_a.clone());
+        let req_b = create_if_absent(url.clone(), body_b.clone());
+        let (ta, tb) = tokio::join!(
+            tokio::spawn(async move { app_a.oneshot(req_a).await.unwrap().status() }),
+            tokio::spawn(async move { app_b.oneshot(req_b).await.unwrap().status() }),
+        );
+        let (sa, sb) = (ta.unwrap(), tb.unwrap());
+        let n_ok = [sa, sb].iter().filter(|s| **s == StatusCode::OK).count();
+        let n_412 = [sa, sb]
+            .iter()
+            .filter(|s| **s == StatusCode::PRECONDITION_FAILED)
+            .count();
+        if !(n_ok == 1 && n_412 == 1) {
+            violations = violations.saturating_add(1);
+            continue;
+        }
+
+        // The LATEST record must be the winner's content — the row (which the
+        // winner swapped) pins a version, and the latest record must match it.
+        let (_ns, race_object_key) = resolve_context(&race_key);
+        let race_row = state
+            .backend
+            .scan_s3_object_exact(&namespace, &race_key)
+            .await
+            .unwrap()
+            .expect("winner row");
+        let race_snapshot = state
+            .backend
+            .s3_object_read_snapshot(&namespace, &race_key, &race_object_key)
+            .await
+            .unwrap();
+        if race_snapshot.record_content_hash.as_deref() != Some(race_row.content_hash.as_str()) {
+            violations = violations.saturating_add(1);
+            continue;
+        }
+
+        // The served bytes + ETag are one consistent commit point.
+        let get = app
+            .clone()
+            .oneshot(get_request(format!("/{BUCKET}/{race_key}")))
+            .await
+            .unwrap();
+        assert_eq!(get.status(), StatusCode::OK);
+        let etag = get
+            .headers()
+            .get(header::ETAG)
+            .map(|value| value.to_str().unwrap().to_owned());
+        let bytes = body_bytes(get).await;
+        assert!(
+            bytes == body_a || bytes == body_b,
+            "round {round}: served bytes must be one of the raced bodies"
+        );
+        if let Some(etag) = etag
+            && etag != format!("\"{:x}\"", md5::Md5::digest(&bytes))
+        {
+            violations = violations.saturating_add(1);
+        }
+    }
+
+    println!(
+        "F-86 delta (fixed): losing conditional PUT leaves the winner's record as LATEST\n\
+         \x20 FIXED   racing rounds with one 200 + one 412 AND row==latest record: {}\n\
+         \x20 rounds with violations (bad statuses, row!=latest, or ETag!=MD5): {violations}",
+        iterations - violations
+    );
+    assert_eq!(
+        violations, 0,
+        "every losing conditional PUT must leave the LATEST record as the winner's content (F-86)"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Frontend coexistence (regression: S3 + Hub used to panic at router build)
 // ---------------------------------------------------------------------------
@@ -878,6 +1365,7 @@ async fn build_router_with(frontends: Vec<ServerFrontend>) -> Router {
         NonZeroUsize::new(65536).unwrap(),
     )
     .with_server_role(ServerRole::All)
+    .with_deployment_mode(crate::DeploymentMode::Insecure)
     .with_server_frontends(frontends)
     .expect("server frontends")
     .with_token_signing_key(TEST_SIGNING_KEY.to_vec())
@@ -1002,6 +1490,7 @@ async fn frontend_pairs_have_no_route_conflicts() {
                         NonZeroUsize::new(65536).unwrap(),
                     )
                     .with_server_role(ServerRole::All)
+                    .with_deployment_mode(crate::DeploymentMode::Insecure)
                     .with_server_frontends(pair)
                     .expect("server frontends")
                     .with_token_signing_key(TEST_SIGNING_KEY.to_vec())
@@ -1030,4 +1519,112 @@ async fn frontend_pairs_have_no_route_conflicts() {
             );
         }
     }
+}
+
+// =========================================================================
+// F-18 — DeleteObjects batch delete takes no per-key lock (bucket.rs).
+// The batch path deleted each key's index row + direct object without
+// serializing against in-flight PUT/Copy/Complete, so a concurrent overwrite
+// of the same key could have its just-committed record deleted (phantom
+// delete / dangling index) even though the single-object DELETE path took
+// the lock.
+// FIX: `s3_post_bucket` acquires the same per-key upload lock around each
+// key's delete pair, releasing it after each key (the body is read+parsed
+// before any lock is taken, so no deadlock across the body read).
+// CONTROL: hold the per-key lock ourselves (standing in for an in-flight PUT)
+// and issue a batch DELETE containing that key: it must BLOCK on the lock and
+// only complete after release.
+// =========================================================================
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn poc_f18_deleteobjects_serialized_with_put() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state);
+
+    let key = "phantom/batch-serialized.bin";
+    let batch_url = format!("/{BUCKET}?delete=");
+
+    // Resolve the same per-key lock the handlers use (mirrors
+    // poc_f8_phantom_delete_serialized) and hold it, standing in for an
+    // in-flight PUT that is mid-upload/mid-swap on this key.
+    let repo = RepositoryScope::new(RepositoryProvider::Generic, OWNER, NAME, None).unwrap();
+    let claims = TokenClaims::new("shardline", "test", TokenScope::Write, repo, u64::MAX).unwrap();
+    let capability = shardline_server_core::AuthorizedRepository::from_verified_context(
+        verified_context(&claims),
+        TokenScope::Write,
+    )
+    .unwrap();
+    let context = require_s3_object_context(&capability, key).unwrap();
+    let object_lock = acquire_object_upload_lock(context.object_key.as_str());
+    let _test_guard = object_lock.lock().await;
+
+    // A batch containing the locked key, issued while the writer holds the
+    // per-key lock.
+    let del_app = app.clone();
+    let batch_body = format!(
+        "<Delete><Object><Key>{key}</Key></Object><Object><Key>other-{key}</Key></Object></Delete>"
+    );
+    let del_req = Request::builder()
+        .method("POST")
+        .uri(batch_url.clone())
+        .header(
+            header::AUTHORIZATION,
+            sigv4_auth(&mint_token(TokenScope::Write, OWNER, NAME)),
+        )
+        .header(header::CONTENT_TYPE, "application/xml")
+        .body(Body::from(batch_body))
+        .unwrap();
+    let delete_task = tokio::spawn(async move { del_app.oneshot(del_req).await.unwrap().status() });
+
+    // With the fix the batch DELETE must be blocked on the per-key lock for
+    // the locked key (it cannot delete that key while the writer holds the
+    // lock). With the bug it completes immediately because it shares no lock
+    // with the writer.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert!(
+        !delete_task.is_finished(),
+        "DeleteObjects must block on the per-key upload lock while a writer holds it (F-18)"
+    );
+
+    // Release the lock (the in-flight PUT commits); the batch then runs and
+    // completes with its serialized 200, and the object is gone.
+    drop(_test_guard);
+    let delete_status = delete_task.await.unwrap();
+    assert_eq!(
+        delete_status,
+        StatusCode::OK,
+        "serialized DeleteObjects must complete 200"
+    );
+    let get = app
+        .clone()
+        .oneshot(get_request(format!("/{BUCKET}/{key}")))
+        .await
+        .unwrap();
+    assert_eq!(
+        get.status(),
+        StatusCode::NOT_FOUND,
+        "object deleted after the serialized batch delete"
+    );
+
+    // The batch must not deadlock across multiple keys: a second batch over
+    // fresh keys completes without any lock held.
+    let ok = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(batch_url)
+                .header(
+                    header::AUTHORIZATION,
+                    sigv4_auth(&mint_token(TokenScope::Write, OWNER, NAME)),
+                )
+                .header(header::CONTENT_TYPE, "application/xml")
+                .body(Body::from(
+                    "<Delete><Object><Key>a.txt</Key></Object><Object><Key>b.txt</Key></Object></Delete>"
+                        .to_owned(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(ok.status(), StatusCode::OK, "multi-key batch completes");
 }

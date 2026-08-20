@@ -12,11 +12,12 @@
     clippy::shadow_unrelated
 )]
 
-use shardline_protocol::{RepositoryProvider, RepositoryScope};
+use shardline_protocol::{RepositoryProvider, RepositoryScope, TokenClaims, TokenScope};
 use shardline_protocol_adapters::{
     BazelCacheKind, ProtocolError, bazel_cache_object_key, lfs_object_key, scope_namespace,
     validate_content_hash,
 };
+use shardline_server_core::{AuthProvider, AuthorizedRepository, LocalHmacProvider};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -25,6 +26,20 @@ use shardline_protocol_adapters::{
 /// Returns a 64-character lowercase hex string.
 fn valid_oid() -> String {
     "a".repeat(64)
+}
+
+/// Builds a capability carrying the given repository scope (or a permissive
+/// anonymous capability when `None`), mirroring how the auth layer mints
+/// capabilities: the claims are verified through a real provider so the
+/// type-level seal is satisfied.
+fn test_capability(scope: Option<RepositoryScope>) -> AuthorizedRepository {
+    scope.map_or_else(AuthorizedRepository::anonymous_full_access, |repo| {
+        let claims = TokenClaims::new("local", "test", TokenScope::Write, repo, u64::MAX).unwrap();
+        let provider = LocalHmacProvider::new(b"test-signing-key-32-bytes-long!!").unwrap();
+        let token = provider.mint_token(&claims).unwrap();
+        let ctx = provider.verify_verified(&token).unwrap();
+        AuthorizedRepository::from_verified_context(ctx, TokenScope::Write).unwrap()
+    })
 }
 
 /// Builds a [`RepositoryScope`] with the given provider, owner, name, and
@@ -60,7 +75,7 @@ fn test_scope_with_revision() -> RepositoryScope {
 #[test]
 fn lfs_object_key_global_namespace() {
     let oid = valid_oid();
-    let key = lfs_object_key(&oid, None).expect("LFS key");
+    let key = lfs_object_key(&oid, &test_capability(None)).expect("LFS key");
     assert!(key.as_str().contains("protocols/lfs/global/objects/"));
     assert!(key.as_str().ends_with(&oid));
 }
@@ -69,7 +84,8 @@ fn lfs_object_key_global_namespace() {
 fn lfs_object_key_scoped_namespace() {
     let oid = valid_oid();
     let scope = test_scope();
-    let key = lfs_object_key(&oid, Some(&scope)).expect("LFS key with scope");
+    let key =
+        lfs_object_key(&oid, &test_capability(Some(scope.clone()))).expect("LFS key with scope");
     assert!(key.as_str().starts_with("protocols/lfs/"));
     assert!(key.as_str().ends_with(&oid));
     // The namespace is deterministic (SHA-256 hash) and should NOT contain "global".
@@ -81,34 +97,34 @@ fn lfs_object_key_scoped_namespace() {
 fn lfs_object_key_with_revision() {
     let oid = valid_oid();
     let scope = test_scope_with_revision();
-    let key = lfs_object_key(&oid, Some(&scope)).expect("LFS key with revision");
+    let key = lfs_object_key(&oid, &test_capability(Some(scope))).expect("LFS key with revision");
     assert!(key.as_str().starts_with("protocols/lfs/"));
     assert!(key.as_str().ends_with(&oid));
 }
 
 #[test]
 fn lfs_object_key_invalid_oid_too_short() {
-    let result = lfs_object_key("short", None);
+    let result = lfs_object_key("short", &test_capability(None));
     assert!(matches!(result, Err(ProtocolError::InvalidContentHash)));
 }
 
 #[test]
 fn lfs_object_key_invalid_oid_uppercase() {
     let oid = "A".repeat(64);
-    let result = lfs_object_key(&oid, None);
+    let result = lfs_object_key(&oid, &test_capability(None));
     assert!(matches!(result, Err(ProtocolError::InvalidContentHash)));
 }
 
 #[test]
 fn lfs_object_key_empty_oid() {
-    let result = lfs_object_key("", None);
+    let result = lfs_object_key("", &test_capability(None));
     assert!(matches!(result, Err(ProtocolError::InvalidContentHash)));
 }
 
 #[test]
 fn lfs_object_key_non_hex_chars() {
     let oid = "z".repeat(64);
-    let result = lfs_object_key(&oid, None);
+    let result = lfs_object_key(&oid, &test_capability(None));
     assert!(matches!(result, Err(ProtocolError::InvalidContentHash)));
 }
 
@@ -117,8 +133,8 @@ fn lfs_object_key_different_providers_produce_different_keys() {
     let oid = valid_oid();
     let gh_scope = make_scope(RepositoryProvider::GitHub, "org", "repo", None);
     let gl_scope = make_scope(RepositoryProvider::GitLab, "org", "repo", None);
-    let key_gh = lfs_object_key(&oid, Some(&gh_scope)).expect("gh key");
-    let key_gl = lfs_object_key(&oid, Some(&gl_scope)).expect("gl key");
+    let key_gh = lfs_object_key(&oid, &test_capability(Some(gh_scope))).expect("gh key");
+    let key_gl = lfs_object_key(&oid, &test_capability(Some(gl_scope))).expect("gl key");
     assert_ne!(key_gh.as_str(), key_gl.as_str());
 }
 
@@ -129,7 +145,8 @@ fn lfs_object_key_different_providers_produce_different_keys() {
 #[test]
 fn bazel_cache_object_key_ac_global() {
     let hash = valid_oid();
-    let key = bazel_cache_object_key(BazelCacheKind::Ac, &hash, None).expect("bazel AC key");
+    let key = bazel_cache_object_key(BazelCacheKind::Ac, &hash, &test_capability(None))
+        .expect("bazel AC key");
     assert!(key.as_str().contains("protocols/bazel/global/ac/"));
     assert!(key.as_str().ends_with(&hash));
 }
@@ -137,7 +154,8 @@ fn bazel_cache_object_key_ac_global() {
 #[test]
 fn bazel_cache_object_key_cas_global() {
     let hash = valid_oid();
-    let key = bazel_cache_object_key(BazelCacheKind::Cas, &hash, None).expect("bazel CAS key");
+    let key = bazel_cache_object_key(BazelCacheKind::Cas, &hash, &test_capability(None))
+        .expect("bazel CAS key");
     assert!(key.as_str().contains("protocols/bazel/global/cas/"));
     assert!(key.as_str().ends_with(&hash));
 }
@@ -147,7 +165,7 @@ fn bazel_cache_object_key_ac_with_scope() {
     let hash = valid_oid();
     let scope = test_scope();
     let namespace = scope_namespace(Some(&scope));
-    let key = bazel_cache_object_key(BazelCacheKind::Ac, &hash, Some(&scope))
+    let key = bazel_cache_object_key(BazelCacheKind::Ac, &hash, &test_capability(Some(scope)))
         .expect("bazel AC scoped key");
     assert!(
         key.as_str()
@@ -161,7 +179,7 @@ fn bazel_cache_object_key_cas_with_scope() {
     let hash = valid_oid();
     let scope = test_scope();
     let namespace = scope_namespace(Some(&scope));
-    let key = bazel_cache_object_key(BazelCacheKind::Cas, &hash, Some(&scope))
+    let key = bazel_cache_object_key(BazelCacheKind::Cas, &hash, &test_capability(Some(scope)))
         .expect("bazel CAS scoped key");
     assert!(
         key.as_str()
@@ -175,7 +193,7 @@ fn bazel_cache_object_key_with_revision_scope() {
     let hash = valid_oid();
     let scope = test_scope_with_revision();
     let namespace = scope_namespace(Some(&scope));
-    let key = bazel_cache_object_key(BazelCacheKind::Cas, &hash, Some(&scope))
+    let key = bazel_cache_object_key(BazelCacheKind::Cas, &hash, &test_capability(Some(scope)))
         .expect("bazel CAS key with revision");
     assert!(key.as_str().contains(&format!("/{namespace}/cas/")));
 }
@@ -183,8 +201,10 @@ fn bazel_cache_object_key_with_revision_scope() {
 #[test]
 fn bazel_cache_object_key_different_kinds_differ() {
     let hash = valid_oid();
-    let key_ac = bazel_cache_object_key(BazelCacheKind::Ac, &hash, None).expect("AC key");
-    let key_cas = bazel_cache_object_key(BazelCacheKind::Cas, &hash, None).expect("CAS key");
+    let key_ac =
+        bazel_cache_object_key(BazelCacheKind::Ac, &hash, &test_capability(None)).expect("AC key");
+    let key_cas = bazel_cache_object_key(BazelCacheKind::Cas, &hash, &test_capability(None))
+        .expect("CAS key");
     assert_ne!(key_ac.as_str(), key_cas.as_str());
     assert!(key_ac.as_str().contains("/ac/"));
     assert!(key_cas.as_str().contains("/cas/"));
@@ -192,20 +212,20 @@ fn bazel_cache_object_key_different_kinds_differ() {
 
 #[test]
 fn bazel_cache_object_key_invalid_hash() {
-    let result = bazel_cache_object_key(BazelCacheKind::Ac, "bad", None);
+    let result = bazel_cache_object_key(BazelCacheKind::Ac, "bad", &test_capability(None));
     assert!(matches!(result, Err(ProtocolError::InvalidContentHash)));
 }
 
 #[test]
 fn bazel_cache_object_key_uppercase_hash() {
     let hash = "F".repeat(64);
-    let result = bazel_cache_object_key(BazelCacheKind::Cas, &hash, None);
+    let result = bazel_cache_object_key(BazelCacheKind::Cas, &hash, &test_capability(None));
     assert!(matches!(result, Err(ProtocolError::InvalidContentHash)));
 }
 
 #[test]
 fn bazel_cache_object_key_empty_hash() {
-    let result = bazel_cache_object_key(BazelCacheKind::Ac, "", None);
+    let result = bazel_cache_object_key(BazelCacheKind::Ac, "", &test_capability(None));
     assert!(matches!(result, Err(ProtocolError::InvalidContentHash)));
 }
 
@@ -388,9 +408,13 @@ fn lfs_and_bazel_keys_use_same_namespace() {
     let oid = valid_oid();
     let scope = test_scope();
 
-    let lfs_key = lfs_object_key(&oid, Some(&scope)).expect("LFS key");
-    let bazel_key =
-        bazel_cache_object_key(BazelCacheKind::Cas, &oid, Some(&scope)).expect("bazel key");
+    let lfs_key = lfs_object_key(&oid, &test_capability(Some(scope.clone()))).expect("LFS key");
+    let bazel_key = bazel_cache_object_key(
+        BazelCacheKind::Cas,
+        &oid,
+        &test_capability(Some(scope.clone())),
+    )
+    .expect("bazel key");
 
     let namespace = scope_namespace(Some(&scope));
     assert!(lfs_key.as_str().contains(&namespace));
@@ -401,7 +425,7 @@ fn lfs_and_bazel_keys_use_same_namespace() {
 fn lfs_key_format_structure() {
     let oid = valid_oid();
     // Without scope: protocols/lfs/global/objects/<hash>
-    let key = lfs_object_key(&oid, None).expect("LFS global key");
+    let key = lfs_object_key(&oid, &test_capability(None)).expect("LFS global key");
     let parts: Vec<&str> = key.as_str().split('/').collect();
     assert_eq!(parts.len(), 5, "expected 5 parts: {parts:?}");
     assert_eq!(parts[0], "protocols");
@@ -415,7 +439,8 @@ fn lfs_key_format_structure() {
 fn bazel_key_format_structure() {
     let hash = valid_oid();
     // Without scope: protocols/bazel/global/ac/<hash>
-    let key = bazel_cache_object_key(BazelCacheKind::Ac, &hash, None).expect("bazel AC global key");
+    let key = bazel_cache_object_key(BazelCacheKind::Ac, &hash, &test_capability(None))
+        .expect("bazel AC global key");
     let parts: Vec<&str> = key.as_str().split('/').collect();
     assert_eq!(parts.len(), 5, "expected 5 parts: {parts:?}");
     assert_eq!(parts[0], "protocols");
@@ -429,8 +454,8 @@ fn bazel_key_format_structure() {
 fn bazel_cas_key_format_structure() {
     let hash = valid_oid();
     // Without scope: protocols/bazel/global/cas/<hash>
-    let key =
-        bazel_cache_object_key(BazelCacheKind::Cas, &hash, None).expect("bazel CAS global key");
+    let key = bazel_cache_object_key(BazelCacheKind::Cas, &hash, &test_capability(None))
+        .expect("bazel CAS global key");
     let parts: Vec<&str> = key.as_str().split('/').collect();
     assert_eq!(parts.len(), 5);
     assert_eq!(parts[3], "cas");

@@ -2,6 +2,7 @@ use std::io::Cursor;
 
 use shardline_index::{FileRecord, parse_xet_hash_hex};
 use shardline_protocol::{ByteRange, ShardlineHash};
+use shardline_server_core::AuthorizedRepository;
 
 use crate::{
     BazelCacheKind, InvalidReconstructionResponseError, InvalidSerializedShardError, ServerError,
@@ -394,17 +395,25 @@ pub fn fuzz_protocol_frontend_summary(
     let frontend_accepts = ServerFrontend::parse(frontend).is_ok();
     let digest_accepts = parse_sha256_digest(digest).is_ok();
 
-    let lfs_accepts = match lfs_object_key(oid, None) {
+    let lfs_accepts = match lfs_object_key(oid, &AuthorizedRepository::anonymous_full_access()) {
         Ok(key) => {
-            let repeated = lfs_object_key(oid, None)?;
+            let repeated = lfs_object_key(oid, &AuthorizedRepository::anonymous_full_access())?;
             key.as_str() == repeated.as_str()
         }
         Err(_) => false,
     };
 
-    let bazel_accepts = match bazel_cache_object_key(BazelCacheKind::Cas, oid, None) {
+    let bazel_accepts = match bazel_cache_object_key(
+        BazelCacheKind::Cas,
+        oid,
+        &AuthorizedRepository::anonymous_full_access(),
+    ) {
         Ok(key) => {
-            let repeated = bazel_cache_object_key(BazelCacheKind::Cas, oid, None)?;
+            let repeated = bazel_cache_object_key(
+                BazelCacheKind::Cas,
+                oid,
+                &AuthorizedRepository::anonymous_full_access(),
+            )?;
             key.as_str() == repeated.as_str()
         }
         Err(_) => false,
@@ -457,13 +466,14 @@ pub fn fuzz_protocol_frontend_summary(
 /// Returns [`ServerError`] when a successfully-derived object key cannot be recomputed
 /// deterministically.
 pub fn fuzz_lfs_frontend_summary(oid: &str) -> Result<FuzzLfsFrontendSummary, ServerError> {
-    let (oid_accepts, key_is_stable) = match lfs_object_key(oid, None) {
-        Ok(key) => {
-            let repeated = lfs_object_key(oid, None)?;
-            (true, key.as_str() == repeated.as_str())
-        }
-        Err(_) => (false, false),
-    };
+    let (oid_accepts, key_is_stable) =
+        match lfs_object_key(oid, &AuthorizedRepository::anonymous_full_access()) {
+            Ok(key) => {
+                let repeated = lfs_object_key(oid, &AuthorizedRepository::anonymous_full_access())?;
+                (true, key.as_str() == repeated.as_str())
+            }
+            Err(_) => (false, false),
+        };
 
     Ok(FuzzLfsFrontendSummary {
         oid_accepts,
@@ -480,16 +490,32 @@ pub fn fuzz_lfs_frontend_summary(oid: &str) -> Result<FuzzLfsFrontendSummary, Se
 pub fn fuzz_bazel_http_frontend_summary(
     hash_hex: &str,
 ) -> Result<FuzzBazelHttpFrontendSummary, ServerError> {
-    let ac_accepts = match bazel_cache_object_key(BazelCacheKind::Ac, hash_hex, None) {
+    let ac_accepts = match bazel_cache_object_key(
+        BazelCacheKind::Ac,
+        hash_hex,
+        &AuthorizedRepository::anonymous_full_access(),
+    ) {
         Ok(key) => {
-            let repeated = bazel_cache_object_key(BazelCacheKind::Ac, hash_hex, None)?;
+            let repeated = bazel_cache_object_key(
+                BazelCacheKind::Ac,
+                hash_hex,
+                &AuthorizedRepository::anonymous_full_access(),
+            )?;
             key.as_str() == repeated.as_str()
         }
         Err(_) => false,
     };
-    let cas_accepts = match bazel_cache_object_key(BazelCacheKind::Cas, hash_hex, None) {
+    let cas_accepts = match bazel_cache_object_key(
+        BazelCacheKind::Cas,
+        hash_hex,
+        &AuthorizedRepository::anonymous_full_access(),
+    ) {
         Ok(key) => {
-            let repeated = bazel_cache_object_key(BazelCacheKind::Cas, hash_hex, None)?;
+            let repeated = bazel_cache_object_key(
+                BazelCacheKind::Cas,
+                hash_hex,
+                &AuthorizedRepository::anonymous_full_access(),
+            )?;
             key.as_str() == repeated.as_str()
         }
         Err(_) => false,

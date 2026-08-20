@@ -73,6 +73,7 @@ pub async fn run_gc_diagnostics(
     retention_report_path: Option<&Path>,
     orphan_inventory_path: Option<&Path>,
 ) -> Result<LocalGcDiagnostics, GcRuntimeError> {
+    let config = load_server_config(root, None)?;
     let options = LocalGcOptions {
         mark,
         sweep,
@@ -81,8 +82,11 @@ pub async fn run_gc_diagnostics(
         // (delete of orphaned chunks).  Concurrent uploads that have written
         // chunks on disk but not yet committed file records need a grace period.
         retention_seconds: retention_seconds.max(MINIMUM_GC_RETENTION_SECONDS),
+        // GC-time enforcement of the F-75 per-repo revision cap: thread the
+        // configured value into the run so the GC runner prunes over-cap
+        // revision-registry rows (oldest first) for every repository.
+        max_revisions_per_repo: Some(config.max_revisions_per_repo().get()),
     };
-    let config = load_server_config(root, None)?;
     let diagnostics = run_server_gc_diagnostics(config, options).await?;
     write_optional_artifact(retention_report_path, &diagnostics.retention_report)?;
     write_optional_artifact(orphan_inventory_path, &diagnostics.orphan_inventory)?;
@@ -122,6 +126,7 @@ mod tests {
             mark: true,
             sweep: false,
             retention_seconds: 0,
+            max_revisions_per_repo: None,
         };
         assert_eq!(opts.retention_seconds, 0);
 
@@ -136,6 +141,7 @@ mod tests {
             mark: true,
             sweep: true,
             retention_seconds: 7200,
+            max_revisions_per_repo: None,
         };
         let clamped = opts.retention_seconds.max(MINIMUM_GC_RETENTION_SECONDS);
         assert_eq!(clamped, 7200);
@@ -147,6 +153,7 @@ mod tests {
             mark: false,
             sweep: true,
             retention_seconds: MINIMUM_GC_RETENTION_SECONDS,
+            max_revisions_per_repo: None,
         };
         let clamped = opts.retention_seconds.max(MINIMUM_GC_RETENTION_SECONDS);
         assert_eq!(clamped, MINIMUM_GC_RETENTION_SECONDS);
@@ -159,6 +166,7 @@ mod tests {
                 mark: false,
                 sweep: false,
                 retention_seconds: 3600,
+                max_revisions_per_repo: None,
             }
             .mode_name(),
             "dry-run"
@@ -168,6 +176,7 @@ mod tests {
                 mark: true,
                 sweep: false,
                 retention_seconds: 3600,
+                max_revisions_per_repo: None,
             }
             .mode_name(),
             "mark"
@@ -177,6 +186,7 @@ mod tests {
                 mark: false,
                 sweep: true,
                 retention_seconds: 3600,
+                max_revisions_per_repo: None,
             }
             .mode_name(),
             "sweep"
@@ -186,6 +196,7 @@ mod tests {
                 mark: true,
                 sweep: true,
                 retention_seconds: 3600,
+                max_revisions_per_repo: None,
             }
             .mode_name(),
             "mark-and-sweep"

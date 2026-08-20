@@ -26,6 +26,9 @@ use shardline_server::{
     oci_manifest_key, oci_manifest_media_type_key, serve_with_listener,
     test_fixtures::{single_chunk_xorb, single_file_shard},
 };
+use shardline_server_core::{
+    AuthProvider, AuthorizedRepository, LocalHmacProvider,
+};
 use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectStore};
 use support::{bearer_token, wait_for_health};
 
@@ -94,6 +97,7 @@ async fn start_protocol_runtime_with_max_request_body(
     )
     .with_max_request_body_bytes(max_request_body_bytes)
     .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())?
+    .with_deployment_mode(shardline_server::DeploymentMode::Insecure)
     .with_server_frontends(frontends.iter().copied())?;
     let server = spawn(async move { serve_with_listener(config, listener).await });
     wait_for_health(&base_url).await?;
@@ -123,6 +127,7 @@ async fn start_protocol_runtime_with_oci_limits(
     .with_oci_upload_session_ttl_seconds(oci_upload_session_ttl_seconds)
     .with_oci_upload_max_active_sessions(oci_upload_max_active_sessions)
     .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())?
+    .with_deployment_mode(shardline_server::DeploymentMode::Insecure)
     .with_server_frontends(frontends.iter().copied())?;
     let server = spawn(async move { serve_with_listener(config, listener).await });
     wait_for_health(&base_url).await?;
@@ -152,6 +157,7 @@ async fn start_protocol_runtime_with_oci_token_limits(
     .with_oci_registry_token_ttl_seconds(oci_registry_token_ttl_seconds)
     .with_oci_registry_token_max_in_flight_requests(oci_registry_token_max_in_flight_requests)
     .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())?
+    .with_deployment_mode(shardline_server::DeploymentMode::Insecure)
     .with_server_frontends(frontends.iter().copied())?;
     let server = spawn(async move { serve_with_listener(config, listener).await });
     wait_for_health(&base_url).await?;
@@ -178,6 +184,7 @@ async fn start_protocol_runtime_on_shared_root(
         NonZeroUsize::new(128).unwrap_or(NonZeroUsize::MIN),
     ))
     .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())?
+    .with_deployment_mode(shardline_server::DeploymentMode::Insecure)
     .with_server_frontends(frontends.iter().copied())?;
     let server = spawn(async move { serve_with_listener(config, listener).await });
     wait_for_health(&base_url).await?;
@@ -702,9 +709,26 @@ async fn all_frontends_share_digest_addressed_storage_and_keep_xet_and_hub_worki
     assert!(reconstruction.fetch_info.contains_key(&second_hash));
 
     let object_store = ServerObjectStore::local(runtime.storage_path().join("chunks"))?;
-    let lfs_key = lfs_object_key(&digest_hex, Some(&repository_scope))?;
-    let bazel_key =
-        bazel_cache_object_key(BazelCacheKind::Cas, &digest_hex, Some(&repository_scope))?;
+    // The repository identity for LFS/Bazel keys comes from the token claims;
+    // build a capability carrying the same RepositoryScope the tokens used by
+    // verifying the claims through a real provider (the capability seal is
+    // type-enforced: only a provider verification can mint the context).
+    let claims = shardline_protocol::TokenClaims::new(
+        "shardline",
+        "test",
+        TokenScope::Write,
+        repository_scope.clone(),
+        u64::MAX,
+    )
+    .map_err(|_e| ServerError::InvalidToken(shardline_protocol::TokenCodecError::InvalidFormat))?;
+    let provider = LocalHmacProvider::new(b"test-signing-key-32-bytes-long!!")
+        .map_err(ServerError::from)?;
+    let token = provider.mint_token(&claims).map_err(ServerError::from)?;
+    let ctx = provider.verify_verified(&token).map_err(ServerError::from)?;
+    let capability = AuthorizedRepository::from_verified_context(ctx, TokenScope::Write)
+        .map_err(|_e| ServerError::InsufficientScope)?;
+    let lfs_key = lfs_object_key(&digest_hex, &capability)?;
+    let bazel_key = bazel_cache_object_key(BazelCacheKind::Cas, &digest_hex, &capability)?;
     let oci_key = oci_blob_key("team/assets", &digest_hex, Some(&repository_scope))?;
     let lfs_path = object_store
         .local_path_for_key(&lfs_key)

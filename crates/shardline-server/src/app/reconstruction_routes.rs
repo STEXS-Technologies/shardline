@@ -3,12 +3,13 @@ use std::time::Instant;
 
 use axum::{
     Json,
-    extract::{Path, Query, State},
-    http::{HeaderMap, Uri},
+    extract::{FromRequestParts, Path, Query, State},
+    http::{HeaderMap, Uri, request::Parts},
     response::IntoResponse,
 };
 use serde::Deserialize;
 use shardline_protocol::TokenScope;
+use shardline_server_core::AuthorizedRepository;
 
 use crate::{
     ServerError,
@@ -25,7 +26,6 @@ use super::{
         load_reconstruction_response, load_reconstruction_v2_response,
         parse_batch_reconstruction_file_ids, parse_reconstruction_request_range,
     },
-    scope_from_auth,
 };
 
 #[derive(Debug, Deserialize)]
@@ -33,10 +33,108 @@ pub(super) struct FileVersionQuery {
     content_hash: Option<String>,
 }
 
+/// Runs the shared authorize chain and mints a typed [`AuthorizedRepository`]
+/// capability for the Xet-side API/transfer routes.
+///
+/// These routes carry no repository segment, so the repository identity comes
+/// exclusively from the verified token claims (isolated via the token's
+/// `RepositoryScope` namespace), exactly like the LFS protocol lane. This
+/// reproduces today's chain in the same order: [`authorize`](crate::app::authorize)
+/// (permissive `Ok(None)` when no auth provider is configured) → mint:
+/// verified context → `from_verified_context`, `None` → `anonymous_full_access()`.
+fn authorize_repository(
+    state: &AppState,
+    headers: &HeaderMap,
+    required_scope: TokenScope,
+) -> Result<AuthorizedRepository, ServerError> {
+    authorize(state, headers, required_scope)?.map_or_else(
+        || Ok(AuthorizedRepository::anonymous_full_access()),
+        |ctx| {
+            // The verified context (minted by the auth layer's
+            // `verify_verified`) flows straight into the capability seam. No
+            // token is re-verified here; `from_verified_context` only
+            // re-applies the scope gate idempotently.
+            AuthorizedRepository::from_verified_context(ctx, required_scope)
+                .map_err(ServerError::from)
+        },
+    )
+}
+
+/// Read-scoped Xet authorization capability, extracted from the request.
+///
+/// Because these routes carry no repository path segment, the capability's
+/// namespace comes entirely from the verified token claims. The extractor
+/// reproduces today's authorize chain exactly: `authorize` (permissive
+/// `Ok(None)` when `state.auth` is `None`) → verified context → capability,
+/// or `anonymous_full_access()` for permissive mode.
+#[derive(Debug)]
+pub(super) struct XetRepository {
+    auth: AuthorizedRepository,
+}
+
+/// Write-scoped Xet authorization capability, extracted from the request.
+#[derive(Debug)]
+pub(super) struct XetWriteRepository {
+    auth: AuthorizedRepository,
+}
+
+impl XetRepository {
+    /// Read-scoped construction from request headers.
+    fn read(state: &AppState, headers: &HeaderMap) -> Result<Self, ServerError> {
+        Ok(Self {
+            auth: authorize_repository(state, headers, TokenScope::Read)?,
+        })
+    }
+
+    /// The typed, verified authorization capability.
+    pub(crate) const fn capability(&self) -> &AuthorizedRepository {
+        &self.auth
+    }
+}
+
+impl XetWriteRepository {
+    /// Write-scoped construction from request headers.
+    fn write(state: &AppState, headers: &HeaderMap) -> Result<Self, ServerError> {
+        Ok(Self {
+            auth: authorize_repository(state, headers, TokenScope::Write)?,
+        })
+    }
+
+    /// The typed, verified authorization capability.
+    pub(crate) const fn capability(&self) -> &AuthorizedRepository {
+        &self.auth
+    }
+}
+
+impl FromRequestParts<Arc<AppState>> for XetRepository {
+    type Rejection = ServerError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
+        // Borrow (do not consume) the headers: handlers extract `HeaderMap`
+        // separately for Range / content-hash parsing.
+        Self::read(state, &parts.headers)
+    }
+}
+
+impl FromRequestParts<Arc<AppState>> for XetWriteRepository {
+    type Rejection = ServerError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
+        Self::write(state, &parts.headers)
+    }
+}
+
 #[tracing::instrument(skip(state, headers), fields(file_id))]
 pub(super) async fn reconstruction(
     State(state): State<Arc<AppState>>,
     Path(file_id): Path<String>,
+    repo: XetRepository,
     headers: HeaderMap,
     Query(query): Query<FileVersionQuery>,
 ) -> Result<impl IntoResponse, ServerError> {
@@ -50,7 +148,6 @@ pub(super) async fn reconstruction(
         .parsing
         .try_acquire()
         .ok_or(ServerError::WorkQueueSaturated)?;
-    let auth = authorize(&state, &headers, TokenScope::Read)?;
     validate_hash_path(&file_id)?;
     validate_optional_content_hash(query.content_hash.as_deref())?;
     let requested_range = parse_reconstruction_request_range(
@@ -58,7 +155,7 @@ pub(super) async fn reconstruction(
         &headers,
         &file_id,
         query.content_hash.as_deref(),
-        auth.as_ref().map(scope_from_auth),
+        repo.capability(),
     )
     .await?;
     let start = Instant::now();
@@ -67,7 +164,7 @@ pub(super) async fn reconstruction(
         &file_id,
         query.content_hash.as_deref(),
         requested_range,
-        auth.as_ref().map(scope_from_auth),
+        repo.capability(),
     )
     .await;
     let elapsed = start.elapsed();
@@ -87,6 +184,7 @@ pub(super) async fn reconstruction(
 pub(super) async fn reconstruction_v2(
     State(state): State<Arc<AppState>>,
     Path(file_id): Path<String>,
+    repo: XetRepository,
     headers: HeaderMap,
     Query(query): Query<FileVersionQuery>,
 ) -> Result<impl IntoResponse, ServerError> {
@@ -100,7 +198,6 @@ pub(super) async fn reconstruction_v2(
         .parsing
         .try_acquire()
         .ok_or(ServerError::WorkQueueSaturated)?;
-    let auth = authorize(&state, &headers, TokenScope::Read)?;
     validate_hash_path(&file_id)?;
     validate_optional_content_hash(query.content_hash.as_deref())?;
     let requested_range = parse_reconstruction_request_range(
@@ -108,7 +205,7 @@ pub(super) async fn reconstruction_v2(
         &headers,
         &file_id,
         query.content_hash.as_deref(),
-        auth.as_ref().map(scope_from_auth),
+        repo.capability(),
     )
     .await?;
     let start = Instant::now();
@@ -117,7 +214,7 @@ pub(super) async fn reconstruction_v2(
         &file_id,
         query.content_hash.as_deref(),
         requested_range,
-        auth.as_ref().map(scope_from_auth),
+        repo.capability(),
     )
     .await;
     let elapsed = start.elapsed();
@@ -133,10 +230,10 @@ pub(super) async fn reconstruction_v2(
     Ok(Json(result?))
 }
 
-#[tracing::instrument(skip(state, headers, uri))]
+#[tracing::instrument(skip(state, uri))]
 pub(super) async fn batch_reconstruction(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    repo: XetRepository,
     uri: Uri,
 ) -> Result<Json<BatchReconstructionResponse>, ServerError> {
     // Acquire admission permit for batch reconstruction
@@ -149,14 +246,12 @@ pub(super) async fn batch_reconstruction(
         .parsing
         .try_acquire()
         .ok_or(ServerError::WorkQueueSaturated)?;
-    let auth = authorize(&state, &headers, TokenScope::Read)?;
-    let repository_scope = auth.as_ref().map(scope_from_auth);
     let file_ids = parse_batch_reconstruction_file_ids(&uri)?;
     let start = Instant::now();
     let mut responses = Vec::new();
 
     for file_id in file_ids {
-        match load_reconstruction_response(&state, &file_id, None, None, repository_scope).await {
+        match load_reconstruction_response(&state, &file_id, None, None, repo.capability()).await {
             Ok(response) => responses.push((file_id, response)),
             Err(ServerError::NotFound) => {}
             Err(error) => return Err(error),

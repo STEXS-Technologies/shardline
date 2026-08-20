@@ -9,7 +9,7 @@ use shardline_server_core::{InvalidSerializedShardError, ServerObjectStoreError}
 use shardline_storage::{LocalObjectStoreError, S3ObjectStoreError};
 use thiserror::Error;
 
-use crate::xorb::XorbParseError;
+use crate::xorb::{XorbInvalidFormatError, XorbParseError};
 
 /// Xet adapter failure.
 #[derive(Debug, Error)]
@@ -59,6 +59,9 @@ pub enum XetAdapterError {
     /// The uploaded xorb bytes were not a valid serialized xorb object.
     #[error("xorb body was not a valid serialized xorb object")]
     InvalidSerializedXorb,
+    /// The uploaded xorb declared more unpacked bytes than the server accepts.
+    #[error("serialized xorb declared unpacked length exceeded the maximum allowed size")]
+    XorbUnpackedLengthExceedsCap,
     /// The uploaded shard bytes were not a valid serialized shard object.
     #[error("shard body was not a valid serialized shard object")]
     InvalidSerializedShard(#[from] InvalidSerializedShardError),
@@ -83,6 +86,9 @@ impl From<XorbParseError> for XetAdapterError {
     fn from(value: XorbParseError) -> Self {
         match value {
             XorbParseError::HashMismatch => Self::XorbHashMismatch,
+            XorbParseError::InvalidFormat(XorbInvalidFormatError::UnpackedLengthExceedsCap) => {
+                Self::XorbUnpackedLengthExceedsCap
+            }
             XorbParseError::InvalidFormat(_)
             | XorbParseError::NumericConversion(_)
             | XorbParseError::Io(_) => Self::InvalidSerializedXorb,
@@ -136,6 +142,7 @@ mod tests {
             (XetAdapterError::InvalidXorbPrefix, "prefix"),
             (XetAdapterError::XorbHashMismatch, "hash"),
             (XetAdapterError::InvalidSerializedXorb, "xorb"),
+            (XetAdapterError::XorbUnpackedLengthExceedsCap, "unpacked"),
             (
                 XetAdapterError::InvalidSerializedShard(
                     InvalidSerializedShardError::ParserRejectedMetadata,

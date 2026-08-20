@@ -531,6 +531,23 @@ impl AsyncIndexStore for MemoryIndexStore {
         Box::pin(async move { DedupeStore::delete_dedupe_shard_mapping(self, chunk_hash) })
     }
 
+    fn prune_revisions_over_cap<'operation>(
+        &'operation self,
+        key: &'operation RepoKey,
+        max_revisions: usize,
+    ) -> IndexStoreFuture<'operation, u64, Self::Error> {
+        let store = self.clone();
+        let key = key.clone();
+        Box::pin(
+            async move { TreeStore::prune_revisions_over_cap(&store, &key, max_revisions).await },
+        )
+    }
+
+    fn list_revision_repo_keys(&self) -> IndexStoreFuture<'_, Vec<RepoKey>, Self::Error> {
+        let store = self.clone();
+        Box::pin(async move { TreeStore::list_revision_repo_keys(&store).await })
+    }
+
     impl_async_lifecycle_delegation!(MemoryIndexStore);
 }
 
@@ -643,15 +660,49 @@ impl TreeStore for MemoryIndexStore {
         Ok(self.lock_state()?.revisions.get(&search).cloned())
     }
 
-    async fn list_revisions(&self, key: &RepoKey) -> Result<Vec<RevisionRecord>, Self::Error> {
+    async fn count_revisions(&self, key: &RepoKey) -> Result<u64, Self::Error> {
         let state = self.lock_state()?;
+        let count = state
+            .revisions
+            .iter()
+            .filter(|(k, _)| {
+                k.provider == key.provider && k.owner == key.owner && k.repo == key.repo
+            })
+            .count();
+        Ok(u64::try_from(count).unwrap_or(u64::MAX))
+    }
+
+    async fn count_tree_entries(&self, key: &RepoKey) -> Result<u64, Self::Error> {
+        let state = self.lock_state()?;
+        let count = state
+            .tree_entries
+            .iter()
+            .filter(|(k, _)| {
+                k.provider == key.provider && k.owner == key.owner && k.repo == key.repo
+            })
+            .count();
+        Ok(u64::try_from(count).unwrap_or(u64::MAX))
+    }
+
+    async fn list_revisions(
+        &self,
+        key: &RepoKey,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<RevisionRecord>, Self::Error> {
+        let state = self.lock_state()?;
+        // MemoryRevisionKey orders by (provider, owner, repo, revision), so a
+        // filtered BTreeMap iteration is already ordered by revision name and a
+        // keyset cursor on the revision name resumes correctly.
         Ok(state
             .revisions
             .iter()
             .filter(|(k, _)| {
                 k.provider == key.provider && k.owner == key.owner && k.repo == key.repo
             })
+            .filter(|(k, _)| !cursor.is_some_and(|c| k.revision.as_str() <= c))
             .map(|(_, v)| v.clone())
+            .take(limit)
             .collect())
     }
 
@@ -666,6 +717,59 @@ impl TreeStore for MemoryIndexStore {
                 && k.revision == rev)
         });
         Ok(u64::from(removed))
+    }
+
+    async fn prune_revisions_over_cap(
+        &self,
+        key: &RepoKey,
+        max_revisions: usize,
+    ) -> Result<u64, Self::Error> {
+        let mut state = self.lock_state()?;
+        // Collect this repo's rows and sort oldest-created-first (created-at,
+        // then revision name as the deterministic tiebreaker) — the same
+        // eviction order the SQL backends use.
+        let mut rows: Vec<(MemoryRevisionKey, u64, String)> = state
+            .revisions
+            .iter()
+            .filter(|(k, _)| {
+                k.provider == key.provider && k.owner == key.owner && k.repo == key.repo
+            })
+            .map(|(k, v)| (k.clone(), v.created_at_unix_seconds, v.revision.clone()))
+            .collect();
+        rows.sort_by(
+            |(_, left_created, left_revision), (_, right_created, right_revision)| {
+                left_created
+                    .cmp(right_created)
+                    .then_with(|| left_revision.cmp(right_revision))
+            },
+        );
+        let Some(over_cap) = rows.len().checked_sub(max_revisions) else {
+            return Ok(0);
+        };
+        let removed = u64::try_from(over_cap).unwrap_or(u64::MAX);
+        for (pruned_key, _, _) in rows.into_iter().take(over_cap) {
+            let pruned_revision = pruned_key.revision.clone();
+            state.revisions.remove(&pruned_key);
+            state.tree_entries.retain(|k, _| {
+                !(k.provider == key.provider
+                    && k.owner == key.owner
+                    && k.repo == key.repo
+                    && k.revision == pruned_revision)
+            });
+        }
+        Ok(removed)
+    }
+
+    async fn list_revision_repo_keys(&self) -> Result<Vec<RepoKey>, Self::Error> {
+        let state = self.lock_state()?;
+        let mut keys: Vec<RepoKey> = state
+            .revisions
+            .keys()
+            .map(|k| RepoKey::new(&k.provider, &k.owner, &k.repo))
+            .collect();
+        keys.sort();
+        keys.dedup();
+        Ok(keys)
     }
 }
 
@@ -1737,6 +1841,55 @@ mod tests {
         assert!(deliveries.is_empty());
     }
 
+    #[test]
+    fn memory_index_store_purge_webhook_deliveries_older_than() {
+        let store = MemoryIndexStore::new();
+        let old = WebhookDelivery::new(
+            RepositoryProvider::GitHub,
+            "team".to_owned(),
+            "assets".to_owned(),
+            "delivery-old".to_owned(),
+            100,
+        )
+        .unwrap();
+        let fresh = WebhookDelivery::new(
+            RepositoryProvider::GitHub,
+            "team".to_owned(),
+            "assets".to_owned(),
+            "delivery-fresh".to_owned(),
+            500,
+        )
+        .unwrap();
+        assert!(store.record_webhook_delivery(&old).unwrap());
+        assert!(store.record_webhook_delivery(&fresh).unwrap());
+
+        // Purge everything strictly older than 400: the old claim is removed,
+        // the fresh one survives (dedup within the retention window is intact).
+        let purged = store.purge_webhook_deliveries_older_than(400).unwrap();
+        assert_eq!(purged, 1);
+        let remaining = store.list_webhook_deliveries().unwrap();
+        assert_eq!(remaining, vec![fresh]);
+    }
+
+    #[test]
+    fn memory_index_store_purge_webhook_deliveries_is_idempotent() {
+        let store = MemoryIndexStore::new();
+        let delivery = WebhookDelivery::new(
+            RepositoryProvider::GitHub,
+            "team".to_owned(),
+            "assets".to_owned(),
+            "delivery-1".to_owned(),
+            100,
+        )
+        .unwrap();
+        assert!(store.record_webhook_delivery(&delivery).unwrap());
+
+        assert_eq!(store.purge_webhook_deliveries_older_than(200).unwrap(), 1);
+        // A second purge has nothing left to remove.
+        assert_eq!(store.purge_webhook_deliveries_older_than(200).unwrap(), 0);
+        assert!(store.list_webhook_deliveries().unwrap().is_empty());
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn memory_index_store_async_interface() {
         use crate::AsyncIndexStore;
@@ -2752,6 +2905,65 @@ mod tests {
             AsyncIndexStore::contains_xorb(&store, &xorb_id)
                 .await
                 .unwrap()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn memory_tree_store_count_tree_entries_counts_only_the_matching_repo() {
+        use crate::{RepoKey, TreeEntry, TreeKey, TreeStore};
+        let store = MemoryIndexStore::new();
+        let repo = RepoKey::new("github", "owner", "repo");
+        let other = RepoKey::new("github", "owner", "other-repo");
+        assert_eq!(
+            TreeStore::count_tree_entries(&store, &repo).await.unwrap(),
+            0
+        );
+        let entry = |revision: &str, path: &str| TreeEntry {
+            provider: "github".to_owned(),
+            owner: "owner".to_owned(),
+            repo: "repo".to_owned(),
+            revision: revision.to_owned(),
+            path: path.to_owned(),
+            file_id: "ab".repeat(32),
+            size_bytes: 10,
+            updated_at_unix_seconds: 100,
+        };
+        // Distinct paths across multiple revisions all count against the repo.
+        for (revision, path) in [("main", "a.txt"), ("main", "b.txt"), ("feature", "c.txt")] {
+            assert!(
+                TreeStore::upsert_tree_entry(&store, &entry(revision, path))
+                    .await
+                    .unwrap()
+                    .created
+            );
+        }
+        assert_eq!(
+            TreeStore::count_tree_entries(&store, &repo).await.unwrap(),
+            3
+        );
+        // A same-path upsert does not grow the count; a different repo is not
+        // counted against this repository.
+        assert!(
+            !TreeStore::upsert_tree_entry(&store, &entry("main", "a.txt"))
+                .await
+                .unwrap()
+                .created
+        );
+        assert_eq!(
+            TreeStore::count_tree_entries(&store, &repo).await.unwrap(),
+            3
+        );
+        assert_eq!(
+            TreeStore::count_tree_entries(&store, &other).await.unwrap(),
+            0
+        );
+        // The key round-trips through the same repo filter used by the count.
+        let key = TreeKey::new("github", "owner", "repo", "main");
+        assert!(
+            TreeStore::tree_entry(&store, &key, "a.txt")
+                .await
+                .unwrap()
+                .is_some()
         );
     }
 }

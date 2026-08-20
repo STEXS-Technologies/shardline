@@ -229,8 +229,11 @@ async fn delete_clears_orphaned_loading_latch_and_wakes_waiter() {
 
     // Seed an orphaned loading latch, as left behind by a failed loader.
     {
-        let mut inner = cache.inner.write().await;
-        inner.loading.insert(key.clone(), Arc::new(Notify::new()));
+        let mut loading = cache.loading.lock().unwrap();
+        loading.insert(
+            key.clone(),
+            super::inner::LoadingEntry::new(Arc::new(Notify::new())),
+        );
     }
 
     // A get() on the orphaned latch would otherwise wait the full 30s stall.
@@ -338,54 +341,398 @@ async fn memory_cache_delete_expired_entry_returns_true() {
     assert_eq!(result, None);
 }
 
-// ── get_or_load with concurrent timeout ──────────────────────────────
+// ── get: a slow-but-alive loader keeps its latch (F-68) ────────────────
+//
+// A loader that takes longer than the 30s stall interval but completes within
+// the total orphan bound must NOT be declared orphaned: get() waits for it and
+// returns the loader's value instead of returning None early (which the service
+// layer would treat as a miss and start a second full load).
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn memory_cache_get_times_out_when_loader_hangs() {
+#[tokio::test(start_paused = true)]
+async fn get_waits_for_slow_loader_instead_of_returning_early() {
     use std::sync::Arc;
 
     let cache = Arc::new(MemoryReconstructionCache::new(
         NonZeroU64::new(3600).unwrap_or(NonZeroU64::MIN),
         NonZeroUsize::new(100).unwrap_or(NonZeroUsize::MIN),
     ));
-    let key = ReconstructionCacheKey::latest("hung-loader", None);
+    let key = ReconstructionCacheKey::latest("slow-loader", None);
 
-    // Task1: start get_or_load with a slow loader (60s)
+    // Loader takes 35s — longer than the 30s stall interval but well within
+    // the 60s total orphan bound.
     let cache_1 = Arc::clone(&cache);
     let key_1 = key.clone();
-    let task1 = tokio::spawn(async move {
-        let _result = cache_1
+    let loader_task = tokio::spawn(async move {
+        cache_1
             .get_or_load(&key_1, || {
                 Box::pin(async {
-                    // Slow loader — takes 60 seconds
-                    tokio::time::sleep(Duration::from_secs(60)).await;
-                    Ok::<_, ReconstructionCacheError>(b"new-data".to_vec())
+                    tokio::time::sleep(Duration::from_secs(35)).await;
+                    Ok::<_, ReconstructionCacheError>(b"slow-data".to_vec())
                 })
             })
-            .await;
+            .await
     });
 
-    // Give task1 time to enter the loading state
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // Give the loader time to register its latch.
+    tokio::time::advance(Duration::from_millis(100)).await;
 
-    // Task2: get() should hit the internal 30-second timeout
-    let result = tokio::time::timeout(Duration::from_secs(35), cache.get(&key)).await;
+    // A concurrent get() must wait for the loader, not return None at 30s.
+    let cache_2 = Arc::clone(&cache);
+    let key_2 = key.clone();
+    let get_task = tokio::spawn(async move { cache_2.get(&key_2).await });
 
-    #[allow(clippy::panic, clippy::match_wild_err_arm)]
-    match result {
-        Ok(Ok(value)) => {
-            // Internal timeout fired — get returned None
-            assert_eq!(value, None, "get should return None after internal timeout");
-        }
-        Ok(Err(e)) => panic!("get returned unexpected error: {e}"),
-        Err(_elapsed) => {
-            panic!(
-                "get did not complete within 35 seconds (internal 30s timeout should have fired)"
-            );
-        }
+    // Advance past the 30s stall interval: the waiter re-enters for a second
+    // interval instead of stealing the latch.
+    tokio::time::advance(Duration::from_secs(31)).await;
+    assert!(
+        !get_task.is_finished(),
+        "get() must not give up at the stall interval while the loader is alive"
+    );
+
+    // Advance the remaining 4s: the loader completes, stores the value, and
+    // the waiter observes it.
+    tokio::time::advance(Duration::from_secs(4)).await;
+
+    let loader_result = loader_task.await.unwrap();
+    assert_eq!(loader_result.unwrap(), Some(b"slow-data".to_vec()));
+
+    let get_result = tokio::time::timeout(Duration::from_secs(5), get_task).await;
+    match get_result {
+        Ok(Ok(Ok(Some(data)))) => assert_eq!(data, b"slow-data".to_vec()),
+        Ok(Ok(Ok(None))) => panic!("get() should have returned the loader's value"),
+        Ok(Ok(Err(e))) => panic!("get() returned an unexpected error: {e}"),
+        Ok(Err(_join)) => panic!("get() task panicked"),
+        Err(_) => panic!("get() stalled despite the loader completing"),
+    }
+}
+
+// ── get_or_load: a 35s loader with a concurrent waiter is deduplicated ──
+
+#[tokio::test(start_paused = true)]
+async fn get_or_load_slow_loader_dedup_concurrent_waiter() {
+    use std::sync::Arc;
+
+    let cache = Arc::new(MemoryReconstructionCache::new(
+        NonZeroU64::new(3600).unwrap_or(NonZeroU64::MIN),
+        NonZeroUsize::new(100).unwrap_or(NonZeroUsize::MIN),
+    ));
+    let key = ReconstructionCacheKey::latest("slow-dedup", None);
+    let load_count = std::sync::Arc::new(AtomicU64::new(0));
+
+    // Caller 1: becomes the exclusive loader (35s).
+    let cache_1 = Arc::clone(&cache);
+    let key_1 = key.clone();
+    let load_count_1 = std::sync::Arc::clone(&load_count);
+    let loader_task = tokio::spawn(async move {
+        cache_1
+            .get_or_load(&key_1, || {
+                load_count_1.fetch_add(1, Ordering::Relaxed);
+                Box::pin(async {
+                    tokio::time::sleep(Duration::from_secs(35)).await;
+                    Ok::<_, ReconstructionCacheError>(b"shared".to_vec())
+                })
+            })
+            .await
+    });
+
+    // Give the loader time to register its latch.
+    tokio::time::advance(Duration::from_millis(100)).await;
+
+    // Caller 2: must wait for the loader and get the value, NOT load again.
+    let cache_2 = Arc::clone(&cache);
+    let key_2 = key.clone();
+    let load_count_2 = std::sync::Arc::clone(&load_count);
+    let waiter_task = tokio::spawn(async move {
+        cache_2
+            .get_or_load(&key_2, || {
+                load_count_2.fetch_add(1, Ordering::Relaxed);
+                Box::pin(async {
+                    panic!("waiter must not run a second load");
+                    #[allow(unreachable_code)]
+                    Ok::<_, ReconstructionCacheError>(vec![])
+                })
+            })
+            .await
+    });
+
+    // Advance past the stall interval and through the loader's completion.
+    tokio::time::advance(Duration::from_secs(36)).await;
+
+    let loader_result = loader_task.await.unwrap();
+    assert_eq!(loader_result.unwrap(), Some(b"shared".to_vec()));
+
+    let waiter_result = tokio::time::timeout(Duration::from_secs(5), waiter_task).await;
+    match waiter_result {
+        Ok(Ok(Ok(value))) => assert_eq!(value, Some(b"shared".to_vec())),
+        Ok(Ok(Err(e))) => panic!("waiter returned an unexpected error: {e}"),
+        Ok(Err(_join)) => panic!("waiter task panicked"),
+        Err(_) => panic!("waiter stalled despite the loader completing"),
     }
 
-    drop(task1);
+    assert_eq!(
+        load_count.load(Ordering::Relaxed),
+        1,
+        "loader must only run once"
+    );
+}
+
+// ── get_or_load: a 61s loader (past the 60s total orphan bound) is not ──
+// orphaned — the loader's heartbeat keeps its latch alive (F-78)
+//
+// F-68 moved the latch-steal boundary to a 60s total orphan bound, but a
+// reconstruction longer than that was STILL stolen: the waiter's deadline fired
+// while the loader was alive, the latch was released, and the service layer
+// started a second full load. The loader now refreshes an aliveness stamp at
+// intervals, and the waiter extends its wait at the deadline while the stamp
+// is fresh instead of stealing the latch.
+
+#[tokio::test(start_paused = true)]
+async fn get_or_load_slow_loader_beyond_total_bound_keeps_latch() {
+    use std::sync::Arc;
+
+    let cache = Arc::new(MemoryReconstructionCache::new(
+        NonZeroU64::new(3600).unwrap_or(NonZeroU64::MIN),
+        NonZeroUsize::new(100).unwrap_or(NonZeroUsize::MIN),
+    ));
+    let key = ReconstructionCacheKey::latest("slow-beyond-bound", None);
+    let load_count = std::sync::Arc::new(AtomicU64::new(0));
+
+    // Caller 1: becomes the exclusive loader, taking 61s — past the 60s total
+    // orphan bound.
+    let cache_1 = Arc::clone(&cache);
+    let key_1 = key.clone();
+    let load_count_1 = std::sync::Arc::clone(&load_count);
+    let loader_task = tokio::spawn(async move {
+        cache_1
+            .get_or_load(&key_1, || {
+                load_count_1.fetch_add(1, Ordering::Relaxed);
+                Box::pin(async {
+                    tokio::time::sleep(Duration::from_secs(61)).await;
+                    Ok::<_, ReconstructionCacheError>(b"shared-beyond".to_vec())
+                })
+            })
+            .await
+    });
+
+    // Give the loader time to register its latch and start its 61s sleep.
+    tokio::time::advance(Duration::from_millis(100)).await;
+
+    // Caller 2: must keep waiting past the total orphan bound instead of
+    // stealing the latch and running a second load.
+    let cache_2 = Arc::clone(&cache);
+    let key_2 = key.clone();
+    let load_count_2 = std::sync::Arc::clone(&load_count);
+    let waiter_task = tokio::spawn(async move {
+        cache_2
+            .get_or_load(&key_2, || {
+                load_count_2.fetch_add(1, Ordering::Relaxed);
+                Box::pin(async {
+                    panic!("waiter must not run a second load");
+                    #[allow(unreachable_code)]
+                    Ok::<_, ReconstructionCacheError>(vec![])
+                })
+            })
+            .await
+    });
+
+    // A tiny advance so the waiter registers its wait (deadline ≈ 60.1s).
+    tokio::time::advance(Duration::from_millis(1)).await;
+
+    // Cross the waiter's 60s deadline while the loader is still alive: the
+    // loader's heartbeat keeps its aliveness stamp fresh, so the waiter must
+    // extend its wait instead of stealing the latch.
+    tokio::time::advance(Duration::from_secs(60)).await;
+    assert!(
+        !waiter_task.is_finished(),
+        "waiter must not steal the latch of a live loader at the orphan bound"
+    );
+
+    // Advance through the loader's completion at 61s: the value is stored and
+    // the waiter observes it.
+    tokio::time::advance(Duration::from_secs(2)).await;
+
+    let loader_result = loader_task.await.unwrap();
+    assert_eq!(loader_result.unwrap(), Some(b"shared-beyond".to_vec()));
+
+    let waiter_result = tokio::time::timeout(Duration::from_secs(5), waiter_task).await;
+    match waiter_result {
+        Ok(Ok(Ok(value))) => assert_eq!(value, Some(b"shared-beyond".to_vec())),
+        Ok(Ok(Err(e))) => panic!("waiter returned an unexpected error: {e}"),
+        Ok(Err(_join)) => panic!("waiter task panicked"),
+        Err(_) => panic!("waiter stalled despite the loader completing"),
+    }
+
+    assert_eq!(
+        load_count.load(Ordering::Relaxed),
+        1,
+        "loader must only run once"
+    );
+}
+
+// ── get: a get() waiter on a 61s loader extends instead of stealing ────
+// (F-78)
+
+#[tokio::test(start_paused = true)]
+async fn get_waits_for_slow_loader_beyond_total_bound_instead_of_stealing_latch() {
+    use std::sync::Arc;
+
+    let cache = Arc::new(MemoryReconstructionCache::new(
+        NonZeroU64::new(3600).unwrap_or(NonZeroU64::MIN),
+        NonZeroUsize::new(100).unwrap_or(NonZeroUsize::MIN),
+    ));
+    let key = ReconstructionCacheKey::latest("slow-get-beyond", None);
+
+    // Loader takes 61s — longer than the 60s total orphan bound.
+    let cache_1 = Arc::clone(&cache);
+    let key_1 = key.clone();
+    let loader_task = tokio::spawn(async move {
+        cache_1
+            .get_or_load(&key_1, || {
+                Box::pin(async {
+                    tokio::time::sleep(Duration::from_secs(61)).await;
+                    Ok::<_, ReconstructionCacheError>(b"slow-get-data".to_vec())
+                })
+            })
+            .await
+    });
+
+    // Give the loader time to register its latch and start its 61s sleep.
+    tokio::time::advance(Duration::from_millis(100)).await;
+
+    // A concurrent get() must wait for the loader, not steal the latch at the
+    // 60s total orphan bound.
+    let cache_2 = Arc::clone(&cache);
+    let key_2 = key.clone();
+    let get_task = tokio::spawn(async move { cache_2.get(&key_2).await });
+
+    // A tiny advance so the waiter registers its wait (deadline ≈ 60.1s).
+    tokio::time::advance(Duration::from_millis(1)).await;
+
+    // Cross the waiter's 60s deadline while the loader is still alive: the
+    // loader's heartbeat keeps its aliveness stamp fresh, so the waiter must
+    // extend its wait instead of stealing the latch.
+    tokio::time::advance(Duration::from_secs(60)).await;
+    assert!(
+        !get_task.is_finished(),
+        "get() must not give up at the total orphan bound while the loader is alive"
+    );
+
+    // Advance through the loader's completion at 61s: the value is stored and
+    // the waiter observes it.
+    tokio::time::advance(Duration::from_secs(2)).await;
+
+    let loader_result = loader_task.await.unwrap();
+    assert_eq!(loader_result.unwrap(), Some(b"slow-get-data".to_vec()));
+
+    let get_result = tokio::time::timeout(Duration::from_secs(5), get_task).await;
+    match get_result {
+        Ok(Ok(Ok(Some(data)))) => assert_eq!(data, b"slow-get-data".to_vec()),
+        Ok(Ok(Ok(None))) => panic!("get() should have returned the loader's value"),
+        Ok(Ok(Err(e))) => panic!("get() returned an unexpected error: {e}"),
+        Ok(Err(_join)) => panic!("get() task panicked"),
+        Err(_) => panic!("get() stalled despite the loader completing"),
+    }
+}
+
+// ── get_or_load: a never-completing loader cannot wedge a waiter beyond the
+//    bounded total (F-100) ────────────────────────────────────────────────
+//
+// The F-78 deadline extension lets a loader that keeps refreshing its aliveness
+// stamp extend every waiter's bound by 60s forever. A loader that never
+// completes but stays pollable (so its heartbeat keeps the stamp fresh) must
+// not pin waiters beyond the documented total: LOADER_ORPHAN_TOTAL_TIMEOUT ×
+// (1 + LOADER_ORPHAN_EXTENSION_CAP), after which the waiter releases the latch
+// and reports a miss.
+
+#[tokio::test(start_paused = true)]
+async fn get_or_load_waiter_escapes_never_completing_loader_within_total_bound() {
+    use std::sync::Arc;
+
+    let cache = Arc::new(MemoryReconstructionCache::new(
+        NonZeroU64::new(3600).unwrap_or(NonZeroU64::MIN),
+        NonZeroUsize::new(100).unwrap_or(NonZeroUsize::MIN),
+    ));
+    let key = ReconstructionCacheKey::latest("wedged-loader", None);
+    let load_count = std::sync::Arc::new(AtomicU64::new(0));
+
+    // Caller 1: a loader that never completes but stays pollable (yields via
+    // 1s sleeps), so run_loader_with_heartbeat keeps its aliveness stamp fresh
+    // forever.
+    let cache_1 = Arc::clone(&cache);
+    let key_1 = key.clone();
+    let load_count_1 = Arc::clone(&load_count);
+    let loader_task = tokio::spawn(async move {
+        cache_1
+            .get_or_load(&key_1, || {
+                load_count_1.fetch_add(1, Ordering::Relaxed);
+                Box::pin(async {
+                    loop {
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                    }
+                    #[allow(unreachable_code)]
+                    Ok::<_, ReconstructionCacheError>(b"never".to_vec())
+                })
+            })
+            .await
+    });
+
+    // Give the loader time to register its latch.
+    tokio::time::advance(Duration::from_millis(100)).await;
+
+    // Caller 2: a waiter that must escape within the bounded total even though
+    // the wedged loader's aliveness stamp never goes stale.
+    let cache_2 = Arc::clone(&cache);
+    let key_2 = key.clone();
+    let load_count_2 = Arc::clone(&load_count);
+    let waiter_task = tokio::spawn(async move {
+        cache_2
+            .get_or_load(&key_2, || {
+                load_count_2.fetch_add(1, Ordering::Relaxed);
+                Box::pin(async {
+                    panic!("waiter must not run a second load inside the adapter");
+                    #[allow(unreachable_code)]
+                    Ok::<_, ReconstructionCacheError>(vec![])
+                })
+            })
+            .await
+    });
+
+    // Poll the waiter once so it registers its wait (deadline ≈ now + 60s).
+    tokio::task::yield_now().await;
+
+    // Advance in 60s stages, yielding between stages. `tokio::time::advance`
+    // only marks timer-woken tasks ready; the yield polls them so the wedged
+    // loader's heartbeat keeps the stamp fresh AND the waiter's extension loop
+    // progresses one interval per stage. After (1 + cap) stages the waiter's
+    // extension cap saturates and it must give up and report a miss.
+    let total_secs = (super::LOADER_ORPHAN_EXTENSION_CAP as u64 + 1)
+        * super::LOADER_ORPHAN_TOTAL_TIMEOUT.as_secs();
+    for _ in 0..=super::LOADER_ORPHAN_EXTENSION_CAP + 1 {
+        tokio::time::advance(Duration::from_secs(60)).await;
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        waiter_task.is_finished(),
+        "waiter must escape within the bounded total ({total_secs}s)"
+    );
+
+    let waiter_result = tokio::time::timeout(Duration::from_secs(5), waiter_task).await;
+    match waiter_result {
+        Ok(Ok(Ok(None))) => {}
+        Ok(Ok(Ok(Some(_)))) => panic!("waiter should not observe a value from the wedged loader"),
+        Ok(Ok(Err(e))) => panic!("waiter returned an unexpected error: {e}"),
+        Ok(Err(_join)) => panic!("waiter task panicked"),
+        Err(_) => panic!("waiter stayed wedged past the bounded total"),
+    }
+
+    assert_eq!(
+        load_count.load(Ordering::Relaxed),
+        1,
+        "the adapter-level waiter must not run its own load"
+    );
+
+    // The wedged loader never completes; abort it so the test can finish.
+    loader_task.abort();
 }
 
 // ── get_or_load: cache hit (fast path) ────────────────────────────────
@@ -639,6 +986,78 @@ async fn get_loading_coalescing_loader_failure_returns_none() {
     }
 
     let _ = task_loader.await;
+}
+
+// ── get_or_load: caller cancellation releases the loading latch (F-112) ──
+//
+// When the exclusive loader's caller is dropped mid-load (client disconnect,
+// request timeout, shutdown), the loading latch it registered must be released
+// synchronously. Without this, the next caller for the same key stalls for the
+// full 60s orphan bound and the loading map grows with zombie entries (each
+// holding a pending load task). A Drop guard removes the latch on caller-drop.
+
+#[tokio::test(start_paused = true)]
+async fn get_or_load_caller_drop_releases_loading_latch() {
+    let cache = std::sync::Arc::new(MemoryReconstructionCache::new(
+        NonZeroU64::new(3600).unwrap_or(NonZeroU64::MIN),
+        NonZeroUsize::new(100).unwrap_or(NonZeroUsize::MIN),
+    ));
+    let key = ReconstructionCacheKey::latest("caller-drop", None);
+
+    // R1: become the exclusive loader. The loader future never completes on
+    // its own — it waits for a signal that is never sent, so the caller stays
+    // in flight until we drop its future.
+    let (never_tx, never_rx) = tokio::sync::oneshot::channel::<()>();
+    let _keep_sender_alive = never_tx;
+    let cache_loader = std::sync::Arc::clone(&cache);
+    let key_loader = key.clone();
+    let loader_task = tokio::spawn(async move {
+        cache_loader
+            .get_or_load(&key_loader, || {
+                Box::pin(async move {
+                    let _ = never_rx.await;
+                    Ok::<_, ReconstructionCacheError>(b"loaded".to_vec())
+                })
+            })
+            .await
+    });
+
+    // Let the loader task register its loading latch.
+    tokio::time::advance(Duration::from_millis(10)).await;
+    assert!(
+        cache.loading.lock().unwrap().contains_key(&key),
+        "loader must register its loading latch before cancellation"
+    );
+
+    // Drop the caller future mid-load (client disconnect / timeout).
+    loader_task.abort();
+    tokio::time::advance(Duration::from_millis(1)).await;
+    let _ = loader_task.await;
+
+    // The latch must be gone immediately — not after the 60s orphan bound.
+    assert!(
+        !cache.loading.lock().unwrap().contains_key(&key),
+        "cancelled loader must release its loading latch (F-112)"
+    );
+
+    // A next caller must NOT stall for the full orphan bound; it loads
+    // promptly. Advance past the 5s probe bound so a leaked zombie latch
+    // surfaces as a timeout instead of hanging the test.
+    let cache_retry = std::sync::Arc::clone(&cache);
+    let retry = tokio::spawn(async move {
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            cache_retry.get_or_load(&key, || {
+                Box::pin(async { Ok::<_, ReconstructionCacheError>(b"retry".to_vec()) })
+            }),
+        )
+        .await
+    });
+    tokio::time::advance(Duration::from_secs(5)).await;
+    match retry.await.unwrap() {
+        Ok(result) => assert_eq!(result.unwrap(), Some(b"retry".to_vec())),
+        Err(_) => panic!("next caller stalled on a zombie loading latch (F-112)"),
+    }
 }
 
 // ── put: update existing entry does not evict ──────────────────────────
@@ -1281,6 +1700,124 @@ async fn get_or_load_waiter_gets_notified_value() {
         1,
         "loader should only run once"
     );
+}
+
+// ── get_or_load: fast loader + many waiters never hangs (lost wakeup) ──
+//
+// A loader that finishes almost instantly can fire `notify_waiters()` before a
+// concurrent waiter has registered its `notified()` future. tokio's `Notify`
+// keeps no permit, so that wakeup is lost and a bare `notified().await` would
+// hang forever. The waiter loop must re-check the cache/loading state before
+// (and after) waiting so every waiter observes the stored value. Assert no
+// waiter exceeds a short bound.
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn get_or_load_fast_loader_never_hangs_waiters() {
+    use std::sync::Arc;
+
+    let cache = Arc::new(MemoryReconstructionCache::new(
+        NonZeroU64::new(3600).unwrap_or(NonZeroU64::MIN),
+        NonZeroUsize::new(100).unwrap_or(NonZeroUsize::MIN),
+    ));
+    let key = ReconstructionCacheKey::latest("fast-loader", None);
+    let load_count = std::sync::Arc::new(AtomicU64::new(0));
+
+    let mut handles = Vec::new();
+    for _ in 0..32 {
+        let cache = Arc::clone(&cache);
+        let key = key.clone();
+        let load_count = std::sync::Arc::clone(&load_count);
+        handles.push(tokio::spawn(async move {
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                cache.get_or_load(&key, || {
+                    load_count.fetch_add(1, Ordering::Relaxed);
+                    Box::pin(async { Ok::<_, ReconstructionCacheError>(b"fast".to_vec()) })
+                }),
+            )
+            .await
+        }));
+    }
+
+    for handle in handles {
+        match handle.await.unwrap() {
+            Ok(Ok(Some(data))) => assert_eq!(data, b"fast".to_vec()),
+            Ok(Ok(None)) => panic!("waiter observed a miss despite a successful loader"),
+            Ok(Err(e)) => panic!("get_or_load returned an unexpected error: {e}"),
+            Err(_) => panic!("waiter hung beyond the 5s bound"),
+        }
+    }
+
+    assert_eq!(
+        load_count.load(Ordering::Relaxed),
+        1,
+        "exactly one loader should have run"
+    );
+}
+
+// ── get_or_load: waiter on an orphaned latch does not hang forever ─────
+//
+// When the exclusive loader dies without ever putting/notifying, the loading
+// latch it left behind would block a waiter forever under a bare
+// `notified().await`. The bounded waiter loop must declare the loader orphaned,
+// release the latch, and return a miss within the total orphan bound
+// (LOADER_ORPHAN_TOTAL_TIMEOUT, 60s).
+
+#[tokio::test(start_paused = true)]
+async fn get_or_load_waiter_does_not_hang_on_orphaned_latch() {
+    use std::sync::Arc;
+
+    let cache = Arc::new(MemoryReconstructionCache::new(
+        NonZeroU64::new(3600).unwrap_or(NonZeroU64::MIN),
+        NonZeroUsize::new(100).unwrap_or(NonZeroUsize::MIN),
+    ));
+    let key = ReconstructionCacheKey::latest("orphaned-latch", None);
+
+    // Seed an orphaned loading latch, as left behind by a loader that never
+    // put()s or notifies. Its aliveness stamp is never refreshed, so a waiter
+    // at the orphan bound must declare it dead and release it.
+    {
+        let mut loading = cache.loading.lock().unwrap();
+        loading.insert(
+            key.clone(),
+            super::inner::LoadingEntry::new(Arc::new(tokio::sync::Notify::new())),
+        );
+    }
+
+    // A waiter must not block past the total orphan bound; advance time past
+    // it so a hang would be detected by the waiter never completing.
+    let cache_wait = Arc::clone(&cache);
+    let key_wait = key.clone();
+    let waiter = tokio::spawn(async move {
+        cache_wait
+            .get_or_load(&key_wait, || {
+                Box::pin(async { Ok::<_, ReconstructionCacheError>(b"retry".to_vec()) })
+            })
+            .await
+    });
+
+    tokio::time::advance(Duration::from_secs(61)).await;
+
+    match waiter.await.unwrap() {
+        Ok(None) => {
+            // The waiter gave up on the orphaned latch and reported a miss.
+        }
+        Ok(Some(_)) => panic!("unexpected value from an orphaned latch"),
+        Err(e) => panic!("get_or_load returned an unexpected error: {e}"),
+    }
+
+    // A subsequent call retries and succeeds promptly.
+    let retry = tokio::time::timeout(
+        Duration::from_secs(5),
+        cache.get_or_load(&key, || {
+            Box::pin(async { Ok::<_, ReconstructionCacheError>(b"retry".to_vec()) })
+        }),
+    )
+    .await;
+    match retry {
+        Ok(retry_result) => assert_eq!(retry_result.unwrap(), Some(b"retry".to_vec())),
+        Err(_) => panic!("retry stalled after latch cleanup"),
+    }
 }
 
 // ── get_or_load expired entry cleanup in write-lock re-check ──────────

@@ -3,9 +3,11 @@
 //!
 //! Routing is `/{bucket}/{*key}` where `{bucket}` is the single dotted segment
 //! `{owner}.{name}` of the bearer token's `RepositoryScope` and `{*key}` is the
-//! arbitrary-depth S3 object key. Every handler authenticates with the
-//! SigV4→bearer bridge ([`authorize_s3`]), binds the bucket to the token
-//! claims, and then dispatches on the query sub-resources.
+//! arbitrary-depth S3 object key. Every handler carries the [`S3Repository`]
+//! axum extractor, which authenticates with the SigV4→bearer bridge
+//! ([`authorize_s3`]), binds the bucket to the token claims, and mints the
+//! typed [`AuthorizedRepository`] capability that storage entry points require;
+//! handlers then dispatch on the query sub-resources.
 
 pub(super) mod aws_chunked;
 pub(super) mod bucket;
@@ -24,14 +26,18 @@ use std::{
     sync::{Arc, LazyLock, Mutex, Weak},
 };
 
-use axum::http::{HeaderMap, HeaderValue, Uri, header::AUTHORIZATION};
-use shardline_protocol::{RepositoryScope, TokenScope};
-use shardline_s3_adapter::{
-    QueryMap, S3Error, extract_access_key, require_s3_bucket_binding, s3_object_key,
+use axum::{
+    extract::FromRequestParts,
+    http::{HeaderMap, HeaderValue, Method, Uri, header::AUTHORIZATION, request::Parts},
 };
+use shardline_protocol::TokenScope;
+use shardline_s3_adapter::{
+    QueryMap, S3Error, encode_bucket, extract_access_key, require_s3_bucket_binding, s3_object_key,
+};
+use shardline_server_core::{AuthorizedRepository, VerifiedAuthContext};
 use shardline_storage::ObjectKey;
 
-use crate::{ServerError, app::AppState, auth::AuthContext, protocol_support::scope_namespace};
+use crate::{ServerError, app::AppState, protocol_support::scope_namespace};
 
 /// Serializes overwrite operations (`PutObject` and multipart completion)
 /// per storage object key.
@@ -117,7 +123,7 @@ pub(super) fn authorize_s3(
     state: &AppState,
     headers: &HeaderMap,
     required_scope: TokenScope,
-) -> Result<Option<AuthContext>, S3Error> {
+) -> Result<Option<VerifiedAuthContext>, S3Error> {
     if let Some(auth) = &state.auth {
         let access_key = extract_access_key(headers).ok_or_else(S3Error::access_denied)?;
         let mut bearer_headers = HeaderMap::new();
@@ -139,9 +145,112 @@ pub(super) fn authorize_s3(
     Ok(None)
 }
 
+/// A typed, repository-scoped S3 authorization capability extracted by axum.
+///
+/// `S3Repository` is the **only** way an S3 handler may obtain an
+/// [`AuthorizedRepository`]: its [`FromRequestParts`] implementation reproduces
+/// the exact S3 authorization + binding chain — SigV4 access key / bearer
+/// bridge → token verification + scope ([`authorize_s3`]) → URI-bucket ↔ claims
+/// binding ([`require_s3_bucket_binding`]) — in the same order as the
+/// pre-refactor `authorize_s3` + `require_s3_object_context` calls, and then
+/// mints the capability from the already-verified context. A handler that does
+/// not carry this extractor cannot reach repository-scoped storage at all.
+pub struct S3Repository {
+    pub(crate) inner: AuthorizedRepository,
+}
+
+impl S3Repository {
+    /// The verified, scope-checked capability backing this extractor.
+    #[must_use]
+    pub(crate) const fn capability(&self) -> &AuthorizedRepository {
+        &self.inner
+    }
+
+    /// Reproduces the S3 authorization + binding chain and mints a capability
+    /// with the given required scope.
+    ///
+    /// 1. SigV4 access key → bearer bridge, token verification, scope check
+    ///    ([`authorize_s3`] unchanged: permissive deployments with no auth
+    ///    provider yield `Ok(None)` unless strict mode fails closed).
+    /// 2. When the URI carries a bucket (every route but the service-level
+    ///    `ListBuckets`), bind it to the token claims BEFORE minting: malformed
+    ///    bucket → `404 NoSuchBucket`, claims mismatch or missing claims →
+    ///    `403 AccessDenied`.
+    /// 3. Mint the capability: `Some(context)` (already verified by the auth
+    ///    layer) → [`AuthorizedRepository::from_verified_context`] (no token is
+    ///    re-verified; the scope gate is re-applied idempotently); `None`
+    ///    (permissive) → [`AuthorizedRepository::anonymous_full_access`], whose
+    ///    `None` namespace resolves to the global namespace exactly like
+    ///    `scope_namespace(None)`.
+    fn authorize(
+        state: &Arc<AppState>,
+        headers: &HeaderMap,
+        uri: &Uri,
+        required_scope: TokenScope,
+    ) -> Result<Self, S3Error> {
+        let auth = authorize_s3(state, headers, required_scope)?;
+
+        if let Some(bucket) = bucket_from_uri(uri) {
+            let claims = auth.as_ref().map(|context| context.claims().repository());
+            require_s3_bucket_binding(claims, &bucket)?;
+        }
+
+        let inner = match auth {
+            Some(context) => {
+                // The verified context (minted by the auth layer's
+                // `verify_verified`) flows straight into the capability seam;
+                // `from_verified_context` only re-applies the scope gate
+                // idempotently.
+                AuthorizedRepository::from_verified_context(context, required_scope)
+                    .map_err(|error| S3Error::from(ServerError::from(error)))?
+            }
+            None => AuthorizedRepository::anonymous_full_access(),
+        };
+        Ok(Self { inner })
+    }
+}
+
+impl FromRequestParts<Arc<AppState>> for S3Repository {
+    type Rejection = S3Error;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
+        // The required scope follows every registered handler's per-method
+        // mapping (GET/HEAD → Read, PUT/POST/DELETE → Write), so each handler
+        // mints with exactly the scope its pre-refactor `authorize_s3` call used.
+        let required_scope = match parts.method {
+            Method::GET | Method::HEAD => TokenScope::Read,
+            Method::PUT | Method::POST | Method::DELETE => TokenScope::Write,
+            _ => return Err(S3Error::access_denied()),
+        };
+        Self::authorize(state, &parts.headers, &parts.uri, required_scope)
+    }
+}
+
+/// Parses the `{owner}.{name}` bucket segment from a request URI path.
+///
+/// The bucket is the first path segment, percent-decoded exactly like axum's
+/// `Path` extractor. Returns `None` for the service-level path `/`
+/// (`ListBuckets`), which carries no bucket and therefore no bucket binding.
+fn bucket_from_uri(uri: &Uri) -> Option<String> {
+    let segment = uri.path().trim_start_matches('/').split('/').next()?;
+    if segment.is_empty() {
+        return None;
+    }
+    let decoded = percent_encoding::percent_decode_str(segment)
+        .decode_utf8()
+        .map(|decoded| decoded.into_owned())
+        .unwrap_or_else(|_error| segment.to_owned());
+    Some(decoded)
+}
+
 /// The scope namespace, storage object key, and client key for one S3 request.
-pub(super) struct S3ObjectContext {
-    /// The bucket name (`{owner}.{name}`).
+pub(super) struct S3ObjectContext<'ctx> {
+    /// The bound capability this context was derived from.
+    pub(super) auth: &'ctx AuthorizedRepository,
+    /// The bucket name (`{owner}.{name}`), derived from the bound capability.
     pub(super) bucket: String,
     /// sha256 repository-scope namespace keying the listing index rows.
     pub(super) scope_namespace: String,
@@ -151,24 +260,36 @@ pub(super) struct S3ObjectContext {
     pub(super) object_key: ObjectKey,
 }
 
-/// Binds the bucket to the token claims and derives the storage object key.
+/// Derives the storage object key for one S3 object request from the bound
+/// capability.
+///
+/// The bucket↔claims binding already happened in the [`S3Repository`]
+/// extractor, so the context's bucket and scope namespace are derived from the
+/// capability itself (equal to the URI bucket by construction). Only the
+/// key-level validation remains here — unchanged semantics:
+/// [`S3Error::no_such_key`] for an invalid key.
 ///
 /// # Errors
 ///
-/// Returns [`S3Error::no_such_bucket`] when the bucket cannot be decoded,
-/// [`S3Error::access_denied`] on claims mismatch, and
-/// [`S3Error::no_such_key`] when the object key is invalid.
-pub(super) fn require_s3_object_context(
-    claims: Option<&RepositoryScope>,
-    bucket: &str,
+/// Returns [`S3Error::access_denied`] when the capability carries no repository
+/// (unreachable in practice: permissive capabilities never survive the
+/// extractor's bucket binding), and [`S3Error::no_such_key`] when the object
+/// key is invalid.
+pub(super) fn require_s3_object_context<'ctx>(
+    auth: &'ctx AuthorizedRepository,
     key: &str,
-) -> Result<S3ObjectContext, S3Error> {
-    require_s3_bucket_binding(claims, bucket)?;
-    let scope_namespace = scope_namespace(claims);
+) -> Result<S3ObjectContext<'ctx>, S3Error> {
+    let bucket = auth
+        .owner()
+        .zip(auth.name())
+        .map(|(owner, name)| encode_bucket(owner, name))
+        .ok_or_else(S3Error::access_denied)?;
+    let scope_namespace = scope_namespace(auth.namespace());
     let object_key =
         s3_object_key(&scope_namespace, key).map_err(|_error| S3Error::no_such_key(key))?;
     Ok(S3ObjectContext {
-        bucket: bucket.to_owned(),
+        auth,
+        bucket,
         scope_namespace,
         key: key.to_owned(),
         object_key,

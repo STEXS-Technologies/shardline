@@ -8,8 +8,9 @@ use serde_json::to_vec;
 use shardline_index::{
     AsyncIndexStore, DedupeShardMapping, FileChunkRecord, FileId, FileReconstruction, FileRecord,
     IndexStoreFuture, LifecycleStore, LocalIndexStore, LocalIndexStoreError,
-    ProviderRepositoryState, QuarantineCandidate, RecordMutation, RecordTraversal, RetentionHold,
-    RetentionHoldError, WebhookDelivery, XorbId, parse_xet_hash_hex, xet_hash_hex_string,
+    ProviderRepositoryState, QuarantineCandidate, RecordMutation, RecordTraversal, RepoKey,
+    RetentionHold, RetentionHoldError, WebhookDelivery, XorbId, parse_xet_hash_hex,
+    xet_hash_hex_string,
 };
 use shardline_protocol::{RepositoryProvider, RepositoryScope, ShardlineHash};
 use shardline_server_core::{ServerObjectStore, chunk_object_key};
@@ -1546,6 +1547,19 @@ impl AsyncIndexStore for FailFirstRetentionHoldIndexStore {
         )
     }
 
+    fn purge_webhook_deliveries_older_than<'operation>(
+        &'operation self,
+        older_than_unix_seconds: u64,
+    ) -> IndexStoreFuture<'operation, u64, Self::Error> {
+        Box::pin(async move {
+            AsyncIndexStore::purge_webhook_deliveries_older_than(
+                &self.inner,
+                older_than_unix_seconds,
+            )
+            .await
+        })
+    }
+
     fn provider_repository_state<'operation>(
         &'operation self,
         provider: RepositoryProvider,
@@ -1582,6 +1596,23 @@ impl AsyncIndexStore for FailFirstRetentionHoldIndexStore {
             AsyncIndexStore::delete_provider_repository_state(&self.inner, provider, owner, repo)
                 .await
         })
+    }
+
+    fn prune_revisions_over_cap<'operation>(
+        &'operation self,
+        key: &'operation RepoKey,
+        max_revisions: usize,
+    ) -> IndexStoreFuture<'operation, u64, Self::Error> {
+        let inner = self.inner.clone();
+        let key = key.clone();
+        Box::pin(async move {
+            AsyncIndexStore::prune_revisions_over_cap(&inner, &key, max_revisions).await
+        })
+    }
+
+    fn list_revision_repo_keys(&self) -> IndexStoreFuture<'_, Vec<RepoKey>, Self::Error> {
+        let inner = self.inner.clone();
+        Box::pin(async move { AsyncIndexStore::list_revision_repo_keys(&inner).await })
     }
 }
 
@@ -1774,6 +1805,19 @@ impl AsyncIndexStore for FailAlwaysStore {
         // Always fail to exercise the tracing::warn! cleanup path
         Box::pin(async move { Err(LocalIndexStoreError::InvalidLegacyImportState) })
     }
+
+    fn purge_webhook_deliveries_older_than<'operation>(
+        &'operation self,
+        older_than_unix_seconds: u64,
+    ) -> IndexStoreFuture<'operation, u64, Self::Error> {
+        Box::pin(async move {
+            AsyncIndexStore::purge_webhook_deliveries_older_than(
+                &self.inner,
+                older_than_unix_seconds,
+            )
+            .await
+        })
+    }
     fn provider_repository_state<'operation>(
         &'operation self,
         provider: RepositoryProvider,
@@ -1807,6 +1851,23 @@ impl AsyncIndexStore for FailAlwaysStore {
             AsyncIndexStore::delete_provider_repository_state(&self.inner, provider, owner, repo)
                 .await
         })
+    }
+
+    fn prune_revisions_over_cap<'operation>(
+        &'operation self,
+        key: &'operation RepoKey,
+        max_revisions: usize,
+    ) -> IndexStoreFuture<'operation, u64, Self::Error> {
+        let inner = self.inner.clone();
+        let key = key.clone();
+        Box::pin(async move {
+            AsyncIndexStore::prune_revisions_over_cap(&inner, &key, max_revisions).await
+        })
+    }
+
+    fn list_revision_repo_keys(&self) -> IndexStoreFuture<'_, Vec<RepoKey>, Self::Error> {
+        let inner = self.inner.clone();
+        Box::pin(async move { AsyncIndexStore::list_revision_repo_keys(&inner).await })
     }
 }
 

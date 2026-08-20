@@ -96,6 +96,9 @@ pub fn print_index_rebuild_summary(report: &LocalIndexRebuildReport) {
         "removed_stale_latest_records: {}",
         report.removed_stale_latest_records
     );
+    for location in &report.preserved_latest_records_unreadable_version {
+        println!("kept_latest_record_unreadable_version: {}", location);
+    }
     println!(
         "scanned_reconstructions: {}",
         report.scanned_reconstructions
@@ -269,6 +272,10 @@ pub fn print_local_gc_summary(report: &LocalGcReport) {
     );
     println!("deleted_chunks: {}", report.deleted_chunks);
     println!("deleted_bytes: {}", report.deleted_bytes);
+    println!(
+        "pruned_revisions_over_cap: {}",
+        report.pruned_revisions_over_cap
+    );
 }
 
 pub fn print_local_gc_cli_summary(
@@ -485,6 +492,7 @@ mod tests {
             rebuilt_dedupe_shard_mappings: 0,
             unchanged_dedupe_shard_mappings: 0,
             removed_stale_dedupe_shard_mappings: 0,
+            preserved_latest_records_unreadable_version: vec![],
             issues: vec![],
         }
     }
@@ -645,6 +653,9 @@ mod tests {
             released_quarantine_candidates: 0,
             deleted_chunks: 0,
             deleted_bytes: 0,
+            reaped_stale_temporary_chunks: 0,
+            reaped_stale_temporary_bytes: 0,
+            pruned_revisions_over_cap: 0,
         }
     }
 

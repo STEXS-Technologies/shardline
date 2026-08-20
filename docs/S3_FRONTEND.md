@@ -37,12 +37,15 @@ as out of scope until a real client need appears.
    `CompleteMultipartUpload` feeds the parts sequentially through **one CDC
    pass**, producing a single `FileRecord` — preserving whole-object dedup and
    the single-record read model (GetObject + Range work unchanged). Part count
-   capped at 10,000. S3's **5 MiB minimum part size** applies to every part
-   except the final one (enforced at Complete, matching S3); per-session and
-   aggregate byte quotas (`SHARDLINE_S3_UPLOAD_SESSION_MAX_BYTES` /
-   `SHARDLINE_S3_UPLOAD_TOTAL_MAX_BYTES`) bound disk use; session expiry is
-   anchored to **initiation** (keep-alive parts do not extend it), matching
-   S3's 7-day multipart lifecycle. `AbortMultipartUpload` discards the session.
+   capped at 10,000. `UploadPart` accepts **any part size** (matching S3); the
+   **5 MiB minimum part size** is enforced at Complete for every part except
+   the last (the highest part number in the submitted list), also matching S3.
+   Per-session and aggregate byte quotas (`SHARDLINE_S3_UPLOAD_SESSION_MAX_BYTES` /
+   `SHARDLINE_S3_UPLOAD_TOTAL_MAX_BYTES`) and a global active-part-file cap
+   (`SHARDLINE_S3_UPLOAD_MAX_ACTIVE_PART_FILES`, checked before the part file
+   is written) bound disk use; session expiry is anchored to **initiation**
+   (keep-alive parts do not extend it), matching S3's 7-day multipart
+   lifecycle. `AbortMultipartUpload` discards the session.
 4. **GetObject Range / ETag / errors.** Range reuses the existing byte-range +
    reconstruction path (`parse_http_byte_range`, 206/416 semantics). ETag is the
    **hex MD5 of the object bytes** (standard S3; identical for single-PUT and
@@ -50,7 +53,8 @@ as out of scope until a real client need appears.
    accept it). Errors are an S3 XML envelope (`<Error><Code>…`);
    codes: `NoSuchKey`, `NoSuchBucket`, `AccessDenied`, `InvalidRange`,
    `EntityTooSmall`, `InvalidPart`, `NoSuchUpload`, `NotImplemented`,
-   `PreconditionFailed` (conditional mismatches), `MalformedXML`, `InternalError`.
+   `PreconditionFailed` (conditional mismatches), `MalformedXML`, `InternalError`,
+   `TooManyParts` (global active-part-file cap reached), `SlowDown`.
 
 ## Operation matrix
 
@@ -132,8 +136,10 @@ must mint with the **same** key material.
 
 - Server: `SHARDLINE_AUTH_PROVIDER=local` plus either
   `SHARDLINE_TOKEN_SIGNING_KEY=<32+ byte key>` **or**
-  `SHARDLINE_TOKEN_SIGNING_KEY_FILE=/path/to/key` (the file form strips one
-  trailing line terminator — the standard `echo $KEY > file` artifact).
+  `SHARDLINE_TOKEN_SIGNING_KEY_FILE=/path/to/key`. The signing key is
+  variable-length and binary-capable, so the file bytes are used verbatim —
+  there is no trailing-newline stripping. Write the key file without a trailing
+  newline (`printf` rather than `echo $KEY > file`).
 - CLI mint (note `--ttl-seconds`, and that a key source is required):
 
   ```sh
@@ -148,8 +154,9 @@ must mint with the **same** key material.
   `Authorization: Bearer <token>` or as the SigV4 form
   `Authorization: AWS4-HMAC-SHA256 Credential=<token>/<date>/<region>/s3/aws4_request`
   (the signature is not verified). `--key-env`/`--key-file` and the server's
-  env/file source must resolve to the same bytes — when the key lives in a
-  file, both sides strip the trailing newline identically.
+  env/file source must resolve to the same bytes — the CLI strips one trailing
+  line terminator from a `--key-file`, so a key file shared with the server must
+  not end in a newline (write it with `printf`, not `echo $KEY > file`).
 
 ## Durability & integrity
 
@@ -177,6 +184,41 @@ durability guarantees:
   authoritative `FileRecord`. A listing row can lag the record until the next
   write of that key (same model as the Xet `TreeStore`); reads are always
   correct.
+
+## Multi-replica consistency
+
+The S3 frontend serializes overwrites of the same object key with a **per-key
+in-process lock** (`acquire_object_upload_lock`: a weak-valued `HashMap` of
+tokio mutexes). That lock is **process-local** — it serializes writers only
+within one server process, so the guarantees below are single-process.
+
+In a multi-replica Postgres deployment (HPA-scaled `api` replicas sharing
+`SHARDLINE_INDEX_POSTGRES_URL`), each replica holds its *own* per-key lock:
+
+- **Conditional-write `create-if-absent` is NOT atomic across replicas.** Two
+  replicas can both pass the `If-None-Match: *` pre-check and both commit
+  their records — the outcome is last-writer-wins, and the post-commit
+  re-check returns `412 PreconditionFailed` to the loser. The loser's record
+  becomes a **non-latest orphan** until the next write of that key, then is
+  reclaimed by GC. Reads are always correct (the listing row / latest alias
+  resolves through the authoritative `FileRecord`), but the strict S3
+  create-if-absent *atomicity* guarantee does not hold across replicas.
+- **The F-92 purge is safe under the race.** When the post-commit re-check
+  fires, the purge deletes only the loser's **own** committed version
+  (verified against the latest alias before deleting), so it can never destroy
+  the winner's acknowledged record — bounded, last-writer-wins semantics.
+
+Batch delete (`DeleteObjects`, F-18), the upload-lock serialization (F-8
+check-then-act), and the purge guard (F-86/F-92) are all single-process-safe
+and remain correct within one replica; the residual multi-replica behavior is
+exactly the both-commit/last-writer-wins case above.
+
+**Recommended deployments** for strict S3 create-if-absent semantics:
+
+- run **one replica per logical store**, or
+- front the S3 routes with an external distributed lock (e.g. a
+  Redis-compatible mutex keyed by object key) when conditional writes must be
+  atomic across replicas.
 
 ## References
 

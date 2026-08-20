@@ -37,7 +37,9 @@ use crate::{
 };
 use shardline_index::{FileChunkRecord, FileRecord, LocalRecordStore, xet_hash_hex_string};
 use shardline_protocol::{RepositoryProvider, RepositoryScope, TokenClaims, TokenScope};
-use shardline_server_core::{AuthProvider, auth::Ed25519AuthProvider, auth::LocalHmacProvider};
+use shardline_server_core::{
+    AuthProvider, AuthorizedRepository, auth::Ed25519AuthProvider, auth::LocalHmacProvider,
+};
 use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectStore};
 use shardline_xet_core::merklehash::compute_data_hash;
 
@@ -82,6 +84,7 @@ async fn test_app_for_frontends_with_role(
         chunk_size,
     )
     .with_server_role(role)
+    .with_deployment_mode(crate::DeploymentMode::Insecure)
     .with_server_frontends(frontends.to_vec())
     .expect("server frontends")
     .with_token_signing_key(b"0123456789abcdef0123456789abcdef".to_vec())
@@ -1247,6 +1250,190 @@ async fn reconstruction_not_found() {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
+// ── Read-path admission gating ──────────────────────────────────────────
+//
+// `read_chunk`, `head_xorb`, and `read_xorb_transfer` each run an O(N)
+// repository-reference metadata scan (`repository_references_xorb` enumerates
+// the repo's latest + version records) with no LIMIT and no cache. They must be
+// admission-gated like the upload/reconstruction paths so a request flood
+// cannot drive unbounded per-request scans. When the admission gate is
+// saturated, every read handler rejects with 503 SERVICE_UNAVAILABLE.
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn read_paths_are_admission_gated() {
+    let tmp = TempDir::new().unwrap();
+    let chunk_size = NonZeroUsize::new(65536).unwrap();
+    let object_store = ServerObjectStore::local(tmp.path().join("chunks")).unwrap();
+    let backend = LocalBackend::new_with_object_store_and_upload_parallelism_with_frontends(
+        tmp.path().to_path_buf(),
+        "http://127.0.0.1:8080".to_owned(),
+        chunk_size,
+        NonZeroUsize::new(64).unwrap(),
+        object_store,
+        &[ServerFrontend::Xet],
+    )
+    .await
+    .unwrap();
+
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        tmp.path().to_path_buf(),
+        chunk_size,
+    )
+    .with_server_role(ServerRole::All)
+    .with_server_frontends(vec![ServerFrontend::Xet])
+    .unwrap();
+
+    // Saturated gate: max weight is the read weight and the only permit is held.
+    let state = Arc::new(AppState {
+        config,
+        role: ServerRole::All,
+        backend: ServerBackend::Local(backend),
+        auth: None,
+        provider_tokens: None,
+        reconstruction_cache: ReconstructionCacheService::disabled(),
+        transfer_limiter: TransferLimiter::new(chunk_size, NonZeroUsize::new(64).unwrap()),
+        oci_registry_token_limiter: Arc::new(tokio::sync::Semaphore::new(100)),
+        admission: crate::admission::WeightedAdmission::new(
+            std::num::NonZeroUsize::new(1).unwrap(),
+        ),
+        pools: crate::admission::ExecutionPools::default_sizes(),
+        protocol_metrics: ProtocolMetrics::default(),
+    });
+    let _held_permit = state
+        .admission
+        .try_acquire(crate::admission::weights::XORB_READ)
+        .expect("held permit");
+
+    let app = Router::new()
+        .route(
+            "/v1/chunks/default/{hash}",
+            get(super::operational::read_chunk),
+        )
+        .route(
+            "/v1/xorbs/default/{hash}",
+            head(super::operational::head_xorb),
+        )
+        .route(
+            "/transfer/xorb/{prefix}/{hash}",
+            get(super::operational::read_xorb_transfer),
+        )
+        .with_state(Arc::clone(&state));
+
+    let hash = "a".repeat(64);
+    let requests = [
+        Request::builder()
+            .method("GET")
+            .uri(format!("/v1/chunks/default/{hash}"))
+            .body(Body::empty())
+            .unwrap(),
+        Request::builder()
+            .method("HEAD")
+            .uri(format!("/v1/xorbs/default/{hash}"))
+            .body(Body::empty())
+            .unwrap(),
+        Request::builder()
+            .method("GET")
+            .uri(format!("/transfer/xorb/default/{hash}"))
+            .header(header::RANGE, "bytes=0-")
+            .body(Body::empty())
+            .unwrap(),
+    ];
+
+    for request in requests {
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "read handler must be admission-gated"
+        );
+    }
+}
+
+// ── /v1/stats admission gating (F-62) ───────────────────────────────────
+//
+// `stats` walks every object in the store (a full dir walk or paginated S3
+// LIST) plus a full latest-record traversal, with no LIMIT and no cache. It
+// must be admission-gated like the read paths: when the admission gate is
+// saturated the handler rejects with 503, and a normal (unsaturated) gate
+// serves the aggregate.
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stats_route_is_admission_gated() {
+    let tmp = TempDir::new().unwrap();
+    let chunk_size = NonZeroUsize::new(65536).unwrap();
+    let object_store = ServerObjectStore::local(tmp.path().join("chunks")).unwrap();
+    let backend = LocalBackend::new_with_object_store_and_upload_parallelism_with_frontends(
+        tmp.path().to_path_buf(),
+        "http://127.0.0.1:8080".to_owned(),
+        chunk_size,
+        NonZeroUsize::new(64).unwrap(),
+        object_store,
+        &[ServerFrontend::Xet],
+    )
+    .await
+    .unwrap();
+
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        tmp.path().to_path_buf(),
+        chunk_size,
+    )
+    .with_server_role(ServerRole::All)
+    .with_server_frontends(vec![ServerFrontend::Xet])
+    .unwrap();
+
+    // Saturated gate: max weight equals the stats weight and the only permit
+    // is held, so a whole-store stats scan cannot run.
+    let state = Arc::new(AppState {
+        config,
+        role: ServerRole::All,
+        backend: ServerBackend::Local(backend),
+        auth: None,
+        provider_tokens: None,
+        reconstruction_cache: ReconstructionCacheService::disabled(),
+        transfer_limiter: TransferLimiter::new(chunk_size, NonZeroUsize::new(64).unwrap()),
+        oci_registry_token_limiter: Arc::new(tokio::sync::Semaphore::new(100)),
+        admission: crate::admission::WeightedAdmission::new(
+            std::num::NonZeroUsize::new(crate::admission::weights::STATS as usize).unwrap(),
+        ),
+        pools: crate::admission::ExecutionPools::default_sizes(),
+        protocol_metrics: ProtocolMetrics::default(),
+    });
+    let _held_permit = state
+        .admission
+        .try_acquire(crate::admission::weights::STATS)
+        .expect("held permit");
+
+    let app = Router::new()
+        .route("/v1/stats", get(super::operational::stats))
+        .with_state(Arc::clone(&state));
+
+    let request = Request::builder()
+        .method("GET")
+        .uri("/v1/stats")
+        .body(Body::empty())
+        .unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "stats must be admission-gated"
+    );
+
+    // Release the permit: the same gate now admits the scan and returns 200.
+    drop(_held_permit);
+    let request = Request::builder()
+        .method("GET")
+        .uri("/v1/stats")
+        .body(Body::empty())
+        .unwrap();
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn batch_reconstruction_empty() {
     let (app, _tmp) = test_app(&[ServerFrontend::Xet]).await;
@@ -1608,8 +1795,12 @@ async fn backward_compatibility_all_formats_readable() {
     // FixedChunkV1: raw uncompressed chunk + old-style record
     let fixed_content = b"fixed-chunk-old-format-data-0123456789";
     let fixed_hash = test_hash(fixed_content);
-    let fixed_key = crate::bazel_cache_object_key(crate::BazelCacheKind::Cas, &fixed_hash, None)
-        .expect("fixed key");
+    let fixed_key = crate::bazel_cache_object_key(
+        crate::BazelCacheKind::Cas,
+        &fixed_hash,
+        &AuthorizedRepository::anonymous_full_access(),
+    )
+    .expect("fixed key");
     let fixed_file_id = format!(
         "protocol-object-{}",
         hex::encode(Sha256::digest(fixed_key.as_str().as_bytes()))
@@ -1632,8 +1823,12 @@ async fn backward_compatibility_all_formats_readable() {
     // WholeFileV1: single object at the object key path
     let whole_content = b"whole-file-old-format-data-0123456789";
     let whole_hash = test_hash(whole_content);
-    let whole_key = crate::bazel_cache_object_key(crate::BazelCacheKind::Cas, &whole_hash, None)
-        .expect("whole key");
+    let whole_key = crate::bazel_cache_object_key(
+        crate::BazelCacheKind::Cas,
+        &whole_hash,
+        &AuthorizedRepository::anonymous_full_access(),
+    )
+    .expect("whole key");
     let whole_file_id = format!(
         "protocol-object-{}",
         hex::encode(Sha256::digest(whole_key.as_str().as_bytes()))
@@ -1856,8 +2051,12 @@ async fn gc_preserves_old_and_new_formats() {
     // 1. Create FixedChunkV1 record (old format, uncompressed chunk)
     let fixed_content = b"fixed-chunk-gc-test-data-0123456789";
     let fixed_hash = test_hash(fixed_content);
-    let fixed_key = crate::bazel_cache_object_key(crate::BazelCacheKind::Cas, &fixed_hash, None)
-        .expect("fixed key");
+    let fixed_key = crate::bazel_cache_object_key(
+        crate::BazelCacheKind::Cas,
+        &fixed_hash,
+        &AuthorizedRepository::anonymous_full_access(),
+    )
+    .expect("fixed key");
     let fixed_file_id = format!(
         "protocol-object-{}",
         hex::encode(Sha256::digest(fixed_key.as_str().as_bytes()))
@@ -1880,8 +2079,12 @@ async fn gc_preserves_old_and_new_formats() {
     // 2. Create WholeFileV1 record (single object at object key)
     let whole_content = b"whole-file-gc-test-data-0123456789";
     let whole_hash = test_hash(whole_content);
-    let whole_key = crate::bazel_cache_object_key(crate::BazelCacheKind::Cas, &whole_hash, None)
-        .expect("whole key");
+    let whole_key = crate::bazel_cache_object_key(
+        crate::BazelCacheKind::Cas,
+        &whole_hash,
+        &AuthorizedRepository::anonymous_full_access(),
+    )
+    .expect("whole key");
     let whole_file_id = format!(
         "protocol-object-{}",
         hex::encode(Sha256::digest(whole_key.as_str().as_bytes()))
@@ -1958,8 +2161,12 @@ async fn gc_preserves_old_and_new_formats() {
     let new_hash = test_hash(new_content);
     server_backend
         .put_sha256_addressed_object_stream_if_absent(
-            &crate::bazel_cache_object_key(crate::BazelCacheKind::Cas, &new_hash, None)
-                .expect("new key"),
+            &crate::bazel_cache_object_key(
+                crate::BazelCacheKind::Cas,
+                &new_hash,
+                &AuthorizedRepository::anonymous_full_access(),
+            )
+            .expect("new key"),
             &new_hash,
             crate::upload_ingest::RequestBodyReader::from_bytes(axum::body::Bytes::from_static(
                 new_content,
@@ -1988,8 +2195,12 @@ async fn gc_preserves_old_and_new_formats() {
         ("WholeFileV1", &whole_hash),
         ("XorbCdcV1", &new_hash),
     ] {
-        let key =
-            crate::bazel_cache_object_key(crate::BazelCacheKind::Cas, hash, None).expect("key");
+        let key = crate::bazel_cache_object_key(
+            crate::BazelCacheKind::Cas,
+            hash,
+            &AuthorizedRepository::anonymous_full_access(),
+        )
+        .expect("key");
         let read = server_backend.read_object(&key).await;
         assert!(read.is_ok(), "{label} readable: {read:?}");
         let bytes = read.expect("read_object");
@@ -10518,6 +10729,7 @@ async fn ed25519_protects_every_application_route_family() {
         ServerFrontend::Hub,
     ])
     .unwrap()
+    .with_deployment_mode(crate::DeploymentMode::Insecure)
     .with_metrics_token(b"metrics-secret".to_vec())
     .unwrap()
     .with_auth_provider(crate::config::AuthProviderKind::Ed25519)
@@ -10723,8 +10935,12 @@ async fn mixed_format_dedup_same_content() {
     // 1. Compute content hashes and object keys used by both formats.
     let content = b"dedup-test-content-that-should-be-identical-in-both-formats!";
     let hash = test_hash(content);
-    let object_key =
-        crate::bazel_cache_object_key(crate::BazelCacheKind::Cas, &hash, None).expect("object key");
+    let object_key = crate::bazel_cache_object_key(
+        crate::BazelCacheKind::Cas,
+        &hash,
+        &AuthorizedRepository::anonymous_full_access(),
+    )
+    .expect("object key");
 
     // The file_id matches what `protocol_object_file_id` computes in backend.rs.
     let file_id = format!(

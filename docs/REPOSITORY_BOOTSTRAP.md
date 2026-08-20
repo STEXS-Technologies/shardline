@@ -8,6 +8,9 @@ If you want the minimal setup sequence first, start with
 For a direct providerless backend without a forge connector, start with
 [Providerless Direct Xet Backend](DEPLOYMENT.md#providerless-direct-xet-backend).
 
+This bootstrap is also the configuration bring-up path for a replacement node during
+recovery; see [Disaster Recovery](DISASTER_RECOVERY.md).
+
 You only need to decide:
 
 - which repository scope the connector will mint tokens for

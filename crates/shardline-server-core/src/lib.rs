@@ -56,6 +56,8 @@ pub mod auth {
     pub use shardline_auth::*;
 }
 
+pub mod auth_capability;
+
 pub mod at_rest;
 pub mod object_store;
 pub mod ops;
@@ -69,6 +71,9 @@ mod tests;
 // ---------------------------------------------------------------------------
 // Re-exports from submodules
 // ---------------------------------------------------------------------------
+
+// Auth capabilities
+pub use auth_capability::{AuthorizedRepository, scope_allows};
 
 // Object store
 pub use object_store::{
@@ -90,7 +95,7 @@ pub use ops::{ParseStoredFileRecordError, parse_stored_file_record_bytes, provid
 // Explicit re-exports from shardline-auth (backward compatibility)
 pub use shardline_auth::{
     AuthContext, AuthError, AuthProvider, Ed25519AuthProvider, LocalHmacProvider,
-    PassthroughProvider,
+    PassthroughProvider, VerifiedAuthContext,
 };
 // Explicit re-exports from shardline-validation (backward compatibility)
 pub use shardline_validation::{

@@ -161,6 +161,113 @@ fn server_config_new_constructs_with_defaults() {
         config.s3_max_part_bytes(),
         NonZeroU64::new(1_073_741_824).unwrap()
     );
+    assert_eq!(
+        config.lfs_patch_ttl_seconds(),
+        NonZeroU64::new(3_600).unwrap()
+    );
+    assert_eq!(
+        config.lfs_patch_max_active_sessions(),
+        NonZeroUsize::new(1_024).unwrap()
+    );
+    assert_eq!(
+        config.lfs_patch_total_max_bytes(),
+        NonZeroU64::new(4_398_046_511_104).unwrap()
+    );
+    assert_eq!(
+        config.lfs_patch_max_seek_ahead_bytes(),
+        NonZeroU64::new(67_108_864).unwrap()
+    );
+    assert_eq!(
+        config.s3_upload_max_active_part_files(),
+        NonZeroUsize::new(200_000).unwrap()
+    );
+    assert_eq!(
+        config.max_revisions_per_repo(),
+        NonZeroUsize::new(10_000).unwrap()
+    );
+    assert_eq!(
+        config.max_tree_entries_per_repo(),
+        NonZeroUsize::new(100_000).unwrap()
+    );
+}
+
+#[test]
+fn server_config_builder_with_max_revisions_per_repo() {
+    let config = ServerConfig::new(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+        "http://localhost:8080".to_owned(),
+        PathBuf::from("/tmp/test"),
+        NonZeroUsize::new(4096).unwrap(),
+    )
+    .with_max_revisions_per_repo(NonZeroUsize::new(4).unwrap())
+    .unwrap();
+    assert_eq!(
+        config.max_revisions_per_repo(),
+        NonZeroUsize::new(4).unwrap()
+    );
+}
+
+#[test]
+fn server_config_builder_with_max_tree_entries_per_repo() {
+    let config = ServerConfig::new(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+        "http://localhost:8080".to_owned(),
+        PathBuf::from("/tmp/test"),
+        NonZeroUsize::new(4096).unwrap(),
+    )
+    .with_max_tree_entries_per_repo(NonZeroUsize::new(4).unwrap())
+    .unwrap();
+    assert_eq!(
+        config.max_tree_entries_per_repo(),
+        NonZeroUsize::new(4).unwrap()
+    );
+}
+
+#[test]
+fn server_config_builder_with_s3_part_file_cap() {
+    let config = ServerConfig::new(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+        "http://localhost:8080".to_owned(),
+        PathBuf::from("/tmp/test"),
+        NonZeroUsize::new(4096).unwrap(),
+    )
+    .with_s3_upload_max_active_part_files(NonZeroUsize::new(16).unwrap())
+    .unwrap();
+    assert_eq!(
+        config.s3_upload_max_active_part_files(),
+        NonZeroUsize::new(16).unwrap()
+    );
+}
+
+#[test]
+fn server_config_builder_with_lfs_patch_limits() {
+    let config = ServerConfig::new(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+        "http://localhost:8080".to_owned(),
+        PathBuf::from("/tmp/test"),
+        NonZeroUsize::new(4096).unwrap(),
+    )
+    .with_lfs_patch_ttl_seconds(NonZeroU64::new(60).unwrap())
+    .unwrap()
+    .with_lfs_patch_max_active_sessions(NonZeroUsize::new(8).unwrap())
+    .unwrap()
+    .with_lfs_patch_total_max_bytes(NonZeroU64::new(1 << 30).unwrap())
+    .unwrap()
+    .with_lfs_patch_max_seek_ahead_bytes(NonZeroU64::new(1 << 20).unwrap())
+    .unwrap();
+    assert_eq!(config.lfs_patch_ttl_seconds(), NonZeroU64::new(60).unwrap());
+    assert_eq!(
+        config.lfs_patch_max_active_sessions(),
+        NonZeroUsize::new(8).unwrap()
+    );
+    assert_eq!(
+        config.lfs_patch_total_max_bytes(),
+        NonZeroU64::new(1 << 30).unwrap()
+    );
+    assert_eq!(
+        config.lfs_patch_max_seek_ahead_bytes(),
+        NonZeroU64::new(1 << 20).unwrap()
+    );
 }
 
 #[test]
@@ -606,6 +713,57 @@ fn server_config_builder_with_auth_oidc_issuer() {
 }
 
 #[test]
+fn server_config_builder_with_auth_oidc_audience() {
+    let config = ServerConfig::new(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+        "http://localhost:8080".to_owned(),
+        PathBuf::from("/tmp/test"),
+        NonZeroUsize::new(4096).unwrap(),
+    )
+    .with_auth_oidc_audience("shardline-web".to_owned());
+    assert_eq!(config.auth_oidc_audience(), Some("shardline-web"));
+    // Unset by default.
+    let default = ServerConfig::new(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+        "http://localhost:8080".to_owned(),
+        PathBuf::from("/tmp/test"),
+        NonZeroUsize::new(4096).unwrap(),
+    );
+    assert_eq!(default.auth_oidc_audience(), None);
+}
+
+#[test]
+fn server_config_builder_with_auth_oidc_jwks_host_allowlist() {
+    let config = ServerConfig::new(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+        "http://localhost:8080".to_owned(),
+        PathBuf::from("/tmp/test"),
+        NonZeroUsize::new(4096).unwrap(),
+    )
+    .with_auth_oidc_jwks_host_allowlist(vec![
+        "www.googleapis.com".to_owned(),
+        "api.example.com".to_owned(),
+    ]);
+    assert_eq!(
+        config.auth_oidc_jwks_host_allowlist(),
+        Some(
+            &[
+                "www.googleapis.com".to_owned(),
+                "api.example.com".to_owned()
+            ][..]
+        )
+    );
+    // Unset by default.
+    let default = ServerConfig::new(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+        "http://localhost:8080".to_owned(),
+        PathBuf::from("/tmp/test"),
+        NonZeroUsize::new(4096).unwrap(),
+    );
+    assert_eq!(default.auth_oidc_jwks_host_allowlist(), None);
+}
+
+#[test]
 fn server_config_builder_with_auth_jwks_url() {
     let config = ServerConfig::new(
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
@@ -809,6 +967,67 @@ fn server_config_validate_runtime_requirements_accepts_passthrough_on_loopback()
     .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
     .unwrap()
     .with_auth_provider(AuthProviderKind::Passthrough);
+    assert!(config.validate_runtime_requirements().is_ok());
+}
+
+#[test]
+fn default_insecure_mode_rejects_non_loopback_bind_without_auth() {
+    // F-41: the implicit (unset) Insecure default on a non-loopback bind with
+    // no auth provider would boot a fully unauthenticated server.
+    let config = ServerConfig::new(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 8080),
+        "http://localhost:8080".to_owned(),
+        PathBuf::from("/tmp/test"),
+        NonZeroUsize::new(4096).unwrap(),
+    );
+    assert!(!config.deployment_mode_explicitly_set);
+    let result = config.validate_runtime_requirements();
+    assert!(matches!(
+        result,
+        Err(ServerConfigError::InsecureDefaultRequiresExplicitOptIn { .. })
+    ));
+}
+
+#[test]
+fn default_insecure_mode_accepts_loopback_bind_without_auth() {
+    // Local dev / test servers bind loopback: the implicit Insecure default
+    // stays valid there.
+    let config = ServerConfig::new(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+        "http://localhost:8080".to_owned(),
+        PathBuf::from("/tmp/test"),
+        NonZeroUsize::new(4096).unwrap(),
+    );
+    assert!(config.validate_runtime_requirements().is_ok());
+}
+
+#[test]
+fn explicit_insecure_mode_accepts_non_loopback_bind_without_auth() {
+    // The operator explicitly chose the Insecure mode: allowed (the warning
+    // about unauthenticated access still fires).
+    let config = ServerConfig::new(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 8080),
+        "http://localhost:8080".to_owned(),
+        PathBuf::from("/tmp/test"),
+        NonZeroUsize::new(4096).unwrap(),
+    )
+    .with_deployment_mode(DeploymentMode::Insecure);
+    assert!(config.deployment_mode_explicitly_set);
+    assert!(config.validate_runtime_requirements().is_ok());
+}
+
+#[test]
+fn default_insecure_mode_accepts_non_loopback_bind_with_auth_provider() {
+    // An auth provider enforces authentication even in Insecure mode, so a
+    // non-loopback bind with the implicit default is not unauthenticated.
+    let config = ServerConfig::new(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 8080),
+        "http://localhost:8080".to_owned(),
+        PathBuf::from("/tmp/test"),
+        NonZeroUsize::new(4096).unwrap(),
+    )
+    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
+    .unwrap();
     assert!(config.validate_runtime_requirements().is_ok());
 }
 
@@ -1320,6 +1539,37 @@ fn server_config_error_display_zero_max_shard_xorb_chunks() {
 }
 
 #[test]
+fn server_config_error_display_max_revisions_per_repo() {
+    let err = ServerConfigError::MaxRevisionsPerRepo("not-a-number".parse::<usize>().unwrap_err());
+    assert_eq!(err.to_string(), "invalid max revisions per repo");
+}
+
+#[test]
+fn server_config_error_display_zero_max_revisions_per_repo() {
+    let err = ServerConfigError::ZeroMaxRevisionsPerRepo;
+    assert_eq!(
+        err.to_string(),
+        "max revisions per repo must be greater than zero"
+    );
+}
+
+#[test]
+fn server_config_error_display_max_tree_entries_per_repo() {
+    let err =
+        ServerConfigError::MaxTreeEntriesPerRepo("not-a-number".parse::<usize>().unwrap_err());
+    assert_eq!(err.to_string(), "invalid max tree entries per repo");
+}
+
+#[test]
+fn server_config_error_display_zero_max_tree_entries_per_repo() {
+    let err = ServerConfigError::ZeroMaxTreeEntriesPerRepo;
+    assert_eq!(
+        err.to_string(),
+        "max tree entries per repo must be greater than zero"
+    );
+}
+
+#[test]
 fn server_config_error_display_upload_max_in_flight_chunks() {
     let err =
         ServerConfigError::UploadMaxInFlightChunks("not-a-number".parse::<usize>().unwrap_err());
@@ -1620,11 +1870,37 @@ fn server_config_error_display_missing_oidc_issuer() {
 }
 
 #[test]
+fn server_config_error_display_oidc_issuer_must_use_https() {
+    let err = ServerConfigError::OidcIssuerMustUseHttps {
+        issuer: "http://accounts.example.com".to_owned(),
+    };
+    let display = err.to_string();
+    assert!(display.contains("https"), "message: {display}");
+    assert!(
+        display.contains("http://accounts.example.com"),
+        "message: {display}"
+    );
+}
+
+#[test]
 fn server_config_error_display_missing_jwks_url() {
     let err = ServerConfigError::MissingJwksUrl;
     assert_eq!(
         err.to_string(),
         "jwks auth provider requires SHARDLINE_AUTH_JWKS_URL"
+    );
+}
+
+#[test]
+fn server_config_error_display_jwks_url_must_use_https() {
+    let err = ServerConfigError::JwksUrlMustUseHttps {
+        url: "http://keys.example.com/jwks".to_owned(),
+    };
+    let display = err.to_string();
+    assert!(display.contains("https"), "message: {display}");
+    assert!(
+        display.contains("http://keys.example.com/jwks"),
+        "message: {display}"
     );
 }
 
@@ -1965,9 +2241,11 @@ fn strict_mode_succeeds_with_all_required() {
     )
     .with_deployment_mode(DeploymentMode::Strict)
     .with_token_signing_key(b"0123456789abcdef0123456789abcdef".to_vec())
+    .unwrap()
+    .with_metrics_token(b"metrics-token".to_vec())
     .unwrap();
     let result = config.validate_runtime_requirements();
-    // With signing key set, strict mode should succeed
+    // With the signing key AND metrics token set, strict mode should succeed
     assert!(result.is_ok());
 }
 
@@ -2030,8 +2308,9 @@ fn deployment_mode_insecure_allows_missing_signing_key() {
 
 #[test]
 fn strict_mode_rejects_missing_metrics_token() {
-    // This verifies the warn! is issued (can't easily test warns, but at least
-    // the validation doesn't fail — it only warns)
+    // Strict mode documents the metrics token as required: a missing token
+    // must fail validation loud (matching the signing-key enforcement style)
+    // so /metrics is never served unauthenticated in strict mode.
     let config = ServerConfig::new(
         "127.0.0.1:0".parse().unwrap(),
         "http://127.0.0.1:8080".to_owned(),
@@ -2043,9 +2322,311 @@ fn strict_mode_rejects_missing_metrics_token() {
     .unwrap();
     let result = config.validate_runtime_requirements();
     assert!(
-        result.is_ok(),
-        "strict mode with signing key should pass even without metrics token"
+        matches!(result, Err(ServerConfigError::MissingMetricsToken)),
+        "strict mode without a metrics token must fail validation, got {result:?}"
     );
+}
+
+#[test]
+fn strict_mode_accepts_metrics_token() {
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        std::path::PathBuf::from("/tmp/test_strict_metrics"),
+        NonZeroUsize::new(65536).unwrap(),
+    )
+    .with_deployment_mode(DeploymentMode::Strict)
+    .with_token_signing_key(b"0123456789abcdef0123456789abcdef".to_vec())
+    .unwrap()
+    .with_metrics_token(b"metrics-token".to_vec())
+    .unwrap();
+    let result = config.validate_runtime_requirements();
+    assert!(
+        result.is_ok(),
+        "strict mode with a metrics token should pass validation"
+    );
+}
+
+#[test]
+fn authenticated_mode_rejects_plaintext_hub_webhook_secrets() {
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        PathBuf::from("/tmp"),
+        NonZeroUsize::new(65536).unwrap(),
+    )
+    .with_deployment_mode(DeploymentMode::Authenticated)
+    .with_token_signing_key(b"0123456789abcdef0123456789abcdef".to_vec())
+    .unwrap()
+    .with_server_frontends([ServerFrontend::Hub])
+    .unwrap();
+    let result = config.validate_runtime_requirements();
+    assert!(matches!(
+        result,
+        Err(ServerConfigError::PlaintextSecretsInProduction { .. })
+    ));
+}
+
+#[test]
+fn authenticated_mode_allows_plaintext_secrets_with_explicit_override() {
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        PathBuf::from("/tmp"),
+        NonZeroUsize::new(65536).unwrap(),
+    )
+    .with_deployment_mode(DeploymentMode::Authenticated)
+    .with_allow_plaintext_secrets_in_production(true)
+    .with_token_signing_key(b"0123456789abcdef0123456789abcdef".to_vec())
+    .unwrap()
+    .with_server_frontends([ServerFrontend::Hub])
+    .unwrap();
+    assert!(config.validate_runtime_requirements().is_ok());
+}
+
+#[test]
+fn insecure_mode_allows_plaintext_hub_webhook_secrets() {
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        PathBuf::from("/tmp"),
+        NonZeroUsize::new(65536).unwrap(),
+    )
+    .with_deployment_mode(DeploymentMode::Insecure)
+    .with_server_frontends([ServerFrontend::Hub])
+    .unwrap();
+    assert!(config.validate_runtime_requirements().is_ok());
+}
+
+#[test]
+fn default_insecure_mode_rejects_plaintext_hub_webhook_secrets_without_key() {
+    // The DEFAULT (unset) mode is Insecure, but that implicit default must NOT
+    // disarm the plaintext-secret gate: secrets configured without an
+    // encryption key and without an explicit mode/override choice fail loud.
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        PathBuf::from("/tmp"),
+        NonZeroUsize::new(65536).unwrap(),
+    )
+    .with_server_frontends([ServerFrontend::Hub])
+    .unwrap();
+    let result = config.validate_runtime_requirements();
+    assert!(matches!(
+        result,
+        Err(ServerConfigError::PlaintextSecretsInProduction { .. })
+    ));
+}
+
+#[test]
+fn default_insecure_mode_allows_plaintext_secrets_with_explicit_override() {
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        PathBuf::from("/tmp"),
+        NonZeroUsize::new(65536).unwrap(),
+    )
+    .with_allow_plaintext_secrets_in_production(true)
+    .with_server_frontends([ServerFrontend::Hub])
+    .unwrap();
+    assert!(config.validate_runtime_requirements().is_ok());
+}
+
+#[test]
+fn explicit_insecure_mode_allows_plaintext_hub_webhook_secrets() {
+    // An EXPLICITLY selected Insecure mode is the operator's informed choice
+    // and disarms the plaintext gate, matching the pre-existing behavior.
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        PathBuf::from("/tmp"),
+        NonZeroUsize::new(65536).unwrap(),
+    )
+    .with_deployment_mode(DeploymentMode::Insecure)
+    .with_server_frontends([ServerFrontend::Hub])
+    .unwrap();
+    assert!(config.validate_runtime_requirements().is_ok());
+}
+
+#[test]
+fn authenticated_mode_without_auth_provider_is_a_startup_error() {
+    // Authenticated mode with no auth provider configured would fail open to
+    // anonymous full access; the mode must be rejected at startup.
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        PathBuf::from("/tmp"),
+        NonZeroUsize::new(65536).unwrap(),
+    )
+    .with_deployment_mode(DeploymentMode::Authenticated);
+    assert!(
+        config.validate_runtime_requirements().is_err(),
+        "authenticated mode without an auth provider must fail startup"
+    );
+    // The deployment-mode check itself must name passthrough as NOT a
+    // substitute for a real auth provider.
+    let error = config
+        .validate_deployment_mode_requirements()
+        .expect_err("the deployment-mode requirement must reject a missing provider");
+    let display = error.to_string();
+    assert!(
+        display.contains("passthrough provider does not satisfy this requirement"),
+        "the error must make clear that passthrough is not a substitute: {display}"
+    );
+}
+
+#[test]
+fn authenticated_mode_with_passthrough_is_accepted_as_trusted_proxy_carve_out() {
+    // Passthrough is handled EXPLICITLY as the trusted-proxy carve-out: the
+    // "requires a configured auth provider" check must not fire, because the
+    // loopback-bind requirement (enforced in validate_runtime_requirements) is
+    // what actually controls a passthrough deployment.
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        PathBuf::from("/tmp"),
+        NonZeroUsize::new(65536).unwrap(),
+    )
+    .with_deployment_mode(DeploymentMode::Authenticated)
+    .with_auth_provider(AuthProviderKind::Passthrough);
+    assert!(
+        config.validate_runtime_requirements().is_ok(),
+        "authenticated mode with passthrough must be accepted on a loopback bind"
+    );
+}
+
+#[test]
+fn insecure_mode_anonymous_warning_only_fires_without_auth_provider() {
+    // The "all requests are allowed without authentication" warning is gated on
+    // there being NO configured auth provider: with a provider present,
+    // authorize() enforces authentication despite the insecure mode.
+    let no_provider = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        PathBuf::from("/tmp"),
+        NonZeroUsize::new(65536).unwrap(),
+    )
+    .with_deployment_mode(DeploymentMode::Insecure);
+    assert!(
+        !no_provider.auth_provider_is_configured(),
+        "Local provider without a signing key is permissive mode"
+    );
+
+    let with_provider = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        PathBuf::from("/tmp"),
+        NonZeroUsize::new(65536).unwrap(),
+    )
+    .with_deployment_mode(DeploymentMode::Insecure)
+    .with_token_signing_key(b"0123456789abcdef0123456789abcdef".to_vec())
+    .unwrap();
+    assert!(
+        with_provider.auth_provider_is_configured(),
+        "a signing key configures a real auth provider"
+    );
+    assert!(with_provider.validate_runtime_requirements().is_ok());
+}
+
+#[test]
+fn auth_provider_is_configured_is_false_for_passthrough() {
+    // Passthrough trusts every inbound token (authenticated in name only), so
+    // it must NOT count as a configured auth provider for the Authenticated
+    // mode requirement. The real control is the loopback-bind requirement.
+    let passthrough = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        PathBuf::from("/tmp"),
+        NonZeroUsize::new(65536).unwrap(),
+    )
+    .with_deployment_mode(DeploymentMode::Insecure)
+    .with_auth_provider(AuthProviderKind::Passthrough);
+    assert!(
+        !passthrough.auth_provider_is_configured(),
+        "passthrough must not count as a configured auth provider"
+    );
+}
+
+#[test]
+fn authenticated_mode_without_hub_or_provider_needs_no_encryption_keys() {
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        PathBuf::from("/tmp"),
+        NonZeroUsize::new(65536).unwrap(),
+    )
+    .with_deployment_mode(DeploymentMode::Authenticated)
+    .with_token_signing_key(b"0123456789abcdef0123456789abcdef".to_vec())
+    .unwrap()
+    .with_server_frontends([ServerFrontend::Xet])
+    .unwrap();
+    assert!(config.validate_runtime_requirements().is_ok());
+}
+
+#[test]
+fn authenticated_mode_accepts_hub_webhook_encryption_key() {
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        PathBuf::from("/tmp"),
+        NonZeroUsize::new(65536).unwrap(),
+    )
+    .with_deployment_mode(DeploymentMode::Authenticated)
+    .with_token_signing_key(b"0123456789abcdef0123456789abcdef".to_vec())
+    .unwrap()
+    .with_server_frontends([ServerFrontend::Hub])
+    .unwrap()
+    .with_hub_webhook_secret_key(b"0123456789abcdef0123456789abcdef".to_vec())
+    .unwrap();
+    assert!(config.validate_runtime_requirements().is_ok());
+}
+
+#[test]
+fn authenticated_mode_rejects_plaintext_provider_config_secrets() {
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        PathBuf::from("/tmp"),
+        NonZeroUsize::new(65536).unwrap(),
+    )
+    .with_deployment_mode(DeploymentMode::Authenticated)
+    .with_token_signing_key(b"0123456789abcdef0123456789abcdef".to_vec())
+    .unwrap()
+    .with_provider_runtime(
+        PathBuf::from("/tmp/provider.yaml"),
+        b"valid-api-key".to_vec(),
+        "issuer".to_owned(),
+        NonZeroU64::new(3600).unwrap(),
+    )
+    .unwrap();
+    let result = config.validate_runtime_requirements();
+    assert!(matches!(
+        result,
+        Err(ServerConfigError::PlaintextSecretsInProduction { .. })
+    ));
+}
+
+#[test]
+fn authenticated_mode_accepts_provider_config_encryption_key() {
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        PathBuf::from("/tmp"),
+        NonZeroUsize::new(65536).unwrap(),
+    )
+    .with_deployment_mode(DeploymentMode::Authenticated)
+    .with_token_signing_key(b"0123456789abcdef0123456789abcdef".to_vec())
+    .unwrap()
+    .with_config_secret_key(b"0123456789abcdef0123456789abcdef".to_vec())
+    .unwrap()
+    .with_provider_runtime(
+        PathBuf::from("/tmp/provider.yaml"),
+        b"valid-api-key".to_vec(),
+        "issuer".to_owned(),
+        NonZeroU64::new(3600).unwrap(),
+    )
+    .unwrap();
+    assert!(config.validate_runtime_requirements().is_ok());
 }
 
 #[test]

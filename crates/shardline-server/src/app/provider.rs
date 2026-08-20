@@ -7,9 +7,7 @@ use axum::{
 };
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use serde_json::from_slice;
-use shardline_index::{
-    AsyncIndexStore, LocalIndexStore, PostgresIndexStore, ProviderRepositoryState,
-};
+use shardline_index::{AsyncIndexStore, LocalIndexStore, ProviderRepositoryState};
 use shardline_metrics::record_provider_token_exchange;
 use shardline_protocol::{SecretBytes, TokenScope};
 use shardline_vcs::BuiltInProviderError;
@@ -20,12 +18,12 @@ use super::{
 };
 use crate::{
     ServerError,
+    backend::ServerBackend,
     clock::unix_now_seconds_checked,
     model::{
         ProviderTokenIssueRequest, ProviderTokenIssueResponse, ProviderWebhookResponse,
         XetCasTokenResponse,
     },
-    postgres_backend::connect_postgres_metadata_pool,
     provider::ProviderServiceError,
     provider_events::{ProviderWebhookOutcome, ProviderWebhookOutcomeKind},
     upload_ingest::{RequestBodyReader, read_body_to_bytes},
@@ -113,14 +111,20 @@ async fn reconcile_provider_repository_state(
     state: &AppState,
     issued: &ProviderTokenIssueResponse,
 ) -> Result<(), ServerError> {
-    if let Some(index_postgres_url) = state.config.index_postgres_url() {
-        let pool = connect_postgres_metadata_pool(index_postgres_url, 4)?;
-        let index_store = PostgresIndexStore::new(pool);
-        return reconcile_provider_repository_state_with_store(&index_store, issued).await;
+    match &state.backend {
+        // Reuse the server's own Postgres metadata store (its pool is created
+        // once per server alongside the backend) instead of opening a fresh
+        // pool per token issuance — per-call pools exhaust Postgres connections
+        // under concurrent load, and a process-global cached pool shared
+        // connections across server instances.
+        ServerBackend::Postgres(backend) => {
+            reconcile_provider_repository_state_with_store(backend.index_store(), issued).await
+        }
+        ServerBackend::Local(_) => {
+            let index_store = LocalIndexStore::open(state.config.root_dir().to_path_buf());
+            reconcile_provider_repository_state_with_store(&index_store, issued).await
+        }
     }
-
-    let index_store = LocalIndexStore::open(state.config.root_dir().to_path_buf());
-    reconcile_provider_repository_state_with_store(&index_store, issued).await
 }
 
 async fn reconcile_provider_repository_state_with_store<IndexAdapter>(

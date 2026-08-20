@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use axum::{
     body::Body,
-    extract::{Path, State},
+    extract::State,
     http::{HeaderMap, Method, StatusCode, Uri},
     response::{IntoResponse, Response},
 };
@@ -10,20 +10,19 @@ use shardline_metrics::metrics;
 use shardline_protocol::TokenScope;
 use shardline_storage::{DeleteOutcome, ObjectKey};
 
-use crate::{
-    ServerError,
-    error::OciError,
-    oci_adapter::{oci_blob_key, oci_manifest_prefix},
-};
+use crate::{ServerError, error::OciError};
 
-use super::super::{AppState, direct_object_response, scope_from_auth};
+use super::super::{AppState, direct_object_response};
 use super::blob_upload::{
     oci_delete_blob_upload, oci_get_blob_upload, oci_patch_blob_upload, oci_post_blob_upload,
     oci_put_blob_upload,
 };
-use super::helpers::{oci_route_served_by_api, oci_route_served_by_transfer};
+use super::helpers::{
+    OciRepository, oci_blob_key, oci_manifest_prefix, oci_route_served_by_api,
+    oci_route_served_by_transfer,
+};
 use super::manifest::{oci_delete_manifest, oci_get_manifest, oci_put_manifest};
-use super::path::{OciPath, parse_oci_path};
+use super::path::OciPath;
 use super::tags::oci_tags_list;
 use super::token::oci_authorize;
 
@@ -41,43 +40,40 @@ pub(crate) async fn oci_v2_root(
 pub(crate) async fn oci_dispatch(
     method: Method,
     State(state): State<Arc<AppState>>,
-    Path(path): Path<String>,
+    repo: OciRepository,
     headers: HeaderMap,
     uri: Uri,
     body: Body,
 ) -> Result<Response, OciError> {
-    let parsed = parse_oci_path(&path)?;
-    Ok(oci_dispatch_parsed(&state, method, headers, uri, body, parsed).await?)
+    Ok(oci_dispatch_parsed(&state, method, headers, uri, body, repo).await?)
 }
 
 pub(crate) async fn oci_api_dispatch(
     method: Method,
     State(state): State<Arc<AppState>>,
-    Path(path): Path<String>,
+    repo: OciRepository,
     headers: HeaderMap,
     uri: Uri,
     body: Body,
 ) -> Result<Response, OciError> {
-    let parsed = parse_oci_path(&path)?;
-    if !oci_route_served_by_api(&method, &parsed) {
+    if !oci_route_served_by_api(&method, repo.path()) {
         return Err(ServerError::NotFound.into());
     }
-    Ok(oci_dispatch_parsed(&state, method, headers, uri, body, parsed).await?)
+    Ok(oci_dispatch_parsed(&state, method, headers, uri, body, repo).await?)
 }
 
 pub(crate) async fn oci_transfer_dispatch(
     method: Method,
     State(state): State<Arc<AppState>>,
-    Path(path): Path<String>,
+    repo: OciRepository,
     headers: HeaderMap,
     uri: Uri,
     body: Body,
 ) -> Result<Response, OciError> {
-    let parsed = parse_oci_path(&path)?;
-    if !oci_route_served_by_transfer(&method, &parsed) {
+    if !oci_route_served_by_transfer(&method, repo.path()) {
         return Err(ServerError::NotFound.into());
     }
-    Ok(oci_dispatch_parsed(&state, method, headers, uri, body, parsed).await?)
+    Ok(oci_dispatch_parsed(&state, method, headers, uri, body, repo).await?)
 }
 
 async fn oci_dispatch_parsed(
@@ -86,19 +82,11 @@ async fn oci_dispatch_parsed(
     headers: HeaderMap,
     uri: Uri,
     body: Body,
-    parsed: OciPath,
+    repo: OciRepository,
 ) -> Result<Response, ServerError> {
-    match (method, parsed) {
-        (
-            Method::GET,
-            OciPath::Blob {
-                repository,
-                digest_hex,
-            },
-        ) => {
-            let auth = oci_authorize(state, &headers, Some(&repository), TokenScope::Read)?;
-            let object_key =
-                oci_blob_key(&repository, &digest_hex, auth.as_ref().map(scope_from_auth))?;
+    match (method, repo.path()) {
+        (Method::GET, OciPath::Blob { digest_hex, .. }) => {
+            let object_key = oci_blob_key(repo.repository(), digest_hex, repo.capability())?;
             metrics().protocol.record_oci_download();
             direct_object_response(
                 state,
@@ -110,16 +98,8 @@ async fn oci_dispatch_parsed(
             )
             .await
         }
-        (
-            Method::HEAD,
-            OciPath::Blob {
-                repository,
-                digest_hex,
-            },
-        ) => {
-            let auth = oci_authorize(state, &headers, Some(&repository), TokenScope::Read)?;
-            let object_key =
-                oci_blob_key(&repository, &digest_hex, auth.as_ref().map(scope_from_auth))?;
+        (Method::HEAD, OciPath::Blob { digest_hex, .. }) => {
+            let object_key = oci_blob_key(repo.repository(), digest_hex, repo.capability())?;
             let total_length = state.backend.object_length(&object_key).await?;
             Ok(Response::builder()
                 .status(StatusCode::OK)
@@ -132,92 +112,53 @@ async fn oci_dispatch_parsed(
                     ServerError::Overflow
                 })?)
         }
-        (
-            Method::GET,
-            OciPath::Manifest {
-                repository,
-                reference,
-            },
-        ) => oci_get_manifest(state, &headers, &repository, &reference, false).await,
-        (
-            Method::HEAD,
-            OciPath::Manifest {
-                repository,
-                reference,
-            },
-        ) => oci_get_manifest(state, &headers, &repository, &reference, true).await,
-        (Method::GET, OciPath::TagsList { repository }) => {
-            oci_tags_list(state, &headers, &uri, &repository).await
+        (Method::GET, OciPath::Manifest { reference, .. }) => {
+            oci_get_manifest(state, &headers, &repo, reference, false).await
         }
-        (Method::POST, OciPath::BlobUploads { repository }) => {
-            oci_post_blob_upload(state, &headers, &uri, &repository, body).await
+        (Method::HEAD, OciPath::Manifest { reference, .. }) => {
+            oci_get_manifest(state, &headers, &repo, reference, true).await
         }
-        (
-            Method::PATCH,
-            OciPath::BlobUploadSession {
-                repository,
-                session_id,
-            },
-        ) => oci_patch_blob_upload(state, &headers, &headers, &repository, &session_id, body).await,
-        (
-            Method::PUT,
-            OciPath::BlobUploadSession {
-                repository,
-                session_id,
-            },
-        ) => oci_put_blob_upload(state, &headers, &uri, &repository, &session_id, body).await,
-        (
-            Method::GET,
-            OciPath::BlobUploadSession {
-                repository,
-                session_id,
-            },
-        ) => oci_get_blob_upload(state, &headers, &repository, &session_id).await,
-        (
-            Method::DELETE,
-            OciPath::BlobUploadSession {
-                repository,
-                session_id,
-            },
-        ) => oci_delete_blob_upload(state, &headers, &repository, &session_id).await,
-        (
-            Method::PUT,
-            OciPath::Manifest {
-                repository,
-                reference,
-            },
-        ) => oci_put_manifest(state, &headers, &uri, &repository, &reference, body).await,
-        (
-            Method::DELETE,
-            OciPath::Manifest {
-                repository,
-                reference,
-            },
-        ) => oci_delete_manifest(state, &headers, &repository, &reference).await,
-        (
-            Method::DELETE,
-            OciPath::Blob {
-                repository,
-                digest_hex,
-            },
-        ) => oci_delete_blob(state, &headers, &repository, &digest_hex).await,
+        (Method::GET, OciPath::TagsList { .. }) => oci_tags_list(state, &uri, &repo).await,
+        (Method::POST, OciPath::BlobUploads { .. }) => {
+            oci_post_blob_upload(state, &headers, &uri, &repo, body).await
+        }
+        (Method::PATCH, OciPath::BlobUploadSession { session_id, .. }) => {
+            oci_patch_blob_upload(state, &headers, &repo, session_id, body).await
+        }
+        (Method::PUT, OciPath::BlobUploadSession { session_id, .. }) => {
+            oci_put_blob_upload(state, &headers, &uri, &repo, session_id, body).await
+        }
+        (Method::GET, OciPath::BlobUploadSession { session_id, .. }) => {
+            oci_get_blob_upload(state, &headers, &repo, session_id).await
+        }
+        (Method::DELETE, OciPath::BlobUploadSession { session_id, .. }) => {
+            oci_delete_blob_upload(state, &headers, &repo, session_id).await
+        }
+        (Method::PUT, OciPath::Manifest { reference, .. }) => {
+            oci_put_manifest(state, &headers, &uri, &repo, reference, body).await
+        }
+        (Method::DELETE, OciPath::Manifest { reference, .. }) => {
+            oci_delete_manifest(state, &headers, &repo, reference).await
+        }
+        (Method::DELETE, OciPath::Blob { digest_hex, .. }) => {
+            oci_delete_blob(state, &headers, &repo, digest_hex).await
+        }
         _ => Err(ServerError::NotFound),
     }
 }
 
 async fn oci_delete_blob(
     state: &Arc<AppState>,
-    headers: &HeaderMap,
-    repository: &str,
+    _headers: &HeaderMap,
+    repo: &OciRepository,
     digest_hex: &str,
 ) -> Result<Response, ServerError> {
-    let auth = oci_authorize(state, headers, Some(repository), TokenScope::Write)?;
-    let scope = auth.as_ref().map(scope_from_auth);
-    let object_key = oci_blob_key(repository, digest_hex, scope)?;
+    let repository = repo.repository();
+    let object_key = oci_blob_key(repository, digest_hex, repo.capability())?;
 
     // Check if any manifest references this blob by walking every page of
     // manifest listings and parsing the JSON document for digest references.
-    let manifest_prefix = oci_manifest_prefix(repository, scope)?;
+    let manifest_prefix = oci_manifest_prefix(repository, repo.capability())?;
     let target_digest = format!("sha256:{digest_hex}");
     let mut start_after: Option<ObjectKey> = None;
     loop {

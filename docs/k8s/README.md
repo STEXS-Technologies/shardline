@@ -44,8 +44,8 @@ docs/k8s/production-scaled/
 ## Configuration
 
 Server settings are defined in `configmap.yaml` as a `shardline.toml` file mounted at
-`/etc/shardline/shardline.toml`. Shardline automatically detects this path, so no
-`--config` flag is needed.
+`/etc/shardline/shardline.toml`. When no `--config` flag is given, Shardline
+automatically detects this path, so pods need no explicit `--config` flag.
 Credentials and secrets remain in the runtime secret as env vars or mounted files.
 
 ```bash
@@ -53,10 +53,21 @@ kubectl apply -f docs/k8s/production-scaled/configmap.yaml
 ```
 
 Use `--config` and `--env-file` with the CLI locally to match the production
-configuration during development:
+configuration during development. An explicit `--config` overrides auto-detection,
+and it must point at the TOML document itself, not at the ConfigMap manifest that
+wraps it (`configmap.yaml` is a Kubernetes object; the TOML content lives under its
+`data.shardline.toml` key). Extract that content to a local file first:
 
 ```bash
-shardline --config docs/k8s/production-scaled/configmap.yaml serve
+kubectl get cm shardline-config -o jsonpath='{.data.shardline\.toml}' > shardline.toml
+shardline --config shardline.toml serve
+```
+
+Bash supports process substitution, so the same recipe works without the
+intermediate file when you prefer:
+
+```bash
+shardline --config <(kubectl get cm shardline-config -o jsonpath='{.data.shardline\.toml}') serve
 ```
 
 ## Prerequisites
@@ -85,9 +96,24 @@ The runtime secret carries:
 - Shardline token-signing key
 - metrics scrape bearer token
 - provider bootstrap API key
+- provider-config at-rest encryption key
 
 The provider catalog secret carries the provider repository catalog JSON, including
 webhook secrets.
+
+The provider-config webhook secrets are encrypted at rest with
+`SHARDLINE_CONFIG_SECRET_KEY`, a 32-byte AES-256 key read from the runtime
+secret's `config-secret-key` entry. Generate one before applying the manifests:
+
+```bash
+openssl rand -base64 24
+```
+
+24 random bytes base64-encode to exactly 32 characters, and the trailing newline
+the command prints is stripped on load. Without this key, the fail-loud
+plaintext-secrets gate rejects the deployment because the provider runtime is
+enabled (`SHARDLINE_PROVIDER_API_KEY_FILE` + `SHARDLINE_PROVIDER_CONFIG_FILE`),
+so the API pods would CrashLoopBackOff in their `config-check` init container.
 
 The manifests use the placeholder image `registry.example.com/shardline:1.0.1` (the
 `1.0.1` tag is an example, not the current workspace version). Replace

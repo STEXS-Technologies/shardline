@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, HashMap};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use tokio::sync::Notify;
 use tokio::time::Instant;
@@ -29,12 +29,31 @@ impl PartialOrd for EvictionKey {
     }
 }
 
+/// A registered in-flight loading latch for one key.
+#[derive(Debug)]
+pub(super) struct LoadingEntry {
+    pub(super) notify: Arc<Notify>,
+    /// Aliveness stamp refreshed by the loader while it is still running.
+    /// A waiter at the orphan bound re-checks this stamp to tell a
+    /// slow-but-alive loader (fresh stamp) from a genuinely dead one
+    /// (stale stamp) before releasing the latch.
+    pub(super) last_seen_alive: Arc<Mutex<Instant>>,
+}
+
+impl LoadingEntry {
+    pub(super) fn new(notify: Arc<Notify>) -> Self {
+        Self {
+            notify,
+            last_seen_alive: Arc::new(Mutex::new(Instant::now())),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(super) struct CacheInner {
     pub(super) entries: HashMap<ReconstructionCacheKey, MemoryEntry>,
     pub(super) eviction_order: BTreeMap<EvictionKey, ReconstructionCacheKey>,
     pub(super) next_seq: u64,
-    pub(super) loading: HashMap<ReconstructionCacheKey, Arc<Notify>>,
 }
 
 impl CacheInner {
@@ -43,7 +62,6 @@ impl CacheInner {
             entries: HashMap::new(),
             eviction_order: BTreeMap::new(),
             next_seq: 0,
-            loading: HashMap::new(),
         }
     }
 

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use shardline_protocol::RepositoryScope;
+use shardline_server_core::AuthorizedRepository;
 use shardline_storage::ObjectKey;
 
 use crate::{ProtocolError, object_key, scope_namespace, validate_content_hash};
@@ -190,19 +190,29 @@ pub struct LfsObjectError {
 /// Returns the storage object key for an LFS object.
 ///
 /// Maps an LFS object ID to its content-addressed location under the global or
-/// repository-scoped namespace.
+/// repository-scoped namespace. The namespace is derived from the verified
+/// [`AuthorizedRepository`] capability: `None` (permissive, anonymous
+/// full-access) resolves to the global namespace, a scoped capability to the
+/// repository's SHA-256 namespace.
 ///
 /// # Examples
 ///
 /// ```
 /// use shardline_protocol_adapters::lfs_object_key;
+/// use shardline_server_core::AuthorizedRepository;
 ///
 /// let oid = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-/// let key = lfs_object_key(oid, None)?;
+/// let key = lfs_object_key(oid, &AuthorizedRepository::anonymous_full_access())?;
 /// assert!(key.as_str().starts_with("protocols/lfs/global/objects/"));
 /// assert!(key.as_str().ends_with(oid));
 ///
-/// assert!(lfs_object_key("not-a-valid-sha256", None).is_err());
+/// assert!(
+///     lfs_object_key(
+///         "not-a-valid-sha256",
+///         &AuthorizedRepository::anonymous_full_access()
+///     )
+///     .is_err()
+/// );
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 ///
@@ -210,21 +220,19 @@ pub struct LfsObjectError {
 ///
 /// Returns [`ProtocolError::InvalidContentHash`] when `oid` is malformed
 /// or the constructed key is invalid.
-pub fn lfs_object_key(
-    oid: &str,
-    repository_scope: Option<&RepositoryScope>,
-) -> Result<ObjectKey, ProtocolError> {
+pub fn lfs_object_key(oid: &str, auth: &AuthorizedRepository) -> Result<ObjectKey, ProtocolError> {
     validate_content_hash(oid)?;
     object_key(&format!(
         "protocols/lfs/{}/objects/{}",
-        scope_namespace(repository_scope),
+        scope_namespace(auth.namespace()),
         oid
     ))
 }
 
 #[cfg(test)]
 mod tests {
-    use shardline_protocol::{RepositoryProvider, RepositoryScope};
+    use shardline_protocol::{RepositoryProvider, RepositoryScope, TokenClaims, TokenScope};
+    use shardline_server_core::{AuthProvider, AuthorizedRepository, LocalHmacProvider};
 
     use super::*;
 
@@ -236,12 +244,27 @@ mod tests {
         RepositoryScope::new(RepositoryProvider::GitHub, "acme", "repo", None).unwrap()
     }
 
+    /// Builds a capability carrying the given repository scope (or a
+    /// permissive anonymous capability when `None`), mirroring how the auth
+    /// layer mints capabilities: the claims are verified through a real
+    /// provider so the type-level seal is satisfied.
+    fn test_capability(scope: Option<RepositoryScope>) -> AuthorizedRepository {
+        scope.map_or_else(AuthorizedRepository::anonymous_full_access, |repo| {
+            let claims =
+                TokenClaims::new("local", "test", TokenScope::Write, repo, u64::MAX).unwrap();
+            let provider = LocalHmacProvider::new(b"test-signing-key-32-bytes-long!!").unwrap();
+            let token = provider.mint_token(&claims).unwrap();
+            let ctx = provider.verify_verified(&token).unwrap();
+            AuthorizedRepository::from_verified_context(ctx, TokenScope::Write).unwrap()
+        })
+    }
+
     // --- lfs_object_key ---
 
     #[test]
     fn lfs_object_key_valid_no_scope() {
         let oid = valid_oid();
-        let key = lfs_object_key(&oid, None).unwrap();
+        let key = lfs_object_key(&oid, &test_capability(None)).unwrap();
         assert!(key.as_str().contains("protocols/lfs/global/objects/"));
         assert!(key.as_str().ends_with(&oid));
     }
@@ -250,7 +273,7 @@ mod tests {
     fn lfs_object_key_valid_with_scope() {
         let oid = valid_oid();
         let scope = test_scope();
-        let key = lfs_object_key(&oid, Some(&scope)).unwrap();
+        let key = lfs_object_key(&oid, &test_capability(Some(scope))).unwrap();
         assert!(!key.as_str().contains("global"));
         assert!(key.as_str().contains("protocols/lfs/"));
         assert!(key.as_str().ends_with(&oid));
@@ -258,14 +281,14 @@ mod tests {
 
     #[test]
     fn lfs_object_key_invalid_too_short() {
-        let result = lfs_object_key("abc123", None);
+        let result = lfs_object_key("abc123", &test_capability(None));
         assert!(matches!(result, Err(ProtocolError::InvalidContentHash)));
     }
 
     #[test]
     fn lfs_object_key_invalid_uppercase() {
         let uppercase_oid = "A".repeat(64);
-        let result = lfs_object_key(&uppercase_oid, None);
+        let result = lfs_object_key(&uppercase_oid, &test_capability(None));
         assert!(matches!(result, Err(ProtocolError::InvalidContentHash)));
     }
 

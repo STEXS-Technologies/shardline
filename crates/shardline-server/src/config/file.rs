@@ -97,6 +97,8 @@ pub struct JwksSection {
 #[derive(Debug, Deserialize)]
 pub struct OidcSection {
     pub issuer_url: Option<String>,
+    pub audience: Option<String>,
+    pub jwks_host_allowlist: Option<Vec<String>>,
 }
 
 /// Standard paths checked for shardline.toml, in priority order (first found wins).

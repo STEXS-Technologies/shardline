@@ -13,9 +13,12 @@ use super::secrets::{
     load_redis_tls_config_from_env, load_s3_object_store_config_from_env, read_secret_file_bytes,
 };
 use super::{
-    AuthProviderKind, CONFIG_SECRET_KEY_BYTES, DEFAULT_MAX_REQUEST_BODY_BYTES,
+    AuthProviderKind, CONFIG_SECRET_KEY_BYTES, DEFAULT_LFS_PATCH_MAX_ACTIVE_SESSIONS,
+    DEFAULT_LFS_PATCH_MAX_SEEK_AHEAD_BYTES, DEFAULT_LFS_PATCH_TOTAL_MAX_BYTES,
+    DEFAULT_LFS_PATCH_TTL_SECONDS, DEFAULT_MAX_REQUEST_BODY_BYTES, DEFAULT_MAX_REVISIONS_PER_REPO,
     DEFAULT_MAX_SHARD_FILES, DEFAULT_MAX_SHARD_RECONSTRUCTION_TERMS, DEFAULT_MAX_SHARD_XORB_CHUNKS,
-    DEFAULT_MAX_SHARD_XORBS, DEFAULT_S3_MAX_PART_BYTES, DEFAULT_S3_MIN_PART_BYTES,
+    DEFAULT_MAX_SHARD_XORBS, DEFAULT_MAX_TREE_ENTRIES_PER_REPO, DEFAULT_S3_MAX_PART_BYTES,
+    DEFAULT_S3_MIN_PART_BYTES, DEFAULT_S3_UPLOAD_MAX_ACTIVE_PART_FILES,
     DEFAULT_S3_UPLOAD_MAX_ACTIVE_SESSIONS, DEFAULT_S3_UPLOAD_SESSION_MAX_BYTES,
     DEFAULT_S3_UPLOAD_SESSION_TTL_SECONDS, DEFAULT_S3_UPLOAD_TOTAL_MAX_BYTES, DeploymentMode,
     HUB_WEBHOOK_SECRET_KEY_BYTES, MAX_ED25519_KEY_BYTES, MAX_METRICS_TOKEN_BYTES,
@@ -88,6 +91,18 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
             || ServerConfigError::ZeroMaxShardXorbChunks,
         )?,
     );
+    let max_revisions_per_repo = load_non_zero_usize_env(
+        "SHARDLINE_MAX_REVISIONS_PER_REPO",
+        DEFAULT_MAX_REVISIONS_PER_REPO,
+        ServerConfigError::MaxRevisionsPerRepo,
+        || ServerConfigError::ZeroMaxRevisionsPerRepo,
+    )?;
+    let max_tree_entries_per_repo = load_non_zero_usize_env(
+        "SHARDLINE_MAX_TREE_ENTRIES_PER_REPO",
+        DEFAULT_MAX_TREE_ENTRIES_PER_REPO,
+        ServerConfigError::MaxTreeEntriesPerRepo,
+        || ServerConfigError::ZeroMaxTreeEntriesPerRepo,
+    )?;
     let raw_chunk_size_str = var("SHARDLINE_CHUNK_SIZE")
         .or_else(|_| var("SHARDLINE_CHUNK_SIZE_BYTES"))
         .unwrap_or_else(|_error| "64KiB".to_owned());
@@ -216,6 +231,45 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
     let Some(s3_upload_total_max_bytes) = NonZeroU64::new(raw_s3_upload_total_max_bytes) else {
         return Err(ServerConfigError::ZeroS3UploadTotalMaxBytes);
     };
+    let raw_s3_upload_max_active_part_files = var("SHARDLINE_S3_UPLOAD_MAX_ACTIVE_PART_FILES")
+        .unwrap_or_else(|_error| DEFAULT_S3_UPLOAD_MAX_ACTIVE_PART_FILES.get().to_string())
+        .parse::<usize>()
+        .map_err(ServerConfigError::S3UploadMaxActivePartFiles)?;
+    let Some(s3_upload_max_active_part_files) =
+        NonZeroUsize::new(raw_s3_upload_max_active_part_files)
+    else {
+        return Err(ServerConfigError::ZeroS3UploadMaxActivePartFiles);
+    };
+    let raw_lfs_patch_ttl_seconds = var("SHARDLINE_LFS_PATCH_TTL_SECONDS")
+        .unwrap_or_else(|_error| DEFAULT_LFS_PATCH_TTL_SECONDS.get().to_string())
+        .parse::<u64>()
+        .map_err(ServerConfigError::LfsPatchTtl)?;
+    let Some(lfs_patch_ttl_seconds) = NonZeroU64::new(raw_lfs_patch_ttl_seconds) else {
+        return Err(ServerConfigError::ZeroLfsPatchTtlSeconds);
+    };
+    let raw_lfs_patch_max_active_sessions = var("SHARDLINE_LFS_PATCH_MAX_ACTIVE_SESSIONS")
+        .unwrap_or_else(|_error| DEFAULT_LFS_PATCH_MAX_ACTIVE_SESSIONS.get().to_string())
+        .parse::<usize>()
+        .map_err(ServerConfigError::LfsPatchMaxActiveSessions)?;
+    let Some(lfs_patch_max_active_sessions) = NonZeroUsize::new(raw_lfs_patch_max_active_sessions)
+    else {
+        return Err(ServerConfigError::ZeroLfsPatchMaxActiveSessions);
+    };
+    let raw_lfs_patch_total_max_bytes = var("SHARDLINE_LFS_PATCH_TOTAL_MAX_BYTES")
+        .unwrap_or_else(|_error| DEFAULT_LFS_PATCH_TOTAL_MAX_BYTES.get().to_string())
+        .parse::<u64>()
+        .map_err(ServerConfigError::LfsPatchTotalMaxBytes)?;
+    let Some(lfs_patch_total_max_bytes) = NonZeroU64::new(raw_lfs_patch_total_max_bytes) else {
+        return Err(ServerConfigError::ZeroLfsPatchTotalMaxBytes);
+    };
+    let raw_lfs_patch_max_seek_ahead_bytes = var("SHARDLINE_LFS_PATCH_MAX_SEEK_AHEAD_BYTES")
+        .unwrap_or_else(|_error| DEFAULT_LFS_PATCH_MAX_SEEK_AHEAD_BYTES.get().to_string())
+        .parse::<u64>()
+        .map_err(ServerConfigError::LfsPatchMaxSeekAheadBytes)?;
+    let Some(lfs_patch_max_seek_ahead_bytes) = NonZeroU64::new(raw_lfs_patch_max_seek_ahead_bytes)
+    else {
+        return Err(ServerConfigError::ZeroLfsPatchMaxSeekAheadBytes);
+    };
     let reconstruction_cache_redis_url = var("SHARDLINE_RECONSTRUCTION_CACHE_REDIS_URL").ok();
     let reconstruction_cache_redis_tls = load_redis_tls_config_from_env()?;
     let index_postgres_url = var("SHARDLINE_INDEX_POSTGRES_URL").ok();
@@ -225,7 +279,10 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
             "SHARDLINE_TOKEN_SIGNING_KEY_FILE",
         ),
         MAX_TOKEN_SIGNING_KEY_BYTES,
-        true,
+        // Variable-length, binary-capable key: never strip a trailing newline
+        // (the loader's contract) — stripping would silently truncate the key
+        // material when the file's last byte is 0x0A.
+        false,
         ServerConfigError::EmptyTokenSigningKey,
         |env, file_env| ServerConfigError::SecretSourceConflict { env, file_env },
         ServerConfigError::TokenSigningKey,
@@ -314,23 +371,22 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
             observed_bytes: observed,
         },
     )?;
-    let metrics_token = match var("SHARDLINE_METRICS_TOKEN_FILE") {
-        Ok(path) => Some(read_secret_file_bytes(
-            Path::new(&path),
-            MAX_METRICS_TOKEN_BYTES,
-            false,
-            ServerConfigError::MetricsToken,
-            |observed_bytes, maximum_bytes| ServerConfigError::MetricsTokenTooLarge {
-                observed_bytes,
-                maximum_bytes,
-            },
-            |expected_bytes, observed_bytes| ServerConfigError::MetricsTokenLengthMismatch {
-                expected_bytes,
-                observed_bytes,
-            },
-        )?),
-        Err(_error) => None,
-    };
+    let metrics_token = load_secret_from_env_or_file_with_conflict_check(
+        ("SHARDLINE_METRICS_TOKEN", "SHARDLINE_METRICS_TOKEN_FILE"),
+        MAX_METRICS_TOKEN_BYTES,
+        false,
+        ServerConfigError::EmptyMetricsToken,
+        |env, file_env| ServerConfigError::SecretSourceConflict { env, file_env },
+        ServerConfigError::MetricsToken,
+        |observed, maximum| ServerConfigError::MetricsTokenTooLarge {
+            observed_bytes: observed,
+            maximum_bytes: maximum,
+        },
+        |expected, observed| ServerConfigError::MetricsTokenLengthMismatch {
+            expected_bytes: expected,
+            observed_bytes: observed,
+        },
+    )?;
     let provider_config_path = var("SHARDLINE_PROVIDER_CONFIG_FILE")
         .ok()
         .map(PathBuf::from);
@@ -360,6 +416,13 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
         .with_s3_min_part_bytes(s3_min_part_bytes)?
         .with_s3_upload_session_max_bytes(s3_upload_session_max_bytes)?
         .with_s3_upload_total_max_bytes(s3_upload_total_max_bytes)?
+        .with_s3_upload_max_active_part_files(s3_upload_max_active_part_files)?
+        .with_lfs_patch_ttl_seconds(lfs_patch_ttl_seconds)?
+        .with_lfs_patch_max_active_sessions(lfs_patch_max_active_sessions)?
+        .with_lfs_patch_total_max_bytes(lfs_patch_total_max_bytes)?
+        .with_lfs_patch_max_seek_ahead_bytes(lfs_patch_max_seek_ahead_bytes)?
+        .with_max_revisions_per_repo(max_revisions_per_repo)?
+        .with_max_tree_entries_per_repo(max_tree_entries_per_repo)?
         .with_admission_max_weight(admission_max_weight_from_env());
     config.cache.adapter = reconstruction_cache_adapter;
     config.cache.redis_url = reconstruction_cache_redis_url.map(SecretString::new);
@@ -403,18 +466,53 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
     let auth_provider = AuthProviderKind::parse(
         &var("SHARDLINE_AUTH_PROVIDER").unwrap_or_else(|_error| "local".to_owned()),
     )?;
-    let auth_oidc_issuer = var("SHARDLINE_AUTH_OIDC_ISSUER").ok();
+    let auth_oidc_issuer = var("SHARDLINE_AUTH_OIDC_ISSUER")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
+    let auth_oidc_audience = var("SHARDLINE_AUTH_OIDC_AUDIENCE")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
+    // Comma-separated allowlist of extra hosts (besides the issuer's own host)
+    // whose JWKS endpoints the OIDC discovery document may advertise. Defaults
+    // to requiring the issuer's host (fail-closed for unknown cross-hosts).
+    let auth_oidc_jwks_host_allowlist = var("SHARDLINE_AUTH_OIDC_JWKS_HOST_ALLOWLIST")
+        .ok()
+        .map(|value| {
+            value
+                .split(',')
+                .map(|host| host.trim().to_owned())
+                .filter(|host| !host.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .filter(|hosts| !hosts.is_empty());
     let auth_jwks_url = var("SHARDLINE_AUTH_JWKS_URL").ok();
     let auth_jwks_issuer = var("SHARDLINE_AUTH_JWKS_ISSUER").ok();
     match auth_provider {
-        AuthProviderKind::Oidc => {
-            if auth_oidc_issuer.is_none() {
-                return Err(ServerConfigError::MissingOidcIssuer);
+        AuthProviderKind::Oidc => match auth_oidc_issuer.as_deref() {
+            None => return Err(ServerConfigError::MissingOidcIssuer),
+            Some(issuer) if !is_https_url(issuer) => {
+                return Err(ServerConfigError::OidcIssuerMustUseHttps {
+                    issuer: issuer.to_owned(),
+                });
             }
-        }
+            Some(_) => {}
+        },
         AuthProviderKind::Jwks => {
-            if auth_jwks_url.is_none() {
-                return Err(ServerConfigError::MissingJwksUrl);
+            // Regression (F-95): JWKS key transport must be encrypted
+            // (RFC 8414 §2), mirroring the OIDC issuer gate above. Plain-http
+            // is tolerated only for loopback hosts so local development and
+            // test tooling (which cannot serve TLS) keep working; non-loopback
+            // http is a startup error rather than a silent downgrade.
+            match auth_jwks_url.as_deref() {
+                None => return Err(ServerConfigError::MissingJwksUrl),
+                Some(url) if !is_secure_jwks_url(url) => {
+                    return Err(ServerConfigError::JwksUrlMustUseHttps {
+                        url: url.to_owned(),
+                    });
+                }
+                Some(_) => {}
             }
         }
         AuthProviderKind::Ed25519 => {
@@ -429,6 +527,12 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
     config = config.with_auth_provider(auth_provider);
     if let Some(issuer) = auth_oidc_issuer {
         config = config.with_auth_oidc_issuer(issuer);
+    }
+    if let Some(audience) = auth_oidc_audience {
+        config = config.with_auth_oidc_audience(audience);
+    }
+    if let Some(hosts) = auth_oidc_jwks_host_allowlist {
+        config = config.with_auth_oidc_jwks_host_allowlist(hosts);
     }
     if let Some(url) = auth_jwks_url {
         config = config.with_auth_jwks_url(url);
@@ -446,9 +550,36 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
         config = config.with_metrics_token(metrics_token)?;
     }
 
-    if let Some(deployment_mode) = deployment_mode_from_env() {
+    if let Some(deployment_mode) = deployment_mode_from_env()? {
         config = config.with_deployment_mode(deployment_mode);
     }
+
+    // Fail-safe override for the at-rest secret encryption gate: only the
+    // exact documented value `true` (case-insensitive) disarms the gate.
+    // Unlike the generic boolean parser, the aliases `1`/`yes`/`on` are NOT
+    // accepted — a stray or legacy value must keep the gate armed (treated as
+    // false), matching the fail-closed deployment-mode parse.
+    //
+    // The fail-loud WARN fires ONLY when the override is explicitly set to a
+    // plaintext value (`true`): that is the state where the operator has
+    // disarmed the at-rest encryption gate. The unset state (the normal case)
+    // and an explicit `false` are silent — a spurious WARN on every normal
+    // boot would train operators to ignore the fail-loud signal (F-110).
+    let allow_plaintext = match var("SHARDLINE_ALLOW_PLAINTEXT_SECRETS_IN_PRODUCTION")
+        .ok()
+        .as_deref()
+    {
+        Some(value) if value.eq_ignore_ascii_case("true") => {
+            tracing::warn!(
+                "SHARDLINE_ALLOW_PLAINTEXT_SECRETS_IN_PRODUCTION=true: at-rest secret \
+                 encryption is disabled; persistent secrets will be stored in plaintext"
+            );
+            true
+        }
+        Some(value) if value.eq_ignore_ascii_case("false") => false,
+        Some(_) | None => false,
+    };
+    config = config.with_allow_plaintext_secrets_in_production(allow_plaintext);
 
     // Validate Hub frontend requires auth configuration.
     if config.server_frontends().contains(&ServerFrontend::Hub)
@@ -509,15 +640,60 @@ pub(crate) fn admission_max_weight_from_env() -> NonZeroUsize {
 }
 
 /// Parses the `SHARDLINE_DEPLOYMENT_MODE` environment variable.
-pub(crate) fn deployment_mode_from_env() -> Option<DeploymentMode> {
-    let value = var("SHARDLINE_DEPLOYMENT_MODE").ok()?;
-    let Some(mode) = DeploymentMode::parse(&value) else {
-        tracing::warn!(
-            "unknown SHARDLINE_DEPLOYMENT_MODE value '{value}', falling back to default"
-        );
-        return None;
+///
+/// Returns `Ok(None)` when the variable is unset (the caller keeps the
+/// insecure default, which is fine for local/dev). A set-but-invalid value is
+/// a startup error, matching the fail-closed sibling gate
+/// `SHARDLINE_ALLOW_PLAINTEXT_SECRETS_IN_PRODUCTION` (only the exact value
+/// `true` disarms it; anything else, including `1`/`yes`/`on`, is treated as
+/// false) rather than a silent fallback to the insecure default.
+///
+/// # Errors
+///
+/// Returns [`ServerConfigError::InvalidDeploymentMode`] when the variable is
+/// set to an unsupported value.
+pub(crate) fn deployment_mode_from_env() -> Result<Option<DeploymentMode>, ServerConfigError> {
+    let Ok(value) = var("SHARDLINE_DEPLOYMENT_MODE") else {
+        return Ok(None);
     };
-    Some(mode)
+    let Some(mode) = DeploymentMode::parse(&value) else {
+        return Err(ServerConfigError::InvalidDeploymentMode { value });
+    };
+    Ok(Some(mode))
+}
+
+/// Returns true when `value` parses as a URL using the https scheme.
+///
+/// OIDC issuers must be served over https (RFC 8414 §2); a misconfigured
+/// http issuer is rejected at startup instead of silently downgrading token
+/// validation. Note this check is intentionally strict (no loopback
+/// exemption): production OIDC issuers must always be https.
+fn is_https_url(value: &str) -> bool {
+    url::Url::parse(value).is_ok_and(|parsed| parsed.scheme() == "https")
+}
+
+/// Returns true when `value` is an https URL, or an http URL whose host is
+/// loopback (`127.0.0.1`, `::1`, or `localhost`).
+///
+/// JWKS key transport must be encrypted (RFC 8414 §2); plain-http is
+/// tolerated only for loopback hosts so local development and test tooling
+/// (which cannot serve TLS) keep working. Non-loopback http is rejected.
+fn is_secure_jwks_url(value: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(value) else {
+        return false;
+    };
+    if parsed.scheme() == "https" {
+        return true;
+    }
+    if parsed.scheme() != "http" {
+        return false;
+    }
+    match parsed.host() {
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        Some(url::Host::Domain(domain)) => domain.eq_ignore_ascii_case("localhost"),
+        None => false,
+    }
 }
 
 fn parse_server_frontends_env(value: &str) -> Result<Vec<ServerFrontend>, ServerConfigError> {
@@ -548,8 +724,9 @@ fn parse_server_frontends_env(value: &str) -> Result<Vec<ServerFrontend>, Server
 ///
 /// When `strip_trailing_newline` is `true`, a single trailing line terminator
 /// is stripped from a file-sourced value. Enable it only for fixed-length keys
-/// (e.g. the 32-byte Hub webhook secret); variable-length secrets must pass
-/// `false` so a trailing newline is never silently altered.
+/// (e.g. the 32-byte Hub webhook secret); variable-length secrets (e.g. the
+/// token signing key) must pass `false` so a trailing newline is never silently
+/// altered.
 // The shared loader legitimately carries several error-mapping callbacks; the
 // additional `strip_trailing_newline` flag keeps it one argument over clippy's
 // default threshold.
@@ -730,6 +907,13 @@ pub fn load_server_config_from_env_with_toml(
         }
         if let Some(oidc) = &auth.oidc {
             set_if_unset("SHARDLINE_AUTH_OIDC_ISSUER", oidc.issuer_url.clone());
+            set_if_unset("SHARDLINE_AUTH_OIDC_AUDIENCE", oidc.audience.clone());
+            if let Some(hosts) = &oidc.jwks_host_allowlist {
+                set_if_unset(
+                    "SHARDLINE_AUTH_OIDC_JWKS_HOST_ALLOWLIST",
+                    Some(hosts.join(",")),
+                );
+            }
         }
         if let Some(ed25519) = &auth.ed25519 {
             set_if_unset(
@@ -970,16 +1154,26 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
             ("Strict", super::DeploymentMode::Strict),
         ] {
             set_env_var("SHARDLINE_DEPLOYMENT_MODE", value);
-            assert_eq!(super::deployment_mode_from_env(), Some(expected));
+            assert_eq!(super::deployment_mode_from_env().unwrap(), Some(expected));
         }
         remove_env_var("SHARDLINE_DEPLOYMENT_MODE");
     }
 
     #[test]
     #[serial_test::serial]
-    fn deployment_mode_from_env_falls_back_for_unknown_value() {
+    fn deployment_mode_from_env_is_unset_when_variable_missing() {
+        remove_env_var("SHARDLINE_DEPLOYMENT_MODE");
+        assert_eq!(super::deployment_mode_from_env().unwrap(), None);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn deployment_mode_from_env_rejects_unknown_value() {
         set_env_var("SHARDLINE_DEPLOYMENT_MODE", "nonsense");
-        assert_eq!(super::deployment_mode_from_env(), None);
+        assert!(matches!(
+            super::deployment_mode_from_env(),
+            Err(super::ServerConfigError::InvalidDeploymentMode { .. })
+        ));
         remove_env_var("SHARDLINE_DEPLOYMENT_MODE");
     }
 
@@ -1072,6 +1266,198 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
         assert!(config.metrics_token().is_some());
 
         remove_env_var("SHARDLINE_METRICS_TOKEN_FILE");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn load_server_config_metrics_token_from_direct_env() {
+        // SHARDLINE_METRICS_TOKEN (direct) must be honored for parity with the
+        // other secret knobs, not just the _FILE indirection.
+        set_env_var("SHARDLINE_METRICS_TOKEN", "direct-metrics-token");
+        remove_env_var("SHARDLINE_METRICS_TOKEN_FILE");
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+        let result = super::load_server_config_from_env();
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+        let config = result.unwrap();
+        assert_eq!(
+            config.metrics_token(),
+            Some(b"direct-metrics-token".as_slice()),
+            "SHARDLINE_METRICS_TOKEN must flow into the config"
+        );
+
+        remove_env_var("SHARDLINE_METRICS_TOKEN");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn load_server_config_metrics_token_rejects_both_sources() {
+        // Both the direct and file-indirection env vars set -> source conflict,
+        // matching every other secret knob.
+        set_env_var("SHARDLINE_METRICS_TOKEN", "direct-metrics-token");
+        set_env_var(
+            "SHARDLINE_METRICS_TOKEN_FILE",
+            "/tmp/does-not-need-to-exist",
+        );
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+        let result = super::load_server_config_from_env();
+        assert!(matches!(
+            result,
+            Err(super::ServerConfigError::SecretSourceConflict { .. })
+        ));
+        remove_env_var("SHARDLINE_METRICS_TOKEN");
+        remove_env_var("SHARDLINE_METRICS_TOKEN_FILE");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+    }
+
+    // ── SHARDLINE_MAX_REVISIONS_PER_REPO ───────────────────────────────────
+
+    #[test]
+    #[serial_test::serial]
+    fn load_server_config_max_revisions_per_repo_from_env() {
+        set_env_var("SHARDLINE_MAX_REVISIONS_PER_REPO", "77");
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+        let result = super::load_server_config_from_env();
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+        let config = result.unwrap();
+        assert_eq!(
+            config.max_revisions_per_repo(),
+            std::num::NonZeroUsize::new(77).unwrap()
+        );
+
+        remove_env_var("SHARDLINE_MAX_REVISIONS_PER_REPO");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn load_server_config_max_revisions_per_repo_defaults() {
+        remove_env_var("SHARDLINE_MAX_REVISIONS_PER_REPO");
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+        let result = super::load_server_config_from_env();
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+        let config = result.unwrap();
+        assert_eq!(
+            config.max_revisions_per_repo(),
+            super::DEFAULT_MAX_REVISIONS_PER_REPO
+        );
+
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn load_server_config_max_revisions_per_repo_rejects_zero() {
+        set_env_var("SHARDLINE_MAX_REVISIONS_PER_REPO", "0");
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+        let result = super::load_server_config_from_env();
+        assert!(matches!(
+            result,
+            Err(super::ServerConfigError::ZeroMaxRevisionsPerRepo)
+        ));
+
+        remove_env_var("SHARDLINE_MAX_REVISIONS_PER_REPO");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn load_server_config_max_revisions_per_repo_rejects_unparsable() {
+        set_env_var("SHARDLINE_MAX_REVISIONS_PER_REPO", "not-a-number");
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+        let result = super::load_server_config_from_env();
+        assert!(matches!(
+            result,
+            Err(super::ServerConfigError::MaxRevisionsPerRepo(_))
+        ));
+
+        remove_env_var("SHARDLINE_MAX_REVISIONS_PER_REPO");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+    }
+
+    // ── SHARDLINE_MAX_TREE_ENTRIES_PER_REPO ────────────────────────────────
+
+    #[test]
+    #[serial_test::serial]
+    fn load_server_config_max_tree_entries_per_repo_from_env() {
+        set_env_var("SHARDLINE_MAX_TREE_ENTRIES_PER_REPO", "77");
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+        let result = super::load_server_config_from_env();
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+        let config = result.unwrap();
+        assert_eq!(
+            config.max_tree_entries_per_repo(),
+            std::num::NonZeroUsize::new(77).unwrap()
+        );
+
+        remove_env_var("SHARDLINE_MAX_TREE_ENTRIES_PER_REPO");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn load_server_config_max_tree_entries_per_repo_defaults() {
+        remove_env_var("SHARDLINE_MAX_TREE_ENTRIES_PER_REPO");
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+        let result = super::load_server_config_from_env();
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+        let config = result.unwrap();
+        assert_eq!(
+            config.max_tree_entries_per_repo(),
+            super::DEFAULT_MAX_TREE_ENTRIES_PER_REPO
+        );
+
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn load_server_config_max_tree_entries_per_repo_rejects_zero() {
+        set_env_var("SHARDLINE_MAX_TREE_ENTRIES_PER_REPO", "0");
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+        let result = super::load_server_config_from_env();
+        assert!(matches!(
+            result,
+            Err(super::ServerConfigError::ZeroMaxTreeEntriesPerRepo)
+        ));
+
+        remove_env_var("SHARDLINE_MAX_TREE_ENTRIES_PER_REPO");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn load_server_config_max_tree_entries_per_repo_rejects_unparsable() {
+        set_env_var("SHARDLINE_MAX_TREE_ENTRIES_PER_REPO", "not-a-number");
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+        let result = super::load_server_config_from_env();
+        assert!(matches!(
+            result,
+            Err(super::ServerConfigError::MaxTreeEntriesPerRepo(_))
+        ));
+
+        remove_env_var("SHARDLINE_MAX_TREE_ENTRIES_PER_REPO");
         remove_env_var("SHARDLINE_ROOT_DIR");
         remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
     }
@@ -1202,6 +1588,327 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
         assert_eq!(
             config.config_secret_key(),
             Some(b"0123456789abcdef0123456789abcdef".as_slice())
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn token_signing_key_file_ending_in_newline_preserves_full_key_bytes() {
+        // Regression (F-97): the token signing key is a variable-length,
+        // binary-capable secret, so a file whose final byte is 0x0A must load
+        // VERBATIM — the effective key must equal the file bytes, never a
+        // silently truncated 31-byte prefix.
+        use std::io::Write;
+        let key_bytes = b"0123456789abcdef0123456789abcde\n"; // 32 bytes, last is 0x0A
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        tmp.write_all(key_bytes).unwrap();
+        tmp.flush().unwrap();
+
+        // SAFETY: serialized env test
+        set_env_var(
+            "SHARDLINE_TOKEN_SIGNING_KEY_FILE",
+            tmp.path().to_str().unwrap(),
+        );
+        remove_env_var("SHARDLINE_TOKEN_SIGNING_KEY");
+        // Clear any auth-provider override a previous serial test left behind.
+        remove_env_var("SHARDLINE_AUTH_PROVIDER");
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+
+        let result = super::load_server_config_from_env();
+        remove_env_var("SHARDLINE_TOKEN_SIGNING_KEY_FILE");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+
+        let config = result.expect("config loads with a trailing-newline token key file");
+        assert_eq!(
+            config.token_signing_key(),
+            Some(key_bytes.as_slice()),
+            "the token signing key must be preserved verbatim (effective key == file bytes)"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn config_secret_key_file_ending_in_newline_is_still_rejected() {
+        // The fixed-length (32-byte) config secret key keeps the strip: a
+        // 32-byte file ending in 0x0A loads as a 31-byte key and is rejected by
+        // the exact-length check — loudly, never silently accepted.
+        use std::io::Write;
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        tmp.write_all(b"0123456789abcdef0123456789abcde\n").unwrap(); // 32 bytes, last is 0x0A
+        tmp.flush().unwrap();
+
+        // SAFETY: serialized env test
+        set_env_var(
+            "SHARDLINE_CONFIG_SECRET_KEY_FILE",
+            tmp.path().to_str().unwrap(),
+        );
+        remove_env_var("SHARDLINE_CONFIG_SECRET_KEY");
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+
+        let result = super::load_server_config_from_env();
+        remove_env_var("SHARDLINE_CONFIG_SECRET_KEY_FILE");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+
+        assert!(matches!(
+            result,
+            Err(super::ServerConfigError::ConfigSecretKeyLength { expected, observed })
+                if expected == 32 && observed == 31
+        ));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn allow_plaintext_secrets_in_production_from_env_true() {
+        // A valid boolean override configured via the environment must flow
+        // through the full loader into `ServerConfig`.
+        // SAFETY: serialized env test
+        set_env_var("SHARDLINE_ALLOW_PLAINTEXT_SECRETS_IN_PRODUCTION", "true");
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+
+        let result = super::load_server_config_from_env();
+        remove_env_var("SHARDLINE_ALLOW_PLAINTEXT_SECRETS_IN_PRODUCTION");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+
+        let config = result.expect("config loads with the plaintext override set");
+        assert!(config.allow_plaintext_secrets_in_production());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn allow_plaintext_secrets_in_production_from_env_invalid_is_false() {
+        // An invalid override value must fail safe and keep the gate armed.
+        // SAFETY: serialized env test
+        set_env_var("SHARDLINE_ALLOW_PLAINTEXT_SECRETS_IN_PRODUCTION", "banana");
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+
+        let result = super::load_server_config_from_env();
+        remove_env_var("SHARDLINE_ALLOW_PLAINTEXT_SECRETS_IN_PRODUCTION");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+
+        let config = result.expect("config loads with an invalid plaintext override");
+        assert!(!config.allow_plaintext_secrets_in_production());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn allow_plaintext_secrets_in_production_from_env_uppercase_true() {
+        // The exact documented value is matched case-insensitively.
+        // SAFETY: serialized env test
+        set_env_var("SHARDLINE_ALLOW_PLAINTEXT_SECRETS_IN_PRODUCTION", "TRUE");
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+
+        let result = super::load_server_config_from_env();
+        remove_env_var("SHARDLINE_ALLOW_PLAINTEXT_SECRETS_IN_PRODUCTION");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+
+        let config = result.expect("config loads with the plaintext override set");
+        assert!(config.allow_plaintext_secrets_in_production());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn allow_plaintext_secrets_in_production_from_env_one_is_false() {
+        // A stray `1` must NOT disarm the gate (generic boolean alias).
+        // SAFETY: serialized env test
+        set_env_var("SHARDLINE_ALLOW_PLAINTEXT_SECRETS_IN_PRODUCTION", "1");
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+
+        let result = super::load_server_config_from_env();
+        remove_env_var("SHARDLINE_ALLOW_PLAINTEXT_SECRETS_IN_PRODUCTION");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+
+        let config = result.expect("config loads with a legacy plaintext override");
+        assert!(
+            !config.allow_plaintext_secrets_in_production(),
+            "the generic true-alias `1` must not disarm the plaintext gate"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn allow_plaintext_secrets_in_production_from_env_yes_is_false() {
+        // A stray `yes` must NOT disarm the gate (generic boolean alias).
+        // SAFETY: serialized env test
+        set_env_var("SHARDLINE_ALLOW_PLAINTEXT_SECRETS_IN_PRODUCTION", "yes");
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+
+        let result = super::load_server_config_from_env();
+        remove_env_var("SHARDLINE_ALLOW_PLAINTEXT_SECRETS_IN_PRODUCTION");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+
+        let config = result.expect("config loads with a legacy plaintext override");
+        assert!(
+            !config.allow_plaintext_secrets_in_production(),
+            "the generic true-alias `yes` must not disarm the plaintext gate"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn allow_plaintext_secrets_in_production_from_env_on_is_false() {
+        // A stray `on` must NOT disarm the gate (generic boolean alias).
+        // SAFETY: serialized env test
+        set_env_var("SHARDLINE_ALLOW_PLAINTEXT_SECRETS_IN_PRODUCTION", "on");
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+
+        let result = super::load_server_config_from_env();
+        remove_env_var("SHARDLINE_ALLOW_PLAINTEXT_SECRETS_IN_PRODUCTION");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+
+        let config = result.expect("config loads with a legacy plaintext override");
+        assert!(
+            !config.allow_plaintext_secrets_in_production(),
+            "the generic true-alias `on` must not disarm the plaintext gate"
+        );
+    }
+
+    /// Minimal test subscriber that records WARN-level event messages so the
+    /// fail-loud gates can be asserted on (F-110 regression tests).
+    #[derive(Default)]
+    struct CapturingSubscriber {
+        warnings: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl tracing::Subscriber for CapturingSubscriber {
+        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+
+        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::Id {
+            tracing::Id::from_u64(1)
+        }
+
+        fn record(&self, _span: &tracing::Id, _values: &tracing::span::Record<'_>) {}
+
+        fn record_follows_from(&self, _span: &tracing::Id, _follows: &tracing::Id) {}
+
+        fn event(&self, event: &tracing::Event<'_>) {
+            if *event.metadata().level() == tracing::Level::WARN {
+                let mut visitor = MessageVisitor::default();
+                event.record(&mut visitor);
+                self.warnings.lock().unwrap().push(visitor.message);
+            }
+        }
+
+        fn enter(&self, _span: &tracing::Id) {}
+
+        fn exit(&self, _span: &tracing::Id) {}
+    }
+
+    #[derive(Default)]
+    struct MessageVisitor {
+        message: String,
+    }
+
+    impl tracing::field::Visit for MessageVisitor {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            if field.name() == "message" {
+                self.message = format!("{value:?}");
+            }
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn allow_plaintext_secrets_in_production_unset_is_silent() {
+        // Regression (F-110): the unset state (the normal case) must NOT emit
+        // the fail-loud WARN. The old gate warned on every boot unless the var
+        // was explicitly set to a non-plaintext value, training operators to
+        // ignore the fail-loud signal.
+        // SAFETY: serialized env test
+        let subscriber = CapturingSubscriber::default();
+        let warnings = subscriber.warnings.clone();
+        tracing::subscriber::with_default(subscriber, || {
+            remove_env_var("SHARDLINE_ALLOW_PLAINTEXT_SECRETS_IN_PRODUCTION");
+            set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+            set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+
+            let result = super::load_server_config_from_env();
+            remove_env_var("SHARDLINE_ROOT_DIR");
+            remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+
+            let config = result.expect("config loads with the override unset");
+            assert!(!config.allow_plaintext_secrets_in_production());
+        });
+        let warnings = warnings.lock().unwrap();
+        assert!(
+            warnings.is_empty(),
+            "the unset plaintext override must be silent, got warnings: {warnings:?}"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn allow_plaintext_secrets_in_production_true_warns() {
+        // Regression (F-110): an explicit plaintext override (`true`) is the
+        // one state that MUST emit the fail-loud WARN — the operator has
+        // disarmed the at-rest secret-encryption gate.
+        // SAFETY: serialized env test
+        let subscriber = CapturingSubscriber::default();
+        let warnings = subscriber.warnings.clone();
+        tracing::subscriber::with_default(subscriber, || {
+            set_env_var("SHARDLINE_ALLOW_PLAINTEXT_SECRETS_IN_PRODUCTION", "true");
+            set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+            set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+
+            let result = super::load_server_config_from_env();
+            remove_env_var("SHARDLINE_ALLOW_PLAINTEXT_SECRETS_IN_PRODUCTION");
+            remove_env_var("SHARDLINE_ROOT_DIR");
+            remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+
+            let config = result.expect("config loads with the plaintext override set");
+            assert!(config.allow_plaintext_secrets_in_production());
+        });
+        let warnings = warnings.lock().unwrap();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("SHARDLINE_ALLOW_PLAINTEXT_SECRETS_IN_PRODUCTION")),
+            "an explicit plaintext override must emit the fail-loud WARN, got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn allow_plaintext_secrets_in_production_false_is_silent() {
+        // Regression (F-110): an explicit non-plaintext (`false`) override must
+        // be silent — the gate stays armed and no fail-loud WARN is needed.
+        // SAFETY: serialized env test
+        let subscriber = CapturingSubscriber::default();
+        let warnings = subscriber.warnings.clone();
+        tracing::subscriber::with_default(subscriber, || {
+            set_env_var("SHARDLINE_ALLOW_PLAINTEXT_SECRETS_IN_PRODUCTION", "false");
+            set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+            set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+
+            let result = super::load_server_config_from_env();
+            remove_env_var("SHARDLINE_ALLOW_PLAINTEXT_SECRETS_IN_PRODUCTION");
+            remove_env_var("SHARDLINE_ROOT_DIR");
+            remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+
+            let config = result.expect("config loads with the plaintext override disabled");
+            assert!(!config.allow_plaintext_secrets_in_production());
+        });
+        let warnings = warnings.lock().unwrap();
+        assert!(
+            warnings.is_empty(),
+            "an explicit non-plaintext override must be silent, got warnings: {warnings:?}"
         );
     }
 
@@ -1780,6 +2487,247 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
 
     #[test]
     #[serial_test::serial]
+    fn load_server_config_oidc_audience_from_env() {
+        set_env_var("SHARDLINE_AUTH_PROVIDER", "oidc");
+        set_env_var("SHARDLINE_AUTH_OIDC_ISSUER", "https://accounts.example.com");
+        set_env_var("SHARDLINE_AUTH_OIDC_AUDIENCE", "shardline-web");
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+        let result = super::load_server_config_from_env();
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+        let config = result.unwrap();
+        assert_eq!(
+            config.auth_oidc_audience(),
+            Some("shardline-web"),
+            "SHARDLINE_AUTH_OIDC_AUDIENCE must flow into the config"
+        );
+        remove_env_var("SHARDLINE_AUTH_PROVIDER");
+        remove_env_var("SHARDLINE_AUTH_OIDC_ISSUER");
+        remove_env_var("SHARDLINE_AUTH_OIDC_AUDIENCE");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn load_server_config_oidc_audience_unset_by_default() {
+        set_env_var("SHARDLINE_AUTH_PROVIDER", "oidc");
+        set_env_var("SHARDLINE_AUTH_OIDC_ISSUER", "https://accounts.example.com");
+        remove_env_var("SHARDLINE_AUTH_OIDC_AUDIENCE");
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+        let result = super::load_server_config_from_env();
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+        let config = result.unwrap();
+        assert_eq!(
+            config.auth_oidc_audience(),
+            None,
+            "audience must default to unset (permissive aud validation)"
+        );
+        remove_env_var("SHARDLINE_AUTH_PROVIDER");
+        remove_env_var("SHARDLINE_AUTH_OIDC_ISSUER");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn load_server_config_oidc_audience_empty_behaves_as_unset() {
+        // Regression (F-55): SHARDLINE_AUTH_OIDC_AUDIENCE="" must behave
+        // exactly like the variable being unset. An empty string used to flow
+        // through as `Some("")`, silently enabling aud validation against an
+        // empty audience (every aud-bearing token rejected) while the startup
+        // aud warning never fired. `config.auth_oidc_audience() == None` is
+        // precisely the condition that triggers the app.rs startup warning and
+        // the permissive (validate_aud disabled) provider behavior.
+        set_env_var("SHARDLINE_AUTH_PROVIDER", "oidc");
+        set_env_var("SHARDLINE_AUTH_OIDC_ISSUER", "https://accounts.example.com");
+        set_env_var("SHARDLINE_AUTH_OIDC_AUDIENCE", "");
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+        let result = super::load_server_config_from_env();
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+        let config = result.unwrap();
+        assert_eq!(
+            config.auth_oidc_audience(),
+            None,
+            "an empty audience must behave exactly like unset"
+        );
+        remove_env_var("SHARDLINE_AUTH_PROVIDER");
+        remove_env_var("SHARDLINE_AUTH_OIDC_ISSUER");
+        remove_env_var("SHARDLINE_AUTH_OIDC_AUDIENCE");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn load_server_config_oidc_audience_whitespace_only_behaves_as_unset() {
+        set_env_var("SHARDLINE_AUTH_PROVIDER", "oidc");
+        set_env_var("SHARDLINE_AUTH_OIDC_ISSUER", "https://accounts.example.com");
+        set_env_var("SHARDLINE_AUTH_OIDC_AUDIENCE", "   ");
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+        let result = super::load_server_config_from_env();
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+        let config = result.unwrap();
+        assert_eq!(
+            config.auth_oidc_audience(),
+            None,
+            "a whitespace-only audience must behave exactly like unset"
+        );
+        remove_env_var("SHARDLINE_AUTH_PROVIDER");
+        remove_env_var("SHARDLINE_AUTH_OIDC_ISSUER");
+        remove_env_var("SHARDLINE_AUTH_OIDC_AUDIENCE");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn load_server_config_oidc_audience_whitespace_is_trimmed() {
+        set_env_var("SHARDLINE_AUTH_PROVIDER", "oidc");
+        set_env_var("SHARDLINE_AUTH_OIDC_ISSUER", "https://accounts.example.com");
+        set_env_var("SHARDLINE_AUTH_OIDC_AUDIENCE", "  shardline-web  ");
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+        let result = super::load_server_config_from_env();
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+        let config = result.unwrap();
+        assert_eq!(
+            config.auth_oidc_audience(),
+            Some("shardline-web"),
+            "surrounding whitespace around the audience must be trimmed"
+        );
+        remove_env_var("SHARDLINE_AUTH_PROVIDER");
+        remove_env_var("SHARDLINE_AUTH_OIDC_ISSUER");
+        remove_env_var("SHARDLINE_AUTH_OIDC_AUDIENCE");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn load_server_config_oidc_jwks_host_allowlist_from_env() {
+        set_env_var("SHARDLINE_AUTH_PROVIDER", "oidc");
+        set_env_var("SHARDLINE_AUTH_OIDC_ISSUER", "https://accounts.example.com");
+        set_env_var(
+            "SHARDLINE_AUTH_OIDC_JWKS_HOST_ALLOWLIST",
+            "www.googleapis.com, api.example.com",
+        );
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+        let result = super::load_server_config_from_env();
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+        let config = result.unwrap();
+        assert_eq!(
+            config.auth_oidc_jwks_host_allowlist(),
+            Some(
+                &[
+                    "www.googleapis.com".to_owned(),
+                    "api.example.com".to_owned()
+                ][..]
+            ),
+            "SHARDLINE_AUTH_OIDC_JWKS_HOST_ALLOWLIST must flow into the config"
+        );
+        remove_env_var("SHARDLINE_AUTH_PROVIDER");
+        remove_env_var("SHARDLINE_AUTH_OIDC_ISSUER");
+        remove_env_var("SHARDLINE_AUTH_OIDC_JWKS_HOST_ALLOWLIST");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn load_server_config_oidc_jwks_host_allowlist_unset_by_default() {
+        set_env_var("SHARDLINE_AUTH_PROVIDER", "oidc");
+        set_env_var("SHARDLINE_AUTH_OIDC_ISSUER", "https://accounts.example.com");
+        remove_env_var("SHARDLINE_AUTH_OIDC_JWKS_HOST_ALLOWLIST");
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+        let result = super::load_server_config_from_env();
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+        let config = result.unwrap();
+        assert_eq!(
+            config.auth_oidc_jwks_host_allowlist(),
+            None,
+            "the jwks host allowlist must default to unset (issuer host only)"
+        );
+        remove_env_var("SHARDLINE_AUTH_PROVIDER");
+        remove_env_var("SHARDLINE_AUTH_OIDC_ISSUER");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn load_server_config_oidc_jwks_host_allowlist_trims_and_skips_empty() {
+        set_env_var("SHARDLINE_AUTH_PROVIDER", "oidc");
+        set_env_var("SHARDLINE_AUTH_OIDC_ISSUER", "https://accounts.example.com");
+        set_env_var(
+            "SHARDLINE_AUTH_OIDC_JWKS_HOST_ALLOWLIST",
+            "  ,,www.googleapis.com,,  ",
+        );
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+        let result = super::load_server_config_from_env();
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+        let config = result.unwrap();
+        assert_eq!(
+            config.auth_oidc_jwks_host_allowlist(),
+            Some(&["www.googleapis.com".to_owned()][..]),
+            "empty entries must be skipped and hosts trimmed"
+        );
+        remove_env_var("SHARDLINE_AUTH_PROVIDER");
+        remove_env_var("SHARDLINE_AUTH_OIDC_ISSUER");
+        remove_env_var("SHARDLINE_AUTH_OIDC_JWKS_HOST_ALLOWLIST");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn load_server_config_oidc_rejects_http_issuer() {
+        // Regression (F-64): OIDC issuers must be https (RFC 8414 §2). A
+        // plain-http issuer is a startup error rather than a silent downgrade.
+        set_env_var("SHARDLINE_AUTH_PROVIDER", "oidc");
+        set_env_var("SHARDLINE_AUTH_OIDC_ISSUER", "http://accounts.example.com");
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+        let result = super::load_server_config_from_env();
+        assert!(matches!(
+            result,
+            Err(super::ServerConfigError::OidcIssuerMustUseHttps { .. })
+        ));
+        remove_env_var("SHARDLINE_AUTH_PROVIDER");
+        remove_env_var("SHARDLINE_AUTH_OIDC_ISSUER");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn load_server_config_oidc_accepts_https_issuer() {
+        set_env_var("SHARDLINE_AUTH_PROVIDER", "oidc");
+        set_env_var("SHARDLINE_AUTH_OIDC_ISSUER", "https://accounts.example.com");
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+        let result = super::load_server_config_from_env();
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+        let config = result.unwrap();
+        assert_eq!(
+            config.auth_oidc_issuer(),
+            Some("https://accounts.example.com"),
+            "an https issuer must be accepted"
+        );
+        remove_env_var("SHARDLINE_AUTH_PROVIDER");
+        remove_env_var("SHARDLINE_AUTH_OIDC_ISSUER");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+    }
+
+    #[test]
+    #[serial_test::serial]
     fn load_server_config_jwks_requires_url() {
         set_env_var("SHARDLINE_AUTH_PROVIDER", "jwks");
         set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
@@ -1790,6 +2738,74 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
             Err(super::ServerConfigError::MissingJwksUrl)
         ));
         remove_env_var("SHARDLINE_AUTH_PROVIDER");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn load_server_config_jwks_rejects_http_url() {
+        // Regression (F-95): JWKS key transport must be https (RFC 8414 §2).
+        // A plain-http non-loopback SHARDLINE_AUTH_JWKS_URL is a startup error
+        // rather than a silent downgrade of key transport.
+        set_env_var("SHARDLINE_AUTH_PROVIDER", "jwks");
+        set_env_var(
+            "SHARDLINE_AUTH_JWKS_URL",
+            "http://keys.example.com/.well-known/jwks",
+        );
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+        let result = super::load_server_config_from_env();
+        assert!(matches!(
+            result,
+            Err(super::ServerConfigError::JwksUrlMustUseHttps { .. })
+        ));
+        remove_env_var("SHARDLINE_AUTH_PROVIDER");
+        remove_env_var("SHARDLINE_AUTH_JWKS_URL");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn load_server_config_jwks_accepts_https_url() {
+        set_env_var("SHARDLINE_AUTH_PROVIDER", "jwks");
+        set_env_var(
+            "SHARDLINE_AUTH_JWKS_URL",
+            "https://keys.example.com/.well-known/jwks",
+        );
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+        let result = super::load_server_config_from_env();
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+        let config = result.unwrap();
+        assert_eq!(
+            config.auth_jwks_url(),
+            Some("https://keys.example.com/.well-known/jwks"),
+            "an https JWKS URL must be accepted"
+        );
+        remove_env_var("SHARDLINE_AUTH_PROVIDER");
+        remove_env_var("SHARDLINE_AUTH_JWKS_URL");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn load_server_config_jwks_accepts_loopback_http_url() {
+        // Loopback http is tolerated so local development and test tooling
+        // (which cannot serve TLS) keep working.
+        set_env_var("SHARDLINE_AUTH_PROVIDER", "jwks");
+        set_env_var(
+            "SHARDLINE_AUTH_JWKS_URL",
+            "http://127.0.0.1:8080/.well-known/jwks",
+        );
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+        let result = super::load_server_config_from_env();
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+        remove_env_var("SHARDLINE_AUTH_PROVIDER");
+        remove_env_var("SHARDLINE_AUTH_JWKS_URL");
         remove_env_var("SHARDLINE_ROOT_DIR");
         remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
     }

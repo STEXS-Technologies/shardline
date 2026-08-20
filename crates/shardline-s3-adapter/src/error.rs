@@ -273,6 +273,7 @@ impl From<crate::multipart::S3SessionError> for S3Error {
         match value {
             crate::multipart::S3SessionError::NotFound => Self::no_such_upload(),
             crate::multipart::S3SessionError::TooManySessions => Self::slow_down(),
+            crate::multipart::S3SessionError::TooManyPartFiles => Self::slow_down(),
             crate::multipart::S3SessionError::MissingPart(_) => Self::invalid_part(),
             crate::multipart::S3SessionError::InvalidPartNumber => {
                 Self::invalid_argument("partNumber must be between 1 and 10000")

@@ -118,6 +118,18 @@ pub enum ServerConfigError {
     /// The maximum shard xorb chunk record count was zero.
     #[error("max shard xorb chunk record count must be greater than zero")]
     ZeroMaxShardXorbChunks,
+    /// The per-repo revision-registry cap could not be parsed.
+    #[error("invalid max revisions per repo")]
+    MaxRevisionsPerRepo(ParseIntError),
+    /// The per-repo revision-registry cap was zero.
+    #[error("max revisions per repo must be greater than zero")]
+    ZeroMaxRevisionsPerRepo,
+    /// The per-repo tree-entry cap could not be parsed.
+    #[error("invalid max tree entries per repo")]
+    MaxTreeEntriesPerRepo(ParseIntError),
+    /// The per-repo tree-entry cap was zero.
+    #[error("max tree entries per repo must be greater than zero")]
+    ZeroMaxTreeEntriesPerRepo,
     /// The chunk size was zero.
     #[error("chunk size must be greater than zero")]
     ZeroChunkSize,
@@ -316,6 +328,11 @@ pub enum ServerConfigError {
         /// Observed secret file length in bytes after bounded read.
         observed_bytes: u64,
     },
+    /// Strict deployment mode requires a metrics bearer token.
+    #[error(
+        "strict deployment mode requires a metrics token (set SHARDLINE_METRICS_TOKEN or SHARDLINE_METRICS_TOKEN_FILE)"
+    )]
+    MissingMetricsToken,
     /// The selected role uses the local HMAC provider and would expose CAS routes
     /// without bearer-token verification.
     #[error("served shardline routes require shardline token signing key configuration")]
@@ -402,18 +419,70 @@ pub enum ServerConfigError {
     /// The S3 multipart aggregate byte quota was zero.
     #[error("s3 upload total max bytes must be greater than zero")]
     ZeroS3UploadTotalMaxBytes,
+    /// The S3 multipart global active-part-file cap could not be parsed.
+    #[error("invalid s3 upload max active part files")]
+    S3UploadMaxActivePartFiles(ParseIntError),
+    /// The S3 multipart global active-part-file cap was zero.
+    #[error("s3 upload max active part files must be greater than zero")]
+    ZeroS3UploadMaxActivePartFiles,
+    /// The LFS chunked-patch staging TTL could not be parsed.
+    #[error("invalid lfs patch ttl")]
+    LfsPatchTtl(ParseIntError),
+    /// The LFS chunked-patch staging TTL was zero.
+    #[error("lfs patch ttl must be greater than zero")]
+    ZeroLfsPatchTtlSeconds,
+    /// The LFS chunked-patch live-session ceiling could not be parsed.
+    #[error("invalid lfs patch max active sessions")]
+    LfsPatchMaxActiveSessions(ParseIntError),
+    /// The LFS chunked-patch live-session ceiling was zero.
+    #[error("lfs patch max active sessions must be greater than zero")]
+    ZeroLfsPatchMaxActiveSessions,
+    /// The LFS chunked-patch aggregate byte cap could not be parsed.
+    #[error("invalid lfs patch total max bytes")]
+    LfsPatchTotalMaxBytes(ParseIntError),
+    /// The LFS chunked-patch aggregate byte cap was zero.
+    #[error("lfs patch total max bytes must be greater than zero")]
+    ZeroLfsPatchTotalMaxBytes,
+    /// The LFS chunked-patch seek-ahead bound could not be parsed.
+    #[error("invalid lfs patch max seek ahead bytes")]
+    LfsPatchMaxSeekAheadBytes(ParseIntError),
+    /// The LFS chunked-patch seek-ahead bound was zero.
+    #[error("lfs patch max seek ahead bytes must be greater than zero")]
+    ZeroLfsPatchMaxSeekAheadBytes,
     /// The public base URL is not a valid URL.
     #[error("SHARDLINE_PUBLIC_BASE_URL is not a valid URL: {0}")]
     InvalidPublicBaseUrl(String),
     /// A configuration file could not be loaded.
     #[error("configuration file error: {0}")]
     ConfigFileError(String),
+    /// The `SHARDLINE_DEPLOYMENT_MODE` environment variable was set to an
+    /// unknown value. Fail closed instead of falling back to the insecure
+    /// default, mirroring the sibling fail-closed behavior of
+    /// `SHARDLINE_ALLOW_PLAINTEXT_SECRETS_IN_PRODUCTION`.
+    #[error(
+        "unknown SHARDLINE_DEPLOYMENT_MODE value '{value}'; expected one of: insecure, authenticated, strict"
+    )]
+    InvalidDeploymentMode { value: String },
+    /// Persistent secrets would be stored in plaintext in a production deployment mode.
+    #[error(
+        "production deployment mode requires at-rest secret encryption, but {surfaces}; \
+         set SHARDLINE_ALLOW_PLAINTEXT_SECRETS_IN_PRODUCTION=true only if you accept \
+         storing secrets unencrypted"
+    )]
+    PlaintextSecretsInProduction { surfaces: String },
     /// OIDC auth provider requires an issuer URL.
     #[error("oidc auth provider requires SHARDLINE_AUTH_OIDC_ISSUER")]
     MissingOidcIssuer,
+    /// The OIDC issuer URL must use https (RFC 8414 §2).
+    #[error("oidc auth provider requires an https SHARDLINE_AUTH_OIDC_ISSUER, got {issuer}")]
+    OidcIssuerMustUseHttps { issuer: String },
     /// JWKS auth provider requires a JWKS URL.
     #[error("jwks auth provider requires SHARDLINE_AUTH_JWKS_URL")]
     MissingJwksUrl,
+    /// The JWKS URL must use https (RFC 8414 §2); plain-http is tolerated
+    /// only for loopback hosts (local development / test tooling).
+    #[error("jwks auth provider requires an https SHARDLINE_AUTH_JWKS_URL, got {url}")]
+    JwksUrlMustUseHttps { url: String },
     /// Hub frontend requires an auth provider to be configured.
     #[error(
         "hub frontend requires auth configuration (SHARDLINE_AUTH_PROVIDER with token signing key or oidc/jwks)"
@@ -423,6 +492,18 @@ pub enum ServerConfigError {
     #[error("passthrough auth provider requires a loopback bind address, got {bind_addr}")]
     PassthroughProviderRequiresLoopbackBind {
         /// The rejected bind address.
+        bind_addr: SocketAddr,
+    },
+    /// The implicit (unset) Insecure deployment mode on a non-loopback bind
+    /// with no auth provider would boot a fully unauthenticated server.
+    #[error(
+        "no SHARDLINE_DEPLOYMENT_MODE set and no auth provider configured: refusing to boot an \
+         unauthenticated server on the non-loopback address {bind_addr}. Set \
+         SHARDLINE_DEPLOYMENT_MODE (insecure/authenticated/strict) explicitly, configure an auth \
+         provider, or bind a loopback address"
+    )]
+    InsecureDefaultRequiresExplicitOptIn {
+        /// The rejected non-loopback bind address.
         bind_addr: SocketAddr,
     },
     /// A secret was provided through both direct env and file indirection.

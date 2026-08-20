@@ -18,11 +18,12 @@ use crate::{
         issue_xet_token, map_provider_issue_error, parse_provider_token_request_body,
         provider_webhook_response, validate_provider_name_path,
     },
+    backend::ServerBackend,
     cas_headers,
     clock::unix_now_seconds_checked,
     metrics,
     model::{GitLfsAuthenticateResponse, ProviderTokenIssueResponse, XetCasTokenResponse},
-    provider_events::apply_provider_webhook,
+    provider_events::{apply_provider_webhook, apply_provider_webhook_with_stores},
 };
 
 #[derive(Debug, Deserialize)]
@@ -137,7 +138,22 @@ pub(super) async fn handle_provider_webhook(
         return Ok(StatusCode::NO_CONTENT.into_response());
     };
     let start = Instant::now();
-    let outcome = apply_provider_webhook(&state.config, &event).await?;
+    let outcome = match &state.backend {
+        // Reuse the server's own Postgres record/index stores (their pool is
+        // created once per server) instead of opening a fresh pool per webhook
+        // event.
+        ServerBackend::Postgres(backend) => {
+            let object_store = backend.object_store();
+            apply_provider_webhook_with_stores(
+                backend.record_store(),
+                backend.index_store(),
+                &object_store,
+                &event,
+            )
+            .await?
+        }
+        ServerBackend::Local(_) => apply_provider_webhook(&state.config, &event).await?,
+    };
     let elapsed = start.elapsed().as_secs_f64();
     metrics::record_webhook_event(&provider, "", elapsed);
     Ok((

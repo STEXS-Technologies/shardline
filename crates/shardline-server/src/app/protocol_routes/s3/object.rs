@@ -25,22 +25,23 @@ use axum::{
 use futures_util::{Stream, StreamExt, stream};
 use md5::{Digest, Md5};
 use shardline_index::S3ObjectEntry;
-use shardline_protocol::TokenScope;
 use shardline_s3_adapter::{
     CopyObjectResult, S3Error, S3SubResource, classify, etag_header, format_iso8601,
-    parse_copy_source, parse_s3_range, read_conditional_headers,
+    parse_copy_source, parse_s3_range, read_conditional_headers, require_s3_bucket_binding,
 };
+use shardline_server_core::AuthorizedRepository;
 
 use crate::{
     ServerByteStream, ServerError,
-    app::{AppState, reconstruction_helpers, scope_from_auth},
+    app::{AppState, reconstruction_helpers},
     metrics,
     overflow::checked_add,
+    protocol_support::scope_namespace,
     upload_ingest::RequestBodyReader,
 };
 
 use super::{
-    S3ObjectContext, acquire_object_upload_lock, authorize_s3, aws_chunked, format_http_date,
+    S3ObjectContext, S3Repository, acquire_object_upload_lock, aws_chunked, format_http_date,
     has_sub_resource, multipart, parse_s3_query, require_s3_object_context, s3_xml_content_type,
 };
 
@@ -110,13 +111,24 @@ fn insert_user_metadata(response: &mut Response, metadata: &[(String, String)]) 
 /// Resolves the S3 listing-index row for an object (`None` when absent).
 async fn s3_object_entry(
     state: &Arc<AppState>,
-    context: &S3ObjectContext,
+    context: &S3ObjectContext<'_>,
 ) -> Result<Option<S3ObjectEntry>, S3Error> {
-    let mut rows = state
+    // The namespace is derived from the capability the context carries — the
+    // same derivation every other storage call got at context construction.
+    //
+    // Exact-key lookup, NOT the prefix scan: `scan_s3_objects` matches
+    // `object_key` as a string PREFIX for listing pagination, so when the
+    // exact key is absent a longer sibling key with it as a string prefix
+    // (e.g. `a` vs `a/b`) would be returned as the object — breaking
+    // conditional semantics (F-33): If-None-Match:* would spuriously 412 a
+    // create-if-absent PUT against the sibling's ETag. The table's unique
+    // `(scope_namespace, object_key)` primary key makes the exact lookup hit
+    // the index directly.
+    state
         .backend
-        .scan_s3_objects(&context.scope_namespace, &context.key, None, 1)
-        .await?;
-    Ok(rows.pop())
+        .scan_s3_object_exact(&scope_namespace(context.auth.namespace()), &context.key)
+        .await
+        .map_err(S3Error::from)
 }
 
 /// Finalizes a shared MD5 tee hasher into an S3 ETag hex string.
@@ -138,17 +150,16 @@ pub(super) fn md5_hasher_hex(hasher: &Arc<Mutex<Md5>>) -> String {
 /// disconnect) commits nothing — the old record version, index row, and direct
 /// object remain intact and readers never observe a transient 404. A per-key
 /// upload lock serializes concurrent overwrites of the same key.
-#[tracing::instrument(skip(state, headers, body), fields(bucket, key))]
+#[tracing::instrument(skip(auth, state, headers, body), fields(bucket, key))]
 pub(crate) async fn s3_put_object(
+    auth: S3Repository,
     State(state): State<Arc<AppState>>,
-    Path((bucket, key)): Path<(String, String)>,
+    Path((_bucket, key)): Path<(String, String)>,
     uri: Uri,
     headers: HeaderMap,
     body: Body,
 ) -> Result<Response, S3Error> {
-    let auth = authorize_s3(&state, &headers, TokenScope::Write)?;
-    let claims = auth.as_ref().map(scope_from_auth);
-    let context = require_s3_object_context(claims, &bucket, &key)?;
+    let context = require_s3_object_context(auth.capability(), &key)?;
 
     // `?partNumber=N&uploadId=U` dispatches to UploadPart; other sub-resources
     // (multipart create/completion and out-of-scope ops) are handled below or
@@ -184,7 +195,7 @@ pub(crate) async fn s3_put_object(
         .get(COPY_SOURCE)
         .and_then(|value| value.to_str().ok())
     {
-        return s3_copy_object(&state, claims, &context, copy_source, &headers).await;
+        return s3_copy_object(&state, auth.capability(), &context, copy_source, &headers).await;
     }
 
     // Bodies larger than SHARDLINE_S3_MAX_PART_BYTES must use multipart.
@@ -271,16 +282,19 @@ pub(crate) async fn s3_put_object(
 /// Responds `200` with a `CopyObjectResult` envelope.
 async fn s3_copy_object(
     state: &Arc<AppState>,
-    claims: Option<&shardline_protocol::RepositoryScope>,
-    destination: &S3ObjectContext,
+    capability: &AuthorizedRepository,
+    destination: &S3ObjectContext<'_>,
     copy_source: &str,
     headers: &HeaderMap,
 ) -> Result<Response, S3Error> {
     let source = parse_copy_source(copy_source)
         .map_err(|_error| S3Error::invalid_argument("Invalid x-amz-copy-source header"))?;
     // The source must be inside the caller's bound bucket (which must equal the
-    // destination bucket under the C1 repo-binding model).
-    let source_context = require_s3_object_context(claims, &source.bucket, &source.key)?;
+    // destination bucket under the C1 repo-binding model). The destination was
+    // bound by the S3Repository extractor; the source bucket lives in the
+    // copy-source header, so it is bound here against the capability.
+    require_s3_bucket_binding(capability.repository(), &source.bucket)?;
+    let source_context = require_s3_object_context(capability, &source.key)?;
 
     // Conditional requests apply to the destination (create-if-absent /
     // replace-if-matching semantics) BEFORE any write. Like PutObject this is
@@ -288,27 +302,25 @@ async fn s3_copy_object(
     // per-key lock in `s3_upload_object_body`, right before the index swap.
     check_put_precondition(state, destination, headers).await?;
 
-    // Metadata directive: COPY (default) propagates the source's user metadata;
-    // REPLACE overrides it with the x-amz-meta-* headers of this request.
-    let user_metadata = match metadata_directive(headers) {
-        MetadataDirective::Replace => capture_user_metadata(headers),
-        MetadataDirective::Copy => s3_object_entry(state, &source_context)
-            .await?
-            .map(|entry| entry.user_metadata)
-            .unwrap_or_default(),
-    };
-
     // The copy is subject to the SAME per-request byte ceiling as PutObject
-    // (SHARDLINE_S3_MAX_PART_BYTES): resolve the source's length in ONE pinned
-    // snapshot and reject an over-cap source with EntityTooLarge BEFORE any
-    // bytes are read or written — exactly like a direct over-cap PUT.
+    // (SHARDLINE_S3_MAX_PART_BYTES): resolve the source's length AND metadata
+    // in ONE pinned snapshot and reject an over-cap source with EntityTooLarge
+    // BEFORE any bytes are read or written — exactly like a direct over-cap
+    // PUT. The snapshot is the source's single commit point (F-70/F-79): its
+    // user metadata, size, and record version are paired in one resolution, so
+    // a concurrent source overwrite can never pair OLD-row metadata with
+    // NEW-record bytes (a PUT commits its new record before swapping the row).
     let max_bytes = usize::try_from(state.config.s3_max_part_bytes().get())
         .map_err(|_error| S3Error::internal())?;
     let max_bytes = NonZeroUsize::new(max_bytes).ok_or_else(S3Error::internal)?;
     let max_bytes_u64 = u64::try_from(max_bytes.get()).map_err(|_error| S3Error::internal())?;
     let snapshot = match state
         .backend
-        .s3_object_read_snapshot(&source_context.object_key)
+        .s3_object_read_snapshot(
+            &source_context.scope_namespace,
+            &source_context.key,
+            &source_context.object_key,
+        )
         .await
     {
         Ok(snapshot) => snapshot,
@@ -322,6 +334,15 @@ async fn s3_copy_object(
             status: StatusCode::PAYLOAD_TOO_LARGE,
         });
     }
+
+    // Metadata directive: COPY (default) propagates the source's user metadata
+    // — resolved from the SAME snapshot as the source bytes, so the copied
+    // metadata always belongs to the copied content (F-79); REPLACE overrides
+    // it with the x-amz-meta-* headers of this request.
+    let user_metadata = match metadata_directive(headers) {
+        MetadataDirective::Replace => capture_user_metadata(headers),
+        MetadataDirective::Copy => snapshot.user_metadata,
+    };
 
     // Stream the source through the same pinned read path as GetObject (no
     // unbounded full-object `read_object` buffer), bounded mid-stream by the
@@ -376,7 +397,7 @@ async fn s3_copy_object(
 /// with `412` when the stored ETag matches (or `*` and the object exists).
 async fn check_put_precondition(
     state: &Arc<AppState>,
-    context: &S3ObjectContext,
+    context: &S3ObjectContext<'_>,
     headers: &HeaderMap,
 ) -> Result<(), S3Error> {
     let existing = match s3_object_entry(state, context).await? {
@@ -460,15 +481,32 @@ fn bounded_byte_stream(
 /// which is stored in the index row and returned.
 ///
 /// When `precondition` is `Some`, the `If-Match` / `If-None-Match` headers are
-/// RE-EVALUATED here — under the per-key lock, after the body streamed but
-/// before the index swap. The handlers' early check is only a fast-path
-/// rejection: without this re-check a concurrent conditional writer that lost
-/// the race would have passed the check against the pre-write state and both
-/// requests would succeed (check-then-act TOCTOU). By re-checking against the
-/// committed row the loser sees the winner's ETag and fails with `412`.
+/// evaluated in TWO places under the per-key lock:
+///
+/// 1. BEFORE the body is streamed or any record committed (F-86): the row is
+///    only mutated by holders of this same lock (PutObject / CopyObject /
+///    multipart completion / DeleteObject), so a failing check here returns
+///    412 with NO write side effect — the losing record is never committed,
+///    never becomes the LATEST version, and its chunks are never written. The
+///    handlers' early check is only a fast-path rejection.
+/// 2. AFTER the body streamed but BEFORE the index swap (the F-8 TOCTOU
+///    guarantee): belt-and-suspenders in case a future row mutation bypasses
+///    the lock. When it fires the just-committed record is the LOSER's — it is
+///    purged (version record + latest alias) so no latest-record consumer ever
+///    serves the loser's bytes and its chunks are not retained as reachable.
+///
+/// The purge is F-92-guarded: it deletes the LOSER's committed version only
+/// while the latest alias still points at it (see
+/// `delete_file_reference_if_latest`). The per-key lock is an in-process
+/// HashMap, so in a multi-replica Postgres deployment it does NOT serialize
+/// conditional writers on different replicas — a replica can commit the
+/// WINNER's record and swap the row between this request's pre-check and
+/// post-check. An unconditional purge would then read the latest alias (now the
+/// winner) and delete the winner's acknowledged write; the guard turns the
+/// purge into a no-op in exactly that interleaving.
 async fn s3_upload_object_body(
     state: &Arc<AppState>,
-    context: &S3ObjectContext,
+    context: &S3ObjectContext<'_>,
     body: RequestBodyReader,
     user_metadata: Vec<(String, String)>,
     hasher: Arc<Mutex<Md5>>,
@@ -478,6 +516,29 @@ async fn s3_upload_object_body(
     // upsert + stale-direct drop) is atomic with respect to other overwrites.
     let object_lock = acquire_object_upload_lock(context.object_key.as_str());
     let _object_guard = object_lock.lock().await;
+
+    // F-86: the authoritative conditional pre-check, under the per-key lock
+    // and BEFORE the body is read or any record committed. The row is only
+    // mutated by holders of this same lock, so a check that passes here cannot
+    // be invalidated before the swap below; a failing check returns 412
+    // without committing anything (the loser's record never becomes the LATEST
+    // version and its chunks are never written). Guarded to skip the extra row
+    // read for unconditional PUTs, whose post-commit re-check below is a
+    // trivially-passing no-op.
+    //
+    // Multi-replica caveat: the per-key lock (acquire_object_upload_lock) is
+    // PROCESS-LOCAL. On two replicas sharing a Postgres index, a concurrent
+    // conditional writer on the OTHER replica holds a different lock, so BOTH
+    // can pass this pre-check and both commit — create-if-absent is not atomic
+    // across replicas (last-writer-wins; the post-commit re-check below 412s
+    // the loser). The loser's record is a non-latest orphan until the next
+    // write of the key, then GC-reclaimed; the F-92 purge below only deletes
+    // the loser's OWN version, so the winner's record survives either way.
+    if let Some(precondition) = precondition
+        && read_conditional_headers(precondition).is_some()
+    {
+        check_put_precondition(state, context, precondition).await?;
+    }
 
     let start = Instant::now();
     let uploaded = match state
@@ -505,13 +566,42 @@ async fn s3_upload_object_body(
     let etag = md5_hasher_hex(&hasher);
 
     // Re-evaluate the conditional precondition NOW, under the per-key lock and
-    // after the body streamed but BEFORE the index swap: a concurrent
-    // conditional writer that won the race has already committed its row, so a
-    // loser sees the winner's ETag here and 412s instead of both writes
-    // succeeding. The pre-upload check in the handlers was against the
-    // pre-write state and cannot serialize concurrent writers.
-    if let Some(precondition) = precondition {
-        check_put_precondition(state, context, precondition).await?;
+    // after the body streamed but BEFORE the index swap: belt-and-suspenders
+    // for the F-8 check-then-act guarantee (the pre-check above is
+    // authoritative today). When it fires the just-committed record is the
+    // loser's — purge its version so no latest-record consumer serves the
+    // loser's bytes and no orphan record (or reachable chunks) remains (F-86).
+    //
+    // F-92 guard: purge the LOSER's committed version, not whatever the latest
+    // alias now points at. The per-key lock is process-local, so in a
+    // multi-replica Postgres deployment a concurrent replica may have committed
+    // the WINNER's record (and swapped the row) between the pre-check above and
+    // this post-check; `delete_file_reference_if_latest` re-reads the latest
+    // alias and only deletes while it still equals the just-committed (loser)
+    // content hash. If the latest alias has moved to the winner the purge is a
+    // no-op and the winner's acknowledged write survives; the loser's record is
+    // left as a non-latest version, which GC eventually reclaims.
+    if let Some(precondition) = precondition
+        && let Err(error) = check_put_precondition(state, context, precondition).await
+    {
+        let file_id = uploaded.file_id.clone();
+        let content_hash = uploaded.content_hash.clone();
+        match state
+            .backend
+            .delete_file_reference_if_latest(&file_id, &content_hash)
+            .await
+        {
+            Ok(true) => {
+                tracing::debug!(file_id, %content_hash, "purged conditional-write loser record");
+            }
+            Ok(false) => {
+                tracing::debug!(file_id, %content_hash, "conditional-write loser record already gone or superseded by another version");
+            }
+            Err(purge_error) => {
+                tracing::warn!(file_id, %purge_error, "failed to purge conditional-write loser record");
+            }
+        }
+        return Err(error);
     }
 
     // Swap: point the index at the new record version, then drop any stale
@@ -545,32 +635,30 @@ async fn s3_upload_object_body(
 /// Serves `200` with the full body when no `Range` header is present, `206`
 /// with `Content-Range` for a satisfiable range, `416 InvalidRange` for an
 /// unsatisfiable one, and `404 NoSuchKey` when the object does not exist.
-#[tracing::instrument(skip(state, headers), fields(bucket, key))]
+#[tracing::instrument(skip(auth, state, headers), fields(bucket, key))]
 pub(crate) async fn s3_get_object(
+    auth: S3Repository,
     State(state): State<Arc<AppState>>,
-    Path((bucket, key)): Path<(String, String)>,
+    Path((_bucket, key)): Path<(String, String)>,
     uri: Uri,
     headers: HeaderMap,
 ) -> Result<Response, S3Error> {
-    let auth = authorize_s3(&state, &headers, TokenScope::Read)?;
-    let claims = auth.as_ref().map(scope_from_auth);
-    let context = require_s3_object_context(claims, &bucket, &key)?;
+    let context = require_s3_object_context(auth.capability(), &key)?;
 
     let query = parse_s3_query(&uri)?;
     if has_sub_resource(&query) {
         return Err(S3Error::not_implemented());
     }
 
-    // Fetch the S3 listing-index row FIRST, then pin the record snapshot for
-    // the stream. Ordering matters: the ETag / user-metadata / Last-Modified
-    // headers and the streamed bytes must come from the same logical commit
-    // point. Reading the entry AFTER the snapshot can pair new metadata with
-    // the old bytes (or vice versa) when a concurrent overwrite commits
-    // between the two reads. The stream below is pinned to the snapshot's
-    // record version, so the served bytes always match the entry captured at
-    // this same moment; a concurrent overwrite commits a new row + record
-    // together and readers simply observe the pre- or post-overwrite state,
-    // never a mix of the two.
+    // The S3 listing-index row is the object's single commit point: its ETag /
+    // user-metadata / Last-Modified and its record version (content hash +
+    // size) are resolved in ONE read, and the stream below is pinned to that
+    // exact immutable record version. A concurrent PUT commits a new record
+    // FIRST and swaps the row SECOND, so the row read before the swap pairs
+    // the OLD row with the OLD record — the reader observes the pre- or
+    // post-overwrite state, never a mix of old-row metadata with new-record
+    // bytes (F-70). Only when no row exists is the latest record snapshot used
+    // as a fallback (there is then no row metadata to pair).
     let entry = s3_object_entry(&state, &context).await?;
     // Conditional requests (If-Match / If-None-Match) evaluate against the
     // stored S3 ETag (listing-index row) before any bytes are served.
@@ -580,21 +668,30 @@ pub(crate) async fn s3_get_object(
         &context.key,
     )?;
 
-    // Resolve the object's length and record version in ONE atomic snapshot:
-    // the stream below is pinned to the same version, so a concurrent
-    // overwrite can never yield a torn read (old length, new stream) or a
-    // transient 404 — the old version stays readable until the new one is
-    // fully durable and the index row has moved.
-    let snapshot = match state
-        .backend
-        .s3_object_read_snapshot(&context.object_key)
-        .await
-    {
-        Ok(snapshot) => snapshot,
-        Err(ServerError::NotFound) => return Err(S3Error::no_such_key(&context.key)),
-        Err(error) => return Err(S3Error::from(error)),
+    // Resolve the object's length and record version from the SAME row whose
+    // ETag / metadata are served below: the stream is pinned to the row's
+    // version, so a concurrent overwrite can never yield a torn read (old
+    // length, new stream) — the old version stays readable until the new one
+    // is fully durable and the index row has moved.
+    let (total_length, pinned_hash) = match &entry {
+        Some(row) => (row.size_bytes, Some(row.content_hash.clone())),
+        None => {
+            let snapshot = match state
+                .backend
+                .s3_object_read_snapshot(
+                    &context.scope_namespace,
+                    &context.key,
+                    &context.object_key,
+                )
+                .await
+            {
+                Ok(snapshot) => snapshot,
+                Err(ServerError::NotFound) => return Err(S3Error::no_such_key(&context.key)),
+                Err(error) => return Err(S3Error::from(error)),
+            };
+            (snapshot.total_bytes, snapshot.record_content_hash)
+        }
     };
-    let total_length = snapshot.total_bytes;
     let range_header = headers.get(RANGE).and_then(|value| value.to_str().ok());
     let range = match range_header {
         Some(header) => {
@@ -613,7 +710,7 @@ pub(crate) async fn s3_get_object(
             &context.object_key,
             total_length,
             range,
-            snapshot.record_content_hash.as_deref(),
+            pinned_hash.as_deref(),
         )
         .await?;
     let mut response = if let Some(range) = range {
@@ -660,26 +757,27 @@ pub(crate) async fn s3_get_object(
 
 /// `HEAD /{bucket}/{*key}` — size + ETag + Last-Modified through the
 /// authoritative record.
-#[tracing::instrument(skip(state, headers), fields(bucket, key))]
+#[tracing::instrument(skip(auth, state, headers), fields(bucket, key))]
 pub(crate) async fn s3_head_object(
+    auth: S3Repository,
     State(state): State<Arc<AppState>>,
-    Path((bucket, key)): Path<(String, String)>,
+    Path((_bucket, key)): Path<(String, String)>,
     uri: Uri,
     headers: HeaderMap,
 ) -> Result<Response, S3Error> {
-    let auth = authorize_s3(&state, &headers, TokenScope::Read)?;
-    let claims = auth.as_ref().map(scope_from_auth);
-    let context = require_s3_object_context(claims, &bucket, &key)?;
+    let context = require_s3_object_context(auth.capability(), &key)?;
 
     let query = parse_s3_query(&uri)?;
     if has_sub_resource(&query) {
         return Err(S3Error::not_implemented());
     }
 
-    // Same ordering as GetObject: the listing-index row is captured FIRST so
-    // the ETag / user-metadata / Last-Modified headers and the size resolved
-    // below all come from the same logical commit point (a concurrent
-    // overwrite is observed either before or after its swap, never torn).
+    // Same single-commit-point resolution as GetObject (F-70): the size comes
+    // from the SAME row whose ETag / user-metadata / Last-Modified are served
+    // below, so a concurrent PUT that committed a new record but has not yet
+    // swapped the row is simply not visible — the headers and the size are
+    // never a mix of two overwrite states. Only when no row exists is the
+    // authoritative record metadata used (with no row metadata to pair).
     let entry = s3_object_entry(&state, &context).await?;
     // Conditional requests evaluate against the stored S3 ETag before the
     // headers are served.
@@ -689,10 +787,17 @@ pub(crate) async fn s3_head_object(
         &context.key,
     )?;
 
-    let (size, _content_hash) = match state.backend.s3_object_metadata(&context.object_key).await {
-        Ok(metadata) => metadata,
-        Err(ServerError::NotFound) => return Err(S3Error::no_such_key(&context.key)),
-        Err(error) => return Err(S3Error::from(error)),
+    let size = match &entry {
+        Some(row) => row.size_bytes,
+        None => {
+            let (size, _content_hash) =
+                match state.backend.s3_object_metadata(&context.object_key).await {
+                    Ok(metadata) => metadata,
+                    Err(ServerError::NotFound) => return Err(S3Error::no_such_key(&context.key)),
+                    Err(error) => return Err(S3Error::from(error)),
+                };
+            size
+        }
     };
     let last_modified = last_modified_from_entry(entry.as_ref());
 
@@ -730,16 +835,15 @@ pub(crate) async fn s3_head_object(
 /// Crash-safe ordering per the design: the listing-index row is dropped first
 /// (the snapshot is GC-inert and deleting it never touches chunks or records),
 /// then `delete_object_if_present` removes the direct object and record.
-#[tracing::instrument(skip(state, headers), fields(bucket, key))]
+#[tracing::instrument(skip(auth, state, headers), fields(bucket, key))]
 pub(crate) async fn s3_delete_object(
+    auth: S3Repository,
     State(state): State<Arc<AppState>>,
-    Path((bucket, key)): Path<(String, String)>,
+    Path((_bucket, key)): Path<(String, String)>,
     uri: Uri,
     headers: HeaderMap,
 ) -> Result<Response, S3Error> {
-    let auth = authorize_s3(&state, &headers, TokenScope::Write)?;
-    let claims = auth.as_ref().map(scope_from_auth);
-    let context = require_s3_object_context(claims, &bucket, &key)?;
+    let context = require_s3_object_context(auth.capability(), &key)?;
 
     // `?uploadId` dispatches to AbortMultipartUpload; other sub-resources are
     // out of scope.
@@ -787,17 +891,16 @@ pub(crate) async fn s3_delete_object(
 /// `POST /{bucket}/{*key}` — `CreateMultipartUpload`/`UploadPart` are Lane 4
 /// work; `PostObject` is out of scope. Everything is `501 NotImplemented`
 /// today.
-#[tracing::instrument(skip(state, headers), fields(bucket, key))]
+#[tracing::instrument(skip(auth, state, headers, body), fields(bucket, key))]
 pub(crate) async fn s3_post_object(
+    auth: S3Repository,
     State(state): State<Arc<AppState>>,
-    Path((bucket, key)): Path<(String, String)>,
+    Path((_bucket, key)): Path<(String, String)>,
     uri: Uri,
     headers: HeaderMap,
     body: Body,
 ) -> Result<Response, S3Error> {
-    let auth = authorize_s3(&state, &headers, TokenScope::Write)?;
-    let claims = auth.as_ref().map(scope_from_auth);
-    let context = require_s3_object_context(claims, &bucket, &key)?;
+    let context = require_s3_object_context(auth.capability(), &key)?;
 
     // `?uploads` → CreateMultipartUpload, `?uploadId` → CompleteMultipartUpload;
     // anything else (PostObject) is out of scope.

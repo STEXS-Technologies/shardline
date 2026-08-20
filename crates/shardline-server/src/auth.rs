@@ -2,31 +2,11 @@ use std::fmt;
 use std::sync::Arc;
 
 use axum::http::{HeaderMap, header::AUTHORIZATION};
-use shardline_protocol::{MAX_TOKEN_STRING_BYTES, TokenClaims, TokenCodecError, TokenScope};
-use shardline_server_core::{AuthError, AuthProvider};
+use shardline_protocol::{MAX_TOKEN_STRING_BYTES, TokenCodecError, TokenScope};
+use shardline_server_core::{AuthError, AuthProvider, VerifiedAuthContext, scope_allows};
 use subtle::ConstantTimeEq;
 
 use crate::ServerError;
-
-/// Verified request authorization context.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AuthContext {
-    claims: TokenClaims,
-}
-
-impl AuthContext {
-    /// Creates an authorization context from verified token claims.
-    #[must_use]
-    pub const fn new(claims: TokenClaims) -> Self {
-        Self { claims }
-    }
-
-    /// Returns the verified claims.
-    #[must_use]
-    pub const fn claims(&self) -> &TokenClaims {
-        &self.claims
-    }
-}
 
 /// Bearer-token verifier backed by a pluggable [`AuthProvider`].
 #[derive(Clone)]
@@ -70,6 +50,10 @@ impl ServerAuth {
 
     /// Validates the request token and required scope.
     ///
+    /// Returns a [`VerifiedAuthContext`] — a type only the auth layer can
+    /// mint — so callers can prove the claims came from a provider
+    /// verification when minting capabilities.
+    ///
     /// # Errors
     ///
     /// Returns [`ServerError`] when the authorization header is missing, malformed, or
@@ -78,7 +62,7 @@ impl ServerAuth {
         &self,
         headers: &HeaderMap,
         required_scope: TokenScope,
-    ) -> Result<AuthContext, ServerError> {
+    ) -> Result<VerifiedAuthContext, ServerError> {
         let header = headers
             .get(AUTHORIZATION)
             .ok_or(ServerError::MissingAuthorization)?;
@@ -86,12 +70,12 @@ impl ServerAuth {
             .to_str()
             .map_err(|_error| ServerError::InvalidAuthorizationHeader)?;
         let token = parse_bearer_token(header)?;
-        let claims = self.provider.verify_token(token)?;
-        if !scope_allows(claims.scope(), required_scope) {
+        let ctx = self.provider.verify_verified(token)?;
+        if !scope_allows(ctx.scope(), required_scope) {
             return Err(ServerError::InsufficientScope);
         }
 
-        Ok(AuthContext::new(claims))
+        Ok(ctx)
     }
 }
 
@@ -154,13 +138,6 @@ pub(crate) fn authorize_static_bearer_token(
     }
 
     Err(ServerError::InvalidAuthorizationHeader)
-}
-
-const fn scope_allows(actual_scope: TokenScope, required_scope: TokenScope) -> bool {
-    match required_scope {
-        TokenScope::Read => actual_scope.allows_read(),
-        TokenScope::Write => actual_scope.allows_write(),
-    }
 }
 
 impl From<TokenCodecError> for ServerError {

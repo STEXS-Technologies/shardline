@@ -25,7 +25,10 @@ fn chunk_object_key_local(hash_hex: &str) -> Result<ObjectKey, XetAdapterError> 
     ObjectKey::parse(&key).map_err(map_object_key_error)
 }
 
-use crate::error::XetAdapterError;
+use crate::{
+    error::XetAdapterError,
+    xorb::{MAX_XORB_UNPACKED_BYTES, declared_unpacked_length_of_serialized},
+};
 
 use super::{
     ValidatedXorb, map_xorb_visit_error, try_for_each_serialized_xorb_chunk,
@@ -232,7 +235,18 @@ pub async fn store_uploaded_xorb(
             async move {
                 let chunk_hash_hex = xet_hash_hex_string(decoded_chunk.descriptor().hash());
                 let chunk_length = u64::try_from(decoded_chunk.data().len())?;
-                unpacked_length.fetch_add(chunk_length, Ordering::Relaxed);
+                // Bound the unpacked total WHILE storing, not only after the
+                // whole xorb has been decompressed and written. The declared
+                // total was already capped during canonicalize/validate before
+                // any decompression; this running check is defense-in-depth so
+                // a future path that skips validation cannot amplify storage.
+                let unpacked_so_far = unpacked_length.fetch_add(chunk_length, Ordering::Relaxed);
+                let unpacked_total = unpacked_so_far
+                    .checked_add(chunk_length)
+                    .ok_or(XetAdapterError::Overflow)?;
+                if unpacked_total > MAX_XORB_UNPACKED_BYTES {
+                    return Err(XetAdapterError::XorbUnpackedLengthExceedsCap);
+                }
                 let chunk_integrity =
                     ObjectIntegrity::new(chunk_hash(decoded_chunk.data()), chunk_length);
                 let chunk_key = chunk_object_key_local(&chunk_hash_hex)?;
@@ -319,6 +333,17 @@ pub fn normalize_serialized_xorb(
     expected_hash: ShardlineHash,
     bytes: &[u8],
 ) -> Result<Vec<u8>, XetAdapterError> {
+    // Reject a decompression bomb BEFORE the reconstruct pass allocates: scan
+    // the chunk headers and bound the total declared unpacked size upfront. The
+    // reconstruct pass itself is streaming (at most one bounded chunk in memory
+    // at a time), but this check avoids paying decompression work on obviously
+    // oversized inputs and keeps the declared-total cap consistent with the
+    // footer-bearing validation path.
+    let declared_total = declared_unpacked_length_of_serialized(bytes)?;
+    if declared_total > MAX_XORB_UNPACKED_BYTES {
+        return Err(XetAdapterError::XorbUnpackedLengthExceedsCap);
+    }
+
     let mut normalized = Vec::with_capacity(bytes.len());
     let (_xorb, computed_hash) = reconstruct_xorb_with_footer(&mut normalized, bytes)
         .map_err(|_error| XetAdapterError::InvalidSerializedXorb)?;
@@ -356,6 +381,7 @@ mod tests {
         xorb_hash_from_object_key_if_present, xorb_object_key,
     };
     use crate::error::XetAdapterError;
+    use crate::xorb::MAX_XORB_UNPACKED_BYTES;
     use shardline_server_core::ServerObjectStore;
     use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectStore};
 
@@ -852,6 +878,88 @@ mod tests {
         assert!(
             matches!(result, Err(XetAdapterError::InvalidSerializedXorb)),
             "expected InvalidSerializedXorb, got {result:?}"
+        );
+    }
+
+    // ── decompression-bomb rejection ────────────────────────────────────
+
+    #[test]
+    fn normalize_serialized_xorb_rejects_declared_unpacked_bomb() {
+        use shardline_xet_core::xorb_object::constants::MAX_CHUNK_SIZE;
+        use shardline_xet_core::xorb_object::{XorbChunkHeader, write_chunk_header};
+
+        // A footerless stream of chunk headers, each declaring a maximum-size
+        // uncompressed length. The declared total exceeds the cap before any
+        // decompression work, so normalize rejects it upfront instead of
+        // allocating a multi-GiB output.
+        let max_declared = (MAX_CHUNK_SIZE.load(std::sync::atomic::Ordering::Relaxed) - 1) as u32;
+        let headers_needed = (MAX_XORB_UNPACKED_BYTES / u64::from(max_declared)) as usize + 1;
+        let mut stream = Vec::with_capacity(headers_needed * 8);
+        for _ in 0..headers_needed {
+            let header = XorbChunkHeader::new(CompressionScheme::None, 0, max_declared);
+            write_chunk_header(&mut stream, &header).unwrap();
+        }
+
+        let hash = parse_xet_hash_hex(&"ab".repeat(32)).unwrap();
+        let result = normalize_serialized_xorb(hash, &stream);
+        assert!(
+            matches!(result, Err(XetAdapterError::XorbUnpackedLengthExceedsCap)),
+            "expected XorbUnpackedLengthExceedsCap, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn store_uploaded_xorb_neutralizes_declared_unpacked_bomb() {
+        // A footer-present xorb whose footer declares a bomb-scale unpacked
+        // total is rejected by validation; the canonicalize fallback re-derives
+        // metadata from the actual (small) chunk content, so the stored xorb is
+        // the safe canonical form and never the attacker's declaration.
+        use shardline_xet_core::xorb_object::XorbObject;
+
+        let raw = build_raw_xorb(1, ChunkSize::Fixed(256));
+        let serialized =
+            SerializedXorbObject::from_xorb_with_compression(raw, CompressionScheme::None, true)
+                .unwrap();
+        let expected_hash = parse_xet_hash_hex(&serialized.hash.hex()).unwrap();
+
+        // Forge the footer's unpacked chunk offsets above the cap.
+        let mut parsed =
+            XorbObject::deserialize(&mut Cursor::new(serialized.serialized_data.as_slice()))
+                .unwrap();
+        *parsed.info.unpacked_chunk_offsets.last_mut().unwrap() = MAX_XORB_UNPACKED_BYTES + 1;
+        parsed.info.fill_in_boundary_offsets();
+        let footer_start = serialized.serialized_data.len() as u64
+            - parsed.info_length
+            - std::mem::size_of::<u64>() as u64;
+        let mut forged = serialized.serialized_data[..footer_start as usize].to_vec();
+        let info_len = parsed.info.serialize(&mut forged).unwrap();
+        forged.extend_from_slice(&(info_len as u64).to_le_bytes());
+
+        // The forged declaration is rejected outright by validation.
+        assert!(
+            validate_serialized_xorb(&mut Cursor::new(forged.as_slice()), expected_hash).is_err()
+        );
+
+        let temp = tempfile::tempdir().unwrap();
+        let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
+        let result = async_store_xorb(&object_store, &serialized.hash.hex(), &forged);
+        assert!(
+            result.is_ok(),
+            "bomb declaration must be neutralized into a canonical xorb, got {result:?}"
+        );
+
+        // The canonicalized stored form is the small, valid xorb.
+        let key = xorb_object_key(&serialized.hash.hex()).unwrap();
+        let stored_meta = ObjectStore::metadata(&object_store, &key)
+            .unwrap()
+            .expect("stored xorb");
+        let stored_bytes = read_full_object(&object_store, &key, stored_meta.length()).unwrap();
+        let mut cursor = Cursor::new(stored_bytes);
+        let revalidated = validate_serialized_xorb(&mut cursor, expected_hash).unwrap();
+        assert_eq!(
+            revalidated.unpacked_length(),
+            256,
+            "the stored xorb must carry the actual small unpacked length"
         );
     }
 

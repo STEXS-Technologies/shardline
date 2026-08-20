@@ -58,6 +58,7 @@ pub(super) async fn start_provider_runtime(
         NonZeroUsize::new(128).unwrap_or(NonZeroUsize::MIN),
     )
     .with_token_signing_key(TOKEN_SIGNING_KEY.to_vec())
+    .map(|config| config.with_deployment_mode(shardline_server::DeploymentMode::Insecure))
     .and_then(|config| {
         config.with_provider_runtime(
             provider_config,

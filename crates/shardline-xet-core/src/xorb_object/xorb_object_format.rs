@@ -751,10 +751,32 @@ pub fn reconstruct_xorb_with_footer(
             .read_exact(&mut compressed_buf)
             .map_err(|e| CoreError::MalformedData(format!("Failed to read chunk data: {e}")))?;
 
-        let uncompressed_data = chunk_header
-            .get_compression_scheme()?
-            .decompress_from_slice(&compressed_buf)
-            .map_err(|e| CoreError::MalformedData(format!("Failed to decompress chunk: {e}")))?;
+        let declared_uncompressed_len = u64::from(chunk_header.get_uncompressed_length());
+        let uncompressed_data = {
+            // Bound per-chunk decompression to the header's declared
+            // uncompressed length DURING decompression (not after), so a crafted
+            // compressed frame that expands far beyond the declaration cannot
+            // allocate an unbounded per-chunk buffer.
+            let mut compressed_cursor = Cursor::new(compressed_buf.as_slice());
+            let mut dest = Vec::new();
+            let uncompressed_len = chunk_header
+                .get_compression_scheme()?
+                .decompress_from_reader_bounded(
+                    &mut compressed_cursor,
+                    &mut dest,
+                    declared_uncompressed_len,
+                )
+                .map_err(|e| {
+                    CoreError::MalformedData(format!("Failed to decompress chunk: {e}"))
+                })?;
+            if uncompressed_len != declared_uncompressed_len {
+                return Err(CoreError::MalformedData(
+                    "chunk is corrupted, uncompressed bytes len doesn't agree with chunk header"
+                        .to_string(),
+                ));
+            }
+            dest
+        };
 
         let uncompressed_len = uncompressed_data.len() as u64;
         total_decompressed_bytes = total_decompressed_bytes

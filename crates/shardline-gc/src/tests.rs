@@ -15,8 +15,8 @@ use shardline_index::{
     AsyncIndexStore, FileChunkRecord, FileRecord, FileRecordInvariantError, LocalIndexStore,
     LocalRecordStore, MemoryIndexStore, MemoryIndexStoreError, MemoryRecordStore,
     MemoryRecordStoreError, PostgresMetadataStoreError, QuarantineCandidate,
-    QuarantineCandidateError, RecordMutation, RetentionHold, RetentionHoldError,
-    WebhookDeliveryError,
+    QuarantineCandidateError, RecordMutation, RepoKey, RetentionHold, RetentionHoldError,
+    RevisionRecord, TreeStore, WebhookDeliveryError,
 };
 use shardline_server_core::{
     InvalidLifecycleMetadataError, ServerObjectStore, ServerObjectStoreError,
@@ -34,6 +34,7 @@ use crate::reachability::OrphanObject;
 use crate::runner::{
     build_gc_diagnostics, orphan_inventory_entry, quarantine_record_path, quarantine_root,
     retention_report_entry, run_gc_with_stores, run_local_gc, run_local_gc_diagnostics,
+    set_gc_now_unix_seconds_override,
 };
 use crate::types::{
     GcOrphanQuarantineState, LocalGcDiagnostics, LocalGcOptions, LocalGcReport,
@@ -776,10 +777,491 @@ async fn run_gc_helper(
     .await
 }
 
+/// Seeds `count` revision registry rows for a repo with monotonically
+/// increasing created-at timestamps (aligned with the name order).
+async fn seed_revisions(index_store: &MemoryIndexStore, repo: &RepoKey, count: u64) {
+    for n in 0..count {
+        let rev = RevisionRecord {
+            provider: repo.provider.clone(),
+            owner: repo.owner.clone(),
+            repo: repo.repo.clone(),
+            revision: format!("rev-{n:03}"),
+            created_at_unix_seconds: 1_000_000_u64.saturating_add(n),
+            updated_at_unix_seconds: 1_000_000_u64.saturating_add(n),
+        };
+        assert!(TreeStore::upsert_revision(index_store, &rev).await.unwrap());
+    }
+}
+
+/// F-75 residual: a GC run with the revision-cap prune enabled evicts the
+/// oldest over-cap rows (report count + store now holds exactly the cap).
+#[test]
+fn gc_prunes_revisions_over_cap_and_reports_count() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let dir = tempfile::tempdir().unwrap();
+        let object_store = ServerObjectStore::local(dir.path()).unwrap();
+        let index_store = MemoryIndexStore::new();
+        let repo = RepoKey::new("github", "owner", "repo");
+        let cap = 3usize;
+
+        seed_revisions(&index_store, &repo, 7).await;
+        // A second repo well under the cap must be untouched.
+        let other = RepoKey::new("github", "owner", "other-repo");
+        seed_revisions(&index_store, &other, 1).await;
+        assert_eq!(
+            TreeStore::count_revisions(&index_store, &repo)
+                .await
+                .unwrap(),
+            7
+        );
+
+        let options = LocalGcOptions {
+            mark: true,
+            sweep: false,
+            retention_seconds: 86_400,
+            max_revisions_per_repo: Some(cap),
+        };
+        let diagnostics = run_gc_helper(&object_store, &index_store, options)
+            .await
+            .expect("gc run");
+
+        // The report exposes the prune count and the store now holds the cap.
+        assert_eq!(diagnostics.report.pruned_revisions_over_cap, 4);
+        assert_eq!(
+            TreeStore::count_revisions(&index_store, &repo)
+                .await
+                .unwrap(),
+            u64::try_from(cap).unwrap()
+        );
+        // Oldest-created rows were evicted first: rev-000..rev-003 are gone,
+        // rev-004..rev-006 survive.
+        let remaining = TreeStore::list_revisions(&index_store, &repo, None, 100)
+            .await
+            .unwrap();
+        let names: Vec<&str> = remaining.iter().map(|r| r.revision.as_str()).collect();
+        assert_eq!(names, vec!["rev-004", "rev-005", "rev-006"]);
+        // The under-cap repo is untouched.
+        assert_eq!(
+            TreeStore::count_revisions(&index_store, &other)
+                .await
+                .unwrap(),
+            1
+        );
+    });
+}
+
+/// The prune is disabled when `max_revisions_per_repo` is `None`: an over-cap
+/// repo is left alone and the report count stays zero.
+#[test]
+fn gc_without_revision_cap_does_not_prune() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let dir = tempfile::tempdir().unwrap();
+        let object_store = ServerObjectStore::local(dir.path()).unwrap();
+        let index_store = MemoryIndexStore::new();
+        let repo = RepoKey::new("github", "owner", "repo");
+        seed_revisions(&index_store, &repo, 5).await;
+
+        let diagnostics = run_gc_helper(
+            &object_store,
+            &index_store,
+            LocalGcOptions::mark_only(86_400),
+        )
+        .await
+        .expect("gc run");
+
+        assert_eq!(diagnostics.report.pruned_revisions_over_cap, 0);
+        assert_eq!(
+            TreeStore::count_revisions(&index_store, &repo)
+                .await
+                .unwrap(),
+            5
+        );
+    });
+}
+
+/// F-107: the F-75 revision-cap prune is gated on the same forward-clock guard
+/// the sweep uses. A backward server step (NTP correction, VM pause/resume,
+/// stale-clock restart, multi-replica with one replica behind) stamps the
+/// newest revision with the SMALLEST `created_at`, so an ungated prune's
+/// oldest-created-first ordering would evict the NEWEST revision and cascade
+/// its tree entries. When the guard fires, the prune must be skipped (a fired
+/// run is all-or-nothing read-only — F-88) and the newest revision preserved.
+#[test]
+fn gc_prune_skipped_when_forward_clock_guard_fired() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let dir = tempfile::tempdir().unwrap();
+        let object_store = ServerObjectStore::local(dir.path()).unwrap();
+        let index_store = MemoryIndexStore::new();
+        let repo = RepoKey::new("github", "owner", "repo");
+        let cap = 3usize;
+
+        // Seed 4 revisions whose newest row (rev-003) carries a created_at
+        // BEHIND the three older rows — the fingerprint of a backward server
+        // clock writing a new revision. The prune's oldest-created-first
+        // ordering would then select rev-003 (the NEWEST revision) as the
+        // eviction candidate.
+        for (name, created) in [
+            ("rev-000", 1_000_000_u64),
+            ("rev-001", 1_000_001),
+            ("rev-002", 1_000_002),
+            ("rev-003", 999_999), // newest revision, smallest created_at
+        ] {
+            let rev = RevisionRecord {
+                provider: repo.provider.clone(),
+                owner: repo.owner.clone(),
+                repo: repo.repo.clone(),
+                revision: name.to_owned(),
+                created_at_unix_seconds: created,
+                updated_at_unix_seconds: created,
+            };
+            assert!(
+                TreeStore::upsert_revision(&index_store, &rev)
+                    .await
+                    .unwrap()
+            );
+        }
+        assert_eq!(
+            TreeStore::count_revisions(&index_store, &repo)
+                .await
+                .unwrap(),
+            4
+        );
+
+        // Arm the forward-clock guard: a quarantine candidate whose first_seen
+        // is old relative to the pinned GC clock makes the creation reference
+        // stale, so a jumped `now` fires the guard (the same way a behind-clock
+        // replica's lifecycle stamps leave the healthy GC clock looking
+        // jumped). The object exists (matching length) so the candidate is not
+        // auto-released and stays in the reference.
+        let data = b"candidate data for the prune guard test";
+        let key = put_gc_chunk(&object_store, F88_CANDIDATE_HASH, data);
+        let candidate = QuarantineCandidate::new(
+            key,
+            u64::try_from(data.len()).unwrap_or(0),
+            1_000_000,
+            2_000_000,
+        )
+        .unwrap();
+        index_store
+            .upsert_quarantine_candidate(&candidate)
+            .await
+            .unwrap();
+
+        let options = LocalGcOptions {
+            mark: true,
+            sweep: false,
+            retention_seconds: 86_400,
+            max_revisions_per_repo: Some(cap),
+        };
+
+        // Pin the GC clock far ahead of the newest stored creation timestamp
+        // (a forward jump beyond the guard slack) so the guard fires.
+        set_gc_now_unix_seconds_override(Some(2_000_000_000));
+        let diagnostics = run_gc_helper(&object_store, &index_store, options)
+            .await
+            .expect("gc run");
+        set_gc_now_unix_seconds_override(None);
+
+        // The fired run must be all-or-nothing read-only: the prune is skipped,
+        // the newest revision survives, and the store stays at 4 rows.
+        assert_eq!(
+            diagnostics.report.pruned_revisions_over_cap, 0,
+            "a guard-fired run must not prune revisions"
+        );
+        assert_eq!(
+            TreeStore::count_revisions(&index_store, &repo)
+                .await
+                .unwrap(),
+            4
+        );
+        let remaining = TreeStore::list_revisions(&index_store, &repo, None, 100)
+            .await
+            .unwrap();
+        assert!(
+            remaining
+                .iter()
+                .map(|r| r.revision.as_str())
+                .any(|r| r == "rev-003"),
+            "the newest revision must survive a guard-fired run"
+        );
+    });
+}
+
+#[test]
+fn gc_sweep_reaps_stale_temporary_chunk_artifacts_only() {
+    use shardline_protocol::unix_now_seconds_lossy;
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("aa")).unwrap();
+
+        let now_secs = unix_now_seconds_lossy();
+        // > 1 hour old: stranded remnant of a killed/crashed writer.
+        let stale_nanos = u128::from(now_secs - 2 * 3600) * 1_000_000_000;
+        // Fresh: created "now", must be left alone (an in-flight write).
+        let fresh_nanos = u128::from(now_secs) * 1_000_000_000;
+        let stale_key = format!(
+            "aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.tmp-{stale_nanos}-0"
+        );
+        let fresh_key = format!(
+            "aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.tmp-{fresh_nanos}-1"
+        );
+        let stale_path = dir.path().join(&stale_key);
+        std::fs::write(&stale_path, b"stale").unwrap();
+        std::fs::write(dir.path().join(&fresh_key), b"fresh").unwrap();
+        // The reaper now prefers the GC-observed mtime (backend truth): age the
+        // stale temp's on-disk mtime so it is genuinely old by both clocks.
+        let aged_mtime =
+            std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 3600);
+        std::fs::File::options()
+            .write(true)
+            .open(&stale_path)
+            .unwrap()
+            .set_modified(aged_mtime)
+            .unwrap();
+
+        // A live referenced chunk (finished key, no temp suffix) must never be
+        // touched by the reaper.
+        let live_hash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let live_key = ObjectKey::parse(&format!("bb/{live_hash}")).unwrap();
+        let object_store = ServerObjectStore::local(dir.path()).unwrap();
+        put_object(&object_store, &live_key, b"live-data");
+
+        let index_store = MemoryIndexStore::new();
+        let diagnostics = run_gc_helper(&object_store, &index_store, LocalGcOptions::sweep_only())
+            .await
+            .unwrap();
+
+        assert_eq!(diagnostics.report.reaped_stale_temporary_chunks, 1);
+        assert_eq!(diagnostics.report.reaped_stale_temporary_bytes, 5);
+        assert!(
+            std::fs::metadata(dir.path().join(&stale_key)).is_err(),
+            "stale temp artifact must be reaped"
+        );
+        assert!(
+            std::fs::metadata(dir.path().join(&fresh_key)).is_ok(),
+            "fresh temp artifact must be left alone"
+        );
+        assert!(
+            object_store.contains(&live_key).unwrap(),
+            "live chunk must never be touched"
+        );
+    });
+}
+
+#[test]
+fn gc_sweep_reaps_stranded_xorb_and_shard_temps_but_never_live_objects() {
+    // F-67 regression: ALL local object writes (chunks, xorb containers, and
+    // shards) go through temp-then-hardlink and get the `.tmp-<nanos>-<counter>`
+    // suffix. A crash between the temp write and the hardlink strands
+    // xorbs/default/<p>/<hash>.xorb.tmp-... and shards/<p>/<hash>.shard.tmp-...
+    // files, which the old chunk-only reaper grammar never matched — and which
+    // managed_object_hash rejects, so every other GC path skipped them too.
+    // The extended reaper must reap them after the age bound while leaving
+    // live chunk/xorb/shard objects untouched.
+    use shardline_protocol::unix_now_seconds_lossy;
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let dir = tempfile::tempdir().unwrap();
+        let hash = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+        let prefix = &hash[..2];
+        std::fs::create_dir_all(dir.path().join("xorbs/default").join(prefix)).unwrap();
+        std::fs::create_dir_all(dir.path().join("shards").join(prefix)).unwrap();
+        std::fs::create_dir_all(dir.path().join(prefix)).unwrap();
+
+        let now_secs = unix_now_seconds_lossy();
+        // > 1 hour old: stranded remnants of killed/crashed writers.
+        let stale_nanos = u128::from(now_secs - 2 * 3600) * 1_000_000_000;
+        let xorb_temp_key = format!("xorbs/default/{prefix}/{hash}.xorb.tmp-{stale_nanos}-0");
+        let shard_temp_key = format!("shards/{prefix}/{hash}.shard.tmp-{stale_nanos}-1");
+        let xorb_temp_path = dir.path().join(&xorb_temp_key);
+        let shard_temp_path = dir.path().join(&shard_temp_key);
+        std::fs::write(&xorb_temp_path, b"stale-xorb").unwrap();
+        std::fs::write(&shard_temp_path, b"stale-shard").unwrap();
+        // The reaper prefers the GC-observed mtime (backend truth): age both
+        // temps' on-disk mtimes so they are genuinely old by both clocks.
+        let aged_mtime = std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 3600);
+        std::fs::File::options()
+            .write(true)
+            .open(&xorb_temp_path)
+            .unwrap()
+            .set_modified(aged_mtime)
+            .unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&shard_temp_path)
+            .unwrap()
+            .set_modified(aged_mtime)
+            .unwrap();
+
+        // Live managed objects (finished keys, no temp suffix) must never be
+        // touched by the reaper.
+        let object_store = ServerObjectStore::local(dir.path()).unwrap();
+        let chunk_key = ObjectKey::parse(&format!("{prefix}/{hash}")).unwrap();
+        put_object(&object_store, &chunk_key, b"live-chunk");
+        let xorb_live_key =
+            ObjectKey::parse(&format!("xorbs/default/{prefix}/{hash}.xorb")).unwrap();
+        put_object(&object_store, &xorb_live_key, b"live-xorb");
+        let shard_live_key = ObjectKey::parse(&format!("shards/{prefix}/{hash}.shard")).unwrap();
+        put_object(&object_store, &shard_live_key, b"live-shard");
+
+        let index_store = MemoryIndexStore::new();
+        let diagnostics = run_gc_helper(&object_store, &index_store, LocalGcOptions::sweep_only())
+            .await
+            .unwrap();
+
+        // Both stranded managed-object temps are reaped.
+        assert_eq!(
+            diagnostics.report.reaped_stale_temporary_chunks, 2,
+            "both stranded xorb and shard temps must be reaped"
+        );
+        assert_eq!(
+            diagnostics.report.reaped_stale_temporary_bytes, 21,
+            "10 bytes of stale-xorb + 11 bytes of stale-shard"
+        );
+        assert!(
+            std::fs::metadata(&xorb_temp_path).is_err(),
+            "stranded xorb temp must be reaped"
+        );
+        assert!(
+            std::fs::metadata(&shard_temp_path).is_err(),
+            "stranded shard temp must be reaped"
+        );
+        // Live objects are untouched.
+        assert!(
+            object_store.contains(&chunk_key).unwrap(),
+            "live chunk must never be touched"
+        );
+        assert!(
+            object_store.contains(&xorb_live_key).unwrap(),
+            "live xorb must never be touched"
+        );
+        assert!(
+            object_store.contains(&shard_live_key).unwrap(),
+            "live shard must never be touched"
+        );
+    });
+}
+
+#[test]
+fn gc_sweep_reaps_stranded_xorb_chunks_and_anchor_temps_but_never_live() {
+    // F-99 regression: the xorb chunk-cache sidecar
+    // (`_xorb_chunks/{prefix}/{hash}`, written by
+    // `xorb_store::visit_stored_xorb_chunk_hashes`) and the last-GC-clock
+    // anchor (`gc/last-gc-clock-anchor`, written by
+    // `write_last_gc_clock_anchor`) are ALSO written via temp-then-hardlink, so
+    // a crash between the temp write and the hardlink strands
+    // `_xorb_chunks/{prefix}/{hash}.tmp-...` and
+    // `gc/last-gc-clock-anchor.tmp-...` files that the old managed-object-only
+    // reaper grammar never matched (F-67 residual). The extended reaper must
+    // reap them after the age bound while leaving the LIVE sidecar, the LIVE
+    // anchor, and live managed objects untouched.
+    use shardline_protocol::unix_now_seconds_lossy;
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let dir = tempfile::tempdir().unwrap();
+        let hash = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+        let prefix = &hash[..2];
+        std::fs::create_dir_all(dir.path().join("_xorb_chunks").join(prefix)).unwrap();
+        std::fs::create_dir_all(dir.path().join("gc")).unwrap();
+
+        let now_secs = unix_now_seconds_lossy();
+        // > 1 hour old: stranded remnants of killed/crashed writers.
+        let stale_nanos = u128::from(now_secs - 2 * 3600) * 1_000_000_000;
+        let sidecar_temp_key = format!("_xorb_chunks/{prefix}/{hash}.tmp-{stale_nanos}-0");
+        let anchor_temp_key = format!("gc/last-gc-clock-anchor.tmp-{stale_nanos}-1");
+        let sidecar_temp_path = dir.path().join(&sidecar_temp_key);
+        let anchor_temp_path = dir.path().join(&anchor_temp_key);
+        std::fs::write(&sidecar_temp_path, b"stale-sidecar").unwrap();
+        std::fs::write(&anchor_temp_path, b"stale-anchor").unwrap();
+        // The reaper prefers the GC-observed mtime (backend truth): age both
+        // temps' on-disk mtimes so they are genuinely old by both clocks.
+        let aged_mtime = std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 3600);
+        std::fs::File::options()
+            .write(true)
+            .open(&sidecar_temp_path)
+            .unwrap()
+            .set_modified(aged_mtime)
+            .unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&anchor_temp_path)
+            .unwrap()
+            .set_modified(aged_mtime)
+            .unwrap();
+
+        // Live keys (finished, no temp suffix) must never be touched by the
+        // reaper, however old their mtimes are.
+        let object_store = ServerObjectStore::local(dir.path()).unwrap();
+        let sidecar_live_key = ObjectKey::parse(&format!("_xorb_chunks/{prefix}/{hash}")).unwrap();
+        put_object(&object_store, &sidecar_live_key, b"live-sidecar");
+        let anchor_live_key = ObjectKey::parse("gc/last-gc-clock-anchor").unwrap();
+        put_object(&object_store, &anchor_live_key, b"live-anchor");
+        let chunk_live_key = ObjectKey::parse(&format!("{prefix}/{hash}")).unwrap();
+        put_object(&object_store, &chunk_live_key, b"live-chunk");
+        // Age the live sidecar and anchor mtimes: only the `.tmp-` suffix
+        // distinguishes them from the stranded temps, so this proves the
+        // reaper matches on key shape, never on age alone.
+        for live_path in [
+            dir.path().join(format!("_xorb_chunks/{prefix}/{hash}")),
+            dir.path().join("gc/last-gc-clock-anchor"),
+        ] {
+            std::fs::File::options()
+                .write(true)
+                .open(&live_path)
+                .unwrap()
+                .set_modified(aged_mtime)
+                .unwrap();
+        }
+
+        let index_store = MemoryIndexStore::new();
+        let diagnostics = run_gc_helper(&object_store, &index_store, LocalGcOptions::sweep_only())
+            .await
+            .unwrap();
+
+        // Both stranded temps are reaped.
+        assert_eq!(
+            diagnostics.report.reaped_stale_temporary_chunks, 2,
+            "both stranded sidecar and anchor temps must be reaped"
+        );
+        assert_eq!(
+            diagnostics.report.reaped_stale_temporary_bytes, 25,
+            "13 bytes of stale-sidecar + 12 bytes of stale-anchor"
+        );
+        assert!(
+            std::fs::metadata(&sidecar_temp_path).is_err(),
+            "stranded sidecar temp must be reaped"
+        );
+        assert!(
+            std::fs::metadata(&anchor_temp_path).is_err(),
+            "stranded anchor temp must be reaped"
+        );
+        // Live keys are untouched.
+        assert!(
+            object_store.contains(&sidecar_live_key).unwrap(),
+            "live xorb chunk-cache sidecar must never be touched"
+        );
+        assert!(
+            object_store.contains(&anchor_live_key).unwrap(),
+            "live last-GC-clock anchor must never be touched"
+        );
+        assert!(
+            object_store.contains(&chunk_live_key).unwrap(),
+            "live chunk must never be touched"
+        );
+    });
+}
+
 #[test]
 fn validate_integrity_missing_quarantine_object_auto_released() {
     // When a quarantine candidate references an object that doesn't exist
-    // in the object store, the candidate should be auto-released.
+    // in the object store, a store-mutating run auto-releases the candidate.
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
         let dir = tempfile::tempdir().unwrap();
@@ -796,8 +1278,13 @@ fn validate_integrity_missing_quarantine_object_auto_released() {
             .await
             .unwrap();
 
-        // No object exists in the store → auto-release.
-        let result = run_gc_helper(&object_store, &index_store, LocalGcOptions::dry_run()).await;
+        // No object exists in the store → auto-release on a mutating run.
+        let result = run_gc_helper(
+            &object_store,
+            &index_store,
+            LocalGcOptions::mark_only(86_400),
+        )
+        .await;
         assert!(
             result.is_ok(),
             "auto-release should not error: {:?}",
@@ -816,6 +1303,49 @@ fn validate_integrity_missing_quarantine_object_auto_released() {
         assert!(
             !found,
             "quarantine candidate should have been auto-released"
+        );
+    });
+}
+
+#[test]
+fn validate_integrity_missing_quarantine_object_not_released_in_dry_run() {
+    // F-111: a pure dry run promises no mutation (F-76), so it must NOT
+    // auto-release quarantine candidates whose objects are missing — the
+    // missing-object detection still runs (read-only) and warns, but the
+    // index store is left untouched.
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("chunks")).unwrap();
+        let object_store = ServerObjectStore::local(dir.path()).unwrap();
+        let index_store = MemoryIndexStore::new();
+
+        let key =
+            ObjectKey::parse("aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                .unwrap();
+        let candidate = QuarantineCandidate::new(key, 100, 1_000_000, 2_000_000).unwrap();
+        index_store
+            .upsert_quarantine_candidate(&candidate)
+            .await
+            .unwrap();
+
+        // No object exists in the store → detected, but a dry-run must not
+        // mutate the index store.
+        let result = run_gc_helper(&object_store, &index_store, LocalGcOptions::dry_run()).await;
+        assert!(result.is_ok(), "dry-run should not error: {:?}", result);
+
+        // Candidate must STILL be present after the dry-run.
+        let mut found = false;
+        index_store
+            .visit_quarantine_candidates(|_c| {
+                found = true;
+                Ok::<(), GcError>(())
+            })
+            .await
+            .unwrap();
+        assert!(
+            found,
+            "dry-run must not auto-release a missing-object candidate"
         );
     });
 }
@@ -909,47 +1439,115 @@ fn validate_integrity_active_retention_hold_missing_object_errors() {
 }
 
 #[test]
-fn validate_integrity_active_retention_hold_conflicts_with_quarantine_errors() {
-    // An active retention hold for an object that is also quarantined should error.
+fn held_quarantined_object_is_repaired_not_wedged() {
+    // Regression test for F-43: a hold placed on an already-quarantined object
+    // used to abort every subsequent GC run with ActiveRetentionHoldQuarantined
+    // at run start — before the code that would release the stale quarantine
+    // entry — wedging GC until hold expiry (forever for release_after=None).
+    //
+    // Held+quarantined is now a repairable state: the run proceeds, the stale
+    // quarantine candidate is released (the hold keeps the data), the object
+    // survives, and a subsequent run is clean.
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
-        let dir = std::env::temp_dir().join(format!("gc-test-act-con-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("gc-test-f43-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("chunks")).unwrap();
         let object_store = ServerObjectStore::local(&dir).unwrap();
         let index_store = MemoryIndexStore::new();
+        let record_store = MemoryRecordStore::new();
 
         let now = shardline_protocol::unix_now_seconds_lossy();
         let hash = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
         let prefix = &hash[..2];
         let key = ObjectKey::parse(&format!("{prefix}/{hash}")).unwrap();
 
-        // Put the object so quarantine passes length check.
+        // Put the object so the quarantine length check passes.
         put_object(&object_store, &key, b"test data");
 
-        // Add both a retention hold and a quarantine candidate for the same key.
-        let hold =
-            RetentionHold::new(key.clone(), "test hold".to_owned(), now, Some(now + 3600)).unwrap();
-        index_store.upsert_retention_hold(&hold).await.unwrap();
-
-        let candidate = QuarantineCandidate::new(key, 9, now, now + 3600).unwrap();
+        // Quarantine X first…
+        let candidate = QuarantineCandidate::new(key.clone(), 9, now - 100, now + 3600).unwrap();
         index_store
             .upsert_quarantine_candidate(&candidate)
             .await
             .unwrap();
 
-        let result = run_gc_helper(&object_store, &index_store, LocalGcOptions::dry_run()).await;
-        assert!(result.is_err(), "active hold + quarantine should error");
-        let err = result.unwrap_err();
+        // …then hold X (a permanent hold, release_after = None — the case that
+        // previously wedged GC indefinitely).
+        let hold = RetentionHold::new(key.clone(), "permanent hold".to_owned(), now, None).unwrap();
+        index_store.upsert_retention_hold(&hold).await.unwrap();
+
+        // The run must complete (no abort) and repair the quarantine state.
+        let result = run_gc_with_stores(
+            &record_store,
+            &index_store,
+            &object_store,
+            &[ServerFrontend::Xet],
+            LocalGcOptions::mark_only(86400),
+        )
+        .await;
         assert!(
-            matches!(
-                err,
-                GcError::InvalidLifecycleMetadata(
-                    InvalidLifecycleMetadataError::ActiveRetentionHoldQuarantined { .. }
-                )
-            ),
-            "expected ActiveRetentionHoldQuarantined, got: {err:?}"
+            result.is_ok(),
+            "held+quarantined must not abort the run: {:?}",
+            result
         );
+        let diagnostics = result.unwrap();
+        assert_eq!(
+            diagnostics.report.released_quarantine_candidates, 1,
+            "the stale quarantine candidate must be released"
+        );
+        // The held object survives.
+        assert!(
+            object_store.contains(&key).unwrap(),
+            "held object must survive the repair run"
+        );
+
+        // Quarantine state is gone from the index…
+        let mut quarantine_found = false;
+        index_store
+            .visit_quarantine_candidates(|_c| {
+                quarantine_found = true;
+                Ok::<(), GcError>(())
+            })
+            .await
+            .unwrap();
+        assert!(!quarantine_found, "quarantine candidate must be released");
+
+        // …and the hold is still present.
+        let mut hold_found = false;
+        index_store
+            .visit_retention_holds(|h| {
+                if h.object_key() == &key {
+                    hold_found = true;
+                }
+                Ok::<(), GcError>(())
+            })
+            .await
+            .unwrap();
+        assert!(hold_found, "retention hold must survive the repair run");
+
+        // A subsequent run is also clean: no abort, no re-quarantine, object intact.
+        let result2 = run_gc_with_stores(
+            &record_store,
+            &index_store,
+            &object_store,
+            &[ServerFrontend::Xet],
+            LocalGcOptions::mark_only(86400),
+        )
+        .await;
+        assert!(
+            result2.is_ok(),
+            "subsequent run must also complete: {:?}",
+            result2
+        );
+        let diagnostics2 = result2.unwrap();
+        assert_eq!(diagnostics2.report.active_quarantine_candidates, 0);
+        assert_eq!(diagnostics2.report.released_quarantine_candidates, 0);
+        assert!(
+            object_store.contains(&key).unwrap(),
+            "held object must still survive after the subsequent run"
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
     });
 }
@@ -1556,6 +2154,315 @@ async fn run_local_gc_diagnostics_with_orphan_chunks() {
     assert_eq!(diagnostics.orphan_inventory.len(), 1);
     assert_eq!(diagnostics.orphan_inventory[0].object_key, key.as_str());
     assert_eq!(diagnostics.orphan_inventory[0].bytes, 28);
+}
+
+// ── last-GC-clock anchor gating + write tolerance (F-76) ───────────────
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dry_run_on_read_only_store_tolerates_anchor_write_failure() {
+    // F-76 regression: the F-57 anchor write propagated errors via `?`, so a
+    // dry run against a read-only object store (chmod 0555 chunks dir;
+    // least-privilege S3 cron role) aborted with an object-store
+    // PermissionDenied error and produced NO report — even though pre-F-57 the
+    // identical dry run completed all-reads. The anchor is an optimization, not
+    // a correctness requirement: a failed write must be tolerated (warn and
+    // continue) and the run must still return Ok with a full report.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().to_path_buf();
+    std::fs::create_dir_all(root.join("chunks")).unwrap();
+    let chunks_dir = root.join("chunks");
+
+    // chmod 0555: reads (metadata, listing) succeed, writes (the anchor put,
+    // which must create chunks/gc/) fail with PermissionDenied.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&chunks_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+    }
+
+    let result = run_local_gc_diagnostics(root.clone(), LocalGcOptions::dry_run()).await;
+
+    // Restore write permission so tempdir cleanup can remove the tree.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&chunks_dir, std::fs::Permissions::from_mode(0o755));
+    }
+
+    assert!(
+        result.is_ok(),
+        "dry-run on a read-only store must succeed despite the anchor write failing: {:?}",
+        result
+    );
+    let diagnostics = result.unwrap();
+    assert_eq!(diagnostics.report.scanned_records, 0);
+    assert_eq!(diagnostics.report.orphan_chunks, 0);
+    assert_eq!(diagnostics.report.deleted_chunks, 0);
+    assert!(diagnostics.retention_report.is_empty());
+    assert!(diagnostics.orphan_inventory.is_empty());
+}
+
+#[test]
+fn dry_run_on_writable_store_does_not_persist_gc_clock_anchor() {
+    // F-76 regression: the F-57 anchor write was unconditional (not gated on
+    // mark||sweep), so the documented "pure dry run" (mark=false, sweep=false,
+    // "changes nothing") CREATED chunks/gc/last-gc-clock-anchor — mutating the
+    // object store. A pure dry run must remain read-only: it still READS the
+    // anchor for the forward-clock guard, but never writes it.
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let dir = tempfile::tempdir().unwrap();
+        let object_store = ServerObjectStore::local(dir.path().join("chunks")).unwrap();
+        let index_store = MemoryIndexStore::new();
+
+        let diagnostics = run_gc_helper(&object_store, &index_store, LocalGcOptions::dry_run())
+            .await
+            .unwrap();
+
+        assert_eq!(diagnostics.report.deleted_chunks, 0);
+        assert!(
+            !object_store
+                .contains(&ObjectKey::parse("gc/last-gc-clock-anchor").unwrap())
+                .unwrap(),
+            "a pure dry run must not persist the last-GC-clock anchor"
+        );
+    });
+}
+
+#[test]
+fn mark_or_sweep_run_on_writable_store_persists_gc_clock_anchor() {
+    // F-76: a run that mutates the object store (mark and/or sweep) must
+    // persist the last-GC-clock anchor so a forward jump between two consecutive
+    // runs is detectable even on a low-churn deployment (F-57).
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let dir = tempfile::tempdir().unwrap();
+        let object_store = ServerObjectStore::local(dir.path().join("chunks")).unwrap();
+        let index_store = MemoryIndexStore::new();
+        let anchor_key = ObjectKey::parse("gc/last-gc-clock-anchor").unwrap();
+
+        // sweep-only is a store-mutating run.
+        let sweep_diagnostics =
+            run_gc_helper(&object_store, &index_store, LocalGcOptions::sweep_only())
+                .await
+                .unwrap();
+        assert_eq!(sweep_diagnostics.report.deleted_chunks, 0);
+        assert!(
+            object_store.contains(&anchor_key).unwrap(),
+            "a sweep run must persist the last-GC-clock anchor"
+        );
+
+        // mark-only is also a store-mutating run.
+        let mark_diagnostics = run_gc_helper(
+            &object_store,
+            &index_store,
+            LocalGcOptions::mark_only(DEFAULT_LOCAL_GC_RETENTION_SECONDS),
+        )
+        .await
+        .unwrap();
+        assert_eq!(mark_diagnostics.report.new_quarantine_candidates, 0);
+        assert!(
+            object_store.contains(&anchor_key).unwrap(),
+            "a mark run must persist the last-GC-clock anchor"
+        );
+    });
+}
+
+// ── F-88: the forward-clock guard must defer the quarantine mark too ──
+
+const F88_CANDIDATE_HASH: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const F88_ORPHAN_HASH: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+/// Puts a chunk object and returns its key.
+fn put_gc_chunk(object_store: &ServerObjectStore, hash: &str, data: &[u8]) -> ObjectKey {
+    let prefix = &hash[..2];
+    let key = ObjectKey::parse(&format!("{prefix}/{hash}")).unwrap();
+    put_object(object_store, &key, data);
+    key
+}
+
+/// Returns true when a quarantine candidate exists for `object_key`.
+async fn has_quarantine_candidate(index_store: &MemoryIndexStore, object_key: &ObjectKey) -> bool {
+    let mut found = false;
+    index_store
+        .visit_quarantine_candidates(|candidate| {
+            if candidate.object_key() == object_key {
+                found = true;
+            }
+            Ok::<(), GcError>(())
+        })
+        .await
+        .unwrap();
+    found
+}
+
+/// Runs two mark-and-sweep cycles under a forward-jumped clock and then one
+/// cycle under the corrected (real) clock, asserting the F-88 invariants:
+///
+/// * run 1 (jumped): the guard fires — NOTHING is marked (no untracked orphan
+///   is stamped with the jumped clock), nothing is swept, the anchor is not
+///   written.
+/// * run 2 (jumped): the guard is STILL armed (the jumped clock never entered
+///   the creation reference) — the pre-jump candidate A is preserved.
+/// * run 3 (real): the guard clears and the deployment self-heals — the
+///   untracked orphan B is finally quarantined with the REAL clock and the
+///   anchor is written; A (delete_after = real + 6d) is still not expired.
+async fn run_forward_clock_two_run_scenario(include_untracked_orphan: bool) {
+    let real_now = 2_000_000_000_u64;
+    // A >1-day forward jump (10 days): beyond the 86400s guard slack.
+    let jumped_now = real_now + 10 * 86_400;
+
+    let dir = tempfile::tempdir().unwrap();
+    let object_store = ServerObjectStore::local(dir.path()).unwrap();
+    let index_store = MemoryIndexStore::new();
+    let anchor_key = ObjectKey::parse("gc/last-gc-clock-anchor").unwrap();
+
+    // Pre-jump state: candidate A quarantined 1 day ago with a 7-day retention
+    // (delete_after = real_now + 6 days). The object exists on disk and is
+    // unreferenced (empty record store), so the sweep would delete it if the
+    // guard were silent.
+    let data_a = b"A-data";
+    let key_a = put_gc_chunk(&object_store, F88_CANDIDATE_HASH, data_a);
+    let candidate_a = QuarantineCandidate::new(
+        key_a.clone(),
+        u64::try_from(data_a.len()).unwrap_or(0),
+        real_now - 86_400,
+        real_now + 6 * 86_400,
+    )
+    .unwrap();
+    index_store
+        .upsert_quarantine_candidate(&candidate_a)
+        .await
+        .unwrap();
+
+    // EXPLOIT (b): an untracked orphan B present before the jump. Pre-fix,
+    // run 1's mark stamped B with the jumped clock, disarming the guard.
+    let key_b = if include_untracked_orphan {
+        Some(put_gc_chunk(&object_store, F88_ORPHAN_HASH, b"B-data"))
+    } else {
+        None
+    };
+
+    let options = LocalGcOptions::mark_and_sweep(MINIMUM_GC_RETENTION_SECONDS);
+
+    // Run 1 + run 2 under the jumped clock.
+    set_gc_now_unix_seconds_override(Some(jumped_now));
+    let run1 = run_gc_helper(&object_store, &index_store, options)
+        .await
+        .unwrap();
+    let run2 = run_gc_helper(&object_store, &index_store, options)
+        .await
+        .unwrap();
+    set_gc_now_unix_seconds_override(None);
+
+    // Run 1: the guard fired → mark deferred → no new candidates stamped with
+    // the jumped clock; sweep skipped → nothing deleted; fired run's `now` is
+    // never written as the anchor.
+    assert_eq!(run1.report.deleted_chunks, 0, "run 1 must not delete");
+    assert_eq!(
+        run1.report.new_quarantine_candidates, 0,
+        "run 1 must not stamp any candidate with the jumped clock"
+    );
+    assert_eq!(run1.report.active_quarantine_candidates, 1);
+    assert!(
+        object_store.contains(&key_a).unwrap(),
+        "candidate A must survive run 1"
+    );
+    if let Some(key_b) = &key_b {
+        assert!(
+            !has_quarantine_candidate(&index_store, key_b).await,
+            "run 1 must not stamp the untracked orphan B with the jumped clock"
+        );
+    }
+    assert!(
+        !object_store.contains(&anchor_key).unwrap(),
+        "a fired run must never persist the last-GC-clock anchor"
+    );
+
+    // Run 2: the guard must STILL be armed — the jumped clock never entered
+    // the creation-timestamp reference, so candidate A is preserved instead of
+    // being deleted ~6 days before its real retention elapsed.
+    assert_eq!(run2.report.deleted_chunks, 0, "run 2 must not delete");
+    assert_eq!(run2.report.new_quarantine_candidates, 0);
+    assert_eq!(run2.report.active_quarantine_candidates, 1);
+    assert!(
+        object_store.contains(&key_a).unwrap(),
+        "candidate A must survive run 2 — the guard stayed armed"
+    );
+    if let Some(key_b) = &key_b {
+        assert!(
+            !has_quarantine_candidate(&index_store, key_b).await,
+            "run 2 must still not stamp B"
+        );
+    }
+    assert!(
+        !object_store.contains(&anchor_key).unwrap(),
+        "a fired run must never persist the last-GC-clock anchor"
+    );
+
+    // Run 3 under the corrected clock: self-healing. The guard clears, the
+    // untracked orphan B is finally quarantined with the REAL clock (proving
+    // the jumped timestamp never became the anchor/reference), the anchor is
+    // written, and A — whose real retention has not elapsed — is still there.
+    set_gc_now_unix_seconds_override(Some(real_now));
+    let run3 = run_gc_helper(&object_store, &index_store, options)
+        .await
+        .unwrap();
+    set_gc_now_unix_seconds_override(None);
+
+    assert_eq!(run3.report.deleted_chunks, 0, "A is not yet expired");
+    assert!(
+        object_store.contains(&key_a).unwrap(),
+        "candidate A must survive the corrected-clock run"
+    );
+    assert!(
+        object_store.contains(&anchor_key).unwrap(),
+        "a trusted run must persist the last-GC-clock anchor"
+    );
+    if let Some(key_b) = &key_b {
+        assert_eq!(run3.report.new_quarantine_candidates, 1);
+        // The stamped first_seen must be the REAL clock — the jumped clock
+        // must never have become the reference.
+        let mut first_seen = None;
+        index_store
+            .visit_quarantine_candidates(|candidate| {
+                if candidate.object_key() == key_b {
+                    first_seen = Some(candidate.first_seen_unreachable_at_unix_seconds());
+                }
+                Ok::<(), GcError>(())
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            first_seen,
+            Some(real_now),
+            "B must be stamped with the real clock, not the jumped one"
+        );
+    } else {
+        assert_eq!(run3.report.new_quarantine_candidates, 0);
+    }
+}
+
+#[test]
+fn forward_clock_guard_defers_mark_control_no_new_orphan() {
+    // F-88 CONTROL (a): a pre-jump candidate A with NO new orphan. Two runs
+    // under a jumped clock must both fire the guard: A is preserved
+    // (deleted_chunks = 0 both runs), no candidate is ever stamped with the
+    // jumped time, and the guard stays armed.
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(run_forward_clock_two_run_scenario(false));
+}
+
+#[test]
+fn forward_clock_guard_defers_mark_exploit_untracked_orphan() {
+    // F-88 EXPLOIT (b): candidate A + an untracked orphan B. Pre-fix, run 1's
+    // mark stamped B's first_seen with the jumped clock, which disarmed the
+    // guard for run 2 and let the sweep delete A ~6 days before its real
+    // retention elapsed. Post-fix the mark is deferred on a fired guard: B is
+    // never stamped with the jumped time, A is preserved (deleted_chunks = 0
+    // in run 2), and only a later trusted run stamps B with the real clock.
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(run_forward_clock_two_run_scenario(true));
 }
 
 // ── run_local_gc with a pre-populated local SQLite store ──────────────

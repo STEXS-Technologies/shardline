@@ -8,6 +8,7 @@ use crate::{ObjectKey, ObjectMetadata};
 
 use super::metadata::{
     ensure_directory_path_components_are_not_symlinked, ensure_regular_file_metadata,
+    modified_unix_nanos,
 };
 use super::store::LocalObjectStoreError;
 
@@ -58,11 +59,16 @@ where
         let key = ObjectKey::parse(&relative)
             .map_err(|_error| LocalObjectStoreError::InvalidStoredKey)
             .map_err(Into::into)?;
-        let metadata = fs::symlink_metadata(&path)
+        let fs_metadata = fs::symlink_metadata(&path)
             .map_err(LocalObjectStoreError::Io)
             .map_err(Into::into)?;
-        ensure_regular_file_metadata(&metadata).map_err(Into::into)?;
-        visitor(ObjectMetadata::new(key, metadata.len(), None))?;
+        ensure_regular_file_metadata(&fs_metadata).map_err(Into::into)?;
+        let mut metadata = ObjectMetadata::new(key, fs_metadata.len(), None);
+        // The observed mtime is backend truth, so attach it when available.
+        if let Some(modified) = modified_unix_nanos(&fs_metadata) {
+            metadata = metadata.with_modified(modified);
+        }
+        visitor(metadata)?;
     }
 
     Ok(())

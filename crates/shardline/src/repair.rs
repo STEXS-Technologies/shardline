@@ -43,6 +43,15 @@ impl RepairReport {
             "index_rebuild.removed_stale_latest_records: {}",
             self.index_rebuild.removed_stale_latest_records
         );
+        for location in &self
+            .index_rebuild
+            .preserved_latest_records_unreadable_version
+        {
+            println!(
+                "index_rebuild.kept_latest_record_unreadable_version: {}",
+                location
+            );
+        }
         println!(
             "index_rebuild.scanned_reconstructions: {}",
             self.index_rebuild.scanned_reconstructions
@@ -243,6 +252,7 @@ mod tests {
                 rebuilt_dedupe_shard_mappings: 0,
                 unchanged_dedupe_shard_mappings: 0,
                 removed_stale_dedupe_shard_mappings: 0,
+                preserved_latest_records_unreadable_version: vec![],
                 issues: vec![],
             },
             lifecycle_repair: LifecycleRepairReport {
@@ -286,6 +296,7 @@ mod tests {
                 rebuilt_dedupe_shard_mappings: 4,
                 unchanged_dedupe_shard_mappings: 10,
                 removed_stale_dedupe_shard_mappings: 1,
+                preserved_latest_records_unreadable_version: vec![],
                 issues: vec![LocalIndexRebuildIssue {
                     kind: LocalIndexRebuildIssueKind::InvalidVersionRecordJson,
                     location: "records/abc".to_owned(),

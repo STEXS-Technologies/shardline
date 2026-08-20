@@ -2,7 +2,6 @@ use std::str::FromStr;
 use std::sync::LazyLock;
 use tokio::sync::Semaphore;
 
-use axum::http::HeaderMap;
 use axum::{
     Json,
     extract::{Path, State},
@@ -13,9 +12,9 @@ use crate::{error::HubApiError, models::*, types::WebhookScheme};
 // HubRepoType used in the webhook_create handler for repo lookup
 // (used implicitly via state.store methods)
 use shardline_index::hub::HubWebhook;
-use shardline_protocol::{SecretString, TokenScope};
+use shardline_protocol::SecretString;
 
-use super::{HubState, authorize_with_context, require_repository_binding};
+use super::{HubRepository, HubState};
 
 /// Delivers webhook events to registered URLs.
 ///
@@ -238,6 +237,16 @@ const MAX_WEBHOOK_URL_LEN: usize = 2048;
 /// Maximum number of events per webhook.
 const MAX_WEBHOOK_EVENTS: usize = 50;
 
+/// Maximum number of webhooks per repository.
+///
+/// Bounds the per-repo fan-out of [`deliver_webhook_events`]: without a cap, a
+/// Write-scoped caller could register an unbounded number of webhooks to a slow
+/// endpoint and, on every commit, spawn one delivery task per webhook — each
+/// holding one permit of the process-global `WEBHOOK_DELIVERY_SEMAPHORE` (16
+/// total) for up to the client timeout — starving every other tenant's webhook
+/// deliveries and driving unbounded task/memory growth.
+const MAX_WEBHOOKS_PER_REPO: usize = 50;
+
 /// Validates a webhook URL to prevent SSRF attacks.
 ///
 /// Checks:
@@ -335,13 +344,13 @@ pub(crate) fn webhook_response_from_hub(
 /// Creates a webhook for a repository.
 pub(crate) async fn webhook_create(
     State(state): State<HubState>,
-    headers: HeaderMap,
+    _repo: HubRepository<true>,
     Path((_repo_type, ns, repo)): Path<(String, String, String)>,
     Json(request): Json<WebhookCreateRequest>,
 ) -> Result<(StatusCode, Json<WebhookResponse>), HubApiError> {
     shardline_metrics::record_hub_api_request("webhook_create", "POST", 201);
-    let auth_ctx = authorize_with_context(&state, &headers, TokenScope::Write)?;
-    require_repository_binding(auth_ctx.as_ref(), &ns, &repo)?;
+    // The extractor has already required Write scope and bound the token to
+    // this repository before the handler runs.
     if request.events.len() > MAX_WEBHOOK_EVENTS {
         return Err(HubApiError::PathValidation(format!(
             "webhook events exceeds maximum of {MAX_WEBHOOK_EVENTS}"
@@ -363,6 +372,13 @@ pub(crate) async fn webhook_create(
         return Err(HubApiError::Conflict(format!(
             "webhook with URL {} already exists for repo {name}",
             request.url
+        )));
+    }
+    // Enforce the per-repo webhook count cap (F-94): an unbounded registration
+    // count would let a single repo starve the global delivery semaphore.
+    if existing.len() >= MAX_WEBHOOKS_PER_REPO {
+        return Err(HubApiError::PathValidation(format!(
+            "webhook count for repo {name} exceeds maximum of {MAX_WEBHOOKS_PER_REPO}"
         )));
     }
     // Encrypt the signing secret at rest when a cipher is configured.
@@ -395,12 +411,10 @@ pub(crate) async fn webhook_create(
 /// Lists webhooks for a repository.
 pub(crate) async fn webhook_list(
     State(state): State<HubState>,
-    headers: HeaderMap,
+    _repo: HubRepository,
     Path((_repo_type, ns, repo)): Path<(String, String, String)>,
 ) -> Result<Json<WebhookListResponse>, HubApiError> {
     shardline_metrics::record_hub_api_request("webhook_list", "GET", 200);
-    let auth_ctx = authorize_with_context(&state, &headers, TokenScope::Read)?;
-    require_repository_binding(auth_ctx.as_ref(), &ns, &repo)?;
     let name = format!("{ns}/{repo}");
     let webhooks = state
         .store
@@ -415,12 +429,10 @@ pub(crate) async fn webhook_list(
 /// Deletes a webhook.
 pub(crate) async fn webhook_delete(
     State(state): State<HubState>,
-    headers: HeaderMap,
+    _repo: HubRepository<true>,
     Path((_repo_type, ns, repo, webhook_id)): Path<(String, String, String, String)>,
 ) -> Result<StatusCode, HubApiError> {
     shardline_metrics::record_hub_api_request("webhook_delete", "DELETE", 204);
-    let auth_ctx = authorize_with_context(&state, &headers, TokenScope::Write)?;
-    require_repository_binding(auth_ctx.as_ref(), &ns, &repo)?;
     let name = format!("{ns}/{repo}");
     state
         .store
@@ -434,6 +446,7 @@ pub(crate) async fn webhook_delete(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::routes::test_repo;
     use std::net::IpAddr;
 
     #[test]
@@ -678,12 +691,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn webhook_create_rejects_beyond_per_repo_cap() {
+        let ts = tempfile::tempdir().unwrap();
+        shardline_index::hub::ensure_hub_tables(ts.path()).unwrap();
+        let store = shardline_index::LocalIndexStore::open(ts.path().to_path_buf());
+        let boxed = BoxedHubStore::from_store(store);
+        boxed
+            .create_repo(HubRepoType::Model, "org/cap", false)
+            .unwrap();
+        let object_store = ServerObjectStore::local(ts.path().join("lfs")).unwrap();
+        let state = HubState {
+            store: boxed,
+            object_store,
+            auth: None,
+            http_client: None,
+            webhook_secret_cipher: None,
+        };
+        let headers = axum::http::HeaderMap::new();
+
+        // Registering up to the cap succeeds.
+        for i in 0..MAX_WEBHOOKS_PER_REPO {
+            let (status, _resp) = webhook_create(
+                State(state.clone()),
+                test_repo(&state, &headers),
+                Path(("models".into(), "org".into(), "cap".into())),
+                Json(WebhookCreateRequest {
+                    url: format!("https://example.com/hook/{i}"),
+                    events: vec!["push".into()],
+                    secret: None,
+                }),
+            )
+            .await
+            .expect("webhook within the per-repo cap should be accepted");
+            assert_eq!(status, StatusCode::CREATED);
+        }
+
+        // One more webhook is rejected by the per-repo cap.
+        let result = webhook_create(
+            State(state.clone()),
+            test_repo(&state, &headers),
+            Path(("models".into(), "org".into(), "cap".into())),
+            Json(WebhookCreateRequest {
+                url: "https://example.com/hook/over-cap".into(),
+                events: vec!["push".into()],
+                secret: None,
+            }),
+        )
+        .await;
+        let err = result.expect_err("webhook beyond the per-repo cap should be rejected");
+        assert!(
+            matches!(&err, HubApiError::PathValidation(msg) if msg.contains("maximum")),
+            "expected PathValidation for exceeding the per-repo cap, got {err:?}"
+        );
+        assert_eq!(
+            state.store.list_webhooks("org/cap").unwrap().len(),
+            MAX_WEBHOOKS_PER_REPO,
+            "no webhook beyond the cap may be stored"
+        );
+    }
+
+    #[tokio::test]
     async fn webhook_create_stores_ciphertext_at_rest() {
         let (_ts, state) = make_encrypted_state(&ENC_KEY);
         let plaintext = "s3cr3t-webhook-token";
         let (status, resp) = webhook_create(
             State(state.clone()),
-            axum::http::HeaderMap::new(),
+            test_repo(&state, &axum::http::HeaderMap::new()),
             Path(("models".into(), "org".into(), "enc".into())),
             Json(WebhookCreateRequest {
                 url: "https://example.com/hook".into(),

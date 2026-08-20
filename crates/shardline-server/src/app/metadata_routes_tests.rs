@@ -56,6 +56,46 @@ fn mint_token(token_scope: TokenScope, owner: &str, repo: &str, rev: &str) -> St
 }
 
 async fn build_app(auth_enabled: bool) -> (Router, TempDir) {
+    let cap = NonZeroUsize::new(10_000).unwrap();
+    build_app_with_config(auth_enabled, cap).await
+}
+
+async fn build_app_with_cap(
+    auth_enabled: bool,
+    max_revisions_per_repo: NonZeroUsize,
+) -> (Router, TempDir) {
+    build_app_with_config(auth_enabled, max_revisions_per_repo).await
+}
+
+async fn build_app_with_tree_cap(
+    auth_enabled: bool,
+    max_tree_entries_per_repo: NonZeroUsize,
+) -> (Router, TempDir) {
+    build_app_with_caps(
+        auth_enabled,
+        NonZeroUsize::new(10_000).unwrap(),
+        max_tree_entries_per_repo,
+    )
+    .await
+}
+
+async fn build_app_with_config(
+    auth_enabled: bool,
+    max_revisions_per_repo: NonZeroUsize,
+) -> (Router, TempDir) {
+    build_app_with_caps(
+        auth_enabled,
+        max_revisions_per_repo,
+        NonZeroUsize::new(10_000).unwrap(),
+    )
+    .await
+}
+
+async fn build_app_with_caps(
+    auth_enabled: bool,
+    max_revisions_per_repo: NonZeroUsize,
+    max_tree_entries_per_repo: NonZeroUsize,
+) -> (Router, TempDir) {
     let tmp = TempDir::new().unwrap();
     let chunk_size = NonZeroUsize::new(65536).unwrap();
     let object_store = ServerObjectStore::local(tmp.path().join("chunks")).unwrap();
@@ -78,6 +118,10 @@ async fn build_app(auth_enabled: bool) -> (Router, TempDir) {
     )
     .with_server_role(ServerRole::All)
     .with_server_frontends(vec![ServerFrontend::Xet])
+    .unwrap()
+    .with_max_revisions_per_repo(max_revisions_per_repo)
+    .unwrap()
+    .with_max_tree_entries_per_repo(max_tree_entries_per_repo)
     .unwrap()
     .with_token_signing_key(TEST_SIGNING_KEY.to_vec())
     .unwrap();
@@ -152,6 +196,10 @@ fn tree_url(query: &str) -> String {
 
 fn path_url(path: &str) -> String {
     format!("/api/{PROVIDER}/{OWNER}/{REPO}/path/{REV}/{path}")
+}
+
+fn path_url_for_rev(rev: &str, path: &str) -> String {
+    format!("/api/{PROVIDER}/{OWNER}/{REPO}/path/{rev}/{path}")
 }
 
 async fn get_body(response: axum::response::Response) -> Value {
@@ -283,6 +331,198 @@ async fn register_unregistered_file_returns_400() {
         body["error"],
         format!("file is not registered in revision {REV}")
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn register_path_respects_per_repo_revision_cap() {
+    // F-89 regression: register_path auto-creates the revision registry row, so
+    // it must enforce the same per-repo cap as create_revision. One valid file
+    // id is enough to mint unlimited revision rows via PUT.
+    let cap = NonZeroUsize::new(3).unwrap();
+    let (app, tmp) = build_app_with_cap(false, cap).await;
+    let id = file_id(4);
+    write_record(tmp.path(), &id, 100, None).await;
+
+    // The first `cap` distinct revisions are accepted.
+    for rev in ["one", "two", "three"] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(path_url_for_rev(rev, "data/model.pt"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(json!({ "fileId": id }).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "{rev} should be accepted"
+        );
+    }
+
+    // The next distinct revision is rejected with 409 once the repo is at
+    // capacity, exactly like create_revision.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(path_url_for_rev("four", "data/model.pt"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(json!({ "fileId": id }).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = get_body(response).await;
+    assert_eq!(
+        body["error"],
+        "revision registry is full for this repository"
+    );
+
+    // The registry holds exactly `cap` rows — no tree rows leaked either.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/api/{PROVIDER}/{OWNER}/{REPO}/revisions"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        get_body(response).await["revisions"]
+            .as_array()
+            .unwrap()
+            .len(),
+        cap.get()
+    );
+
+    // Re-registering an EXISTING revision (a refresh) is still allowed at the
+    // cap: it refreshes the tree entry without growing the registry.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(path_url_for_rev("one", "data/model.pt"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(json!({ "fileId": id }).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = get_body(response).await;
+    assert_eq!(body["created"], false);
+
+    // A different repository has its own independent cap.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/api/{PROVIDER}/{OWNER}/other/path/solo/f.txt"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(json!({ "fileId": id }).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn register_path_respects_per_repo_tree_entry_cap() {
+    // F-103 regression: one valid file_id can be registered under arbitrarily
+    // many distinct paths, so register_path must enforce a per-repo tree-entry
+    // cap. F-108: the cap also governs the refresh path — at capacity a
+    // re-registration of an existing path is rejected too, mirroring
+    // create_revision's count-before-insert gate.
+    let cap = NonZeroUsize::new(3).unwrap();
+    let (app, tmp) = build_app_with_tree_cap(false, cap).await;
+    let id = file_id(4);
+    write_record(tmp.path(), &id, 100, None).await;
+
+    // The first `cap` distinct paths under the same revision are accepted.
+    for path in ["a.txt", "b.txt", "c.txt"] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(path_url(path))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(json!({ "fileId": id }).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "{path} should be accepted"
+        );
+    }
+
+    // The next distinct path is rejected with 409 once the repo is at capacity.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(path_url("d.txt"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(json!({ "fileId": id }).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = get_body(response).await;
+    assert_eq!(
+        body["error"],
+        "revision registry is full for this repository"
+    );
+
+    // F-108: re-registering an EXISTING path at the cap is rejected too, so
+    // register_path and create_revision agree at capacity.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(path_url("a.txt"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(json!({ "fileId": id }).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+
+    // A different repository has its own independent cap.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/api/{PROVIDER}/{OWNER}/other/path/solo/f.txt"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(json!({ "fileId": id }).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
 }
 
 // ── Listing (§1.2) ─────────────────────────────────────────────────────────
@@ -593,6 +833,84 @@ async fn list_revisions_returns_created() {
         .map(|r| r["name"].as_str().unwrap())
         .collect();
     assert_eq!(names, vec!["one", "two"]);
+    assert_eq!(body["nextCursor"], Value::Null);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn list_revisions_is_bounded_and_paginates() {
+    let (app, _tmp) = build_app(false).await;
+    let base = format!("/api/{PROVIDER}/{OWNER}/{REPO}/revisions");
+    for name in ["a", "b", "c", "d", "e"] {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("{base}/{name}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+    }
+
+    // A bounded listing returns at most `limit` rows plus a nextCursor.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("{base}?limit=3"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = get_body(response).await;
+    let names: Vec<&str> = body["revisions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, vec!["a", "b", "c"]);
+    let cursor = body["nextCursor"].as_str().unwrap().to_owned();
+
+    // The cursor resumes after the last returned revision name.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("{base}?limit=3&cursor={cursor}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = get_body(response).await;
+    let names: Vec<&str> = body["revisions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, vec!["d", "e"]);
+    assert_eq!(body["nextCursor"], Value::Null);
+
+    // An out-of-range limit is rejected like the tree listing.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("{base}?limit=0"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -933,4 +1251,213 @@ async fn create_revision_rejects_invalid_revision() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn create_revision_rejects_oversize_owner_repo_provider_segments() {
+    let (app, _tmp) = build_app(false).await;
+    let long_segment = "o".repeat(513);
+
+    // Oversize owner segment is rejected with 400.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/generic/{long_segment}/{REPO}/revisions/{REV}"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    // Oversize repo segment is rejected with 400.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/generic/{OWNER}/{long_segment}/revisions/{REV}"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    // Oversize provider segment is rejected with 400.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/{long_segment}/{OWNER}/{REPO}/revisions/{REV}"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    // Control characters in an owner segment are rejected with 400.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/generic/bad%0Aowner/{REPO}/revisions/{REV}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    // A valid identity still creates at the same boundary length as the
+    // revision name (512 bytes) — the segment cap mirrors validate_revision.
+    let boundary_segment = "b".repeat(512);
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/generic/{boundary_segment}/{REPO}/revisions/{REV}"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // A revision registry row is created under the long but valid identity.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/api/generic/{boundary_segment}/{REPO}/revisions"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        get_body(response).await["revisions"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn create_revision_rejects_beyond_per_repo_cap() {
+    let cap = NonZeroUsize::new(3).unwrap();
+    let (app, _tmp) = build_app_with_cap(false, cap).await;
+    let base = format!("/api/{PROVIDER}/{OWNER}/{REPO}/revisions");
+
+    // The first `cap` distinct names are accepted.
+    for name in ["one", "two", "three"] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("{base}/{name}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "{name} should be accepted"
+        );
+    }
+
+    // The next distinct name is rejected once the repo is at capacity.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("{base}/four"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = get_body(response).await;
+    assert_eq!(
+        body["error"],
+        "revision registry is full for this repository"
+    );
+
+    // An upsert of an existing name is still allowed at the cap (it does not
+    // grow the registry), matching the count-before-insert design.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("{base}/one"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT, "same-name upsert");
+
+    // A different repository with its own cap is unaffected.
+    let other_base = format!("/api/{PROVIDER}/{OWNER}/other/revisions");
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("{other_base}/solo"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Deleting a revision frees a slot for a new name.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("{base}/one"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("{base}/four"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK, "slot freed by delete");
 }

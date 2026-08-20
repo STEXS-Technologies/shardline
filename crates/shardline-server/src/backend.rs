@@ -51,6 +51,12 @@ pub(crate) struct S3ObjectReadSnapshot {
     /// served from a direct object at the protocol key and has no record to
     /// pin.
     pub record_content_hash: Option<String>,
+    /// The S3 user metadata paired with this version — resolved in the SAME
+    /// read as the length and record version, so metadata and bytes always
+    /// belong to one logical commit point (F-79). Empty when the object has no
+    /// listing-index row (e.g. the row-absent GET fallback): there is then no
+    /// row metadata to pair.
+    pub user_metadata: Vec<(String, String)>,
 }
 
 /// Outcome of registering a path mapping.
@@ -370,6 +376,31 @@ impl ServerBackend {
             Self::Postgres(backend) => {
                 backend
                     .scan_s3_objects(scope_namespace, prefix, cursor, limit)
+                    .await
+            }
+        }
+    }
+
+    /// Resolves exactly one S3 object listing row by its full raw key (no
+    /// prefix matching), for the S3 frontend's conditional-object semantics.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError`] when the index lookup fails.
+    pub(crate) async fn scan_s3_object_exact(
+        &self,
+        scope_namespace: &str,
+        object_key: &str,
+    ) -> Result<Option<S3ObjectEntry>, ServerError> {
+        match self {
+            Self::Local(backend) => {
+                backend
+                    .scan_s3_object_exact(scope_namespace, object_key)
+                    .await
+            }
+            Self::Postgres(backend) => {
+                backend
+                    .scan_s3_object_exact(scope_namespace, object_key)
                     .await
             }
         }
@@ -754,7 +785,8 @@ impl ServerBackend {
         Ok(stream)
     }
 
-    /// Resolves an S3 object's length and record version in ONE record read.
+    /// Resolves an S3 object's length, record version, and user metadata in
+    /// ONE consistent read.
     ///
     /// The S3 GET path must resolve the length and the stream from the SAME
     /// immutable record version. Resolving the length from the latest record
@@ -764,14 +796,33 @@ impl ServerBackend {
     /// version; [`Self::read_object_stream_pinned`] then streams that exact
     /// version.
     ///
+    /// The listing-index row is the S3 object's single commit point (F-70,
+    /// F-79): when a row exists its size, record version, and user metadata
+    /// are paired here in ONE resolution, and the caller pins the stream to
+    /// that exact version. A concurrent overwrite commits its record BEFORE
+    /// swapping the row, so preferring the row serves the pre-overwrite state
+    /// (old row + old record) or the post-overwrite state (new row + new
+    /// record) — never a mix of old-row metadata with new-record bytes. Only
+    /// when no row exists (e.g. the row-absent GET fallback) is the
+    /// authoritative latest record used, with no row metadata to pair.
+    ///
     /// # Errors
     ///
     /// Returns [`ServerError::NotFound`] when neither a direct object nor a
     /// record exists.
     pub(crate) async fn s3_object_read_snapshot(
         &self,
+        scope_namespace: &str,
+        key: &str,
         object_key: &ObjectKey,
     ) -> Result<S3ObjectReadSnapshot, ServerError> {
+        if let Some(entry) = self.scan_s3_object_exact(scope_namespace, key).await? {
+            return Ok(S3ObjectReadSnapshot {
+                total_bytes: entry.size_bytes,
+                record_content_hash: Some(entry.content_hash),
+                user_metadata: entry.user_metadata,
+            });
+        }
         // Raw direct-object probe: unlike `object_length`, this does NOT fall
         // back to the record, so the snapshot can tell direct-backed from
         // record-backed objects (S3 objects are record-only).
@@ -783,6 +834,7 @@ impl ServerBackend {
             Ok(length) => Ok(S3ObjectReadSnapshot {
                 total_bytes: length,
                 record_content_hash: None,
+                user_metadata: Vec::new(),
             }),
             Err(ServerError::NotFound) => {
                 let file_id = protocol_object_file_id(object_key);
@@ -790,6 +842,7 @@ impl ServerBackend {
                 Ok(S3ObjectReadSnapshot {
                     total_bytes: record.total_bytes,
                     record_content_hash: Some(record.content_hash),
+                    user_metadata: Vec::new(),
                 })
             }
             Err(error) => Err(error),
@@ -883,10 +936,7 @@ impl ServerBackend {
             Self::Postgres(backend) => backend.delete_object_if_present(object_key).await,
         }?;
         let file_id = protocol_object_file_id(object_key);
-        let record_deleted = match self {
-            Self::Local(backend) => backend.delete_file_reference(&file_id).await?,
-            Self::Postgres(backend) => backend.delete_file_reference(&file_id).await?,
-        };
+        let record_deleted = self.delete_file_reference(&file_id).await?;
         if direct == DeleteOutcome::Deleted || record_deleted {
             Ok(DeleteOutcome::Deleted)
         } else {
@@ -908,6 +958,63 @@ impl ServerBackend {
         match self {
             Self::Local(backend) => backend.delete_object_if_present(object_key).await,
             Self::Postgres(backend) => backend.delete_object_if_present(object_key).await,
+        }
+    }
+
+    /// Deletes a protocol file's latest reference and its immutable version
+    /// record.
+    ///
+    /// Unconditional: whatever the latest alias currently points at is removed.
+    /// Used by `DeleteObject`, where removing the object's current state is the
+    /// intended semantics. The S3 conditional-write purge must NOT use this —
+    /// it needs the guarded [`Self::delete_file_reference_if_latest`] so a
+    /// multi-replica race can never delete the winner's record (F-92).
+    pub(crate) async fn delete_file_reference(&self, file_id: &str) -> Result<bool, ServerError> {
+        match self {
+            Self::Local(backend) => backend.delete_file_reference(file_id).await,
+            Self::Postgres(backend) => backend.delete_file_reference(file_id).await,
+        }
+    }
+
+    /// Deletes a protocol file's latest reference and its immutable version
+    /// record — but ONLY when the latest record is still the expected version.
+    ///
+    /// Used by the S3 conditional-write path (F-86) to purge a record that was
+    /// committed but whose index-row swap is rejected by the authoritative
+    /// post-commit precondition re-check. Under the single-process per-key
+    /// upload lock the record store's latest alias points at the
+    /// just-committed LOSER record, so deleting the reference removes exactly
+    /// the loser's version: every latest-record consumer stops serving the
+    /// loser's bytes and the loser's chunks are no longer marked reachable.
+    ///
+    /// The guard is the F-92 fix: the per-key lock is an in-process HashMap, so
+    /// in a MULTI-REPLICA Postgres deployment it does not serialize conditional
+    /// writers on different replicas. A concurrent replica can commit the
+    /// WINNER's record and swap the row between this request's pre-check and
+    /// post-check; re-reading the latest here and comparing it against the
+    /// loser's committed content hash makes the purge a no-op when the latest
+    /// alias has already moved to the winner. Deleting unconditionally would
+    /// remove the winner's acknowledged write (its version record + latest
+    /// alias), leaving the swapped row pointing at a deleted version — every
+    /// subsequent GET/HEAD/CopyObject 404s and GC reclaims the winner's chunks.
+    /// When the guard skips, the loser's record is simply left as a non-latest
+    /// version, which GC eventually reclaims.
+    pub(crate) async fn delete_file_reference_if_latest(
+        &self,
+        file_id: &str,
+        expected_content_hash: &str,
+    ) -> Result<bool, ServerError> {
+        match self {
+            Self::Local(backend) => {
+                backend
+                    .delete_file_reference_if_latest(file_id, expected_content_hash)
+                    .await
+            }
+            Self::Postgres(backend) => {
+                backend
+                    .delete_file_reference_if_latest(file_id, expected_content_hash)
+                    .await
+            }
         }
     }
 
@@ -941,10 +1048,34 @@ impl ServerBackend {
         path: &str,
         file_id: &str,
         scope: Option<&RepositoryScope>,
+        max_revisions_per_repo: NonZeroUsize,
+        max_tree_entries_per_repo: NonZeroUsize,
     ) -> Result<RegisterPathOutcome, ServerError> {
         match self {
-            Self::Local(backend) => backend.register_tree_path(key, path, file_id, scope).await,
-            Self::Postgres(backend) => backend.register_tree_path(key, path, file_id, scope).await,
+            Self::Local(backend) => {
+                backend
+                    .register_tree_path(
+                        key,
+                        path,
+                        file_id,
+                        scope,
+                        max_revisions_per_repo,
+                        max_tree_entries_per_repo,
+                    )
+                    .await
+            }
+            Self::Postgres(backend) => {
+                backend
+                    .register_tree_path(
+                        key,
+                        path,
+                        file_id,
+                        scope,
+                        max_revisions_per_repo,
+                        max_tree_entries_per_repo,
+                    )
+                    .await
+            }
         }
     }
 
@@ -963,10 +1094,12 @@ impl ServerBackend {
     pub(crate) async fn list_revisions(
         &self,
         key: &RepoKey,
+        cursor: Option<&str>,
+        limit: usize,
     ) -> Result<Vec<RevisionRecord>, ServerError> {
         match self {
-            Self::Local(backend) => backend.list_revisions(key).await,
-            Self::Postgres(backend) => backend.list_revisions(key).await,
+            Self::Local(backend) => backend.list_revisions(key, cursor, limit).await,
+            Self::Postgres(backend) => backend.list_revisions(key, cursor, limit).await,
         }
     }
 
@@ -974,6 +1107,14 @@ impl ServerBackend {
         match self {
             Self::Local(backend) => backend.create_revision(rev).await,
             Self::Postgres(backend) => backend.create_revision(rev).await,
+        }
+    }
+
+    /// Counts the revision registry rows for a repository (F-75 cap check).
+    pub(crate) async fn count_revisions(&self, key: &RepoKey) -> Result<u64, ServerError> {
+        match self {
+            Self::Local(backend) => backend.count_revisions(key).await,
+            Self::Postgres(backend) => backend.count_revisions(key).await,
         }
     }
 
@@ -1229,6 +1370,10 @@ fn server_error_to_oci(error: ServerError) -> shardline_oci_adapter::OciAdapterE
         | ServerError::NotAcceptable
         | ServerError::UnauthorizedChallenge(_)
         | ServerError::TooManyRegistryTokenRequests
+        | ServerError::LfsPatchTooManySessions
+        | ServerError::LfsPatchStoreFull
+        | ServerError::LfsPatchRangeNotSatisfiable
+        | ServerError::S3UploadTooManyParts
         | ServerError::UploadIntentConflict
         | ServerError::MissingReconstructionCacheRedisUrl
         | ServerError::TransferLimiterClosed
@@ -1238,7 +1383,8 @@ fn server_error_to_oci(error: ServerError) -> shardline_oci_adapter::OciAdapterE
         | ServerError::SigningKeyError(_)
         | ServerError::InvalidPath
         | ServerError::UnregisteredFile(_)
-        | ServerError::RevisionConflict) => OciAdapterError::Io(Error::other(other.to_string())),
+        | ServerError::RevisionConflict
+        | ServerError::TooManyRevisions) => OciAdapterError::Io(Error::other(other.to_string())),
     }
 }
 

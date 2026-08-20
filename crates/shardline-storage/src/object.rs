@@ -112,6 +112,11 @@ pub struct ObjectMetadata {
     key: ObjectKey,
     length: u64,
     checksum: Option<ShardlineHash>,
+    /// Last-modified time (unix nanoseconds) observed by the OBJECT STORE
+    /// backend, not by the writer. `None` when the backend does not expose one
+    /// cheaply. This is backend-truth and immune to writer/host clock
+    /// divergence, unlike writer-embedded timestamps in object keys.
+    modified_unix_nanos: Option<u64>,
 }
 
 impl ObjectMetadata {
@@ -122,6 +127,7 @@ impl ObjectMetadata {
             key,
             length,
             checksum,
+            modified_unix_nanos: None,
         }
     }
 
@@ -141,6 +147,20 @@ impl ObjectMetadata {
     #[must_use]
     pub const fn checksum(&self) -> Option<ShardlineHash> {
         self.checksum
+    }
+
+    /// Returns the backend-observed last-modified time in unix nanoseconds,
+    /// when the backend exposed one.
+    #[must_use]
+    pub const fn modified_unix_nanos(&self) -> Option<u64> {
+        self.modified_unix_nanos
+    }
+
+    /// Sets the backend-observed last-modified time (unix nanoseconds).
+    #[must_use]
+    pub const fn with_modified(mut self, unix_nanos: u64) -> Self {
+        self.modified_unix_nanos = Some(unix_nanos);
+        self
     }
 }
 
@@ -197,6 +217,26 @@ mod tests {
         assert_eq!(metadata.key(), &key);
         assert_eq!(metadata.length(), 64);
         assert_eq!(metadata.checksum(), Some(hash));
+        assert_eq!(
+            metadata.modified_unix_nanos(),
+            None,
+            "plain `new` carries no modified timestamp"
+        );
+    }
+
+    #[test]
+    fn object_metadata_with_modified_sets_backend_observed_mtime() {
+        let key = ObjectKey::parse("xorbs/default/aa/bb/hash.xorb").unwrap();
+
+        let metadata =
+            ObjectMetadata::new(key.clone(), 64, None).with_modified(1_700_000_000_000_000_000);
+
+        assert_eq!(metadata.key(), &key);
+        assert_eq!(metadata.length(), 64);
+        assert_eq!(
+            metadata.modified_unix_nanos(),
+            Some(1_700_000_000_000_000_000)
+        );
     }
 
     #[test]

@@ -7,8 +7,8 @@ use sqlx::{Row, postgres::PgRow, query, query_scalar, types::Json};
 use super::{PostgresMetadataStoreError, i64_to_u64, u64_to_i64};
 use crate::{
     AsyncIndexStore, DedupeShardMapping, FileId, FileReconstruction, IndexStoreFuture,
-    ProviderRepositoryState, QuarantineCandidate, ReconstructionTerm, RetentionHold,
-    StoredObjectId, WebhookDelivery, WebhookDeliveryError, parse_xet_hash_hex,
+    ProviderRepositoryState, QuarantineCandidate, ReconstructionTerm, RepoKey, RetentionHold,
+    StoredObjectId, TreeStore, WebhookDelivery, WebhookDeliveryError, parse_xet_hash_hex,
     provider::parse_repository_provider,
     upload_intent::{UploadIntent, UploadIntentState, UploadIntentStore},
     xet_hash_hex_string,
@@ -523,6 +523,22 @@ impl AsyncIndexStore for super::PostgresIndexStore {
         })
     }
 
+    fn purge_webhook_deliveries_older_than<'operation>(
+        &'operation self,
+        older_than_unix_seconds: u64,
+    ) -> IndexStoreFuture<'operation, u64, Self::Error> {
+        Box::pin(async move {
+            let result = query(
+                "DELETE FROM shardline_webhook_deliveries
+                 WHERE processed_at_unix_seconds < $1",
+            )
+            .bind(u64_to_i64(older_than_unix_seconds)?)
+            .execute(&self.pool)
+            .await?;
+            Ok(result.rows_affected())
+        })
+    }
+
     fn provider_repository_state<'operation>(
         &'operation self,
         provider: RepositoryProvider,
@@ -666,6 +682,23 @@ impl AsyncIndexStore for super::PostgresIndexStore {
             .await?;
             Ok(result.rows_affected() > 0)
         })
+    }
+
+    fn prune_revisions_over_cap<'operation>(
+        &'operation self,
+        key: &'operation RepoKey,
+        max_revisions: usize,
+    ) -> IndexStoreFuture<'operation, u64, Self::Error> {
+        let store = self.clone();
+        let key = key.clone();
+        Box::pin(
+            async move { TreeStore::prune_revisions_over_cap(&store, &key, max_revisions).await },
+        )
+    }
+
+    fn list_revision_repo_keys(&self) -> IndexStoreFuture<'_, Vec<RepoKey>, Self::Error> {
+        let store = self.clone();
+        Box::pin(async move { TreeStore::list_revision_repo_keys(&store).await })
     }
 }
 

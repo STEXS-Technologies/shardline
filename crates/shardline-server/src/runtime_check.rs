@@ -201,6 +201,8 @@ mod tests {
         .with_server_role(ServerRole::All)
         .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
         .unwrap()
+        .with_config_secret_key(b"0123456789abcdef0123456789abcdef".to_vec())
+        .unwrap()
         .with_provider_runtime(
             storage.path_buf().join("provider.toml"),
             b"test-api-key".to_vec(),

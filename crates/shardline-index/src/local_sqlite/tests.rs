@@ -850,6 +850,99 @@ async fn exercise_local_sqlite_imports_legacy_filesystem_metadata() -> Result<()
     Ok(())
 }
 
+/// Every `.up.sql` migration file under `crates/shardline-index/migrations` must
+/// be registered in [`LOCAL_SQLITE_MIGRATIONS`] and vice versa, so a fresh
+/// SQLite database applies the same schema history as Postgres. This is the
+/// Rust-side mirror of `scripts/check_migration_sync.sh` and would have caught
+/// the F-85 registration gap (the unregistered `20260630000004_drop_lfs_objects`
+/// migration).
+#[test]
+fn bundled_sqlite_migrations_match_on_disk_files() {
+    let migrations_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+    let entries = fs::read_dir(&migrations_dir).expect("migrations directory must exist");
+    let mut on_disk = Vec::new();
+    for entry in entries {
+        let name = entry.expect("readdir").file_name().into_string().unwrap();
+        if name.ends_with(".up.sql") {
+            on_disk.push(name);
+        }
+    }
+    on_disk.sort();
+
+    assert_eq!(
+        LOCAL_SQLITE_MIGRATIONS.len(),
+        on_disk.len(),
+        "registration count must match the on-disk .up.sql count \
+         (registered={}, on_disk={})",
+        LOCAL_SQLITE_MIGRATIONS.len(),
+        on_disk.len(),
+    );
+    for migration in LOCAL_SQLITE_MIGRATIONS {
+        assert!(
+            on_disk
+                .iter()
+                .any(|name| name.starts_with(migration.version)),
+            "migration {} is registered but {}_*_missing.up.sql is not on disk",
+            migration.version,
+            migration.version,
+        );
+    }
+    let mut registered_versions: Vec<&str> = LOCAL_SQLITE_MIGRATIONS
+        .iter()
+        .map(|migration| migration.version)
+        .collect();
+    registered_versions.sort_unstable();
+    let mut disk_versions: Vec<&str> = on_disk
+        .iter()
+        .map(|name| name.split('_').next().unwrap())
+        .collect();
+    disk_versions.sort_unstable();
+    assert_eq!(
+        registered_versions, disk_versions,
+        "registered migration versions must exactly match the on-disk .up.sql versions"
+    );
+}
+
+/// SQLite has no uniqueness constraint on the applied migration version — the
+/// history insert is an `ON CONFLICT ... DO NOTHING` — so a duplicated version
+/// in [`LOCAL_SQLITE_MIGRATIONS`] is skipped silently at apply time and never
+/// applied, while the PG path would reject the duplicate history row. Mirror of
+/// `bundled_migrations_have_unique_versions` in `database_migration.rs`.
+#[test]
+fn bundled_sqlite_migrations_have_unique_versions() {
+    assert!(!LOCAL_SQLITE_MIGRATIONS.is_empty());
+    let mut versions: Vec<&str> = LOCAL_SQLITE_MIGRATIONS
+        .iter()
+        .map(|migration| migration.version)
+        .collect();
+    versions.sort_unstable();
+    versions.dedup();
+    assert_eq!(
+        versions.len(),
+        LOCAL_SQLITE_MIGRATIONS.len(),
+        "LOCAL_SQLITE_MIGRATIONS contains a duplicate version"
+    );
+}
+
+/// The array order IS the SQLite apply order, so a mis-ordering silently
+/// reorders schema application — e.g. applying `drop_lfs_objects` before
+/// `hub_api` would no-op the drop at runtime — while the PG path sorts applied
+/// migrations by version. Mirror of `bundled_database_migrations_are_monotonic`
+/// in `database_migration.rs`.
+#[test]
+fn bundled_sqlite_migrations_are_monotonic() {
+    assert!(!LOCAL_SQLITE_MIGRATIONS.is_empty());
+    assert!(LOCAL_SQLITE_MIGRATIONS.windows(2).all(|window| {
+        let Some(first) = window.first() else {
+            return false;
+        };
+        let Some(second) = window.get(1) else {
+            return false;
+        };
+        first.version < second.version
+    }));
+}
+
 fn sample_state_machine_records() -> Result<Vec<FileRecord>, Box<dyn Error>> {
     let scope_a = RepositoryScope::new(
         RepositoryProvider::GitHub,

@@ -30,8 +30,9 @@ use crate::{
 };
 
 use super::{
-    LARGE_COPY_CHUNK_BYTES, MAX_SINGLE_COPY_BYTES, S3ByteStream, S3ObjectStoreConfig,
-    S3ObjectStoreError, STREAM_UPLOAD_CHUNK_BYTES, TEMP_UPLOAD_COUNTER, is_temp_upload_key,
+    LARGE_COPY_CHUNK_BYTES, MAX_SINGLE_COPY_BYTES, S3_TEMP_ARTIFACT_AGE_SECONDS, S3ByteStream,
+    S3ObjectStoreConfig, S3ObjectStoreError, STREAM_UPLOAD_CHUNK_BYTES, TEMP_UPLOAD_COUNTER,
+    is_temp_upload_key,
 };
 
 /// S3-compatible implementation of [`ObjectStore`].
@@ -241,7 +242,17 @@ impl S3ObjectStore {
             raw_key
         };
         let key = ObjectKey::parse(key).map_err(|_error| S3ObjectStoreError::InvalidListedKey)?;
-        Ok(ObjectMetadata::new(key, metadata.size, None))
+        // The S3 LastModified is observed by the backend, so it is immune to
+        // writer/GC wall-clock divergence; attach it when available.
+        let backend_modified_unix_nanos = metadata
+            .last_modified
+            .timestamp_nanos_opt()
+            .and_then(|nanos| u64::try_from(nanos).ok());
+        let mut metadata = ObjectMetadata::new(key, metadata.size, None);
+        if let Some(modified_unix_nanos) = backend_modified_unix_nanos {
+            metadata = metadata.with_modified(modified_unix_nanos);
+        }
+        Ok(metadata)
     }
 
     /// Stores bytes at a key, replacing any existing object.
@@ -260,18 +271,12 @@ impl S3ObjectStore {
         let location = self.location_for_key(key)?;
         let bytes = body.into_bytes();
 
-        // Write to a temp key first to avoid destroying the existing object
-        // on partial multipart failure. Only copy to the live key after the
-        // new content is fully durable.
-        let counter = TEMP_UPLOAD_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let now_nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let pid = std::process::id();
-        let temp_suffix = format!("tmp.{counter}.{pid}.{now_nanos}");
-        let temp_key = ObjectKey::parse(&format!("{}.{temp_suffix}", key.as_str()))
-            .map_err(|_err| S3ObjectStoreError::InvalidListedKey)?;
+        // Write to a reserved temp key first to avoid destroying the existing
+        // object on partial multipart failure. Only copy to the live key after
+        // the new content is fully durable. The reserved `__tmp/` namespace
+        // keeps the temp key from ever colliding with (or shadowing) a user
+        // key (F-80).
+        let temp_key = super::temp_key_for(key)?;
         let temp_location = self.location_for_key(&temp_key)?;
         self.block_on(
             self.inner
@@ -646,6 +651,69 @@ impl S3ObjectStore {
             Err(S3ObjectStoreError::External(ExternalObjectStoreError::NotFound { .. })) => Ok(()),
             Err(error) => Err(error),
         }
+    }
+
+    /// Reaps S3 temp-upload artifacts whose observed `LastModified` is older
+    /// than `S3_TEMP_ARTIFACT_AGE_SECONDS`.
+    ///
+    /// S3 temp keys (`__tmp/shardline-overwrite/<key-digest>.<counter>.<pid>.<nanos>`
+    /// and `__tmp/shardline-stream-upload/<nanos>-<pid>-<counter>`) are
+    /// normally deleted immediately after promotion, but a crash between the
+    /// temp write and the copy/delete strands them forever (F-48). The normal
+    /// listing paths skip temp keys, so this sweep does its own raw enumeration
+    /// and deletes only keys matching the exact generated-temp grammars
+    /// (`is_temp_upload_key`) whose `LastModified` — S3 backend truth, immune
+    /// to writer/GC wall-clock divergence — is older than the age bound. User
+    /// objects are never matched (both grammars live in the reserved `__tmp/`
+    /// namespace user keys cannot reach; F-80). Returns
+    /// `(reaped_count, reaped_bytes)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`S3ObjectStoreError`] when the store cannot be enumerated or a
+    /// delete fails.
+    pub fn sweep_stale_temp_keys(
+        &self,
+        now_unix_seconds: u64,
+    ) -> Result<(usize, u64), S3ObjectStoreError> {
+        let cutoff_unix_nanos =
+            u128::from(now_unix_seconds.saturating_sub(S3_TEMP_ARTIFACT_AGE_SECONDS))
+                * 1_000_000_000;
+        let prefix =
+            ObjectPrefix::parse("").map_err(|_error| S3ObjectStoreError::InvalidListedKey)?;
+        let location = self.location_for_prefix(&prefix)?;
+        self.block_on_result(async {
+            let mut listed = self.inner.list(Some(&location));
+            let mut reaped = 0_usize;
+            let mut reaped_bytes = 0_u64;
+            while let Some(entry) = listed
+                .try_next()
+                .await
+                .map_err(S3ObjectStoreError::External)?
+            {
+                let metadata = self.metadata_from_external(&entry)?;
+                if !is_temp_upload_key(metadata.key().as_str()) {
+                    continue;
+                }
+                // Age bound on the S3-observed LastModified (backend truth). A
+                // backend exposing no mtime keeps the key — never risk reaping
+                // a live in-flight artifact.
+                let Some(modified_unix_nanos) = metadata.modified_unix_nanos() else {
+                    continue;
+                };
+                if u128::from(modified_unix_nanos) >= cutoff_unix_nanos {
+                    continue;
+                }
+                let temp_location = self.location_for_key(metadata.key())?;
+                self.inner
+                    .delete(&temp_location)
+                    .await
+                    .map_err(S3ObjectStoreError::External)?;
+                reaped = reaped.saturating_add(1);
+                reaped_bytes = reaped_bytes.saturating_add(metadata.length());
+            }
+            Ok((reaped, reaped_bytes))
+        })
     }
 }
 

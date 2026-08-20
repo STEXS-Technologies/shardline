@@ -372,9 +372,10 @@ SHARDLINE_UPLOAD_MAX_IN_FLIGHT_CHUNKS=64
 SHARDLINE_TRANSFER_MAX_IN_FLIGHT_CHUNKS=64
 # S3 frontend upload limits (multipart sessions)
 SHARDLINE_S3_MAX_PART_BYTES=1073741824       # 1 GiB; minimum accepted value 1 MiB
-SHARDLINE_S3_MIN_PART_BYTES=5242880          # 5 MiB, S3's minimum non-final part size
+SHARDLINE_S3_MIN_PART_BYTES=5242880          # 5 MiB, S3's minimum non-final part size (checked at Complete only)
 SHARDLINE_S3_UPLOAD_SESSION_MAX_BYTES=1099511627776   # 1 TiB per upload session
 SHARDLINE_S3_UPLOAD_TOTAL_MAX_BYTES=4398046511104     # 4 TiB across active sessions
+SHARDLINE_S3_UPLOAD_MAX_ACTIVE_PART_FILES=200000      # global cap on part files across active sessions
 SHARDLINE_S3_UPLOAD_SESSION_TTL_SECONDS=3600          # 1 hour
 SHARDLINE_S3_UPLOAD_MAX_ACTIVE_SESSIONS=1024
 RUST_LOG=info
@@ -395,6 +396,25 @@ repository scope, and the required read or write scope.
 The stats endpoint follows the same rule and requires a valid bearer token.
 `SHARDLINE_PROVIDER_CONFIG_FILE` and `SHARDLINE_PROVIDER_API_KEY_FILE` are optional.
 Leave them unset for a providerless deployment that serves clients directly.
+
+### Secret encryption at rest
+
+`Strict` and `Authenticated` deployment modes require at-rest encryption keys for
+every persistent-secret surface that is enabled:
+
+- Hub webhook signing secrets — set `SHARDLINE_HUB_WEBHOOK_SECRET_KEY` (32-byte
+  AES-256 key) when the hub frontend is enabled.
+- Provider-config webhook secrets — set `SHARDLINE_CONFIG_SECRET_KEY` (32-byte
+  AES-256 key) when a provider config or API key is configured.
+
+Startup **fails** in these modes when a persistent-secret surface is present
+without its key, instead of silently storing secrets in plaintext. Insecure mode
+(local development) is exempt.
+
+`SHARDLINE_ALLOW_PLAINTEXT_SECRETS_IN_PRODUCTION=true` is an explicit insecure
+override that re-enables plaintext storage. It is intended **only** for
+migrating an existing deployment to at-rest encryption and must not be used in
+production.
 
 ### Providerless Direct Xet Backend
 
@@ -840,6 +860,12 @@ SHARDLINE_AUTH_PROVIDER=oidc
 SHARDLINE_AUTH_OIDC_ISSUER=https://accounts.google.com
 ```
 
+The discovery document's `jwks_uri` must be hosted on the issuer's own host and
+the discovery fetch never follows redirects. IdPs that serve keys from a
+different host (e.g. Google serves JWKS from `www.googleapis.com`) must list
+that host in `SHARDLINE_AUTH_OIDC_JWKS_HOST_ALLOWLIST` (comma-separated).
+`SHARDLINE_AUTH_OIDC_AUDIENCE` optionally requires a specific `aud` claim.
+
 ### JWKS
 
 Validate tokens against a JSON Web Key Set endpoint:
@@ -882,6 +908,15 @@ shardline health --server http://127.0.0.1:8080
 Health endpoints must not expose secrets, token claims, presigned URLs, or object keys
 for private data.
 
+### Rolling Upgrades
+
+To upgrade a running deployment without a full outage, upgrade one role class at a
+time — `api` and `transfer` separately in the scaled profile, one process for
+`--role all` — and poll `/healthz` and `/readyz` after each class. The readiness
+check reports the server role and configured backends, so each class can be confirmed
+ready before the next one moves. See [Rolling Upgrade](ROLLING_UPGRADE.md) for the
+full procedure, recommended order, and rollback steps.
+
 ## Metrics
 
 `GET /metrics` emits Prometheus text format.
@@ -909,6 +944,10 @@ Production backup requires both stores:
 
 - index database backup
 - object storage retention or backup
+
+For scenario-by-scenario recovery runbooks (node loss, metadata loss, object-store
+loss, crash mid-upload, cross-node moves), see
+[Disaster Recovery](DISASTER_RECOVERY.md).
 
 The index alone is not enough to restore data.
 Object bytes alone are not enough to serve reconstructions efficiently without

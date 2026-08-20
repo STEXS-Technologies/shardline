@@ -242,7 +242,7 @@ pub(crate) mod gc {
     };
     #[cfg(test)]
     pub(crate) use shardline_gc::{
-        GcError, GcOrphanQuarantineState, quarantine_record_path, quarantine_root, run_local_gc,
+        GcOrphanQuarantineState, quarantine_record_path, quarantine_root, run_local_gc,
         run_local_gc_diagnostics,
     };
 }

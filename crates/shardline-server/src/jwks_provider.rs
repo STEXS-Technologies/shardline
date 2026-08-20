@@ -88,6 +88,9 @@ pub enum JwksProviderError {
     /// The JWKS endpoint could not be reached.
     #[error("failed to fetch JWKS keys: {0}")]
     JwksFetch(String),
+    /// The JWKS URL uses an insecure scheme (non-https, non-loopback).
+    #[error("jwks url must use https (loopback http allowed for development), got {0}")]
+    InsecureUrl(String),
 }
 
 impl JwksProvider {
@@ -97,6 +100,15 @@ impl JwksProvider {
     ///
     /// Returns [`JwksProviderError`] when the JWKS endpoint is unreachable.
     pub async fn new(jwks_url: &str, issuer: &str) -> Result<Self, JwksProviderError> {
+        // Regression (F-95): JWKS key transport must be encrypted (RFC 8414
+        // §2). Enforce the scheme gate here too, mirroring the config-load
+        // gate in `load_server_config_from_env`, so a programmatic caller can
+        // never construct a provider that fetches signing keys over plain-http
+        // (loopback http is tolerated for local development / test tooling).
+        if !is_secure_jwks_url(jwks_url) {
+            return Err(JwksProviderError::InsecureUrl(jwks_url.to_owned()));
+        }
+
         let client = Client::builder()
             .timeout(Duration::from_secs(10))
             .build()
@@ -290,6 +302,14 @@ impl JwksProvider {
         let mut validation = Validation::new(algorithm);
         validation.set_issuer(&[self.issuer.as_str()]);
 
+        // JwksProvider has no audience configuration, so jsonwebtoken's
+        // `validate_aud` default of `true` would reject every token that
+        // carries an `aud` claim (InvalidAudience) — OIDC Core / RFC 9068
+        // make `aud` required in real IdP tokens. Explicitly disable aud
+        // validation, matching OidcProvider's documented permissive default
+        // when no audience is configured.
+        validation.validate_aud = false;
+
         let token = format!("{header_b64}.{payload_b64}.{signature_b64}");
         let token_data = decode::<serde_json::Value>(&token, &decoding_key, &validation)
             .map_err(|e| AuthError::ProviderError(format!("JWT verification failed: {e}")))?;
@@ -459,6 +479,30 @@ fn parse_cache_max_age(headers: &reqwest::header::HeaderMap) -> Option<Duration>
     None
 }
 
+/// Returns true when `url` is an https URL, or an http URL whose host is
+/// loopback (`127.0.0.1`, `::1`, or `localhost`).
+///
+/// JWKS key transport must be encrypted (RFC 8414 §2); plain-http is
+/// tolerated only for loopback hosts so local development and test tooling
+/// (which cannot serve TLS) keep working. Non-loopback http is rejected.
+fn is_secure_jwks_url(url: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(url) else {
+        return false;
+    };
+    if parsed.scheme() == "https" {
+        return true;
+    }
+    if parsed.scheme() != "http" {
+        return false;
+    }
+    match parsed.host() {
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        Some(url::Host::Domain(domain)) => domain.eq_ignore_ascii_case("localhost"),
+        None => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -480,6 +524,15 @@ mod tests {
         let msg = format!("{e}");
         assert!(!msg.is_empty());
         assert!(msg.contains("JWKS"));
+    }
+
+    #[test]
+    fn jwks_provider_error_insecure_url_display_non_empty() {
+        let e = JwksProviderError::InsecureUrl("http://keys.example.com/jwks".into());
+        let msg = format!("{e}");
+        assert!(!msg.is_empty());
+        assert!(msg.contains("https"), "message: {msg}");
+        assert!(msg.contains("keys.example.com"), "message: {msg}");
     }
 
     // ── Jwk deserialization ──────────────────────────────────────────────
@@ -897,7 +950,55 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
         }
     }
 
+    // ── is_secure_jwks_url (F-95) ────────────────────────────────────────
+
+    #[test]
+    fn is_secure_jwks_url_accepts_https() {
+        assert!(is_secure_jwks_url("https://keys.example.com/jwks"));
+        assert!(is_secure_jwks_url("https://keys.example.com:8443/jwks"));
+    }
+
+    #[test]
+    fn is_secure_jwks_url_accepts_loopback_http() {
+        assert!(is_secure_jwks_url("http://127.0.0.1:8080/jwks"));
+        assert!(is_secure_jwks_url("http://localhost:8080/jwks"));
+        assert!(is_secure_jwks_url("http://[::1]:8080/jwks"));
+    }
+
+    #[test]
+    fn is_secure_jwks_url_rejects_non_https_non_loopback() {
+        assert!(!is_secure_jwks_url("http://keys.example.com/jwks"));
+        assert!(!is_secure_jwks_url("http://attacker.example.com/jwks"));
+        assert!(!is_secure_jwks_url("ftp://keys.example.com/jwks"));
+        assert!(!is_secure_jwks_url("not-a-url"));
+        assert!(!is_secure_jwks_url(""));
+    }
+
     // ── JwksProvider::new error path ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn new_with_insecure_http_url_returns_insecure_url_error() {
+        // Regression (F-95): a non-https, non-loopback JWKS URL must be
+        // rejected by the provider itself, before any HTTP client is built or
+        // request is made.
+        let result = JwksProvider::new(
+            "http://keys.example.com/.well-known/jwks",
+            "https://example.com",
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "a plain-http non-loopback JWKS URL must be rejected before any fetch"
+        );
+        if let Err(err) = result {
+            assert!(
+                matches!(err, JwksProviderError::InsecureUrl(_)),
+                "expected InsecureUrl error, got {err:?}"
+            );
+            let msg = err.to_string();
+            assert!(msg.contains("https"), "message: {msg}");
+        }
+    }
 
     #[tokio::test]
     async fn new_with_unreachable_url_returns_error() {
@@ -1643,6 +1744,46 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
         let token_claims = result.unwrap();
         assert_eq!(token_claims.subject(), "admin-user");
         assert_eq!(token_claims.scope(), TokenScope::Write);
+    }
+
+    #[test]
+    fn verify_token_with_aud_claim_succeeds() {
+        use jsonwebtoken::{EncodingKey, Header, encode};
+        use std::collections::BTreeMap;
+
+        // Regression (F-81): JwksProvider has no audience configuration, and
+        // jsonwebtoken's `validate_aud` defaults to true with no audience set,
+        // which rejects any token that carries an `aud` claim
+        // (InvalidAudience). OIDC Core / RFC 9068 require `aud` in real IdP
+        // tokens, so every aud-bearing token was rejected. The provider must
+        // disable aud validation so the permissive default is true.
+        let mut claims = BTreeMap::new();
+        claims.insert("iss", serde_json::json!("https://example.com"));
+        claims.insert("sub", serde_json::json!("aud-user"));
+        claims.insert("aud", serde_json::json!("some-oidc-client"));
+        claims.insert("exp", serde_json::json!(9999999999u64));
+        claims.insert("iat", serde_json::json!(1000000000u64));
+
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some("test-key-1".to_owned());
+
+        let encoding_key =
+            EncodingKey::from_rsa_pem(TEST_RSA_PEM.as_bytes()).expect("valid RSA PEM");
+        let token = encode(&header, &claims, &encoding_key).expect("should sign token");
+
+        let provider = make_provider(Some(CachedJwks {
+            keys: Arc::new(vec![test_rsa_jwk("test-key-1")]),
+            etag: None,
+            refresh_interval: DEFAULT_JWKS_REFRESH_INTERVAL,
+        }));
+
+        let result = provider.verify_token(&token);
+        assert!(
+            result.is_ok(),
+            "an aud-bearing token must verify when no audience is configured, got {result:?}"
+        );
+        let token_claims = result.unwrap();
+        assert_eq!(token_claims.subject(), "aud-user");
     }
 
     #[test]

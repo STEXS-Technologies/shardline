@@ -29,16 +29,17 @@ use std::{
 };
 
 use axum::{
-    body::Body,
+    body::{Body, HttpBody},
     http::{HeaderMap, HeaderValue, StatusCode, header::ETAG},
     response::{IntoResponse, Response},
 };
 use md5::{Digest, Md5};
 use shardline_index::S3ObjectEntry;
 use shardline_s3_adapter::{
-    CompleteMultipartUploadResult, InitiateMultipartUploadResult, S3Error,
+    CompleteMultipartUploadResult, InitiateMultipartUploadResult, S3Error, S3SessionError,
     acquire_session_part_lock, create_session, delete_session_locked, lock_upload_sessions,
     parse_complete_multipart_parts, part_file_path, read_session, store_part_locked,
+    validate_part_quota_locked,
 };
 use tokio::io::AsyncWriteExt;
 
@@ -67,13 +68,40 @@ fn entity_too_large() -> S3Error {
     }
 }
 
+/// Translates an adapter session-store failure into the S3 error envelope.
+///
+/// The global active-part-file cap is a server resource limit with no S3
+/// protocol code; it is surfaced as a `429 TooManyParts` envelope carrying the
+/// [`ServerError::S3UploadTooManyParts`] message. Every other adapter error
+/// keeps its existing S3 translation.
+fn store_error_to_s3(error: S3SessionError) -> S3Error {
+    match error {
+        S3SessionError::TooManyPartFiles => S3Error {
+            code: "TooManyParts",
+            message: ServerError::S3UploadTooManyParts.to_string(),
+            status: StatusCode::TOO_MANY_REQUESTS,
+        },
+        other @ S3SessionError::Io(_)
+        | other @ S3SessionError::Json(_)
+        | other @ S3SessionError::NotFound
+        | other @ S3SessionError::InvalidUploadId
+        | other @ S3SessionError::InvalidPartNumber
+        | other @ S3SessionError::MissingPart(_)
+        | other @ S3SessionError::TooManySessions
+        | other @ S3SessionError::SessionQuotaExceeded
+        | other @ S3SessionError::AggregateQuotaExceeded
+        | other @ S3SessionError::Overflow
+        | other @ S3SessionError::BlockingTask(_) => S3Error::from(other),
+    }
+}
+
 /// `POST /{bucket}/{*key}?uploads` — `CreateMultipartUpload`.
 ///
 /// Creates a disk-persisted session and responds `200` with the
 /// `InitiateMultipartUploadResult` XML envelope carrying the opaque upload id.
 pub(super) async fn s3_create_multipart_upload(
     state: &Arc<AppState>,
-    context: &S3ObjectContext,
+    context: &S3ObjectContext<'_>,
     headers: &HeaderMap,
 ) -> Result<Response, S3Error> {
     // S3 user metadata is supplied at CreateMultipartUpload and applied to the
@@ -109,12 +137,16 @@ pub(super) async fn s3_create_multipart_upload(
 /// Streams the part body to the session's `part-{N}` file (overwrite: the
 /// last upload of a part number wins) and responds `200` with an opaque
 /// per-part ETag (`"<upload_id>-<N>"`) the client echoes back in Complete.
-/// The per-session and aggregate byte quotas are enforced under the session
-/// lock; the S3 5 MiB minimum is enforced for non-final parts at Complete
-/// (matching S3, which validates at completion).
+/// UploadPart accepts ANY body size for any part number `1..=MAX_S3_PART_NUMBER`
+/// (matching S3: the 5 MiB minimum is enforced only at CompleteMultipartUpload
+/// for every part except the last). The per-session and aggregate byte quotas
+/// and the global active-part-file cap are enforced under the session lock:
+/// against the declared part length BEFORE the file is written (no
+/// write-then-delete) and again against the streamed size at
+/// `store_part_locked`. The expiry sweep remains as belt-and-braces.
 pub(super) async fn s3_upload_part(
     state: &Arc<AppState>,
-    context: &S3ObjectContext,
+    context: &S3ObjectContext<'_>,
     part_number: u32,
     upload_id: &str,
     headers: &HeaderMap,
@@ -122,6 +154,9 @@ pub(super) async fn s3_upload_part(
 ) -> Result<Response, S3Error> {
     let root = state.config.root_dir();
     let ttl = state.config.s3_upload_session_ttl_seconds();
+    let session_quota = state.config.s3_upload_session_max_bytes();
+    let total_quota = state.config.s3_upload_total_max_bytes();
+    let part_file_cap = state.config.s3_upload_max_active_part_files();
 
     // Global session lock: session validation and the metadata/quota mutation
     // (`store_part_locked`) below only. The lock is NOT held across the body
@@ -136,11 +171,67 @@ pub(super) async fn s3_upload_part(
         return Err(S3Error::no_such_upload());
     }
 
-    // Parts larger than SHARDLINE_S3_MAX_PART_BYTES are rejected.
+    // The part's current contribution to the session total (an overwrite
+    // replaces the old size), used for the pre-write quota projection and the
+    // undeclared-length body ceiling.
+    let previous_size = session
+        .parts
+        .get(&part_number)
+        .map_or(0_u64, |part| part.size_bytes);
+    let session_total = session
+        .parts
+        .values()
+        .fold(0_u64, |total, part| total.saturating_add(part.size_bytes));
+    let session_remaining = session_quota
+        .get()
+        .saturating_sub(session_total.saturating_sub(previous_size));
+
+    // The declared decoded part length, when the client provides one
+    // (aws-chunked framing or a `Content-Length`/framed size hint). `None`
+    // means the length is unknown until the stream is drained.
+    let expected_len: Option<u64> = if aws_chunked::is_aws_chunked(headers) {
+        aws_chunked::declared_decoded_content_length(headers)
+    } else {
+        let size_hint = body.size_hint();
+        size_hint.exact().or_else(|| size_hint.upper())
+    };
+
+    // F-19: enforce the per-session and aggregate byte quotas and the global
+    // active-part-file cap against the declared part length BEFORE any bytes
+    // are written, so an over-quota/over-cap part never materializes a file.
+    // Runs under the global session lock, exactly like `store_part_locked`'s
+    // accounting; the quotas are re-checked against the streamed size after
+    // the write. A cap rejection is surfaced as a clean 429.
+    if let Some(length) = expected_len {
+        validate_part_quota_locked(
+            root,
+            upload_id,
+            part_number,
+            length,
+            ttl,
+            session_quota,
+            total_quota,
+            part_file_cap,
+        )
+        .await
+        .map_err(store_error_to_s3)?;
+    }
+
+    // Parts larger than SHARDLINE_S3_MAX_PART_BYTES are rejected. For
+    // undeclared-length bodies the reader ceiling is additionally clamped to
+    // the remaining session quota, so an over-quota chunked stream aborts
+    // mid-stream instead of fully materializing on disk (F-19b).
     let max_bytes = usize::try_from(state.config.s3_max_part_bytes().get())
         .map_err(|_error| S3Error::internal())?;
     let max_bytes = NonZeroUsize::new(max_bytes).ok_or_else(S3Error::internal)?;
-    let mut body = match RequestBodyReader::from_body(body, max_bytes) {
+    let body_ceiling = if expected_len.is_some() {
+        max_bytes
+    } else {
+        let remaining = usize::try_from(session_remaining).map_err(|_error| S3Error::internal())?;
+        let clamped = remaining.min(max_bytes.get());
+        NonZeroUsize::new(clamped).ok_or_else(entity_too_large)?
+    };
+    let mut body = match RequestBodyReader::from_body(body, body_ceiling) {
         Ok(reader) => reader,
         Err(ServerError::RequestBodyTooLarge) => return Err(entity_too_large()),
         Err(error) => return Err(S3Error::from(error)),
@@ -150,16 +241,14 @@ pub(super) async fn s3_upload_part(
     // the framing so the part file holds the actual payload. The decoded size
     // is enforced by the decoder against the part ceiling.
     if aws_chunked::is_aws_chunked(headers) {
-        let max_bytes_u64 = u64::try_from(max_bytes.get()).map_err(|_error| S3Error::internal())?;
+        let max_bytes_u64 =
+            u64::try_from(body_ceiling.get()).map_err(|_error| S3Error::internal())?;
         if let Some(decoded) = aws_chunked::declared_decoded_content_length(headers)
             && decoded > max_bytes_u64
         {
             return Err(entity_too_large());
         }
-        body = RequestBodyReader::from_stream(aws_chunked::decode_aws_chunked(
-            body,
-            u64::try_from(max_bytes.get()).map_err(|_error| S3Error::internal())?,
-        ));
+        body = RequestBodyReader::from_stream(aws_chunked::decode_aws_chunked(body, max_bytes_u64));
     }
 
     // Take the per-session lock while still holding the global lock (the
@@ -171,7 +260,9 @@ pub(super) async fn s3_upload_part(
     let _part_guard = part_lock.lock().await;
     drop(_session_lock);
 
-    // Stream the body to the part file (overwrite semantics).
+    // Stream the body to the part file (overwrite semantics). A mid-stream
+    // abort (over-quota ceiling or over-size) removes the partial file, so a
+    // rejected part never materializes.
     let part_path = part_file_path(root, upload_id, part_number)?;
     let mut file = match tokio::fs::File::create(&part_path).await {
         Ok(file) => file,
@@ -182,18 +273,32 @@ pub(super) async fn s3_upload_part(
         }
         Err(error) => return Err(io_to_s3(error)),
     };
-    let mut total_bytes = 0_u64;
-    while let Some(chunk) = body.next_bytes().await? {
-        total_bytes = total_bytes
-            .checked_add(u64::try_from(chunk.len()).map_err(ServerError::from)?)
-            .ok_or(ServerError::Overflow)?;
-        file.write_all(&chunk).await.map_err(io_to_s3)?;
+    let streamed: Result<u64, ServerError> = async {
+        let mut total_bytes = 0_u64;
+        while let Some(chunk) = body.next_bytes().await? {
+            total_bytes = total_bytes
+                .checked_add(u64::try_from(chunk.len()).map_err(ServerError::from)?)
+                .ok_or(ServerError::Overflow)?;
+            file.write_all(&chunk).await.map_err(ServerError::from)?;
+        }
+        file.flush().await.map_err(ServerError::from)?;
+        Ok(total_bytes)
     }
-    file.flush().await.map_err(io_to_s3)?;
+    .await;
+    let total_bytes = match streamed {
+        Ok(total_bytes) => total_bytes,
+        Err(error) => {
+            // A mid-stream quota/size abort must not leave a partial file.
+            let _ignored = tokio::fs::remove_file(&part_path).await;
+            return Err(S3Error::from(error));
+        }
+    };
 
     // The file is fully written; release the per-session lock (never await
     // the global lock while holding it) and do the metadata + quota
-    // accounting back under the global lock.
+    // accounting back under the global lock. The quotas (and the global
+    // active-part-file cap) are re-checked against the actually-streamed size
+    // here; a rejection must not leave an orphaned part file behind.
     drop(_part_guard);
     let _global_lock = lock_upload_sessions(root).await?;
     if let Err(error) = store_part_locked(
@@ -204,12 +309,13 @@ pub(super) async fn s3_upload_part(
         ttl,
         state.config.s3_upload_session_max_bytes(),
         state.config.s3_upload_total_max_bytes(),
+        part_file_cap,
     )
     .await
     {
-        // A quota rejection must not leave an orphaned part file behind.
+        // A quota/cap rejection must not leave an orphaned part file behind.
         let _ignored = tokio::fs::remove_file(&part_path).await;
-        return Err(S3Error::from(error));
+        return Err(store_error_to_s3(error));
     }
 
     // Opaque per-part ETag (documented deviation: the client echoes it back in
@@ -226,16 +332,19 @@ pub(super) async fn s3_upload_part(
 /// `POST /{bucket}/{*key}?uploadId=U` — `CompleteMultipartUpload`.
 ///
 /// Validates the echoed part list against the session, enforces S3's 5 MiB
-/// minimum for every non-final part, then streams the part files in order
-/// through ONE `FileUploadIngestor` pass (whole-object dedup), removes the
-/// session, and atomically swaps the object (upload-then-swap, like
-/// `PutObject`): the new record is streamed first, then the listing-index row
-/// is upserted and any stale direct object dropped. Responds `200` with the
-/// `CompleteMultipartUploadResult` XML envelope (`ETag` = the BLAKE3 root
-/// content hash — identical to a single `PutObject` of the same bytes).
+/// minimum for every part EXCEPT the last (the part with the highest part
+/// number in the submitted list — the client's part set must exactly match
+/// the uploaded parts, so the highest uploaded number IS the last part),
+/// then streams the part files in order through ONE `FileUploadIngestor`
+/// pass (whole-object dedup), removes the session, and atomically swaps the
+/// object (upload-then-swap, like `PutObject`): the new record is streamed
+/// first, then the listing-index row is upserted and any stale direct object
+/// dropped. Responds `200` with the `CompleteMultipartUploadResult` XML
+/// envelope (`ETag` = the BLAKE3 root content hash — identical to a single
+/// `PutObject` of the same bytes).
 pub(super) async fn s3_complete_multipart_upload(
     state: &Arc<AppState>,
-    context: &S3ObjectContext,
+    context: &S3ObjectContext<'_>,
     upload_id: &str,
     body: Body,
 ) -> Result<Response, S3Error> {
@@ -276,7 +385,11 @@ pub(super) async fn s3_complete_multipart_upload(
         return Err(S3Error::invalid_part());
     };
 
-    // S3's 5 MiB minimum applies to every part except the final one.
+    // S3's 5 MiB minimum applies to every part except the LAST one — the part
+    // with the highest part number in the submitted parts list (a small part
+    // is exempt no matter its number, and a small non-final part is rejected
+    // with EntityTooSmall). The request part set was verified to exactly
+    // match `session.parts` above, so `max_part` IS the last part.
     let min_part_bytes = state.config.s3_min_part_bytes().get();
     for (part_number, part) in &session.parts {
         if *part_number < max_part && part.size_bytes < min_part_bytes {
@@ -375,7 +488,7 @@ pub(super) async fn s3_complete_multipart_upload(
 /// exists yet) and responds `204`. Unknown upload ids are `404 NoSuchUpload`.
 pub(super) async fn s3_abort_multipart_upload(
     state: &Arc<AppState>,
-    context: &S3ObjectContext,
+    context: &S3ObjectContext<'_>,
     upload_id: &str,
 ) -> Result<Response, S3Error> {
     let root = state.config.root_dir();

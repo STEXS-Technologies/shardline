@@ -12,18 +12,17 @@ use axum::{
 };
 use serde_json::json;
 use shardline_metrics;
-use shardline_protocol::TokenScope;
 
 use crate::{
     HealthResponse, ServerError, ShardUploadResponse, XorbUploadResponse,
     admission::weights,
     app::{
-        AppState, authorize,
+        AppState,
         reconstruction_helpers::{
             byte_range_stream_response, full_byte_stream_response,
             parse_required_xorb_transfer_range,
         },
-        scope_from_auth,
+        reconstruction_routes::{XetRepository, XetWriteRepository},
     },
     auth::authorize_static_bearer_token,
     metrics,
@@ -68,23 +67,30 @@ pub(super) async fn ready(State(state): State<Arc<AppState>>) -> impl IntoRespon
     }
 }
 
-#[tracing::instrument(skip(state, headers), fields(hash = %hash))]
+#[tracing::instrument(skip(state), fields(hash = %hash))]
 pub(super) async fn read_chunk(
     State(state): State<Arc<AppState>>,
     Path(hash): Path<String>,
-    headers: HeaderMap,
+    repo: XetRepository,
 ) -> Result<Response, ServerError> {
-    let auth = authorize(&state, &headers, TokenScope::Read)?;
+    // Acquire an admission permit before the repository-reference metadata
+    // scan: `repository_references_xorb` enumerates the repo's latest + version
+    // records (O(N) in record count) with no LIMIT, so reads are gated like the
+    // upload/reconstruction paths to bound concurrent per-request scans.
+    let _admit = state
+        .admission
+        .try_acquire(weights::XORB_READ)
+        .ok_or(ServerError::WorkQueueSaturated)?;
     validate_hash_path(&hash)?;
 
     // Do not query repository references for an object that is absent. Besides
     // avoiding unnecessary metadata work, this makes unknown hashes
     // indistinguishable from inaccessible ones without scanning repositories.
     let _stored_length = state.backend.chunk_length(&hash).await?;
-    if let Some(auth) = auth.as_ref() {
+    if let Some(namespace) = repo.capability().namespace() {
         let reachable = state
             .backend
-            .repository_references_xorb(&hash, scope_from_auth(auth))
+            .repository_references_xorb(&hash, namespace)
             .await?;
         if !reachable {
             return Err(ServerError::NotFound);
@@ -98,11 +104,11 @@ pub(super) async fn read_chunk(
     ))
 }
 
-#[tracing::instrument(skip(state, headers, body), fields(hash = %hash))]
+#[tracing::instrument(skip(state, body), fields(hash = %hash))]
 pub(super) async fn upload_xorb(
     State(state): State<Arc<AppState>>,
     Path(hash): Path<String>,
-    headers: HeaderMap,
+    repo: XetWriteRepository,
     body: Body,
 ) -> Result<Json<XorbUploadResponse>, ServerError> {
     // Acquire admission permit for xorb upload
@@ -115,7 +121,6 @@ pub(super) async fn upload_xorb(
         .hashing
         .try_acquire()
         .ok_or(ServerError::WorkQueueSaturated)?;
-    authorize(&state, &headers, TokenScope::Write)?;
     validate_hash_path(&hash)?;
     let mut body_reader =
         RequestBodyReader::from_body(body, state.config.max_request_body_bytes())?;
@@ -134,19 +139,23 @@ pub(super) async fn upload_xorb(
     Ok(Json(response))
 }
 
-#[tracing::instrument(skip(state, headers), fields(hash = %hash))]
+#[tracing::instrument(skip(state), fields(hash = %hash))]
 pub(super) async fn head_xorb(
     State(state): State<Arc<AppState>>,
     Path(hash): Path<String>,
-    headers: HeaderMap,
+    repo: XetRepository,
 ) -> Result<impl IntoResponse, ServerError> {
-    let auth = authorize(&state, &headers, TokenScope::Read)?;
+    // Admission gate for the repository-reference metadata scan (see read_chunk).
+    let _admit = state
+        .admission
+        .try_acquire(weights::XORB_READ)
+        .ok_or(ServerError::WorkQueueSaturated)?;
     validate_hash_path(&hash)?;
     let total_length = state.backend.xorb_length(&hash).await?;
-    if let Some(auth) = auth.as_ref() {
+    if let Some(namespace) = repo.capability().namespace() {
         let reachable = state
             .backend
-            .repository_references_xorb(&hash, scope_from_auth(auth))
+            .repository_references_xorb(&hash, namespace)
             .await?;
         if !reachable {
             return Err(ServerError::NotFound);
@@ -159,16 +168,21 @@ pub(super) async fn head_xorb(
 pub(super) async fn read_xorb_transfer(
     State(state): State<Arc<AppState>>,
     Path((prefix, hash)): Path<(String, String)>,
+    repo: XetRepository,
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, ServerError> {
-    let auth = authorize(&state, &headers, TokenScope::Read)?;
+    // Admission gate for the repository-reference metadata scan (see read_chunk).
+    let _admit = state
+        .admission
+        .try_acquire(weights::XORB_READ)
+        .ok_or(ServerError::WorkQueueSaturated)?;
     validate_xorb_transfer_namespace(&prefix)?;
     validate_hash_path(&hash)?;
     let total_length = state.backend.xorb_length(&hash).await?;
-    if let Some(auth) = auth.as_ref() {
+    if let Some(namespace) = repo.capability().namespace() {
         let reachable = state
             .backend
-            .repository_references_xorb(&hash, scope_from_auth(auth))
+            .repository_references_xorb(&hash, namespace)
             .await?;
         if !reachable {
             return Err(ServerError::NotFound);
@@ -194,11 +208,11 @@ pub(super) async fn read_xorb_transfer(
 /// git-xet uses this endpoint to upload chunk-grouped data directly
 /// to the content-addressed storage layer after receiving the CAS URL
 /// and access token from the LFS batch response.
-#[tracing::instrument(skip(state, headers, body), fields(hash = %hash))]
+#[tracing::instrument(skip(state, body), fields(hash = %hash))]
 pub(super) async fn write_xorb_transfer(
     State(state): State<Arc<AppState>>,
     Path((prefix, hash)): Path<(String, String)>,
-    headers: HeaderMap,
+    repo: XetWriteRepository,
     body: Body,
 ) -> Result<Json<XorbUploadResponse>, ServerError> {
     let _admit = state
@@ -210,17 +224,16 @@ pub(super) async fn write_xorb_transfer(
         .hashing
         .try_acquire()
         .ok_or(ServerError::WorkQueueSaturated)?;
-    authorize(&state, &headers, TokenScope::Write)?;
     validate_xorb_transfer_namespace(&prefix)?;
     validate_hash_path(&hash)?;
     let body = RequestBodyReader::from_body(body, state.config.max_request_body_bytes())?;
     Ok(Json(state.backend.upload_xorb_stream(&hash, body).await?))
 }
 
-#[tracing::instrument(skip(state, headers, body))]
+#[tracing::instrument(skip(state, body))]
 pub(super) async fn upload_shard(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    repo: XetWriteRepository,
     body: Body,
 ) -> Result<Json<ShardUploadResponse>, ServerError> {
     // Acquire admission permit for shard upload
@@ -233,13 +246,12 @@ pub(super) async fn upload_shard(
         .parsing
         .try_acquire()
         .ok_or(ServerError::WorkQueueSaturated)?;
-    let auth = authorize(&state, &headers, TokenScope::Write)?;
     let body = RequestBodyReader::from_body(body, state.config.max_request_body_bytes())?;
     let response = state
         .backend
         .upload_shard_stream(
             body,
-            auth.as_ref().map(scope_from_auth),
+            repo.capability().namespace(),
             state.config.shard_metadata_limits(),
         )
         .await?;
@@ -247,12 +259,20 @@ pub(super) async fn upload_shard(
     Ok(Json(response))
 }
 
-#[tracing::instrument(skip(state, headers))]
+#[tracing::instrument(skip(state))]
 pub(super) async fn stats(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    repo: XetRepository,
 ) -> Result<impl IntoResponse, ServerError> {
-    authorize(&state, &headers, TokenScope::Read)?;
+    // Admission gate for the whole-store scan: `stats` visits every object in
+    // the store (local: full dir walk; S3: paginated LIST) plus a full
+    // latest-record traversal, with no LIMIT and no cache. Concurrent scans are
+    // bounded like the read/upload/reconstruction paths so a request flood
+    // cannot drive unbounded per-request store I/O.
+    let _admit = state
+        .admission
+        .try_acquire(weights::STATS)
+        .ok_or(ServerError::WorkQueueSaturated)?;
     Ok(Json(state.backend.stats().await?))
 }
 

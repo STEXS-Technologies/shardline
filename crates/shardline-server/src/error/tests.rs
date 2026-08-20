@@ -37,6 +37,14 @@ fn too_many_registry_token_requests_maps_to_429() {
 }
 
 #[test]
+fn s3_upload_too_many_parts_maps_to_429() {
+    assert_eq!(
+        status_for(&ServerError::S3UploadTooManyParts),
+        StatusCode::TOO_MANY_REQUESTS
+    );
+}
+
+#[test]
 fn missing_authorization_maps_to_401() {
     assert_eq!(
         status_for(&ServerError::MissingAuthorization),

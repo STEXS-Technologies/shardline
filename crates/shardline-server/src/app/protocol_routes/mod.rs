@@ -14,7 +14,7 @@ pub(crate) use helpers::{
 };
 pub(crate) use lfs::{
     lfs_batch, lfs_delete_object, lfs_get_object, lfs_head_object, lfs_patch_object,
-    lfs_put_object, lfs_verify_object,
+    lfs_put_object, lfs_verify_object, sweep_lfs_patch_sessions,
 };
 #[cfg(feature = "fuzzing")]
 pub(crate) use oci::parse_oci_path;
@@ -32,7 +32,6 @@ use super::MAX_PROTOCOL_QUERY_BYTES;
 use super::reconstruction_helpers::{byte_range_stream_response, full_byte_stream_response};
 use super::{
     AppState, MAX_LFS_BATCH_OBJECTS, MAX_OCI_MANIFEST_TAGS, MAX_OCI_TAG_LIST_PAGE_SIZE, authorize,
-    scope_from_auth,
 };
 
 #[cfg(test)]

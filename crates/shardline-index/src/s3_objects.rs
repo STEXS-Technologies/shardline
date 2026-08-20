@@ -64,6 +64,12 @@ pub trait S3ObjectIndexStore: Send + Sync {
     /// `prefix`, ordered by key, resuming after `cursor` (keyset on the raw
     /// key), returning at most `limit` rows.
     ///
+    /// The `object_key` column is matched as a string **prefix**, which is the
+    /// listing/pagination contract (keyset cursors walk prefix pages). It must
+    /// NOT be used for exact-key object resolution — a sibling key that merely
+    /// has the target as a string prefix (e.g. `a` vs `a/b`) would be returned
+    /// as if it were the object. Use [`Self::scan_s3_object_exact`] instead.
+    ///
     /// # Errors
     ///
     /// Returns the adapter error when the scan fails.
@@ -74,6 +80,25 @@ pub trait S3ObjectIndexStore: Send + Sync {
         cursor: Option<&str>,
         limit: usize,
     ) -> Result<Vec<S3ObjectEntry>, Self::Error>;
+
+    /// Resolves exactly one S3 object row by its full raw key — no prefix
+    /// matching — returning `None` when the exact key is absent.
+    ///
+    /// This is the exact-key path for conditional semantics (`If-Match` /
+    /// `If-None-Match` on the object's ETag): a prefix-shadowed sibling row
+    /// (e.g. `a/b` when looking up `a`) must never satisfy the lookup (F-33).
+    /// The `shardline_s3_objects` table keys rows on the unique
+    /// `(scope_namespace, object_key)` primary key, so the lookup hits that
+    /// index directly.
+    ///
+    /// # Errors
+    ///
+    /// Returns the adapter error when the lookup fails.
+    async fn scan_s3_object_exact(
+        &self,
+        scope_namespace: &str,
+        object_key: &str,
+    ) -> Result<Option<S3ObjectEntry>, Self::Error>;
 }
 
 #[cfg(test)]

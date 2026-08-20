@@ -78,6 +78,7 @@ fn report_is_clean_when_no_issues() {
         rebuilt_dedupe_shard_mappings: 1,
         unchanged_dedupe_shard_mappings: 0,
         removed_stale_dedupe_shard_mappings: 0,
+        preserved_latest_records_unreadable_version: Vec::new(),
         issues: Vec::new(),
     };
     assert!(report.is_clean());
@@ -98,6 +99,7 @@ fn report_not_clean_when_issues_present() {
         rebuilt_dedupe_shard_mappings: 0,
         unchanged_dedupe_shard_mappings: 0,
         removed_stale_dedupe_shard_mappings: 0,
+        preserved_latest_records_unreadable_version: Vec::new(),
         issues: vec![shardline_rebuild::IndexRebuildIssue {
             kind: IndexRebuildIssueKind::InvalidVersionRecordJson,
             location: "test-location".to_owned(),
@@ -131,6 +133,7 @@ fn report_counts_multiple_issues() {
         rebuilt_dedupe_shard_mappings: 0,
         unchanged_dedupe_shard_mappings: 0,
         removed_stale_dedupe_shard_mappings: 0,
+        preserved_latest_records_unreadable_version: Vec::new(),
         issues,
     };
     assert_eq!(report.issue_count(), 5);

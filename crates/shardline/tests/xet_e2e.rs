@@ -82,6 +82,7 @@ impl TestServer {
             .unwrap()
             .with_token_signing_key(SIGNING_KEY.to_vec())
             .unwrap()
+            .with_deployment_mode(shardline_server::DeploymentMode::Insecure)
             .with_provider_runtime(
                 config_path,
                 BOOTSTRAP_KEY.as_bytes().to_vec(),

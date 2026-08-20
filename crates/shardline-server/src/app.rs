@@ -38,12 +38,12 @@ use tokio::net::TcpListener;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot};
 use tower_http::cors::{Any, CorsLayer};
 
-use shardline_server_core::auth::Ed25519AuthProvider;
+use shardline_server_core::{VerifiedAuthContext, auth::Ed25519AuthProvider};
 
 use crate::{
     ServerConfig, ServerError,
     admission::{ExecutionPools, WeightedAdmission, timeouts},
-    auth::{AuthContext, ServerAuth},
+    auth::ServerAuth,
     backend::ServerBackend,
     config::{
         AuthProviderKind, DeploymentMode, ServerConfigError, env::bounded_pool_size_from_env,
@@ -296,6 +296,31 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
             }
             Err(error) => {
                 tracing::warn!(error = %error, "s3 startup sweep of expired multipart upload sessions failed");
+            }
+        }
+    }
+
+    // Sweep expired LFS chunked-patch (PATCH) staging sessions at startup
+    // (crash recovery); in-flight sweeps also run on every PATCH, mirroring
+    // the S3 multipart sweep's startup + on-creation scheduling (F-20).
+    if state
+        .config
+        .server_frontends()
+        .iter()
+        .any(|frontend| matches!(frontend, ServerFrontend::Lfs))
+    {
+        match protocol_routes::sweep_lfs_patch_sessions(
+            state.config.root_dir(),
+            state.config.lfs_patch_ttl_seconds(),
+        ) {
+            Ok(removed) => {
+                tracing::info!(
+                    removed,
+                    "lfs startup sweep removed expired chunked-patch staging sessions"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, "lfs startup sweep of expired chunked-patch staging sessions failed");
             }
         }
     }
@@ -674,7 +699,7 @@ fn authorize(
     state: &AppState,
     headers: &HeaderMap,
     required_scope: TokenScope,
-) -> Result<Option<AuthContext>, ServerError> {
+) -> Result<Option<VerifiedAuthContext>, ServerError> {
     if let Some(auth) = &state.auth {
         return Ok(Some(auth.authorize(headers, required_scope)?));
     }
@@ -688,7 +713,10 @@ fn authorize(
     Ok(None)
 }
 
-const fn scope_from_auth(auth: &AuthContext) -> &RepositoryScope {
+/// Kept during the authorization-capability migration; not yet wired to a
+/// caller.
+#[allow(dead_code)]
+const fn scope_from_auth(auth: &VerifiedAuthContext) -> &RepositoryScope {
     auth.claims().repository()
 }
 
@@ -737,16 +765,7 @@ fn build_hub_state(
         )?;
 
     // Build an HTTP client for outbound webhook delivery.
-    let http_client = match reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()
-    {
-        Ok(client) => Some(client),
-        Err(e) => {
-            tracing::warn!("failed to build HTTP client for webhook delivery: {e}");
-            None
-        }
-    };
+    let http_client = build_webhook_delivery_client();
 
     // Thread an at-rest cipher for webhook signing secrets when configured.
     let webhook_secret_cipher = app_state.config.hub_webhook_secret_key().map_or_else(
@@ -807,6 +826,28 @@ fn endpoint_body_limit(
         .ok_or(ServerError::Overflow)
 }
 
+/// Builds the HTTP client used for outbound webhook delivery.
+///
+/// Redirects are deliberately disabled: an attacker-controlled webhook URL
+/// could answer with a 301/302/307/308 pointing at a private, loopback, or
+/// metadata address that was never validated. Following such a redirect would
+/// carry the webhook payload (and the server's credentials) into the internal
+/// network — an SSRF bypass. A 3xx response is therefore surfaced as a
+/// non-success status and the delivery fails instead of being followed.
+fn build_webhook_delivery_client() -> Option<reqwest::Client> {
+    match reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+    {
+        Ok(client) => Some(client),
+        Err(e) => {
+            tracing::warn!("failed to build HTTP client for webhook delivery: {e}");
+            None
+        }
+    }
+}
+
 /// Acquires a semaphore permit for a chunk transfer.
 ///
 /// # Errors
@@ -837,9 +878,21 @@ async fn build_auth_provider(config: &ServerConfig) -> Result<Option<ServerAuth>
             let issuer = config
                 .auth_oidc_issuer()
                 .ok_or_else(|| ServerError::Config(ServerConfigError::InvalidAuthProvider))?;
-            let provider = OidcProvider::new(issuer, None)
-                .await
-                .map_err(|_e| ServerError::Config(ServerConfigError::InvalidAuthProvider))?;
+            let audience = config.auth_oidc_audience();
+            if audience.is_none() {
+                tracing::warn!(
+                    "OIDC auth provider has no SHARDLINE_AUTH_OIDC_AUDIENCE configured; the \
+                     token aud claim is not validated and any aud-bearing token is accepted \
+                     (set SHARDLINE_AUTH_OIDC_AUDIENCE to require a specific audience)"
+                );
+            }
+            let provider = OidcProvider::new(
+                issuer,
+                audience.map(str::to_owned),
+                config.auth_oidc_jwks_host_allowlist().unwrap_or(&[]),
+            )
+            .await
+            .map_err(|_e| ServerError::Config(ServerConfigError::InvalidAuthProvider))?;
             Ok(Some(ServerAuth::from_provider(Box::new(provider))))
         }
         AuthProviderKind::Jwks => {

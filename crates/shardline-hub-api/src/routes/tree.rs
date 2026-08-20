@@ -1,4 +1,3 @@
-use axum::http::HeaderMap;
 use axum::{
     Json,
     extract::{Path, Query, State},
@@ -6,9 +5,8 @@ use axum::{
 
 use crate::{error::HubApiError, models::*};
 use shardline_index::hub::HubFileEntry;
-use shardline_protocol::TokenScope;
 
-use super::{HubState, authorize_with_context, require_repository_binding};
+use super::{HubRepository, HubState};
 
 // ---- File tree (requires Read) ----
 
@@ -18,35 +16,40 @@ use super::{HubState, authorize_with_context, require_repository_binding};
 /// every file, so this is deliberately a distinct route from the path variant.
 pub(crate) async fn file_tree_at_root(
     State(state): State<HubState>,
-    headers: HeaderMap,
-    Path((_repo_type, ns, repo, rev)): Path<(String, String, String, String)>,
+    _repo: HubRepository,
+    Path((_repo_type, ns, repo_name, rev)): Path<(String, String, String, String)>,
     Query(query): Query<TreeQuery>,
 ) -> Result<Json<Vec<TreeEntry>>, HubApiError> {
-    file_tree_for_path(state, headers, ns, repo, rev, String::new(), query).await
+    file_tree_for_path(state, _repo, ns, repo_name, rev, String::new(), query).await
 }
 
 pub(crate) async fn file_tree(
     State(state): State<HubState>,
-    headers: HeaderMap,
-    Path((_repo_type, ns, repo, rev, file_path)): Path<(String, String, String, String, String)>,
+    _repo: HubRepository,
+    Path((_repo_type, ns, repo_name, rev, file_path)): Path<(
+        String,
+        String,
+        String,
+        String,
+        String,
+    )>,
     Query(query): Query<TreeQuery>,
 ) -> Result<Json<Vec<TreeEntry>>, HubApiError> {
-    file_tree_for_path(state, headers, ns, repo, rev, file_path, query).await
+    file_tree_for_path(state, _repo, ns, repo_name, rev, file_path, query).await
 }
 
 async fn file_tree_for_path(
     state: HubState,
-    headers: HeaderMap,
+    _repo: HubRepository,
     ns: String,
-    repo: String,
+    repo_name: String,
     rev: String,
     file_path: String,
     query: TreeQuery,
 ) -> Result<Json<Vec<TreeEntry>>, HubApiError> {
     shardline_metrics::record_hub_api_request("file_tree", "GET", 200);
-    let auth_ctx = authorize_with_context(&state, &headers, TokenScope::Read)?;
-    require_repository_binding(auth_ctx.as_ref(), &ns, &repo)?;
-    let name = format!("{ns}/{repo}");
+    // The extractor has already authorized this request and minted `repo`.
+    let name = format!("{ns}/{repo_name}");
     let commit_sha = state
         .store
         .resolve_revision(&name, &rev)

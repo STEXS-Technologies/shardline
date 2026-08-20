@@ -165,6 +165,7 @@ async fn start_local_cluster_runtime() -> Result<Option<LocalClusterRuntime>, Te
     .with_reconstruction_cache_redis(redis_url.clone(), NonZeroU64::new(30).ok_or("cache ttl")?)?
     .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())?
     .with_metrics_token(metrics_token.clone())?
+    .with_deployment_mode(shardline_server::DeploymentMode::Insecure)
     .with_provider_runtime(
         provider_config,
         b"local-provider-bootstrap-key".to_vec(),

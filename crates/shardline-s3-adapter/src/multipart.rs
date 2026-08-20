@@ -114,6 +114,9 @@ pub enum S3SessionError {
     /// The aggregate byte quota across active sessions was exceeded.
     #[error("s3 upload aggregate byte quota exceeded")]
     AggregateQuotaExceeded,
+    /// The global cap on part files across active sessions was exceeded.
+    #[error("too many active s3 upload part files")]
+    TooManyPartFiles,
     /// Numeric conversion exceeded supported bounds.
     #[error("s3 upload session overflow")]
     Overflow,
@@ -381,15 +384,19 @@ pub async fn read_session(
 ///
 /// The part file itself is written by the caller (which streams the request
 /// body to [`part_file_path`]); this persists the size under the session lock
-/// and enforces the per-session and aggregate byte quotas.
+/// and enforces the per-session and aggregate byte quotas plus the global
+/// active-part-file cap.
 ///
 /// # Errors
 ///
 /// Returns [`S3SessionError::NotFound`] when the session is missing or expired,
 /// [`S3SessionError::InvalidPartNumber`] for an out-of-range part number,
 /// [`S3SessionError::SessionQuotaExceeded`]/[`S3SessionError::AggregateQuotaExceeded`]
-/// when the byte quotas would be exceeded, and
-/// [`S3SessionError::Io`]/[`S3SessionError::Json`] on persistence failure.
+/// when the byte quotas would be exceeded,
+/// [`S3SessionError::TooManyPartFiles`] when the global active-part-file cap
+/// would be exceeded, and [`S3SessionError::Io`]/[`S3SessionError::Json`] on
+/// persistence failure.
+#[allow(clippy::too_many_arguments)]
 pub async fn store_part(
     root: &Path,
     upload_id: &str,
@@ -398,6 +405,7 @@ pub async fn store_part(
     ttl_seconds: NonZeroU64,
     session_max_bytes: NonZeroU64,
     total_max_bytes: NonZeroU64,
+    max_active_part_files: NonZeroUsize,
 ) -> Result<(), S3SessionError> {
     validate_upload_id(upload_id)?;
     validate_part_number(part_number)?;
@@ -410,6 +418,7 @@ pub async fn store_part(
         ttl_seconds,
         session_max_bytes,
         total_max_bytes,
+        max_active_part_files,
     )
     .await
 }
@@ -421,6 +430,7 @@ pub async fn store_part(
 /// # Errors
 ///
 /// See [`store_part`].
+#[allow(clippy::too_many_arguments)]
 pub async fn store_part_locked(
     root: &Path,
     upload_id: &str,
@@ -429,6 +439,7 @@ pub async fn store_part_locked(
     ttl_seconds: NonZeroU64,
     session_max_bytes: NonZeroU64,
     total_max_bytes: NonZeroU64,
+    max_active_part_files: NonZeroUsize,
 ) -> Result<(), S3SessionError> {
     validate_upload_id(upload_id)?;
     validate_part_number(part_number)?;
@@ -440,7 +451,104 @@ pub async fn store_part_locked(
     )
     .await?;
 
-    // Enforce the aggregate byte quotas (checked under the lock).
+    let (total_active_bytes, total_active_part_files) =
+        total_active_usage_locked(root, ttl_seconds, now_unix_seconds).await?;
+    enforce_part_quotas(
+        &session,
+        part_number,
+        size_bytes,
+        session_max_bytes,
+        total_max_bytes,
+        max_active_part_files,
+        total_active_bytes,
+        total_active_part_files,
+    )?;
+
+    session.parts.insert(
+        part_number,
+        MultipartPart {
+            size_bytes,
+            file_name: format!("part-{part_number}"),
+        },
+    );
+    session.last_touched_unix_seconds = now_unix_seconds;
+    persist_session(root, upload_id, &session).await
+}
+
+/// Validates a part against the per-session and aggregate byte quotas and the
+/// global active-part-file cap WITHOUT persisting anything.
+///
+/// The caller must hold the session lock ([`lock_upload_sessions`]). Used by
+/// the server's `UploadPart` handler to reject an over-quota or over-cap part
+/// BEFORE its file is written (no write-then-delete); [`store_part_locked`]
+/// re-checks the same quotas against the actually-streamed size and then
+/// persists.
+///
+/// # Errors
+///
+/// Returns [`S3SessionError::NotFound`] when the session is missing or expired,
+/// [`S3SessionError::InvalidPartNumber`] for an out-of-range part number,
+/// [`S3SessionError::SessionQuotaExceeded`]/[`S3SessionError::AggregateQuotaExceeded`]
+/// when the byte quotas would be exceeded,
+/// [`S3SessionError::TooManyPartFiles`] when the global active-part-file cap
+/// would be exceeded, and [`S3SessionError::Io`]/[`S3SessionError::Json`] on
+/// read failure.
+#[allow(clippy::too_many_arguments)]
+pub async fn validate_part_quota_locked(
+    root: &Path,
+    upload_id: &str,
+    part_number: u32,
+    size_bytes: u64,
+    ttl_seconds: NonZeroU64,
+    session_max_bytes: NonZeroU64,
+    total_max_bytes: NonZeroU64,
+    max_active_part_files: NonZeroUsize,
+) -> Result<(), S3SessionError> {
+    validate_upload_id(upload_id)?;
+    validate_part_number(part_number)?;
+    let now_unix_seconds = unix_now_seconds_checked()?;
+    let session = load_session_at(
+        &session_dir(root, upload_id)?,
+        ttl_seconds,
+        now_unix_seconds,
+    )
+    .await?;
+    let (total_active_bytes, total_active_part_files) =
+        total_active_usage_locked(root, ttl_seconds, now_unix_seconds).await?;
+    enforce_part_quotas(
+        &session,
+        part_number,
+        size_bytes,
+        session_max_bytes,
+        total_max_bytes,
+        max_active_part_files,
+        total_active_bytes,
+        total_active_part_files,
+    )
+}
+
+/// The shared per-session + aggregate byte-quota and global part-file-count
+/// enforcement for a stored (or about-to-be-stored) part.
+///
+/// An overwrite of an existing part number replaces the previous size (so only
+/// the delta counts against the byte quotas) and does not materialize a NEW
+/// part file (so only a new part number counts against the global
+/// active-part-file cap). Both counts are computed from the session metadata
+/// under the same lock section as the byte quotas, so the cap is enforced
+/// atomically with the quota accounting and an over-cap part never reaches the
+/// disk; deleting a session (abort/sweep/complete) removes its part files from
+/// the count as a side effect of the next scan.
+#[allow(clippy::too_many_arguments)]
+fn enforce_part_quotas(
+    session: &MultipartUploadSession,
+    part_number: u32,
+    size_bytes: u64,
+    session_max_bytes: NonZeroU64,
+    total_max_bytes: NonZeroU64,
+    max_active_part_files: NonZeroUsize,
+    total_active_bytes: u64,
+    total_active_part_files: u64,
+) -> Result<(), S3SessionError> {
     let previous_size = session
         .parts
         .get(&part_number)
@@ -454,20 +562,19 @@ pub async fn store_part_locked(
     if new_session_total > session_max_bytes.get() {
         return Err(S3SessionError::SessionQuotaExceeded);
     }
-    let total_active = total_active_bytes_locked(root, ttl_seconds, now_unix_seconds).await?;
-    if total_active.saturating_add(delta) > total_max_bytes.get() {
+    if total_active_bytes.saturating_add(delta) > total_max_bytes.get() {
         return Err(S3SessionError::AggregateQuotaExceeded);
     }
-
-    session.parts.insert(
-        part_number,
-        MultipartPart {
-            size_bytes,
-            file_name: format!("part-{part_number}"),
-        },
-    );
-    session.last_touched_unix_seconds = now_unix_seconds;
-    persist_session(root, upload_id, &session).await
+    let new_part_file = if session.parts.contains_key(&part_number) {
+        0_u64
+    } else {
+        1_u64
+    };
+    let cap = u64::try_from(max_active_part_files.get()).unwrap_or(u64::MAX);
+    if total_active_part_files.saturating_add(new_part_file) > cap {
+        return Err(S3SessionError::TooManyPartFiles);
+    }
+    Ok(())
 }
 
 /// Deletes a session and all of its part files.
@@ -677,19 +784,41 @@ async fn count_active_sessions_locked(
 }
 
 /// Sums the stored part bytes across all active sessions (caller must hold
-/// the session lock). Used to enforce the aggregate byte quota.
+/// the session lock). Used to enforce the aggregate byte quota at session
+/// creation; part writes use [`total_active_usage_locked`].
 async fn total_active_bytes_locked(
     root: &Path,
     ttl_seconds: NonZeroU64,
     now_unix_seconds: u64,
 ) -> Result<u64, S3SessionError> {
+    Ok(
+        total_active_usage_locked(root, ttl_seconds, now_unix_seconds)
+            .await?
+            .0,
+    )
+}
+
+/// Computes the aggregate stored-part bytes AND the total part-file count
+/// across all active sessions (caller must hold the session lock). Used to
+/// enforce the aggregate byte quota and the global active-part-file cap in a
+/// single scan, so both limits are checked atomically under the same lock
+/// section with no counter drift. Each active session contributes
+/// `parts.len()` part files — one `part-{n}` file per stored part number —
+/// so deleting a session (abort/sweep/complete) releases its slots as a side
+/// effect of the next scan.
+async fn total_active_usage_locked(
+    root: &Path,
+    ttl_seconds: NonZeroU64,
+    now_unix_seconds: u64,
+) -> Result<(u64, u64), S3SessionError> {
     let dir = upload_dir(root);
     let mut entries = match fs::read_dir(&dir).await {
         Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok((0, 0)),
         Err(error) => return Err(S3SessionError::Io(error)),
     };
-    let mut total = 0_u64;
+    let mut total_bytes = 0_u64;
+    let mut total_part_files = 0_u64;
     while let Some(entry) = entries.next_entry().await? {
         let path = entry.path();
         if !path.is_dir() {
@@ -706,10 +835,12 @@ async fn total_active_bytes_locked(
                 .parts
                 .values()
                 .fold(0_u64, |sum, part| sum.saturating_add(part.size_bytes));
-            total = total.saturating_add(session_total);
+            total_bytes = total_bytes.saturating_add(session_total);
+            total_part_files = total_part_files
+                .saturating_add(u64::try_from(session.parts.len()).unwrap_or(u64::MAX));
         }
     }
-    Ok(total)
+    Ok((total_bytes, total_part_files))
 }
 
 #[cfg(test)]
@@ -812,6 +943,7 @@ mod tests {
                 ttl(3600),
                 quota(1 << 40),
                 quota(1 << 40),
+                cap(200_000),
             )
             .await
             .unwrap();
@@ -853,6 +985,7 @@ mod tests {
             ttl(3600),
             quota(1 << 40),
             quota(1 << 40),
+            cap(200_000),
         )
         .await
         .unwrap();
@@ -864,6 +997,7 @@ mod tests {
             ttl(3600),
             quota(1 << 40),
             quota(1 << 40),
+            cap(200_000),
         )
         .await
         .unwrap();
@@ -910,6 +1044,7 @@ mod tests {
             ttl(3600),
             quota(1 << 40),
             quota(1 << 40),
+            cap(200_000),
         )
         .await
         .unwrap();
@@ -1092,6 +1227,7 @@ mod tests {
             ttl(3600),
             quota(150),
             quota(1 << 40),
+            cap(200_000),
         )
         .await
         .unwrap();
@@ -1104,6 +1240,7 @@ mod tests {
             ttl(3600),
             quota(150),
             quota(1 << 40),
+            cap(200_000),
         )
         .await;
         assert!(matches!(result, Err(S3SessionError::SessionQuotaExceeded)));
@@ -1116,6 +1253,7 @@ mod tests {
             ttl(3600),
             quota(150),
             quota(1 << 40),
+            cap(200_000),
         )
         .await
         .unwrap();
@@ -1144,6 +1282,7 @@ mod tests {
             ttl(3600),
             quota(1 << 40),
             quota(200),
+            cap(200_000),
         )
         .await
         .unwrap();
@@ -1156,6 +1295,7 @@ mod tests {
             ttl(3600),
             quota(1 << 40),
             quota(200),
+            cap(200_000),
         )
         .await;
         assert!(matches!(
@@ -1187,6 +1327,7 @@ mod tests {
             ttl(3600),
             quota(1 << 40),
             quota(200),
+            cap(200_000),
         )
         .await
         .unwrap();
@@ -1234,6 +1375,7 @@ mod tests {
             ttl(3600),
             quota(1 << 40),
             quota(1 << 40),
+            cap(200_000),
         )
         .await
         .unwrap();
@@ -1246,5 +1388,233 @@ mod tests {
             read_session(root.path(), &upload_id, ttl(3600)).await,
             Err(S3SessionError::NotFound)
         ));
+    }
+
+    #[tokio::test]
+    async fn validate_part_quota_locked_rejects_without_persisting() {
+        // F-19: the pre-write quota validator rejects an over-quota part
+        // WITHOUT touching the session (the server uses it before streaming a
+        // part body, so no write-then-delete), and accepts an in-quota one.
+        let root = make_root().await;
+        let upload_id = create_session(
+            root.path(),
+            "acme.models",
+            "k",
+            "global",
+            ttl(3600),
+            cap(16),
+            quota(1 << 40),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+        store_part(
+            root.path(),
+            &upload_id,
+            1,
+            100,
+            ttl(3600),
+            quota(150),
+            quota(1 << 40),
+            cap(200_000),
+        )
+        .await
+        .unwrap();
+
+        // A part that would push the session over its 150-byte quota is
+        // rejected; the session metadata is left untouched.
+        let rejected = validate_part_quota_locked(
+            root.path(),
+            &upload_id,
+            2,
+            60,
+            ttl(3600),
+            quota(150),
+            quota(1 << 40),
+            cap(200_000),
+        )
+        .await;
+        assert!(matches!(
+            rejected,
+            Err(S3SessionError::SessionQuotaExceeded)
+        ));
+        let session = read_session(root.path(), &upload_id, ttl(3600))
+            .await
+            .unwrap();
+        assert_eq!(session.parts.len(), 1, "no part was persisted");
+
+        // An in-quota part passes validation.
+        validate_part_quota_locked(
+            root.path(),
+            &upload_id,
+            2,
+            40,
+            ttl(3600),
+            quota(150),
+            quota(1 << 40),
+            cap(200_000),
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn validate_part_quota_locked_enforces_aggregate_quota() {
+        // F-19: the aggregate quota is checked against the projected size.
+        let root = make_root().await;
+        let upload_id = create_session(
+            root.path(),
+            "acme.models",
+            "k",
+            "global",
+            ttl(3600),
+            cap(16),
+            quota(200),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+        store_part(
+            root.path(),
+            &upload_id,
+            1,
+            100,
+            ttl(3600),
+            quota(1 << 40),
+            quota(200),
+            cap(200_000),
+        )
+        .await
+        .unwrap();
+
+        let rejected = validate_part_quota_locked(
+            root.path(),
+            &upload_id,
+            2,
+            150,
+            ttl(3600),
+            quota(1 << 40),
+            quota(200),
+            cap(200_000),
+        )
+        .await;
+        assert!(matches!(
+            rejected,
+            Err(S3SessionError::AggregateQuotaExceeded)
+        ));
+    }
+
+    #[tokio::test]
+    async fn part_file_cap_rejects_new_part_before_any_file_is_written() {
+        // F-19: the global active-part-file cap is enforced (under the same
+        // lock as the byte quotas) BEFORE a part file materializes; a NEW part
+        // number consumes one slot while overwriting an existing number does
+        // not, and a rejected part leaves no file on disk.
+        let root = make_root().await;
+        let upload_id = create_session(
+            root.path(),
+            "acme.models",
+            "k",
+            "global",
+            ttl(3600),
+            cap(16),
+            quota(1 << 40),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+
+        // A cap of 1: the first part file consumes the only slot.
+        store_part(
+            root.path(),
+            &upload_id,
+            1,
+            10,
+            ttl(3600),
+            quota(1 << 40),
+            quota(1 << 40),
+            cap(1),
+        )
+        .await
+        .unwrap();
+
+        // The pre-write validator rejects a NEW part number at the cap.
+        let rejected = validate_part_quota_locked(
+            root.path(),
+            &upload_id,
+            2,
+            10,
+            ttl(3600),
+            quota(1 << 40),
+            quota(1 << 40),
+            cap(1),
+        )
+        .await;
+        assert!(matches!(rejected, Err(S3SessionError::TooManyPartFiles)));
+        let session = read_session(root.path(), &upload_id, ttl(3600))
+            .await
+            .unwrap();
+        assert_eq!(session.parts.len(), 1, "no part was persisted");
+
+        // Overwriting the existing part number is allowed (no new file).
+        store_part(
+            root.path(),
+            &upload_id,
+            1,
+            20,
+            ttl(3600),
+            quota(1 << 40),
+            quota(1 << 40),
+            cap(1),
+        )
+        .await
+        .unwrap();
+
+        // The post-write store path rejects the new part number too, so a
+        // rejected part never leaves a file behind.
+        let rejected = store_part(
+            root.path(),
+            &upload_id,
+            2,
+            10,
+            ttl(3600),
+            quota(1 << 40),
+            quota(1 << 40),
+            cap(1),
+        )
+        .await;
+        assert!(matches!(rejected, Err(S3SessionError::TooManyPartFiles)));
+        assert!(
+            !part_file_path(root.path(), &upload_id, 2).unwrap().exists(),
+            "an over-cap part must not materialize a file"
+        );
+
+        // Deleting the session frees the slot: a fresh session can store a
+        // part again (the count is derived from live session metadata).
+        delete_session(root.path(), &upload_id).await.unwrap();
+        let fresh = create_session(
+            root.path(),
+            "acme.models",
+            "k",
+            "global",
+            ttl(3600),
+            cap(16),
+            quota(1 << 40),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+        store_part(
+            root.path(),
+            &fresh,
+            1,
+            10,
+            ttl(3600),
+            quota(1 << 40),
+            quota(1 << 40),
+            cap(1),
+        )
+        .await
+        .unwrap();
     }
 }

@@ -697,13 +697,15 @@ fn pre_existing_quarantine_candidate_released_when_missing_from_store() {
     ))
     .unwrap();
 
-    // Run GC — auto-release happens during validate_gc_index_integrity.
+    // Run GC — auto-release happens during validate_gc_index_integrity. A
+    // store-mutating run (mark) is required: a pure dry run promises no
+    // mutation (F-76) and must not delete index rows even as a repair (F-111).
     let result = rt.block_on(run_gc_with_stores(
         &record_store,
         &index_store,
         &object_store,
         &[ServerFrontend::Xet],
-        LocalGcOptions::dry_run(),
+        LocalGcOptions::mark_only(86_400),
     ));
     assert!(
         result.is_ok(),

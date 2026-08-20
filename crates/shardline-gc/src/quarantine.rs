@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use shardline_index::{AsyncIndexStore, QuarantineCandidate, RecordStore};
-use shardline_storage::{ObjectKey, ObjectStore};
+use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectStore};
 use shardline_xet_adapter::xorb_hash_from_object_key_if_present;
 
 use crate::{
@@ -9,7 +9,7 @@ use crate::{
     reachability::{OrphanObject, ReachabilityAccumulator, collect_referenced_object_keys},
     types::LocalGcReport,
 };
-use shardline_server_core::{ServerObjectStore, checked_add, checked_increment};
+use shardline_server_core::{ServerObjectStore, checked_add, checked_increment, chunk_hash};
 
 pub(super) async fn read_quarantine_entries<IndexAdapter>(
     index_store: &IndexAdapter,
@@ -27,6 +27,134 @@ where
         .await?;
 
     Ok(entries_by_object_key)
+}
+
+/// Returns the newest CREATION timestamp stored in the index: the maximum of
+/// every quarantine candidate's `first_seen_unreachable_at` and every retention
+/// hold's `held_at`.
+///
+/// This is the reference point for the forward-clock guard: creation
+/// timestamps are written by the same wall clock the GC reads at
+/// lifecycle-event time, so a GC `now` far ahead of the newest stored creation
+/// timestamp indicates a forward NTP step / VM time-sync-after-pause rather
+/// than genuine elapsed time.
+///
+/// Future-dated lifecycle fields (`delete_after = first_seen + retention` and
+/// hold `release_after`) are deliberately EXCLUDED: any deployment with an
+/// active hold or a retention longer than the clock slack keeps those fields
+/// in the future, which previously blinded the guard to forward jumps of up to
+/// (newest future timestamp - real now + slack) — days to weeks — and let the
+/// sweep delete candidates before their real retention elapsed (F-57).
+///
+/// Returns `None` when the index holds no lifecycle entries at all.
+pub(super) async fn read_newest_stored_creation_timestamp<IndexAdapter>(
+    index_store: &IndexAdapter,
+) -> Result<Option<u64>, GcError>
+where
+    IndexAdapter: AsyncIndexStore + Sync,
+    IndexAdapter::Error: Into<GcError>,
+{
+    let mut newest_stored: Option<u64> = None;
+    index_store
+        .visit_quarantine_candidates(|candidate| {
+            let candidate_newest = candidate.first_seen_unreachable_at_unix_seconds();
+            newest_stored =
+                Some(newest_stored.map_or(candidate_newest, |newest| newest.max(candidate_newest)));
+            Ok::<(), GcError>(())
+        })
+        .await?;
+    index_store
+        .visit_retention_holds(|hold| {
+            let hold_newest = hold.held_at_unix_seconds();
+            newest_stored =
+                Some(newest_stored.map_or(hold_newest, |newest| newest.max(hold_newest)));
+            Ok::<(), GcError>(())
+        })
+        .await?;
+
+    Ok(newest_stored)
+}
+
+/// Reserved object key for the persisted last-GC-clock anchor.
+///
+/// Written on every store-mutating GC run (mark and/or sweep) whose wall clock
+/// the forward guard deemed trustworthy; a pure dry run remains read-only and
+/// never writes it, and a failed write is tolerated (the anchor is an
+/// optimization, not a correctness requirement). It records that run's `now` so
+/// a forward jump occurring between two consecutive runs is detected even when
+/// no lifecycle activity has refreshed the creation-timestamp reference
+/// (low-churn deployments). Without the anchor, a healthy deployment where GC
+/// runs more often than lifecycle activity happens would age the creation-only
+/// reference past the clock slack and spuriously disable the sweep and temp
+/// reaping.
+///
+/// The `gc/` namespace is not a managed object namespace (the reachability
+/// scans never recognize it), so the anchor is invisible to every GC path:
+/// `scan_orphan_objects` skips it, the temp reaper's `.tmp-` grammar cannot
+/// match it, and the S3 temp sweep only matches temp-upload keys. It can never
+/// be mistaken for — or reaped as — a managed object.
+/// The reserved object key for the persisted last-GC-clock anchor.
+///
+/// `pub(super)` (visible to the whole crate) so the stale-temp reaper in
+/// `reachability` can recognize a stranded `<anchor>.tmp-*` write artifact
+/// (F-99).
+pub(super) const LAST_GC_CLOCK_ANCHOR_KEY: &str = "gc/last-gc-clock-anchor";
+
+fn last_gc_clock_anchor_key() -> Result<ObjectKey, GcError> {
+    ObjectKey::parse(LAST_GC_CLOCK_ANCHOR_KEY).map_err(|_error| GcError::InvalidContentHash)
+}
+
+/// Reads the persisted last-GC-clock anchor: the wall clock recorded by the
+/// most recent GC run whose clock the forward guard trusted.
+///
+/// Returns `None` when no anchor has been persisted yet. An unreadable or
+/// malformed anchor (for example a torn write) is treated as absent — it is
+/// logged and will be overwritten by a later store-mutating run's anchor write.
+pub(super) fn read_last_gc_clock_anchor(
+    object_store: &ServerObjectStore,
+) -> Result<Option<u64>, GcError> {
+    let key = last_gc_clock_anchor_key()?;
+    let Some(metadata) = object_store.metadata(&key)? else {
+        return Ok(None);
+    };
+    let body = object_store.read_full_object(&key, metadata.length())?;
+    let parsed = std::str::from_utf8(&body)
+        .ok()
+        .and_then(|text| text.trim().parse::<u64>().ok());
+    if parsed.is_none() {
+        tracing::warn!(
+            "ignoring unreadable last-GC-clock anchor at {LAST_GC_CLOCK_ANCHOR_KEY} ({} bytes); \
+             it will be overwritten this run",
+            body.len(),
+        );
+    }
+    Ok(parsed)
+}
+
+/// Persists the supplied wall clock as the last-GC-clock anchor.
+///
+/// Called on every run that mutates the object store (mark and/or sweep) whose
+/// clock the forward guard deemed trustworthy (the guard did not fire). A pure
+/// dry run never calls this — dry runs must remain read-only. A fired run's
+/// `now` is suspect — the sweep and hold pruning were skipped for that reason —
+/// so it is never stamped as an anchor.
+///
+/// A write failure must be tolerated by the caller (warn and continue): the
+/// anchor is an optimization, not a correctness requirement, and the forward
+/// guard safely falls back to the creation-timestamp-only reference (the
+/// pre-anchor behavior) when no anchor is persisted.
+pub(super) fn write_last_gc_clock_anchor(
+    object_store: &ServerObjectStore,
+    now_unix_seconds: u64,
+) -> Result<(), GcError> {
+    let key = last_gc_clock_anchor_key()?;
+    let body = now_unix_seconds.to_string();
+    let integrity = ObjectIntegrity::new(
+        chunk_hash(body.as_bytes()),
+        u64::try_from(body.len()).unwrap_or(0),
+    );
+    object_store.put_overwrite(&key, ObjectBody::Borrowed(body.as_bytes()), &integrity)?;
+    Ok(())
 }
 
 pub(super) async fn read_active_retention_hold_object_keys<IndexAdapter>(
@@ -257,6 +385,31 @@ where
             continue;
         }
 
+        // Re-verify at delete time that no retention hold now covers the key.
+        //
+        // The runner snapshots `read_active_retention_hold_object_keys` at run
+        // start and filters the orphan set once with it. A hold placed after
+        // that snapshot but before this per-candidate delete is invisible to
+        // the snapshot, so the sweep would otherwise destroy held data. Fetch
+        // the current hold for exactly this key (an O(1) single-row lookup, not
+        // a full hold re-scan per candidate) and skip the storage delete when a
+        // hold now covers the key. The quarantine entry is released either way:
+        // the hold keeps the data, and the stale entry is de-marked so the next
+        // cycle does not re-quarantine a held object.
+        let hold_now_active = index_store
+            .retention_hold(&orphan.object_key)
+            .await
+            .map_err(Into::into)?
+            .is_some_and(|hold| hold.is_active_at(now_unix_seconds));
+        if hold_now_active {
+            tracing::debug!(
+                "skipping sweep delete for {object_key}: retention hold placed after snapshot",
+            );
+            report.released_quarantine_candidates =
+                checked_increment(report.released_quarantine_candidates)?;
+            continue;
+        }
+
         let _outcome = object_store
             .delete_if_present(&orphan.object_key)
             .map_err(GcError::ObjectStore)?;
@@ -352,6 +505,9 @@ mod tests {
                 released_quarantine_candidates: 0,
                 deleted_chunks: 0,
                 deleted_bytes: 0,
+                reaped_stale_temporary_chunks: 0,
+                reaped_stale_temporary_bytes: 0,
+                pruned_revisions_over_cap: 0,
             };
 
             reconcile_quarantine_entries(
@@ -407,6 +563,9 @@ mod tests {
                 released_quarantine_candidates: 0,
                 deleted_chunks: 0,
                 deleted_bytes: 0,
+                reaped_stale_temporary_chunks: 0,
+                reaped_stale_temporary_bytes: 0,
+                pruned_revisions_over_cap: 0,
             };
 
             reconcile_quarantine_entries(
@@ -487,6 +646,9 @@ mod tests {
                 released_quarantine_candidates: 0,
                 deleted_chunks: 0,
                 deleted_bytes: 0,
+                reaped_stale_temporary_chunks: 0,
+                reaped_stale_temporary_bytes: 0,
+                pruned_revisions_over_cap: 0,
             };
 
             reconcile_quarantine_entries(
@@ -561,6 +723,9 @@ mod tests {
                 released_quarantine_candidates: 0,
                 deleted_chunks: 0,
                 deleted_bytes: 0,
+                reaped_stale_temporary_chunks: 0,
+                reaped_stale_temporary_bytes: 0,
+                pruned_revisions_over_cap: 0,
             };
 
             reconcile_quarantine_entries(
@@ -690,6 +855,9 @@ mod tests {
                 released_quarantine_candidates: 0,
                 deleted_chunks: 0,
                 deleted_bytes: 0,
+                reaped_stale_temporary_chunks: 0,
+                reaped_stale_temporary_bytes: 0,
+                pruned_revisions_over_cap: 0,
             };
 
             sweep_quarantine_entries(
@@ -840,6 +1008,9 @@ mod tests {
                 released_quarantine_candidates: 0,
                 deleted_chunks: 0,
                 deleted_bytes: 0,
+                reaped_stale_temporary_chunks: 0,
+                reaped_stale_temporary_bytes: 0,
+                pruned_revisions_over_cap: 0,
             };
 
             sweep_quarantine_entries(
@@ -902,6 +1073,9 @@ mod tests {
                 released_quarantine_candidates: 0,
                 deleted_chunks: 0,
                 deleted_bytes: 0,
+                reaped_stale_temporary_chunks: 0,
+                reaped_stale_temporary_bytes: 0,
+                pruned_revisions_over_cap: 0,
             };
 
             sweep_quarantine_entries(
@@ -1067,6 +1241,9 @@ mod tests {
                 released_quarantine_candidates: 0,
                 deleted_chunks: 0,
                 deleted_bytes: 0,
+                reaped_stale_temporary_chunks: 0,
+                reaped_stale_temporary_bytes: 0,
+                pruned_revisions_over_cap: 0,
             };
 
             reconcile_quarantine_entries(
@@ -1130,6 +1307,9 @@ mod tests {
                 released_quarantine_candidates: 0,
                 deleted_chunks: 0,
                 deleted_bytes: 0,
+                reaped_stale_temporary_chunks: 0,
+                reaped_stale_temporary_bytes: 0,
+                pruned_revisions_over_cap: 0,
             };
 
             // Empty orphan_objects → the stale entry should be released.
@@ -1394,6 +1574,167 @@ mod tests {
         });
     }
 
+    // ── sweep: retention hold placed after the run-start snapshot → delete skipped ─
+    //
+    // Regression test for F-42: the runner snapshots the active-hold set at run
+    // start, so a hold placed mid-run (after the snapshot, before the sweep's
+    // per-candidate delete) is invisible to that snapshot. The sweep must
+    // re-check the hold at delete time and skip the storage delete; the hold
+    // keeps the data and the stale quarantine entry is released.
+    //
+    // In this harness the `orphan_objects` map plays the role of the run-start
+    // snapshot (the object is still classified as an orphan), and the hold is
+    // registered afterwards — exactly the mid-run transition the finding proved.
+
+    #[test]
+    fn sweep_skips_delete_when_hold_placed_after_snapshot() {
+        use shardline_index::RetentionHold;
+        use shardline_storage::{ObjectBody, ObjectIntegrity};
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let record_store = MemoryRecordStore::new();
+            let index_store = MemoryIndexStore::new();
+
+            let dir = tempfile::tempdir().unwrap();
+            let object_store = ServerObjectStore::local(dir.path().join("chunks")).unwrap();
+
+            let now = 1_000_000_u64;
+            let hash = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+            let key = make_orphan(hash, 0).object_key;
+            let data = b"held after snapshot data".to_vec();
+
+            // Put the chunk on disk.
+            let integrity = ObjectIntegrity::new(
+                shardline_server_core::chunk_hash(&data),
+                u64::try_from(data.len()).unwrap_or(0),
+            );
+            object_store
+                .put_if_absent(&key, ObjectBody::Borrowed(&data), &integrity)
+                .unwrap();
+
+            // Cycle snapshot: the chunk is an orphan with an expired quarantine
+            // candidate and is NOT in any hold set (the hold does not exist yet).
+            let orphan = make_orphan(hash, u64::try_from(data.len()).unwrap_or(0));
+            let mut orphan_objects = HashMap::new();
+            orphan_objects.insert(orphan.hash.clone(), orphan.clone());
+
+            let candidate = QuarantineCandidate::new(
+                orphan.object_key.clone(),
+                orphan.bytes,
+                now - 200_000, // first seen long ago
+                now - 1,       // expired before now
+            )
+            .unwrap();
+            index_store
+                .upsert_quarantine_candidate(&candidate)
+                .await
+                .unwrap();
+            let mut quarantine_entries = HashMap::new();
+            quarantine_entries.insert(orphan.hash.clone(), candidate);
+
+            // The hold is placed AFTER the snapshot but BEFORE the sweep's
+            // per-candidate delete — the exact mid-run TOCTOU window. It must
+            // not be visible to the run-start snapshot, so it is registered on
+            // the shared index store after `orphan_objects` was built.
+            let hold = RetentionHold::new(
+                orphan.object_key.clone(),
+                "mid-run operator hold".to_owned(),
+                now - 100,
+                Some(now + 3600), // still active at sweep time
+            )
+            .unwrap();
+            index_store.upsert_retention_hold(&hold).await.unwrap();
+
+            let mut report = LocalGcReport::default();
+
+            sweep_quarantine_entries(
+                &record_store,
+                &object_store,
+                &index_store,
+                &[ServerFrontend::Xet],
+                &orphan_objects,
+                now,
+                &mut quarantine_entries,
+                &mut report,
+            )
+            .await
+            .unwrap();
+
+            // The delete-time hold re-check sees the mid-run hold and skips the
+            // storage delete: no data loss.
+            assert_eq!(report.deleted_chunks, 0);
+            assert_eq!(report.deleted_bytes, 0);
+            assert_eq!(report.released_quarantine_candidates, 1);
+            assert!(quarantine_entries.is_empty());
+            // The chunk is still present on disk.
+            assert!(object_store.contains(&orphan.object_key).unwrap());
+            // The hold is still present afterwards.
+            let mut hold_present = false;
+            index_store
+                .visit_retention_holds(|h| {
+                    if h.object_key() == &orphan.object_key {
+                        hold_present = true;
+                    }
+                    Ok::<(), GcError>(())
+                })
+                .await
+                .unwrap();
+            assert!(hold_present, "mid-run hold must survive the sweep");
+        });
+    }
+
+    #[test]
+    fn sweep_deletes_expired_orphan_without_any_hold() {
+        // Control: with no hold registered at all (before or mid-run), the
+        // sweep's delete-time hold re-check finds nothing and the expired
+        // candidate is deleted as usual.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let record_store = MemoryRecordStore::new();
+            let index_store = MemoryIndexStore::new();
+            let object_store = ServerObjectStore::blackhole();
+
+            let now = 1_000_000_u64;
+            let hash = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+            let orphan = make_orphan(hash, 64);
+            let mut orphan_objects = HashMap::new();
+            orphan_objects.insert(orphan.hash.clone(), orphan.clone());
+
+            let candidate = QuarantineCandidate::new(
+                orphan.object_key.clone(),
+                orphan.bytes,
+                now - 200_000,
+                now - 1,
+            )
+            .unwrap();
+            index_store
+                .upsert_quarantine_candidate(&candidate)
+                .await
+                .unwrap();
+            let mut quarantine_entries = HashMap::new();
+            quarantine_entries.insert(orphan.hash.clone(), candidate);
+
+            let mut report = LocalGcReport::default();
+            sweep_quarantine_entries(
+                &record_store,
+                &object_store,
+                &index_store,
+                &[ServerFrontend::Xet],
+                &orphan_objects,
+                now,
+                &mut quarantine_entries,
+                &mut report,
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(report.deleted_chunks, 1);
+            assert_eq!(report.deleted_bytes, 64);
+            assert!(quarantine_entries.is_empty());
+        });
+    }
+
     // ── read_active_retention_holds with active holds ───────────────────
 
     #[test]
@@ -1443,5 +1784,159 @@ mod tests {
             assert!(holds.contains(active_key.as_str()));
             assert!(holds.contains(permanent_key.as_str()));
         });
+    }
+
+    // ── read_newest_stored_creation_timestamp (F-57) ────────────────────
+
+    #[test]
+    fn newest_stored_creation_timestamp_excludes_future_dated_fields() {
+        // F-57 regression: the forward-clock guard reference must be creation
+        // timestamps only. A candidate 1 day old with a 7-day retention has
+        // `delete_after` 6 days in the future, and an active hold's
+        // `release_after` can be 30 days out; including either would put the
+        // reference in the future and blind the guard to a forward jump of
+        // days to weeks. The reader must return the newest CREATION timestamp
+        // (max first_seen / held_at) only.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let index_store = MemoryIndexStore::new();
+            let real_now = 2_000_000_000_u64;
+
+            // Candidate created 1 day ago with a 7-day retention →
+            // delete_after = real_now + 6 days (future-dated).
+            let candidate_key = ObjectKey::parse(
+                "aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            )
+            .unwrap();
+            let candidate = QuarantineCandidate::new(
+                candidate_key.clone(),
+                512,
+                real_now - 86_400,
+                real_now + 6 * 86_400,
+            )
+            .unwrap();
+            index_store
+                .upsert_quarantine_candidate(&candidate)
+                .await
+                .unwrap();
+
+            // Hold placed an hour ago with release_after = +30 days
+            // (future-dated).
+            let hold_key = ObjectKey::parse(
+                "bb/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            )
+            .unwrap();
+            let hold = shardline_index::RetentionHold::new(
+                hold_key.clone(),
+                "operator hold".to_owned(),
+                real_now - 3600,
+                Some(real_now + 30 * 86_400),
+            )
+            .unwrap();
+            index_store.upsert_retention_hold(&hold).await.unwrap();
+
+            let newest_creation = read_newest_stored_creation_timestamp(&index_store)
+                .await
+                .unwrap();
+
+            assert_eq!(
+                newest_creation,
+                Some(real_now - 3600),
+                "the newest CREATION timestamp is the hold's held_at; \
+                 delete_after/release_after must never enter the reference"
+            );
+        });
+    }
+
+    #[test]
+    fn newest_stored_creation_timestamp_empty_store_returns_none() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let index_store = MemoryIndexStore::new();
+            assert_eq!(
+                read_newest_stored_creation_timestamp(&index_store)
+                    .await
+                    .unwrap(),
+                None
+            );
+        });
+    }
+
+    #[test]
+    fn newest_stored_creation_timestamp_ignores_future_release_after_hold() {
+        // A hold with an infinite/remote release_after must not move the
+        // reference into the future; only held_at counts.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let index_store = MemoryIndexStore::new();
+            let now = 1_000_000_u64;
+            let hold_key = ObjectKey::parse(
+                "cc/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            )
+            .unwrap();
+            let hold = shardline_index::RetentionHold::new(
+                hold_key.clone(),
+                "infinite hold".to_owned(),
+                now - 500,
+                Some(now + 1_000_000_000),
+            )
+            .unwrap();
+            index_store.upsert_retention_hold(&hold).await.unwrap();
+
+            let newest_creation = read_newest_stored_creation_timestamp(&index_store)
+                .await
+                .unwrap();
+            assert_eq!(newest_creation, Some(now - 500));
+        });
+    }
+
+    // ── last-GC-clock anchor (F-57) ─────────────────────────────────────
+
+    #[test]
+    fn last_gc_clock_anchor_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let object_store = ServerObjectStore::local(dir.path().join("chunks")).unwrap();
+
+        // No anchor persisted yet.
+        assert_eq!(
+            read_last_gc_clock_anchor(&object_store).unwrap(),
+            None,
+            "a fresh store has no anchor"
+        );
+
+        let now = 2_000_000_000_u64;
+        write_last_gc_clock_anchor(&object_store, now).unwrap();
+
+        assert_eq!(
+            read_last_gc_clock_anchor(&object_store).unwrap(),
+            Some(now),
+            "the anchor must round-trip"
+        );
+
+        // Overwriting with a newer trusted clock is the normal per-run update.
+        write_last_gc_clock_anchor(&object_store, now + 86_400).unwrap();
+        assert_eq!(
+            read_last_gc_clock_anchor(&object_store).unwrap(),
+            Some(now + 86_400)
+        );
+    }
+
+    #[test]
+    fn last_gc_clock_anchor_malformed_reads_as_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let object_store = ServerObjectStore::local(dir.path().join("chunks")).unwrap();
+
+        // A torn/corrupt anchor (valid integrity, non-numeric body) must be
+        // treated as absent rather than aborting the run; it will be
+        // overwritten by the next anchor write.
+        let key = last_gc_clock_anchor_key().unwrap();
+        let body = b"not-a-timestamp";
+        let integrity =
+            ObjectIntegrity::new(chunk_hash(body), u64::try_from(body.len()).unwrap_or(0));
+        object_store
+            .put_overwrite(&key, ObjectBody::Borrowed(body), &integrity)
+            .unwrap();
+
+        assert_eq!(read_last_gc_clock_anchor(&object_store).unwrap(), None);
     }
 }

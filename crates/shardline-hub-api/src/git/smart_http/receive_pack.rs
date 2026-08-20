@@ -20,7 +20,8 @@ use crate::{
     routes::{HubState, lfs_object_key, require_repository_binding},
 };
 use shardline_index::hub::{HubFileEntry, canonical_ref_name};
-use shardline_protocol::{RepositoryScope, ShardlineHash};
+use shardline_protocol::{ShardlineHash, TokenScope};
+use shardline_server_core::AuthorizedRepository;
 use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectStore};
 
 // ---- Receive-pack: POST /{type}/{ns}/{repo}/git-receive-pack ----
@@ -41,7 +42,14 @@ pub async fn receive_pack(
     require_repository_binding(auth_ctx.as_ref(), &ns, &repo)?;
 
     let repo_id = resolve_repo_id(&repo_type, &ns, &repo);
-    let repo_scope = auth_ctx.as_ref().map(|c| c.claims().repository());
+    // This smart-http path predates the `HubRepository` extractor migration
+    // (open item); mint the capability from the already-verified context the
+    // same way the extractor does, so the LFS object keys stay namespaced by
+    // the verified token's repository scope.
+    let capability = match auth_ctx {
+        Some(ctx) => AuthorizedRepository::from_verified_context(ctx, TokenScope::Write)?,
+        None => AuthorizedRepository::anonymous_full_access(),
+    };
 
     let (updates, pack_data) = parse_receive_pack_request(&body);
 
@@ -82,7 +90,13 @@ pub async fn receive_pack(
             delete_push_ref(&state, &repo_id, old_sha, refname)
         } else {
             store_push_objects(
-                &state, &repo_id, old_sha, new_sha, refname, &objects, repo_scope,
+                &state,
+                &repo_id,
+                old_sha,
+                new_sha,
+                refname,
+                &objects,
+                &capability,
             )
             .await
         };
@@ -148,7 +162,7 @@ async fn store_push_objects(
     new_sha: &str,
     ref_name: &str,
     objects: &[GitObject],
-    repo_scope: Option<&RepositoryScope>,
+    auth: &AuthorizedRepository,
 ) -> Result<(), SmartHttpError> {
     // Build SHA → object index.
     let mut sha_to_obj: HashMap<[u8; 20], &GitObject> = HashMap::new();
@@ -184,6 +198,33 @@ async fn store_push_objects(
 
     let files = walk_git_tree(&tree_sha_arr, &sha_to_obj, "")?;
 
+    // Determine parent SHA for revision creation.
+    //
+    // This MUST happen before any file-entry / LFS-object persistence: a
+    // non-fast-forward push is rejected outright, and a rejected push must not
+    // leave write side effects behind (orphaned file entries keyed by a commit
+    // SHA no revision will ever reference, and LFS objects nobody will read).
+    let parent = if old_sha == "0000000000000000000000000000000000000000" {
+        None
+    } else {
+        // Non-fast-forward check: if the ref already exists and the client's
+        // old_sha doesn't match the current ref value, reject the push.
+        match state.store.resolve_revision(repo_id, ref_name) {
+            Ok(Some(current)) if current != old_sha => {
+                return Err(SmartHttpError::NonFastForward(format!(
+                    "non-fast-forward (current: {current}, expected: {old_sha})"
+                )));
+            }
+            Ok(None) if old_sha != "0000000000000000000000000000000000000000" => {
+                return Err(SmartHttpError::NonFastForward(
+                    "non-fast-forward".to_owned(),
+                ));
+            }
+            _ => {}
+        }
+        Some(old_sha)
+    };
+
     // Store file entries for this commit.
     state
         .store
@@ -212,7 +253,7 @@ async fn store_push_objects(
             // content object are matched (including non-canonical pointers).
             let blob_obj = find_lfs_blob(file, &sha_to_obj, &content_by_sha256)
                 .ok_or_else(|| SmartHttpError::LfsContentNotFoundInPack(file.sha.clone()))?;
-            let key = lfs_object_key(&file.sha, repo_scope)
+            let key = lfs_object_key(&file.sha, auth)
                 .map_err(|e| SmartHttpError::StoreLfsObject(e.to_string()))?;
             let object_body = ObjectBody::from_slice(&blob_obj.data);
             let integrity = ObjectIntegrity::new(
@@ -225,28 +266,6 @@ async fn store_push_objects(
                 .map_err(|e| SmartHttpError::StoreLfsObject(e.to_string()))?;
         }
     }
-
-    // Determine parent SHA for revision creation.
-    let parent = if old_sha == "0000000000000000000000000000000000000000" {
-        None
-    } else {
-        // Non-fast-forward check: if the ref already exists and the client's
-        // old_sha doesn't match the current ref value, reject the push.
-        match state.store.resolve_revision(repo_id, ref_name) {
-            Ok(Some(current)) if current != old_sha => {
-                return Err(SmartHttpError::NonFastForward(format!(
-                    "non-fast-forward (current: {current}, expected: {old_sha})"
-                )));
-            }
-            Ok(None) if old_sha != "0000000000000000000000000000000000000000" => {
-                return Err(SmartHttpError::NonFastForward(
-                    "non-fast-forward".to_owned(),
-                ));
-            }
-            _ => {}
-        }
-        Some(old_sha)
-    };
 
     // Create revision in the store.
     state

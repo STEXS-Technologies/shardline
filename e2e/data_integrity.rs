@@ -87,7 +87,9 @@ async fn try_start_server(
     if let Some(r) = role {
         config = config.with_server_role(r);
     }
-    let config = config.with_provider_runtime(
+    let config = config
+        .with_deployment_mode(shardline_server::DeploymentMode::Insecure)
+        .with_provider_runtime(
         config_path,
         b"test-api-key".to_vec(),
         "test-issuer".to_owned(),
@@ -5605,6 +5607,7 @@ async fn lfs_objects_survive_gc_when_referenced() {
     .unwrap()
     .with_server_frontends([ServerFrontend::Lfs].iter().copied())
     .unwrap()
+    .with_deployment_mode(shardline_server::DeploymentMode::Insecure)
     .with_provider_runtime(
         config_path,
         b"test-api-key".to_vec(),
@@ -5638,6 +5641,7 @@ async fn lfs_objects_survive_gc_when_referenced() {
         mark: true,
         sweep: true,
         retention_seconds: 0,
+        max_revisions_per_repo: None,
     };
     let _report = shardline_server::run_gc(
         ServerConfig::new(
@@ -5670,6 +5674,7 @@ async fn lfs_objects_survive_gc_when_referenced() {
     .unwrap()
     .with_server_frontends([ServerFrontend::Lfs].iter().copied())
     .unwrap()
+    .with_deployment_mode(shardline_server::DeploymentMode::Insecure)
     .with_provider_runtime(
         write_provider_config(storage.path()).unwrap(),
         b"test-api-key".to_vec(),
@@ -5961,6 +5966,7 @@ async fn try_start_hub_server() -> Result<
     .unwrap()
     .with_server_frontends([ServerFrontend::Hub].iter().copied())
     .unwrap()
+    .with_deployment_mode(shardline_server::DeploymentMode::Insecure)
     .with_provider_runtime(
         config_path,
         b"test-api-key".to_vec(),
@@ -7948,6 +7954,7 @@ async fn health_check_during_gc() {
     .unwrap()
     .with_server_frontends([ServerFrontend::Lfs].iter().copied())
     .unwrap()
+    .with_deployment_mode(shardline_server::DeploymentMode::Insecure)
     .with_provider_runtime(
         config_path,
         b"test-api-key".to_vec(),
@@ -7993,6 +8000,7 @@ async fn health_check_during_gc() {
                 mark: true,
                 sweep: true,
                 retention_seconds: 0,
+                max_revisions_per_repo: None,
             },
         )
         .await
@@ -8174,6 +8182,7 @@ async fn gc_does_not_remove_referenced_chunks() {
     .unwrap()
     .with_server_frontends([ServerFrontend::Lfs].iter().copied())
     .unwrap()
+    .with_deployment_mode(shardline_server::DeploymentMode::Insecure)
     .with_provider_runtime(
         config_path,
         b"test-api-key".to_vec(),
@@ -8229,6 +8238,7 @@ async fn gc_does_not_remove_referenced_chunks() {
             mark: true,
             sweep: true,
             retention_seconds: 0,
+            max_revisions_per_repo: None,
         },
     )
     .await
@@ -8795,6 +8805,7 @@ async fn postgres_backend_lfs_round_trip() {
     .unwrap()
     .with_server_frontends([ServerFrontend::Lfs].iter().copied())
     .unwrap()
+    .with_deployment_mode(shardline_server::DeploymentMode::Insecure)
     .with_provider_runtime(
         config_path,
         b"test-api-key".to_vec(),
@@ -8913,6 +8924,7 @@ async fn config_validation_chunk_size_too_large() {
     .unwrap()
     .with_server_frontends([ServerFrontend::Lfs].iter().copied())
     .unwrap()
+    .with_deployment_mode(shardline_server::DeploymentMode::Insecure)
     .with_provider_runtime(
         config_path.clone(),
         b"test-api-key".to_vec(),
@@ -8953,6 +8965,7 @@ async fn config_validation_chunk_size_too_large() {
     .unwrap()
     .with_server_frontends([ServerFrontend::Lfs].iter().copied())
     .unwrap()
+    .with_deployment_mode(shardline_server::DeploymentMode::Insecure)
     .with_provider_runtime(
         config_path,
         b"test-api-key".to_vec(),
@@ -9350,6 +9363,7 @@ async fn s3_backend_lfs_round_trip() {
         .copied(),
     )
     .unwrap()
+    .with_deployment_mode(shardline_server::DeploymentMode::Insecure)
     .with_provider_runtime(
         config_path,
         b"test-api-key".to_vec(),
@@ -9463,6 +9477,7 @@ async fn s3_backend_dedup_cross_frontend() {
     .unwrap()
     .with_server_frontends([ServerFrontend::Lfs, ServerFrontend::Oci].iter().copied())
     .unwrap()
+    .with_deployment_mode(shardline_server::DeploymentMode::Insecure)
     .with_provider_runtime(
         config_path,
         b"test-api-key".to_vec(),
@@ -9553,6 +9568,7 @@ async fn postgres_backend_oci_manifest_push_pull() {
     .unwrap()
     .with_server_frontends([ServerFrontend::Oci].iter().copied())
     .unwrap()
+    .with_deployment_mode(shardline_server::DeploymentMode::Insecure)
     .with_provider_runtime(
         config_path,
         b"test-api-key".to_vec(),
@@ -10277,6 +10293,7 @@ async fn upload_during_gc() {
     .unwrap()
     .with_server_frontends([ServerFrontend::Lfs].iter().copied())
     .unwrap()
+    .with_deployment_mode(shardline_server::DeploymentMode::Insecure)
     .with_provider_runtime(
         config_path,
         b"test-api-key".to_vec(),
@@ -10325,6 +10342,7 @@ async fn upload_during_gc() {
                 // window, so exercise concurrent reachability marking here.
                 sweep: false,
                 retention_seconds: 0,
+                max_revisions_per_repo: None,
             },
         )
         .await
@@ -12342,6 +12360,7 @@ async fn s3_backend_oci_session_upload() {
     .unwrap()
     .with_server_frontends([ServerFrontend::Oci].iter().copied())
     .unwrap()
+    .with_deployment_mode(shardline_server::DeploymentMode::Insecure)
     .with_provider_runtime(
         config_path,
         b"test-api-key".to_vec(),
@@ -12489,6 +12508,7 @@ async fn s3_backend_oci_session_abort() {
     .unwrap()
     .with_server_frontends([ServerFrontend::Oci].iter().copied())
     .unwrap()
+    .with_deployment_mode(shardline_server::DeploymentMode::Insecure)
     .with_provider_runtime(
         config_path,
         b"test-api-key".to_vec(),

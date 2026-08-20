@@ -216,6 +216,22 @@ pub enum ServerError {
     /// Too many OCI upload sessions are currently active.
     #[error("too many active oci upload sessions")]
     TooManyUploadSessions,
+    /// Too many LFS chunked-patch (PATCH) staging sessions are currently
+    /// active.
+    #[error("too many active lfs patch sessions")]
+    LfsPatchTooManySessions,
+    /// The aggregate staging-byte cap across active LFS chunked-patch
+    /// sessions was exceeded.
+    #[error("lfs patch staging byte quota exceeded")]
+    LfsPatchStoreFull,
+    /// An LFS chunked-patch (PATCH) `Content-Range` start seeks beyond the
+    /// session's sequential-growth high-water mark.
+    #[error("lfs patch content-range seeks beyond the session high-water mark")]
+    LfsPatchRangeNotSatisfiable,
+    /// The global cap on S3 multipart part files across active upload
+    /// sessions was exceeded.
+    #[error("too many active s3 upload part files")]
+    S3UploadTooManyParts,
     /// Too many OCI registry token exchanges are currently active.
     #[error("too many active oci registry token requests")]
     TooManyRegistryTokenRequests,
@@ -249,6 +265,9 @@ pub enum ServerError {
     /// The revision already exists.
     #[error("revision already exists")]
     RevisionConflict,
+    /// The per-repo revision-registry cap was reached.
+    #[error("revision registry is full for this repository")]
+    TooManyRevisions,
 }
 
 impl ServerError {
@@ -270,7 +289,9 @@ impl ServerError {
             Self::InsufficientScope => "DENIED",
             Self::NotAcceptable => "UNSUPPORTED",
             Self::ExpectedBodyHashMismatch => "DIGEST_INVALID",
-            Self::TooManyUploadSessions | Self::TooManyRegistryTokenRequests => "TOO_MANY_REQUESTS",
+            Self::TooManyUploadSessions
+            | Self::S3UploadTooManyParts
+            | Self::TooManyRegistryTokenRequests => "TOO_MANY_REQUESTS",
             // All remaining variants are internal server errors with no
             // OCI-specific code. Add new OCI-mappable variants above.
             Self::Io(_)
@@ -294,6 +315,9 @@ impl ServerError {
             | Self::TooManyShardTerms
             | Self::TooManyBatchReconstructionFileIds
             | Self::UploadIntentConflict
+            | Self::LfsPatchTooManySessions
+            | Self::LfsPatchStoreFull
+            | Self::LfsPatchRangeNotSatisfiable
             | Self::Overflow
             | Self::InvalidRangeHeader
             | Self::RangeNotSatisfiable
@@ -320,7 +344,8 @@ impl ServerError {
             | Self::BlockingTask(_)
             | Self::InvalidPath
             | Self::UnregisteredFile(_)
-            | Self::RevisionConflict => "INTERNAL",
+            | Self::RevisionConflict
+            | Self::TooManyRevisions => "INTERNAL",
         }
     }
 
@@ -367,9 +392,13 @@ impl ServerError {
             Self::TooManyUploadSessions | Self::TooManyRegistryTokenRequests => {
                 StatusCode::TOO_MANY_REQUESTS
             }
+            Self::LfsPatchTooManySessions => StatusCode::TOO_MANY_REQUESTS,
+            Self::LfsPatchStoreFull => StatusCode::PAYLOAD_TOO_LARGE,
+            Self::LfsPatchRangeNotSatisfiable => StatusCode::RANGE_NOT_SATISFIABLE,
+            Self::S3UploadTooManyParts => StatusCode::TOO_MANY_REQUESTS,
             Self::UploadIntentConflict => StatusCode::CONFLICT,
             Self::InvalidPath | Self::UnregisteredFile(_) => StatusCode::BAD_REQUEST,
-            Self::RevisionConflict => StatusCode::CONFLICT,
+            Self::RevisionConflict | Self::TooManyRevisions => StatusCode::CONFLICT,
             Self::TransferLimiterClosed
             | Self::TransferLimiterTimedOut
             | Self::WorkQueueSaturated
@@ -487,7 +516,8 @@ impl From<XetAdapterError> for ServerError {
             XetAdapterError::InvalidContentHash => Self::InvalidContentHash,
             XetAdapterError::InvalidXorbPrefix => Self::InvalidXorbPrefix,
             XetAdapterError::XorbHashMismatch => Self::XorbHashMismatch,
-            XetAdapterError::InvalidSerializedXorb => Self::InvalidSerializedXorb,
+            XetAdapterError::InvalidSerializedXorb
+            | XetAdapterError::XorbUnpackedLengthExceedsCap => Self::InvalidSerializedXorb,
             XetAdapterError::InvalidSerializedShard(e) => Self::InvalidSerializedShard(e),
             XetAdapterError::MissingReferencedXorb => Self::MissingReferencedXorb,
             XetAdapterError::TooManyShardTerms => Self::TooManyShardTerms,
@@ -695,7 +725,9 @@ impl shardline_s3_adapter::S3ErrorClassify for ServerError {
     fn s3_class(&self) -> shardline_s3_adapter::S3ErrorClass {
         use shardline_s3_adapter::S3ErrorClass;
         match self {
-            Self::RangeNotSatisfiable => S3ErrorClass::RangeNotSatisfiable,
+            Self::RangeNotSatisfiable | Self::LfsPatchRangeNotSatisfiable => {
+                S3ErrorClass::RangeNotSatisfiable
+            }
             Self::NotFound => S3ErrorClass::NotFound,
             Self::MissingAuthorization
             | Self::InvalidAuthorizationHeader
@@ -749,6 +781,9 @@ impl shardline_s3_adapter::S3ErrorClassify for ServerError {
             | Self::UnauthorizedChallenge(_)
             | Self::InvalidUploadSession
             | Self::TooManyUploadSessions
+            | Self::LfsPatchTooManySessions
+            | Self::LfsPatchStoreFull
+            | Self::S3UploadTooManyParts
             | Self::TooManyRegistryTokenRequests
             | Self::MissingReconstructionCacheRedisUrl
             | Self::TransferLimiterClosed
@@ -758,7 +793,8 @@ impl shardline_s3_adapter::S3ErrorClassify for ServerError {
             | Self::BlockingTask(_)
             | Self::InvalidPath
             | Self::UnregisteredFile(_)
-            | Self::RevisionConflict => S3ErrorClass::Internal,
+            | Self::RevisionConflict
+            | Self::TooManyRevisions => S3ErrorClass::Internal,
         }
     }
 }

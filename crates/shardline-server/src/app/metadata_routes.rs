@@ -17,17 +17,19 @@ use axum::{
     Json,
     body::Body,
     extract::{Path, Query, State},
-    http::HeaderMap,
     response::{IntoResponse, Response},
 };
 use serde::{Deserialize, Serialize};
 use shardline_index::{RepoKey, RevisionRecord, TreeKey};
-use shardline_protocol::{TokenScope, unix_now_seconds_lossy};
+use shardline_protocol::unix_now_seconds_lossy;
+use shardline_server_core::AuthorizedRepository;
 
 use crate::{
     ServerError,
-    app::{AppState, authorize, endpoint_body_limit, scope_from_auth},
-    auth::AuthContext,
+    app::{
+        AppState, endpoint_body_limit,
+        reconstruction_routes::{XetRepository, XetWriteRepository},
+    },
     upload_ingest::{RequestBodyReader, read_body_to_bytes},
 };
 
@@ -116,6 +118,16 @@ pub(super) struct RevisionJson {
 #[derive(Debug, Serialize)]
 pub(super) struct RevisionsResponse {
     revisions: Vec<RevisionJson>,
+    #[serde(rename = "nextCursor")]
+    next_cursor: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct RevisionsQuery {
+    #[serde(rename = "limit")]
+    limit: Option<usize>,
+    #[serde(rename = "cursor")]
+    cursor: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -184,39 +196,48 @@ fn validate_revision(rev: &str) -> Result<(), ServerError> {
     Ok(())
 }
 
+/// Validates a provider/owner/repo path segment, mirroring the revision-name
+/// controls so the per-row amplification of the revision registry cannot be
+/// inflated with oversized identity segments (F-75).
+fn validate_repo_segment(segment: &str) -> Result<(), ServerError> {
+    if segment.is_empty() || segment.len() > 512 || segment.chars().any(char::is_control) {
+        return Err(ServerError::InvalidPath);
+    }
+    Ok(())
+}
+
 /// Cross-checks the authenticated scope against the full route scope, including revision.
 fn check_scope(
-    auth: Option<&AuthContext>,
+    auth: Option<&AuthorizedRepository>,
     provider: &str,
     owner: &str,
     repo: &str,
     rev: &str,
 ) -> Result<(), ServerError> {
-    if let Some(auth) = auth {
-        let scope = auth.claims().repository();
-        if scope.provider().as_str() != provider
-            || scope.owner() != owner
-            || scope.name() != repo
-            || scope.revision() != Some(rev)
-        {
-            return Err(ServerError::InsufficientScope);
-        }
+    if let Some(repository_scope) = auth.and_then(AuthorizedRepository::repository)
+        && (repository_scope.provider().as_str() != provider
+            || repository_scope.owner() != owner
+            || repository_scope.name() != repo
+            || repository_scope.revision() != Some(rev))
+    {
+        return Err(ServerError::InsufficientScope);
     }
     Ok(())
 }
 
 /// Cross-checks the authenticated scope against the route repository identity only.
 fn check_scope_repo(
-    auth: Option<&AuthContext>,
+    auth: Option<&AuthorizedRepository>,
     provider: &str,
     owner: &str,
     repo: &str,
 ) -> Result<(), ServerError> {
-    if let Some(auth) = auth {
-        let scope = auth.claims().repository();
-        if scope.provider().as_str() != provider || scope.owner() != owner || scope.name() != repo {
-            return Err(ServerError::InsufficientScope);
-        }
+    if let Some(repository_scope) = auth.and_then(AuthorizedRepository::repository)
+        && (repository_scope.provider().as_str() != provider
+            || repository_scope.owner() != owner
+            || repository_scope.name() != repo)
+    {
+        return Err(ServerError::InsufficientScope);
     }
     Ok(())
 }
@@ -259,11 +280,11 @@ fn derive_child(scan_prefix: &str, raw_path: &str) -> Option<(String, bool)> {
 pub(super) async fn tree_lookup(
     State(state): State<Arc<AppState>>,
     Path((provider, owner, repo, rev)): Path<(String, String, String, String)>,
-    headers: HeaderMap,
+    repo_capability: XetRepository,
     Query(query): Query<TreeLookupQuery>,
 ) -> Result<Response, ServerError> {
-    let auth = authorize(&state, &headers, TokenScope::Read)?;
-    check_scope(auth.as_ref(), &provider, &owner, &repo, &rev)?;
+    let auth = Some(repo_capability.capability());
+    check_scope(auth, &provider, &owner, &repo, &rev)?;
     validate_revision(&rev)?;
 
     if let Some(path) = query.path.as_deref() {
@@ -359,12 +380,17 @@ async fn build_list_response(
 pub(super) async fn register_path(
     State(state): State<Arc<AppState>>,
     Path((provider, owner, repo, rev, path)): Path<(String, String, String, String, String)>,
-    headers: HeaderMap,
+    repo_capability: XetWriteRepository,
     body: Body,
 ) -> Result<Json<RegisterResponse>, ServerError> {
-    let auth = authorize(&state, &headers, TokenScope::Write)?;
-    check_scope(auth.as_ref(), &provider, &owner, &repo, &rev)?;
+    let auth = Some(repo_capability.capability());
+    check_scope(auth, &provider, &owner, &repo, &rev)?;
     validate_revision(&rev)?;
+    // register_path auto-creates a revision registry row (F-89), so the same
+    // provider/owner/repo segment controls as create_revision apply here.
+    validate_repo_segment(&provider)?;
+    validate_repo_segment(&owner)?;
+    validate_repo_segment(&repo)?;
     let path = normalize_path(&path, false)?;
 
     let max_bytes = endpoint_body_limit(
@@ -377,10 +403,20 @@ pub(super) async fn register_path(
         serde_json::from_slice(&bytes).map_err(|_error| ServerError::InvalidPath)?;
 
     let key = TreeKey::new(&provider, &owner, &repo, &rev);
-    let scope = auth.as_ref().map(scope_from_auth);
+    let scope = repo_capability.capability().namespace();
+    // Thread the F-75 per-repo revision cap and the F-103 per-repo tree-entry
+    // cap into the backend so the auto-create in register_tree_path enforces
+    // the same bounds as create_revision (F-89) plus the tree-entry bound.
     let outcome = state
         .backend
-        .register_tree_path(&key, &path, &parsed.file_id, scope)
+        .register_tree_path(
+            &key,
+            &path,
+            &parsed.file_id,
+            scope,
+            state.config.max_revisions_per_repo(),
+            state.config.max_tree_entries_per_repo(),
+        )
         .await?;
     Ok(Json(RegisterResponse {
         path: outcome.entry.path,
@@ -394,11 +430,11 @@ pub(super) async fn register_path(
 pub(super) async fn delete_path(
     State(state): State<Arc<AppState>>,
     Path((provider, owner, repo, rev, path)): Path<(String, String, String, String, String)>,
-    headers: HeaderMap,
+    repo_capability: XetWriteRepository,
     Query(query): Query<DeletePathQuery>,
 ) -> Result<Json<DeletePathResponse>, ServerError> {
-    let auth = authorize(&state, &headers, TokenScope::Write)?;
-    check_scope(auth.as_ref(), &provider, &owner, &repo, &rev)?;
+    let auth = Some(repo_capability.capability());
+    check_scope(auth, &provider, &owner, &repo, &rev)?;
     validate_revision(&rev)?;
     let path = normalize_path(&path, false)?;
     let recursive = query.recursive.unwrap_or(false);
@@ -417,12 +453,28 @@ pub(super) async fn delete_path(
 pub(super) async fn list_revisions(
     State(state): State<Arc<AppState>>,
     Path((provider, owner, repo)): Path<(String, String, String)>,
-    headers: HeaderMap,
+    repo_capability: XetRepository,
+    Query(query): Query<RevisionsQuery>,
 ) -> Result<Json<RevisionsResponse>, ServerError> {
-    let auth = authorize(&state, &headers, TokenScope::Read)?;
-    check_scope_repo(auth.as_ref(), &provider, &owner, &repo)?;
+    let auth = Some(repo_capability.capability());
+    check_scope_repo(auth, &provider, &owner, &repo)?;
+    // Bounded listing mirroring the tree listing: a limit (default 1000,
+    // capped at MAX_TREE_LIST_LIMIT) plus an optional keyset cursor, so a repo
+    // with 100k revisions cannot force one request to buffer the whole
+    // registry. Fetch limit+1 rows to detect a next page.
+    let limit = parse_limit(query.limit)?;
     let key = RepoKey::new(&provider, &owner, &repo);
-    let revisions = state.backend.list_revisions(&key).await?;
+    let revisions = state
+        .backend
+        .list_revisions(&key, query.cursor.as_deref(), limit.saturating_add(1))
+        .await?;
+    let has_more = revisions.len() > limit;
+    let revisions: Vec<_> = revisions.into_iter().take(limit).collect();
+    let next_cursor = if has_more {
+        revisions.last().map(|record| record.revision.clone())
+    } else {
+        None
+    };
     Ok(Json(RevisionsResponse {
         revisions: revisions
             .into_iter()
@@ -432,17 +484,32 @@ pub(super) async fn list_revisions(
                 updated_at: record.updated_at_unix_seconds,
             })
             .collect(),
+        next_cursor,
     }))
 }
 
 pub(super) async fn create_revision(
     State(state): State<Arc<AppState>>,
     Path((provider, owner, repo, rev)): Path<(String, String, String, String)>,
-    headers: HeaderMap,
+    repo_capability: XetWriteRepository,
 ) -> Result<Json<RevisionJson>, ServerError> {
-    let auth = authorize(&state, &headers, TokenScope::Write)?;
-    check_scope(auth.as_ref(), &provider, &owner, &repo, &rev)?;
+    let auth = Some(repo_capability.capability());
+    check_scope(auth, &provider, &owner, &repo, &rev)?;
     validate_revision(&rev)?;
+    // Bound the per-row amplification of the revision registry (F-75): the
+    // provider/owner/repo identity is stored verbatim in every revision row,
+    // so enforce the same length/charset controls as the revision name.
+    validate_repo_segment(&provider)?;
+    validate_repo_segment(&owner)?;
+    validate_repo_segment(&repo)?;
+    // Per-repo revision-registry cap (F-75): reject new names once the repo
+    // is at capacity. The count-then-insert race at the boundary is accepted;
+    // the cap is a bound on growth, not a hard invariant.
+    let key = RepoKey::new(&provider, &owner, &repo);
+    let count = state.backend.count_revisions(&key).await?;
+    if count >= u64::try_from(state.config.max_revisions_per_repo().get()).unwrap_or(u64::MAX) {
+        return Err(ServerError::TooManyRevisions);
+    }
     let now = unix_now_seconds_lossy();
     let record = RevisionRecord {
         provider: provider.clone(),
@@ -466,10 +533,10 @@ pub(super) async fn create_revision(
 pub(super) async fn delete_revision(
     State(state): State<Arc<AppState>>,
     Path((provider, owner, repo, rev)): Path<(String, String, String, String)>,
-    headers: HeaderMap,
+    repo_capability: XetWriteRepository,
 ) -> Result<Json<DeleteRevisionResponse>, ServerError> {
-    let auth = authorize(&state, &headers, TokenScope::Write)?;
-    check_scope(auth.as_ref(), &provider, &owner, &repo, &rev)?;
+    let auth = Some(repo_capability.capability());
+    check_scope(auth, &provider, &owner, &repo, &rev)?;
     validate_revision(&rev)?;
     let key = RepoKey::new(&provider, &owner, &repo);
     let deleted = state.backend.delete_revision(&key, &rev).await?;

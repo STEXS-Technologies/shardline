@@ -251,21 +251,70 @@ fn revision_sql(
         .map_err(LocalIndexStoreError::from)
 }
 
+fn count_revisions_sql(
+    connection: &Connection,
+    key: &RepoKey,
+) -> Result<u64, LocalIndexStoreError> {
+    let count: i64 = connection.query_row(
+        "SELECT COUNT(*)
+         FROM shardline_revisions
+         WHERE provider = ?1 AND owner = ?2 AND repo = ?3",
+        params![key.provider, key.owner, key.repo],
+        |row| row.get(0),
+    )?;
+    Ok(u64::try_from(count).unwrap_or(u64::MAX))
+}
+
+fn count_tree_entries_sql(
+    connection: &Connection,
+    key: &RepoKey,
+) -> Result<u64, LocalIndexStoreError> {
+    let count: i64 = connection.query_row(
+        "SELECT COUNT(*)
+         FROM shardline_tree_entries
+         WHERE provider = ?1 AND owner = ?2 AND repo = ?3",
+        params![key.provider, key.owner, key.repo],
+        |row| row.get(0),
+    )?;
+    Ok(u64::try_from(count).unwrap_or(u64::MAX))
+}
+
 fn list_revisions_sql(
     connection: &Connection,
     key: &RepoKey,
+    cursor: Option<&str>,
+    limit: usize,
 ) -> Result<Vec<RevisionRecord>, LocalIndexStoreError> {
-    let mut statement = connection.prepare(
+    use rusqlite::types::Value;
+    use std::fmt::Write as _;
+
+    let mut sql = String::from(
         "SELECT provider, owner, repo, revision, created_at_unix_seconds,
                 updated_at_unix_seconds
          FROM shardline_revisions
-         WHERE provider = ?1 AND owner = ?2 AND repo = ?3
-         ORDER BY revision",
-    )?;
-    let rows = statement.query_map(
-        params![key.provider, key.owner, key.repo],
-        revision_record_from_row,
-    )?;
+         WHERE provider = ?1 AND owner = ?2 AND repo = ?3",
+    );
+    let mut args: Vec<Value> = vec![
+        Value::Text(key.provider.clone()),
+        Value::Text(key.owner.clone()),
+        Value::Text(key.repo.clone()),
+    ];
+    let mut index = 4usize;
+    if let Some(cursor) = cursor {
+        write!(sql, " AND revision > ?{index}")
+            .map_err(|e| LocalIndexStoreError::Io(std::io::Error::other(e)))?;
+        args.push(Value::Text(cursor.to_owned()));
+        index = index.saturating_add(1);
+    }
+    let limit_i64 =
+        i64::try_from(limit).map_err(|e| LocalIndexStoreError::IntegerOutOfRange(e.to_string()))?;
+    sql.push_str(" ORDER BY revision");
+    write!(sql, " LIMIT ?{index}")
+        .map_err(|e| LocalIndexStoreError::Io(std::io::Error::other(e)))?;
+    args.push(Value::Integer(limit_i64));
+
+    let mut statement = connection.prepare(&sql)?;
+    let rows = statement.query_map(params_from_iter(args.iter()), revision_record_from_row)?;
     collect_rows(rows)
 }
 
@@ -287,6 +336,66 @@ fn delete_revision_sql(
     )?;
     transaction.commit()?;
     Ok(u64::try_from(revision_rows).unwrap_or(u64::MAX))
+}
+
+/// Deletes the oldest `prune_limit` revision rows for a repository (ordered
+/// by created-at, then revision name) together with every tree entry of those
+/// revisions, returning how many revision rows were removed.
+///
+/// The subqueries select the same oldest rows both times: the tree-entry
+/// delete does not touch `shardline_revisions`, so the second subquery still
+/// sees the full pre-prune row set. `prune_limit` is pre-computed by the
+/// caller as `count - max_revisions` (never called when at/below the cap).
+fn prune_revisions_over_cap_sql(
+    connection: &Connection,
+    key: &RepoKey,
+    prune_limit: u64,
+) -> Result<u64, LocalIndexStoreError> {
+    let limit_i64 = i64::try_from(prune_limit)
+        .map_err(|e| LocalIndexStoreError::IntegerOutOfRange(e.to_string()))?;
+    let transaction = connection.unchecked_transaction()?;
+    transaction.execute(
+        "DELETE FROM shardline_tree_entries
+         WHERE provider = ?1 AND owner = ?2 AND repo = ?3
+           AND revision IN (
+               SELECT revision FROM shardline_revisions
+               WHERE provider = ?1 AND owner = ?2 AND repo = ?3
+               ORDER BY created_at_unix_seconds, revision
+               LIMIT ?4
+           )",
+        params![key.provider, key.owner, key.repo, limit_i64],
+    )?;
+    let revision_rows = transaction.execute(
+        "DELETE FROM shardline_revisions
+         WHERE provider = ?1 AND owner = ?2 AND repo = ?3
+           AND revision IN (
+               SELECT revision FROM shardline_revisions
+               WHERE provider = ?1 AND owner = ?2 AND repo = ?3
+               ORDER BY created_at_unix_seconds, revision
+               LIMIT ?4
+           )",
+        params![key.provider, key.owner, key.repo, limit_i64],
+    )?;
+    transaction.commit()?;
+    Ok(u64::try_from(revision_rows).unwrap_or(u64::MAX))
+}
+
+fn list_revision_repo_keys_sql(
+    connection: &Connection,
+) -> Result<Vec<RepoKey>, LocalIndexStoreError> {
+    let mut statement = connection.prepare(
+        "SELECT DISTINCT provider, owner, repo
+         FROM shardline_revisions
+         ORDER BY provider, owner, repo",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok(RepoKey {
+            provider: row.get("provider")?,
+            owner: row.get("owner")?,
+            repo: row.get("repo")?,
+        })
+    })?;
+    collect_rows(rows)
 }
 
 #[async_trait::async_trait]
@@ -383,12 +492,40 @@ impl TreeStore for LocalIndexStore {
         .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
     }
 
-    async fn list_revisions(&self, key: &RepoKey) -> Result<Vec<RevisionRecord>, Self::Error> {
+    async fn count_revisions(&self, key: &RepoKey) -> Result<u64, Self::Error> {
         let store = self.clone();
         let key = key.clone();
         tokio::task::spawn_blocking(move || {
             let connection = store.open_connection()?;
-            list_revisions_sql(&connection, &key)
+            count_revisions_sql(&connection, &key)
+        })
+        .await
+        .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
+    }
+
+    async fn count_tree_entries(&self, key: &RepoKey) -> Result<u64, Self::Error> {
+        let store = self.clone();
+        let key = key.clone();
+        tokio::task::spawn_blocking(move || {
+            let connection = store.open_connection()?;
+            count_tree_entries_sql(&connection, &key)
+        })
+        .await
+        .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
+    }
+
+    async fn list_revisions(
+        &self,
+        key: &RepoKey,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<RevisionRecord>, Self::Error> {
+        let store = self.clone();
+        let key = key.clone();
+        let cursor = cursor.map(ToOwned::to_owned);
+        tokio::task::spawn_blocking(move || {
+            let connection = store.open_connection()?;
+            list_revisions_sql(&connection, &key, cursor.as_deref(), limit)
         })
         .await
         .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
@@ -401,6 +538,39 @@ impl TreeStore for LocalIndexStore {
         tokio::task::spawn_blocking(move || {
             let connection = store.open_connection()?;
             delete_revision_sql(&connection, &key, &rev)
+        })
+        .await
+        .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
+    }
+
+    async fn prune_revisions_over_cap(
+        &self,
+        key: &RepoKey,
+        max_revisions: usize,
+    ) -> Result<u64, Self::Error> {
+        let store = self.clone();
+        let key = key.clone();
+        tokio::task::spawn_blocking(move || {
+            let connection = store.open_connection()?;
+            let count = count_revisions_sql(&connection, &key)?;
+            let cap = u64::try_from(max_revisions).unwrap_or(u64::MAX);
+            let Some(prune_limit) = count.checked_sub(cap) else {
+                return Ok(0);
+            };
+            if prune_limit == 0 {
+                return Ok(0);
+            }
+            prune_revisions_over_cap_sql(&connection, &key, prune_limit)
+        })
+        .await
+        .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
+    }
+
+    async fn list_revision_repo_keys(&self) -> Result<Vec<RepoKey>, Self::Error> {
+        let store = self.clone();
+        tokio::task::spawn_blocking(move || {
+            let connection = store.open_connection()?;
+            list_revision_repo_keys_sql(&connection)
         })
         .await
         .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
@@ -589,7 +759,7 @@ mod tests {
             .unwrap();
         assert_eq!(loaded, rev);
 
-        let listed = TreeStore::list_revisions(&store, &repo_key())
+        let listed = TreeStore::list_revisions(&store, &repo_key(), None, 100)
             .await
             .unwrap();
         assert_eq!(listed.len(), 1);
@@ -683,11 +853,42 @@ mod tests {
                 .is_none()
         );
         assert!(
-            TreeStore::list_revisions(&store, &repo_key())
+            TreeStore::list_revisions(&store, &repo_key(), None, 100)
                 .await
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn list_revisions_respects_limit_and_cursor() {
+        let store = make_store();
+        for n in 0..5u8 {
+            let rev = RevisionRecord {
+                provider: "github".to_owned(),
+                owner: "owner".to_owned(),
+                repo: "repo".to_owned(),
+                revision: format!("rev-{n:02}"),
+                created_at_unix_seconds: u64::from(n),
+                updated_at_unix_seconds: u64::from(n),
+            };
+            assert!(TreeStore::upsert_revision(&store, &rev).await.unwrap());
+        }
+
+        // A bounded listing returns at most `limit` rows, ordered by revision.
+        let first = TreeStore::list_revisions(&store, &repo_key(), None, 3)
+            .await
+            .unwrap();
+        let names: Vec<&str> = first.iter().map(|r| r.revision.as_str()).collect();
+        assert_eq!(names, vec!["rev-00", "rev-01", "rev-02"]);
+
+        // The cursor resumes after the last returned revision name.
+        let cursor = first.last().unwrap().revision.clone();
+        let rest = TreeStore::list_revisions(&store, &repo_key(), Some(&cursor), 100)
+            .await
+            .unwrap();
+        let names: Vec<&str> = rest.iter().map(|r| r.revision.as_str()).collect();
+        assert_eq!(names, vec!["rev-03", "rev-04"]);
     }
 
     #[tokio::test]
@@ -710,6 +911,301 @@ mod tests {
             !TreeStore::upsert_revision(&store, &refreshed)
                 .await
                 .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn count_revisions_counts_only_the_matching_repo() {
+        let store = make_store();
+        assert_eq!(
+            TreeStore::count_revisions(&store, &repo_key())
+                .await
+                .unwrap(),
+            0
+        );
+        for n in 0..5u8 {
+            let rev = RevisionRecord {
+                provider: "github".to_owned(),
+                owner: "owner".to_owned(),
+                repo: "repo".to_owned(),
+                revision: format!("rev-{n:02}"),
+                created_at_unix_seconds: u64::from(n),
+                updated_at_unix_seconds: u64::from(n),
+            };
+            assert!(TreeStore::upsert_revision(&store, &rev).await.unwrap());
+        }
+        assert_eq!(
+            TreeStore::count_revisions(&store, &repo_key())
+                .await
+                .unwrap(),
+            5
+        );
+
+        // A same-name upsert does not grow the count; a different repo is not
+        // counted against this repository.
+        let refreshed = RevisionRecord {
+            provider: "github".to_owned(),
+            owner: "owner".to_owned(),
+            repo: "repo".to_owned(),
+            revision: "rev-00".to_owned(),
+            created_at_unix_seconds: 9,
+            updated_at_unix_seconds: 9,
+        };
+        assert!(
+            !TreeStore::upsert_revision(&store, &refreshed)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            TreeStore::count_revisions(&store, &repo_key())
+                .await
+                .unwrap(),
+            5
+        );
+        let other = RepoKey::new("github", "owner", "other-repo");
+        assert_eq!(TreeStore::count_revisions(&store, &other).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn count_tree_entries_counts_only_the_matching_repo() {
+        let store = make_store();
+        assert_eq!(
+            TreeStore::count_tree_entries(&store, &repo_key())
+                .await
+                .unwrap(),
+            0
+        );
+        // Distinct paths across multiple revisions all count against the repo.
+        for (revision, path) in [("main", "a.txt"), ("main", "b.txt"), ("feature", "c.txt")] {
+            assert!(
+                TreeStore::upsert_tree_entry(&store, &entry(revision, path, &file_id(1), 10, 100))
+                    .await
+                    .unwrap()
+                    .created
+            );
+        }
+        assert_eq!(
+            TreeStore::count_tree_entries(&store, &repo_key())
+                .await
+                .unwrap(),
+            3
+        );
+
+        // A same-path upsert does not grow the count; a different repo is not
+        // counted against this repository.
+        assert!(
+            !TreeStore::upsert_tree_entry(&store, &entry("main", "a.txt", &file_id(2), 20, 200))
+                .await
+                .unwrap()
+                .created
+        );
+        assert_eq!(
+            TreeStore::count_tree_entries(&store, &repo_key())
+                .await
+                .unwrap(),
+            3
+        );
+        let other = RepoKey::new("github", "owner", "other-repo");
+        assert_eq!(
+            TreeStore::count_tree_entries(&store, &other).await.unwrap(),
+            0
+        );
+    }
+
+    async fn insert_revision_record(
+        store: &LocalIndexStore,
+        provider: &str,
+        owner: &str,
+        repo: &str,
+        revision: &str,
+        created_at: u64,
+    ) {
+        let rev = RevisionRecord {
+            provider: provider.to_owned(),
+            owner: owner.to_owned(),
+            repo: repo.to_owned(),
+            revision: revision.to_owned(),
+            created_at_unix_seconds: created_at,
+            updated_at_unix_seconds: created_at,
+        };
+        assert!(TreeStore::upsert_revision(store, &rev).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn prune_revisions_over_cap_removes_oldest_down_to_cap() {
+        let store = make_store();
+        // created_at is deliberately NOT aligned with the name order, so the
+        // prune must follow created-at (oldest first), not the name order that
+        // `list_revisions` uses for pagination.
+        insert_revision_record(&store, "github", "owner", "repo", "rev-b", 200).await;
+        insert_revision_record(&store, "github", "owner", "repo", "rev-a", 100).await;
+        insert_revision_record(&store, "github", "owner", "repo", "rev-c", 300).await;
+        insert_revision_record(&store, "github", "owner", "repo", "rev-e", 500).await;
+        insert_revision_record(&store, "github", "owner", "repo", "rev-d", 400).await;
+        assert_eq!(
+            TreeStore::count_revisions(&store, &repo_key())
+                .await
+                .unwrap(),
+            5
+        );
+
+        let removed = TreeStore::prune_revisions_over_cap(&store, &repo_key(), 2)
+            .await
+            .unwrap();
+        assert_eq!(removed, 3);
+        assert_eq!(
+            TreeStore::count_revisions(&store, &repo_key())
+                .await
+                .unwrap(),
+            2
+        );
+        // The three oldest (rev-a@100, rev-b@200, rev-c@300) were evicted; the
+        // two newest-created (rev-d@400, rev-e@500) survive regardless of name.
+        let remaining = TreeStore::list_revisions(&store, &repo_key(), None, 100)
+            .await
+            .unwrap();
+        let names: Vec<&str> = remaining.iter().map(|r| r.revision.as_str()).collect();
+        assert_eq!(names, vec!["rev-d", "rev-e"]);
+    }
+
+    #[tokio::test]
+    async fn prune_revisions_over_cap_ties_break_by_name_and_cascade_tree_rows() {
+        let store = make_store();
+        // Same created_at for every row: the name tiebreaker decides, so
+        // rev-00..rev-02 are the oldest and must be evicted first.
+        for n in 0..5u8 {
+            insert_revision_record(&store, "github", "owner", "repo", &format!("rev-{n:02}"), 7)
+                .await;
+        }
+        // Tree rows for the to-be-pruned revisions must cascade away.
+        for n in 0..5u8 {
+            TreeStore::upsert_tree_entry(
+                &store,
+                &entry(&format!("rev-{n:02}"), "x.txt", &file_id(n + 1), 1, 1),
+            )
+            .await
+            .unwrap();
+        }
+        let removed = TreeStore::prune_revisions_over_cap(&store, &repo_key(), 3)
+            .await
+            .unwrap();
+        assert_eq!(removed, 2);
+        let remaining = TreeStore::list_revisions(&store, &repo_key(), None, 100)
+            .await
+            .unwrap();
+        let names: Vec<&str> = remaining.iter().map(|r| r.revision.as_str()).collect();
+        assert_eq!(names, vec!["rev-02", "rev-03", "rev-04"]);
+        // The evicted revisions' tree rows are gone; the survivors' remain.
+        assert!(
+            TreeStore::scan_tree(&store, &key("rev-00"), "", None, 100)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            TreeStore::scan_tree(&store, &key("rev-01"), "", None, 100)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            TreeStore::scan_tree(&store, &key("rev-02"), "", None, 100)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn prune_revisions_over_cap_leaves_at_cap_and_below_untouched() {
+        let store = make_store();
+        for n in 0..3u8 {
+            insert_revision_record(
+                &store,
+                "github",
+                "owner",
+                "repo",
+                &format!("rev-{n:02}"),
+                u64::from(n),
+            )
+            .await;
+        }
+        // At exactly the cap: nothing to prune.
+        let removed = TreeStore::prune_revisions_over_cap(&store, &repo_key(), 3)
+            .await
+            .unwrap();
+        assert_eq!(removed, 0);
+        assert_eq!(
+            TreeStore::count_revisions(&store, &repo_key())
+                .await
+                .unwrap(),
+            3
+        );
+        // Below the cap: nothing to prune.
+        let removed = TreeStore::prune_revisions_over_cap(&store, &repo_key(), 10)
+            .await
+            .unwrap();
+        assert_eq!(removed, 0);
+        assert_eq!(
+            TreeStore::count_revisions(&store, &repo_key())
+                .await
+                .unwrap(),
+            3
+        );
+    }
+
+    #[tokio::test]
+    async fn prune_revisions_over_cap_leaves_other_repos_untouched() {
+        let store = make_store();
+        for n in 0..5u8 {
+            insert_revision_record(
+                &store,
+                "github",
+                "owner",
+                "repo",
+                &format!("rev-{n:02}"),
+                u64::from(n),
+            )
+            .await;
+        }
+        let other = RepoKey::new("github", "owner", "other-repo");
+        insert_revision_record(&store, "github", "owner", "other-repo", "main", 1).await;
+
+        let removed = TreeStore::prune_revisions_over_cap(&store, &repo_key(), 2)
+            .await
+            .unwrap();
+        assert_eq!(removed, 3);
+        // The other repo is untouched.
+        assert_eq!(TreeStore::count_revisions(&store, &other).await.unwrap(), 1);
+        let other_list = TreeStore::list_revisions(&store, &other, None, 100)
+            .await
+            .unwrap();
+        assert_eq!(other_list[0].revision, "main");
+    }
+
+    #[tokio::test]
+    async fn list_revision_repo_keys_returns_distinct_repos_ordered() {
+        let store = make_store();
+        assert!(
+            TreeStore::list_revision_repo_keys(&store)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        insert_revision_record(&store, "github", "owner", "repo", "main", 1).await;
+        insert_revision_record(&store, "github", "owner", "repo", "feature", 2).await;
+        insert_revision_record(&store, "github", "owner", "other-repo", "main", 3).await;
+        insert_revision_record(&store, "gitlab", "team", "assets", "main", 4).await;
+
+        let keys = TreeStore::list_revision_repo_keys(&store).await.unwrap();
+        assert_eq!(
+            keys,
+            vec![
+                RepoKey::new("github", "owner", "other-repo"),
+                RepoKey::new("github", "owner", "repo"),
+                RepoKey::new("gitlab", "team", "assets"),
+            ]
         );
     }
 }

@@ -14,10 +14,13 @@ use tracing;
 
 use super::super::secrets::ensure_secret_size_within_limit;
 use super::defaults::{
-    CONFIG_SECRET_KEY_BYTES, DEFAULT_MAX_REQUEST_BODY_BYTES,
-    DEFAULT_OCI_REGISTRY_TOKEN_MAX_IN_FLIGHT_REQUESTS, DEFAULT_OCI_REGISTRY_TOKEN_TTL_SECONDS,
-    DEFAULT_OCI_UPLOAD_MAX_ACTIVE_SESSIONS, DEFAULT_OCI_UPLOAD_SESSION_TTL_SECONDS,
-    DEFAULT_PARALLELISM_FALLBACK, DEFAULT_S3_MAX_PART_BYTES, DEFAULT_S3_MIN_PART_BYTES,
+    CONFIG_SECRET_KEY_BYTES, DEFAULT_LFS_PATCH_MAX_ACTIVE_SESSIONS,
+    DEFAULT_LFS_PATCH_MAX_SEEK_AHEAD_BYTES, DEFAULT_LFS_PATCH_TOTAL_MAX_BYTES,
+    DEFAULT_LFS_PATCH_TTL_SECONDS, DEFAULT_MAX_REQUEST_BODY_BYTES, DEFAULT_MAX_REVISIONS_PER_REPO,
+    DEFAULT_MAX_TREE_ENTRIES_PER_REPO, DEFAULT_OCI_REGISTRY_TOKEN_MAX_IN_FLIGHT_REQUESTS,
+    DEFAULT_OCI_REGISTRY_TOKEN_TTL_SECONDS, DEFAULT_OCI_UPLOAD_MAX_ACTIVE_SESSIONS,
+    DEFAULT_OCI_UPLOAD_SESSION_TTL_SECONDS, DEFAULT_PARALLELISM_FALLBACK,
+    DEFAULT_S3_MAX_PART_BYTES, DEFAULT_S3_MIN_PART_BYTES, DEFAULT_S3_UPLOAD_MAX_ACTIVE_PART_FILES,
     DEFAULT_S3_UPLOAD_MAX_ACTIVE_SESSIONS, DEFAULT_S3_UPLOAD_SESSION_MAX_BYTES,
     DEFAULT_S3_UPLOAD_SESSION_TTL_SECONDS, DEFAULT_S3_UPLOAD_TOTAL_MAX_BYTES,
     HUB_WEBHOOK_SECRET_KEY_BYTES, MAX_DEFAULT_TRANSFER_MAX_IN_FLIGHT_CHUNKS,
@@ -64,6 +67,12 @@ pub struct ServerConfig {
     pub(crate) index_postgres_url: Option<SecretString>,
     pub(crate) metrics_token: Option<SecretBytes>,
     pub(crate) deployment_mode: DeploymentMode,
+    /// Whether the deployment mode was explicitly selected (e.g. via
+    /// `SHARDLINE_DEPLOYMENT_MODE`), as opposed to the built-in insecure
+    /// default. Used by the plaintext-secret gate: an explicit Insecure choice
+    /// opts out, while the implicit default still fails loud.
+    pub(crate) deployment_mode_explicitly_set: bool,
+    pub(crate) allow_plaintext_secrets_in_production: bool,
     pub(crate) auth: AuthConfig,
     pub(crate) oci: OciConfig,
     pub(crate) cache: CacheConfig,
@@ -76,6 +85,13 @@ pub struct ServerConfig {
     pub(crate) s3_upload_max_active_sessions: NonZeroUsize,
     pub(crate) s3_upload_session_max_bytes: NonZeroU64,
     pub(crate) s3_upload_total_max_bytes: NonZeroU64,
+    pub(crate) s3_upload_max_active_part_files: NonZeroUsize,
+    pub(crate) lfs_patch_ttl_seconds: NonZeroU64,
+    pub(crate) lfs_patch_max_active_sessions: NonZeroUsize,
+    pub(crate) lfs_patch_total_max_bytes: NonZeroU64,
+    pub(crate) lfs_patch_max_seek_ahead_bytes: NonZeroU64,
+    pub(crate) max_revisions_per_repo: NonZeroUsize,
+    pub(crate) max_tree_entries_per_repo: NonZeroUsize,
 }
 
 impl ServerConfig {
@@ -126,12 +142,16 @@ impl ServerConfig {
             index_postgres_url: None,
             metrics_token: None,
             deployment_mode: DeploymentMode::default(),
+            deployment_mode_explicitly_set: false,
+            allow_plaintext_secrets_in_production: false,
             auth: AuthConfig {
                 token_signing_key: None,
                 hub_webhook_secret_key: None,
                 config_secret_key: None,
                 auth_provider: AuthProviderKind::Local,
                 auth_oidc_issuer: None,
+                auth_oidc_audience: None,
+                auth_oidc_jwks_host_allowlist: None,
                 auth_jwks_url: None,
                 auth_jwks_issuer: None,
                 ed25519_private_key: None,
@@ -165,6 +185,13 @@ impl ServerConfig {
             s3_upload_max_active_sessions: DEFAULT_S3_UPLOAD_MAX_ACTIVE_SESSIONS,
             s3_upload_session_max_bytes: DEFAULT_S3_UPLOAD_SESSION_MAX_BYTES,
             s3_upload_total_max_bytes: DEFAULT_S3_UPLOAD_TOTAL_MAX_BYTES,
+            s3_upload_max_active_part_files: DEFAULT_S3_UPLOAD_MAX_ACTIVE_PART_FILES,
+            lfs_patch_ttl_seconds: DEFAULT_LFS_PATCH_TTL_SECONDS,
+            lfs_patch_max_active_sessions: DEFAULT_LFS_PATCH_MAX_ACTIVE_SESSIONS,
+            lfs_patch_total_max_bytes: DEFAULT_LFS_PATCH_TOTAL_MAX_BYTES,
+            lfs_patch_max_seek_ahead_bytes: DEFAULT_LFS_PATCH_MAX_SEEK_AHEAD_BYTES,
+            max_revisions_per_repo: DEFAULT_MAX_REVISIONS_PER_REPO,
+            max_tree_entries_per_repo: DEFAULT_MAX_TREE_ENTRIES_PER_REPO,
         }
     }
 
@@ -508,6 +535,24 @@ impl ServerConfig {
         self.auth.auth_oidc_issuer.as_deref()
     }
 
+    /// Returns the optional OIDC audience (`aud` claim) validated for tokens.
+    #[must_use]
+    pub fn auth_oidc_audience(&self) -> Option<&str> {
+        self.auth.auth_oidc_audience.as_deref()
+    }
+
+    /// Returns the allowlist of hosts (besides the issuer's own host) whose
+    /// JWKS endpoints the OIDC discovery document may advertise via `jwks_uri`.
+    ///
+    /// Some IdPs legitimately cross-host their JWKS endpoint onto a different
+    /// domain than the issuer (e.g. Google serves keys from
+    /// `www.googleapis.com` while the issuer is `accounts.google.com`). When
+    /// unset, only the issuer's own host is accepted (fail-closed).
+    #[must_use]
+    pub fn auth_oidc_jwks_host_allowlist(&self) -> Option<&[String]> {
+        self.auth.auth_oidc_jwks_host_allowlist.as_deref()
+    }
+
     /// Returns the optional JWKS endpoint URL.
     #[must_use]
     pub fn auth_jwks_url(&self) -> Option<&str> {
@@ -578,9 +623,32 @@ impl ServerConfig {
     }
 
     /// Overrides the deployment security mode.
+    ///
+    /// Marks the mode as explicitly selected so the plaintext-secret gate can
+    /// distinguish "operator chose Insecure" from "insecure default left in
+    /// place" (see [`Self::validate_plaintext_secrets_in_production`]).
     #[must_use]
     pub const fn with_deployment_mode(mut self, mode: DeploymentMode) -> Self {
         self.deployment_mode = mode;
+        self.deployment_mode_explicitly_set = true;
+        self
+    }
+
+    /// Returns whether plaintext persistent secrets are permitted in
+    /// non-insecure (production) deployment modes.
+    #[must_use]
+    pub const fn allow_plaintext_secrets_in_production(&self) -> bool {
+        self.allow_plaintext_secrets_in_production
+    }
+
+    /// Explicitly permits plaintext persistent secrets in non-insecure
+    /// deployment modes.
+    ///
+    /// This is an insecure override intended only for migrating an existing
+    /// deployment to at-rest secret encryption.
+    #[must_use]
+    pub const fn with_allow_plaintext_secrets_in_production(mut self, value: bool) -> Self {
+        self.allow_plaintext_secrets_in_production = value;
         self
     }
 
@@ -711,8 +779,9 @@ impl ServerConfig {
         Ok(self)
     }
 
-    /// Returns the S3 multipart minimum part size in bytes (S3's 5 MiB rule for
-    /// all but the final part).
+    /// Returns the S3 multipart minimum part size in bytes (S3's 5 MiB rule
+    /// for all but the last part, enforced at `CompleteMultipartUpload` only —
+    /// `UploadPart` accepts any body size, matching S3).
     #[must_use]
     pub const fn s3_min_part_bytes(&self) -> NonZeroU64 {
         self.s3_min_part_bytes
@@ -768,6 +837,159 @@ impl ServerConfig {
         s3_upload_total_max_bytes: NonZeroU64,
     ) -> Result<Self, ServerConfigError> {
         self.s3_upload_total_max_bytes = s3_upload_total_max_bytes;
+        Ok(self)
+    }
+
+    /// Returns the global cap on part files stored across all active S3
+    /// multipart upload sessions.
+    #[must_use]
+    pub const fn s3_upload_max_active_part_files(&self) -> NonZeroUsize {
+        self.s3_upload_max_active_part_files
+    }
+
+    /// Overrides the global cap on part files stored across all active S3
+    /// multipart upload sessions.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerConfigError::S3UploadMaxActivePartFiles`] when the
+    /// value is zero.
+    pub const fn with_s3_upload_max_active_part_files(
+        mut self,
+        s3_upload_max_active_part_files: NonZeroUsize,
+    ) -> Result<Self, ServerConfigError> {
+        self.s3_upload_max_active_part_files = s3_upload_max_active_part_files;
+        Ok(self)
+    }
+
+    /// Returns the LFS chunked-patch (PATCH) staging TTL in seconds.
+    #[must_use]
+    pub const fn lfs_patch_ttl_seconds(&self) -> NonZeroU64 {
+        self.lfs_patch_ttl_seconds
+    }
+
+    /// Overrides the LFS chunked-patch (PATCH) staging TTL in seconds.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerConfigError::LfsPatchTtl`] when the value is zero.
+    pub const fn with_lfs_patch_ttl_seconds(
+        mut self,
+        lfs_patch_ttl_seconds: NonZeroU64,
+    ) -> Result<Self, ServerConfigError> {
+        self.lfs_patch_ttl_seconds = lfs_patch_ttl_seconds;
+        Ok(self)
+    }
+
+    /// Returns the maximum number of concurrently active LFS chunked-patch
+    /// sessions.
+    #[must_use]
+    pub const fn lfs_patch_max_active_sessions(&self) -> NonZeroUsize {
+        self.lfs_patch_max_active_sessions
+    }
+
+    /// Overrides the maximum number of concurrently active LFS chunked-patch
+    /// sessions.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerConfigError::LfsPatchMaxActiveSessions`] when the value
+    /// is zero.
+    pub const fn with_lfs_patch_max_active_sessions(
+        mut self,
+        lfs_patch_max_active_sessions: NonZeroUsize,
+    ) -> Result<Self, ServerConfigError> {
+        self.lfs_patch_max_active_sessions = lfs_patch_max_active_sessions;
+        Ok(self)
+    }
+
+    /// Returns the aggregate byte cap across active LFS chunked-patch
+    /// sessions.
+    #[must_use]
+    pub const fn lfs_patch_total_max_bytes(&self) -> NonZeroU64 {
+        self.lfs_patch_total_max_bytes
+    }
+
+    /// Overrides the aggregate byte cap across active LFS chunked-patch
+    /// sessions.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerConfigError::LfsPatchTotalMaxBytes`] when the value is
+    /// zero.
+    pub const fn with_lfs_patch_total_max_bytes(
+        mut self,
+        lfs_patch_total_max_bytes: NonZeroU64,
+    ) -> Result<Self, ServerConfigError> {
+        self.lfs_patch_total_max_bytes = lfs_patch_total_max_bytes;
+        Ok(self)
+    }
+
+    /// Returns the maximum distance an LFS chunked-patch (PATCH)
+    /// `Content-Range` may start ahead of the session's current high-water
+    /// mark.
+    #[must_use]
+    pub const fn lfs_patch_max_seek_ahead_bytes(&self) -> NonZeroU64 {
+        self.lfs_patch_max_seek_ahead_bytes
+    }
+
+    /// Overrides the maximum distance an LFS chunked-patch (PATCH)
+    /// `Content-Range` may start ahead of the session's current high-water
+    /// mark.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerConfigError::LfsPatchMaxSeekAheadBytes`] when the value
+    /// is zero.
+    pub const fn with_lfs_patch_max_seek_ahead_bytes(
+        mut self,
+        lfs_patch_max_seek_ahead_bytes: NonZeroU64,
+    ) -> Result<Self, ServerConfigError> {
+        self.lfs_patch_max_seek_ahead_bytes = lfs_patch_max_seek_ahead_bytes;
+        Ok(self)
+    }
+
+    /// Returns the per-repo revision-registry cap: `create_revision` rejects
+    /// new revision names once a repository has reached this many registered
+    /// revisions.
+    #[must_use]
+    pub const fn max_revisions_per_repo(&self) -> NonZeroUsize {
+        self.max_revisions_per_repo
+    }
+
+    /// Overrides the per-repo revision-registry cap.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerConfigError::ZeroMaxRevisionsPerRepo`] when the value
+    /// is zero.
+    pub const fn with_max_revisions_per_repo(
+        mut self,
+        max_revisions_per_repo: NonZeroUsize,
+    ) -> Result<Self, ServerConfigError> {
+        self.max_revisions_per_repo = max_revisions_per_repo;
+        Ok(self)
+    }
+
+    /// Returns the per-repo tree-entry cap: `register_path` rejects new path
+    /// mappings once a repository has reached this many tree-entry rows
+    /// (across every revision).
+    #[must_use]
+    pub const fn max_tree_entries_per_repo(&self) -> NonZeroUsize {
+        self.max_tree_entries_per_repo
+    }
+
+    /// Overrides the per-repo tree-entry cap.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerConfigError::ZeroMaxTreeEntriesPerRepo`] when the value
+    /// is zero.
+    pub const fn with_max_tree_entries_per_repo(
+        mut self,
+        max_tree_entries_per_repo: NonZeroUsize,
+    ) -> Result<Self, ServerConfigError> {
+        self.max_tree_entries_per_repo = max_tree_entries_per_repo;
         Ok(self)
     }
 
@@ -938,6 +1160,26 @@ impl ServerConfig {
         self
     }
 
+    /// Sets the OIDC audience (`aud` claim) validated for tokens issued by the
+    /// OIDC auth provider.
+    ///
+    /// When set, tokens whose `aud` claim does not match are rejected. When
+    /// unset, the `aud` claim is not validated (see the startup warning in
+    /// [`crate::app::build_auth_provider`]).
+    #[must_use]
+    pub fn with_auth_oidc_audience(mut self, audience: String) -> Self {
+        self.auth.auth_oidc_audience = Some(audience);
+        self
+    }
+
+    /// Sets the allowlist of hosts (besides the issuer's own host) whose JWKS
+    /// endpoints the OIDC discovery document may advertise via `jwks_uri`.
+    #[must_use]
+    pub fn with_auth_oidc_jwks_host_allowlist(mut self, hosts: Vec<String>) -> Self {
+        self.auth.auth_oidc_jwks_host_allowlist = Some(hosts);
+        self
+    }
+
     /// Sets the JWKS endpoint URL for the JWKS auth provider.
     #[must_use]
     pub fn with_auth_jwks_url(mut self, url: String) -> Self {
@@ -1029,6 +1271,10 @@ impl ServerConfig {
     ///
     /// Returns [`ServerConfigError::ConfigFileError`] when the deployment mode
     /// constraints are not satisfied.
+    ///
+    /// Returns [`ServerConfigError::PlaintextSecretsInProduction`] when a
+    /// non-insecure deployment mode would persist secrets without at-rest
+    /// encryption keys.
     pub fn validate_runtime_requirements(&self) -> Result<(), ServerConfigError> {
         // The CDC chunker requires a power-of-two chunk size; a misconfigured
         // value must fail startup with a clear error instead of panicking on
@@ -1068,11 +1314,77 @@ impl ServerConfig {
 
         self.validate_deployment_mode_requirements()?;
 
+        self.validate_plaintext_secrets_in_production()?;
+
         Ok(())
     }
 
+    /// Validates that persistent secrets are never stored unencrypted in a
+    /// production (non-insecure) deployment mode unless explicitly permitted.
+    ///
+    /// The plaintext gate is armed whenever persistent secrets are present
+    /// without an at-rest encryption key UNLESS the operator explicitly opted
+    /// out: either `SHARDLINE_ALLOW_PLAINTEXT_SECRETS_IN_PRODUCTION` is set, or
+    /// the deployment mode was EXPLICITLY set to Insecure. Because the default
+    /// (unset) mode is Insecure, the default case — secrets configured with no
+    /// encryption key and no mode override — fails loud instead of silently
+    /// persisting secrets in plaintext.
+    fn validate_plaintext_secrets_in_production(&self) -> Result<(), ServerConfigError> {
+        if self.allow_plaintext_secrets_in_production {
+            return Ok(());
+        }
+        let explicitly_insecure =
+            self.deployment_mode == DeploymentMode::Insecure && self.deployment_mode_explicitly_set;
+        if explicitly_insecure {
+            return Ok(());
+        }
+        let surfaces = self.plaintext_secret_surfaces();
+        if surfaces.is_empty() {
+            return Ok(());
+        }
+        Err(ServerConfigError::PlaintextSecretsInProduction {
+            surfaces: surfaces.join("; "),
+        })
+    }
+
+    /// Returns the enabled surfaces whose persistent secrets would be stored
+    /// in plaintext because no at-rest encryption key is configured.
+    fn plaintext_secret_surfaces(&self) -> Vec<&'static str> {
+        let mut surfaces = Vec::new();
+        if self.server_frontends().contains(&ServerFrontend::Hub)
+            && self.auth.hub_webhook_secret_key.is_none()
+        {
+            surfaces.push("hub webhook signing secrets (set SHARDLINE_HUB_WEBHOOK_SECRET_KEY)");
+        }
+        if (self.provider.config_path.is_some() || self.provider.api_key.is_some())
+            && self.auth.config_secret_key.is_none()
+        {
+            surfaces.push("provider-config webhook secrets (set SHARDLINE_CONFIG_SECRET_KEY)");
+        }
+        surfaces
+    }
+
+    /// Returns true when this config will actually produce a REAL auth
+    /// provider.
+    ///
+    /// Mirrors `build_auth_provider`: the Local provider with no token signing
+    /// key maps to permissive mode (`None`). Passthrough is also NOT a real
+    /// provider here: it trusts every inbound token (authenticated in name
+    /// only — the actual control is the loopback-bind requirement enforced in
+    /// [`Self::validate_runtime_requirements`]) and is handled separately as
+    /// the trusted-proxy carve-out for [`DeploymentMode::Authenticated`].
+    /// Every other configured provider kind (Local with a key, Oidc, Jwks,
+    /// Ed25519) yields a real provider that `authorize()` enforces.
+    pub(crate) fn auth_provider_is_configured(&self) -> bool {
+        if self.auth.auth_provider == AuthProviderKind::Passthrough {
+            return false;
+        }
+        !(self.auth.auth_provider == AuthProviderKind::Local
+            && self.auth.token_signing_key.is_none())
+    }
+
     /// Validates deployment-mode-specific constraints.
-    fn validate_deployment_mode_requirements(&self) -> Result<(), ServerConfigError> {
+    pub(crate) fn validate_deployment_mode_requirements(&self) -> Result<(), ServerConfigError> {
         match self.deployment_mode {
             DeploymentMode::Strict => {
                 // Passthrough auth is forbidden in strict mode
@@ -1087,27 +1399,61 @@ impl ServerConfig {
                         "strict deployment mode requires a token signing key".into(),
                     ));
                 }
-                // Metrics token should be configured
+                // Metrics token is required: without it /metrics serves the
+                // platform's runtime state to any unauthenticated caller,
+                // which the strict-mode contract forbids (enums.rs documents
+                // the metrics token as required).
                 if self.metrics_token().is_none() {
-                    tracing::warn!(
-                        "strict deployment mode recommends configuring SHARDLINE_METRICS_TOKEN_FILE"
-                    );
+                    return Err(ServerConfigError::MissingMetricsToken);
                 }
             }
             DeploymentMode::Authenticated => {
-                // Some auth provider must be configured (not None)
                 if self.auth.auth_provider == AuthProviderKind::Passthrough {
-                    // Passthrough is allowed in authenticated mode but warn
+                    // Passthrough trusts every inbound token (authenticated in
+                    // name only); the real control is the loopback-bind
+                    // requirement enforced in `validate_runtime_requirements`.
+                    // This is the explicit trusted-proxy carve-out: warn but do
+                    // not treat Passthrough as a configured auth provider.
                     tracing::warn!(
                         "authenticated mode with passthrough auth: only use behind a trusted proxy"
                     );
+                } else if !self.auth_provider_is_configured() {
+                    // Some real auth provider must be configured; without one
+                    // the mode fails open to anonymous full access. Passthrough
+                    // does NOT satisfy this requirement (it is handled by the
+                    // carve-out above).
+                    return Err(ServerConfigError::ConfigFileError(
+                        "authenticated deployment mode requires a configured auth provider \
+                         (set SHARDLINE_TOKEN_SIGNING_KEY_FILE or an OIDC/JWKS/Ed25519 provider; \
+                         the passthrough provider does not satisfy this requirement)"
+                            .into(),
+                    ));
                 }
             }
             DeploymentMode::Insecure => {
-                // Allow everything — warn that this is not for production
-                tracing::warn!(
-                    "insecure deployment mode: all requests are allowed without authentication"
-                );
+                // Refuse to boot a fully unauthenticated server on a
+                // non-loopback address when the Insecure mode is only the
+                // implicit (unset) default and no auth provider is configured:
+                // an operator who did not explicitly choose the mode likely
+                // intends a production deployment. Explicit
+                // SHARDLINE_DEPLOYMENT_MODE=insecure, a loopback bind, or a
+                // configured auth provider each make the intent unambiguous.
+                if !self.deployment_mode_explicitly_set
+                    && !self.auth_provider_is_configured()
+                    && !self.bind_addr.ip().is_loopback()
+                {
+                    return Err(ServerConfigError::InsecureDefaultRequiresExplicitOptIn {
+                        bind_addr: self.bind_addr,
+                    });
+                }
+                // Warn only when no auth provider is configured: with a provider
+                // present, authorize() still enforces authentication despite
+                // the insecure mode.
+                if !self.auth_provider_is_configured() {
+                    tracing::warn!(
+                        "insecure deployment mode: all requests are allowed without authentication"
+                    );
+                }
             }
         }
         Ok(())

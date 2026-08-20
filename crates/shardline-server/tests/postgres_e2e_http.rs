@@ -116,6 +116,7 @@ impl TestServer {
         .unwrap()
         .with_token_signing_key(TEST_SIGNING_KEY.to_vec())
         .unwrap()
+        .with_deployment_mode(shardline_server::DeploymentMode::Insecure)
         .with_index_postgres_url(pg_url.to_owned())
         .unwrap()
         .with_reconstruction_cache_disabled();
@@ -242,6 +243,7 @@ impl TestServerBuilder {
         .with_server_role(self.role)
         .with_server_frontends(self.frontends.clone())
         .unwrap()
+        .with_deployment_mode(shardline_server::DeploymentMode::Insecure)
         .with_token_signing_key(TEST_SIGNING_KEY.to_vec())
         .unwrap()
         .with_index_postgres_url(pg_url.to_owned())
@@ -3187,6 +3189,7 @@ async fn app_with_body_limit(
     .with_server_role(ServerRole::All)
     .with_server_frontends(frontends.to_vec())
     .unwrap()
+    .with_deployment_mode(shardline_server::DeploymentMode::Insecure)
     .with_token_signing_key(TEST_SIGNING_KEY.to_vec())
     .unwrap()
     .with_index_postgres_url(pg_url.to_owned())
@@ -4700,6 +4703,7 @@ async fn test_hub_xet_lfs_triple_coexist() {
         ServerFrontend::Lfs,
     ])
     .unwrap()
+    .with_deployment_mode(shardline_server::DeploymentMode::Insecure)
     .with_token_signing_key(TEST_SIGNING_KEY.to_vec())
     .unwrap()
     .with_index_postgres_url(pg_url.to_owned())
