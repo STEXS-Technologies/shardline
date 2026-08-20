@@ -10,7 +10,7 @@ frontend supports them.**
 It accepts immutable object uploads, deduplicates content, and serves range-aware
 downloads. It is especially useful for large-file versioning when the selected frontend
 keeps revisions or commits, because unchanged content can be reused instead of uploaded
-repeatedly. Use the frontend that fits your workflow—Xet, OCI, Git LFS, S3, Hugging Face
+repeatedly. Use the frontend that fits your workflow: Xet, OCI, Git LFS, S3, Hugging Face
 Hub, cache clients, or the native API—or run it standalone for your own storage needs.
 Pair it with GitHub, GitLab, or Gitea when you want repository-scoped storage.
 
