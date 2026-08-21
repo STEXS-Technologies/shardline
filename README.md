@@ -3,14 +3,16 @@
 [![Status](https://img.shields.io/badge/status-stable-1f6feb)](docs/COMPATIBILITY_STATUS.md)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-green)](#license)
 
-**Shardline is a protocol-neutral content-addressed storage engine, optimized for
-deduplicated model, dataset, container and build-artifact distribution, with Xet, OCI,
-Git LFS, S3, HuggingFace Hub and cache-compatible frontends.**
+**Shardline is a self-hostable content-addressed storage backend for anyone’s storage
+needs, with content deduplication at its core and version-aware workflows where the
+frontend supports them.**
 
-Shardline is a self-hostable content-addressed storage (CAS) server.
 It accepts immutable object uploads, deduplicates content, and serves range-aware
-downloads. Run it standalone or pair it with GitHub, GitLab, or Gitea for
-repository-scoped storage.
+downloads. It is especially useful for large-file versioning when the selected frontend
+keeps revisions or commits, because unchanged content can be reused instead of uploaded
+repeatedly. Use the frontend that fits your workflow: Xet, OCI, Git LFS, S3, Hugging Face
+Hub, cache clients, or the native API—or run it standalone for your own storage needs.
+Pair it with GitHub, GitLab, or Gitea when you want repository-scoped storage.
 
 ## Surface Maturity
 
@@ -57,11 +59,20 @@ repository-scoped storage.
 
 ## Quick start
 
-```bash
-# Run with Docker
-docker compose -f docker-compose.yml up --build
+The recommended first run is the development Compose profile.
+It provisions the local Postgres and MinIO dependencies, applies migrations, and waits
+for them before starting Shardline:
 
-# Or build from source
+```bash
+docker compose -f docker-compose.yml up --build
+```
+
+See [Getting Started](docs/GETTING_STARTED.md) for readiness checks, token creation,
+state cleanup, and the boundary between the development and production profiles.
+
+For a host-native binary:
+
+```bash
 cargo build --release
 ./target/release/shardline serve
 ```
@@ -96,6 +107,7 @@ Provider integration is optional.
 | Guide | Description |
 | --- | --- |
 | [Deployment](docs/DEPLOYMENT.md) | Installation and configuration |
+| [Getting Started](docs/GETTING_STARTED.md) | One deterministic local path from checkout to a running server |
 | [Authentication](docs/AUTHENTICATION.md) | Pluggable auth providers (HMAC, Ed25519, OIDC, JWKS, passthrough) |
 | [HuggingFace Hub API](docs/HUGGINGFACE_HUB_API.md) | Hub API compatibility for huggingface-cli |
 | [S3 Frontend](docs/S3_FRONTEND.md) | S3-compatible object API for lakehouse and s3:// clients |

@@ -41,6 +41,25 @@ version.
   interoperability may still change.
 - **Internal**: architectural component, not a user-facing promise.
 
+## Versioning and Deduplication Semantics
+
+The shared CAS core stores immutable content and reuses identical content whenever a
+new upload refers to it. That does not mean every frontend exposes the same version
+history. Version visibility and overwrite behavior belong to the frontend contract:
+
+| Frontend | User-visible version semantics |
+| --- | --- |
+| Xet | Revision-oriented workflows can address and retrieve older versions. |
+| Git LFS | Version history comes from Git commits and refs; the LFS object endpoint alone is a blob store. |
+| Hugging Face Hub | Repository revisions and commits expose historical states. |
+| OCI | Blobs and manifests are immutable by digest; tags are mutable pointers and have no tag-history API here. |
+| S3 | A `PUT` replaces the logical object key. S3 bucket versioning and `ListObjectVersions` are not implemented. |
+| Bazel HTTP cache | Digest-keyed cache entries have no user-facing version history. |
+
+When an overwrite makes a prior record unreachable, its unique chunks become GC
+candidates after the configured quarantine/retention period. Chunks shared by another
+reachable record remain protected.
+
 ## Validated Route Surface
 
 - Git LFS: batch negotiation plus direct object `GET`, `HEAD`, and `PUT`
