@@ -10,6 +10,7 @@ docs that match your use case.
 
 ## Start Here
 
+- [Getting Started](GETTING_STARTED.md)
 - [Deployment](DEPLOYMENT.md)
 - [Operations](OPERATIONS.md)
 - [Architecture](ARCHITECTURE.md)
