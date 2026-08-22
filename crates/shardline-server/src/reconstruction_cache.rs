@@ -571,6 +571,35 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cache_service_ignores_corrupt_cached_payload_and_repairs_entry() {
+        let put_calls = Arc::new(AtomicUsize::new(0));
+        let adapter: SharedReconstructionCache = Arc::new(StaticCache {
+            payload: Some(b"not a reconstruction response".to_vec()),
+            put_calls: Arc::clone(&put_calls),
+        });
+        let cache = ReconstructionCacheService::for_tests("static", adapter);
+        let key = ReconstructionCacheKey::latest("asset.bin", None);
+        let loader_calls = AtomicUsize::new(0);
+
+        let response = cache
+            .get_or_load(&key, || {
+                loader_calls.fetch_add(1, Ordering::SeqCst);
+                async { Ok(sample_response("chunk-repaired")) }
+            })
+            .await;
+
+        assert!(response.is_ok());
+        assert_eq!(loader_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(put_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            response
+                .ok()
+                .and_then(|value| value.terms.first().map(|term| term.hash.clone())),
+            Some("chunk-repaired".to_owned())
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn cache_service_skips_put_when_loaded_payload_exceeds_bound() {
         let put_calls = Arc::new(AtomicUsize::new(0));
         let stored_payloads = Arc::new(Mutex::new(Vec::new()));
