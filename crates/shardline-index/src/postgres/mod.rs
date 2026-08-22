@@ -1,10 +1,15 @@
 mod index_store;
 mod oci_tags;
+mod provider_mutation;
 mod record_store;
 mod s3_objects;
 mod tree_store;
 mod types;
 
+pub use provider_mutation::{
+    PostgresProviderMutation, PostgresProviderMutationOutcome, PostgresResourceFence,
+    ProviderRepositoryKey,
+};
 pub(crate) use types::RecordKind;
 pub use types::{
     PostgresIndexStore, PostgresMetadataStoreError, PostgresRecordLocator, PostgresRecordStore,
