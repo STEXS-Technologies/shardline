@@ -71,7 +71,9 @@ pub use anchored_fs::{
     rename_at, sync_parent_directory, temporary_file_name, write_anchored_temporary_file,
 };
 pub use async_store::{AsyncObjectStore, SyncObjectStoreBridge};
-pub use fault_injection::LocalPublishBoundary;
+pub use fault_injection::{LocalPublishBoundary, LocalPublishFault};
+#[cfg(feature = "test-fault-injection")]
+pub use fault_injection::{LocalPublishFailpointGuard, arm, arm_fault};
 pub use key::{ObjectKey, ObjectKeyError, ObjectPrefix, ObjectPrefixError};
 pub use local::{LocalObjectStore, LocalObjectStoreError};
 pub use local_path::{
