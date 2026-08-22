@@ -68,6 +68,7 @@ use tokio::{
 const TEST_SIGNING_KEY: &[u8] = b"0123456789abcdef0123456789abcdef";
 const BUCKET: &str = "chaos.chaos";
 const DEFAULT_CHAOS_SEED: u64 = 0x5EED_CAFE;
+const DEFAULT_ROUND_BUDGET_SECONDS: u64 = 30;
 const DEFAULT_CHAOS_ROUNDS: usize = 10;
 const CHUNK: usize = 65536;
 const STALL_CHUNK: usize = 512 * 1024;
@@ -1630,7 +1631,15 @@ async fn chaos_runner() {
     let scale = chaos_scale_enabled();
     let p = scale_params(scale);
     let rounds = if scale { rounds.min(2) } else { rounds };
-    eprintln!("chaos: seed={seed:#x} rounds={rounds} scale={scale}");
+    let default_timeout_seconds = u64::try_from(rounds)
+        .unwrap_or(u64::MAX)
+        .saturating_mul(DEFAULT_ROUND_BUDGET_SECONDS)
+        .max(DEFAULT_ROUND_BUDGET_SECONDS);
+    let timeout_seconds =
+        env_u64("SHARDLINE_CHAOS_TIMEOUT_SECONDS", default_timeout_seconds).max(1);
+    eprintln!(
+        "chaos: seed={seed:#x} rounds={rounds} scale={scale} timeout_seconds={timeout_seconds}"
+    );
     let mut rng = SplitMix64::new(seed);
     let mut harness = ChaosHarness::new();
     harness.spawn_server().await;
@@ -1854,7 +1863,9 @@ async fn chaos_runner() {
         }
         eprintln!("chaos: PASS — {rounds} rounds, seed={seed:#x}");
     };
-    tokio::time::timeout(Duration::from_secs(180), run)
+    tokio::time::timeout(Duration::from_secs(timeout_seconds), run)
         .await
-        .expect("chaos runner exceeded global 180s budget");
+        .unwrap_or_else(|_| {
+            panic!("chaos runner exceeded global {timeout_seconds}s budget for {rounds} rounds")
+        });
 }
