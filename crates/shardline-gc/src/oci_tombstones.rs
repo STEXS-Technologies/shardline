@@ -176,10 +176,7 @@ where
 #[cfg(test)]
 mod tests {
     use proptest::prelude::*;
-    use shardline_index::{
-        FileChunkRecord, LocalIndexStore, OciObjectKey, OciObjectStore as _, RecordTraversal as _,
-        StorageRepresentation,
-    };
+    use shardline_index::{FileChunkRecord, LocalIndexStore, OciObjectKey, StorageRepresentation};
     use shardline_storage::{ObjectBody, ObjectIntegrity};
 
     use super::*;
