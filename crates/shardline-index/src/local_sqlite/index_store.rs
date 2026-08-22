@@ -465,17 +465,53 @@ impl LifecycleStore for LocalIndexStore {
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
              ON CONFLICT (provider, owner, repo)
              DO UPDATE SET
-                last_access_changed_at_unix_seconds =
-                    excluded.last_access_changed_at_unix_seconds,
-                last_revision_pushed_at_unix_seconds =
-                    excluded.last_revision_pushed_at_unix_seconds,
-                last_pushed_revision = excluded.last_pushed_revision,
-                last_cache_invalidated_at_unix_seconds =
-                    excluded.last_cache_invalidated_at_unix_seconds,
-                last_authorization_rechecked_at_unix_seconds =
-                    excluded.last_authorization_rechecked_at_unix_seconds,
-                last_drift_checked_at_unix_seconds =
-                    excluded.last_drift_checked_at_unix_seconds,
+                last_access_changed_at_unix_seconds = CASE
+                    WHEN excluded.last_access_changed_at_unix_seconds IS NULL
+                        THEN shardline_provider_repository_states.last_access_changed_at_unix_seconds
+                    WHEN shardline_provider_repository_states.last_access_changed_at_unix_seconds IS NULL
+                      OR excluded.last_access_changed_at_unix_seconds >= shardline_provider_repository_states.last_access_changed_at_unix_seconds
+                        THEN excluded.last_access_changed_at_unix_seconds
+                    ELSE shardline_provider_repository_states.last_access_changed_at_unix_seconds
+                END,
+                last_pushed_revision = CASE
+                    WHEN excluded.last_revision_pushed_at_unix_seconds IS NOT NULL
+                     AND (shardline_provider_repository_states.last_revision_pushed_at_unix_seconds IS NULL
+                       OR excluded.last_revision_pushed_at_unix_seconds >= shardline_provider_repository_states.last_revision_pushed_at_unix_seconds)
+                        THEN excluded.last_pushed_revision
+                    ELSE shardline_provider_repository_states.last_pushed_revision
+                END,
+                last_revision_pushed_at_unix_seconds = CASE
+                    WHEN excluded.last_revision_pushed_at_unix_seconds IS NULL
+                        THEN shardline_provider_repository_states.last_revision_pushed_at_unix_seconds
+                    WHEN shardline_provider_repository_states.last_revision_pushed_at_unix_seconds IS NULL
+                      OR excluded.last_revision_pushed_at_unix_seconds >= shardline_provider_repository_states.last_revision_pushed_at_unix_seconds
+                        THEN excluded.last_revision_pushed_at_unix_seconds
+                    ELSE shardline_provider_repository_states.last_revision_pushed_at_unix_seconds
+                END,
+                last_cache_invalidated_at_unix_seconds = CASE
+                    WHEN excluded.last_cache_invalidated_at_unix_seconds IS NULL
+                        THEN shardline_provider_repository_states.last_cache_invalidated_at_unix_seconds
+                    WHEN shardline_provider_repository_states.last_cache_invalidated_at_unix_seconds IS NULL
+                      OR excluded.last_cache_invalidated_at_unix_seconds >= shardline_provider_repository_states.last_cache_invalidated_at_unix_seconds
+                        THEN excluded.last_cache_invalidated_at_unix_seconds
+                    ELSE shardline_provider_repository_states.last_cache_invalidated_at_unix_seconds
+                END,
+                last_authorization_rechecked_at_unix_seconds = CASE
+                    WHEN excluded.last_authorization_rechecked_at_unix_seconds IS NULL
+                        THEN shardline_provider_repository_states.last_authorization_rechecked_at_unix_seconds
+                    WHEN shardline_provider_repository_states.last_authorization_rechecked_at_unix_seconds IS NULL
+                      OR excluded.last_authorization_rechecked_at_unix_seconds >= shardline_provider_repository_states.last_authorization_rechecked_at_unix_seconds
+                        THEN excluded.last_authorization_rechecked_at_unix_seconds
+                    ELSE shardline_provider_repository_states.last_authorization_rechecked_at_unix_seconds
+                END,
+                last_drift_checked_at_unix_seconds = CASE
+                    WHEN excluded.last_drift_checked_at_unix_seconds IS NULL
+                        THEN shardline_provider_repository_states.last_drift_checked_at_unix_seconds
+                    WHEN shardline_provider_repository_states.last_drift_checked_at_unix_seconds IS NULL
+                      OR excluded.last_drift_checked_at_unix_seconds >= shardline_provider_repository_states.last_drift_checked_at_unix_seconds
+                        THEN excluded.last_drift_checked_at_unix_seconds
+                    ELSE shardline_provider_repository_states.last_drift_checked_at_unix_seconds
+                END,
                 updated_at_unix_seconds = excluded.updated_at_unix_seconds",
             params![
                 state.provider().as_str(),
@@ -1166,6 +1202,60 @@ mod tests {
         )
         .expect("lookup should succeed");
         assert_eq!(loaded, Some(state));
+    }
+
+    #[test]
+    fn provider_repository_state_upsert_merges_partial_and_stale_observations() {
+        let store = make_store();
+        let revision = ProviderRepositoryState::new(
+            RepositoryProvider::GitHub,
+            "team".into(),
+            "merge".into(),
+            None,
+            Some(200),
+            Some("new-revision".into()),
+        )
+        .with_reconciliation(None, Some(180), None);
+        let independent = ProviderRepositoryState::new(
+            RepositoryProvider::GitHub,
+            "team".into(),
+            "merge".into(),
+            Some(150),
+            None,
+            None,
+        )
+        .with_reconciliation(Some(170), None, Some(190));
+        let stale = ProviderRepositoryState::new(
+            RepositoryProvider::GitHub,
+            "team".into(),
+            "merge".into(),
+            Some(100),
+            Some(120),
+            Some("stale-revision".into()),
+        )
+        .with_reconciliation(Some(110), Some(130), Some(140));
+
+        for state in [&revision, &independent, &stale] {
+            LifecycleStore::upsert_provider_repository_state(&store, state).unwrap();
+        }
+
+        let loaded = LifecycleStore::provider_repository_state(
+            &store,
+            RepositoryProvider::GitHub,
+            "team",
+            "merge",
+        )
+        .unwrap()
+        .expect("merged state");
+        assert_eq!(loaded.last_access_changed_at_unix_seconds(), Some(150));
+        assert_eq!(loaded.last_revision_pushed_at_unix_seconds(), Some(200));
+        assert_eq!(loaded.last_pushed_revision(), Some("new-revision"));
+        assert_eq!(loaded.last_cache_invalidated_at_unix_seconds(), Some(170));
+        assert_eq!(
+            loaded.last_authorization_rechecked_at_unix_seconds(),
+            Some(180)
+        );
+        assert_eq!(loaded.last_drift_checked_at_unix_seconds(), Some(190));
     }
 
     #[test]

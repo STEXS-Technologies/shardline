@@ -454,7 +454,10 @@ pub trait LifecycleStore {
         ProviderRepositoryState
     );
 
-    /// Inserts or replaces durable provider-derived lifecycle state for one repository.
+    /// Atomically merges durable provider-derived lifecycle state for one repository.
+    ///
+    /// Timestamped observations are monotonic and absent fields do not erase
+    /// observations recorded by another writer.
     ///
     /// # Errors
     ///
@@ -672,7 +675,10 @@ pub trait AsyncIndexStore {
         ProviderRepositoryState
     );
 
-    /// Inserts or replaces durable provider-derived lifecycle state for one repository.
+    /// Atomically merges durable provider-derived lifecycle state for one repository.
+    ///
+    /// Timestamped observations are monotonic and absent fields do not erase
+    /// observations recorded by another writer.
     fn upsert_provider_repository_state<'operation>(
         &'operation self,
         state: &'operation ProviderRepositoryState,
