@@ -1,4 +1,4 @@
-use sqlx::{Row, postgres::PgRow, query};
+use sqlx::{PgConnection, Row, postgres::PgRow, query};
 
 use super::{PostgresIndexStore, PostgresMetadataStoreError, u64_to_i64};
 use crate::{OciTagEntry, OciTagStore};
@@ -10,6 +10,62 @@ fn entry_from_row(row: &PgRow) -> Result<OciTagEntry, PostgresMetadataStoreError
         tag: row.try_get("tag")?,
         digest_hex: row.try_get("digest_hex")?,
     })
+}
+
+impl PostgresIndexStore {
+    /// Upserts an OCI tag through a caller-owned Postgres connection.
+    ///
+    /// This is used by the server's fenced resource guard so the mutation and
+    /// session advisory lock share one database session.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PostgresMetadataStoreError`] when Postgres rejects the mutation.
+    pub async fn upsert_oci_tag_on_connection(
+        &self,
+        connection: &mut PgConnection,
+        entry: &OciTagEntry,
+    ) -> Result<(), PostgresMetadataStoreError> {
+        query(
+            "INSERT INTO shardline_oci_tags (scope_namespace, repository, tag, digest_hex)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (scope_namespace, repository, tag)
+             DO UPDATE SET digest_hex = EXCLUDED.digest_hex",
+        )
+        .bind(&entry.scope_namespace)
+        .bind(&entry.repository)
+        .bind(&entry.tag)
+        .bind(&entry.digest_hex)
+        .execute(connection)
+        .await?;
+        Ok(())
+    }
+
+    /// Digest-guarded OCI tag deletion through a caller-owned connection.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PostgresMetadataStoreError`] when Postgres rejects the mutation.
+    pub async fn delete_oci_tag_if_digest_on_connection(
+        &self,
+        connection: &mut PgConnection,
+        scope_namespace: &str,
+        repository: &str,
+        tag: &str,
+        digest_hex: &str,
+    ) -> Result<bool, PostgresMetadataStoreError> {
+        let result = query(
+            "DELETE FROM shardline_oci_tags
+             WHERE scope_namespace = $1 AND repository = $2 AND tag = $3 AND digest_hex = $4",
+        )
+        .bind(scope_namespace)
+        .bind(repository)
+        .bind(tag)
+        .bind(digest_hex)
+        .execute(connection)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
 }
 
 #[async_trait::async_trait]

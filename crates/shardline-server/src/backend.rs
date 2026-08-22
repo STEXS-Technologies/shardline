@@ -111,7 +111,7 @@ impl ServerBackend {
         root: &Path,
         domain: &str,
         resource: &str,
-    ) -> Result<crate::maintenance_barrier::MaintenanceBarrierGuard, ServerError> {
+    ) -> Result<crate::maintenance_barrier::ResourceWriteGuard, ServerError> {
         match self {
             Self::Local(_) => {
                 crate::maintenance_barrier::acquire_local_resource_exclusive(root, domain, resource)
@@ -465,10 +465,29 @@ impl ServerBackend {
         }
     }
 
-    pub(crate) async fn upsert_oci_tag(&self, entry: &OciTagEntry) -> Result<(), ServerError> {
+    /// Upserts an OCI tag through the connection that owns the repository fence.
+    pub(crate) async fn upsert_oci_tag_locked(
+        &self,
+        guard: &mut crate::maintenance_barrier::ResourceWriteGuard,
+        entry: &OciTagEntry,
+    ) -> Result<(), ServerError> {
         match self {
-            Self::Local(backend) => backend.upsert_oci_tag(entry).await,
-            Self::Postgres(backend) => backend.upsert_oci_tag(entry).await,
+            Self::Local(backend) => {
+                if guard.postgres_connection_mut().is_some() {
+                    return Err(ServerError::StaleResourceFence);
+                }
+                backend.upsert_oci_tag(entry).await
+            }
+            Self::Postgres(backend) => {
+                let connection = guard
+                    .postgres_connection_mut()
+                    .ok_or(ServerError::StaleResourceFence)?;
+                backend
+                    .index_store()
+                    .upsert_oci_tag_on_connection(connection, entry)
+                    .await?;
+                Ok(())
+            }
         }
     }
 
@@ -535,8 +554,10 @@ impl ServerBackend {
         }
     }
 
-    pub(crate) async fn delete_oci_tag_if_digest(
+    /// Deletes an OCI tag through the connection that owns the repository fence.
+    pub(crate) async fn delete_oci_tag_if_digest_locked(
         &self,
+        guard: &mut crate::maintenance_barrier::ResourceWriteGuard,
         scope_namespace: &str,
         repository: &str,
         tag: &str,
@@ -544,14 +565,27 @@ impl ServerBackend {
     ) -> Result<bool, ServerError> {
         match self {
             Self::Local(backend) => {
+                if guard.postgres_connection_mut().is_some() {
+                    return Err(ServerError::StaleResourceFence);
+                }
                 backend
                     .delete_oci_tag_if_digest(scope_namespace, repository, tag, digest_hex)
                     .await
             }
             Self::Postgres(backend) => {
-                backend
-                    .delete_oci_tag_if_digest(scope_namespace, repository, tag, digest_hex)
-                    .await
+                let connection = guard
+                    .postgres_connection_mut()
+                    .ok_or(ServerError::StaleResourceFence)?;
+                Ok(backend
+                    .index_store()
+                    .delete_oci_tag_if_digest_on_connection(
+                        connection,
+                        scope_namespace,
+                        repository,
+                        tag,
+                        digest_hex,
+                    )
+                    .await?)
             }
         }
     }
@@ -1530,6 +1564,7 @@ fn server_error_to_oci(error: ServerError) -> shardline_oci_adapter::OciAdapterE
         | ServerError::TransferLimiterTimedOut
         | ServerError::WorkQueueSaturated
         | ServerError::RequestTimedOut
+        | ServerError::StaleResourceFence
         | ServerError::SigningKeyError(_)
         | ServerError::InvalidPath
         | ServerError::UnregisteredFile(_)

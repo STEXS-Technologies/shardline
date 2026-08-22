@@ -12,7 +12,7 @@ The scaled topology uses:
 - one shared Postgres metadata database
 - one shared S3-compatible object store
 - one shared `ReadWriteMany` API staging filesystem with cross-node advisory locks
-- any number of API and transfer replicas running the same barrier-aware version
+- any number of API and transfer replicas running the same barrier/fence-aware version
 
 SQLite is supported for a local deployment. Multiple local processes must share the
 same root filesystem and its advisory-lock implementation; SQLite itself still limits
@@ -27,7 +27,7 @@ write throughput, so Postgres is the production multi-replica metadata backend.
 | S3 conditional object write | exactly one matching writer wins | metadata-row insert-if-absent or compare-and-swap; loser receives `412` |
 | S3 unconditional write | one complete version is visible, last metadata commit wins | immutable record first, atomic metadata-row swap second |
 | Hub ref/revision mutation | stale parent loses; delete cannot interleave with a push | SQLite transaction or Postgres repository-row lock |
-| OCI tag | one authoritative digest | unique metadata key plus database upsert/digest-guarded delete |
+| OCI tag | one authoritative digest; a stale lock owner cannot retarget it | unique metadata key plus upsert/digest-guarded delete on the lock-owning fenced Postgres session |
 | OCI manifest/tag/blob deletion | operations in one repository are ordered | repository-scoped local/Postgres advisory lock |
 | provider reconciliation fields | timestamps never move backward and revision matches its winning timestamp | atomic field-wise maximum merge in SQLite/Postgres |
 | provider rename/delete/push/access event | old and new repository identities do not interleave | repository-scoped locks; rename acquires both identities in sorted order |
@@ -44,9 +44,16 @@ metadata from different versions.
 ## Lock Domains And Ordering
 
 Application resource locks use a stable SHA-256-derived identity. Local deployments
-lock files beneath `.resource-locks`; Postgres deployments use transaction-scoped
-advisory locks. Locks are domain-separated, so an OCI repository and provider
-repository with the same text do not alias.
+lock files beneath `.resource-locks`. Postgres deployments use a dedicated
+session-level advisory lock and atomically advance a durable epoch in
+`shardline_resource_fences`; the dedicated connection is closed on guard drop and is
+never returned to the pool with a lock attached. Locks are domain-separated, so an OCI
+repository and provider repository with the same text do not alias.
+
+OCI tag mutations run on the same connection that owns the lock and epoch. Protocol
+commit boundaries also revalidate the epoch through that connection. A terminated
+database session therefore releases its advisory lock, a replacement owner advances
+the epoch, and the stale owner fails closed instead of acknowledging success.
 
 Operations needing more than one resource sort their lock identities before acquiring
 them. Provider rename is the current two-resource operation: it locks old and new
@@ -74,14 +81,26 @@ LFS uses 256 hashed lock stripes, bounding lock-file growth independently of the
 of client OIDs. S3 multipart uses one lock inside each already-bounded session directory.
 Expired session sweeps take the same locks as active writers before deleting files.
 
-## Failure Boundary Still Under Test
+## Remaining Fencing Boundary
 
-Postgres transaction advisory locks close normal replica races, but they are not a
-fencing token. If a node loses the database connection that owns a resource lock while
-continuing an object-store operation, another node can acquire the released lock before
-the first node observes failure. Stable arbitrary-multi-writer status therefore remains
-unclaimed until failover tests either prove every affected commit revalidates ownership
-or the operation adopts a persisted epoch/fencing check.
+Persisted epochs and dedicated lock-owning sessions now detect a terminated owner, and
+OCI tag metadata commits are fenced on that session. The checked Postgres test
+terminates the first backend, proves the replacement receives a higher epoch, and
+proves the old guard can no longer validate or mutate through its owning connection.
+
+Two categories still prevent a Stable arbitrary-multi-writer claim:
+
+- OCI manifest/blob deletion directly changes the object store, which cannot validate a
+  Postgres epoch. A connection can theoretically fail after the final validation but
+  before that external delete.
+- provider rename/delete spans several Postgres record and lifecycle statements. The
+  request detects lost ownership before acknowledging success, but those statements are
+  not yet one fenced transaction on the lock-owning connection.
+
+Those operations need logical tombstones/deferred GC or one fenced database transaction
+before the remaining claim can be closed. Immutable content-addressed puts are safe:
+their keys cannot be retargeted and a failed metadata commit leaves only unreachable
+debris.
 
 Until that work is complete:
 
@@ -97,4 +116,3 @@ Older replicas do not participate in newly added resource locks or the GC barrie
 a rolling API upgrade, route OCI manifest/blob deletion and provider webhook mutations
 only to new replicas, and suspend destructive GC. Resume unrestricted routing only when
 all replicas run the new version. See [Rolling Upgrade](ROLLING_UPGRADE.md).
-

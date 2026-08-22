@@ -527,11 +527,6 @@ impl super::PostgresBackend {
             .map_err(ServerError::from)
     }
 
-    pub(crate) async fn upsert_oci_tag(&self, entry: &OciTagEntry) -> Result<(), ServerError> {
-        self.index_store.upsert_oci_tag(entry).await?;
-        Ok(())
-    }
-
     pub(crate) async fn insert_oci_tag_if_absent(
         &self,
         entry: &OciTagEntry,
@@ -575,19 +570,6 @@ impl super::PostgresBackend {
     ) -> Result<Vec<OciTagEntry>, ServerError> {
         self.index_store
             .list_oci_tags_by_digest(scope_namespace, repository, digest_hex)
-            .await
-            .map_err(ServerError::from)
-    }
-
-    pub(crate) async fn delete_oci_tag_if_digest(
-        &self,
-        scope_namespace: &str,
-        repository: &str,
-        tag: &str,
-        digest_hex: &str,
-    ) -> Result<bool, ServerError> {
-        self.index_store
-            .delete_oci_tag_if_digest(scope_namespace, repository, tag, digest_hex)
             .await
             .map_err(ServerError::from)
     }

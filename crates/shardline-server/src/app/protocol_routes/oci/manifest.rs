@@ -100,7 +100,7 @@ pub(crate) async fn oci_put_manifest(
         .and_then(|value| value.to_str().ok())
         .unwrap_or(OCI_IMAGE_MANIFEST_MEDIA_TYPE)
         .to_owned();
-    let _repository_guard = state
+    let mut repository_guard = state
         .backend
         .acquire_resource_write_lock(
             state.config.root_dir(),
@@ -133,8 +133,17 @@ pub(crate) async fn oci_put_manifest(
     accepted_tags.sort();
     accepted_tags.dedup();
     if !accepted_tags.is_empty() {
-        update_oci_tags(state, repository, auth, &accepted_tags, &digest_hex).await?;
+        update_oci_tags(
+            state,
+            &mut repository_guard,
+            repository,
+            auth,
+            &accepted_tags,
+            &digest_hex,
+        )
+        .await?;
     }
+    repository_guard.assert_current().await?;
 
     let mut builder = Response::builder()
         .status(StatusCode::CREATED)
@@ -162,7 +171,7 @@ pub(crate) async fn oci_delete_manifest(
 ) -> Result<Response, ServerError> {
     let repository = repo.repository();
     let auth = repo.capability();
-    let _repository_guard = state
+    let mut repository_guard = state
         .backend
         .acquire_resource_write_lock(
             state.config.root_dir(),
@@ -172,6 +181,7 @@ pub(crate) async fn oci_delete_manifest(
         .await?;
     let digest_hex = resolve_manifest_digest(state, repository, reference, auth).await?;
     let manifest_key = oci_manifest_key(repository, &digest_hex, auth)?;
+    repository_guard.assert_current().await?;
     match state
         .backend
         .delete_object_if_present(&manifest_key)
@@ -186,7 +196,9 @@ pub(crate) async fn oci_delete_manifest(
         .backend
         .delete_object_if_present(&media_type_key)
         .await?;
-    delete_oci_tags_pointing_to_digest(state, repository, auth, &digest_hex).await?;
+    delete_oci_tags_pointing_to_digest(state, &mut repository_guard, repository, auth, &digest_hex)
+        .await?;
+    repository_guard.assert_current().await?;
 
     Response::builder()
         .status(StatusCode::ACCEPTED)
