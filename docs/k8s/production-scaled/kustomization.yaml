@@ -11,6 +11,7 @@ resources:
   - networkpolicy-allow-ingress-nginx.yaml
   - networkpolicy-allow-monitoring.yaml
   - api-service.yaml
+  - api-staging-pvc.yaml
   - api-deployment.yaml
   - api-pdb.yaml
   - api-hpa.yaml
