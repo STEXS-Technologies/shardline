@@ -256,6 +256,12 @@ pub enum ServerError {
     /// A writer lost ownership of its distributed resource fence.
     #[error("resource write fence is no longer current")]
     StaleResourceFence,
+    /// A test interrupted lifecycle repair after one durable mutation.
+    #[error("lifecycle repair interrupted at {boundary:?}")]
+    InjectedLifecycleRepairInterruption {
+        /// Boundary reached by lifecycle repair.
+        boundary: crate::LifecycleRepairBoundary,
+    },
     /// A blocking worker task failed before it could finish storage work.
     #[error("blocking worker task failed")]
     BlockingTask(#[source] JoinError),
@@ -345,6 +351,7 @@ impl ServerError {
             | Self::WorkQueueSaturated
             | Self::RequestTimedOut
             | Self::StaleResourceFence
+            | Self::InjectedLifecycleRepairInterruption { .. }
             | Self::BlockingTask(_)
             | Self::InvalidPath
             | Self::UnregisteredFile(_)
@@ -408,6 +415,7 @@ impl ServerError {
             | Self::WorkQueueSaturated
             | Self::RequestTimedOut
             | Self::StaleResourceFence => StatusCode::SERVICE_UNAVAILABLE,
+            Self::InjectedLifecycleRepairInterruption { .. } => StatusCode::INTERNAL_SERVER_ERROR,
             Self::Io(_)
             | Self::Json(_)
             | Self::NumericConversion(_)
@@ -800,6 +808,7 @@ impl shardline_s3_adapter::S3ErrorClassify for ServerError {
             | Self::WorkQueueSaturated
             | Self::RequestTimedOut
             | Self::StaleResourceFence
+            | Self::InjectedLifecycleRepairInterruption { .. }
             | Self::BlockingTask(_)
             | Self::InvalidPath
             | Self::UnregisteredFile(_)

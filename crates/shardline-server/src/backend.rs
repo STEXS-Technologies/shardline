@@ -1543,6 +1543,7 @@ fn server_error_to_oci(error: ServerError) -> shardline_oci_adapter::OciAdapterE
         | ServerError::WorkQueueSaturated
         | ServerError::RequestTimedOut
         | ServerError::StaleResourceFence
+        | ServerError::InjectedLifecycleRepairInterruption { .. }
         | ServerError::SigningKeyError(_)
         | ServerError::InvalidPath
         | ServerError::UnregisteredFile(_)

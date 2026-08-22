@@ -215,8 +215,8 @@ pub use gc::{
 };
 pub use ingest_bench::ingest_without_storage_with_parallelism;
 pub use lifecycle_repair::{
-    DEFAULT_WEBHOOK_DELIVERY_RETENTION_SECONDS, LifecycleRepairOptions, LifecycleRepairReport,
-    run_lifecycle_repair, run_local_lifecycle_repair,
+    DEFAULT_WEBHOOK_DELIVERY_RETENTION_SECONDS, LifecycleRepairBoundary, LifecycleRepairOptions,
+    LifecycleRepairReport, run_lifecycle_repair, run_local_lifecycle_repair,
 };
 pub use local_backend::LocalBackend;
 pub use model::{

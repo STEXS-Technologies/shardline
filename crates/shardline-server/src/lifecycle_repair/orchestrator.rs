@@ -20,10 +20,11 @@ use super::classification::{
     classify_quarantine_repair_action, classify_retention_hold_repair_action,
     classify_webhook_delivery_repair_action,
 };
+use super::fault_injection::lifecycle_repair_failpoint;
 use super::reachability::collect_referenced_object_keys;
 use super::types::{
-    LifecycleRepairOptions, LifecycleRepairReport, QuarantineRepairAction, RepairReachability,
-    RetentionHoldRepairAction, WebhookDeliveryRepairAction,
+    LifecycleRepairBoundary, LifecycleRepairOptions, LifecycleRepairReport, QuarantineRepairAction,
+    RepairReachability, RetentionHoldRepairAction, WebhookDeliveryRepairAction,
 };
 
 /// Repairs stale lifecycle metadata against the configured metadata backend.
@@ -176,6 +177,7 @@ where
                     .map_err(Into::into)?;
                 report.removed_expired_retention_holds =
                     checked_increment(report.removed_expired_retention_holds)?;
+                lifecycle_repair_failpoint(LifecycleRepairBoundary::AfterRetentionHoldMutation)?;
             }
             RetentionHoldRepairAction::DeleteMissing => {
                 let _deleted = index_store
@@ -184,6 +186,7 @@ where
                     .map_err(Into::into)?;
                 report.removed_missing_retention_holds =
                     checked_increment(report.removed_missing_retention_holds)?;
+                lifecycle_repair_failpoint(LifecycleRepairBoundary::AfterRetentionHoldMutation)?;
             }
         }
     }
@@ -213,6 +216,9 @@ where
                     .map_err(Into::into)?;
                 report.removed_missing_quarantine_candidates =
                     checked_increment(report.removed_missing_quarantine_candidates)?;
+                lifecycle_repair_failpoint(
+                    LifecycleRepairBoundary::AfterQuarantineCandidateMutation,
+                )?;
             }
             QuarantineRepairAction::DeleteReachable => {
                 let _deleted = index_store
@@ -221,6 +227,9 @@ where
                     .map_err(Into::into)?;
                 report.removed_reachable_quarantine_candidates =
                     checked_increment(report.removed_reachable_quarantine_candidates)?;
+                lifecycle_repair_failpoint(
+                    LifecycleRepairBoundary::AfterQuarantineCandidateMutation,
+                )?;
             }
             QuarantineRepairAction::DeleteHeld => {
                 let _deleted = index_store
@@ -229,6 +238,9 @@ where
                     .map_err(Into::into)?;
                 report.removed_held_quarantine_candidates =
                     checked_increment(report.removed_held_quarantine_candidates)?;
+                lifecycle_repair_failpoint(
+                    LifecycleRepairBoundary::AfterQuarantineCandidateMutation,
+                )?;
             }
         }
     }
@@ -252,6 +264,7 @@ where
                     .map_err(Into::into)?;
                 report.removed_stale_webhook_deliveries =
                     checked_increment(report.removed_stale_webhook_deliveries)?;
+                lifecycle_repair_failpoint(LifecycleRepairBoundary::AfterWebhookDeliveryMutation)?;
             }
             WebhookDeliveryRepairAction::DeleteFuture => {
                 let _deleted = index_store
@@ -260,6 +273,7 @@ where
                     .map_err(Into::into)?;
                 report.removed_future_webhook_deliveries =
                     checked_increment(report.removed_future_webhook_deliveries)?;
+                lifecycle_repair_failpoint(LifecycleRepairBoundary::AfterWebhookDeliveryMutation)?;
             }
         }
     }
