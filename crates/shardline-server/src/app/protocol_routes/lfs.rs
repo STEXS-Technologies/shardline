@@ -1607,6 +1607,20 @@ mod tests {
         test_oid(b"test-lfs-object")
     }
 
+    fn assert_lfs_patch_session_absent(dir: &std::path::Path, oid: &str, operation: &str) {
+        for path in [
+            dir.join(oid),
+            dir.join(format!("{oid}.ranges")),
+            lfs_patch_meta_path(dir, oid),
+        ] {
+            assert!(
+                !path.exists(),
+                "{operation} must consume session artifact {}",
+                path.display()
+            );
+        }
+    }
+
     /// Builds a minimal [`AppState`] backed by a fresh temp directory.
     ///
     /// `auth` is left as `None` so that route handlers skip authorization checks,
@@ -3760,13 +3774,7 @@ mod tests {
 
         // The promotion consumed the staging files.
         let dir = lfs_patch_dir(state.config.root_dir());
-        let entries = std::fs::read_dir(&dir)
-            .map(|read| read.count())
-            .unwrap_or(0);
-        assert_eq!(
-            entries, 0,
-            "a completed promotion must not leave staging files behind"
-        );
+        assert_lfs_patch_session_absent(&dir, &oid, "a completed promotion");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3801,13 +3809,7 @@ mod tests {
         );
 
         let dir = lfs_patch_dir(state.config.root_dir());
-        let entries = std::fs::read_dir(&dir)
-            .map(|read| read.count())
-            .unwrap_or(0);
-        assert_eq!(
-            entries, 0,
-            "a failed promotion must clean its staging files"
-        );
+        assert_lfs_patch_session_absent(&dir, &oid, "a failed promotion");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3875,13 +3877,7 @@ mod tests {
             StatusCode::OK,
             "the object must be present after the re-promotion"
         );
-        let entries = std::fs::read_dir(&dir)
-            .map(|read| read.count())
-            .unwrap_or(0);
-        assert_eq!(
-            entries, 0,
-            "the re-promotion must consume the crash-left staging files"
-        );
+        assert_lfs_patch_session_absent(&dir, &oid, "the re-promotion");
     }
 
     // =========================================================================
