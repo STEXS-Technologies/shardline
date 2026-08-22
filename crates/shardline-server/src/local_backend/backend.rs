@@ -284,19 +284,32 @@ impl LocalBackend {
                     reconciled = reconciled.saturating_add(1);
                     continue;
                 }
-                let target_state = if intent.state() == UploadIntentState::MetadataCommitted {
-                    match ObjectKey::parse(intent.object_key()) {
-                        Ok(key)
-                            if AsyncObjectStore::metadata(&self.object_store, &key)
-                                .await?
-                                .is_some() =>
-                        {
-                            UploadIntentState::Visible
+                let target_state = match ObjectKey::parse(intent.object_key()) {
+                    Ok(key) => match AsyncObjectStore::metadata(&self.object_store, &key).await? {
+                        Some(metadata) if metadata.length() != intent.object_length() => {
+                            Some(UploadIntentState::Failed)
                         }
-                        Ok(_) | Err(_) => UploadIntentState::Failed,
-                    }
-                } else {
-                    UploadIntentState::Failed
+                        Some(_) if intent.state() == UploadIntentState::MetadataCommitted => {
+                            Some(UploadIntentState::Visible)
+                        }
+                        Some(_) => {
+                            // The immutable write may have committed before its
+                            // response was lost. Earlier states do not prove that
+                            // protocol metadata is visible (notably for shards),
+                            // so preserve the retryable state instead of guessing.
+                            tracing::warn!(
+                                intent_id = %intent.intent_id(),
+                                state = ?intent.state(),
+                                "durable object found for in-flight intent; preserving for retry"
+                            );
+                            None
+                        }
+                        None => Some(UploadIntentState::Failed),
+                    },
+                    Err(_) => Some(UploadIntentState::Failed),
+                };
+                let Some(target_state) = target_state else {
+                    continue;
                 };
                 if let Err(e) = self
                     .index_store
@@ -876,6 +889,20 @@ mod tests {
                     .unwrap()
             );
         }
+        let ambiguous = UploadIntent::new(
+            "ambiguous-reconcile".to_owned(),
+            key.as_str().to_owned(),
+            "hash".to_owned(),
+            bytes.len() as u64,
+        );
+        backend.index_store.create_intent(&ambiguous).await.unwrap();
+        assert!(
+            backend
+                .index_store
+                .transition_intent(ambiguous.intent_id(), UploadIntentState::Storing)
+                .await
+                .unwrap()
+        );
         backend
             .upload_file(
                 "stored-record-reconcile",
@@ -923,6 +950,13 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(missing.state(), UploadIntentState::Failed);
+        let ambiguous = backend
+            .index_store
+            .intent_by_id(ambiguous.intent_id())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(ambiguous.state(), UploadIntentState::Storing);
         let stored_record = backend
             .index_store
             .intent_by_id(stored_record.intent_id())
