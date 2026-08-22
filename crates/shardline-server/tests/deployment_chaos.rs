@@ -79,10 +79,26 @@ const CHUNK_SIZE: usize = 65536;
 // ---------------------------------------------------------------------------
 
 fn mint_token(owner: &str, name: &str, scope: TokenScope) -> String {
+    mint_token_expiring_at(owner, name, scope, u64::MAX)
+}
+
+fn mint_token_expiring_at(
+    owner: &str,
+    name: &str,
+    scope: TokenScope,
+    expires_at_unix_seconds: u64,
+) -> String {
     let provider = LocalHmacProvider::new(TEST_SIGNING_KEY).unwrap();
     let repo =
         RepositoryScope::new(RepositoryProvider::Generic, owner, name, Some("main")).unwrap();
-    let claims = TokenClaims::new("shardline", "deployment-chaos", scope, repo, u64::MAX).unwrap();
+    let claims = TokenClaims::new(
+        "shardline",
+        "deployment-chaos",
+        scope,
+        repo,
+        expires_at_unix_seconds,
+    )
+    .unwrap();
     provider.mint_token(&claims).unwrap()
 }
 
@@ -607,6 +623,16 @@ fn resolve_n_minus_one_binary(drill: &str) -> Option<PathBuf> {
         eprintln!(
             "SKIPPED: {drill} — set SHARDLINE_N_MINUS_ONE_BINARY to a built v1.6.0 shardline binary"
         );
+    }
+    path
+}
+
+fn resolve_faketime_library(drill: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("SHARDLINE_FAKETIME_LIBRARY")
+        .map(PathBuf::from)
+        .filter(|path| path.is_file());
+    if path.is_none() {
+        eprintln!("SKIPPED: {drill} — set SHARDLINE_FAKETIME_LIBRARY to libfaketime.so.1");
     }
     path
 }
@@ -1643,7 +1669,134 @@ async fn drill_deploy_f_real_mixed_version_rollout_and_rollback() {
 }
 
 // ===========================================================================
-// OPTIONAL G — CHEAP WORKLOAD BURST (no fault injection).
+// DRILL G — LIVE MULTI-NODE TOKEN VERIFICATION CLOCK SKEW.
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn drill_deploy_g_live_verifier_clock_skew() {
+    let drill = "drill_deploy_g_live_verifier_clock_skew";
+    let Some(stack) = boot_chaos_stack(drill).await else {
+        return;
+    };
+    let Some(binary) = resolve_shardline_binary() else {
+        eprintln!("SKIPPED: {drill} — current shardline binary not found");
+        return;
+    };
+    let Some(faketime_library) = resolve_faketime_library(drill) else {
+        return;
+    };
+    migrate_chaos_postgres(&stack.pg_url).await;
+
+    let fast_root = TempDir::new().unwrap();
+    let slow_root = TempDir::new().unwrap();
+    let faketime_library = faketime_library.to_str().unwrap();
+    let fast_environment = [
+        ("SHARDLINE_S3_ENDPOINT", stack.s3_endpoint.as_str()),
+        ("LD_PRELOAD", faketime_library),
+        ("FAKETIME", "+120s"),
+        ("FAKETIME_DONT_FAKE_MONOTONIC", "1"),
+        ("FAKETIME_NO_CACHE", "1"),
+    ];
+    let slow_environment = [
+        ("SHARDLINE_S3_ENDPOINT", stack.s3_endpoint.as_str()),
+        ("LD_PRELOAD", faketime_library),
+        ("FAKETIME", "-120s"),
+        ("FAKETIME_DONT_FAKE_MONOTONIC", "1"),
+        ("FAKETIME_NO_CACHE", "1"),
+    ];
+    let mut fast_node =
+        DeploymentServer::spawn_at(&binary, BIN_ADDR, &fast_environment, fast_root.path());
+    let mut slow_node = DeploymentServer::spawn_at(
+        &binary,
+        BIN_ADDR_SECONDARY,
+        &slow_environment,
+        slow_root.path(),
+    );
+    fast_node.wait_ready(Duration::from_secs(20)).await;
+    slow_node.wait_ready(Duration::from_secs(20)).await;
+
+    let host_now = shardline_protocol::unix_now_seconds_lossy();
+    let boundary_token = mint_token_expiring_at(
+        "drill",
+        "drill",
+        TokenScope::Write,
+        host_now.saturating_add(60),
+    );
+    let boundary_bytes = deterministic_bytes(65_573, 701);
+    let rejected = s3_put(
+        &fast_node.base_url(),
+        &boundary_token,
+        "g-boundary",
+        boundary_bytes.clone(),
+    )
+    .await;
+    assert_eq!(
+        rejected.status().as_u16(),
+        403,
+        "fast verifier must reject a token beyond its local expiry"
+    );
+    let absent = s3_get(
+        &slow_node.base_url(),
+        &mint_token("drill", "drill", TokenScope::Write),
+        "g-boundary",
+    )
+    .await;
+    assert_eq!(
+        absent.status().as_u16(),
+        404,
+        "rejected fast-node write must have no shared side effect"
+    );
+    let accepted = s3_put(
+        &slow_node.base_url(),
+        &boundary_token,
+        "g-boundary",
+        boundary_bytes.clone(),
+    )
+    .await;
+    assert_eq!(
+        accepted.status().as_u16(),
+        200,
+        "slow verifier must accept the same token before its local expiry"
+    );
+
+    let cluster_valid_token = mint_token_expiring_at(
+        "drill",
+        "drill",
+        TokenScope::Write,
+        host_now.saturating_add(600),
+    );
+    assert_s3_bytes(
+        &fast_node.base_url(),
+        &cluster_valid_token,
+        "g-boundary",
+        &boundary_bytes,
+        "fast peer after slow-node publication",
+    )
+    .await;
+    let cluster_expired_token = mint_token_expiring_at(
+        "drill",
+        "drill",
+        TokenScope::Write,
+        host_now.saturating_sub(180),
+    );
+    for base_url in [fast_node.base_url(), slow_node.base_url()] {
+        let response = s3_get(&base_url, &cluster_expired_token, "g-boundary").await;
+        assert_eq!(
+            response.status().as_u16(),
+            403,
+            "a token older than the tested skew bound must be rejected on every node"
+        );
+    }
+    assert!(fast_node.alive(), "fast verifier node must stay alive");
+    assert!(slow_node.alive(), "slow verifier node must stay alive");
+    eprintln!(
+        "chaos({drill}): PASS — independent ±120s verifier clocks enforced exact expiry decisions without partial writes"
+    );
+}
+
+// ===========================================================================
+// OPTIONAL H — CHEAP WORKLOAD BURST (no fault injection).
 // Gated on SHARDLINE_CHAOS_DEPLOYMENT=1.
 // ===========================================================================
 
