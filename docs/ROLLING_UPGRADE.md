@@ -59,6 +59,12 @@ remain available and legacy tags are imported lazily. Resume OCI mutations after
 API replicas run the new version; this avoids two software versions using different
 authoritative tag-pointer stores during the brief mixed-version window.
 
+Suspend destructive GC (`--mark` and/or `--sweep`) for the entire mixed-version
+rollout. The new release coordinates GC against writers with a shared/exclusive
+barrier, but an older server does not participate in that barrier. Dry-run GC remains
+safe. Resume scheduled destructive GC only after every API and transfer replica runs
+the barrier-aware version.
+
 ## Procedure
 
 The example uses the Production Scaled profile (`kubectl`). For systemd or host-native
