@@ -54,10 +54,12 @@ with the previous version's processes for the duration of the rollout.
 
 The OCI tag-index migration is additive and old processes continue to read their
 object-store tag pointers. During the API-class rollout, drain OCI manifest `PUT` and
-`DELETE` traffic or route those mutations exclusively to the new API version. Reads
+`DELETE` traffic, OCI blob deletion, and provider webhook traffic, or route those
+mutations exclusively to the new API version. Reads
 remain available and legacy tags are imported lazily. Resume OCI mutations after all
 API replicas run the new version; this avoids two software versions using different
-authoritative tag-pointer stores during the brief mixed-version window.
+authoritative tag-pointer stores or bypassing repository-scoped locks during the brief
+mixed-version window.
 
 Suspend destructive GC (`--mark` and/or `--sweep`) for the entire mixed-version
 rollout. The new release coordinates GC against writers with a shared/exclusive
