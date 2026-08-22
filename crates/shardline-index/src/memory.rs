@@ -802,7 +802,11 @@ pub enum MemoryIndexStoreError {
     LockPoisoned(String),
     /// An upload intent ID was reused for different object identity.
     #[error("upload intent conflict")]
-    UploadIntentConflict(#[from] #[source] UploadIntentConflictError),
+    UploadIntentConflict(
+        #[from]
+        #[source]
+        UploadIntentConflictError,
+    ),
 }
 
 #[derive(Debug, Default)]
