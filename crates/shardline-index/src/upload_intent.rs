@@ -23,7 +23,9 @@ pub enum UploadIntentState {
     MetadataCommitted,
     /// The upload completed successfully and the record is visible.
     Visible,
-    /// The upload failed and should be reconciled or quarantined.
+    /// Durable inspection established that the upload failed and it should be
+    /// quarantined. A request error alone must not select this state because an
+    /// external commit acknowledgement may have been lost.
     Failed,
 }
 

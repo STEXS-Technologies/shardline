@@ -79,6 +79,10 @@ where
     ///
     /// The configured index is the only store used for the lifecycle, preventing
     /// intent creation and state transitions from being split across stores.
+    /// A work error deliberately leaves the intent at its last durable in-flight
+    /// state: external commits can succeed even when their acknowledgement is
+    /// lost, so only reconciliation after inspecting durable state may classify
+    /// an attempt as terminally failed.
     ///
     /// # Errors
     ///
@@ -136,15 +140,14 @@ where
                 }
                 Ok(result)
             }
-            Err(error) => {
-                self.transition_upload(
-                    intent.intent_id(),
-                    shardline_index::UploadIntentState::Failed,
-                )
-                .await
-                .ok();
-                Err(error)
-            }
+            // A returned error does not establish whether an object-store or
+            // metadata commit happened before its acknowledgement was lost.
+            // Keep the intent at its last durable in-flight boundary so an
+            // idempotent retry or startup reconciliation can inspect reality.
+            // Marking it terminal here would make an ambiguous success
+            // unrecoverable and could let one failed duplicate poison a
+            // concurrent winner.
+            Err(error) => Err(error),
         }
     }
 
@@ -294,8 +297,18 @@ where
 #[cfg(test)]
 mod tests {
     use shardline_index::{MemoryIndexStore, UploadIntent, UploadIntentState, UploadIntentStore};
-    use shardline_storage::{LocalObjectStore, SyncObjectStoreBridge};
-    use std::num::NonZeroU64;
+    use shardline_protocol::ByteRange;
+    use shardline_storage::{
+        AsyncObjectStore, DeleteOutcome, LocalObjectStore, ObjectBody, ObjectIntegrity, ObjectKey,
+        ObjectMetadata, ObjectPrefix, PutOutcome, SyncObjectStoreBridge,
+    };
+    use std::{
+        num::NonZeroU64,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+    };
 
     use super::CasCoordinator;
     use crate::{CasError, CasLimits};
@@ -306,6 +319,96 @@ mod tests {
     struct ObjectStoreProbe;
     #[derive(Debug, PartialEq, Eq)]
     struct RecordStoreProbe;
+
+    #[derive(Debug, thiserror::Error)]
+    enum LostAcknowledgementError {
+        #[error("object-store acknowledgement was lost after commit")]
+        LostAfterCommit,
+        #[error("inner object-store operation failed: {0}")]
+        Inner(String),
+    }
+
+    #[derive(Clone)]
+    struct LostPutAcknowledgementStore {
+        inner: SyncObjectStoreBridge<LocalObjectStore>,
+        lose_next_put_acknowledgement: Arc<AtomicBool>,
+    }
+
+    impl LostPutAcknowledgementStore {
+        fn new(inner: LocalObjectStore) -> Self {
+            Self {
+                inner: SyncObjectStoreBridge::new(inner),
+                lose_next_put_acknowledgement: Arc::new(AtomicBool::new(true)),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AsyncObjectStore for LostPutAcknowledgementStore {
+        type Error = LostAcknowledgementError;
+
+        async fn put_if_absent(
+            &self,
+            key: &ObjectKey,
+            body: ObjectBody<'_>,
+            integrity: &ObjectIntegrity,
+        ) -> Result<PutOutcome, Self::Error> {
+            let outcome = self
+                .inner
+                .put_if_absent(key, body, integrity)
+                .await
+                .map_err(|error| LostAcknowledgementError::Inner(error.to_string()))?;
+            if self
+                .lose_next_put_acknowledgement
+                .swap(false, Ordering::SeqCst)
+            {
+                return Err(LostAcknowledgementError::LostAfterCommit);
+            }
+            Ok(outcome)
+        }
+
+        async fn read_range(
+            &self,
+            key: &ObjectKey,
+            range: ByteRange,
+        ) -> Result<Vec<u8>, Self::Error> {
+            self.inner
+                .read_range(key, range)
+                .await
+                .map_err(|error| LostAcknowledgementError::Inner(error.to_string()))
+        }
+
+        async fn contains(&self, key: &ObjectKey) -> Result<bool, Self::Error> {
+            self.inner
+                .contains(key)
+                .await
+                .map_err(|error| LostAcknowledgementError::Inner(error.to_string()))
+        }
+
+        async fn metadata(&self, key: &ObjectKey) -> Result<Option<ObjectMetadata>, Self::Error> {
+            self.inner
+                .metadata(key)
+                .await
+                .map_err(|error| LostAcknowledgementError::Inner(error.to_string()))
+        }
+
+        async fn list_prefix(
+            &self,
+            prefix: &ObjectPrefix,
+        ) -> Result<Vec<ObjectMetadata>, Self::Error> {
+            self.inner
+                .list_prefix(prefix)
+                .await
+                .map_err(|error| LostAcknowledgementError::Inner(error.to_string()))
+        }
+
+        async fn delete_if_present(&self, key: &ObjectKey) -> Result<DeleteOutcome, Self::Error> {
+            self.inner
+                .delete_if_present(key)
+                .await
+                .map_err(|error| LostAcknowledgementError::Inner(error.to_string()))
+        }
+    }
 
     #[test]
     fn coordinator_keeps_adapters_and_limits() {
@@ -355,6 +458,45 @@ mod tests {
         );
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn content_addressed_retry_recovers_from_lost_put_acknowledgement() {
+        let storage = tempfile::tempdir().unwrap();
+        let object_store = LostPutAcknowledgementStore::new(
+            LocalObjectStore::new(storage.path().join("objects")).unwrap(),
+        );
+        let coordinator = CasCoordinator::new(
+            MemoryIndexStore::new(),
+            object_store.clone(),
+            (),
+            CasLimits::new(NonZeroU64::MAX, NonZeroU64::MAX, NonZeroU64::MAX),
+        );
+        let key = ObjectKey::parse("objects/lost-ack").unwrap();
+        let body = b"durably accepted before response loss".to_vec();
+        let integrity = ObjectIntegrity::new(
+            shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(&body).as_bytes()),
+            u64::try_from(body.len()).unwrap(),
+        );
+
+        let first = coordinator
+            .store_content_addressed_blob(&key, &integrity, body.clone())
+            .await;
+        assert!(matches!(first, Err(CasError::ObjectStore(_))));
+        assert!(object_store.contains(&key).await.unwrap());
+
+        let retry = coordinator
+            .store_content_addressed_blob(&key, &integrity, body.clone())
+            .await;
+        assert_eq!(retry, Ok(PutOutcome::AlreadyExists));
+        let end = u64::try_from(body.len()).unwrap().saturating_sub(1);
+        assert_eq!(
+            object_store
+                .read_range(&key, ByteRange::new(0, end).unwrap())
+                .await
+                .unwrap(),
+            body
+        );
+    }
+
     #[test]
     fn with_upload_intent_success_transitions_to_visible() {
         let rt = tokio::runtime::Runtime::new().unwrap();
@@ -390,7 +532,7 @@ mod tests {
     }
 
     #[test]
-    fn with_upload_intent_failure_transitions_to_failed() {
+    fn with_upload_intent_failure_remains_recoverable() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let storage = tempfile::tempdir().unwrap();
         let index = MemoryIndexStore::new();
@@ -421,7 +563,74 @@ mod tests {
             .block_on(index.intent_by_id("failure-intent"))
             .unwrap()
             .unwrap();
-        assert_eq!(stored.state(), UploadIntentState::Failed);
+        assert_eq!(stored.state(), UploadIntentState::Storing);
+    }
+
+    #[test]
+    fn with_upload_intent_retry_after_ambiguous_error_can_complete() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let index = MemoryIndexStore::new();
+        let coordinator = CasCoordinator::new(
+            index.clone(),
+            (),
+            (),
+            CasLimits::new(NonZeroU64::MAX, NonZeroU64::MAX, NonZeroU64::MAX),
+        );
+        let intent = UploadIntent::new(
+            "ambiguous-intent".to_owned(),
+            "objects/test".to_owned(),
+            "abcdef".to_owned(),
+            42,
+        );
+
+        let first: Result<i32, CasError> =
+            rt.block_on(coordinator.with_upload_intent(&intent, || async {
+                Err(CasError::ObjectStore("lost acknowledgement".to_owned()))
+            }));
+        let retry: Result<i32, CasError> =
+            rt.block_on(coordinator.with_upload_intent(&intent, || async { Ok(42) }));
+
+        assert!(matches!(first, Err(CasError::ObjectStore(_))));
+        assert_eq!(retry, Ok(42));
+        let stored = rt
+            .block_on(index.intent_by_id(intent.intent_id()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.state(), UploadIntentState::Visible);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failed_duplicate_does_not_poison_visible_winner() {
+        let index = MemoryIndexStore::new();
+        let coordinator = CasCoordinator::new(
+            index.clone(),
+            (),
+            (),
+            CasLimits::new(NonZeroU64::MAX, NonZeroU64::MAX, NonZeroU64::MAX),
+        );
+        let intent = UploadIntent::new(
+            "concurrent-ambiguous-intent".to_owned(),
+            "objects/test".to_owned(),
+            "abcdef".to_owned(),
+            42,
+        );
+
+        let (failed, winner): (Result<i32, CasError>, Result<i32, CasError>) = tokio::join!(
+            coordinator.with_upload_intent(&intent, || async {
+                tokio::task::yield_now().await;
+                Err(CasError::ObjectStore("lost acknowledgement".to_owned()))
+            }),
+            coordinator.with_upload_intent(&intent, || async { Ok(42) }),
+        );
+
+        assert!(matches!(failed, Err(CasError::ObjectStore(_))));
+        assert_eq!(winner, Ok(42));
+        let stored = index
+            .intent_by_id(intent.intent_id())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.state(), UploadIntentState::Visible);
     }
 
     #[test]

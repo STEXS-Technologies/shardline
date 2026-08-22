@@ -219,19 +219,32 @@ impl PostgresBackend {
                     reconciled = reconciled.saturating_add(1);
                     continue;
                 }
-                let target_state = if intent.state() == UploadIntentState::MetadataCommitted {
-                    match ObjectKey::parse(intent.object_key()) {
-                        Ok(key)
-                            if AsyncObjectStore::metadata(&self.object_store, &key)
-                                .await?
-                                .is_some() =>
-                        {
-                            UploadIntentState::Visible
+                let target_state = match ObjectKey::parse(intent.object_key()) {
+                    Ok(key) => match AsyncObjectStore::metadata(&self.object_store, &key).await? {
+                        Some(metadata) if metadata.length() != intent.object_length() => {
+                            Some(UploadIntentState::Failed)
                         }
-                        Ok(_) | Err(_) => UploadIntentState::Failed,
-                    }
-                } else {
-                    UploadIntentState::Failed
+                        Some(_) if intent.state() == UploadIntentState::MetadataCommitted => {
+                            Some(UploadIntentState::Visible)
+                        }
+                        Some(_) => {
+                            // The immutable write may have committed before its
+                            // response was lost. Earlier states do not prove that
+                            // protocol metadata is visible (notably for shards),
+                            // so preserve the retryable state instead of guessing.
+                            tracing::warn!(
+                                intent_id = %intent.intent_id(),
+                                state = ?intent.state(),
+                                "durable object found for in-flight intent; preserving for retry"
+                            );
+                            None
+                        }
+                        None => Some(UploadIntentState::Failed),
+                    },
+                    Err(_) => Some(UploadIntentState::Failed),
+                };
+                let Some(target_state) = target_state else {
+                    continue;
                 };
                 if let Err(e) = self
                     .index_store
