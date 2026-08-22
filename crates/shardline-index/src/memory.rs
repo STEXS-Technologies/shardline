@@ -111,7 +111,9 @@ impl MemoryIndexStore {
         let key = MemoryProviderRepositoryStateKey::from_domain(state);
         self.lock_state()?
             .provider_repository_states
-            .insert(key, state.clone());
+            .entry(key)
+            .and_modify(|current| *current = current.merge_monotonic(state))
+            .or_insert_with(|| state.clone());
         Ok(())
     }
 
