@@ -48,13 +48,13 @@ Status meanings:
 | Network | Partial | API/transfer and MinIO/Postgres partitions, connection stalls and reconnect recovery | Add packet duplication/reordering and asymmetric long-lived cluster partitions |
 | Cluster | Covered | `multinode_chaos` kills either role, partitions split roles and replaces roles during traffic | True N-1/N mixed-binary tests remain upgrade evidence, not basic cluster-failure evidence |
 | Concurrency | Covered | Upload/overwrite/delete/GC/reconstruction/cache/provider/OCI races plus Loom models | Extend models whenever a new shared mutable state machine is introduced |
-| Resource pressure | Partial | Request/body/list bounds, admission and concurrency stress exist | Inject memory pressure, file-descriptor exhaustion and executor/task starvation |
+| Resource pressure | Partial | Request/body/list bounds, admission and concurrency stress exist; an isolated `RLIMIT_NOFILE` regression exhausts descriptors, requires atomic local-publication failure, releases pressure and verifies an exact-byte retry | Inject memory pressure and executor/task starvation |
 | Time | Partial | Retention boundaries, expiry and corrupted/future timestamps are tested | Inject wall-clock jumps and multi-node skew around leases, tokens and retention |
 | Data corruption | Covered | Corrupt chunks, hashes, ranges, metadata, cache entries and protocol inputs are rejected or repaired; fsck is an independent oracle | Add sampled corruption campaigns over restored production-scale inventories |
 | Upgrade | Partial | Same-binary role replacement, migration up/down checks and documented rolling procedure | Run actual N-1 and N binaries together, test rollback limits, and kill during every migration boundary |
 | Operator actions | Partial | Repeated restart, destructive restore rehearsal, repair/fsck/rebuild dry runs and malformed configuration tests | Add interrupted repair/migration resume campaigns and operator-command idempotency transcripts |
 | Security | Partial | Cross-tenant route matrices, capability binding, provider revocation/visibility and webhook replay tests | Race authorization/revocation against every active write/read frontend and measure existence/timing leakage |
-| Long soak | Partial | A weekly two-hour deterministic chaos campaign archives every seed transcript, elapsed time, peak RSS, sampled process-tree FD/task counts and invariant result; a separate scheduled job archives the real Postgres/MinIO/Redis kill-and-partition campaign | Add explicit resource-pressure campaigns to the scheduled workflow |
+| Long soak | Partial | A weekly two-hour deterministic chaos campaign archives every seed transcript, elapsed time, peak RSS, sampled process-tree FD/task counts and invariant result; a separate scheduled job archives the real Postgres/MinIO/Redis kill-and-partition campaign; deterministic FD exhaustion runs in the normal storage test suite | Add scheduled memory-pressure and executor-starvation campaigns |
 
 “Partial” and “Open” rows are release-plan work. They must not be described as proven or
 silently relabeled Stable based only on line coverage.
