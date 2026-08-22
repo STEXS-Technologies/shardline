@@ -1,4 +1,4 @@
-use std::{fmt, num::NonZeroU64};
+use std::{fmt, future::Future, num::NonZeroU64, time::Duration};
 
 use redis::AsyncCommands;
 use shardline_protocol::SecretBytes;
@@ -9,6 +9,7 @@ use crate::{
 };
 
 const RECONSTRUCTION_CACHE_PREFIX: &str = "shardline:reconstruction:v1";
+const DEFAULT_REDIS_OPERATION_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// TLS material for a Redis connection.
 ///
@@ -84,6 +85,7 @@ impl fmt::Debug for RedisTlsConfig {
 pub struct RedisReconstructionCache {
     client: redis::Client,
     ttl_seconds: NonZeroU64,
+    operation_timeout: Duration,
 }
 
 impl Clone for RedisReconstructionCache {
@@ -91,6 +93,7 @@ impl Clone for RedisReconstructionCache {
         Self {
             client: self.client.clone(),
             ttl_seconds: self.ttl_seconds,
+            operation_timeout: self.operation_timeout,
         }
     }
 }
@@ -101,6 +104,7 @@ impl fmt::Debug for RedisReconstructionCache {
             .debug_struct("RedisReconstructionCache")
             .field("client", &"***")
             .field("ttl_seconds", &self.ttl_seconds)
+            .field("operation_timeout", &self.operation_timeout)
             .finish()
     }
 }
@@ -112,7 +116,12 @@ impl RedisReconstructionCache {
     ///
     /// Returns [`ReconstructionCacheError`] when the URL is empty or invalid.
     pub fn new(redis_url: &str, ttl_seconds: NonZeroU64) -> Result<Self, ReconstructionCacheError> {
-        Self::new_with_tls(redis_url, ttl_seconds, RedisTlsConfig::default())
+        Self::new_with_tls_and_timeout(
+            redis_url,
+            ttl_seconds,
+            RedisTlsConfig::default(),
+            DEFAULT_REDIS_OPERATION_TIMEOUT,
+        )
     }
 
     /// Creates a Redis-backed reconstruction cache adapter with TLS or mTLS material.
@@ -129,8 +138,35 @@ impl RedisReconstructionCache {
         ttl_seconds: NonZeroU64,
         tls_config: RedisTlsConfig,
     ) -> Result<Self, ReconstructionCacheError> {
+        Self::new_with_tls_and_timeout(
+            redis_url,
+            ttl_seconds,
+            tls_config,
+            DEFAULT_REDIS_OPERATION_TIMEOUT,
+        )
+    }
+
+    /// Creates a Redis-backed cache with an explicit per-operation latency bound.
+    ///
+    /// The timeout covers connection acquisition and the Redis command. Bounding the
+    /// complete operation ensures an unavailable cache cannot indefinitely delay the
+    /// durable reconstruction fallback.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ReconstructionCacheError`] when the URL or TLS material is invalid or
+    /// when `operation_timeout` is zero.
+    pub fn new_with_tls_and_timeout(
+        redis_url: &str,
+        ttl_seconds: NonZeroU64,
+        tls_config: RedisTlsConfig,
+        operation_timeout: Duration,
+    ) -> Result<Self, ReconstructionCacheError> {
         if redis_url.trim().is_empty() {
             return Err(ReconstructionCacheError::EmptyRedisUrl);
+        }
+        if operation_timeout.is_zero() {
+            return Err(ReconstructionCacheError::InvalidRedisOperationTimeout);
         }
 
         if redis_url.trim_start().starts_with("rediss://") || !tls_config.is_empty() {
@@ -146,6 +182,7 @@ impl RedisReconstructionCache {
         Ok(Self {
             client,
             ttl_seconds,
+            operation_timeout,
         })
     }
 
@@ -157,6 +194,18 @@ impl RedisReconstructionCache {
         &self,
     ) -> Result<redis::aio::MultiplexedConnection, ReconstructionCacheError> {
         Ok(self.client.get_multiplexed_async_connection().await?)
+    }
+
+    async fn with_operation_timeout<T, Operation>(
+        &self,
+        operation: Operation,
+    ) -> Result<T, ReconstructionCacheError>
+    where
+        Operation: Future<Output = Result<T, ReconstructionCacheError>>,
+    {
+        tokio::time::timeout(self.operation_timeout, operation)
+            .await
+            .map_err(|_elapsed| ReconstructionCacheError::RedisTimeout)?
     }
 
     pub(crate) fn redis_key(key: &ReconstructionCacheKey) -> String {
@@ -195,9 +244,12 @@ fn install_rustls_crypto_provider() {
 impl AsyncReconstructionCache for RedisReconstructionCache {
     fn ready(&self) -> ReconstructionCacheFuture<'_, ()> {
         Box::pin(async move {
-            let mut connection = self.get_connection().await?;
-            let _pong: String = redis::cmd("PING").query_async(&mut connection).await?;
-            Ok(())
+            self.with_operation_timeout(async {
+                let mut connection = self.get_connection().await?;
+                let _pong: String = redis::cmd("PING").query_async(&mut connection).await?;
+                Ok(())
+            })
+            .await
         })
     }
 
@@ -206,10 +258,13 @@ impl AsyncReconstructionCache for RedisReconstructionCache {
         key: &'operation ReconstructionCacheKey,
     ) -> ReconstructionCacheFuture<'operation, Option<Vec<u8>>> {
         Box::pin(async move {
-            let mut connection = self.get_connection().await?;
-            let redis_key = Self::redis_key(key);
-            let value: Option<Vec<u8>> = connection.get(redis_key).await?;
-            Ok(value)
+            self.with_operation_timeout(async {
+                let mut connection = self.get_connection().await?;
+                let redis_key = Self::redis_key(key);
+                let value: Option<Vec<u8>> = connection.get(redis_key).await?;
+                Ok(value)
+            })
+            .await
         })
     }
 
@@ -219,13 +274,16 @@ impl AsyncReconstructionCache for RedisReconstructionCache {
         payload: &'operation [u8],
     ) -> ReconstructionCacheFuture<'operation, ()> {
         Box::pin(async move {
-            let mut connection = self.get_connection().await?;
-            let redis_key = Self::redis_key(key);
-            let ttl_seconds = self.ttl_seconds.get();
-            let _: () = connection
-                .set_ex(redis_key, payload.to_vec(), ttl_seconds)
-                .await?;
-            Ok(())
+            self.with_operation_timeout(async {
+                let mut connection = self.get_connection().await?;
+                let redis_key = Self::redis_key(key);
+                let ttl_seconds = self.ttl_seconds.get();
+                let _: () = connection
+                    .set_ex(redis_key, payload.to_vec(), ttl_seconds)
+                    .await?;
+                Ok(())
+            })
+            .await
         })
     }
 
@@ -234,10 +292,13 @@ impl AsyncReconstructionCache for RedisReconstructionCache {
         key: &'operation ReconstructionCacheKey,
     ) -> ReconstructionCacheFuture<'operation, bool> {
         Box::pin(async move {
-            let mut connection = self.get_connection().await?;
-            let redis_key = Self::redis_key(key);
-            let deleted: usize = connection.del(redis_key).await?;
-            Ok(deleted > 0)
+            self.with_operation_timeout(async {
+                let mut connection = self.get_connection().await?;
+                let redis_key = Self::redis_key(key);
+                let deleted: usize = connection.del(redis_key).await?;
+                Ok(deleted > 0)
+            })
+            .await
         })
     }
 }
@@ -248,7 +309,7 @@ fn encode_component(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::{env::var as env_var, error::Error as StdError, num::NonZeroU64};
+    use std::{env::var as env_var, error::Error as StdError, num::NonZeroU64, time::Duration};
 
     use redis::AsyncCommands;
 
@@ -281,6 +342,58 @@ mod tests {
         assert!(matches!(
             result,
             Err(crate::ReconstructionCacheError::EmptyRedisUrl)
+        ));
+    }
+
+    #[test]
+    fn redis_cache_rejects_zero_operation_timeout() {
+        let result = RedisReconstructionCache::new_with_tls_and_timeout(
+            "redis://127.0.0.1:6379",
+            NonZeroU64::MIN,
+            RedisTlsConfig::default(),
+            Duration::ZERO,
+        );
+        assert!(matches!(
+            result,
+            Err(crate::ReconstructionCacheError::InvalidRedisOperationTimeout)
+        ));
+    }
+
+    #[tokio::test]
+    async fn redis_cache_bounds_stalled_connection_operations() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await;
+        assert!(listener.is_ok());
+        let Ok(listener) = listener else {
+            return;
+        };
+        let address = listener.local_addr();
+        assert!(address.is_ok());
+        let Ok(address) = address else {
+            return;
+        };
+        let stalled_peer = tokio::spawn(async move {
+            let accepted = listener.accept().await;
+            if accepted.is_ok() {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+        });
+        let cache = RedisReconstructionCache::new_with_tls_and_timeout(
+            &format!("redis://{address}"),
+            NonZeroU64::MIN,
+            RedisTlsConfig::default(),
+            Duration::from_millis(50),
+        );
+        assert!(cache.is_ok());
+        let Ok(cache) = cache else {
+            return;
+        };
+
+        let result = cache.ready().await;
+        stalled_peer.abort();
+
+        assert!(matches!(
+            result,
+            Err(crate::ReconstructionCacheError::RedisTimeout)
         ));
     }
 

@@ -11,7 +11,7 @@ use shardline_server::serve;
 use crate::{
     BenchConfig, BenchMode, CliCommand, GcScheduleInstallOptions, MINIMUM_GC_RETENTION_SECONDS,
     install_gc_schedule, load_runtime_server_config, local_output::print_error_chain,
-    local_path::resolve_root, mint_admin_token_from_sources, print_hold_list_summary,
+    local_path::resolve_root, mint_admin_token_for_provider_from_sources, print_hold_list_summary,
     print_hold_summary, render_completion, render_manpage, report_output, run_backup_manifest,
     run_bench, run_config_check_from_env, run_db_migration, run_fsck, run_gc, run_health_check,
     run_hold_list, run_hold_release, run_hold_set, run_index_rebuild, run_ingest_bench,
@@ -98,6 +98,7 @@ pub async fn run(args: impl Iterator<Item = OsString>) -> ExitCode {
             }
         },
         Ok(CliCommand::AdminToken {
+            auth_provider,
             issuer,
             subject,
             scope,
@@ -110,7 +111,8 @@ pub async fn run(args: impl Iterator<Item = OsString>) -> ExitCode {
             key_env,
         }) => match RepositoryScope::new(provider, &owner, &repo, revision.as_deref()) {
             Ok(repository) => {
-                match mint_admin_token_from_sources(
+                match mint_admin_token_for_provider_from_sources(
+                    auth_provider,
                     key_file.as_deref(),
                     key_env.as_deref(),
                     &issuer,

@@ -248,6 +248,20 @@ impl HubStore for PostgresIndexStore {
         block_on_async(async {
             let mut tx = pool.begin().await?;
 
+            // Serialize every mutable ref operation for this repository across
+            // Postgres-backed Shardline replicas. The row lock also excludes
+            // `delete_repo`, so a commit cannot be acknowledged into a
+            // repository concurrently removed by another process.
+            let locked_repo: Option<String> = sqlx::query_scalar(
+                "SELECT repo_id FROM shardline_hub_repos WHERE repo_id = $1 FOR UPDATE",
+            )
+            .bind(&repo_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+            if locked_repo.is_none() {
+                return Err(PostgresMetadataStoreError::RecordNotFound);
+            }
+
             // Optimistic concurrency check
             if let Some(ref parent) = parent_sha {
                 let current_ref: Option<String> = sqlx::query_scalar::<_, String>(
@@ -521,6 +535,18 @@ impl HubStore for PostgresIndexStore {
 
         block_on_async(async {
             let mut tx = pool.begin().await?;
+
+            // Use the same repository-row lock as `create_revision`. This
+            // makes delete-vs-push ordering explicit across replicas.
+            let locked_repo: Option<String> = sqlx::query_scalar(
+                "SELECT repo_id FROM shardline_hub_repos WHERE repo_id = $1 FOR UPDATE",
+            )
+            .bind(&repo_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+            if locked_repo.is_none() {
+                return Ok(());
+            }
 
             // Delete file entries for all revisions in this repo
             sqlx::query(
@@ -1027,6 +1053,99 @@ mod tests {
         assert!(result.is_err());
 
         cleanup_repo(&store, "pg-concurrency").await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn pg_concurrent_ref_updates_have_exactly_one_winner() {
+        let Some(pool) = connect_postgres().await else {
+            eprintln!("skipping Postgres test: no DATABASE_URL");
+            return;
+        };
+        let first_store = make_store(pool.clone());
+        let second_store = make_store(pool.clone());
+        let verifier = make_store(pool);
+        let repo_id = "pg-concurrent-ref-cas";
+        cleanup_repo(&first_store, repo_id).await;
+        first_store
+            .create_repo(HubRepoType::Model, repo_id, false)
+            .unwrap();
+        let initial_sha = "4b825dc642cb6eb9a060e54bf899d69f8f5ce8e3";
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+
+        let first_barrier = barrier.clone();
+        let first = tokio::spawn(async move {
+            first_barrier.wait().await;
+            first_store.create_revision(repo_id, Some(initial_sha), "first-sha", "main", "first")
+        });
+        let second = tokio::spawn(async move {
+            barrier.wait().await;
+            second_store.create_revision(repo_id, Some(initial_sha), "second-sha", "main", "second")
+        });
+
+        let first = first.await.unwrap();
+        let second = second.await.unwrap();
+        assert_ne!(first.is_ok(), second.is_ok());
+
+        let resolved = verifier.resolve_revision(repo_id, "main").unwrap().unwrap();
+        assert_eq!(
+            resolved,
+            if first.is_ok() {
+                "first-sha"
+            } else {
+                "second-sha"
+            }
+        );
+        cleanup_repo(&verifier, repo_id).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn pg_delete_and_push_cannot_leave_a_resurrected_ref() {
+        let Some(pool) = connect_postgres().await else {
+            eprintln!("skipping Postgres test: no DATABASE_URL");
+            return;
+        };
+        let push_store = make_store(pool.clone());
+        let delete_store = make_store(pool.clone());
+        let verifier = make_store(pool.clone());
+        let repo_id = "pg-delete-push-race";
+        cleanup_repo(&push_store, repo_id).await;
+        push_store
+            .create_repo(HubRepoType::Model, repo_id, false)
+            .unwrap();
+        let initial_sha = "4b825dc642cb6eb9a060e54bf899d69f8f5ce8e3";
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+
+        let push_barrier = barrier.clone();
+        let push = tokio::spawn(async move {
+            push_barrier.wait().await;
+            push_store.create_revision(
+                repo_id,
+                Some(initial_sha),
+                "racing-sha",
+                "main",
+                "racing push",
+            )
+        });
+        let delete = tokio::spawn(async move {
+            barrier.wait().await;
+            delete_store.delete_repo(repo_id)
+        });
+
+        let _push_result = push.await.unwrap();
+        delete.await.unwrap().unwrap();
+        assert!(verifier.get_repo(repo_id).unwrap().is_none());
+        assert!(verifier.list_refs(repo_id).unwrap().is_empty());
+        assert!(verifier.list_revisions(repo_id).unwrap().is_empty());
+
+        let dangling_files: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM shardline_hub_file_entries
+             WHERE commit_sha = 'racing-sha'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(dangling_files, 0);
+        cleanup_repo(&verifier, repo_id).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]

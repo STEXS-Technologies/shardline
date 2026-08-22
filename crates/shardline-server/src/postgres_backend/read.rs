@@ -1,14 +1,15 @@
 use std::time::Duration;
 
 use shardline_index::{
-    FileRecord, FileRecordStorageLayout, PostgresMetadataStoreError, RecordStore, RecordTraversal,
-    RepositoryRecordScope, S3ObjectEntry, S3ObjectIndexStore,
+    FileRecord, FileRecordStorageLayout, OciObjectKey, OciObjectStore, OciTagEntry, OciTagStore,
+    PostgresMetadataStoreError, RecordStore, RecordTraversal, RepositoryRecordScope, S3ObjectEntry,
+    S3ObjectIndexStore,
 };
 use shardline_protocol::{ByteRange, RepositoryScope};
 #[cfg(test)]
 use shardline_storage::ObjectStore;
 use shardline_storage::{AsyncObjectStore, DeleteOutcome, ObjectKey, ObjectMetadata, ObjectPrefix};
-use sqlx::query_scalar;
+use sqlx::{PgPool, query_scalar};
 use tokio::task;
 
 use crate::{
@@ -16,6 +17,7 @@ use crate::{
     chunk_store::chunk_object_key,
     download_stream::{
         ServerByteStream, file_record_byte_stream, object_byte_range_stream, object_byte_stream,
+        validated_xorb_byte_range_stream,
     },
     error::IndexError,
     object_store::{read_full_object, reconstruct_file_record_bytes, visit_object_prefix},
@@ -361,7 +363,7 @@ impl super::PostgresBackend {
         let object_store = self.object_store();
         let object_key = xorb_object_key(hash_hex)?;
 
-        object_byte_range_stream(object_store, object_key, total_length, range).await
+        validated_xorb_byte_range_stream(&object_store, &object_key, hash_hex, total_length, range)
     }
 
     /// Reads a stored chunk only when it is reachable from a concrete file version.
@@ -464,6 +466,18 @@ impl super::PostgresBackend {
         Ok(())
     }
 
+    /// Atomically replaces an S3 object row if its current value matches.
+    pub(crate) async fn compare_and_swap_s3_object(
+        &self,
+        expected: Option<&S3ObjectEntry>,
+        replacement: &S3ObjectEntry,
+    ) -> Result<bool, ServerError> {
+        self.index_store
+            .compare_and_swap_s3_object(expected, replacement)
+            .await
+            .map_err(ServerError::from)
+    }
+
     /// Deletes one S3 object listing-index row, returning whether a row was removed.
     ///
     /// # Errors
@@ -511,6 +525,51 @@ impl super::PostgresBackend {
     ) -> Result<Option<S3ObjectEntry>, ServerError> {
         self.index_store
             .scan_s3_object_exact(scope_namespace, object_key)
+            .await
+            .map_err(ServerError::from)
+    }
+
+    pub(crate) async fn insert_oci_tag_if_absent(
+        &self,
+        entry: &OciTagEntry,
+    ) -> Result<bool, ServerError> {
+        self.index_store
+            .insert_oci_tag_if_absent(entry)
+            .await
+            .map_err(ServerError::from)
+    }
+
+    pub(crate) async fn oci_tag(
+        &self,
+        scope_namespace: &str,
+        repository: &str,
+        tag: &str,
+    ) -> Result<Option<OciTagEntry>, ServerError> {
+        self.index_store
+            .oci_tag(scope_namespace, repository, tag)
+            .await
+            .map_err(ServerError::from)
+    }
+
+    pub(crate) async fn list_oci_tags(
+        &self,
+        scope_namespace: &str,
+        repository: &str,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<OciTagEntry>, ServerError> {
+        self.index_store
+            .list_oci_tags(scope_namespace, repository, cursor, limit)
+            .await
+            .map_err(ServerError::from)
+    }
+
+    pub(crate) async fn oci_object_is_deleted(
+        &self,
+        key: &OciObjectKey,
+    ) -> Result<bool, ServerError> {
+        self.index_store
+            .oci_object_is_deleted(key)
             .await
             .map_err(ServerError::from)
     }
@@ -584,6 +643,21 @@ pub(crate) fn connect_postgres_metadata_pool(
         .map_err(ServerError::from)
 }
 
+/// Returns PostgreSQL's current Unix timestamp for shared lifecycle decisions.
+///
+/// Multi-replica deployments must not expire shared retention state from each
+/// node's independently skewable wall clock. PostgreSQL already coordinates
+/// the durable metadata, so its clock is the single authority for those
+/// decisions as well.
+pub(crate) async fn postgres_unix_now_seconds(pool: &PgPool) -> Result<u64, ServerError> {
+    let seconds =
+        sqlx::query_scalar::<_, i64>("SELECT floor(extract(epoch FROM clock_timestamp()))::bigint")
+            .fetch_one(pool)
+            .await
+            .map_err(shardline_index::PostgresMetadataStoreError::from)?;
+    u64::try_from(seconds).map_err(ServerError::from)
+}
+
 fn map_record_store_error(error: PostgresMetadataStoreError) -> ServerError {
     match error {
         PostgresMetadataStoreError::RecordNotFound => ServerError::NotFound,
@@ -597,9 +671,11 @@ fn map_record_store_error(error: PostgresMetadataStoreError) -> ServerError {
         | PostgresMetadataStoreError::WebhookDelivery(_)
         | PostgresMetadataStoreError::IntegerOutOfRange(_)
         | PostgresMetadataStoreError::InvalidRecordKind
+        | PostgresMetadataStoreError::InvalidOciObjectKind(_)
         | PostgresMetadataStoreError::InvalidRepoType(_)
         | PostgresMetadataStoreError::Unsupported(_)
-        | PostgresMetadataStoreError::InvalidUploadIntentState(_) => {
+        | PostgresMetadataStoreError::InvalidUploadIntentState(_)
+        | PostgresMetadataStoreError::UploadIntentConflict(_) => {
             ServerError::Index(IndexError::PostgresMetadata(error))
         }
     }
@@ -945,6 +1021,36 @@ mod tests {
         assert!(result.is_ok() || result.is_err());
         // Drop the pool explicitly within the tokio context.
         drop(result);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn postgres_lifecycle_clock_is_timezone_independent() {
+        let Some(database_url) = std::env::var("DATABASE_URL").ok() else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&database_url)
+            .await
+            .unwrap();
+
+        sqlx::query("SET TIME ZONE 'Pacific/Kiritimati'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let far_east = postgres_unix_now_seconds(&pool).await.unwrap();
+        sqlx::query("SET TIME ZONE 'America/Adak'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let far_west = postgres_unix_now_seconds(&pool).await.unwrap();
+
+        assert!(
+            far_west.abs_diff(far_east) <= 1,
+            "shared lifecycle time must be an epoch value independent of session timezone"
+        );
+        pool.close().await;
     }
 
     // ===== chunk_length / read_chunk integration tests =====

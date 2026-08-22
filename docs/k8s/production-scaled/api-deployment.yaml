@@ -173,7 +173,8 @@ spec:
           configMap:
             name: shardline-config
         - name: root
-          emptyDir: {}
+          persistentVolumeClaim:
+            claimName: shardline-api-staging
         - name: tmp
           emptyDir: {}
         - name: runtime-secrets

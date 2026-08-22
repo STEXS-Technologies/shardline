@@ -253,6 +253,15 @@ pub enum ServerError {
     /// A request exceeded the server's total execution deadline.
     #[error("request exceeded the server execution deadline")]
     RequestTimedOut,
+    /// A writer lost ownership of its distributed resource fence.
+    #[error("resource write fence is no longer current")]
+    StaleResourceFence,
+    /// A test interrupted lifecycle repair after one durable mutation.
+    #[error("lifecycle repair interrupted at {boundary:?}")]
+    InjectedLifecycleRepairInterruption {
+        /// Boundary reached by lifecycle repair.
+        boundary: crate::LifecycleRepairBoundary,
+    },
     /// A blocking worker task failed before it could finish storage work.
     #[error("blocking worker task failed")]
     BlockingTask(#[source] JoinError),
@@ -341,6 +350,8 @@ impl ServerError {
             | Self::TransferLimiterTimedOut
             | Self::WorkQueueSaturated
             | Self::RequestTimedOut
+            | Self::StaleResourceFence
+            | Self::InjectedLifecycleRepairInterruption { .. }
             | Self::BlockingTask(_)
             | Self::InvalidPath
             | Self::UnregisteredFile(_)
@@ -402,7 +413,9 @@ impl ServerError {
             Self::TransferLimiterClosed
             | Self::TransferLimiterTimedOut
             | Self::WorkQueueSaturated
-            | Self::RequestTimedOut => StatusCode::SERVICE_UNAVAILABLE,
+            | Self::RequestTimedOut
+            | Self::StaleResourceFence => StatusCode::SERVICE_UNAVAILABLE,
+            Self::InjectedLifecycleRepairInterruption { .. } => StatusCode::INTERNAL_SERVER_ERROR,
             Self::Io(_)
             | Self::Json(_)
             | Self::NumericConversion(_)
@@ -426,6 +439,9 @@ impl From<CasError> for ServerError {
         match value {
             CasError::BodyTooLarge { .. } => Self::RequestBodyTooLarge,
             CasError::InvalidUploadTransition => Self::UploadIntentConflict,
+            CasError::InjectedUploadInterruption { boundary } => Self::Io(IoError::other(format!(
+                "upload interrupted at {boundary:?}"
+            ))),
             CasError::Overflow => Self::Overflow,
             CasError::ObjectStore(message)
             | CasError::Index(message)
@@ -582,6 +598,7 @@ impl From<GcError> for ServerError {
             GcError::InvalidContentHash => Self::InvalidContentHash,
             GcError::Overflow => Self::Overflow,
             GcError::XetAdapter(e) => Self::from(e),
+            GcError::OciAdapter(e) => Self::from(e),
         }
     }
 }
@@ -790,6 +807,8 @@ impl shardline_s3_adapter::S3ErrorClassify for ServerError {
             | Self::TransferLimiterTimedOut
             | Self::WorkQueueSaturated
             | Self::RequestTimedOut
+            | Self::StaleResourceFence
+            | Self::InjectedLifecycleRepairInterruption { .. }
             | Self::BlockingTask(_)
             | Self::InvalidPath
             | Self::UnregisteredFile(_)

@@ -356,7 +356,7 @@ pub(crate) async fn bazel_head(
 
 #[cfg(test)]
 mod tests {
-    use std::{num::NonZeroUsize, sync::Arc};
+    use std::{io, num::NonZeroUsize, sync::Arc};
 
     use axum::{
         Router,
@@ -711,6 +711,138 @@ mod tests {
         // CAS verifies SHA-256 hash of content matches URL hash, so wrong hash
         // should produce an error response
         assert!(response.status().is_client_error());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_same_digest_cas_puts_are_idempotent() {
+        let (state, _tmp) = build_test_state().await;
+        let app = bazel_router(state);
+        let content = test_content();
+        let hash = test_content_hash();
+        let barrier = Arc::new(tokio::sync::Barrier::new(16));
+
+        let mut uploads = Vec::new();
+        for _ in 0..16 {
+            let app = app.clone();
+            let content = content.clone();
+            let hash = hash.clone();
+            let barrier = barrier.clone();
+            uploads.push(tokio::spawn(async move {
+                barrier.wait().await;
+                app.oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri(format!("/v1/bazel/cache/cas/{hash}"))
+                        .body(Body::from(content))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            }));
+        }
+
+        for upload in uploads {
+            assert_eq!(upload.await.unwrap().status(), StatusCode::NO_CONTENT);
+        }
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/v1/bazel/cache/cas/{hash}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let stored = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(stored.as_ref(), content.as_slice());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ac_and_cas_keep_the_same_hash_in_separate_namespaces() {
+        let (state, _tmp) = build_test_state().await;
+        let app = bazel_router(state);
+        let cas_content = test_content();
+        let hash = test_content_hash();
+        let ac_content = b"action-result-for-the-same-digest".to_vec();
+
+        for (kind, body) in [("cas", cas_content.clone()), ("ac", ac_content.clone())] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri(format!("/v1/bazel/cache/{kind}/{hash}"))
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        }
+
+        for (kind, expected) in [("cas", cas_content), ("ac", ac_content)] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/v1/bazel/cache/{kind}/{hash}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let stored = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            assert_eq!(stored.as_ref(), expected.as_slice());
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn interrupted_cas_put_is_not_published() {
+        use axum::body::Bytes;
+        use futures_util::stream;
+
+        let (state, _tmp) = build_test_state().await;
+        let app = bazel_router(state);
+        let content = test_content();
+        let hash = test_content_hash();
+        let chunks: Vec<Result<Bytes, io::Error>> = vec![
+            Ok(Bytes::copy_from_slice(&content[..5])),
+            Err(io::Error::new(
+                io::ErrorKind::ConnectionReset,
+                "simulated client disconnect",
+            )),
+        ];
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/v1/bazel/cache/cas/{hash}"))
+                    .body(Body::from_stream(stream::iter(chunks)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(!response.status().is_success());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/v1/bazel/cache/cas/{hash}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     // =========================================================================

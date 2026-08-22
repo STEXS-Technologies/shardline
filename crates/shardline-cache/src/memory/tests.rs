@@ -1201,7 +1201,16 @@ async fn memory_cache_concurrent_get_put_delete() {
                     }
                     2 | 3 => {
                         // get
-                        let _ = cache.get(key).await;
+                        let result = cache.get(key).await;
+                        if matches!(result, Ok(None)) {
+                            // A cold get owns the loading latch and production
+                            // callers must either put/delete or release it on
+                            // cancellation. This stress task intentionally has
+                            // no loader, so release its ownership immediately
+                            // instead of making later rounds wait for the
+                            // orphan-loader deadline.
+                            cache.release_loading(key);
+                        }
                     }
                     _ => {
                         // delete

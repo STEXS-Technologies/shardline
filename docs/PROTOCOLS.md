@@ -81,6 +81,11 @@ git config http.extraHeader "Authorization: Bearer $SHARDLINE_TOKEN"
 git lfs push origin main
 ```
 
+Chunked `PATCH` uploads keep bounded staging files under `SHARDLINE_ROOT_DIR`.
+Multi-replica API deployments must share that root on a filesystem with cross-node
+advisory locking; the production Kubernetes profile provisions this as a
+`ReadWriteMany` claim, so any replica can accept the next range.
+
 Bazel HTTP remote cache:
 
 ```bash
@@ -95,6 +100,24 @@ OCI Distribution:
 skopeo login --username shardline --password "$SHARDLINE_TOKEN" http://127.0.0.1:8080
 skopeo copy oci:./artifact:latest docker://127.0.0.1:8080/team/assets:latest
 ```
+
+OCI manifest and blob bytes are immutable by digest. Mutable tag pointers are
+linearized in the metadata database, so replicas share one authoritative value and a
+manifest deletion only removes a tag if it still points to that manifest. On first
+access after upgrading, legacy object-store-only tag pointers are imported with
+create-if-absent semantics. Manifest creation and manifest/blob deletion are serialized
+per repository, preventing a tag or manifest from committing against a concurrently
+deleted dependency.
+
+OCI `DELETE` is a logical operation. Shardline atomically records a durable tombstone
+and removes manifest tags, while retaining immutable payload bytes. Republishing the
+same digest clears the tombstone. This prevents a stale database-fence owner from
+deleting content made visible by a newer replica; retained deleted bytes are not
+currently reclaimed by online GC.
+
+Incomplete OCI upload sessions use the same shared API staging root and a
+cross-process session lock. Completed blobs remain authoritative in the configured
+object store.
 
 For local plain-HTTP registries, OCI clients may require their own insecure-registry
 flags or local client configuration.
@@ -125,4 +148,4 @@ The maturity tiers are defined in [Compatibility Status](COMPATIBILITY_STATUS.md
 | Remote HTTP (Bazel) | `bazel-http` | **Beta** | Developer and CI remote caching | SHA-256 digest paths today | HTTP `GET` and `PUT` | Straightforward shared cache protocol for build artifacts. |
 | OCI Distribution | `oci` | **Stable** | Container images and OCI artifacts | SHA-256 digest | HTTP and REST | Standard registry protocol for Docker, Kubernetes, and OCI artifacts. |
 | Hugging Face Hub API | `hub` | **Beta** | ML model and dataset distribution | Repository paths | HTTP and REST | Drop-in alternative for huggingface-cli workflows. |
-| S3-compatible object API | `s3` | **Beta** | Lakehouse and `s3://` object workflows | Content-addressed (BLAKE3 ETag) | HTTP and REST (SigV4) | Direct drop-in for S3 clients against a deduplicating CAS backend. |
+| S3-compatible object API | `s3` | **Stable** | Lakehouse and `s3://` object workflows | Content-addressed storage with standard S3-style MD5 ETags | HTTP and REST (SigV4) | Validated real-client surface with database-linearized conditional writes. |

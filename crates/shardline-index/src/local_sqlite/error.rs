@@ -6,7 +6,10 @@ use shardline_protocol::{HashParseError, RangeError};
 use shardline_storage::ObjectKeyError;
 use thiserror::Error;
 
-use crate::{QuarantineCandidateError, RetentionHoldError, WebhookDeliveryError};
+use crate::{
+    OciObjectKindParseError, QuarantineCandidateError, RetentionHoldError,
+    UploadIntentConflictError, WebhookDeliveryError,
+};
 
 /// Local metadata-store failure.
 #[derive(Debug, Error)]
@@ -54,12 +57,22 @@ pub enum LocalIndexStoreError {
     /// A stored webhook delivery was invalid.
     #[error("stored webhook delivery was invalid")]
     WebhookDelivery(#[from] WebhookDeliveryError),
+    /// An upload intent ID was reused for different object identity.
+    #[error("upload intent conflict")]
+    UploadIntentConflict(
+        #[from]
+        #[source]
+        UploadIntentConflictError,
+    ),
     /// A stored integer exceeded the supported range.
     #[error("stored integer exceeded the supported range: {0}")]
     IntegerOutOfRange(String),
     /// A stored record kind was invalid.
     #[error("stored local record kind was invalid")]
     InvalidRecordKind,
+    /// A stored OCI object kind was invalid.
+    #[error("stored OCI object kind was invalid")]
+    InvalidOciObjectKind(#[from] OciObjectKindParseError),
     /// The local metadata database had inconsistent import state.
     #[error("local metadata database had inconsistent legacy import state")]
     InvalidLegacyImportState,

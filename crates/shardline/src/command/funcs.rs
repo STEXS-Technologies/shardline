@@ -9,11 +9,11 @@ use shardline_server::{
 
 use super::cli::{CliCommand, RedactedDbUrl};
 use super::definition::{
-    AdminSubcommand, BackupSubcommand, BenchMode, CliDefinition, CliDefinitionCommand,
-    CliObjectStorageAdapter, CliRepositoryProvider, CliServerFrontend, CliServerRole,
-    CliTokenScope, ConfigSubcommand, DbMigrateSubcommand, DbSubcommand, GcScheduleSubcommand,
-    GcSubcommand, HoldSubcommand, IndexSubcommand, ProviderlessSubcommand, RepairSubcommand,
-    StorageSubcommand,
+    AdminSubcommand, BackupSubcommand, BenchMode, CliAdminTokenAuthProvider, CliDefinition,
+    CliDefinitionCommand, CliObjectStorageAdapter, CliRepositoryProvider, CliServerFrontend,
+    CliServerRole, CliTokenScope, ConfigSubcommand, DbMigrateSubcommand, DbSubcommand,
+    GcScheduleSubcommand, GcSubcommand, HoldSubcommand, IndexSubcommand, ProviderlessSubcommand,
+    RepairSubcommand, StorageSubcommand,
 };
 use super::error::CliParseError;
 
@@ -142,6 +142,7 @@ impl TryFrom<CliDefinition> for CliCommand {
             },
             CliDefinitionCommand::Admin(args) => match args.command {
                 AdminSubcommand::Token(args) => Ok(Self::AdminToken {
+                    auth_provider: args.auth_provider.into(),
                     issuer: args.issuer,
                     subject: args.subject,
                     scope: args.scope.into(),
@@ -294,6 +295,15 @@ impl From<CliTokenScope> for TokenScope {
         match value {
             CliTokenScope::Read => Self::Read,
             CliTokenScope::Write => Self::Write,
+        }
+    }
+}
+
+impl From<CliAdminTokenAuthProvider> for crate::AdminTokenAuthProvider {
+    fn from(value: CliAdminTokenAuthProvider) -> Self {
+        match value {
+            CliAdminTokenAuthProvider::Local => Self::Local,
+            CliAdminTokenAuthProvider::Ed25519 => Self::Ed25519,
         }
     }
 }

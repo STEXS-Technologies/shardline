@@ -204,6 +204,58 @@ impl ProviderRepositoryState {
         self
     }
 
+    /// Merges newer lifecycle observations without discarding independent fields.
+    ///
+    /// Both states must describe the same repository. Timestamped observations
+    /// are monotonic; the revision value is kept together with the timestamp
+    /// that selected it. This is the in-memory equivalent of the atomic merge
+    /// performed by persistent index adapters.
+    #[must_use]
+    pub(crate) fn merge_monotonic(&self, incoming: &Self) -> Self {
+        debug_assert_eq!(self.provider, incoming.provider);
+        debug_assert_eq!(self.owner, incoming.owner);
+        debug_assert_eq!(self.repo, incoming.repo);
+
+        let (last_revision_pushed_at_unix_seconds, last_pushed_revision) =
+            match incoming.last_revision_pushed_at_unix_seconds {
+                Some(incoming_at)
+                    if self
+                        .last_revision_pushed_at_unix_seconds
+                        .is_none_or(|current_at| incoming_at >= current_at) =>
+                {
+                    (Some(incoming_at), incoming.last_pushed_revision.clone())
+                }
+                _ => (
+                    self.last_revision_pushed_at_unix_seconds,
+                    self.last_pushed_revision.clone(),
+                ),
+            };
+
+        Self {
+            provider: self.provider,
+            owner: self.owner.clone(),
+            repo: self.repo.clone(),
+            last_access_changed_at_unix_seconds: max_optional_timestamp(
+                self.last_access_changed_at_unix_seconds,
+                incoming.last_access_changed_at_unix_seconds,
+            ),
+            last_revision_pushed_at_unix_seconds,
+            last_pushed_revision,
+            last_cache_invalidated_at_unix_seconds: max_optional_timestamp(
+                self.last_cache_invalidated_at_unix_seconds,
+                incoming.last_cache_invalidated_at_unix_seconds,
+            ),
+            last_authorization_rechecked_at_unix_seconds: max_optional_timestamp(
+                self.last_authorization_rechecked_at_unix_seconds,
+                incoming.last_authorization_rechecked_at_unix_seconds,
+            ),
+            last_drift_checked_at_unix_seconds: max_optional_timestamp(
+                self.last_drift_checked_at_unix_seconds,
+                incoming.last_drift_checked_at_unix_seconds,
+            ),
+        }
+    }
+
     /// Returns the repository hosting provider.
     #[must_use]
     pub const fn provider(&self) -> RepositoryProvider {
@@ -256,6 +308,13 @@ impl ProviderRepositoryState {
     #[must_use]
     pub const fn last_drift_checked_at_unix_seconds(&self) -> Option<u64> {
         self.last_drift_checked_at_unix_seconds
+    }
+}
+
+fn max_optional_timestamp(current: Option<u64>, incoming: Option<u64>) -> Option<u64> {
+    match (current, incoming) {
+        (Some(current), Some(incoming)) => Some(current.max(incoming)),
+        (current, incoming) => current.or(incoming),
     }
 }
 

@@ -703,33 +703,67 @@ fn github_provider() -> Result<BuiltInProvider, ProviderServiceError> {
 
 #[test]
 fn visibility_private() {
-    assert_eq!(super::visibility("private"), RepositoryVisibility::Private);
+    assert_eq!(
+        super::visibility("private").unwrap(),
+        RepositoryVisibility::Private
+    );
 }
 
 #[test]
 fn visibility_internal() {
     assert_eq!(
-        super::visibility("internal"),
+        super::visibility("internal").unwrap(),
         RepositoryVisibility::Internal
     );
 }
 
 #[test]
 fn visibility_public() {
-    assert_eq!(super::visibility("public"), RepositoryVisibility::Public);
-}
-
-#[test]
-fn visibility_unknown_defaults_to_public() {
     assert_eq!(
-        super::visibility("unknown-value"),
+        super::visibility("public").unwrap(),
         RepositoryVisibility::Public
     );
 }
 
 #[test]
-fn visibility_empty_defaults_to_public() {
-    assert_eq!(super::visibility(""), RepositoryVisibility::Public);
+fn visibility_unknown_fails_closed() {
+    assert!(matches!(
+        super::visibility("unknown-value"),
+        Err(ProviderServiceError::InvalidRepositoryVisibility)
+    ));
+}
+
+#[test]
+fn visibility_empty_fails_closed() {
+    assert!(matches!(
+        super::visibility(""),
+        Err(ProviderServiceError::InvalidRepositoryVisibility)
+    ));
+}
+
+#[test]
+fn provider_registry_rejects_unknown_visibility_instead_of_granting_public_access() {
+    let document = ProviderConfigDocument {
+        providers: vec![ProviderConfig {
+            kind: "github".to_owned(),
+            integration_subject: "github-app".to_owned(),
+            webhook_secret: Some(SecretString::from_secret("secret")),
+            repositories: vec![RepositoryPolicyConfig {
+                owner: "team".to_owned(),
+                name: "assets".to_owned(),
+                visibility: "unknown-value".to_owned(),
+                default_revision: "main".to_owned(),
+                clone_url: "https://github.example/team/assets.git".to_owned(),
+                read_subjects: Vec::new(),
+                write_subjects: Vec::new(),
+            }],
+        }],
+    };
+
+    assert!(matches!(
+        ProviderRegistry::from_document(document, None),
+        Err(ProviderServiceError::InvalidRepositoryVisibility)
+    ));
 }
 
 // ── parse_provider_kind ────────────────────────────────────────────────
@@ -900,6 +934,15 @@ fn provider_service_error_display_config_length_mismatch() {
 fn provider_service_error_display_duplicate_provider() {
     let err = ProviderServiceError::DuplicateProvider;
     assert_eq!(err.to_string(), "provider is configured more than once");
+}
+
+#[test]
+fn provider_service_error_display_invalid_repository_visibility() {
+    let err = ProviderServiceError::InvalidRepositoryVisibility;
+    assert_eq!(
+        err.to_string(),
+        "provider repository visibility must be public, private, or internal"
+    );
 }
 
 #[test]
@@ -1383,6 +1426,7 @@ fn provider_service_error_debug_all_variants() {
         ProviderServiceError::MissingApiKey,
         ProviderServiceError::InvalidApiKey,
         ProviderServiceError::DuplicateProvider,
+        ProviderServiceError::InvalidRepositoryVisibility,
         ProviderServiceError::MissingWebhookSecret,
         ProviderServiceError::EmptyWebhookSecret,
         ProviderServiceError::UnknownProvider,

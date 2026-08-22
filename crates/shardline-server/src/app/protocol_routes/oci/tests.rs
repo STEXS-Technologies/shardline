@@ -315,6 +315,76 @@ async fn manifest_delete_cleans_up_tag() {
     // Tag should no longer resolve
     let response = send(&app, Method::GET, &uri, Body::empty()).await;
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let tags_uri = format!("/v2/{REPO}/tags/list");
+    let response = send(&app, Method::GET, &tags_uri, Body::empty()).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["tags"], serde_json::json!([]));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn manifest_republish_same_digest_clears_tombstone() {
+    let ctx = build_oci_test_state().await;
+    let app = oci_test_router(&ctx.state);
+    let manifest_digest = setup_manifest(&app, REPO, TAG).await;
+    let config_digest = sha256_hex(b"{}");
+    let layer_digest = sha256_hex(b"\x1f\x8b\x08\x00");
+    let manifest_json = test_manifest_json(&config_digest, &layer_digest);
+
+    let digest_uri = format!("/v2/{REPO}/manifests/sha256:{manifest_digest}");
+    let response = send(&app, Method::DELETE, &digest_uri, Body::empty()).await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let response = send(&app, Method::GET, &digest_uri, Body::empty()).await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let tag_uri = format!("/v2/{REPO}/manifests/reborn");
+    let response = send_with_content_type(
+        &app,
+        Method::PUT,
+        &tag_uri,
+        Body::from(manifest_json.into_bytes()),
+        MANIFEST_MEDIA_TYPE,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    assert_eq!(
+        send(&app, Method::GET, &digest_uri, Body::empty())
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        send(&app, Method::GET, &tag_uri, Body::empty())
+            .await
+            .status(),
+        StatusCode::OK
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn blob_reupload_same_digest_clears_tombstone() {
+    let ctx = build_oci_test_state().await;
+    let app = oci_test_router(&ctx.state);
+    let bytes = b"immutable reborn blob";
+    let digest = upload_blob(&app, REPO, bytes).await;
+    let uri = format!("/v2/{REPO}/blobs/sha256:{digest}");
+
+    let response = send(&app, Method::DELETE, &uri, Body::empty()).await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert_eq!(
+        send(&app, Method::GET, &uri, Body::empty()).await.status(),
+        StatusCode::NOT_FOUND
+    );
+
+    assert_eq!(upload_blob(&app, REPO, bytes).await, digest);
+    assert_eq!(
+        send(&app, Method::GET, &uri, Body::empty()).await.status(),
+        StatusCode::OK
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

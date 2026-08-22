@@ -61,6 +61,14 @@ DATABASE_URL="${coverage_database_url}" \
 DATABASE_URL="${coverage_database_url}" \
     cargo test -p shardline-index --lib -- pg_upload_intent
 DATABASE_URL="${coverage_database_url}" \
+    cargo test -p shardline-index --lib -- pg_provider_
+DATABASE_URL="${coverage_database_url}" \
+    cargo test -p shardline-index --lib -- pg_manifest_tombstone
+DATABASE_URL="${coverage_database_url}" \
+    cargo test -p shardline-index --lib -- pg_oci_tag
+DATABASE_URL="${coverage_database_url}" \
+    cargo test -p shardline-index --lib -- pg_s3_object
+DATABASE_URL="${coverage_database_url}" \
     cargo test -p shardline-server --lib -- postgres_backend::
 
 cargo llvm-cov report \

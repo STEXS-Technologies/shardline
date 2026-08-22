@@ -1,6 +1,7 @@
 /target
 /dist
 /dist-release-check
+/benchmark-results/
 /.shardline
 crates/shardline/.shardline/
 /cobertura.xml

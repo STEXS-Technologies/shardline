@@ -397,4 +397,20 @@ mod tests {
             super::run_repair(Some(Path::new("/nonexistent-shardline-test-root")), 3600).await;
         assert!(result.is_err());
     }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn full_repair_is_idempotent_on_the_same_durable_root() {
+        let root = tempfile::tempdir().expect("repair root");
+
+        let first = super::run_repair(Some(root.path()), 3_600)
+            .await
+            .expect("first repair pass");
+        let second = super::run_repair(Some(root.path()), 3_600)
+            .await
+            .expect("second repair pass");
+
+        assert_eq!(second, first, "a quiescent repair rerun must converge");
+        assert!(second.index_rebuild.is_clean());
+        assert!(second.fsck.is_clean());
+    }
 }

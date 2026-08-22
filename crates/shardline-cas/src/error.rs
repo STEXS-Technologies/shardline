@@ -18,6 +18,11 @@ pub enum CasError {
     Record(String),
     /// A persisted upload intent is missing or cannot move to the requested state.
     InvalidUploadTransition,
+    /// A deterministic test interrupted the upload lifecycle at a typed boundary.
+    InjectedUploadInterruption {
+        /// Boundary reached immediately before the interruption.
+        boundary: crate::UploadLifecycleBoundary,
+    },
     /// Numeric overflow.
     Overflow,
     /// Internal error.
@@ -34,6 +39,9 @@ impl fmt::Display for CasError {
             Self::Index(msg) => write!(f, "index error: {msg}"),
             Self::Record(msg) => write!(f, "record store error: {msg}"),
             Self::InvalidUploadTransition => write!(f, "invalid upload intent state transition"),
+            Self::InjectedUploadInterruption { boundary } => {
+                write!(f, "injected upload interruption at {boundary:?}")
+            }
             Self::Overflow => write!(f, "numeric overflow"),
             Self::Internal(msg) => write!(f, "internal error: {msg}"),
         }
@@ -97,6 +105,17 @@ mod tests {
     fn cas_error_overflow_display() {
         let err = CasError::Overflow;
         assert_eq!(err.to_string(), "numeric overflow");
+    }
+
+    #[test]
+    fn cas_error_injected_upload_interruption_display() {
+        let err = CasError::InjectedUploadInterruption {
+            boundary: crate::UploadLifecycleBoundary::AfterMetadataCommitted,
+        };
+        assert_eq!(
+            err.to_string(),
+            "injected upload interruption at AfterMetadataCommitted"
+        );
     }
 
     #[test]

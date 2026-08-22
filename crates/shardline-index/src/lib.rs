@@ -67,12 +67,15 @@ mod ids;
 mod lifecycle;
 mod local_sqlite;
 mod memory;
+mod oci_objects;
+mod oci_tags;
 mod postgres;
 mod provider;
 mod reconstruction;
 mod record;
 mod record_key;
 mod record_kind;
+mod resource_fence;
 mod s3_objects;
 #[cfg(test)]
 mod test_invariant_error;
@@ -93,8 +96,14 @@ pub use memory::{
     MemoryIndexStore, MemoryIndexStoreError, MemoryRecordLocator, MemoryRecordStore,
     MemoryRecordStoreError,
 };
+pub use oci_objects::{
+    OciObjectKey, OciObjectKind, OciObjectKindParseError, OciObjectStore, OciObjectTombstone,
+};
+pub use oci_tags::{OciTagEntry, OciTagStore};
 pub use postgres::{
-    PostgresIndexStore, PostgresMetadataStoreError, PostgresRecordLocator, PostgresRecordStore,
+    PostgresIndexStore, PostgresMetadataStoreError, PostgresProviderMutation,
+    PostgresProviderMutationOutcome, PostgresRecordLocator, PostgresRecordStore,
+    PostgresResourceFence, ProviderRepositoryKey,
 };
 pub use reconstruction::{FileReconstruction, ReconstructionTerm};
 pub use record::{
@@ -102,11 +111,14 @@ pub use record::{
     RecordStore, RecordStoreFuture, RecordTraversal, RepositoryRecordScope, StorageRepresentation,
     StoredRecord,
 };
+pub use resource_fence::{ResourceLockDomain, ResourceLockKey};
 pub use s3_objects::{S3ObjectEntry, S3ObjectIndexStore};
 pub use store::{
     AsyncIndexStore, DedupeStore, IndexStore, IndexStoreFuture, LifecycleStore,
     ReconstructionStore, Repository,
 };
 pub use tree::{RepoKey, RevisionRecord, TreeEntry, TreeEntryOutcome, TreeKey, TreeStore};
-pub use upload_intent::{UploadIntent, UploadIntentState, UploadIntentStore};
+pub use upload_intent::{
+    UploadIntent, UploadIntentConflictError, UploadIntentState, UploadIntentStore,
+};
 pub use xet_hash::{parse_xet_hash_hex, xet_hash_hex_string};

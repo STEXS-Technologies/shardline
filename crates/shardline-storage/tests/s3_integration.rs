@@ -1,12 +1,301 @@
 #![allow(clippy::unwrap_used)]
 
+use std::{
+    io::{Read, Write},
+    net::{Shutdown, TcpListener, TcpStream},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
+    thread::{self, JoinHandle},
+    time::{Duration, Instant},
+};
+
 use futures_util::StreamExt;
 use shardline_protocol::SecretString;
 use shardline_storage::{
     ObjectBody, ObjectIntegrity, ObjectKey, ObjectPrefix, ObjectStore, PutOutcome, S3ObjectStore,
     S3ObjectStoreConfig,
 };
-use shardline_test_support::DockerLocalStack;
+use shardline_test_support::{DockerLocalStack, S3RawConfig};
+
+#[derive(Clone, Copy)]
+enum S3ProxyFault {
+    DropAcceptedPut,
+    ServiceUnavailableOnce,
+    DelaySuccessfulGetBody(Duration),
+}
+
+/// A provider-backed, one-shot HTTP fault injector in front of MinIO.
+struct S3FaultProxy {
+    endpoint: String,
+    injected: Arc<AtomicBool>,
+    stop: Option<mpsc::Sender<()>>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl S3FaultProxy {
+    fn start(upstream_endpoint: &str, fault: S3ProxyFault) -> std::io::Result<Self> {
+        let upstream = upstream_endpoint
+            .strip_prefix("http://")
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "MinIO test endpoint must use HTTP",
+                )
+            })?
+            .to_owned();
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        listener.set_nonblocking(true)?;
+        let endpoint = format!("http://{}", listener.local_addr()?);
+        let injected = Arc::new(AtomicBool::new(false));
+        let worker_injected = Arc::clone(&injected);
+        let (stop, stopped) = mpsc::channel();
+        let thread = thread::spawn(move || {
+            loop {
+                if stopped.try_recv().is_ok() {
+                    break;
+                }
+                match listener.accept() {
+                    Ok((client, _address)) => {
+                        proxy_one_s3_request(client, &upstream, fault, &worker_injected).ok();
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_error) => break,
+                }
+            }
+        });
+        Ok(Self {
+            endpoint,
+            injected,
+            stop: Some(stop),
+            thread: Some(thread),
+        })
+    }
+
+    fn endpoint(&self) -> &str {
+        &self.endpoint
+    }
+
+    fn fault_was_injected(&self) -> bool {
+        self.injected.load(Ordering::Acquire)
+    }
+}
+
+impl Drop for S3FaultProxy {
+    fn drop(&mut self) {
+        if let Some(stop) = self.stop.take() {
+            stop.send(()).ok();
+        }
+        if let Some(thread) = self.thread.take() {
+            thread.join().unwrap();
+        }
+    }
+}
+
+fn proxy_one_s3_request(
+    mut client: TcpStream,
+    upstream: &str,
+    fault: S3ProxyFault,
+    injected: &AtomicBool,
+) -> std::io::Result<()> {
+    client.set_read_timeout(Some(Duration::from_secs(10)))?;
+    let request = read_http_request(&mut client)?;
+    let is_put = request.starts_with(b"PUT ");
+    let is_get = request.starts_with(b"GET ");
+    if is_put
+        && matches!(fault, S3ProxyFault::ServiceUnavailableOnce)
+        && injected
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    {
+        client.write_all(
+            b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        )?;
+        return Ok(());
+    }
+    let request = force_connection_close(&request)?;
+
+    let mut provider = TcpStream::connect(upstream)?;
+    provider.set_read_timeout(Some(Duration::from_secs(10)))?;
+    provider.write_all(&request)?;
+    let mut response = Vec::new();
+    provider.read_to_end(&mut response)?;
+    let accepted = response.starts_with(b"HTTP/1.1 200 ")
+        || response.starts_with(b"HTTP/1.1 201 ")
+        || response.starts_with(b"HTTP/1.1 206 ")
+        || response.starts_with(b"HTTP/1.1 204 ");
+
+    if is_put
+        && accepted
+        && matches!(fault, S3ProxyFault::DropAcceptedPut)
+        && injected
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    {
+        client.shutdown(Shutdown::Both)?;
+        return Ok(());
+    }
+    if is_get
+        && accepted
+        && let S3ProxyFault::DelaySuccessfulGetBody(delay) = fault
+        && injected
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    {
+        let header_end = response
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .and_then(|offset| offset.checked_add(4))
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "missing provider response header end",
+                )
+            })?;
+        client.write_all(response.get(..header_end).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid provider response header length",
+            )
+        })?)?;
+        thread::sleep(delay);
+        return client.write_all(response.get(header_end..).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid provider response body offset",
+            )
+        })?);
+    }
+    client.write_all(&response)
+}
+
+fn read_http_request(stream: &mut TcpStream) -> std::io::Result<Vec<u8>> {
+    const HEADER_LIMIT: usize = 64 * 1024;
+    let mut request = Vec::new();
+    let mut buffer = [0_u8; 8 * 1024];
+    let header_end = loop {
+        let read = stream.read(&mut buffer)?;
+        if read == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "client closed before HTTP headers completed",
+            ));
+        }
+        request.extend_from_slice(buffer.get(..read).ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid HTTP read length")
+        })?);
+        if let Some(offset) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+            break offset.checked_add(4).ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "HTTP header offset overflow",
+                )
+            })?;
+        }
+        if request.len() > HEADER_LIMIT {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "HTTP request headers exceed test proxy limit",
+            ));
+        }
+    };
+
+    let headers = std::str::from_utf8(request.get(..header_end).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "invalid HTTP header length",
+        )
+    })?)
+    .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    let content_length = headers.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.eq_ignore_ascii_case("content-length")
+            .then(|| value.trim().parse::<usize>().ok())
+            .flatten()
+    });
+    let transfer_chunked = headers.lines().any(|line| {
+        line.split_once(':').is_some_and(|(name, value)| {
+            name.eq_ignore_ascii_case("transfer-encoding")
+                && value
+                    .split(',')
+                    .any(|encoding| encoding.trim().eq_ignore_ascii_case("chunked"))
+        })
+    });
+    if transfer_chunked {
+        while !request
+            .get(header_end..)
+            .ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid HTTP body offset")
+            })?
+            .windows(5)
+            .any(|window| window == b"0\r\n\r\n")
+        {
+            let read = stream.read(&mut buffer)?;
+            if read == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "client closed before chunked HTTP body completed",
+                ));
+            }
+            request.extend_from_slice(buffer.get(..read).ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid HTTP read length")
+            })?);
+        }
+    } else {
+        let expected = header_end.saturating_add(content_length.unwrap_or(0));
+        while request.len() < expected {
+            let read = stream.read(&mut buffer)?;
+            if read == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "client closed before HTTP body completed",
+                ));
+            }
+            request.extend_from_slice(buffer.get(..read).ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid HTTP read length")
+            })?);
+        }
+    }
+    Ok(request)
+}
+
+fn force_connection_close(request: &[u8]) -> std::io::Result<Vec<u8>> {
+    let header_end = request
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .and_then(|offset| offset.checked_add(4))
+        .ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "missing HTTP header end")
+        })?;
+    let headers = std::str::from_utf8(request.get(..header_end).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "invalid HTTP header length",
+        )
+    })?)
+    .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    let mut rewritten = String::new();
+    for line in headers.trim_end_matches("\r\n").split("\r\n") {
+        if line
+            .split_once(':')
+            .is_some_and(|(name, _value)| name.eq_ignore_ascii_case("connection"))
+        {
+            continue;
+        }
+        rewritten.push_str(line);
+        rewritten.push_str("\r\n");
+    }
+    rewritten.push_str("Connection: close\r\n\r\n");
+    let mut result = rewritten.into_bytes();
+    result.extend_from_slice(request.get(header_end..).ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid HTTP body offset")
+    })?);
+    Ok(result)
+}
 
 fn s3_config_with_bucket(
     stack: &DockerLocalStack,
@@ -22,8 +311,21 @@ fn s3_config_with_bucket(
                 raw.secret_key.map(SecretString::new),
                 raw.session_token.map(SecretString::new),
             )
+            .with_key_prefix(raw.key_prefix.as_deref())
             .with_allow_http(raw.allow_http),
     )
+}
+
+fn s3_config_from_raw(raw: S3RawConfig, endpoint: String) -> S3ObjectStoreConfig {
+    S3ObjectStoreConfig::new(raw.bucket, raw.region)
+        .with_endpoint(Some(endpoint))
+        .with_credentials(
+            raw.access_key.map(SecretString::new),
+            raw.secret_key.map(SecretString::new),
+            raw.session_token.map(SecretString::new),
+        )
+        .with_key_prefix(raw.key_prefix.as_deref())
+        .with_allow_http(raw.allow_http)
 }
 
 fn s3_config(stack: &DockerLocalStack, key_prefix: Option<&str>) -> Option<S3ObjectStoreConfig> {
@@ -36,6 +338,7 @@ fn s3_config(stack: &DockerLocalStack, key_prefix: Option<&str>) -> Option<S3Obj
                 raw.secret_key.map(SecretString::new),
                 raw.session_token.map(SecretString::new),
             )
+            .with_key_prefix(raw.key_prefix.as_deref())
             .with_allow_http(raw.allow_http),
     )
 }
@@ -141,6 +444,112 @@ async fn s3_put_is_idempotent() {
             .unwrap(),
         PutOutcome::AlreadyExists
     ));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_accepted_put_with_lost_response_recovers_idempotently() {
+    let Some(stack) = DockerLocalStack::builder().with_minio().start().unwrap() else {
+        eprintln!("skipping: docker not available");
+        return;
+    };
+    let raw = stack.s3_raw_config(Some("test-accepted-put-response-loss"));
+    let Some(raw) = raw else {
+        return;
+    };
+    let provider_endpoint = raw.endpoint.as_deref().unwrap();
+    let proxy = S3FaultProxy::start(provider_endpoint, S3ProxyFault::DropAcceptedPut).unwrap();
+    let config = s3_config_from_raw(raw, proxy.endpoint().to_owned());
+    let store = S3ObjectStore::new(config).unwrap();
+    let key = ObjectKey::parse("ab/provider-accepted-lost-response").unwrap();
+    let body = b"provider accepted these exact bytes before the response was lost";
+    let integrity = ObjectIntegrity::new(chunk_hash(body), body.len() as u64);
+
+    let first = store.put_if_absent(&key, ObjectBody::from_slice(body), &integrity);
+    assert!(
+        proxy.fault_was_injected(),
+        "the test must observe MinIO accepting the PUT before dropping its response"
+    );
+    if let Err(error) = first {
+        eprintln!("first PUT had the intended ambiguous outcome: {error}");
+    }
+
+    assert!(matches!(
+        store
+            .put_if_absent(&key, ObjectBody::from_slice(body), &integrity)
+            .unwrap(),
+        PutOutcome::AlreadyExists
+    ));
+    let end = (body.len() as u64).checked_sub(1).unwrap();
+    let range = shardline_protocol::ByteRange::new(0, end).unwrap();
+    assert_eq!(store.read_range(&key, range).unwrap(), body);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_provider_503_is_retried_without_partial_visibility() {
+    let Some(stack) = DockerLocalStack::builder().with_minio().start().unwrap() else {
+        eprintln!("skipping: docker not available");
+        return;
+    };
+    let Some(raw) = stack.s3_raw_config(Some("test-provider-503")) else {
+        return;
+    };
+    let provider_endpoint = raw.endpoint.as_deref().unwrap().to_owned();
+    let proxy =
+        S3FaultProxy::start(&provider_endpoint, S3ProxyFault::ServiceUnavailableOnce).unwrap();
+    let store = S3ObjectStore::new(s3_config_from_raw(raw, proxy.endpoint().to_owned())).unwrap();
+    let key = ObjectKey::parse("ab/provider-503-retry").unwrap();
+    let body = b"provider retry remains byte exact";
+    let integrity = ObjectIntegrity::new(chunk_hash(body), body.len() as u64);
+
+    assert!(matches!(
+        store
+            .put_if_absent(&key, ObjectBody::from_slice(body), &integrity)
+            .unwrap(),
+        PutOutcome::Inserted
+    ));
+    assert!(proxy.fault_was_injected());
+    let end = (body.len() as u64).checked_sub(1).unwrap();
+    let range = shardline_protocol::ByteRange::new(0, end).unwrap();
+    assert_eq!(store.read_range(&key, range).unwrap(), body);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_slow_successful_get_body_streams_exact_bytes() {
+    let Some(stack) = DockerLocalStack::builder().with_minio().start().unwrap() else {
+        eprintln!("skipping: docker not available");
+        return;
+    };
+    let prefix = "test-slow-provider-body";
+    let Some(direct_config) = s3_config(&stack, Some(prefix)) else {
+        return;
+    };
+    let direct_store = S3ObjectStore::new(direct_config).unwrap();
+    let key = ObjectKey::parse("ab/slow-provider-body").unwrap();
+    let body = b"a delayed provider body must not become a short successful read";
+    let integrity = ObjectIntegrity::new(chunk_hash(body), body.len() as u64);
+    direct_store
+        .put_if_absent(&key, ObjectBody::from_slice(body), &integrity)
+        .unwrap();
+
+    let Some(raw) = stack.s3_raw_config(Some(prefix)) else {
+        return;
+    };
+    let provider_endpoint = raw.endpoint.as_deref().unwrap().to_owned();
+    let delay = Duration::from_millis(150);
+    let proxy = S3FaultProxy::start(
+        &provider_endpoint,
+        S3ProxyFault::DelaySuccessfulGetBody(delay),
+    )
+    .unwrap();
+    let store = S3ObjectStore::new(s3_config_from_raw(raw, proxy.endpoint().to_owned())).unwrap();
+    let end = (body.len() as u64).checked_sub(1).unwrap();
+    let range = shardline_protocol::ByteRange::new(0, end).unwrap();
+    let started = Instant::now();
+    let observed = store.read_range(&key, range).unwrap();
+
+    assert!(proxy.fault_was_injected());
+    assert!(started.elapsed() >= delay);
+    assert_eq!(observed, body);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

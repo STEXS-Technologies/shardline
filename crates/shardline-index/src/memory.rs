@@ -15,7 +15,9 @@ use crate::{
     ReconstructionStore, RecordMutation, RecordStoreFuture, RecordTraversal, RepoKey,
     RepositoryRecordScope, RetentionHold, RevisionRecord, StoredObjectId, StoredRecord, TreeEntry,
     TreeEntryOutcome, TreeKey, TreeStore, WebhookDelivery, XorbId,
-    upload_intent::{UploadIntent, UploadIntentState, UploadIntentStore},
+    upload_intent::{
+        UploadIntent, UploadIntentConflictError, UploadIntentState, UploadIntentStore,
+    },
     xet_hash_hex_string,
 };
 
@@ -111,7 +113,9 @@ impl MemoryIndexStore {
         let key = MemoryProviderRepositoryStateKey::from_domain(state);
         self.lock_state()?
             .provider_repository_states
-            .insert(key, state.clone());
+            .entry(key)
+            .and_modify(|current| *current = current.merge_monotonic(state))
+            .or_insert_with(|| state.clone());
         Ok(())
     }
 
@@ -381,10 +385,17 @@ impl UploadIntentStore for MemoryIndexStore {
         // DO NOTHING): never overwrite an existing intent. Overwriting a fresh
         // `Created` intent over a concurrent caller's already-advanced intent
         // would reset its durable state and corrupt the upload lifecycle.
-        self.lock_state()?
-            .upload_intents
-            .entry(intent.intent_id().to_owned())
-            .or_insert_with(|| intent.clone());
+        let mut state = self.lock_state()?;
+        match state.upload_intents.entry(intent.intent_id().to_owned()) {
+            std::collections::hash_map::Entry::Occupied(existing) => {
+                if !existing.get().has_same_identity(intent) {
+                    return Err(UploadIntentConflictError::new(intent.intent_id()).into());
+                }
+            }
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(intent.clone());
+            }
+        }
         Ok(())
     }
 
@@ -789,6 +800,13 @@ pub enum MemoryIndexStoreError {
     /// The in-memory state lock was poisoned.
     #[error("memory index store lock was poisoned: {0}")]
     LockPoisoned(String),
+    /// An upload intent ID was reused for different object identity.
+    #[error("upload intent conflict")]
+    UploadIntentConflict(
+        #[from]
+        #[source]
+        UploadIntentConflictError,
+    ),
 }
 
 #[derive(Debug, Default)]

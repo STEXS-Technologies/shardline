@@ -76,6 +76,48 @@ Garbage collection must obey these invariants:
 - never require full object rewrites to repair collector metadata
 - every deletion decision must be reproducible from durable state
 
+Destructive runs also use a GC/write barrier. Every mutating server request holds the
+shared side before it can write content or publish metadata; `--mark`, `--sweep`, and
+`--mark --sweep` hold the exclusive side for the complete collector run. Local
+deployments coordinate through an advisory file lock under the state root. Postgres
+deployments use a transaction-scoped advisory reader/writer lock shared by every
+replica. This closes the final re-reference race between the sweep's delete-time mark
+and physical deletion. Read-only requests and GC dry runs do not take the exclusive
+barrier.
+
+When destructive GC owns the barrier, new mutation requests wait up to the normal
+request timeout and then fail without writing if the collector is still running.
+Clients may retry them after GC completes.
+
+## OCI Tombstone Reclamation
+
+OCI logical-deletion tombstones remain authoritative visibility metadata throughout their
+retention window. A sweep can reclaim an expired tombstone only while it owns the same
+cluster-wide exclusive GC/write barrier described above. This removes the two historical
+blockers: concurrent republication and a stale writer on another replica.
+
+Reclamation is deliberately ordered:
+
+1. delete the immutable physical object components idempotently
+2. for a chunk-backed blob, remove only its deterministic file record; shared chunks remain
+   protected by every other live record and enter ordinary quarantine only when unreachable
+3. for a manifest, delete both the manifest bytes and media-type sidecar
+4. compare-delete the exact tombstone generation using its deletion timestamp
+
+A crash before step 4 leaves the object logically hidden. The next sweep repeats the
+already-missing physical deletes and finishes the tombstone removal. Removing metadata
+before bytes is forbidden because it could resurrect retained content.
+
+Dry runs and mark-only runs inventory tombstones but never reclaim them. Sweep eligibility
+uses the normal GC retention window and forward-clock guard. Reports expose scanned,
+eligible, and reclaimed OCI tombstone counts.
+
+This guarantee requires every writer in the deployment to implement the shared barrier.
+During a mixed-version rolling upgrade from a build that predates the barrier, suspend
+destructive GC until all writers run the hardened build. A time-to-live by itself is still
+not a safety proof; the exclusive barrier, physical-first order, and generation compare-delete
+are the safety contract.
+
 ## Quarantine and Retention
 
 Deletion should be staged:
@@ -272,6 +314,10 @@ Mode behavior:
 - `--mark` records current orphan chunks as quarantine candidates
 - `--sweep` deletes only quarantine candidates whose retention window already expired
 - `--mark --sweep` performs both steps in one run
+
+The supported `shardline gc` command acquires the barrier automatically. Library code
+calling the lower-level `run_gc_with_stores` function directly must provide equivalent
+writer exclusion whenever `mark` or `sweep` is enabled.
 
 New quarantine candidates default to a retention window of `86400` seconds.
 That default applies only when a run includes `--mark`.

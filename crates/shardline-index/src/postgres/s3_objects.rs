@@ -61,6 +61,62 @@ impl S3ObjectIndexStore for PostgresIndexStore {
         Ok(())
     }
 
+    async fn compare_and_swap_s3_object(
+        &self,
+        expected: Option<&S3ObjectEntry>,
+        replacement: &S3ObjectEntry,
+    ) -> Result<bool, Self::Error> {
+        let replacement_metadata = user_metadata_to_json(&replacement.user_metadata)?;
+        let result = if let Some(expected) = expected {
+            let expected_metadata = user_metadata_to_json(&expected.user_metadata)?;
+            query(
+                "UPDATE shardline_s3_objects
+                 SET file_id = $3, size_bytes = $4, content_hash = $5, etag = $6,
+                     user_metadata = $7, updated_at_unix_seconds = $8
+                 WHERE scope_namespace = $1 AND object_key = $2
+                   AND file_id = $9 AND size_bytes = $10 AND content_hash = $11
+                   AND etag = $12 AND user_metadata = $13
+                   AND updated_at_unix_seconds = $14",
+            )
+            .bind(&replacement.scope_namespace)
+            .bind(&replacement.object_key)
+            .bind(&replacement.file_id)
+            .bind(u64_to_i64(replacement.size_bytes)?)
+            .bind(&replacement.content_hash)
+            .bind(&replacement.etag)
+            .bind(replacement_metadata)
+            .bind(replacement.updated_at_unix_seconds)
+            .bind(&expected.file_id)
+            .bind(u64_to_i64(expected.size_bytes)?)
+            .bind(&expected.content_hash)
+            .bind(&expected.etag)
+            .bind(expected_metadata)
+            .bind(expected.updated_at_unix_seconds)
+            .execute(&self.pool)
+            .await?
+        } else {
+            query(
+                "INSERT INTO shardline_s3_objects (
+                    scope_namespace, object_key, file_id, size_bytes, content_hash, etag,
+                    user_metadata, updated_at_unix_seconds
+                 )
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                 ON CONFLICT (scope_namespace, object_key) DO NOTHING",
+            )
+            .bind(&replacement.scope_namespace)
+            .bind(&replacement.object_key)
+            .bind(&replacement.file_id)
+            .bind(u64_to_i64(replacement.size_bytes)?)
+            .bind(&replacement.content_hash)
+            .bind(&replacement.etag)
+            .bind(replacement_metadata)
+            .bind(replacement.updated_at_unix_seconds)
+            .execute(&self.pool)
+            .await?
+        };
+        Ok(result.rows_affected() == 1)
+    }
+
     async fn delete_s3_object(
         &self,
         scope_namespace: &str,
@@ -175,6 +231,53 @@ mod tests {
             .execute(pool)
             .await
             .expect("cleanup s3 object rows");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pg_s3_object_compare_and_swap_has_one_cross_connection_winner() {
+        let Some(pool) = connect_postgres().await else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let scope = "pg-s3-cas";
+        cleanup(&pool, scope).await;
+        let first_store = PostgresIndexStore::new(pool.clone());
+        let second_store = PostgresIndexStore::new(pool.clone());
+        let first = entry(scope, "model.bin", "first");
+        let second = entry(scope, "model.bin", "second");
+
+        let (first_won, second_won) = tokio::join!(
+            first_store.compare_and_swap_s3_object(None, &first),
+            second_store.compare_and_swap_s3_object(None, &second),
+        );
+        let first_won = first_won.unwrap();
+        let second_won = second_won.unwrap();
+        assert_ne!(first_won, second_won);
+
+        let stored = first_store
+            .scan_s3_object_exact(scope, "model.bin")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored, if first_won { first } else { second });
+
+        let third = entry(scope, "model.bin", "third");
+        let fourth = entry(scope, "model.bin", "fourth");
+        let (third_won, fourth_won) = tokio::join!(
+            first_store.compare_and_swap_s3_object(Some(&stored), &third),
+            second_store.compare_and_swap_s3_object(Some(&stored), &fourth),
+        );
+        let third_won = third_won.unwrap();
+        let fourth_won = fourth_won.unwrap();
+        assert_ne!(third_won, fourth_won);
+
+        let updated = first_store
+            .scan_s3_object_exact(scope, "model.bin")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated, if third_won { third } else { fourth });
+        cleanup(&pool, scope).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]

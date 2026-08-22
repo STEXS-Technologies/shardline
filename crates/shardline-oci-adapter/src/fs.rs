@@ -7,7 +7,7 @@ use std::{
 #[cfg(unix)]
 use shardline_storage::{
     AnchoredPathOptions, ensure_parent_path_matches_anchor, open_anchored_target,
-    remove_if_present, write_anchored_temporary_file,
+    remove_if_present, sync_parent_directory, write_anchored_temporary_file,
 };
 use tokio::task::spawn_blocking;
 
@@ -264,6 +264,7 @@ pub(crate) fn write_file_atomically(root: &Path, path: &Path, bytes: &[u8]) -> s
         remove_if_present(&final_path)?;
         return Err(error);
     }
+    sync_parent_directory(&anchored)?;
     Ok(())
 }
 

@@ -14,12 +14,15 @@ use sha2::{Digest, Sha256};
 use shardline_protocol::{
     RepositoryProvider, RepositoryScope, SecretString, TokenClaims, TokenScope,
 };
-use shardline_server::{ObjectStorageAdapter, ServerConfig, ServerFrontend, ServerRole, app};
+use shardline_server::{
+    ObjectStorageAdapter, ServerConfig, ServerFrontend, ServerRole, app, test_fixtures,
+};
 use shardline_server_core::{AuthProvider, auth::LocalHmacProvider};
 use shardline_storage::S3ObjectStoreConfig;
-use shardline_test_support::DockerLocalStack;
+use shardline_test_support::{DockerLocalStack, S3FaultProxy, S3ProxyFault};
 use std::{
     num::{NonZeroU64, NonZeroUsize},
+    sync::Arc,
     time::Duration,
 };
 use tempfile::TempDir;
@@ -103,7 +106,13 @@ impl TestServer {
     /// the shared Docker MinIO instance (local metadata, S3 object store).
     async fn start(frontends: &[ServerFrontend]) -> Self {
         let key_prefix = ensure_minio().await;
+        Self::start_with_s3_config(frontends, s3_config(key_prefix)).await
+    }
 
+    async fn start_with_s3_config(
+        frontends: &[ServerFrontend],
+        object_storage: S3ObjectStoreConfig,
+    ) -> Self {
         let tmp = TempDir::new().unwrap();
         let chunk_size = NonZeroUsize::new(65536).unwrap();
 
@@ -120,7 +129,7 @@ impl TestServer {
         .with_token_signing_key(TEST_SIGNING_KEY.to_vec())
         .unwrap()
         .with_reconstruction_cache_disabled()
-        .with_object_storage(ObjectStorageAdapter::S3, Some(s3_config(key_prefix)));
+        .with_object_storage(ObjectStorageAdapter::S3, Some(object_storage));
 
         config.validate_runtime_requirements().unwrap();
 
@@ -176,6 +185,94 @@ impl TestServer {
     fn auth_header_for(&self, owner: &str, name: &str) -> String {
         mint_token_for(owner, name)
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stale_s3_xorb_read_is_rejected_before_transfer_bytes_are_exposed() {
+    let key_prefix = ensure_minio().await;
+    let raw = MINIO
+        .get()
+        .expect("MinIO initialized")
+        .0
+        .s3_raw_config(Some(key_prefix))
+        .expect("MinIO S3 config");
+    let provider_endpoint = raw.endpoint.clone().expect("MinIO HTTP endpoint");
+
+    let current_content = vec![0x31_u8; 64 * 1024];
+    let stale_content = vec![0x72_u8; current_content.len()];
+    let (current_xorb, current_hash) = test_fixtures::single_chunk_xorb(&current_content);
+    let (stale_xorb, stale_hash) = test_fixtures::single_chunk_xorb(&stale_content);
+    assert_ne!(current_hash, stale_hash);
+    assert_eq!(
+        current_xorb.len(),
+        stale_xorb.len(),
+        "same-size uncompressed xorbs make the substituted HTTP response well formed",
+    );
+
+    let proxy = S3FaultProxy::start_disarmed(
+        &provider_endpoint,
+        S3ProxyFault::ReplaceSuccessfulGetBody(Arc::from(stale_xorb.as_ref())),
+    )
+    .expect("start stale-read proxy");
+    let object_storage = S3ObjectStoreConfig::new(raw.bucket, raw.region)
+        .with_endpoint(Some(proxy.endpoint().to_owned()))
+        .with_credentials(
+            raw.access_key.map(SecretString::new),
+            raw.secret_key.map(SecretString::new),
+            raw.session_token.map(SecretString::new),
+        )
+        .with_key_prefix(raw.key_prefix.as_deref())
+        .with_allow_http(raw.allow_http);
+    let server = TestServer::start_with_s3_config(&[ServerFrontend::Xet], object_storage).await;
+    let client = reqwest::Client::new();
+    let transfer_url = server.url(&format!("/transfer/xorb/default/{current_hash}"));
+
+    let upload = client
+        .put(&transfer_url)
+        .header("Authorization", format!("Bearer {}", server.auth_header()))
+        .body(current_xorb.clone())
+        .send()
+        .await
+        .expect("upload current xorb through proxy");
+    assert_eq!(upload.status(), 200);
+
+    let (shard_bytes, _file_id) =
+        test_fixtures::single_file_shard(&[(&current_content, &current_hash)]);
+    let shard = client
+        .post(server.url("/v1/shards"))
+        .header("Authorization", format!("Bearer {}", server.auth_header()))
+        .header("Content-Type", "application/octet-stream")
+        .body(shard_bytes)
+        .send()
+        .await
+        .expect("register repository reference to current xorb");
+    assert_eq!(shard.status(), 200);
+
+    proxy.arm();
+
+    let stale_read = client
+        .get(&transfer_url)
+        .header("Authorization", format!("Bearer {}", server.auth_header()))
+        .header("Range", "bytes=0-4095")
+        .send()
+        .await
+        .expect("stale provider read returns a clean server response");
+    assert!(proxy.fault_was_injected());
+    assert!(
+        !stale_read.status().is_success(),
+        "a stale provider xorb must never become a successful transfer",
+    );
+
+    let recovered = client
+        .get(&transfer_url)
+        .header("Authorization", format!("Bearer {}", server.auth_header()))
+        .header("Range", "bytes=0-4095")
+        .send()
+        .await
+        .expect("read after one-shot stale response");
+    assert_eq!(recovered.status(), 206);
+    let recovered_bytes = recovered.bytes().await.expect("recovered range body");
+    assert_eq!(recovered_bytes.as_ref(), &current_xorb[..4096]);
 }
 
 impl Drop for TestServer {

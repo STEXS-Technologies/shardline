@@ -1,0 +1,55 @@
+name: shardline-postgres-failover
+
+services:
+  failover-primary:
+    image: postgres:16-alpine
+    container_name: shardline-failover-primary
+    networks: [failover-net]
+    ports: ["25432:5432"]
+    environment:
+      POSTGRES_USER: shardline
+      POSTGRES_PASSWORD: shardline-dev-password
+      POSTGRES_DB: shardline
+    command:
+      - postgres
+      - -c
+      - wal_level=replica
+      - -c
+      - max_wal_senders=10
+      - -c
+      - max_replication_slots=10
+    tmpfs: [/var/lib/postgresql/data]
+    volumes:
+      - ./scripts/fixtures/postgres-failover/init-replication.sh:/docker-entrypoint-initdb.d/10-replication.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U shardline -d shardline"]
+      interval: 1s
+      timeout: 2s
+      retries: 30
+      start_period: 3s
+
+  failover-standby:
+    image: postgres:16-alpine
+    container_name: shardline-failover-standby
+    networks: [failover-net]
+    ports: ["25433:5432"]
+    environment:
+      PGDATA: /var/lib/postgresql/data
+      PGPASSWORD: replication-dev-password
+    entrypoint: [/usr/local/bin/shardline-standby-entrypoint.sh]
+    depends_on:
+      failover-primary: { condition: service_healthy }
+    tmpfs: [/var/lib/postgresql/data]
+    volumes:
+      - ./scripts/fixtures/postgres-failover/standby-entrypoint.sh:/usr/local/bin/shardline-standby-entrypoint.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U shardline -d shardline"]
+      interval: 1s
+      timeout: 2s
+      retries: 60
+      start_period: 5s
+
+networks:
+  failover-net:
+    name: shardline-postgres-failover-net
+    driver: bridge

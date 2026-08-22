@@ -6,8 +6,12 @@ use std::{
 
 use axum::body::Bytes;
 use sha2::{Digest, Sha256};
-use shardline_index::{FileRecord, RepoKey, RevisionRecord, S3ObjectEntry, TreeEntry, TreeKey};
+use shardline_index::{
+    FileRecord, OciObjectKey, OciTagEntry, RepoKey, ResourceLockKey, RevisionRecord, S3ObjectEntry,
+    TreeEntry, TreeKey,
+};
 use shardline_protocol::{ByteRange, RepositoryScope};
+use shardline_server_core::protocol_support::protocol_object_file_id;
 use shardline_storage::{
     AsyncObjectStore, DeleteOutcome, ObjectBody, ObjectIntegrity, ObjectKey, ObjectMetadata,
     ObjectPrefix, PutOutcome,
@@ -68,13 +72,6 @@ pub struct RegisterPathOutcome {
     pub created: bool,
 }
 
-fn protocol_object_file_id(object_key: &ObjectKey) -> String {
-    format!(
-        "protocol-object-{}",
-        hex::encode(Sha256::digest(object_key.as_str().as_bytes()))
-    )
-}
-
 /// Public benchmark-facing backend wrapper that resolves the active metadata and object
 /// adapters without exposing the private server runtime enum.
 #[derive(Debug, Clone)]
@@ -89,6 +86,40 @@ static REPOSITORY_REFERENCE_PROBE_TEST_LOCK: LazyLock<Arc<AsyncMutex<()>>> =
     LazyLock::new(|| Arc::new(AsyncMutex::new(())));
 
 impl ServerBackend {
+    /// Acquires the shared side of the GC/write barrier for one mutating request.
+    pub(crate) async fn acquire_gc_write_barrier(
+        &self,
+        root: &Path,
+    ) -> Result<crate::maintenance_barrier::MaintenanceBarrierGuard, ServerError> {
+        match self {
+            Self::Local(_) => crate::maintenance_barrier::acquire_local_shared(root).await,
+            Self::Postgres(backend) => {
+                crate::maintenance_barrier::acquire_postgres_shared(backend.index_store().pool())
+                    .await
+            }
+        }
+    }
+
+    /// Acquires an exclusive cross-process lock for one mutable logical resource.
+    pub(crate) async fn acquire_resource_write_lock(
+        &self,
+        root: &Path,
+        key: &ResourceLockKey,
+    ) -> Result<crate::maintenance_barrier::ResourceWriteGuard, ServerError> {
+        match self {
+            Self::Local(_) => {
+                crate::maintenance_barrier::acquire_local_resource_exclusive(root, key).await
+            }
+            Self::Postgres(backend) => {
+                crate::maintenance_barrier::acquire_postgres_resource_exclusive(
+                    backend.index_store().pool(),
+                    key,
+                )
+                .await
+            }
+        }
+    }
+
     /// Build a [`ServerBackend`] from a [`ServerConfig`] by resolving the object store
     /// and metadata backend (local or Postgres).
     ///
@@ -339,6 +370,26 @@ impl ServerBackend {
         }
     }
 
+    /// Atomically replaces an S3 object row if its current value matches.
+    pub(crate) async fn compare_and_swap_s3_object(
+        &self,
+        expected: Option<&S3ObjectEntry>,
+        replacement: &S3ObjectEntry,
+    ) -> Result<bool, ServerError> {
+        match self {
+            Self::Local(backend) => {
+                backend
+                    .compare_and_swap_s3_object(expected, replacement)
+                    .await
+            }
+            Self::Postgres(backend) => {
+                backend
+                    .compare_and_swap_s3_object(expected, replacement)
+                    .await
+            }
+        }
+    }
+
     /// Deletes one S3 object listing-index row, returning whether a row was removed.
     ///
     /// # Errors
@@ -402,6 +453,116 @@ impl ServerBackend {
                 backend
                     .scan_s3_object_exact(scope_namespace, object_key)
                     .await
+            }
+        }
+    }
+
+    pub(crate) async fn insert_oci_tag_if_absent(
+        &self,
+        entry: &OciTagEntry,
+    ) -> Result<bool, ServerError> {
+        match self {
+            Self::Local(backend) => backend.insert_oci_tag_if_absent(entry).await,
+            Self::Postgres(backend) => backend.insert_oci_tag_if_absent(entry).await,
+        }
+    }
+
+    pub(crate) async fn oci_tag(
+        &self,
+        scope_namespace: &str,
+        repository: &str,
+        tag: &str,
+    ) -> Result<Option<OciTagEntry>, ServerError> {
+        match self {
+            Self::Local(backend) => backend.oci_tag(scope_namespace, repository, tag).await,
+            Self::Postgres(backend) => backend.oci_tag(scope_namespace, repository, tag).await,
+        }
+    }
+
+    pub(crate) async fn list_oci_tags(
+        &self,
+        scope_namespace: &str,
+        repository: &str,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<OciTagEntry>, ServerError> {
+        match self {
+            Self::Local(backend) => {
+                backend
+                    .list_oci_tags(scope_namespace, repository, cursor, limit)
+                    .await
+            }
+            Self::Postgres(backend) => {
+                backend
+                    .list_oci_tags(scope_namespace, repository, cursor, limit)
+                    .await
+            }
+        }
+    }
+
+    /// Returns whether an immutable OCI object is hidden by a durable tombstone.
+    pub(crate) async fn oci_object_is_deleted(
+        &self,
+        key: &OciObjectKey,
+    ) -> Result<bool, ServerError> {
+        match self {
+            Self::Local(backend) => backend.oci_object_is_deleted(key).await,
+            Self::Postgres(backend) => backend.oci_object_is_deleted(key).await,
+        }
+    }
+
+    /// Publishes immutable OCI bytes through the metadata session that owns
+    /// the repository fence. Clearing a prior tombstone and retargeting tags
+    /// form one database transaction.
+    pub(crate) async fn publish_oci_object_locked(
+        &self,
+        guard: &mut crate::maintenance_barrier::ResourceWriteGuard,
+        key: &OciObjectKey,
+        tags: &[OciTagEntry],
+    ) -> Result<(), ServerError> {
+        match self {
+            Self::Local(backend) => {
+                if guard.postgres_connection_mut().is_some() {
+                    return Err(ServerError::StaleResourceFence);
+                }
+                backend.publish_oci_object(key, tags).await
+            }
+            Self::Postgres(backend) => {
+                let connection = guard
+                    .postgres_connection_mut()
+                    .ok_or(ServerError::StaleResourceFence)?;
+                backend
+                    .index_store()
+                    .publish_oci_object_on_connection(connection, key, tags)
+                    .await?;
+                Ok(())
+            }
+        }
+    }
+
+    /// Commits an OCI tombstone through the lock-owning metadata session.
+    /// Manifest tag removal is part of the same database transaction.
+    pub(crate) async fn delete_oci_object_locked(
+        &self,
+        guard: &mut crate::maintenance_barrier::ResourceWriteGuard,
+        key: &OciObjectKey,
+    ) -> Result<(), ServerError> {
+        match self {
+            Self::Local(backend) => {
+                if guard.postgres_connection_mut().is_some() {
+                    return Err(ServerError::StaleResourceFence);
+                }
+                backend.delete_oci_object(key).await
+            }
+            Self::Postgres(backend) => {
+                let connection = guard
+                    .postgres_connection_mut()
+                    .ok_or(ServerError::StaleResourceFence)?;
+                backend
+                    .index_store()
+                    .delete_oci_object_on_connection(connection, key)
+                    .await?;
+                Ok(())
             }
         }
     }
@@ -658,6 +819,7 @@ impl ServerBackend {
         })
     }
 
+    #[cfg(test)]
     pub(crate) async fn put_object_bytes_overwrite(
         &self,
         object_key: &ObjectKey,
@@ -1380,6 +1542,8 @@ fn server_error_to_oci(error: ServerError) -> shardline_oci_adapter::OciAdapterE
         | ServerError::TransferLimiterTimedOut
         | ServerError::WorkQueueSaturated
         | ServerError::RequestTimedOut
+        | ServerError::StaleResourceFence
+        | ServerError::InjectedLifecycleRepairInterruption { .. }
         | ServerError::SigningKeyError(_)
         | ServerError::InvalidPath
         | ServerError::UnregisteredFile(_)

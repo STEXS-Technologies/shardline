@@ -54,6 +54,7 @@
 #[cfg_attr(docsrs, doc(cfg(unix)))]
 pub(crate) mod anchored_fs;
 mod async_store;
+mod fault_injection;
 mod key;
 mod local;
 mod local_fs;
@@ -67,9 +68,12 @@ mod store;
 pub use anchored_fs::{
     AnchoredPathOptions, AnchoredTarget, ensure_parent_path_matches_anchor, fd_child_path,
     open_anchored_target, open_directory_chain, open_new_file, remove_at, remove_if_present,
-    rename_at, temporary_file_name, write_anchored_temporary_file,
+    rename_at, sync_parent_directory, temporary_file_name, write_anchored_temporary_file,
 };
 pub use async_store::{AsyncObjectStore, SyncObjectStoreBridge};
+pub use fault_injection::{LocalPublishBoundary, LocalPublishFault};
+#[cfg(feature = "test-fault-injection")]
+pub use fault_injection::{LocalPublishFailpointGuard, arm, arm_fault};
 pub use key::{ObjectKey, ObjectKeyError, ObjectPrefix, ObjectPrefixError};
 pub use local::{LocalObjectStore, LocalObjectStoreError};
 pub use local_path::{

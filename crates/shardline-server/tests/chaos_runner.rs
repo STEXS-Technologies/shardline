@@ -68,6 +68,7 @@ use tokio::{
 const TEST_SIGNING_KEY: &[u8] = b"0123456789abcdef0123456789abcdef";
 const BUCKET: &str = "chaos.chaos";
 const DEFAULT_CHAOS_SEED: u64 = 0x5EED_CAFE;
+const DEFAULT_ROUND_BUDGET_SECONDS: u64 = 30;
 const DEFAULT_CHAOS_ROUNDS: usize = 10;
 const CHUNK: usize = 65536;
 const STALL_CHUNK: usize = 512 * 1024;
@@ -187,46 +188,6 @@ fn count_files_recursive(dir: &Path) -> usize {
 
 fn count_chunk_files(root: &Path) -> usize {
     count_files_recursive(&root.join("chunks"))
-}
-
-// ---------------------------------------------------------------------------
-// GC .tmp-* accommodation (REAL server bug, documented for the report).
-//
-// shardline's chunk writes are write-temp-then-hardlink: anchored_fs.rs:219-227
-// names temp files `chunks/<2hex>/<64hex>.tmp-<nanos>-<counter>` beside the
-// target, and local_fs.rs:200-207 hard_link + remove_if_present. If the GC
-// orphan-scan runs while such a temp exists (or after a hard-kill stranded
-// one), `chunk_hash_from_chunk_object_key_if_present`
-// (shardline-server-core/src/validation.rs:74-97) returns
-// Err(ServerObjectStoreError::InvalidContentHash) for the `.tmp-*`-suffixed key
-// instead of Ok(None), so `run_gc` aborts the WHOLE mark_and_sweep with
-// GcError::ObjectStore(InvalidContentHash). The upstream fix is for that
-// validation helper to return Ok(None) for keys that pass the 2-hex/64-hex
-// prefix gates but fail full hash validation. These `.tmp-*` files are
-// unreferenced dead garbage (no record references a temp name), so deleting
-// them here is always safe.
-fn sweep_chunk_tmp_files(root: &Path) -> usize {
-    let mut swept = 0usize;
-    let chunks_dir = root.join("chunks");
-    if let Ok(entries) = std::fs::read_dir(&chunks_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.is_dir() {
-                continue;
-            }
-            if let Ok(files) = std::fs::read_dir(&path) {
-                for file in files.flatten() {
-                    let name = file.file_name().to_string_lossy().into_owned();
-                    let file_path = file.path();
-                    if name.contains(".tmp-") && file_path.is_file() {
-                        let _ = std::fs::remove_file(&file_path);
-                        swept = swept.saturating_add(1);
-                    }
-                }
-            }
-        }
-    }
-    swept
 }
 
 fn part_file_size(root: &Path, upload_id: &str, part_number: u32) -> u64 {
@@ -520,65 +481,6 @@ impl ChaosHarness {
     async fn gc(&self, options: LocalGcOptions) -> LocalGcReport {
         let config = self.build_config("127.0.0.1:0".parse().unwrap());
         shardline_server::run_gc(config, options).await.unwrap()
-    }
-
-    /// Run GC without panicking on failure (for tolerance-aware call sites).
-    async fn gc_result(&self, options: LocalGcOptions) -> Result<LocalGcReport, String> {
-        let config = self.build_config("127.0.0.1:0".parse().unwrap());
-        shardline_server::run_gc(config, options)
-            .await
-            .map_err(|err| err.to_string())
-    }
-
-    /// Run GC tolerating the known InvalidContentHash `.tmp-*` transient (see
-    /// `sweep_chunk_tmp_files` for the underlying bug): on that specific error,
-    /// sweep the temp chunk files, settle briefly, and retry once. Any other
-    /// error — or a second InvalidContentHash — fails the round with the
-    /// diagnostic (that would be a genuine problem, not the known transient).
-    ///
-    /// NOTE: the error is matched on its Display string — both
-    /// `GcError::InvalidContentHash` and
-    /// `ServerObjectStoreError::InvalidContentHash` render as "content hash must
-    /// be 64 hexadecimal characters" (see shardline-gc/src/error.rs and
-    /// shardline-server-core/src/object_store.rs).
-    async fn gc_tolerating_tmp_files(&self, root: &Path, what: &str) -> LocalGcReport {
-        match self.gc_result(LocalGcOptions::mark_and_sweep(0)).await {
-            Ok(report) => report,
-            Err(err) if err.contains("content hash") => {
-                let swept = sweep_chunk_tmp_files(root);
-                eprintln!(
-                    "chaos: {what}: GC hit known .tmp-* InvalidContentHash bug ({err}); \
-                     swept {swept} temp chunk files, retrying once"
-                );
-                self.settle(Duration::from_millis(200)).await;
-                match self.gc_result(LocalGcOptions::mark_and_sweep(0)).await {
-                    Ok(report) => report,
-                    Err(retry_err) => panic!(
-                        "chaos: {what}: GC retry ALSO failed with InvalidContentHash \
-                         ({retry_err}); swept {swept} temp files"
-                    ),
-                }
-            }
-            // Under coverage instrumentation the chaos interference can leave
-            // the index adapter in a transient error state; settle and retry
-            // once rather than panicking immediately.
-            Err(err) if err.contains("index adapter") => {
-                eprintln!(
-                    "chaos: {what}: GC hit transient index adapter error ({err}); \
-                     settling and retrying once"
-                );
-                self.settle(Duration::from_millis(200)).await;
-                self.gc_result(LocalGcOptions::mark_and_sweep(0))
-                    .await
-                    .unwrap_or_else(|retry_err| {
-                        panic!(
-                            "chaos: {what}: GC retry ALSO failed with index adapter error \
-                             ({retry_err})"
-                        )
-                    })
-            }
-            Err(err) => panic!("chaos: {what}: GC failed with unexpected error: {err}"),
-        }
     }
 
     fn url(&self, path: &str) -> String {
@@ -1729,7 +1631,15 @@ async fn chaos_runner() {
     let scale = chaos_scale_enabled();
     let p = scale_params(scale);
     let rounds = if scale { rounds.min(2) } else { rounds };
-    eprintln!("chaos: seed={seed:#x} rounds={rounds} scale={scale}");
+    let default_timeout_seconds = u64::try_from(rounds)
+        .unwrap_or(u64::MAX)
+        .saturating_mul(DEFAULT_ROUND_BUDGET_SECONDS)
+        .max(DEFAULT_ROUND_BUDGET_SECONDS);
+    let timeout_seconds =
+        env_u64("SHARDLINE_CHAOS_TIMEOUT_SECONDS", default_timeout_seconds).max(1);
+    eprintln!(
+        "chaos: seed={seed:#x} rounds={rounds} scale={scale} timeout_seconds={timeout_seconds}"
+    );
     let mut rng = SplitMix64::new(seed);
     let mut harness = ChaosHarness::new();
     harness.spawn_server().await;
@@ -1788,7 +1698,6 @@ async fn chaos_runner() {
                     harness.kill_hard().await;
                     harness.settle(Duration::from_millis(50)).await;
                     harness.restart().await;
-                    sweep_chunk_tmp_files(&harness.root);
                     engine.relaunch(&harness, &ledger);
                 }
                 FailureInjection::ConnectionStall => {
@@ -1808,7 +1717,6 @@ async fn chaos_runner() {
                     engine.abort_stream().await;
                     harness.settle(Duration::from_millis(100)).await;
                     harness.restart().await;
-                    sweep_chunk_tmp_files(&harness.root);
                     engine.relaunch(&harness, &ledger);
                 }
                 FailureInjection::StorageInterference => {
@@ -1873,7 +1781,6 @@ async fn chaos_runner() {
                             engine.abort_stream().await;
                             harness.settle(Duration::from_millis(50)).await;
                             harness.restart().await;
-                            sweep_chunk_tmp_files(&harness.root);
                             engine.relaunch(&harness, &ledger);
                             let resp = harness.s3_get(&mp_key).await;
                             assert_eq!(
@@ -1897,12 +1804,7 @@ async fn chaos_runner() {
                                 std::fs::create_dir_all(&dir).unwrap();
                                 std::fs::write(dir.join(&name), vec![0xAB; 1024]).unwrap();
                             }
-                            let gc_report = harness
-                                .gc_tolerating_tmp_files(
-                                    &root,
-                                    &format!("round {round} interference (orphan chunk junk)"),
-                                )
-                                .await;
+                            let gc_report = harness.gc(LocalGcOptions::mark_and_sweep(0)).await;
                             // Do NOT hard-assert deletion (retention semantics may
                             // retain); acked integrity + server health are the point.
                             eprintln!("chaos: round {round} interference gc_report={gc_report:?}");
@@ -1917,12 +1819,7 @@ async fn chaos_runner() {
                                 let name = sha256_hex(&deterministic_bytes(len, rng.next_u64()));
                                 std::fs::write(dir.join(&name), vec![0xCD; 512]).unwrap();
                             }
-                            let gc_report = harness
-                                .gc_tolerating_tmp_files(
-                                    &root,
-                                    &format!("round {round} interference (quarantine junk)"),
-                                )
-                                .await;
+                            let gc_report = harness.gc(LocalGcOptions::mark_and_sweep(0)).await;
                             eprintln!("chaos: round {round} interference gc_report={gc_report:?}");
                         }
                     }
@@ -1935,7 +1832,6 @@ async fn chaos_runner() {
                     };
                     harness.kill_hard().await;
                     harness.restart().await;
-                    sweep_chunk_tmp_files(&harness.root);
                     engine.relaunch(&harness, &ledger);
                 }
                 FailureInjection::None => {
@@ -1945,9 +1841,6 @@ async fn chaos_runner() {
 
             engine.join(Duration::from_secs(15)).await;
             let mut checks = verify_all(&mut harness, &ledger, &attempted).await;
-            // Sweep any GC-poison `.tmp-*` chunk temps before the fixed-point
-            // check so the GC runs clean (see sweep_chunk_tmp_files).
-            sweep_chunk_tmp_files(&harness.root);
             let gc1 = harness.gc(LocalGcOptions::mark_and_sweep(0)).await;
             let gc2 = harness.gc(LocalGcOptions::mark_and_sweep(0)).await;
             checks.push(CheckResult::new(
@@ -1970,7 +1863,9 @@ async fn chaos_runner() {
         }
         eprintln!("chaos: PASS — {rounds} rounds, seed={seed:#x}");
     };
-    tokio::time::timeout(Duration::from_secs(180), run)
+    tokio::time::timeout(Duration::from_secs(timeout_seconds), run)
         .await
-        .expect("chaos runner exceeded global 180s budget");
+        .unwrap_or_else(|_| {
+            panic!("chaos runner exceeded global {timeout_seconds}s budget for {rounds} rounds")
+        });
 }

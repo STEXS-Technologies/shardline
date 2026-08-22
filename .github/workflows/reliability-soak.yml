@@ -1,0 +1,333 @@
+name: Reliability soak
+
+on:
+  workflow_call:
+    inputs:
+      duration_seconds:
+        description: Deterministic chaos campaign duration
+        required: false
+        default: "600"
+        type: string
+  workflow_dispatch:
+    inputs:
+      duration_seconds:
+        description: Deterministic chaos campaign duration
+        required: false
+        default: "7200"
+  pull_request:
+    paths:
+      - ".github/workflows/release.yml"
+      - ".github/workflows/reliability-soak.yml"
+  schedule:
+    - cron: "31 1 * * 0"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: reliability-soak-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  deterministic-chaos:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Setup Rust CI toolchain and tools
+        uses: ./.github/actions/rust-ci-setup
+
+      - name: Run replayable chaos soak
+        env:
+          SHARDLINE_SOAK_DURATION_SECONDS: ${{ inputs.duration_seconds || (github.event_name == 'pull_request' && '600') || '7200' }}
+          SHARDLINE_SOAK_INITIAL_SEED: "2436552524"
+        run: scripts/reliability-soak.sh reliability-soak-results
+
+      - name: Publish soak summary
+        if: always()
+        run: |
+          if [ -f reliability-soak-results/summary.md ]; then
+            cat reliability-soak-results/summary.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload replay evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: shardline-reliability-soak-${{ github.sha }}
+          path: reliability-soak-results
+          if-no-files-found: error
+          retention-days: 90
+
+  deployment-chaos:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Setup Rust CI toolchain and tools
+        uses: ./.github/actions/rust-ci-setup
+
+      - name: Install independent wall-clock fault injector
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfaketime
+          faketime_library=$(dpkg -L libfaketime | awk '/libfaketime\.so\.1$/ { print; exit }')
+          test -n "$faketime_library"
+          echo "SHARDLINE_FAKETIME_LIBRARY=$faketime_library" >> "$GITHUB_ENV"
+
+      - name: Run deployment fault campaign
+        run: |
+          set -o pipefail
+          mkdir -p reliability-deployment-results
+          cargo make chaos-deployment 2>&1 \
+            | tee reliability-deployment-results/deployment-chaos.log
+
+      - name: Record deployment campaign metadata
+        if: always()
+        run: |
+          {
+            echo "commit=${GITHUB_SHA}"
+            echo "run_id=${GITHUB_RUN_ID}"
+            echo "run_attempt=${GITHUB_RUN_ATTEMPT}"
+            echo "finished_epoch=$(date +%s)"
+          } > reliability-deployment-results/metadata.txt
+
+      - name: Upload deployment fault evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: shardline-deployment-chaos-${{ github.sha }}
+          path: reliability-deployment-results
+          if-no-files-found: error
+          retention-days: 90
+
+  resource-pressure:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Setup Rust CI toolchain and tools
+        uses: ./.github/actions/rust-ci-setup
+
+      - name: Run repeated resource-pressure recovery campaign
+        run: |
+          set -o pipefail
+          mkdir -p reliability-resource-results
+          for iteration in $(seq 1 100); do
+            echo "resource-pressure iteration=${iteration}"
+            cargo test -p shardline-storage --test resource_pressure \
+              -- --test-threads=1 --nocapture
+          done 2>&1 | tee reliability-resource-results/resource-pressure.log
+
+      - name: Record resource campaign metadata
+        if: always()
+        run: |
+          {
+            echo "commit=${GITHUB_SHA}"
+            echo "run_id=${GITHUB_RUN_ID}"
+            echo "run_attempt=${GITHUB_RUN_ATTEMPT}"
+            echo "iterations=100"
+            echo "finished_epoch=$(date +%s)"
+          } > reliability-resource-results/metadata.txt
+
+      - name: Upload resource-pressure evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: shardline-resource-pressure-${{ github.sha }}
+          path: reliability-resource-results
+          if-no-files-found: error
+          retention-days: 90
+
+  mixed-version-upgrade:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout with release history
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+
+      - name: Setup Rust CI toolchain and tools
+        uses: ./.github/actions/rust-ci-setup
+
+      - name: Select adjacent released version
+        id: adjacent
+        shell: bash
+        run: |
+          set -euo pipefail
+          current_tag=""
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            current_tag="${GITHUB_REF_NAME}"
+          fi
+          adjacent_tag=""
+          while IFS= read -r candidate; do
+            if [[ "${candidate}" != "${current_tag}" ]]; then
+              adjacent_tag="${candidate}"
+              break
+            fi
+          done < <(git tag --merged HEAD --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname)
+          if [[ -z "${adjacent_tag}" ]]; then
+            echo "No preceding SemVer release tag is reachable from ${GITHUB_SHA}" >&2
+            exit 1
+          fi
+          echo "tag=${adjacent_tag}" >> "${GITHUB_OUTPUT}"
+          echo "commit=$(git rev-list -n 1 "${adjacent_tag}")" >> "${GITHUB_OUTPUT}"
+
+      - name: Build N and tagged N-1 binaries
+        env:
+          SHARDLINE_ADJACENT_TAG: ${{ steps.adjacent.outputs.tag }}
+        run: |
+          cargo build -p shardline
+          git worktree add --detach "$RUNNER_TEMP/shardline-n-minus-one" "$SHARDLINE_ADJACENT_TAG"
+          cargo build \
+            --manifest-path "$RUNNER_TEMP/shardline-n-minus-one/Cargo.toml" \
+            --target-dir "$RUNNER_TEMP/shardline-n-minus-one-target" \
+            -p shardline
+
+      - name: Start shared Postgres, MinIO, and Redis
+        run: |
+          docker compose -f docker-compose.chaos.yml -p shardline-chaos up -d
+          for container in chaos-postgres chaos-minio chaos-redis; do
+            until [ "$(docker inspect -f '{{.State.Health.Status}}' "$container" 2>/dev/null)" = "healthy" ]; do
+              sleep 1
+            done
+          done
+          target/debug/shardline db migrate up \
+            --database-url postgres://shardline:shardline-dev-password@127.0.0.1:15432/shardline
+
+      - name: Exercise real mixed-version rollout and rollback
+        env:
+          SHARDLINE_N_MINUS_ONE_BINARY: ${{ runner.temp }}/shardline-n-minus-one-target/debug/shardline
+        run: |
+          set -o pipefail
+          mkdir -p reliability-upgrade-results
+          cargo test -p shardline-server --test deployment_chaos \
+            drill_deploy_f_real_mixed_version_rollout_and_rollback \
+            -- --exact --nocapture 2>&1 \
+            | tee reliability-upgrade-results/mixed-version-upgrade.log
+
+      - name: Record mixed-version campaign metadata
+        if: always()
+        env:
+          SHARDLINE_ADJACENT_TAG: ${{ steps.adjacent.outputs.tag }}
+          SHARDLINE_ADJACENT_COMMIT: ${{ steps.adjacent.outputs.commit }}
+        run: |
+          mkdir -p reliability-upgrade-results
+          {
+            echo "current_commit=${GITHUB_SHA}"
+            echo "n_minus_one_tag=${SHARDLINE_ADJACENT_TAG}"
+            echo "n_minus_one_commit=${SHARDLINE_ADJACENT_COMMIT}"
+            echo "run_id=${GITHUB_RUN_ID}"
+            echo "run_attempt=${GITHUB_RUN_ATTEMPT}"
+            echo "finished_epoch=$(date +%s)"
+          } > reliability-upgrade-results/metadata.txt
+
+      - name: Stop mixed-version dependencies
+        if: always()
+        run: docker compose -f docker-compose.chaos.yml -p shardline-chaos down
+
+      - name: Upload mixed-version evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: shardline-mixed-version-${{ github.sha }}
+          path: reliability-upgrade-results
+          if-no-files-found: error
+          retention-days: 90
+
+  postgres-promotion:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Setup Rust CI toolchain and tools
+        uses: ./.github/actions/rust-ci-setup
+
+      - name: Start PostgreSQL streaming pair
+        run: docker compose -f docker-compose.postgres-failover.yml up -d --wait
+
+      - name: Kill primary, promote standby, and verify live recovery
+        run: |
+          set -o pipefail
+          mkdir -p reliability-postgres-results
+          cargo test -p shardline-server --test postgres_failover \
+            -- --exact --nocapture 2>&1 \
+            | tee reliability-postgres-results/postgres-promotion.log
+
+      - name: Record PostgreSQL promotion metadata
+        if: always()
+        run: |
+          mkdir -p reliability-postgres-results
+          {
+            echo "commit=${GITHUB_SHA}"
+            echo "postgres_image=postgres:16-alpine"
+            echo "run_id=${GITHUB_RUN_ID}"
+            echo "run_attempt=${GITHUB_RUN_ATTEMPT}"
+            echo "finished_epoch=$(date +%s)"
+          } > reliability-postgres-results/metadata.txt
+
+      - name: Stop PostgreSQL streaming pair
+        if: always()
+        run: docker compose -f docker-compose.postgres-failover.yml down
+
+      - name: Upload PostgreSQL promotion evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: shardline-postgres-promotion-${{ github.sha }}
+          path: reliability-postgres-results
+          if-no-files-found: error
+          retention-days: 90
+
+  security-boundary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Setup Rust CI toolchain and tools
+        uses: ./.github/actions/rust-ci-setup
+
+      - name: Repeat revoked-token existence and timing campaign
+        run: |
+          set -o pipefail
+          mkdir -p reliability-security-results
+          for iteration in $(seq 1 100); do
+            echo "security-boundary iteration=${iteration}"
+            cargo test -q -p shardline-server --test authorization_matrix \
+              expired_revocation_probes_hide_existence_across_all_frontends \
+              -- --exact
+          done 2>&1 | tee reliability-security-results/security-boundary.log
+
+      - name: Record security campaign metadata
+        if: always()
+        run: |
+          mkdir -p reliability-security-results
+          {
+            echo "commit=${GITHUB_SHA}"
+            echo "iterations=100"
+            echo "samples_per_resource_state=32"
+            echo "frontends=s3,lfs,bazel,oci,hub,xet"
+            echo "run_id=${GITHUB_RUN_ID}"
+            echo "run_attempt=${GITHUB_RUN_ATTEMPT}"
+            echo "finished_epoch=$(date +%s)"
+          } > reliability-security-results/metadata.txt
+
+      - name: Upload security-boundary evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: shardline-security-boundary-${{ github.sha }}
+          path: reliability-security-results
+          if-no-files-found: error
+          retention-days: 90

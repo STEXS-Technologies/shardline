@@ -112,6 +112,12 @@ Hub metadata is persisted to the configured index store:
 
 Hub metadata storage goes through the same index store contract used by the rest of
 the server.
+Postgres-backed revision creation and repository deletion lock the repository row in
+their transaction. This serializes mutable ref updates and delete-vs-push races across
+Shardline replicas; the parent-SHA comparison then permits exactly one of two stale-parent
+competitors to advance a ref. Immutable file and commit content may be prepared before
+that linearization point, so a losing request can leave unreachable content for GC, but
+it cannot overwrite the winning ref or resurrect a deleted repository.
 When an auth provider is configured, Hub API routes validate bearer tokens against it,
 the same as every other frontend.
 

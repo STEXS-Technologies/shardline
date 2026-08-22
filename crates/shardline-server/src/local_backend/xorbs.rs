@@ -9,7 +9,7 @@ use shardline_storage::ObjectStore;
 use super::LocalBackend;
 use crate::{
     ServerError,
-    download_stream::{ServerByteStream, object_byte_range_stream, object_byte_stream},
+    download_stream::{ServerByteStream, object_byte_stream, validated_xorb_byte_range_stream},
     upload_ingest::{RequestBodyReader, read_body_to_bytes},
     xet_adapter::{
         XorbUploadResponse, resolve_dedupe_shard_object, store_uploaded_xorb_bytes, xorb_object_key,
@@ -95,7 +95,7 @@ impl LocalBackend {
         let object_store = self.object_store();
         let object_key = xorb_object_key(hash_hex)?;
 
-        object_byte_range_stream(object_store, object_key, total_length, range).await
+        validated_xorb_byte_range_stream(&object_store, &object_key, hash_hex, total_length, range)
     }
 
     /// Loads the stored byte length for a serialized xorb object.

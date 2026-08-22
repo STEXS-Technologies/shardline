@@ -91,7 +91,10 @@
     clippy::string_add
 )]
 
-use std::{num::NonZeroUsize, time::Duration};
+use std::{
+    num::NonZeroUsize,
+    time::{Duration, Instant},
+};
 
 use axum::{Router, body::Body};
 use sha2::{Digest, Sha256};
@@ -121,9 +124,19 @@ fn sha256_hex(data: &[u8]) -> String {
 // ---------------------------------------------------------------------------
 
 fn mint_token(scope: TokenScope, owner: &str, name: &str) -> String {
+    mint_token_expiring_at(scope, owner, name, u64::MAX)
+}
+
+fn mint_token_expiring_at(
+    scope: TokenScope,
+    owner: &str,
+    name: &str,
+    expires_at_unix_seconds: u64,
+) -> String {
     let provider = LocalHmacProvider::new(TEST_SIGNING_KEY).unwrap();
     let repo = RepositoryScope::new(RepositoryProvider::Generic, owner, name, None).unwrap();
-    let claims = TokenClaims::new("shardline", "test", scope, repo, u64::MAX).unwrap();
+    let claims =
+        TokenClaims::new("shardline", "test", scope, repo, expires_at_unix_seconds).unwrap();
     provider.mint_token(&claims).unwrap()
 }
 
@@ -317,6 +330,173 @@ fn assert_denied_client_error(status: axum::http::StatusCode, case: &str, ctx: &
         status.is_client_error(),
         "{ctx}: case {case} must be denied with a 4xx, got {status}"
     );
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct DeniedSurface {
+    status: reqwest::StatusCode,
+    content_type: Option<String>,
+    body_len: usize,
+}
+
+async fn denied_http_sample(
+    client: &reqwest::Client,
+    url: &str,
+    authorization: &str,
+) -> (DeniedSurface, Duration) {
+    let started = Instant::now();
+    let response = client
+        .get(url)
+        .header("Authorization", authorization)
+        .send()
+        .await
+        .unwrap();
+    let elapsed = started.elapsed();
+    let status = response.status();
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(ToOwned::to_owned);
+    let body_len = response.bytes().await.unwrap().len();
+    (
+        DeniedSurface {
+            status,
+            content_type,
+            body_len,
+        },
+        elapsed,
+    )
+}
+
+fn median_duration(samples: &mut [Duration]) -> Duration {
+    samples.sort_unstable();
+    samples[samples.len() / 2]
+}
+
+fn assert_timing_is_bounded(
+    protocol: &str,
+    mut existing_samples: Vec<Duration>,
+    mut missing_samples: Vec<Duration>,
+) {
+    let existing = median_duration(&mut existing_samples);
+    let missing = median_duration(&mut missing_samples);
+    let faster = existing.min(missing);
+    let slower = existing.max(missing);
+    let allowance = faster
+        .checked_mul(8)
+        .unwrap_or(Duration::MAX)
+        .saturating_add(Duration::from_millis(5));
+    assert!(
+        slower <= allowance,
+        "{protocol}: denied existing/missing median latency diverged: existing={existing:?}, missing={missing:?}, allowance={allowance:?}"
+    );
+}
+
+async fn assert_http_existence_probe_is_indistinguishable(
+    protocol: &str,
+    client: &reqwest::Client,
+    existing_url: &str,
+    missing_url: &str,
+    authorization: &str,
+) {
+    let mut existing_samples = Vec::with_capacity(32);
+    let mut missing_samples = Vec::with_capacity(32);
+    for iteration in 0..32 {
+        let (first_url, second_url) = if iteration % 2 == 0 {
+            (existing_url, missing_url)
+        } else {
+            (missing_url, existing_url)
+        };
+        let (first_surface, first_elapsed) =
+            denied_http_sample(client, first_url, authorization).await;
+        let (second_surface, second_elapsed) =
+            denied_http_sample(client, second_url, authorization).await;
+        assert_eq!(
+            first_surface, second_surface,
+            "{protocol}: denied surface disclosed whether the resource exists"
+        );
+        assert!(
+            first_surface.status.is_client_error(),
+            "{protocol}: revoked probe must be denied"
+        );
+        if iteration % 2 == 0 {
+            existing_samples.push(first_elapsed);
+            missing_samples.push(second_elapsed);
+        } else {
+            missing_samples.push(first_elapsed);
+            existing_samples.push(second_elapsed);
+        }
+    }
+    assert_timing_is_bounded(protocol, existing_samples, missing_samples);
+}
+
+async fn denied_oci_sample(
+    app: Router,
+    uri: &str,
+    authorization: &str,
+) -> ((axum::http::StatusCode, Option<String>, usize), Duration) {
+    let started = Instant::now();
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri(uri)
+                .header("Authorization", authorization)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let elapsed = started.elapsed();
+    let status = response.status();
+    let content_type = response
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(ToOwned::to_owned);
+    let body_len = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap()
+        .len();
+    ((status, content_type, body_len), elapsed)
+}
+
+async fn assert_oci_existence_probe_is_indistinguishable(
+    app: Router,
+    existing_uri: &str,
+    missing_uri: &str,
+    authorization: &str,
+) {
+    let mut existing_samples = Vec::with_capacity(32);
+    let mut missing_samples = Vec::with_capacity(32);
+    for iteration in 0..32 {
+        let (first_uri, second_uri) = if iteration % 2 == 0 {
+            (existing_uri, missing_uri)
+        } else {
+            (missing_uri, existing_uri)
+        };
+        let (first_surface, first_elapsed) =
+            denied_oci_sample(app.clone(), first_uri, authorization).await;
+        let (second_surface, second_elapsed) =
+            denied_oci_sample(app.clone(), second_uri, authorization).await;
+        assert_eq!(
+            first_surface, second_surface,
+            "oci: denied surface disclosed whether the blob exists"
+        );
+        assert!(
+            first_surface.0.is_client_error(),
+            "oci: revoked probe must be denied"
+        );
+        if iteration % 2 == 0 {
+            existing_samples.push(first_elapsed);
+            missing_samples.push(second_elapsed);
+        } else {
+            missing_samples.push(first_elapsed);
+            existing_samples.push(second_elapsed);
+        }
+    }
+    assert_timing_is_bounded("oci", existing_samples, missing_samples);
 }
 
 // ===========================================================================
@@ -1524,6 +1704,177 @@ async fn matrix_xet_cases_a_through_e() {
         resp.status(),
         axum::http::StatusCode::OK,
         "xet: file uploaded by repo A must be reconstructable by repo A"
+    );
+}
+
+// ===========================================================================
+// Revoked-token existence and timing surface across every frontend.
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn expired_revocation_probes_hide_existence_across_all_frontends() {
+    let server = TestServer::start().await;
+    let client = reqwest::Client::new();
+    let valid_token = mint_token(TokenScope::Write, OWNER_A, NAME_A);
+    let expired_token = mint_token_expiring_at(TokenScope::Write, OWNER_A, NAME_A, 1);
+    let valid_bearer = bearer(&valid_token);
+    let expired_bearer = bearer(&expired_token);
+
+    // S3 seed.
+    let bucket = format!("{OWNER_A}.{NAME_A}");
+    let s3_existing = server.url(&format!("/{bucket}/security/exist"));
+    let s3_missing = server.url(&format!("/{bucket}/security/missx"));
+    let response = client
+        .put(&s3_existing)
+        .header("Authorization", sigv4_auth(&valid_token))
+        .body("security-s3")
+        .send()
+        .await
+        .unwrap();
+    assert!(response.status().is_success());
+
+    // LFS seed.
+    let lfs_bytes = b"security-lfs";
+    let lfs_hash = sha256_hex(lfs_bytes);
+    let lfs_existing = server.url(&format!("/v1/lfs/objects/{lfs_hash}"));
+    let lfs_missing = server.url(&format!("/v1/lfs/objects/{}", "f".repeat(64)));
+    let response = client
+        .put(&lfs_existing)
+        .header("Authorization", &valid_bearer)
+        .body(lfs_bytes.as_slice())
+        .send()
+        .await
+        .unwrap();
+    assert!(response.status().is_success());
+
+    // Bazel seed.
+    let bazel_bytes = b"security-bazel";
+    let bazel_hash = sha256_hex(bazel_bytes);
+    let bazel_existing = server.url(&format!("/v1/bazel/cache/cas/{bazel_hash}"));
+    let bazel_missing = server.url(&format!("/v1/bazel/cache/cas/{}", "e".repeat(64)));
+    let response = client
+        .put(&bazel_existing)
+        .header("Authorization", &valid_bearer)
+        .body(bazel_bytes.as_slice())
+        .send()
+        .await
+        .unwrap();
+    assert!(response.status().is_success());
+
+    // Hub seed.
+    let hub_existing = server.url(&format!("/api/models/{OWNER_A}/{NAME_A}"));
+    let hub_missing = server.url(&format!("/api/models/{OWNER_A}/{NAME_B}"));
+    let response = client
+        .post(server.url("/api/repos/create"))
+        .header("Authorization", &valid_bearer)
+        .header("Content-Type", "application/json")
+        .body(
+            serde_json::json!({
+                "type": "model",
+                "name": format!("{OWNER_A}/{NAME_A}"),
+                "private": true,
+            })
+            .to_string(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert!(response.status().is_success());
+
+    // Xet seed.
+    let xet_content = b"security-xet";
+    let (xorb_bytes, xorb_hash) = shardline_server::test_fixtures::single_chunk_xorb(xet_content);
+    let (shard_bytes, file_id) =
+        shardline_server::test_fixtures::single_file_shard(&[(xet_content, xorb_hash.as_str())]);
+    let response = client
+        .post(server.url(&format!("/v1/xorbs/default/{xorb_hash}")))
+        .header("Authorization", &valid_bearer)
+        .body(xorb_bytes)
+        .send()
+        .await
+        .unwrap();
+    assert!(response.status().is_success());
+    let response = client
+        .post(server.url("/v1/shards"))
+        .header("Authorization", &valid_bearer)
+        .body(shard_bytes)
+        .send()
+        .await
+        .unwrap();
+    assert!(response.status().is_success());
+    let xet_existing = server.url(&format!("/v1/reconstructions/{file_id}"));
+    let xet_missing = server.url(&format!("/v1/reconstructions/{}", "d".repeat(64)));
+
+    // OCI seed in its wildcard-capable oneshot router.
+    let (oci_app, _oci_tmp) = oci_oneshot_app().await;
+    let oci_bytes = b"security-oci";
+    let oci_digest = sha256_hex(oci_bytes);
+    let oci_existing = format!("/v2/{OWNER_A}/{NAME_A}/blobs/sha256:{oci_digest}");
+    let oci_missing = format!("/v2/{OWNER_A}/{NAME_A}/blobs/sha256:{}", "c".repeat(64));
+    let response = oci_app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/v2/{OWNER_A}/{NAME_A}/blobs/uploads/?digest=sha256:{oci_digest}"
+                ))
+                .header("Authorization", &valid_bearer)
+                .header("Content-Type", "application/octet-stream")
+                .body(Body::from(oci_bytes.as_slice()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(response.status().is_success());
+
+    // All protocol probes run concurrently. Within each protocol, existing
+    // and missing paths alternate first position to remove order drift. An
+    // expired token is the deterministic revocation boundary: authorization
+    // must terminate before any existence-dependent storage operation.
+    let s3_authorization = sigv4_auth(&expired_token);
+    tokio::join!(
+        assert_http_existence_probe_is_indistinguishable(
+            "s3",
+            &client,
+            &s3_existing,
+            &s3_missing,
+            &s3_authorization,
+        ),
+        assert_http_existence_probe_is_indistinguishable(
+            "lfs",
+            &client,
+            &lfs_existing,
+            &lfs_missing,
+            &expired_bearer,
+        ),
+        assert_http_existence_probe_is_indistinguishable(
+            "bazel",
+            &client,
+            &bazel_existing,
+            &bazel_missing,
+            &expired_bearer,
+        ),
+        assert_http_existence_probe_is_indistinguishable(
+            "hub",
+            &client,
+            &hub_existing,
+            &hub_missing,
+            &expired_bearer,
+        ),
+        assert_http_existence_probe_is_indistinguishable(
+            "xet",
+            &client,
+            &xet_existing,
+            &xet_missing,
+            &expired_bearer,
+        ),
+        assert_oci_existence_probe_is_indistinguishable(
+            oci_app,
+            &oci_existing,
+            &oci_missing,
+            &expired_bearer,
+        ),
     );
 }
 

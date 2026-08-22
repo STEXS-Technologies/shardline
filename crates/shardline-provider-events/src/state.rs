@@ -79,13 +79,44 @@ where
     IndexAdapter: AsyncIndexStore,
     IndexAdapter::Error: Into<ProviderEventsError>,
 {
+    let Some(migrated) =
+        planned_provider_repository_state_migration(index_store, old_repository, new_repository)
+            .await?
+    else {
+        return Ok(());
+    };
+    let old_provider = old_repository.provider().repository_provider();
+    index_store
+        .upsert_provider_repository_state(&migrated)
+        .await
+        .map_err(Into::into)?;
+    let _deleted = index_store
+        .delete_provider_repository_state(
+            old_provider,
+            old_repository.owner(),
+            old_repository.name(),
+        )
+        .await
+        .map_err(Into::into)?;
+    Ok(())
+}
+
+pub(super) async fn planned_provider_repository_state_migration<IndexAdapter>(
+    index_store: &IndexAdapter,
+    old_repository: &RepositoryRef,
+    new_repository: &RepositoryRef,
+) -> Result<Option<ProviderRepositoryState>, ProviderEventsError>
+where
+    IndexAdapter: AsyncIndexStore,
+    IndexAdapter::Error: Into<ProviderEventsError>,
+{
     let old_provider = old_repository.provider().repository_provider();
     let Some(state) = index_store
         .provider_repository_state(old_provider, old_repository.owner(), old_repository.name())
         .await
         .map_err(Into::into)?
     else {
-        return Ok(());
+        return Ok(None);
     };
     let migrated = ProviderRepositoryState::new(
         new_repository.provider().repository_provider(),
@@ -100,19 +131,7 @@ where
         state.last_authorization_rechecked_at_unix_seconds(),
         state.last_drift_checked_at_unix_seconds(),
     );
-    index_store
-        .upsert_provider_repository_state(&migrated)
-        .await
-        .map_err(Into::into)?;
-    let _deleted = index_store
-        .delete_provider_repository_state(
-            old_provider,
-            old_repository.owner(),
-            old_repository.name(),
-        )
-        .await
-        .map_err(Into::into)?;
-    Ok(())
+    Ok(Some(migrated))
 }
 
 async fn upsert_provider_repository_state<IndexAdapter>(

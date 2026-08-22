@@ -47,6 +47,7 @@ use tokio::{net::TcpStream, sync::mpsc, task::JoinHandle};
 
 /// Host bind address for the deployed server (avoids dev 18080 / default 8080).
 const BIN_ADDR: &str = "127.0.0.1:18081";
+const BIN_ADDR_SECONDARY: &str = "127.0.0.1:18082";
 /// Chaos Postgres (compose publishes `15432 -> 5432`).
 const PG_URL: &str = "postgres://shardline:shardline-dev-password@127.0.0.1:15432/shardline";
 /// Design-default MinIO endpoint. Overridden at runtime from the container's
@@ -67,6 +68,7 @@ const OBJECT_BUCKET: &str = "shardline";
 const CONTAINER_POSTGRES: &str = "chaos-postgres";
 const CONTAINER_MINIO: &str = "chaos-minio";
 const CONTAINER_REDIS: &str = "chaos-redis";
+const NETEM_IMAGE: &str = "nicolaka/netshoot:v0.13";
 
 const TEST_SIGNING_KEY: &[u8] = b"0123456789abcdef0123456789abcdef";
 const CHUNK_SIZE: usize = 65536;
@@ -77,10 +79,26 @@ const CHUNK_SIZE: usize = 65536;
 // ---------------------------------------------------------------------------
 
 fn mint_token(owner: &str, name: &str, scope: TokenScope) -> String {
+    mint_token_expiring_at(owner, name, scope, u64::MAX)
+}
+
+fn mint_token_expiring_at(
+    owner: &str,
+    name: &str,
+    scope: TokenScope,
+    expires_at_unix_seconds: u64,
+) -> String {
     let provider = LocalHmacProvider::new(TEST_SIGNING_KEY).unwrap();
     let repo =
         RepositoryScope::new(RepositoryProvider::Generic, owner, name, Some("main")).unwrap();
-    let claims = TokenClaims::new("shardline", "deployment-chaos", scope, repo, u64::MAX).unwrap();
+    let claims = TokenClaims::new(
+        "shardline",
+        "deployment-chaos",
+        scope,
+        repo,
+        expires_at_unix_seconds,
+    )
+    .unwrap();
     provider.mint_token(&claims).unwrap()
 }
 
@@ -149,6 +167,45 @@ async fn docker_run(args: &[&str]) -> std::process::Output {
     .unwrap()
 }
 
+async fn docker_run_owned(args: Vec<String>) -> std::process::Output {
+    tokio::task::spawn_blocking(move || {
+        std::process::Command::new("docker")
+            .args(args)
+            .output()
+            .unwrap()
+    })
+    .await
+    .unwrap()
+}
+
+async fn replace_netem(container: &str, rule: &str) -> std::process::Output {
+    docker_run_owned(vec![
+        "run".to_owned(),
+        "--rm".to_owned(),
+        format!("--network=container:{container}"),
+        "--cap-add=NET_ADMIN".to_owned(),
+        NETEM_IMAGE.to_owned(),
+        "sh".to_owned(),
+        "-c".to_owned(),
+        format!("tc qdisc replace dev eth0 root netem {rule}"),
+    ])
+    .await
+}
+
+async fn clear_netem(container: &str) -> std::process::Output {
+    docker_run_owned(vec![
+        "run".to_owned(),
+        "--rm".to_owned(),
+        format!("--network=container:{container}"),
+        "--cap-add=NET_ADMIN".to_owned(),
+        NETEM_IMAGE.to_owned(),
+        "sh".to_owned(),
+        "-c".to_owned(),
+        "tc qdisc del dev eth0 root 2>/dev/null || true".to_owned(),
+    ])
+    .await
+}
+
 /// Resolves the host-published port of `container_port` inside `container`
 /// (`docker port chaos-minio 9000/tcp` -> `0.0.0.0:29000` -> `29000`).
 async fn container_published_port(container: &str, container_port: &str) -> Option<String> {
@@ -208,6 +265,7 @@ where
 struct ServiceRecoveryGuard {
     stopped: Vec<&'static str>,
     disconnected: Vec<&'static str>,
+    netem: Vec<&'static str>,
 }
 
 impl ServiceRecoveryGuard {
@@ -215,6 +273,7 @@ impl ServiceRecoveryGuard {
         Self {
             stopped: Vec::new(),
             disconnected: Vec::new(),
+            netem: Vec::new(),
         }
     }
 
@@ -236,6 +295,28 @@ impl ServiceRecoveryGuard {
         }
     }
 
+    async fn replace_netem(&mut self, name: &'static str, rule: &str) {
+        let out = replace_netem(name, rule).await;
+        assert!(
+            out.status.success(),
+            "install netem rule on {name}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        if !self.netem.contains(&name) {
+            self.netem.push(name);
+        }
+    }
+
+    async fn clear_netem(&mut self, name: &'static str) {
+        let out = clear_netem(name).await;
+        assert!(
+            out.status.success(),
+            "clear netem rule on {name}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        self.netem.retain(|container| *container != name);
+    }
+
     /// Marks a service as restored (call after a successful `docker start` /
     /// reconnect + readiness) so Drop won't touch it again.
     fn recovered(&mut self, name: &'static str) {
@@ -254,6 +335,21 @@ impl Drop for ServiceRecoveryGuard {
         for name in &self.disconnected {
             let _ = std::process::Command::new("docker")
                 .args(["network", "connect", NET, name])
+                .output();
+        }
+        for name in &self.netem {
+            let network = format!("--network=container:{name}");
+            let _ = std::process::Command::new("docker")
+                .args([
+                    "run",
+                    "--rm",
+                    &network,
+                    "--cap-add=NET_ADMIN",
+                    NETEM_IMAGE,
+                    "sh",
+                    "-c",
+                    "tc qdisc del dev eth0 root 2>/dev/null || true",
+                ])
                 .output();
         }
     }
@@ -519,6 +615,28 @@ fn resolve_shardline_binary() -> Option<PathBuf> {
     candidate.is_file().then_some(candidate)
 }
 
+fn resolve_n_minus_one_binary(drill: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("SHARDLINE_N_MINUS_ONE_BINARY")
+        .map(PathBuf::from)
+        .filter(|path| path.is_file());
+    if path.is_none() {
+        eprintln!(
+            "SKIPPED: {drill} — set SHARDLINE_N_MINUS_ONE_BINARY to a built v1.6.0 shardline binary"
+        );
+    }
+    path
+}
+
+fn resolve_faketime_library(drill: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("SHARDLINE_FAKETIME_LIBRARY")
+        .map(PathBuf::from)
+        .filter(|path| path.is_file());
+    if path.is_none() {
+        eprintln!("SKIPPED: {drill} — set SHARDLINE_FAKETIME_LIBRARY to libfaketime.so.1");
+    }
+    path
+}
+
 struct DeploymentServer {
     child: std::process::Child,
     base_url: String,
@@ -531,6 +649,10 @@ impl DeploymentServer {
     /// `extra_env` is applied after the base env, so drills can override the
     /// S3 endpoint, frontends, and reconstruction-cache wiring.
     fn spawn(binary: &Path, extra_env: &[(&str, &str)], root: &Path) -> Self {
+        Self::spawn_at(binary, BIN_ADDR, extra_env, root)
+    }
+
+    fn spawn_at(binary: &Path, bind_addr: &str, extra_env: &[(&str, &str)], root: &Path) -> Self {
         let data_dir = root.join("data");
         std::fs::create_dir_all(&data_dir).unwrap_or_else(|e| panic!("create {data_dir:?}: {e}"));
         let log = NamedTempFile::new().expect("temp log file");
@@ -539,8 +661,8 @@ impl DeploymentServer {
 
         let mut cmd = std::process::Command::new(binary);
         cmd.arg("serve");
-        cmd.env("SHARDLINE_BIND_ADDR", BIN_ADDR)
-            .env("SHARDLINE_PUBLIC_BASE_URL", format!("http://{BIN_ADDR}"))
+        cmd.env("SHARDLINE_BIND_ADDR", bind_addr)
+            .env("SHARDLINE_PUBLIC_BASE_URL", format!("http://{bind_addr}"))
             .env("SHARDLINE_SERVER_ROLE", "all")
             .env("SHARDLINE_AUTH_PROVIDER", "local")
             .env(
@@ -569,7 +691,7 @@ impl DeploymentServer {
             .unwrap_or_else(|e| panic!("spawn {binary:?}: {e}"));
         Self {
             child,
-            base_url: format!("http://{BIN_ADDR}"),
+            base_url: format!("http://{bind_addr}"),
             _log: log,
         }
     }
@@ -649,6 +771,16 @@ async fn s3_get(base: &str, token: &str, key: &str) -> reqwest::Response {
         .send()
         .await
         .expect("s3 GET request")
+}
+
+async fn assert_s3_bytes(base: &str, token: &str, key: &str, expected: &[u8], context: &str) {
+    let response = s3_get(base, token, key).await;
+    assert_eq!(response.status().as_u16(), 200, "{context}: GET {key}");
+    assert_eq!(
+        response.bytes().await.unwrap().as_ref(),
+        expected,
+        "{context}: exact bytes for {key}"
+    );
 }
 
 async fn s3_delete(base: &str, token: &str, key: &str) -> reqwest::Response {
@@ -1280,7 +1412,391 @@ async fn drill_deploy_d_minio_network_partition_recovery() {
 }
 
 // ===========================================================================
-// OPTIONAL F — CHEAP WORKLOAD BURST (no fault injection).
+// DRILL E — KERNEL PACKET DUPLICATION/REORDERING + ONE-WAY RESPONSE LOSS.
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn drill_deploy_e_netem_duplicate_reorder_and_asymmetric_recovery() {
+    let drill = "drill_deploy_e_netem_duplicate_reorder_and_asymmetric_recovery";
+    let Some(stack) = boot_chaos_stack(drill).await else {
+        return;
+    };
+    let Some(binary) = resolve_shardline_binary() else {
+        eprintln!("SKIPPED: {drill} — shardline binary not found; run `cargo build -p shardline`");
+        return;
+    };
+    let mut guard = ServiceRecoveryGuard::new();
+    migrate_chaos_postgres(&stack.pg_url).await;
+
+    let tmp = TempDir::new().unwrap();
+    let mut server = DeploymentServer::spawn(
+        &binary,
+        &[
+            ("SHARDLINE_SERVER_FRONTENDS", "s3"),
+            ("SHARDLINE_S3_ENDPOINT", &stack.s3_endpoint),
+        ],
+        tmp.path(),
+    );
+    server.wait_ready(Duration::from_secs(10)).await;
+
+    let token = mint_token("drill", "drill", TokenScope::Write);
+    let base = server.base_url();
+    let seed_key = "e-stable";
+    let seed_bytes = deterministic_bytes(96 * 1024 + 31, 501);
+    let seeded = s3_put(&base, &token, seed_key, seed_bytes.clone()).await;
+    assert_eq!(seeded.status().as_u16(), 200, "seed before netem faults");
+
+    guard
+        .replace_netem(
+            CONTAINER_MINIO,
+            "delay 40ms 20ms 25% duplicate 10% reorder 50% 25%",
+        )
+        .await;
+    for sequence in 0..8_u64 {
+        let key = format!("e-netem-{sequence}");
+        let bytes = deterministic_bytes(
+            (32_usize * 1024)
+                .checked_add(usize::try_from(sequence).unwrap())
+                .unwrap(),
+            510_u64.saturating_add(sequence),
+        );
+        let put = s3_put(&base, &token, &key, bytes.clone()).await;
+        assert_eq!(
+            put.status().as_u16(),
+            200,
+            "PUT through duplicate/reordered packets for {key}"
+        );
+        let get = s3_get(&base, &token, &key).await;
+        assert_eq!(
+            get.status().as_u16(),
+            200,
+            "GET through duplicate/reordered packets for {key}"
+        );
+        assert_eq!(
+            get.bytes().await.unwrap().as_ref(),
+            bytes.as_slice(),
+            "packet faults must not alter acknowledged bytes for {key}"
+        );
+    }
+
+    // Apply loss only to packets leaving MinIO's namespace. Requests still
+    // travel toward the dependency, but its TCP acknowledgements/responses do
+    // not return: an asymmetric response partition rather than a symmetric
+    // Docker-network disconnect.
+    guard.replace_netem(CONTAINER_MINIO, "loss 100%").await;
+    let partitioned_read = reqwest::Client::new()
+        .get(format!("{base}/{BUCKET}/{seed_key}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .timeout(Duration::from_secs(3))
+        .send()
+        .await;
+    assert!(
+        partitioned_read
+            .as_ref()
+            .map_or(true, |response| !response.status().is_success()),
+        "one-way MinIO response partition must never return a false successful read"
+    );
+    assert!(
+        server.alive(),
+        "server must remain alive during asymmetric dependency partition"
+    );
+
+    guard.clear_netem(CONTAINER_MINIO).await;
+    let s3_endpoint = stack.s3_endpoint.clone();
+    wait_for(
+        "MinIO after netem removal",
+        move || {
+            let endpoint = s3_endpoint.clone();
+            async move { minio_health_ok(&endpoint).await }
+        },
+        Duration::from_secs(30),
+    )
+    .await;
+
+    let recovered = s3_get(&base, &token, seed_key).await;
+    assert_eq!(recovered.status().as_u16(), 200, "read after netem removal");
+    assert_eq!(
+        recovered.bytes().await.unwrap().as_ref(),
+        seed_bytes.as_slice(),
+        "pre-fault acknowledged bytes must recover exactly"
+    );
+    let recovery_key = "e-recovered";
+    let recovery_bytes = deterministic_bytes(48 * 1024 + 7, 599);
+    let put = s3_put(&base, &token, recovery_key, recovery_bytes.clone()).await;
+    assert_eq!(put.status().as_u16(), 200, "write after netem removal");
+    let get = s3_get(&base, &token, recovery_key).await;
+    assert_eq!(get.status().as_u16(), 200, "read new post-fault write");
+    assert_eq!(
+        get.bytes().await.unwrap().as_ref(),
+        recovery_bytes.as_slice(),
+        "post-fault publication must be byte exact"
+    );
+    eprintln!(
+        "chaos({drill}): PASS — kernel duplicate/reorder and asymmetric response loss recovered"
+    );
+}
+
+// ===========================================================================
+// DRILL F — REAL N-1/N MIXED-BINARY ROLLOUT AND ROLLBACK.
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn drill_deploy_f_real_mixed_version_rollout_and_rollback() {
+    let drill = "drill_deploy_f_real_mixed_version_rollout_and_rollback";
+    let Some(stack) = boot_chaos_stack(drill).await else {
+        return;
+    };
+    let Some(current_binary) = resolve_shardline_binary() else {
+        eprintln!("SKIPPED: {drill} — current shardline binary not found");
+        return;
+    };
+    let Some(previous_binary) = resolve_n_minus_one_binary(drill) else {
+        return;
+    };
+    migrate_chaos_postgres(&stack.pg_url).await;
+
+    let old_a_root = TempDir::new().unwrap();
+    let old_b_root = TempDir::new().unwrap();
+    let new_a_root = TempDir::new().unwrap();
+    let new_b_root = TempDir::new().unwrap();
+    let rollback_root = TempDir::new().unwrap();
+    let environment = [("SHARDLINE_S3_ENDPOINT", stack.s3_endpoint.as_str())];
+    let mut node_a =
+        DeploymentServer::spawn_at(&previous_binary, BIN_ADDR, &environment, old_a_root.path());
+    let mut node_b = DeploymentServer::spawn_at(
+        &previous_binary,
+        BIN_ADDR_SECONDARY,
+        &environment,
+        old_b_root.path(),
+    );
+    node_a.wait_ready(Duration::from_secs(20)).await;
+    node_b.wait_ready(Duration::from_secs(20)).await;
+
+    let token = mint_token("drill", "drill", TokenScope::Write);
+    let old_bytes = deterministic_bytes(98_323, 601);
+    let old_put = s3_put(&node_a.base_url(), &token, "f-old", old_bytes.clone()).await;
+    assert_eq!(old_put.status().as_u16(), 200, "N-1 seed write");
+    assert_s3_bytes(&node_b.base_url(), &token, "f-old", &old_bytes, "N-1 peer").await;
+
+    // First rollout step: an N process and an N-1 process actively share the
+    // same Postgres metadata and S3 objects.
+    drop(node_a);
+    let mut node_a =
+        DeploymentServer::spawn_at(&current_binary, BIN_ADDR, &environment, new_a_root.path());
+    node_a.wait_ready(Duration::from_secs(20)).await;
+    assert_s3_bytes(
+        &node_a.base_url(),
+        &token,
+        "f-old",
+        &old_bytes,
+        "N reads N-1 write",
+    )
+    .await;
+    let new_bytes = deterministic_bytes(114_711, 602);
+    let new_put = s3_put(&node_a.base_url(), &token, "f-new", new_bytes.clone()).await;
+    assert_eq!(
+        new_put.status().as_u16(),
+        200,
+        "N write during mixed window"
+    );
+    assert_s3_bytes(
+        &node_b.base_url(),
+        &token,
+        "f-new",
+        &new_bytes,
+        "N-1 reads N write",
+    )
+    .await;
+
+    // Finish the rollout, then roll one node back to the real N-1 binary. The
+    // previous binary must read state written by N and publish a fresh object
+    // that the remaining N node reconstructs exactly.
+    drop(node_b);
+    let mut node_b = DeploymentServer::spawn_at(
+        &current_binary,
+        BIN_ADDR_SECONDARY,
+        &environment,
+        new_b_root.path(),
+    );
+    node_b.wait_ready(Duration::from_secs(20)).await;
+    assert_s3_bytes(
+        &node_b.base_url(),
+        &token,
+        "f-new",
+        &new_bytes,
+        "N peer after rollout",
+    )
+    .await;
+
+    drop(node_a);
+    let mut rollback_node = DeploymentServer::spawn_at(
+        &previous_binary,
+        BIN_ADDR,
+        &environment,
+        rollback_root.path(),
+    );
+    rollback_node.wait_ready(Duration::from_secs(20)).await;
+    assert_s3_bytes(
+        &rollback_node.base_url(),
+        &token,
+        "f-new",
+        &new_bytes,
+        "N-1 rollback reads N write",
+    )
+    .await;
+    let rollback_bytes = deterministic_bytes(81_949, 603);
+    let rollback_put = s3_put(
+        &rollback_node.base_url(),
+        &token,
+        "f-rollback",
+        rollback_bytes.clone(),
+    )
+    .await;
+    assert_eq!(rollback_put.status().as_u16(), 200, "N-1 rollback write");
+    assert_s3_bytes(
+        &node_b.base_url(),
+        &token,
+        "f-rollback",
+        &rollback_bytes,
+        "N reads N-1 rollback write",
+    )
+    .await;
+    eprintln!(
+        "chaos({drill}): PASS — real N-1/N rollout and one-node rollback preserved exact bytes"
+    );
+}
+
+// ===========================================================================
+// DRILL G — LIVE MULTI-NODE TOKEN VERIFICATION CLOCK SKEW.
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn drill_deploy_g_live_verifier_clock_skew() {
+    let drill = "drill_deploy_g_live_verifier_clock_skew";
+    let Some(stack) = boot_chaos_stack(drill).await else {
+        return;
+    };
+    let Some(binary) = resolve_shardline_binary() else {
+        eprintln!("SKIPPED: {drill} — current shardline binary not found");
+        return;
+    };
+    let Some(faketime_library) = resolve_faketime_library(drill) else {
+        return;
+    };
+    migrate_chaos_postgres(&stack.pg_url).await;
+
+    let fast_root = TempDir::new().unwrap();
+    let slow_root = TempDir::new().unwrap();
+    let faketime_library = faketime_library.to_str().unwrap();
+    let fast_environment = [
+        ("SHARDLINE_S3_ENDPOINT", stack.s3_endpoint.as_str()),
+        ("LD_PRELOAD", faketime_library),
+        ("FAKETIME", "+120s"),
+        ("FAKETIME_DONT_FAKE_MONOTONIC", "1"),
+        ("FAKETIME_NO_CACHE", "1"),
+    ];
+    let slow_environment = [
+        ("SHARDLINE_S3_ENDPOINT", stack.s3_endpoint.as_str()),
+        ("LD_PRELOAD", faketime_library),
+        ("FAKETIME", "-120s"),
+        ("FAKETIME_DONT_FAKE_MONOTONIC", "1"),
+        ("FAKETIME_NO_CACHE", "1"),
+    ];
+    let mut fast_node =
+        DeploymentServer::spawn_at(&binary, BIN_ADDR, &fast_environment, fast_root.path());
+    let mut slow_node = DeploymentServer::spawn_at(
+        &binary,
+        BIN_ADDR_SECONDARY,
+        &slow_environment,
+        slow_root.path(),
+    );
+    fast_node.wait_ready(Duration::from_secs(20)).await;
+    slow_node.wait_ready(Duration::from_secs(20)).await;
+
+    let host_now = shardline_protocol::unix_now_seconds_lossy();
+    let boundary_token = mint_token_expiring_at(
+        "drill",
+        "drill",
+        TokenScope::Write,
+        host_now.saturating_add(60),
+    );
+    let boundary_bytes = deterministic_bytes(65_573, 701);
+    let rejected = s3_put(
+        &fast_node.base_url(),
+        &boundary_token,
+        "g-boundary",
+        boundary_bytes.clone(),
+    )
+    .await;
+    assert_eq!(
+        rejected.status().as_u16(),
+        403,
+        "fast verifier must reject a token beyond its local expiry"
+    );
+    let absent = s3_get(
+        &slow_node.base_url(),
+        &mint_token("drill", "drill", TokenScope::Write),
+        "g-boundary",
+    )
+    .await;
+    assert_eq!(
+        absent.status().as_u16(),
+        404,
+        "rejected fast-node write must have no shared side effect"
+    );
+    let accepted = s3_put(
+        &slow_node.base_url(),
+        &boundary_token,
+        "g-boundary",
+        boundary_bytes.clone(),
+    )
+    .await;
+    assert_eq!(
+        accepted.status().as_u16(),
+        200,
+        "slow verifier must accept the same token before its local expiry"
+    );
+
+    let cluster_valid_token = mint_token_expiring_at(
+        "drill",
+        "drill",
+        TokenScope::Write,
+        host_now.saturating_add(600),
+    );
+    assert_s3_bytes(
+        &fast_node.base_url(),
+        &cluster_valid_token,
+        "g-boundary",
+        &boundary_bytes,
+        "fast peer after slow-node publication",
+    )
+    .await;
+    let cluster_expired_token = mint_token_expiring_at(
+        "drill",
+        "drill",
+        TokenScope::Write,
+        host_now.saturating_sub(180),
+    );
+    for base_url in [fast_node.base_url(), slow_node.base_url()] {
+        let response = s3_get(&base_url, &cluster_expired_token, "g-boundary").await;
+        assert_eq!(
+            response.status().as_u16(),
+            403,
+            "a token older than the tested skew bound must be rejected on every node"
+        );
+    }
+    assert!(fast_node.alive(), "fast verifier node must stay alive");
+    assert!(slow_node.alive(), "slow verifier node must stay alive");
+    eprintln!(
+        "chaos({drill}): PASS — independent ±120s verifier clocks enforced exact expiry decisions without partial writes"
+    );
+}
+
+// ===========================================================================
+// OPTIONAL H — CHEAP WORKLOAD BURST (no fault injection).
 // Gated on SHARDLINE_CHAOS_DEPLOYMENT=1.
 // ===========================================================================
 
