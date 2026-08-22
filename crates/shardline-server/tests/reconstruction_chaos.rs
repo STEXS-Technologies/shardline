@@ -344,9 +344,8 @@ fn latest_record(root: &Path) -> Option<(String, String)> {
 ///     corruption; what breaks is the xorb LOAD, not the record lookup);
 ///   - the S3 GET fails cleanly (>= 400, expected exactly 400) and never a
 ///     panic;
-///   - the xorb transfer route serves the corrupt bytes undetected (a
-///     REPORT-ONLY finding: content validation lives only on the S3/native
-///     read paths);
+///   - the xorb transfer route rejects the corrupt container before exposing
+///     a requested range;
 ///   - the server stays healthy;
 ///   - repair = remove-file + re-PUT of the SAME bytes restores the object
 ///     byte-exact and the reconstruction route serves the same terms.

@@ -37,6 +37,8 @@
 
 #[cfg(feature = "docker")]
 mod docker;
+#[cfg(feature = "docker")]
+mod s3_fault_proxy;
 
 use std::{
     fmt::Display,
@@ -49,6 +51,8 @@ use thiserror::Error;
 
 #[cfg(feature = "docker")]
 pub use docker::{DockerLocalStack, DockerLocalStackBuilder, S3RawConfig};
+#[cfg(feature = "docker")]
+pub use s3_fault_proxy::{S3FaultProxy, S3ProxyFault};
 
 /// Error type for test-only invariant failures.
 #[derive(Debug, Error)]
