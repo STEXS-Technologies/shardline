@@ -81,7 +81,7 @@ compatibility documentation. They must not be silently omitted.
 | S3 frontend | Stable | conditional writes have an adapter-level database CAS contract with concurrent SQLite and Postgres-handle evidence; unconditional overwrites remain documented last-writer-wins |
 | Hugging Face Hub API | Beta | broader client matrix and remaining semantic compatibility; tenant-bound route extraction, stale-parent rejection, Postgres cross-replica ref serialization, and delete-vs-push row locking are covered |
 | Redis reconstruction cache | Beta | partition, flush, restart, and multi-node stampede evidence; bounded timeout and corruption repair are covered |
-| Provider integration | Beta | revocation timing and authoritative provider reconciliation evidence; duplicate/replay handling, access/revision reordering, rename migration, signature checks, and fail-closed visibility parsing are covered |
+| Provider integration | Beta | revocation timing and authoritative provider reconciliation evidence; duplicate/replay handling, atomic monotonic reconciliation-state merging across replicas, access/revision reordering, rename migration, signature checks, and fail-closed visibility parsing are covered |
 | Ed25519 | Experimental | overlapping multi-key verification; operator minting, CLI-to-provider verification, key formats, tampering, expiry, wrong-key, malformed-token, and algorithm-confusion paths are covered; the coordinated non-overlap rotation limitation is documented |
 | Multi-replica Postgres/S3 writers | Not claimed | database-enforced mutable-state contracts, fencing, chaos, and mixed-version proof |
 

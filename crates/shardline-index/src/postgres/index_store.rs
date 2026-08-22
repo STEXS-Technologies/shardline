@@ -616,12 +616,53 @@ impl AsyncIndexStore for super::PostgresIndexStore {
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                  ON CONFLICT (provider, owner, repo)
                  DO UPDATE SET
-                    last_access_changed_at_unix_seconds = EXCLUDED.last_access_changed_at_unix_seconds,
-                    last_revision_pushed_at_unix_seconds = EXCLUDED.last_revision_pushed_at_unix_seconds,
-                    last_pushed_revision = EXCLUDED.last_pushed_revision,
-                    last_cache_invalidated_at_unix_seconds = EXCLUDED.last_cache_invalidated_at_unix_seconds,
-                    last_authorization_rechecked_at_unix_seconds = EXCLUDED.last_authorization_rechecked_at_unix_seconds,
-                    last_drift_checked_at_unix_seconds = EXCLUDED.last_drift_checked_at_unix_seconds,
+                    last_access_changed_at_unix_seconds = CASE
+                        WHEN EXCLUDED.last_access_changed_at_unix_seconds IS NULL
+                            THEN shardline_provider_repository_states.last_access_changed_at_unix_seconds
+                        WHEN shardline_provider_repository_states.last_access_changed_at_unix_seconds IS NULL
+                          OR EXCLUDED.last_access_changed_at_unix_seconds >= shardline_provider_repository_states.last_access_changed_at_unix_seconds
+                            THEN EXCLUDED.last_access_changed_at_unix_seconds
+                        ELSE shardline_provider_repository_states.last_access_changed_at_unix_seconds
+                    END,
+                    last_pushed_revision = CASE
+                        WHEN EXCLUDED.last_revision_pushed_at_unix_seconds IS NOT NULL
+                         AND (shardline_provider_repository_states.last_revision_pushed_at_unix_seconds IS NULL
+                           OR EXCLUDED.last_revision_pushed_at_unix_seconds >= shardline_provider_repository_states.last_revision_pushed_at_unix_seconds)
+                            THEN EXCLUDED.last_pushed_revision
+                        ELSE shardline_provider_repository_states.last_pushed_revision
+                    END,
+                    last_revision_pushed_at_unix_seconds = CASE
+                        WHEN EXCLUDED.last_revision_pushed_at_unix_seconds IS NULL
+                            THEN shardline_provider_repository_states.last_revision_pushed_at_unix_seconds
+                        WHEN shardline_provider_repository_states.last_revision_pushed_at_unix_seconds IS NULL
+                          OR EXCLUDED.last_revision_pushed_at_unix_seconds >= shardline_provider_repository_states.last_revision_pushed_at_unix_seconds
+                            THEN EXCLUDED.last_revision_pushed_at_unix_seconds
+                        ELSE shardline_provider_repository_states.last_revision_pushed_at_unix_seconds
+                    END,
+                    last_cache_invalidated_at_unix_seconds = CASE
+                        WHEN EXCLUDED.last_cache_invalidated_at_unix_seconds IS NULL
+                            THEN shardline_provider_repository_states.last_cache_invalidated_at_unix_seconds
+                        WHEN shardline_provider_repository_states.last_cache_invalidated_at_unix_seconds IS NULL
+                          OR EXCLUDED.last_cache_invalidated_at_unix_seconds >= shardline_provider_repository_states.last_cache_invalidated_at_unix_seconds
+                            THEN EXCLUDED.last_cache_invalidated_at_unix_seconds
+                        ELSE shardline_provider_repository_states.last_cache_invalidated_at_unix_seconds
+                    END,
+                    last_authorization_rechecked_at_unix_seconds = CASE
+                        WHEN EXCLUDED.last_authorization_rechecked_at_unix_seconds IS NULL
+                            THEN shardline_provider_repository_states.last_authorization_rechecked_at_unix_seconds
+                        WHEN shardline_provider_repository_states.last_authorization_rechecked_at_unix_seconds IS NULL
+                          OR EXCLUDED.last_authorization_rechecked_at_unix_seconds >= shardline_provider_repository_states.last_authorization_rechecked_at_unix_seconds
+                            THEN EXCLUDED.last_authorization_rechecked_at_unix_seconds
+                        ELSE shardline_provider_repository_states.last_authorization_rechecked_at_unix_seconds
+                    END,
+                    last_drift_checked_at_unix_seconds = CASE
+                        WHEN EXCLUDED.last_drift_checked_at_unix_seconds IS NULL
+                            THEN shardline_provider_repository_states.last_drift_checked_at_unix_seconds
+                        WHEN shardline_provider_repository_states.last_drift_checked_at_unix_seconds IS NULL
+                          OR EXCLUDED.last_drift_checked_at_unix_seconds >= shardline_provider_repository_states.last_drift_checked_at_unix_seconds
+                            THEN EXCLUDED.last_drift_checked_at_unix_seconds
+                        ELSE shardline_provider_repository_states.last_drift_checked_at_unix_seconds
+                    END,
                     updated_at = now()",
             )
             .bind(state.provider().as_str())
@@ -1013,10 +1054,13 @@ mod tests {
         clippy::shadow_unrelated,
         clippy::let_underscore_must_use
     )]
-    use shardline_protocol::{ChunkRange, HashParseError, ShardlineHash};
+    use shardline_protocol::{ChunkRange, HashParseError, RepositoryProvider, ShardlineHash};
 
     use super::{PostgresFileReconstructionRecord, PostgresReconstructionTermRecord};
-    use crate::{FileReconstruction, ReconstructionTerm, StoredObjectId};
+    use crate::{
+        AsyncIndexStore, FileReconstruction, ProviderRepositoryState, ReconstructionTerm,
+        StoredObjectId,
+    };
 
     // ------------------------------------------------------------------
     // PostgresReconstructionTermRecord: private type, tested in-module
@@ -1146,6 +1190,71 @@ mod tests {
 
     fn make_pg_store(pool: sqlx::PgPool) -> crate::PostgresIndexStore {
         crate::PostgresIndexStore::new(pool)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pg_provider_repository_state_concurrent_partial_updates_are_merged() {
+        let Some(pool) = connect_postgres().await else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        sqlx::query(
+            "DELETE FROM shardline_provider_repository_states
+             WHERE provider = $1 AND owner = $2 AND repo = $3",
+        )
+        .bind(RepositoryProvider::GitHub.as_str())
+        .bind("concurrent-team")
+        .bind("concurrent-state")
+        .execute(&pool)
+        .await
+        .expect("clean provider state fixture");
+
+        let access_store = make_pg_store(pool.clone());
+        let revision_store = make_pg_store(pool);
+        let access = ProviderRepositoryState::new(
+            RepositoryProvider::GitHub,
+            "concurrent-team".into(),
+            "concurrent-state".into(),
+            Some(150),
+            None,
+            None,
+        )
+        .with_reconciliation(Some(170), None, Some(190));
+        let revision = ProviderRepositoryState::new(
+            RepositoryProvider::GitHub,
+            "concurrent-team".into(),
+            "concurrent-state".into(),
+            None,
+            Some(200),
+            Some("refs/heads/main".into()),
+        )
+        .with_reconciliation(None, Some(180), None);
+
+        let (access_result, revision_result) = tokio::join!(
+            access_store.upsert_provider_repository_state(&access),
+            revision_store.upsert_provider_repository_state(&revision),
+        );
+        access_result.expect("access state upsert");
+        revision_result.expect("revision state upsert");
+
+        let loaded = access_store
+            .provider_repository_state(
+                RepositoryProvider::GitHub,
+                "concurrent-team",
+                "concurrent-state",
+            )
+            .await
+            .expect("load merged provider state")
+            .expect("merged provider state");
+        assert_eq!(loaded.last_access_changed_at_unix_seconds(), Some(150));
+        assert_eq!(loaded.last_revision_pushed_at_unix_seconds(), Some(200));
+        assert_eq!(loaded.last_pushed_revision(), Some("refs/heads/main"));
+        assert_eq!(loaded.last_cache_invalidated_at_unix_seconds(), Some(170));
+        assert_eq!(
+            loaded.last_authorization_rechecked_at_unix_seconds(),
+            Some(180)
+        );
+        assert_eq!(loaded.last_drift_checked_at_unix_seconds(), Some(190));
     }
 
     #[tokio::test(flavor = "multi_thread")]
