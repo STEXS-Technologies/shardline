@@ -5,6 +5,7 @@ use shardline_server::{
     DatabaseMigrationCommand, ObjectStorageAdapter, ServerFrontend, ServerRole,
 };
 
+use crate::AdminTokenAuthProvider;
 use crate::bench::{BenchDeploymentTarget, BenchScenario};
 
 use super::definition::{BenchMode, CompletionShell};
@@ -49,6 +50,8 @@ pub enum CliCommand {
     },
     /// Manage local administrative tokens.
     AdminToken {
+        /// Token signature provider.
+        auth_provider: AdminTokenAuthProvider,
         /// Issuer embedded in the signed token.
         issuer: String,
         /// Subject embedded in the signed token.
@@ -65,9 +68,9 @@ pub enum CliCommand {
         revision: Option<String>,
         /// Token lifetime in seconds.
         ttl_seconds: u64,
-        /// Local signing-key file path.
+        /// HMAC signing key or Ed25519 private-key file path.
         key_file: Option<PathBuf>,
-        /// Environment variable that stores the signing key.
+        /// Environment variable that stores the HMAC key or Ed25519 private key.
         key_env: Option<String>,
     },
     /// Verify object and index integrity.

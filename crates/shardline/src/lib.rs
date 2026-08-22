@@ -59,7 +59,10 @@ mod storage_migration;
 mod xet;
 
 pub use adapter::{CliRuntimeError, run_health_check};
-pub use admin::{AdminTokenError, mint_admin_token, mint_admin_token_from_sources};
+pub use admin::{
+    AdminTokenAuthProvider, AdminTokenError, mint_admin_token,
+    mint_admin_token_for_provider_from_sources, mint_admin_token_from_sources,
+};
 pub use artifact::{
     CliArtifactError, render_completion, render_manpage, render_xet_completion, render_xet_manpage,
 };

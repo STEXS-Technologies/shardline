@@ -112,10 +112,25 @@ Use `public_key_path` instead of `private_key_path` for verification-only operat
 Configure one key mode at a time.
 Verification-only mode cannot mint tokens.
 
-The `shardline admin token` command currently creates Local HMAC tokens; it does not
-create Ed25519 tokens.
-Use an issuer built against Shardline's Ed25519 token format when deploying this
-provider. This operator-tooling gap is why Ed25519 remains experimental.
+Mint an Ed25519 token with the operator CLI by selecting the provider and passing a
+private key in any supported private-key format:
+
+```bash
+shardline admin token \
+  --auth-provider ed25519 \
+  --issuer local-ed25519 \
+  --subject operator-1 \
+  --scope write \
+  --provider generic \
+  --owner team \
+  --repo assets \
+  --revision main \
+  --key-file /run/secrets/shardline-ed25519-private-key
+```
+
+The default `--auth-provider local` remains HMAC-SHA256 for backward compatibility.
+Use `--key-env` instead of `--key-file` when the private key is supplied through an
+environment variable.
 
 ### OIDC
 
