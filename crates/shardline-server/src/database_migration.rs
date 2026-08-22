@@ -4,6 +4,77 @@ use sqlx::{
 };
 use thiserror::Error;
 
+/// Typed interruption point in one transactional database migration.
+///
+/// Production builds never inject these failures. Tests use the same enum as
+/// the migration implementation so durability boundaries cannot drift behind
+/// string-based failpoint names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DatabaseMigrationBoundary {
+    /// Forward SQL and its history row are uncommitted.
+    BeforeApplyCommit,
+    /// Forward SQL and its history row committed, but the caller lost the result.
+    AfterApplyCommit,
+    /// Reverse SQL and history-row removal are uncommitted.
+    BeforeRevertCommit,
+    /// Reverse SQL and history-row removal committed, but the caller lost the result.
+    AfterRevertCommit,
+}
+
+#[cfg(not(test))]
+#[allow(clippy::unnecessary_wraps)]
+const fn database_migration_failpoint(
+    _boundary: DatabaseMigrationBoundary,
+) -> Result<(), DatabaseMigrationError> {
+    Ok(())
+}
+
+#[cfg(test)]
+fn database_migration_failpoint(
+    boundary: DatabaseMigrationBoundary,
+) -> Result<(), DatabaseMigrationError> {
+    migration_fault_injection::hit(boundary)
+}
+
+#[cfg(test)]
+mod migration_fault_injection {
+    use std::sync::{LazyLock, Mutex};
+
+    use super::{DatabaseMigrationBoundary, DatabaseMigrationError};
+
+    static ARMED_BOUNDARY: LazyLock<Mutex<Option<DatabaseMigrationBoundary>>> =
+        LazyLock::new(|| Mutex::new(None));
+
+    pub(super) struct DatabaseMigrationFailpointGuard;
+
+    impl Drop for DatabaseMigrationFailpointGuard {
+        fn drop(&mut self) {
+            *ARMED_BOUNDARY
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = None;
+        }
+    }
+
+    pub(super) fn arm(boundary: DatabaseMigrationBoundary) -> DatabaseMigrationFailpointGuard {
+        *ARMED_BOUNDARY
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(boundary);
+        DatabaseMigrationFailpointGuard
+    }
+
+    pub(super) fn hit(boundary: DatabaseMigrationBoundary) -> Result<(), DatabaseMigrationError> {
+        let interrupted = ARMED_BOUNDARY
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .is_some_and(|armed| armed == boundary);
+        if interrupted {
+            Err(DatabaseMigrationError::InjectedInterruption { boundary })
+        } else {
+            Ok(())
+        }
+    }
+}
+
 /// One Shardline schema migration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DatabaseMigration {
@@ -119,6 +190,12 @@ pub enum DatabaseMigrationError {
         expected_checksum: String,
         /// Hash recorded in the database.
         observed_checksum: String,
+    },
+    /// A test interrupted execution at a typed transactional boundary.
+    #[error("database migration interrupted at {boundary:?}")]
+    InjectedInterruption {
+        /// Boundary reached by the migration transaction.
+        boundary: DatabaseMigrationBoundary,
     },
 }
 
@@ -442,7 +519,9 @@ async fn apply_one_migration(
     .bind(migration_checksum(migration))
     .execute(&mut *transaction)
     .await?;
+    database_migration_failpoint(DatabaseMigrationBoundary::BeforeApplyCommit)?;
     transaction.commit().await?;
+    database_migration_failpoint(DatabaseMigrationBoundary::AfterApplyCommit)?;
     Ok(())
 }
 
@@ -460,7 +539,9 @@ async fn revert_one_migration(
     .bind(migration.version)
     .execute(&mut *transaction)
     .await?;
+    database_migration_failpoint(DatabaseMigrationBoundary::BeforeRevertCommit)?;
     transaction.commit().await?;
+    database_migration_failpoint(DatabaseMigrationBoundary::AfterRevertCommit)?;
     Ok(())
 }
 
@@ -521,13 +602,25 @@ fn migration_checksum(migration: &DatabaseMigration) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    use serial_test::serial;
 
     use super::{
-        DatabaseMigration, DatabaseMigrationCommand, DatabaseMigrationOptions,
+        DatabaseMigration, DatabaseMigrationBoundary, DatabaseMigrationCommand,
+        DatabaseMigrationError, DatabaseMigrationOptions, DatabaseMigrationReport,
         DatabaseMigrationStatusEntry, acquire_migration_lock, bundled_database_migrations,
-        migration_by_version, migration_checksum,
+        migration_by_version, migration_checksum, migration_fault_injection,
+        run_database_migration,
     };
+
+    async fn run_test_migration_command(
+        database_url: &str,
+        command: DatabaseMigrationCommand,
+    ) -> Result<DatabaseMigrationReport, DatabaseMigrationError> {
+        let options = DatabaseMigrationOptions::new(database_url.to_owned(), command);
+        run_database_migration(&options).await
+    }
 
     #[test]
     fn bundled_migrations_are_not_empty() {
@@ -600,6 +693,165 @@ mod tests {
             .expect("migration lock task should complete")
             .unwrap();
         drop(second);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[serial(database_migration_failpoint)]
+    async fn interrupted_migration_boundaries_resume_to_complete_schema() {
+        let Some(base_database_url) = std::env::var("DATABASE_URL").ok() else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let unique_suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database_name = format!(
+            "shardline_migration_interrupt_{}_{}",
+            std::process::id(),
+            unique_suffix
+        );
+        let mut admin_url = url::Url::parse(&base_database_url).unwrap();
+        admin_url.set_path("postgres");
+        let admin_pool = sqlx::PgPool::connect(admin_url.as_str()).await.unwrap();
+        sqlx::query(&format!("CREATE DATABASE {database_name}"))
+            .execute(&admin_pool)
+            .await
+            .unwrap();
+
+        let mut test_url = url::Url::parse(&base_database_url).unwrap();
+        test_url.set_path(&database_name);
+        let test_url = test_url.to_string();
+
+        {
+            let _fault =
+                migration_fault_injection::arm(DatabaseMigrationBoundary::BeforeApplyCommit);
+            assert!(matches!(
+                run_test_migration_command(
+                    &test_url,
+                    DatabaseMigrationCommand::Up { steps: Some(1) }
+                )
+                .await,
+                Err(DatabaseMigrationError::InjectedInterruption {
+                    boundary: DatabaseMigrationBoundary::BeforeApplyCommit
+                })
+            ));
+        }
+        assert_eq!(
+            run_test_migration_command(&test_url, DatabaseMigrationCommand::Status)
+                .await
+                .unwrap()
+                .applied_total_count,
+            0
+        );
+
+        assert_eq!(
+            run_test_migration_command(&test_url, DatabaseMigrationCommand::Up { steps: Some(1) })
+                .await
+                .unwrap()
+                .applied_total_count,
+            1
+        );
+        assert_eq!(
+            run_test_migration_command(&test_url, DatabaseMigrationCommand::Down { steps: 1 })
+                .await
+                .unwrap()
+                .applied_total_count,
+            0
+        );
+
+        {
+            let _fault =
+                migration_fault_injection::arm(DatabaseMigrationBoundary::AfterApplyCommit);
+            assert!(matches!(
+                run_test_migration_command(
+                    &test_url,
+                    DatabaseMigrationCommand::Up { steps: Some(1) }
+                )
+                .await,
+                Err(DatabaseMigrationError::InjectedInterruption {
+                    boundary: DatabaseMigrationBoundary::AfterApplyCommit
+                })
+            ));
+        }
+        assert_eq!(
+            run_test_migration_command(&test_url, DatabaseMigrationCommand::Status)
+                .await
+                .unwrap()
+                .applied_total_count,
+            1
+        );
+
+        {
+            let _fault =
+                migration_fault_injection::arm(DatabaseMigrationBoundary::BeforeRevertCommit);
+            assert!(matches!(
+                run_test_migration_command(&test_url, DatabaseMigrationCommand::Down { steps: 1 })
+                    .await,
+                Err(DatabaseMigrationError::InjectedInterruption {
+                    boundary: DatabaseMigrationBoundary::BeforeRevertCommit
+                })
+            ));
+        }
+        assert_eq!(
+            run_test_migration_command(&test_url, DatabaseMigrationCommand::Status)
+                .await
+                .unwrap()
+                .applied_total_count,
+            1
+        );
+        assert_eq!(
+            run_test_migration_command(&test_url, DatabaseMigrationCommand::Down { steps: 1 })
+                .await
+                .unwrap()
+                .applied_total_count,
+            0
+        );
+        assert_eq!(
+            run_test_migration_command(&test_url, DatabaseMigrationCommand::Up { steps: Some(1) })
+                .await
+                .unwrap()
+                .applied_total_count,
+            1
+        );
+
+        {
+            let _fault =
+                migration_fault_injection::arm(DatabaseMigrationBoundary::AfterRevertCommit);
+            assert!(matches!(
+                run_test_migration_command(&test_url, DatabaseMigrationCommand::Down { steps: 1 })
+                    .await,
+                Err(DatabaseMigrationError::InjectedInterruption {
+                    boundary: DatabaseMigrationBoundary::AfterRevertCommit
+                })
+            ));
+        }
+        assert_eq!(
+            run_test_migration_command(&test_url, DatabaseMigrationCommand::Status)
+                .await
+                .unwrap()
+                .applied_total_count,
+            0
+        );
+
+        let resumed = run_database_migration(&DatabaseMigrationOptions::new(
+            test_url.clone(),
+            DatabaseMigrationCommand::Up { steps: None },
+        ))
+        .await
+        .unwrap();
+        assert_eq!(resumed.pending_count, 0);
+        assert_eq!(
+            resumed.applied_total_count,
+            bundled_database_migrations().len() as u64
+        );
+        assert!(resumed.migrations.iter().all(|migration| migration.applied));
+
+        sqlx::query(&format!("DROP DATABASE {database_name} WITH (FORCE)"))
+            .execute(&admin_pool)
+            .await
+            .unwrap();
+        admin_pool.close().await;
     }
 
     #[test]
