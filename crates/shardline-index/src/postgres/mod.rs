@@ -1,4 +1,5 @@
 mod index_store;
+mod oci_tags;
 mod record_store;
 mod s3_objects;
 mod tree_store;

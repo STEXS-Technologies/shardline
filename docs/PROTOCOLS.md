@@ -96,6 +96,12 @@ skopeo login --username shardline --password "$SHARDLINE_TOKEN" http://127.0.0.1
 skopeo copy oci:./artifact:latest docker://127.0.0.1:8080/team/assets:latest
 ```
 
+OCI manifest and blob bytes are immutable by digest. Mutable tag pointers are
+linearized in the metadata database, so replicas share one authoritative value and a
+manifest deletion only removes a tag if it still points to that manifest. On first
+access after upgrading, legacy object-store-only tag pointers are imported with
+create-if-absent semantics.
+
 For local plain-HTTP registries, OCI clients may require their own insecure-registry
 flags or local client configuration.
 

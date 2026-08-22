@@ -52,6 +52,13 @@ schema change, apply it before the process rollout with `shardline db migrate up
 (see [Database Migrations](DATABASE_MIGRATIONS.md)); the schema must be compatible
 with the previous version's processes for the duration of the rollout.
 
+The OCI tag-index migration is additive and old processes continue to read their
+object-store tag pointers. During the API-class rollout, drain OCI manifest `PUT` and
+`DELETE` traffic or route those mutations exclusively to the new API version. Reads
+remain available and legacy tags are imported lazily. Resume OCI mutations after all
+API replicas run the new version; this avoids two software versions using different
+authoritative tag-pointer stores during the brief mixed-version window.
+
 ## Procedure
 
 The example uses the Production Scaled profile (`kubectl`). For systemd or host-native

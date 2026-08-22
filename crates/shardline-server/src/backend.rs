@@ -6,7 +6,9 @@ use std::{
 
 use axum::body::Bytes;
 use sha2::{Digest, Sha256};
-use shardline_index::{FileRecord, RepoKey, RevisionRecord, S3ObjectEntry, TreeEntry, TreeKey};
+use shardline_index::{
+    FileRecord, OciTagEntry, RepoKey, RevisionRecord, S3ObjectEntry, TreeEntry, TreeKey,
+};
 use shardline_protocol::{ByteRange, RepositoryScope};
 use shardline_storage::{
     AsyncObjectStore, DeleteOutcome, ObjectBody, ObjectIntegrity, ObjectKey, ObjectMetadata,
@@ -421,6 +423,97 @@ impl ServerBackend {
             Self::Postgres(backend) => {
                 backend
                     .scan_s3_object_exact(scope_namespace, object_key)
+                    .await
+            }
+        }
+    }
+
+    pub(crate) async fn upsert_oci_tag(&self, entry: &OciTagEntry) -> Result<(), ServerError> {
+        match self {
+            Self::Local(backend) => backend.upsert_oci_tag(entry).await,
+            Self::Postgres(backend) => backend.upsert_oci_tag(entry).await,
+        }
+    }
+
+    pub(crate) async fn insert_oci_tag_if_absent(
+        &self,
+        entry: &OciTagEntry,
+    ) -> Result<bool, ServerError> {
+        match self {
+            Self::Local(backend) => backend.insert_oci_tag_if_absent(entry).await,
+            Self::Postgres(backend) => backend.insert_oci_tag_if_absent(entry).await,
+        }
+    }
+
+    pub(crate) async fn oci_tag(
+        &self,
+        scope_namespace: &str,
+        repository: &str,
+        tag: &str,
+    ) -> Result<Option<OciTagEntry>, ServerError> {
+        match self {
+            Self::Local(backend) => backend.oci_tag(scope_namespace, repository, tag).await,
+            Self::Postgres(backend) => backend.oci_tag(scope_namespace, repository, tag).await,
+        }
+    }
+
+    pub(crate) async fn list_oci_tags(
+        &self,
+        scope_namespace: &str,
+        repository: &str,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<OciTagEntry>, ServerError> {
+        match self {
+            Self::Local(backend) => {
+                backend
+                    .list_oci_tags(scope_namespace, repository, cursor, limit)
+                    .await
+            }
+            Self::Postgres(backend) => {
+                backend
+                    .list_oci_tags(scope_namespace, repository, cursor, limit)
+                    .await
+            }
+        }
+    }
+
+    pub(crate) async fn list_oci_tags_by_digest(
+        &self,
+        scope_namespace: &str,
+        repository: &str,
+        digest_hex: &str,
+    ) -> Result<Vec<OciTagEntry>, ServerError> {
+        match self {
+            Self::Local(backend) => {
+                backend
+                    .list_oci_tags_by_digest(scope_namespace, repository, digest_hex)
+                    .await
+            }
+            Self::Postgres(backend) => {
+                backend
+                    .list_oci_tags_by_digest(scope_namespace, repository, digest_hex)
+                    .await
+            }
+        }
+    }
+
+    pub(crate) async fn delete_oci_tag_if_digest(
+        &self,
+        scope_namespace: &str,
+        repository: &str,
+        tag: &str,
+        digest_hex: &str,
+    ) -> Result<bool, ServerError> {
+        match self {
+            Self::Local(backend) => {
+                backend
+                    .delete_oci_tag_if_digest(scope_namespace, repository, tag, digest_hex)
+                    .await
+            }
+            Self::Postgres(backend) => {
+                backend
+                    .delete_oci_tag_if_digest(scope_namespace, repository, tag, digest_hex)
                     .await
             }
         }
