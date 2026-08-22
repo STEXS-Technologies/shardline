@@ -1,6 +1,7 @@
 use std::{fs::File, path::Path};
 
 use sha2::{Digest, Sha256};
+use shardline_index::ResourceLockKey;
 use sqlx::{
     PgConnection, PgPool, Postgres, Transaction, pool::PoolConnection, query, query_scalar,
 };
@@ -53,8 +54,7 @@ pub(crate) enum ResourceWriteGuard {
     },
     Postgres {
         connection: PoolConnection<Postgres>,
-        domain: String,
-        resource: String,
+        key: ResourceLockKey,
         epoch: i64,
     },
 }
@@ -63,15 +63,9 @@ impl std::fmt::Debug for ResourceWriteGuard {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Local { .. } => formatter.write_str("ResourceWriteGuard::Local"),
-            Self::Postgres {
-                domain,
-                resource,
-                epoch,
-                ..
-            } => formatter
+            Self::Postgres { key, epoch, .. } => formatter
                 .debug_struct("ResourceWriteGuard::Postgres")
-                .field("domain", domain)
-                .field("resource", resource)
+                .field("key", key)
                 .field("epoch", epoch)
                 .finish_non_exhaustive(),
         }
@@ -91,14 +85,8 @@ impl ResourceWriteGuard {
     pub(crate) fn postgres_fence(&self) -> Option<shardline_index::PostgresResourceFence> {
         match self {
             Self::Local { .. } => None,
-            Self::Postgres {
-                domain,
-                resource,
-                epoch,
-                ..
-            } => Some(shardline_index::PostgresResourceFence::new(
-                domain.clone(),
-                resource.clone(),
+            Self::Postgres { key, epoch, .. } => Some(shardline_index::PostgresResourceFence::new(
+                key.clone(),
                 *epoch,
             )),
         }
@@ -119,8 +107,7 @@ impl ResourceWriteGuard {
     pub(crate) async fn assert_current(&mut self) -> Result<(), ServerError> {
         let Self::Postgres {
             connection,
-            domain,
-            resource,
+            key,
             epoch,
         } = self
         else {
@@ -131,8 +118,8 @@ impl ResourceWriteGuard {
              FROM shardline_resource_fences
              WHERE domain = $1 AND resource = $2",
         )
-        .bind(domain.as_str())
-        .bind(resource.as_str())
+        .bind(key.domain().as_str())
+        .bind(key.resource())
         .fetch_optional(&mut **connection)
         .await
         .map_err(shardline_index::PostgresMetadataStoreError::from)?;
@@ -198,10 +185,9 @@ async fn acquire_local(
 /// repository names never become path components.
 pub(crate) async fn acquire_local_resource_exclusive(
     root: &Path,
-    domain: &str,
-    resource: &str,
+    key: &ResourceLockKey,
 ) -> Result<ResourceWriteGuard, ServerError> {
-    let digest = resource_lock_digest(domain, resource);
+    let digest = resource_lock_digest(key);
     let path = root
         .join(LOCAL_RESOURCE_LOCK_DIR)
         .join(format!("{digest}.lock"));
@@ -262,17 +248,16 @@ async fn acquire_postgres(
 /// Acquires an exclusive transaction-scoped advisory lock for an application resource.
 pub(crate) async fn acquire_postgres_resource_exclusive(
     pool: &PgPool,
-    domain: &str,
-    resource: &str,
+    key: &ResourceLockKey,
 ) -> Result<ResourceWriteGuard, ServerError> {
-    let key = resource_lock_key(domain, resource);
+    let advisory_key = resource_lock_key(key);
     let mut connection = pool
         .acquire()
         .await
         .map_err(shardline_index::PostgresMetadataStoreError::from)?;
     connection.close_on_drop();
     query("SELECT pg_advisory_lock($1)")
-        .bind(key)
+        .bind(advisory_key)
         .execute(&mut *connection)
         .await
         .map_err(shardline_index::PostgresMetadataStoreError::from)?;
@@ -283,30 +268,29 @@ pub(crate) async fn acquire_postgres_resource_exclusive(
          DO UPDATE SET epoch = shardline_resource_fences.epoch + 1
          RETURNING epoch",
     )
-    .bind(domain)
-    .bind(resource)
+    .bind(key.domain().as_str())
+    .bind(key.resource())
     .fetch_one(&mut *connection)
     .await
     .map_err(shardline_index::PostgresMetadataStoreError::from)?;
     Ok(ResourceWriteGuard::Postgres {
         connection,
-        domain: domain.to_owned(),
-        resource: resource.to_owned(),
+        key: key.clone(),
         epoch,
     })
 }
 
-fn resource_lock_digest(domain: &str, resource: &str) -> String {
+fn resource_lock_digest(key: &ResourceLockKey) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"shardline-resource-lock\0");
-    hasher.update(domain.as_bytes());
+    hasher.update(key.domain().as_str().as_bytes());
     hasher.update(b"\0");
-    hasher.update(resource.as_bytes());
+    hasher.update(key.resource().as_bytes());
     hex::encode(hasher.finalize())
 }
 
-fn resource_lock_key(domain: &str, resource: &str) -> i64 {
-    let digest = Sha256::digest(resource_lock_digest(domain, resource).as_bytes());
+fn resource_lock_key(key: &ResourceLockKey) -> i64 {
+    let digest = Sha256::digest(resource_lock_digest(key).as_bytes());
     let mut bytes = [0_u8; 8];
     if let Some(prefix) = digest.get(..bytes.len()) {
         bytes.copy_from_slice(prefix);
@@ -357,13 +341,15 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn local_resource_lock_serializes_only_the_same_resource() {
         let storage = shardline_test_support::TempStorage::new();
-        let first = acquire_local_resource_exclusive(storage.path(), "oci", "global:team/a")
+        let first_key = ResourceLockKey::oci_repository("global", "team/a");
+        let first = acquire_local_resource_exclusive(storage.path(), &first_key)
             .await
             .unwrap();
 
+        let other_key = ResourceLockKey::oci_repository("global", "team/b");
         let other = tokio::time::timeout(
             Duration::from_secs(2),
-            acquire_local_resource_exclusive(storage.path(), "oci", "global:team/b"),
+            acquire_local_resource_exclusive(storage.path(), &other_key),
         )
         .await
         .expect("unrelated resource must not block")
@@ -371,9 +357,9 @@ mod tests {
         drop(other);
 
         let root = storage.path_buf();
-        let mut waiter = tokio::spawn(async move {
-            acquire_local_resource_exclusive(&root, "oci", "global:team/a").await
-        });
+        let waiter_key = first_key.clone();
+        let mut waiter =
+            tokio::spawn(async move { acquire_local_resource_exclusive(&root, &waiter_key).await });
         assert!(
             tokio::time::timeout(Duration::from_millis(50), &mut waiter)
                 .await
@@ -420,13 +406,15 @@ mod tests {
             return;
         };
         let pool = PgPool::connect(&database_url).await.unwrap();
-        let first = acquire_postgres_resource_exclusive(&pool, "oci", "global:team/a")
+        let key = ResourceLockKey::oci_repository("global", "team/a");
+        let first = acquire_postgres_resource_exclusive(&pool, &key)
             .await
             .unwrap();
         let first_epoch = first.epoch().unwrap();
         let waiter_pool = pool.clone();
+        let waiter_key = key.clone();
         let mut waiter = tokio::spawn(async move {
-            acquire_postgres_resource_exclusive(&waiter_pool, "oci", "global:team/a").await
+            acquire_postgres_resource_exclusive(&waiter_pool, &waiter_key).await
         });
         assert!(
             tokio::time::timeout(Duration::from_millis(50), &mut waiter)
@@ -450,10 +438,10 @@ mod tests {
             return;
         };
         let pool = PgPool::connect(&database_url).await.unwrap();
-        let mut first =
-            acquire_postgres_resource_exclusive(&pool, "fence-test", "terminated-owner")
-                .await
-                .unwrap();
+        let key = ResourceLockKey::provider_repository("github", "test", "terminated-owner");
+        let mut first = acquire_postgres_resource_exclusive(&pool, &key)
+            .await
+            .unwrap();
         let first_epoch = first.epoch().unwrap();
         let backend_pid = query_scalar::<_, i32>("SELECT pg_backend_pid()")
             .fetch_one(
@@ -473,7 +461,7 @@ mod tests {
 
         let second = tokio::time::timeout(
             Duration::from_secs(2),
-            acquire_postgres_resource_exclusive(&pool, "fence-test", "terminated-owner"),
+            acquire_postgres_resource_exclusive(&pool, &key),
         )
         .await
         .expect("replacement owner should acquire the released server-side lock")

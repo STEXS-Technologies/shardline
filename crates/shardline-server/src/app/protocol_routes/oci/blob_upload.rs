@@ -296,13 +296,13 @@ async fn publish_oci_blob(
     auth: &shardline_server_core::AuthorizedRepository,
     digest_hex: &str,
 ) -> Result<(), ServerError> {
+    let lock_key = shardline_index::ResourceLockKey::oci_repository(
+        &scope_namespace(auth.namespace()),
+        repository,
+    );
     let mut repository_guard = state
         .backend
-        .acquire_resource_write_lock(
-            state.config.root_dir(),
-            "oci-repository",
-            &format!("{}:{repository}", scope_namespace(auth.namespace())),
-        )
+        .acquire_resource_write_lock(state.config.root_dir(), &lock_key)
         .await?;
     repository_guard.assert_current().await?;
     state
