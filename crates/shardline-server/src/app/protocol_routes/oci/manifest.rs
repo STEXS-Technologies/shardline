@@ -21,10 +21,8 @@ use crate::{
 };
 
 use super::super::{AppState, direct_object_response, parse_query_values};
-use super::helpers::{
-    OciRepository, oci_blob_key, oci_manifest_key, oci_manifest_media_type_key, oci_tag_key,
-};
-use super::tags::{delete_oci_tags_pointing_to_digest, update_oci_tags};
+use super::helpers::{OciRepository, oci_blob_key, oci_manifest_key, oci_manifest_media_type_key};
+use super::tags::{delete_oci_tags_pointing_to_digest, resolve_oci_tag_digest, update_oci_tags};
 
 pub(super) const OCI_IMAGE_MANIFEST_MEDIA_TYPE: &str = "application/vnd.oci.image.manifest.v1+json";
 pub(super) const OCI_IMAGE_INDEX_MEDIA_TYPE: &str = "application/vnd.oci.image.index.v1+json";
@@ -191,24 +189,8 @@ async fn resolve_manifest_digest(
 ) -> Result<String, ServerError> {
     match parse_reference(reference)? {
         OciReference::Digest(digest_hex) => Ok(digest_hex),
-        OciReference::Tag(tag) => load_oci_tag_digest(state, repository, auth, &tag).await,
+        OciReference::Tag(tag) => resolve_oci_tag_digest(state, repository, auth, &tag).await,
     }
-}
-
-async fn load_oci_tag_digest(
-    state: &Arc<AppState>,
-    repository: &str,
-    auth: &AuthorizedRepository,
-    tag: &str,
-) -> Result<String, ServerError> {
-    let tag_key = oci_tag_key(repository, tag, auth)?;
-    let bytes = state.backend.read_object(&tag_key).await?;
-    let digest_hex = String::from_utf8(bytes).map_err(|e| {
-        tracing::warn!(error = %e, "invalid digest utf-8");
-        ServerError::InvalidDigest
-    })?;
-    parse_sha256_digest(&format!("sha256:{digest_hex}"))?;
-    Ok(digest_hex)
 }
 
 async fn validate_oci_manifest_document(

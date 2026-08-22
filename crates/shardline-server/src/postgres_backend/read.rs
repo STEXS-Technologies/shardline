@@ -1,8 +1,8 @@
 use std::time::Duration;
 
 use shardline_index::{
-    FileRecord, FileRecordStorageLayout, PostgresMetadataStoreError, RecordStore, RecordTraversal,
-    RepositoryRecordScope, S3ObjectEntry, S3ObjectIndexStore,
+    FileRecord, FileRecordStorageLayout, OciTagEntry, OciTagStore, PostgresMetadataStoreError,
+    RecordStore, RecordTraversal, RepositoryRecordScope, S3ObjectEntry, S3ObjectIndexStore,
 };
 use shardline_protocol::{ByteRange, RepositoryScope};
 #[cfg(test)]
@@ -523,6 +523,71 @@ impl super::PostgresBackend {
     ) -> Result<Option<S3ObjectEntry>, ServerError> {
         self.index_store
             .scan_s3_object_exact(scope_namespace, object_key)
+            .await
+            .map_err(ServerError::from)
+    }
+
+    pub(crate) async fn upsert_oci_tag(&self, entry: &OciTagEntry) -> Result<(), ServerError> {
+        self.index_store.upsert_oci_tag(entry).await?;
+        Ok(())
+    }
+
+    pub(crate) async fn insert_oci_tag_if_absent(
+        &self,
+        entry: &OciTagEntry,
+    ) -> Result<bool, ServerError> {
+        self.index_store
+            .insert_oci_tag_if_absent(entry)
+            .await
+            .map_err(ServerError::from)
+    }
+
+    pub(crate) async fn oci_tag(
+        &self,
+        scope_namespace: &str,
+        repository: &str,
+        tag: &str,
+    ) -> Result<Option<OciTagEntry>, ServerError> {
+        self.index_store
+            .oci_tag(scope_namespace, repository, tag)
+            .await
+            .map_err(ServerError::from)
+    }
+
+    pub(crate) async fn list_oci_tags(
+        &self,
+        scope_namespace: &str,
+        repository: &str,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<OciTagEntry>, ServerError> {
+        self.index_store
+            .list_oci_tags(scope_namespace, repository, cursor, limit)
+            .await
+            .map_err(ServerError::from)
+    }
+
+    pub(crate) async fn list_oci_tags_by_digest(
+        &self,
+        scope_namespace: &str,
+        repository: &str,
+        digest_hex: &str,
+    ) -> Result<Vec<OciTagEntry>, ServerError> {
+        self.index_store
+            .list_oci_tags_by_digest(scope_namespace, repository, digest_hex)
+            .await
+            .map_err(ServerError::from)
+    }
+
+    pub(crate) async fn delete_oci_tag_if_digest(
+        &self,
+        scope_namespace: &str,
+        repository: &str,
+        tag: &str,
+        digest_hex: &str,
+    ) -> Result<bool, ServerError> {
+        self.index_store
+            .delete_oci_tag_if_digest(scope_namespace, repository, tag, digest_hex)
             .await
             .map_err(ServerError::from)
     }
