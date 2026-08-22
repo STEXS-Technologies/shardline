@@ -39,7 +39,7 @@
 use sha2::{Digest, Sha256};
 use shardline_gc::{LocalGcOptions, LocalGcReport};
 use shardline_protocol::{RepositoryProvider, RepositoryScope, TokenClaims, TokenScope};
-use shardline_server::{ServerConfig, ServerFrontend, ServerRole, app};
+use shardline_server::{ServerConfig, ServerError, ServerFrontend, ServerRole, app};
 use shardline_server_core::{AuthProvider, auth::LocalHmacProvider};
 use std::{
     collections::HashMap,
@@ -523,11 +523,9 @@ impl ChaosHarness {
     }
 
     /// Run GC without panicking on failure (for tolerance-aware call sites).
-    async fn gc_result(&self, options: LocalGcOptions) -> Result<LocalGcReport, String> {
+    async fn gc_result(&self, options: LocalGcOptions) -> Result<LocalGcReport, ServerError> {
         let config = self.build_config("127.0.0.1:0".parse().unwrap());
-        shardline_server::run_gc(config, options)
-            .await
-            .map_err(|err| err.to_string())
+        shardline_server::run_gc(config, options).await
     }
 
     /// Run GC tolerating the known InvalidContentHash `.tmp-*` transient (see
@@ -535,16 +533,10 @@ impl ChaosHarness {
     /// sweep the temp chunk files, settle briefly, and retry once. Any other
     /// error — or a second InvalidContentHash — fails the round with the
     /// diagnostic (that would be a genuine problem, not the known transient).
-    ///
-    /// NOTE: the error is matched on its Display string — both
-    /// `GcError::InvalidContentHash` and
-    /// `ServerObjectStoreError::InvalidContentHash` render as "content hash must
-    /// be 64 hexadecimal characters" (see shardline-gc/src/error.rs and
-    /// shardline-server-core/src/object_store.rs).
     async fn gc_tolerating_tmp_files(&self, root: &Path, what: &str) -> LocalGcReport {
         match self.gc_result(LocalGcOptions::mark_and_sweep(0)).await {
             Ok(report) => report,
-            Err(err) if err.contains("content hash") => {
+            Err(err @ ServerError::InvalidContentHash) => {
                 let swept = sweep_chunk_tmp_files(root);
                 eprintln!(
                     "chaos: {what}: GC hit known .tmp-* InvalidContentHash bug ({err}); \
@@ -562,7 +554,7 @@ impl ChaosHarness {
             // Under coverage instrumentation the chaos interference can leave
             // the index adapter in a transient error state; settle and retry
             // once rather than panicking immediately.
-            Err(err) if err.contains("index adapter") => {
+            Err(err @ ServerError::Index(_)) => {
                 eprintln!(
                     "chaos: {what}: GC hit transient index adapter error ({err}); \
                      settling and retrying once"
