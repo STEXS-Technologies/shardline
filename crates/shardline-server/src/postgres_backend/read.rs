@@ -17,6 +17,7 @@ use crate::{
     chunk_store::chunk_object_key,
     download_stream::{
         ServerByteStream, file_record_byte_stream, object_byte_range_stream, object_byte_stream,
+        validated_xorb_byte_range_stream,
     },
     error::IndexError,
     object_store::{read_full_object, reconstruct_file_record_bytes, visit_object_prefix},
@@ -362,7 +363,7 @@ impl super::PostgresBackend {
         let object_store = self.object_store();
         let object_key = xorb_object_key(hash_hex)?;
 
-        object_byte_range_stream(object_store, object_key, total_length, range).await
+        validated_xorb_byte_range_stream(&object_store, &object_key, hash_hex, total_length, range)
     }
 
     /// Reads a stored chunk only when it is reachable from a concrete file version.
