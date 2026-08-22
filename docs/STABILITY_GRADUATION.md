@@ -82,9 +82,9 @@ compatibility documentation. They must not be silently omitted.
 | S3 frontend | Stable | conditional writes have an adapter-level database CAS contract with concurrent SQLite and Postgres-handle evidence; unconditional overwrites remain documented last-writer-wins |
 | Hugging Face Hub API | Beta | broader client matrix and remaining semantic compatibility; tenant-bound route extraction, stale-parent rejection, Postgres cross-replica ref serialization, and delete-vs-push row locking are covered |
 | Redis reconstruction cache | Beta | partition, flush, restart, and multi-node stampede evidence; bounded timeout and corruption repair are covered |
-| Provider integration | Beta | revocation timing, lost-lock fencing, and authoritative provider reconciliation evidence; duplicate/replay handling, atomic monotonic reconciliation-state merging, repository-scoped event serialization, access/revision reordering, rename migration, signature checks, and fail-closed visibility parsing are covered |
+| Provider integration | Beta | revocation timing and one-transaction fenced rename/delete evidence; duplicate/replay handling, atomic monotonic reconciliation-state merging, repository-scoped event serialization with persisted ownership epochs, terminated-owner detection, access/revision reordering, rename migration, signature checks, and fail-closed visibility parsing are covered |
 | Ed25519 | Experimental | overlapping multi-key verification; operator minting, CLI-to-provider verification, key formats, tampering, expiry, wrong-key, malformed-token, and algorithm-confusion paths are covered; the coordinated non-overlap rotation limitation is documented |
-| Multi-replica Postgres/S3 writers | Not claimed | remaining database-enforced mutable-state contracts, fencing, chaos, and mixed-version proof; shared resumable staging, repository locks, migration serialization, and a backup-destroy-restore-fsck-download drill are checked in |
+| Multi-replica Postgres/S3 writers | Not claimed | fenced provider multi-row mutations, tombstoned/deferred external deletes, chaos, and mixed-version proof; shared resumable staging, persisted lock epochs, fenced OCI tag mutations, terminated-owner takeover, migration serialization, and a backup-destroy-restore-fsck-download drill are checked in |
 
 ## Promotion Review
 

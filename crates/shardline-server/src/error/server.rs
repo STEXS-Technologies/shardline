@@ -253,6 +253,9 @@ pub enum ServerError {
     /// A request exceeded the server's total execution deadline.
     #[error("request exceeded the server execution deadline")]
     RequestTimedOut,
+    /// A writer lost ownership of its distributed resource fence.
+    #[error("resource write fence is no longer current")]
+    StaleResourceFence,
     /// A blocking worker task failed before it could finish storage work.
     #[error("blocking worker task failed")]
     BlockingTask(#[source] JoinError),
@@ -341,6 +344,7 @@ impl ServerError {
             | Self::TransferLimiterTimedOut
             | Self::WorkQueueSaturated
             | Self::RequestTimedOut
+            | Self::StaleResourceFence
             | Self::BlockingTask(_)
             | Self::InvalidPath
             | Self::UnregisteredFile(_)
@@ -402,7 +406,8 @@ impl ServerError {
             Self::TransferLimiterClosed
             | Self::TransferLimiterTimedOut
             | Self::WorkQueueSaturated
-            | Self::RequestTimedOut => StatusCode::SERVICE_UNAVAILABLE,
+            | Self::RequestTimedOut
+            | Self::StaleResourceFence => StatusCode::SERVICE_UNAVAILABLE,
             Self::Io(_)
             | Self::Json(_)
             | Self::NumericConversion(_)
@@ -790,6 +795,7 @@ impl shardline_s3_adapter::S3ErrorClassify for ServerError {
             | Self::TransferLimiterTimedOut
             | Self::WorkQueueSaturated
             | Self::RequestTimedOut
+            | Self::StaleResourceFence
             | Self::BlockingTask(_)
             | Self::InvalidPath
             | Self::UnregisteredFile(_)

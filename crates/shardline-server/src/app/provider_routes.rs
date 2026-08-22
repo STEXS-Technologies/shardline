@@ -192,6 +192,9 @@ pub(super) async fn handle_provider_webhook(
         ServerBackend::Local(_) => apply_provider_webhook(&state.config, &event).await?,
     };
     let elapsed = start.elapsed().as_secs_f64();
+    for guard in &mut repository_guards {
+        guard.assert_current().await?;
+    }
     drop(repository_guards);
     metrics::record_webhook_event(&provider, "", elapsed);
     Ok((

@@ -13,6 +13,7 @@ use shardline_server_core::AuthorizedRepository;
 
 use crate::{
     ServerError,
+    maintenance_barrier::ResourceWriteGuard,
     protocol_support::{parse_sha256_digest, scope_namespace, validate_oci_tag},
 };
 
@@ -103,6 +104,7 @@ async fn list_oci_tags(
 
 pub(crate) async fn update_oci_tags(
     state: &Arc<AppState>,
+    resource_guard: &mut ResourceWriteGuard,
     repository: &str,
     auth: &AuthorizedRepository,
     tags: &[String],
@@ -124,12 +126,15 @@ pub(crate) async fn update_oci_tags(
             .await?;
         state
             .backend
-            .upsert_oci_tag(&OciTagEntry {
-                scope_namespace: scope_namespace.clone(),
-                repository: repository.to_owned(),
-                tag: tag.clone(),
-                digest_hex: digest_hex.to_owned(),
-            })
+            .upsert_oci_tag_locked(
+                resource_guard,
+                &OciTagEntry {
+                    scope_namespace: scope_namespace.clone(),
+                    repository: repository.to_owned(),
+                    tag: tag.clone(),
+                    digest_hex: digest_hex.to_owned(),
+                },
+            )
             .await?;
     }
     Ok(())
@@ -137,6 +142,7 @@ pub(crate) async fn update_oci_tags(
 
 pub(crate) async fn delete_oci_tags_pointing_to_digest(
     state: &Arc<AppState>,
+    resource_guard: &mut ResourceWriteGuard,
     repository: &str,
     auth: &AuthorizedRepository,
     digest_hex: &str,
@@ -150,7 +156,13 @@ pub(crate) async fn delete_oci_tags_pointing_to_digest(
     for entry in entries {
         if state
             .backend
-            .delete_oci_tag_if_digest(&scope_namespace, repository, &entry.tag, digest_hex)
+            .delete_oci_tag_if_digest_locked(
+                resource_guard,
+                &scope_namespace,
+                repository,
+                &entry.tag,
+                digest_hex,
+            )
             .await?
         {
             let tag_key = oci_tag_key(repository, &entry.tag, auth)?;
