@@ -27,8 +27,8 @@ write throughput, so Postgres is the production multi-replica metadata backend.
 | S3 conditional object write | exactly one matching writer wins | metadata-row insert-if-absent or compare-and-swap; loser receives `412` |
 | S3 unconditional write | one complete version is visible, last metadata commit wins | immutable record first, atomic metadata-row swap second |
 | Hub ref/revision mutation | stale parent loses; delete cannot interleave with a push | SQLite transaction or Postgres repository-row lock |
-| OCI tag | one authoritative digest; a stale lock owner cannot retarget it | unique metadata key plus upsert/digest-guarded delete on the lock-owning fenced Postgres session |
-| OCI manifest/tag/blob deletion | operations in one repository are ordered | repository-scoped local/Postgres advisory lock |
+| OCI tag | one authoritative digest; a stale lock owner cannot retarget it | unique metadata key plus transactional publication on the lock-owning fenced Postgres session |
+| OCI manifest/tag/blob deletion | deletion is immediately visible without an unfenced object-store side effect | repository-scoped lock plus transactional tombstone; manifest tags are removed in the same commit |
 | provider reconciliation fields | timestamps never move backward and revision matches its winning timestamp | atomic field-wise maximum merge in SQLite/Postgres |
 | provider rename/delete event | old and new repository identities do not interleave and all durable effects commit together | sorted repository locks plus one transaction containing the delivery claim, record mutations, retention holds, lifecycle state, and every expected fence row |
 | provider push/access event | independent lifecycle observations never regress each other | repository lock plus atomic monotonic state merge |
@@ -51,8 +51,11 @@ session-level advisory lock and atomically advance a durable epoch in
 never returned to the pool with a lock attached. Locks are domain-separated, so an OCI
 repository and provider repository with the same text do not alias.
 
-OCI tag mutations run on the same connection that owns the lock and epoch. Provider
-rename/delete transactions run on the first lock-owning connection and lock every
+OCI publication and deletion metadata run on the same connection that owns the lock and
+epoch. Publishing clears a prior tombstone and updates all requested tags in one
+transaction. Deleting a manifest writes its tombstone and removes every tag still
+pointing to that digest in one transaction. Provider rename/delete transactions run on
+the first lock-owning connection and lock every
 expected fence row before claiming the delivery or changing metadata. That row lock
 prevents a replacement owner for a second rename identity from advancing its epoch
 until the transaction commits or aborts. A terminated primary session aborts the
@@ -84,34 +87,33 @@ LFS uses 256 hashed lock stripes, bounding lock-file growth independently of the
 of client OIDs. S3 multipart uses one lock inside each already-bounded session directory.
 Expired session sweeps take the same locks as active writers before deleting files.
 
-## Remaining Fencing Boundary
+## OCI Logical Deletion
 
 Persisted epochs and dedicated lock-owning sessions now detect a terminated owner, and
-OCI tag metadata commits are fenced on that session. The checked Postgres test
+OCI visibility metadata commits are fenced on that session. The checked Postgres test
 terminates the first backend, proves the replacement receives a higher epoch, and
 proves the old guard can no longer validate or mutate through its owning connection.
 
-One external-system category still prevents a Stable arbitrary-multi-writer claim:
+OCI request handlers never physically delete manifest, media-type, blob, or legacy tag
+objects. They commit durable tombstones instead, and every OCI read and reference check
+consults those tombstones. Re-uploading identical content clears the tombstone under the
+same repository fence. A process that loses its Postgres session therefore has no
+external destructive side effect left to race against a newer owner.
 
-- OCI manifest/blob deletion directly changes the object store, which cannot validate a
-  Postgres epoch. A connection can theoretically fail after the final validation but
-  before that external delete.
-OCI deletion needs logical tombstones/deferred GC before the remaining claim can be
-closed. Immutable content-addressed puts are safe:
-their keys cannot be retargeted and a failed metadata commit leaves only unreachable
-debris.
+The tradeoff is deliberate retention: deleted OCI bytes remain in the immutable object
+store. They are not eligible for online GC because the object store cannot validate a
+Postgres fencing epoch, and deleting a fixed digest key could race republication. Safe
+future reclamation requires generation-specific physical keys or an offline maintenance
+window that excludes every writer. This is a capacity characteristic, not a visibility
+or multi-writer correctness gap.
 
-Until that work is complete:
-
-- use one Postgres primary and reliable network failure detection
-- stop or isolate a replica whose Postgres session is partitioned
-- do not treat a successful object-store side effect without its metadata commit as a
-  visible protocol commit; `fsck` and GC handle unreachable immutable debris
-- keep the overall multi-replica writer topology below Stable
+With all replicas on this fence-aware version, the shared Postgres/S3 writer topology
+has a defined correctness contract. Availability still follows the configured
+Postgres, object-store, Redis, and shared-staging dependencies.
 
 ## Mixed-Version Rule
 
-Older replicas do not participate in newly added resource locks or the GC barrier. During
-a rolling API upgrade, route OCI manifest/blob deletion and provider webhook mutations
-only to new replicas, and suspend destructive GC. Resume unrestricted routing only when
-all replicas run the new version. See [Rolling Upgrade](ROLLING_UPGRADE.md).
+Older replicas do not participate in newly added resource locks, tombstones, or the GC
+barrier. During a rolling API upgrade, route OCI reads/writes/deletes and provider
+webhook mutations only to new replicas, and suspend destructive GC. Resume unrestricted
+routing only when all replicas run the new version. See [Rolling Upgrade](ROLLING_UPGRADE.md).

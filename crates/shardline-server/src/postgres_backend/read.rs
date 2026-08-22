@@ -1,8 +1,9 @@
 use std::time::Duration;
 
 use shardline_index::{
-    FileRecord, FileRecordStorageLayout, OciTagEntry, OciTagStore, PostgresMetadataStoreError,
-    RecordStore, RecordTraversal, RepositoryRecordScope, S3ObjectEntry, S3ObjectIndexStore,
+    FileRecord, FileRecordStorageLayout, OciObjectKey, OciObjectStore, OciTagEntry, OciTagStore,
+    PostgresMetadataStoreError, RecordStore, RecordTraversal, RepositoryRecordScope, S3ObjectEntry,
+    S3ObjectIndexStore,
 };
 use shardline_protocol::{ByteRange, RepositoryScope};
 #[cfg(test)]
@@ -562,14 +563,12 @@ impl super::PostgresBackend {
             .map_err(ServerError::from)
     }
 
-    pub(crate) async fn list_oci_tags_by_digest(
+    pub(crate) async fn oci_object_is_deleted(
         &self,
-        scope_namespace: &str,
-        repository: &str,
-        digest_hex: &str,
-    ) -> Result<Vec<OciTagEntry>, ServerError> {
+        key: &OciObjectKey,
+    ) -> Result<bool, ServerError> {
         self.index_store
-            .list_oci_tags_by_digest(scope_namespace, repository, digest_hex)
+            .oci_object_is_deleted(key)
             .await
             .map_err(ServerError::from)
     }

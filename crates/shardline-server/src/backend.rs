@@ -7,7 +7,8 @@ use std::{
 use axum::body::Bytes;
 use sha2::{Digest, Sha256};
 use shardline_index::{
-    FileRecord, OciTagEntry, RepoKey, RevisionRecord, S3ObjectEntry, TreeEntry, TreeKey,
+    FileRecord, OciObjectKey, OciTagEntry, RepoKey, RevisionRecord, S3ObjectEntry, TreeEntry,
+    TreeKey,
 };
 use shardline_protocol::{ByteRange, RepositoryScope};
 use shardline_storage::{
@@ -465,32 +466,6 @@ impl ServerBackend {
         }
     }
 
-    /// Upserts an OCI tag through the connection that owns the repository fence.
-    pub(crate) async fn upsert_oci_tag_locked(
-        &self,
-        guard: &mut crate::maintenance_barrier::ResourceWriteGuard,
-        entry: &OciTagEntry,
-    ) -> Result<(), ServerError> {
-        match self {
-            Self::Local(backend) => {
-                if guard.postgres_connection_mut().is_some() {
-                    return Err(ServerError::StaleResourceFence);
-                }
-                backend.upsert_oci_tag(entry).await
-            }
-            Self::Postgres(backend) => {
-                let connection = guard
-                    .postgres_connection_mut()
-                    .ok_or(ServerError::StaleResourceFence)?;
-                backend
-                    .index_store()
-                    .upsert_oci_tag_on_connection(connection, entry)
-                    .await?;
-                Ok(())
-            }
-        }
-    }
-
     pub(crate) async fn insert_oci_tag_if_absent(
         &self,
         entry: &OciTagEntry,
@@ -534,58 +509,69 @@ impl ServerBackend {
         }
     }
 
-    pub(crate) async fn list_oci_tags_by_digest(
+    /// Returns whether an immutable OCI object is hidden by a durable tombstone.
+    pub(crate) async fn oci_object_is_deleted(
         &self,
-        scope_namespace: &str,
-        repository: &str,
-        digest_hex: &str,
-    ) -> Result<Vec<OciTagEntry>, ServerError> {
+        key: &OciObjectKey,
+    ) -> Result<bool, ServerError> {
         match self {
-            Self::Local(backend) => {
-                backend
-                    .list_oci_tags_by_digest(scope_namespace, repository, digest_hex)
-                    .await
-            }
-            Self::Postgres(backend) => {
-                backend
-                    .list_oci_tags_by_digest(scope_namespace, repository, digest_hex)
-                    .await
-            }
+            Self::Local(backend) => backend.oci_object_is_deleted(key).await,
+            Self::Postgres(backend) => backend.oci_object_is_deleted(key).await,
         }
     }
 
-    /// Deletes an OCI tag through the connection that owns the repository fence.
-    pub(crate) async fn delete_oci_tag_if_digest_locked(
+    /// Publishes immutable OCI bytes through the metadata session that owns
+    /// the repository fence. Clearing a prior tombstone and retargeting tags
+    /// form one database transaction.
+    pub(crate) async fn publish_oci_object_locked(
         &self,
         guard: &mut crate::maintenance_barrier::ResourceWriteGuard,
-        scope_namespace: &str,
-        repository: &str,
-        tag: &str,
-        digest_hex: &str,
-    ) -> Result<bool, ServerError> {
+        key: &OciObjectKey,
+        tags: &[OciTagEntry],
+    ) -> Result<(), ServerError> {
         match self {
             Self::Local(backend) => {
                 if guard.postgres_connection_mut().is_some() {
                     return Err(ServerError::StaleResourceFence);
                 }
-                backend
-                    .delete_oci_tag_if_digest(scope_namespace, repository, tag, digest_hex)
-                    .await
+                backend.publish_oci_object(key, tags).await
             }
             Self::Postgres(backend) => {
                 let connection = guard
                     .postgres_connection_mut()
                     .ok_or(ServerError::StaleResourceFence)?;
-                Ok(backend
+                backend
                     .index_store()
-                    .delete_oci_tag_if_digest_on_connection(
-                        connection,
-                        scope_namespace,
-                        repository,
-                        tag,
-                        digest_hex,
-                    )
-                    .await?)
+                    .publish_oci_object_on_connection(connection, key, tags)
+                    .await?;
+                Ok(())
+            }
+        }
+    }
+
+    /// Commits an OCI tombstone through the lock-owning metadata session.
+    /// Manifest tag removal is part of the same database transaction.
+    pub(crate) async fn delete_oci_object_locked(
+        &self,
+        guard: &mut crate::maintenance_barrier::ResourceWriteGuard,
+        key: &OciObjectKey,
+    ) -> Result<(), ServerError> {
+        match self {
+            Self::Local(backend) => {
+                if guard.postgres_connection_mut().is_some() {
+                    return Err(ServerError::StaleResourceFence);
+                }
+                backend.delete_oci_object(key).await
+            }
+            Self::Postgres(backend) => {
+                let connection = guard
+                    .postgres_connection_mut()
+                    .ok_or(ServerError::StaleResourceFence)?;
+                backend
+                    .index_store()
+                    .delete_oci_object_on_connection(connection, key)
+                    .await?;
+                Ok(())
             }
         }
     }
@@ -842,6 +828,7 @@ impl ServerBackend {
         })
     }
 
+    #[cfg(test)]
     pub(crate) async fn put_object_bytes_overwrite(
         &self,
         object_key: &ObjectKey,
