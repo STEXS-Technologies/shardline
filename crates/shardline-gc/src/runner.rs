@@ -115,6 +115,11 @@ pub async fn run_local_gc_diagnostics(
 
 /// Runs garbage collection against provided record, index, and object stores.
 ///
+/// A caller that enables `mark` or `sweep` must exclude concurrent visible
+/// metadata writers for the duration of this function. The Shardline server
+/// wrapper enforces that contract with its local/Postgres GC-write barrier.
+/// Dry runs are read-only and need no exclusive barrier.
+///
 /// # Errors
 ///
 /// Returns [`GcError`] when metadata cannot be read, record JSON is invalid,

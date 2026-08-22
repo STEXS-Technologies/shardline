@@ -91,6 +91,20 @@ static REPOSITORY_REFERENCE_PROBE_TEST_LOCK: LazyLock<Arc<AsyncMutex<()>>> =
     LazyLock::new(|| Arc::new(AsyncMutex::new(())));
 
 impl ServerBackend {
+    /// Acquires the shared side of the GC/write barrier for one mutating request.
+    pub(crate) async fn acquire_gc_write_barrier(
+        &self,
+        root: &Path,
+    ) -> Result<crate::maintenance_barrier::MaintenanceBarrierGuard, ServerError> {
+        match self {
+            Self::Local(_) => crate::maintenance_barrier::acquire_local_shared(root).await,
+            Self::Postgres(backend) => {
+                crate::maintenance_barrier::acquire_postgres_shared(backend.index_store().pool())
+                    .await
+            }
+        }
+    }
+
     /// Build a [`ServerBackend`] from a [`ServerConfig`] by resolving the object store
     /// and metadata backend (local or Postgres).
     ///

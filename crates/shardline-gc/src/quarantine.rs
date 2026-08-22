@@ -289,13 +289,11 @@ where
     // XorbCdcV1 records reads + parses the stored xorb container; doing it
     // once per candidate would make the sweep O(candidates × store_size)).
     //
-    // Residual window: the mark is taken once for the whole sweep, so a chunk
-    // re-referenced strictly between that mark and its storage delete could
-    // still be deleted. That window is far smaller than the original
-    // cycle-start snapshot and, in aggregate, strictly smaller than a sweep
-    // that never re-checked at all. The GC sweep runs in a separate process
-    // from the server, so this is closed to the extent the index/record
-    // stores are shared and consistent at read time. If a candidate is
+    // The supported server wrapper closes the residual mark-to-delete window
+    // with an exclusive GC/write barrier. Every mutating HTTP request holds
+    // the shared side from before it can write objects until its handler has
+    // published metadata. Direct callers of `run_gc_with_stores` must provide
+    // the same exclusion contract. If a candidate is
     // referenced in this set we skip the storage delete and only release the
     // (now stale) quarantine entry; the object stays on disk and is seen as
     // live on the next cycle, so no data is lost and nothing is resurrected.
