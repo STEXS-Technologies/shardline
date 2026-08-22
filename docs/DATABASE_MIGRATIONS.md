@@ -61,6 +61,10 @@ the command fails closed instead of guessing.
 
 Each migration step runs inside its own transaction.
 A failed step does not mark itself applied.
+Mutating migration commands also hold one Postgres advisory lock for the full command,
+so concurrent jobs serialize instead of both selecting and applying the same pending
+step. If a process or database connection dies, Postgres releases that lock and the
+step transaction rolls back; rerunning `up` resumes from the last committed step.
 
 ## Kubernetes
 

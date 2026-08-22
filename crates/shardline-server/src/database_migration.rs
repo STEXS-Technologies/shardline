@@ -1,5 +1,7 @@
 use shardline_protocol::SecretString;
-use sqlx::{Error as SqlxError, PgPool, Row, postgres::PgPoolOptions, query, raw_sql};
+use sqlx::{
+    Error as SqlxError, PgPool, Postgres, Row, Transaction, postgres::PgPoolOptions, query, raw_sql,
+};
 use thiserror::Error;
 
 /// One Shardline schema migration.
@@ -128,8 +130,9 @@ struct AppliedMigration {
 }
 
 const MIGRATION_HISTORY_TABLE: &str = "shardline_schema_migrations";
+const MIGRATION_ADVISORY_LOCK_KEY: i64 = 0x5348_4152_444d_4701;
 
-const SHARDLINE_MIGRATIONS: [DatabaseMigration; 17] = [
+const SHARDLINE_MIGRATIONS: [DatabaseMigration; 18] = [
     DatabaseMigration {
         version: "20260417000000",
         name: "metadata_store",
@@ -236,6 +239,12 @@ const SHARDLINE_MIGRATIONS: [DatabaseMigration; 17] = [
         up_sql: include_str!("../migrations/20260814000000_s3_object_etag_metadata.up.sql"),
         down_sql: include_str!("../migrations/20260814000000_s3_object_etag_metadata.down.sql"),
     },
+    DatabaseMigration {
+        version: "20260822000000",
+        name: "oci_tags",
+        up_sql: include_str!("../migrations/20260822000000_oci_tags.up.sql"),
+        down_sql: include_str!("../migrations/20260822000000_oci_tags.down.sql"),
+    },
 ];
 
 /// Returns the bundled Shardline migration list in application order.
@@ -252,6 +261,7 @@ pub const fn bundled_database_migrations() -> &'static [DatabaseMigration] {
 /// when Postgres rejects the schema updates.
 pub async fn apply_database_migrations(pool: &PgPool) -> Result<(), DatabaseMigrationError> {
     ensure_migration_history_table(pool).await?;
+    let _migration_guard = acquire_migration_lock(pool).await?;
     verify_applied_migrations(pool).await?;
 
     for migration in pending_migrations(pool).await? {
@@ -279,6 +289,12 @@ pub async fn run_database_migration(
         .connect(options.database_url())
         .await?;
     ensure_migration_history_table(&pool).await?;
+    let _migration_guard = match options.command() {
+        DatabaseMigrationCommand::Up { .. } | DatabaseMigrationCommand::Down { .. } => {
+            Some(acquire_migration_lock(&pool).await?)
+        }
+        DatabaseMigrationCommand::Status => None,
+    };
     verify_applied_migrations(&pool).await?;
 
     let (applied_count, reverted_count) = match options.command() {
@@ -333,6 +349,17 @@ async fn ensure_migration_history_table(pool: &PgPool) -> Result<(), SqlxError> 
     .await?;
 
     Ok(())
+}
+
+async fn acquire_migration_lock(
+    pool: &PgPool,
+) -> Result<Transaction<'static, Postgres>, DatabaseMigrationError> {
+    let mut transaction = pool.begin().await?;
+    query("SELECT pg_advisory_xact_lock($1)")
+        .bind(MIGRATION_ADVISORY_LOCK_KEY)
+        .execute(&mut *transaction)
+        .await?;
+    Ok(transaction)
 }
 
 async fn verify_applied_migrations(pool: &PgPool) -> Result<(), DatabaseMigrationError> {
@@ -482,11 +509,12 @@ fn migration_checksum(migration: &DatabaseMigration) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
 
     use super::{
         DatabaseMigration, DatabaseMigrationCommand, DatabaseMigrationOptions,
-        DatabaseMigrationStatusEntry, bundled_database_migrations, migration_by_version,
-        migration_checksum,
+        DatabaseMigrationStatusEntry, acquire_migration_lock, bundled_database_migrations,
+        migration_by_version, migration_checksum,
     };
 
     #[test]
@@ -497,7 +525,43 @@ mod tests {
 
     #[test]
     fn bundled_migrations_have_expected_count() {
-        assert_eq!(bundled_database_migrations().len(), 17);
+        assert_eq!(bundled_database_migrations().len(), 18);
+    }
+
+    #[test]
+    fn bundled_migrations_include_oci_tags() {
+        let migration = bundled_database_migrations()
+            .iter()
+            .find(|migration| migration.name == "oci_tags")
+            .expect("OCI tag migration must be registered");
+        assert_eq!(migration.version, "20260822000000");
+        assert!(migration.up_sql.contains("shardline_oci_tags"));
+        assert!(migration.down_sql.contains("shardline_oci_tags"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn migration_lock_serializes_independent_connections() {
+        let Some(database_url) = std::env::var("DATABASE_URL").ok() else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&database_url).await.unwrap();
+        let first = acquire_migration_lock(&pool).await.unwrap();
+        let waiter_pool = pool.clone();
+        let mut waiter = tokio::spawn(async move { acquire_migration_lock(&waiter_pool).await });
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut waiter)
+                .await
+                .is_err()
+        );
+        drop(first);
+        let second = tokio::time::timeout(Duration::from_secs(2), waiter)
+            .await
+            .expect("migration lock should become available")
+            .expect("migration lock task should complete")
+            .unwrap();
+        drop(second);
     }
 
     #[test]
