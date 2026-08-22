@@ -1,5 +1,7 @@
 use std::time::Duration;
 
+use thiserror::Error;
+
 /// Persisted state of a content-addressed upload intent.
 ///
 /// An upload normally moves
@@ -21,7 +23,9 @@ pub enum UploadIntentState {
     MetadataCommitted,
     /// The upload completed successfully and the record is visible.
     Visible,
-    /// The upload failed and should be reconciled or quarantined.
+    /// Durable inspection established that the upload failed and it should be
+    /// quarantined. A request error alone must not select this state because an
+    /// external commit acknowledgement may have been lost.
     Failed,
 }
 
@@ -186,6 +190,15 @@ impl UploadIntent {
         self.updated_at
     }
 
+    /// Returns whether another value describes the same immutable upload operation.
+    #[must_use]
+    pub fn has_same_identity(&self, other: &Self) -> bool {
+        self.intent_id == other.intent_id
+            && self.object_key == other.object_key
+            && self.object_hash == other.object_hash
+            && self.object_length == other.object_length
+    }
+
     /// Constructs an `UploadIntent` from raw parts, including timestamps.
     ///
     /// This is intended for store implementations that reconstruct intents
@@ -213,6 +226,29 @@ impl UploadIntent {
     }
 }
 
+/// An idempotency key was reused for a different upload operation.
+#[derive(Debug, Clone, Error, PartialEq, Eq)]
+#[error("upload intent id {intent_id} is already bound to different object identity")]
+pub struct UploadIntentConflictError {
+    intent_id: String,
+}
+
+impl UploadIntentConflictError {
+    /// Creates an identity-conflict error.
+    #[must_use]
+    pub fn new(intent_id: impl Into<String>) -> Self {
+        Self {
+            intent_id: intent_id.into(),
+        }
+    }
+
+    /// Returns the conflicting idempotency key.
+    #[must_use]
+    pub fn intent_id(&self) -> &str {
+        &self.intent_id
+    }
+}
+
 /// Durable storage for upload intent records.
 #[async_trait::async_trait]
 pub trait UploadIntentStore: Send + Sync {
@@ -220,6 +256,9 @@ pub trait UploadIntentStore: Send + Sync {
     type Error: Send + Sync;
 
     /// Persists a new upload intent in `Created` state.
+    ///
+    /// Repeating the same intent identity is idempotent. Reusing an intent ID
+    /// for a different object key, hash, or length must fail.
     ///
     /// # Errors
     ///
@@ -271,6 +310,8 @@ pub trait UploadIntentStore: Send + Sync {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
 
     const ALL_STATES: &[UploadIntentState] = &[
@@ -281,6 +322,61 @@ mod tests {
         UploadIntentState::Visible,
         UploadIntentState::Failed,
     ];
+
+    fn state_rank(state: UploadIntentState) -> u8 {
+        match state {
+            UploadIntentState::Created => 0,
+            UploadIntentState::Storing => 1,
+            UploadIntentState::Stored => 2,
+            UploadIntentState::MetadataCommitted => 3,
+            UploadIntentState::Visible => 4,
+            UploadIntentState::Failed => 5,
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn accepted_transition_sequences_are_monotonic_and_terminal(
+            choices in proptest::collection::vec(0_usize..ALL_STATES.len(), 0..256),
+        ) {
+            let mut current = UploadIntentState::Created;
+            for choice in choices {
+                let next = ALL_STATES
+                    .get(choice)
+                    .copied()
+                    .unwrap_or(UploadIntentState::Created);
+                if current.can_transition_to(next) {
+                    let previous = current;
+                    current = next;
+                    prop_assert!(state_rank(current) >= state_rank(previous));
+                    if current != UploadIntentState::Failed {
+                        prop_assert!(
+                            state_rank(current)
+                                .checked_sub(state_rank(previous))
+                                .is_some_and(|difference| difference <= 1)
+                        );
+                    }
+                }
+
+                if matches!(current, UploadIntentState::Visible | UploadIntentState::Failed) {
+                    prop_assert!(current.can_transition_to(current));
+                    for candidate in ALL_STATES {
+                        prop_assert_eq!(
+                            current.can_transition_to(*candidate),
+                            *candidate == current
+                        );
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn arbitrary_persisted_state_text_is_canonical_when_accepted(value in ".{0,128}") {
+            if let Some(state) = UploadIntentState::parse(&value) {
+                prop_assert_eq!(state.as_str(), value);
+            }
+        }
+    }
 
     #[test]
     fn state_as_str_and_parse_round_trip_all_variants() {
@@ -332,5 +428,39 @@ mod tests {
         assert_eq!(intent.object_key(), "key/obj");
         assert_eq!(intent.object_hash(), "hash123");
         assert_eq!(intent.object_length(), 999);
+    }
+
+    #[test]
+    fn identity_ignores_state_timestamps_but_not_object_fields() {
+        let original = UploadIntent::new(
+            "intent".to_owned(),
+            "objects/a".to_owned(),
+            "hash-a".to_owned(),
+            10,
+        );
+        let advanced = UploadIntent::from_parts(
+            "intent".to_owned(),
+            "objects/a".to_owned(),
+            "hash-a".to_owned(),
+            10,
+            UploadIntentState::Visible,
+            Duration::from_secs(1),
+            Duration::from_secs(2),
+        );
+        let conflicting = UploadIntent::new(
+            "intent".to_owned(),
+            "objects/b".to_owned(),
+            "hash-a".to_owned(),
+            10,
+        );
+        assert!(original.has_same_identity(&advanced));
+        assert!(!original.has_same_identity(&conflicting));
+    }
+
+    #[test]
+    fn conflict_error_exposes_intent_id() {
+        let error = UploadIntentConflictError::new("intent-1");
+        assert_eq!(error.intent_id(), "intent-1");
+        assert!(error.to_string().contains("intent-1"));
     }
 }

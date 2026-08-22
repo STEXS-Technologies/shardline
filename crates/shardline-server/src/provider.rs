@@ -300,7 +300,7 @@ impl BuiltInProvider {
             let repository_ref = RepositoryRef::new(kind, &repository.owner, &repository.name)?;
             let metadata = configured_metadata(
                 repository_ref,
-                visibility(&repository.visibility),
+                visibility(&repository.visibility)?,
                 &repository.default_revision,
                 &repository.clone_url,
             )?;
@@ -458,6 +458,9 @@ pub enum ProviderServiceError {
     /// The provider catalog registered the same provider twice.
     #[error("provider is configured more than once")]
     DuplicateProvider,
+    /// A repository visibility value was not one of the supported values.
+    #[error("provider repository visibility must be public, private, or internal")]
+    InvalidRepositoryVisibility,
     /// The provider webhook secret was not configured.
     #[error("provider webhook secret must be configured")]
     MissingWebhookSecret,
@@ -519,10 +522,11 @@ fn parse_provider_kind(value: &str) -> Result<ProviderKind, ProviderServiceError
         .map_err(ProviderServiceError::from)
 }
 
-fn visibility(value: &str) -> RepositoryVisibility {
-    // Delegate to the canonical case-insensitive `RepositoryVisibility` parser;
-    // unknown values still fall back to `Public` (historical lenient behavior).
-    RepositoryVisibility::from_str(value).unwrap_or(RepositoryVisibility::Public)
+fn visibility(value: &str) -> Result<RepositoryVisibility, ProviderServiceError> {
+    // Visibility directly affects authorization. Invalid or missing values must
+    // fail closed during startup instead of silently making a repository public.
+    RepositoryVisibility::from_str(value)
+        .map_err(|_error| ProviderServiceError::InvalidRepositoryVisibility)
 }
 
 /// Canonical at-rest AAD identity for a provider-config secret field.

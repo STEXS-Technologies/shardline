@@ -83,7 +83,7 @@ impl super::PostgresBackend {
             ingestor.ingest_body_chunk(&object_store, &bytes).await?;
         }
 
-        let result = async {
+        async {
             let (record, response) = ingestor
                 .finish(&object_store, file_id, repository_scope, expected_sha256)
                 .await?;
@@ -105,15 +105,7 @@ impl super::PostgresBackend {
             }
             Ok(response)
         }
-        .await;
-        if result.is_err()
-            && let Some(intent) = &intent
-        {
-            let _ignored = coordinator
-                .transition_upload(intent.intent_id(), UploadIntentState::Failed)
-                .await;
-        }
-        result
+        .await
     }
 
     /// Stores a raw xorb body under its content hash.

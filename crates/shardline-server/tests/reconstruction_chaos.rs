@@ -43,9 +43,8 @@
 //!        - the S3 GET fails cleanly with >= 400 (XorbHashMismatch /
 //!          InvalidSerializedXorb map to BAD_REQUEST), never a byte-exact 200,
 //!          never a panic;
-//!        - the xorb transfer route serves the corrupt bytes undetected
-//!          (REPORT-ONLY finding — content validation lives only on the
-//!          S3/native read paths).
+//!        - the xorb transfer route also rejects the corrupt container before
+//!          exposing any requested range.
 //!   6. The server stays healthy (unrelated PUT/GET byte-exact, healthz 200,
 //!      panic status Running).
 //!   7. Repair = remove the corrupt xorb FIRST (a re-PUT without removal would
@@ -345,9 +344,8 @@ fn latest_record(root: &Path) -> Option<(String, String)> {
 ///     corruption; what breaks is the xorb LOAD, not the record lookup);
 ///   - the S3 GET fails cleanly (>= 400, expected exactly 400) and never a
 ///     panic;
-///   - the xorb transfer route serves the corrupt bytes undetected (a
-///     REPORT-ONLY finding: content validation lives only on the S3/native
-///     read paths);
+///   - the xorb transfer route rejects the corrupt container before exposing
+///     a requested range;
 ///   - the server stays healthy;
 ///   - repair = remove-file + re-PUT of the SAME bytes restores the object
 ///     byte-exact and the reconstruction route serves the same terms.
@@ -478,11 +476,9 @@ async fn reconstruction_corrupt_xorb_clean_error_and_reupload_restores() {
     // fully consumed before the next request.
     let _corrupt_body = corrupt_get.bytes().await.unwrap_or_default();
 
-    //    Leg B — the xorb transfer surface serves the corrupt bytes
-    //    undetected. REPORT-ONLY finding: content validation lives only on the
-    //    S3/native-download paths. Assert the range provably hits the flipped
-    //    byte (body != snapshot prefix); if the route were absent on this role
-    //    the request error is noted, not fatal.
+    //    Leg B — the xorb transfer surface validates the complete addressed
+    //    container before exposing even a partial range. The requested range
+    //    includes the flipped byte, but no corrupt bytes may receive a 2xx.
     let transfer = harness
         .client
         .get(harness.url(&format!("/transfer/xorb/default/{first_hash}")))
@@ -490,29 +486,15 @@ async fn reconstruction_corrupt_xorb_clean_error_and_reupload_restores() {
         .header("Range", "bytes=0-4095")
         .send()
         .await;
-    match transfer {
-        Ok(resp) => {
-            let status = resp.status().as_u16();
-            let body = resp.bytes().await.unwrap_or_default();
-            let prefix_len = snapshot.len().min(body.len());
-            let differs = body.as_ref() != &snapshot[..prefix_len];
-            eprintln!(
-                "recon-chaos: REPORT-ONLY FINDING — xorb transfer route serves corrupt bytes \
-                 undetected; content validation lives only on S3/native-download paths \
-                 (status={status}, body_len={}, hits_corrupt_bytes={differs})",
-                body.len()
-            );
-            assert!(
-                differs,
-                "fetch leg range bytes=0-4095 must include the flipped byte (offset 2048)"
-            );
-        }
-        Err(error) => {
-            eprintln!(
-                "recon-chaos: transfer leg request error {error} — noted, not fatal (report-only)"
-            );
-        }
-    }
+    let transfer = transfer.expect("corrupt transfer request must receive a clean error response");
+    let transfer_status = transfer.status().as_u16();
+    let transfer_body = transfer.bytes().await.unwrap_or_default();
+    assert!(
+        transfer_status >= 400,
+        "corrupt xorb transfer must fail before exposing bytes, got status={transfer_status}, \
+         body_len={}",
+        transfer_body.len(),
+    );
 
     // 6. Server healthy: unrelated PUT + GET byte-exact, healthz 200, and the
     //    serve task reports Running (never panicked).

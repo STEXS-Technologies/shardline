@@ -14,6 +14,12 @@ pub enum ReconstructionCacheError {
     /// Redis client initialization or operations failed.
     #[error("reconstruction cache redis operation failed")]
     Redis(#[from] redis::RedisError),
+    /// A Redis operation exceeded its configured latency bound.
+    #[error("reconstruction cache redis operation timed out")]
+    RedisTimeout,
+    /// The Redis operation timeout was zero.
+    #[error("reconstruction cache redis operation timeout must be greater than zero")]
+    InvalidRedisOperationTimeout,
     /// Numeric conversion exceeded supported bounds.
     #[error("reconstruction cache numeric conversion exceeded supported bounds")]
     NumericConversion(#[from] TryFromIntError),
@@ -39,6 +45,12 @@ mod tests {
         assert!(ReconstructionCacheError::Operation.source().is_none());
         assert!(
             ReconstructionCacheError::IncompleteRedisTlsClientIdentity
+                .source()
+                .is_none()
+        );
+        assert!(ReconstructionCacheError::RedisTimeout.source().is_none());
+        assert!(
+            ReconstructionCacheError::InvalidRedisOperationTimeout
                 .source()
                 .is_none()
         );
@@ -97,6 +109,18 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "reconstruction cache redis operation failed"
+        );
+    }
+
+    #[test]
+    fn display_redis_timeout() {
+        assert_eq!(
+            ReconstructionCacheError::RedisTimeout.to_string(),
+            "reconstruction cache redis operation timed out"
+        );
+        assert_eq!(
+            ReconstructionCacheError::InvalidRedisOperationTimeout.to_string(),
+            "reconstruction cache redis operation timeout must be greater than zero"
         );
     }
 

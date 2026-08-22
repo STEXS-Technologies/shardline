@@ -168,6 +168,12 @@ workspace = false
 command = "bash"
 args = ["scripts/shardline/perf.sh", "e2e", "${@}"]
 
+[tasks.shardline-bench-matrix]
+description = "Record the reproducible concurrency benchmark matrix"
+workspace = false
+command = "bash"
+args = ["scripts/benchmark-matrix.sh", "${@}"]
+
 [tasks.shardline-bench-ingest]
 description = "Run the shardline zero-storage ingest benchmark suite"
 workspace = false

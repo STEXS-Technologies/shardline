@@ -1,8 +1,9 @@
 use std::{num::NonZeroUsize, path::PathBuf, sync::Arc};
 
 use shardline_index::{
-    FileChunkRecord, LocalIndexStore, LocalRecordStore, ReconstructionStore, RecordTraversal,
-    RepoKey, RevisionRecord, S3ObjectEntry, S3ObjectIndexStore, TreeEntry, TreeKey, TreeStore,
+    FileChunkRecord, LocalIndexStore, LocalRecordStore, OciObjectKey, OciObjectStore, OciTagEntry,
+    OciTagStore, ReconstructionStore, RecordTraversal, RepoKey, RevisionRecord, S3ObjectEntry,
+    S3ObjectIndexStore, TreeEntry, TreeKey, TreeStore,
 };
 use shardline_protocol::unix_now_seconds_lossy;
 use shardline_storage::{ObjectPrefix, ObjectStore};
@@ -283,19 +284,32 @@ impl LocalBackend {
                     reconciled = reconciled.saturating_add(1);
                     continue;
                 }
-                let target_state = if intent.state() == UploadIntentState::MetadataCommitted {
-                    match ObjectKey::parse(intent.object_key()) {
-                        Ok(key)
-                            if AsyncObjectStore::metadata(&self.object_store, &key)
-                                .await?
-                                .is_some() =>
-                        {
-                            UploadIntentState::Visible
+                let target_state = match ObjectKey::parse(intent.object_key()) {
+                    Ok(key) => match AsyncObjectStore::metadata(&self.object_store, &key).await? {
+                        Some(metadata) if metadata.length() != intent.object_length() => {
+                            Some(UploadIntentState::Failed)
                         }
-                        Ok(_) | Err(_) => UploadIntentState::Failed,
-                    }
-                } else {
-                    UploadIntentState::Failed
+                        Some(_) if intent.state() == UploadIntentState::MetadataCommitted => {
+                            Some(UploadIntentState::Visible)
+                        }
+                        Some(_) => {
+                            // The immutable write may have committed before its
+                            // response was lost. Earlier states do not prove that
+                            // protocol metadata is visible (notably for shards),
+                            // so preserve the retryable state instead of guessing.
+                            tracing::warn!(
+                                intent_id = %intent.intent_id(),
+                                state = ?intent.state(),
+                                "durable object found for in-flight intent; preserving for retry"
+                            );
+                            None
+                        }
+                        None => Some(UploadIntentState::Failed),
+                    },
+                    Err(_) => Some(UploadIntentState::Failed),
+                };
+                let Some(target_state) = target_state else {
+                    continue;
                 };
                 if let Err(e) = self
                     .index_store
@@ -347,6 +361,18 @@ impl LocalBackend {
         Ok(())
     }
 
+    /// Atomically replaces an S3 object row if its current value matches.
+    pub(crate) async fn compare_and_swap_s3_object(
+        &self,
+        expected: Option<&S3ObjectEntry>,
+        replacement: &S3ObjectEntry,
+    ) -> Result<bool, ServerError> {
+        self.index_store
+            .compare_and_swap_s3_object(expected, replacement)
+            .await
+            .map_err(ServerError::from)
+    }
+
     /// Deletes one S3 object listing-index row, returning whether a row was removed.
     ///
     /// # Errors
@@ -396,6 +422,65 @@ impl LocalBackend {
             .scan_s3_object_exact(scope_namespace, object_key)
             .await
             .map_err(ServerError::from)
+    }
+
+    pub(crate) async fn insert_oci_tag_if_absent(
+        &self,
+        entry: &OciTagEntry,
+    ) -> Result<bool, ServerError> {
+        self.index_store
+            .insert_oci_tag_if_absent(entry)
+            .await
+            .map_err(ServerError::from)
+    }
+
+    pub(crate) async fn oci_tag(
+        &self,
+        scope_namespace: &str,
+        repository: &str,
+        tag: &str,
+    ) -> Result<Option<OciTagEntry>, ServerError> {
+        self.index_store
+            .oci_tag(scope_namespace, repository, tag)
+            .await
+            .map_err(ServerError::from)
+    }
+
+    pub(crate) async fn list_oci_tags(
+        &self,
+        scope_namespace: &str,
+        repository: &str,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<OciTagEntry>, ServerError> {
+        self.index_store
+            .list_oci_tags(scope_namespace, repository, cursor, limit)
+            .await
+            .map_err(ServerError::from)
+    }
+
+    pub(crate) async fn oci_object_is_deleted(
+        &self,
+        key: &OciObjectKey,
+    ) -> Result<bool, ServerError> {
+        self.index_store
+            .oci_object_is_deleted(key)
+            .await
+            .map_err(ServerError::from)
+    }
+
+    pub(crate) async fn publish_oci_object(
+        &self,
+        key: &OciObjectKey,
+        tags: &[OciTagEntry],
+    ) -> Result<(), ServerError> {
+        self.index_store.publish_oci_object(key, tags).await?;
+        Ok(())
+    }
+
+    pub(crate) async fn delete_oci_object(&self, key: &OciObjectKey) -> Result<(), ServerError> {
+        self.index_store.delete_oci_object(key).await?;
+        Ok(())
     }
 
     /// Resolves a single canonical path to its tree entry, if any.
@@ -804,6 +889,20 @@ mod tests {
                     .unwrap()
             );
         }
+        let ambiguous = UploadIntent::new(
+            "ambiguous-reconcile".to_owned(),
+            key.as_str().to_owned(),
+            "hash".to_owned(),
+            bytes.len() as u64,
+        );
+        backend.index_store.create_intent(&ambiguous).await.unwrap();
+        assert!(
+            backend
+                .index_store
+                .transition_intent(ambiguous.intent_id(), UploadIntentState::Storing)
+                .await
+                .unwrap()
+        );
         backend
             .upload_file(
                 "stored-record-reconcile",
@@ -851,6 +950,13 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(missing.state(), UploadIntentState::Failed);
+        let ambiguous = backend
+            .index_store
+            .intent_by_id(ambiguous.intent_id())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(ambiguous.state(), UploadIntentState::Storing);
         let stored_record = backend
             .index_store
             .intent_by_id(stored_record.intent_id())

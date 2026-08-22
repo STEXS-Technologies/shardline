@@ -26,7 +26,13 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  reliability-gate:
+    uses: ./.github/workflows/reliability-soak.yml
+    with:
+      duration_seconds: "600"
+
   release:
+    needs: reliability-gate
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:

@@ -562,7 +562,7 @@ impl RecordMutation for super::PostgresRecordStore {
     }
 }
 
-async fn upsert_record_in_transaction(
+pub(super) async fn upsert_record_in_transaction(
     transaction: &mut Transaction<'_, Postgres>,
     locator: &PostgresRecordLocator,
     record: &FileRecord,

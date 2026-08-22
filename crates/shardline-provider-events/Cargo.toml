@@ -21,6 +21,7 @@ thiserror.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+sqlx.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 shardline-xet-core.workspace = true

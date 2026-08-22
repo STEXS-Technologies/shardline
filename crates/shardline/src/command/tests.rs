@@ -898,6 +898,7 @@ fn parse_admin_token() {
     assert_eq!(
         CliCommand::parse(args),
         Ok(CliCommand::AdminToken {
+            auth_provider: crate::AdminTokenAuthProvider::Local,
             issuer: "local".to_owned(),
             subject: "operator-1".to_owned(),
             scope: TokenScope::Write,
@@ -937,6 +938,7 @@ fn parse_admin_token_with_key_env() {
     assert_eq!(
         CliCommand::parse(args),
         Ok(CliCommand::AdminToken {
+            auth_provider: crate::AdminTokenAuthProvider::Local,
             issuer: "local".to_owned(),
             subject: "operator-1".to_owned(),
             scope: TokenScope::Write,
@@ -947,6 +949,48 @@ fn parse_admin_token_with_key_env() {
             ttl_seconds: 3600,
             key_file: None,
             key_env: Some("SHARDLINE_TOKEN_SIGNING_KEY".to_owned()),
+        })
+    );
+}
+
+#[test]
+fn parse_admin_token_with_ed25519_provider() {
+    let args = vec![
+        "shardline".to_owned(),
+        "admin".to_owned(),
+        "token".to_owned(),
+        "--auth-provider".to_owned(),
+        "ed25519".to_owned(),
+        "--issuer".to_owned(),
+        "local-ed25519".to_owned(),
+        "--subject".to_owned(),
+        "operator-1".to_owned(),
+        "--scope".to_owned(),
+        "write".to_owned(),
+        "--provider".to_owned(),
+        "generic".to_owned(),
+        "--owner".to_owned(),
+        "team".to_owned(),
+        "--repo".to_owned(),
+        "assets".to_owned(),
+        "--key-file".to_owned(),
+        "/tmp/shardline-ed25519.key".to_owned(),
+    ];
+
+    assert_eq!(
+        CliCommand::parse(args),
+        Ok(CliCommand::AdminToken {
+            auth_provider: crate::AdminTokenAuthProvider::Ed25519,
+            issuer: "local-ed25519".to_owned(),
+            subject: "operator-1".to_owned(),
+            scope: TokenScope::Write,
+            provider: RepositoryProvider::Generic,
+            owner: "team".to_owned(),
+            repo: "assets".to_owned(),
+            revision: None,
+            ttl_seconds: 3600,
+            key_file: Some(PathBuf::from("/tmp/shardline-ed25519.key")),
+            key_env: None,
         })
     );
 }

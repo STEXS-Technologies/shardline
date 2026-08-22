@@ -26,6 +26,12 @@ use crate::{
     overflow::{checked_add, checked_increment},
 };
 
+// Native Xet permits up to 64 MiB of raw data per xorb. Server-side ingest uses
+// half that ceiling so several independently validated range fetches can be in
+// flight without approaching whole-file memory use.
+const MAX_SERVER_XORB_RAW_BYTES: usize = 32 * 1024 * 1024;
+const MAX_XORB_CHUNKS: usize = 8 * 1024;
+
 /// Incremental file upload assembler.
 pub(crate) struct FileUploadIngestor {
     pub(super) chunk_size: usize,
@@ -148,72 +154,20 @@ impl FileUploadIngestor {
         let total_bytes = self.next_offset;
         let chunk_size = u64::try_from(self.chunk_size)?;
 
-        // Pack CDC chunks into a xorb container and store it alongside
-        // individual chunks. The xorb provides efficient single-GET download
-        // for future optimization; individual chunks remain for dedup and
-        // backward compat.
+        // Pack CDC chunks into bounded xorb containers and store them alongside
+        // individual chunks. A file can be arbitrarily larger than one xorb;
+        // keeping each container within the native 64 MiB / 8192-chunk envelope
+        // also bounds integrity validation before a requested range is exposed.
+        // Individual chunks remain authoritative fallback for any batch that
+        // cannot be packed or stored.
         if !self.raw_chunk_data.is_empty() {
-            let raw_offsets: Vec<u64> = self.records.iter().map(|r| r.offset).collect();
-            let chunks_with_offsets: Vec<(Vec<u8>, u64)> =
-                self.raw_chunk_data.drain(..).zip(raw_offsets).collect();
-            match pack_chunks_into_xorb(&chunks_with_offsets) {
-                Ok(packed) => {
-                    match store_xorb(object_store, &packed.xorb_hash_hex, &packed.serialized).await
-                    {
-                        Ok(_inserted) => {
-                            debug!(
-                                file_id,
-                                xorb_hash = %packed.xorb_hash_hex,
-                                num_chunks = packed.chunk_entries.len(),
-                                packed_len = packed.serialized.len(),
-                                "stored xorb container for file upload"
-                            );
-                            // Update all FileChunkRecord entries to reference the xorb
-                            // so the download path can read a single xorb object instead
-                            // of fetching each chunk individually. Single-chunk files are
-                            // included: the reconstruction fetch info is built from the
-                            // record hash, so pointing it at the stored xorb is what
-                            // makes single-chunk downloads work over the CAS transfer
-                            // path (`/transfer/xorb/default/{hash}`). The download
-                            // stream's is_xorb_backed guard distinguishes these records
-                            // from individual-chunk records by probing for the stored
-                            // xorb object under the record hash.
-                            for (i, record) in self.records.iter_mut().enumerate() {
-                                if let Some(entry) = packed.chunk_entries.get(i) {
-                                    record.hash = packed.xorb_hash_hex.clone();
-                                    record.range_start = u64::from(entry.chunk_index);
-                                    let next_index = entry
-                                        .chunk_index
-                                        .checked_add(1)
-                                        .ok_or(ServerError::Overflow)?;
-                                    record.range_end = u64::from(next_index);
-                                    record.packed_start = u64::from(entry.packed_offset);
-                                    let packed_end = entry
-                                        .packed_offset
-                                        .checked_add(entry.packed_length)
-                                        .ok_or(ServerError::Overflow)?;
-                                    record.packed_end = u64::from(packed_end);
-                                }
-                            }
-                        }
-                        Err(error) => {
-                            warn!(
-                                file_id,
-                                xorb_hash = %packed.xorb_hash_hex,
-                                error = %error,
-                                "failed to store xorb container, continuing with individual chunks"
-                            );
-                        }
-                    }
-                }
-                Err(error) => {
-                    warn!(
-                        file_id,
-                        error = %error,
-                        "failed to pack chunks into xorb, continuing with individual chunks"
-                    );
-                }
-            }
+            pack_and_store_xorb_batches(
+                object_store,
+                file_id,
+                mem::take(&mut self.raw_chunk_data),
+                &mut self.records,
+            )
+            .await?;
         }
 
         let content_hash = content_hash(total_bytes, chunk_size, &self.records);
@@ -482,6 +436,112 @@ impl FileUploadIngestor {
         });
         Ok(())
     }
+}
+
+async fn pack_and_store_xorb_batches(
+    object_store: &ServerObjectStore,
+    file_id: &str,
+    raw_chunks: Vec<Vec<u8>>,
+    records: &mut [FileChunkRecord],
+) -> Result<(), ServerError> {
+    if raw_chunks.len() != records.len() {
+        return Err(ServerError::Overflow);
+    }
+
+    let mut batch = Vec::new();
+    let mut batch_raw_bytes = 0usize;
+    let mut batch_record_start = 0usize;
+
+    for (record_index, raw_chunk) in raw_chunks.into_iter().enumerate() {
+        let next_raw_bytes = batch_raw_bytes
+            .checked_add(raw_chunk.len())
+            .ok_or(ServerError::Overflow)?;
+        if !batch.is_empty()
+            && (batch.len() >= MAX_XORB_CHUNKS || next_raw_bytes > MAX_SERVER_XORB_RAW_BYTES)
+        {
+            store_xorb_batch(object_store, file_id, &batch, records, batch_record_start).await;
+            batch.clear();
+            batch_raw_bytes = 0;
+            batch_record_start = record_index;
+        }
+
+        let record = records.get(record_index).ok_or(ServerError::Overflow)?;
+        batch_raw_bytes = batch_raw_bytes
+            .checked_add(raw_chunk.len())
+            .ok_or(ServerError::Overflow)?;
+        batch.push((raw_chunk, record.offset));
+    }
+
+    if !batch.is_empty() {
+        store_xorb_batch(object_store, file_id, &batch, records, batch_record_start).await;
+    }
+    Ok(())
+}
+
+async fn store_xorb_batch(
+    object_store: &ServerObjectStore,
+    file_id: &str,
+    chunks: &[(Vec<u8>, u64)],
+    records: &mut [FileChunkRecord],
+    record_start: usize,
+) {
+    let packed = match pack_chunks_into_xorb(chunks) {
+        Ok(packed) => packed,
+        Err(error) => {
+            warn!(
+                file_id,
+                record_start,
+                num_chunks = chunks.len(),
+                error = %error,
+                "failed to pack xorb batch, continuing with individual chunks"
+            );
+            return;
+        }
+    };
+    if let Err(error) = store_xorb(object_store, &packed.xorb_hash_hex, &packed.serialized).await {
+        warn!(
+            file_id,
+            record_start,
+            xorb_hash = %packed.xorb_hash_hex,
+            error = %error,
+            "failed to store xorb batch, continuing with individual chunks"
+        );
+        return;
+    }
+
+    let Some(batch_records) = records
+        .get_mut(record_start..)
+        .and_then(|remaining| remaining.get_mut(..packed.chunk_entries.len()))
+    else {
+        warn!(
+            file_id,
+            record_start, "xorb batch record mapping is inconsistent"
+        );
+        return;
+    };
+    for (record, entry) in batch_records.iter_mut().zip(&packed.chunk_entries) {
+        let Some(next_index) = entry.chunk_index.checked_add(1) else {
+            warn!(file_id, record_start, "xorb batch chunk index overflow");
+            return;
+        };
+        let Some(packed_end) = entry.packed_offset.checked_add(entry.packed_length) else {
+            warn!(file_id, record_start, "xorb batch packed range overflow");
+            return;
+        };
+        record.hash.clone_from(&packed.xorb_hash_hex);
+        record.range_start = u64::from(entry.chunk_index);
+        record.range_end = u64::from(next_index);
+        record.packed_start = u64::from(entry.packed_offset);
+        record.packed_end = u64::from(packed_end);
+    }
+    debug!(
+        file_id,
+        record_start,
+        xorb_hash = %packed.xorb_hash_hex,
+        num_chunks = packed.chunk_entries.len(),
+        packed_len = packed.serialized.len(),
+        "stored bounded xorb batch for file upload"
+    );
 }
 
 #[cfg(test)]

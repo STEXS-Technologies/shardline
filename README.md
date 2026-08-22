@@ -28,9 +28,9 @@ Pair it with GitHub, GitLab, or Gitea when you want repository-scoped storage.
 | S3-compatible storage | **Stable** | Checked-in object read/write/list and HTTP integration coverage |
 | Postgres metadata | **Stable** | Checked-in index, dedupe, concurrency, and operator workflow coverage |
 | SQLite metadata | **Stable** | Checked-in local single-node and operator workflow coverage |
-| Redis reconstruction cache | **Beta** | TLS and mTLS connectivity; cache hit/miss paths validated |
+| Redis reconstruction cache | **Beta** | TLS/mTLS, bounded operation latency, cache hit/miss, and corrupt-value recovery are validated |
 | Provider integration (GitHub/GitLab/Gitea/Codeberg/generic) | **Beta** | Checked-in token issuance, webhook, and repository-scoped authorization coverage |
-| Ed25519 auth provider | **Experimental** | Signing and verification, verification-only mode, configuration, and authenticated HTTP flows have targeted tests |
+| Ed25519 auth provider | **Experimental** | Signing/verification, CLI minting, verification-only mode, configuration, and authenticated HTTP flows have targeted tests |
 
 ## What it does
 
@@ -97,7 +97,7 @@ shardline admin token
 | --- | --- |
 | **Local** | Single-node with local filesystem storage — `docker compose up` |
 | **Production small** | Single process with S3 + Postgres |
-| **Production scaled** | Split `api` and `transfer` roles with shared storage |
+| **Production scaled** | Split `api` and `transfer` roles with shared Postgres/S3 plus lock-coherent RWX staging |
 
 All profiles run providerless by default.
 Provider integration is optional.
@@ -115,6 +115,7 @@ Provider integration is optional.
 | [CLI Reference](docs/CLI.md) | All commands and flags |
 | [Compatibility Status](docs/COMPATIBILITY_STATUS.md) | Surface maturity tiers and validated route coverage |
 | [Architecture](docs/ARCHITECTURE.md) | System design and runtime shape |
+| [Distributed Correctness](docs/DISTRIBUTED_CORRECTNESS.md) | Multi-writer contracts, lock ordering, fencing epochs, and supported deployment boundaries |
 | [Provider Setup](docs/PROVIDER_QUICKSTART.md) | GitHub/GitLab/Gitea/Codeberg integration |
 | [Client Configuration](docs/CLIENT_CONFIGURATION.md) | Configure git, LFS, and Xet clients |
 | [Protocols](docs/PROTOCOLS.md) | Supported protocol frontends |

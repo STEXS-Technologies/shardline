@@ -10,7 +10,7 @@ use std::time::Instant;
 
 use axum::{
     Json,
-    body::{Body, Bytes},
+    body::{Body, Bytes, HttpBody},
     extract::{FromRequestParts, Path, State},
     http::{
         HeaderMap, StatusCode,
@@ -224,6 +224,67 @@ fn live_lfs_patch_lock_count() -> usize {
 /// path acquires store→per-OID and per-OID→store in the same run.
 static LFS_PATCH_STORE_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
+/// Held process-local + filesystem advisory lock for patch-store accounting.
+///
+/// API replicas mount the same staging root in the scaled topology, so the
+/// file guard extends quotas, sweeping, and session creation across pods.
+struct LfsPatchStoreGuard {
+    _process_guard: std::sync::MutexGuard<'static, ()>,
+    file: fs::File,
+}
+
+impl Drop for LfsPatchStoreGuard {
+    fn drop(&mut self) {
+        let _ignored = self.file.unlock();
+    }
+}
+
+struct LfsPatchOidFileGuard {
+    file: fs::File,
+}
+
+impl Drop for LfsPatchOidFileGuard {
+    fn drop(&mut self) {
+        let _ignored = self.file.unlock();
+    }
+}
+
+fn lock_lfs_patch_store(dir: &FsPath) -> Result<LfsPatchStoreGuard, ServerError> {
+    let process_guard = LFS_PATCH_STORE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    fs::create_dir_all(dir)?;
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(dir.join(".sessions.lock"))?;
+    file.lock()?;
+    Ok(LfsPatchStoreGuard {
+        _process_guard: process_guard,
+        file,
+    })
+}
+
+fn lock_lfs_patch_oid(dir: &FsPath, oid: &str) -> Result<LfsPatchOidFileGuard, ServerError> {
+    // A fixed 256-way stripe set avoids one permanent lock inode per attacker-
+    // supplied OID. Hashing also keeps the lock-file component independent of
+    // the client value. Collisions only serialize unrelated PATCHes briefly.
+    let digest = Sha256::digest(oid.as_bytes());
+    let stripe = digest.first().copied().ok_or(ServerError::Overflow)?;
+    let lock_dir = dir.join(".locks");
+    fs::create_dir_all(&lock_dir)?;
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(lock_dir.join(format!("{stripe:02x}.lock")))?;
+    file.lock()?;
+    Ok(LfsPatchOidFileGuard { file })
+}
+
 /// In-memory merged-range bookkeeping for active LFS patch sessions.
 ///
 /// Each session's ranges are kept merged in memory (a hole-map) and persisted
@@ -375,6 +436,7 @@ fn sweep_lfs_patch_sessions_locked(
             let _guard = oid_lock
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let _file_guard = lock_lfs_patch_oid(dir, oid)?;
             let removed_data = fs::remove_file(dir.join(oid));
             let ranges_path = dir.join(format!("{oid}.ranges"));
             let removed_ranges = fs::remove_file(&ranges_path);
@@ -401,11 +463,10 @@ pub(crate) fn sweep_lfs_patch_sessions(
     root: &FsPath,
     ttl_seconds: NonZeroU64,
 ) -> Result<usize, ServerError> {
-    let _guard = LFS_PATCH_STORE_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let dir = lfs_patch_dir(root);
+    let _guard = lock_lfs_patch_store(&dir)?;
     let now = lfs_patch_now_seconds()?;
-    sweep_lfs_patch_sessions_locked(&lfs_patch_dir(root), ttl_seconds, now)
+    sweep_lfs_patch_sessions_locked(&dir, ttl_seconds, now)
 }
 
 /// Builds a bounded streaming reader over a local file, feeding it in
@@ -718,11 +779,9 @@ fn record_lfs_patch_range(
 fn consume_lfs_patch_session(tmp_path: &FsPath, ranges_path: &FsPath, tmp_dir: &FsPath, oid: &str) {
     drop(fs::remove_file(tmp_path));
     drop(fs::remove_file(ranges_path));
-    let _store_guard = LFS_PATCH_STORE_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    drop(fs::remove_file(lfs_patch_meta_path(tmp_dir, oid)));
-    drop(_store_guard);
+    if let Ok(_store_guard) = lock_lfs_patch_store(tmp_dir) {
+        drop(fs::remove_file(lfs_patch_meta_path(tmp_dir, oid)));
+    }
     evict_lfs_patch_ranges(ranges_path);
 }
 
@@ -1031,11 +1090,27 @@ pub(crate) async fn lfs_put_object(
             return Ok(lfs_validation_response("invalid oid"));
         }
     };
-    let content_length = headers
-        .get(CONTENT_LENGTH)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(0);
+    let content_length = match headers.get(CONTENT_LENGTH) {
+        Some(value) => match value
+            .to_str()
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+        {
+            Some(length) => length,
+            None => return Ok(lfs_validation_response("invalid Content-Length header")),
+        },
+        None => body.size_hint().exact().unwrap_or(0),
+    };
+    if headers.contains_key(CONTENT_LENGTH)
+        && body
+            .size_hint()
+            .exact()
+            .is_some_and(|actual| actual != content_length)
+    {
+        return Ok(lfs_validation_response(
+            "Content-Length does not match the request body",
+        ));
+    }
     let start = Instant::now();
     let body = RequestBodyReader::from_body(body, state.config.max_request_body_bytes())?;
     let _stored = state
@@ -1186,12 +1261,13 @@ pub(crate) async fn lfs_patch_object(
 
     // Write the chunk to a temp file at the correct offset.
     // Use a deterministic path based on OID so multiple chunks accumulate in the same file.
-    // The temp directory is per-server-instance, avoiding cross-session conflicts.
+    // The scaled deployment mounts this staging directory across API replicas;
+    // local and advisory file locks below serialize shared-session mutations.
     //
     // All blocking I/O is offloaded to the tokio blocking thread-pool to avoid
-    // starving the async runtime.  A per-OID Mutex serializes concurrent PATCH
-    // requests for the same object, preventing data corruption in the shared
-    // temp file.
+    // starving the async runtime. A per-OID mutex plus advisory file lock
+    // serialize concurrent PATCH requests for the same object both within a
+    // process and across replicas.
     let root_dir = state.config.root_dir().to_path_buf();
     let backend = state.backend.clone();
     let oid_for_closure = oid.clone();
@@ -1226,9 +1302,7 @@ pub(crate) async fn lfs_patch_object(
         // released before the promotion; the promotion cleanup re-acquires the
         // store lock only with no per-OID guard held.
         let now = lfs_patch_now_seconds()?;
-        let store_guard = LFS_PATCH_STORE_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let store_guard = lock_lfs_patch_store(&tmp_dir)?;
         sweep_lfs_patch_sessions_locked(&tmp_dir, patch_ttl_seconds, now)?;
         let (active_sessions, used_bytes) = patch_store_usage(&tmp_dir)?;
         // F-60: a continuation of an EXISTING session (its `.meta` sidecar is
@@ -1256,6 +1330,7 @@ pub(crate) async fn lfs_patch_object(
         // Recover from poisoning: the lock is a simple empty-token Mutex<()>,
         // so its state is trivially consistent even if a previous holder panicked.
         let lock = lock_arc.lock().unwrap_or_else(|e| e.into_inner());
+        let file_lock = lock_lfs_patch_oid(&tmp_dir, &oid_for_closure)?;
 
         // Pre-write checks under the per-OID lock. A concurrent same-OID PATCH
         // may have already covered [0,total) and be promoting the object; and
@@ -1292,6 +1367,7 @@ pub(crate) async fn lfs_patch_object(
             // concurrent same-OID promotion, or a crash after the commit but
             // before the cleanup) the backend ingest is an idempotent no-op.
             drop(lock);
+            drop(file_lock);
             let object_present = match tokio::runtime::Handle::current()
                 .block_on(backend.object_length(&object_key_for_closure))
             {
@@ -1338,6 +1414,7 @@ pub(crate) async fn lfs_patch_object(
             record_lfs_patch_range(&ranges_path, offset, end_exclusive, total)
         })();
         drop(lock);
+        drop(file_lock);
         let promote = match write_result {
             Ok(promote) => promote,
             Err(error) => {
@@ -1346,14 +1423,12 @@ pub(crate) async fn lfs_patch_object(
                 // store lock may be taken safely for the meta removal (F-31).
                 drop(fs::remove_file(&tmp_path));
                 drop(fs::remove_file(&ranges_path));
-                let _store_guard = LFS_PATCH_STORE_LOCK
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                drop(fs::remove_file(lfs_patch_meta_path(
-                    &tmp_dir,
-                    &oid_for_closure,
-                )));
-                drop(_store_guard);
+                if let Ok(_store_guard) = lock_lfs_patch_store(&tmp_dir) {
+                    drop(fs::remove_file(lfs_patch_meta_path(
+                        &tmp_dir,
+                        &oid_for_closure,
+                    )));
+                }
                 evict_lfs_patch_ranges(&ranges_path);
                 return Err(error);
             }
@@ -1484,6 +1559,7 @@ fn parse_content_range(value: &str) -> Result<(u64, u64, u64), ()> {
 #[cfg(test)]
 mod tests {
     use std::{
+        fs,
         num::{NonZeroU64, NonZeroUsize},
         sync::Arc,
     };
@@ -1511,8 +1587,8 @@ mod tests {
         lfs_batch, lfs_delete_object, lfs_get_object, lfs_head_object, lfs_patch_dir,
         lfs_patch_meta_path, lfs_patch_now_seconds, lfs_patch_object, lfs_patch_ranges_compactions,
         lfs_put_object, lfs_validation_response, lfs_verify_object, live_lfs_patch_lock_count,
-        parse_content_range, patch_store_usage, record_lfs_patch_range, sweep_lfs_patch_sessions,
-        touch_patch_session,
+        lock_lfs_patch_oid, parse_content_range, patch_store_usage, record_lfs_patch_range,
+        sweep_lfs_patch_sessions, touch_patch_session,
     };
 
     /// Test signing key matching the one used in e2e tests.
@@ -1529,6 +1605,20 @@ mod tests {
 
     fn test_oid_constant() -> String {
         test_oid(b"test-lfs-object")
+    }
+
+    fn assert_lfs_patch_session_absent(dir: &std::path::Path, oid: &str, operation: &str) {
+        for path in [
+            dir.join(oid),
+            dir.join(format!("{oid}.ranges")),
+            lfs_patch_meta_path(dir, oid),
+        ] {
+            assert!(
+                !path.exists(),
+                "{operation} must consume session artifact {}",
+                path.display()
+            );
+        }
     }
 
     /// Builds a minimal [`AppState`] backed by a fresh temp directory.
@@ -2595,6 +2685,89 @@ mod tests {
         assert_eq!(second.status(), StatusCode::OK);
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_same_oid_puts_are_idempotent() {
+        let (state, _tmp) = build_test_state().await;
+        let app = lfs_router(state);
+        let content = b"concurrent-same-oid-content".to_vec();
+        let oid = test_oid(&content);
+        let barrier = Arc::new(tokio::sync::Barrier::new(16));
+        let mut uploads = Vec::new();
+
+        for _ in 0..16 {
+            let app = app.clone();
+            let content = content.clone();
+            let oid = oid.clone();
+            let barrier = barrier.clone();
+            uploads.push(tokio::spawn(async move {
+                barrier.wait().await;
+                app.oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri(format!("/v1/lfs/objects/{oid}"))
+                        .header("content-length", content.len())
+                        .body(Body::from(content))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            }));
+        }
+
+        for upload in uploads {
+            assert_eq!(upload.await.unwrap().status(), StatusCode::OK);
+        }
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/v1/lfs/objects/{oid}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let stored = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(stored.as_ref(), content.as_slice());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn put_object_rejects_content_length_mismatch_without_publishing() {
+        let (state, _tmp) = build_test_state().await;
+        let app = lfs_router(state);
+        let content = b"content-length-mismatch".to_vec();
+        let oid = test_oid(&content);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/v1/lfs/objects/{oid}"))
+                    .header("content-length", content.len() + 1)
+                    .body(Body::from(content))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("HEAD")
+                    .uri(format!("/v1/lfs/objects/{oid}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
     // =========================================================================
     // lfs_delete_object tests
     // =========================================================================
@@ -2826,6 +2999,31 @@ mod tests {
         let lock1 = acquire_lfs_patch_lock("abc123");
         let lock2 = acquire_lfs_patch_lock("def456");
         assert!(!Arc::ptr_eq(&lock1, &lock2));
+    }
+
+    #[test]
+    fn lfs_patch_oid_file_lock_excludes_independent_openers() {
+        let root = TempDir::new().unwrap();
+        let dir = lfs_patch_dir(root.path());
+        fs::create_dir_all(&dir).unwrap();
+        let first = lock_lfs_patch_oid(&dir, "abc123").unwrap();
+        let (acquired_tx, acquired_rx) = std::sync::mpsc::channel();
+        let waiter_dir = dir;
+        let waiter = std::thread::spawn(move || {
+            let _second = lock_lfs_patch_oid(&waiter_dir, "abc123").unwrap();
+            acquired_tx.send(()).unwrap();
+        });
+
+        assert!(
+            acquired_rx
+                .recv_timeout(std::time::Duration::from_millis(50))
+                .is_err()
+        );
+        drop(first);
+        acquired_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        waiter.join().unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3576,13 +3774,7 @@ mod tests {
 
         // The promotion consumed the staging files.
         let dir = lfs_patch_dir(state.config.root_dir());
-        let entries = std::fs::read_dir(&dir)
-            .map(|read| read.count())
-            .unwrap_or(0);
-        assert_eq!(
-            entries, 0,
-            "a completed promotion must not leave staging files behind"
-        );
+        assert_lfs_patch_session_absent(&dir, &oid, "a completed promotion");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3617,13 +3809,7 @@ mod tests {
         );
 
         let dir = lfs_patch_dir(state.config.root_dir());
-        let entries = std::fs::read_dir(&dir)
-            .map(|read| read.count())
-            .unwrap_or(0);
-        assert_eq!(
-            entries, 0,
-            "a failed promotion must clean its staging files"
-        );
+        assert_lfs_patch_session_absent(&dir, &oid, "a failed promotion");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3691,13 +3877,7 @@ mod tests {
             StatusCode::OK,
             "the object must be present after the re-promotion"
         );
-        let entries = std::fs::read_dir(&dir)
-            .map(|read| read.count())
-            .unwrap_or(0);
-        assert_eq!(
-            entries, 0,
-            "the re-promotion must consume the crash-left staging files"
-        );
+        assert_lfs_patch_session_absent(&dir, &oid, "the re-promotion");
     }
 
     // =========================================================================

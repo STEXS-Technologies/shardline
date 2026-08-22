@@ -3380,6 +3380,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serial_test",
+ "shardline-auth",
  "shardline-index",
  "shardline-protocol",
  "shardline-server",
@@ -3445,6 +3446,7 @@ version = "1.6.0"
 dependencies = [
  "async-trait",
  "blake3",
+ "proptest",
  "shardline-index",
  "shardline-protocol",
  "shardline-storage",
@@ -3493,6 +3495,7 @@ dependencies = [
  "shardline-gc",
  "shardline-hub-api",
  "shardline-index",
+ "shardline-oci-adapter",
  "shardline-protocol",
  "shardline-protocol-adapters",
  "shardline-rebuild",
@@ -3511,10 +3514,13 @@ dependencies = [
 name = "shardline-gc"
 version = "1.6.0"
 dependencies = [
+ "async-trait",
+ "proptest",
  "serde",
  "serde_json",
  "shardline-index",
  "shardline-metrics",
+ "shardline-oci-adapter",
  "shardline-protocol",
  "shardline-server-core",
  "shardline-storage",
@@ -3584,6 +3590,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "url",
 ]
 
 [[package]]
@@ -3666,6 +3673,7 @@ dependencies = [
  "shardline-vcs",
  "shardline-xet-adapter",
  "shardline-xet-core",
+ "sqlx",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",

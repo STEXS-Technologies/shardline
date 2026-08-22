@@ -44,6 +44,26 @@ SHARDLINE_AUTH_OIDC_ISSUER=https://accounts.google.com   # required when provide
 SHARDLINE_AUTH_JWKS_URL=https://example.com/.well-known/jwks.json  # required when provider=jwks
 ```
 
+### Clock synchronization and expiry
+
+Token expiry is evaluated against the wall clock of the process that receives the
+request. Keep every replica synchronized with a monitored NTP source and alert before
+clock error approaches the shortest token lifetime. Two replicas on opposite sides of
+an expiry boundary can otherwise make different, individually valid decisions about
+the same token.
+
+Shardline authorizes a request before its first repository operation. A request that is
+rejected as expired performs no repository read or mutation. A request authorized just
+before expiry may finish after the expiry instant; expiration does not cancel work that
+already passed authorization. Size, concurrency and request deadlines bound that
+window.
+
+The reliability campaign runs two real replicas with independent `-120s` and `+120s`
+wall-clock offsets (while leaving monotonic timers unchanged). It verifies exact
+boundary decisions, absence of rejected-write side effects, agreement for tokens
+outside the skew window, and continued cross-node reconstruction. This is adversarial
+evidence, not a substitute for production clock synchronization.
+
 ### Local HMAC
 
 The default provider.
@@ -112,10 +132,46 @@ Use `public_key_path` instead of `private_key_path` for verification-only operat
 Configure one key mode at a time.
 Verification-only mode cannot mint tokens.
 
-The `shardline admin token` command currently creates Local HMAC tokens; it does not
-create Ed25519 tokens.
-Use an issuer built against Shardline's Ed25519 token format when deploying this
-provider. This operator-tooling gap is why Ed25519 remains experimental.
+Mint an Ed25519 token with the operator CLI by selecting the provider and passing a
+private key in any supported private-key format:
+
+```bash
+shardline admin token \
+  --auth-provider ed25519 \
+  --issuer local-ed25519 \
+  --subject operator-1 \
+  --scope write \
+  --provider generic \
+  --owner team \
+  --repo assets \
+  --revision main \
+  --key-file /run/secrets/shardline-ed25519-private-key
+```
+
+The default `--auth-provider local` remains HMAC-SHA256 for backward compatibility.
+Use `--key-env` instead of `--key-file` when the private key is supplied through an
+environment variable.
+
+#### Ed25519 key rotation
+
+The current Ed25519 provider accepts exactly one verification key at a time. It does not
+yet support an overlapping old-and-new verification window. Treat that as an explicit
+operational constraint rather than assuming a rolling key change is safe:
+
+1. Reduce the token TTL far enough in advance that every token signed by the old key
+   expires before the rotation window.
+2. Stop issuing tokens with the old private key and wait through the old maximum TTL.
+3. Replace the private key on signing nodes and the corresponding public key on
+   verification-only nodes as one coordinated maintenance operation.
+4. Restart every server and mint a short-lived probe token with `shardline admin token
+   --auth-provider ed25519` before returning traffic.
+5. Verify that the new token succeeds and a token signed by the retired key fails.
+
+Do not mix old-key and new-key replicas behind one load balancer: requests would be
+accepted or rejected depending on which replica receives them. Deployments that require
+zero-downtime overlapping verification should keep Ed25519 classified as Experimental
+until multi-key verification is implemented, or use the JWKS/OIDC providers whose key
+sets have rotation support.
 
 ### OIDC
 
@@ -208,3 +264,5 @@ With the pluggable auth system:
    tooling.
 4. Restart the server. Existing HMAC, OIDC, or JWKS tokens are not accepted as Ed25519
    tokens.
+5. For later Ed25519-to-Ed25519 rotations, follow the coordinated procedure above; the
+   server does not currently accept old and new Ed25519 public keys simultaneously.

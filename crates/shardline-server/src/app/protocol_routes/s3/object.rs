@@ -481,7 +481,8 @@ fn bounded_byte_stream(
 /// which is stored in the index row and returned.
 ///
 /// When `precondition` is `Some`, the `If-Match` / `If-None-Match` headers are
-/// evaluated in TWO places under the per-key lock:
+/// evaluated before streaming and the observed row becomes the expected value
+/// of an atomic metadata compare-and-swap:
 ///
 /// 1. BEFORE the body is streamed or any record committed (F-86): the row is
 ///    only mutated by holders of this same lock (PutObject / CopyObject /
@@ -489,21 +490,15 @@ fn bounded_byte_stream(
 ///    412 with NO write side effect — the losing record is never committed,
 ///    never becomes the LATEST version, and its chunks are never written. The
 ///    handlers' early check is only a fast-path rejection.
-/// 2. AFTER the body streamed but BEFORE the index swap (the F-8 TOCTOU
-///    guarantee): belt-and-suspenders in case a future row mutation bypasses
-///    the lock. When it fires the just-committed record is the LOSER's — it is
-///    purged (version record + latest alias) so no latest-record consumer ever
-///    serves the loser's bytes and its chunks are not retained as reachable.
+/// 2. AFTER the body streamed, the replacement row is written only if the
+///    database row still exactly matches that observed value. This is the
+///    cross-replica linearization point; only one competing conditional writer
+///    can win. A loser purges its just-created record when it is still latest.
 ///
 /// The purge is F-92-guarded: it deletes the LOSER's committed version only
 /// while the latest alias still points at it (see
-/// `delete_file_reference_if_latest`). The per-key lock is an in-process
-/// HashMap, so in a multi-replica Postgres deployment it does NOT serialize
-/// conditional writers on different replicas — a replica can commit the
-/// WINNER's record and swap the row between this request's pre-check and
-/// post-check. An unconditional purge would then read the latest alias (now the
-/// winner) and delete the winner's acknowledged write; the guard turns the
-/// purge into a no-op in exactly that interleaving.
+/// `delete_file_reference_if_latest`). The process-local lock remains a useful
+/// single-node optimization, but correctness comes from the database CAS.
 async fn s3_upload_object_body(
     state: &Arc<AppState>,
     context: &S3ObjectContext<'_>,
@@ -517,28 +512,22 @@ async fn s3_upload_object_body(
     let object_lock = acquire_object_upload_lock(context.object_key.as_str());
     let _object_guard = object_lock.lock().await;
 
-    // F-86: the authoritative conditional pre-check, under the per-key lock
-    // and BEFORE the body is read or any record committed. The row is only
-    // mutated by holders of this same lock, so a check that passes here cannot
-    // be invalidated before the swap below; a failing check returns 412
-    // without committing anything (the loser's record never becomes the LATEST
-    // version and its chunks are never written). Guarded to skip the extra row
-    // read for unconditional PUTs, whose post-commit re-check below is a
-    // trivially-passing no-op.
-    //
-    // Multi-replica caveat: the per-key lock (acquire_object_upload_lock) is
-    // PROCESS-LOCAL. On two replicas sharing a Postgres index, a concurrent
-    // conditional writer on the OTHER replica holds a different lock, so BOTH
-    // can pass this pre-check and both commit — create-if-absent is not atomic
-    // across replicas (last-writer-wins; the post-commit re-check below 412s
-    // the loser). The loser's record is a non-latest orphan until the next
-    // write of the key, then GC-reclaimed; the F-92 purge below only deletes
-    // the loser's OWN version, so the winner's record survives either way.
-    if let Some(precondition) = precondition
-        && read_conditional_headers(precondition).is_some()
-    {
-        check_put_precondition(state, context, precondition).await?;
-    }
+    // Capture the exact metadata row that satisfied the condition. The later
+    // compare-and-swap rejects the write if any replica changes that row while
+    // this request streams its body.
+    let conditional_headers =
+        precondition.filter(|headers| read_conditional_headers(headers).is_some());
+    let expected_entry = if let Some(headers) = conditional_headers {
+        let existing = s3_object_entry(state, context).await?;
+        check_precondition(
+            existing.as_ref().map(|entry| entry.etag.as_str()),
+            headers,
+            &context.key,
+        )?;
+        Some(existing)
+    } else {
+        None
+    };
 
     let start = Instant::now();
     let uploaded = match state
@@ -565,25 +554,34 @@ async fn s3_upload_object_body(
     // MD5 of the object bytes — the standard S3 ETag.
     let etag = md5_hasher_hex(&hasher);
 
-    // Re-evaluate the conditional precondition NOW, under the per-key lock and
-    // after the body streamed but BEFORE the index swap: belt-and-suspenders
-    // for the F-8 check-then-act guarantee (the pre-check above is
-    // authoritative today). When it fires the just-committed record is the
-    // loser's — purge its version so no latest-record consumer serves the
-    // loser's bytes and no orphan record (or reachable chunks) remains (F-86).
-    //
-    // F-92 guard: purge the LOSER's committed version, not whatever the latest
-    // alias now points at. The per-key lock is process-local, so in a
-    // multi-replica Postgres deployment a concurrent replica may have committed
-    // the WINNER's record (and swapped the row) between the pre-check above and
-    // this post-check; `delete_file_reference_if_latest` re-reads the latest
-    // alias and only deletes while it still equals the just-committed (loser)
-    // content hash. If the latest alias has moved to the winner the purge is a
-    // no-op and the winner's acknowledged write survives; the loser's record is
-    // left as a non-latest version, which GC eventually reclaims.
-    if let Some(precondition) = precondition
-        && let Err(error) = check_put_precondition(state, context, precondition).await
-    {
+    // Swap: point the index at the new record version, then drop any stale
+    // direct object that would shadow the record (the old record version is
+    // left for GC — record stores are versioned).
+    let now = i64::try_from(shardline_protocol::unix_now_seconds_lossy())
+        .map_err(|_error| S3Error::internal())?;
+    let replacement = S3ObjectEntry {
+        scope_namespace: context.scope_namespace.clone(),
+        object_key: context.key.clone(),
+        file_id: uploaded.file_id.clone(),
+        size_bytes: uploaded.total_bytes,
+        content_hash: uploaded.content_hash.clone(),
+        etag: etag.clone(),
+        user_metadata,
+        updated_at_unix_seconds: now,
+    };
+    let swapped = if conditional_headers.is_some() {
+        state
+            .backend
+            .compare_and_swap_s3_object(
+                expected_entry.as_ref().and_then(Option::as_ref),
+                &replacement,
+            )
+            .await?
+    } else {
+        state.backend.upsert_s3_object(&replacement).await?;
+        true
+    };
+    if !swapped {
         let file_id = uploaded.file_id.clone();
         let content_hash = uploaded.content_hash.clone();
         match state
@@ -601,27 +599,8 @@ async fn s3_upload_object_body(
                 tracing::warn!(file_id, %purge_error, "failed to purge conditional-write loser record");
             }
         }
-        return Err(error);
+        return Err(S3Error::precondition_failed());
     }
-
-    // Swap: point the index at the new record version, then drop any stale
-    // direct object that would shadow the record (the old record version is
-    // left for GC — record stores are versioned).
-    let now = i64::try_from(shardline_protocol::unix_now_seconds_lossy())
-        .map_err(|_error| S3Error::internal())?;
-    state
-        .backend
-        .upsert_s3_object(&S3ObjectEntry {
-            scope_namespace: context.scope_namespace.clone(),
-            object_key: context.key.clone(),
-            file_id: uploaded.file_id.clone(),
-            size_bytes: uploaded.total_bytes,
-            content_hash: uploaded.content_hash.clone(),
-            etag: etag.clone(),
-            user_metadata,
-            updated_at_unix_seconds: now,
-        })
-        .await?;
     let _stale_direct = state
         .backend
         .delete_direct_object_if_present(&context.object_key)

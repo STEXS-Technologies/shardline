@@ -321,6 +321,7 @@ pub(super) fn map_provider_issue_error(error: ProviderServiceError) -> ServerErr
         | other @ ProviderServiceError::Io(_)
         | other @ ProviderServiceError::Json(_)
         | other @ ProviderServiceError::DuplicateProvider
+        | other @ ProviderServiceError::InvalidRepositoryVisibility
         | other @ ProviderServiceError::MissingWebhookSecret
         | other @ ProviderServiceError::EmptyWebhookSecret
         | other @ ProviderServiceError::EncryptedSecretWithoutKey

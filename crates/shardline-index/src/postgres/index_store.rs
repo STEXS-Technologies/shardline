@@ -616,12 +616,53 @@ impl AsyncIndexStore for super::PostgresIndexStore {
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                  ON CONFLICT (provider, owner, repo)
                  DO UPDATE SET
-                    last_access_changed_at_unix_seconds = EXCLUDED.last_access_changed_at_unix_seconds,
-                    last_revision_pushed_at_unix_seconds = EXCLUDED.last_revision_pushed_at_unix_seconds,
-                    last_pushed_revision = EXCLUDED.last_pushed_revision,
-                    last_cache_invalidated_at_unix_seconds = EXCLUDED.last_cache_invalidated_at_unix_seconds,
-                    last_authorization_rechecked_at_unix_seconds = EXCLUDED.last_authorization_rechecked_at_unix_seconds,
-                    last_drift_checked_at_unix_seconds = EXCLUDED.last_drift_checked_at_unix_seconds,
+                    last_access_changed_at_unix_seconds = CASE
+                        WHEN EXCLUDED.last_access_changed_at_unix_seconds IS NULL
+                            THEN shardline_provider_repository_states.last_access_changed_at_unix_seconds
+                        WHEN shardline_provider_repository_states.last_access_changed_at_unix_seconds IS NULL
+                          OR EXCLUDED.last_access_changed_at_unix_seconds >= shardline_provider_repository_states.last_access_changed_at_unix_seconds
+                            THEN EXCLUDED.last_access_changed_at_unix_seconds
+                        ELSE shardline_provider_repository_states.last_access_changed_at_unix_seconds
+                    END,
+                    last_pushed_revision = CASE
+                        WHEN EXCLUDED.last_revision_pushed_at_unix_seconds IS NOT NULL
+                         AND (shardline_provider_repository_states.last_revision_pushed_at_unix_seconds IS NULL
+                           OR EXCLUDED.last_revision_pushed_at_unix_seconds >= shardline_provider_repository_states.last_revision_pushed_at_unix_seconds)
+                            THEN EXCLUDED.last_pushed_revision
+                        ELSE shardline_provider_repository_states.last_pushed_revision
+                    END,
+                    last_revision_pushed_at_unix_seconds = CASE
+                        WHEN EXCLUDED.last_revision_pushed_at_unix_seconds IS NULL
+                            THEN shardline_provider_repository_states.last_revision_pushed_at_unix_seconds
+                        WHEN shardline_provider_repository_states.last_revision_pushed_at_unix_seconds IS NULL
+                          OR EXCLUDED.last_revision_pushed_at_unix_seconds >= shardline_provider_repository_states.last_revision_pushed_at_unix_seconds
+                            THEN EXCLUDED.last_revision_pushed_at_unix_seconds
+                        ELSE shardline_provider_repository_states.last_revision_pushed_at_unix_seconds
+                    END,
+                    last_cache_invalidated_at_unix_seconds = CASE
+                        WHEN EXCLUDED.last_cache_invalidated_at_unix_seconds IS NULL
+                            THEN shardline_provider_repository_states.last_cache_invalidated_at_unix_seconds
+                        WHEN shardline_provider_repository_states.last_cache_invalidated_at_unix_seconds IS NULL
+                          OR EXCLUDED.last_cache_invalidated_at_unix_seconds >= shardline_provider_repository_states.last_cache_invalidated_at_unix_seconds
+                            THEN EXCLUDED.last_cache_invalidated_at_unix_seconds
+                        ELSE shardline_provider_repository_states.last_cache_invalidated_at_unix_seconds
+                    END,
+                    last_authorization_rechecked_at_unix_seconds = CASE
+                        WHEN EXCLUDED.last_authorization_rechecked_at_unix_seconds IS NULL
+                            THEN shardline_provider_repository_states.last_authorization_rechecked_at_unix_seconds
+                        WHEN shardline_provider_repository_states.last_authorization_rechecked_at_unix_seconds IS NULL
+                          OR EXCLUDED.last_authorization_rechecked_at_unix_seconds >= shardline_provider_repository_states.last_authorization_rechecked_at_unix_seconds
+                            THEN EXCLUDED.last_authorization_rechecked_at_unix_seconds
+                        ELSE shardline_provider_repository_states.last_authorization_rechecked_at_unix_seconds
+                    END,
+                    last_drift_checked_at_unix_seconds = CASE
+                        WHEN EXCLUDED.last_drift_checked_at_unix_seconds IS NULL
+                            THEN shardline_provider_repository_states.last_drift_checked_at_unix_seconds
+                        WHEN shardline_provider_repository_states.last_drift_checked_at_unix_seconds IS NULL
+                          OR EXCLUDED.last_drift_checked_at_unix_seconds >= shardline_provider_repository_states.last_drift_checked_at_unix_seconds
+                            THEN EXCLUDED.last_drift_checked_at_unix_seconds
+                        ELSE shardline_provider_repository_states.last_drift_checked_at_unix_seconds
+                    END,
                     updated_at = now()",
             )
             .bind(state.provider().as_str())
@@ -707,8 +748,15 @@ impl UploadIntentStore for super::PostgresIndexStore {
     type Error = PostgresMetadataStoreError;
 
     async fn create_intent(&self, intent: &UploadIntent) -> Result<(), Self::Error> {
-        sqlx::query(
-            "INSERT INTO shardline_upload_intents (intent_id, object_key, object_hash, object_length, state, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, now(), now()) ON CONFLICT (intent_id) DO NOTHING"
+        let result = sqlx::query(
+            "INSERT INTO shardline_upload_intents (
+                intent_id, object_key, object_hash, object_length, state, created_at, updated_at
+             )
+             VALUES ($1, $2, $3, $4, $5, now(), now())
+             ON CONFLICT (intent_id) DO UPDATE SET intent_id = EXCLUDED.intent_id
+             WHERE shardline_upload_intents.object_key = EXCLUDED.object_key
+               AND shardline_upload_intents.object_hash = EXCLUDED.object_hash
+               AND shardline_upload_intents.object_length = EXCLUDED.object_length",
         )
         .bind(intent.intent_id())
         .bind(intent.object_key())
@@ -717,6 +765,9 @@ impl UploadIntentStore for super::PostgresIndexStore {
         .bind(intent.state().as_str())
         .execute(&self.pool)
         .await?;
+        if result.rows_affected() == 0 {
+            return Err(crate::UploadIntentConflictError::new(intent.intent_id()).into());
+        }
         Ok(())
     }
 
@@ -1013,10 +1064,127 @@ mod tests {
         clippy::shadow_unrelated,
         clippy::let_underscore_must_use
     )]
-    use shardline_protocol::{ChunkRange, HashParseError, ShardlineHash};
+    use std::{
+        io::{Read, Write},
+        net::{Shutdown, TcpListener, TcpStream},
+        str::FromStr,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+        thread::{self, JoinHandle},
+        time::Duration,
+    };
+
+    use shardline_protocol::{ChunkRange, HashParseError, RepositoryProvider, ShardlineHash};
+    use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode};
 
     use super::{PostgresFileReconstructionRecord, PostgresReconstructionTermRecord};
-    use crate::{FileReconstruction, ReconstructionTerm, StoredObjectId};
+    use crate::{
+        AsyncIndexStore, FileReconstruction, ProviderRepositoryState, ReconstructionTerm,
+        StoredObjectId,
+    };
+
+    struct CommitResponseLossProxy {
+        port: u16,
+        response_dropped: Arc<AtomicBool>,
+        thread: Option<JoinHandle<()>>,
+    }
+
+    impl CommitResponseLossProxy {
+        fn start(upstream: String) -> std::io::Result<Self> {
+            let listener = TcpListener::bind("127.0.0.1:0")?;
+            let port = listener.local_addr()?.port();
+            let response_dropped = Arc::new(AtomicBool::new(false));
+            let worker_response_dropped = Arc::clone(&response_dropped);
+            let thread = thread::spawn(move || {
+                let Ok((mut client, _address)) = listener.accept() else {
+                    return;
+                };
+                let Ok(mut provider) = TcpStream::connect(upstream) else {
+                    return;
+                };
+                let Ok(mut client_requests) = client.try_clone() else {
+                    return;
+                };
+                let Ok(mut provider_requests) = provider.try_clone() else {
+                    return;
+                };
+                let request_thread = thread::spawn(move || {
+                    std::io::copy(&mut client_requests, &mut provider_requests).ok();
+                });
+                forward_postgres_responses(&mut provider, &mut client, &worker_response_dropped)
+                    .ok();
+                client.shutdown(Shutdown::Both).ok();
+                provider.shutdown(Shutdown::Both).ok();
+                request_thread.join().ok();
+            });
+            Ok(Self {
+                port,
+                response_dropped,
+                thread: Some(thread),
+            })
+        }
+
+        const fn port(&self) -> u16 {
+            self.port
+        }
+
+        fn response_was_dropped(&self) -> bool {
+            self.response_dropped.load(Ordering::Acquire)
+        }
+    }
+
+    impl Drop for CommitResponseLossProxy {
+        fn drop(&mut self) {
+            if let Some(thread) = self.thread.take() {
+                thread.join().unwrap();
+            }
+        }
+    }
+
+    fn forward_postgres_responses(
+        provider: &mut TcpStream,
+        client: &mut TcpStream,
+        response_dropped: &AtomicBool,
+    ) -> std::io::Result<()> {
+        const MAX_BACKEND_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
+        loop {
+            let mut message_type = [0_u8; 1];
+            match provider.read_exact(&mut message_type) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(()),
+                Err(error) => return Err(error),
+            }
+            let mut encoded_length = [0_u8; 4];
+            provider.read_exact(&mut encoded_length)?;
+            let encoded_length = u32::from_be_bytes(encoded_length);
+            let payload_length = encoded_length.checked_sub(4).ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "invalid PostgreSQL backend message length",
+                )
+            })?;
+            let payload_length = usize::try_from(payload_length)
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+            if payload_length > MAX_BACKEND_MESSAGE_BYTES {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "PostgreSQL backend message exceeds proxy limit",
+                ));
+            }
+            let mut payload = vec![0_u8; payload_length];
+            provider.read_exact(&mut payload)?;
+            if message_type == *b"C" && payload == b"COMMIT\0" {
+                response_dropped.store(true, Ordering::Release);
+                client.shutdown(Shutdown::Both)?;
+                return Ok(());
+            }
+            client.write_all(&message_type)?;
+            client.write_all(&encoded_length.to_be_bytes())?;
+            client.write_all(&payload)?;
+        }
+    }
 
     // ------------------------------------------------------------------
     // PostgresReconstructionTermRecord: private type, tested in-module
@@ -1144,8 +1312,80 @@ mod tests {
         sqlx::PgPool::connect(&url).await.ok()
     }
 
+    fn postgres_upstream(database_url: &str) -> Option<String> {
+        let parsed = url::Url::parse(database_url).ok()?;
+        let host = parsed.host_str()?;
+        let port = parsed.port().unwrap_or(5432);
+        Some(format!("{host}:{port}"))
+    }
+
     fn make_pg_store(pool: sqlx::PgPool) -> crate::PostgresIndexStore {
         crate::PostgresIndexStore::new(pool)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pg_provider_repository_state_concurrent_partial_updates_are_merged() {
+        let Some(pool) = connect_postgres().await else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        sqlx::query(
+            "DELETE FROM shardline_provider_repository_states
+             WHERE provider = $1 AND owner = $2 AND repo = $3",
+        )
+        .bind(RepositoryProvider::GitHub.as_str())
+        .bind("concurrent-team")
+        .bind("concurrent-state")
+        .execute(&pool)
+        .await
+        .expect("clean provider state fixture");
+
+        let access_store = make_pg_store(pool.clone());
+        let revision_store = make_pg_store(pool);
+        let access = ProviderRepositoryState::new(
+            RepositoryProvider::GitHub,
+            "concurrent-team".into(),
+            "concurrent-state".into(),
+            Some(150),
+            None,
+            None,
+        )
+        .with_reconciliation(Some(170), None, Some(190));
+        let revision = ProviderRepositoryState::new(
+            RepositoryProvider::GitHub,
+            "concurrent-team".into(),
+            "concurrent-state".into(),
+            None,
+            Some(200),
+            Some("refs/heads/main".into()),
+        )
+        .with_reconciliation(None, Some(180), None);
+
+        let (access_result, revision_result) = tokio::join!(
+            access_store.upsert_provider_repository_state(&access),
+            revision_store.upsert_provider_repository_state(&revision),
+        );
+        access_result.expect("access state upsert");
+        revision_result.expect("revision state upsert");
+
+        let loaded = access_store
+            .provider_repository_state(
+                RepositoryProvider::GitHub,
+                "concurrent-team",
+                "concurrent-state",
+            )
+            .await
+            .expect("load merged provider state")
+            .expect("merged provider state");
+        assert_eq!(loaded.last_access_changed_at_unix_seconds(), Some(150));
+        assert_eq!(loaded.last_revision_pushed_at_unix_seconds(), Some(200));
+        assert_eq!(loaded.last_pushed_revision(), Some("refs/heads/main"));
+        assert_eq!(loaded.last_cache_invalidated_at_unix_seconds(), Some(170));
+        assert_eq!(
+            loaded.last_authorization_rechecked_at_unix_seconds(),
+            Some(180)
+        );
+        assert_eq!(loaded.last_drift_checked_at_unix_seconds(), Some(190));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1191,6 +1431,223 @@ mod tests {
             .create_intent(&intent)
             .await
             .expect("second create (idempotent)");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pg_upload_intent_recovers_when_commit_response_is_lost() {
+        let Ok(database_url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let Some(direct_pool) = connect_postgres().await else {
+            eprintln!("skipping: cannot connect to DATABASE_URL");
+            return;
+        };
+        let intent = UploadIntent::new(
+            "test-intent-lost-commit-response".into(),
+            "test/lost-commit-response".into(),
+            "9a".repeat(32),
+            4096,
+        );
+        sqlx::query("DELETE FROM shardline_upload_intents WHERE intent_id = $1")
+            .bind(intent.intent_id())
+            .execute(&direct_pool)
+            .await
+            .expect("clean commit-response-loss fixture");
+
+        let upstream = postgres_upstream(&database_url).expect("Postgres upstream address");
+        let proxy = CommitResponseLossProxy::start(upstream).expect("start Postgres fault proxy");
+        let connect_options = PgConnectOptions::from_str(&database_url)
+            .expect("parse DATABASE_URL")
+            .host("127.0.0.1")
+            .port(proxy.port())
+            .ssl_mode(PgSslMode::Disable);
+        let proxy_pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect_with(connect_options)
+            .await
+            .expect("connect through Postgres fault proxy");
+        let mut transaction = proxy_pool.begin().await.expect("begin transaction");
+        sqlx::query(
+            "INSERT INTO shardline_upload_intents (
+                intent_id, object_key, object_hash, object_length, state, created_at, updated_at
+             ) VALUES ($1, $2, $3, $4, $5, now(), now())",
+        )
+        .bind(intent.intent_id())
+        .bind(intent.object_key())
+        .bind(intent.object_hash())
+        .bind(intent.object_length() as i64)
+        .bind(intent.state().as_str())
+        .execute(&mut *transaction)
+        .await
+        .expect("insert upload intent before ambiguous COMMIT");
+
+        let commit = transaction.commit().await;
+        assert!(
+            proxy.response_was_dropped(),
+            "proxy must observe PostgreSQL commit before dropping its completion message"
+        );
+        assert!(
+            commit.is_err(),
+            "client must see an ambiguous outcome when COMMIT completion is lost"
+        );
+        proxy_pool.close().await;
+
+        let store = make_pg_store(direct_pool.clone());
+        store
+            .create_intent(&intent)
+            .await
+            .expect("idempotent retry after ambiguous COMMIT");
+        let loaded = store
+            .intent_by_id(intent.intent_id())
+            .await
+            .expect("read durable intent after ambiguous COMMIT")
+            .expect("committed intent exists");
+        assert_eq!(loaded.object_key(), intent.object_key());
+        assert_eq!(loaded.object_hash(), intent.object_hash());
+        assert_eq!(loaded.object_length(), intent.object_length());
+        assert_eq!(loaded.state(), UploadIntentState::Created);
+
+        sqlx::query("DELETE FROM shardline_upload_intents WHERE intent_id = $1")
+            .bind(intent.intent_id())
+            .execute(&direct_pool)
+            .await
+            .expect("clean commit-response-loss fixture");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pg_upload_intent_pool_exhaustion_is_bounded_and_recovers() {
+        let Ok(database_url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(Duration::from_millis(100))
+            .connect(&database_url)
+            .await
+            .expect("connect bounded Postgres pool");
+        let held_connection = pool.acquire().await.expect("hold only pool connection");
+        let exhausted = pool.acquire().await;
+        assert!(
+            matches!(exhausted, Err(sqlx::Error::PoolTimedOut)),
+            "exhausted pool must fail within its configured bound: {exhausted:?}"
+        );
+        drop(held_connection);
+        let recovered = pool.acquire().await;
+        assert!(
+            recovered.is_ok(),
+            "pool must recover after capacity is released: {recovered:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pg_upload_intent_statement_timeout_is_retryable_after_lock_release() {
+        let Ok(database_url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .after_connect(|connection, _metadata| {
+                Box::pin(async move {
+                    sqlx::query("SET statement_timeout = '100ms'")
+                        .execute(connection)
+                        .await?;
+                    Ok(())
+                })
+            })
+            .connect(&database_url)
+            .await
+            .expect("connect statement-timeout Postgres pool");
+        let store = make_pg_store(pool.clone());
+        let intent = UploadIntent::new(
+            "test-intent-statement-timeout".into(),
+            "test/statement-timeout".into(),
+            "7b".repeat(32),
+            2048,
+        );
+        sqlx::query("DELETE FROM shardline_upload_intents WHERE intent_id = $1")
+            .bind(intent.intent_id())
+            .execute(&pool)
+            .await
+            .expect("clean statement-timeout fixture");
+        store
+            .create_intent(&intent)
+            .await
+            .expect("create statement-timeout fixture");
+
+        let mut lock_transaction = pool.begin().await.expect("begin row-lock transaction");
+        sqlx::query(
+            "SELECT intent_id FROM shardline_upload_intents WHERE intent_id = $1 FOR UPDATE",
+        )
+        .bind(intent.intent_id())
+        .fetch_one(&mut *lock_transaction)
+        .await
+        .expect("lock upload-intent row");
+        let timed_out = store
+            .transition_intent(intent.intent_id(), UploadIntentState::Storing)
+            .await;
+        assert!(
+            matches!(timed_out, Err(super::PostgresMetadataStoreError::Sqlx(_))),
+            "blocked transition must surface the statement timeout: {timed_out:?}"
+        );
+        lock_transaction
+            .rollback()
+            .await
+            .expect("release upload-intent row lock");
+
+        assert!(
+            store
+                .transition_intent(intent.intent_id(), UploadIntentState::Storing)
+                .await
+                .expect("retry transition after lock release"),
+            "retry must advance the intent after the transient lock clears"
+        );
+        let loaded = store
+            .intent_by_id(intent.intent_id())
+            .await
+            .expect("load transitioned upload intent")
+            .expect("transitioned upload intent exists");
+        assert_eq!(loaded.state(), UploadIntentState::Storing);
+
+        sqlx::query("DELETE FROM shardline_upload_intents WHERE intent_id = $1")
+            .bind(intent.intent_id())
+            .execute(&pool)
+            .await
+            .expect("clean statement-timeout fixture");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pg_upload_intent_rejects_id_reuse_for_different_object() {
+        let Some(pool) = connect_postgres().await else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        sqlx::query("DELETE FROM shardline_upload_intents WHERE intent_id = $1")
+            .bind("test-intent-conflict")
+            .execute(&pool)
+            .await
+            .expect("clean leftover intent");
+        let store = make_pg_store(pool);
+        let original = UploadIntent::new(
+            "test-intent-conflict".into(),
+            "test/original".into(),
+            "ab".repeat(32),
+            64,
+        );
+        let conflicting = UploadIntent::new(
+            "test-intent-conflict".into(),
+            "test/conflicting".into(),
+            "cd".repeat(32),
+            128,
+        );
+        store.create_intent(&original).await.unwrap();
+        store.create_intent(&original).await.unwrap();
+        assert!(matches!(
+            store.create_intent(&conflicting).await,
+            Err(super::PostgresMetadataStoreError::UploadIntentConflict(_))
+        ));
     }
 
     #[tokio::test(flavor = "multi_thread")]
