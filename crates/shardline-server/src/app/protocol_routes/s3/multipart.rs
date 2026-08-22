@@ -258,7 +258,7 @@ pub(super) async fn s3_upload_part(
     // tenants' session operations are never blocked on this body (F-10).
     let part_lock = acquire_session_part_lock(upload_id);
     let _part_guard = part_lock.lock().await;
-    let _part_file_guard = lock_session_parts(root, upload_id).await?;
+    let part_file_guard = lock_session_parts(root, upload_id).await?;
     drop(_session_lock);
 
     // Stream the body to the part file (overwrite semantics). A mid-stream
@@ -300,6 +300,11 @@ pub(super) async fn s3_upload_part(
     // accounting back under the global lock. The quotas (and the global
     // active-part-file cap) are re-checked against the actually-streamed size
     // here; a rejection must not leave an orphaned part file behind.
+    // Release BOTH layers of the per-session lock before waiting for the
+    // global lock. Keeping the cross-process file lock here lets a sweep take
+    // the global lock and then wait for this file lock while this request
+    // waits for the global lock: a lock-order cycle within one process.
+    drop(part_file_guard);
     drop(_part_guard);
     let _global_lock = lock_upload_sessions(root).await?;
     if let Err(error) = store_part_locked(
@@ -405,7 +410,7 @@ pub(super) async fn s3_complete_multipart_upload(
     // ingest below cannot race a part write or a directory delete (F-10).
     let part_lock = acquire_session_part_lock(upload_id);
     let _part_guard = part_lock.lock().await;
-    let _part_file_guard = lock_session_parts(root, upload_id).await?;
+    let part_file_guard = lock_session_parts(root, upload_id).await?;
     drop(_session_lock);
 
     // Build one continuous stream from the part files, in order.
@@ -443,6 +448,9 @@ pub(super) async fn s3_complete_multipart_upload(
     // The ingest is done; release the per-session lock (never await the
     // global lock while holding it) and consume the session under the global
     // lock.
+    // The sweep's order is global -> process-local part -> part file. Release
+    // both per-session layers before reacquiring global to preserve that order.
+    drop(part_file_guard);
     drop(_part_guard);
     let _global_lock = lock_upload_sessions(root).await?;
 
