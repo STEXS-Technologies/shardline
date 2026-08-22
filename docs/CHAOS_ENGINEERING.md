@@ -41,8 +41,8 @@ Status meanings:
 
 | Layer | Status | Current evidence | Remaining trust work |
 | --- | --- | --- | --- |
-| Process | Covered | `chaos_runner`, `fault_drills`, `fault_drills_extreme` kill in-flight servers and run repeated restart cycles | Add named failpoints at every internal persistence boundary so timing does not depend on external observation |
-| Filesystem | Partial | Anchored-path race tests, atomic temp publication, parent-swap fuzzing, read-only/permission failures, durable file and directory `fsync` | Inject ENOSPC, EIO, partial write and `fsync` failure with a faulting filesystem in CI |
+| Process | Covered | `chaos_runner`, `fault_drills`, `fault_drills_extreme` kill in-flight servers and run repeated restart cycles | Extend typed failpoints beyond local object publication to metadata commit/index publication boundaries |
+| Filesystem | Partial | Anchored-path race tests, atomic temp publication, parent-swap fuzzing, read-only/permission failures, durable file and directory `fsync`, and typed failpoints before temp write/after temp durability/after install/after directory durability | Inject ENOSPC, EIO, partial write and real `fsync` failure with a faulting filesystem in CI |
 | Object storage | Partial | `deployment_chaos` kills and partitions MinIO during writes; S3 retry, multipart and integrity tests cover normal failures | Inject a successful remote PUT/DELETE followed by a lost response, slow bodies, stale responses and provider-specific 5xx behavior |
 | Database | Partial | Postgres kill/restart, mid-transaction loss, stale fencing, serialization/deadlock behavior and atomic migrations are exercised | Add primary failover, response loss after COMMIT, statement timeout and pool-exhaustion campaigns |
 | Network | Partial | API/transfer and MinIO/Postgres partitions, connection stalls and reconnect recovery | Add packet duplication/reordering and asymmetric long-lived cluster partitions |
@@ -61,8 +61,9 @@ silently relabeled Stable based only on line coverage.
 
 ## Required failure-boundary model
 
-The target state is an explicit, typed boundary enum shared by production instrumentation
-and tests. At minimum it must distinguish:
+`LocalPublishBoundary` is the first explicit typed boundary enum shared by production code
+and deterministic tests. It covers the local object publication transitions. The target is
+to extend the same pattern through the complete write path so it distinguishes:
 
 ```text
 validated
