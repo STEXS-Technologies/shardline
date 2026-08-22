@@ -76,7 +76,7 @@ compatibility documentation. They must not be silently omitted.
 
 | Surface | Current tier | Principal evidence still required |
 | --- | --- | --- |
-| Git LFS | Beta | retry/resume, parallel mixed outcomes, platform client matrix, multi-writer evidence |
+| Git LFS | Beta | platform client matrix and multi-writer evidence; retry/resume, mixed parallel operations, same-OID concurrency, and length/digest failures have checked-in coverage |
 | Bazel HTTP cache | Beta | client-version matrix and multi-replica evidence; same-digest concurrency, AC/CAS isolation, interrupted PUT, and large objects have checked-in coverage |
 | S3 frontend | Stable in compatibility docs; Beta in protocol docs | reconcile the claim after the distributed conditional-write contract and evidence are complete |
 | Hugging Face Hub API | Beta | broader client matrix, revision races, delete/push races, and complete tenant-bound authorization audit |
