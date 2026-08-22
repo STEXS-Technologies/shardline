@@ -41,7 +41,7 @@ Status meanings:
 
 | Layer | Status | Current evidence | Remaining trust work |
 | --- | --- | --- | --- |
-| Process | Covered | `chaos_runner`, `fault_drills`, `fault_drills_extreme` kill in-flight servers and run repeated restart cycles | Extend typed failpoints beyond local object publication to metadata commit/index publication boundaries |
+| Process | Covered | `chaos_runner`, `fault_drills`, `fault_drills_extreme` kill in-flight servers and run repeated restart cycles; typed CAS failpoints interrupt intent creation, storing, successful object work, stored, metadata-committed and visible boundaries, while a proptest requires every interrupted state to converge to `Visible` on retry | Extend the typed boundary vocabulary whenever a new durable state machine is introduced |
 | Filesystem | Covered | Anchored-path race tests, atomic temp publication, parent-swap fuzzing, read-only/permission failures and durable file/directory `fsync`; typed test-only I/O faults inject `ENOSPC`, `EIO`, prefix-only writes and sync failure at seven explicit publication boundaries, while proptests and `shardline_local_publication_faults` require complete-old or complete-new visibility | Kernel/FUSE fault mounts remain useful supplemental platform evidence, not the only regression oracle |
 | Object storage | Covered | `deployment_chaos` kills and partitions MinIO during writes; a typed one-shot HTTP proxy proves exact-byte behavior for accepted PUT response loss, a retryable provider `503`, delayed successful range bodies and a stale-but-well-formed xorb response against real MinIO; the stale response is driven through the Xet HTTP frontend and rejected by end-to-end CAS validation before transfer bytes are exposed; multipart/integrity tests and OCI tombstone DELETE replay cover the other normal and ambiguous paths | Extend the provider/version matrix as external deployments contribute evidence |
 | Database | Partial | Postgres kill/restart, mid-transaction loss, stale fencing, serialization/deadlock behavior and atomic migrations are exercised; a protocol-aware TCP proxy drops `CommandComplete(COMMIT)` only after PostgreSQL commits and proves idempotent recovery; lock-induced statement timeout and bounded pool exhaustion both prove recovery after the transient condition clears | Add a real primary/standby promotion campaign |
@@ -61,10 +61,10 @@ silently relabeled Stable based only on line coverage.
 
 ## Required failure-boundary model
 
-`LocalPublishBoundary` and `LocalPublishFault` are the first explicit typed fault vocabulary
-shared by production code and deterministic tests. They cover local write, file-sync,
-installation and directory-sync transitions without string matching. The target is to extend
-the same pattern through the complete write path so it distinguishes:
+`LocalPublishBoundary`, `LocalPublishFault` and `UploadLifecycleBoundary` are the explicit
+typed fault vocabulary shared by production code and deterministic tests. They cover local
+write, file-sync, installation, directory-sync, durable intent, object-work, metadata-commit
+and visibility transitions without string matching. The complete write path now distinguishes:
 
 ```text
 validated
