@@ -43,7 +43,7 @@ Status meanings:
 | --- | --- | --- | --- |
 | Process | Covered | `chaos_runner`, `fault_drills`, `fault_drills_extreme` kill in-flight servers and run repeated restart cycles | Extend typed failpoints beyond local object publication to metadata commit/index publication boundaries |
 | Filesystem | Partial | Anchored-path race tests, atomic temp publication, parent-swap fuzzing, read-only/permission failures, durable file and directory `fsync`, and typed failpoints before temp write/after temp durability/after install/after directory durability | Inject ENOSPC, EIO, partial write and real `fsync` failure with a faulting filesystem in CI |
-| Object storage | Partial | `deployment_chaos` kills and partitions MinIO during writes; S3 retry, multipart and integrity tests cover normal failures | Inject a successful remote PUT/DELETE followed by a lost response, slow bodies, stale responses and provider-specific 5xx behavior |
+| Object storage | Partial | `deployment_chaos` kills and partitions MinIO during writes; S3 retry, multipart and integrity tests cover normal failures; OCI tombstone regression tests replay a successful physical DELETE whose acknowledgement was lost before metadata cleanup | Inject a successful remote PUT followed by a lost response, slow bodies, stale responses and provider-specific 5xx behavior |
 | Database | Partial | Postgres kill/restart, mid-transaction loss, stale fencing, serialization/deadlock behavior and atomic migrations are exercised | Add primary failover, response loss after COMMIT, statement timeout and pool-exhaustion campaigns |
 | Network | Partial | API/transfer and MinIO/Postgres partitions, connection stalls and reconnect recovery | Add packet duplication/reordering and asymmetric long-lived cluster partitions |
 | Cluster | Covered | `multinode_chaos` kills either role, partitions split roles and replaces roles during traffic | True N-1/N mixed-binary tests remain upgrade evidence, not basic cluster-failure evidence |
@@ -54,7 +54,7 @@ Status meanings:
 | Upgrade | Partial | Same-binary role replacement, migration up/down checks and documented rolling procedure | Run actual N-1 and N binaries together, test rollback limits, and kill during every migration boundary |
 | Operator actions | Partial | Repeated restart, destructive restore rehearsal, repair/fsck/rebuild dry runs and malformed configuration tests | Add interrupted repair/migration resume campaigns and operator-command idempotency transcripts |
 | Security | Partial | Cross-tenant route matrices, capability binding, provider revocation/visibility and webhook replay tests | Race authorization/revocation against every active write/read frontend and measure existence/timing leakage |
-| Long soak | Open | Bounded concurrency and repeated-kill tests run in CI | Add scheduled multi-hour restart/partition/resource-pressure campaigns with leak and invariant counters |
+| Long soak | Partial | A weekly two-hour deterministic chaos campaign archives every seed transcript, elapsed time, peak RSS and invariant result | Extend the scheduled campaign to deployment partitions and explicit resource pressure; add task/FD leak counters |
 
 “Partial” and “Open” rows are release-plan work. They must not be described as proven or
 silently relabeled Stable based only on line coverage.
@@ -89,7 +89,7 @@ boundary, node and fencing epoch needed for replay.
 Run the fast deterministic schedule:
 
 ```bash
-SHARDLINE_CHAOS_SCALE=1 SHARDLINE_CHAOS_SEED=0x913ad74c \
+SHARDLINE_CHAOS_SCALE=1 SHARDLINE_CHAOS_SEED=2436552524 \
   cargo test -p shardline-server --test chaos_runner -- --nocapture
 ```
 
@@ -109,6 +109,14 @@ Deployment drills require the Docker fault stack described by the test and CI wo
 
 ```bash
 cargo test -p shardline-server --test deployment_chaos -- --nocapture
+```
+
+Run a bounded local soak (the scheduled workflow uses 7200 seconds):
+
+```bash
+SHARDLINE_SOAK_DURATION_SECONDS=600 \
+SHARDLINE_SOAK_INITIAL_SEED=2436552524 \
+  scripts/reliability-soak.sh reliability-soak-results
 ```
 
 ## Evidence accounting
