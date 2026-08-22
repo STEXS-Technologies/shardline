@@ -308,6 +308,8 @@ pub trait UploadIntentStore: Send + Sync {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
 
     const ALL_STATES: &[UploadIntentState] = &[
@@ -318,6 +320,61 @@ mod tests {
         UploadIntentState::Visible,
         UploadIntentState::Failed,
     ];
+
+    fn state_rank(state: UploadIntentState) -> u8 {
+        match state {
+            UploadIntentState::Created => 0,
+            UploadIntentState::Storing => 1,
+            UploadIntentState::Stored => 2,
+            UploadIntentState::MetadataCommitted => 3,
+            UploadIntentState::Visible => 4,
+            UploadIntentState::Failed => 5,
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn accepted_transition_sequences_are_monotonic_and_terminal(
+            choices in proptest::collection::vec(0_usize..ALL_STATES.len(), 0..256),
+        ) {
+            let mut current = UploadIntentState::Created;
+            for choice in choices {
+                let next = ALL_STATES
+                    .get(choice)
+                    .copied()
+                    .unwrap_or(UploadIntentState::Created);
+                if current.can_transition_to(next) {
+                    let previous = current;
+                    current = next;
+                    prop_assert!(state_rank(current) >= state_rank(previous));
+                    if current != UploadIntentState::Failed {
+                        prop_assert!(
+                            state_rank(current)
+                                .checked_sub(state_rank(previous))
+                                .is_some_and(|difference| difference <= 1)
+                        );
+                    }
+                }
+
+                if matches!(current, UploadIntentState::Visible | UploadIntentState::Failed) {
+                    prop_assert!(current.can_transition_to(current));
+                    for candidate in ALL_STATES {
+                        prop_assert_eq!(
+                            current.can_transition_to(*candidate),
+                            *candidate == current
+                        );
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn arbitrary_persisted_state_text_is_canonical_when_accepted(value in ".{0,128}") {
+            if let Some(state) = UploadIntentState::parse(&value) {
+                prop_assert_eq!(state.as_str(), value);
+            }
+        }
+    }
 
     #[test]
     fn state_as_str_and_parse_round_trip_all_variants() {
