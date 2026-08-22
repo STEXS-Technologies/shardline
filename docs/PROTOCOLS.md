@@ -105,7 +105,9 @@ OCI manifest and blob bytes are immutable by digest. Mutable tag pointers are
 linearized in the metadata database, so replicas share one authoritative value and a
 manifest deletion only removes a tag if it still points to that manifest. On first
 access after upgrading, legacy object-store-only tag pointers are imported with
-create-if-absent semantics.
+create-if-absent semantics. Manifest creation and manifest/blob deletion are serialized
+per repository, preventing a tag or manifest from committing against a concurrently
+deleted dependency.
 
 Incomplete OCI upload sessions use the same shared API staging root and a
 cross-process session lock. Completed blobs remain authoritative in the configured

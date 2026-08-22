@@ -154,6 +154,17 @@ async fn oci_delete_blob(
     digest_hex: &str,
 ) -> Result<Response, ServerError> {
     let repository = repo.repository();
+    let _repository_guard = state
+        .backend
+        .acquire_resource_write_lock(
+            state.config.root_dir(),
+            "oci-repository",
+            &format!(
+                "{}:{repository}",
+                crate::protocol_support::scope_namespace(repo.capability().namespace())
+            ),
+        )
+        .await?;
     let object_key = oci_blob_key(repository, digest_hex, repo.capability())?;
 
     // Check if any manifest references this blob by walking every page of
