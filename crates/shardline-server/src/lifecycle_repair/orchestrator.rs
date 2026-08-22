@@ -11,7 +11,7 @@ use crate::{
     clock::unix_now_seconds_checked,
     object_store::{ServerObjectStore, object_store_from_config},
     overflow::checked_increment,
-    postgres_backend::connect_postgres_metadata_pool,
+    postgres_backend::{connect_postgres_metadata_pool, postgres_unix_now_seconds},
     record_store::LocalRecordStore,
 };
 
@@ -40,13 +40,15 @@ pub async fn run_lifecycle_repair(
     if let Some(index_postgres_url) = config.index_postgres_url() {
         let pool = connect_postgres_metadata_pool(index_postgres_url, 4)?;
         let index_store = PostgresIndexStore::new(pool.clone());
-        let record_store = PostgresRecordStore::new(pool);
-        return run_lifecycle_repair_with_stores(
+        let record_store = PostgresRecordStore::new(pool.clone());
+        let now_unix_seconds = postgres_unix_now_seconds(&pool).await?;
+        return run_lifecycle_repair_with_stores_at_time(
             &record_store,
             &index_store,
             &object_store,
             config.server_frontends(),
             options,
+            now_unix_seconds,
         )
         .await;
     }
