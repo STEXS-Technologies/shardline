@@ -185,9 +185,9 @@ pub use config::{
     ShardMetadataLimits, file::load_toml_config, load_server_config_from_env_with_toml,
 };
 pub use database_migration::{
-    DatabaseMigration, DatabaseMigrationCommand, DatabaseMigrationError, DatabaseMigrationOptions,
-    DatabaseMigrationReport, DatabaseMigrationStatusEntry, apply_database_migrations,
-    bundled_database_migrations, run_database_migration,
+    DatabaseMigration, DatabaseMigrationBoundary, DatabaseMigrationCommand, DatabaseMigrationError,
+    DatabaseMigrationOptions, DatabaseMigrationReport, DatabaseMigrationStatusEntry,
+    apply_database_migrations, bundled_database_migrations, run_database_migration,
 };
 #[cfg(feature = "fuzzing")]
 pub(crate) use error::InvalidReconstructionResponseError;
