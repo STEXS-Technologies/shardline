@@ -97,7 +97,7 @@ shardline admin token
 | --- | --- |
 | **Local** | Single-node with local filesystem storage — `docker compose up` |
 | **Production small** | Single process with S3 + Postgres |
-| **Production scaled** | Split `api` and `transfer` roles with shared storage |
+| **Production scaled** | Split `api` and `transfer` roles with shared Postgres/S3 plus lock-coherent RWX staging |
 
 All profiles run providerless by default.
 Provider integration is optional.
@@ -115,7 +115,7 @@ Provider integration is optional.
 | [CLI Reference](docs/CLI.md) | All commands and flags |
 | [Compatibility Status](docs/COMPATIBILITY_STATUS.md) | Surface maturity tiers and validated route coverage |
 | [Architecture](docs/ARCHITECTURE.md) | System design and runtime shape |
-| [Distributed Correctness](docs/DISTRIBUTED_CORRECTNESS.md) | Multi-writer contracts, lock ordering, and remaining fencing boundary |
+| [Distributed Correctness](docs/DISTRIBUTED_CORRECTNESS.md) | Multi-writer contracts, lock ordering, fencing epochs, and supported deployment boundaries |
 | [Provider Setup](docs/PROVIDER_QUICKSTART.md) | GitHub/GitLab/Gitea/Codeberg integration |
 | [Client Configuration](docs/CLIENT_CONFIGURATION.md) | Configure git, LFS, and Xet clients |
 | [Protocols](docs/PROTOCOLS.md) | Supported protocol frontends |
