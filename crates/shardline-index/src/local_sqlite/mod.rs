@@ -3,6 +3,7 @@ mod error;
 mod helpers;
 mod index_store;
 mod migration;
+mod oci_objects;
 mod oci_tags;
 mod record_store;
 mod records;

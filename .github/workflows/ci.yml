@@ -64,6 +64,7 @@ jobs:
           cargo test -p shardline-index -- pg_upload_intent 2>&1
           cargo test -p shardline-index -- pg_s3_object 2>&1
           cargo test -p shardline-index -- pg_oci_tag 2>&1
+          cargo test -p shardline-index -- pg_manifest_tombstone 2>&1
           cargo test -p shardline-index -- pg_provider_repository_state 2>&1
           cargo test -p shardline-index -- pg_provider_mutation 2>&1
           cargo test -p shardline-provider-events --test provider_events_integration -- postgres_ 2>&1

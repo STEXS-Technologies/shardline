@@ -18,9 +18,7 @@ use crate::{
 };
 
 use super::super::{AppState, parse_query_map};
-use super::helpers::{
-    OciRepository, oci_tag_key, oci_tag_prefix, oci_tag_target_key, oci_tag_target_prefix,
-};
+use super::helpers::{OciRepository, oci_manifest_index_key, oci_tag_key, oci_tag_prefix};
 
 struct OciTagListPage {
     tags: Vec<String>,
@@ -110,68 +108,25 @@ pub(crate) async fn update_oci_tags(
     tags: &[String],
     digest_hex: &str,
 ) -> Result<(), ServerError> {
-    let digest_bytes = digest_hex.as_bytes().to_vec();
     let scope_namespace = scope_namespace(auth.namespace());
+    let mut entries = Vec::with_capacity(tags.len());
     for tag in tags {
         validate_oci_tag(tag)?;
-        let tag_key = oci_tag_key(repository, tag, auth)?;
-        let target_key = oci_tag_target_key(repository, digest_hex, tag, auth)?;
-        state
-            .backend
-            .put_object_bytes_overwrite(&target_key, Vec::new())
-            .await?;
-        state
-            .backend
-            .put_object_bytes_overwrite(&tag_key, digest_bytes.clone())
-            .await?;
-        state
-            .backend
-            .upsert_oci_tag_locked(
-                resource_guard,
-                &OciTagEntry {
-                    scope_namespace: scope_namespace.clone(),
-                    repository: repository.to_owned(),
-                    tag: tag.clone(),
-                    digest_hex: digest_hex.to_owned(),
-                },
-            )
-            .await?;
+        entries.push(OciTagEntry {
+            scope_namespace: scope_namespace.clone(),
+            repository: repository.to_owned(),
+            tag: tag.clone(),
+            digest_hex: digest_hex.to_owned(),
+        });
     }
-    Ok(())
-}
-
-pub(crate) async fn delete_oci_tags_pointing_to_digest(
-    state: &Arc<AppState>,
-    resource_guard: &mut ResourceWriteGuard,
-    repository: &str,
-    auth: &AuthorizedRepository,
-    digest_hex: &str,
-) -> Result<(), ServerError> {
-    backfill_legacy_oci_tags_for_digest(state, repository, auth, digest_hex).await?;
-    let scope_namespace = scope_namespace(auth.namespace());
-    let entries = state
+    state
         .backend
-        .list_oci_tags_by_digest(&scope_namespace, repository, digest_hex)
-        .await?;
-    for entry in entries {
-        if state
-            .backend
-            .delete_oci_tag_if_digest_locked(
-                resource_guard,
-                &scope_namespace,
-                repository,
-                &entry.tag,
-                digest_hex,
-            )
-            .await?
-        {
-            let tag_key = oci_tag_key(repository, &entry.tag, auth)?;
-            let _deleted = state.backend.delete_object_if_present(&tag_key).await?;
-        }
-        let target_key = oci_tag_target_key(repository, digest_hex, &entry.tag, auth)?;
-        let _deleted = state.backend.delete_object_if_present(&target_key).await?;
-    }
-    Ok(())
+        .publish_oci_object_locked(
+            resource_guard,
+            &oci_manifest_index_key(repository, digest_hex, auth),
+            &entries,
+        )
+        .await
 }
 
 pub(crate) async fn resolve_oci_tag_digest(
@@ -193,6 +148,13 @@ pub(crate) async fn resolve_oci_tag_digest(
     let bytes = state.backend.read_object(&tag_key).await?;
     let digest_hex = String::from_utf8(bytes).map_err(|_error| ServerError::InvalidDigest)?;
     parse_sha256_digest(&format!("sha256:{digest_hex}"))?;
+    if state
+        .backend
+        .oci_object_is_deleted(&oci_manifest_index_key(repository, &digest_hex, auth))
+        .await?
+    {
+        return Err(ServerError::NotFound);
+    }
     let legacy = OciTagEntry {
         scope_namespace: scope_namespace.clone(),
         repository: repository.to_owned(),
@@ -223,41 +185,14 @@ async fn backfill_legacy_oci_tags(
     })?;
     for tag in tags {
         validate_oci_tag(&tag)?;
-        let _digest = resolve_oci_tag_digest(state, repository, auth, &tag).await?;
-    }
-    Ok(())
-}
-
-async fn backfill_legacy_oci_tags_for_digest(
-    state: &Arc<AppState>,
-    repository: &str,
-    auth: &AuthorizedRepository,
-    digest_hex: &str,
-) -> Result<(), ServerError> {
-    let prefix = oci_tag_target_prefix(repository, digest_hex, auth)?;
-    let mut target_keys = Vec::new();
-    state.backend.visit_object_prefix(&prefix, |object| {
-        target_keys.push(object.key().clone());
-        Ok(())
-    })?;
-    let scope_namespace = scope_namespace(auth.namespace());
-    for target_key in target_keys {
-        let Some(tag) = target_key.as_str().rsplit('/').next() else {
+        let result = resolve_oci_tag_digest(state, repository, auth, &tag).await;
+        if result
+            .as_ref()
+            .is_err_and(|error| matches!(error, ServerError::NotFound))
+        {
             continue;
-        };
-        validate_oci_tag(tag)?;
-        let _inserted = state
-            .backend
-            .insert_oci_tag_if_absent(&OciTagEntry {
-                scope_namespace: scope_namespace.clone(),
-                repository: repository.to_owned(),
-                tag: tag.to_owned(),
-                digest_hex: digest_hex.to_owned(),
-            })
-            .await?;
-        // The database now carries the legacy pointer (or a newer concurrent
-        // value won), so this reverse marker is no longer authoritative.
-        let _deleted = state.backend.delete_object_if_present(&target_key).await?;
+        }
+        let _digest = result?;
     }
     Ok(())
 }
