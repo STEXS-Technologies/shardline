@@ -170,6 +170,10 @@ table as its job summary and retains the metadata, raw JSON, and peak-RSS report
 one artifact. A dirty working tree is recorded explicitly in local-run metadata so a
 result cannot silently masquerade as evidence for the named commit.
 
+Checked-in reference measurements and their interpretation live in
+[`docs/benchmarks/`](benchmarks/README.md). They are snapshots, not pass/fail
+thresholds; use repeated measurements on the same runner for regression decisions.
+
 The current report includes:
 
 - deployment target
