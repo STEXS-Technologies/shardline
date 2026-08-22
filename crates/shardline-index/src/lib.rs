@@ -96,7 +96,9 @@ pub use memory::{
 };
 pub use oci_tags::{OciTagEntry, OciTagStore};
 pub use postgres::{
-    PostgresIndexStore, PostgresMetadataStoreError, PostgresRecordLocator, PostgresRecordStore,
+    PostgresIndexStore, PostgresMetadataStoreError, PostgresProviderMutation,
+    PostgresProviderMutationOutcome, PostgresRecordLocator, PostgresRecordStore,
+    PostgresResourceFence, ProviderRepositoryKey,
 };
 pub use reconstruction::{FileReconstruction, ReconstructionTerm};
 pub use record::{

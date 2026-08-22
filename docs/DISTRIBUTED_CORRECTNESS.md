@@ -30,7 +30,8 @@ write throughput, so Postgres is the production multi-replica metadata backend.
 | OCI tag | one authoritative digest; a stale lock owner cannot retarget it | unique metadata key plus upsert/digest-guarded delete on the lock-owning fenced Postgres session |
 | OCI manifest/tag/blob deletion | operations in one repository are ordered | repository-scoped local/Postgres advisory lock |
 | provider reconciliation fields | timestamps never move backward and revision matches its winning timestamp | atomic field-wise maximum merge in SQLite/Postgres |
-| provider rename/delete/push/access event | old and new repository identities do not interleave | repository-scoped locks; rename acquires both identities in sorted order |
+| provider rename/delete event | old and new repository identities do not interleave and all durable effects commit together | sorted repository locks plus one transaction containing the delivery claim, record mutations, retention holds, lifecycle state, and every expected fence row |
+| provider push/access event | independent lifecycle observations never regress each other | repository lock plus atomic monotonic state merge |
 | webhook delivery | one application per provider/repository/delivery ID | unique delivery claim, removed when application fails |
 | LFS PATCH session | ranges, quota, promotion, and sweep do not race | shared staging root, global accounting lock, striped per-OID lock |
 | OCI upload session | append/finalize/abort and quota accounting do not race | shared staging root and cross-process session lock |
@@ -50,10 +51,12 @@ session-level advisory lock and atomically advance a durable epoch in
 never returned to the pool with a lock attached. Locks are domain-separated, so an OCI
 repository and provider repository with the same text do not alias.
 
-OCI tag mutations run on the same connection that owns the lock and epoch. Protocol
-commit boundaries also revalidate the epoch through that connection. A terminated
-database session therefore releases its advisory lock, a replacement owner advances
-the epoch, and the stale owner fails closed instead of acknowledging success.
+OCI tag mutations run on the same connection that owns the lock and epoch. Provider
+rename/delete transactions run on the first lock-owning connection and lock every
+expected fence row before claiming the delivery or changing metadata. That row lock
+prevents a replacement owner for a second rename identity from advancing its epoch
+until the transaction commits or aborts. A terminated primary session aborts the
+transaction; a superseded secondary identity is detected before mutation.
 
 Operations needing more than one resource sort their lock identities before acquiring
 them. Provider rename is the current two-resource operation: it locks old and new
@@ -88,17 +91,13 @@ OCI tag metadata commits are fenced on that session. The checked Postgres test
 terminates the first backend, proves the replacement receives a higher epoch, and
 proves the old guard can no longer validate or mutate through its owning connection.
 
-Two categories still prevent a Stable arbitrary-multi-writer claim:
+One external-system category still prevents a Stable arbitrary-multi-writer claim:
 
 - OCI manifest/blob deletion directly changes the object store, which cannot validate a
   Postgres epoch. A connection can theoretically fail after the final validation but
   before that external delete.
-- provider rename/delete spans several Postgres record and lifecycle statements. The
-  request detects lost ownership before acknowledging success, but those statements are
-  not yet one fenced transaction on the lock-owning connection.
-
-Those operations need logical tombstones/deferred GC or one fenced database transaction
-before the remaining claim can be closed. Immutable content-addressed puts are safe:
+OCI deletion needs logical tombstones/deferred GC before the remaining claim can be
+closed. Immutable content-addressed puts are safe:
 their keys cannot be retargeted and a failed metadata commit leaves only unreachable
 debris.
 
@@ -108,7 +107,7 @@ Until that work is complete:
 - stop or isolate a replica whose Postgres session is partitioned
 - do not treat a successful object-store side effect without its metadata commit as a
   visible protocol commit; `fsck` and GC handle unreachable immutable debris
-- keep provider integration and the overall multi-replica writer topology below Stable
+- keep the overall multi-replica writer topology below Stable
 
 ## Mixed-Version Rule
 
