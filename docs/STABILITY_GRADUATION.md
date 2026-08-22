@@ -81,7 +81,7 @@ compatibility documentation. They must not be silently omitted.
 | S3 frontend | Stable in compatibility docs; Beta in protocol docs | reconcile the claim after the distributed conditional-write contract and evidence are complete |
 | Hugging Face Hub API | Beta | broader client matrix, revision races, delete/push races, and complete tenant-bound authorization audit |
 | Redis reconstruction cache | Beta | partition, flush, restart, and multi-node stampede evidence; bounded timeout and corruption repair are covered |
-| Provider integration | Beta | duplicate/out-of-order/replay convergence and revocation timing evidence |
+| Provider integration | Beta | revocation timing and authoritative provider reconciliation evidence; duplicate/replay handling, access/revision reordering, rename migration, signature checks, and fail-closed visibility parsing are covered |
 | Ed25519 | Experimental | key-rotation contract and full negative-path matrix; operator minting and CLI-to-provider verification are covered |
 | Multi-replica Postgres/S3 writers | Not claimed | database-enforced mutable-state contracts, fencing, chaos, and mixed-version proof |
 
