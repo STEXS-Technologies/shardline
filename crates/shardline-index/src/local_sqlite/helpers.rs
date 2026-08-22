@@ -1142,6 +1142,7 @@ pub(crate) fn read_sqlite_record_bytes(value: ValueRef<'_>) -> Result<Vec<u8>, S
         | other @ LocalIndexStoreError::RetentionHold(_)
         | other @ LocalIndexStoreError::QuarantineCandidate(_)
         | other @ LocalIndexStoreError::WebhookDelivery(_)
+        | other @ LocalIndexStoreError::UploadIntentConflict(_)
         | other @ LocalIndexStoreError::IntegerOutOfRange(_)
         | other @ LocalIndexStoreError::InvalidRecordKind
         | other @ LocalIndexStoreError::InvalidLegacyImportState
