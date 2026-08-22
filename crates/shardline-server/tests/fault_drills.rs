@@ -24,7 +24,9 @@
 use sha2::{Digest, Sha256};
 use shardline_gc::{LocalGcOptions, LocalGcReport};
 use shardline_protocol::{RepositoryProvider, RepositoryScope, TokenClaims, TokenScope};
-use shardline_server::{ServerConfig, ServerFrontend, ServerRole, app};
+use shardline_server::{
+    ServerConfig, ServerFrontend, ServerRole, app, run_fsck, write_backup_manifest,
+};
 use shardline_server_core::{AuthProvider, auth::LocalHmacProvider};
 use std::{
     net::SocketAddr,
@@ -76,6 +78,21 @@ fn deterministic_bytes(len: usize, seed: u64) -> Vec<u8> {
         out.push((state & 0xff) as u8);
     }
     out
+}
+
+fn copy_directory_tree(source: &Path, destination: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(destination)?;
+    for entry in std::fs::read_dir(source)? {
+        let entry = entry?;
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_directory_tree(&source_path, &destination_path)?;
+        } else {
+            std::fs::copy(source_path, destination_path)?;
+        }
+    }
+    Ok(())
 }
 
 /// Extract the first `{tag}` element's text from an XML string (S3 envelopes).
@@ -915,4 +932,60 @@ async fn drill8_client_disconnect_after_publish_object_stays_durable() {
         sha256_hex(&resp.bytes().await.unwrap()),
         sha256_hex(&payload)
     );
+}
+
+/// Full local recovery rehearsal: inventory a populated deployment, snapshot
+/// its native metadata/object root, destroy that root, restore it, run fsck,
+/// regenerate the inventory, and verify every acknowledged object byte-for-byte.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn drill9_backup_destroy_restore_fsck_and_download() {
+    let mut harness = DrillHarness::new(3600);
+    harness.spawn_server().await;
+
+    let fixtures = [
+        ("restore-a", deterministic_bytes(96 * 1024 + 3, 901)),
+        ("restore-b", deterministic_bytes(160 * 1024 + 7, 902)),
+        ("restore-c", deterministic_bytes(8 * 1024 + 11, 903)),
+    ];
+    for (key, payload) in &fixtures {
+        let response = harness.s3_put_bytes(key, payload.clone()).await;
+        assert_eq!(response.status().as_u16(), 200, "seed {key}");
+    }
+
+    let config = harness.build_config("127.0.0.1:0".parse().unwrap());
+    let mut before_manifest = Vec::new();
+    let before_report = write_backup_manifest(config.clone(), &mut before_manifest)
+        .await
+        .unwrap();
+    assert!(before_report.object_count > 0);
+
+    harness.kill_hard().await;
+    let backup = TempDir::new().unwrap();
+    let snapshot = backup.path().join("snapshot");
+    copy_directory_tree(&harness.root, &snapshot).unwrap();
+
+    // The target is the harness-owned TempDir root resolved above, never a
+    // caller-controlled or broad filesystem path.
+    std::fs::remove_dir_all(&harness.root).unwrap();
+    assert!(!harness.root.exists());
+    copy_directory_tree(&snapshot, &harness.root).unwrap();
+
+    let fsck = run_fsck(config.clone()).await.unwrap();
+    assert_eq!(fsck.issue_count(), 0, "restored deployment must be clean");
+
+    let mut after_manifest = Vec::new();
+    let after_report = write_backup_manifest(config, &mut after_manifest)
+        .await
+        .unwrap();
+    assert_eq!(after_report, before_report);
+    let before_json: serde_json::Value = serde_json::from_slice(&before_manifest).unwrap();
+    let after_json: serde_json::Value = serde_json::from_slice(&after_manifest).unwrap();
+    assert_eq!(after_json, before_json);
+
+    harness.restart().await;
+    for (key, payload) in &fixtures {
+        let response = harness.s3_get(key).await;
+        assert_eq!(response.status().as_u16(), 200, "restore GET {key}");
+        assert_eq!(response.bytes().await.unwrap().as_ref(), payload.as_slice());
+    }
 }

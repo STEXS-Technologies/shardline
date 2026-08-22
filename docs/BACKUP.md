@@ -88,3 +88,22 @@ then run `shardline repair` before returning traffic.
 For scenario-by-scenario recovery procedures built on these manifests — node loss,
 metadata loss, object-store loss, crash mid-upload, and cross-node moves — see
 [Disaster Recovery](DISASTER_RECOVERY.md).
+
+## Automated Recovery Rehearsal
+
+`crates/shardline-server/tests/fault_drills.rs` contains
+`drill9_backup_destroy_restore_fsck_and_download`. The hermetic drill:
+
+1. uploads several differently sized objects and records their acknowledged bytes
+2. writes a backup manifest and takes a native snapshot of the local deployment root
+3. destroys the live root and restores the snapshot into a fresh root
+4. requires `fsck` to report zero issues
+5. requires the post-restore manifest to equal the pre-destruction manifest
+6. restarts the server and compares every downloaded object byte-for-byte
+
+Run it directly with:
+
+```bash
+cargo test -p shardline-server --test fault_drills \
+  drill9_backup_destroy_restore_fsck_and_download
+```
