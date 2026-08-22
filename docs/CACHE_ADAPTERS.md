@@ -109,6 +109,12 @@ TLS material requires a `rediss://` URL.
 Redis-compatible caches improve cache reuse across horizontally scaled API nodes while
 keeping the cache separate from durable metadata.
 
+Every Redis operation, including connection acquisition, is bounded by a one-second
+adapter timeout. A timeout is treated as a cache miss by reconstruction-serving paths:
+Shardline falls back to durable metadata, returns the correct reconstruction, and may
+repair the cache when Redis becomes available again. Corrupt or non-decodable cache
+payloads are handled the same way. Redis availability affects latency, not correctness.
+
 ## Cache Keys
 
 Shardline keys reconstruction cache entries by:
