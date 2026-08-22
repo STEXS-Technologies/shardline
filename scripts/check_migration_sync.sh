@@ -3,6 +3,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PG_DIR="$REPO_ROOT/migrations"
+SERVER_PG_DIR="$REPO_ROOT/crates/shardline-server/migrations"
 SQLITE_DIR="$REPO_ROOT/crates/shardline-index/migrations"
 PG_REGISTRY="$REPO_ROOT/crates/shardline-server/src/database_migration.rs"
 SQLITE_REGISTRY="$REPO_ROOT/crates/shardline-index/src/local_sqlite/migration.rs"
@@ -59,6 +60,38 @@ fi
 
 if [ -z "$sqlite_versions" ]; then
   echo "ERROR: No SQLite migrations found in $SQLITE_DIR"
+  exit 1
+fi
+
+# The server crate keeps a package-local mirror because `include_str!` cannot
+# read workspace-root files once the crate is packaged for crates.io. Validate
+# both filenames and bytes so release builds cannot silently bundle stale SQL.
+pg_sql_files=$(find "$PG_DIR" -maxdepth 1 -type f \( -name '*.up.sql' -o -name '*.down.sql' \) -printf '%f\n' | sort)
+server_pg_sql_files=$(find "$SERVER_PG_DIR" -maxdepth 1 -type f \( -name '*.up.sql' -o -name '*.down.sql' \) -printf '%f\n' | sort)
+missing_server_pg=$(comm -23 <(echo "$pg_sql_files") <(echo "$server_pg_sql_files"))
+extra_server_pg=$(comm -13 <(echo "$pg_sql_files") <(echo "$server_pg_sql_files"))
+different_server_pg=""
+while IFS= read -r filename; do
+  if [ -n "$filename" ] && [ -f "$SERVER_PG_DIR/$filename" ] \
+      && ! cmp -s "$PG_DIR/$filename" "$SERVER_PG_DIR/$filename"; then
+    different_server_pg+="$filename\n"
+  fi
+done <<< "$pg_sql_files"
+
+if [ -n "$missing_server_pg" ] || [ -n "$extra_server_pg" ] || [ -n "$different_server_pg" ]; then
+  echo "ERROR: Workspace and shardline-server Postgres migration mirrors differ!"
+  if [ -n "$missing_server_pg" ]; then
+    echo "Missing from crates/shardline-server/migrations:"
+    echo "$missing_server_pg" | sed 's/^/  - /'
+  fi
+  if [ -n "$extra_server_pg" ]; then
+    echo "Only in crates/shardline-server/migrations:"
+    echo "$extra_server_pg" | sed 's/^/  - /'
+  fi
+  if [ -n "$different_server_pg" ]; then
+    echo "Different contents in crates/shardline-server/migrations:"
+    echo -e "$different_server_pg" | sed '/^$/d; s/^/  - /'
+  fi
   exit 1
 fi
 
