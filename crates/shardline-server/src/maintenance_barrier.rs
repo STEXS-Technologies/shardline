@@ -87,6 +87,23 @@ impl Drop for ResourceWriteGuard {
 }
 
 impl ResourceWriteGuard {
+    /// Returns a copy of this guard's durable Postgres fence identity.
+    pub(crate) fn postgres_fence(&self) -> Option<shardline_index::PostgresResourceFence> {
+        match self {
+            Self::Local { .. } => None,
+            Self::Postgres {
+                domain,
+                resource,
+                epoch,
+                ..
+            } => Some(shardline_index::PostgresResourceFence::new(
+                domain.clone(),
+                resource.clone(),
+                *epoch,
+            )),
+        }
+    }
+
     /// Returns the dedicated lock-owning Postgres connection, when applicable.
     pub(crate) fn postgres_connection_mut(&mut self) -> Option<&mut PgConnection> {
         match self {

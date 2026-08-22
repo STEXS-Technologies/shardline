@@ -8,6 +8,7 @@ use axum::{
     response::IntoResponse,
 };
 use serde::Deserialize;
+use shardline_index::{PostgresIndexStore, PostgresProviderMutationOutcome};
 use shardline_protocol::TokenScope;
 use shardline_vcs::{RepositoryRef, RepositoryWebhookEvent, RepositoryWebhookEventKind};
 
@@ -179,6 +180,48 @@ pub(super) async fn handle_provider_webhook(
         // Reuse the server's own Postgres record/index stores (their pool is
         // created once per server) instead of opening a fresh pool per webhook
         // event.
+        ServerBackend::Postgres(backend)
+            if matches!(
+                event.kind(),
+                RepositoryWebhookEventKind::RepositoryDeleted
+                    | RepositoryWebhookEventKind::RepositoryRenamed { .. }
+            ) =>
+        {
+            let object_store = backend.object_store();
+            let plan = shardline_provider_events::plan_postgres_provider_repository_webhook(
+                backend.record_store(),
+                backend.index_store(),
+                &object_store,
+                &event,
+            )
+            .await?;
+            let (mutation, applied_outcome, duplicate_outcome) = plan.into_parts();
+            let expected_fences = repository_guards
+                .iter()
+                .map(|guard| {
+                    guard
+                        .postgres_fence()
+                        .ok_or(ServerError::StaleResourceFence)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let connection = repository_guards
+                .first_mut()
+                .and_then(|guard| guard.postgres_connection_mut())
+                .ok_or(ServerError::StaleResourceFence)?;
+            match PostgresIndexStore::commit_provider_mutation_on_connection(
+                connection,
+                &expected_fences,
+                &mutation,
+            )
+            .await?
+            {
+                PostgresProviderMutationOutcome::Applied => applied_outcome,
+                PostgresProviderMutationOutcome::Duplicate => duplicate_outcome,
+                PostgresProviderMutationOutcome::StaleFence => {
+                    return Err(ServerError::StaleResourceFence);
+                }
+            }
+        }
         ServerBackend::Postgres(backend) => {
             let object_store = backend.object_store();
             apply_provider_webhook_with_stores(

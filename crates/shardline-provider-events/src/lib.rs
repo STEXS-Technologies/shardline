@@ -67,8 +67,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serde_json::Error as JsonError;
 use shardline_index::{
     AsyncIndexStore, LocalIndexStoreError, MemoryIndexStoreError, MemoryRecordStoreError,
-    PostgresMetadataStoreError, RecordStore, RetentionHoldError, WebhookDelivery,
-    WebhookDeliveryError,
+    PostgresIndexStore, PostgresMetadataStoreError, PostgresProviderMutation, PostgresRecordStore,
+    RecordStore, RetentionHoldError, WebhookDelivery, WebhookDeliveryError,
 };
 use shardline_protocol::unix_now_seconds_lossy;
 use shardline_server_core::{ParseStoredFileRecordError, ServerObjectStoreError};
@@ -229,6 +229,83 @@ fn duplicate_webhook_outcome(event: &RepositoryWebhookEvent) -> ProviderWebhookO
         applied_holds: 0,
         retention_seconds: None,
     }
+}
+
+/// Planned atomic Postgres mutation and its applied/duplicate protocol outcomes.
+#[derive(Debug, Clone)]
+pub struct PlannedPostgresProviderWebhook {
+    mutation: PostgresProviderMutation,
+    applied_outcome: ProviderWebhookOutcome,
+    duplicate_outcome: ProviderWebhookOutcome,
+}
+
+impl PlannedPostgresProviderWebhook {
+    /// Consumes the plan into the mutation and both possible protocol outcomes.
+    #[must_use]
+    pub fn into_parts(
+        self,
+    ) -> (
+        PostgresProviderMutation,
+        ProviderWebhookOutcome,
+        ProviderWebhookOutcome,
+    ) {
+        (self.mutation, self.applied_outcome, self.duplicate_outcome)
+    }
+}
+
+/// Plans one Postgres repository rename or deletion without changing durable metadata.
+///
+/// The server commits the returned batch on the resource-lock-owning connection after
+/// locking its fence rows. Other event kinds remain single-row monotonic updates and use
+/// [`apply_provider_webhook_with_stores`].
+///
+/// # Errors
+///
+/// Returns [`ProviderEventsError`] when repository metadata cannot be read or validated.
+pub async fn plan_postgres_provider_repository_webhook(
+    record_store: &PostgresRecordStore,
+    index_store: &PostgresIndexStore,
+    object_store: &shardline_server_core::ServerObjectStore,
+    event: &RepositoryWebhookEvent,
+) -> Result<PlannedPostgresProviderWebhook, ProviderEventsError> {
+    let delivery = WebhookDelivery::new(
+        event.repository().provider().repository_provider(),
+        event.repository().owner().to_owned(),
+        event.repository().name().to_owned(),
+        event.delivery_id().as_str().to_owned(),
+        unix_now_seconds_lossy(),
+    )?;
+    let mut mutation = PostgresProviderMutation::new(delivery);
+    let applied_outcome = match event.kind() {
+        RepositoryWebhookEventKind::RepositoryDeleted => {
+            repository::plan_postgres_repository_deleted(
+                record_store,
+                object_store,
+                event,
+                &mut mutation,
+            )
+            .await?
+        }
+        RepositoryWebhookEventKind::RepositoryRenamed { new_repository } => {
+            repository::plan_postgres_repository_renamed(
+                record_store,
+                index_store,
+                event,
+                new_repository,
+                &mut mutation,
+            )
+            .await?
+        }
+        RepositoryWebhookEventKind::AccessChanged
+        | RepositoryWebhookEventKind::RevisionPushed { .. } => {
+            return Err(ProviderEventsError::InvalidProviderWebhookPayload);
+        }
+    };
+    Ok(PlannedPostgresProviderWebhook {
+        mutation,
+        applied_outcome,
+        duplicate_outcome: duplicate_webhook_outcome(event),
+    })
 }
 
 /// Opportunistically purges webhook-delivery dedup rows older than the
