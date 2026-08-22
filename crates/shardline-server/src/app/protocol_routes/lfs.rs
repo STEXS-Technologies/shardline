@@ -10,7 +10,7 @@ use std::time::Instant;
 
 use axum::{
     Json,
-    body::{Body, Bytes},
+    body::{Body, Bytes, HttpBody},
     extract::{FromRequestParts, Path, State},
     http::{
         HeaderMap, StatusCode,
@@ -1031,11 +1031,27 @@ pub(crate) async fn lfs_put_object(
             return Ok(lfs_validation_response("invalid oid"));
         }
     };
-    let content_length = headers
-        .get(CONTENT_LENGTH)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(0);
+    let content_length = match headers.get(CONTENT_LENGTH) {
+        Some(value) => match value
+            .to_str()
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+        {
+            Some(length) => length,
+            None => return Ok(lfs_validation_response("invalid Content-Length header")),
+        },
+        None => body.size_hint().exact().unwrap_or(0),
+    };
+    if headers.contains_key(CONTENT_LENGTH)
+        && body
+            .size_hint()
+            .exact()
+            .is_some_and(|actual| actual != content_length)
+    {
+        return Ok(lfs_validation_response(
+            "Content-Length does not match the request body",
+        ));
+    }
     let start = Instant::now();
     let body = RequestBodyReader::from_body(body, state.config.max_request_body_bytes())?;
     let _stored = state
@@ -2593,6 +2609,89 @@ mod tests {
 
         assert_eq!(first.status(), StatusCode::OK);
         assert_eq!(second.status(), StatusCode::OK);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_same_oid_puts_are_idempotent() {
+        let (state, _tmp) = build_test_state().await;
+        let app = lfs_router(state);
+        let content = b"concurrent-same-oid-content".to_vec();
+        let oid = test_oid(&content);
+        let barrier = Arc::new(tokio::sync::Barrier::new(16));
+        let mut uploads = Vec::new();
+
+        for _ in 0..16 {
+            let app = app.clone();
+            let content = content.clone();
+            let oid = oid.clone();
+            let barrier = barrier.clone();
+            uploads.push(tokio::spawn(async move {
+                barrier.wait().await;
+                app.oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri(format!("/v1/lfs/objects/{oid}"))
+                        .header("content-length", content.len())
+                        .body(Body::from(content))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            }));
+        }
+
+        for upload in uploads {
+            assert_eq!(upload.await.unwrap().status(), StatusCode::OK);
+        }
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/v1/lfs/objects/{oid}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let stored = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(stored.as_ref(), content.as_slice());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn put_object_rejects_content_length_mismatch_without_publishing() {
+        let (state, _tmp) = build_test_state().await;
+        let app = lfs_router(state);
+        let content = b"content-length-mismatch".to_vec();
+        let oid = test_oid(&content);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/v1/lfs/objects/{oid}"))
+                    .header("content-length", content.len() + 1)
+                    .body(Body::from(content))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("HEAD")
+                    .uri(format!("/v1/lfs/objects/{oid}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     // =========================================================================
