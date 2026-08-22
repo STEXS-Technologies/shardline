@@ -506,6 +506,7 @@ mod tests {
                 reaped_stale_temporary_chunks: 0,
                 reaped_stale_temporary_bytes: 0,
                 pruned_revisions_over_cap: 0,
+                ..LocalGcReport::default()
             };
 
             reconcile_quarantine_entries(
@@ -564,6 +565,7 @@ mod tests {
                 reaped_stale_temporary_chunks: 0,
                 reaped_stale_temporary_bytes: 0,
                 pruned_revisions_over_cap: 0,
+                ..LocalGcReport::default()
             };
 
             reconcile_quarantine_entries(
@@ -647,6 +649,7 @@ mod tests {
                 reaped_stale_temporary_chunks: 0,
                 reaped_stale_temporary_bytes: 0,
                 pruned_revisions_over_cap: 0,
+                ..LocalGcReport::default()
             };
 
             reconcile_quarantine_entries(
@@ -724,6 +727,7 @@ mod tests {
                 reaped_stale_temporary_chunks: 0,
                 reaped_stale_temporary_bytes: 0,
                 pruned_revisions_over_cap: 0,
+                ..LocalGcReport::default()
             };
 
             reconcile_quarantine_entries(
@@ -856,6 +860,7 @@ mod tests {
                 reaped_stale_temporary_chunks: 0,
                 reaped_stale_temporary_bytes: 0,
                 pruned_revisions_over_cap: 0,
+                ..LocalGcReport::default()
             };
 
             sweep_quarantine_entries(
@@ -1009,6 +1014,7 @@ mod tests {
                 reaped_stale_temporary_chunks: 0,
                 reaped_stale_temporary_bytes: 0,
                 pruned_revisions_over_cap: 0,
+                ..LocalGcReport::default()
             };
 
             sweep_quarantine_entries(
@@ -1074,6 +1080,7 @@ mod tests {
                 reaped_stale_temporary_chunks: 0,
                 reaped_stale_temporary_bytes: 0,
                 pruned_revisions_over_cap: 0,
+                ..LocalGcReport::default()
             };
 
             sweep_quarantine_entries(
@@ -1242,6 +1249,7 @@ mod tests {
                 reaped_stale_temporary_chunks: 0,
                 reaped_stale_temporary_bytes: 0,
                 pruned_revisions_over_cap: 0,
+                ..LocalGcReport::default()
             };
 
             reconcile_quarantine_entries(
@@ -1308,6 +1316,7 @@ mod tests {
                 reaped_stale_temporary_chunks: 0,
                 reaped_stale_temporary_bytes: 0,
                 pruned_revisions_over_cap: 0,
+                ..LocalGcReport::default()
             };
 
             // Empty orphan_objects → the stale entry should be released.

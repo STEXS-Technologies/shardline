@@ -11,6 +11,7 @@ use shardline_index::{
     TreeEntry, TreeKey,
 };
 use shardline_protocol::{ByteRange, RepositoryScope};
+use shardline_server_core::protocol_support::protocol_object_file_id;
 use shardline_storage::{
     AsyncObjectStore, DeleteOutcome, ObjectBody, ObjectIntegrity, ObjectKey, ObjectMetadata,
     ObjectPrefix, PutOutcome,
@@ -69,13 +70,6 @@ pub struct RegisterPathOutcome {
     pub entry: shardline_index::TreeEntry,
     /// True when no prior mapping existed at this path.
     pub created: bool,
-}
-
-fn protocol_object_file_id(object_key: &ObjectKey) -> String {
-    format!(
-        "protocol-object-{}",
-        hex::encode(Sha256::digest(object_key.as_str().as_bytes()))
-    )
 }
 
 /// Public benchmark-facing backend wrapper that resolves the active metadata and object
