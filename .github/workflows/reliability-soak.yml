@@ -248,3 +248,47 @@ jobs:
           path: reliability-postgres-results
           if-no-files-found: error
           retention-days: 90
+
+  security-boundary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Setup Rust CI toolchain and tools
+        uses: ./.github/actions/rust-ci-setup
+
+      - name: Repeat revoked-token existence and timing campaign
+        run: |
+          set -o pipefail
+          mkdir -p reliability-security-results
+          for iteration in $(seq 1 100); do
+            echo "security-boundary iteration=${iteration}"
+            cargo test -q -p shardline-server --test authorization_matrix \
+              expired_revocation_probes_hide_existence_across_all_frontends \
+              -- --exact
+          done 2>&1 | tee reliability-security-results/security-boundary.log
+
+      - name: Record security campaign metadata
+        if: always()
+        run: |
+          mkdir -p reliability-security-results
+          {
+            echo "commit=${GITHUB_SHA}"
+            echo "iterations=100"
+            echo "samples_per_resource_state=32"
+            echo "frontends=s3,lfs,bazel,oci,hub,xet"
+            echo "run_id=${GITHUB_RUN_ID}"
+            echo "run_attempt=${GITHUB_RUN_ATTEMPT}"
+            echo "finished_epoch=$(date +%s)"
+          } > reliability-security-results/metadata.txt
+
+      - name: Upload security-boundary evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: shardline-security-boundary-${{ github.sha }}
+          path: reliability-security-results
+          if-no-files-found: error
+          retention-days: 90
