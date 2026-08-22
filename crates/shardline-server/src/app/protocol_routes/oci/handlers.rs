@@ -166,16 +166,13 @@ async fn oci_delete_blob(
     digest_hex: &str,
 ) -> Result<Response, ServerError> {
     let repository = repo.repository();
+    let lock_key = shardline_index::ResourceLockKey::oci_repository(
+        &crate::protocol_support::scope_namespace(repo.capability().namespace()),
+        repository,
+    );
     let mut repository_guard = state
         .backend
-        .acquire_resource_write_lock(
-            state.config.root_dir(),
-            "oci-repository",
-            &format!(
-                "{}:{repository}",
-                crate::protocol_support::scope_namespace(repo.capability().namespace())
-            ),
-        )
+        .acquire_resource_write_lock(state.config.root_dir(), &lock_key)
         .await?;
     let object_key = oci_blob_key(repository, digest_hex, repo.capability())?;
     let index_key = oci_blob_index_key(repository, digest_hex, repo.capability());

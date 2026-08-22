@@ -75,6 +75,7 @@ mod reconstruction;
 mod record;
 mod record_key;
 mod record_kind;
+mod resource_fence;
 mod s3_objects;
 #[cfg(test)]
 mod test_invariant_error;
@@ -108,6 +109,7 @@ pub use record::{
     RecordStore, RecordStoreFuture, RecordTraversal, RepositoryRecordScope, StorageRepresentation,
     StoredRecord,
 };
+pub use resource_fence::{ResourceLockDomain, ResourceLockKey};
 pub use s3_objects::{S3ObjectEntry, S3ObjectIndexStore};
 pub use store::{
     AsyncIndexStore, DedupeStore, IndexStore, IndexStoreFuture, LifecycleStore,

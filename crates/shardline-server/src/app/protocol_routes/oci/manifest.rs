@@ -107,13 +107,13 @@ pub(crate) async fn oci_put_manifest(
         .and_then(|value| value.to_str().ok())
         .unwrap_or(OCI_IMAGE_MANIFEST_MEDIA_TYPE)
         .to_owned();
+    let lock_key = shardline_index::ResourceLockKey::oci_repository(
+        &scope_namespace(auth.namespace()),
+        repository,
+    );
     let mut repository_guard = state
         .backend
-        .acquire_resource_write_lock(
-            state.config.root_dir(),
-            "oci-repository",
-            &format!("{}:{repository}", scope_namespace(auth.namespace())),
-        )
+        .acquire_resource_write_lock(state.config.root_dir(), &lock_key)
         .await?;
     validate_oci_manifest_document(state, repository, auth, &media_type, &bytes).await?;
     let manifest_key = oci_manifest_key(repository, &digest_hex, auth)?;
@@ -176,13 +176,13 @@ pub(crate) async fn oci_delete_manifest(
 ) -> Result<Response, ServerError> {
     let repository = repo.repository();
     let auth = repo.capability();
+    let lock_key = shardline_index::ResourceLockKey::oci_repository(
+        &scope_namespace(auth.namespace()),
+        repository,
+    );
     let mut repository_guard = state
         .backend
-        .acquire_resource_write_lock(
-            state.config.root_dir(),
-            "oci-repository",
-            &format!("{}:{repository}", scope_namespace(auth.namespace())),
-        )
+        .acquire_resource_write_lock(state.config.root_dir(), &lock_key)
         .await?;
     let digest_hex = resolve_manifest_digest(state, repository, reference, auth).await?;
     let manifest_key = oci_manifest_key(repository, &digest_hex, auth)?;

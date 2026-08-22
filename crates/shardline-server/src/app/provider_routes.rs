@@ -8,7 +8,7 @@ use axum::{
     response::IntoResponse,
 };
 use serde::Deserialize;
-use shardline_index::{PostgresIndexStore, PostgresProviderMutationOutcome};
+use shardline_index::{PostgresIndexStore, PostgresProviderMutationOutcome, ResourceLockKey};
 use shardline_protocol::TokenScope;
 use shardline_vcs::{RepositoryRef, RepositoryWebhookEvent, RepositoryWebhookEventKind};
 
@@ -33,16 +33,15 @@ pub(super) struct XetTokenQuery {
     subject: Option<String>,
 }
 
-fn provider_repository_lock_resource(repository: &RepositoryRef) -> String {
-    format!(
-        "{}:{}/{}",
+fn provider_repository_lock_resource(repository: &RepositoryRef) -> ResourceLockKey {
+    ResourceLockKey::provider_repository(
         repository.provider().as_str(),
         repository.owner(),
-        repository.name()
+        repository.name(),
     )
 }
 
-fn provider_event_lock_resources(event: &RepositoryWebhookEvent) -> Vec<String> {
+fn provider_event_lock_resources(event: &RepositoryWebhookEvent) -> Vec<ResourceLockKey> {
     let mut resources = vec![provider_repository_lock_resource(event.repository())];
     if let RepositoryWebhookEventKind::RepositoryRenamed { new_repository } = event.kind() {
         resources.push(provider_repository_lock_resource(new_repository));
@@ -163,15 +162,11 @@ pub(super) async fn handle_provider_webhook(
     // canonical order so pushes to either name cannot interleave with the
     // copy/delete/state-migration sequence and two renames cannot deadlock.
     let mut repository_guards = Vec::new();
-    for resource in provider_event_lock_resources(&event) {
+    for key in provider_event_lock_resources(&event) {
         repository_guards.push(
             state
                 .backend
-                .acquire_resource_write_lock(
-                    state.config.root_dir(),
-                    "provider-repository",
-                    &resource,
-                )
+                .acquire_resource_write_lock(state.config.root_dir(), &key)
                 .await?,
         );
     }
@@ -259,6 +254,8 @@ mod tests {
         WebhookDeliveryId,
     };
 
+    use shardline_index::ResourceLockKey;
+
     use super::{XetTokenQuery, provider_event_lock_resources};
     use crate::{
         ProtocolMetrics, ReconstructionCacheService, ServerBackend, ServerConfig, ServerRole,
@@ -294,7 +291,10 @@ mod tests {
 
         assert_eq!(
             provider_event_lock_resources(&event),
-            vec!["github:a-team/new", "github:z-team/old"]
+            vec![
+                ResourceLockKey::provider_repository("github", "a-team", "new"),
+                ResourceLockKey::provider_repository("github", "z-team", "old"),
+            ]
         );
     }
 

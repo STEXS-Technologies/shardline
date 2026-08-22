@@ -137,8 +137,7 @@ async fn postgres_rename_plan_commits_records_state_and_delivery_together()
     .execute(&pool)
     .await?;
     let fences = [PostgresResourceFence::new(
-        "provider-repository".to_owned(),
-        resource,
+        shardline_index::ResourceLockKey::provider_repository("github", old_owner, old_repo),
         77,
     )];
     let mut connection = pool.acquire().await?;
@@ -249,8 +248,7 @@ async fn postgres_delete_plan_commits_holds_records_state_and_delivery_together(
     .execute(&pool)
     .await?;
     let fences = [PostgresResourceFence::new(
-        "provider-repository".to_owned(),
-        resource,
+        shardline_index::ResourceLockKey::provider_repository("github", owner, repo),
         88,
     )];
     let mut connection = pool.acquire().await?;

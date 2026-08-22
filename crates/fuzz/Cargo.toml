@@ -311,5 +311,11 @@ path = "fuzz_targets/shardline/s3_continuation_token.rs"
 test = false
 doc = false
 
+[[bin]]
+name = "shardline_resource_fence_key"
+path = "fuzz_targets/shardline/resource_fence_key.rs"
+test = false
+doc = false
+
 [lints]
 workspace = true
