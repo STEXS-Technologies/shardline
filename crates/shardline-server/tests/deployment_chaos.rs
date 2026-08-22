@@ -47,6 +47,7 @@ use tokio::{net::TcpStream, sync::mpsc, task::JoinHandle};
 
 /// Host bind address for the deployed server (avoids dev 18080 / default 8080).
 const BIN_ADDR: &str = "127.0.0.1:18081";
+const BIN_ADDR_SECONDARY: &str = "127.0.0.1:18082";
 /// Chaos Postgres (compose publishes `15432 -> 5432`).
 const PG_URL: &str = "postgres://shardline:shardline-dev-password@127.0.0.1:15432/shardline";
 /// Design-default MinIO endpoint. Overridden at runtime from the container's
@@ -598,6 +599,18 @@ fn resolve_shardline_binary() -> Option<PathBuf> {
     candidate.is_file().then_some(candidate)
 }
 
+fn resolve_n_minus_one_binary(drill: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("SHARDLINE_N_MINUS_ONE_BINARY")
+        .map(PathBuf::from)
+        .filter(|path| path.is_file());
+    if path.is_none() {
+        eprintln!(
+            "SKIPPED: {drill} — set SHARDLINE_N_MINUS_ONE_BINARY to a built v1.6.0 shardline binary"
+        );
+    }
+    path
+}
+
 struct DeploymentServer {
     child: std::process::Child,
     base_url: String,
@@ -610,6 +623,10 @@ impl DeploymentServer {
     /// `extra_env` is applied after the base env, so drills can override the
     /// S3 endpoint, frontends, and reconstruction-cache wiring.
     fn spawn(binary: &Path, extra_env: &[(&str, &str)], root: &Path) -> Self {
+        Self::spawn_at(binary, BIN_ADDR, extra_env, root)
+    }
+
+    fn spawn_at(binary: &Path, bind_addr: &str, extra_env: &[(&str, &str)], root: &Path) -> Self {
         let data_dir = root.join("data");
         std::fs::create_dir_all(&data_dir).unwrap_or_else(|e| panic!("create {data_dir:?}: {e}"));
         let log = NamedTempFile::new().expect("temp log file");
@@ -618,8 +635,8 @@ impl DeploymentServer {
 
         let mut cmd = std::process::Command::new(binary);
         cmd.arg("serve");
-        cmd.env("SHARDLINE_BIND_ADDR", BIN_ADDR)
-            .env("SHARDLINE_PUBLIC_BASE_URL", format!("http://{BIN_ADDR}"))
+        cmd.env("SHARDLINE_BIND_ADDR", bind_addr)
+            .env("SHARDLINE_PUBLIC_BASE_URL", format!("http://{bind_addr}"))
             .env("SHARDLINE_SERVER_ROLE", "all")
             .env("SHARDLINE_AUTH_PROVIDER", "local")
             .env(
@@ -648,7 +665,7 @@ impl DeploymentServer {
             .unwrap_or_else(|e| panic!("spawn {binary:?}: {e}"));
         Self {
             child,
-            base_url: format!("http://{BIN_ADDR}"),
+            base_url: format!("http://{bind_addr}"),
             _log: log,
         }
     }
@@ -728,6 +745,16 @@ async fn s3_get(base: &str, token: &str, key: &str) -> reqwest::Response {
         .send()
         .await
         .expect("s3 GET request")
+}
+
+async fn assert_s3_bytes(base: &str, token: &str, key: &str, expected: &[u8], context: &str) {
+    let response = s3_get(base, token, key).await;
+    assert_eq!(response.status().as_u16(), 200, "{context}: GET {key}");
+    assert_eq!(
+        response.bytes().await.unwrap().as_ref(),
+        expected,
+        "{context}: exact bytes for {key}"
+    );
 }
 
 async fn s3_delete(base: &str, token: &str, key: &str) -> reqwest::Response {
@@ -1485,7 +1512,138 @@ async fn drill_deploy_e_netem_duplicate_reorder_and_asymmetric_recovery() {
 }
 
 // ===========================================================================
-// OPTIONAL F — CHEAP WORKLOAD BURST (no fault injection).
+// DRILL F — REAL N-1/N MIXED-BINARY ROLLOUT AND ROLLBACK.
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn drill_deploy_f_real_mixed_version_rollout_and_rollback() {
+    let drill = "drill_deploy_f_real_mixed_version_rollout_and_rollback";
+    let Some(stack) = boot_chaos_stack(drill).await else {
+        return;
+    };
+    let Some(current_binary) = resolve_shardline_binary() else {
+        eprintln!("SKIPPED: {drill} — current shardline binary not found");
+        return;
+    };
+    let Some(previous_binary) = resolve_n_minus_one_binary(drill) else {
+        return;
+    };
+    migrate_chaos_postgres(&stack.pg_url).await;
+
+    let old_a_root = TempDir::new().unwrap();
+    let old_b_root = TempDir::new().unwrap();
+    let new_a_root = TempDir::new().unwrap();
+    let new_b_root = TempDir::new().unwrap();
+    let rollback_root = TempDir::new().unwrap();
+    let environment = [("SHARDLINE_S3_ENDPOINT", stack.s3_endpoint.as_str())];
+    let mut node_a =
+        DeploymentServer::spawn_at(&previous_binary, BIN_ADDR, &environment, old_a_root.path());
+    let mut node_b = DeploymentServer::spawn_at(
+        &previous_binary,
+        BIN_ADDR_SECONDARY,
+        &environment,
+        old_b_root.path(),
+    );
+    node_a.wait_ready(Duration::from_secs(20)).await;
+    node_b.wait_ready(Duration::from_secs(20)).await;
+
+    let token = mint_token("drill", "drill", TokenScope::Write);
+    let old_bytes = deterministic_bytes(98_323, 601);
+    let old_put = s3_put(&node_a.base_url(), &token, "f-old", old_bytes.clone()).await;
+    assert_eq!(old_put.status().as_u16(), 200, "N-1 seed write");
+    assert_s3_bytes(&node_b.base_url(), &token, "f-old", &old_bytes, "N-1 peer").await;
+
+    // First rollout step: an N process and an N-1 process actively share the
+    // same Postgres metadata and S3 objects.
+    drop(node_a);
+    let mut node_a =
+        DeploymentServer::spawn_at(&current_binary, BIN_ADDR, &environment, new_a_root.path());
+    node_a.wait_ready(Duration::from_secs(20)).await;
+    assert_s3_bytes(
+        &node_a.base_url(),
+        &token,
+        "f-old",
+        &old_bytes,
+        "N reads N-1 write",
+    )
+    .await;
+    let new_bytes = deterministic_bytes(114_711, 602);
+    let new_put = s3_put(&node_a.base_url(), &token, "f-new", new_bytes.clone()).await;
+    assert_eq!(
+        new_put.status().as_u16(),
+        200,
+        "N write during mixed window"
+    );
+    assert_s3_bytes(
+        &node_b.base_url(),
+        &token,
+        "f-new",
+        &new_bytes,
+        "N-1 reads N write",
+    )
+    .await;
+
+    // Finish the rollout, then roll one node back to the real N-1 binary. The
+    // previous binary must read state written by N and publish a fresh object
+    // that the remaining N node reconstructs exactly.
+    drop(node_b);
+    let mut node_b = DeploymentServer::spawn_at(
+        &current_binary,
+        BIN_ADDR_SECONDARY,
+        &environment,
+        new_b_root.path(),
+    );
+    node_b.wait_ready(Duration::from_secs(20)).await;
+    assert_s3_bytes(
+        &node_b.base_url(),
+        &token,
+        "f-new",
+        &new_bytes,
+        "N peer after rollout",
+    )
+    .await;
+
+    drop(node_a);
+    let mut rollback_node = DeploymentServer::spawn_at(
+        &previous_binary,
+        BIN_ADDR,
+        &environment,
+        rollback_root.path(),
+    );
+    rollback_node.wait_ready(Duration::from_secs(20)).await;
+    assert_s3_bytes(
+        &rollback_node.base_url(),
+        &token,
+        "f-new",
+        &new_bytes,
+        "N-1 rollback reads N write",
+    )
+    .await;
+    let rollback_bytes = deterministic_bytes(81_949, 603);
+    let rollback_put = s3_put(
+        &rollback_node.base_url(),
+        &token,
+        "f-rollback",
+        rollback_bytes.clone(),
+    )
+    .await;
+    assert_eq!(rollback_put.status().as_u16(), 200, "N-1 rollback write");
+    assert_s3_bytes(
+        &node_b.base_url(),
+        &token,
+        "f-rollback",
+        &rollback_bytes,
+        "N reads N-1 rollback write",
+    )
+    .await;
+    eprintln!(
+        "chaos({drill}): PASS — real N-1/N rollout and one-node rollback preserved exact bytes"
+    );
+}
+
+// ===========================================================================
+// OPTIONAL G — CHEAP WORKLOAD BURST (no fault injection).
 // Gated on SHARDLINE_CHAOS_DEPLOYMENT=1.
 // ===========================================================================
 
