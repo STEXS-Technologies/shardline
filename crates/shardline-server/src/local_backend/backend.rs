@@ -1,8 +1,8 @@
 use std::{num::NonZeroUsize, path::PathBuf, sync::Arc};
 
 use shardline_index::{
-    FileChunkRecord, LocalIndexStore, LocalRecordStore, OciTagEntry, OciTagStore,
-    ReconstructionStore, RecordTraversal, RepoKey, RevisionRecord, S3ObjectEntry,
+    FileChunkRecord, LocalIndexStore, LocalRecordStore, OciObjectKey, OciObjectStore, OciTagEntry,
+    OciTagStore, ReconstructionStore, RecordTraversal, RepoKey, RevisionRecord, S3ObjectEntry,
     S3ObjectIndexStore, TreeEntry, TreeKey, TreeStore,
 };
 use shardline_protocol::unix_now_seconds_lossy;
@@ -411,11 +411,6 @@ impl LocalBackend {
             .map_err(ServerError::from)
     }
 
-    pub(crate) async fn upsert_oci_tag(&self, entry: &OciTagEntry) -> Result<(), ServerError> {
-        self.index_store.upsert_oci_tag(entry).await?;
-        Ok(())
-    }
-
     pub(crate) async fn insert_oci_tag_if_absent(
         &self,
         entry: &OciTagEntry,
@@ -451,29 +446,28 @@ impl LocalBackend {
             .map_err(ServerError::from)
     }
 
-    pub(crate) async fn list_oci_tags_by_digest(
+    pub(crate) async fn oci_object_is_deleted(
         &self,
-        scope_namespace: &str,
-        repository: &str,
-        digest_hex: &str,
-    ) -> Result<Vec<OciTagEntry>, ServerError> {
+        key: &OciObjectKey,
+    ) -> Result<bool, ServerError> {
         self.index_store
-            .list_oci_tags_by_digest(scope_namespace, repository, digest_hex)
+            .oci_object_is_deleted(key)
             .await
             .map_err(ServerError::from)
     }
 
-    pub(crate) async fn delete_oci_tag_if_digest(
+    pub(crate) async fn publish_oci_object(
         &self,
-        scope_namespace: &str,
-        repository: &str,
-        tag: &str,
-        digest_hex: &str,
-    ) -> Result<bool, ServerError> {
-        self.index_store
-            .delete_oci_tag_if_digest(scope_namespace, repository, tag, digest_hex)
-            .await
-            .map_err(ServerError::from)
+        key: &OciObjectKey,
+        tags: &[OciTagEntry],
+    ) -> Result<(), ServerError> {
+        self.index_store.publish_oci_object(key, tags).await?;
+        Ok(())
+    }
+
+    pub(crate) async fn delete_oci_object(&self, key: &OciObjectKey) -> Result<(), ServerError> {
+        self.index_store.delete_oci_object(key).await?;
+        Ok(())
     }
 
     /// Resolves a single canonical path to its tree entry, if any.

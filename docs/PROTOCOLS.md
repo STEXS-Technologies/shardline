@@ -109,6 +109,12 @@ create-if-absent semantics. Manifest creation and manifest/blob deletion are ser
 per repository, preventing a tag or manifest from committing against a concurrently
 deleted dependency.
 
+OCI `DELETE` is a logical operation. Shardline atomically records a durable tombstone
+and removes manifest tags, while retaining immutable payload bytes. Republishing the
+same digest clears the tombstone. This prevents a stale database-fence owner from
+deleting content made visible by a newer replica; retained deleted bytes are not
+currently reclaimed by online GC.
+
 Incomplete OCI upload sessions use the same shared API staging root and a
 cross-process session lock. Completed blobs remain authoritative in the configured
 object store.

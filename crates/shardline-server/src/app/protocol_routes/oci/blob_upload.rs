@@ -27,7 +27,8 @@ use crate::{
 use super::super::{
     AppState, ensure_upload_growth_within_limit, parse_query_map, parse_upload_content_range,
 };
-use super::helpers::{OciRepository, oci_blob_key};
+use super::helpers::{OciRepository, oci_blob_index_key, oci_blob_key};
+use super::manifest::ensure_oci_object_visible;
 use super::tags::oci_created_response;
 
 #[tracing::instrument(skip(state, _headers, uri, body, repo), fields(repository = %repo.repository()))]
@@ -56,6 +57,7 @@ pub(crate) async fn oci_post_blob_upload(
     if let Some(mount_digest) = query.get("mount") {
         let digest_hex = parse_sha256_digest(mount_digest)?;
         let from = query.get("from").map(String::as_str).unwrap_or(repository);
+        ensure_oci_object_visible(state, &oci_blob_index_key(from, &digest_hex, auth)).await?;
         let source_key = oci_blob_key(from, &digest_hex, auth)?;
         let target_key = oci_blob_key(repository, &digest_hex, auth)?;
         match state
@@ -64,6 +66,7 @@ pub(crate) async fn oci_post_blob_upload(
             .await
         {
             Ok(_stored) => {
+                publish_oci_blob(state, repository, auth, &digest_hex).await?;
                 return oci_created_response(
                     &oci_blob_location(repository, &digest_hex),
                     Some(&digest_hex),
@@ -82,6 +85,7 @@ pub(crate) async fn oci_post_blob_upload(
             .backend
             .put_sha256_addressed_object_stream_if_absent(&object_key, &digest_hex, body)
             .await?;
+        publish_oci_blob(state, repository, auth, &digest_hex).await?;
         metrics().protocol.record_oci_upload();
         return oci_created_response(
             &oci_blob_location(repository, &digest_hex),
@@ -257,6 +261,7 @@ pub(crate) async fn oci_put_blob_upload(
             &final_bytes,
         )
         .await?;
+        publish_oci_blob(state, repository, auth, &digest_hex).await?;
         delete_upload_session(state.config.root_dir(), session_id).await?;
         return oci_created_response(
             &oci_blob_location(repository, &digest_hex),
@@ -276,12 +281,39 @@ pub(crate) async fn oci_put_blob_upload(
         .backend
         .put_sha256_addressed_object_file(&object_key, &digest_hex, &upload_path, &integrity)
         .await?;
+    publish_oci_blob(state, repository, auth, &digest_hex).await?;
     delete_upload_session(state.config.root_dir(), session_id).await?;
     metrics().protocol.record_oci_upload();
     oci_created_response(
         &oci_blob_location(repository, &digest_hex),
         Some(&digest_hex),
     )
+}
+
+async fn publish_oci_blob(
+    state: &Arc<AppState>,
+    repository: &str,
+    auth: &shardline_server_core::AuthorizedRepository,
+    digest_hex: &str,
+) -> Result<(), ServerError> {
+    let mut repository_guard = state
+        .backend
+        .acquire_resource_write_lock(
+            state.config.root_dir(),
+            "oci-repository",
+            &format!("{}:{repository}", scope_namespace(auth.namespace())),
+        )
+        .await?;
+    repository_guard.assert_current().await?;
+    state
+        .backend
+        .publish_oci_object_locked(
+            &mut repository_guard,
+            &oci_blob_index_key(repository, digest_hex, auth),
+            &[],
+        )
+        .await?;
+    repository_guard.assert_current().await
 }
 
 #[tracing::instrument(skip(state, _headers, repo), fields(repository = %repo.repository(), session_id))]

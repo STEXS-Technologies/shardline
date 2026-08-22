@@ -67,6 +67,7 @@ mod ids;
 mod lifecycle;
 mod local_sqlite;
 mod memory;
+mod oci_objects;
 mod oci_tags;
 mod postgres;
 mod provider;
@@ -94,6 +95,7 @@ pub use memory::{
     MemoryIndexStore, MemoryIndexStoreError, MemoryRecordLocator, MemoryRecordStore,
     MemoryRecordStoreError,
 };
+pub use oci_objects::{OciObjectKey, OciObjectKind, OciObjectStore};
 pub use oci_tags::{OciTagEntry, OciTagStore};
 pub use postgres::{
     PostgresIndexStore, PostgresMetadataStoreError, PostgresProviderMutation,

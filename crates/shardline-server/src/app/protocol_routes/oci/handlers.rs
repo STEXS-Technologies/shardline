@@ -8,7 +8,7 @@ use axum::{
 };
 use shardline_metrics::metrics;
 use shardline_protocol::TokenScope;
-use shardline_storage::{DeleteOutcome, ObjectKey};
+use shardline_storage::ObjectKey;
 
 use crate::{ServerError, error::OciError};
 
@@ -18,10 +18,12 @@ use super::blob_upload::{
     oci_put_blob_upload,
 };
 use super::helpers::{
-    OciRepository, oci_blob_key, oci_manifest_prefix, oci_route_served_by_api,
-    oci_route_served_by_transfer,
+    OciRepository, oci_blob_index_key, oci_blob_key, oci_manifest_index_key, oci_manifest_prefix,
+    oci_route_served_by_api, oci_route_served_by_transfer,
 };
-use super::manifest::{oci_delete_manifest, oci_get_manifest, oci_put_manifest};
+use super::manifest::{
+    ensure_oci_object_visible, oci_delete_manifest, oci_get_manifest, oci_put_manifest,
+};
 use super::path::OciPath;
 use super::tags::oci_tags_list;
 use super::token::oci_authorize;
@@ -86,6 +88,11 @@ async fn oci_dispatch_parsed(
 ) -> Result<Response, ServerError> {
     match (method, repo.path()) {
         (Method::GET, OciPath::Blob { digest_hex, .. }) => {
+            ensure_oci_object_visible(
+                state,
+                &oci_blob_index_key(repo.repository(), digest_hex, repo.capability()),
+            )
+            .await?;
             let object_key = oci_blob_key(repo.repository(), digest_hex, repo.capability())?;
             metrics().protocol.record_oci_download();
             direct_object_response(
@@ -99,6 +106,11 @@ async fn oci_dispatch_parsed(
             .await
         }
         (Method::HEAD, OciPath::Blob { digest_hex, .. }) => {
+            ensure_oci_object_visible(
+                state,
+                &oci_blob_index_key(repo.repository(), digest_hex, repo.capability()),
+            )
+            .await?;
             let object_key = oci_blob_key(repo.repository(), digest_hex, repo.capability())?;
             let total_length = state.backend.object_length(&object_key).await?;
             Ok(Response::builder()
@@ -166,6 +178,8 @@ async fn oci_delete_blob(
         )
         .await?;
     let object_key = oci_blob_key(repository, digest_hex, repo.capability())?;
+    let index_key = oci_blob_index_key(repository, digest_hex, repo.capability());
+    ensure_oci_object_visible(state, &index_key).await?;
 
     // Check if any manifest references this blob by walking every page of
     // manifest listings and parsing the JSON document for digest references.
@@ -183,6 +197,20 @@ async fn oci_delete_blob(
             break;
         }
         for manifest_key in &page {
+            let Some(manifest_digest) = manifest_key.as_str().rsplit('/').next() else {
+                continue;
+            };
+            if state
+                .backend
+                .oci_object_is_deleted(&oci_manifest_index_key(
+                    repository,
+                    manifest_digest,
+                    repo.capability(),
+                ))
+                .await?
+            {
+                continue;
+            }
             let body = state.backend.read_object(manifest_key).await?;
             if manifest_references_digest(&body, &target_digest) {
                 return Err(ServerError::InvalidManifestReference);
@@ -192,10 +220,14 @@ async fn oci_delete_blob(
     }
 
     repository_guard.assert_current().await?;
-    match state.backend.delete_object_if_present(&object_key).await? {
-        DeleteOutcome::Deleted => {}
-        DeleteOutcome::NotFound => return Err(ServerError::NotFound),
-    }
+    // Confirm the immutable payload exists, then make it invisible solely by
+    // committing metadata. Retaining the bytes prevents stale-fence deletion
+    // from racing a later publication of the same digest.
+    let _length = state.backend.object_length(&object_key).await?;
+    state
+        .backend
+        .delete_oci_object_locked(&mut repository_guard, &index_key)
+        .await?;
     repository_guard.assert_current().await?;
     Response::builder()
         .status(StatusCode::ACCEPTED)

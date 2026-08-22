@@ -132,7 +132,7 @@ struct AppliedMigration {
 const MIGRATION_HISTORY_TABLE: &str = "shardline_schema_migrations";
 const MIGRATION_ADVISORY_LOCK_KEY: i64 = 0x5348_4152_444d_4701;
 
-const SHARDLINE_MIGRATIONS: [DatabaseMigration; 19] = [
+const SHARDLINE_MIGRATIONS: [DatabaseMigration; 20] = [
     DatabaseMigration {
         version: "20260417000000",
         name: "metadata_store",
@@ -250,6 +250,12 @@ const SHARDLINE_MIGRATIONS: [DatabaseMigration; 19] = [
         name: "resource_fences",
         up_sql: include_str!("../migrations/20260822010000_resource_fences.up.sql"),
         down_sql: include_str!("../migrations/20260822010000_resource_fences.down.sql"),
+    },
+    DatabaseMigration {
+        version: "20260822020000",
+        name: "oci_object_tombstones",
+        up_sql: include_str!("../migrations/20260822020000_oci_object_tombstones.up.sql"),
+        down_sql: include_str!("../migrations/20260822020000_oci_object_tombstones.down.sql"),
     },
 ];
 
@@ -531,7 +537,7 @@ mod tests {
 
     #[test]
     fn bundled_migrations_have_expected_count() {
-        assert_eq!(bundled_database_migrations().len(), 19);
+        assert_eq!(bundled_database_migrations().len(), 20);
     }
 
     #[test]
@@ -554,6 +560,21 @@ mod tests {
         assert_eq!(migration.version, "20260822010000");
         assert!(migration.up_sql.contains("shardline_resource_fences"));
         assert!(migration.down_sql.contains("shardline_resource_fences"));
+    }
+
+    #[test]
+    fn bundled_migrations_include_oci_object_tombstones() {
+        let migration = bundled_database_migrations()
+            .iter()
+            .find(|migration| migration.name == "oci_object_tombstones")
+            .expect("OCI object tombstone migration must be registered");
+        assert_eq!(migration.version, "20260822020000");
+        assert!(migration.up_sql.contains("shardline_oci_object_tombstones"));
+        assert!(
+            migration
+                .down_sql
+                .contains("shardline_oci_object_tombstones")
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

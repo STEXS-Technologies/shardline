@@ -1,4 +1,5 @@
 mod index_store;
+mod oci_objects;
 mod oci_tags;
 mod provider_mutation;
 mod record_store;

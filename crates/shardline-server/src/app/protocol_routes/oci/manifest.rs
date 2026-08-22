@@ -11,7 +11,6 @@ use axum::{
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use shardline_server_core::AuthorizedRepository;
-use shardline_storage::DeleteOutcome;
 
 use crate::{
     ServerError,
@@ -21,8 +20,11 @@ use crate::{
 };
 
 use super::super::{AppState, direct_object_response, parse_query_values};
-use super::helpers::{OciRepository, oci_blob_key, oci_manifest_key, oci_manifest_media_type_key};
-use super::tags::{delete_oci_tags_pointing_to_digest, resolve_oci_tag_digest, update_oci_tags};
+use super::helpers::{
+    OciRepository, oci_blob_index_key, oci_blob_key, oci_manifest_index_key, oci_manifest_key,
+    oci_manifest_media_type_key,
+};
+use super::tags::{resolve_oci_tag_digest, update_oci_tags};
 
 pub(super) const OCI_IMAGE_MANIFEST_MEDIA_TYPE: &str = "application/vnd.oci.image.manifest.v1+json";
 pub(super) const OCI_IMAGE_INDEX_MEDIA_TYPE: &str = "application/vnd.oci.image.index.v1+json";
@@ -42,6 +44,11 @@ pub(crate) async fn oci_get_manifest(
     let repository = repo.repository();
     let auth = repo.capability();
     let digest_hex = resolve_manifest_digest(state, repository, reference, auth).await?;
+    ensure_oci_object_visible(
+        state,
+        &oci_manifest_index_key(repository, &digest_hex, auth),
+    )
+    .await?;
     let manifest_key = oci_manifest_key(repository, &digest_hex, auth)?;
     let media_type_key = oci_manifest_media_type_key(repository, &digest_hex, auth)?;
     let total_length = state.backend.object_length(&manifest_key).await?;
@@ -132,17 +139,15 @@ pub(crate) async fn oci_put_manifest(
     }
     accepted_tags.sort();
     accepted_tags.dedup();
-    if !accepted_tags.is_empty() {
-        update_oci_tags(
-            state,
-            &mut repository_guard,
-            repository,
-            auth,
-            &accepted_tags,
-            &digest_hex,
-        )
-        .await?;
-    }
+    update_oci_tags(
+        state,
+        &mut repository_guard,
+        repository,
+        auth,
+        &accepted_tags,
+        &digest_hex,
+    )
+    .await?;
     repository_guard.assert_current().await?;
 
     let mut builder = Response::builder()
@@ -181,22 +186,15 @@ pub(crate) async fn oci_delete_manifest(
         .await?;
     let digest_hex = resolve_manifest_digest(state, repository, reference, auth).await?;
     let manifest_key = oci_manifest_key(repository, &digest_hex, auth)?;
+    let index_key = oci_manifest_index_key(repository, &digest_hex, auth);
+    ensure_oci_object_visible(state, &index_key).await?;
+    // Confirm that legacy deployments really contain the immutable bytes
+    // before creating a tombstone. The request never physically deletes them.
+    let _length = state.backend.object_length(&manifest_key).await?;
     repository_guard.assert_current().await?;
-    match state
+    state
         .backend
-        .delete_object_if_present(&manifest_key)
-        .await?
-    {
-        DeleteOutcome::Deleted => {}
-        DeleteOutcome::NotFound => return Err(ServerError::NotFound),
-    }
-
-    let media_type_key = oci_manifest_media_type_key(repository, &digest_hex, auth)?;
-    let _deleted = state
-        .backend
-        .delete_object_if_present(&media_type_key)
-        .await?;
-    delete_oci_tags_pointing_to_digest(state, &mut repository_guard, repository, auth, &digest_hex)
+        .delete_oci_object_locked(&mut repository_guard, &index_key)
         .await?;
     repository_guard.assert_current().await?;
 
@@ -334,6 +332,13 @@ async fn ensure_oci_blob_exists(
     auth: &AuthorizedRepository,
     digest_hex: &str,
 ) -> Result<(), ServerError> {
+    if state
+        .backend
+        .oci_object_is_deleted(&oci_blob_index_key(repository, digest_hex, auth))
+        .await?
+    {
+        return Err(ServerError::InvalidManifestReference);
+    }
     let object_key = oci_blob_key(repository, digest_hex, auth)?;
     match state.backend.object_length(&object_key).await {
         Ok(_length) => Ok(()),
@@ -348,11 +353,29 @@ async fn ensure_oci_manifest_exists(
     auth: &AuthorizedRepository,
     digest_hex: &str,
 ) -> Result<(), ServerError> {
+    if state
+        .backend
+        .oci_object_is_deleted(&oci_manifest_index_key(repository, digest_hex, auth))
+        .await?
+    {
+        return Err(ServerError::InvalidManifestReference);
+    }
     let object_key = oci_manifest_key(repository, digest_hex, auth)?;
     match state.backend.object_length(&object_key).await {
         Ok(_length) => Ok(()),
         Err(ServerError::NotFound) => Err(ServerError::InvalidManifestReference),
         Err(error) => Err(error),
+    }
+}
+
+pub(super) async fn ensure_oci_object_visible(
+    state: &Arc<AppState>,
+    key: &shardline_index::OciObjectKey,
+) -> Result<(), ServerError> {
+    if state.backend.oci_object_is_deleted(key).await? {
+        Err(ServerError::NotFound)
+    } else {
+        Ok(())
     }
 }
 
