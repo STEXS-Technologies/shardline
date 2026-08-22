@@ -16,7 +16,7 @@ use shardline_storage::DeleteOutcome;
 use crate::{
     ServerError,
     oci_adapter::{OciReference, oci_manifest_location, parse_reference},
-    protocol_support::parse_sha256_digest,
+    protocol_support::{parse_sha256_digest, scope_namespace},
     upload_ingest::{RequestBodyReader, read_body_to_bytes},
 };
 
@@ -100,6 +100,14 @@ pub(crate) async fn oci_put_manifest(
         .and_then(|value| value.to_str().ok())
         .unwrap_or(OCI_IMAGE_MANIFEST_MEDIA_TYPE)
         .to_owned();
+    let _repository_guard = state
+        .backend
+        .acquire_resource_write_lock(
+            state.config.root_dir(),
+            "oci-repository",
+            &format!("{}:{repository}", scope_namespace(auth.namespace())),
+        )
+        .await?;
     validate_oci_manifest_document(state, repository, auth, &media_type, &bytes).await?;
     let manifest_key = oci_manifest_key(repository, &digest_hex, auth)?;
     let media_type_key = oci_manifest_media_type_key(repository, &digest_hex, auth)?;
@@ -154,6 +162,14 @@ pub(crate) async fn oci_delete_manifest(
 ) -> Result<Response, ServerError> {
     let repository = repo.repository();
     let auth = repo.capability();
+    let _repository_guard = state
+        .backend
+        .acquire_resource_write_lock(
+            state.config.root_dir(),
+            "oci-repository",
+            &format!("{}:{repository}", scope_namespace(auth.namespace())),
+        )
+        .await?;
     let digest_hex = resolve_manifest_digest(state, repository, reference, auth).await?;
     let manifest_key = oci_manifest_key(repository, &digest_hex, auth)?;
     match state

@@ -39,6 +39,7 @@ docs that match your use case.
 - [Cache Adapters](CACHE_ADAPTERS.md)
 - [Provider Adapters](PROVIDER_ADAPTERS.md)
 - [Security and Invariants](SECURITY_AND_INVARIANTS.md)
+- [Distributed Correctness](DISTRIBUTED_CORRECTNESS.md)
 
 ## Operator Workflows
 

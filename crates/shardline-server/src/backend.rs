@@ -105,6 +105,29 @@ impl ServerBackend {
         }
     }
 
+    /// Acquires an exclusive cross-process lock for one mutable logical resource.
+    pub(crate) async fn acquire_resource_write_lock(
+        &self,
+        root: &Path,
+        domain: &str,
+        resource: &str,
+    ) -> Result<crate::maintenance_barrier::MaintenanceBarrierGuard, ServerError> {
+        match self {
+            Self::Local(_) => {
+                crate::maintenance_barrier::acquire_local_resource_exclusive(root, domain, resource)
+                    .await
+            }
+            Self::Postgres(backend) => {
+                crate::maintenance_barrier::acquire_postgres_resource_exclusive(
+                    backend.index_store().pool(),
+                    domain,
+                    resource,
+                )
+                .await
+            }
+        }
+    }
+
     /// Build a [`ServerBackend`] from a [`ServerConfig`] by resolving the object store
     /// and metadata backend (local or Postgres).
     ///

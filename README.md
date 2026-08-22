@@ -115,6 +115,7 @@ Provider integration is optional.
 | [CLI Reference](docs/CLI.md) | All commands and flags |
 | [Compatibility Status](docs/COMPATIBILITY_STATUS.md) | Surface maturity tiers and validated route coverage |
 | [Architecture](docs/ARCHITECTURE.md) | System design and runtime shape |
+| [Distributed Correctness](docs/DISTRIBUTED_CORRECTNESS.md) | Multi-writer contracts, lock ordering, and remaining fencing boundary |
 | [Provider Setup](docs/PROVIDER_QUICKSTART.md) | GitHub/GitLab/Gitea/Codeberg integration |
 | [Client Configuration](docs/CLIENT_CONFIGURATION.md) | Configure git, LFS, and Xet clients |
 | [Protocols](docs/PROTOCOLS.md) | Supported protocol frontends |

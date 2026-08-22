@@ -9,6 +9,7 @@ use axum::{
 };
 use serde::Deserialize;
 use shardline_protocol::TokenScope;
+use shardline_vcs::{RepositoryRef, RepositoryWebhookEvent, RepositoryWebhookEventKind};
 
 use crate::{
     ServerError,
@@ -29,6 +30,25 @@ use crate::{
 #[derive(Debug, Deserialize)]
 pub(super) struct XetTokenQuery {
     subject: Option<String>,
+}
+
+fn provider_repository_lock_resource(repository: &RepositoryRef) -> String {
+    format!(
+        "{}:{}/{}",
+        repository.provider().as_str(),
+        repository.owner(),
+        repository.name()
+    )
+}
+
+fn provider_event_lock_resources(event: &RepositoryWebhookEvent) -> Vec<String> {
+    let mut resources = vec![provider_repository_lock_resource(event.repository())];
+    if let RepositoryWebhookEventKind::RepositoryRenamed { new_repository } = event.kind() {
+        resources.push(provider_repository_lock_resource(new_repository));
+    }
+    resources.sort();
+    resources.dedup();
+    resources
 }
 
 #[tracing::instrument(skip(state, headers, body), fields(provider))]
@@ -137,6 +157,23 @@ pub(super) async fn handle_provider_webhook(
     let Some(event) = event else {
         return Ok(StatusCode::NO_CONTENT.into_response());
     };
+    // Repository lifecycle changes span record and index stores. Serialize
+    // them at the production boundary; rename takes old+new identities in
+    // canonical order so pushes to either name cannot interleave with the
+    // copy/delete/state-migration sequence and two renames cannot deadlock.
+    let mut repository_guards = Vec::new();
+    for resource in provider_event_lock_resources(&event) {
+        repository_guards.push(
+            state
+                .backend
+                .acquire_resource_write_lock(
+                    state.config.root_dir(),
+                    "provider-repository",
+                    &resource,
+                )
+                .await?,
+        );
+    }
     let start = Instant::now();
     let outcome = match &state.backend {
         // Reuse the server's own Postgres record/index stores (their pool is
@@ -155,6 +192,7 @@ pub(super) async fn handle_provider_webhook(
         ServerBackend::Local(_) => apply_provider_webhook(&state.config, &event).await?,
     };
     let elapsed = start.elapsed().as_secs_f64();
+    drop(repository_guards);
     metrics::record_webhook_event(&provider, "", elapsed);
     Ok((
         StatusCode::ACCEPTED,
@@ -170,8 +208,12 @@ mod tests {
     use axum::body::Bytes;
     use axum::extract::{Path, State};
     use axum::http::HeaderMap;
+    use shardline_vcs::{
+        ProviderKind, RepositoryRef, RepositoryWebhookEvent, RepositoryWebhookEventKind,
+        WebhookDeliveryId,
+    };
 
-    use super::XetTokenQuery;
+    use super::{XetTokenQuery, provider_event_lock_resources};
     use crate::{
         ProtocolMetrics, ReconstructionCacheService, ServerBackend, ServerConfig, ServerRole,
         TransferLimiter, app::AppState,
@@ -190,6 +232,24 @@ mod tests {
     fn xet_token_query_subject_none() {
         let query = XetTokenQuery { subject: None };
         assert!(query.subject.is_none());
+    }
+
+    #[test]
+    fn rename_locks_old_and_new_repository_in_canonical_order() {
+        let old = RepositoryRef::new(ProviderKind::GitHub, "z-team", "old").unwrap();
+        let new = RepositoryRef::new(ProviderKind::GitHub, "a-team", "new").unwrap();
+        let event = RepositoryWebhookEvent::new(
+            old,
+            WebhookDeliveryId::new("rename-lock-order").unwrap(),
+            RepositoryWebhookEventKind::RepositoryRenamed {
+                new_repository: new,
+            },
+        );
+
+        assert_eq!(
+            provider_event_lock_resources(&event),
+            vec!["github:a-team/new", "github:z-team/old"]
+        );
     }
 
     #[test]
