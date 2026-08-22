@@ -35,7 +35,7 @@ shardline-rebuild.workspace = true
 shardline-s3-adapter.workspace = true
 shardline-server = { workspace = true, features = ["fuzzing"] }
 shardline-server-core.workspace = true
-shardline-storage = { workspace = true, features = ["s3"] }
+shardline-storage = { workspace = true, features = ["s3", "test-fault-injection"] }
 shardline-vcs.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt", "macros"] }
@@ -327,6 +327,12 @@ doc = false
 [[bin]]
 name = "shardline_oci_tombstone_key"
 path = "fuzz_targets/shardline/oci_tombstone_key.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "shardline_local_publication_faults"
+path = "fuzz_targets/shardline/local_publication_faults.rs"
 test = false
 doc = false
 

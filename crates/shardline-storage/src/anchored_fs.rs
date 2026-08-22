@@ -12,7 +12,10 @@ use std::os::unix::{
     io::AsRawFd,
 };
 
-use crate::{LocalPublishBoundary, fault_injection::local_publish_failpoint};
+use crate::{
+    LocalPublishBoundary,
+    fault_injection::{local_publish_failpoint, local_publish_partial_write_len},
+};
 
 static TEMPORARY_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -210,13 +213,42 @@ pub fn write_anchored_temporary_file(
         );
         match open_new_file(&temporary, file_mode) {
             Ok(mut file) => {
-                file.write_all(bytes)?;
-                file.sync_all()?;
-                local_publish_failpoint(
-                    &anchored.logical_path(),
-                    LocalPublishBoundary::AfterTemporaryDurable,
-                )?;
-                return Ok(temporary);
+                let logical_path = anchored.logical_path();
+                let write_result = (|| {
+                    if let Some(write_len) =
+                        local_publish_partial_write_len(&logical_path, bytes.len())
+                    {
+                        let prefix = bytes.get(..write_len).ok_or_else(|| {
+                            io::Error::new(
+                                ErrorKind::InvalidInput,
+                                "injected partial-write length exceeds payload",
+                            )
+                        })?;
+                        file.write_all(prefix)?;
+                    } else {
+                        file.write_all(bytes)?;
+                    }
+                    local_publish_failpoint(
+                        &logical_path,
+                        LocalPublishBoundary::DuringTemporaryWrite,
+                    )?;
+                    local_publish_failpoint(
+                        &logical_path,
+                        LocalPublishBoundary::BeforeTemporarySync,
+                    )?;
+                    file.sync_all()?;
+                    local_publish_failpoint(
+                        &logical_path,
+                        LocalPublishBoundary::AfterTemporaryDurable,
+                    )
+                })();
+                match write_result {
+                    Ok(()) => return Ok(temporary),
+                    Err(error) => {
+                        remove_if_present(&temporary).ok();
+                        return Err(error);
+                    }
+                }
             }
             Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
             Err(error) => return Err(error),
