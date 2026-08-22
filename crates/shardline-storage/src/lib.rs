@@ -54,6 +54,7 @@
 #[cfg_attr(docsrs, doc(cfg(unix)))]
 pub(crate) mod anchored_fs;
 mod async_store;
+mod fault_injection;
 mod key;
 mod local;
 mod local_fs;
@@ -70,6 +71,7 @@ pub use anchored_fs::{
     rename_at, sync_parent_directory, temporary_file_name, write_anchored_temporary_file,
 };
 pub use async_store::{AsyncObjectStore, SyncObjectStoreBridge};
+pub use fault_injection::LocalPublishBoundary;
 pub use key::{ObjectKey, ObjectKeyError, ObjectPrefix, ObjectPrefixError};
 pub use local::{LocalObjectStore, LocalObjectStoreError};
 pub use local_path::{
