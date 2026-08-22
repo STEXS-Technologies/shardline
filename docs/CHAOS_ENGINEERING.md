@@ -17,7 +17,10 @@ have committed completely, but it must never become partially visible.
 orchestrator. All workload and injection choices use one `SplitMix64` stream. Set
 `SHARDLINE_CHAOS_SEED` to replay a schedule; the runner prints the seed and operation
 transcript on failure. `SHARDLINE_CHAOS_SCALE=1` is a smaller local schedule and is not
-the CI default.
+the CI default. Each seed has a real hang bound: by default 30 seconds per configured
+round, with `SHARDLINE_CHAOS_TIMEOUT_SECONDS` available for deliberately constrained
+environments. The budget scales with the amount of scheduled work so a slow runner is
+not mislabeled as an invariant failure by a fixed whole-test timeout.
 
 The runner's acknowledged-write ledger is independent of server metadata. It verifies:
 
