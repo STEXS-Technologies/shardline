@@ -49,6 +49,19 @@ pub fn scope_namespace(repository_scope: Option<&RepositoryScope>) -> String {
     )
 }
 
+/// Returns the deterministic file-record identifier used for a protocol object.
+///
+/// Keeping this derivation in the shared core lets online request handling and
+/// offline garbage collection address the same deduplicated record without
+/// copying the encoding contract.
+#[must_use]
+pub fn protocol_object_file_id(object_key: &ObjectKey) -> String {
+    format!(
+        "protocol-object-{}",
+        hex::encode(Sha256::digest(object_key.as_str().as_bytes()))
+    )
+}
+
 /// Parses an object key from a string path.
 ///
 /// # Errors

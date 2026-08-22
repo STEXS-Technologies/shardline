@@ -18,9 +18,11 @@ use std::os::unix::fs::OpenOptionsExt;
 use crate::anchored_fs::{
     AnchoredPathOptions, AnchoredTarget,
     ensure_parent_path_matches_anchor as ensure_parent_path_matches_anchor_shared,
-    open_anchored_target as open_anchored_target_shared, remove_if_present,
+    open_anchored_target as open_anchored_target_shared, remove_if_present, sync_parent_directory,
     write_anchored_temporary_file as write_anchored_temporary_file_shared,
 };
+#[cfg(unix)]
+use crate::{LocalPublishBoundary, fault_injection::local_publish_failpoint};
 
 #[cfg(unix)]
 const LOCAL_DIRECTORY_MODE: u32 = 0o700;
@@ -169,10 +171,21 @@ fn hard_link_file_if_absent_unix(root: &Path, path: &Path, temporary: &Path) -> 
     run_before_local_write_hook(&anchored.logical_path());
     let final_path = anchored.final_path();
     fs::hard_link(temporary, &final_path)?;
+    local_publish_failpoint(&anchored.logical_path(), LocalPublishBoundary::AfterInstall)?;
     if let Err(error) = ensure_parent_path_matches_anchor(&anchored) {
         remove_if_present(&final_path)?;
         return Err(error);
     }
+
+    local_publish_failpoint(
+        &anchored.logical_path(),
+        LocalPublishBoundary::BeforeParentSync,
+    )?;
+    sync_parent_directory(&anchored)?;
+    local_publish_failpoint(
+        &anchored.logical_path(),
+        LocalPublishBoundary::AfterParentDurable,
+    )?;
 
     Ok(())
 }
@@ -202,10 +215,20 @@ fn put_bytes_if_absent_unix(
     match fs::hard_link(&temporary, &final_path) {
         Ok(()) => {
             remove_if_present(&temporary)?;
+            local_publish_failpoint(&anchored.logical_path(), LocalPublishBoundary::AfterInstall)?;
             if let Err(mismatch_error) = ensure_parent_path_matches_anchor(&anchored) {
                 remove_if_present(&final_path)?;
                 return Err(mismatch_error);
             }
+            local_publish_failpoint(
+                &anchored.logical_path(),
+                LocalPublishBoundary::BeforeParentSync,
+            )?;
+            sync_parent_directory(&anchored)?;
+            local_publish_failpoint(
+                &anchored.logical_path(),
+                LocalPublishBoundary::AfterParentDurable,
+            )?;
             Ok(PutBytesIfAbsentOutcome::Inserted)
         }
         Err(error) if error.kind() == ErrorKind::AlreadyExists => {
@@ -239,10 +262,20 @@ fn write_bytes_atomically_unix(root: &Path, path: &Path, bytes: &[u8]) -> io::Re
             return Err(error);
         }
     }
+    local_publish_failpoint(&anchored.logical_path(), LocalPublishBoundary::AfterInstall)?;
     if let Err(error) = ensure_parent_path_matches_anchor(&anchored) {
         remove_if_present(&final_path)?;
         return Err(error);
     }
+    local_publish_failpoint(
+        &anchored.logical_path(),
+        LocalPublishBoundary::BeforeParentSync,
+    )?;
+    sync_parent_directory(&anchored)?;
+    local_publish_failpoint(
+        &anchored.logical_path(),
+        LocalPublishBoundary::AfterParentDurable,
+    )?;
     Ok(())
 }
 
@@ -364,6 +397,159 @@ mod tests {
 
     #[cfg(unix)]
     use super::{PutBytesIfAbsentOutcome, put_bytes_if_absent};
+
+    #[cfg(unix)]
+    proptest::proptest! {
+        #[test]
+        fn injected_publication_boundaries_never_expose_torn_bytes(
+            payload in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..4096),
+            boundary_index in 0_u8..7,
+        ) {
+            let sandbox = tempfile::tempdir().expect("temporary directory");
+            let root = sandbox.path().join("root");
+            let path = root.join("properties").join("failpoint.bin");
+            let boundary = match boundary_index {
+                0 => crate::LocalPublishBoundary::BeforeTemporaryWrite,
+                1 => crate::LocalPublishBoundary::DuringTemporaryWrite,
+                2 => crate::LocalPublishBoundary::BeforeTemporarySync,
+                3 => crate::LocalPublishBoundary::AfterTemporaryDurable,
+                4 => crate::LocalPublishBoundary::AfterInstall,
+                5 => crate::LocalPublishBoundary::BeforeParentSync,
+                _ => crate::LocalPublishBoundary::AfterParentDurable,
+            };
+            let _failpoint: crate::fault_injection::LocalPublishFailpointGuard =
+                crate::fault_injection::arm(path.clone(), boundary);
+
+            let result = super::write_bytes_atomically(&root, &path, &payload);
+            proptest::prop_assert!(result.is_err());
+            match std::fs::read(&path) {
+                Ok(stored) => {
+                    proptest::prop_assert_eq!(stored, payload);
+                    proptest::prop_assert!(matches!(
+                        boundary,
+                        crate::LocalPublishBoundary::AfterInstall
+                            | crate::LocalPublishBoundary::BeforeParentSync
+                            | crate::LocalPublishBoundary::AfterParentDurable
+                    ));
+                }
+                Err(error) => {
+                    proptest::prop_assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+                    proptest::prop_assert!(matches!(
+                        boundary,
+                        crate::LocalPublishBoundary::BeforeTemporaryWrite
+                            | crate::LocalPublishBoundary::DuringTemporaryWrite
+                            | crate::LocalPublishBoundary::BeforeTemporarySync
+                            | crate::LocalPublishBoundary::AfterTemporaryDurable
+                    ));
+                }
+            }
+        }
+
+        #[test]
+        fn injected_io_fault_classes_never_expose_torn_bytes(
+            payload in proptest::collection::vec(proptest::prelude::any::<u8>(), 1..4096),
+            fault_index in 0_u8..5,
+        ) {
+            let sandbox = tempfile::tempdir().expect("temporary directory");
+            let root = sandbox.path().join("root");
+            let path = root.join("properties").join("io-fault.bin");
+            let (boundary, fault) = match fault_index {
+                0 => (
+                    crate::LocalPublishBoundary::BeforeTemporaryWrite,
+                    crate::LocalPublishFault::OutOfSpace,
+                ),
+                1 => (
+                    crate::LocalPublishBoundary::BeforeTemporaryWrite,
+                    crate::LocalPublishFault::InputOutput,
+                ),
+                2 => (
+                    crate::LocalPublishBoundary::DuringTemporaryWrite,
+                    crate::LocalPublishFault::PartialWrite,
+                ),
+                3 => (
+                    crate::LocalPublishBoundary::BeforeTemporarySync,
+                    crate::LocalPublishFault::SyncFailure,
+                ),
+                _ => (
+                    crate::LocalPublishBoundary::BeforeParentSync,
+                    crate::LocalPublishFault::SyncFailure,
+                ),
+            };
+            let _failpoint: crate::fault_injection::LocalPublishFailpointGuard =
+                crate::fault_injection::arm_fault(path.clone(), boundary, fault);
+
+            let error = super::write_bytes_atomically(&root, &path, &payload)
+                .expect_err("injected filesystem fault must fail the operation");
+            match fault {
+                crate::LocalPublishFault::OutOfSpace => {
+                    proptest::prop_assert_eq!(error.raw_os_error(), Some(libc::ENOSPC));
+                }
+                crate::LocalPublishFault::InputOutput
+                | crate::LocalPublishFault::SyncFailure => {
+                    proptest::prop_assert_eq!(error.raw_os_error(), Some(libc::EIO));
+                }
+                crate::LocalPublishFault::PartialWrite => {
+                    proptest::prop_assert_eq!(error.kind(), std::io::ErrorKind::WriteZero);
+                }
+                crate::LocalPublishFault::Interrupted => {
+                    proptest::prop_assert!(false, "unexpected generic interruption fault");
+                }
+            }
+
+            if boundary == crate::LocalPublishBoundary::BeforeParentSync {
+                proptest::prop_assert_eq!(std::fs::read(&path).expect("installed bytes"), payload);
+            } else {
+                proptest::prop_assert_eq!(
+                    std::fs::read(&path).expect_err("failed pre-install write must stay invisible").kind(),
+                    std::io::ErrorKind::NotFound,
+                );
+            }
+        }
+
+        #[test]
+        fn atomic_publication_round_trips_every_acknowledged_payload(
+            payloads in proptest::collection::vec(
+                proptest::collection::vec(proptest::prelude::any::<u8>(), 0..4096),
+                1..8,
+            ),
+        ) {
+            let sandbox = tempfile::tempdir().expect("temporary directory");
+            let root = sandbox.path().join("root");
+            let path = root.join("properties").join("atomic.bin");
+
+            for payload in &payloads {
+                super::write_bytes_atomically(&root, &path, payload)
+                    .expect("acknowledged atomic write");
+                let stored = std::fs::read(&path).expect("read acknowledged bytes");
+                proptest::prop_assert_eq!(stored.as_slice(), payload.as_slice());
+            }
+        }
+
+        #[test]
+        fn content_addressed_publication_is_idempotent_or_rejects_conflicts(
+            first in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..4096),
+            second in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..4096),
+        ) {
+            let sandbox = tempfile::tempdir().expect("temporary directory");
+            let root = sandbox.path().join("root");
+            let path = root.join("properties").join("cas.bin");
+
+            let inserted = put_bytes_if_absent(&root, &path, &first)
+                .expect("initial content-addressed publication");
+            proptest::prop_assert!(matches!(inserted, PutBytesIfAbsentOutcome::Inserted));
+
+            let repeated = put_bytes_if_absent(&root, &path, &second);
+            if first == second {
+                proptest::prop_assert!(matches!(
+                    repeated,
+                    Ok(PutBytesIfAbsentOutcome::AlreadyExists)
+                ));
+            } else {
+                proptest::prop_assert!(repeated.is_err());
+            }
+            proptest::prop_assert_eq!(std::fs::read(&path).expect("read CAS bytes"), first);
+        }
+    }
 
     #[cfg(unix)]
     #[test]

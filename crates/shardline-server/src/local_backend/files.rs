@@ -164,7 +164,7 @@ impl LocalBackend {
             ingestor.ingest_body_chunk(&object_store, &bytes).await?;
         }
 
-        let result = async {
+        async {
             let (record, response) = ingestor
                 .finish(&object_store, file_id, repository_scope, expected_sha256)
                 .await?;
@@ -187,16 +187,7 @@ impl LocalBackend {
             }
             Ok(response)
         }
-        .await;
-        if result.is_err()
-            && let Some(intent) = &intent
-        {
-            let _metadata_guard = self.metadata_write_lock.lock().await;
-            let _ignored = coordinator
-                .transition_upload(intent.intent_id(), UploadIntentState::Failed)
-                .await;
-        }
-        result
+        .await
     }
 
     /// Stores a bounded native Xet shard and indexes the contained file reconstructions.

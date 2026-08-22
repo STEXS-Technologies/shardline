@@ -172,6 +172,15 @@ pub(crate) struct S3FileLock {
     file: std::fs::File,
 }
 
+/// Cross-process advisory lock protecting one multipart session's part files.
+///
+/// The process-local per-session mutex remains useful for cheap serialization,
+/// while this guard extends the same exclusion to replicas sharing the upload
+/// root on a filesystem with advisory-lock support.
+pub struct S3SessionPartFileLock {
+    _file_lock: S3FileLock,
+}
+
 impl Drop for S3FileLock {
     fn drop(&mut self) {
         let _ignored = self.file.unlock();
@@ -286,6 +295,32 @@ pub async fn lock_upload_sessions(root: &Path) -> Result<S3UploadSessionLock, S3
     })
 }
 
+/// Acquires the cross-process advisory lock for one session's part files.
+///
+/// The caller must acquire this while holding [`lock_upload_sessions`] and
+/// after its process-local [`acquire_session_part_lock`] guard. That ordering
+/// is also used by expiry, completion, and abort, preventing cross-replica
+/// part writes from racing reads or deletion on a shared upload filesystem.
+///
+/// # Errors
+///
+/// Returns [`S3SessionError::NotFound`] if the session directory disappeared,
+/// or an I/O/blocking-task error if the advisory lock cannot be acquired.
+pub async fn lock_session_parts(
+    root: &Path,
+    upload_id: &str,
+) -> Result<S3SessionPartFileLock, S3SessionError> {
+    validate_upload_id(upload_id)?;
+    let dir = session_dir(root, upload_id)?;
+    if !dir.is_dir() {
+        return Err(S3SessionError::NotFound);
+    }
+    let file_lock = acquire_existing_session_file_lock(dir.join(".parts.lock")).await?;
+    Ok(S3SessionPartFileLock {
+        _file_lock: file_lock,
+    })
+}
+
 async fn acquire_session_file_lock(path: PathBuf) -> Result<S3FileLock, S3SessionError> {
     spawn_blocking(move || {
         if let Some(parent) = path.parent() {
@@ -297,6 +332,28 @@ async fn acquire_session_file_lock(path: PathBuf) -> Result<S3FileLock, S3Sessio
             .read(true)
             .write(true)
             .open(path)?;
+        file.lock()?;
+        Ok(S3FileLock { file })
+    })
+    .await
+    .map_err(S3SessionError::BlockingTask)?
+}
+
+async fn acquire_existing_session_file_lock(path: PathBuf) -> Result<S3FileLock, S3SessionError> {
+    spawn_blocking(move || {
+        let file = match std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(path)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(S3SessionError::NotFound);
+            }
+            Err(error) => return Err(S3SessionError::Io(error)),
+        };
         file.lock()?;
         Ok(S3FileLock { file })
     })
@@ -742,6 +799,7 @@ async fn sweep_expired_sessions_locked(
             // (F-10), so we cannot remove the directory mid-write.
             let part_lock = acquire_session_part_lock(file_name);
             let _part_guard = part_lock.lock().await;
+            let _part_file_guard = lock_session_parts(root, file_name).await?;
             if delete_session_dir(&path).await.is_ok() {
                 removed = removed.saturating_add(1);
             }
@@ -882,6 +940,44 @@ mod tests {
         // Reads the session json directly for assertions.
         let bytes = std::fs::read(session_metadata_path(root, upload_id).unwrap()).unwrap();
         serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn session_part_file_lock_excludes_independent_openers() {
+        let root = make_root().await;
+        let upload_id = create_session(
+            root.path(),
+            "acme.models",
+            "large.bin",
+            "global",
+            ttl(3600),
+            cap(16),
+            quota(1 << 40),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+        let first = lock_session_parts(root.path(), &upload_id).await.unwrap();
+
+        let (acquired_tx, mut acquired_rx) = tokio::sync::oneshot::channel();
+        let waiter_root = root.path().to_path_buf();
+        let waiter_id = upload_id.clone();
+        let waiter = tokio::spawn(async move {
+            let _second = lock_session_parts(&waiter_root, &waiter_id).await.unwrap();
+            let _ignored = acquired_tx.send(());
+        });
+
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut acquired_rx)
+                .await
+                .is_err()
+        );
+        drop(first);
+        tokio::time::timeout(std::time::Duration::from_secs(2), &mut acquired_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        waiter.await.unwrap();
     }
 
     #[test]

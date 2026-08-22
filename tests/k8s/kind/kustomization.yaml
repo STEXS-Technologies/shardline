@@ -20,6 +20,7 @@ patches:
   - path: configmap.patch.yaml
   - path: api-deployment.patch.yaml
   - path: transfer-deployment.patch.yaml
+  - path: api-staging-pvc.patch.yaml
   - path: delete-api-hpa.patch.yaml
   - path: delete-transfer-hpa.patch.yaml
   - path: delete-ingress.patch.yaml

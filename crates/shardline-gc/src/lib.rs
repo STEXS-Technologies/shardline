@@ -59,6 +59,7 @@
 
 mod dispatch;
 mod error;
+mod oci_tombstones;
 mod quarantine;
 mod reachability;
 mod runner;
@@ -72,9 +73,11 @@ mod tests;
 // ---------------------------------------------------------------------------
 
 pub use error::GcError;
+#[doc(hidden)]
+pub use oci_tombstones::OciRecordReclaimer;
 pub use runner::{
-    quarantine_record_path, quarantine_root, run_gc_with_stores, run_local_gc,
-    run_local_gc_diagnostics,
+    quarantine_record_path, quarantine_root, run_gc_with_oci_tombstones, run_gc_with_stores,
+    run_local_gc, run_local_gc_diagnostics,
 };
 pub use shardline_server_core::server_frontend::{
     ServerFrontend, ServerFrontend as ServerFrontendKind, ServerFrontendParseError,

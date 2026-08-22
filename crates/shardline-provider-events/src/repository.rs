@@ -1,7 +1,8 @@
 use std::collections::HashSet;
 
 use shardline_index::{
-    AsyncIndexStore, FileRecord, RecordMutation, RecordStore, RecordTraversal, RetentionHold,
+    AsyncIndexStore, FileRecord, PostgresIndexStore, PostgresProviderMutation, PostgresRecordStore,
+    ProviderRepositoryKey, RecordMutation, RecordStore, RecordTraversal, RetentionHold,
 };
 use shardline_protocol::unix_now_seconds_lossy;
 use shardline_storage::ObjectKey;
@@ -14,7 +15,7 @@ use super::{
         parse_record_entry, record_belongs_to_repository, renamed_file_record,
         repository_record_scope,
     },
-    state::migrate_provider_repository_state,
+    state::{migrate_provider_repository_state, planned_provider_repository_state_migration},
 };
 use crate::ProviderEventsError;
 use shardline_server_core::ServerObjectStore;
@@ -91,6 +92,147 @@ where
         affected_chunks: u64::try_from(chunk_hashes.len())?,
         applied_holds: 0,
         retention_seconds: None,
+    })
+}
+
+pub(super) async fn plan_postgres_repository_renamed(
+    record_store: &PostgresRecordStore,
+    index_store: &PostgresIndexStore,
+    event: &RepositoryWebhookEvent,
+    new_repository: &RepositoryRef,
+    mutation: &mut PostgresProviderMutation,
+) -> Result<ProviderWebhookOutcome, ProviderEventsError> {
+    let RepositoryRecords {
+        latest_locators,
+        version_locators,
+        latest_records: _,
+        version_records,
+    } = collect_repository_records(record_store, event.repository()).await?;
+    let mut file_versions = 0_u64;
+    let mut chunk_hashes = HashSet::new();
+    let renamed_records = version_records
+        .iter()
+        .map(|record| renamed_file_record(record, new_repository))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    for renamed_record in &renamed_records {
+        ensure_absent_or_matching_record(
+            record_store,
+            &RecordTraversal::version_record_locator(record_store, renamed_record),
+            renamed_record,
+        )
+        .await?;
+        ensure_absent_or_matching_record(
+            record_store,
+            &RecordTraversal::latest_record_locator(record_store, renamed_record),
+            renamed_record,
+        )
+        .await?;
+    }
+    for renamed_record in renamed_records {
+        file_versions = file_versions
+            .checked_add(1)
+            .ok_or(ProviderEventsError::Overflow)?;
+        for chunk in &renamed_record.chunks {
+            chunk_hashes.insert(chunk.hash.clone());
+        }
+        mutation.upsert_record(renamed_record);
+    }
+    for locator in latest_locators.iter().chain(&version_locators) {
+        mutation.delete_record(locator);
+    }
+    if let Some(state) =
+        planned_provider_repository_state_migration(index_store, event.repository(), new_repository)
+            .await?
+    {
+        mutation.upsert_provider_repository_state(state);
+        mutation.delete_provider_repository_state(ProviderRepositoryKey::new(
+            event.repository().provider().repository_provider(),
+            event.repository().owner().to_owned(),
+            event.repository().name().to_owned(),
+        ));
+    }
+
+    Ok(ProviderWebhookOutcome {
+        provider: event.repository().provider(),
+        owner: event.repository().owner().to_owned(),
+        repo: event.repository().name().to_owned(),
+        delivery_id: event.delivery_id().as_str().to_owned(),
+        event_kind: ProviderWebhookOutcomeKind::RepositoryRenamed {
+            new_owner: new_repository.owner().to_owned(),
+            new_repo: new_repository.name().to_owned(),
+        },
+        affected_file_versions: file_versions,
+        affected_chunks: u64::try_from(chunk_hashes.len())?,
+        applied_holds: 0,
+        retention_seconds: None,
+    })
+}
+
+pub(super) async fn plan_postgres_repository_deleted(
+    record_store: &PostgresRecordStore,
+    object_store: &ServerObjectStore,
+    event: &RepositoryWebhookEvent,
+    mutation: &mut PostgresProviderMutation,
+) -> Result<ProviderWebhookOutcome, ProviderEventsError> {
+    let now_unix_seconds = unix_now_seconds_lossy();
+    let delete_after_unix_seconds = now_unix_seconds
+        .checked_add(DEFAULT_LOCAL_GC_RETENTION_SECONDS)
+        .ok_or(ProviderEventsError::Overflow)?;
+    let reason = format!(
+        "provider repository deletion: {}/{}/{}",
+        event.repository().provider().as_str(),
+        event.repository().owner(),
+        event.repository().name(),
+    );
+    let RepositoryRecords {
+        latest_locators,
+        version_locators,
+        latest_records,
+        version_records,
+    } = collect_repository_records(record_store, event.repository()).await?;
+    let mut file_versions = 0_u64;
+    let mut chunk_hashes = HashSet::new();
+    let mut held_object_keys = HashSet::new();
+    let mut seen_record_identities = HashSet::new();
+    for record in latest_records.iter().chain(&version_records) {
+        collect_deleted_repository_record_references(
+            object_store,
+            record,
+            &mut seen_record_identities,
+            &mut file_versions,
+            &mut chunk_hashes,
+            &mut held_object_keys,
+        )?;
+    }
+    for object_key in held_object_keys {
+        mutation.upsert_retention_hold(RetentionHold::new(
+            ObjectKey::parse(&object_key)
+                .map_err(|_error| ProviderEventsError::InvalidContentHash)?,
+            reason.clone(),
+            now_unix_seconds,
+            Some(delete_after_unix_seconds),
+        )?);
+    }
+    for locator in latest_locators.iter().chain(&version_locators) {
+        mutation.delete_record(locator);
+    }
+    mutation.delete_provider_repository_state(ProviderRepositoryKey::new(
+        event.repository().provider().repository_provider(),
+        event.repository().owner().to_owned(),
+        event.repository().name().to_owned(),
+    ));
+
+    Ok(ProviderWebhookOutcome {
+        provider: event.repository().provider(),
+        owner: event.repository().owner().to_owned(),
+        repo: event.repository().name().to_owned(),
+        delivery_id: event.delivery_id().as_str().to_owned(),
+        event_kind: ProviderWebhookOutcomeKind::RepositoryDeleted,
+        affected_file_versions: file_versions,
+        affected_chunks: u64::try_from(chunk_hashes.len())?,
+        applied_holds: u64::try_from(mutation.retention_holds_len())?,
+        retention_seconds: Some(DEFAULT_LOCAL_GC_RETENTION_SECONDS),
     })
 }
 

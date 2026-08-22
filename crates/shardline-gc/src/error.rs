@@ -72,6 +72,9 @@ pub enum GcError {
     /// Xet adapter operation failed.
     #[error("xet adapter operation failed")]
     XetAdapter(#[from] XetAdapterError),
+    /// OCI object-key reconstruction failed.
+    #[error("OCI adapter operation failed")]
+    OciAdapter(#[from] shardline_oci_adapter::OciAdapterError),
 }
 
 impl From<shardline_server_core::ParseStoredFileRecordError> for GcError {
@@ -121,7 +124,8 @@ impl From<GcError> for shardline_server_core::ServerObjectStoreError {
             | GcError::WebhookDelivery(_)
             | GcError::FileRecordInvariant(_)
             | GcError::InvalidLifecycleMetadata(_)
-            | GcError::XetAdapter(_) => Self::Io(std::io::Error::other(err)),
+            | GcError::XetAdapter(_)
+            | GcError::OciAdapter(_) => Self::Io(std::io::Error::other(err)),
         }
     }
 }

@@ -91,6 +91,7 @@ mod lifecycle_repair;
 mod local_backend;
 mod local_fs;
 mod local_path;
+mod maintenance_barrier;
 pub mod metrics;
 mod model;
 mod object_store;
@@ -136,10 +137,10 @@ pub(crate) mod oci_adapter {
         OciReference, abort_s3_multipart_upload_session, append_s3_multipart_upload_bytes,
         append_upload_bytes, create_upload_session, delete_upload_session,
         finalize_s3_multipart_upload_session, lock_upload_sessions, oci_blob_location,
-        oci_manifest_location, oci_manifest_prefix, oci_tag_key, oci_tag_prefix,
-        oci_tag_target_key, oci_tag_target_prefix, parse_reference, read_upload_session,
-        touch_upload_session, upload_body_integrity, upload_body_path_for_session, upload_length,
-        upload_session_length, upload_session_location, validate_repository,
+        oci_manifest_location, oci_manifest_prefix, oci_tag_key, oci_tag_prefix, parse_reference,
+        read_upload_session, touch_upload_session, upload_body_integrity,
+        upload_body_path_for_session, upload_length, upload_session_length,
+        upload_session_location, validate_repository,
     };
     pub use shardline_oci_adapter::{oci_blob_key, oci_manifest_key, oci_manifest_media_type_key};
 }
@@ -184,9 +185,9 @@ pub use config::{
     ShardMetadataLimits, file::load_toml_config, load_server_config_from_env_with_toml,
 };
 pub use database_migration::{
-    DatabaseMigration, DatabaseMigrationCommand, DatabaseMigrationError, DatabaseMigrationOptions,
-    DatabaseMigrationReport, DatabaseMigrationStatusEntry, apply_database_migrations,
-    bundled_database_migrations, run_database_migration,
+    DatabaseMigration, DatabaseMigrationBoundary, DatabaseMigrationCommand, DatabaseMigrationError,
+    DatabaseMigrationOptions, DatabaseMigrationReport, DatabaseMigrationStatusEntry,
+    apply_database_migrations, bundled_database_migrations, run_database_migration,
 };
 #[cfg(feature = "fuzzing")]
 pub(crate) use error::InvalidReconstructionResponseError;
@@ -214,8 +215,8 @@ pub use gc::{
 };
 pub use ingest_bench::ingest_without_storage_with_parallelism;
 pub use lifecycle_repair::{
-    DEFAULT_WEBHOOK_DELIVERY_RETENTION_SECONDS, LifecycleRepairOptions, LifecycleRepairReport,
-    run_lifecycle_repair, run_local_lifecycle_repair,
+    DEFAULT_WEBHOOK_DELIVERY_RETENTION_SECONDS, LifecycleRepairBoundary, LifecycleRepairOptions,
+    LifecycleRepairReport, run_lifecycle_repair, run_local_lifecycle_repair,
 };
 pub use local_backend::LocalBackend;
 pub use model::{
@@ -236,7 +237,7 @@ pub use runtime_check::{ConfigCheckReport, run_config_check};
 pub use server_frontend::{ServerFrontend, ServerFrontendParseError};
 pub use server_role::{ServerRole, ServerRoleParseError};
 pub(crate) mod gc {
-    pub(crate) use shardline_gc::run_gc_with_stores;
+    pub(crate) use shardline_gc::run_gc_with_oci_tombstones;
     pub use shardline_gc::{
         DEFAULT_LOCAL_GC_RETENTION_SECONDS, LocalGcDiagnostics, LocalGcOptions, LocalGcReport,
     };
@@ -309,9 +310,14 @@ pub async fn run_gc_diagnostics(
     let object_store = object_store_from_config(&config)?;
     if let Some(index_postgres_url) = config.index_postgres_url() {
         let pool = connect_postgres_metadata_pool(index_postgres_url, 4)?;
+        let _gc_barrier = if options.mark || options.sweep {
+            Some(maintenance_barrier::acquire_postgres_exclusive(&pool).await?)
+        } else {
+            None
+        };
         let index_store = PostgresIndexStore::new(pool.clone());
         let record_store = PostgresRecordStore::new(pool);
-        return gc::run_gc_with_stores(
+        return gc::run_gc_with_oci_tombstones(
             &record_store,
             &index_store,
             &object_store,
@@ -322,9 +328,14 @@ pub async fn run_gc_diagnostics(
         .map_err(Into::into);
     }
 
+    let _gc_barrier = if options.mark || options.sweep {
+        Some(maintenance_barrier::acquire_local_exclusive(config.root_dir()).await?)
+    } else {
+        None
+    };
     let index_store = LocalIndexStore::open(config.root_dir().to_path_buf());
     let record_store = LocalRecordStore::open(config.root_dir().to_path_buf());
-    gc::run_gc_with_stores(
+    gc::run_gc_with_oci_tombstones(
         &record_store,
         &index_store,
         &object_store,

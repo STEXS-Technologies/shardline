@@ -9,6 +9,9 @@ documentation = "https://docs.rs/shardline-cas"
 readme = "README.md"
 description = "CAS coordinator composition for Shardline."
 
+[features]
+test-fault-injection = []
+
 [package.metadata.docs.rs]
 targets = ["x86_64-unknown-linux-gnu"]
 rustdoc-args = ["--cfg", "docsrs"]
@@ -20,6 +23,7 @@ shardline-storage.workspace = true
 
 [dev-dependencies]
 blake3.workspace = true
+proptest.workspace = true
 shardline-protocol.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true

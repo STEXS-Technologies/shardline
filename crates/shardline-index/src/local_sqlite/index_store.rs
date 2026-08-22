@@ -465,17 +465,53 @@ impl LifecycleStore for LocalIndexStore {
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
              ON CONFLICT (provider, owner, repo)
              DO UPDATE SET
-                last_access_changed_at_unix_seconds =
-                    excluded.last_access_changed_at_unix_seconds,
-                last_revision_pushed_at_unix_seconds =
-                    excluded.last_revision_pushed_at_unix_seconds,
-                last_pushed_revision = excluded.last_pushed_revision,
-                last_cache_invalidated_at_unix_seconds =
-                    excluded.last_cache_invalidated_at_unix_seconds,
-                last_authorization_rechecked_at_unix_seconds =
-                    excluded.last_authorization_rechecked_at_unix_seconds,
-                last_drift_checked_at_unix_seconds =
-                    excluded.last_drift_checked_at_unix_seconds,
+                last_access_changed_at_unix_seconds = CASE
+                    WHEN excluded.last_access_changed_at_unix_seconds IS NULL
+                        THEN shardline_provider_repository_states.last_access_changed_at_unix_seconds
+                    WHEN shardline_provider_repository_states.last_access_changed_at_unix_seconds IS NULL
+                      OR excluded.last_access_changed_at_unix_seconds >= shardline_provider_repository_states.last_access_changed_at_unix_seconds
+                        THEN excluded.last_access_changed_at_unix_seconds
+                    ELSE shardline_provider_repository_states.last_access_changed_at_unix_seconds
+                END,
+                last_pushed_revision = CASE
+                    WHEN excluded.last_revision_pushed_at_unix_seconds IS NOT NULL
+                     AND (shardline_provider_repository_states.last_revision_pushed_at_unix_seconds IS NULL
+                       OR excluded.last_revision_pushed_at_unix_seconds >= shardline_provider_repository_states.last_revision_pushed_at_unix_seconds)
+                        THEN excluded.last_pushed_revision
+                    ELSE shardline_provider_repository_states.last_pushed_revision
+                END,
+                last_revision_pushed_at_unix_seconds = CASE
+                    WHEN excluded.last_revision_pushed_at_unix_seconds IS NULL
+                        THEN shardline_provider_repository_states.last_revision_pushed_at_unix_seconds
+                    WHEN shardline_provider_repository_states.last_revision_pushed_at_unix_seconds IS NULL
+                      OR excluded.last_revision_pushed_at_unix_seconds >= shardline_provider_repository_states.last_revision_pushed_at_unix_seconds
+                        THEN excluded.last_revision_pushed_at_unix_seconds
+                    ELSE shardline_provider_repository_states.last_revision_pushed_at_unix_seconds
+                END,
+                last_cache_invalidated_at_unix_seconds = CASE
+                    WHEN excluded.last_cache_invalidated_at_unix_seconds IS NULL
+                        THEN shardline_provider_repository_states.last_cache_invalidated_at_unix_seconds
+                    WHEN shardline_provider_repository_states.last_cache_invalidated_at_unix_seconds IS NULL
+                      OR excluded.last_cache_invalidated_at_unix_seconds >= shardline_provider_repository_states.last_cache_invalidated_at_unix_seconds
+                        THEN excluded.last_cache_invalidated_at_unix_seconds
+                    ELSE shardline_provider_repository_states.last_cache_invalidated_at_unix_seconds
+                END,
+                last_authorization_rechecked_at_unix_seconds = CASE
+                    WHEN excluded.last_authorization_rechecked_at_unix_seconds IS NULL
+                        THEN shardline_provider_repository_states.last_authorization_rechecked_at_unix_seconds
+                    WHEN shardline_provider_repository_states.last_authorization_rechecked_at_unix_seconds IS NULL
+                      OR excluded.last_authorization_rechecked_at_unix_seconds >= shardline_provider_repository_states.last_authorization_rechecked_at_unix_seconds
+                        THEN excluded.last_authorization_rechecked_at_unix_seconds
+                    ELSE shardline_provider_repository_states.last_authorization_rechecked_at_unix_seconds
+                END,
+                last_drift_checked_at_unix_seconds = CASE
+                    WHEN excluded.last_drift_checked_at_unix_seconds IS NULL
+                        THEN shardline_provider_repository_states.last_drift_checked_at_unix_seconds
+                    WHEN shardline_provider_repository_states.last_drift_checked_at_unix_seconds IS NULL
+                      OR excluded.last_drift_checked_at_unix_seconds >= shardline_provider_repository_states.last_drift_checked_at_unix_seconds
+                        THEN excluded.last_drift_checked_at_unix_seconds
+                    ELSE shardline_provider_repository_states.last_drift_checked_at_unix_seconds
+                END,
                 updated_at_unix_seconds = excluded.updated_at_unix_seconds",
             params![
                 state.provider().as_str(),
@@ -538,7 +574,7 @@ impl UploadIntentStore for super::LocalIndexStore {
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or(Duration::ZERO)
                 .as_secs() as i64;
-            conn.execute(
+            let inserted = conn.execute(
                 "INSERT OR IGNORE INTO shardline_upload_intents (intent_id, object_key, object_hash, object_length, state, created_at_unix_seconds, updated_at_unix_seconds) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 rusqlite::params![
                     intent.intent_id(),
@@ -550,6 +586,25 @@ impl UploadIntentStore for super::LocalIndexStore {
                     now,
                 ],
             )?;
+            if inserted == 0 {
+                let matches_identity = conn.query_row(
+                    "SELECT EXISTS(
+                        SELECT 1 FROM shardline_upload_intents
+                        WHERE intent_id = ?1 AND object_key = ?2 AND object_hash = ?3
+                          AND object_length = ?4
+                     )",
+                    rusqlite::params![
+                        intent.intent_id(),
+                        intent.object_key(),
+                        intent.object_hash(),
+                        intent.object_length() as i64,
+                    ],
+                    |row| row.get::<_, bool>(0),
+                )?;
+                if !matches_identity {
+                    return Err(crate::UploadIntentConflictError::new(intent.intent_id()).into());
+                }
+            }
             Ok(())
         })
         .await
@@ -1169,6 +1224,60 @@ mod tests {
     }
 
     #[test]
+    fn provider_repository_state_upsert_merges_partial_and_stale_observations() {
+        let store = make_store();
+        let revision = ProviderRepositoryState::new(
+            RepositoryProvider::GitHub,
+            "team".into(),
+            "merge".into(),
+            None,
+            Some(200),
+            Some("new-revision".into()),
+        )
+        .with_reconciliation(None, Some(180), None);
+        let independent = ProviderRepositoryState::new(
+            RepositoryProvider::GitHub,
+            "team".into(),
+            "merge".into(),
+            Some(150),
+            None,
+            None,
+        )
+        .with_reconciliation(Some(170), None, Some(190));
+        let stale = ProviderRepositoryState::new(
+            RepositoryProvider::GitHub,
+            "team".into(),
+            "merge".into(),
+            Some(100),
+            Some(120),
+            Some("stale-revision".into()),
+        )
+        .with_reconciliation(Some(110), Some(130), Some(140));
+
+        for state in [&revision, &independent, &stale] {
+            LifecycleStore::upsert_provider_repository_state(&store, state).unwrap();
+        }
+
+        let loaded = LifecycleStore::provider_repository_state(
+            &store,
+            RepositoryProvider::GitHub,
+            "team",
+            "merge",
+        )
+        .unwrap()
+        .expect("merged state");
+        assert_eq!(loaded.last_access_changed_at_unix_seconds(), Some(150));
+        assert_eq!(loaded.last_revision_pushed_at_unix_seconds(), Some(200));
+        assert_eq!(loaded.last_pushed_revision(), Some("new-revision"));
+        assert_eq!(loaded.last_cache_invalidated_at_unix_seconds(), Some(170));
+        assert_eq!(
+            loaded.last_authorization_rechecked_at_unix_seconds(),
+            Some(180)
+        );
+        assert_eq!(loaded.last_drift_checked_at_unix_seconds(), Some(190));
+    }
+
+    #[test]
     fn provider_repository_state_list_includes_upserted() {
         let store = make_store();
         let state = ProviderRepositoryState::new(
@@ -1282,6 +1391,30 @@ mod tests {
     }
 
     // ── UploadIntentStore: transition idempotency ─────────────────────────
+
+    #[test]
+    fn create_intent_rejects_id_reuse_for_different_object() {
+        let store = make_store();
+        let original = UploadIntent::new(
+            "conflicting-intent".to_owned(),
+            "objects/a".to_owned(),
+            "hash-a".to_owned(),
+            42,
+        );
+        let conflicting = UploadIntent::new(
+            "conflicting-intent".to_owned(),
+            "objects/b".to_owned(),
+            "hash-b".to_owned(),
+            43,
+        );
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(store.create_intent(&original)).unwrap();
+        runtime.block_on(store.create_intent(&original)).unwrap();
+        assert!(matches!(
+            runtime.block_on(store.create_intent(&conflicting)),
+            Err(LocalIndexStoreError::UploadIntentConflict(_))
+        ));
+    }
 
     #[test]
     fn transition_intent_to_same_state_is_idempotent() {

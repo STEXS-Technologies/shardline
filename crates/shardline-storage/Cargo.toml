@@ -16,6 +16,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 [features]
 default = ["s3"]
 s3 = ["object_store/aws"]
+test-fault-injection = []
 
 [dependencies]
 async-trait.workspace = true

@@ -52,6 +52,21 @@ schema change, apply it before the process rollout with `shardline db migrate up
 (see [Database Migrations](DATABASE_MIGRATIONS.md)); the schema must be compatible
 with the previous version's processes for the duration of the rollout.
 
+The OCI tag-index migration is additive and old processes continue to read their
+object-store tag pointers. During the API-class rollout, drain OCI manifest `PUT` and
+`DELETE` traffic, OCI blob deletion, and provider webhook traffic, or route those
+mutations exclusively to the new API version. Reads
+remain available and legacy tags are imported lazily. Resume OCI mutations after all
+API replicas run the new version; this avoids two software versions using different
+authoritative tag-pointer stores or bypassing repository-scoped locks during the brief
+mixed-version window.
+
+Suspend destructive GC (`--mark` and/or `--sweep`) for the entire mixed-version
+rollout. The new release coordinates GC against writers with a shared/exclusive
+barrier, but an older server does not participate in that barrier. Dry-run GC remains
+safe. Resume scheduled destructive GC only after every API and transfer replica runs
+the barrier-aware version.
+
 ## Procedure
 
 The example uses the Production Scaled profile (`kubectl`). For systemd or host-native
@@ -165,9 +180,23 @@ schema, revert it with `shardline db migrate down` before restarting the old
 processes (see [Database Migrations](DATABASE_MIGRATIONS.md)). Because only one class
 is mid-rollout at any time, rollback always has a known-good version to return to.
 
-## Automated Proof
+## Automated Evidence
 
-A rolling-upgrade end-to-end test exercises this procedure against a live deployment:
-`e2e/rolling_upgrade_e2e.rs`. The test upgrades one role class, polls `/healthz` and
-`/readyz`, verifies readiness, then upgrades the other, and confirms the deployment
-keeps serving throughout. Role separation itself is covered by `e2e/role_split_e2e.rs`.
+`e2e/rolling_upgrade_e2e.rs` replaces each role independently, polls `/healthz` and
+`/readyz`, and confirms the other role keeps serving. Role separation itself is covered
+by `e2e/role_split_e2e.rs`.
+
+The `mixed-version-upgrade` reliability job adds the binary compatibility evidence that
+an in-process test cannot provide. It automatically selects the greatest preceding
+SemVer tag reachable from the current commit, builds that release and the current commit
+separately, starts two N-1 processes against shared Postgres and S3, then performs:
+
+```text
+N-1 + N-1 -> N + N-1 -> N + N -> N-1 + N
+```
+
+At every mixed-version stage, each binary reads exact bytes written by the other. The
+rollback stage also publishes through N-1 and reconstructs through N. Its transcript
+and exact N/N-1 commit identities are retained as CI artifacts. This evidence applies
+to the tested adjacent release pair; every release reruns the automatically advanced
+pair rather than assuming transitive compatibility.

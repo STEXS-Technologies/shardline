@@ -170,6 +170,12 @@ pub struct LocalGcReport {
     /// Number of over-cap revision registry rows pruned by this run's GC-time
     /// revision-cap enforcement (F-75 residual), across every repository.
     pub pruned_revisions_over_cap: u64,
+    /// Number of durable OCI tombstones inspected by this run.
+    pub scanned_oci_tombstones: u64,
+    /// Number of OCI tombstones whose retention window had expired.
+    pub eligible_oci_tombstones: u64,
+    /// Number of OCI objects physically reclaimed and tombstones removed.
+    pub reclaimed_oci_tombstones: u64,
 }
 
 /// One active retention-window entry after a GC run.

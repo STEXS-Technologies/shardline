@@ -4,6 +4,7 @@ use axum::{
     extract::{FromRequestParts, Path},
     http::{HeaderMap, Method, request::Parts},
 };
+use shardline_index::{OciObjectKey as OciIndexObjectKey, OciObjectKind};
 use shardline_protocol::TokenScope;
 use shardline_server_core::AuthorizedRepository;
 use shardline_storage::{ObjectKey, ObjectPrefix};
@@ -178,6 +179,38 @@ pub(crate) fn oci_blob_key(
         .map_err(ServerError::from)
 }
 
+/// Builds the durable logical-visibility identity for an OCI blob.
+pub(crate) fn oci_blob_index_key(
+    repository: &str,
+    digest_hex: &str,
+    auth: &AuthorizedRepository,
+) -> OciIndexObjectKey {
+    oci_index_object_key(repository, digest_hex, auth, OciObjectKind::Blob)
+}
+
+/// Builds the durable logical-visibility identity for an OCI manifest.
+pub(crate) fn oci_manifest_index_key(
+    repository: &str,
+    digest_hex: &str,
+    auth: &AuthorizedRepository,
+) -> OciIndexObjectKey {
+    oci_index_object_key(repository, digest_hex, auth, OciObjectKind::Manifest)
+}
+
+fn oci_index_object_key(
+    repository: &str,
+    digest_hex: &str,
+    auth: &AuthorizedRepository,
+    kind: OciObjectKind,
+) -> OciIndexObjectKey {
+    OciIndexObjectKey {
+        scope_namespace: crate::protocol_support::scope_namespace(auth.namespace()),
+        repository: repository.to_owned(),
+        kind,
+        digest_hex: digest_hex.to_owned(),
+    }
+}
+
 /// # Errors
 ///
 /// Returns an error when the repository, digest, or scope is invalid.
@@ -231,31 +264,6 @@ pub(crate) fn oci_tag_prefix(
     auth: &AuthorizedRepository,
 ) -> Result<ObjectPrefix, ServerError> {
     crate::oci_adapter::oci_tag_prefix(repository, auth.namespace()).map_err(ServerError::from)
-}
-
-/// # Errors
-///
-/// Returns an error when the repository, digest, tag, or scope is invalid.
-pub(crate) fn oci_tag_target_key(
-    repository: &str,
-    digest_hex: &str,
-    tag: &str,
-    auth: &AuthorizedRepository,
-) -> Result<ObjectKey, ServerError> {
-    crate::oci_adapter::oci_tag_target_key(repository, digest_hex, tag, auth.namespace())
-        .map_err(ServerError::from)
-}
-
-/// # Errors
-///
-/// Returns an error when the repository, digest, or scope is invalid.
-pub(crate) fn oci_tag_target_prefix(
-    repository: &str,
-    digest_hex: &str,
-    auth: &AuthorizedRepository,
-) -> Result<ObjectPrefix, ServerError> {
-    crate::oci_adapter::oci_tag_target_prefix(repository, digest_hex, auth.namespace())
-        .map_err(ServerError::from)
 }
 
 pub(crate) const fn oci_route_served_by_api(method: &Method, path: &OciPath) -> bool {

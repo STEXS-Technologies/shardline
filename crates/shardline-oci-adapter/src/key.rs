@@ -99,6 +99,46 @@ pub fn oci_blob_key(
     ))
 }
 
+fn validate_scope_namespace(scope_namespace: &str) -> Result<(), OciAdapterError> {
+    if scope_namespace == "global"
+        || (scope_namespace.len() == 64
+            && scope_namespace
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
+    {
+        return Ok(());
+    }
+    Err(OciAdapterError::InvalidContentHash)
+}
+
+fn oci_object_key_from_namespace(
+    repository: &str,
+    digest_hex: &str,
+    scope_namespace: &str,
+    object_namespace: &str,
+) -> Result<ObjectKey, OciAdapterError> {
+    validate_repository(repository)?;
+    validate_scope_namespace(scope_namespace)?;
+    parse_sha256_digest(&format!("sha256:{digest_hex}"))?;
+    object_key(&format!(
+        "protocols/oci/{scope_namespace}/repos/{}/{object_namespace}/{digest_hex}",
+        stable_hex_id(repository),
+    ))
+}
+
+/// Rebuilds an OCI blob key from its durable tombstone namespace.
+///
+/// # Errors
+///
+/// Returns an error when the namespace, repository, or digest is invalid.
+pub fn oci_blob_key_from_namespace(
+    repository: &str,
+    digest_hex: &str,
+    scope_namespace: &str,
+) -> Result<ObjectKey, OciAdapterError> {
+    oci_object_key_from_namespace(repository, digest_hex, scope_namespace, "blobs")
+}
+
 /// # Errors
 ///
 /// Returns an error when the repository, digest, or scope is invalid.
@@ -117,6 +157,19 @@ pub fn oci_manifest_key(
     ))
 }
 
+/// Rebuilds an OCI manifest key from its durable tombstone namespace.
+///
+/// # Errors
+///
+/// Returns an error when the namespace, repository, or digest is invalid.
+pub fn oci_manifest_key_from_namespace(
+    repository: &str,
+    digest_hex: &str,
+    scope_namespace: &str,
+) -> Result<ObjectKey, OciAdapterError> {
+    oci_object_key_from_namespace(repository, digest_hex, scope_namespace, "manifests")
+}
+
 /// # Errors
 ///
 /// Returns an error when the repository, digest, or scope is invalid.
@@ -133,6 +186,24 @@ pub fn oci_manifest_media_type_key(
         stable_hex_id(repository),
         digest_hex
     ))
+}
+
+/// Rebuilds an OCI manifest media-type key from its durable tombstone namespace.
+///
+/// # Errors
+///
+/// Returns an error when the namespace, repository, or digest is invalid.
+pub fn oci_manifest_media_type_key_from_namespace(
+    repository: &str,
+    digest_hex: &str,
+    scope_namespace: &str,
+) -> Result<ObjectKey, OciAdapterError> {
+    oci_object_key_from_namespace(
+        repository,
+        digest_hex,
+        scope_namespace,
+        "manifest-media-types",
+    )
 }
 
 /// # Errors

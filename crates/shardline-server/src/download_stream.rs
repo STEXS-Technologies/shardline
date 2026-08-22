@@ -25,6 +25,45 @@ pub const STREAM_READ_BUFFER_BYTES: u64 = 1024 * 1024;
 
 pub type ServerByteStream = Pin<Box<dyn Stream<Item = Result<Bytes, ServerError>> + Send>>;
 
+/// Reads and validates a complete content-addressed xorb before exposing a requested
+/// serialized-byte range.
+///
+/// A range cannot be authenticated in isolation because the xorb identity covers its
+/// chunk sequence and the serialized container can be corrupted outside the requested
+/// range. Validation therefore finishes before the response stream is constructed, so
+/// stale or corrupted provider bytes never become a successful partial response.
+///
+/// # Errors
+///
+/// Returns [`ServerError`] when the object is missing, its stored length or requested
+/// range is invalid, or the serialized xorb does not match `hash_hex`.
+pub(crate) fn validated_xorb_byte_range_stream(
+    object_store: &ServerObjectStore,
+    object_key: &ObjectKey,
+    hash_hex: &str,
+    total_length: u64,
+    range: ByteRange,
+) -> Result<ServerByteStream, ServerError> {
+    if range.end_inclusive() >= total_length {
+        return Err(ServerError::RangeNotSatisfiable);
+    }
+
+    let xorb_data = read_full_object(object_store, object_key, total_length)?;
+    let expected_hash = parse_xet_hash_hex(hash_hex)?;
+    let mut cursor = std::io::Cursor::new(xorb_data.as_slice());
+    crate::xet_adapter::validate_serialized_xorb(&mut cursor, expected_hash)?;
+
+    let start = usize::try_from(range.start())?;
+    let end_exclusive = usize::try_from(
+        range
+            .end_inclusive()
+            .checked_add(1)
+            .ok_or(ServerError::Overflow)?,
+    )?;
+    let bytes = Bytes::from(xorb_data).slice(start..end_exclusive);
+    Ok(Box::pin(stream::once(async move { Ok(bytes) })))
+}
+
 /// Returns whether a serialized xorb object is stored under `hash_hex`.
 ///
 /// Used by the single-chunk routing decision in [`file_record_byte_stream`]: a
