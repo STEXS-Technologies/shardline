@@ -132,6 +132,27 @@ The default `--auth-provider local` remains HMAC-SHA256 for backward compatibili
 Use `--key-env` instead of `--key-file` when the private key is supplied through an
 environment variable.
 
+#### Ed25519 key rotation
+
+The current Ed25519 provider accepts exactly one verification key at a time. It does not
+yet support an overlapping old-and-new verification window. Treat that as an explicit
+operational constraint rather than assuming a rolling key change is safe:
+
+1. Reduce the token TTL far enough in advance that every token signed by the old key
+   expires before the rotation window.
+2. Stop issuing tokens with the old private key and wait through the old maximum TTL.
+3. Replace the private key on signing nodes and the corresponding public key on
+   verification-only nodes as one coordinated maintenance operation.
+4. Restart every server and mint a short-lived probe token with `shardline admin token
+   --auth-provider ed25519` before returning traffic.
+5. Verify that the new token succeeds and a token signed by the retired key fails.
+
+Do not mix old-key and new-key replicas behind one load balancer: requests would be
+accepted or rejected depending on which replica receives them. Deployments that require
+zero-downtime overlapping verification should keep Ed25519 classified as Experimental
+until multi-key verification is implemented, or use the JWKS/OIDC providers whose key
+sets have rotation support.
+
 ### OIDC
 
 Set the issuer URL and point `SHARDLINE_AUTH_PROVIDER=oidc`:
@@ -223,3 +244,5 @@ With the pluggable auth system:
    tooling.
 4. Restart the server. Existing HMAC, OIDC, or JWKS tokens are not accepted as Ed25519
    tokens.
+5. For later Ed25519-to-Ed25519 rotations, follow the coordinated procedure above; the
+   server does not currently accept old and new Ed25519 public keys simultaneously.
