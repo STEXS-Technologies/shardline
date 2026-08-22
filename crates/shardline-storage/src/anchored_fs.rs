@@ -191,7 +191,7 @@ pub fn open_or_create_child_directory(
 /// # Errors
 ///
 /// Returns an error when a temporary file cannot be created safely or the payload cannot be fully
-/// written and flushed.
+/// written and durably synchronized.
 pub fn write_anchored_temporary_file(
     anchored: &AnchoredTarget,
     bytes: &[u8],
@@ -205,13 +205,25 @@ pub fn write_anchored_temporary_file(
         match open_new_file(&temporary, file_mode) {
             Ok(mut file) => {
                 file.write_all(bytes)?;
-                file.flush()?;
+                file.sync_all()?;
                 return Ok(temporary);
             }
             Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
             Err(error) => return Err(error),
         }
     }
+}
+
+/// Durably synchronizes directory-entry changes made below an anchored parent.
+///
+/// Call this after the final rename/link and any temporary-name removal so an
+/// acknowledged atomic publication survives a process or host crash.
+///
+/// # Errors
+///
+/// Returns an error when the operating system cannot synchronize the directory.
+pub fn sync_parent_directory(anchored: &AnchoredTarget) -> io::Result<()> {
+    anchored.parent_dir().sync_all()
 }
 
 /// Returns a collision-resistant temporary filename beside `file_name`.

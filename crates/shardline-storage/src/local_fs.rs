@@ -18,7 +18,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use crate::anchored_fs::{
     AnchoredPathOptions, AnchoredTarget,
     ensure_parent_path_matches_anchor as ensure_parent_path_matches_anchor_shared,
-    open_anchored_target as open_anchored_target_shared, remove_if_present,
+    open_anchored_target as open_anchored_target_shared, remove_if_present, sync_parent_directory,
     write_anchored_temporary_file as write_anchored_temporary_file_shared,
 };
 
@@ -174,6 +174,8 @@ fn hard_link_file_if_absent_unix(root: &Path, path: &Path, temporary: &Path) -> 
         return Err(error);
     }
 
+    sync_parent_directory(&anchored)?;
+
     Ok(())
 }
 
@@ -206,6 +208,7 @@ fn put_bytes_if_absent_unix(
                 remove_if_present(&final_path)?;
                 return Err(mismatch_error);
             }
+            sync_parent_directory(&anchored)?;
             Ok(PutBytesIfAbsentOutcome::Inserted)
         }
         Err(error) if error.kind() == ErrorKind::AlreadyExists => {
@@ -243,6 +246,7 @@ fn write_bytes_atomically_unix(root: &Path, path: &Path, bytes: &[u8]) -> io::Re
         remove_if_present(&final_path)?;
         return Err(error);
     }
+    sync_parent_directory(&anchored)?;
     Ok(())
 }
 
@@ -364,6 +368,53 @@ mod tests {
 
     #[cfg(unix)]
     use super::{PutBytesIfAbsentOutcome, put_bytes_if_absent};
+
+    #[cfg(unix)]
+    proptest::proptest! {
+        #[test]
+        fn atomic_publication_round_trips_every_acknowledged_payload(
+            payloads in proptest::collection::vec(
+                proptest::collection::vec(proptest::prelude::any::<u8>(), 0..4096),
+                1..8,
+            ),
+        ) {
+            let sandbox = tempfile::tempdir().expect("temporary directory");
+            let root = sandbox.path().join("root");
+            let path = root.join("properties").join("atomic.bin");
+
+            for payload in &payloads {
+                super::write_bytes_atomically(&root, &path, payload)
+                    .expect("acknowledged atomic write");
+                let stored = std::fs::read(&path).expect("read acknowledged bytes");
+                proptest::prop_assert_eq!(stored.as_slice(), payload.as_slice());
+            }
+        }
+
+        #[test]
+        fn content_addressed_publication_is_idempotent_or_rejects_conflicts(
+            first in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..4096),
+            second in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..4096),
+        ) {
+            let sandbox = tempfile::tempdir().expect("temporary directory");
+            let root = sandbox.path().join("root");
+            let path = root.join("properties").join("cas.bin");
+
+            let inserted = put_bytes_if_absent(&root, &path, &first)
+                .expect("initial content-addressed publication");
+            proptest::prop_assert!(matches!(inserted, PutBytesIfAbsentOutcome::Inserted));
+
+            let repeated = put_bytes_if_absent(&root, &path, &second);
+            if first == second {
+                proptest::prop_assert!(matches!(
+                    repeated,
+                    Ok(PutBytesIfAbsentOutcome::AlreadyExists)
+                ));
+            } else {
+                proptest::prop_assert!(repeated.is_err());
+            }
+            proptest::prop_assert_eq!(std::fs::read(&path).expect("read CAS bytes"), first);
+        }
+    }
 
     #[cfg(unix)]
     #[test]
