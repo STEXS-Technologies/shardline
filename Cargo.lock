@@ -3446,6 +3446,7 @@ version = "1.6.0"
 dependencies = [
  "async-trait",
  "blake3",
+ "proptest",
  "shardline-index",
  "shardline-protocol",
  "shardline-storage",

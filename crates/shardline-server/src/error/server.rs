@@ -431,6 +431,9 @@ impl From<CasError> for ServerError {
         match value {
             CasError::BodyTooLarge { .. } => Self::RequestBodyTooLarge,
             CasError::InvalidUploadTransition => Self::UploadIntentConflict,
+            CasError::InjectedUploadInterruption { boundary } => Self::Io(IoError::other(format!(
+                "upload interrupted at {boundary:?}"
+            ))),
             CasError::Overflow => Self::Overflow,
             CasError::ObjectStore(message)
             | CasError::Index(message)

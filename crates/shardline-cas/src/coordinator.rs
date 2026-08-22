@@ -2,7 +2,9 @@ use shardline_index::{AsyncIndexStore, StoredObjectId};
 use shardline_storage::{AsyncObjectStore, ObjectBody, ObjectIntegrity, ObjectKey, PutOutcome};
 
 use crate::reachability::ObjectReachability;
-use crate::{CasError, CasLimits};
+use crate::{
+    CasError, CasLimits, UploadLifecycleBoundary, fault_injection::upload_lifecycle_failpoint,
+};
 
 #[derive(Debug)]
 pub struct CasCoordinator<I, O, R> {
@@ -99,6 +101,11 @@ where
         Fut: std::future::Future<Output = Result<T, E>>,
     {
         self.begin_upload(intent).await.map_err(E::from)?;
+        upload_lifecycle_failpoint(
+            intent.intent_id(),
+            UploadLifecycleBoundary::AfterIntentCreated,
+        )
+        .map_err(E::from)?;
         let current = self
             .index
             .intent_by_id(intent.intent_id())
@@ -126,18 +133,49 @@ where
         )
         .await
         .map_err(E::from)?;
+        upload_lifecycle_failpoint(intent.intent_id(), UploadLifecycleBoundary::AfterStoring)
+            .map_err(E::from)?;
 
         match work().await {
             Ok(result) => {
-                for state in [
+                upload_lifecycle_failpoint(
+                    intent.intent_id(),
+                    UploadLifecycleBoundary::AfterObjectWork,
+                )
+                .map_err(E::from)?;
+                self.transition_upload(
+                    intent.intent_id(),
                     shardline_index::UploadIntentState::Stored,
+                )
+                .await
+                .map_err(E::from)?;
+                upload_lifecycle_failpoint(
+                    intent.intent_id(),
+                    UploadLifecycleBoundary::AfterStored,
+                )
+                .map_err(E::from)?;
+                self.transition_upload(
+                    intent.intent_id(),
                     shardline_index::UploadIntentState::MetadataCommitted,
+                )
+                .await
+                .map_err(E::from)?;
+                upload_lifecycle_failpoint(
+                    intent.intent_id(),
+                    UploadLifecycleBoundary::AfterMetadataCommitted,
+                )
+                .map_err(E::from)?;
+                self.transition_upload(
+                    intent.intent_id(),
                     shardline_index::UploadIntentState::Visible,
-                ] {
-                    self.transition_upload(intent.intent_id(), state)
-                        .await
-                        .map_err(E::from)?;
-                }
+                )
+                .await
+                .map_err(E::from)?;
+                upload_lifecycle_failpoint(
+                    intent.intent_id(),
+                    UploadLifecycleBoundary::AfterVisible,
+                )
+                .map_err(E::from)?;
                 Ok(result)
             }
             // A returned error does not establish whether an object-store or
@@ -296,6 +334,7 @@ where
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
     use shardline_index::{MemoryIndexStore, UploadIntent, UploadIntentState, UploadIntentStore};
     use shardline_protocol::ByteRange;
     use shardline_storage::{
@@ -306,12 +345,12 @@ mod tests {
         num::NonZeroU64,
         sync::{
             Arc,
-            atomic::{AtomicBool, Ordering},
+            atomic::{AtomicBool, AtomicUsize, Ordering},
         },
     };
 
     use super::CasCoordinator;
-    use crate::{CasError, CasLimits};
+    use crate::{CasError, CasLimits, UploadLifecycleBoundary, arm_upload_interruption};
 
     #[derive(Debug, PartialEq, Eq)]
     struct IndexProbe;
@@ -631,6 +670,98 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(stored.state(), UploadIntentState::Visible);
+    }
+
+    fn upload_lifecycle_boundary_strategy() -> impl Strategy<Value = UploadLifecycleBoundary> {
+        prop_oneof![
+            Just(UploadLifecycleBoundary::AfterIntentCreated),
+            Just(UploadLifecycleBoundary::AfterStoring),
+            Just(UploadLifecycleBoundary::AfterObjectWork),
+            Just(UploadLifecycleBoundary::AfterStored),
+            Just(UploadLifecycleBoundary::AfterMetadataCommitted),
+            Just(UploadLifecycleBoundary::AfterVisible),
+        ]
+    }
+
+    fn durable_state_at_boundary(boundary: UploadLifecycleBoundary) -> UploadIntentState {
+        match boundary {
+            UploadLifecycleBoundary::AfterIntentCreated => UploadIntentState::Created,
+            UploadLifecycleBoundary::AfterStoring | UploadLifecycleBoundary::AfterObjectWork => {
+                UploadIntentState::Storing
+            }
+            UploadLifecycleBoundary::AfterStored => UploadIntentState::Stored,
+            UploadLifecycleBoundary::AfterMetadataCommitted => UploadIntentState::MetadataCommitted,
+            UploadLifecycleBoundary::AfterVisible => UploadIntentState::Visible,
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(32))]
+
+        #[test]
+        fn every_upload_lifecycle_interruption_is_recoverable(
+            boundary in upload_lifecycle_boundary_strategy(),
+        ) {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            let index = MemoryIndexStore::new();
+            let coordinator = CasCoordinator::new(
+                index.clone(),
+                (),
+                (),
+                CasLimits::new(NonZeroU64::MAX, NonZeroU64::MAX, NonZeroU64::MAX),
+            );
+            let intent_id = format!("fault-{boundary:?}");
+            let intent = UploadIntent::new(
+                intent_id.clone(),
+                "objects/test".to_owned(),
+                "abcdef".to_owned(),
+                42,
+            );
+            let work_calls = Arc::new(AtomicUsize::new(0));
+            let guard = arm_upload_interruption(intent_id.clone(), boundary);
+            let first_calls = Arc::clone(&work_calls);
+            let first: Result<i32, CasError> = rt.block_on(
+                coordinator.with_upload_intent(&intent, move || async move {
+                    first_calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(42)
+                }),
+            );
+
+            prop_assert_eq!(
+                first,
+                Err(CasError::InjectedUploadInterruption { boundary }),
+            );
+            let durable = rt
+                .block_on(index.intent_by_id(&intent_id))
+                .unwrap()
+                .unwrap();
+            prop_assert_eq!(durable.state(), durable_state_at_boundary(boundary));
+
+            drop(guard);
+            let retry_calls = Arc::clone(&work_calls);
+            let retry: Result<i32, CasError> = rt.block_on(
+                coordinator.with_upload_intent(&intent, move || async move {
+                    retry_calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(42)
+                }),
+            );
+
+            prop_assert_eq!(retry, Ok(42));
+            let recovered = rt
+                .block_on(index.intent_by_id(&intent_id))
+                .unwrap()
+                .unwrap();
+            prop_assert_eq!(recovered.state(), UploadIntentState::Visible);
+            let expected_work_calls = match boundary {
+                UploadLifecycleBoundary::AfterIntentCreated
+                | UploadLifecycleBoundary::AfterStoring => 1,
+                UploadLifecycleBoundary::AfterObjectWork
+                | UploadLifecycleBoundary::AfterStored
+                | UploadLifecycleBoundary::AfterMetadataCommitted
+                | UploadLifecycleBoundary::AfterVisible => 2,
+            };
+            prop_assert_eq!(work_calls.load(Ordering::SeqCst), expected_work_calls);
+        }
     }
 
     #[test]
