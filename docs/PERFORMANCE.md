@@ -150,6 +150,26 @@ JSON output is available for machine processing:
 shardline bench --storage-dir /tmp/shardline-bench --json
 ```
 
+For a checked, repeatable 1/32/128-client matrix with host/toolchain metadata, full
+JSON reports, peak-RSS output, and a generated Markdown summary, run:
+
+```bash
+scripts/benchmark-matrix.sh /tmp/shardline-benchmark-results
+# or: cargo make shardline-bench-matrix -- /tmp/shardline-benchmark-results
+```
+
+The script refuses to overwrite an existing run and records results beneath a
+timestamped, commit-addressed directory. Defaults are deliberately small enough for
+regular regression work; use `SHARDLINE_BENCH_MATRIX_BASE_BYTES`,
+`SHARDLINE_BENCH_MATRIX_ITERATIONS`, and `SHARDLINE_BENCH_MATRIX_CONCURRENCY` for a
+capacity run. Set `SHARDLINE_BENCH_MATRIX_TARGET=configured` to exercise the active
+Postgres/S3/Redis configuration rather than isolated local adapters.
+
+The monthly and manually dispatchable `Benchmarks` workflow publishes the generated
+table as its job summary and retains the metadata, raw JSON, and peak-RSS reports as
+one artifact. A dirty working tree is recorded explicitly in local-run metadata so a
+result cannot silently masquerade as evidence for the named commit.
+
 The current report includes:
 
 - deployment target
