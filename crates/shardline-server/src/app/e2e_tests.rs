@@ -1435,6 +1435,90 @@ async fn stats_route_is_admission_gated() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hashing_pool_starvation_rejects_immediately_and_recovers() {
+    let tmp = TempDir::new().unwrap();
+    let chunk_size = NonZeroUsize::new(65_536).unwrap();
+    let object_store = ServerObjectStore::local(tmp.path().join("chunks")).unwrap();
+    let backend = LocalBackend::new_with_object_store_and_upload_parallelism_with_frontends(
+        tmp.path().to_path_buf(),
+        "http://127.0.0.1:8080".to_owned(),
+        chunk_size,
+        NonZeroUsize::new(1).unwrap(),
+        object_store,
+        &[ServerFrontend::Xet],
+    )
+    .await
+    .unwrap();
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        tmp.path().to_path_buf(),
+        chunk_size,
+    )
+    .with_server_role(ServerRole::All)
+    .with_server_frontends(vec![ServerFrontend::Xet])
+    .unwrap();
+    let one = NonZeroUsize::new(1).unwrap();
+    let pools = crate::admission::ExecutionPools::with_sizes(one, one, one);
+    let held_hashing_permit = pools.hashing.try_acquire().expect("hold only hashing slot");
+    let state = Arc::new(AppState {
+        config,
+        role: ServerRole::All,
+        backend: ServerBackend::Local(backend),
+        auth: None,
+        provider_tokens: None,
+        reconstruction_cache: ReconstructionCacheService::disabled(),
+        transfer_limiter: TransferLimiter::new(chunk_size, NonZeroUsize::new(1).unwrap()),
+        oci_registry_token_limiter: Arc::new(tokio::sync::Semaphore::new(1)),
+        admission: crate::admission::WeightedAdmission::new(
+            NonZeroUsize::new(crate::admission::weights::XORB_UPLOAD as usize).unwrap(),
+        ),
+        pools,
+        protocol_metrics: ProtocolMetrics::default(),
+    });
+    let app = Router::new()
+        .route(
+            "/transfer/xorb/{prefix}/{hash}",
+            put(super::operational::write_xorb_transfer),
+        )
+        .with_state(state);
+    let (xorb_bytes, xorb_hash) = test_fixtures::single_chunk_xorb(b"pool recovery payload");
+    let uri = format!("/transfer/xorb/default/{xorb_hash}");
+
+    let saturated = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        app.clone().oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(&uri)
+                .body(Body::from(xorb_bytes.clone()))
+                .unwrap(),
+        ),
+    )
+    .await
+    .expect("saturated pool must reject without queueing")
+    .unwrap();
+    assert_eq!(saturated.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    drop(held_hashing_permit);
+
+    let recovered = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        app.oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(uri)
+                .body(Body::from(xorb_bytes))
+                .unwrap(),
+        ),
+    )
+    .await
+    .expect("released pool must admit new work")
+    .unwrap();
+    assert_eq!(recovered.status(), StatusCode::OK);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn batch_reconstruction_empty() {
     let (app, _tmp) = test_app(&[ServerFrontend::Xet]).await;
 
