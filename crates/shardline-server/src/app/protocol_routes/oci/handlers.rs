@@ -154,7 +154,7 @@ async fn oci_delete_blob(
     digest_hex: &str,
 ) -> Result<Response, ServerError> {
     let repository = repo.repository();
-    let _repository_guard = state
+    let mut repository_guard = state
         .backend
         .acquire_resource_write_lock(
             state.config.root_dir(),
@@ -191,10 +191,12 @@ async fn oci_delete_blob(
         start_after = page.last().cloned();
     }
 
+    repository_guard.assert_current().await?;
     match state.backend.delete_object_if_present(&object_key).await? {
         DeleteOutcome::Deleted => {}
         DeleteOutcome::NotFound => return Err(ServerError::NotFound),
     }
+    repository_guard.assert_current().await?;
     Response::builder()
         .status(StatusCode::ACCEPTED)
         .body(Body::empty())
