@@ -194,3 +194,49 @@ jobs:
           path: reliability-upgrade-results
           if-no-files-found: error
           retention-days: 90
+
+  postgres-promotion:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Setup Rust CI toolchain and tools
+        uses: ./.github/actions/rust-ci-setup
+
+      - name: Start PostgreSQL streaming pair
+        run: docker compose -f docker-compose.postgres-failover.yml up -d --wait
+
+      - name: Kill primary, promote standby, and verify live recovery
+        run: |
+          set -o pipefail
+          mkdir -p reliability-postgres-results
+          cargo test -p shardline-server --test postgres_failover \
+            -- --exact --nocapture 2>&1 \
+            | tee reliability-postgres-results/postgres-promotion.log
+
+      - name: Record PostgreSQL promotion metadata
+        if: always()
+        run: |
+          mkdir -p reliability-postgres-results
+          {
+            echo "commit=${GITHUB_SHA}"
+            echo "postgres_image=postgres:16-alpine"
+            echo "run_id=${GITHUB_RUN_ID}"
+            echo "run_attempt=${GITHUB_RUN_ATTEMPT}"
+            echo "finished_epoch=$(date +%s)"
+          } > reliability-postgres-results/metadata.txt
+
+      - name: Stop PostgreSQL streaming pair
+        if: always()
+        run: docker compose -f docker-compose.postgres-failover.yml down
+
+      - name: Upload PostgreSQL promotion evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: shardline-postgres-promotion-${{ github.sha }}
+          path: reliability-postgres-results
+          if-no-files-found: error
+          retention-days: 90

@@ -44,7 +44,7 @@ Status meanings:
 | Process | Covered | `chaos_runner`, `fault_drills`, `fault_drills_extreme` kill in-flight servers and run repeated restart cycles; typed CAS failpoints interrupt intent creation, storing, successful object work, stored, metadata-committed and visible boundaries, while a proptest requires every interrupted state to converge to `Visible` on retry; task-scoped lifecycle-repair failpoints interrupt each durable metadata-mutation class and require retry convergence | Extend the typed boundary vocabulary whenever a new durable state machine is introduced |
 | Filesystem | Covered | Anchored-path race tests, atomic temp publication, parent-swap fuzzing, read-only/permission failures and durable file/directory `fsync`; typed test-only I/O faults inject `ENOSPC`, `EIO`, prefix-only writes and sync failure at seven explicit publication boundaries, while proptests and `shardline_local_publication_faults` require complete-old or complete-new visibility | Kernel/FUSE fault mounts remain useful supplemental platform evidence, not the only regression oracle |
 | Object storage | Covered | `deployment_chaos` kills and partitions MinIO during writes; a typed one-shot HTTP proxy proves exact-byte behavior for accepted PUT response loss, a retryable provider `503`, delayed successful range bodies and a stale-but-well-formed xorb response against real MinIO; the stale response is driven through the Xet HTTP frontend and rejected by end-to-end CAS validation before transfer bytes are exposed; multipart/integrity tests and OCI tombstone DELETE replay cover the other normal and ambiguous paths | Extend the provider/version matrix as external deployments contribute evidence |
-| Database | Partial | Postgres kill/restart, mid-transaction loss, stale fencing, serialization/deadlock behavior and atomic migrations are exercised; typed migration failpoints cover apply/revert immediately before and after commit and require a rerun to reach the complete schema; a protocol-aware TCP proxy drops `CommandComplete(COMMIT)` only after PostgreSQL commits and proves idempotent recovery; lock-induced statement timeout and bounded pool exhaustion both prove recovery after the transient condition clears | Add a real primary/standby promotion campaign |
+| Database | Covered | Postgres kill/restart, mid-transaction loss, stale fencing, serialization/deadlock behavior and atomic migrations are exercised; typed migration failpoints cover apply/revert immediately before and after commit and require a rerun to reach the complete schema; a protocol-aware TCP proxy drops `CommandComplete(COMMIT)` only after PostgreSQL commits and proves idempotent recovery; lock-induced statement timeout and bounded pool exhaustion both prove recovery; a real PostgreSQL 16 streaming standby replays acknowledged state, is promoted after a primary `SIGKILL`, and the unchanged Shardline process reconnects through a stable endpoint, reconstructs pre-failover bytes and publishes fresh exact bytes | Extend the promotion matrix across supported PostgreSQL/HA-provider versions |
 | Network | Covered | API/transfer and MinIO/Postgres partitions, connection stalls and reconnect recovery; a real Linux `tc netem` drill injects packet delay, jitter, duplication and reordering, then a one-way 100% MinIO response loss, and requires exact acknowledged bytes plus fresh post-recovery publication | Extend the netem matrix with new deployment topologies and provider versions |
 | Cluster | Covered | `multinode_chaos` kills either role, partitions split roles and replaces roles during traffic | True N-1/N mixed-binary tests remain upgrade evidence, not basic cluster-failure evidence |
 | Concurrency | Covered | Upload/overwrite/delete/GC/reconstruction/cache/provider/OCI races plus Loom models | Extend models whenever a new shared mutable state machine is introduced |
@@ -110,6 +110,14 @@ Deployment drills require the Docker fault stack described by the test and CI wo
 
 ```bash
 cargo test -p shardline-server --test deployment_chaos -- --nocapture
+```
+
+Run the real PostgreSQL streaming-replica promotion drill:
+
+```bash
+docker compose -f docker-compose.postgres-failover.yml up -d --wait
+cargo test -p shardline-server --test postgres_failover -- --exact --nocapture
+docker compose -f docker-compose.postgres-failover.yml down
 ```
 
 Run a bounded local soak (the scheduled workflow uses 7200 seconds):
