@@ -13,7 +13,8 @@ use shardline_storage::{
     AnchoredPathOptions, AnchoredTarget,
     ensure_parent_path_matches_anchor as ensure_parent_path_matches_anchor_shared,
     open_anchored_target as open_anchored_target_shared, open_new_file as open_new_file_shared,
-    remove_if_present, write_anchored_temporary_file as write_anchored_temporary_file_shared,
+    remove_if_present, sync_parent_directory,
+    write_anchored_temporary_file as write_anchored_temporary_file_shared,
 };
 
 static TEMPORARY_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -132,6 +133,8 @@ fn write_file_atomically_unix(root: &Path, path: &Path, bytes: &[u8]) -> io::Res
         return Err(error);
     }
 
+    sync_parent_directory(&anchored)?;
+
     Ok(())
 }
 
@@ -142,11 +145,13 @@ fn write_new_file_unix(root: &Path, path: &Path, bytes: &[u8]) -> io::Result<()>
     let final_path = anchored.final_path();
     let mut file = open_new_file(&final_path)?;
     file.write_all(bytes)?;
-    file.flush()?;
+    file.sync_all()?;
     if let Err(error) = ensure_parent_path_matches_anchor(&anchored) {
         remove_if_present(&final_path)?;
         return Err(error);
     }
+
+    sync_parent_directory(&anchored)?;
 
     Ok(())
 }
