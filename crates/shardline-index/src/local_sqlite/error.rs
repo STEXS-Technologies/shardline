@@ -6,7 +6,9 @@ use shardline_protocol::{HashParseError, RangeError};
 use shardline_storage::ObjectKeyError;
 use thiserror::Error;
 
-use crate::{QuarantineCandidateError, RetentionHoldError, WebhookDeliveryError};
+use crate::{
+    QuarantineCandidateError, RetentionHoldError, UploadIntentConflictError, WebhookDeliveryError,
+};
 
 /// Local metadata-store failure.
 #[derive(Debug, Error)]
@@ -54,6 +56,9 @@ pub enum LocalIndexStoreError {
     /// A stored webhook delivery was invalid.
     #[error("stored webhook delivery was invalid")]
     WebhookDelivery(#[from] WebhookDeliveryError),
+    /// An upload intent ID was reused for different object identity.
+    #[error("upload intent conflict")]
+    UploadIntentConflict(#[from] #[source] UploadIntentConflictError),
     /// A stored integer exceeded the supported range.
     #[error("stored integer exceeded the supported range: {0}")]
     IntegerOutOfRange(String),

@@ -574,7 +574,7 @@ impl UploadIntentStore for super::LocalIndexStore {
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or(Duration::ZERO)
                 .as_secs() as i64;
-            conn.execute(
+            let inserted = conn.execute(
                 "INSERT OR IGNORE INTO shardline_upload_intents (intent_id, object_key, object_hash, object_length, state, created_at_unix_seconds, updated_at_unix_seconds) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 rusqlite::params![
                     intent.intent_id(),
@@ -586,6 +586,25 @@ impl UploadIntentStore for super::LocalIndexStore {
                     now,
                 ],
             )?;
+            if inserted == 0 {
+                let matches_identity = conn.query_row(
+                    "SELECT EXISTS(
+                        SELECT 1 FROM shardline_upload_intents
+                        WHERE intent_id = ?1 AND object_key = ?2 AND object_hash = ?3
+                          AND object_length = ?4
+                     )",
+                    rusqlite::params![
+                        intent.intent_id(),
+                        intent.object_key(),
+                        intent.object_hash(),
+                        intent.object_length() as i64,
+                    ],
+                    |row| row.get::<_, bool>(0),
+                )?;
+                if !matches_identity {
+                    return Err(crate::UploadIntentConflictError::new(intent.intent_id()).into());
+                }
+            }
             Ok(())
         })
         .await
@@ -1372,6 +1391,30 @@ mod tests {
     }
 
     // ── UploadIntentStore: transition idempotency ─────────────────────────
+
+    #[test]
+    fn create_intent_rejects_id_reuse_for_different_object() {
+        let store = make_store();
+        let original = UploadIntent::new(
+            "conflicting-intent".to_owned(),
+            "objects/a".to_owned(),
+            "hash-a".to_owned(),
+            42,
+        );
+        let conflicting = UploadIntent::new(
+            "conflicting-intent".to_owned(),
+            "objects/b".to_owned(),
+            "hash-b".to_owned(),
+            43,
+        );
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(store.create_intent(&original)).unwrap();
+        runtime.block_on(store.create_intent(&original)).unwrap();
+        assert!(matches!(
+            runtime.block_on(store.create_intent(&conflicting)),
+            Err(LocalIndexStoreError::UploadIntentConflict(_))
+        ));
+    }
 
     #[test]
     fn transition_intent_to_same_state_is_idempotent() {

@@ -160,7 +160,17 @@ where
         self.index
             .create_intent(intent)
             .await
-            .map_err(CasError::from_record)
+            .map_err(map_upload_intent_store_error)?;
+        let stored = self
+            .index
+            .intent_by_id(intent.intent_id())
+            .await
+            .map_err(CasError::from_record)?;
+        if stored.is_some_and(|stored| stored.has_same_identity(intent)) {
+            Ok(())
+        } else {
+            Err(CasError::InvalidUploadTransition)
+        }
     }
 
     /// Records one validated persistence boundary for an upload.
@@ -186,9 +196,18 @@ where
         let Some(current) = current else {
             return Err(CasError::InvalidUploadTransition);
         };
+        if current.state() == shardline_index::UploadIntentState::Failed {
+            return if next == shardline_index::UploadIntentState::Failed {
+                Ok(())
+            } else {
+                Err(CasError::InvalidUploadTransition)
+            };
+        }
         // Already at or past the target in the committed chain: a concurrent
         // duplicate caller advanced it, so the boundary is effectively reached.
-        if committed_state_rank(current.state()) >= committed_state_rank(next) {
+        if next != shardline_index::UploadIntentState::Failed
+            && committed_state_rank(current.state()) >= committed_state_rank(next)
+        {
             return Ok(());
         }
         let transitioned = self
@@ -209,12 +228,37 @@ where
             .await
             .map_err(CasError::from_record)?;
         match after {
-            Some(intent) if committed_state_rank(intent.state()) >= committed_state_rank(next) => {
+            Some(intent) if intent.state() == shardline_index::UploadIntentState::Failed => {
+                if next == shardline_index::UploadIntentState::Failed {
+                    Ok(())
+                } else {
+                    Err(CasError::InvalidUploadTransition)
+                }
+            }
+            Some(intent)
+                if next != shardline_index::UploadIntentState::Failed
+                    && committed_state_rank(intent.state()) >= committed_state_rank(next) =>
+            {
                 Ok(())
             }
             _ => Err(CasError::InvalidUploadTransition),
         }
     }
+}
+
+fn map_upload_intent_store_error(error: impl std::error::Error + 'static) -> CasError {
+    let message = error.to_string();
+    let mut source: Option<&(dyn std::error::Error + 'static)> = Some(&error);
+    while let Some(current) = source {
+        if current
+            .downcast_ref::<shardline_index::UploadIntentConflictError>()
+            .is_some()
+        {
+            return CasError::InvalidUploadTransition;
+        }
+        source = current.source();
+    }
+    CasError::Record(message)
 }
 
 /// Returns the order of an upload-intent state along the committed chain,
@@ -227,7 +271,7 @@ const fn committed_state_rank(state: shardline_index::UploadIntentState) -> u8 {
         shardline_index::UploadIntentState::Stored => 2,
         shardline_index::UploadIntentState::MetadataCommitted => 3,
         shardline_index::UploadIntentState::Visible => 4,
-        shardline_index::UploadIntentState::Failed => u8::MAX,
+        shardline_index::UploadIntentState::Failed => 0,
     }
 }
 
@@ -463,5 +507,68 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(stored.state(), UploadIntentState::Visible);
+    }
+
+    #[test]
+    fn begin_upload_rejects_conflicting_idempotency_key() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let index = MemoryIndexStore::new();
+        let coordinator = CasCoordinator::new(
+            index,
+            (),
+            (),
+            CasLimits::new(NonZeroU64::MAX, NonZeroU64::MAX, NonZeroU64::MAX),
+        );
+        let original = UploadIntent::new(
+            "collision".to_owned(),
+            "objects/a".to_owned(),
+            "hash-a".to_owned(),
+            1,
+        );
+        let conflicting = UploadIntent::new(
+            "collision".to_owned(),
+            "objects/b".to_owned(),
+            "hash-b".to_owned(),
+            2,
+        );
+        rt.block_on(coordinator.begin_upload(&original)).unwrap();
+        assert_eq!(
+            rt.block_on(coordinator.begin_upload(&conflicting)),
+            Err(CasError::InvalidUploadTransition)
+        );
+    }
+
+    #[test]
+    fn failed_intent_cannot_resume_success_chain() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let index = MemoryIndexStore::new();
+        let coordinator = CasCoordinator::new(
+            index.clone(),
+            (),
+            (),
+            CasLimits::new(NonZeroU64::MAX, NonZeroU64::MAX, NonZeroU64::MAX),
+        );
+        let intent = UploadIntent::new(
+            "terminal-failure".to_owned(),
+            "objects/a".to_owned(),
+            "hash-a".to_owned(),
+            1,
+        );
+        rt.block_on(coordinator.begin_upload(&intent)).unwrap();
+        rt.block_on(coordinator.transition_upload(intent.intent_id(), UploadIntentState::Failed))
+            .unwrap();
+        assert_eq!(
+            rt.block_on(
+                coordinator.transition_upload(intent.intent_id(), UploadIntentState::Storing,)
+            ),
+            Err(CasError::InvalidUploadTransition)
+        );
+        assert_eq!(
+            rt.block_on(index.intent_by_id(intent.intent_id()))
+                .unwrap()
+                .unwrap()
+                .state(),
+            UploadIntentState::Failed
+        );
     }
 }

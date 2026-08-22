@@ -4,7 +4,9 @@ use shardline_storage::ObjectKeyError;
 use sqlx::{Error as SqlxError, PgPool};
 use thiserror::Error;
 
-use crate::{QuarantineCandidateError, RetentionHoldError, WebhookDeliveryError};
+use crate::{
+    QuarantineCandidateError, RetentionHoldError, UploadIntentConflictError, WebhookDeliveryError,
+};
 
 /// Postgres-compatible implementation of the asynchronous index-store contract.
 #[derive(Debug, Clone)]
@@ -141,6 +143,9 @@ pub enum PostgresMetadataStoreError {
     /// A stored upload intent state value was invalid.
     #[error("invalid upload intent state: {0}")]
     InvalidUploadIntentState(String),
+    /// An upload intent ID was reused for different object identity.
+    #[error("upload intent conflict")]
+    UploadIntentConflict(#[from] #[source] UploadIntentConflictError),
 }
 
 impl From<SqlxError> for PostgresMetadataStoreError {
