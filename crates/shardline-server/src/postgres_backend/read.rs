@@ -9,7 +9,7 @@ use shardline_protocol::{ByteRange, RepositoryScope};
 #[cfg(test)]
 use shardline_storage::ObjectStore;
 use shardline_storage::{AsyncObjectStore, DeleteOutcome, ObjectKey, ObjectMetadata, ObjectPrefix};
-use sqlx::query_scalar;
+use sqlx::{PgPool, query_scalar};
 use tokio::task;
 
 use crate::{
@@ -643,6 +643,21 @@ pub(crate) fn connect_postgres_metadata_pool(
         .map_err(ServerError::from)
 }
 
+/// Returns PostgreSQL's current Unix timestamp for shared lifecycle decisions.
+///
+/// Multi-replica deployments must not expire shared retention state from each
+/// node's independently skewable wall clock. PostgreSQL already coordinates
+/// the durable metadata, so its clock is the single authority for those
+/// decisions as well.
+pub(crate) async fn postgres_unix_now_seconds(pool: &PgPool) -> Result<u64, ServerError> {
+    let seconds =
+        sqlx::query_scalar::<_, i64>("SELECT floor(extract(epoch FROM clock_timestamp()))::bigint")
+            .fetch_one(pool)
+            .await
+            .map_err(shardline_index::PostgresMetadataStoreError::from)?;
+    u64::try_from(seconds).map_err(ServerError::from)
+}
+
 fn map_record_store_error(error: PostgresMetadataStoreError) -> ServerError {
     match error {
         PostgresMetadataStoreError::RecordNotFound => ServerError::NotFound,
@@ -1006,6 +1021,36 @@ mod tests {
         assert!(result.is_ok() || result.is_err());
         // Drop the pool explicitly within the tokio context.
         drop(result);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn postgres_lifecycle_clock_is_timezone_independent() {
+        let Some(database_url) = std::env::var("DATABASE_URL").ok() else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&database_url)
+            .await
+            .unwrap();
+
+        sqlx::query("SET TIME ZONE 'Pacific/Kiritimati'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let far_east = postgres_unix_now_seconds(&pool).await.unwrap();
+        sqlx::query("SET TIME ZONE 'America/Adak'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let far_west = postgres_unix_now_seconds(&pool).await.unwrap();
+
+        assert!(
+            far_west.abs_diff(far_east) <= 1,
+            "shared lifecycle time must be an epoch value independent of session timezone"
+        );
+        pool.close().await;
     }
 
     // ===== chunk_length / read_chunk integration tests =====

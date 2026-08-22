@@ -31,6 +31,7 @@ write throughput, so Postgres is the production multi-replica metadata backend.
 | OCI manifest/tag/blob deletion | deletion is immediately visible without an unfenced object-store side effect | repository-scoped lock plus transactional tombstone; manifest tags are removed in the same commit |
 | provider reconciliation fields | timestamps never move backward and revision matches its winning timestamp | atomic field-wise maximum merge in SQLite/Postgres |
 | provider rename/delete event | old and new repository identities do not interleave and all durable effects commit together | sorted repository locks plus one transaction containing the delivery claim, record mutations, retention holds, lifecycle state, and every expected fence row |
+| shared retention expiry | a skewed replica cannot expire a hold early using its local wall clock | Postgres-backed lifecycle repair uses PostgreSQL `clock_timestamp()` as the shared epoch authority; local deployments remain single-writer |
 | provider push/access event | independent lifecycle observations never regress each other | repository lock plus atomic monotonic state merge |
 | webhook delivery | one application per provider/repository/delivery ID | unique delivery claim, removed when application fails |
 | LFS PATCH session | ranges, quota, promotion, and sweep do not race | shared staging root, global accounting lock, striped per-OID lock |
