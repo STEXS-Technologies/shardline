@@ -237,7 +237,7 @@ pub use runtime_check::{ConfigCheckReport, run_config_check};
 pub use server_frontend::{ServerFrontend, ServerFrontendParseError};
 pub use server_role::{ServerRole, ServerRoleParseError};
 pub(crate) mod gc {
-    pub(crate) use shardline_gc::run_gc_with_stores;
+    pub(crate) use shardline_gc::run_gc_with_oci_tombstones;
     pub use shardline_gc::{
         DEFAULT_LOCAL_GC_RETENTION_SECONDS, LocalGcDiagnostics, LocalGcOptions, LocalGcReport,
     };
@@ -317,7 +317,7 @@ pub async fn run_gc_diagnostics(
         };
         let index_store = PostgresIndexStore::new(pool.clone());
         let record_store = PostgresRecordStore::new(pool);
-        return gc::run_gc_with_stores(
+        return gc::run_gc_with_oci_tombstones(
             &record_store,
             &index_store,
             &object_store,
@@ -335,7 +335,7 @@ pub async fn run_gc_diagnostics(
     };
     let index_store = LocalIndexStore::open(config.root_dir().to_path_buf());
     let record_store = LocalRecordStore::open(config.root_dir().to_path_buf());
-    gc::run_gc_with_stores(
+    gc::run_gc_with_oci_tombstones(
         &record_store,
         &index_store,
         &object_store,

@@ -3494,6 +3494,7 @@ dependencies = [
  "shardline-gc",
  "shardline-hub-api",
  "shardline-index",
+ "shardline-oci-adapter",
  "shardline-protocol",
  "shardline-protocol-adapters",
  "shardline-rebuild",
@@ -3512,10 +3513,13 @@ dependencies = [
 name = "shardline-gc"
 version = "1.6.0"
 dependencies = [
+ "async-trait",
+ "proptest",
  "serde",
  "serde_json",
  "shardline-index",
  "shardline-metrics",
+ "shardline-oci-adapter",
  "shardline-protocol",
  "shardline-server-core",
  "shardline-storage",

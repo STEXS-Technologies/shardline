@@ -30,7 +30,7 @@ pub(crate) fn set_gc_now_unix_seconds_override(now_unix_seconds: Option<u64>) {
 /// on this thread, otherwise the real system clock.
 #[cfg(test)]
 #[must_use]
-fn gc_now_unix_seconds() -> u64 {
+pub(crate) fn gc_now_unix_seconds() -> u64 {
     TEST_NOW_UNIX_SECONDS_OVERRIDE
         .with(|slot| slot.get())
         .unwrap_or_else(unix_now_seconds_lossy)
@@ -39,7 +39,7 @@ fn gc_now_unix_seconds() -> u64 {
 /// Returns the wall clock for this GC run.
 #[cfg(not(test))]
 #[must_use]
-fn gc_now_unix_seconds() -> u64 {
+pub(crate) fn gc_now_unix_seconds() -> u64 {
     unix_now_seconds_lossy()
 }
 
@@ -52,6 +52,7 @@ use shardline_storage::ObjectStore;
 
 use crate::{
     error::GcError,
+    oci_tombstones::{OciRecordReclaimer, reclaim_oci_tombstones},
     quarantine::{
         read_active_retention_hold_object_keys, read_last_gc_clock_anchor,
         read_newest_stored_creation_timestamp, read_quarantine_entries,
@@ -135,7 +136,7 @@ where
     RecordAdapter: shardline_index::RecordStore + Sync,
     RecordAdapter::Error: Into<GcError>,
     IndexAdapter: AsyncIndexStore + Sync,
-    IndexAdapter::Error: Into<GcError>,
+    <IndexAdapter as AsyncIndexStore>::Error: Into<GcError>,
 {
     let mark_start = std::time::Instant::now();
     let mut reachability = ReachabilityAccumulator::default();
@@ -276,6 +277,9 @@ where
         reaped_stale_temporary_chunks: 0,
         reaped_stale_temporary_bytes: 0,
         pruned_revisions_over_cap: 0,
+        scanned_oci_tombstones: 0,
+        eligible_oci_tombstones: 0,
+        reclaimed_oci_tombstones: 0,
     };
 
     // The mark is gated on the same `!retention_clock_is_skewed_forward`
@@ -436,6 +440,42 @@ where
         &quarantine_entries,
         now_unix_seconds,
     ))
+}
+
+/// Runs GC with OCI tombstone reclamation enabled.
+///
+/// The caller must hold the same exclusive writer barrier required by
+/// [`run_gc_with_stores`] whenever `mark` or `sweep` is enabled. Tombstone
+/// reclamation happens before reachability collection so chunks released by a
+/// deleted blob record can enter quarantine in the same run.
+///
+/// # Errors
+///
+/// Returns [`GcError`] when tombstone inventory, physical reclamation, record
+/// mutation, or the ordinary GC pass fails.
+pub async fn run_gc_with_oci_tombstones<RecordAdapter, IndexAdapter>(
+    record_store: &RecordAdapter,
+    index_store: &IndexAdapter,
+    object_store: &ServerObjectStore,
+    frontends: &[ServerFrontend],
+    options: LocalGcOptions,
+) -> Result<LocalGcDiagnostics, GcError>
+where
+    RecordAdapter: shardline_index::RecordStore + OciRecordReclaimer + Sync,
+    RecordAdapter::Error: Into<GcError>,
+    IndexAdapter: AsyncIndexStore
+        + shardline_index::OciObjectStore<Error = <IndexAdapter as AsyncIndexStore>::Error>
+        + Sync,
+    <IndexAdapter as AsyncIndexStore>::Error: Into<GcError>,
+{
+    let oci_report =
+        reclaim_oci_tombstones(record_store, index_store, object_store, options).await?;
+    let mut diagnostics =
+        run_gc_with_stores(record_store, index_store, object_store, frontends, options).await?;
+    diagnostics.report.scanned_oci_tombstones = oci_report.scanned;
+    diagnostics.report.eligible_oci_tombstones = oci_report.eligible;
+    diagnostics.report.reclaimed_oci_tombstones = oci_report.reclaimed;
+    Ok(diagnostics)
 }
 
 /// Returns true when the GC host's wall clock appears to be behind the newest

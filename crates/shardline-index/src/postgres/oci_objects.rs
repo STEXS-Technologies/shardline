@@ -1,7 +1,7 @@
-use sqlx::{Connection as _, PgConnection, query, query_scalar};
+use sqlx::{Connection as _, PgConnection, Row as _, query, query_scalar};
 
 use super::{PostgresIndexStore, PostgresMetadataStoreError};
-use crate::{OciObjectKey, OciObjectKind, OciObjectStore, OciTagEntry};
+use crate::{OciObjectKey, OciObjectKind, OciObjectStore, OciObjectTombstone, OciTagEntry};
 
 impl PostgresIndexStore {
     /// Publishes an OCI object through the session that owns its repository fence.
@@ -119,6 +119,54 @@ impl OciObjectStore for PostgresIndexStore {
         self.delete_oci_object_on_connection(&mut connection, key)
             .await
     }
+
+    async fn list_oci_object_tombstones(&self) -> Result<Vec<OciObjectTombstone>, Self::Error> {
+        let rows = query(
+            "SELECT scope_namespace, repository, object_kind, digest_hex,
+                    deleted_at_unix_seconds
+             FROM shardline_oci_object_tombstones
+             ORDER BY scope_namespace, repository, object_kind, digest_hex",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                let object_kind: String = row.try_get("object_kind")?;
+                let kind = object_kind.parse()?;
+                Ok(OciObjectTombstone {
+                    key: OciObjectKey {
+                        scope_namespace: row.try_get("scope_namespace")?,
+                        repository: row.try_get("repository")?,
+                        kind,
+                        digest_hex: row.try_get("digest_hex")?,
+                    },
+                    deleted_at_unix_seconds: super::i64_to_u64(
+                        row.try_get("deleted_at_unix_seconds")?,
+                    )?,
+                })
+            })
+            .collect()
+    }
+
+    async fn delete_oci_object_tombstone_if_unchanged(
+        &self,
+        tombstone: &OciObjectTombstone,
+    ) -> Result<bool, Self::Error> {
+        let result = query(
+            "DELETE FROM shardline_oci_object_tombstones
+             WHERE scope_namespace = $1 AND repository = $2
+               AND object_kind = $3 AND digest_hex = $4
+               AND deleted_at_unix_seconds = $5",
+        )
+        .bind(&tombstone.key.scope_namespace)
+        .bind(&tombstone.key.repository)
+        .bind(tombstone.key.kind.as_str())
+        .bind(&tombstone.key.digest_hex)
+        .bind(super::u64_to_i64(tombstone.deleted_at_unix_seconds)?)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() != 0)
+    }
 }
 
 #[cfg(test)]
@@ -196,6 +244,28 @@ mod tests {
                 .await
                 .unwrap(),
             Some(unrelated)
+        );
+
+        let tombstone = store
+            .list_oci_object_tombstones()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|candidate| candidate.key == manifest)
+            .unwrap();
+        let mut stale = tombstone.clone();
+        stale.deleted_at_unix_seconds = stale.deleted_at_unix_seconds.saturating_add(1);
+        assert!(
+            !store
+                .delete_oci_object_tombstone_if_unchanged(&stale)
+                .await
+                .unwrap()
+        );
+        assert!(
+            store
+                .delete_oci_object_tombstone_if_unchanged(&tombstone)
+                .await
+                .unwrap()
         );
     }
 }

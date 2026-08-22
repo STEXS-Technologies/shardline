@@ -655,6 +655,7 @@ fn map_record_store_error(error: PostgresMetadataStoreError) -> ServerError {
         | PostgresMetadataStoreError::WebhookDelivery(_)
         | PostgresMetadataStoreError::IntegerOutOfRange(_)
         | PostgresMetadataStoreError::InvalidRecordKind
+        | PostgresMetadataStoreError::InvalidOciObjectKind(_)
         | PostgresMetadataStoreError::InvalidRepoType(_)
         | PostgresMetadataStoreError::Unsupported(_)
         | PostgresMetadataStoreError::InvalidUploadIntentState(_)

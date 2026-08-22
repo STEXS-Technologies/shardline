@@ -276,6 +276,15 @@ pub fn print_local_gc_summary(report: &LocalGcReport) {
         "pruned_revisions_over_cap: {}",
         report.pruned_revisions_over_cap
     );
+    println!("scanned_oci_tombstones: {}", report.scanned_oci_tombstones);
+    println!(
+        "eligible_oci_tombstones: {}",
+        report.eligible_oci_tombstones
+    );
+    println!(
+        "reclaimed_oci_tombstones: {}",
+        report.reclaimed_oci_tombstones
+    );
 }
 
 pub fn print_local_gc_cli_summary(
@@ -656,6 +665,7 @@ mod tests {
             reaped_stale_temporary_chunks: 0,
             reaped_stale_temporary_bytes: 0,
             pruned_revisions_over_cap: 0,
+            ..LocalGcReport::default()
         }
     }
 

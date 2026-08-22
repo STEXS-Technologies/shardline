@@ -7,7 +7,8 @@ use shardline_storage::ObjectKeyError;
 use thiserror::Error;
 
 use crate::{
-    QuarantineCandidateError, RetentionHoldError, UploadIntentConflictError, WebhookDeliveryError,
+    OciObjectKindParseError, QuarantineCandidateError, RetentionHoldError,
+    UploadIntentConflictError, WebhookDeliveryError,
 };
 
 /// Local metadata-store failure.
@@ -69,6 +70,9 @@ pub enum LocalIndexStoreError {
     /// A stored record kind was invalid.
     #[error("stored local record kind was invalid")]
     InvalidRecordKind,
+    /// A stored OCI object kind was invalid.
+    #[error("stored OCI object kind was invalid")]
+    InvalidOciObjectKind(#[from] OciObjectKindParseError),
     /// The local metadata database had inconsistent import state.
     #[error("local metadata database had inconsistent legacy import state")]
     InvalidLegacyImportState,

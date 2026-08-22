@@ -28,6 +28,7 @@ shardline-fsck.workspace = true
 shardline-gc.workspace = true
 shardline-hub-api.workspace = true
 shardline-index.workspace = true
+shardline-oci-adapter.workspace = true
 shardline-protocol.workspace = true
 shardline-protocol-adapters.workspace = true
 shardline-rebuild.workspace = true
@@ -320,6 +321,12 @@ doc = false
 [[bin]]
 name = "shardline_upload_intent_state"
 path = "fuzz_targets/shardline/upload_intent_state.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "shardline_oci_tombstone_key"
+path = "fuzz_targets/shardline/oci_tombstone_key.rs"
 test = false
 doc = false
 
