@@ -77,12 +77,12 @@ compatibility documentation. They must not be silently omitted.
 | Surface | Current tier | Principal evidence still required |
 | --- | --- | --- |
 | Git LFS | Beta | retry/resume, parallel mixed outcomes, platform client matrix, multi-writer evidence |
-| Bazel HTTP cache | Beta | stampede/high-concurrency, interrupted PUT, large-object and client-version matrix |
+| Bazel HTTP cache | Beta | client-version matrix and multi-replica evidence; same-digest concurrency, AC/CAS isolation, interrupted PUT, and large objects have checked-in coverage |
 | S3 frontend | Stable in compatibility docs; Beta in protocol docs | reconcile the claim after the distributed conditional-write contract and evidence are complete |
 | Hugging Face Hub API | Beta | broader client matrix, revision races, delete/push races, and complete tenant-bound authorization audit |
-| Redis reconstruction cache | Beta | partition, timeout, corruption, flush, restart, and multi-node stampede evidence |
+| Redis reconstruction cache | Beta | partition, flush, restart, and multi-node stampede evidence; bounded timeout and corruption repair are covered |
 | Provider integration | Beta | duplicate/out-of-order/replay convergence and revocation timing evidence |
-| Ed25519 | Experimental | operator minting, CLI-to-server E2E, key-rotation contract, and full negative-path matrix |
+| Ed25519 | Experimental | key-rotation contract and full negative-path matrix; operator minting and CLI-to-provider verification are covered |
 | Multi-replica Postgres/S3 writers | Not claimed | database-enforced mutable-state contracts, fencing, chaos, and mixed-version proof |
 
 ## Promotion Review
