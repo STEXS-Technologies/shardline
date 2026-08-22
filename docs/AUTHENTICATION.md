@@ -44,6 +44,26 @@ SHARDLINE_AUTH_OIDC_ISSUER=https://accounts.google.com   # required when provide
 SHARDLINE_AUTH_JWKS_URL=https://example.com/.well-known/jwks.json  # required when provider=jwks
 ```
 
+### Clock synchronization and expiry
+
+Token expiry is evaluated against the wall clock of the process that receives the
+request. Keep every replica synchronized with a monitored NTP source and alert before
+clock error approaches the shortest token lifetime. Two replicas on opposite sides of
+an expiry boundary can otherwise make different, individually valid decisions about
+the same token.
+
+Shardline authorizes a request before its first repository operation. A request that is
+rejected as expired performs no repository read or mutation. A request authorized just
+before expiry may finish after the expiry instant; expiration does not cancel work that
+already passed authorization. Size, concurrency and request deadlines bound that
+window.
+
+The reliability campaign runs two real replicas with independent `-120s` and `+120s`
+wall-clock offsets (while leaving monotonic timers unchanged). It verifies exact
+boundary decisions, absence of rejected-write side effects, agreement for tokens
+outside the skew window, and continued cross-node reconstruction. This is adversarial
+evidence, not a substitute for production clock synchronization.
+
 ### Local HMAC
 
 The default provider.

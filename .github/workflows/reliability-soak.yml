@@ -60,6 +60,14 @@ jobs:
       - name: Setup Rust CI toolchain and tools
         uses: ./.github/actions/rust-ci-setup
 
+      - name: Install independent wall-clock fault injector
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfaketime
+          faketime_library=$(dpkg -L libfaketime | awk '/libfaketime\.so\.1$/ { print; exit }')
+          test -n "$faketime_library"
+          echo "SHARDLINE_FAKETIME_LIBRARY=$faketime_library" >> "$GITHUB_ENV"
+
       - name: Run deployment fault campaign
         run: |
           set -o pipefail
