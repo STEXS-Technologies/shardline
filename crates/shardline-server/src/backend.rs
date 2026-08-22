@@ -339,6 +339,26 @@ impl ServerBackend {
         }
     }
 
+    /// Atomically replaces an S3 object row if its current value matches.
+    pub(crate) async fn compare_and_swap_s3_object(
+        &self,
+        expected: Option<&S3ObjectEntry>,
+        replacement: &S3ObjectEntry,
+    ) -> Result<bool, ServerError> {
+        match self {
+            Self::Local(backend) => {
+                backend
+                    .compare_and_swap_s3_object(expected, replacement)
+                    .await
+            }
+            Self::Postgres(backend) => {
+                backend
+                    .compare_and_swap_s3_object(expected, replacement)
+                    .await
+            }
+        }
+    }
+
     /// Deletes one S3 object listing-index row, returning whether a row was removed.
     ///
     /// # Errors

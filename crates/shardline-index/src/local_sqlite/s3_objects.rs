@@ -64,6 +64,61 @@ fn upsert_s3_object_sql(
     Ok(())
 }
 
+fn compare_and_swap_s3_object_sql(
+    connection: &Connection,
+    expected: Option<&S3ObjectEntry>,
+    replacement: &S3ObjectEntry,
+) -> Result<bool, LocalIndexStoreError> {
+    let replacement_metadata = user_metadata_to_json(&replacement.user_metadata)?;
+    let changed = if let Some(expected) = expected {
+        connection.execute(
+            "UPDATE shardline_s3_objects
+             SET file_id = ?3, size_bytes = ?4, content_hash = ?5, etag = ?6,
+                 user_metadata = ?7, updated_at_unix_seconds = ?8
+             WHERE scope_namespace = ?1 AND object_key = ?2
+               AND file_id = ?9 AND size_bytes = ?10 AND content_hash = ?11
+               AND etag = ?12 AND user_metadata = ?13
+               AND updated_at_unix_seconds = ?14",
+            rusqlite::params![
+                replacement.scope_namespace,
+                replacement.object_key,
+                replacement.file_id,
+                helpers::u64_to_i64(replacement.size_bytes)?,
+                replacement.content_hash,
+                replacement.etag,
+                replacement_metadata,
+                replacement.updated_at_unix_seconds,
+                expected.file_id,
+                helpers::u64_to_i64(expected.size_bytes)?,
+                expected.content_hash,
+                expected.etag,
+                user_metadata_to_json(&expected.user_metadata)?,
+                expected.updated_at_unix_seconds,
+            ],
+        )?
+    } else {
+        connection.execute(
+            "INSERT INTO shardline_s3_objects (
+                scope_namespace, object_key, file_id, size_bytes, content_hash, etag,
+                user_metadata, updated_at_unix_seconds
+             )
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT (scope_namespace, object_key) DO NOTHING",
+            rusqlite::params![
+                replacement.scope_namespace,
+                replacement.object_key,
+                replacement.file_id,
+                helpers::u64_to_i64(replacement.size_bytes)?,
+                replacement.content_hash,
+                replacement.etag,
+                replacement_metadata,
+                replacement.updated_at_unix_seconds,
+            ],
+        )?
+    };
+    Ok(changed == 1)
+}
+
 fn delete_s3_object_sql(
     connection: &Connection,
     scope_namespace: &str,
@@ -143,6 +198,26 @@ impl S3ObjectIndexStore for LocalIndexStore {
         tokio::task::spawn_blocking(move || {
             let connection = store.open_connection()?;
             upsert_s3_object_sql(&connection, &entry)
+        })
+        .await
+        .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
+    }
+
+    async fn compare_and_swap_s3_object(
+        &self,
+        expected: Option<&S3ObjectEntry>,
+        replacement: &S3ObjectEntry,
+    ) -> Result<bool, Self::Error> {
+        let store = self.clone();
+        let expected = expected.cloned();
+        let replacement = replacement.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut connection = store.open_connection()?;
+            let transaction = connection.transaction()?;
+            let changed =
+                compare_and_swap_s3_object_sql(&transaction, expected.as_ref(), &replacement)?;
+            transaction.commit()?;
+            Ok(changed)
         })
         .await
         .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
@@ -248,6 +323,54 @@ mod tests {
             user_metadata: Vec::new(),
             updated_at_unix_seconds,
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn compare_and_swap_create_has_exactly_one_winner() {
+        let storage = shardline_test_support::TempStorage::new();
+        let store = LocalIndexStore::new(storage.path_buf()).unwrap();
+        let first = entry("cas-create", "model.bin", &file_id(1), 10, 1);
+        let second = entry("cas-create", "model.bin", &file_id(2), 20, 2);
+
+        let (first_won, second_won) = tokio::join!(
+            store.compare_and_swap_s3_object(None, &first),
+            store.compare_and_swap_s3_object(None, &second),
+        );
+        let first_won = first_won.unwrap();
+        let second_won = second_won.unwrap();
+        assert_ne!(first_won, second_won);
+
+        let stored = store
+            .scan_s3_object_exact("cas-create", "model.bin")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored, if first_won { first } else { second });
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn compare_and_swap_update_rejects_a_stale_expected_row() {
+        let storage = shardline_test_support::TempStorage::new();
+        let store = LocalIndexStore::new(storage.path_buf()).unwrap();
+        let original = entry("cas-update", "model.bin", &file_id(1), 10, 1);
+        let first = entry("cas-update", "model.bin", &file_id(2), 20, 2);
+        let second = entry("cas-update", "model.bin", &file_id(3), 30, 3);
+        store.upsert_s3_object(&original).await.unwrap();
+
+        let (first_won, second_won) = tokio::join!(
+            store.compare_and_swap_s3_object(Some(&original), &first),
+            store.compare_and_swap_s3_object(Some(&original), &second),
+        );
+        let first_won = first_won.unwrap();
+        let second_won = second_won.unwrap();
+        assert_ne!(first_won, second_won);
+
+        let stored = store
+            .scan_s3_object_exact("cas-update", "model.bin")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored, if first_won { first } else { second });
     }
 
     async fn scan(

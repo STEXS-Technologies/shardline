@@ -49,6 +49,22 @@ pub trait S3ObjectIndexStore: Send + Sync {
     /// Returns the adapter error when persistence fails.
     async fn upsert_s3_object(&self, entry: &S3ObjectEntry) -> Result<(), Self::Error>;
 
+    /// Atomically replaces an S3 object row only when its current value equals
+    /// `expected`. `None` means create only when the key is absent.
+    ///
+    /// Returns `true` when the replacement became visible and `false` when a
+    /// concurrent writer changed or created/deleted the row first. This is the
+    /// database linearization point for S3 conditional writes across replicas.
+    ///
+    /// # Errors
+    ///
+    /// Returns the adapter error when persistence fails.
+    async fn compare_and_swap_s3_object(
+        &self,
+        expected: Option<&S3ObjectEntry>,
+        replacement: &S3ObjectEntry,
+    ) -> Result<bool, Self::Error>;
+
     /// Deletes one S3 object index row, returning whether a row was removed.
     ///
     /// # Errors

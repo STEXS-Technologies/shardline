@@ -187,38 +187,36 @@ durability guarantees:
 
 ## Multi-replica consistency
 
-The S3 frontend serializes overwrites of the same object key with a **per-key
-in-process lock** (`acquire_object_upload_lock`: a weak-valued `HashMap` of
-tokio mutexes). That lock is **process-local** — it serializes writers only
-within one server process, so the guarantees below are single-process.
+The S3 frontend keeps a **per-key in-process lock**
+(`acquire_object_upload_lock`: a weak-valued `HashMap` of Tokio mutexes) to
+avoid waste within one process. Correctness does not depend on that lock.
 
-In a multi-replica Postgres deployment (HPA-scaled `api` replicas sharing
-`SHARDLINE_INDEX_POSTGRES_URL`), each replica holds its *own* per-key lock:
+Conditional `PUT` and `CopyObject` use the S3 listing row as their database
+linearization point:
 
-- **Conditional-write `create-if-absent` is NOT atomic across replicas.** Two
-  replicas can both pass the `If-None-Match: *` pre-check and both commit
-  their records — the outcome is last-writer-wins, and the post-commit
-  re-check returns `412 PreconditionFailed` to the loser. The loser's record
-  becomes a **non-latest orphan** until the next write of that key, then is
-  reclaimed by GC. Reads are always correct (the listing row / latest alias
-  resolves through the authoritative `FileRecord`), but the strict S3
-  create-if-absent *atomicity* guarantee does not hold across replicas.
-- **The F-92 purge is safe under the race.** When the post-commit re-check
-  fires, the purge deletes only the loser's **own** committed version
-  (verified against the latest alias before deleting), so it can never destroy
-  the winner's acknowledged record — bounded, last-writer-wins semantics.
+1. read the exact `(scope_namespace, object_key)` row and evaluate
+   `If-Match` / `If-None-Match`;
+2. stream and commit the immutable content record;
+3. atomically compare-and-swap the row from the observed value to the new
+   value (or insert only if absent).
 
-Batch delete (`DeleteObjects`, F-18), the upload-lock serialization (F-8
-check-then-act), and the purge guard (F-86/F-92) are all single-process-safe
-and remain correct within one replica; the residual multi-replica behavior is
-exactly the both-commit/last-writer-wins case above.
+SQLite performs the compare-and-swap in a transaction. Postgres performs it
+as one conditional `UPDATE` or `INSERT ... ON CONFLICT DO NOTHING`. Therefore
+two replicas cannot both win `If-None-Match: *`, and a stale `If-Match` writer
+cannot replace a row advanced by another replica. The loser returns
+`412 PreconditionFailed`; its just-created record is removed when it is still
+the latest alias, otherwise it is an unreachable version reclaimed by GC.
 
-**Recommended deployments** for strict S3 create-if-absent semantics:
+Unconditional overwrites and multipart completions deliberately retain S3's
+last-writer-wins behavior. Concurrent deletes and unconditional writes are
+ordered by their atomic metadata-row operations; reads pin the row's immutable
+record version, so they never combine one version's bytes with another
+version's ETag or metadata.
 
-- run **one replica per logical store**, or
-- front the S3 routes with an external distributed lock (e.g. a
-  Redis-compatible mutex keyed by object key) when conditional writes must be
-  atomic across replicas.
+Checked-in adapter tests race independent SQLite connections and independent
+Postgres store handles and require exactly one conditional winner. The
+Postgres test runs when `DATABASE_URL` is available in the integration
+environment.
 
 ## References
 
