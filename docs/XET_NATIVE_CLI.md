@@ -200,6 +200,11 @@ GET /transfer/xorb/{namespace}/{64-char-hex-hash}
 Authorization: Bearer <accessToken>
 ```
 
+Shardline validates the complete serialized xorb against the addressed hash before
+exposing any requested range. This intentionally turns stale or corrupted provider
+responses into an error rather than a successful partial body. The trade-off is that a
+cold range request reads and validates the complete bounded xorb before responding.
+
 Xorb upload:
 
 ```

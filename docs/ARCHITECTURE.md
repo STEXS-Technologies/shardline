@@ -123,6 +123,10 @@ exposes a range-enforced transfer endpoint:
 
 - `GET /transfer/xorb/{prefix}/{hash}`
 
+The xorb transfer path authenticates the complete serialized container against `hash`
+before constructing a range response. Partial provider reads are not independently
+trusted because corruption elsewhere in the container can invalidate its CAS identity.
+
 The Xet-specific route constants, hash/path validation, transfer URL construction,
 reconstruction shaping, and protocol-object ingest flow are intentionally isolated
 inside the server's `xet_adapter` layer rather than spread through generic backend and
