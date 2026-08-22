@@ -81,6 +81,11 @@ git config http.extraHeader "Authorization: Bearer $SHARDLINE_TOKEN"
 git lfs push origin main
 ```
 
+Chunked `PATCH` uploads keep bounded staging files under `SHARDLINE_ROOT_DIR`.
+Multi-replica API deployments must share that root on a filesystem with cross-node
+advisory locking; the production Kubernetes profile provisions this as a
+`ReadWriteMany` claim, so any replica can accept the next range.
+
 Bazel HTTP remote cache:
 
 ```bash
@@ -101,6 +106,10 @@ linearized in the metadata database, so replicas share one authoritative value a
 manifest deletion only removes a tag if it still points to that manifest. On first
 access after upgrading, legacy object-store-only tag pointers are imported with
 create-if-absent semantics.
+
+Incomplete OCI upload sessions use the same shared API staging root and a
+cross-process session lock. Completed blobs remain authoritative in the configured
+object store.
 
 For local plain-HTTP registries, OCI clients may require their own insecure-registry
 flags or local client configuration.

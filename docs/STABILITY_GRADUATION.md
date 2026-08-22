@@ -84,7 +84,7 @@ compatibility documentation. They must not be silently omitted.
 | Redis reconstruction cache | Beta | partition, flush, restart, and multi-node stampede evidence; bounded timeout and corruption repair are covered |
 | Provider integration | Beta | revocation timing and authoritative provider reconciliation evidence; duplicate/replay handling, atomic monotonic reconciliation-state merging across replicas, access/revision reordering, rename migration, signature checks, and fail-closed visibility parsing are covered |
 | Ed25519 | Experimental | overlapping multi-key verification; operator minting, CLI-to-provider verification, key formats, tampering, expiry, wrong-key, malformed-token, and algorithm-confusion paths are covered; the coordinated non-overlap rotation limitation is documented |
-| Multi-replica Postgres/S3 writers | Not claimed | database-enforced mutable-state contracts, fencing, chaos, and mixed-version proof |
+| Multi-replica Postgres/S3 writers | Not claimed | remaining database-enforced mutable-state contracts, fencing, chaos, and mixed-version proof; the scaled manifest now shares resumable-upload staging and uses cross-replica advisory locks |
 
 ## Promotion Review
 
