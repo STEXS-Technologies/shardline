@@ -7,8 +7,8 @@ use std::{
 use axum::body::Bytes;
 use sha2::{Digest, Sha256};
 use shardline_index::{
-    FileRecord, OciObjectKey, OciTagEntry, RepoKey, RevisionRecord, S3ObjectEntry, TreeEntry,
-    TreeKey,
+    FileRecord, OciObjectKey, OciTagEntry, RepoKey, ResourceLockKey, RevisionRecord, S3ObjectEntry,
+    TreeEntry, TreeKey,
 };
 use shardline_protocol::{ByteRange, RepositoryScope};
 use shardline_storage::{
@@ -110,19 +110,16 @@ impl ServerBackend {
     pub(crate) async fn acquire_resource_write_lock(
         &self,
         root: &Path,
-        domain: &str,
-        resource: &str,
+        key: &ResourceLockKey,
     ) -> Result<crate::maintenance_barrier::ResourceWriteGuard, ServerError> {
         match self {
             Self::Local(_) => {
-                crate::maintenance_barrier::acquire_local_resource_exclusive(root, domain, resource)
-                    .await
+                crate::maintenance_barrier::acquire_local_resource_exclusive(root, key).await
             }
             Self::Postgres(backend) => {
                 crate::maintenance_barrier::acquire_postgres_resource_exclusive(
                     backend.index_store().pool(),
-                    domain,
-                    resource,
+                    key,
                 )
                 .await
             }

@@ -6,25 +6,20 @@ use super::{
     record_store::{record_locator, upsert_record_in_transaction},
     u64_to_i64,
 };
-use crate::{FileRecord, ProviderRepositoryState, RetentionHold, WebhookDelivery};
+use crate::{FileRecord, ProviderRepositoryState, ResourceLockKey, RetentionHold, WebhookDelivery};
 
 /// One durable fencing identity that must still match when a provider mutation commits.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PostgresResourceFence {
-    domain: String,
-    resource: String,
+    key: ResourceLockKey,
     epoch: i64,
 }
 
 impl PostgresResourceFence {
     /// Creates an expected resource-fence identity.
     #[must_use]
-    pub const fn new(domain: String, resource: String, epoch: i64) -> Self {
-        Self {
-            domain,
-            resource,
-            epoch,
-        }
+    pub const fn new(key: ResourceLockKey, epoch: i64) -> Self {
+        Self { key, epoch }
     }
 }
 
@@ -139,8 +134,8 @@ impl super::PostgresIndexStore {
                  WHERE domain = $1 AND resource = $2
                  FOR UPDATE",
             )
-            .bind(&fence.domain)
-            .bind(&fence.resource)
+            .bind(fence.key.domain().as_str())
+            .bind(fence.key.resource())
             .fetch_optional(&mut *transaction)
             .await?;
             if epoch != Some(fence.epoch) {
@@ -429,8 +424,7 @@ mod tests {
             None,
         ));
         let fences = [PostgresResourceFence::new(
-            "provider-repository".to_owned(),
-            resource.to_owned(),
+            ResourceLockKey::provider_repository("github", owner, repo),
             41,
         )];
         let mut connection = pool.acquire().await.expect("connection");
@@ -507,8 +501,7 @@ mod tests {
             None,
         ));
         let fences = [PostgresResourceFence::new(
-            "provider-repository".to_owned(),
-            resource.to_owned(),
+            ResourceLockKey::provider_repository("github", owner, repo),
             51,
         )];
         let mut connection = pool.acquire().await.expect("connection");
@@ -556,8 +549,7 @@ mod tests {
 
         let mutation = PostgresProviderMutation::new(delivery(owner, repo, delivery_id));
         let fences = [PostgresResourceFence::new(
-            "provider-repository".to_owned(),
-            resource.to_owned(),
+            ResourceLockKey::provider_repository("github", owner, repo),
             61,
         )];
         let mut connection = pool.acquire().await.expect("connection");
