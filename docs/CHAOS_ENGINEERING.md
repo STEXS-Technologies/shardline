@@ -42,7 +42,7 @@ Status meanings:
 | Layer | Status | Current evidence | Remaining trust work |
 | --- | --- | --- | --- |
 | Process | Covered | `chaos_runner`, `fault_drills`, `fault_drills_extreme` kill in-flight servers and run repeated restart cycles | Extend typed failpoints beyond local object publication to metadata commit/index publication boundaries |
-| Filesystem | Partial | Anchored-path race tests, atomic temp publication, parent-swap fuzzing, read-only/permission failures, durable file and directory `fsync`, and typed failpoints before temp write/after temp durability/after install/after directory durability | Inject ENOSPC, EIO, partial write and real `fsync` failure with a faulting filesystem in CI |
+| Filesystem | Covered | Anchored-path race tests, atomic temp publication, parent-swap fuzzing, read-only/permission failures and durable file/directory `fsync`; typed test-only I/O faults inject `ENOSPC`, `EIO`, prefix-only writes and sync failure at seven explicit publication boundaries, while proptests and `shardline_local_publication_faults` require complete-old or complete-new visibility | Kernel/FUSE fault mounts remain useful supplemental platform evidence, not the only regression oracle |
 | Object storage | Partial | `deployment_chaos` kills and partitions MinIO during writes; S3 retry, multipart and integrity tests cover normal failures; a one-shot HTTP fault proxy lets MinIO commit a conditional PUT and then drops the successful response, proving retry and exact-byte idempotence against a real provider; OCI tombstone tests replay the equivalent DELETE ambiguity | Inject slow response bodies, stale responses and provider-specific 5xx behavior |
 | Database | Partial | Postgres kill/restart, mid-transaction loss, stale fencing, serialization/deadlock behavior and atomic migrations are exercised; request errors now preserve durable upload intents for retry and reconciliation instead of declaring ambiguous outcomes terminal | Add primary failover, response loss after COMMIT, statement timeout and pool-exhaustion campaigns |
 | Network | Partial | API/transfer and MinIO/Postgres partitions, connection stalls and reconnect recovery | Add packet duplication/reordering and asymmetric long-lived cluster partitions |
@@ -61,9 +61,10 @@ silently relabeled Stable based only on line coverage.
 
 ## Required failure-boundary model
 
-`LocalPublishBoundary` is the first explicit typed boundary enum shared by production code
-and deterministic tests. It covers the local object publication transitions. The target is
-to extend the same pattern through the complete write path so it distinguishes:
+`LocalPublishBoundary` and `LocalPublishFault` are the first explicit typed fault vocabulary
+shared by production code and deterministic tests. They cover local write, file-sync,
+installation and directory-sync transitions without string matching. The target is to extend
+the same pattern through the complete write path so it distinguishes:
 
 ```text
 validated
