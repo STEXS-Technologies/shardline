@@ -133,7 +133,9 @@ use a bounded 600-second deterministic campaign plus the deployment, resource-pr
 adjacent-version, PostgreSQL-promotion, and security-boundary jobs; the weekly schedule
 keeps the longer 7200-second campaign. The adjacent-version job derives the preceding
 SemVer tag from repository history, so every release advances the N-1 compatibility
-boundary without editing a pinned version.
+boundary without editing a pinned version. Pull requests that change either workflow
+also run the bounded matrix, validating the gate itself before merge without adding the
+campaign to unrelated pull requests.
 
 ## Evidence accounting
 

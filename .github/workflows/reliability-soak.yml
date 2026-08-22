@@ -14,6 +14,10 @@ on:
         description: Deterministic chaos campaign duration
         required: false
         default: "7200"
+  pull_request:
+    paths:
+      - ".github/workflows/release.yml"
+      - ".github/workflows/reliability-soak.yml"
   schedule:
     - cron: "31 1 * * 0"
 
@@ -37,7 +41,7 @@ jobs:
 
       - name: Run replayable chaos soak
         env:
-          SHARDLINE_SOAK_DURATION_SECONDS: ${{ inputs.duration_seconds || '7200' }}
+          SHARDLINE_SOAK_DURATION_SECONDS: ${{ inputs.duration_seconds || (github.event_name == 'pull_request' && '600') || '7200' }}
           SHARDLINE_SOAK_INITIAL_SEED: "2436552524"
         run: scripts/reliability-soak.sh reliability-soak-results
 
