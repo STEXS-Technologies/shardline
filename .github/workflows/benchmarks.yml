@@ -1,0 +1,41 @@
+name: Benchmarks
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 1 * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: benchmarks-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  matrix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Setup Rust CI toolchain and tools
+        uses: ./.github/actions/rust-ci-setup
+
+      - name: Record benchmark matrix
+        env:
+          SHARDLINE_BENCH_MATRIX_CONCURRENCY: "1 32 128"
+          SHARDLINE_BENCH_MATRIX_ITERATIONS: "3"
+        run: scripts/benchmark-matrix.sh benchmark-results
+
+      - name: Publish job summary
+        run: cat benchmark-results/run-*/summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload raw benchmark evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: shardline-benchmark-${{ github.sha }}
+          path: benchmark-results/run-*
+          if-no-files-found: error
+          retention-days: 90
