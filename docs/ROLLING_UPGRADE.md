@@ -186,10 +186,10 @@ is mid-rollout at any time, rollback always has a known-good version to return t
 `/readyz`, and confirms the other role keeps serving. Role separation itself is covered
 by `e2e/role_split_e2e.rs`.
 
-The scheduled `mixed-version-upgrade` reliability job adds the binary compatibility
-evidence that an in-process test cannot provide. It builds tagged `v1.6.0` and the
-current commit separately, starts two N-1 processes against shared Postgres and S3,
-then performs:
+The `mixed-version-upgrade` reliability job adds the binary compatibility evidence that
+an in-process test cannot provide. It automatically selects the greatest preceding
+SemVer tag reachable from the current commit, builds that release and the current commit
+separately, starts two N-1 processes against shared Postgres and S3, then performs:
 
 ```text
 N-1 + N-1 -> N + N-1 -> N + N -> N-1 + N
@@ -198,5 +198,5 @@ N-1 + N-1 -> N + N-1 -> N + N -> N-1 + N
 At every mixed-version stage, each binary reads exact bytes written by the other. The
 rollback stage also publishes through N-1 and reconstructs through N. Its transcript
 and exact N/N-1 commit identities are retained as CI artifacts. This evidence applies
-to the tested adjacent release pair; each release must advance the N-1 tag and rerun
-the campaign rather than assuming transitive compatibility.
+to the tested adjacent release pair; every release reruns the automatically advanced
+pair rather than assuming transitive compatibility.
