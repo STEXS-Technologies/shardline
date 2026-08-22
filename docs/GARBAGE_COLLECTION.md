@@ -89,29 +89,34 @@ When destructive GC owns the barrier, new mutation requests wait up to the norma
 request timeout and then fail without writing if the collector is still running.
 Clients may retry them after GC completes.
 
-## OCI Tombstones Are Not GC Candidates
+## OCI Tombstone Reclamation
 
-OCI logical-deletion tombstones are authoritative visibility metadata, not ordinary
-garbage-candidate rows. Shardline currently retains the immutable object bytes after an OCI
-delete. Removing only the tombstone would make those retained bytes visible again through a
-digest read, so normal GC must not compact OCI tombstones.
+OCI logical-deletion tombstones remain authoritative visibility metadata throughout their
+retention window. A sweep can reclaim an expired tombstone only while it owns the same
+cluster-wide exclusive GC/write barrier described above. This removes the two historical
+blockers: concurrent republication and a stale writer on another replica.
 
-Online physical reclamation is also unsafe with the current generation-independent object
-keys. A collector could delete old bytes after a newer writer republishes the same digest;
-the object-store delete has no database fencing precondition. Tombstone rows are small, and
-retaining them is required for correctness. Physical bytes are a capacity concern, not a
-reason to weaken the visibility invariant.
+Reclamation is deliberately ordered:
 
-Safe reclamation requires one of these explicit designs:
+1. delete the immutable physical object components idempotently
+2. for a chunk-backed blob, remove only its deterministic file record; shared chunks remain
+   protected by every other live record and enter ordinary quarantine only when unreachable
+3. for a manifest, delete both the manifest bytes and media-type sidecar
+4. compare-delete the exact tombstone generation using its deletion timestamp
 
-- generation-specific object keys, followed by deletion of a generation that can no longer
-  be referenced
-- an object-store compare/delete primitive bound to a durable generation or fencing token
-- an offline, cluster-wide quiescent compactor that proves no old or new writer can run and
-  deletes bytes before removing the matching tombstone
+A crash before step 4 leaves the object logically hidden. The next sweep repeats the
+already-missing physical deletes and finishes the tombstone removal. Removing metadata
+before bytes is forbidden because it could resurrect retained content.
 
-Until one of those contracts is implemented and fault-tested, tombstone removal by GC is
-intentionally out of scope. A time-to-live alone is not a safety proof.
+Dry runs and mark-only runs inventory tombstones but never reclaim them. Sweep eligibility
+uses the normal GC retention window and forward-clock guard. Reports expose scanned,
+eligible, and reclaimed OCI tombstone counts.
+
+This guarantee requires every writer in the deployment to implement the shared barrier.
+During a mixed-version rolling upgrade from a build that predates the barrier, suspend
+destructive GC until all writers run the hardened build. A time-to-live by itself is still
+not a safety proof; the exclusive barrier, physical-first order, and generation compare-delete
+are the safety contract.
 
 ## Quarantine and Retention
 

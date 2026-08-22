@@ -5,7 +5,8 @@ use sqlx::{Error as SqlxError, PgPool};
 use thiserror::Error;
 
 use crate::{
-    QuarantineCandidateError, RetentionHoldError, UploadIntentConflictError, WebhookDeliveryError,
+    OciObjectKindParseError, QuarantineCandidateError, RetentionHoldError,
+    UploadIntentConflictError, WebhookDeliveryError,
 };
 
 /// Postgres-compatible implementation of the asynchronous index-store contract.
@@ -134,6 +135,9 @@ pub enum PostgresMetadataStoreError {
     /// A stored record kind was invalid.
     #[error("stored record kind was invalid")]
     InvalidRecordKind,
+    /// A stored OCI object kind was invalid.
+    #[error("stored OCI object kind was invalid")]
+    InvalidOciObjectKind(#[from] OciObjectKindParseError),
     /// An invalid repository type string was encountered.
     #[error("invalid repository type: {0}")]
     InvalidRepoType(String),

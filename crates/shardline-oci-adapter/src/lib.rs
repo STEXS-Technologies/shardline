@@ -70,8 +70,9 @@ pub use types::{
 };
 
 pub use key::{
-    oci_blob_key, oci_blob_location, oci_manifest_key, oci_manifest_location,
-    oci_manifest_media_type_key, oci_manifest_prefix, oci_tag_key, oci_tag_prefix,
+    oci_blob_key, oci_blob_key_from_namespace, oci_blob_location, oci_manifest_key,
+    oci_manifest_key_from_namespace, oci_manifest_location, oci_manifest_media_type_key,
+    oci_manifest_media_type_key_from_namespace, oci_manifest_prefix, oci_tag_key, oci_tag_prefix,
     oci_tag_target_key, oci_tag_target_prefix, parse_reference, upload_session_location,
     validate_repository,
 };

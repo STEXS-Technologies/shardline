@@ -587,6 +587,7 @@ impl From<GcError> for ServerError {
             GcError::InvalidContentHash => Self::InvalidContentHash,
             GcError::Overflow => Self::Overflow,
             GcError::XetAdapter(e) => Self::from(e),
+            GcError::OciAdapter(e) => Self::from(e),
         }
     }
 }

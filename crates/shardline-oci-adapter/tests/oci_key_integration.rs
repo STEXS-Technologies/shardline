@@ -18,9 +18,10 @@
 )]
 
 use shardline_oci_adapter::{
-    OciAdapterError, OciReference, oci_blob_key, oci_blob_location, oci_manifest_key,
-    oci_manifest_location, oci_manifest_media_type_key, oci_manifest_prefix, oci_tag_key,
-    oci_tag_prefix, oci_tag_target_key, oci_tag_target_prefix, parse_reference,
+    OciAdapterError, OciReference, oci_blob_key, oci_blob_key_from_namespace, oci_blob_location,
+    oci_manifest_key, oci_manifest_key_from_namespace, oci_manifest_location,
+    oci_manifest_media_type_key, oci_manifest_media_type_key_from_namespace, oci_manifest_prefix,
+    oci_tag_key, oci_tag_prefix, oci_tag_target_key, oci_tag_target_prefix, parse_reference,
     upload_session_location, validate_repository,
 };
 use shardline_protocol::{RepositoryProvider, RepositoryScope};
@@ -48,6 +49,52 @@ fn blob_key_global_scope() {
     assert!(s.contains("protocols/oci/global/repos/"));
     assert!(s.contains("/blobs/"));
     assert!(s.contains(VALID_DIGEST));
+}
+
+#[test]
+fn tombstone_blob_key_rebuild_matches_live_key() {
+    let live = oci_blob_key("team/assets", VALID_DIGEST_HEX, global_scope()).unwrap();
+    let rebuilt = oci_blob_key_from_namespace("team/assets", VALID_DIGEST_HEX, "global").unwrap();
+    assert_eq!(rebuilt, live);
+}
+
+#[test]
+fn tombstone_keys_rebuild_scoped_live_keys() {
+    let scope = make_scope(RepositoryProvider::GitHub, "github-user", "project");
+    let live_blob = oci_blob_key("github-user/project", VALID_DIGEST_HEX, Some(&scope)).unwrap();
+    let scope_namespace = live_blob
+        .as_str()
+        .split('/')
+        .nth(2)
+        .expect("OCI keys include a scope namespace");
+    assert_eq!(
+        oci_blob_key_from_namespace("github-user/project", VALID_DIGEST_HEX, scope_namespace)
+            .unwrap(),
+        live_blob
+    );
+    assert_eq!(
+        oci_manifest_key_from_namespace("github-user/project", VALID_DIGEST_HEX, scope_namespace)
+            .unwrap(),
+        oci_manifest_key("github-user/project", VALID_DIGEST_HEX, Some(&scope)).unwrap()
+    );
+    assert_eq!(
+        oci_manifest_media_type_key_from_namespace(
+            "github-user/project",
+            VALID_DIGEST_HEX,
+            scope_namespace
+        )
+        .unwrap(),
+        oci_manifest_media_type_key("github-user/project", VALID_DIGEST_HEX, Some(&scope)).unwrap()
+    );
+}
+
+#[test]
+fn tombstone_key_rebuild_rejects_corrupt_namespace_and_digest() {
+    assert!(matches!(
+        oci_blob_key_from_namespace("team/assets", VALID_DIGEST_HEX, "../escape"),
+        Err(OciAdapterError::InvalidContentHash)
+    ));
+    assert!(oci_blob_key_from_namespace("team/assets", "bad", "global").is_err());
 }
 
 #[test]
