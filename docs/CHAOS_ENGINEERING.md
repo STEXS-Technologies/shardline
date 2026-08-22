@@ -54,7 +54,7 @@ Status meanings:
 | Upgrade | Partial | Same-binary role replacement, migration up/down checks and documented rolling procedure | Run actual N-1 and N binaries together, test rollback limits, and kill during every migration boundary |
 | Operator actions | Partial | Repeated restart, destructive restore rehearsal, repair/fsck/rebuild dry runs and malformed configuration tests | Add interrupted repair/migration resume campaigns and operator-command idempotency transcripts |
 | Security | Partial | Cross-tenant route matrices, capability binding, provider revocation/visibility and webhook replay tests | Race authorization/revocation against every active write/read frontend and measure existence/timing leakage |
-| Long soak | Partial | A weekly two-hour deterministic chaos campaign archives every seed transcript, elapsed time, peak RSS and invariant result | Extend the scheduled campaign to deployment partitions and explicit resource pressure; add task/FD leak counters |
+| Long soak | Partial | A weekly two-hour deterministic chaos campaign archives every seed transcript, elapsed time, peak RSS, sampled process-tree FD/task counts and invariant result; first-to-last peaks expose cross-seed growth | Extend the scheduled campaign to deployment partitions and explicit resource pressure |
 
 “Partial” and “Open” rows are release-plan work. They must not be described as proven or
 silently relabeled Stable based only on line coverage.
