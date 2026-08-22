@@ -15,6 +15,7 @@ docs that match your use case.
 - [Operations](OPERATIONS.md)
 - [Architecture](ARCHITECTURE.md)
 - [Compatibility Status](COMPATIBILITY_STATUS.md)
+- [Stability Graduation Policy](STABILITY_GRADUATION.md)
 - [CLI](CLI.md)
 
 ## Setup And Rollout

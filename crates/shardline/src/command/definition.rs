@@ -208,6 +208,9 @@ pub(crate) enum AdminSubcommand {
 
 #[derive(Debug, Args)]
 pub(crate) struct AdminTokenArgs {
+    /// Token signature provider.
+    #[arg(long, value_enum, default_value = "local")]
+    pub(crate) auth_provider: CliAdminTokenAuthProvider,
     /// Token issuer identifier.
     #[arg(long)]
     pub(crate) issuer: String,
@@ -232,16 +235,24 @@ pub(crate) struct AdminTokenArgs {
     /// Token lifetime in seconds.
     #[arg(long, default_value_t = 3_600_u64)]
     pub(crate) ttl_seconds: u64,
-    /// Local signing-key file path.
+    /// HMAC signing key or Ed25519 private-key file path.
     #[arg(long, conflicts_with = "key_env", required_unless_present = "key_env")]
     pub(crate) key_file: Option<PathBuf>,
-    /// Environment variable that stores the signing key.
+    /// Environment variable that stores the HMAC key or Ed25519 private key.
     #[arg(
         long,
         conflicts_with = "key_file",
         required_unless_present = "key_file"
     )]
     pub(crate) key_env: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum CliAdminTokenAuthProvider {
+    /// Sign with the local HMAC-SHA256 provider.
+    Local,
+    /// Sign with an Ed25519 private key.
+    Ed25519,
 }
 
 // ── Index ───────────────────────────────────────────────────────────────

@@ -9,6 +9,7 @@ use std::{
     path::{Path, PathBuf as StdPathBuf},
 };
 
+use shardline_auth::{AuthError, AuthProvider, Ed25519AuthProvider};
 use shardline_protocol::{
     RepositoryScope, SecretBytes, TokenClaims, TokenClaimsError, TokenCodecError, TokenScope,
     TokenSigner, unix_now_seconds_lossy,
@@ -16,6 +17,15 @@ use shardline_protocol::{
 use thiserror::Error;
 
 const MAX_TOKEN_SIGNING_KEY_BYTES: u64 = 1_048_576;
+
+/// Signing provider used by the operator token-minting command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdminTokenAuthProvider {
+    /// HMAC-SHA256 using the local shared signing key.
+    Local,
+    /// Ed25519 using a private signing key.
+    Ed25519,
+}
 
 #[cfg(test)]
 type SigningKeyReadHook = Box<dyn FnOnce() + Send>;
@@ -58,6 +68,9 @@ pub enum AdminTokenError {
     /// The token could not be created.
     #[error("token operation failed")]
     Token(#[from] TokenCodecError),
+    /// The asymmetric token provider could not parse the key or sign the token.
+    #[error("authentication provider token operation failed")]
+    Auth(#[from] AuthError),
     /// The token claims were invalid.
     #[error("token claims were invalid")]
     Claims(#[from] TokenClaimsError),
@@ -122,18 +135,55 @@ pub fn mint_admin_token_from_sources(
     repository: RepositoryScope,
     ttl_seconds: u64,
 ) -> Result<String, AdminTokenError> {
+    mint_admin_token_for_provider_from_sources(
+        AdminTokenAuthProvider::Local,
+        key_file,
+        key_env,
+        issuer,
+        subject,
+        scope,
+        repository,
+        ttl_seconds,
+    )
+}
+
+/// Mints a bearer token with the selected local signing provider.
+///
+/// # Errors
+///
+/// Returns [`AdminTokenError`] when the selected key source cannot be read, the key
+/// format is invalid for the selected provider, or the token cannot be signed.
+#[allow(clippy::too_many_arguments)]
+pub fn mint_admin_token_for_provider_from_sources(
+    auth_provider: AdminTokenAuthProvider,
+    key_file: Option<&Path>,
+    key_env: Option<&str>,
+    issuer: &str,
+    subject: &str,
+    scope: TokenScope,
+    repository: RepositoryScope,
+    ttl_seconds: u64,
+) -> Result<String, AdminTokenError> {
     let signing_key = match (key_file, key_env) {
         (Some(path), None) => read_signing_key_bytes(path)?,
         (None, Some(name)) => read_signing_key_bytes_from_env(name)?,
         (None, None) => return Err(AdminTokenError::MissingSigningKeySource),
         (Some(_path), Some(_name)) => return Err(AdminTokenError::SigningKeySourceConflict),
     };
-    let signer = TokenSigner::new(signing_key.expose_secret())?;
     let expires_at_unix_seconds = unix_now_seconds_lossy()
         .checked_add(ttl_seconds)
         .ok_or(AdminTokenError::TtlOverflow)?;
     let claims = TokenClaims::new(issuer, subject, scope, repository, expires_at_unix_seconds)?;
-    Ok(signer.sign(&claims)?)
+    match auth_provider {
+        AdminTokenAuthProvider::Local => {
+            let signer = TokenSigner::new(signing_key.expose_secret())?;
+            Ok(signer.sign(&claims)?)
+        }
+        AdminTokenAuthProvider::Ed25519 => {
+            let provider = Ed25519AuthProvider::new(signing_key.expose_secret())?;
+            Ok(provider.mint_token(&claims)?)
+        }
+    }
 }
 
 pub(crate) fn read_signing_key_bytes(path: &Path) -> Result<SecretBytes, AdminTokenError> {
@@ -329,9 +379,13 @@ mod tests {
         path::Path,
     };
 
+    use shardline_auth::{AuthProvider, Ed25519AuthProvider};
     use shardline_protocol::{RepositoryProvider, RepositoryScope, TokenScope};
 
-    use super::{mint_admin_token, mint_admin_token_from_sources};
+    use super::{
+        AdminTokenAuthProvider, mint_admin_token, mint_admin_token_for_provider_from_sources,
+        mint_admin_token_from_sources,
+    };
 
     fn make_test_repository() -> RepositoryScope {
         RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", Some("main")).unwrap()
@@ -553,6 +607,52 @@ mod tests {
         assert!(token.is_ok());
         let token = token.unwrap();
         assert!(token.contains('.'));
+    }
+
+    #[test]
+    fn mint_admin_token_for_provider_accepts_ed25519_private_key_file() {
+        let seed = [7_u8; 32];
+        let temp = tempfile::NamedTempFile::new().unwrap();
+        let wrote = write(temp.path(), seed);
+        assert!(wrote.is_ok());
+
+        let token = mint_admin_token_for_provider_from_sources(
+            AdminTokenAuthProvider::Ed25519,
+            Some(temp.path()),
+            None,
+            "ed25519-issuer",
+            "operator-1",
+            TokenScope::Write,
+            make_test_repository(),
+            60,
+        )
+        .unwrap();
+
+        let verifier = Ed25519AuthProvider::new(&seed).unwrap();
+        let claims = verifier.verify_token(&token).unwrap();
+        assert_eq!(claims.issuer(), "ed25519-issuer");
+        assert_eq!(claims.subject(), "operator-1");
+        assert_eq!(claims.scope(), TokenScope::Write);
+    }
+
+    #[test]
+    fn mint_admin_token_for_provider_rejects_invalid_ed25519_private_key() {
+        let temp = tempfile::NamedTempFile::new().unwrap();
+        let wrote = write(temp.path(), b"not-an-ed25519-private-key");
+        assert!(wrote.is_ok());
+
+        let token = mint_admin_token_for_provider_from_sources(
+            AdminTokenAuthProvider::Ed25519,
+            Some(temp.path()),
+            None,
+            "ed25519-issuer",
+            "operator-1",
+            TokenScope::Write,
+            make_test_repository(),
+            60,
+        );
+
+        assert!(matches!(token, Err(super::AdminTokenError::Auth(_))));
     }
 
     #[test]

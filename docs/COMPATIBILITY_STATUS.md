@@ -3,6 +3,8 @@
 Shardline has a CAS-agnostic runtime with explicit protocol frontends.
 The current compatibility contract is scoped to the protocol and operator workflows
 documented in this repository.
+Promotion between maturity tiers follows the checked-in evidence requirements in
+[Stability Graduation Policy](STABILITY_GRADUATION.md).
 
 ## Current Source-Tree Contract
 
