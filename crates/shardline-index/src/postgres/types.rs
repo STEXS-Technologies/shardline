@@ -145,7 +145,11 @@ pub enum PostgresMetadataStoreError {
     InvalidUploadIntentState(String),
     /// An upload intent ID was reused for different object identity.
     #[error("upload intent conflict")]
-    UploadIntentConflict(#[from] #[source] UploadIntentConflictError),
+    UploadIntentConflict(
+        #[from]
+        #[source]
+        UploadIntentConflictError,
+    ),
 }
 
 impl From<SqlxError> for PostgresMetadataStoreError {

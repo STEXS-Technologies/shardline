@@ -58,7 +58,11 @@ pub enum LocalIndexStoreError {
     WebhookDelivery(#[from] WebhookDeliveryError),
     /// An upload intent ID was reused for different object identity.
     #[error("upload intent conflict")]
-    UploadIntentConflict(#[from] #[source] UploadIntentConflictError),
+    UploadIntentConflict(
+        #[from]
+        #[source]
+        UploadIntentConflictError,
+    ),
     /// A stored integer exceeded the supported range.
     #[error("stored integer exceeded the supported range: {0}")]
     IntegerOutOfRange(String),
