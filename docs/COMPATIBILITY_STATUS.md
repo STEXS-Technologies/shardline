@@ -54,7 +54,7 @@ history. Version visibility and overwrite behavior belong to the frontend contra
 | Xet | Revision-oriented workflows can address and retrieve older versions. |
 | Git LFS | Version history comes from Git commits and refs; the LFS object endpoint alone is a blob store. |
 | Hugging Face Hub | Repository revisions and commits expose historical states. |
-| OCI | Blobs and manifests are immutable by digest; tags are mutable pointers and have no tag-history API here. |
+| OCI | Blobs and manifests are immutable by digest; tags are mutable, database-linearized pointers and have no tag-history API here. Digest-guarded deletion cannot remove a concurrently retargeted tag. |
 | S3 | A `PUT` replaces the logical object key. S3 bucket versioning and `ListObjectVersions` are not implemented. |
 | Bazel HTTP cache | Digest-keyed cache entries have no user-facing version history. |
 

@@ -460,7 +460,7 @@ Token-gated in production via `SHARDLINE_METRICS_TOKEN_FILE`.
 
 ## Database Migrations
 
-Shardline ships 16 bundled migrations applied via `shardline db migrate up`:
+Shardline ships 18 bundled migrations applied via `shardline db migrate up`:
 
 1. `metadata_store` — core index and record tables
 2. `retention_holds` — GC retention hold tracking
@@ -478,6 +478,8 @@ Shardline ships 16 bundled migrations applied via `shardline db migrate up`:
 14. `upload_intents` — upload lifecycle intent tracking
 15. `tree_store` — Xet path-to-file_id and revision registry tables
 16. `s3_object_index` — S3 object-key registry tables
+17. `s3_object_etag_metadata` — S3 ETag and user-metadata columns
+18. `oci_tags` — database-linearized OCI tag pointers
 
 SQLite uses `BLOB`/`INTEGER`; Postgres uses `BYTEA`/`BOOLEAN`/`BIGINT`. Migrations are
 stored in `migrations/` (Postgres) and `crates/shardline-index/migrations/` (SQLite).
