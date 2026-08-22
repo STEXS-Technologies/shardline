@@ -748,8 +748,15 @@ impl UploadIntentStore for super::PostgresIndexStore {
     type Error = PostgresMetadataStoreError;
 
     async fn create_intent(&self, intent: &UploadIntent) -> Result<(), Self::Error> {
-        sqlx::query(
-            "INSERT INTO shardline_upload_intents (intent_id, object_key, object_hash, object_length, state, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, now(), now()) ON CONFLICT (intent_id) DO NOTHING"
+        let result = sqlx::query(
+            "INSERT INTO shardline_upload_intents (
+                intent_id, object_key, object_hash, object_length, state, created_at, updated_at
+             )
+             VALUES ($1, $2, $3, $4, $5, now(), now())
+             ON CONFLICT (intent_id) DO UPDATE SET intent_id = EXCLUDED.intent_id
+             WHERE shardline_upload_intents.object_key = EXCLUDED.object_key
+               AND shardline_upload_intents.object_hash = EXCLUDED.object_hash
+               AND shardline_upload_intents.object_length = EXCLUDED.object_length",
         )
         .bind(intent.intent_id())
         .bind(intent.object_key())
@@ -758,6 +765,9 @@ impl UploadIntentStore for super::PostgresIndexStore {
         .bind(intent.state().as_str())
         .execute(&self.pool)
         .await?;
+        if result.rows_affected() == 0 {
+            return Err(crate::UploadIntentConflictError::new(intent.intent_id()).into());
+        }
         Ok(())
     }
 
@@ -1300,6 +1310,38 @@ mod tests {
             .create_intent(&intent)
             .await
             .expect("second create (idempotent)");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pg_upload_intent_rejects_id_reuse_for_different_object() {
+        let Some(pool) = connect_postgres().await else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        sqlx::query("DELETE FROM shardline_upload_intents WHERE intent_id = $1")
+            .bind("test-intent-conflict")
+            .execute(&pool)
+            .await
+            .expect("clean leftover intent");
+        let store = make_pg_store(pool);
+        let original = UploadIntent::new(
+            "test-intent-conflict".into(),
+            "test/original".into(),
+            "ab".repeat(32),
+            64,
+        );
+        let conflicting = UploadIntent::new(
+            "test-intent-conflict".into(),
+            "test/conflicting".into(),
+            "cd".repeat(32),
+            128,
+        );
+        store.create_intent(&original).await.unwrap();
+        store.create_intent(&original).await.unwrap();
+        assert!(matches!(
+            store.create_intent(&conflicting).await,
+            Err(super::PostgresMetadataStoreError::UploadIntentConflict(_))
+        ));
     }
 
     #[tokio::test(flavor = "multi_thread")]
