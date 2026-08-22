@@ -67,6 +67,7 @@ const OBJECT_BUCKET: &str = "shardline";
 const CONTAINER_POSTGRES: &str = "chaos-postgres";
 const CONTAINER_MINIO: &str = "chaos-minio";
 const CONTAINER_REDIS: &str = "chaos-redis";
+const NETEM_IMAGE: &str = "nicolaka/netshoot:v0.13";
 
 const TEST_SIGNING_KEY: &[u8] = b"0123456789abcdef0123456789abcdef";
 const CHUNK_SIZE: usize = 65536;
@@ -149,6 +150,45 @@ async fn docker_run(args: &[&str]) -> std::process::Output {
     .unwrap()
 }
 
+async fn docker_run_owned(args: Vec<String>) -> std::process::Output {
+    tokio::task::spawn_blocking(move || {
+        std::process::Command::new("docker")
+            .args(args)
+            .output()
+            .unwrap()
+    })
+    .await
+    .unwrap()
+}
+
+async fn replace_netem(container: &str, rule: &str) -> std::process::Output {
+    docker_run_owned(vec![
+        "run".to_owned(),
+        "--rm".to_owned(),
+        format!("--network=container:{container}"),
+        "--cap-add=NET_ADMIN".to_owned(),
+        NETEM_IMAGE.to_owned(),
+        "sh".to_owned(),
+        "-c".to_owned(),
+        format!("tc qdisc replace dev eth0 root netem {rule}"),
+    ])
+    .await
+}
+
+async fn clear_netem(container: &str) -> std::process::Output {
+    docker_run_owned(vec![
+        "run".to_owned(),
+        "--rm".to_owned(),
+        format!("--network=container:{container}"),
+        "--cap-add=NET_ADMIN".to_owned(),
+        NETEM_IMAGE.to_owned(),
+        "sh".to_owned(),
+        "-c".to_owned(),
+        "tc qdisc del dev eth0 root 2>/dev/null || true".to_owned(),
+    ])
+    .await
+}
+
 /// Resolves the host-published port of `container_port` inside `container`
 /// (`docker port chaos-minio 9000/tcp` -> `0.0.0.0:29000` -> `29000`).
 async fn container_published_port(container: &str, container_port: &str) -> Option<String> {
@@ -208,6 +248,7 @@ where
 struct ServiceRecoveryGuard {
     stopped: Vec<&'static str>,
     disconnected: Vec<&'static str>,
+    netem: Vec<&'static str>,
 }
 
 impl ServiceRecoveryGuard {
@@ -215,6 +256,7 @@ impl ServiceRecoveryGuard {
         Self {
             stopped: Vec::new(),
             disconnected: Vec::new(),
+            netem: Vec::new(),
         }
     }
 
@@ -236,6 +278,28 @@ impl ServiceRecoveryGuard {
         }
     }
 
+    async fn replace_netem(&mut self, name: &'static str, rule: &str) {
+        let out = replace_netem(name, rule).await;
+        assert!(
+            out.status.success(),
+            "install netem rule on {name}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        if !self.netem.contains(&name) {
+            self.netem.push(name);
+        }
+    }
+
+    async fn clear_netem(&mut self, name: &'static str) {
+        let out = clear_netem(name).await;
+        assert!(
+            out.status.success(),
+            "clear netem rule on {name}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        self.netem.retain(|container| *container != name);
+    }
+
     /// Marks a service as restored (call after a successful `docker start` /
     /// reconnect + readiness) so Drop won't touch it again.
     fn recovered(&mut self, name: &'static str) {
@@ -254,6 +318,21 @@ impl Drop for ServiceRecoveryGuard {
         for name in &self.disconnected {
             let _ = std::process::Command::new("docker")
                 .args(["network", "connect", NET, name])
+                .output();
+        }
+        for name in &self.netem {
+            let network = format!("--network=container:{name}");
+            let _ = std::process::Command::new("docker")
+                .args([
+                    "run",
+                    "--rm",
+                    &network,
+                    "--cap-add=NET_ADMIN",
+                    NETEM_IMAGE,
+                    "sh",
+                    "-c",
+                    "tc qdisc del dev eth0 root 2>/dev/null || true",
+                ])
                 .output();
         }
     }
@@ -1276,6 +1355,132 @@ async fn drill_deploy_d_minio_network_partition_recovery() {
         } else {
             "metadata-path fallback"
         }
+    );
+}
+
+// ===========================================================================
+// DRILL E — KERNEL PACKET DUPLICATION/REORDERING + ONE-WAY RESPONSE LOSS.
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn drill_deploy_e_netem_duplicate_reorder_and_asymmetric_recovery() {
+    let drill = "drill_deploy_e_netem_duplicate_reorder_and_asymmetric_recovery";
+    let Some(stack) = boot_chaos_stack(drill).await else {
+        return;
+    };
+    let Some(binary) = resolve_shardline_binary() else {
+        eprintln!("SKIPPED: {drill} — shardline binary not found; run `cargo build -p shardline`");
+        return;
+    };
+    let mut guard = ServiceRecoveryGuard::new();
+    migrate_chaos_postgres(&stack.pg_url).await;
+
+    let tmp = TempDir::new().unwrap();
+    let mut server = DeploymentServer::spawn(
+        &binary,
+        &[
+            ("SHARDLINE_SERVER_FRONTENDS", "s3"),
+            ("SHARDLINE_S3_ENDPOINT", &stack.s3_endpoint),
+        ],
+        tmp.path(),
+    );
+    server.wait_ready(Duration::from_secs(10)).await;
+
+    let token = mint_token("drill", "drill", TokenScope::Write);
+    let base = server.base_url();
+    let seed_key = "e-stable";
+    let seed_bytes = deterministic_bytes(96 * 1024 + 31, 501);
+    let seeded = s3_put(&base, &token, seed_key, seed_bytes.clone()).await;
+    assert_eq!(seeded.status().as_u16(), 200, "seed before netem faults");
+
+    guard
+        .replace_netem(
+            CONTAINER_MINIO,
+            "delay 40ms 20ms 25% duplicate 10% reorder 50% 25%",
+        )
+        .await;
+    for sequence in 0..8_u64 {
+        let key = format!("e-netem-{sequence}");
+        let bytes = deterministic_bytes(
+            (32_usize * 1024)
+                .checked_add(usize::try_from(sequence).unwrap())
+                .unwrap(),
+            510_u64.saturating_add(sequence),
+        );
+        let put = s3_put(&base, &token, &key, bytes.clone()).await;
+        assert_eq!(
+            put.status().as_u16(),
+            200,
+            "PUT through duplicate/reordered packets for {key}"
+        );
+        let get = s3_get(&base, &token, &key).await;
+        assert_eq!(
+            get.status().as_u16(),
+            200,
+            "GET through duplicate/reordered packets for {key}"
+        );
+        assert_eq!(
+            get.bytes().await.unwrap().as_ref(),
+            bytes.as_slice(),
+            "packet faults must not alter acknowledged bytes for {key}"
+        );
+    }
+
+    // Apply loss only to packets leaving MinIO's namespace. Requests still
+    // travel toward the dependency, but its TCP acknowledgements/responses do
+    // not return: an asymmetric response partition rather than a symmetric
+    // Docker-network disconnect.
+    guard.replace_netem(CONTAINER_MINIO, "loss 100%").await;
+    let partitioned_read = reqwest::Client::new()
+        .get(format!("{base}/{BUCKET}/{seed_key}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .timeout(Duration::from_secs(3))
+        .send()
+        .await;
+    assert!(
+        partitioned_read
+            .as_ref()
+            .map_or(true, |response| !response.status().is_success()),
+        "one-way MinIO response partition must never return a false successful read"
+    );
+    assert!(
+        server.alive(),
+        "server must remain alive during asymmetric dependency partition"
+    );
+
+    guard.clear_netem(CONTAINER_MINIO).await;
+    let s3_endpoint = stack.s3_endpoint.clone();
+    wait_for(
+        "MinIO after netem removal",
+        move || {
+            let endpoint = s3_endpoint.clone();
+            async move { minio_health_ok(&endpoint).await }
+        },
+        Duration::from_secs(30),
+    )
+    .await;
+
+    let recovered = s3_get(&base, &token, seed_key).await;
+    assert_eq!(recovered.status().as_u16(), 200, "read after netem removal");
+    assert_eq!(
+        recovered.bytes().await.unwrap().as_ref(),
+        seed_bytes.as_slice(),
+        "pre-fault acknowledged bytes must recover exactly"
+    );
+    let recovery_key = "e-recovered";
+    let recovery_bytes = deterministic_bytes(48 * 1024 + 7, 599);
+    let put = s3_put(&base, &token, recovery_key, recovery_bytes.clone()).await;
+    assert_eq!(put.status().as_u16(), 200, "write after netem removal");
+    let get = s3_get(&base, &token, recovery_key).await;
+    assert_eq!(get.status().as_u16(), 200, "read new post-fault write");
+    assert_eq!(
+        get.bytes().await.unwrap().as_ref(),
+        recovery_bytes.as_slice(),
+        "post-fault publication must be byte exact"
+    );
+    eprintln!(
+        "chaos({drill}): PASS — kernel duplicate/reorder and asymmetric response loss recovered"
     );
 }
 
