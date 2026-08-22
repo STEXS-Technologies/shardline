@@ -40,6 +40,7 @@ docs that match your use case.
 - [Provider Adapters](PROVIDER_ADAPTERS.md)
 - [Security and Invariants](SECURITY_AND_INVARIANTS.md)
 - [Distributed Correctness](DISTRIBUTED_CORRECTNESS.md)
+- [Chaos Engineering and Reliability Evidence](CHAOS_ENGINEERING.md)
 
 ## Operator Workflows
 

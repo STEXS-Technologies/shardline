@@ -89,6 +89,30 @@ When destructive GC owns the barrier, new mutation requests wait up to the norma
 request timeout and then fail without writing if the collector is still running.
 Clients may retry them after GC completes.
 
+## OCI Tombstones Are Not GC Candidates
+
+OCI logical-deletion tombstones are authoritative visibility metadata, not ordinary
+garbage-candidate rows. Shardline currently retains the immutable object bytes after an OCI
+delete. Removing only the tombstone would make those retained bytes visible again through a
+digest read, so normal GC must not compact OCI tombstones.
+
+Online physical reclamation is also unsafe with the current generation-independent object
+keys. A collector could delete old bytes after a newer writer republishes the same digest;
+the object-store delete has no database fencing precondition. Tombstone rows are small, and
+retaining them is required for correctness. Physical bytes are a capacity concern, not a
+reason to weaken the visibility invariant.
+
+Safe reclamation requires one of these explicit designs:
+
+- generation-specific object keys, followed by deletion of a generation that can no longer
+  be referenced
+- an object-store compare/delete primitive bound to a durable generation or fencing token
+- an offline, cluster-wide quiescent compactor that proves no old or new writer can run and
+  deletes bytes before removing the matching tombstone
+
+Until one of those contracts is implemented and fault-tested, tombstone removal by GC is
+intentionally out of scope. A time-to-live alone is not a safety proof.
+
 ## Quarantine and Retention
 
 Deletion should be staged:
