@@ -125,3 +125,72 @@ jobs:
           path: reliability-resource-results
           if-no-files-found: error
           retention-days: 90
+
+  mixed-version-upgrade:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout with release history
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+
+      - name: Setup Rust CI toolchain and tools
+        uses: ./.github/actions/rust-ci-setup
+
+      - name: Build N and tagged N-1 binaries
+        run: |
+          cargo build -p shardline
+          git worktree add --detach "$RUNNER_TEMP/shardline-n-minus-one" v1.6.0
+          cargo build \
+            --manifest-path "$RUNNER_TEMP/shardline-n-minus-one/Cargo.toml" \
+            --target-dir "$RUNNER_TEMP/shardline-n-minus-one-target" \
+            -p shardline
+
+      - name: Start shared Postgres, MinIO, and Redis
+        run: |
+          docker compose -f docker-compose.chaos.yml -p shardline-chaos up -d
+          for container in chaos-postgres chaos-minio chaos-redis; do
+            until [ "$(docker inspect -f '{{.State.Health.Status}}' "$container" 2>/dev/null)" = "healthy" ]; do
+              sleep 1
+            done
+          done
+          target/debug/shardline db migrate up \
+            --database-url postgres://shardline:shardline-dev-password@127.0.0.1:15432/shardline
+
+      - name: Exercise real mixed-version rollout and rollback
+        env:
+          SHARDLINE_N_MINUS_ONE_BINARY: ${{ runner.temp }}/shardline-n-minus-one-target/debug/shardline
+        run: |
+          set -o pipefail
+          mkdir -p reliability-upgrade-results
+          cargo test -p shardline-server --test deployment_chaos \
+            drill_deploy_f_real_mixed_version_rollout_and_rollback \
+            -- --exact --nocapture 2>&1 \
+            | tee reliability-upgrade-results/mixed-version-upgrade.log
+
+      - name: Record mixed-version campaign metadata
+        if: always()
+        run: |
+          mkdir -p reliability-upgrade-results
+          {
+            echo "current_commit=${GITHUB_SHA}"
+            echo "n_minus_one_tag=v1.6.0"
+            echo "n_minus_one_commit=$(git rev-list -n 1 v1.6.0)"
+            echo "run_id=${GITHUB_RUN_ID}"
+            echo "run_attempt=${GITHUB_RUN_ATTEMPT}"
+            echo "finished_epoch=$(date +%s)"
+          } > reliability-upgrade-results/metadata.txt
+
+      - name: Stop mixed-version dependencies
+        if: always()
+        run: docker compose -f docker-compose.chaos.yml -p shardline-chaos down
+
+      - name: Upload mixed-version evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: shardline-mixed-version-${{ github.sha }}
+          path: reliability-upgrade-results
+          if-no-files-found: error
+          retention-days: 90
