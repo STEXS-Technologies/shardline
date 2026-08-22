@@ -1175,7 +1175,7 @@ mod tests {
             }
             let mut payload = vec![0_u8; payload_length];
             provider.read_exact(&mut payload)?;
-            if message_type == [b'C'] && payload == b"COMMIT\0" {
+            if message_type == *b"C" && payload == b"COMMIT\0" {
                 response_dropped.store(true, Ordering::Release);
                 client.shutdown(Shutdown::Both)?;
                 return Ok(());
