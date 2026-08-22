@@ -9,7 +9,7 @@ use std::{
         mpsc,
     },
     thread::{self, JoinHandle},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use futures_util::StreamExt;
@@ -18,19 +18,25 @@ use shardline_storage::{
     ObjectBody, ObjectIntegrity, ObjectKey, ObjectPrefix, ObjectStore, PutOutcome, S3ObjectStore,
     S3ObjectStoreConfig,
 };
-use shardline_test_support::DockerLocalStack;
+use shardline_test_support::{DockerLocalStack, S3RawConfig};
 
-/// A provider-backed ambiguity injector: the first successful PUT reaches
-/// MinIO, but its HTTP response never reaches the S3 client.
-struct AcceptedPutResponseLossProxy {
+#[derive(Clone, Copy)]
+enum S3ProxyFault {
+    DropAcceptedPut,
+    ServiceUnavailableOnce,
+    DelaySuccessfulGetBody(Duration),
+}
+
+/// A provider-backed, one-shot HTTP fault injector in front of MinIO.
+struct S3FaultProxy {
     endpoint: String,
-    response_dropped: Arc<AtomicBool>,
+    injected: Arc<AtomicBool>,
     stop: Option<mpsc::Sender<()>>,
     thread: Option<JoinHandle<()>>,
 }
 
-impl AcceptedPutResponseLossProxy {
-    fn start(upstream_endpoint: &str) -> std::io::Result<Self> {
+impl S3FaultProxy {
+    fn start(upstream_endpoint: &str, fault: S3ProxyFault) -> std::io::Result<Self> {
         let upstream = upstream_endpoint
             .strip_prefix("http://")
             .ok_or_else(|| {
@@ -43,8 +49,8 @@ impl AcceptedPutResponseLossProxy {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         listener.set_nonblocking(true)?;
         let endpoint = format!("http://{}", listener.local_addr()?);
-        let response_dropped = Arc::new(AtomicBool::new(false));
-        let worker_response_dropped = Arc::clone(&response_dropped);
+        let injected = Arc::new(AtomicBool::new(false));
+        let worker_injected = Arc::clone(&injected);
         let (stop, stopped) = mpsc::channel();
         let thread = thread::spawn(move || {
             loop {
@@ -53,7 +59,7 @@ impl AcceptedPutResponseLossProxy {
                 }
                 match listener.accept() {
                     Ok((client, _address)) => {
-                        proxy_one_s3_request(client, &upstream, &worker_response_dropped).ok();
+                        proxy_one_s3_request(client, &upstream, fault, &worker_injected).ok();
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(5));
@@ -64,7 +70,7 @@ impl AcceptedPutResponseLossProxy {
         });
         Ok(Self {
             endpoint,
-            response_dropped,
+            injected,
             stop: Some(stop),
             thread: Some(thread),
         })
@@ -74,12 +80,12 @@ impl AcceptedPutResponseLossProxy {
         &self.endpoint
     }
 
-    fn response_was_dropped(&self) -> bool {
-        self.response_dropped.load(Ordering::Acquire)
+    fn fault_was_injected(&self) -> bool {
+        self.injected.load(Ordering::Acquire)
     }
 }
 
-impl Drop for AcceptedPutResponseLossProxy {
+impl Drop for S3FaultProxy {
     fn drop(&mut self) {
         if let Some(stop) = self.stop.take() {
             stop.send(()).ok();
@@ -93,11 +99,24 @@ impl Drop for AcceptedPutResponseLossProxy {
 fn proxy_one_s3_request(
     mut client: TcpStream,
     upstream: &str,
-    response_dropped: &AtomicBool,
+    fault: S3ProxyFault,
+    injected: &AtomicBool,
 ) -> std::io::Result<()> {
     client.set_read_timeout(Some(Duration::from_secs(10)))?;
     let request = read_http_request(&mut client)?;
     let is_put = request.starts_with(b"PUT ");
+    let is_get = request.starts_with(b"GET ");
+    if is_put
+        && matches!(fault, S3ProxyFault::ServiceUnavailableOnce)
+        && injected
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    {
+        client.write_all(
+            b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        )?;
+        return Ok(());
+    }
     let request = force_connection_close(&request)?;
 
     let mut provider = TcpStream::connect(upstream)?;
@@ -107,16 +126,49 @@ fn proxy_one_s3_request(
     provider.read_to_end(&mut response)?;
     let accepted = response.starts_with(b"HTTP/1.1 200 ")
         || response.starts_with(b"HTTP/1.1 201 ")
+        || response.starts_with(b"HTTP/1.1 206 ")
         || response.starts_with(b"HTTP/1.1 204 ");
 
     if is_put
         && accepted
-        && response_dropped
+        && matches!(fault, S3ProxyFault::DropAcceptedPut)
+        && injected
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
     {
         client.shutdown(Shutdown::Both)?;
         return Ok(());
+    }
+    if is_get
+        && accepted
+        && let S3ProxyFault::DelaySuccessfulGetBody(delay) = fault
+        && injected
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    {
+        let header_end = response
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .and_then(|offset| offset.checked_add(4))
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "missing provider response header end",
+                )
+            })?;
+        client.write_all(response.get(..header_end).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid provider response header length",
+            )
+        })?)?;
+        thread::sleep(delay);
+        return client.write_all(response.get(header_end..).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid provider response body offset",
+            )
+        })?);
     }
     client.write_all(&response)
 }
@@ -259,8 +311,21 @@ fn s3_config_with_bucket(
                 raw.secret_key.map(SecretString::new),
                 raw.session_token.map(SecretString::new),
             )
+            .with_key_prefix(raw.key_prefix.as_deref())
             .with_allow_http(raw.allow_http),
     )
+}
+
+fn s3_config_from_raw(raw: S3RawConfig, endpoint: String) -> S3ObjectStoreConfig {
+    S3ObjectStoreConfig::new(raw.bucket, raw.region)
+        .with_endpoint(Some(endpoint))
+        .with_credentials(
+            raw.access_key.map(SecretString::new),
+            raw.secret_key.map(SecretString::new),
+            raw.session_token.map(SecretString::new),
+        )
+        .with_key_prefix(raw.key_prefix.as_deref())
+        .with_allow_http(raw.allow_http)
 }
 
 fn s3_config(stack: &DockerLocalStack, key_prefix: Option<&str>) -> Option<S3ObjectStoreConfig> {
@@ -273,6 +338,7 @@ fn s3_config(stack: &DockerLocalStack, key_prefix: Option<&str>) -> Option<S3Obj
                 raw.secret_key.map(SecretString::new),
                 raw.session_token.map(SecretString::new),
             )
+            .with_key_prefix(raw.key_prefix.as_deref())
             .with_allow_http(raw.allow_http),
     )
 }
@@ -391,15 +457,8 @@ async fn s3_accepted_put_with_lost_response_recovers_idempotently() {
         return;
     };
     let provider_endpoint = raw.endpoint.as_deref().unwrap();
-    let proxy = AcceptedPutResponseLossProxy::start(provider_endpoint).unwrap();
-    let config = S3ObjectStoreConfig::new(raw.bucket, raw.region)
-        .with_endpoint(Some(proxy.endpoint().to_owned()))
-        .with_credentials(
-            raw.access_key.map(SecretString::new),
-            raw.secret_key.map(SecretString::new),
-            raw.session_token.map(SecretString::new),
-        )
-        .with_allow_http(raw.allow_http);
+    let proxy = S3FaultProxy::start(provider_endpoint, S3ProxyFault::DropAcceptedPut).unwrap();
+    let config = s3_config_from_raw(raw, proxy.endpoint().to_owned());
     let store = S3ObjectStore::new(config).unwrap();
     let key = ObjectKey::parse("ab/provider-accepted-lost-response").unwrap();
     let body = b"provider accepted these exact bytes before the response was lost";
@@ -407,7 +466,7 @@ async fn s3_accepted_put_with_lost_response_recovers_idempotently() {
 
     let first = store.put_if_absent(&key, ObjectBody::from_slice(body), &integrity);
     assert!(
-        proxy.response_was_dropped(),
+        proxy.fault_was_injected(),
         "the test must observe MinIO accepting the PUT before dropping its response"
     );
     if let Err(error) = first {
@@ -423,6 +482,74 @@ async fn s3_accepted_put_with_lost_response_recovers_idempotently() {
     let end = (body.len() as u64).checked_sub(1).unwrap();
     let range = shardline_protocol::ByteRange::new(0, end).unwrap();
     assert_eq!(store.read_range(&key, range).unwrap(), body);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_provider_503_is_retried_without_partial_visibility() {
+    let Some(stack) = DockerLocalStack::builder().with_minio().start().unwrap() else {
+        eprintln!("skipping: docker not available");
+        return;
+    };
+    let Some(raw) = stack.s3_raw_config(Some("test-provider-503")) else {
+        return;
+    };
+    let provider_endpoint = raw.endpoint.as_deref().unwrap().to_owned();
+    let proxy =
+        S3FaultProxy::start(&provider_endpoint, S3ProxyFault::ServiceUnavailableOnce).unwrap();
+    let store = S3ObjectStore::new(s3_config_from_raw(raw, proxy.endpoint().to_owned())).unwrap();
+    let key = ObjectKey::parse("ab/provider-503-retry").unwrap();
+    let body = b"provider retry remains byte exact";
+    let integrity = ObjectIntegrity::new(chunk_hash(body), body.len() as u64);
+
+    assert!(matches!(
+        store
+            .put_if_absent(&key, ObjectBody::from_slice(body), &integrity)
+            .unwrap(),
+        PutOutcome::Inserted
+    ));
+    assert!(proxy.fault_was_injected());
+    let end = (body.len() as u64).checked_sub(1).unwrap();
+    let range = shardline_protocol::ByteRange::new(0, end).unwrap();
+    assert_eq!(store.read_range(&key, range).unwrap(), body);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_slow_successful_get_body_streams_exact_bytes() {
+    let Some(stack) = DockerLocalStack::builder().with_minio().start().unwrap() else {
+        eprintln!("skipping: docker not available");
+        return;
+    };
+    let prefix = "test-slow-provider-body";
+    let Some(direct_config) = s3_config(&stack, Some(prefix)) else {
+        return;
+    };
+    let direct_store = S3ObjectStore::new(direct_config).unwrap();
+    let key = ObjectKey::parse("ab/slow-provider-body").unwrap();
+    let body = b"a delayed provider body must not become a short successful read";
+    let integrity = ObjectIntegrity::new(chunk_hash(body), body.len() as u64);
+    direct_store
+        .put_if_absent(&key, ObjectBody::from_slice(body), &integrity)
+        .unwrap();
+
+    let Some(raw) = stack.s3_raw_config(Some(prefix)) else {
+        return;
+    };
+    let provider_endpoint = raw.endpoint.as_deref().unwrap().to_owned();
+    let delay = Duration::from_millis(150);
+    let proxy = S3FaultProxy::start(
+        &provider_endpoint,
+        S3ProxyFault::DelaySuccessfulGetBody(delay),
+    )
+    .unwrap();
+    let store = S3ObjectStore::new(s3_config_from_raw(raw, proxy.endpoint().to_owned())).unwrap();
+    let end = (body.len() as u64).checked_sub(1).unwrap();
+    let range = shardline_protocol::ByteRange::new(0, end).unwrap();
+    let started = Instant::now();
+    let observed = store.read_range(&key, range).unwrap();
+
+    assert!(proxy.fault_was_injected());
+    assert!(started.elapsed() >= delay);
+    assert_eq!(observed, body);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
