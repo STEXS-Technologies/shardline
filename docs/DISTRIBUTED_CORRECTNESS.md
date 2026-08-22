@@ -14,6 +14,12 @@ The scaled topology uses:
 - one shared `ReadWriteMany` API staging filesystem with cross-node advisory locks
 - any number of API and transfer replicas running the same barrier/fence-aware version
 
+Postgres, S3, and the lock-coherent RWX staging filesystem are all inside the
+distributed-correctness envelope. Shared bytes alone are insufficient: if advisory
+lock exclusion is local to each node, resumable-session accounting and finalization can
+race even though every node sees the same files. A deployment that cannot demonstrate
+cross-node lock coherence is unsupported.
+
 SQLite is supported for a local deployment. Multiple local processes must share the
 same root filesystem and its advisory-lock implementation; SQLite itself still limits
 write throughput, so Postgres is the production multi-replica metadata backend.
@@ -87,6 +93,13 @@ the same bytes without coherent locking is unsupported.
 LFS uses 256 hashed lock stripes, bounding lock-file growth independently of the number
 of client OIDs. S3 multipart uses one lock inside each already-bounded session directory.
 Expired session sweeps take the same locks as active writers before deleting files.
+
+The shared POSIX lock dependency is an explicit current contract, not the desired final
+coordination boundary. A future design may move resumable-session identity, ranges,
+quota, ownership leases, and fencing into Postgres while placing staged payloads in
+object storage. That would remove RWX advisory locking from the correctness envelope.
+Until such a design is implemented and adversarially verified, operators must provide
+the staging filesystem described above.
 
 ## OCI Logical Deletion
 
