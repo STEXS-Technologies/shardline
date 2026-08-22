@@ -12,6 +12,8 @@ use std::os::unix::{
     io::AsRawFd,
 };
 
+use crate::{LocalPublishBoundary, fault_injection::local_publish_failpoint};
+
 static TEMPORARY_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// File and directory mode overrides for anchored filesystem writes.
@@ -197,6 +199,10 @@ pub fn write_anchored_temporary_file(
     bytes: &[u8],
     file_mode: Option<u32>,
 ) -> io::Result<PathBuf> {
+    local_publish_failpoint(
+        &anchored.logical_path(),
+        LocalPublishBoundary::BeforeTemporaryWrite,
+    )?;
     loop {
         let temporary = fd_child_path(
             anchored.parent_dir(),
@@ -206,6 +212,10 @@ pub fn write_anchored_temporary_file(
             Ok(mut file) => {
                 file.write_all(bytes)?;
                 file.sync_all()?;
+                local_publish_failpoint(
+                    &anchored.logical_path(),
+                    LocalPublishBoundary::AfterTemporaryDurable,
+                )?;
                 return Ok(temporary);
             }
             Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
