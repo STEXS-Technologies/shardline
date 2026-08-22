@@ -91,6 +91,7 @@ mod lifecycle_repair;
 mod local_backend;
 mod local_fs;
 mod local_path;
+mod maintenance_barrier;
 pub mod metrics;
 mod model;
 mod object_store;
@@ -309,6 +310,11 @@ pub async fn run_gc_diagnostics(
     let object_store = object_store_from_config(&config)?;
     if let Some(index_postgres_url) = config.index_postgres_url() {
         let pool = connect_postgres_metadata_pool(index_postgres_url, 4)?;
+        let _gc_barrier = if options.mark || options.sweep {
+            Some(maintenance_barrier::acquire_postgres_exclusive(&pool).await?)
+        } else {
+            None
+        };
         let index_store = PostgresIndexStore::new(pool.clone());
         let record_store = PostgresRecordStore::new(pool);
         return gc::run_gc_with_stores(
@@ -322,6 +328,11 @@ pub async fn run_gc_diagnostics(
         .map_err(Into::into);
     }
 
+    let _gc_barrier = if options.mark || options.sweep {
+        Some(maintenance_barrier::acquire_local_exclusive(config.root_dir()).await?)
+    } else {
+        None
+    };
     let index_store = LocalIndexStore::open(config.root_dir().to_path_buf());
     let record_store = LocalRecordStore::open(config.root_dir().to_path_buf());
     gc::run_gc_with_stores(

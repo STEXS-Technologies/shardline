@@ -76,6 +76,19 @@ Garbage collection must obey these invariants:
 - never require full object rewrites to repair collector metadata
 - every deletion decision must be reproducible from durable state
 
+Destructive runs also use a GC/write barrier. Every mutating server request holds the
+shared side before it can write content or publish metadata; `--mark`, `--sweep`, and
+`--mark --sweep` hold the exclusive side for the complete collector run. Local
+deployments coordinate through an advisory file lock under the state root. Postgres
+deployments use a transaction-scoped advisory reader/writer lock shared by every
+replica. This closes the final re-reference race between the sweep's delete-time mark
+and physical deletion. Read-only requests and GC dry runs do not take the exclusive
+barrier.
+
+When destructive GC owns the barrier, new mutation requests wait up to the normal
+request timeout and then fail without writing if the collector is still running.
+Clients may retry them after GC completes.
+
 ## Quarantine and Retention
 
 Deletion should be staged:
@@ -272,6 +285,10 @@ Mode behavior:
 - `--mark` records current orphan chunks as quarantine candidates
 - `--sweep` deletes only quarantine candidates whose retention window already expired
 - `--mark --sweep` performs both steps in one run
+
+The supported `shardline gc` command acquires the barrier automatically. Library code
+calling the lower-level `run_gc_with_stores` function directly must provide equivalent
+writer exclusion whenever `mark` or `sweep` is enabled.
 
 New quarantine candidates default to a retention window of `86400` seconds.
 That default applies only when a run includes `--mark`.

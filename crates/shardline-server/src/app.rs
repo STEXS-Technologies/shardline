@@ -26,7 +26,7 @@ use std::{
 
 use axum::{
     Router,
-    extract::DefaultBodyLimit,
+    extract::{DefaultBodyLimit, State},
     http::{HeaderMap, Method, header},
     middleware::{self, Next},
     response::IntoResponse,
@@ -398,7 +398,7 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
 
     let app = app
         .layer(DefaultBodyLimit::max(max_request_body_bytes.get()))
-        .with_state(state);
+        .with_state(state.clone());
 
     // Merge hub routes (Router<()>) into the main app (Router<()>).
     let app = if let Some(hs) = hub_state {
@@ -418,7 +418,10 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
     // Apply CORS after every optional frontend has been registered and the Hub
     // router has been merged, so preflight and normal requests are covered by
     // the same policy regardless of which protocol owns the route.
-    let app = app.layer(cors);
+    let app = app.layer(cors).layer(middleware::from_fn_with_state(
+        state,
+        gc_write_barrier_middleware,
+    ));
 
     // Register route auth policies for auditability and fail-closed enforcement.
     let mut policy_registry = RoutePolicyRegistry::new();
@@ -959,6 +962,33 @@ pub(super) async fn security_headers_middleware(
         );
     }
     axum::response::Response::from_parts(parts, body)
+}
+
+async fn gc_write_barrier_middleware(
+    State(state): State<Arc<AppState>>,
+    request: axum::extract::Request,
+    next: Next,
+) -> axum::response::Response {
+    if !matches!(
+        *request.method(),
+        Method::POST | Method::PUT | Method::PATCH | Method::DELETE
+    ) {
+        return next.run(request).await;
+    }
+
+    let barrier = tokio::time::timeout(
+        timeouts::REQUEST_TOTAL,
+        state
+            .backend
+            .acquire_gc_write_barrier(state.config.root_dir()),
+    )
+    .await;
+    let _guard = match barrier {
+        Ok(Ok(guard)) => guard,
+        Ok(Err(error)) => return error.into_response(),
+        Err(_) => return ServerError::RequestTimedOut.into_response(),
+    };
+    next.run(request).await
 }
 
 async fn request_timeout_middleware(

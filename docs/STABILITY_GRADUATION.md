@@ -69,6 +69,7 @@ compatibility documentation. They must not be silently omitted.
   transactional lock, or fenced-lease contract
 - stale writers cannot commit after ownership changes
 - rolling mixed-version operation is covered for the documented compatibility window
+- destructive GC excludes concurrent writers across local processes and Postgres replicas
 - backup, destructive loss, restore, integrity verification, and traffic return are
   exercised end to end
 
