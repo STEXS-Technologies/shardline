@@ -2,6 +2,20 @@ use std::collections::HashSet;
 
 use super::DEFAULT_WEBHOOK_DELIVERY_RETENTION_SECONDS;
 
+/// Typed durable mutation boundary in lifecycle repair.
+///
+/// Deterministic tests interrupt these exact transitions without relying on
+/// string failpoint names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LifecycleRepairBoundary {
+    /// A retention-hold deletion completed durably.
+    AfterRetentionHoldMutation,
+    /// A quarantine-candidate deletion completed durably.
+    AfterQuarantineCandidateMutation,
+    /// A webhook-delivery deletion completed durably.
+    AfterWebhookDeliveryMutation,
+}
+
 /// Lifecycle-repair execution options.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LifecycleRepairOptions {

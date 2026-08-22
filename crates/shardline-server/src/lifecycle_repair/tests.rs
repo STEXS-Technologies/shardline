@@ -1,14 +1,15 @@
 use shardline_index::{FileChunkRecord, FileRecord};
 
-use crate::{ServerFrontend, object_store::ServerObjectStore};
+use crate::{ServerError, ServerFrontend, object_store::ServerObjectStore};
 
 use super::{
-    DEFAULT_WEBHOOK_DELIVERY_RETENTION_SECONDS, LifecycleRepairOptions, LifecycleRepairReport,
-    WEBHOOK_DELIVERY_FUTURE_SKEW_SECONDS,
+    DEFAULT_WEBHOOK_DELIVERY_RETENTION_SECONDS, LifecycleRepairBoundary, LifecycleRepairOptions,
+    LifecycleRepairReport, WEBHOOK_DELIVERY_FUTURE_SKEW_SECONDS,
     classification::{
         classify_quarantine_repair_action, classify_retention_hold_repair_action,
         classify_webhook_delivery_repair_action,
     },
+    fault_injection::interrupt_at,
     orchestrator::run_lifecycle_repair_with_stores_at_time,
     reachability::{collect_record_object_references, collect_referenced_object_keys},
     types::{
@@ -826,6 +827,124 @@ async fn repair_empty_stores_produces_zero_report() {
     assert_eq!(report.scanned_webhook_deliveries, 0);
     assert_eq!(report.removed_stale_webhook_deliveries, 0);
     assert_eq!(report.removed_future_webhook_deliveries, 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn interrupted_repair_mutations_resume_and_converge() {
+    const BOUNDARIES: [LifecycleRepairBoundary; 3] = [
+        LifecycleRepairBoundary::AfterRetentionHoldMutation,
+        LifecycleRepairBoundary::AfterQuarantineCandidateMutation,
+        LifecycleRepairBoundary::AfterWebhookDeliveryMutation,
+    ];
+
+    for boundary in BOUNDARIES {
+        let (_root, record_store, index_store, object_store) = make_test_stores();
+        let now = 1_000;
+
+        for suffix in ["a", "b"] {
+            let hold_key = ObjectKey::parse(&format!("test/interrupted-hold-{suffix}")).unwrap();
+            let hold =
+                RetentionHold::new(hold_key, "expired hold".to_owned(), 0, Some(now - 1)).unwrap();
+            index_store.upsert_retention_hold(&hold).unwrap();
+
+            let candidate_key =
+                ObjectKey::parse(&format!("test/interrupted-quarantine-{suffix}")).unwrap();
+            let candidate = QuarantineCandidate::new(candidate_key, 1, 0, now + 1).unwrap();
+            index_store.upsert_quarantine_candidate(&candidate).unwrap();
+
+            let delivery = WebhookDelivery::new(
+                RepositoryProvider::GitHub,
+                "owner".to_owned(),
+                "repo".to_owned(),
+                format!("interrupted-delivery-{suffix}"),
+                0,
+            )
+            .unwrap();
+            index_store.record_webhook_delivery(&delivery).unwrap();
+        }
+
+        let interrupted = interrupt_at(
+            boundary,
+            run_lifecycle_repair_with_stores_at_time(
+                &record_store,
+                &index_store,
+                &object_store,
+                &[ServerFrontend::Xet],
+                LifecycleRepairOptions::default(),
+                now,
+            ),
+        )
+        .await;
+        assert!(
+            matches!(
+                interrupted,
+                Err(ServerError::InjectedLifecycleRepairInterruption {
+                    boundary: observed
+                }) if observed == boundary
+            ),
+            "expected a typed interruption at {boundary:?}"
+        );
+
+        let holds_after_interruption = index_store.list_retention_holds().unwrap().len();
+        let quarantine_after_interruption = index_store.list_quarantine_candidates().unwrap().len();
+        let webhooks_after_interruption = index_store.list_webhook_deliveries().unwrap().len();
+        let expected_remaining = match boundary {
+            LifecycleRepairBoundary::AfterRetentionHoldMutation => (1, 2, 2),
+            LifecycleRepairBoundary::AfterQuarantineCandidateMutation => (0, 1, 2),
+            LifecycleRepairBoundary::AfterWebhookDeliveryMutation => (0, 0, 1),
+        };
+        assert_eq!(
+            (
+                holds_after_interruption,
+                quarantine_after_interruption,
+                webhooks_after_interruption,
+            ),
+            expected_remaining,
+            "the interruption must preserve exactly the mutations completed before {boundary:?}"
+        );
+
+        let resumed = run_lifecycle_repair_with_stores_at_time(
+            &record_store,
+            &index_store,
+            &object_store,
+            &[ServerFrontend::Xet],
+            LifecycleRepairOptions::default(),
+            now,
+        )
+        .await
+        .unwrap();
+        assert_eq!(index_store.list_retention_holds().unwrap().len(), 0);
+        assert_eq!(index_store.list_quarantine_candidates().unwrap().len(), 0);
+        assert_eq!(index_store.list_webhook_deliveries().unwrap().len(), 0);
+        assert_eq!(
+            resumed.removed_expired_retention_holds + resumed.removed_missing_retention_holds,
+            u64::try_from(expected_remaining.0).unwrap()
+        );
+        assert_eq!(
+            resumed.removed_missing_quarantine_candidates
+                + resumed.removed_reachable_quarantine_candidates
+                + resumed.removed_held_quarantine_candidates,
+            u64::try_from(expected_remaining.1).unwrap()
+        );
+        assert_eq!(
+            resumed.removed_stale_webhook_deliveries + resumed.removed_future_webhook_deliveries,
+            u64::try_from(expected_remaining.2).unwrap()
+        );
+
+        let converged = run_lifecycle_repair_with_stores_at_time(
+            &record_store,
+            &index_store,
+            &object_store,
+            &[ServerFrontend::Xet],
+            LifecycleRepairOptions::default(),
+            now,
+        )
+        .await
+        .unwrap();
+        assert_eq!(converged.scanned_retention_holds, 0);
+        assert_eq!(converged.scanned_quarantine_candidates, 0);
+        assert_eq!(converged.scanned_webhook_deliveries, 0);
+    }
 }
 
 // ── Retention hold iteration ───────────────────────────────────────────
