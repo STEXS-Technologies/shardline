@@ -49,3 +49,39 @@ jobs:
           path: reliability-soak-results
           if-no-files-found: error
           retention-days: 90
+
+  deployment-chaos:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Setup Rust CI toolchain and tools
+        uses: ./.github/actions/rust-ci-setup
+
+      - name: Run deployment fault campaign
+        run: |
+          set -o pipefail
+          mkdir -p reliability-deployment-results
+          cargo make chaos-deployment 2>&1 \
+            | tee reliability-deployment-results/deployment-chaos.log
+
+      - name: Record deployment campaign metadata
+        if: always()
+        run: |
+          {
+            echo "commit=${GITHUB_SHA}"
+            echo "run_id=${GITHUB_RUN_ID}"
+            echo "run_attempt=${GITHUB_RUN_ATTEMPT}"
+            echo "finished_epoch=$(date +%s)"
+          } > reliability-deployment-results/metadata.txt
+
+      - name: Upload deployment fault evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: shardline-deployment-chaos-${{ github.sha }}
+          path: reliability-deployment-results
+          if-no-files-found: error
+          retention-days: 90
