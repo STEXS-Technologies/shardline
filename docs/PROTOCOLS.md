@@ -81,10 +81,10 @@ git config http.extraHeader "Authorization: Bearer $SHARDLINE_TOKEN"
 git lfs push origin main
 ```
 
-Chunked `PATCH` uploads keep bounded staging files under `SHARDLINE_ROOT_DIR`.
-Multi-replica API deployments must share that root on a filesystem with cross-node
-advisory locking; the production Kubernetes profile provisions this as a
-`ReadWriteMany` claim, so any replica can accept the next range.
+Chunked `PATCH` uploads in a Postgres deployment keep their range map and completion
+fence in Postgres and immutable fragments in object storage, so any replica can accept
+the next range without shared filesystem state. Local SQLite deployments retain
+bounded staging files under `SHARDLINE_ROOT_DIR` as a single-node implementation.
 
 Bazel HTTP remote cache:
 

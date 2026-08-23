@@ -280,6 +280,11 @@ where
         scanned_oci_tombstones: 0,
         eligible_oci_tombstones: 0,
         reclaimed_oci_tombstones: 0,
+        scanned_resumable_staging_objects: 0,
+        protected_resumable_staging_objects: 0,
+        reclaimed_resumable_staging_objects: 0,
+        reclaimed_resumable_staging_bytes: 0,
+        reclaimed_resumable_sessions: 0,
     };
 
     // The mark is gated on the same `!retention_clock_is_skewed_forward`

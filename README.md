@@ -102,7 +102,7 @@ shardline admin token
 | --- | --- |
 | **Local** | Single-node with local filesystem storage — `docker compose up` |
 | **Production small** | Single process with S3 + Postgres |
-| **Production scaled** | Split `api` and `transfer` roles with shared Postgres/S3 plus lock-coherent RWX staging |
+| **Production scaled** | Disposable `api` and `transfer` replicas with shared Postgres/S3; no RWX volume required |
 
 All profiles run providerless by default.
 Provider integration is optional.

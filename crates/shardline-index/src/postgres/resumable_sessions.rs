@@ -5,8 +5,8 @@ use sqlx::{Postgres, Row, Transaction};
 use super::{PostgresIndexStore, PostgresMetadataStoreError, i64_to_u64, u64_to_i64};
 use crate::{
     CreateResumableSessionOutcome, PublishResumablePartOutcome, ResumablePartRange,
-    ResumableSession, ResumableSessionError, ResumableSessionPart, ResumableSessionProtocol,
-    ResumableSessionState,
+    ResumableSession, ResumableSessionError, ResumableSessionGcInventory, ResumableSessionPart,
+    ResumableSessionProtocol, ResumableSessionState,
 };
 
 const SESSION_ACCOUNTING_LOCK_ID: i64 = 0x5348_5244_5345_5353;
@@ -76,6 +76,88 @@ async fn parts_on_transaction(
 }
 
 impl PostgresIndexStore {
+    /// Captures every staged key that must remain live plus sessions whose
+    /// metadata may be removed after physical staging reclamation succeeds.
+    ///
+    /// The caller must hold Shardline's exclusive GC/write barrier for the
+    /// duration of inventory, object deletion, and candidate deletion.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when persisted session data is invalid or Postgres
+    /// cannot provide a consistent transaction snapshot.
+    pub async fn resumable_session_gc_inventory(
+        &self,
+    ) -> Result<ResumableSessionGcInventory, PostgresMetadataStoreError> {
+        let mut transaction = self.pool().begin().await?;
+        let protected_rows = sqlx::query(
+            "SELECT parts.staging_key
+             FROM shardline_resumable_session_parts AS parts
+             JOIN shardline_resumable_sessions AS sessions USING (session_id)
+             WHERE sessions.state IN ('active', 'completing')
+               AND sessions.expires_at > clock_timestamp()
+             ORDER BY parts.staging_key",
+        )
+        .fetch_all(&mut *transaction)
+        .await?;
+        let protected_staging_keys = protected_rows
+            .into_iter()
+            .map(|row| row.try_get("staging_key").map_err(Into::into))
+            .collect::<Result<Vec<String>, PostgresMetadataStoreError>>()?;
+        let candidate_rows = sqlx::query(
+            "SELECT session_id, protocol, scope_namespace, target_key, attributes_json, state,
+                    generation, fence_epoch, expires_at
+             FROM shardline_resumable_sessions
+             WHERE state IN ('completed', 'aborted', 'expired')
+                OR expires_at <= clock_timestamp()
+             ORDER BY session_id",
+        )
+        .fetch_all(&mut *transaction)
+        .await?;
+        let reclaimable_sessions = candidate_rows
+            .iter()
+            .map(session_from_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        transaction.commit().await?;
+        Ok(ResumableSessionGcInventory::new(
+            protected_staging_keys,
+            reclaimable_sessions,
+        ))
+    }
+
+    /// CAS-removes terminal sessions after all of their private staged objects
+    /// have been reclaimed. Restarted generations and live states are retained.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when Postgres rejects the cleanup transaction.
+    pub async fn delete_reclaimable_resumable_sessions(
+        &self,
+        candidates: &[ResumableSession],
+    ) -> Result<u64, PostgresMetadataStoreError> {
+        let mut transaction = self.pool().begin().await?;
+        let mut deleted = 0_u64;
+        for candidate in candidates {
+            let result = sqlx::query(
+                "DELETE FROM shardline_resumable_sessions
+                 WHERE session_id = $1 AND generation = $2 AND fence_epoch = $3
+                   AND state IN ('completed', 'aborted', 'expired')",
+            )
+            .bind(candidate.session_id())
+            .bind(u64_to_i64(candidate.generation().get())?)
+            .bind(u64_to_i64(candidate.fence_epoch().get())?)
+            .execute(&mut *transaction)
+            .await?;
+            deleted = deleted.checked_add(result.rows_affected()).ok_or_else(|| {
+                PostgresMetadataStoreError::IntegerOutOfRange(
+                    "resumable-session deletion count overflow".to_owned(),
+                )
+            })?;
+        }
+        transaction.commit().await?;
+        Ok(deleted)
+    }
+
     /// Ensures a deterministic session identity is active, restarting an
     /// expired or terminal generation after removing its old part map.
     ///
@@ -847,6 +929,90 @@ mod tests {
                 .expect("session remains as a durable tombstone")
                 .state(),
             ResumableSessionState::Expired
+        );
+    }
+
+    #[tokio::test]
+    async fn postgres_resumable_gc_protects_live_parts_and_deletes_terminal_sessions() {
+        let Some(store) = store().await else {
+            eprintln!("skipping: no reachable DATABASE_URL");
+            return;
+        };
+        let expiry = Duration::from_secs(
+            u64::try_from(chrono::Utc::now().timestamp()).unwrap_or_default() + 3600,
+        );
+        let live = session("gc-live", expiry);
+        let terminal = session("gc-terminal", expiry);
+        assert!(store.create_resumable_session(&live).await.unwrap());
+        assert!(store.create_resumable_session(&terminal).await.unwrap());
+        let live_key = format!("staging/resumable/test/{}/live", live.session_id());
+        let terminal_key = format!("staging/resumable/test/{}/terminal", terminal.session_id());
+        assert!(
+            store
+                .publish_resumable_part(live.session_id(), NonZeroU64::MIN, &live_key, 4, None,)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            store
+                .publish_resumable_part(
+                    terminal.session_id(),
+                    NonZeroU64::MIN,
+                    &terminal_key,
+                    4,
+                    None,
+                )
+                .await
+                .unwrap()
+                .is_some()
+        );
+        let (claim, _) = store
+            .begin_resumable_completion(terminal.session_id())
+            .await
+            .unwrap()
+            .expect("completion claim");
+        assert!(
+            store
+                .transition_resumable_session(
+                    terminal.session_id(),
+                    ResumableSessionState::Completing,
+                    claim.fence_epoch(),
+                    ResumableSessionState::Completed,
+                )
+                .await
+                .unwrap()
+        );
+
+        let inventory = store.resumable_session_gc_inventory().await.unwrap();
+        assert!(inventory.protected_staging_keys().contains(&live_key));
+        assert!(!inventory.protected_staging_keys().contains(&terminal_key));
+        let terminal_candidate = inventory
+            .reclaimable_sessions()
+            .iter()
+            .find(|candidate| candidate.session_id() == terminal.session_id())
+            .cloned()
+            .expect("terminal candidate");
+        assert_eq!(
+            store
+                .delete_reclaimable_resumable_sessions(std::slice::from_ref(&terminal_candidate))
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(
+            store
+                .resumable_session_by_id(terminal.session_id())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .resumable_session_by_id(live.session_id())
+                .await
+                .unwrap()
+                .is_some()
         );
     }
 }

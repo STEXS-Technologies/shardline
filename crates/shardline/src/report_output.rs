@@ -285,6 +285,26 @@ pub fn print_local_gc_summary(report: &LocalGcReport) {
         "reclaimed_oci_tombstones: {}",
         report.reclaimed_oci_tombstones
     );
+    println!(
+        "scanned_resumable_staging_objects: {}",
+        report.scanned_resumable_staging_objects
+    );
+    println!(
+        "protected_resumable_staging_objects: {}",
+        report.protected_resumable_staging_objects
+    );
+    println!(
+        "reclaimed_resumable_staging_objects: {}",
+        report.reclaimed_resumable_staging_objects
+    );
+    println!(
+        "reclaimed_resumable_staging_bytes: {}",
+        report.reclaimed_resumable_staging_bytes
+    );
+    println!(
+        "reclaimed_resumable_sessions: {}",
+        report.reclaimed_resumable_sessions
+    );
 }
 
 pub fn print_local_gc_cli_summary(

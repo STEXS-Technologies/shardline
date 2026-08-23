@@ -84,7 +84,7 @@ compatibility documentation. They must not be silently omitted.
 | Redis reconstruction cache | Beta | partition, flush, restart, and multi-node stampede evidence; bounded timeout and corruption repair are covered |
 | Provider integration | Beta | revocation timing and broader live-provider evidence; duplicate/replay handling, atomic monotonic reconciliation-state merging, one-transaction fenced rename/delete with atomic delivery claims, repository-scoped event serialization with persisted ownership epochs, terminated-owner detection, access/revision reordering, rename migration, signature checks, and fail-closed visibility parsing are covered |
 | Ed25519 | Experimental | overlapping multi-key verification; operator minting, CLI-to-provider verification, key formats, tampering, expiry, wrong-key, malformed-token, and algorithm-confusion paths are covered; the coordinated non-overlap rotation limitation is documented |
-| Multi-replica Postgres/S3 writers | Not claimed | tombstoned/deferred external deletes, chaos, and mixed-version proof; shared resumable staging, persisted lock epochs, fenced OCI tag mutations, one-transaction fenced provider rename/delete, terminated-owner takeover, migration serialization, and a backup-destroy-restore-fsck-download drill are checked in |
+| Multi-replica Postgres/S3 writers | Stable | durable resumable sessions remove RWX state; persisted lock epochs, fenced publication, writer-excluding GC, tombstone reclamation, cross-replica protocol tests, deterministic chaos, terminated-owner takeover, migration serialization, and backup-destroy-restore-fsck-download drills are checked in |
 
 ## Promotion Review
 

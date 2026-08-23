@@ -116,7 +116,8 @@ pub use resource_fence::{ResourceLockDomain, ResourceLockKey};
 pub use resumable_session::{
     CreateResumableSessionOutcome, PublishResumablePartOutcome, ResumableCompletionFence,
     ResumablePartRange, ResumableSession, ResumableSessionAttributes, ResumableSessionError,
-    ResumableSessionPart, ResumableSessionProtocol, ResumableSessionState,
+    ResumableSessionGcInventory, ResumableSessionPart, ResumableSessionProtocol,
+    ResumableSessionState,
 };
 pub use s3_objects::{S3ObjectEntry, S3ObjectIndexStore, S3PublishCondition};
 pub use store::{
