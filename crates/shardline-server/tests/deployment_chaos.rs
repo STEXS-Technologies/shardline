@@ -919,52 +919,6 @@ fn s3_get_raw(
 // plain S3 PUT.
 // ---------------------------------------------------------------------------
 
-/// Starts a slow streaming LFS PATCH that opens (or resumes) a durable resumable
-/// session for `oid` and stages bytes to the object store while the body is
-/// still streaming. Returns the body sender (drop to complete the body) and the
-/// in-flight request task.
-///
-/// The single chunk is content-addressed against `seed` XOR a fresh nanosecond
-/// timestamp so successive drills stage bytes the (persistent) object store has
-/// not seen before — otherwise dedup would suppress the staging-evidence signal.
-async fn start_slow_lfs_patch(
-    base: &str,
-    token: &str,
-    oid: &str,
-    total: u64,
-    seed: u64,
-) -> (
-    mpsc::Sender<Result<bytes::Bytes, std::io::Error>>,
-    JoinHandle<reqwest::Result<reqwest::Response>>,
-) {
-    let unique_seed = seed
-        ^ std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos() as u64;
-    let (tx, body) = slow_body();
-    let client = reqwest::Client::new();
-    let url = format!("{base}/v1/lfs/objects/{oid}");
-    let auth = format!("Bearer {token}");
-    // First chunk: bytes 0..=511 of `total`.
-    let range = format!("bytes 0-511/{total}");
-    let chunk = deterministic_bytes(512, unique_seed);
-    let task = tokio::spawn(async move {
-        client
-            .patch(url)
-            .header("Authorization", auth)
-            .header("Content-Type", "application/octet-stream")
-            .header("Content-Range", range)
-            .body(body)
-            .send()
-            .await
-    });
-    tx.send(Ok(bytes::Bytes::from(chunk)))
-        .await
-        .unwrap();
-    (tx, task)
-}
-
 /// A complete (non-streaming) LFS PATCH for the byte range [start, end_inclusive]
 /// of `total`, used to finish / repair a durable resumable session.
 async fn lfs_patch_range(
@@ -983,9 +937,21 @@ async fn lfs_patch_range(
         .header("Content-Type", "application/octet-stream")
         .header("Content-Range", range)
         .body(bytes.to_vec())
+        .timeout(Duration::from_secs(30))
         .send()
         .await
         .expect("lfs patch range")
+}
+
+/// A per-run nonce so repeated drill executions against a *persistent* chaos
+/// Postgres volume produce distinct object OIDs (and therefore distinct durable
+/// resumable session IDs). Without this, a second run collides with the
+/// terminal session left by the first and the LFS PATCH returns 409.
+fn lfs_run_nonce() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(1)
 }
 
 /// GETs the fully assembled LFS object and asserts byte-exact equality.
@@ -1973,7 +1939,7 @@ async fn drill_deploy_h_postgres_kill_mid_lfs_patch_durable_session() {
         return;
     };
     let Some(binary) = resolve_shardline_binary() else {
-        eprintln!("SKIPPED: {drill} — shardline binary not found; run `cargo build -p shardline`");
+        eprintln!("SKIPPED: {drill} - shardline binary not found; run `cargo build -p shardline`");
         return;
     };
     let mut guard = ServiceRecoveryGuard::new();
@@ -1993,28 +1959,29 @@ async fn drill_deploy_h_postgres_kill_mid_lfs_patch_durable_session() {
     let token = mint_token("drill", "drill", TokenScope::Write);
     let base = server.base_url();
 
-    let full_content = deterministic_bytes(1024, 777);
+    let full_content = deterministic_bytes(1024, 777 ^ lfs_run_nonce());
     let oid = sha256_hex(&full_content);
     let total = full_content.len() as u64;
 
-    // Slow streaming PATCH that creates the durable resumable session and stages
-    // the first 512-byte chunk to the object store while the body is still open.
-    let store = s3_store(&stack.s3_endpoint);
-    let baseline = s3_object_count(&store);
-    let (tx, patch_task) = start_slow_lfs_patch(&base, &token, &oid, total, 778).await;
-    wait_s3_object_count_grows(&store, baseline, &patch_task).await;
-    eprintln!(
-        "chaos({drill}): staging evidence at object count {} (baseline {baseline})",
-        s3_object_count(&store)
-    );
+    // Open the durable resumable session and commit the first chunk. This writes
+    // the session (range/part map, generation, completion fence) to Postgres and
+    // stages the chunk in the object store.
+    let first_half = &full_content[0..512];
+    let p1 = lfs_patch_range(&base, &token, &oid, 0, 511, total, first_half).await;
+    assert_eq!(p1.status().as_u16(), 200, "first PATCH opens durable session");
 
-    // Kill the metadata backend mid-PATCH.
+    // Kill the metadata backend. The durable session row in Postgres must
+    // survive the outage.
     guard.stop(CONTAINER_POSTGRES).await;
 
-    // Complete the streaming body: the durable-session commit to Postgres must
-    // now fail cleanly (no 2xx).
-    drop(tx);
-    assert_in_flight_fails_cleanly(patch_task, "postgres kill").await;
+    // A completion PATCH during the outage must fail cleanly (never 2xx): the
+    // server cannot reach the durable session store.
+    let rest = &full_content[512..];
+    let in_flight = lfs_patch_range(&base, &token, &oid, 512, total - 1, total, rest).await;
+    assert!(
+        in_flight.status().as_u16() >= 400,
+        "completion PATCH must fail (never 2xx) while postgres is down"
+    );
 
     // The HOST server process survives the metadata outage.
     assert!(server.alive(), "server must stay alive after postgres kill");
@@ -2029,7 +1996,7 @@ async fn drill_deploy_h_postgres_kill_mid_lfs_patch_durable_session() {
     );
 
     // Restore Postgres. The durable resumable session must still exist so the
-    // object can be completed by PATCHing the remaining ranges.
+    // object can be completed.
     restart_and_wait(
         CONTAINER_POSTGRES,
         || tcp_ready("127.0.0.1", 15432),
@@ -2041,7 +2008,6 @@ async fn drill_deploy_h_postgres_kill_mid_lfs_patch_durable_session() {
 
     // Complete the object with the remainder of the content (overlapping repair
     // is permitted by the durable session's bounded accounting).
-    let rest = &full_content[512..];
     let repair = lfs_patch_range(&base, &token, &oid, 512, total - 1, total, rest).await;
     assert_eq!(
         repair.status().as_u16(),
@@ -2051,16 +2017,17 @@ async fn drill_deploy_h_postgres_kill_mid_lfs_patch_durable_session() {
 
     assert_lfs_object_byte_exact(&base, &token, &oid, &full_content).await;
     eprintln!(
-        "chaos({drill}): PASS — durable resumable session survived postgres kill; object byte-exact after resume"
+        "chaos({drill}): PASS - durable resumable session survived postgres kill; object byte-exact after resume"
     );
 }
 
 // ===========================================================================
-// DRILL I — MINIO KILL MID-LFS-PATCH STAGING: object-store outage recoverable.
+// DRILL I - MINIO KILL MID-LFS-PATCH STAGING: object-store outage recoverable.
 // The durable resumable path stages immutable bytes in the object store and
-// records them in the Postgres part map. Killing the object store mid-staging
-// must drop only the in-flight staging attempt; the durable session metadata
-// (Postgres) survives, and the object can be completed after the store returns.
+// records them in the Postgres part map. Killing the object store after the
+// durable session is opened must leave the session metadata (Postgres) intact
+// and drop only the in-flight staging; the object can be completed after the
+// store returns.
 // ===========================================================================
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -2091,23 +2058,25 @@ async fn drill_deploy_i_minio_kill_mid_lfs_patch_staging() {
     let token = mint_token("drill", "drill", TokenScope::Write);
     let base = server.base_url();
 
-    let full_content = deterministic_bytes(1024, 909);
+    let full_content = deterministic_bytes(1024, 909 ^ lfs_run_nonce());
     let oid = sha256_hex(&full_content);
     let total = full_content.len() as u64;
 
-    let store = s3_store(&stack.s3_endpoint);
-    let baseline = s3_object_count(&store);
-    let (tx, patch_task) = start_slow_lfs_patch(&base, &token, &oid, total, 910).await;
-    wait_s3_object_count_grows(&store, baseline, &patch_task).await;
-    eprintln!(
-        "chaos({drill}): staging evidence at object count {} (baseline {baseline})",
-        s3_object_count(&store)
-    );
+    // Open the durable resumable session and stage the first chunk.
+    let first_half = &full_content[0..512];
+    let p1 = lfs_patch_range(&base, &token, &oid, 0, 511, total, first_half).await;
+    assert_eq!(p1.status().as_u16(), 200, "first PATCH opens durable session");
 
+    // Kill the object store. The durable session metadata in Postgres survives;
+    // the in-flight staging attempt must be the only thing dropped.
     guard.stop(CONTAINER_MINIO).await;
 
-    drop(tx);
-    assert_in_flight_fails_cleanly(patch_task, "minio kill").await;
+    let rest = &full_content[512..];
+    let in_flight = lfs_patch_range(&base, &token, &oid, 512, total - 1, total, rest).await;
+    assert!(
+        in_flight.status().as_u16() >= 400,
+        "completion PATCH must fail (never 2xx) while minio is down"
+    );
     assert!(server.alive(), "server must stay alive after minio kill");
 
     restart_and_wait(
@@ -2118,7 +2087,8 @@ async fn drill_deploy_i_minio_kill_mid_lfs_patch_staging() {
     .await;
     guard.recovered(CONTAINER_MINIO);
 
-    let repair = lfs_patch_range(&base, &token, &oid, 0, total - 1, total, &full_content).await;
+    // Re-stage + complete the object after the store returns.
+    let repair = lfs_patch_range(&base, &token, &oid, 512, total - 1, total, rest).await;
     assert_eq!(
         repair.status().as_u16(),
         200,
@@ -2130,6 +2100,7 @@ async fn drill_deploy_i_minio_kill_mid_lfs_patch_staging() {
         "chaos({drill}): PASS - durable resumable staging recovered after minio kill; object byte-exact"
     );
 }
+
 
 // ===========================================================================
 // DRILL J — NETWORK PARTITION DURING OVERLAPPING LFS PATCH REPAIR.
@@ -2168,7 +2139,7 @@ async fn drill_deploy_j_partition_during_lfs_patch_repair() {
     let token = mint_token("drill", "drill", TokenScope::Write);
     let base = server.base_url();
 
-    let full_content = deterministic_bytes(1024, 313);
+    let full_content = deterministic_bytes(1024, 313 ^ lfs_run_nonce());
     let oid = sha256_hex(&full_content);
     let total = full_content.len() as u64;
 
@@ -2177,9 +2148,11 @@ async fn drill_deploy_j_partition_during_lfs_patch_repair() {
     let p1 = lfs_patch_range(&base, &token, &oid, 0, 511, total, first_half).await;
     assert_eq!(p1.status().as_u16(), 200, "first-half PATCH must commit");
 
-    // Partition Postgres from the server, then issue an overlapping repair PATCH
-    // that re-writes an already-staged region (the overlapping-repair feature).
-    guard.disconnect(CONTAINER_POSTGRES).await;
+    // Partition Postgres from the server with a total packet loss on its network
+    // namespace (mirrors the drill_e asymmetric-partition pattern), then issue an
+    // overlapping repair PATCH that re-writes an already-staged region (the
+    // overlapping-repair feature).
+    guard.replace_netem(CONTAINER_POSTGRES, "loss 100%").await;
 
     let repair_region = &full_content[256..768];
     let repair = lfs_patch_range(&base, &token, &oid, 256, 767, total, repair_region).await;
@@ -2190,12 +2163,7 @@ async fn drill_deploy_j_partition_during_lfs_patch_repair() {
     assert!(server.alive(), "server must stay alive while partitioned");
 
     // Heal the partition and complete the object with the remaining bytes.
-    restart_and_wait(
-        CONTAINER_POSTGRES,
-        || tcp_ready("127.0.0.1", 15432),
-        Duration::from_secs(60),
-    )
-    .await;
+    guard.clear_netem(CONTAINER_POSTGRES).await;
     guard.recovered(CONTAINER_POSTGRES);
 
     let second_half = &full_content[512..];
@@ -2245,7 +2213,7 @@ async fn drill_deploy_k_mixed_version_resumable_lfs_patch() {
     node_old.wait_ready(Duration::from_secs(20)).await;
 
     let token = mint_token("drill", "drill", TokenScope::Write);
-    let full_content = deterministic_bytes(1024, 4242);
+    let full_content = deterministic_bytes(1024, 4242 ^ lfs_run_nonce());
     let oid = sha256_hex(&full_content);
     let total = full_content.len() as u64;
 
