@@ -28,6 +28,7 @@ use std::{
     num::{NonZeroU64, NonZeroUsize},
     ops::RangeInclusive,
     path::Path,
+    process::Command,
     time::{Duration, Instant},
 };
 
@@ -44,15 +45,6 @@ const SIGNING_KEY: &[u8] = b"0123456789abcdef0123456789abcdef";
 const BOOTSTRAP_KEY: &str = "bootstrap";
 /// Provider subject authorized for read+write on the test repository.
 const SUBJECT: &str = "github-user-1";
-
-/// Serializes the RSS-measuring test(s) so no two run concurrently and pollute
-/// each other's process-wide `VmRSS` measurement. Only tests that assert on
-/// `/proc/self/status` VmRSS acquire this write lock; the fast tests do not, so
-/// they keep running in parallel. The memory test's robustness against the fast
-/// tests' allocations comes from its delta-based bound (see that test's doc
-/// comment), while this lock prevents multiple RSS-asserting tests from stacking
-/// on top of each other.
-static MEMORY_MEASUREMENT_LOCK: tokio::sync::RwLock<()> = tokio::sync::RwLock::const_new(());
 
 const PROVIDER_CONFIG: &[u8] = br#"{
     "providers": [{
@@ -330,6 +322,7 @@ const ZEROS_ID: char = 'd';
 const RANDOM_ID: char = 'e';
 const UNKNOWN_ID: char = 'f';
 const MEMORY_ID: char = '1';
+const MEMORY_MEASUREMENT_CHILD_ENV: &str = "SHARDLINE_SDX_MEMORY_MEASUREMENT_CHILD";
 
 /// Current resident set size of this process in KiB (Linux `/proc/self/status`).
 fn current_rss_kib() -> u64 {
@@ -659,29 +652,31 @@ async fn download_stream_byte_range_matches_uploaded_bytes() {
 ///
 /// The server runs in-process, and its ingest retains freed-but-unreturned
 /// glibc arena memory after the upload; `malloc_trim(0)` releases it before
-/// the download. Because the harness runs every E2E test concurrently in one
-/// process, `VmRSS` (read from `/proc/self/status`) is process-wide, so the
-/// assertion is on the streaming *delta* over a baseline captured immediately
-/// before the download.
-///
-/// # Why this assertion is robust under full-suite parallelism
-///
-/// The measured streaming delta (~98 MiB) is far below the buffer cap, and a
-/// broken pipeline that buffers the whole file would show ~1 GiB. The one
-/// source of flakiness is other concurrently-running tests in this process
-/// allocating memory during the download window, which can push the process
-/// `VmRSS` peak above the bound even though *this* test adds only ~98 MiB.
-/// We keep the bound comfortably above the measured delta (384 MiB) while still
-/// well below the file size, so modest concurrent noise is absorbed without
-/// weakening the core property: a correct stream never buffers the 1 GiB file
-/// (that would exceed the bound by ~2.6x). The earlier 256 MiB bound was too
-/// tight under load; serializing the whole suite to eliminate concurrent noise
-/// (e.g. a global lock) was evaluated and rejected because it added ~2x to the
-/// e2e suite runtime while this delta-based bound already stays meaningful.
+/// the download. The measurement runs in a child instance of this test binary:
+/// `VmRSS` is process-wide, while the normal E2E harness runs many tests
+/// concurrently in one process. The child executes this exact test alone, so
+/// its RSS delta is attributable to the streaming pipeline rather than
+/// unrelated test allocations.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn stream_large_file_memory_bounded_cat() {
-    // Only one RSS-asserting test runs at a time (see `MEMORY_MEASUREMENT_LOCK`).
-    let _memory_lock = MEMORY_MEASUREMENT_LOCK.write().await;
+    if std::env::var_os(MEMORY_MEASUREMENT_CHILD_ENV).is_none() {
+        let current_exe = std::env::current_exe().unwrap();
+        let status = tokio::task::spawn_blocking(move || {
+            Command::new(current_exe)
+                .arg("--exact")
+                .arg("stream_large_file_memory_bounded_cat")
+                .arg("--nocapture")
+                .env(MEMORY_MEASUREMENT_CHILD_ENV, "1")
+                .env("RUST_TEST_THREADS", "1")
+                .status()
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(status.success(), "isolated RSS measurement child failed");
+        return;
+    }
+
     // 64 KiB chunk target keeps term counts (and thus in-flight tasks) small;
     // the file still spans multiple 64 MiB xorbs.
     let server = TestServer::start_with_chunk_size(NonZeroUsize::new(65_536).unwrap()).await;
