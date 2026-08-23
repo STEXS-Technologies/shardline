@@ -11,7 +11,8 @@ use sqlx::{
 use super::{PostgresMetadataStoreError, PostgresRecordLocator, RecordKind, i64_to_u64};
 use crate::{
     DedupeShardMapping, FileRecord, RecordMutation, RecordStoreFuture, RecordTraversal,
-    RepositoryRecordScope, S3ObjectEntry, S3PublishCondition, StoredRecord,
+    RepositoryRecordScope, ResumableCompletionFence, S3ObjectEntry, S3PublishCondition,
+    StoredRecord,
     record_key::record_key as shared_record_key,
     record_key::{
         repository_record_scope_key as shared_repository_record_scope_key,
@@ -67,6 +68,7 @@ impl super::PostgresRecordStore {
         record: &FileRecord,
         entry: &S3ObjectEntry,
         condition: &S3PublishCondition,
+        completion_fence: Option<&ResumableCompletionFence>,
     ) -> Result<bool, PostgresMetadataStoreError> {
         if entry.file_id != record.file_id
             || entry.content_hash != record.content_hash
@@ -76,6 +78,23 @@ impl super::PostgresRecordStore {
         }
         let metadata = serde_json::to_string(&entry.user_metadata)?;
         let mut transaction = connection.begin().await?;
+        if let Some(fence) = completion_fence {
+            let owns_completion = query_scalar::<_, i32>(
+                "SELECT 1 FROM shardline_resumable_sessions
+                 WHERE session_id = $1 AND state = 'completing' AND fence_epoch = $2
+                   AND expires_at > clock_timestamp()
+                 FOR UPDATE",
+            )
+            .bind(fence.session_id())
+            .bind(super::u64_to_i64(fence.epoch().get())?)
+            .fetch_optional(&mut *transaction)
+            .await?
+            .is_some();
+            if !owns_completion {
+                transaction.rollback().await?;
+                return Ok(false);
+            }
+        }
         let version = self.version_record_locator(record);
         upsert_record_in_transaction(&mut transaction, &version, record).await?;
         let latest = self.latest_record_locator(record);
@@ -155,6 +174,21 @@ impl super::PostgresRecordStore {
         if publication.rows_affected() != 1 {
             transaction.rollback().await?;
             return Ok(false);
+        }
+        if let Some(fence) = completion_fence {
+            let completed = query(
+                "UPDATE shardline_resumable_sessions
+                 SET state = 'completed', updated_at = now()
+                 WHERE session_id = $1 AND state = 'completing' AND fence_epoch = $2",
+            )
+            .bind(fence.session_id())
+            .bind(super::u64_to_i64(fence.epoch().get())?)
+            .execute(&mut *transaction)
+            .await?;
+            if completed.rows_affected() != 1 {
+                transaction.rollback().await?;
+                return Ok(false);
+            }
         }
         transaction.commit().await?;
         Ok(true)
@@ -796,7 +830,10 @@ mod tests {
 
     use super::RecordKind;
     use super::record_locator;
-    use crate::{FileChunkRecord, FileRecord, S3ObjectEntry, S3PublishCondition};
+    use crate::{
+        FileChunkRecord, FileRecord, ResumableSession, ResumableSessionProtocol, S3ObjectEntry,
+        S3PublishCondition,
+    };
 
     fn sample_record(repo_scope: Option<RepositoryScope>) -> FileRecord {
         FileRecord {
@@ -913,6 +950,7 @@ mod tests {
                     &record,
                     &entry,
                     &S3PublishCondition::IfUnchanged(Some(expected)),
+                    None,
                 )
                 .await
                 .unwrap()
@@ -932,6 +970,7 @@ mod tests {
                     &record,
                     &entry,
                     &S3PublishCondition::Unconditional,
+                    None,
                 )
                 .await
                 .unwrap()
@@ -943,5 +982,91 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(record_count, 2);
+    }
+
+    #[tokio::test]
+    async fn stale_multipart_completion_cannot_publish() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&url).await.unwrap();
+        let record_store = super::super::PostgresRecordStore::new(pool.clone());
+        let index_store = super::super::PostgresIndexStore::new(pool.clone());
+        let suffix = chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default();
+        let session = ResumableSession::new(
+            format!("fenced-completion-{suffix}"),
+            ResumableSessionProtocol::S3Multipart,
+            format!("scope-{suffix}"),
+            "large.bin".to_owned(),
+            std::time::Duration::from_secs(
+                u64::try_from(chrono::Utc::now().timestamp()).unwrap() + 3_600,
+            ),
+        );
+        assert!(
+            index_store
+                .create_resumable_session(&session)
+                .await
+                .unwrap()
+        );
+        let first = index_store
+            .begin_resumable_completion(session.session_id())
+            .await
+            .unwrap()
+            .unwrap()
+            .0;
+        let second = index_store
+            .begin_resumable_completion(session.session_id())
+            .await
+            .unwrap()
+            .unwrap()
+            .0;
+        assert!(second.fence_epoch() > first.fence_epoch());
+
+        let mut record = sample_record(None);
+        record.file_id = format!("fenced-record-{suffix}");
+        let entry = S3ObjectEntry {
+            scope_namespace: session.scope_namespace().to_owned(),
+            object_key: session.target_key().to_owned(),
+            file_id: record.file_id.clone(),
+            size_bytes: record.total_bytes,
+            content_hash: record.content_hash.clone(),
+            etag: "etag".to_owned(),
+            user_metadata: Vec::new(),
+            updated_at_unix_seconds: 1,
+        };
+        let mut connection = pool.acquire().await.unwrap();
+        assert!(
+            !record_store
+                .publish_s3_object_on_connection(
+                    &mut connection,
+                    &record,
+                    &entry,
+                    &S3PublishCondition::Unconditional,
+                    Some(&first.completion_fence()),
+                )
+                .await
+                .unwrap()
+        );
+        assert!(
+            record_store
+                .publish_s3_object_on_connection(
+                    &mut connection,
+                    &record,
+                    &entry,
+                    &S3PublishCondition::Unconditional,
+                    Some(&second.completion_fence()),
+                )
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            index_store
+                .resumable_session_by_id(session.session_id())
+                .await
+                .unwrap()
+                .unwrap()
+                .state(),
+            crate::ResumableSessionState::Completed
+        );
     }
 }

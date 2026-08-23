@@ -615,6 +615,7 @@ async fn s3_upload_object_body(
                 prepared,
                 &replacement,
                 &condition,
+                None,
             )
             .await?
     } else if conditional_headers.is_some() {

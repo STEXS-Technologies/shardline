@@ -384,7 +384,8 @@ impl PostgresIndexStore {
             "UPDATE shardline_resumable_sessions
              SET state = 'completing', generation = generation + 1,
                  fence_epoch = fence_epoch + 1, updated_at = now()
-             WHERE session_id = $1 AND state = 'active' AND expires_at > clock_timestamp()
+             WHERE session_id = $1 AND state IN ('active', 'completing')
+               AND expires_at > clock_timestamp()
              RETURNING session_id, protocol, scope_namespace, target_key, attributes_json, state,
                        generation, fence_epoch, expires_at",
         )
@@ -419,7 +420,8 @@ impl PostgresIndexStore {
         let result = sqlx::query(
             "UPDATE shardline_resumable_sessions
              SET state = $1, updated_at = now()
-             WHERE session_id = $2 AND state = $3 AND fence_epoch = $4",
+             WHERE session_id = $2 AND state = $3 AND fence_epoch = $4
+               AND (state NOT IN ('active', 'completing') OR expires_at > clock_timestamp())",
         )
         .bind(next_state.as_str())
         .bind(session_id)
@@ -447,7 +449,7 @@ impl PostgresIndexStore {
         let rows = sqlx::query(
             "WITH expired AS (
                  SELECT session_id FROM shardline_resumable_sessions
-                 WHERE state = 'active' AND expires_at <= clock_timestamp()
+                 WHERE state IN ('active', 'completing') AND expires_at <= clock_timestamp()
                  ORDER BY expires_at, session_id
                  FOR UPDATE SKIP LOCKED
                  LIMIT $1
