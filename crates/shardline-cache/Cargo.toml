@@ -15,6 +15,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
 hex.workspace = true
+getrandom.workspace = true
 redis = { workspace = true, features = ["tokio-rustls-comp"] }
 rustls.workspace = true
 shardline-protocol.workspace = true
