@@ -53,6 +53,7 @@ sqlx = { workspace = true, features = [
 ] }
 subtle.workspace = true
 thiserror.workspace = true
+tempfile.workspace = true
 toml.workspace = true
 dotenvy.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time", "test-util"] }
@@ -76,7 +77,6 @@ reqwest = { workspace = true, features = ["json", "rustls-tls", "stream"] }
 rusqlite = { workspace = true, features = ["bundled"] }
 serial_test.workspace = true
 shardline-test-support.workspace = true
-tempfile.workspace = true
 wiremock = "0.6"
 xet-client.workspace = true
 xet-data.workspace = true

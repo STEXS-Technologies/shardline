@@ -116,7 +116,7 @@ impl ResumableSessionState {
                 Self::Active | Self::Completing | Self::Aborted | Self::Expired
             ) | (
                 Self::Completing,
-                Self::Completing | Self::Active | Self::Completed
+                Self::Completing | Self::Active | Self::Completed | Self::Aborted | Self::Expired
             ) | (Self::Completed, Self::Completed)
                 | (Self::Aborted, Self::Aborted)
                 | (Self::Expired, Self::Expired)
@@ -138,6 +138,31 @@ pub struct ResumableSessionPart {
     staging_key: String,
     size_bytes: u64,
     etag: Option<String>,
+}
+
+/// Ownership token for one resumable-session completion attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResumableCompletionFence {
+    session_id: String,
+    epoch: NonZeroU64,
+}
+
+impl ResumableCompletionFence {
+    /// Captures the durable identity returned by a completion claim.
+    #[must_use]
+    pub const fn new(session_id: String, epoch: NonZeroU64) -> Self {
+        Self { session_id, epoch }
+    }
+
+    #[must_use]
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    #[must_use]
+    pub const fn epoch(&self) -> NonZeroU64 {
+        self.epoch
+    }
 }
 
 impl ResumableSessionPart {
@@ -267,6 +292,12 @@ impl ResumableSession {
     #[must_use]
     pub const fn expires_at(&self) -> Duration {
         self.expires_at
+    }
+
+    /// Returns the ownership token for this claimed completion.
+    #[must_use]
+    pub fn completion_fence(&self) -> ResumableCompletionFence {
+        ResumableCompletionFence::new(self.session_id.clone(), self.fence_epoch)
     }
 
     /// Reconstructs a validated value from a persistence adapter.

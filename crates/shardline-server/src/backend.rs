@@ -1,13 +1,16 @@
 use std::{
     io::{Error, ErrorKind},
-    num::NonZeroUsize,
+    num::{NonZeroU64, NonZeroUsize},
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use axum::body::Bytes;
 use sha2::{Digest, Sha256};
 use shardline_index::{
-    FileRecord, OciObjectKey, OciTagEntry, RepoKey, ResourceLockKey, RevisionRecord, S3ObjectEntry,
+    CreateResumableSessionOutcome, FileRecord, OciObjectKey, OciTagEntry,
+    PublishResumablePartOutcome, RepoKey, ResourceLockKey, ResumableCompletionFence,
+    ResumableSession, ResumableSessionPart, ResumableSessionState, RevisionRecord, S3ObjectEntry,
     S3PublishCondition, TreeEntry, TreeKey,
 };
 use shardline_protocol::{ByteRange, RepositoryScope};
@@ -344,6 +347,7 @@ impl ServerBackend {
         prepared: &PreparedS3Object,
         entry: &S3ObjectEntry,
         condition: &S3PublishCondition,
+        completion_fence: Option<&ResumableCompletionFence>,
     ) -> Result<bool, ServerError> {
         let Self::Postgres(backend) = self else {
             return Err(ServerError::StaleResourceFence);
@@ -353,7 +357,13 @@ impl ServerBackend {
             .ok_or(ServerError::StaleResourceFence)?;
         let published = backend
             .record_store()
-            .publish_s3_object_on_connection(connection, &prepared.record, entry, condition)
+            .publish_s3_object_on_connection(
+                connection,
+                &prepared.record,
+                entry,
+                condition,
+                completion_fence,
+            )
             .await?;
         Ok(published)
     }
@@ -362,6 +372,107 @@ impl ServerBackend {
     #[must_use]
     pub(crate) const fn supports_fenced_s3_publication(&self) -> bool {
         matches!(self, Self::Postgres(_))
+    }
+
+    pub(crate) async fn postgres_now(&self) -> Result<Duration, ServerError> {
+        let Self::Postgres(backend) = self else {
+            return Err(ServerError::StaleResourceFence);
+        };
+        Ok(Duration::from_secs(
+            crate::postgres_backend::postgres_unix_now_seconds(backend.index_store().pool())
+                .await?,
+        ))
+    }
+
+    pub(crate) async fn create_resumable_session_bounded(
+        &self,
+        session: &ResumableSession,
+        max_active: usize,
+    ) -> Result<CreateResumableSessionOutcome, ServerError> {
+        let Self::Postgres(backend) = self else {
+            return Err(ServerError::StaleResourceFence);
+        };
+        Ok(backend
+            .index_store()
+            .create_resumable_session_bounded(session, max_active)
+            .await?)
+    }
+
+    pub(crate) async fn resumable_session_by_id(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<ResumableSession>, ServerError> {
+        let Self::Postgres(backend) = self else {
+            return Err(ServerError::StaleResourceFence);
+        };
+        Ok(backend
+            .index_store()
+            .resumable_session_by_id(session_id)
+            .await?)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn publish_resumable_part_bounded(
+        &self,
+        session_id: &str,
+        part_number: NonZeroU64,
+        staging_key: &str,
+        size_bytes: u64,
+        etag: Option<&str>,
+        session_max_bytes: u64,
+        aggregate_max_bytes: u64,
+        max_active_parts: usize,
+    ) -> Result<PublishResumablePartOutcome, ServerError> {
+        let Self::Postgres(backend) = self else {
+            return Err(ServerError::StaleResourceFence);
+        };
+        Ok(backend
+            .index_store()
+            .publish_resumable_part_bounded(
+                session_id,
+                part_number,
+                staging_key,
+                size_bytes,
+                etag,
+                session_max_bytes,
+                aggregate_max_bytes,
+                max_active_parts,
+            )
+            .await?)
+    }
+
+    pub(crate) async fn begin_resumable_completion(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<(ResumableSession, Vec<ResumableSessionPart>)>, ServerError> {
+        let Self::Postgres(backend) = self else {
+            return Err(ServerError::StaleResourceFence);
+        };
+        Ok(backend
+            .index_store()
+            .begin_resumable_completion(session_id)
+            .await?)
+    }
+
+    pub(crate) async fn transition_resumable_session(
+        &self,
+        session_id: &str,
+        expected_state: ResumableSessionState,
+        expected_fence_epoch: NonZeroU64,
+        next_state: ResumableSessionState,
+    ) -> Result<bool, ServerError> {
+        let Self::Postgres(backend) = self else {
+            return Err(ServerError::StaleResourceFence);
+        };
+        Ok(backend
+            .index_store()
+            .transition_resumable_session(
+                session_id,
+                expected_state,
+                expected_fence_epoch,
+                next_state,
+            )
+            .await?)
     }
 
     /// Loads the authoritative file-version record for a protocol object's
