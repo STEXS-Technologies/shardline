@@ -194,6 +194,71 @@ impl super::PostgresRecordStore {
         Ok(true)
     }
 
+    /// Atomically removes an S3 listing row and the record version it made
+    /// visible through a lock-owning Postgres connection.
+    ///
+    /// When no listing row exists, the current global latest alias is removed
+    /// for compatibility with objects written before the S3 listing index.
+    /// Immutable chunks remain for writer-excluding GC.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when Postgres cannot commit the deletion transaction.
+    pub async fn delete_s3_object_on_connection(
+        &self,
+        connection: &mut PgConnection,
+        scope_namespace: &str,
+        object_key: &str,
+        fallback_file_id: &str,
+    ) -> Result<bool, PostgresMetadataStoreError> {
+        let mut transaction = connection.begin().await?;
+        let deleted_entry = query(
+            "DELETE FROM shardline_s3_objects
+             WHERE scope_namespace = $1 AND object_key = $2
+             RETURNING file_id, content_hash",
+        )
+        .bind(scope_namespace)
+        .bind(object_key)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let scope_key = shared_repository_scope_key(None);
+        let (file_id, visible_hash) = if let Some(row) = deleted_entry.as_ref() {
+            (
+                row.try_get::<String, _>("file_id")?,
+                Some(row.try_get::<String, _>("content_hash")?),
+            )
+        } else {
+            let hash = query_scalar::<_, String>(
+                "SELECT content_hash FROM shardline_file_records
+                 WHERE scope_key = $1 AND file_id = $2 AND record_kind = 'latest'
+                 FOR UPDATE",
+            )
+            .bind(&scope_key)
+            .bind(fallback_file_id)
+            .fetch_optional(&mut *transaction)
+            .await?;
+            (fallback_file_id.to_owned(), hash)
+        };
+        let deleted_records = if let Some(content_hash) = visible_hash {
+            query(
+                "DELETE FROM shardline_file_records
+                 WHERE scope_key = $1 AND file_id = $2
+                   AND (record_kind = 'latest'
+                        OR (record_kind = 'version' AND content_hash = $3))",
+            )
+            .bind(scope_key)
+            .bind(file_id)
+            .bind(content_hash)
+            .execute(&mut *transaction)
+            .await?
+            .rows_affected()
+        } else {
+            0
+        };
+        transaction.commit().await?;
+        Ok(deleted_entry.is_some() || deleted_records > 0)
+    }
+
     /// Atomically removes a visible file reference and its immutable version record.
     ///
     /// # Errors
@@ -982,6 +1047,35 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(record_count, 2);
+
+        assert!(
+            store
+                .delete_s3_object_on_connection(
+                    &mut connection,
+                    &entry.scope_namespace,
+                    &entry.object_key,
+                    &entry.file_id,
+                )
+                .await
+                .unwrap()
+        );
+        let record_count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM shardline_file_records WHERE file_id = $1")
+                .bind(&record.file_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(record_count, 0);
+        let listing_count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM shardline_s3_objects
+             WHERE scope_namespace = $1 AND object_key = $2",
+        )
+        .bind(&entry.scope_namespace)
+        .bind(&entry.object_key)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(listing_count, 0);
     }
 
     #[tokio::test]

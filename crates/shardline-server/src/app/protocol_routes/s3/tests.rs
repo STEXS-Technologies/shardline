@@ -1323,6 +1323,96 @@ async fn s3_postgres_multipart_resumes_across_nodes_without_shared_rwx() {
     assert_eq!(body_bytes(get).await, b"cross-replica");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s3_postgres_delete_and_put_are_one_cross_replica_order() {
+    let Ok(database_url) = std::env::var("DATABASE_URL") else {
+        return;
+    };
+    let tmp = TempDir::new().unwrap();
+    let shared_objects =
+        crate::object_store::ServerObjectStore::local(tmp.path().join("objects")).unwrap();
+    let Some(node_a) = build_postgres_state(
+        &database_url,
+        &tmp.path().join("node-a"),
+        shared_objects.clone(),
+    )
+    .await
+    else {
+        return;
+    };
+    let Some(node_b) =
+        build_postgres_state(&database_url, &tmp.path().join("node-b"), shared_objects).await
+    else {
+        return;
+    };
+    let app_a = s3_router(node_a);
+    let app_b = s3_router(node_b);
+    let suffix = hex::encode(blake3::hash(tmp.path().as_os_str().as_encoded_bytes()).as_bytes());
+    let key = format!("race/{suffix}.bin");
+    let uri = format!("/{BUCKET}/{key}");
+    assert_eq!(
+        app_a
+            .clone()
+            .oneshot(put_request(uri.clone(), b"old".to_vec()))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+
+    let put = tokio::spawn({
+        let app = app_a.clone();
+        let uri = uri.clone();
+        async move {
+            app.oneshot(put_request(uri, b"new-cross-replica-value".to_vec()))
+                .await
+                .unwrap()
+        }
+    });
+    let delete = tokio::spawn({
+        let app = app_b.clone();
+        let uri = uri.clone();
+        async move {
+            app.oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(uri)
+                    .header(
+                        header::AUTHORIZATION,
+                        sigv4_auth(&mint_token(TokenScope::Write, OWNER, NAME)),
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+        }
+    });
+    let (put, delete) = tokio::join!(put, delete);
+    assert_eq!(put.unwrap().status(), StatusCode::OK);
+    assert_eq!(delete.unwrap().status(), StatusCode::NO_CONTENT);
+
+    let get = app_b
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(uri)
+                .header(
+                    header::AUTHORIZATION,
+                    sigv4_auth(&mint_token(TokenScope::Read, OWNER, NAME)),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    match get.status() {
+        StatusCode::OK => assert_eq!(body_bytes(get).await, b"new-cross-replica-value"),
+        StatusCode::NOT_FOUND => {}
+        status => panic!("delete/put race left an invalid visible state: {status}"),
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn s3_multipart_etag_matches_single_put_of_same_bytes() {
     let (state, _tmp) = build_test_state().await;

@@ -368,6 +368,43 @@ impl ServerBackend {
         Ok(published)
     }
 
+    /// Removes S3 visibility metadata while holding the key's distributed
+    /// writer lock. Postgres commits the listing row and record aliases in one
+    /// transaction; direct legacy bytes are removed only after visibility is gone.
+    pub(crate) async fn delete_s3_object_locked(
+        &self,
+        guard: &mut crate::maintenance_barrier::ResourceWriteGuard,
+        scope_namespace: &str,
+        key: &str,
+        object_key: &ObjectKey,
+    ) -> Result<DeleteOutcome, ServerError> {
+        match self {
+            Self::Local(_) => {
+                if guard.postgres_connection_mut().is_some() {
+                    return Err(ServerError::StaleResourceFence);
+                }
+                let _row_deleted = self.delete_s3_object(scope_namespace, key).await?;
+                self.delete_object_if_present(object_key).await
+            }
+            Self::Postgres(backend) => {
+                let connection = guard
+                    .postgres_connection_mut()
+                    .ok_or(ServerError::StaleResourceFence)?;
+                let file_id = protocol_object_file_id(object_key);
+                let metadata_deleted = backend
+                    .record_store()
+                    .delete_s3_object_on_connection(connection, scope_namespace, key, &file_id)
+                    .await?;
+                let direct = backend.delete_object_if_present(object_key).await?;
+                if metadata_deleted || direct == DeleteOutcome::Deleted {
+                    Ok(DeleteOutcome::Deleted)
+                } else {
+                    Ok(DeleteOutcome::NotFound)
+                }
+            }
+        }
+    }
+
     /// True when metadata publication can use a Postgres fencing connection.
     #[must_use]
     pub(crate) const fn supports_fenced_s3_publication(&self) -> bool {

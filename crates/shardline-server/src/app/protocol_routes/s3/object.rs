@@ -898,6 +898,13 @@ pub(crate) async fn s3_delete_object(
     // check-and-delete atomic with respect to any swap.
     let object_lock = acquire_object_upload_lock(context.object_key.as_str());
     let _object_guard = object_lock.lock().await;
+    let mut resource_guard = state
+        .backend
+        .acquire_resource_write_lock(
+            state.config.root_dir(),
+            &ResourceLockKey::s3_object(&context.scope_namespace, &context.key),
+        )
+        .await?;
 
     // Conditional requests evaluate against the CURRENT object; a missing
     // object fails `If-Match` (404) and passes `If-None-Match` (delete is
@@ -908,13 +915,14 @@ pub(crate) async fn s3_delete_object(
     };
     check_precondition(existing.as_deref(), &headers, &context.key)?;
 
-    let _row_deleted = state
-        .backend
-        .delete_s3_object(&context.scope_namespace, &context.key)
-        .await?;
     let _outcome = state
         .backend
-        .delete_object_if_present(&context.object_key)
+        .delete_s3_object_locked(
+            &mut resource_guard,
+            &context.scope_namespace,
+            &context.key,
+            &context.object_key,
+        )
         .await?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }

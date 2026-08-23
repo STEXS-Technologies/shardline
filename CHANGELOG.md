@@ -22,6 +22,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 - Production Kubernetes API roots are pod-local `emptyDir` volumes.
 - S3 object publication commits immutable record metadata and the visible S3
   index row in one fenced transaction.
+- S3 single and batch deletion now take the same cross-replica key fence as
+  publication and atomically remove listing and visible record metadata.
 
 ### Fixed
 - Replaced, failed, expired, aborted, and completed resumable staging objects
