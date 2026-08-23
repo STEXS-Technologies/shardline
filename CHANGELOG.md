@@ -41,6 +41,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
   lookup through publish, failure cleanup, heartbeat, and cancellation.
 
 ### Fixed
+- Re-baseline the line-coverage ratchet to 92.8% to reflect the single-replica
+  role split, inline resumable-session reconstruction, and longer-lived durable
+  staging paths landed in this release.
 - Durable LFS PATCH now permits bounded overlapping repair ranges without
   misclassifying their retained immutable staging bytes as an oversized logical
   object; the coverage gate now executes every Postgres protocol-replica test.
