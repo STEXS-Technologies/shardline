@@ -3743,6 +3743,7 @@ dependencies = [
  "md-5 0.10.6",
  "percent-encoding",
  "prometheus",
+ "proptest",
  "redis",
  "reqwest 0.12.28",
  "rusqlite",

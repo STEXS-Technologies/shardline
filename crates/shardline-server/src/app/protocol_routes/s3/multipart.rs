@@ -485,6 +485,7 @@ async fn durable_s3_upload_part(
             staging_key.as_str(),
             size_bytes,
             Some(&etag),
+            None,
             state.config.s3_upload_session_max_bytes().get(),
             state.config.s3_upload_total_max_bytes().get(),
             state.config.s3_upload_max_active_part_files().get(),
