@@ -41,6 +41,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
   lookup through publish, failure cleanup, heartbeat, and cancellation.
 
 ### Fixed
+- Durable LFS PATCH now permits bounded overlapping repair ranges without
+  misclassifying their retained immutable staging bytes as an oversized logical
+  object; the coverage gate now executes every Postgres protocol-replica test.
 - Replaced, failed, expired, aborted, and completed resumable staging objects
   are reclaimed under the writer-excluding GC barrier without risking live
   session parts.

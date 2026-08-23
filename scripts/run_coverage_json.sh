@@ -69,7 +69,9 @@ DATABASE_URL="${coverage_database_url}" \
 DATABASE_URL="${coverage_database_url}" \
     cargo test -p shardline-index --lib -- pg_s3_object
 DATABASE_URL="${coverage_database_url}" \
-    cargo test -p shardline-server --lib -- postgres_backend::
+    cargo test -p shardline-index --lib -- resumable_sessions::tests
+DATABASE_URL="${coverage_database_url}" \
+    cargo test -p shardline-server --lib -- postgres
 
 cargo llvm-cov report \
     --json \
