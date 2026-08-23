@@ -7,16 +7,15 @@ These manifests target the scaled production deployment profile:
 - garbage collection runs as a separate `CronJob`
 - immutable object bytes live in S3-compatible storage
 - durable metadata lives in Postgres-compatible SQL
-- active resumable API uploads use a shared ReadWriteMany staging volume
+- active resumable API uploads keep coordination in Postgres and bytes in object storage
 - reconstruction cache uses the Redis protocol; the manifests reference an external
   Redis-compatible endpoint that you must provide (the runtime secret carries a
   placeholder URL at `garnet.example.com` — no cache service is deployed here)
 
-This package does not assume local object storage or local metadata. The API root is a
-shared staging area for resumable Git LFS, OCI, and S3 multipart uploads; completed
-objects remain authoritative in S3/Postgres. Sharing this mount is required so a retry
-can land on any API replica. Its filesystem must implement cross-node advisory locks.
-Transfer and maintenance pod roots remain local runtime state.
+This package does not assume local object storage or local metadata. Resumable Git LFS,
+OCI, and S3 multipart sessions use Postgres plus the configured object store, so API
+pods are disposable and a retry can land on any replica. API, transfer, and maintenance
+pod roots are local runtime state.
 
 ## Layout
 
@@ -32,7 +31,6 @@ docs/k8s/production-scaled/
   networkpolicy-allow-monitoring.yaml
   networkpolicy-allow-runtime-egress.template.yaml
   api-deployment.yaml
-  api-staging-pvc.yaml
   api-service.yaml
   api-hpa.yaml
   api-pdb.yaml
@@ -82,8 +80,6 @@ shardline --config <(kubectl get cm shardline-config -o jsonpath='{.data.shardli
 - a reachable S3-compatible object store
 - a reachable Postgres-compatible metadata database
 - a reachable Redis-compatible cache
-- a storage class capable of binding a `ReadWriteMany` claim with cross-node advisory
-  file-lock support (for example NFSv4 or a managed shared filesystem)
 - a monitoring namespace labeled `shardline.io/monitoring=true` if Prometheus-style
   scraping runs outside the Shardline namespace
 

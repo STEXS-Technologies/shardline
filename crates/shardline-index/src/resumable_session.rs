@@ -425,6 +425,38 @@ pub enum PublishResumablePartOutcome {
     TooManyParts,
 }
 
+/// Consistent metadata snapshot used by object-store staging reclamation.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ResumableSessionGcInventory {
+    protected_staging_keys: Vec<String>,
+    reclaimable_sessions: Vec<ResumableSession>,
+}
+
+impl ResumableSessionGcInventory {
+    #[must_use]
+    pub const fn new(
+        protected_staging_keys: Vec<String>,
+        reclaimable_sessions: Vec<ResumableSession>,
+    ) -> Self {
+        Self {
+            protected_staging_keys,
+            reclaimable_sessions,
+        }
+    }
+
+    /// Staged objects still authoritative for a live, unexpired session.
+    #[must_use]
+    pub fn protected_staging_keys(&self) -> &[String] {
+        &self.protected_staging_keys
+    }
+
+    /// Terminal or database-clock-expired sessions eligible for metadata cleanup.
+    #[must_use]
+    pub fn reclaimable_sessions(&self) -> &[ResumableSession] {
+        &self.reclaimable_sessions
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
