@@ -39,6 +39,41 @@ use crate::{
     xet_adapter::{FileReconstructionResponse, ShardUploadResponse, XorbUploadResponse},
 };
 
+#[cfg(test)]
+pub(crate) mod s3_delete_fault_injection {
+    use std::sync::{LazyLock, Mutex};
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum S3DeleteBoundary {
+        AfterDirectDelete,
+    }
+
+    static ARMED: LazyLock<Mutex<Option<(S3DeleteBoundary, String)>>> =
+        LazyLock::new(|| Mutex::new(None));
+
+    pub(crate) fn arm(boundary: S3DeleteBoundary, object_key: &str) {
+        *ARMED
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            Some((boundary, object_key.to_owned()));
+    }
+
+    pub(super) fn hit(boundary: S3DeleteBoundary, object_key: &str) -> bool {
+        let mut armed = ARMED
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if armed
+            .as_ref()
+            .is_some_and(|candidate| candidate.0 == boundary && candidate.1 == object_key)
+        {
+            *armed = None;
+            true
+        } else {
+            false
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum ServerBackend {
     Local(LocalBackend),
@@ -387,6 +422,15 @@ impl ServerBackend {
                     return Err(ServerError::StaleResourceFence);
                 }
                 let direct = self.delete_direct_object_if_present(object_key).await?;
+                #[cfg(test)]
+                if s3_delete_fault_injection::hit(
+                    s3_delete_fault_injection::S3DeleteBoundary::AfterDirectDelete,
+                    object_key.as_str(),
+                ) {
+                    return Err(ServerError::Io(Error::other(
+                        "injected interruption after direct S3 object deletion",
+                    )));
+                }
                 let row_deleted = self.delete_s3_object(scope_namespace, key).await?;
                 let file_id = protocol_object_file_id(object_key);
                 let record_deleted = self.delete_file_reference(&file_id).await?;
@@ -398,6 +442,15 @@ impl ServerBackend {
             }
             Self::Postgres(backend) => {
                 let direct = backend.delete_object_if_present(object_key).await?;
+                #[cfg(test)]
+                if s3_delete_fault_injection::hit(
+                    s3_delete_fault_injection::S3DeleteBoundary::AfterDirectDelete,
+                    object_key.as_str(),
+                ) {
+                    return Err(ServerError::Io(Error::other(
+                        "injected interruption after direct S3 object deletion",
+                    )));
+                }
                 let connection = guard
                     .postgres_connection_mut()
                     .ok_or(ServerError::StaleResourceFence)?;
