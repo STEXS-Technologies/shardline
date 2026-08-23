@@ -1,6 +1,0 @@
-# Canonicalize historical local-tool commits to the repository owner's GitHub identity.
-# Rewriting published commits would invalidate tags and downstream clones; mailmap is
-# Git's non-destructive mechanism for correcting author attribution.
-Lythaeon <76955327+Lythaeon@users.noreply.github.com> Shardline Local <shardline-local@example.invalid>
-Lythaeon <76955327+Lythaeon@users.noreply.github.com> Lythaeon <vost_400@gmx.de>
-Lythaeon <76955327+Lythaeon@users.noreply.github.com> lythaeon <vost_400@gmx.de>
