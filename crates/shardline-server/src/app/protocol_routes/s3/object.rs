@@ -24,7 +24,7 @@ use axum::{
 };
 use futures_util::{Stream, StreamExt, stream};
 use md5::{Digest, Md5};
-use shardline_index::S3ObjectEntry;
+use shardline_index::{ResourceLockKey, S3ObjectEntry, S3PublishCondition};
 use shardline_s3_adapter::{
     CopyObjectResult, S3Error, S3SubResource, classify, etag_header, format_iso8601,
     parse_copy_source, parse_s3_range, read_conditional_headers, require_s3_bucket_binding,
@@ -511,6 +511,19 @@ async fn s3_upload_object_body(
     // upsert + stale-direct drop) is atomic with respect to other overwrites.
     let object_lock = acquire_object_upload_lock(context.object_key.as_str());
     let _object_guard = object_lock.lock().await;
+    let mut resource_guard = if state.backend.supports_fenced_s3_publication() {
+        Some(
+            state
+                .backend
+                .acquire_resource_write_lock(
+                    state.config.root_dir(),
+                    &ResourceLockKey::s3_object(&context.scope_namespace, &context.key),
+                )
+                .await?,
+        )
+    } else {
+        None
+    };
 
     // Capture the exact metadata row that satisfied the condition. The later
     // compare-and-swap rejects the write if any replica changes that row while
@@ -530,22 +543,42 @@ async fn s3_upload_object_body(
     };
 
     let start = Instant::now();
-    let uploaded = match state
-        .backend
-        .put_s3_object_stream(&context.object_key, body)
-        .await
-    {
-        Ok(uploaded) => uploaded,
-        // A chunked body with a lying/absent Content-Length can exceed the
-        // limit mid-stream; surface it as the S3 EntityTooLarge envelope.
-        Err(ServerError::RequestBodyTooLarge) => {
-            return Err(S3Error {
-                code: "EntityTooLarge",
-                message: "Your proposed upload exceeds the maximum allowed object size".to_owned(),
-                status: StatusCode::PAYLOAD_TOO_LARGE,
-            });
+    let (uploaded, prepared) = if resource_guard.is_some() {
+        match state
+            .backend
+            .prepare_s3_object_stream(&context.object_key, body)
+            .await
+        {
+            Ok(prepared) => (prepared.response.clone(), Some(prepared)),
+            Err(ServerError::RequestBodyTooLarge) => {
+                return Err(S3Error {
+                    code: "EntityTooLarge",
+                    message: "Your proposed upload exceeds the maximum allowed object size"
+                        .to_owned(),
+                    status: StatusCode::PAYLOAD_TOO_LARGE,
+                });
+            }
+            Err(error) => return Err(S3Error::from(error)),
         }
-        Err(error) => return Err(S3Error::from(error)),
+    } else {
+        match state
+            .backend
+            .put_s3_object_stream(&context.object_key, body)
+            .await
+        {
+            Ok(uploaded) => (uploaded, None),
+            // A chunked body with a lying/absent Content-Length can exceed the
+            // limit mid-stream; surface it as the S3 EntityTooLarge envelope.
+            Err(ServerError::RequestBodyTooLarge) => {
+                return Err(S3Error {
+                    code: "EntityTooLarge",
+                    message: "Your proposed upload exceeds the maximum allowed object size"
+                        .to_owned(),
+                    status: StatusCode::PAYLOAD_TOO_LARGE,
+                });
+            }
+            Err(error) => return Err(S3Error::from(error)),
+        }
     };
     let elapsed = start.elapsed().as_secs_f64();
     metrics::record_upload("s3", uploaded.total_bytes, elapsed, true);
@@ -569,7 +602,22 @@ async fn s3_upload_object_body(
         user_metadata,
         updated_at_unix_seconds: now,
     };
-    let swapped = if conditional_headers.is_some() {
+    let swapped = if let Some(prepared) = prepared.as_ref() {
+        let condition = if conditional_headers.is_some() {
+            S3PublishCondition::IfUnchanged(expected_entry.clone().flatten())
+        } else {
+            S3PublishCondition::Unconditional
+        };
+        state
+            .backend
+            .publish_s3_object_locked(
+                resource_guard.as_mut().ok_or_else(S3Error::internal)?,
+                prepared,
+                &replacement,
+                &condition,
+            )
+            .await?
+    } else if conditional_headers.is_some() {
         state
             .backend
             .compare_and_swap_s3_object(
@@ -582,6 +630,9 @@ async fn s3_upload_object_body(
         true
     };
     if !swapped {
+        if prepared.is_some() {
+            return Err(S3Error::precondition_failed());
+        }
         let file_id = uploaded.file_id.clone();
         let content_hash = uploaded.content_hash.clone();
         match state
