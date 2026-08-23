@@ -1,7 +1,10 @@
 use sqlx::{Connection as _, PgConnection, Row as _, query, query_scalar};
 
 use super::{PostgresIndexStore, PostgresMetadataStoreError};
-use crate::{OciObjectKey, OciObjectKind, OciObjectStore, OciObjectTombstone, OciTagEntry};
+use crate::{
+    OciObjectKey, OciObjectKind, OciObjectStore, OciObjectTombstone, OciTagEntry,
+    ResumableCompletionFence,
+};
 
 impl PostgresIndexStore {
     /// Publishes an OCI object through the session that owns its repository fence.
@@ -43,6 +46,76 @@ impl PostgresIndexStore {
         }
         transaction.commit().await?;
         Ok(())
+    }
+
+    /// Publishes an OCI object and completes its resumable session in the same
+    /// transaction, rejecting a superseded completion fence.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when Postgres cannot validate or commit the transaction.
+    pub async fn publish_oci_object_completion_on_connection(
+        &self,
+        connection: &mut PgConnection,
+        key: &OciObjectKey,
+        tags: &[OciTagEntry],
+        fence: &ResumableCompletionFence,
+    ) -> Result<bool, PostgresMetadataStoreError> {
+        let mut transaction = connection.begin().await?;
+        let owns_completion = query_scalar::<_, i32>(
+            "SELECT 1 FROM shardline_resumable_sessions
+             WHERE session_id = $1 AND state = 'completing' AND fence_epoch = $2
+               AND expires_at > clock_timestamp()
+             FOR UPDATE",
+        )
+        .bind(fence.session_id())
+        .bind(super::u64_to_i64(fence.epoch().get())?)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .is_some();
+        if !owns_completion {
+            transaction.rollback().await?;
+            return Ok(false);
+        }
+        query(
+            "DELETE FROM shardline_oci_object_tombstones
+             WHERE scope_namespace = $1 AND repository = $2
+               AND object_kind = $3 AND digest_hex = $4",
+        )
+        .bind(&key.scope_namespace)
+        .bind(&key.repository)
+        .bind(key.kind.as_str())
+        .bind(&key.digest_hex)
+        .execute(&mut *transaction)
+        .await?;
+        for tag in tags {
+            query(
+                "INSERT INTO shardline_oci_tags (scope_namespace, repository, tag, digest_hex)
+                 VALUES ($1, $2, $3, $4)
+                 ON CONFLICT (scope_namespace, repository, tag)
+                 DO UPDATE SET digest_hex = EXCLUDED.digest_hex",
+            )
+            .bind(&tag.scope_namespace)
+            .bind(&tag.repository)
+            .bind(&tag.tag)
+            .bind(&tag.digest_hex)
+            .execute(&mut *transaction)
+            .await?;
+        }
+        let completed = query(
+            "UPDATE shardline_resumable_sessions SET state = 'completed', updated_at = now()
+             WHERE session_id = $1 AND state = 'completing' AND fence_epoch = $2",
+        )
+        .bind(fence.session_id())
+        .bind(super::u64_to_i64(fence.epoch().get())?)
+        .execute(&mut *transaction)
+        .await?;
+        if completed.rows_affected() != 1 {
+            transaction.rollback().await?;
+            return Ok(false);
+        }
+        transaction.commit().await?;
+        Ok(true)
     }
 
     /// Logically deletes an OCI object through the lock-owning session.

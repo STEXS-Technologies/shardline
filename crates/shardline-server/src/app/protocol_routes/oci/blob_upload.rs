@@ -8,21 +8,34 @@ use axum::{
     },
     response::Response,
 };
+use sha2::{Digest as _, Sha256};
+use shardline_index::{
+    CreateResumableSessionOutcome, PublishResumablePartOutcome, ResumableSession,
+    ResumableSessionProtocol,
+};
 use shardline_metrics::metrics;
+use shardline_protocol::ShardlineHash;
+use shardline_storage::ObjectIntegrity;
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 use crate::{
     ServerError,
     admission::weights,
+    object_store::{materialize_object_to_file, stage_bytes_content_addressed},
     oci_adapter::{
         abort_s3_multipart_upload_session, append_s3_multipart_upload_bytes, append_upload_bytes,
         create_upload_session, delete_upload_session, finalize_s3_multipart_upload_session,
-        lock_upload_sessions, oci_blob_location, read_upload_session, touch_upload_session,
-        upload_body_integrity, upload_body_path_for_session, upload_length, upload_session_length,
-        upload_session_location, validate_repository,
+        lock_upload_sessions, new_upload_session_id, oci_blob_location, read_upload_session,
+        touch_upload_session, upload_body_integrity, upload_body_path_for_session, upload_length,
+        upload_session_length, upload_session_location, validate_repository,
     },
     protocol_support::{parse_sha256_digest, scope_namespace},
     upload_ingest::{RequestBodyReader, read_body_to_bytes},
 };
+
+const fn durable_oci_sessions_enabled(state: &AppState) -> bool {
+    state.backend.supports_fenced_s3_publication()
+}
 
 use super::super::{
     AppState, ensure_upload_growth_within_limit, parse_query_map, parse_upload_content_range,
@@ -93,6 +106,44 @@ pub(crate) async fn oci_post_blob_upload(
         );
     }
 
+    if durable_oci_sessions_enabled(state) {
+        let session_id = new_upload_session_id();
+        let expires_at = state
+            .backend
+            .postgres_now()
+            .await?
+            .checked_add(std::time::Duration::from_secs(
+                state.config.oci_upload_session_ttl_seconds().get(),
+            ))
+            .ok_or(ServerError::Overflow)?;
+        let session = ResumableSession::new(
+            session_id.clone(),
+            ResumableSessionProtocol::OciBlob,
+            scope_namespace(auth.namespace()),
+            repository.to_owned(),
+            expires_at,
+        );
+        match state
+            .backend
+            .create_resumable_session_bounded(
+                &session,
+                state.config.oci_upload_max_active_sessions().get(),
+            )
+            .await?
+        {
+            CreateResumableSessionOutcome::Created => {}
+            CreateResumableSessionOutcome::AlreadyExists => return Err(ServerError::Overflow),
+            CreateResumableSessionOutcome::TooManyActive => {
+                return Err(ServerError::TooManyUploadSessions);
+            }
+        }
+        return Response::builder()
+            .status(StatusCode::ACCEPTED)
+            .header(LOCATION, upload_session_location(repository, &session_id))
+            .header(RANGE, "0-0")
+            .body(Body::empty())
+            .map_err(|_error| ServerError::Overflow);
+    }
     let session_id = create_upload_session(
         state.config.root_dir(),
         Some(&state.backend),
@@ -130,6 +181,17 @@ pub(crate) async fn oci_patch_blob_upload(
     let auth = repo.capability();
     let mut body = RequestBodyReader::from_body(body, state.config.max_request_body_bytes())?;
     let bytes = read_body_to_bytes(&mut body).await?;
+    if durable_oci_sessions_enabled(state) {
+        return durable_oci_patch_blob_upload(
+            state,
+            headers,
+            repository,
+            auth.namespace(),
+            session_id,
+            &bytes,
+        )
+        .await;
+    }
     let _lock = lock_upload_sessions(state.config.root_dir()).await?;
     let session = read_upload_session(
         state.config.root_dir(),
@@ -193,6 +255,98 @@ pub(crate) async fn oci_patch_blob_upload(
         })
 }
 
+async fn durable_oci_patch_blob_upload(
+    state: &Arc<AppState>,
+    headers: &HeaderMap,
+    repository: &str,
+    repository_scope: Option<&shardline_protocol::RepositoryScope>,
+    session_id: &str,
+    bytes: &[u8],
+) -> Result<Response, ServerError> {
+    let expected_scope = scope_namespace(repository_scope);
+    let (session, parts) = state
+        .backend
+        .resumable_session_snapshot(session_id)
+        .await?
+        .filter(|(session, _parts)| {
+            session.protocol() == ResumableSessionProtocol::OciBlob
+                && session.scope_namespace() == expected_scope
+                && session.target_key() == repository
+        })
+        .ok_or(ServerError::NotFound)?;
+    let current_length = parts.iter().try_fold(0_u64, |total, part| {
+        total
+            .checked_add(part.size_bytes())
+            .ok_or(ServerError::Overflow)
+    })?;
+    if let Some(content_range) = headers.get(CONTENT_RANGE) {
+        let expected_range = parse_upload_content_range(
+            content_range
+                .to_str()
+                .map_err(|_error| ServerError::InvalidRangeHeader)?,
+        )?;
+        if expected_range.start() != current_length {
+            return Err(ServerError::RangeNotSatisfiable);
+        }
+        let observed_end = current_length
+            .checked_add(u64::try_from(bytes.len())?)
+            .and_then(|value| value.checked_sub(1))
+            .ok_or(ServerError::Overflow)?;
+        if observed_end != expected_range.end_inclusive() {
+            return Err(ServerError::RangeNotSatisfiable);
+        }
+    }
+    ensure_upload_growth_within_limit(state, current_length, bytes.len())?;
+    if !bytes.is_empty() {
+        let part_number = parts
+            .last()
+            .map_or(1_u64, |part| part.part_number().get().saturating_add(1));
+        let part_number = std::num::NonZeroU64::new(part_number).ok_or(ServerError::Overflow)?;
+        let (key, integrity) = stage_bytes_content_addressed(
+            &state.backend.object_store(),
+            &format!("staging/resumable/oci/{session_id}/{}", part_number.get()),
+            bytes,
+        )
+        .await?;
+        let max_bytes = u64::try_from(state.config.max_request_body_bytes().get())?;
+        match state
+            .backend
+            .publish_resumable_part_bounded(
+                session.session_id(),
+                part_number,
+                key.as_str(),
+                integrity.length(),
+                None,
+                max_bytes,
+                u64::MAX,
+                100_000,
+            )
+            .await?
+        {
+            PublishResumablePartOutcome::Published(_) => {}
+            PublishResumablePartOutcome::SessionUnavailable => {
+                return Err(ServerError::NotFound);
+            }
+            PublishResumablePartOutcome::SessionQuotaExceeded
+            | PublishResumablePartOutcome::AggregateQuotaExceeded => {
+                return Err(ServerError::RequestBodyTooLarge);
+            }
+            PublishResumablePartOutcome::TooManyParts => {
+                return Err(ServerError::TooManyUploadSessions);
+            }
+        }
+    }
+    let new_length = current_length
+        .checked_add(u64::try_from(bytes.len())?)
+        .ok_or(ServerError::Overflow)?;
+    Response::builder()
+        .status(StatusCode::ACCEPTED)
+        .header(LOCATION, upload_session_location(repository, session_id))
+        .header(RANGE, format!("0-{}", new_length.saturating_sub(1)))
+        .body(Body::empty())
+        .map_err(|_error| ServerError::Overflow)
+}
+
 #[tracing::instrument(skip(state, headers, uri, body, repo), fields(repository = %repo.repository(), session_id))]
 pub(crate) async fn oci_put_blob_upload(
     state: &Arc<AppState>,
@@ -213,6 +367,18 @@ pub(crate) async fn oci_put_blob_upload(
     let digest_hex = parse_sha256_digest(digest)?;
     let mut body = RequestBodyReader::from_body(body, state.config.max_request_body_bytes())?;
     let final_bytes = read_body_to_bytes(&mut body).await?;
+    if durable_oci_sessions_enabled(state) {
+        return durable_oci_put_blob_upload(
+            state,
+            headers,
+            repository,
+            auth,
+            session_id,
+            &digest_hex,
+            &final_bytes,
+        )
+        .await;
+    }
     let _lock = lock_upload_sessions(state.config.root_dir()).await?;
     let session = read_upload_session(
         state.config.root_dir(),
@@ -290,6 +456,161 @@ pub(crate) async fn oci_put_blob_upload(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn durable_oci_put_blob_upload(
+    state: &Arc<AppState>,
+    headers: &HeaderMap,
+    repository: &str,
+    auth: &shardline_server_core::AuthorizedRepository,
+    session_id: &str,
+    digest_hex: &str,
+    final_bytes: &[u8],
+) -> Result<Response, ServerError> {
+    let expected_scope = scope_namespace(auth.namespace());
+    let (session, parts) = state
+        .backend
+        .resumable_session_snapshot(session_id)
+        .await?
+        .filter(|(session, _parts)| {
+            session.protocol() == ResumableSessionProtocol::OciBlob
+                && session.scope_namespace() == expected_scope
+                && session.target_key() == repository
+        })
+        .ok_or(ServerError::NotFound)?;
+    let current_length = parts.iter().try_fold(0_u64, |total, part| {
+        total
+            .checked_add(part.size_bytes())
+            .ok_or(ServerError::Overflow)
+    })?;
+    if let Some(content_range) = headers.get(CONTENT_RANGE) {
+        let expected_range = parse_upload_content_range(
+            content_range
+                .to_str()
+                .map_err(|_error| ServerError::InvalidRangeHeader)?,
+        )?;
+        if expected_range.start() != current_length {
+            return Err(ServerError::RangeNotSatisfiable);
+        }
+        let observed_end = current_length
+            .checked_add(u64::try_from(final_bytes.len())?)
+            .and_then(|value| value.checked_sub(1))
+            .ok_or(ServerError::Overflow)?;
+        if observed_end != expected_range.end_inclusive() {
+            return Err(ServerError::RangeNotSatisfiable);
+        }
+    }
+    ensure_upload_growth_within_limit(state, current_length, final_bytes.len())?;
+    if !final_bytes.is_empty() {
+        let number = parts
+            .last()
+            .map_or(1_u64, |part| part.part_number().get().saturating_add(1));
+        let number = std::num::NonZeroU64::new(number).ok_or(ServerError::Overflow)?;
+        let (key, integrity) = stage_bytes_content_addressed(
+            &state.backend.object_store(),
+            &format!("staging/resumable/oci/{session_id}/{}", number.get()),
+            final_bytes,
+        )
+        .await?;
+        let max_bytes = u64::try_from(state.config.max_request_body_bytes().get())?;
+        if !matches!(
+            state
+                .backend
+                .publish_resumable_part_bounded(
+                    session.session_id(),
+                    number,
+                    key.as_str(),
+                    integrity.length(),
+                    None,
+                    max_bytes,
+                    u64::MAX,
+                    100_000,
+                )
+                .await?,
+            PublishResumablePartOutcome::Published(_)
+        ) {
+            return Err(ServerError::NotFound);
+        }
+    }
+
+    let (claimed, claimed_parts) = state
+        .backend
+        .begin_resumable_completion(session_id)
+        .await?
+        .ok_or(ServerError::NotFound)?;
+    let temporary = tempfile::tempdir()?;
+    let assembled_path = temporary.path().join("assembled");
+    let mut assembled = tokio::fs::File::create(&assembled_path).await?;
+    for part in &claimed_parts {
+        let key = shardline_storage::ObjectKey::parse(part.staging_key())
+            .map_err(|_error| ServerError::InvalidPath)?;
+        let path = temporary
+            .path()
+            .join(format!("part-{}", part.part_number()));
+        materialize_object_to_file(
+            &state.backend.object_store(),
+            &key,
+            part.size_bytes(),
+            &path,
+        )
+        .await?;
+        let mut input = tokio::fs::File::open(path).await?;
+        tokio::io::copy(&mut input, &mut assembled).await?;
+    }
+    assembled.flush().await?;
+    drop(assembled);
+
+    let mut input = tokio::fs::File::open(&assembled_path).await?;
+    let mut sha256 = Sha256::new();
+    let mut blake3 = blake3::Hasher::new();
+    let mut total = 0_u64;
+    let mut buffer = vec![0_u8; 1024 * 1024];
+    loop {
+        let read = input.read(&mut buffer).await?;
+        if read == 0 {
+            break;
+        }
+        let bytes = buffer.get(..read).ok_or(ServerError::Overflow)?;
+        sha256.update(bytes);
+        blake3.update(bytes);
+        total = total
+            .checked_add(u64::try_from(read)?)
+            .ok_or(ServerError::Overflow)?;
+    }
+    if hex::encode(sha256.finalize()) != digest_hex {
+        return Err(ServerError::ExpectedBodyHashMismatch);
+    }
+    let integrity = ObjectIntegrity::new(
+        ShardlineHash::from_bytes(*blake3.finalize().as_bytes()),
+        total,
+    );
+    let object_key = oci_blob_key(repository, digest_hex, auth)?;
+    let _stored = state
+        .backend
+        .put_sha256_addressed_object_file(&object_key, digest_hex, &assembled_path, &integrity)
+        .await?;
+
+    let lock_key = shardline_index::ResourceLockKey::oci_repository(&expected_scope, repository);
+    let mut guard = state
+        .backend
+        .acquire_resource_write_lock(state.config.root_dir(), &lock_key)
+        .await?;
+    let completion_fence = claimed.completion_fence();
+    if !state
+        .backend
+        .publish_oci_object_completion_locked(
+            &mut guard,
+            &oci_blob_index_key(repository, digest_hex, auth),
+            &[],
+            &completion_fence,
+        )
+        .await?
+    {
+        return Err(ServerError::StaleResourceFence);
+    }
+    metrics().protocol.record_oci_upload();
+    oci_created_response(&oci_blob_location(repository, digest_hex), Some(digest_hex))
+}
+
 async fn publish_oci_blob(
     state: &Arc<AppState>,
     repository: &str,
@@ -325,6 +646,30 @@ pub(crate) async fn oci_get_blob_upload(
 ) -> Result<Response, ServerError> {
     let repository = repo.repository();
     let auth = repo.capability();
+    if durable_oci_sessions_enabled(state) {
+        let expected_scope = scope_namespace(auth.namespace());
+        let (_session, parts) = state
+            .backend
+            .resumable_session_snapshot(session_id)
+            .await?
+            .filter(|(session, _parts)| {
+                session.protocol() == ResumableSessionProtocol::OciBlob
+                    && session.scope_namespace() == expected_scope
+                    && session.target_key() == repository
+            })
+            .ok_or(ServerError::NotFound)?;
+        let length = parts.iter().try_fold(0_u64, |total, part| {
+            total
+                .checked_add(part.size_bytes())
+                .ok_or(ServerError::Overflow)
+        })?;
+        return Response::builder()
+            .status(StatusCode::NO_CONTENT)
+            .header(LOCATION, upload_session_location(repository, session_id))
+            .header(RANGE, format!("0-{}", length.saturating_sub(1)))
+            .body(Body::empty())
+            .map_err(|_error| ServerError::Overflow);
+    }
     let _lock = lock_upload_sessions(state.config.root_dir()).await?;
     let session = read_upload_session(
         state.config.root_dir(),
@@ -364,6 +709,40 @@ pub(crate) async fn oci_delete_blob_upload(
 ) -> Result<Response, ServerError> {
     let repository = repo.repository();
     let auth = repo.capability();
+    if durable_oci_sessions_enabled(state) {
+        let expected_scope = scope_namespace(auth.namespace());
+        let session = state
+            .backend
+            .resumable_session_by_id(session_id)
+            .await?
+            .filter(|session| {
+                session.protocol() == ResumableSessionProtocol::OciBlob
+                    && matches!(
+                        session.state(),
+                        shardline_index::ResumableSessionState::Active
+                            | shardline_index::ResumableSessionState::Completing
+                    )
+                    && session.scope_namespace() == expected_scope
+                    && session.target_key() == repository
+            })
+            .ok_or(ServerError::NotFound)?;
+        if !state
+            .backend
+            .transition_resumable_session(
+                session_id,
+                session.state(),
+                session.fence_epoch(),
+                shardline_index::ResumableSessionState::Aborted,
+            )
+            .await?
+        {
+            return Err(ServerError::NotFound);
+        }
+        return Response::builder()
+            .status(StatusCode::NO_CONTENT)
+            .body(Body::empty())
+            .map_err(|_error| ServerError::Overflow);
+    }
     let _lock = lock_upload_sessions(state.config.root_dir()).await?;
     let session = read_upload_session(
         state.config.root_dir(),
