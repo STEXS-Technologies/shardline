@@ -4,6 +4,44 @@ All notable changes to Shardline are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.7.0] - 2026-08-23
+
+Reliability release focused on distributed correctness, crash recovery, and
+adversarial verification. **No breaking API changes** — the multi-writer
+contracts, fencing, tombstones, and typed parsing additions are compatible with
+existing deployments and data.
+
+### Added
+- **Distributed-correctness contract** — fenced multi-writer publication over
+  shared Postgres/S3 state, explicit lock ordering, recovery semantics, and
+  mixed-version/upgrade documentation.
+- **Tombstone lifecycle** — durable deletion markers coordinate GC with
+  concurrent readers, reconstruction, repair, and retries; GC now removes only
+  safely expired tombstones.
+- **Typed parsing and property coverage** — closed-domain newtypes replace
+  string matching in security-sensitive paths, with expanded proptests and
+  fuzz targets for protocol, URL, config, auth, and CAS boundaries.
+- **Replayable chaos verification** — deterministic fault schedules, failpoints,
+  invariant checks, and expanded database, object-store, network, restart, and
+  authorization campaigns.
+
+### Changed
+- **Multi-node deployment guidance** now specifies the shared-filesystem byte
+  and locking contract, Postgres/S3 fencing requirements, and N-1 upgrade
+  compatibility.
+- **GC and publication** use transactional reachability checks and bounded
+  server-side Xorb batches, reducing memory pressure for large uploads.
+- **Release CI** requires the reliability campaign before publishing crates,
+  images, and release assets.
+
+### Fixed
+- Stale writers can no longer commit after lease replacement or fencing epoch
+  changes.
+- Crash and retry windows around metadata publication, object-store ambiguity,
+  reconstruction, repair, and GC now recover to a valid state.
+- Large streamed uploads no longer require a single unbounded server-side Xorb.
+- Documentation now reflects the completed distributed-correctness contract.
+
 ## [1.6.0] - 2026-08-20
 
 Major release that adds a full S3-compatible frontend and closes the hardening
