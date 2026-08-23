@@ -112,7 +112,8 @@ SHARDLINE_ED25519_PUBLIC_KEY_FILE=/run/secrets/shardline-ed25519-public-key
 ```
 
 The public-key file may contain a raw 32-byte Ed25519 public key, its hexadecimal
-encoding, or a SubjectPublicKeyInfo PEM public key.
+encoding, a SubjectPublicKeyInfo PEM public key, or up to 32 newline-delimited
+hexadecimal public keys for overlapping rotation.
 Direct `SHARDLINE_ED25519_PRIVATE_KEY` and `SHARDLINE_ED25519_PUBLIC_KEY` values are
 also accepted; use hexadecimal or PEM text for direct environment values.
 `_FILE` is preferred for key material.
@@ -128,8 +129,9 @@ provider = "ed25519"
 private_key_path = "/run/secrets/shardline-ed25519-private-key"
 ```
 
-Use `public_key_path` instead of `private_key_path` for verification-only operation.
-Configure one key mode at a time.
+Use `public_key_path` instead of `private_key_path` for verification-only operation, or
+configure both paths during a signing-key rotation: the private key signs new tokens and
+the public-key ring keeps old unexpired tokens verifiable.
 Verification-only mode cannot mint tokens.
 
 Mint an Ed25519 token with the operator CLI by selecting the provider and passing a
@@ -154,24 +156,23 @@ environment variable.
 
 #### Ed25519 key rotation
 
-The current Ed25519 provider accepts exactly one verification key at a time. It does not
-yet support an overlapping old-and-new verification window. Treat that as an explicit
-operational constraint rather than assuming a rolling key change is safe:
+The public-key input accepts either one existing raw, hexadecimal, or PEM key, or a
+newline-delimited key ring of up to 32 hexadecimal public keys. When a private key and a
+public-key ring are both configured, the private key signs new tokens and its derived
+public key is automatically added to the verification set. This supports a bounded,
+zero-downtime old-and-new verification window:
 
-1. Reduce the token TTL far enough in advance that every token signed by the old key
-   expires before the rotation window.
-2. Stop issuing tokens with the old private key and wait through the old maximum TTL.
-3. Replace the private key on signing nodes and the corresponding public key on
-   verification-only nodes as one coordinated maintenance operation.
-4. Restart every server and mint a short-lived probe token with `shardline admin token
-   --auth-provider ed25519` before returning traffic.
-5. Verify that the new token succeeds and a token signed by the retired key fails.
+1. Put the old and new public keys in the public-key ring and deploy it to every replica.
+2. Verify that tokens from both signers succeed on every replica.
+3. Configure the new private key on signing nodes while retaining the old public key in
+   the ring. Newly minted tokens now use the new key; old unexpired tokens remain valid.
+4. Wait at least the old maximum token TTL, then remove the old public key and restart or
+   roll every replica.
+5. Verify that a new-key probe token succeeds and an old-key token fails.
 
-Do not mix old-key and new-key replicas behind one load balancer: requests would be
-accepted or rejected depending on which replica receives them. Deployments that require
-zero-downtime overlapping verification should keep Ed25519 classified as Experimental
-until multi-key verification is implemented, or use the JWKS/OIDC providers whose key
-sets have rotation support.
+The key-count ceiling bounds adversarial verification work. Duplicate entries are
+deduplicated, and malformed or weak keys fail startup rather than reducing the accepted
+verification set.
 
 ### OIDC
 
@@ -264,5 +265,5 @@ With the pluggable auth system:
    tooling.
 4. Restart the server. Existing HMAC, OIDC, or JWKS tokens are not accepted as Ed25519
    tokens.
-5. For later Ed25519-to-Ed25519 rotations, follow the coordinated procedure above; the
-   server does not currently accept old and new Ed25519 public keys simultaneously.
+5. For later Ed25519-to-Ed25519 rotations, use the overlapping public-key-ring procedure
+   above.

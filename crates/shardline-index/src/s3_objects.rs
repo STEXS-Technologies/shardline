@@ -26,6 +26,16 @@ pub struct S3ObjectEntry {
     pub updated_at_unix_seconds: i64,
 }
 
+/// Metadata precondition applied at the S3 object's publication transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum S3PublishCondition {
+    /// Replace any current value.
+    Unconditional,
+    /// Publish only when the current row still equals this snapshot. `None`
+    /// requires the key to remain absent.
+    IfUnchanged(Option<S3ObjectEntry>),
+}
+
 /// S3 object listing-index storage contract.
 ///
 /// Implementations store per-`(scope_namespace, object_key)` rows for the S3

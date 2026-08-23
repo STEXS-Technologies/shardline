@@ -18,17 +18,17 @@ version.
 | Surface | Tier | Evidence |
 | --- | --- | --- |
 | Xet CAS | **Stable** | Native Xet upload and download flows; checked-in `git` + `git-lfs` + `git-xet` push, clone, fetch, pull, historical checkout, and sparse checkout coverage |
-| Git LFS | **Beta** | LFS batch negotiation plus direct object GET/HEAD/PUT routes; `git-lfs` push/pull plus separate pull and fetch --all flows; conformance-tested but limited production evidence |
-| Bazel HTTP remote cache | **Beta** | `ac` and `cas` object GET and PUT routes; `bazel`/`bazelisk` remote-cache flows with remote_download_outputs=all and toplevel; conformance-tested but limited production evidence |
+| Git LFS | **Beta** | LFS batch negotiation plus direct object GET/HEAD/PUT routes; pinned Git LFS 3.7.1 and adjacent 3.6.1 push/pull plus separate pull and fetch --all flows; conformance-tested but limited production evidence |
+| Bazel HTTP remote cache | **Beta** | `ac` and `cas` object GET and PUT routes; pinned Bazel 8.7.0 and 9.2.0 remote-cache flows with `remote_download_outputs=all` and `toplevel`; conformance-tested but limited production evidence |
 | OCI Distribution | **Stable** | Full blob upload/download, manifest PUT/GET/HEAD/DELETE, tag listing with pagination, token-service flow at /v2/token, upload cancellation, scoped upload-session handling; checked-in `skopeo`, Docker, Helm, and Podman client coverage |
 | Hugging Face Hub API | **Beta** | Repository create/info/delete, revision and tree lookup, preupload, NDJSON commit, resolve/download, dataset viewer routes, basic search, webhooks, Git Smart HTTP clone/fetch/push; `hf` CLI model and dataset create, upload, download, filtered snapshot, delete-files, and delete-repository flows; conformance-tested but limited production evidence |
 | S3 frontend (protocol) | **Stable** | S3-compatible object API — Put/Get(+Range)/Head/Delete, conditional requests (If-Match/If-None-Match), CopyObject, multipart upload (create/part/complete/abort), ListObjectsV2 + ListObjects v1, DeleteObjects, ListBuckets, and bucket stubs; standard MD5 ETags (single-PUT and multipart-complete) and user metadata (`x-amz-meta-*`) round-trip; SigV4 access-key=token auth plus a Bearer auth bridge; index-backed listing with zero object-store reads; validated against real clients (`mc`, AWS CLI, boto3, `s3cmd`, `rclone`, pyarrow 25) in the CI-run real-client e2e suite and security-audited (`feat/s3-frontend`) |
-| Ed25519 auth provider | **Experimental** | Signing and verification, verification-only mode, environment/TOML configuration, authenticated HTTP flows, and operator CLI mint-to-verify interoperability have targeted tests; key-rotation policy and the full negative matrix remain graduation work |
+| Ed25519 auth provider | **Beta** | Signing and verification, bounded overlapping key rotation, verification-only mode, environment/TOML configuration, authenticated HTTP flows, and operator CLI mint-to-verify interoperability have targeted tests; broader deployment evidence remains graduation work |
 | Local filesystem storage | **Stable** | Checked-in adapter, concurrency, and operator workflow coverage |
 | S3-compatible storage | **Stable** | Checked-in object read/write/list and HTTP integration coverage |
 | Postgres metadata | **Stable** | Checked-in index, dedupe, concurrency, and operator workflow coverage |
 | SQLite metadata | **Stable** | Checked-in local single-node and operator workflow coverage |
-| Redis reconstruction cache | **Beta** | TLS and mTLS connectivity, bounded per-operation timeout, cache hit/miss paths, and corrupt-value repair from durable storage are validated; partition/restart and multi-node stampede evidence remain |
+| Redis reconstruction cache | **Beta** | TLS/mTLS connectivity, bounded per-operation timeout, corrupt-value repair, partition and kill/restart recovery, plus operation-scoped cross-replica cold-load reservations with cancellation takeover and stale-owner fencing are validated; broader production evidence remains |
 | Provider integration | **Beta** | Checked-in token issuance, webhook handling, and repository-scoped authorization coverage for GitHub, GitLab, Gitea, Codeberg, and the generic adapter |
 
 ### Tier Definitions

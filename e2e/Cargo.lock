@@ -2971,6 +2971,7 @@ dependencies = [
 name = "shardline-cache"
 version = "1.7.0"
 dependencies = [
+ "getrandom 0.3.4",
  "hex",
  "redis",
  "rustls",
@@ -3264,6 +3265,7 @@ dependencies = [
  "shardline-xet-core",
  "sqlx",
  "subtle",
+ "tempfile",
  "thiserror",
  "tokio",
  "toml",

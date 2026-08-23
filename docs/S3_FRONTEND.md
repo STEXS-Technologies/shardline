@@ -177,8 +177,12 @@ durability guarantees:
   backend. fsck validates the record↔chunk contract; GC reachability protects
   the chunks via the record.
 - **The S3 listing index is a derived snapshot, GC inert, and not a
-  reachability source** — deleting a listing row never touches chunks or
-  records. Delete ordering is crash-safe: index row first, then record+object.
+  reachability source** — deletion takes the same distributed per-key fence as
+  publication, removes legacy direct bytes first, then atomically removes the
+  listing row plus visible record aliases. A failed metadata transaction leaves
+  row-backed bytes readable; a crash cannot resurrect a deleted legacy object
+  through the row-absent fallback. Immutable chunks are reclaimed later by
+  writer-excluding GC.
 - **Listing nuance** — `ListObjectsV2` serves the snapshot (size/hash/mtime from
   the index row); `HeadObject`/`GetObject` always resolve through the
   authoritative `FileRecord`. A listing row can lag the record until the next
@@ -187,12 +191,11 @@ durability guarantees:
 
 ## Multi-replica consistency
 
-Multipart session metadata and incomplete parts live under `SHARDLINE_ROOT_DIR`.
-Every API replica in one writer topology must therefore mount the same filesystem at
-that path. The filesystem must support cross-node advisory locks: session accounting
-uses one global file lock and part upload/completion/abort/sweep use a per-session file
-lock. The production Kubernetes profile supplies a `ReadWriteMany` claim for this
-staging data, so a multipart request may be retried against any API replica.
+In a Postgres deployment, multipart identity, quotas, part maps, expiry, and
+completion fences are durable database state. Incomplete part bytes are immutable
+private objects in the configured object store. A multipart request may therefore be
+retried against any API replica without a shared filesystem. Local SQLite deployments
+retain bounded filesystem staging as their explicitly single-node implementation.
 
 The S3 frontend keeps a **per-key in-process lock**
 (`acquire_object_upload_lock`: a weak-valued `HashMap` of Tokio mutexes) to

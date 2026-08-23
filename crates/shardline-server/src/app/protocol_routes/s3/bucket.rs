@@ -15,6 +15,7 @@ use axum::{
     http::{HeaderMap, StatusCode, Uri},
     response::{IntoResponse, Response},
 };
+use shardline_index::ResourceLockKey;
 use shardline_s3_adapter::{
     ListBucketsResult, MAX_S3_DELETE_KEYS, S3Error, S3SubResource, classify, encode_bucket,
     parse_delete_object_keys, s3_object_key,
@@ -230,11 +231,22 @@ pub(crate) async fn s3_post_bucket(
                 // then record + direct object.
                 let object_lock = acquire_object_upload_lock(object_key.as_str());
                 let _object_guard = object_lock.lock().await;
-                let _row_deleted = state
+                let mut resource_guard = state
                     .backend
-                    .delete_s3_object(&scope_namespace, &key)
+                    .acquire_resource_write_lock(
+                        state.config.root_dir(),
+                        &ResourceLockKey::s3_object(&scope_namespace, &key),
+                    )
                     .await?;
-                let _outcome = state.backend.delete_object_if_present(&object_key).await?;
+                let _outcome = state
+                    .backend
+                    .delete_s3_object_locked(
+                        &mut resource_guard,
+                        &scope_namespace,
+                        &key,
+                        &object_key,
+                    )
+                    .await?;
                 outcomes.push(DeleteOutcome::Deleted(key));
             }
             Err(_error) => {

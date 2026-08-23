@@ -1,9 +1,11 @@
-#![allow(clippy::unwrap_used)]
+#![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
-use std::{fs::read, num::NonZeroU64};
+use std::{fs::read, num::NonZeroU64, time::Duration};
 
+use redis::AsyncCommands;
 use shardline_cache::{
-    AsyncReconstructionCache, ReconstructionCacheKey, RedisReconstructionCache, RedisTlsConfig,
+    AsyncReconstructionCache, ReconstructionCacheError, ReconstructionCacheKey,
+    ReconstructionCacheLookup, RedisReconstructionCache, RedisTlsConfig,
 };
 use shardline_protocol::SecretBytes;
 use shardline_test_support::DockerLocalStack;
@@ -64,6 +66,119 @@ async fn redis_cache_put_get_roundtrip() {
     // Get
     let result = cache.get(&key).await.unwrap();
     assert_eq!(result, Some(payload.to_vec()));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn redis_cache_serializes_cold_loads_across_replicas() {
+    let Some(stack) = DockerLocalStack::builder().with_redis().start().unwrap() else {
+        eprintln!("skipping: docker not available");
+        return;
+    };
+    let Some(redis_url) = stack.redis_url() else {
+        return;
+    };
+    let ttl = NonZeroU64::new(3600).unwrap();
+    let first_replica = RedisReconstructionCache::new(&redis_url, ttl).unwrap();
+    let second_replica = RedisReconstructionCache::new(&redis_url, ttl).unwrap();
+    let key = ReconstructionCacheKey::latest("distributed-cold-load", None);
+
+    let first_reservation = match first_replica.get_or_reserve(&key).await.unwrap() {
+        ReconstructionCacheLookup::Reserved(reservation) => reservation,
+        ReconstructionCacheLookup::Hit(_) => panic!("test key must start cold"),
+    };
+
+    let second_key = key.clone();
+    let second_load = tokio::spawn(async move { second_replica.get_or_reserve(&second_key).await });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        !second_load.is_finished(),
+        "the losing replica must wait for the reservation owner"
+    );
+
+    first_replica
+        .put_reserved(&key, b"reconstructed-once", &first_reservation)
+        .await
+        .unwrap();
+    assert!(matches!(
+        second_load.await.unwrap().unwrap(),
+        ReconstructionCacheLookup::Hit(payload) if payload == b"reconstructed-once"
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn redis_cache_releases_cancelled_load_reservations() {
+    let Some(stack) = DockerLocalStack::builder().with_redis().start().unwrap() else {
+        eprintln!("skipping: docker not available");
+        return;
+    };
+    let Some(redis_url) = stack.redis_url() else {
+        return;
+    };
+    let ttl = NonZeroU64::new(3600).unwrap();
+    let cancelled_replica = RedisReconstructionCache::new(&redis_url, ttl).unwrap();
+    let replacement_replica = RedisReconstructionCache::new(&redis_url, ttl).unwrap();
+    let key = ReconstructionCacheKey::latest("cancelled-distributed-load", None);
+
+    let cancelled_reservation = match cancelled_replica.get_or_reserve(&key).await.unwrap() {
+        ReconstructionCacheLookup::Reserved(reservation) => reservation,
+        ReconstructionCacheLookup::Hit(_) => panic!("test key must start cold"),
+    };
+    cancelled_replica.release_reservation(&key, &cancelled_reservation);
+
+    let replacement = tokio::time::timeout(
+        Duration::from_millis(500),
+        replacement_replica.get_or_reserve(&key),
+    )
+    .await
+    .expect("replacement replica should promptly acquire the released reservation")
+    .unwrap();
+    let replacement_reservation = match replacement {
+        ReconstructionCacheLookup::Reserved(reservation) => reservation,
+        ReconstructionCacheLookup::Hit(_) => panic!("cancelled load must not publish a value"),
+    };
+    replacement_replica.release_reservation(&key, &replacement_reservation);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn redis_cache_rejects_stale_reservation_publication() {
+    let Some(stack) = DockerLocalStack::builder().with_redis().start().unwrap() else {
+        eprintln!("skipping: docker not available");
+        return;
+    };
+    let Some(redis_url) = stack.redis_url() else {
+        return;
+    };
+    let cache = RedisReconstructionCache::new(&redis_url, NonZeroU64::new(3600).unwrap()).unwrap();
+    let file_id = "stale-distributed-loader";
+    let key = ReconstructionCacheKey::latest(file_id, None);
+    let stale_reservation = match cache.get_or_reserve(&key).await.unwrap() {
+        ReconstructionCacheLookup::Reserved(reservation) => reservation,
+        ReconstructionCacheLookup::Hit(_) => panic!("test key must start cold"),
+    };
+
+    let client = redis::Client::open(redis_url).unwrap();
+    let mut connection = client.get_multiplexed_async_connection().await.unwrap();
+    let redis_key = format!(
+        "shardline:reconstruction:v1:global:latest:{}",
+        hex::encode(file_id)
+    );
+    let loading_key = format!("{redis_key}:loading");
+    let _: () = connection
+        .set_ex(&loading_key, "replacement-owner", 30_u64)
+        .await
+        .unwrap();
+
+    let stale_publish = cache
+        .put_reserved(&key, b"must-not-publish", &stale_reservation)
+        .await;
+    assert!(matches!(
+        stale_publish,
+        Err(ReconstructionCacheError::LostLoadingReservation)
+    ));
+    let stored: Option<Vec<u8>> = connection.get(&redis_key).await.unwrap();
+    assert!(stored.is_none(), "a fenced stale loader must not publish");
+    let owner: Option<String> = connection.get(&loading_key).await.unwrap();
+    assert_eq!(owner.as_deref(), Some("replacement-owner"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

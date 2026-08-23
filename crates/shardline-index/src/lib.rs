@@ -76,6 +76,7 @@ mod record;
 mod record_key;
 mod record_kind;
 mod resource_fence;
+mod resumable_session;
 mod s3_objects;
 #[cfg(test)]
 mod test_invariant_error;
@@ -112,7 +113,13 @@ pub use record::{
     StoredRecord,
 };
 pub use resource_fence::{ResourceLockDomain, ResourceLockKey};
-pub use s3_objects::{S3ObjectEntry, S3ObjectIndexStore};
+pub use resumable_session::{
+    CreateResumableSessionOutcome, PublishResumablePartOutcome, ResumableCompletionFence,
+    ResumablePartRange, ResumableSession, ResumableSessionAttributes, ResumableSessionError,
+    ResumableSessionGcInventory, ResumableSessionPart, ResumableSessionProtocol,
+    ResumableSessionState,
+};
+pub use s3_objects::{S3ObjectEntry, S3ObjectIndexStore, S3PublishCondition};
 pub use store::{
     AsyncIndexStore, DedupeStore, IndexStore, IndexStoreFuture, LifecycleStore,
     ReconstructionStore, Repository,

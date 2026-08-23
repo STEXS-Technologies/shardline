@@ -17,6 +17,9 @@ pub enum ReconstructionCacheError {
     /// A Redis operation exceeded its configured latency bound.
     #[error("reconstruction cache redis operation timed out")]
     RedisTimeout,
+    /// A stale loader attempted to mutate a reservation owned by another caller.
+    #[error("reconstruction cache loading reservation is no longer owned by this operation")]
+    LostLoadingReservation,
     /// The Redis operation timeout was zero.
     #[error("reconstruction cache redis operation timeout must be greater than zero")]
     InvalidRedisOperationTimeout,
