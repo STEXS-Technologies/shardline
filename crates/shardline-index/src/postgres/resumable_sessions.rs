@@ -184,6 +184,37 @@ impl PostgresIndexStore {
         .transpose()
     }
 
+    /// Loads one active, unexpired session and its ordered authoritative parts
+    /// from a single transaction snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when Postgres fails or durable rows violate the typed contract.
+    pub async fn resumable_session_snapshot(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<(ResumableSession, Vec<ResumableSessionPart>)>, PostgresMetadataStoreError>
+    {
+        let mut transaction = self.pool().begin().await?;
+        let row = sqlx::query(
+            "SELECT session_id, protocol, scope_namespace, target_key, attributes_json, state,
+                    generation, fence_epoch, expires_at
+             FROM shardline_resumable_sessions
+             WHERE session_id = $1 AND state = 'active' AND expires_at > clock_timestamp()",
+        )
+        .bind(session_id)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let Some(row) = row else {
+            transaction.rollback().await?;
+            return Ok(None);
+        };
+        let session = session_from_row(&row)?;
+        let parts = parts_on_transaction(&mut transaction, session_id).await?;
+        transaction.commit().await?;
+        Ok(Some((session, parts)))
+    }
+
     /// Atomically selects one immutable staged object as the current part.
     ///
     /// The object must already exist. Publication succeeds only while the
