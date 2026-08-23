@@ -411,6 +411,19 @@ impl ServerBackend {
             .await?)
     }
 
+    pub(crate) async fn resumable_session_snapshot(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<(ResumableSession, Vec<ResumableSessionPart>)>, ServerError> {
+        let Self::Postgres(backend) = self else {
+            return Err(ServerError::StaleResourceFence);
+        };
+        Ok(backend
+            .index_store()
+            .resumable_session_snapshot(session_id)
+            .await?)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn publish_resumable_part_bounded(
         &self,
@@ -701,6 +714,27 @@ impl ServerBackend {
                 Ok(())
             }
         }
+    }
+
+    /// Publishes immutable OCI bytes and completes the owning resumable
+    /// session in one fence-checked metadata transaction.
+    pub(crate) async fn publish_oci_object_completion_locked(
+        &self,
+        guard: &mut crate::maintenance_barrier::ResourceWriteGuard,
+        key: &OciObjectKey,
+        tags: &[OciTagEntry],
+        fence: &ResumableCompletionFence,
+    ) -> Result<bool, ServerError> {
+        let Self::Postgres(backend) = self else {
+            return Err(ServerError::StaleResourceFence);
+        };
+        let connection = guard
+            .postgres_connection_mut()
+            .ok_or(ServerError::StaleResourceFence)?;
+        Ok(backend
+            .index_store()
+            .publish_oci_object_completion_on_connection(connection, key, tags, fence)
+            .await?)
     }
 
     /// Commits an OCI tombstone through the lock-owning metadata session.

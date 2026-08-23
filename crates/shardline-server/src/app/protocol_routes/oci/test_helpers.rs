@@ -19,6 +19,69 @@ pub(crate) struct OciTestContext {
     pub state: Arc<AppState>,
 }
 
+pub(crate) struct OciPostgresTestCluster {
+    pub _temp: tempfile::TempDir,
+    pub node_a: Arc<AppState>,
+    pub node_b: Arc<AppState>,
+}
+
+pub(crate) async fn build_oci_postgres_test_cluster() -> Option<OciPostgresTestCluster> {
+    let database_url = std::env::var("DATABASE_URL").ok()?;
+    let temp = tempfile::tempdir().ok()?;
+    let shared_store = crate::ServerObjectStore::local(temp.path().join("objects")).ok()?;
+    let node_a = build_oci_postgres_state(
+        &database_url,
+        temp.path().join("node-a"),
+        shared_store.clone(),
+    )
+    .await?;
+    let node_b =
+        build_oci_postgres_state(&database_url, temp.path().join("node-b"), shared_store).await?;
+    Some(OciPostgresTestCluster {
+        _temp: temp,
+        node_a,
+        node_b,
+    })
+}
+
+async fn build_oci_postgres_state(
+    database_url: &str,
+    root: std::path::PathBuf,
+    object_store: crate::ServerObjectStore,
+) -> Option<Arc<AppState>> {
+    let chunk_size = NonZeroUsize::new(65_536)?;
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().ok()?,
+        "http://127.0.0.1:8080".to_owned(),
+        root.clone(),
+        chunk_size,
+    )
+    .with_server_frontends([ServerFrontend::Oci])
+    .ok()?;
+    let backend = crate::PostgresBackend::new_with_object_store(
+        root,
+        "http://127.0.0.1:8080".to_owned(),
+        chunk_size,
+        database_url,
+        object_store,
+    )
+    .await
+    .ok()?;
+    Some(Arc::new(AppState {
+        config,
+        role: ServerRole::All,
+        backend: ServerBackend::Postgres(backend),
+        auth: None,
+        provider_tokens: None,
+        reconstruction_cache: ReconstructionCacheService::disabled(),
+        transfer_limiter: TransferLimiter::new(NonZeroUsize::new(4096)?, NonZeroUsize::new(16)?),
+        oci_registry_token_limiter: Arc::new(Semaphore::new(64)),
+        admission: crate::admission::WeightedAdmission::new(NonZeroUsize::new(256)?),
+        pools: crate::admission::ExecutionPools::default_sizes(),
+        protocol_metrics: ProtocolMetrics::default(),
+    }))
+}
+
 /// Builds a minimal [`AppState`] backed by a local filesystem backend rooted
 /// in a fresh temporary directory. Authentication is **disabled** so that
 /// handlers can be exercised without bearer tokens.

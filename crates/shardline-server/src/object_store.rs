@@ -12,10 +12,10 @@ use futures_util::StreamExt;
 use shardline_index::{
     FileChunkRecord, FileRecord, FileRecordInvariantError, FileRecordStorageLayout,
 };
-use shardline_protocol::ByteRange;
+use shardline_protocol::{ByteRange, ShardlineHash};
 pub use shardline_server_core::ServerObjectStore;
 pub use shardline_server_core::ServerObjectStoreError;
-use shardline_storage::{ObjectKey, ObjectMetadata, ObjectPrefix, ObjectStore};
+use shardline_storage::{ObjectIntegrity, ObjectKey, ObjectMetadata, ObjectPrefix, ObjectStore};
 use tokio::io::AsyncWriteExt;
 
 use crate::error::{IndexError, ObjectStoreError};
@@ -143,6 +143,33 @@ pub(crate) async fn materialize_object_to_file(
         }
         ServerObjectStore::Blackhole => Err(ServerError::NotFound),
     }
+}
+
+/// Promotes bounded bytes through a pod-local temporary file into an immutable
+/// object-store staging key below `prefix`.
+pub(crate) async fn stage_bytes_content_addressed(
+    object_store: &ServerObjectStore,
+    prefix: &str,
+    bytes: &[u8],
+) -> Result<(ObjectKey, ObjectIntegrity), ServerError> {
+    let digest = blake3::hash(bytes);
+    let key = ObjectKey::parse(&format!("{prefix}/{}", hex::encode(digest.as_bytes())))
+        .map_err(|_error| ServerError::InvalidPath)?;
+    let integrity = ObjectIntegrity::new(
+        ShardlineHash::from_bytes(*digest.as_bytes()),
+        u64::try_from(bytes.len())?,
+    );
+    let temporary = tempfile::NamedTempFile::new()?;
+    tokio::fs::write(temporary.path(), bytes).await?;
+    let store = object_store.clone();
+    let path = temporary.path().to_path_buf();
+    let durable_key = key.clone();
+    tokio::task::spawn_blocking(move || {
+        store.put_content_addressed_file(&durable_key, &path, &integrity)
+    })
+    .await
+    .map_err(|error| ServerError::Io(std::io::Error::other(error)))??;
+    Ok((key, integrity))
 }
 
 pub(crate) fn reconstruct_local_file_bytes(
