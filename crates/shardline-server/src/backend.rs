@@ -10,8 +10,8 @@ use sha2::{Digest, Sha256};
 use shardline_index::{
     CreateResumableSessionOutcome, FileRecord, OciObjectKey, OciTagEntry,
     PublishResumablePartOutcome, RepoKey, ResourceLockKey, ResumableCompletionFence,
-    ResumableSession, ResumableSessionPart, ResumableSessionState, RevisionRecord, S3ObjectEntry,
-    S3PublishCondition, TreeEntry, TreeKey,
+    ResumablePartRange, ResumableSession, ResumableSessionPart, ResumableSessionState,
+    RevisionRecord, S3ObjectEntry, S3PublishCondition, TreeEntry, TreeKey,
 };
 use shardline_protocol::{ByteRange, RepositoryScope};
 use shardline_server_core::protocol_support::protocol_object_file_id;
@@ -398,6 +398,20 @@ impl ServerBackend {
             .await?)
     }
 
+    pub(crate) async fn ensure_resumable_session_bounded(
+        &self,
+        session: &ResumableSession,
+        max_active: usize,
+    ) -> Result<CreateResumableSessionOutcome, ServerError> {
+        let Self::Postgres(backend) = self else {
+            return Err(ServerError::StaleResourceFence);
+        };
+        Ok(backend
+            .index_store()
+            .ensure_resumable_session_bounded(session, max_active)
+            .await?)
+    }
+
     pub(crate) async fn resumable_session_by_id(
         &self,
         session_id: &str,
@@ -432,6 +446,7 @@ impl ServerBackend {
         staging_key: &str,
         size_bytes: u64,
         etag: Option<&str>,
+        range: Option<ResumablePartRange>,
         session_max_bytes: u64,
         aggregate_max_bytes: u64,
         max_active_parts: usize,
@@ -447,6 +462,7 @@ impl ServerBackend {
                 staging_key,
                 size_bytes,
                 etag,
+                range,
                 session_max_bytes,
                 aggregate_max_bytes,
                 max_active_parts,
