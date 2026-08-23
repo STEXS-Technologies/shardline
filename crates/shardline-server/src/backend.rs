@@ -370,7 +370,10 @@ impl ServerBackend {
 
     /// Removes S3 visibility metadata while holding the key's distributed
     /// writer lock. Postgres commits the listing row and record aliases in one
-    /// transaction; direct legacy bytes are removed only after visibility is gone.
+    /// transaction. Direct legacy bytes are removed first: if metadata removal
+    /// then fails, row-backed objects remain readable from their immutable
+    /// record, while a crash can never resurrect deleted direct bytes through
+    /// the row-absent compatibility fallback.
     pub(crate) async fn delete_s3_object_locked(
         &self,
         guard: &mut crate::maintenance_barrier::ResourceWriteGuard,
@@ -383,10 +386,18 @@ impl ServerBackend {
                 if guard.postgres_connection_mut().is_some() {
                     return Err(ServerError::StaleResourceFence);
                 }
-                let _row_deleted = self.delete_s3_object(scope_namespace, key).await?;
-                self.delete_object_if_present(object_key).await
+                let direct = self.delete_direct_object_if_present(object_key).await?;
+                let row_deleted = self.delete_s3_object(scope_namespace, key).await?;
+                let file_id = protocol_object_file_id(object_key);
+                let record_deleted = self.delete_file_reference(&file_id).await?;
+                if direct == DeleteOutcome::Deleted || row_deleted || record_deleted {
+                    Ok(DeleteOutcome::Deleted)
+                } else {
+                    Ok(DeleteOutcome::NotFound)
+                }
             }
             Self::Postgres(backend) => {
+                let direct = backend.delete_object_if_present(object_key).await?;
                 let connection = guard
                     .postgres_connection_mut()
                     .ok_or(ServerError::StaleResourceFence)?;
@@ -395,7 +406,6 @@ impl ServerBackend {
                     .record_store()
                     .delete_s3_object_on_connection(connection, scope_namespace, key, &file_id)
                     .await?;
-                let direct = backend.delete_object_if_present(object_key).await?;
                 if metadata_deleted || direct == DeleteOutcome::Deleted {
                     Ok(DeleteOutcome::Deleted)
                 } else {

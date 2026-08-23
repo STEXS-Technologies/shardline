@@ -178,8 +178,11 @@ durability guarantees:
   the chunks via the record.
 - **The S3 listing index is a derived snapshot, GC inert, and not a
   reachability source** — deletion takes the same distributed per-key fence as
-  publication and atomically removes the listing row plus visible record aliases.
-  Immutable chunks are reclaimed later by writer-excluding GC.
+  publication, removes legacy direct bytes first, then atomically removes the
+  listing row plus visible record aliases. A failed metadata transaction leaves
+  row-backed bytes readable; a crash cannot resurrect a deleted legacy object
+  through the row-absent fallback. Immutable chunks are reclaimed later by
+  writer-excluding GC.
 - **Listing nuance** — `ListObjectsV2` serves the snapshot (size/hash/mtime from
   the index row); `HeadObject`/`GetObject` always resolve through the
   authoritative `FileRecord`. A listing row can lag the record until the next

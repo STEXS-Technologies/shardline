@@ -863,9 +863,11 @@ pub(crate) async fn s3_head_object(
 
 /// `DELETE /{bucket}/{*key}` — idempotent object removal (`204`).
 ///
-/// Crash-safe ordering per the design: the listing-index row is dropped first
-/// (the snapshot is GC-inert and deleting it never touches chunks or records),
-/// then `delete_object_if_present` removes the direct object and record.
+/// Crash-safe ordering per the design: legacy direct bytes are removed first,
+/// then the listing-index row and record aliases are removed. If metadata
+/// deletion fails, row-backed objects remain readable from their immutable
+/// record. If the process dies, a removed legacy object cannot be resurrected
+/// through the row-absent compatibility fallback.
 #[tracing::instrument(skip(auth, state, headers), fields(bucket, key))]
 pub(crate) async fn s3_delete_object(
     auth: S3Repository,
