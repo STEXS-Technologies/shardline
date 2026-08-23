@@ -157,6 +157,9 @@ pub enum PostgresMetadataStoreError {
     /// Stored resumable-session data violated the typed contract.
     #[error("invalid resumable-session metadata")]
     ResumableSession(#[from] ResumableSessionError),
+    /// An S3 listing entry did not identify the record being published.
+    #[error("S3 publication entry does not match its file record")]
+    S3PublicationMismatch,
 }
 
 impl From<SqlxError> for PostgresMetadataStoreError {

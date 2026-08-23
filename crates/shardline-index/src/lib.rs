@@ -118,7 +118,7 @@ pub use resumable_session::{
     ResumableSessionAttributes, ResumableSessionError, ResumableSessionPart,
     ResumableSessionProtocol, ResumableSessionState,
 };
-pub use s3_objects::{S3ObjectEntry, S3ObjectIndexStore};
+pub use s3_objects::{S3ObjectEntry, S3ObjectIndexStore, S3PublishCondition};
 pub use store::{
     AsyncIndexStore, DedupeStore, IndexStore, IndexStoreFuture, LifecycleStore,
     ReconstructionStore, Repository,
