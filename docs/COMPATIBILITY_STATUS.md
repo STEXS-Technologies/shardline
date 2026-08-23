@@ -28,7 +28,7 @@ version.
 | S3-compatible storage | **Stable** | Checked-in object read/write/list and HTTP integration coverage |
 | Postgres metadata | **Stable** | Checked-in index, dedupe, concurrency, and operator workflow coverage |
 | SQLite metadata | **Stable** | Checked-in local single-node and operator workflow coverage |
-| Redis reconstruction cache | **Beta** | TLS and mTLS connectivity, bounded per-operation timeout, cache hit/miss paths, and corrupt-value repair from durable storage are validated; partition/restart and multi-node stampede evidence remain |
+| Redis reconstruction cache | **Beta** | TLS/mTLS connectivity, bounded per-operation timeout, corrupt-value repair, partition and kill/restart recovery, plus operation-scoped cross-replica cold-load reservations with cancellation takeover and stale-owner fencing are validated; broader production evidence remains |
 | Provider integration | **Beta** | Checked-in token issuance, webhook handling, and repository-scoped authorization coverage for GitHub, GitLab, Gitea, Codeberg, and the generic adapter |
 
 ### Tier Definitions

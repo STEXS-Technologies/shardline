@@ -3431,6 +3431,7 @@ name = "shardline-cache"
 version = "1.7.0"
 dependencies = [
  "criterion",
+ "getrandom 0.3.4",
  "hex",
  "redis",
  "rustls",
