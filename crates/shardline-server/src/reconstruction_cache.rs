@@ -128,26 +128,43 @@ impl ReconstructionCacheService {
         LoadFuture: Future<Output = Result<FileReconstructionResponse, ServerError>>,
     {
         let reservation = match self.adapter.get_or_reserve(key).await {
-            Ok(ReconstructionCacheLookup::Hit(payload))
-                if payload_within_bound(&payload)
-                    && let Ok(response) = from_slice::<FileReconstructionResponse>(&payload) =>
-            {
-                shardline_metrics::record_reconstruction_cache_hit();
-                return Ok(response);
-            }
-            Ok(ReconstructionCacheLookup::Hit(_invalid_payload)) => {
+            Ok(ReconstructionCacheLookup::Hit(payload)) if payload_within_bound(&payload) => {
+                if let Ok(response) = from_slice::<FileReconstructionResponse>(&payload) {
+                    shardline_metrics::record_reconstruction_cache_hit();
+                    return Ok(response);
+                }
                 // A cache value is never authoritative. Remove malformed or
-                // oversized data, then compete for a fenced reconstruction
+                // oversized data, and locate for a fenced reconstruction
                 // reservation instead of allowing every replica to rebuild it.
                 self.adapter.delete(key).await.ok();
                 match self.adapter.get_or_reserve(key).await {
-                    Ok(ReconstructionCacheLookup::Hit(payload))
-                        if payload_within_bound(&payload)
-                            && let Ok(response) =
-                                from_slice::<FileReconstructionResponse>(&payload) =>
+                    Ok(ReconstructionCacheLookup::Hit(refetched))
+                        if payload_within_bound(&refetched) =>
                     {
-                        shardline_metrics::record_reconstruction_cache_hit();
-                        return Ok(response);
+                        if let Ok(response) = from_slice::<FileReconstructionResponse>(&refetched) {
+                            shardline_metrics::record_reconstruction_cache_hit();
+                            return Ok(response);
+                        }
+                        None
+                    }
+                    Ok(ReconstructionCacheLookup::Reserved(reservation)) => Some(reservation),
+                    Ok(ReconstructionCacheLookup::Hit(_)) | Err(_) => None,
+                }
+            }
+            Ok(ReconstructionCacheLookup::Hit(_invalid_payload)) => {
+                // A cache entry is never authoritative. Remove malformed or
+                // oversized data, and compete for a fenced reconstruction
+                // reservation instead of allowing every replica to rebuild it.
+                self.adapter.delete(key).await.ok();
+                match self.adapter.get_or_reserve(key).await {
+                    Ok(ReconstructionCacheLookup::Hit(refetched))
+                        if payload_within_bound(&refetched) =>
+                    {
+                        if let Ok(response) = from_slice::<FileReconstructionResponse>(&refetched) {
+                            shardline_metrics::record_reconstruction_cache_hit();
+                            return Ok(response);
+                        }
+                        None
                     }
                     Ok(ReconstructionCacheLookup::Reserved(reservation)) => Some(reservation),
                     Ok(ReconstructionCacheLookup::Hit(_)) | Err(_) => None,
