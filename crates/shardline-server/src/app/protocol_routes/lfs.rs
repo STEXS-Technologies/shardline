@@ -1593,7 +1593,14 @@ async fn durable_lfs_patch_object(
             staged_integrity.length(),
             None,
             Some(published_range),
-            total,
+            // LFS PATCH permits overlapping ranges so that a later request can
+            // repair bytes written by an earlier request. The durable part map
+            // retains both immutable attempts until terminal-session GC, which
+            // means its physical byte count can legitimately exceed the final
+            // object's logical size. Bound that retained staging by the global
+            // LFS staging budget; the declared object size and every published
+            // range are validated independently above.
+            state.config.lfs_patch_total_max_bytes().get(),
             state.config.lfs_patch_total_max_bytes().get(),
             MAX_LFS_PATCH_RANGES,
         )
