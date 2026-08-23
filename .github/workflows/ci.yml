@@ -77,3 +77,32 @@ jobs:
         env:
           DATABASE_URL: postgres://shardline:shardline-dev-password@localhost:5432/shardline
         run: cargo test -p shardline --test db_migrate_e2e 2>&1
+
+  release-candidate-infrastructure:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Setup Rust CI toolchain and tools
+        uses: ./.github/actions/rust-ci-setup
+
+      - name: Install Kubernetes smoke-test tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          kubectl_version="v1.33.1"
+          kind_version="v0.29.0"
+          curl --fail --location --silent --show-error \
+            --output /usr/local/bin/kubectl \
+            "https://dl.k8s.io/release/${kubectl_version}/bin/linux/amd64/kubectl"
+          curl --fail --location --silent --show-error \
+            --output /usr/local/bin/kind \
+            "https://kind.sigs.k8s.io/dl/${kind_version}/kind-linux-amd64"
+          chmod +x /usr/local/bin/kubectl /usr/local/bin/kind
+          kubectl version --client=true
+          kind version
+
+      - name: Run release-candidate infrastructure matrix
+        run: cargo make test-infrastructure
