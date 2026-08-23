@@ -1066,7 +1066,7 @@ fn server_config_validate_runtime_requirements_rejects_ed25519_without_key() {
 }
 
 #[test]
-fn server_config_validate_runtime_requirements_rejects_conflicting_ed25519_keys() {
+fn server_config_validate_runtime_requirements_accepts_ed25519_rotation_keyring() {
     let config = ServerConfig::new(
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
         "http://localhost:8080".to_owned(),
@@ -1079,10 +1079,7 @@ fn server_config_validate_runtime_requirements_rejects_conflicting_ed25519_keys(
     .with_ed25519_public_key(vec![2_u8; 32])
     .unwrap();
 
-    assert!(matches!(
-        config.validate_runtime_requirements(),
-        Err(ServerConfigError::ConflictingEd25519Keys)
-    ));
+    assert!(config.validate_runtime_requirements().is_ok());
 }
 
 #[test]
@@ -1908,16 +1905,7 @@ fn server_config_error_display_jwks_url_must_use_https() {
 fn server_config_error_display_missing_ed25519_key() {
     let err = ServerConfigError::MissingEd25519Key;
     assert!(err.to_string().contains("ed25519 auth provider requires"));
-    assert!(err.to_string().contains("exactly one"));
-}
-
-#[test]
-fn server_config_error_display_conflicting_ed25519_keys() {
-    let err = ServerConfigError::ConflictingEd25519Keys;
-    assert_eq!(
-        err.to_string(),
-        "ed25519 private and public keys must not both be configured"
-    );
+    assert!(err.to_string().contains("at least one"));
 }
 
 #[test]

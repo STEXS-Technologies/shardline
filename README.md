@@ -34,7 +34,7 @@ frontends over the same hardened storage core.
 | SQLite metadata | **Stable** | Checked-in local single-node and operator workflow coverage |
 | Redis reconstruction cache | **Beta** | TLS/mTLS, bounded operation latency, cache hit/miss, and corrupt-value recovery are validated |
 | Provider integration (GitHub/GitLab/Gitea/Codeberg/generic) | **Beta** | Checked-in token issuance, webhook, and repository-scoped authorization coverage |
-| Ed25519 auth provider | **Experimental** | Signing/verification, CLI minting, verification-only mode, configuration, and authenticated HTTP flows have targeted tests |
+| Ed25519 auth provider | **Beta** | Signing/verification, bounded overlapping key rotation, CLI minting, verification-only mode, configuration, and authenticated HTTP flows have targeted tests |
 
 ## What it does
 

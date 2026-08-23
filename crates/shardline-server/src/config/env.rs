@@ -516,10 +516,8 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
             }
         }
         AuthProviderKind::Ed25519 => {
-            match (ed25519_private_key.is_some(), ed25519_public_key.is_some()) {
-                (false, false) => return Err(ServerConfigError::MissingEd25519Key),
-                (true, true) => return Err(ServerConfigError::ConflictingEd25519Keys),
-                (true, false) | (false, true) => {}
+            if ed25519_private_key.is_none() && ed25519_public_key.is_none() {
+                return Err(ServerConfigError::MissingEd25519Key);
             }
         }
         AuthProviderKind::Local | AuthProviderKind::Passthrough => {}
@@ -3136,18 +3134,16 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
 
     #[test]
     #[serial_test::serial]
-    fn env_ed25519_private_and_public_key_conflict_errors() {
+    fn env_ed25519_private_and_public_key_enable_rotation_overlap() {
         remove_env_var("SHARDLINE_ED25519_PRIVATE_KEY_FILE");
         remove_env_var("SHARDLINE_ED25519_PUBLIC_KEY_FILE");
         set_env_var("SHARDLINE_ED25519_PRIVATE_KEY", &hex::encode([1_u8; 32]));
         set_env_var("SHARDLINE_ED25519_PUBLIC_KEY", &hex::encode([2_u8; 32]));
         set_env_var("SHARDLINE_AUTH_PROVIDER", "ed25519");
 
-        let result = super::load_server_config_from_env();
-        assert!(matches!(
-            result,
-            Err(super::ServerConfigError::ConflictingEd25519Keys)
-        ));
+        let config = super::load_server_config_from_env().expect("rotation overlap config");
+        assert!(config.ed25519_private_key().is_some());
+        assert!(config.ed25519_public_key().is_some());
 
         remove_env_var("SHARDLINE_ED25519_PRIVATE_KEY");
         remove_env_var("SHARDLINE_ED25519_PUBLIC_KEY");
