@@ -25,8 +25,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Changed
 - E2E CI now installs checksum-pinned Git LFS 3.7.1 and Bazelisk 1.29.0,
-  pins Bazel 8.7.0, and explicitly runs the native Bazel cache flows instead
-  of silently skipping unavailable clients.
+  exercises adjacent Git LFS 3.6.1 and Bazel 8.7.0/9.2.0, and explicitly runs
+  the native Bazel cache flows instead of silently skipping unavailable clients.
 - Scaled API replicas now keep incomplete payload fragments in object storage
   and coordination in Postgres; a lock-coherent RWX volume is no longer part of
   the production topology.
