@@ -32,7 +32,7 @@ frontends over the same hardened storage core.
 | S3-compatible storage | **Stable** | Checked-in object read/write/list and HTTP integration coverage |
 | Postgres metadata | **Stable** | Checked-in index, dedupe, concurrency, and operator workflow coverage |
 | SQLite metadata | **Stable** | Checked-in local single-node and operator workflow coverage |
-| Redis reconstruction cache | **Beta** | TLS/mTLS, bounded operation latency, cache hit/miss, and corrupt-value recovery are validated |
+| Redis reconstruction cache | **Beta** | TLS/mTLS, bounded operation latency, corrupt-value recovery, and fenced cross-replica cold-load deduplication are validated |
 | Provider integration (GitHub/GitLab/Gitea/Codeberg/generic) | **Beta** | Checked-in token issuance, webhook, and repository-scoped authorization coverage |
 | Ed25519 auth provider | **Beta** | Signing/verification, bounded overlapping key rotation, CLI minting, verification-only mode, configuration, and authenticated HTTP flows have targeted tests |
 

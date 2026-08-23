@@ -22,6 +22,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
   direct-byte removal crash window.
 - GC inventory and counters for private resumable staging objects and terminal
   session metadata.
+- Operation-scoped Redis cold-load reservations with random owner tokens,
+  lease heartbeats, bounded waiter latency, and live two-replica regressions.
 
 ### Changed
 - E2E CI now installs checksum-pinned Git LFS 3.7.1 and Bazelisk 1.29.0,
@@ -35,6 +37,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
   index row in one fenced transaction.
 - S3 single and batch deletion now take the same cross-replica key fence as
   publication and atomically remove listing and visible record metadata.
+- Reconstruction-cache loaders now carry an explicit reservation newtype from
+  lookup through publish, failure cleanup, heartbeat, and cancellation.
 
 ### Fixed
 - Replaced, failed, expired, aborted, and completed resumable staging objects
@@ -43,6 +47,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 - Release tag publishing no longer reruns the separate infrastructure matrix;
   that matrix remains a pull-request gate while release publishing retains its
   contributor CI and reliability gates.
+- Redis cache publication and cleanup reject stale reservation owners with an
+  atomic compare-and-mutate script, preventing timed-out or replaced loaders
+  from overwriting or deleting a newer replica's cache state.
 
 ## [1.7.0] - 2026-08-23
 
