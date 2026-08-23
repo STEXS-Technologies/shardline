@@ -2,8 +2,8 @@
 
 ## Purpose
 
-This document defines the replacement for the shared ReadWriteMany (RWX)
-staging filesystem required by the v1.7 scaled topology. Its goal is to make
+This document defines the implemented replacement for the shared ReadWriteMany (RWX)
+staging filesystem used by the v1.7 scaled topology. It makes
 API and transfer replicas disposable: durable coordination belongs in
 Postgres, and incomplete payload bytes belong in the configured object store.
 
@@ -15,7 +15,7 @@ the failure mode being removed.
 
 The design covers incomplete, externally visible protocol operations:
 
-| Protocol | Current staging | Durable replacement |
+| Protocol | Local SQLite implementation | Postgres scaled implementation |
 | --- | --- | --- |
 | Git LFS PATCH | sparse file and range journal | immutable range fragments plus a Postgres range map |
 | OCI blob upload | body/tail files; optionally native S3 multipart | immutable append fragments or native object-store multipart state |
@@ -47,7 +47,7 @@ created_at, updated_at
 ```
 
 Each staged byte range or multipart part is written to an immutable object
-key containing its session ID, generation, and a random attempt ID. Only after
+key containing its session ID, part identity, and content hash. Only after
 the object write is known to exist does a conditional Postgres mutation make
 that object authoritative for the range/part. An object written by a losing
 attempt is unreachable garbage and is eligible for session GC.
@@ -65,23 +65,22 @@ publication path has completed.
 
 ## Fencing and ambiguous outcomes
 
-Mutating operations claim the session with a durable, monotonically advancing
-fencing epoch. The claim is short-lived and only protects metadata updates;
-it is never held while a client streams a body.
+Part publication advances a durable generation in the same transaction that swaps the
+authoritative part map. Completion claims a durable, monotonically advancing fencing
+epoch. Neither mechanism is held while a client streams a body.
 
 ```text
-writer A claims session: epoch 17
-writer A writes temporary object
-writer A loses its database connection
-writer B claims session: epoch 18
-writer A receives a delayed success response
-writer A's metadata compare-and-set(epoch 17) fails
+writer A writes immutable attempt A
+writer B writes immutable attempt B
+writer A publishes part generation 17
+writer B publishes part generation 18
+completion pins generation 18
+writer A's bytes remain unreachable garbage
 ```
 
-The same rule resolves an acknowledgement lost after a metadata commit:
-the caller reads the session row and determines whether its immutable attempt
-became authoritative before retrying. Retrying a request is therefore
-idempotent; it must never create a second visible part/range.
+The persisted part map resolves an acknowledgement lost after a metadata commit.
+Retrying the same part/range atomically replaces or converges on the authoritative
+entry and never creates partially visible content.
 
 All expiry decisions use PostgreSQL's clock in a Postgres deployment. A
 reaper first changes `active` to `expired` with a conditional update, then
@@ -136,19 +135,18 @@ reconstructs from the pinned fragments before normal LFS publication.
   single-node implementation. The Postgres scaled topology must require no
   shared filesystem.
 
-## Rollout
+## Completed rollout
 
-1. Add the Postgres schema, typed session API, database-clock expiry, and
+1. Added the Postgres schema, typed session API, database-clock expiry, and
    deterministic state-machine tests. No request path changes yet.
-2. Add object-store temporary-object primitives with streamed write/read and
+2. Added object-store temporary-object primitives with streamed write/read and
    integrity verification.
-3. Move S3 multipart first: it has discrete parts and the smallest semantic
-   gap. Exercise two replicas, takeover, response loss, abort/complete, and
+3. Moved S3 multipart first and exercised two replicas, takeover, response loss, abort/complete, and
    expiry races.
-4. Move OCI sessions, preserving native multipart when available.
-5. Move LFS PATCH ranges and their overlap/promotion rules.
-6. Remove the RWX PVC and coherent-lock requirement from scaled deployment
-   manifests and documentation only after all three paths pass the
+4. Moved OCI sessions to immutable fragments and fenced publication.
+5. Moved LFS PATCH ranges with deterministic overlap/promotion rules.
+6. Removed the RWX PVC and coherent-lock requirement from scaled deployment
+   manifests and documentation after all three paths passed the
    multi-replica fault matrix.
 
 The old and new session formats must not be mutated concurrently. During each

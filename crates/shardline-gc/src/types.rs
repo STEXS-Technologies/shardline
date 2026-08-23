@@ -176,6 +176,16 @@ pub struct LocalGcReport {
     pub eligible_oci_tombstones: u64,
     /// Number of OCI objects physically reclaimed and tombstones removed.
     pub reclaimed_oci_tombstones: u64,
+    /// Number of private resumable-session staging objects inspected.
+    pub scanned_resumable_staging_objects: u64,
+    /// Number of inspected staging objects still pinned by live sessions.
+    pub protected_resumable_staging_objects: u64,
+    /// Number of unreferenced or terminal-session staging objects removed.
+    pub reclaimed_resumable_staging_objects: u64,
+    /// Bytes reclaimed from private resumable-session staging objects.
+    pub reclaimed_resumable_staging_bytes: u64,
+    /// Number of terminal durable resumable-session rows removed.
+    pub reclaimed_resumable_sessions: u64,
 }
 
 /// One active retention-window entry after a GC run.

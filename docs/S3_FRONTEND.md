@@ -187,12 +187,11 @@ durability guarantees:
 
 ## Multi-replica consistency
 
-Multipart session metadata and incomplete parts live under `SHARDLINE_ROOT_DIR`.
-Every API replica in one writer topology must therefore mount the same filesystem at
-that path. The filesystem must support cross-node advisory locks: session accounting
-uses one global file lock and part upload/completion/abort/sweep use a per-session file
-lock. The production Kubernetes profile supplies a `ReadWriteMany` claim for this
-staging data, so a multipart request may be retried against any API replica.
+In a Postgres deployment, multipart identity, quotas, part maps, expiry, and
+completion fences are durable database state. Incomplete part bytes are immutable
+private objects in the configured object store. A multipart request may therefore be
+retried against any API replica without a shared filesystem. Local SQLite deployments
+retain bounded filesystem staging as their explicitly single-node implementation.
 
 The S3 frontend keeps a **per-key in-process lock**
 (`acquire_object_upload_lock`: a weak-valued `HashMap` of Tokio mutexes) to
