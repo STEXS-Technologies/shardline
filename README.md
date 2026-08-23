@@ -14,6 +14,10 @@ repeatedly. Use the frontend that fits your workflow: Xet, OCI, Git LFS, S3, Hug
 Hub, cache clients, or the native API—or run it standalone for your own storage needs.
 Pair it with GitHub, GitLab, or Gitea when you want repository-scoped storage.
 
+**Use only the protocols you need.** Run Shardline as a focused Xet backend, OCI
+registry, S3-compatible service, or Hugging Face backend—or compose multiple
+frontends over the same hardened storage core.
+
 ## Surface Maturity
 
 | Surface | Tier | Evidence |
@@ -36,8 +40,9 @@ Pair it with GitHub, GitLab, or Gitea when you want repository-scoped storage.
 
 - **Store and deduplicate** any binary content — datasets, model weights, build
   artifacts, media
-- **Multiple protocols** — Xet (default), Git LFS, Bazel HTTP remote cache, OCI
-  Distribution, S3, and HuggingFace Hub
+- **Composable protocol frontends** — enable only the protocols you need: Xet
+  (default), Git LFS, Bazel HTTP remote cache, OCI Distribution, S3, and
+  Hugging Face Hub
 - **HuggingFace Hub API** — drop-in alternative for `huggingface-cli` uploads and
   downloads
 - **Pluggable auth** — local HMAC, Ed25519, OIDC, JWKS, or passthrough provider adapters
