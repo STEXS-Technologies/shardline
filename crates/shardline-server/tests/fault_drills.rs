@@ -200,16 +200,27 @@ impl DrillHarness {
     }
 
     /// Simulates SIGKILL: abort the serve task (drops all in-flight
-    /// connections) and await its cancellation.
+    /// connections) and wait until it is no longer running.
     async fn kill_hard(&mut self) {
         self.graceful_shutdown = None;
         if let Some(handle) = self.handle.take() {
             handle.abort();
             let result = handle.await;
-            assert!(
-                result.is_err(),
-                "aborted server task must report cancellation"
-            );
+            // `abort` wins unless the server task has already completed at the
+            // scheduling boundary. Both results mean there is no live server
+            // task; asserting cancellation here turns a valid teardown race
+            // into a flaky GC-recovery failure.
+            match result {
+                Ok(()) => {
+                    eprintln!("kill_hard: server task completed before abort took effect");
+                }
+                Err(error) if error.is_cancelled() => {
+                    eprintln!("kill_hard: server task cancelled as expected");
+                }
+                Err(error) => {
+                    panic!("kill_hard: server task panicked: {error}");
+                }
+            }
         }
         self.base_url.clear();
     }
