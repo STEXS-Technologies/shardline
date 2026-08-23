@@ -77,8 +77,8 @@ compatibility documentation. They must not be silently omitted.
 
 | Surface | Current tier | Principal evidence still required |
 | --- | --- | --- |
-| Git LFS | Beta | platform client matrix and multi-writer evidence; retry/resume, mixed parallel operations, same-OID concurrency, and length/digest failures have checked-in coverage |
-| Bazel HTTP cache | Beta | client-version matrix and multi-replica evidence; same-digest concurrency, AC/CAS isolation, interrupted PUT, and large objects have checked-in coverage |
+| Git LFS | Beta | broader platform evidence; pinned Git LFS 3.7.1/3.6.1 client flows, Postgres cross-replica resume, retry/resume, mixed parallel operations, same-OID concurrency, and length/digest failures have checked-in coverage |
+| Bazel HTTP cache | Beta | multi-replica evidence and broader platform evidence; pinned Bazel 8.7.0/9.2.0 client flows, same-digest concurrency, AC/CAS isolation, interrupted PUT, and large objects have checked-in coverage |
 | S3 frontend | Stable | conditional writes have an adapter-level database CAS contract with concurrent SQLite and Postgres-handle evidence; unconditional overwrites remain documented last-writer-wins |
 | Hugging Face Hub API | Beta | broader client matrix and remaining semantic compatibility; tenant-bound route extraction, stale-parent rejection, Postgres cross-replica ref serialization, and delete-vs-push row locking are covered |
 | Redis reconstruction cache | Beta | partition, flush, restart, and multi-node stampede evidence; bounded timeout and corruption repair are covered |
