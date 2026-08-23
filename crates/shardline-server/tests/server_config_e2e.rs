@@ -186,6 +186,53 @@ async fn test_ed25519_public_key_verification_mode_on_authenticated_route() {
     assert_eq!(response.status(), 200);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_ed25519_rotation_accepts_old_and_new_tokens_on_authenticated_route() {
+    let tmp = TempDir::new().unwrap();
+    let old_seed = [11_u8; 32];
+    let new_seed = [12_u8; 32];
+    let old_signer = Ed25519AuthProvider::new(&old_seed).unwrap();
+    let new_signer = Ed25519AuthProvider::new(&new_seed).unwrap();
+    let old_public = ed25519_dalek::SigningKey::from_bytes(&old_seed)
+        .verifying_key()
+        .to_bytes();
+    let new_public = ed25519_dalek::SigningKey::from_bytes(&new_seed)
+        .verifying_key()
+        .to_bytes();
+    let keyring = format!("{}\n{}\n", hex::encode(old_public), hex::encode(new_public));
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        tmp.path().to_path_buf(),
+        NonZeroUsize::new(65_536).unwrap(),
+    )
+    .with_auth_provider(AuthProviderKind::Ed25519)
+    .with_ed25519_private_key(new_seed.to_vec())
+    .unwrap()
+    .with_ed25519_public_key(keyring.into_bytes())
+    .unwrap()
+    .with_reconstruction_cache_disabled();
+    let app = app::router(config).await.unwrap();
+
+    for signer in [&old_signer, &new_signer] {
+        let token = signer
+            .mint_token(&ed25519_claims(TokenScope::Read))
+            .unwrap();
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/v1/stats")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 2. Startup: invalid bind address
 // ---------------------------------------------------------------------------
