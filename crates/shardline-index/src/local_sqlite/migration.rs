@@ -133,4 +133,10 @@ pub(crate) const LOCAL_SQLITE_MIGRATIONS: [LocalSqliteMigration; 20] = [
         up_sql: include_str!("../../migrations/20260822020000_oci_object_tombstones.up.sql"),
         down_sql: include_str!("../../migrations/20260822020000_oci_object_tombstones.down.sql"),
     },
+    LocalSqliteMigration {
+        version: "20260823000000",
+        name: "resumable_sessions",
+        up_sql: include_str!("../../migrations/20260823000000_resumable_sessions.up.sql"),
+        down_sql: include_str!("../../migrations/20260823000000_resumable_sessions.down.sql"),
+    },
 ];
