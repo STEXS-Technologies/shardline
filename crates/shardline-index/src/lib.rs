@@ -114,8 +114,9 @@ pub use record::{
 };
 pub use resource_fence::{ResourceLockDomain, ResourceLockKey};
 pub use resumable_session::{
-    ResumableSession, ResumableSessionError, ResumableSessionPart, ResumableSessionProtocol,
-    ResumableSessionState,
+    CreateResumableSessionOutcome, PublishResumablePartOutcome, ResumableSession,
+    ResumableSessionAttributes, ResumableSessionError, ResumableSessionPart,
+    ResumableSessionProtocol, ResumableSessionState,
 };
 pub use s3_objects::{S3ObjectEntry, S3ObjectIndexStore};
 pub use store::{
