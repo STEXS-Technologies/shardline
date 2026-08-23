@@ -8,13 +8,15 @@ use std::{
     path::Path,
 };
 
+use futures_util::StreamExt;
 use shardline_index::{
     FileChunkRecord, FileRecord, FileRecordInvariantError, FileRecordStorageLayout,
 };
-use shardline_protocol::ByteRange;
+use shardline_protocol::{ByteRange, ShardlineHash};
 pub use shardline_server_core::ServerObjectStore;
 pub use shardline_server_core::ServerObjectStoreError;
-use shardline_storage::{ObjectKey, ObjectMetadata, ObjectPrefix, ObjectStore};
+use shardline_storage::{ObjectIntegrity, ObjectKey, ObjectMetadata, ObjectPrefix, ObjectStore};
+use tokio::io::AsyncWriteExt;
 
 use crate::error::{IndexError, ObjectStoreError};
 use crate::{
@@ -87,6 +89,87 @@ pub(crate) fn read_full_object(
     let end = length.checked_sub(1).ok_or(ServerError::Overflow)?;
     let range = ByteRange::new(0, end).map_err(|_error| ServerError::Overflow)?;
     Ok(object_store.read_range(object_key, range)?)
+}
+
+/// Streams one object into a pod-local ephemeral file without materializing it in memory.
+///
+/// The destination is never authoritative. Callers own its cleanup and must
+/// continue to validate the durable session's fenced metadata before publication.
+#[allow(dead_code)]
+pub(crate) async fn materialize_object_to_file(
+    object_store: &ServerObjectStore,
+    object_key: &ObjectKey,
+    expected_length: u64,
+    destination: &Path,
+) -> Result<(), ServerError> {
+    let mut output = tokio::fs::File::create(destination).await?;
+    match object_store {
+        ServerObjectStore::Local(store) => {
+            drop(output);
+            let source = store.path_for_key(object_key);
+            let copied = tokio::fs::copy(source, destination).await?;
+            if copied != expected_length {
+                return Err(ServerError::ObjectStore(
+                    ObjectStoreError::StoredLengthMismatch,
+                ));
+            }
+            Ok(())
+        }
+        ServerObjectStore::S3(store) if expected_length > 0 => {
+            let end = expected_length
+                .checked_sub(1)
+                .ok_or(ServerError::Overflow)?;
+            let range = ByteRange::new(0, end).map_err(|_error| ServerError::Overflow)?;
+            let mut stream = store.stream_range(object_key, range).await?;
+            let mut written = 0_u64;
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk?;
+                written = written
+                    .checked_add(u64::try_from(chunk.len())?)
+                    .ok_or(ServerError::Overflow)?;
+                output.write_all(&chunk).await?;
+            }
+            output.flush().await?;
+            if written != expected_length {
+                return Err(ServerError::ObjectStore(
+                    ObjectStoreError::StoredLengthMismatch,
+                ));
+            }
+            Ok(())
+        }
+        ServerObjectStore::S3(_store) => {
+            output.flush().await?;
+            Ok(())
+        }
+        ServerObjectStore::Blackhole => Err(ServerError::NotFound),
+    }
+}
+
+/// Promotes bounded bytes through a pod-local temporary file into an immutable
+/// object-store staging key below `prefix`.
+pub(crate) async fn stage_bytes_content_addressed(
+    object_store: &ServerObjectStore,
+    prefix: &str,
+    bytes: &[u8],
+) -> Result<(ObjectKey, ObjectIntegrity), ServerError> {
+    let digest = blake3::hash(bytes);
+    let key = ObjectKey::parse(&format!("{prefix}/{}", hex::encode(digest.as_bytes())))
+        .map_err(|_error| ServerError::InvalidPath)?;
+    let integrity = ObjectIntegrity::new(
+        ShardlineHash::from_bytes(*digest.as_bytes()),
+        u64::try_from(bytes.len())?,
+    );
+    let temporary = tempfile::NamedTempFile::new()?;
+    tokio::fs::write(temporary.path(), bytes).await?;
+    let store = object_store.clone();
+    let path = temporary.path().to_path_buf();
+    let durable_key = key.clone();
+    tokio::task::spawn_blocking(move || {
+        store.put_content_addressed_file(&durable_key, &path, &integrity)
+    })
+    .await
+    .map_err(|error| ServerError::Io(std::io::Error::other(error)))??;
+    Ok((key, integrity))
 }
 
 pub(crate) fn reconstruct_local_file_bytes(

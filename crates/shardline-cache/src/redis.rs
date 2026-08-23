@@ -1,15 +1,22 @@
-use std::{fmt, future::Future, num::NonZeroU64, time::Duration};
+use std::{
+    fmt,
+    future::Future,
+    num::NonZeroU64,
+    time::{Duration, Instant},
+};
 
 use redis::AsyncCommands;
 use shardline_protocol::SecretBytes;
 
 use crate::{
     AsyncReconstructionCache, ReconstructionCacheError, ReconstructionCacheFuture,
-    ReconstructionCacheKey,
+    ReconstructionCacheKey, ReconstructionCacheLookup, ReconstructionCacheReservation,
 };
 
 const RECONSTRUCTION_CACHE_PREFIX: &str = "shardline:reconstruction:v1";
 const DEFAULT_REDIS_OPERATION_TIMEOUT: Duration = Duration::from_secs(1);
+const REDIS_LOADING_LEASE: Duration = Duration::from_secs(30);
+const REDIS_LOADING_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 /// TLS material for a Redis connection.
 ///
@@ -233,6 +240,32 @@ impl RedisReconstructionCache {
             encode_component(key.file_id())
         )
     }
+
+    fn loading_key(redis_key: &str) -> String {
+        format!("{redis_key}:loading")
+    }
+
+    fn new_reservation_token() -> Result<String, ReconstructionCacheError> {
+        let mut bytes = [0_u8; 16];
+        getrandom::fill(&mut bytes).map_err(|_error| ReconstructionCacheError::Operation)?;
+        Ok(hex::encode(bytes))
+    }
+
+    async fn compare_delete_loading(
+        connection: &mut redis::aio::MultiplexedConnection,
+        loading_key: &str,
+        token: &str,
+    ) -> Result<bool, ReconstructionCacheError> {
+        let deleted: i64 = redis::Script::new(
+            "if redis.call('GET', KEYS[1]) == ARGV[1] then \
+             return redis.call('DEL', KEYS[1]) else return 0 end",
+        )
+        .key(loading_key)
+        .arg(token)
+        .invoke_async(connection)
+        .await?;
+        Ok(deleted > 0)
+    }
 }
 
 fn install_rustls_crypto_provider() {
@@ -261,10 +294,63 @@ impl AsyncReconstructionCache for RedisReconstructionCache {
             self.with_operation_timeout(async {
                 let mut connection = self.get_connection().await?;
                 let redis_key = Self::redis_key(key);
-                let value: Option<Vec<u8>> = connection.get(redis_key).await?;
-                Ok(value)
+                Ok(connection.get(redis_key).await?)
             })
             .await
+        })
+    }
+
+    fn get_or_reserve<'operation>(
+        &'operation self,
+        key: &'operation ReconstructionCacheKey,
+    ) -> ReconstructionCacheFuture<'operation, ReconstructionCacheLookup> {
+        Box::pin(async move {
+            let redis_key = Self::redis_key(key);
+            let loading_key = Self::loading_key(&redis_key);
+            let reservation_token = Self::new_reservation_token()?;
+            let deadline = Instant::now()
+                .checked_add(self.operation_timeout)
+                .ok_or(ReconstructionCacheError::Operation)?;
+            loop {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Err(ReconstructionCacheError::RedisTimeout);
+                }
+                let (state, payload) = tokio::time::timeout(remaining, async {
+                    let mut connection = self.get_connection().await?;
+                    let lease_millis = u64::try_from(REDIS_LOADING_LEASE.as_millis())?;
+                    let lookup: (i64, Option<Vec<u8>>) = redis::Script::new(
+                        "local value = redis.call('GET', KEYS[1]); \
+                         if value then return {1, value} end; \
+                         local acquired = redis.call('SET', KEYS[2], ARGV[1], 'NX', 'PX', ARGV[2]); \
+                         if acquired then return {2, false} else return {0, false} end",
+                    )
+                    .key(&redis_key)
+                    .key(&loading_key)
+                    .arg(&reservation_token)
+                    .arg(lease_millis)
+                    .invoke_async(&mut connection)
+                        .await?;
+                    Ok::<_, ReconstructionCacheError>(lookup)
+                })
+                .await
+                .map_err(|_elapsed| ReconstructionCacheError::RedisTimeout)??;
+                if state == 1
+                    && let Some(payload) = payload
+                {
+                    return Ok(ReconstructionCacheLookup::Hit(payload));
+                }
+                if state == 2 {
+                    return Ok(ReconstructionCacheLookup::Reserved(
+                        ReconstructionCacheReservation::distributed(reservation_token),
+                    ));
+                }
+                let remaining_before_sleep = deadline.saturating_duration_since(Instant::now());
+                if remaining_before_sleep.is_zero() {
+                    return Err(ReconstructionCacheError::RedisTimeout);
+                }
+                tokio::time::sleep(REDIS_LOADING_POLL_INTERVAL.min(remaining_before_sleep)).await;
+            }
         })
     }
 
@@ -276,11 +362,46 @@ impl AsyncReconstructionCache for RedisReconstructionCache {
         Box::pin(async move {
             self.with_operation_timeout(async {
                 let mut connection = self.get_connection().await?;
-                let redis_key = Self::redis_key(key);
                 let ttl_seconds = self.ttl_seconds.get();
                 let _: () = connection
-                    .set_ex(redis_key, payload.to_vec(), ttl_seconds)
+                    .set_ex(Self::redis_key(key), payload.to_vec(), ttl_seconds)
                     .await?;
+                Ok(())
+            })
+            .await
+        })
+    }
+
+    fn put_reserved<'operation>(
+        &'operation self,
+        key: &'operation ReconstructionCacheKey,
+        payload: &'operation [u8],
+        reservation: &'operation ReconstructionCacheReservation,
+    ) -> ReconstructionCacheFuture<'operation, ()> {
+        Box::pin(async move {
+            let Some(token) = reservation.owner_token() else {
+                return self.put(key, payload).await;
+            };
+            let redis_key = Self::redis_key(key);
+            let loading_key = Self::loading_key(&redis_key);
+            self.with_operation_timeout(async {
+                let mut connection = self.get_connection().await?;
+                let ttl_seconds = self.ttl_seconds.get();
+                let published: i64 = redis::Script::new(
+                    "if redis.call('GET', KEYS[2]) == ARGV[1] then \
+                     redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[3]); \
+                     redis.call('DEL', KEYS[2]); return 1 else return 0 end",
+                )
+                .key(&redis_key)
+                .key(&loading_key)
+                .arg(token)
+                .arg(payload)
+                .arg(ttl_seconds)
+                .invoke_async(&mut connection)
+                .await?;
+                if published == 0 {
+                    return Err(ReconstructionCacheError::LostLoadingReservation);
+                }
                 Ok(())
             })
             .await
@@ -294,12 +415,97 @@ impl AsyncReconstructionCache for RedisReconstructionCache {
         Box::pin(async move {
             self.with_operation_timeout(async {
                 let mut connection = self.get_connection().await?;
-                let redis_key = Self::redis_key(key);
-                let deleted: usize = connection.del(redis_key).await?;
+                let deleted: usize = connection.del(Self::redis_key(key)).await?;
                 Ok(deleted > 0)
             })
             .await
         })
+    }
+
+    fn delete_reserved<'operation>(
+        &'operation self,
+        key: &'operation ReconstructionCacheKey,
+        reservation: &'operation ReconstructionCacheReservation,
+    ) -> ReconstructionCacheFuture<'operation, bool> {
+        Box::pin(async move {
+            let redis_key = Self::redis_key(key);
+            let Some(token) = reservation.owner_token() else {
+                return self.delete(key).await;
+            };
+            let loading_key = Self::loading_key(&redis_key);
+            self.with_operation_timeout(async {
+                let mut connection = self.get_connection().await?;
+                let released: i64 = redis::Script::new(
+                    "if redis.call('GET', KEYS[2]) == ARGV[1] then \
+                     local deleted = redis.call('DEL', KEYS[1]); \
+                     redis.call('DEL', KEYS[2]); return deleted else return 0 end",
+                )
+                .key(&redis_key)
+                .key(&loading_key)
+                .arg(token)
+                .invoke_async(&mut connection)
+                .await?;
+                Ok(released > 0)
+            })
+            .await
+        })
+    }
+
+    fn touch_reservation<'operation>(
+        &'operation self,
+        key: &'operation ReconstructionCacheKey,
+        reservation: &'operation ReconstructionCacheReservation,
+    ) -> ReconstructionCacheFuture<'operation, bool> {
+        Box::pin(async move {
+            let Some(token) = reservation.owner_token() else {
+                return Ok(false);
+            };
+            let loading_key = Self::loading_key(&Self::redis_key(key));
+            self.with_operation_timeout(async {
+                let mut connection = self.get_connection().await?;
+                let lease_millis = u64::try_from(REDIS_LOADING_LEASE.as_millis())?;
+                let refreshed: i64 = redis::Script::new(
+                    "if redis.call('GET', KEYS[1]) == ARGV[1] then \
+                     return redis.call('PEXPIRE', KEYS[1], ARGV[2]) else return 0 end",
+                )
+                .key(loading_key)
+                .arg(token)
+                .arg(lease_millis)
+                .invoke_async(&mut connection)
+                .await?;
+                Ok(refreshed > 0)
+            })
+            .await
+        })
+    }
+
+    fn release_reservation(
+        &self,
+        key: &ReconstructionCacheKey,
+        reservation: &ReconstructionCacheReservation,
+    ) {
+        let Some(token) = reservation.owner_token().map(ToOwned::to_owned) else {
+            return;
+        };
+        let redis_key = Self::redis_key(key);
+        let loading_key = Self::loading_key(&redis_key);
+        let client = self.client.clone();
+        let operation_timeout = self.operation_timeout;
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                let release = async {
+                    let mut connection = client.get_multiplexed_async_connection().await?;
+                    let _deleted = RedisReconstructionCache::compare_delete_loading(
+                        &mut connection,
+                        &loading_key,
+                        &token,
+                    )
+                    .await?;
+                    Ok::<(), ReconstructionCacheError>(())
+                };
+                let _ignored = tokio::time::timeout(operation_timeout, release).await;
+            });
+        }
     }
 }
 

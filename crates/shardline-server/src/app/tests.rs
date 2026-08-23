@@ -701,7 +701,7 @@ async fn auth_provider_ed25519_with_public_key_only_builds_successfully() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn auth_provider_ed25519_rejects_conflicting_private_and_public_keys() {
+async fn auth_provider_ed25519_accepts_private_key_with_rotation_public_key() {
     let tmp = TempDir::new().unwrap();
     let config = ServerConfig::new(
         "127.0.0.1:0".parse().unwrap(),
@@ -717,11 +717,12 @@ async fn auth_provider_ed25519_rejects_conflicting_private_and_public_keys() {
     )
     .unwrap();
 
-    let error = router(config).await.unwrap_err();
-    assert!(matches!(
-        error,
-        ServerError::Config(ServerConfigError::ConflictingEd25519Keys)
-    ));
+    let app = router(config).await;
+    assert!(
+        app.is_ok(),
+        "rotation key ring should build: {:?}",
+        app.err()
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

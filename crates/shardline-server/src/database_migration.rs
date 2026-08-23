@@ -209,7 +209,7 @@ struct AppliedMigration {
 const MIGRATION_HISTORY_TABLE: &str = "shardline_schema_migrations";
 const MIGRATION_ADVISORY_LOCK_KEY: i64 = 0x5348_4152_444d_4701;
 
-const SHARDLINE_MIGRATIONS: [DatabaseMigration; 20] = [
+const SHARDLINE_MIGRATIONS: [DatabaseMigration; 21] = [
     DatabaseMigration {
         version: "20260417000000",
         name: "metadata_store",
@@ -333,6 +333,12 @@ const SHARDLINE_MIGRATIONS: [DatabaseMigration; 20] = [
         name: "oci_object_tombstones",
         up_sql: include_str!("../migrations/20260822020000_oci_object_tombstones.up.sql"),
         down_sql: include_str!("../migrations/20260822020000_oci_object_tombstones.down.sql"),
+    },
+    DatabaseMigration {
+        version: "20260823000000",
+        name: "resumable_sessions",
+        up_sql: include_str!("../migrations/20260823000000_resumable_sessions.up.sql"),
+        down_sql: include_str!("../migrations/20260823000000_resumable_sessions.down.sql"),
     },
 ];
 
@@ -630,7 +636,7 @@ mod tests {
 
     #[test]
     fn bundled_migrations_have_expected_count() {
-        assert_eq!(bundled_database_migrations().len(), 20);
+        assert_eq!(bundled_database_migrations().len(), 21);
     }
 
     #[test]
@@ -667,6 +673,27 @@ mod tests {
             migration
                 .down_sql
                 .contains("shardline_oci_object_tombstones")
+        );
+    }
+
+    #[test]
+    fn bundled_migrations_include_resumable_sessions() {
+        let migration = bundled_database_migrations()
+            .iter()
+            .find(|migration| migration.name == "resumable_sessions")
+            .expect("resumable session migration must be registered");
+        assert_eq!(migration.version, "20260823000000");
+        assert!(migration.up_sql.contains("shardline_resumable_sessions"));
+        assert!(
+            migration
+                .up_sql
+                .contains("shardline_resumable_session_parts")
+        );
+        assert!(migration.down_sql.contains("shardline_resumable_sessions"));
+        assert!(
+            migration
+                .down_sql
+                .contains("shardline_resumable_session_parts")
         );
     }
 

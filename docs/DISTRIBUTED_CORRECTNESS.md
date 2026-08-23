@@ -11,14 +11,10 @@ The scaled topology uses:
 
 - one shared Postgres metadata database
 - one shared S3-compatible object store
-- one shared `ReadWriteMany` API staging filesystem with cross-node advisory locks
 - any number of API and transfer replicas running the same barrier/fence-aware version
 
-Postgres, S3, and the lock-coherent RWX staging filesystem are all inside the
-distributed-correctness envelope. Shared bytes alone are insufficient: if advisory
-lock exclusion is local to each node, resumable-session accounting and finalization can
-race even though every node sees the same files. A deployment that cannot demonstrate
-cross-node lock coherence is unsupported.
+Postgres and S3 are the complete shared durable-state envelope. API and transfer roots
+are pod-local runtime state and do not require cross-node locking or shared bytes.
 
 SQLite is supported for a local deployment. Multiple local processes must share the
 same root filesystem and its advisory-lock implementation; SQLite itself still limits
@@ -32,6 +28,7 @@ write throughput, so Postgres is the production multi-replica metadata backend.
 | upload intent ID | one immutable `(object key, hash, length)` identity and monotonic lifecycle | store-level identity check and legal-state transition check |
 | S3 conditional object write | exactly one matching writer wins | metadata-row insert-if-absent or compare-and-swap; loser receives `412` |
 | S3 unconditional write | one complete version is visible, last metadata commit wins | immutable record first, atomic metadata-row swap second |
+| S3 object deletion | delete and competing publication have one cross-replica order; no listing row points at removed record metadata | per-key distributed fence plus one transaction removing listing and visible record aliases |
 | Hub ref/revision mutation | stale parent loses; delete cannot interleave with a push | SQLite transaction or Postgres repository-row lock |
 | OCI tag | one authoritative digest; a stale lock owner cannot retarget it | unique metadata key plus transactional publication on the lock-owning fenced Postgres session |
 | OCI manifest/tag/blob deletion | deletion is immediately visible without an unfenced object-store side effect | repository-scoped lock plus transactional tombstone; manifest tags are removed in the same commit |
@@ -40,9 +37,9 @@ write throughput, so Postgres is the production multi-replica metadata backend.
 | shared retention expiry | a skewed replica cannot expire a hold early using its local wall clock | Postgres-backed lifecycle repair uses PostgreSQL `clock_timestamp()` as the shared epoch authority; local deployments remain single-writer |
 | provider push/access event | independent lifecycle observations never regress each other | repository lock plus atomic monotonic state merge |
 | webhook delivery | one application per provider/repository/delivery ID | unique delivery claim, removed when application fails |
-| LFS PATCH session | ranges, quota, promotion, and sweep do not race | shared staging root, global accounting lock, striped per-OID lock |
-| OCI upload session | append/finalize/abort and quota accounting do not race | shared staging root and cross-process session lock |
-| S3 multipart session | part write, completion, abort, quota, and sweep do not race | shared staging root, global accounting lock, per-session part lock |
+| LFS PATCH session | ranges, overlap order, quota, promotion, and sweep do not race | Postgres range map and completion fence; immutable object-store fragments |
+| OCI upload session | append/finalize/abort and quota accounting do not race | Postgres part map and completion fence; immutable object-store fragments |
+| S3 multipart session | part replacement, completion, abort, quota, and sweep do not race | Postgres part map and completion fence; immutable object-store parts |
 | destructive GC | no visible writer can re-reference an object between final mark and delete | request-shared/GC-exclusive local or Postgres barrier |
 
 Unconditional last-writer-wins operations do not promise request-arrival ordering. They
@@ -83,23 +80,25 @@ request shared GC barrier
 Destructive GC takes only the exclusive GC barrier. This ordering prevents a resource
 operation and GC from forming a lock cycle.
 
-## Staging Filesystem Contract
+## Durable Resumable Sessions
 
-Resumable protocol state is intentionally bounded filesystem staging, not authoritative
-completed-object storage. Every API replica must see the same paths and advisory locks.
-The filesystem must preserve lock exclusion across nodes; a volume that merely exposes
-the same bytes without coherent locking is unsupported.
+Postgres deployments store session identity, protocol target, attributes, quotas,
+part/range maps, database-clock expiry, generation, and completion fencing in Postgres.
+Payload fragments are immutable private objects beneath `staging/resumable/` in the
+configured object store. A staged write becomes authoritative only after its part-map
+transaction commits; a losing or replaced attempt is garbage, never visible content.
 
-LFS uses 256 hashed lock stripes, bounding lock-file growth independently of the number
-of client OIDs. S3 multipart uses one lock inside each already-bounded session directory.
-Expired session sweeps take the same locks as active writers before deleting files.
+Completion advances the session fence and pins one durable part snapshot. LFS replays
+overlaps in generation order, OCI replays append parts in part-number order, and S3
+uses the exact client-selected part sequence. Publication completes before the fenced
+session changes to `completed`. Stale completion owners cannot commit the terminal
+transition.
 
-The shared POSIX lock dependency is an explicit current contract, not the desired final
-coordination boundary. A future design may move resumable-session identity, ranges,
-quota, ownership leases, and fencing into Postgres while placing staged payloads in
-object storage. That would remove RWX advisory locking from the correctness envelope.
-Until such a design is implemented and adversarially verified, operators must provide
-the staging filesystem described above.
+The exclusive GC/write barrier blocks mutating requests while session GC expires stale
+sessions using PostgreSQL's clock, protects every object referenced by a live part map,
+reclaims all other staging objects, and only then CAS-removes terminal session rows.
+Crashes at any point are retry-safe. Local SQLite deployments retain bounded local
+filesystem sessions and remain explicitly single-node.
 
 ## OCI Logical Deletion
 
@@ -114,16 +113,15 @@ consults those tombstones. Re-uploading identical content clears the tombstone u
 same repository fence. A process that loses its Postgres session therefore has no
 external destructive side effect left to race against a newer owner.
 
-The tradeoff is deliberate retention: deleted OCI bytes remain in the immutable object
-store. They are not eligible for online GC because the object store cannot validate a
-Postgres fencing epoch, and deleting a fixed digest key could race republication. Safe
-future reclamation requires generation-specific physical keys or an offline maintenance
-window that excludes every writer. This is a capacity characteristic, not a visibility
-or multi-writer correctness gap.
+Physical reclamation is performed only by GC while it owns the exclusive writer
+barrier. After the retention window expires, GC deletes the fixed digest object first
+and CAS-removes the unchanged tombstone second. A crash before tombstone removal leaves
+the object logically deleted and makes the next sweep idempotent; no publisher can race
+the physical delete because all mutations require the shared side of the same barrier.
 
 With all replicas on this fence-aware version, the shared Postgres/S3 writer topology
 has a defined correctness contract. Availability still follows the configured
-Postgres, object-store, Redis, and shared-staging dependencies.
+Postgres, object-store, and Redis dependencies.
 
 ## Mixed-Version Rule
 

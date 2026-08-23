@@ -47,4 +47,7 @@ pub use error::ReconstructionCacheError;
 pub use key::{ReconstructionCacheKey, RepositoryScopeCacheKey};
 pub use memory::MemoryReconstructionCache;
 pub use redis::{RedisReconstructionCache, RedisTlsConfig};
-pub use store::{AsyncReconstructionCache, ReconstructionCacheFuture};
+pub use store::{
+    AsyncReconstructionCache, ReconstructionCacheFuture, ReconstructionCacheLookup,
+    ReconstructionCacheReservation,
+};

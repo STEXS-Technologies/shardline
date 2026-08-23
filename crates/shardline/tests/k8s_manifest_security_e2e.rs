@@ -13,6 +13,8 @@ fn production_api_manifest_pins_secret_volume_permissions() {
     assert!(manifest.contains("SHARDLINE_S3_SECRET_ACCESS_KEY_FILE"));
     assert!(!manifest.contains("SHARDLINE_S3_ACCESS_KEY_ID\n"));
     assert!(!manifest.contains("SHARDLINE_S3_SECRET_ACCESS_KEY\n"));
+    assert!(manifest.contains("- name: root\n          emptyDir: {}"));
+    assert!(!manifest.contains("persistentVolumeClaim:"));
 }
 
 #[test]
@@ -65,6 +67,7 @@ fn production_scaled_profile_keeps_role_disruption_budgets_and_autoscalers() {
 #[test]
 fn production_scaled_profile_keeps_default_deny_and_explicit_ingress_routes() {
     let kustomization = read_manifest("docs/k8s/production-scaled/kustomization.yaml");
+    assert!(!kustomization.contains("api-staging-pvc.yaml"));
     for resource in [
         "networkpolicy-default-deny-ingress.yaml",
         "networkpolicy-allow-ingress-nginx.yaml",

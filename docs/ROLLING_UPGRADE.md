@@ -61,6 +61,14 @@ API replicas run the new version; this avoids two software versions using differ
 authoritative tag-pointer stores or bypassing repository-scoped locks during the brief
 mixed-version window.
 
+The durable resumable-session migration is also additive, but session formats are not
+shared across versions. Before replacing the API class, stop admitting new Git LFS
+PATCH, OCI blob-upload, and S3 multipart sessions to the old replicas and allow their
+in-flight sessions to finish or expire. Keep the legacy RWX mount attached only while
+old API replicas remain. New replicas persist new sessions in Postgres/object storage;
+after every API replica is upgraded and legacy sessions are drained, the RWX claim can
+be removed permanently. Do not route one legacy session between old and new replicas.
+
 Suspend destructive GC (`--mark` and/or `--sweep`) for the entire mixed-version
 rollout. The new release coordinates GC against writers with a shared/exclusive
 barrier, but an older server does not participate in that barrier. Dry-run GC remains
