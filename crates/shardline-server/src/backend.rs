@@ -8,7 +8,7 @@ use axum::body::Bytes;
 use sha2::{Digest, Sha256};
 use shardline_index::{
     FileRecord, OciObjectKey, OciTagEntry, RepoKey, ResourceLockKey, RevisionRecord, S3ObjectEntry,
-    TreeEntry, TreeKey,
+    S3PublishCondition, TreeEntry, TreeKey,
 };
 use shardline_protocol::{ByteRange, RepositoryScope};
 use shardline_server_core::protocol_support::protocol_object_file_id;
@@ -61,6 +61,12 @@ pub(crate) struct S3ObjectReadSnapshot {
     /// listing-index row (e.g. the row-absent GET fallback): there is then no
     /// row metadata to pair.
     pub user_metadata: Vec<(String, String)>,
+}
+
+/// Immutable CAS preparation awaiting an atomic S3 metadata publication.
+pub(crate) struct PreparedS3Object {
+    pub record: FileRecord,
+    pub response: UploadFileResponse,
 }
 
 /// Outcome of registering a path mapping.
@@ -310,6 +316,52 @@ impl ServerBackend {
             Self::Local(backend) => backend.upload_file_stream(&file_id, body, None, None).await,
             Self::Postgres(backend) => backend.upload_file_stream(&file_id, body, None, None).await,
         }
+    }
+
+    /// Streams an S3 body into immutable CAS data without publishing metadata.
+    ///
+    /// This operation is available for Postgres deployments, where the caller
+    /// subsequently publishes the file record and S3 listing row atomically on
+    /// the resource-lock connection.
+    pub(crate) async fn prepare_s3_object_stream(
+        &self,
+        object_key: &ObjectKey,
+        body: RequestBodyReader,
+    ) -> Result<PreparedS3Object, ServerError> {
+        let file_id = protocol_object_file_id(object_key);
+        let Self::Postgres(backend) = self else {
+            return Err(ServerError::StaleResourceFence);
+        };
+        let (record, response) = backend.prepare_file_stream(&file_id, body, None).await?;
+        Ok(PreparedS3Object { record, response })
+    }
+
+    /// Atomically makes a prepared S3 object visible through its lock-owning
+    /// Postgres connection.
+    pub(crate) async fn publish_s3_object_locked(
+        &self,
+        guard: &mut crate::maintenance_barrier::ResourceWriteGuard,
+        prepared: &PreparedS3Object,
+        entry: &S3ObjectEntry,
+        condition: &S3PublishCondition,
+    ) -> Result<bool, ServerError> {
+        let Self::Postgres(backend) = self else {
+            return Err(ServerError::StaleResourceFence);
+        };
+        let connection = guard
+            .postgres_connection_mut()
+            .ok_or(ServerError::StaleResourceFence)?;
+        let published = backend
+            .record_store()
+            .publish_s3_object_on_connection(connection, &prepared.record, entry, condition)
+            .await?;
+        Ok(published)
+    }
+
+    /// True when metadata publication can use a Postgres fencing connection.
+    #[must_use]
+    pub(crate) const fn supports_fenced_s3_publication(&self) -> bool {
+        matches!(self, Self::Postgres(_))
     }
 
     /// Loads the authoritative file-version record for a protocol object's
