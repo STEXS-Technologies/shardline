@@ -2,6 +2,35 @@ use std::{num::NonZeroU64, time::Duration};
 
 use thiserror::Error;
 
+/// Validated protocol-specific metadata attached to a resumable session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResumableSessionAttributes(String);
+
+impl ResumableSessionAttributes {
+    /// Creates validated JSON metadata.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `value` is not one complete JSON value.
+    pub fn parse(value: String) -> Result<Self, ResumableSessionError> {
+        serde_json::from_str::<serde_json::Value>(&value)
+            .map_err(|error| ResumableSessionError::InvalidAttributesJson(error.to_string()))?;
+        Ok(Self(value))
+    }
+
+    /// Returns the persisted JSON text.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Default for ResumableSessionAttributes {
+    fn default() -> Self {
+        Self("{}".to_owned())
+    }
+}
+
 /// Protocol owning a durable resumable upload session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ResumableSessionProtocol {
@@ -159,6 +188,7 @@ pub struct ResumableSession {
     protocol: ResumableSessionProtocol,
     scope_namespace: String,
     target_key: String,
+    attributes: ResumableSessionAttributes,
     state: ResumableSessionState,
     generation: NonZeroU64,
     fence_epoch: NonZeroU64,
@@ -168,7 +198,8 @@ pub struct ResumableSession {
 impl ResumableSession {
     /// Creates an active generation-one session.
     #[must_use]
-    pub const fn new(
+    #[allow(clippy::missing_const_for_fn)]
+    pub fn new(
         session_id: String,
         protocol: ResumableSessionProtocol,
         scope_namespace: String,
@@ -180,6 +211,7 @@ impl ResumableSession {
             protocol,
             scope_namespace,
             target_key,
+            attributes: ResumableSessionAttributes::default(),
             state: ResumableSessionState::Active,
             generation: NonZeroU64::MIN,
             fence_epoch: NonZeroU64::MIN,
@@ -202,6 +234,23 @@ impl ResumableSession {
     #[must_use]
     pub fn target_key(&self) -> &str {
         &self.target_key
+    }
+    /// Returns protocol-specific creation metadata as validated JSON text.
+    #[must_use]
+    pub fn attributes_json(&self) -> &str {
+        self.attributes.as_str()
+    }
+    /// Attaches protocol-specific creation metadata.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the supplied value is not valid JSON.
+    pub fn with_attributes_json(
+        mut self,
+        attributes_json: String,
+    ) -> Result<Self, ResumableSessionError> {
+        self.attributes = ResumableSessionAttributes::parse(attributes_json)?;
+        Ok(self)
     }
     #[must_use]
     pub const fn state(&self) -> ResumableSessionState {
@@ -227,6 +276,7 @@ impl ResumableSession {
         protocol: ResumableSessionProtocol,
         scope_namespace: String,
         target_key: String,
+        attributes_json: String,
         state: ResumableSessionState,
         generation: u64,
         fence_epoch: u64,
@@ -237,6 +287,7 @@ impl ResumableSession {
             protocol,
             scope_namespace,
             target_key,
+            attributes: ResumableSessionAttributes::parse(attributes_json)?,
             state,
             generation: NonZeroU64::new(generation).ok_or(ResumableSessionError::ZeroGeneration)?,
             fence_epoch: NonZeroU64::new(fence_epoch)
@@ -257,6 +308,34 @@ pub enum ResumableSessionError {
     ZeroGeneration,
     #[error("resumable-session fence epoch must be positive")]
     ZeroFenceEpoch,
+    #[error("invalid resumable-session attributes JSON: {0}")]
+    InvalidAttributesJson(String),
+}
+
+/// Outcome of bounded durable-session creation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CreateResumableSessionOutcome {
+    /// The new immutable identity was inserted.
+    Created,
+    /// The opaque ID already exists.
+    AlreadyExists,
+    /// The protocol's configured active-session ceiling was reached.
+    TooManyActive,
+}
+
+/// Outcome of transactionally publishing one staged part.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PublishResumablePartOutcome {
+    /// This immutable staged object became authoritative for the part number.
+    Published(ResumableSessionPart),
+    /// The session is absent, non-active, or expired.
+    SessionUnavailable,
+    /// The replacement would exceed the configured per-session byte ceiling.
+    SessionQuotaExceeded,
+    /// The replacement would exceed the configured aggregate byte ceiling.
+    AggregateQuotaExceeded,
+    /// A new part would exceed the configured global active-part ceiling.
+    TooManyParts,
 }
 
 #[cfg(test)]
@@ -284,6 +363,27 @@ mod tests {
                 Some(protocol)
             );
         }
+    }
+
+    #[test]
+    fn attributes_reject_malformed_json() {
+        assert!(matches!(
+            ResumableSessionAttributes::parse("{not-json}".to_owned()),
+            Err(ResumableSessionError::InvalidAttributesJson(_))
+        ));
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn attributes_preserve_valid_json() {
+        let attributes = ResumableSessionAttributes::parse(
+            r#"{"bucket":"models","metadata":[["owner","alice"]]}"#.to_owned(),
+        )
+        .expect("valid attributes");
+        assert_eq!(
+            attributes.as_str(),
+            r#"{"bucket":"models","metadata":[["owner","alice"]]}"#
+        );
     }
 
     proptest! {
