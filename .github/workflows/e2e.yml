@@ -68,5 +68,23 @@ jobs:
             --test native_protocol_frontends_e2e native_bazel \
             -- --ignored --nocapture
 
+      - name: Run adjacent client compatibility
+        run: |
+          set -euo pipefail
+          git_lfs_archive="${RUNNER_TEMP}/git-lfs-linux-amd64-v3.6.1.tar.gz"
+          curl --fail --location --silent --show-error \
+            --output "${git_lfs_archive}" \
+            https://github.com/git-lfs/git-lfs/releases/download/v3.6.1/git-lfs-linux-amd64-v3.6.1.tar.gz
+          echo "2138d2e405a12f1a088272e06790b76699b79cb90d0317b77aafaf35de908d76  ${git_lfs_archive}" \
+            | sha256sum --check --strict
+          tar --extract --gzip --file "${git_lfs_archive}" --directory "${RUNNER_TEMP}"
+          sudo install --mode=0755 "${RUNNER_TEMP}/git-lfs-3.6.1/git-lfs" /usr/local/bin/git-lfs
+          git-lfs version
+          cargo test --manifest-path e2e/Cargo.toml \
+            --test native_protocol_frontends_e2e native_git_lfs -- --nocapture
+          USE_BAZEL_VERSION=9.2.0 cargo test --manifest-path e2e/Cargo.toml \
+            --test native_protocol_frontends_e2e native_bazel \
+            -- --ignored --nocapture
+
       - name: Run S3 real-client e2e tests
         run: cargo nextest run -p shardline-server --test s3_real_client_e2e --no-tests=pass
