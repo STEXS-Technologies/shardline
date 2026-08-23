@@ -138,6 +138,44 @@ pub struct ResumableSessionPart {
     staging_key: String,
     size_bytes: u64,
     etag: Option<String>,
+    range: Option<ResumablePartRange>,
+}
+
+/// Validated half-open byte range owned by a staged resumable part.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResumablePartRange {
+    start: u64,
+    end_exclusive: NonZeroU64,
+}
+
+impl ResumablePartRange {
+    /// Creates a non-empty half-open range.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ResumableSessionError::InvalidPartRange`] when the interval is
+    /// empty, reversed, or cannot represent a positive exclusive end.
+    pub fn new(start: u64, end_exclusive: u64) -> Result<Self, ResumableSessionError> {
+        let end_exclusive =
+            NonZeroU64::new(end_exclusive).ok_or(ResumableSessionError::InvalidPartRange)?;
+        if start >= end_exclusive.get() {
+            return Err(ResumableSessionError::InvalidPartRange);
+        }
+        Ok(Self {
+            start,
+            end_exclusive,
+        })
+    }
+
+    #[must_use]
+    pub const fn start(self) -> u64 {
+        self.start
+    }
+
+    #[must_use]
+    pub const fn end_exclusive(self) -> u64 {
+        self.end_exclusive.get()
+    }
 }
 
 /// Ownership token for one resumable-session completion attempt.
@@ -181,7 +219,19 @@ impl ResumableSessionPart {
             staging_key,
             size_bytes,
             etag,
+            range: None,
         }
+    }
+
+    /// Attaches an authoritative byte range to this staged part.
+    #[must_use]
+    pub const fn with_range(mut self, range: ResumablePartRange) -> Self {
+        self.range = Some(range);
+        self
+    }
+    pub(crate) const fn with_optional_range(mut self, range: Option<ResumablePartRange>) -> Self {
+        self.range = range;
+        self
     }
 
     #[must_use]
@@ -203,6 +253,10 @@ impl ResumableSessionPart {
     #[must_use]
     pub fn etag(&self) -> Option<&str> {
         self.etag.as_deref()
+    }
+    #[must_use]
+    pub const fn range(&self) -> Option<ResumablePartRange> {
+        self.range
     }
 }
 
@@ -341,6 +395,8 @@ pub enum ResumableSessionError {
     ZeroFenceEpoch,
     #[error("invalid resumable-session attributes JSON: {0}")]
     InvalidAttributesJson(String),
+    #[error("resumable-session part range must be non-empty")]
+    InvalidPartRange,
 }
 
 /// Outcome of bounded durable-session creation.
@@ -419,6 +475,23 @@ mod tests {
 
     proptest! {
         #[test]
+        fn valid_part_ranges_round_trip(
+            start in 0_u64..1_000_000,
+            length in 1_u64..1_000_000,
+        ) {
+            let Some(end) = start.checked_add(length) else {
+                prop_assert!(false, "bounded generated range overflowed");
+                return Ok(());
+            };
+            let Ok(range) = ResumablePartRange::new(start, end) else {
+                prop_assert!(false, "positive generated range was rejected");
+                return Ok(());
+            };
+            prop_assert_eq!(range.start(), start);
+            prop_assert_eq!(range.end_exclusive(), end);
+        }
+
+        #[test]
         fn terminal_states_never_transition(index in 0_usize..STATES.len()) {
             let state = *STATES.get(index).unwrap_or(&ResumableSessionState::Active);
             if state.is_terminal() {
@@ -427,5 +500,17 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn part_range_rejects_empty_and_reversed_intervals() {
+        assert_eq!(
+            ResumablePartRange::new(0, 0),
+            Err(ResumableSessionError::InvalidPartRange)
+        );
+        assert_eq!(
+            ResumablePartRange::new(2, 1),
+            Err(ResumableSessionError::InvalidPartRange)
+        );
     }
 }

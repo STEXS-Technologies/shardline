@@ -4,8 +4,9 @@ use sqlx::{Postgres, Row, Transaction};
 
 use super::{PostgresIndexStore, PostgresMetadataStoreError, i64_to_u64, u64_to_i64};
 use crate::{
-    CreateResumableSessionOutcome, PublishResumablePartOutcome, ResumableSession,
-    ResumableSessionError, ResumableSessionPart, ResumableSessionProtocol, ResumableSessionState,
+    CreateResumableSessionOutcome, PublishResumablePartOutcome, ResumablePartRange,
+    ResumableSession, ResumableSessionError, ResumableSessionPart, ResumableSessionProtocol,
+    ResumableSessionState,
 };
 
 const SESSION_ACCOUNTING_LOCK_ID: i64 = 0x5348_5244_5345_5353;
@@ -40,7 +41,7 @@ async fn parts_on_transaction(
     session_id: &str,
 ) -> Result<Vec<ResumableSessionPart>, PostgresMetadataStoreError> {
     let rows = sqlx::query(
-        "SELECT part_number, generation, staging_key, size_bytes, etag
+        "SELECT part_number, generation, staging_key, size_bytes, etag, range_start, range_end
          FROM shardline_resumable_session_parts
          WHERE session_id = $1
          ORDER BY part_number",
@@ -50,6 +51,16 @@ async fn parts_on_transaction(
     .await?;
     rows.into_iter()
         .map(|row| {
+            let range_start: Option<i64> = row.try_get("range_start")?;
+            let range_end: Option<i64> = row.try_get("range_end")?;
+            let range = match (range_start, range_end) {
+                (Some(start), Some(end)) => Some(ResumablePartRange::new(
+                    i64_to_u64(start)?,
+                    i64_to_u64(end)?,
+                )?),
+                (None, None) => None,
+                _ => return Err(ResumableSessionError::InvalidPartRange.into()),
+            };
             Ok(ResumableSessionPart::new(
                 NonZeroU64::new(i64_to_u64(row.try_get("part_number")?)?)
                     .ok_or(ResumableSessionError::ZeroGeneration)?,
@@ -58,12 +69,100 @@ async fn parts_on_transaction(
                 row.try_get("staging_key")?,
                 i64_to_u64(row.try_get("size_bytes")?)?,
                 row.try_get("etag")?,
-            ))
+            )
+            .with_optional_range(range))
         })
         .collect()
 }
 
 impl PostgresIndexStore {
+    /// Ensures a deterministic session identity is active, restarting an
+    /// expired or terminal generation after removing its old part map.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when bounds cannot be represented or Postgres rejects the transaction.
+    pub async fn ensure_resumable_session_bounded(
+        &self,
+        session: &ResumableSession,
+        max_active: usize,
+    ) -> Result<CreateResumableSessionOutcome, PostgresMetadataStoreError> {
+        let max_active = i64::try_from(max_active)
+            .map_err(|error| PostgresMetadataStoreError::IntegerOutOfRange(error.to_string()))?;
+        let expires_at = chrono::DateTime::<chrono::Utc>::from_timestamp(
+            i64::try_from(session.expires_at().as_secs()).map_err(|error| {
+                PostgresMetadataStoreError::IntegerOutOfRange(error.to_string())
+            })?,
+            0,
+        )
+        .ok_or_else(|| PostgresMetadataStoreError::IntegerOutOfRange("invalid expiry".into()))?;
+        let mut transaction = self.pool().begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(SESSION_ACCOUNTING_LOCK_ID)
+            .execute(&mut *transaction)
+            .await?;
+        let existing = sqlx::query(
+            "SELECT session_id, protocol, scope_namespace, target_key, attributes_json, state,
+                    generation, fence_epoch, expires_at,
+                    expires_at <= clock_timestamp() AS expired
+             FROM shardline_resumable_sessions WHERE session_id = $1 FOR UPDATE",
+        )
+        .bind(session.session_id())
+        .fetch_optional(&mut *transaction)
+        .await?;
+        if let Some(row) = existing {
+            let stored = session_from_row(&row)?;
+            if stored.protocol() != session.protocol()
+                || stored.scope_namespace() != session.scope_namespace()
+                || stored.target_key() != session.target_key()
+            {
+                transaction.rollback().await?;
+                return Ok(CreateResumableSessionOutcome::AlreadyExists);
+            }
+            let expired: bool = row.try_get("expired")?;
+            if !expired && !stored.state().is_terminal() {
+                transaction.rollback().await?;
+                return Ok(CreateResumableSessionOutcome::AlreadyExists);
+            }
+            let active: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM shardline_resumable_sessions
+                 WHERE protocol = $1 AND state = 'active' AND expires_at > clock_timestamp()",
+            )
+            .bind(session.protocol().as_str())
+            .fetch_one(&mut *transaction)
+            .await?;
+            if active >= max_active {
+                transaction.rollback().await?;
+                return Ok(CreateResumableSessionOutcome::TooManyActive);
+            }
+            sqlx::query("DELETE FROM shardline_resumable_session_parts WHERE session_id = $1")
+                .bind(session.session_id())
+                .execute(&mut *transaction)
+                .await?;
+            sqlx::query(
+                "UPDATE shardline_resumable_sessions
+                 SET attributes_json = $2, state = 'active', generation = generation + 1,
+                     fence_epoch = fence_epoch + 1, expires_at = $3, updated_at = now()
+                 WHERE session_id = $1",
+            )
+            .bind(session.session_id())
+            .bind(session.attributes_json())
+            .bind(expires_at)
+            .execute(&mut *transaction)
+            .await?;
+            transaction.commit().await?;
+            return Ok(CreateResumableSessionOutcome::Created);
+        }
+        transaction.rollback().await?;
+        self.create_resumable_session_bounded(
+            session,
+            usize::try_from(max_active).map_err(|error| {
+                PostgresMetadataStoreError::IntegerOutOfRange(error.to_string())
+            })?,
+        )
+        .await
+    }
+
     /// Idempotently creates a durable resumable session with immutable identity.
     ///
     /// # Errors
@@ -247,13 +346,15 @@ impl PostgresIndexStore {
         };
         sqlx::query(
             "INSERT INTO shardline_resumable_session_parts (
-                 session_id, part_number, generation, staging_key, size_bytes, etag
-             ) VALUES ($1, $2, $3, $4, $5, $6)
+                 session_id, part_number, generation, staging_key, size_bytes, etag,
+                 range_start, range_end
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
              ON CONFLICT (session_id, part_number) DO UPDATE SET
                  generation = EXCLUDED.generation,
                  staging_key = EXCLUDED.staging_key,
                  size_bytes = EXCLUDED.size_bytes,
-                 etag = EXCLUDED.etag",
+                 etag = EXCLUDED.etag, range_start = EXCLUDED.range_start,
+                 range_end = EXCLUDED.range_end",
         )
         .bind(session_id)
         .bind(u64_to_i64(part_number.get())?)
@@ -261,6 +362,8 @@ impl PostgresIndexStore {
         .bind(staging_key)
         .bind(u64_to_i64(size_bytes)?)
         .bind(etag)
+        .bind(Option::<i64>::None)
+        .bind(Option::<i64>::None)
         .execute(&mut *transaction)
         .await?;
         transaction.commit().await?;
@@ -287,6 +390,7 @@ impl PostgresIndexStore {
         staging_key: &str,
         size_bytes: u64,
         etag: Option<&str>,
+        range: Option<ResumablePartRange>,
         session_max_bytes: u64,
         aggregate_max_bytes: u64,
         max_active_parts: usize,
@@ -373,11 +477,13 @@ impl PostgresIndexStore {
         }
         sqlx::query(
             "INSERT INTO shardline_resumable_session_parts (
-                 session_id, part_number, generation, staging_key, size_bytes, etag
-             ) VALUES ($1, $2, $3, $4, $5, $6)
+                 session_id, part_number, generation, staging_key, size_bytes, etag,
+                 range_start, range_end
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
              ON CONFLICT (session_id, part_number) DO UPDATE SET
                  generation = EXCLUDED.generation, staging_key = EXCLUDED.staging_key,
-                 size_bytes = EXCLUDED.size_bytes, etag = EXCLUDED.etag",
+                 size_bytes = EXCLUDED.size_bytes, etag = EXCLUDED.etag,
+                 range_start = EXCLUDED.range_start, range_end = EXCLUDED.range_end",
         )
         .bind(session_id)
         .bind(part_number_i64)
@@ -385,6 +491,12 @@ impl PostgresIndexStore {
         .bind(staging_key)
         .bind(u64_to_i64(size_bytes)?)
         .bind(etag)
+        .bind(range.map(|value| u64_to_i64(value.start())).transpose()?)
+        .bind(
+            range
+                .map(|value| u64_to_i64(value.end_exclusive()))
+                .transpose()?,
+        )
         .execute(&mut *transaction)
         .await?;
         transaction.commit().await?;
@@ -396,7 +508,8 @@ impl PostgresIndexStore {
                 staging_key.to_owned(),
                 size_bytes,
                 etag.map(str::to_owned),
-            ),
+            )
+            .with_optional_range(range),
         ))
     }
 
@@ -571,6 +684,7 @@ mod tests {
                     "staging/first",
                     4,
                     Some("etag-1"),
+                    None,
                     5,
                     u64::MAX,
                     100_000,
@@ -592,6 +706,7 @@ mod tests {
                     NonZeroU64::new(2).unwrap(),
                     "staging/too-large",
                     2,
+                    None,
                     None,
                     5,
                     u64::MAX,
