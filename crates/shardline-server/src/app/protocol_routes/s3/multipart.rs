@@ -23,7 +23,7 @@
 //! mutations.
 
 use std::{
-    num::NonZeroUsize,
+    num::{NonZeroU64, NonZeroUsize},
     sync::{Arc, Mutex},
     time::Instant,
 };
@@ -34,19 +34,26 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use md5::{Digest, Md5};
-use shardline_index::S3ObjectEntry;
+use serde::{Deserialize, Serialize};
+use shardline_index::{
+    CreateResumableSessionOutcome, PublishResumablePartOutcome, ResourceLockKey, ResumableSession,
+    ResumableSessionProtocol, ResumableSessionState, S3ObjectEntry, S3PublishCondition,
+};
+use shardline_protocol::ShardlineHash;
 use shardline_s3_adapter::{
     CompleteMultipartUploadResult, InitiateMultipartUploadResult, S3Error, S3SessionError,
     acquire_session_part_lock, create_session, delete_session_locked, lock_session_parts,
-    lock_upload_sessions, parse_complete_multipart_parts, part_file_path, read_session,
-    store_part_locked, validate_part_quota_locked,
+    lock_upload_sessions, new_upload_id, parse_complete_multipart_parts, part_file_path,
+    read_session, store_part_locked, validate_part_quota_locked,
 };
+use shardline_storage::{ObjectIntegrity, ObjectKey};
 use tokio::io::AsyncWriteExt;
 
 use crate::{
     ServerError,
     app::AppState,
     metrics,
+    object_store::materialize_object_to_file,
     upload_ingest::{RequestBodyReader, read_body_to_bytes},
 };
 
@@ -95,6 +102,16 @@ fn store_error_to_s3(error: S3SessionError) -> S3Error {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DurableS3SessionAttributes {
+    bucket: String,
+    user_metadata: Vec<(String, String)>,
+}
+
+const fn durable_sessions_enabled(state: &AppState) -> bool {
+    state.backend.supports_fenced_s3_publication()
+}
+
 /// `POST /{bucket}/{*key}?uploads` — `CreateMultipartUpload`.
 ///
 /// Creates a disk-persisted session and responds `200` with the
@@ -107,6 +124,57 @@ pub(super) async fn s3_create_multipart_upload(
     // S3 user metadata is supplied at CreateMultipartUpload and applied to the
     // completed object.
     let user_metadata = object::capture_user_metadata(headers);
+    if durable_sessions_enabled(state) {
+        let upload_id = new_upload_id();
+        let expires_at = state
+            .backend
+            .postgres_now()
+            .await?
+            .checked_add(std::time::Duration::from_secs(
+                state.config.s3_upload_session_ttl_seconds().get(),
+            ))
+            .ok_or_else(S3Error::internal)?;
+        let attributes = serde_json::to_string(&DurableS3SessionAttributes {
+            bucket: context.bucket.clone(),
+            user_metadata,
+        })
+        .map_err(|_error| S3Error::internal())?;
+        let session = ResumableSession::new(
+            upload_id.clone(),
+            ResumableSessionProtocol::S3Multipart,
+            context.scope_namespace.clone(),
+            context.key.clone(),
+            expires_at,
+        )
+        .with_attributes_json(attributes)
+        .map_err(|_error| S3Error::internal())?;
+        match state
+            .backend
+            .create_resumable_session_bounded(
+                &session,
+                state.config.s3_upload_max_active_sessions().get(),
+            )
+            .await?
+        {
+            CreateResumableSessionOutcome::Created => {}
+            CreateResumableSessionOutcome::AlreadyExists => return Err(S3Error::internal()),
+            CreateResumableSessionOutcome::TooManyActive => {
+                return Err(S3Error::from(S3SessionError::TooManySessions));
+            }
+        }
+        let xml = InitiateMultipartUploadResult {
+            bucket: context.bucket.clone(),
+            key: context.key.clone(),
+            upload_id,
+        }
+        .to_xml();
+        return Ok((
+            StatusCode::OK,
+            [(axum::http::header::CONTENT_TYPE, s3_xml_content_type())],
+            xml,
+        )
+            .into_response());
+    }
     let upload_id = create_session(
         state.config.root_dir(),
         &context.bucket,
@@ -152,6 +220,9 @@ pub(super) async fn s3_upload_part(
     headers: &HeaderMap,
     body: Body,
 ) -> Result<Response, S3Error> {
+    if durable_sessions_enabled(state) {
+        return durable_s3_upload_part(state, context, part_number, upload_id, headers, body).await;
+    }
     let root = state.config.root_dir();
     let ttl = state.config.s3_upload_session_ttl_seconds();
     let session_quota = state.config.s3_upload_session_max_bytes();
@@ -335,6 +406,113 @@ pub(super) async fn s3_upload_part(
     Ok(response)
 }
 
+async fn durable_s3_upload_part(
+    state: &Arc<AppState>,
+    context: &S3ObjectContext<'_>,
+    part_number: u32,
+    upload_id: &str,
+    headers: &HeaderMap,
+    body: Body,
+) -> Result<Response, S3Error> {
+    let session = state
+        .backend
+        .resumable_session_by_id(upload_id)
+        .await?
+        .filter(|session| {
+            session.protocol() == ResumableSessionProtocol::S3Multipart
+                && session.state() == ResumableSessionState::Active
+                && session.scope_namespace() == context.scope_namespace
+                && session.target_key() == context.key
+        })
+        .ok_or_else(S3Error::no_such_upload)?;
+    let _session = session;
+    let max_bytes = usize::try_from(state.config.s3_max_part_bytes().get())
+        .map_err(|_error| S3Error::internal())?;
+    let max_bytes = NonZeroUsize::new(max_bytes).ok_or_else(S3Error::internal)?;
+    let mut reader = RequestBodyReader::from_body(body, max_bytes).map_err(|error| {
+        if matches!(&error, ServerError::RequestBodyTooLarge) {
+            entity_too_large()
+        } else {
+            S3Error::from(error)
+        }
+    })?;
+    if aws_chunked::is_aws_chunked(headers) {
+        let ceiling = u64::try_from(max_bytes.get()).map_err(|_error| S3Error::internal())?;
+        if aws_chunked::declared_decoded_content_length(headers).is_some_and(|len| len > ceiling) {
+            return Err(entity_too_large());
+        }
+        reader = RequestBodyReader::from_stream(aws_chunked::decode_aws_chunked(reader, ceiling));
+    }
+
+    let temporary = tempfile::NamedTempFile::new().map_err(io_to_s3)?;
+    let mut file = tokio::fs::File::from_std(temporary.reopen().map_err(io_to_s3)?);
+    let mut hasher = blake3::Hasher::new();
+    let mut size_bytes = 0_u64;
+    while let Some(chunk) = reader.next_bytes().await.map_err(S3Error::from)? {
+        size_bytes = size_bytes
+            .checked_add(u64::try_from(chunk.len()).map_err(|_error| S3Error::internal())?)
+            .ok_or_else(S3Error::internal)?;
+        hasher.update(&chunk);
+        file.write_all(&chunk).await.map_err(io_to_s3)?;
+    }
+    file.flush().await.map_err(io_to_s3)?;
+    drop(file);
+
+    let digest = hasher.finalize();
+    let staging_key = ObjectKey::parse(&format!(
+        "staging/resumable/s3/{upload_id}/{part_number}/{}",
+        hex::encode(digest.as_bytes())
+    ))
+    .map_err(|_error| S3Error::internal())?;
+    let integrity = ObjectIntegrity::new(ShardlineHash::from_bytes(*digest.as_bytes()), size_bytes);
+    let store = state.backend.object_store();
+    let path = temporary.path().to_path_buf();
+    let durable_key = staging_key.clone();
+    tokio::task::spawn_blocking(move || {
+        store.put_content_addressed_file(&durable_key, &path, &integrity)
+    })
+    .await
+    .map_err(|error| io_to_s3(std::io::Error::other(error)))?
+    .map_err(ServerError::from)?;
+
+    let part_number = NonZeroU64::new(u64::from(part_number)).ok_or_else(S3Error::invalid_part)?;
+    let etag = format!("\"{upload_id}-{}\"", part_number.get());
+    match state
+        .backend
+        .publish_resumable_part_bounded(
+            upload_id,
+            part_number,
+            staging_key.as_str(),
+            size_bytes,
+            Some(&etag),
+            state.config.s3_upload_session_max_bytes().get(),
+            state.config.s3_upload_total_max_bytes().get(),
+            state.config.s3_upload_max_active_part_files().get(),
+        )
+        .await?
+    {
+        PublishResumablePartOutcome::Published(_) => {}
+        PublishResumablePartOutcome::SessionUnavailable => {
+            return Err(S3Error::no_such_upload());
+        }
+        PublishResumablePartOutcome::SessionQuotaExceeded => {
+            return Err(S3Error::from(S3SessionError::SessionQuotaExceeded));
+        }
+        PublishResumablePartOutcome::AggregateQuotaExceeded => {
+            return Err(S3Error::from(S3SessionError::AggregateQuotaExceeded));
+        }
+        PublishResumablePartOutcome::TooManyParts => {
+            return Err(store_error_to_s3(S3SessionError::TooManyPartFiles));
+        }
+    }
+    let mut response = StatusCode::OK.into_response();
+    response.headers_mut().insert(
+        ETAG,
+        HeaderValue::from_str(&etag).map_err(|_error| S3Error::internal())?,
+    );
+    Ok(response)
+}
+
 /// `POST /{bucket}/{*key}?uploadId=U` — `CompleteMultipartUpload`.
 ///
 /// Validates the echoed part list against the session, enforces S3's 5 MiB
@@ -354,6 +532,9 @@ pub(super) async fn s3_complete_multipart_upload(
     upload_id: &str,
     body: Body,
 ) -> Result<Response, S3Error> {
+    if durable_sessions_enabled(state) {
+        return durable_s3_complete_multipart_upload(state, context, upload_id, body).await;
+    }
     let root = state.config.root_dir();
     let ttl = state.config.s3_upload_session_ttl_seconds();
 
@@ -492,6 +673,141 @@ pub(super) async fn s3_complete_multipart_upload(
         .into_response())
 }
 
+async fn durable_s3_complete_multipart_upload(
+    state: &Arc<AppState>,
+    context: &S3ObjectContext<'_>,
+    upload_id: &str,
+    body: Body,
+) -> Result<Response, S3Error> {
+    let (session, parts) = state
+        .backend
+        .begin_resumable_completion(upload_id)
+        .await?
+        .filter(|(session, _parts)| {
+            session.protocol() == ResumableSessionProtocol::S3Multipart
+                && session.scope_namespace() == context.scope_namespace
+                && session.target_key() == context.key
+        })
+        .ok_or_else(S3Error::no_such_upload)?;
+    let attributes: DurableS3SessionAttributes =
+        serde_json::from_str(session.attributes_json()).map_err(|_error| S3Error::internal())?;
+    if attributes.bucket != context.bucket {
+        return Err(S3Error::no_such_upload());
+    }
+
+    let mut request_reader =
+        RequestBodyReader::from_body(body, state.config.max_request_body_bytes())
+            .map_err(S3Error::from)?;
+    let request_bytes = read_body_to_bytes(&mut request_reader)
+        .await
+        .map_err(S3Error::from)?;
+    let request_text =
+        std::str::from_utf8(&request_bytes).map_err(|_error| S3Error::invalid_part())?;
+    let requested = parse_complete_multipart_parts(request_text)?;
+    let uploaded_numbers = parts
+        .iter()
+        .map(|part| u32::try_from(part.part_number().get()))
+        .collect::<Result<std::collections::BTreeSet<_>, _>>()
+        .map_err(|_error| S3Error::invalid_part())?;
+    if requested.part_numbers() != &uploaded_numbers {
+        return Err(S3Error::invalid_part());
+    }
+    let Some(last_part) = parts.last() else {
+        return Err(S3Error::invalid_part());
+    };
+    for part in &parts {
+        if part.part_number() != last_part.part_number()
+            && part.size_bytes() < state.config.s3_min_part_bytes().get()
+        {
+            return Err(S3Error::entity_too_small());
+        }
+    }
+
+    let temporary = tempfile::tempdir().map_err(io_to_s3)?;
+    let mut files = Vec::with_capacity(parts.len());
+    for part in &parts {
+        let key = ObjectKey::parse(part.staging_key()).map_err(|_error| S3Error::internal())?;
+        let destination = temporary
+            .path()
+            .join(format!("part-{}", part.part_number()));
+        materialize_object_to_file(
+            &state.backend.object_store(),
+            &key,
+            part.size_bytes(),
+            &destination,
+        )
+        .await?;
+        files.push(tokio::fs::File::open(destination).await.map_err(io_to_s3)?);
+    }
+    let chunk_size = state.config.chunk_size().get();
+    let hasher = Arc::new(Mutex::new(Md5::new()));
+    let reader =
+        RequestBodyReader::from_reader_chain(files, chunk_size).with_md5_tee(hasher.clone());
+
+    let object_lock = acquire_object_upload_lock(context.object_key.as_str());
+    let _object_guard = object_lock.lock().await;
+    let mut resource_guard = state
+        .backend
+        .acquire_resource_write_lock(
+            state.config.root_dir(),
+            &ResourceLockKey::s3_object(&context.scope_namespace, &context.key),
+        )
+        .await?;
+    let start = Instant::now();
+    let prepared = state
+        .backend
+        .prepare_s3_object_stream(&context.object_key, reader)
+        .await?;
+    metrics::record_upload(
+        "s3",
+        prepared.response.total_bytes,
+        start.elapsed().as_secs_f64(),
+        true,
+    );
+    let etag = object::md5_hasher_hex(&hasher);
+    let now = i64::try_from(shardline_protocol::unix_now_seconds_lossy())
+        .map_err(|_error| S3Error::internal())?;
+    let entry = S3ObjectEntry {
+        scope_namespace: context.scope_namespace.clone(),
+        object_key: context.key.clone(),
+        file_id: prepared.response.file_id.clone(),
+        size_bytes: prepared.response.total_bytes,
+        content_hash: prepared.response.content_hash.clone(),
+        etag: etag.clone(),
+        user_metadata: attributes.user_metadata,
+        updated_at_unix_seconds: now,
+    };
+    let published = state
+        .backend
+        .publish_s3_object_locked(
+            &mut resource_guard,
+            &prepared,
+            &entry,
+            &S3PublishCondition::Unconditional,
+            Some(&session.completion_fence()),
+        )
+        .await?;
+    if !published {
+        return Err(S3Error::no_such_upload());
+    }
+    let _stale_direct = state
+        .backend
+        .delete_direct_object_if_present(&context.object_key)
+        .await?;
+    let xml = CompleteMultipartUploadResult {
+        bucket: context.bucket.clone(),
+        key: context.key.clone(),
+        etag,
+    }
+    .to_xml();
+    Ok((
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, s3_xml_content_type())],
+        xml,
+    )
+        .into_response())
+}
+
 /// `DELETE /{bucket}/{*key}?uploadId=U` — `AbortMultipartUpload`.
 ///
 /// Removes the session directory and all part files (no object or index row
@@ -501,6 +817,35 @@ pub(super) async fn s3_abort_multipart_upload(
     context: &S3ObjectContext<'_>,
     upload_id: &str,
 ) -> Result<Response, S3Error> {
+    if durable_sessions_enabled(state) {
+        let session = state
+            .backend
+            .resumable_session_by_id(upload_id)
+            .await?
+            .filter(|session| {
+                session.protocol() == ResumableSessionProtocol::S3Multipart
+                    && matches!(
+                        session.state(),
+                        ResumableSessionState::Active | ResumableSessionState::Completing
+                    )
+                    && session.scope_namespace() == context.scope_namespace
+                    && session.target_key() == context.key
+            })
+            .ok_or_else(S3Error::no_such_upload)?;
+        if !state
+            .backend
+            .transition_resumable_session(
+                upload_id,
+                session.state(),
+                session.fence_epoch(),
+                ResumableSessionState::Aborted,
+            )
+            .await?
+        {
+            return Err(S3Error::no_such_upload());
+        }
+        return Ok(StatusCode::NO_CONTENT.into_response());
+    }
     let root = state.config.root_dir();
     let ttl = state.config.s3_upload_session_ttl_seconds();
 
