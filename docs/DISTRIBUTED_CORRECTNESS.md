@@ -95,11 +95,12 @@ of client OIDs. S3 multipart uses one lock inside each already-bounded session d
 Expired session sweeps take the same locks as active writers before deleting files.
 
 The shared POSIX lock dependency is an explicit current contract, not the desired final
-coordination boundary. A future design may move resumable-session identity, ranges,
-quota, ownership leases, and fencing into Postgres while placing staged payloads in
-object storage. That would remove RWX advisory locking from the correctness envelope.
-Until such a design is implemented and adversarially verified, operators must provide
-the staging filesystem described above.
+coordination boundary. The replacement contract is specified in
+[Resumable Session Architecture](RESUMABLE_SESSION_ARCHITECTURE.md): it moves
+resumable-session identity, ranges, quota, ownership leases, and fencing into
+Postgres while placing staged payloads in object storage. Until that design is
+implemented and adversarially verified, operators must provide the staging filesystem
+described above.
 
 ## OCI Logical Deletion
 
