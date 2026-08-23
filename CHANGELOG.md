@@ -4,6 +4,33 @@ All notable changes to Shardline are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- Durable Postgres resumable-session state for Git LFS PATCH, OCI blob uploads,
+  and S3 multipart uploads, with typed range/part maps, database-clock expiry,
+  bounded durable accounting, and fenced completion.
+- Cross-replica tests for all three resumable protocols, including out-of-order
+  and overlapping LFS ranges.
+- GC inventory and counters for private resumable staging objects and terminal
+  session metadata.
+
+### Changed
+- Scaled API replicas now keep incomplete payload fragments in object storage
+  and coordination in Postgres; a lock-coherent RWX volume is no longer part of
+  the production topology.
+- Production Kubernetes API roots are pod-local `emptyDir` volumes.
+- S3 object publication commits immutable record metadata and the visible S3
+  index row in one fenced transaction.
+
+### Fixed
+- Replaced, failed, expired, aborted, and completed resumable staging objects
+  are reclaimed under the writer-excluding GC barrier without risking live
+  session parts.
+- Release tag publishing no longer reruns the separate infrastructure matrix;
+  that matrix remains a pull-request gate while release publishing retains its
+  contributor CI and reliability gates.
+
 ## [1.7.0] - 2026-08-23
 
 Reliability release focused on distributed correctness, crash recovery, and

@@ -369,9 +369,11 @@ before useful work can begin.
 
 ## Capturing Benchmark Artifacts
 
-This repository does not currently publish a canonical benchmark result set.
-Do not compare unpublished numbers without recording the exact commit, host, backend
-topology, configuration, and raw JSON output used to produce them.
+Selected reproducible snapshots are published under
+[`docs/benchmarks/`](benchmarks/README.md), with exact commits, hosts, toolchains,
+configuration, and reproduction commands. They are evidence for regression comparison
+on equivalent hardware, not universal product claims. Do not compare any other numbers
+without recording the same provenance and raw JSON output.
 
 An isolated local run uses SQLite metadata and filesystem object storage:
 
