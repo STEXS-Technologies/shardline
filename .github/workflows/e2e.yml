@@ -24,12 +24,29 @@ jobs:
       - name: Build shardline binary
         run: cargo build --release
 
-      - name: Install real clients (mc, hf CLI, pyarrow, AWS CLI, boto3, s3cmd, rclone)
+      - name: Install real clients
         run: |
+          set -euo pipefail
           sudo curl -fsSLo /usr/local/bin/mc \
             https://dl.min.io/client/mc/release/linux-amd64/archive/mc.RELEASE.2025-08-13T08-35-41Z
           sudo chmod +x /usr/local/bin/mc
           mc --version
+          git_lfs_archive="${RUNNER_TEMP}/git-lfs-linux-amd64-v3.7.1.tar.gz"
+          curl --fail --location --silent --show-error \
+            --output "${git_lfs_archive}" \
+            https://github.com/git-lfs/git-lfs/releases/download/v3.7.1/git-lfs-linux-amd64-v3.7.1.tar.gz
+          echo "1c0b6ee5200ca708c5cebebb18fdeb0e1c98f1af5c1a9cba205a4c0ab5a5ec08  ${git_lfs_archive}" \
+            | sha256sum --check --strict
+          tar --extract --gzip --file "${git_lfs_archive}" --directory "${RUNNER_TEMP}"
+          sudo install --mode=0755 "${RUNNER_TEMP}/git-lfs-3.7.1/git-lfs" /usr/local/bin/git-lfs
+          git-lfs version
+          sudo curl --fail --location --silent --show-error \
+            --output /usr/local/bin/bazelisk \
+            https://github.com/bazelbuild/bazelisk/releases/download/v1.29.0/bazelisk-linux-amd64
+          echo "5a408715e932c0250d28bd84555f12edbf70117de42f9181691c736eacc4a992  /usr/local/bin/bazelisk" \
+            | sha256sum --check --strict
+          sudo chmod 0755 /usr/local/bin/bazelisk
+          USE_BAZEL_VERSION=8.7.0 bazelisk version
           pip3 install --break-system-packages huggingface_hub pyarrow awscli boto3 s3cmd
           hf --version
           python3 -c "import pyarrow; print('pyarrow', pyarrow.__version__)"
@@ -42,6 +59,32 @@ jobs:
 
       - name: Run e2e tests
         run: cargo make test-e2e
+
+      - name: Run native Bazel client flows
+        env:
+          USE_BAZEL_VERSION: "8.7.0"
+        run: |
+          cargo test --manifest-path e2e/Cargo.toml \
+            --test native_protocol_frontends_e2e native_bazel \
+            -- --ignored --nocapture
+
+      - name: Run adjacent client compatibility
+        run: |
+          set -euo pipefail
+          git_lfs_archive="${RUNNER_TEMP}/git-lfs-linux-amd64-v3.6.1.tar.gz"
+          curl --fail --location --silent --show-error \
+            --output "${git_lfs_archive}" \
+            https://github.com/git-lfs/git-lfs/releases/download/v3.6.1/git-lfs-linux-amd64-v3.6.1.tar.gz
+          echo "2138d2e405a12f1a088272e06790b76699b79cb90d0317b77aafaf35de908d76  ${git_lfs_archive}" \
+            | sha256sum --check --strict
+          tar --extract --gzip --file "${git_lfs_archive}" --directory "${RUNNER_TEMP}"
+          sudo install --mode=0755 "${RUNNER_TEMP}/git-lfs-3.6.1/git-lfs" /usr/local/bin/git-lfs
+          git-lfs version
+          cargo test --manifest-path e2e/Cargo.toml \
+            --test native_protocol_frontends_e2e native_git_lfs -- --nocapture
+          USE_BAZEL_VERSION=9.2.0 cargo test --manifest-path e2e/Cargo.toml \
+            --test native_protocol_frontends_e2e native_bazel \
+            -- --ignored --nocapture
 
       - name: Run S3 real-client e2e tests
         run: cargo nextest run -p shardline-server --test s3_real_client_e2e --no-tests=pass

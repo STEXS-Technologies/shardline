@@ -356,7 +356,7 @@ pub(crate) async fn bazel_head(
 
 #[cfg(test)]
 mod tests {
-    use std::{io, num::NonZeroUsize, sync::Arc};
+    use std::{io, num::NonZeroUsize, path::Path, sync::Arc};
 
     use axum::{
         Router,
@@ -418,6 +418,44 @@ mod tests {
         (state, tmp)
     }
 
+    async fn build_postgres_state(
+        database_url: &str,
+        root: &Path,
+        object_store: crate::object_store::ServerObjectStore,
+    ) -> Option<Arc<AppState>> {
+        let chunk_size = NonZeroUsize::new(65_536)?;
+        let config = ServerConfig::new(
+            "127.0.0.1:0".parse().ok()?,
+            "http://127.0.0.1:0".to_owned(),
+            root.to_path_buf(),
+            chunk_size,
+        )
+        .with_server_frontends([ServerFrontend::BazelHttp])
+        .ok()?;
+        let backend = crate::PostgresBackend::new_with_object_store(
+            root.to_path_buf(),
+            "http://127.0.0.1:0".to_owned(),
+            chunk_size,
+            database_url,
+            object_store,
+        )
+        .await
+        .ok()?;
+        Some(Arc::new(AppState {
+            config,
+            role: ServerRole::All,
+            backend: ServerBackend::Postgres(backend),
+            auth: None,
+            provider_tokens: None,
+            reconstruction_cache: ReconstructionCacheService::disabled(),
+            transfer_limiter: TransferLimiter::new(chunk_size, chunk_size),
+            oci_registry_token_limiter: Arc::new(tokio::sync::Semaphore::new(64)),
+            admission: crate::admission::WeightedAdmission::new(std::num::NonZeroUsize::new(256)?),
+            pools: crate::admission::ExecutionPools::default_sizes(),
+            protocol_metrics: ProtocolMetrics::default(),
+        }))
+    }
+
     fn bazel_router(state: Arc<AppState>) -> Router {
         Router::new()
             // AC routes
@@ -448,6 +486,109 @@ mod tests {
 
     fn test_content_hash() -> String {
         hex::encode(Sha256::digest(b"bazel-test-content"))
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn postgres_replicas_converge_for_cas_and_action_cache_writes() {
+        let Ok(database_url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let tmp = TempDir::new().unwrap();
+        let shared_objects =
+            crate::object_store::ServerObjectStore::local(tmp.path().join("objects")).unwrap();
+        let Some(node_a) = build_postgres_state(
+            &database_url,
+            &tmp.path().join("node-a"),
+            shared_objects.clone(),
+        )
+        .await
+        else {
+            return;
+        };
+        let Some(node_b) =
+            build_postgres_state(&database_url, &tmp.path().join("node-b"), shared_objects).await
+        else {
+            return;
+        };
+        let app_a = bazel_router(node_a);
+        let app_b = bazel_router(node_b);
+
+        let cas_body = b"cross-replica-cas".to_vec();
+        let cas_hash = hex::encode(Sha256::digest(&cas_body));
+        let cas_uri = format!("/v1/bazel/cache/cas/{cas_hash}");
+        let (cas_a, cas_b) = tokio::join!(
+            app_a.clone().oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(cas_uri.clone())
+                    .body(Body::from(cas_body.clone()))
+                    .unwrap()
+            ),
+            app_b.clone().oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(cas_uri.clone())
+                    .body(Body::from(cas_body.clone()))
+                    .unwrap()
+            )
+        );
+        assert_eq!(cas_a.unwrap().status(), StatusCode::NO_CONTENT);
+        assert_eq!(cas_b.unwrap().status(), StatusCode::NO_CONTENT);
+        let cas_get = app_b
+            .clone()
+            .oneshot(Request::builder().uri(cas_uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(cas_get.status(), StatusCode::OK);
+        assert_eq!(
+            axum::body::to_bytes(cas_get.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+            cas_body
+        );
+
+        let action_hash = "c".repeat(64);
+        let action_uri = format!("/v1/bazel/cache/ac/{action_hash}");
+        let body_a = b"action-result-a".to_vec();
+        let body_b = b"action-result-b".to_vec();
+        let (action_a, action_b) = tokio::join!(
+            app_a.oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(action_uri.clone())
+                    .body(Body::from(body_a.clone()))
+                    .unwrap()
+            ),
+            app_b.clone().oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(action_uri.clone())
+                    .body(Body::from(body_b.clone()))
+                    .unwrap()
+            )
+        );
+        let statuses = [action_a.unwrap().status(), action_b.unwrap().status()];
+        assert_eq!(
+            statuses
+                .iter()
+                .filter(|status| **status == StatusCode::NO_CONTENT)
+                .count(),
+            1
+        );
+        let action_get = app_b
+            .oneshot(
+                Request::builder()
+                    .uri(action_uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(action_get.status(), StatusCode::OK);
+        let visible = axum::body::to_bytes(action_get.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(visible.as_ref() == body_a || visible.as_ref() == body_b);
     }
 
     // =========================================================================

@@ -9,6 +9,8 @@ pub enum ResourceLockDomain {
     OciRepository,
     /// One source-control provider repository.
     ProviderRepository,
+    /// One S3 object key within a storage scope.
+    S3Object,
 }
 
 impl ResourceLockDomain {
@@ -18,6 +20,7 @@ impl ResourceLockDomain {
         match self {
             Self::OciRepository => "oci-repository",
             Self::ProviderRepository => "provider-repository",
+            Self::S3Object => "s3-object",
         }
     }
 }
@@ -48,6 +51,15 @@ impl ResourceLockKey {
         Self {
             domain: ResourceLockDomain::ProviderRepository,
             resource: format!("{provider}:{owner}/{repository}"),
+        }
+    }
+
+    /// Builds the rolling-upgrade-compatible identity for one S3 object.
+    #[must_use]
+    pub fn s3_object(scope_namespace: &str, object_key: &str) -> Self {
+        Self {
+            domain: ResourceLockDomain::S3Object,
+            resource: format!("{scope_namespace}:{object_key}"),
         }
     }
 
@@ -114,6 +126,18 @@ mod tests {
                     && repository_a == repository_b
             );
         }
+
+        #[test]
+        fn valid_s3_components_have_unique_canonical_keys(
+            scope_a in "[a-z0-9]{1,32}",
+            key_a in "[A-Za-z0-9_.-]{1,24}(/[A-Za-z0-9_.-]{1,24}){0,3}",
+            scope_b in "[a-z0-9]{1,32}",
+            key_b in "[A-Za-z0-9_.-]{1,24}(/[A-Za-z0-9_.-]{1,24}){0,3}",
+        ) {
+            let first = ResourceLockKey::s3_object(&scope_a, &key_a);
+            let second = ResourceLockKey::s3_object(&scope_b, &key_b);
+            prop_assert_eq!(first == second, scope_a == scope_b && key_a == key_b);
+        }
     }
 
     #[test]
@@ -121,6 +145,7 @@ mod tests {
         let values = [
             ResourceLockDomain::OciRepository,
             ResourceLockDomain::ProviderRepository,
+            ResourceLockDomain::S3Object,
         ];
         let encoded = values
             .into_iter()
@@ -138,5 +163,9 @@ mod tests {
         let provider = ResourceLockKey::provider_repository("github", "team", "assets");
         assert_eq!(provider.domain().as_str(), "provider-repository");
         assert_eq!(provider.resource(), "github:team/assets");
+
+        let s3 = ResourceLockKey::s3_object("global", "models/weights.bin");
+        assert_eq!(s3.domain().as_str(), "s3-object");
+        assert_eq!(s3.resource(), "global:models/weights.bin");
     }
 }

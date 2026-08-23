@@ -1,14 +1,17 @@
 use std::{
     io::{Error, ErrorKind},
-    num::NonZeroUsize,
+    num::{NonZeroU64, NonZeroUsize},
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use axum::body::Bytes;
 use sha2::{Digest, Sha256};
 use shardline_index::{
-    FileRecord, OciObjectKey, OciTagEntry, RepoKey, ResourceLockKey, RevisionRecord, S3ObjectEntry,
-    TreeEntry, TreeKey,
+    CreateResumableSessionOutcome, FileRecord, OciObjectKey, OciTagEntry,
+    PublishResumablePartOutcome, RepoKey, ResourceLockKey, ResumableCompletionFence,
+    ResumablePartRange, ResumableSession, ResumableSessionPart, ResumableSessionState,
+    RevisionRecord, S3ObjectEntry, S3PublishCondition, TreeEntry, TreeKey,
 };
 use shardline_protocol::{ByteRange, RepositoryScope};
 use shardline_server_core::protocol_support::protocol_object_file_id;
@@ -36,6 +39,41 @@ use crate::{
     xet_adapter::{FileReconstructionResponse, ShardUploadResponse, XorbUploadResponse},
 };
 
+#[cfg(test)]
+pub(crate) mod s3_delete_fault_injection {
+    use std::sync::{LazyLock, Mutex};
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum S3DeleteBoundary {
+        AfterDirectDelete,
+    }
+
+    static ARMED: LazyLock<Mutex<Option<(S3DeleteBoundary, String)>>> =
+        LazyLock::new(|| Mutex::new(None));
+
+    pub(crate) fn arm(boundary: S3DeleteBoundary, object_key: &str) {
+        *ARMED
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            Some((boundary, object_key.to_owned()));
+    }
+
+    pub(super) fn hit(boundary: S3DeleteBoundary, object_key: &str) -> bool {
+        let mut armed = ARMED
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if armed
+            .as_ref()
+            .is_some_and(|candidate| candidate.0 == boundary && candidate.1 == object_key)
+        {
+            *armed = None;
+            true
+        } else {
+            false
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum ServerBackend {
     Local(LocalBackend),
@@ -61,6 +99,12 @@ pub(crate) struct S3ObjectReadSnapshot {
     /// listing-index row (e.g. the row-absent GET fallback): there is then no
     /// row metadata to pair.
     pub user_metadata: Vec<(String, String)>,
+}
+
+/// Immutable CAS preparation awaiting an atomic S3 metadata publication.
+pub(crate) struct PreparedS3Object {
+    pub record: FileRecord,
+    pub response: UploadFileResponse,
 }
 
 /// Outcome of registering a path mapping.
@@ -312,6 +356,254 @@ impl ServerBackend {
         }
     }
 
+    /// Streams an S3 body into immutable CAS data without publishing metadata.
+    ///
+    /// This operation is available for Postgres deployments, where the caller
+    /// subsequently publishes the file record and S3 listing row atomically on
+    /// the resource-lock connection.
+    pub(crate) async fn prepare_s3_object_stream(
+        &self,
+        object_key: &ObjectKey,
+        body: RequestBodyReader,
+    ) -> Result<PreparedS3Object, ServerError> {
+        let file_id = protocol_object_file_id(object_key);
+        let Self::Postgres(backend) = self else {
+            return Err(ServerError::StaleResourceFence);
+        };
+        let (record, response) = backend.prepare_file_stream(&file_id, body, None).await?;
+        Ok(PreparedS3Object { record, response })
+    }
+
+    /// Atomically makes a prepared S3 object visible through its lock-owning
+    /// Postgres connection.
+    pub(crate) async fn publish_s3_object_locked(
+        &self,
+        guard: &mut crate::maintenance_barrier::ResourceWriteGuard,
+        prepared: &PreparedS3Object,
+        entry: &S3ObjectEntry,
+        condition: &S3PublishCondition,
+        completion_fence: Option<&ResumableCompletionFence>,
+    ) -> Result<bool, ServerError> {
+        let Self::Postgres(backend) = self else {
+            return Err(ServerError::StaleResourceFence);
+        };
+        let connection = guard
+            .postgres_connection_mut()
+            .ok_or(ServerError::StaleResourceFence)?;
+        let published = backend
+            .record_store()
+            .publish_s3_object_on_connection(
+                connection,
+                &prepared.record,
+                entry,
+                condition,
+                completion_fence,
+            )
+            .await?;
+        Ok(published)
+    }
+
+    /// Removes S3 visibility metadata while holding the key's distributed
+    /// writer lock. Postgres commits the listing row and record aliases in one
+    /// transaction. Direct legacy bytes are removed first: if metadata removal
+    /// then fails, row-backed objects remain readable from their immutable
+    /// record, while a crash can never resurrect deleted direct bytes through
+    /// the row-absent compatibility fallback.
+    pub(crate) async fn delete_s3_object_locked(
+        &self,
+        guard: &mut crate::maintenance_barrier::ResourceWriteGuard,
+        scope_namespace: &str,
+        key: &str,
+        object_key: &ObjectKey,
+    ) -> Result<DeleteOutcome, ServerError> {
+        match self {
+            Self::Local(_) => {
+                if guard.postgres_connection_mut().is_some() {
+                    return Err(ServerError::StaleResourceFence);
+                }
+                let direct = self.delete_direct_object_if_present(object_key).await?;
+                #[cfg(test)]
+                if s3_delete_fault_injection::hit(
+                    s3_delete_fault_injection::S3DeleteBoundary::AfterDirectDelete,
+                    object_key.as_str(),
+                ) {
+                    return Err(ServerError::Io(Error::other(
+                        "injected interruption after direct S3 object deletion",
+                    )));
+                }
+                let row_deleted = self.delete_s3_object(scope_namespace, key).await?;
+                let file_id = protocol_object_file_id(object_key);
+                let record_deleted = self.delete_file_reference(&file_id).await?;
+                if direct == DeleteOutcome::Deleted || row_deleted || record_deleted {
+                    Ok(DeleteOutcome::Deleted)
+                } else {
+                    Ok(DeleteOutcome::NotFound)
+                }
+            }
+            Self::Postgres(backend) => {
+                let direct = backend.delete_object_if_present(object_key).await?;
+                #[cfg(test)]
+                if s3_delete_fault_injection::hit(
+                    s3_delete_fault_injection::S3DeleteBoundary::AfterDirectDelete,
+                    object_key.as_str(),
+                ) {
+                    return Err(ServerError::Io(Error::other(
+                        "injected interruption after direct S3 object deletion",
+                    )));
+                }
+                let connection = guard
+                    .postgres_connection_mut()
+                    .ok_or(ServerError::StaleResourceFence)?;
+                let file_id = protocol_object_file_id(object_key);
+                let metadata_deleted = backend
+                    .record_store()
+                    .delete_s3_object_on_connection(connection, scope_namespace, key, &file_id)
+                    .await?;
+                if metadata_deleted || direct == DeleteOutcome::Deleted {
+                    Ok(DeleteOutcome::Deleted)
+                } else {
+                    Ok(DeleteOutcome::NotFound)
+                }
+            }
+        }
+    }
+
+    /// True when metadata publication can use a Postgres fencing connection.
+    #[must_use]
+    pub(crate) const fn supports_fenced_s3_publication(&self) -> bool {
+        matches!(self, Self::Postgres(_))
+    }
+
+    pub(crate) async fn postgres_now(&self) -> Result<Duration, ServerError> {
+        let Self::Postgres(backend) = self else {
+            return Err(ServerError::StaleResourceFence);
+        };
+        Ok(Duration::from_secs(
+            crate::postgres_backend::postgres_unix_now_seconds(backend.index_store().pool())
+                .await?,
+        ))
+    }
+
+    pub(crate) async fn create_resumable_session_bounded(
+        &self,
+        session: &ResumableSession,
+        max_active: usize,
+    ) -> Result<CreateResumableSessionOutcome, ServerError> {
+        let Self::Postgres(backend) = self else {
+            return Err(ServerError::StaleResourceFence);
+        };
+        Ok(backend
+            .index_store()
+            .create_resumable_session_bounded(session, max_active)
+            .await?)
+    }
+
+    pub(crate) async fn ensure_resumable_session_bounded(
+        &self,
+        session: &ResumableSession,
+        max_active: usize,
+    ) -> Result<CreateResumableSessionOutcome, ServerError> {
+        let Self::Postgres(backend) = self else {
+            return Err(ServerError::StaleResourceFence);
+        };
+        Ok(backend
+            .index_store()
+            .ensure_resumable_session_bounded(session, max_active)
+            .await?)
+    }
+
+    pub(crate) async fn resumable_session_by_id(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<ResumableSession>, ServerError> {
+        let Self::Postgres(backend) = self else {
+            return Err(ServerError::StaleResourceFence);
+        };
+        Ok(backend
+            .index_store()
+            .resumable_session_by_id(session_id)
+            .await?)
+    }
+
+    pub(crate) async fn resumable_session_snapshot(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<(ResumableSession, Vec<ResumableSessionPart>)>, ServerError> {
+        let Self::Postgres(backend) = self else {
+            return Err(ServerError::StaleResourceFence);
+        };
+        Ok(backend
+            .index_store()
+            .resumable_session_snapshot(session_id)
+            .await?)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn publish_resumable_part_bounded(
+        &self,
+        session_id: &str,
+        part_number: NonZeroU64,
+        staging_key: &str,
+        size_bytes: u64,
+        etag: Option<&str>,
+        range: Option<ResumablePartRange>,
+        session_max_bytes: u64,
+        aggregate_max_bytes: u64,
+        max_active_parts: usize,
+    ) -> Result<PublishResumablePartOutcome, ServerError> {
+        let Self::Postgres(backend) = self else {
+            return Err(ServerError::StaleResourceFence);
+        };
+        Ok(backend
+            .index_store()
+            .publish_resumable_part_bounded(
+                session_id,
+                part_number,
+                staging_key,
+                size_bytes,
+                etag,
+                range,
+                session_max_bytes,
+                aggregate_max_bytes,
+                max_active_parts,
+            )
+            .await?)
+    }
+
+    pub(crate) async fn begin_resumable_completion(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<(ResumableSession, Vec<ResumableSessionPart>)>, ServerError> {
+        let Self::Postgres(backend) = self else {
+            return Err(ServerError::StaleResourceFence);
+        };
+        Ok(backend
+            .index_store()
+            .begin_resumable_completion(session_id)
+            .await?)
+    }
+
+    pub(crate) async fn transition_resumable_session(
+        &self,
+        session_id: &str,
+        expected_state: ResumableSessionState,
+        expected_fence_epoch: NonZeroU64,
+        next_state: ResumableSessionState,
+    ) -> Result<bool, ServerError> {
+        let Self::Postgres(backend) = self else {
+            return Err(ServerError::StaleResourceFence);
+        };
+        Ok(backend
+            .index_store()
+            .transition_resumable_session(
+                session_id,
+                expected_state,
+                expected_fence_epoch,
+                next_state,
+            )
+            .await?)
+    }
+
     /// Loads the authoritative file-version record for a protocol object's
     /// deterministic file id.
     ///
@@ -538,6 +830,27 @@ impl ServerBackend {
                 Ok(())
             }
         }
+    }
+
+    /// Publishes immutable OCI bytes and completes the owning resumable
+    /// session in one fence-checked metadata transaction.
+    pub(crate) async fn publish_oci_object_completion_locked(
+        &self,
+        guard: &mut crate::maintenance_barrier::ResourceWriteGuard,
+        key: &OciObjectKey,
+        tags: &[OciTagEntry],
+        fence: &ResumableCompletionFence,
+    ) -> Result<bool, ServerError> {
+        let Self::Postgres(backend) = self else {
+            return Err(ServerError::StaleResourceFence);
+        };
+        let connection = guard
+            .postgres_connection_mut()
+            .ok_or(ServerError::StaleResourceFence)?;
+        Ok(backend
+            .index_store()
+            .publish_oci_object_completion_on_connection(connection, key, tags, fence)
+            .await?)
     }
 
     /// Commits an OCI tombstone through the lock-owning metadata session.

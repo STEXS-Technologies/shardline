@@ -515,11 +515,8 @@ pub enum ServerConfigError {
         file_env: &'static str,
     },
     /// Ed25519 auth provider requires a key.
-    #[error("ed25519 auth provider requires exactly one private or public key")]
+    #[error("ed25519 auth provider requires at least one private or public key")]
     MissingEd25519Key,
-    /// Ed25519 signing and verification-only modes were configured together.
-    #[error("ed25519 private and public keys must not both be configured")]
-    ConflictingEd25519Keys,
     /// The Ed25519 private key file could not be read.
     #[error("ed25519 private key could not be read")]
     Ed25519PrivateKey(#[source] IoError),

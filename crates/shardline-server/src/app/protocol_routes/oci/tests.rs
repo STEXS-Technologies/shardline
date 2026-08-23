@@ -4,7 +4,7 @@ use axum::{
 };
 use tower::ServiceExt;
 
-use super::test_helpers::{build_oci_test_state, oci_test_router};
+use super::test_helpers::{build_oci_postgres_test_cluster, build_oci_test_state, oci_test_router};
 
 const DIGEST: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 const REPO: &str = "team/assets";
@@ -188,6 +188,60 @@ async fn blob_upload_session_lifecycle() {
     )
     .await;
     assert_eq!(response.status(), StatusCode::CREATED);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn blob_upload_session_resumes_across_postgres_nodes_without_rwx() {
+    let Some(cluster) = build_oci_postgres_test_cluster().await else {
+        return;
+    };
+    let app_a = oci_test_router(&cluster.node_a);
+    let app_b = oci_test_router(&cluster.node_b);
+    let uri = format!("/v2/{REPO}/blobs/uploads/");
+    let response = send(&app_a, Method::POST, &uri, Body::empty()).await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let session_id = response
+        .headers()
+        .get(header::LOCATION)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .rsplit('/')
+        .next()
+        .unwrap()
+        .to_owned();
+    let upload_uri = format!("/v2/{REPO}/blobs/uploads/{session_id}");
+    assert_eq!(
+        send(&app_b, Method::PATCH, &upload_uri, Body::from("cross-"))
+            .await
+            .status(),
+        StatusCode::ACCEPTED
+    );
+    assert_eq!(
+        send(&app_a, Method::GET, &upload_uri, Body::empty())
+            .await
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+    let digest = sha256_hex(b"cross-replica");
+    let complete_uri = format!("{upload_uri}?digest=sha256:{digest}");
+    assert_eq!(
+        send(&app_b, Method::PUT, &complete_uri, Body::from("replica"))
+            .await
+            .status(),
+        StatusCode::CREATED
+    );
+    assert_eq!(
+        send(
+            &app_a,
+            Method::GET,
+            &format!("/v2/{REPO}/blobs/sha256:{digest}"),
+            Body::empty(),
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

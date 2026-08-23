@@ -20,6 +20,7 @@
 
 use std::{
     num::{NonZeroU64, NonZeroUsize},
+    path::Path,
     sync::Arc,
 };
 
@@ -64,6 +65,63 @@ async fn build_test_state() -> (Arc<AppState>, TempDir) {
         NonZeroU64::new(1 << 40).unwrap(),
     )
     .await
+}
+
+/// Builds the same S3 router over Postgres metadata so multipart uses the
+/// durable object-store session path. Returns `None` outside the Postgres CI job.
+async fn build_postgres_test_state() -> Option<(Arc<AppState>, TempDir)> {
+    let database_url = std::env::var("DATABASE_URL").ok()?;
+    let tmp = TempDir::new().ok()?;
+    let object_store =
+        crate::object_store::ServerObjectStore::local(tmp.path().join("objects")).ok()?;
+    let state = build_postgres_state(&database_url, tmp.path(), object_store).await?;
+    Some((state, tmp))
+}
+
+async fn build_postgres_state(
+    database_url: &str,
+    root: &Path,
+    object_store: crate::object_store::ServerObjectStore,
+) -> Option<Arc<AppState>> {
+    let chunk_size = NonZeroUsize::new(65_536)?;
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().ok()?,
+        "http://127.0.0.1:8080".to_owned(),
+        root.to_path_buf(),
+        chunk_size,
+    )
+    .with_server_frontends([ServerFrontend::S3])
+    .ok()?
+    .with_token_signing_key(TEST_SIGNING_KEY.to_vec())
+    .ok()?
+    .with_s3_max_part_bytes(NonZeroU64::new(1_048_576)?)
+    .ok()?
+    .with_s3_min_part_bytes(NonZeroU64::MIN)
+    .ok()?;
+    let backend = crate::PostgresBackend::new_with_object_store(
+        root.to_path_buf(),
+        "http://127.0.0.1:8080".to_owned(),
+        chunk_size,
+        database_url,
+        object_store,
+    )
+    .await
+    .ok()?;
+    let auth = crate::auth::ServerAuth::new(TEST_SIGNING_KEY).ok()?;
+    let state = Arc::new(AppState {
+        config,
+        role: ServerRole::All,
+        backend: crate::ServerBackend::Postgres(backend),
+        auth: Some(auth),
+        provider_tokens: None,
+        reconstruction_cache: ReconstructionCacheService::disabled(),
+        transfer_limiter: TransferLimiter::new(chunk_size, NonZeroUsize::new(64)?),
+        oci_registry_token_limiter: Arc::new(tokio::sync::Semaphore::new(64)),
+        admission: crate::admission::WeightedAdmission::new(NonZeroUsize::new(256)?),
+        pools: crate::admission::ExecutionPools::default_sizes(),
+        protocol_metrics: ProtocolMetrics::default(),
+    });
+    Some(state)
 }
 
 /// Like [`build_test_state`] but with an explicit S3 minimum part size and
@@ -821,6 +879,74 @@ async fn s3_delete_object_is_idempotent() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_delete_interruption_cannot_resurrect_legacy_direct_bytes() {
+    let (state, _tmp) = build_test_state().await;
+    let repository = RepositoryScope::new(RepositoryProvider::Generic, OWNER, NAME, None).unwrap();
+    let namespace = crate::protocol_support::scope_namespace(Some(&repository));
+    let key = "legacy/crash-window.bin";
+    let object_key = shardline_s3_adapter::s3_object_key(&namespace, key).unwrap();
+    state
+        .backend
+        .put_object_bytes_overwrite(&object_key, b"legacy-direct".to_vec())
+        .await
+        .unwrap();
+    crate::backend::s3_delete_fault_injection::arm(
+        crate::backend::s3_delete_fault_injection::S3DeleteBoundary::AfterDirectDelete,
+        object_key.as_str(),
+    );
+    let app = s3_router(state);
+    let uri = format!("/{BUCKET}/{key}");
+    let interrupted = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(uri.clone())
+                .header(
+                    header::AUTHORIZATION,
+                    sigv4_auth(&mint_token(TokenScope::Write, OWNER, NAME)),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(interrupted.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+    let get = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(uri.clone())
+                .header(
+                    header::AUTHORIZATION,
+                    sigv4_auth(&mint_token(TokenScope::Read, OWNER, NAME)),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get.status(), StatusCode::NOT_FOUND);
+
+    let retry = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(uri)
+                .header(
+                    header::AUTHORIZATION,
+                    sigv4_auth(&mint_token(TokenScope::Write, OWNER, NAME)),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(retry.status(), StatusCode::NO_CONTENT);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn s3_post_without_sub_resource_returns_501_not_implemented() {
     let (state, _tmp) = build_test_state().await;
     let app = s3_router(state);
@@ -1166,6 +1292,193 @@ async fn s3_multipart_roundtrip_assembles_parts_and_ranges() {
         .unwrap();
     assert_eq!(range.status(), StatusCode::PARTIAL_CONTENT);
     assert_eq!(body_bytes(range).await, &part2[0..4]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_postgres_multipart_survives_without_shared_session_files() {
+    let Some((state, tmp)) = build_postgres_test_state().await else {
+        return;
+    };
+    let app = s3_router(state);
+    let upload_id = create_upload_id(&app).await;
+    let part1 = b"durable-".to_vec();
+    let part2 = b"multipart".to_vec();
+    assert_eq!(
+        upload_part(&app, &upload_id, 1, &part1).await.status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        upload_part(&app, &upload_id, 2, &part2).await.status(),
+        StatusCode::OK
+    );
+    assert!(
+        !tmp.path().join("s3-multipart").exists(),
+        "Postgres multipart must not create shared session directories"
+    );
+    let complete = complete_upload(&app, &upload_id, complete_body(&upload_id, &[1, 2])).await;
+    assert_eq!(complete.status(), StatusCode::OK);
+    let get = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/{BUCKET}/{KEY}"))
+                .header(
+                    header::AUTHORIZATION,
+                    sigv4_auth(&mint_token(TokenScope::Read, OWNER, NAME)),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get.status(), StatusCode::OK);
+    assert_eq!(body_bytes(get).await, b"durable-multipart");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s3_postgres_multipart_resumes_across_nodes_without_shared_rwx() {
+    let Ok(database_url) = std::env::var("DATABASE_URL") else {
+        return;
+    };
+    let tmp = TempDir::new().unwrap();
+    let shared_objects =
+        crate::object_store::ServerObjectStore::local(tmp.path().join("objects")).unwrap();
+    let node_a_root = tmp.path().join("node-a");
+    let node_b_root = tmp.path().join("node-b");
+    let Some(node_a) =
+        build_postgres_state(&database_url, &node_a_root, shared_objects.clone()).await
+    else {
+        return;
+    };
+    let Some(node_b) = build_postgres_state(&database_url, &node_b_root, shared_objects).await
+    else {
+        return;
+    };
+    let app_a = s3_router(node_a);
+    let app_b = s3_router(node_b);
+
+    let upload_id = create_upload_id(&app_a).await;
+    assert_eq!(
+        upload_part(&app_b, &upload_id, 1, b"cross-").await.status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        upload_part(&app_a, &upload_id, 2, b"replica")
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    let complete = complete_upload(&app_b, &upload_id, complete_body(&upload_id, &[1, 2])).await;
+    assert_eq!(complete.status(), StatusCode::OK);
+    assert!(!node_a_root.join("s3-multipart").exists());
+    assert!(!node_b_root.join("s3-multipart").exists());
+
+    let get = app_a
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/{BUCKET}/{KEY}"))
+                .header(
+                    header::AUTHORIZATION,
+                    sigv4_auth(&mint_token(TokenScope::Read, OWNER, NAME)),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get.status(), StatusCode::OK);
+    assert_eq!(body_bytes(get).await, b"cross-replica");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s3_postgres_delete_and_put_are_one_cross_replica_order() {
+    let Ok(database_url) = std::env::var("DATABASE_URL") else {
+        return;
+    };
+    let tmp = TempDir::new().unwrap();
+    let shared_objects =
+        crate::object_store::ServerObjectStore::local(tmp.path().join("objects")).unwrap();
+    let Some(node_a) = build_postgres_state(
+        &database_url,
+        &tmp.path().join("node-a"),
+        shared_objects.clone(),
+    )
+    .await
+    else {
+        return;
+    };
+    let Some(node_b) =
+        build_postgres_state(&database_url, &tmp.path().join("node-b"), shared_objects).await
+    else {
+        return;
+    };
+    let app_a = s3_router(node_a);
+    let app_b = s3_router(node_b);
+    let suffix = hex::encode(blake3::hash(tmp.path().as_os_str().as_encoded_bytes()).as_bytes());
+    let key = format!("race/{suffix}.bin");
+    let uri = format!("/{BUCKET}/{key}");
+    assert_eq!(
+        app_a
+            .clone()
+            .oneshot(put_request(uri.clone(), b"old".to_vec()))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+
+    let put = tokio::spawn({
+        let app = app_a.clone();
+        let uri = uri.clone();
+        async move {
+            app.oneshot(put_request(uri, b"new-cross-replica-value".to_vec()))
+                .await
+                .unwrap()
+        }
+    });
+    let delete = tokio::spawn({
+        let app = app_b.clone();
+        let uri = uri.clone();
+        async move {
+            app.oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(uri)
+                    .header(
+                        header::AUTHORIZATION,
+                        sigv4_auth(&mint_token(TokenScope::Write, OWNER, NAME)),
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+        }
+    });
+    let (put, delete) = tokio::join!(put, delete);
+    assert_eq!(put.unwrap().status(), StatusCode::OK);
+    assert_eq!(delete.unwrap().status(), StatusCode::NO_CONTENT);
+
+    let get = app_b
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(uri)
+                .header(
+                    header::AUTHORIZATION,
+                    sigv4_auth(&mint_token(TokenScope::Read, OWNER, NAME)),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    match get.status() {
+        StatusCode::OK => assert_eq!(body_bytes(get).await, b"new-cross-replica-value"),
+        StatusCode::NOT_FOUND => {}
+        status => panic!("delete/put race left an invalid visible state: {status}"),
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

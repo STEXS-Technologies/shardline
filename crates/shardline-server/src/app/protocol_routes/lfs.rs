@@ -20,13 +20,19 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use futures_util::stream;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use shardline_protocol::TokenScope;
+use shardline_index::{
+    CreateResumableSessionOutcome, PublishResumablePartOutcome, ResumablePartRange,
+    ResumableSession, ResumableSessionProtocol, ResumableSessionState,
+};
+use shardline_protocol::{ShardlineHash, TokenScope};
 use shardline_server_core::AuthorizedRepository;
 
 use futures_util::StreamExt;
-use shardline_storage::DeleteOutcome;
+use shardline_storage::{DeleteOutcome, ObjectIntegrity, ObjectKey};
+use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _, AsyncWriteExt as _};
 
 use super::{MAX_LFS_BATCH_OBJECTS, direct_object_response};
 use crate::app::{AppState, authorize};
@@ -36,7 +42,9 @@ use crate::{
     admission::weights,
     cas_headers::{ACCESS_TOKEN, TOKEN_EXPIRATION, URL},
     lfs_object_key, metrics,
+    object_store::{materialize_object_to_file, stage_bytes_content_addressed},
     overflow::checked_add,
+    protocol_support::scope_namespace,
     upload_ingest::{RequestBodyReader, read_body_to_bytes},
 };
 
@@ -58,6 +66,24 @@ const LFS_PATCH_RANGES_COMPACTION_THRESHOLD: usize = 1024;
 /// request an arbitrary `u64` offset (which would create a multi-TiB sparse
 /// staging file). One TiB is well above any legitimate dataset/model object.
 const MAX_LFS_OBJECT_SIZE: u64 = 1 << 40; // 1 TiB
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DurableLfsPatchAttributes {
+    total_bytes: u64,
+}
+
+const fn durable_lfs_sessions_enabled(state: &AppState) -> bool {
+    state.backend.supports_fenced_s3_publication()
+}
+
+fn durable_lfs_session_id(scope_namespace: &str, oid: &str) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"shardline-lfs-patch-session\0");
+    hasher.update(scope_namespace.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(oid.as_bytes());
+    format!("lfs-{}", hex::encode(hasher.finalize().as_bytes()))
+}
 
 /// Runs the shared authorize chain and mints a typed [`AuthorizedRepository`]
 /// capability for LFS requests.
@@ -1259,6 +1285,21 @@ pub(crate) async fn lfs_patch_object(
         Err(error) => return Err(error),
     }
 
+    if durable_lfs_sessions_enabled(&state) {
+        return durable_lfs_patch_object(
+            &state,
+            &oid,
+            repo.capability(),
+            &object_key,
+            offset,
+            end,
+            total,
+            &chunk_bytes,
+            start,
+        )
+        .await;
+    }
+
     // Write the chunk to a temp file at the correct offset.
     // Use a deterministic path based on OID so multiple chunks accumulate in the same file.
     // The scaled deployment mounts this staging directory across API replicas;
@@ -1462,6 +1503,249 @@ pub(crate) async fn lfs_patch_object(
     Ok(StatusCode::OK.into_response())
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn durable_lfs_patch_object(
+    state: &Arc<AppState>,
+    oid: &str,
+    repository: &AuthorizedRepository,
+    object_key: &ObjectKey,
+    offset: u64,
+    end_inclusive: u64,
+    total: u64,
+    chunk_bytes: &[u8],
+    started: Instant,
+) -> Result<Response, ServerError> {
+    let scope = scope_namespace(repository.namespace());
+    let session_id = durable_lfs_session_id(&scope, oid);
+    let attributes = serde_json::to_string(&DurableLfsPatchAttributes { total_bytes: total })?;
+    let expires_at = state
+        .backend
+        .postgres_now()
+        .await?
+        .checked_add(std::time::Duration::from_secs(
+            state.config.lfs_patch_ttl_seconds().get(),
+        ))
+        .ok_or(ServerError::Overflow)?;
+    let session = ResumableSession::new(
+        session_id.clone(),
+        ResumableSessionProtocol::LfsPatch,
+        scope,
+        oid.to_owned(),
+        expires_at,
+    )
+    .with_attributes_json(attributes)
+    .map_err(|_error| ServerError::InvalidPath)?;
+    match state
+        .backend
+        .ensure_resumable_session_bounded(
+            &session,
+            state.config.lfs_patch_max_active_sessions().get(),
+        )
+        .await?
+    {
+        CreateResumableSessionOutcome::Created | CreateResumableSessionOutcome::AlreadyExists => {}
+        CreateResumableSessionOutcome::TooManyActive => {
+            return Err(ServerError::LfsPatchTooManySessions);
+        }
+    }
+    let (stored_session, existing_parts) = state
+        .backend
+        .resumable_session_snapshot(&session_id)
+        .await?
+        .ok_or(ServerError::LfsPatchRangeNotSatisfiable)?;
+    let stored_attributes: DurableLfsPatchAttributes =
+        serde_json::from_str(stored_session.attributes_json())?;
+    if stored_attributes.total_bytes != total {
+        return Err(ServerError::LfsPatchRangeNotSatisfiable);
+    }
+    let high_water = existing_parts
+        .iter()
+        .filter_map(|part| part.range())
+        .map(ResumablePartRange::end_exclusive)
+        .max()
+        .unwrap_or(0);
+    if offset
+        > high_water
+            .checked_add(state.config.lfs_patch_max_seek_ahead_bytes().get())
+            .ok_or(ServerError::Overflow)?
+    {
+        return Err(ServerError::LfsPatchRangeNotSatisfiable);
+    }
+
+    let end_exclusive = end_inclusive.checked_add(1).ok_or(ServerError::Overflow)?;
+    let published_range = ResumablePartRange::new(offset, end_exclusive)
+        .map_err(|_error| ServerError::LfsPatchRangeNotSatisfiable)?;
+    let part_number =
+        std::num::NonZeroU64::new(offset.checked_add(1).ok_or(ServerError::Overflow)?)
+            .ok_or(ServerError::Overflow)?;
+    let (staging_key, staged_integrity) = stage_bytes_content_addressed(
+        &state.backend.object_store(),
+        &format!("staging/resumable/lfs/{session_id}/{}", part_number.get()),
+        chunk_bytes,
+    )
+    .await?;
+    match state
+        .backend
+        .publish_resumable_part_bounded(
+            &session_id,
+            part_number,
+            staging_key.as_str(),
+            staged_integrity.length(),
+            None,
+            Some(published_range),
+            // LFS PATCH permits overlapping ranges so that a later request can
+            // repair bytes written by an earlier request. The durable part map
+            // retains both immutable attempts until terminal-session GC, which
+            // means its physical byte count can legitimately exceed the final
+            // object's logical size. Bound that retained staging by the global
+            // LFS staging budget; the declared object size and every published
+            // range are validated independently above.
+            state.config.lfs_patch_total_max_bytes().get(),
+            state.config.lfs_patch_total_max_bytes().get(),
+            MAX_LFS_PATCH_RANGES,
+        )
+        .await?
+    {
+        PublishResumablePartOutcome::Published(_) => {}
+        PublishResumablePartOutcome::SessionUnavailable => {
+            return Err(ServerError::LfsPatchRangeNotSatisfiable);
+        }
+        PublishResumablePartOutcome::SessionQuotaExceeded
+        | PublishResumablePartOutcome::AggregateQuotaExceeded => {
+            return Err(ServerError::LfsPatchStoreFull);
+        }
+        PublishResumablePartOutcome::TooManyParts => {
+            return Err(ServerError::LfsPatchRangeNotSatisfiable);
+        }
+    }
+    let (_active, published_parts) = state
+        .backend
+        .resumable_session_snapshot(&session_id)
+        .await?
+        .ok_or(ServerError::LfsPatchRangeNotSatisfiable)?;
+    if !lfs_ranges_cover_total(&published_parts, total)? {
+        metrics::record_upload(
+            "lfs",
+            u64::try_from(chunk_bytes.len())?,
+            started.elapsed().as_secs_f64(),
+            true,
+        );
+        return Ok(StatusCode::OK.into_response());
+    }
+
+    let (claimed, mut claimed_parts) = state
+        .backend
+        .begin_resumable_completion(&session_id)
+        .await?
+        .ok_or(ServerError::LfsPatchRangeNotSatisfiable)?;
+    claimed_parts.sort_by_key(|part| part.generation());
+    if !lfs_ranges_cover_total(&claimed_parts, total)? {
+        return Err(ServerError::LfsPatchRangeNotSatisfiable);
+    }
+    let temporary = tempfile::tempdir()?;
+    let assembled_path = temporary.path().join("assembled");
+    let mut assembled = tokio::fs::File::create(&assembled_path).await?;
+    assembled.set_len(total).await?;
+    for part in &claimed_parts {
+        let part_range = part
+            .range()
+            .ok_or(ServerError::LfsPatchRangeNotSatisfiable)?;
+        let key =
+            ObjectKey::parse(part.staging_key()).map_err(|_error| ServerError::InvalidPath)?;
+        let path = temporary.path().join(format!("part-{}", part.generation()));
+        materialize_object_to_file(
+            &state.backend.object_store(),
+            &key,
+            part.size_bytes(),
+            &path,
+        )
+        .await?;
+        assembled.seek(SeekFrom::Start(part_range.start())).await?;
+        let mut input = tokio::fs::File::open(path).await?;
+        tokio::io::copy(&mut input, &mut assembled).await?;
+    }
+    assembled.flush().await?;
+    drop(assembled);
+
+    let mut input = tokio::fs::File::open(&assembled_path).await?;
+    let mut sha256 = Sha256::new();
+    let mut blake3 = blake3::Hasher::new();
+    let mut observed = 0_u64;
+    let mut buffer = vec![0_u8; 1024 * 1024];
+    loop {
+        let read = input.read(&mut buffer).await?;
+        if read == 0 {
+            break;
+        }
+        let bytes = buffer.get(..read).ok_or(ServerError::Overflow)?;
+        sha256.update(bytes);
+        blake3.update(bytes);
+        observed = observed
+            .checked_add(u64::try_from(read)?)
+            .ok_or(ServerError::Overflow)?;
+    }
+    if observed != total || hex::encode(sha256.finalize()) != oid {
+        return Err(ServerError::ExpectedBodyHashMismatch);
+    }
+    let object_integrity = ObjectIntegrity::new(
+        ShardlineHash::from_bytes(*blake3.finalize().as_bytes()),
+        observed,
+    );
+    let _stored = state
+        .backend
+        .put_sha256_addressed_object_file(object_key, oid, &assembled_path, &object_integrity)
+        .await?;
+    if !state
+        .backend
+        .transition_resumable_session(
+            &session_id,
+            ResumableSessionState::Completing,
+            claimed.fence_epoch(),
+            ResumableSessionState::Completed,
+        )
+        .await?
+    {
+        return Err(ServerError::StaleResourceFence);
+    }
+    metrics::record_upload(
+        "lfs",
+        u64::try_from(chunk_bytes.len())?,
+        started.elapsed().as_secs_f64(),
+        true,
+    );
+    shardline_metrics::metrics().protocol.record_lfs_upload();
+    Ok(StatusCode::OK.into_response())
+}
+
+fn lfs_ranges_cover_total(
+    parts: &[shardline_index::ResumableSessionPart],
+    total: u64,
+) -> Result<bool, ServerError> {
+    let mut ranges = parts
+        .iter()
+        .map(|part| {
+            let range = part
+                .range()
+                .ok_or(ServerError::LfsPatchRangeNotSatisfiable)?;
+            if range.end_exclusive().saturating_sub(range.start()) != part.size_bytes()
+                || range.end_exclusive() > total
+            {
+                return Err(ServerError::LfsPatchRangeNotSatisfiable);
+            }
+            Ok(range)
+        })
+        .collect::<Result<Vec<_>, ServerError>>()?;
+    ranges.sort_by_key(|range| (range.start(), range.end_exclusive()));
+    let mut covered = 0_u64;
+    for range in ranges {
+        if range.start() > covered {
+            return Ok(false);
+        }
+        covered = covered.max(range.end_exclusive());
+    }
+    Ok(covered == total)
+}
+
 /// POST /v1/lfs/objects/{oid}/verify — Upload verification
 ///
 /// Verifies that an object exists in the store and that its SHA-256 hash
@@ -1561,24 +1845,31 @@ mod tests {
     use std::{
         fs,
         num::{NonZeroU64, NonZeroUsize},
+        path::PathBuf,
         sync::Arc,
     };
 
     use axum::{
         Router,
         body::Body,
-        http::{Request, StatusCode},
+        http::{
+            Request, StatusCode,
+            header::{CONTENT_LENGTH, CONTENT_RANGE},
+        },
         routing::{get, post},
     };
+    use proptest::prelude::*;
     use serde_json::{Value, json};
     use sha2::Digest;
+    use shardline_index::{ResumablePartRange, ResumableSessionPart};
     use shardline_protocol::TokenScope;
     use shardline_server_core::AuthProvider;
     use tempfile::TempDir;
     use tower::ServiceExt;
 
     use crate::{
-        ServerConfig, ServerError, ServerFrontend, ServerRole, app::AppState, lfs_object_key,
+        ServerBackend, ServerConfig, ServerError, ServerFrontend, ServerRole, app::AppState,
+        lfs_object_key,
     };
     use shardline_server_core::AuthorizedRepository;
 
@@ -1586,9 +1877,9 @@ mod tests {
         LFS_PATCH_LOCKS, acquire_lfs_patch_lock, evict_lfs_patch_ranges, inspect_lfs_patch_ranges,
         lfs_batch, lfs_delete_object, lfs_get_object, lfs_head_object, lfs_patch_dir,
         lfs_patch_meta_path, lfs_patch_now_seconds, lfs_patch_object, lfs_patch_ranges_compactions,
-        lfs_put_object, lfs_validation_response, lfs_verify_object, live_lfs_patch_lock_count,
-        lock_lfs_patch_oid, parse_content_range, patch_store_usage, record_lfs_patch_range,
-        sweep_lfs_patch_sessions, touch_patch_session,
+        lfs_put_object, lfs_ranges_cover_total, lfs_validation_response, lfs_verify_object,
+        live_lfs_patch_lock_count, lock_lfs_patch_oid, parse_content_range, patch_store_usage,
+        record_lfs_patch_range, sweep_lfs_patch_sessions, touch_patch_session,
     };
 
     /// Test signing key matching the one used in e2e tests.
@@ -1660,6 +1951,46 @@ mod tests {
         });
 
         (state, tmp)
+    }
+
+    async fn build_postgres_lfs_state(
+        database_url: &str,
+        root: PathBuf,
+        object_store: crate::ServerObjectStore,
+    ) -> Option<Arc<AppState>> {
+        let chunk_size = NonZeroUsize::new(65_536)?;
+        let config = ServerConfig::new(
+            "127.0.0.1:0".parse().ok()?,
+            "http://127.0.0.1:8080".to_owned(),
+            root.clone(),
+            chunk_size,
+        )
+        .with_server_frontends([ServerFrontend::Lfs])
+        .ok()?;
+        let backend = crate::PostgresBackend::new_with_object_store(
+            root,
+            "http://127.0.0.1:8080".to_owned(),
+            chunk_size,
+            database_url,
+            object_store,
+        )
+        .await
+        .ok()?;
+        Some(Arc::new(AppState {
+            config,
+            role: ServerRole::All,
+            backend: ServerBackend::Postgres(backend),
+            auth: None,
+            provider_tokens: None,
+            reconstruction_cache: crate::ReconstructionCacheService::disabled(),
+            transfer_limiter: crate::TransferLimiter::new(chunk_size, chunk_size),
+            oci_registry_token_limiter: Arc::new(tokio::sync::Semaphore::new(64)),
+            admission: crate::admission::WeightedAdmission::new(
+                NonZeroUsize::new(256).expect("nonzero"),
+            ),
+            pools: crate::admission::ExecutionPools::default_sizes(),
+            protocol_metrics: crate::ProtocolMetrics::default(),
+        }))
     }
 
     /// Builds a minimal [`AppState`] with explicit LFS chunked-patch store
@@ -1830,6 +2161,44 @@ mod tests {
     #[test]
     fn parse_content_range_rejects_empty_string() {
         assert_eq!(parse_content_range(""), Err(()));
+    }
+
+    proptest! {
+        #[test]
+        #[allow(clippy::arithmetic_side_effects)]
+        fn durable_range_coverage_matches_byte_oracle(
+            total in 1_u64..128,
+            raw_ranges in proptest::collection::vec((0_u64..128, 1_u64..129), 0..64),
+        ) {
+            let mut parts = Vec::new();
+            let mut oracle = vec![false; usize::try_from(total).expect("small total")];
+            for (generation, (raw_start, raw_end)) in raw_ranges.into_iter().enumerate() {
+                let start = raw_start.min(total - 1);
+                let end = raw_end.max(start + 1).min(total);
+                let range = ResumablePartRange::new(start, end).expect("normalized range");
+                for covered in oracle
+                    .get_mut(usize::try_from(start).expect("small start")..
+                        usize::try_from(end).expect("small end"))
+                    .expect("range inside oracle")
+                {
+                    *covered = true;
+                }
+                parts.push(
+                    ResumableSessionPart::new(
+                        NonZeroU64::new(u64::try_from(generation + 1).expect("small generation"))
+                            .expect("nonzero part"),
+                        NonZeroU64::new(u64::try_from(generation + 1).expect("small generation"))
+                            .expect("nonzero generation"),
+                        format!("staging/{generation}"),
+                        end - start,
+                        None,
+                    )
+                    .with_range(range),
+                );
+            }
+            let expected = oracle.iter().all(|covered| *covered);
+            prop_assert_eq!(lfs_ranges_cover_total(&parts, total).expect("valid ranges"), expected);
+        }
     }
 
     #[test]
@@ -2910,6 +3279,109 @@ mod tests {
             .parse::<u64>()
             .unwrap();
         assert_eq!(content_length, total);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[allow(clippy::arithmetic_side_effects)]
+    async fn patch_object_resumes_across_postgres_nodes_without_shared_rwx() {
+        let Ok(database_url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let tmp = TempDir::new().expect("tempdir");
+        let shared_store = crate::ServerObjectStore::local(tmp.path().join("objects"))
+            .expect("shared object store");
+        let node_a_root = tmp.path().join("node-a");
+        let node_b_root = tmp.path().join("node-b");
+        let Some(node_a) =
+            build_postgres_lfs_state(&database_url, node_a_root.clone(), shared_store.clone())
+                .await
+        else {
+            return;
+        };
+        let Some(node_b) =
+            build_postgres_lfs_state(&database_url, node_b_root.clone(), shared_store).await
+        else {
+            return;
+        };
+        let app_a = lfs_router(node_a);
+        let app_b = lfs_router(node_b);
+        let content = format!("cross-replica:{}", tmp.path().display()).into_bytes();
+        let split = content.len() / 2;
+        let oid = test_oid(&content);
+        let total = content.len();
+        let suffix_start = split + 3;
+
+        let second = app_b
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(format!("/v1/lfs/objects/{oid}"))
+                    .header(
+                        CONTENT_RANGE,
+                        format!("bytes {suffix_start}-{}/{}", total - 1, total),
+                    )
+                    .header(CONTENT_LENGTH, total - suffix_start)
+                    .body(Body::from(content[suffix_start..].to_vec()))
+                    .expect("request"),
+            )
+            .await
+            .expect("second-node patch");
+        assert_eq!(second.status(), StatusCode::OK);
+
+        let mut damaged_prefix = content[..split].to_vec();
+        damaged_prefix[split - 2..].fill(b'X');
+        let first = app_a
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(format!("/v1/lfs/objects/{oid}"))
+                    .header(CONTENT_RANGE, format!("bytes 0-{}/{}", split - 1, total))
+                    .header(CONTENT_LENGTH, split)
+                    .body(Body::from(damaged_prefix))
+                    .expect("request"),
+            )
+            .await
+            .expect("first-node patch");
+        assert_eq!(first.status(), StatusCode::OK);
+
+        let overlap_start = split - 2;
+        let overlap = app_b
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(format!("/v1/lfs/objects/{oid}"))
+                    .header(
+                        CONTENT_RANGE,
+                        format!("bytes {overlap_start}-{}/{}", suffix_start - 1, total),
+                    )
+                    .header(CONTENT_LENGTH, suffix_start - overlap_start)
+                    .body(Body::from(content[overlap_start..suffix_start].to_vec()))
+                    .expect("request"),
+            )
+            .await
+            .expect("overlapping completion patch");
+        assert_eq!(overlap.status(), StatusCode::OK);
+        assert!(!node_a_root.join("lfs-patch").exists());
+        assert!(!node_b_root.join("lfs-patch").exists());
+
+        let get = app_b
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/v1/lfs/objects/{oid}"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("cross-node get");
+        assert_eq!(get.status(), StatusCode::OK);
+        let observed = axum::body::to_bytes(get.into_body(), usize::MAX)
+            .await
+            .expect("response bytes");
+        assert_eq!(observed.as_ref(), content);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

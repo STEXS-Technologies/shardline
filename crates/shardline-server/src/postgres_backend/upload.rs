@@ -2,7 +2,7 @@ use axum::body::Bytes;
 use std::num::NonZeroU64;
 
 use shardline_cas::{CasCoordinator, CasLimits};
-use shardline_index::{UploadIntent, UploadIntentState};
+use shardline_index::{FileRecord, UploadIntent, UploadIntentState};
 use shardline_protocol::RepositoryScope;
 
 use crate::{
@@ -17,6 +17,32 @@ use crate::{
 };
 
 impl super::PostgresBackend {
+    /// Streams bytes into immutable CAS objects without making a file record visible.
+    ///
+    /// The caller must publish the returned record in a later transaction. This
+    /// is the prepare half of fenced protocol publication: crashes may leave
+    /// unreachable immutable chunks, but never a partially visible file.
+    pub(crate) async fn prepare_file_stream(
+        &self,
+        file_id: &str,
+        mut body: RequestBodyReader,
+        repository_scope: Option<&RepositoryScope>,
+    ) -> Result<(FileRecord, UploadFileResponse), ServerError> {
+        validate_identifier(file_id)?;
+        let object_store = self.object_store();
+        let mut ingestor = FileUploadIngestor::new_with_parallelism(
+            self.chunk_size,
+            false,
+            self.upload_max_in_flight_chunks,
+        );
+        while let Some(bytes) = body.next_bytes().await? {
+            ingestor.ingest_body_chunk(&object_store, &bytes).await?;
+        }
+        ingestor
+            .finish(&object_store, file_id, repository_scope, None)
+            .await
+    }
+
     /// Stores a file version as deduplicated content chunks.
     ///
     /// # Errors

@@ -94,15 +94,18 @@ jobs:
           set -euo pipefail
           kubectl_version="v1.33.1"
           kind_version="v0.29.0"
+          install_dir="${RUNNER_TEMP}/shardline-k8s-tools"
+          mkdir --parents "${install_dir}"
           curl --fail --location --silent --show-error \
-            --output /usr/local/bin/kubectl \
+            --output "${install_dir}/kubectl" \
             "https://dl.k8s.io/release/${kubectl_version}/bin/linux/amd64/kubectl"
           curl --fail --location --silent --show-error \
-            --output /usr/local/bin/kind \
+            --output "${install_dir}/kind" \
             "https://kind.sigs.k8s.io/dl/${kind_version}/kind-linux-amd64"
-          chmod +x /usr/local/bin/kubectl /usr/local/bin/kind
-          kubectl version --client=true
-          kind version
+          chmod +x "${install_dir}/kubectl" "${install_dir}/kind"
+          echo "${install_dir}" >> "${GITHUB_PATH}"
+          "${install_dir}/kubectl" version --client=true
+          "${install_dir}/kind" version
 
       - name: Run release-candidate infrastructure matrix
         run: cargo make test-infrastructure

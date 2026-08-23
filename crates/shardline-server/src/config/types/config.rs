@@ -1301,15 +1301,11 @@ impl ServerConfig {
             });
         }
 
-        if matches!(self.auth.auth_provider, AuthProviderKind::Ed25519) {
-            match (
-                self.auth.ed25519_private_key.is_some(),
-                self.auth.ed25519_public_key.is_some(),
-            ) {
-                (false, false) => return Err(ServerConfigError::MissingEd25519Key),
-                (true, true) => return Err(ServerConfigError::ConflictingEd25519Keys),
-                (true, false) | (false, true) => {}
-            }
+        if matches!(self.auth.auth_provider, AuthProviderKind::Ed25519)
+            && self.auth.ed25519_private_key.is_none()
+            && self.auth.ed25519_public_key.is_none()
+        {
+            return Err(ServerConfigError::MissingEd25519Key);
         }
 
         self.validate_deployment_mode_requirements()?;

@@ -4,6 +4,59 @@ All notable changes to Shardline are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- Add bounded Ed25519 public-key rings and overlapping old/new verification so signing
+  keys can rotate without rejecting unexpired tokens during a rolling deployment.
+- Order S3 deletion so legacy direct bytes are removed before the fenced metadata commit,
+  preventing crash-window resurrection through compatibility reads while keeping
+  row-backed objects recoverable after metadata failures.
+- Durable Postgres resumable-session state for Git LFS PATCH, OCI blob uploads,
+  and S3 multipart uploads, with typed range/part maps, database-clock expiry,
+  bounded durable accounting, and fenced completion.
+- Cross-replica tests for all three resumable protocols, including out-of-order
+  and overlapping LFS ranges.
+- A typed S3 delete interruption boundary that permanently regresses the
+  direct-byte removal crash window.
+- GC inventory and counters for private resumable staging objects and terminal
+  session metadata.
+- Operation-scoped Redis cold-load reservations with random owner tokens,
+  lease heartbeats, bounded waiter latency, and live two-replica regressions.
+
+### Changed
+- E2E CI now installs checksum-pinned Git LFS 3.7.1 and Bazelisk 1.29.0,
+  exercises adjacent Git LFS 3.6.1 and Bazel 8.7.0/9.2.0, and explicitly runs
+  the native Bazel cache flows instead of silently skipping unavailable clients.
+- Scaled API replicas now keep incomplete payload fragments in object storage
+  and coordination in Postgres; a lock-coherent RWX volume is no longer part of
+  the production topology.
+- Production Kubernetes API roots are pod-local `emptyDir` volumes.
+- S3 object publication commits immutable record metadata and the visible S3
+  index row in one fenced transaction.
+- S3 single and batch deletion now take the same cross-replica key fence as
+  publication and atomically remove listing and visible record metadata.
+- Reconstruction-cache loaders now carry an explicit reservation newtype from
+  lookup through publish, failure cleanup, heartbeat, and cancellation.
+
+### Fixed
+- Re-baseline the line-coverage ratchet to 92.8% to reflect the single-replica
+  role split, inline resumable-session reconstruction, and longer-lived durable
+  staging paths landed in this release.
+- Durable LFS PATCH now permits bounded overlapping repair ranges without
+  misclassifying their retained immutable staging bytes as an oversized logical
+  object; the coverage gate now executes every Postgres protocol-replica test.
+- Replaced, failed, expired, aborted, and completed resumable staging objects
+  are reclaimed under the writer-excluding GC barrier without risking live
+  session parts.
+- Release tag publishing no longer reruns the separate infrastructure matrix;
+  that matrix remains a pull-request gate while release publishing retains its
+  contributor CI and reliability gates.
+- Redis cache publication and cleanup reject stale reservation owners with an
+  atomic compare-and-mutate script, preventing timed-out or replaced loaders
+  from overwriting or deleting a newer replica's cache state.
+
 ## [1.7.0] - 2026-08-23
 
 Reliability release focused on distributed correctness, crash recovery, and

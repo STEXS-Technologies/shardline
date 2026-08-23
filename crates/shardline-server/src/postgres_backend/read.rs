@@ -675,7 +675,9 @@ fn map_record_store_error(error: PostgresMetadataStoreError) -> ServerError {
         | PostgresMetadataStoreError::InvalidRepoType(_)
         | PostgresMetadataStoreError::Unsupported(_)
         | PostgresMetadataStoreError::InvalidUploadIntentState(_)
-        | PostgresMetadataStoreError::UploadIntentConflict(_) => {
+        | PostgresMetadataStoreError::UploadIntentConflict(_)
+        | PostgresMetadataStoreError::ResumableSession(_)
+        | PostgresMetadataStoreError::S3PublicationMismatch => {
             ServerError::Index(IndexError::PostgresMetadata(error))
         }
     }

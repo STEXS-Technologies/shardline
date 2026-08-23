@@ -77,14 +77,14 @@ compatibility documentation. They must not be silently omitted.
 
 | Surface | Current tier | Principal evidence still required |
 | --- | --- | --- |
-| Git LFS | Beta | platform client matrix and multi-writer evidence; retry/resume, mixed parallel operations, same-OID concurrency, and length/digest failures have checked-in coverage |
-| Bazel HTTP cache | Beta | client-version matrix and multi-replica evidence; same-digest concurrency, AC/CAS isolation, interrupted PUT, and large objects have checked-in coverage |
+| Git LFS | Beta | broader platform evidence; pinned Git LFS 3.7.1/3.6.1 client flows, Postgres cross-replica resume, retry/resume, mixed parallel operations, same-OID concurrency, and length/digest failures have checked-in coverage |
+| Bazel HTTP cache | Beta | multi-replica evidence and broader platform evidence; pinned Bazel 8.7.0/9.2.0 client flows, same-digest concurrency, AC/CAS isolation, interrupted PUT, and large objects have checked-in coverage |
 | S3 frontend | Stable | conditional writes have an adapter-level database CAS contract with concurrent SQLite and Postgres-handle evidence; unconditional overwrites remain documented last-writer-wins |
 | Hugging Face Hub API | Beta | broader client matrix and remaining semantic compatibility; tenant-bound route extraction, stale-parent rejection, Postgres cross-replica ref serialization, and delete-vs-push row locking are covered |
-| Redis reconstruction cache | Beta | partition, flush, restart, and multi-node stampede evidence; bounded timeout and corruption repair are covered |
+| Redis reconstruction cache | Beta | broader production and provider-version evidence; partition, flush, kill/restart, bounded timeout, corruption repair, cross-replica cold-load serialization, cancellation takeover, and stale-owner fencing are covered |
 | Provider integration | Beta | revocation timing and broader live-provider evidence; duplicate/replay handling, atomic monotonic reconciliation-state merging, one-transaction fenced rename/delete with atomic delivery claims, repository-scoped event serialization with persisted ownership epochs, terminated-owner detection, access/revision reordering, rename migration, signature checks, and fail-closed visibility parsing are covered |
-| Ed25519 | Experimental | overlapping multi-key verification; operator minting, CLI-to-provider verification, key formats, tampering, expiry, wrong-key, malformed-token, and algorithm-confusion paths are covered; the coordinated non-overlap rotation limitation is documented |
-| Multi-replica Postgres/S3 writers | Not claimed | tombstoned/deferred external deletes, chaos, and mixed-version proof; shared resumable staging, persisted lock epochs, fenced OCI tag mutations, one-transaction fenced provider rename/delete, terminated-owner takeover, migration serialization, and a backup-destroy-restore-fsck-download drill are checked in |
+| Ed25519 | Beta | broader deployment evidence; bounded overlapping multi-key verification, zero-downtime rotation, operator minting, CLI-to-provider verification, key formats, tampering, expiry, wrong-key, malformed-token, and algorithm-confusion paths are covered |
+| Multi-replica Postgres/S3 writers | Stable | durable resumable sessions remove RWX state; persisted lock epochs, fenced publication, writer-excluding GC, tombstone reclamation, cross-replica protocol tests, deterministic chaos, terminated-owner takeover, migration serialization, and backup-destroy-restore-fsck-download drills are checked in |
 
 ## Promotion Review
 

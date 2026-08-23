@@ -25,15 +25,17 @@ pub struct Ed25519AuthProvider {
     signing_key: Option<SigningKey>,
     /// Verifying key for token verification (derived from signing key or
     /// provided separately).
-    verifying_key: VerifyingKey,
+    verifying_keys: Vec<VerifyingKey>,
 }
+
+const MAX_VERIFYING_KEYS: usize = 32;
 
 impl fmt::Debug for Ed25519AuthProvider {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("Ed25519AuthProvider")
             .field("signing_key", &"<redacted>")
-            .field("verifying_key", &"<redacted>")
+            .field("verifying_keys", &"<redacted>")
             .finish()
     }
 }
@@ -50,7 +52,32 @@ impl Ed25519AuthProvider {
         let verifying_key = signing_key.verifying_key();
         Ok(Self {
             signing_key: Some(signing_key),
-            verifying_key,
+            verifying_keys: vec![verifying_key],
+        })
+    }
+
+    /// Creates a signing provider that also accepts tokens signed by an
+    /// overlapping public-key ring during rotation.
+    ///
+    /// The key ring accepts every existing single-key representation plus a
+    /// newline-delimited list of hexadecimal public keys. Duplicate keys are
+    /// removed and the active signing key is always included.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::ProviderError`] when either key input is invalid
+    /// or the bounded verification-key count is exceeded.
+    pub fn new_with_public_keyring(
+        private_key: &[u8],
+        public_keyring: &[u8],
+    ) -> Result<Self, AuthError> {
+        let signing_key = parse_signing_key(private_key)?;
+        let mut verifying_keys = vec![signing_key.verifying_key()];
+        append_unique_verifying_keys(&mut verifying_keys, parse_verifying_keys(public_keyring)?);
+        enforce_verifying_key_limit(verifying_keys.len())?;
+        Ok(Self {
+            signing_key: Some(signing_key),
+            verifying_keys,
         })
     }
 
@@ -61,10 +88,10 @@ impl Ed25519AuthProvider {
     /// Returns [`AuthError::ProviderError`] when the key bytes cannot be parsed
     /// as a valid Ed25519 public key.
     pub fn with_public_key(public_key: &[u8]) -> Result<Self, AuthError> {
-        let verifying_key = parse_verifying_key(public_key)?;
+        let verifying_keys = parse_verifying_keys(public_key)?;
         Ok(Self {
             signing_key: None,
-            verifying_key,
+            verifying_keys,
         })
     }
 
@@ -86,9 +113,13 @@ impl Ed25519AuthProvider {
             hex::decode(signature_hex).map_err(|_error| AuthError::InvalidToken)?;
         let signature =
             Signature::from_slice(&signature_bytes).map_err(|_error| AuthError::InvalidToken)?;
-        self.verifying_key
-            .verify_strict(&payload, &signature)
-            .map_err(|_e| AuthError::InvalidToken)?;
+        if !self
+            .verifying_keys
+            .iter()
+            .any(|key| key.verify_strict(&payload, &signature).is_ok())
+        {
+            return Err(AuthError::InvalidToken);
+        }
         decode_and_validate_claims(&payload, current_unix_seconds).map_err(|e| match e {
             TokenCodecError::Expired => AuthError::ExpiredToken,
             TokenCodecError::EmptySigningKey(_)
@@ -100,6 +131,65 @@ impl Ed25519AuthProvider {
             | TokenCodecError::Claims(_) => AuthError::InvalidToken,
         })
     }
+}
+
+fn parse_verifying_keys(bytes: &[u8]) -> Result<Vec<VerifyingKey>, AuthError> {
+    let single_error = match parse_verifying_key(bytes) {
+        Ok(key) => return Ok(vec![key]),
+        Err(error) => error,
+    };
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return Err(single_error);
+    };
+    let encoded_keys: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    if encoded_keys.is_empty()
+        || encoded_keys
+            .iter()
+            .any(|line| line.len() != 64 || !line.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    {
+        return Err(single_error);
+    }
+    enforce_verifying_key_limit(encoded_keys.len())?;
+    let mut keys = Vec::with_capacity(encoded_keys.len());
+    for encoded in encoded_keys {
+        let decoded = hex::decode(encoded).map_err(|error| {
+            AuthError::ProviderError(format!("invalid Ed25519 hexadecimal key: {error}"))
+        })?;
+        let key = parse_raw_verifying_key(&decoded)?;
+        if key.is_weak() {
+            return Err(AuthError::ProviderError(
+                "Ed25519 public key must not be a weak small-order point".to_owned(),
+            ));
+        }
+        if !keys.iter().any(|existing: &VerifyingKey| existing == &key) {
+            keys.push(key);
+        }
+    }
+    Ok(keys)
+}
+
+fn append_unique_verifying_keys(
+    destination: &mut Vec<VerifyingKey>,
+    additional: Vec<VerifyingKey>,
+) {
+    for key in additional {
+        if !destination.iter().any(|existing| existing == &key) {
+            destination.push(key);
+        }
+    }
+}
+
+fn enforce_verifying_key_limit(count: usize) -> Result<(), AuthError> {
+    if count > MAX_VERIFYING_KEYS {
+        return Err(AuthError::ProviderError(format!(
+            "Ed25519 public key ring exceeds the {MAX_VERIFYING_KEYS}-key limit"
+        )));
+    }
+    Ok(())
 }
 
 impl AuthProvider for Ed25519AuthProvider {
@@ -444,6 +534,70 @@ mod tests {
         let claims = test_claims();
         let token = signer.mint_token(&claims).expect("mint");
         assert_eq!(verifier.verify_token(&token).expect("verify"), claims);
+    }
+
+    #[test]
+    fn public_keyring_verifies_overlapping_signers() {
+        let old_seed = test_seed();
+        let mut new_seed = test_seed();
+        new_seed.reverse();
+        let old_signer = Ed25519AuthProvider::new(&old_seed).expect("old signer");
+        let new_signer = Ed25519AuthProvider::new(&new_seed).expect("new signer");
+        let keyring = format!(
+            "{}\n{}\n",
+            hex::encode(SigningKey::from_bytes(&old_seed).verifying_key().to_bytes()),
+            hex::encode(SigningKey::from_bytes(&new_seed).verifying_key().to_bytes())
+        );
+        let verifier =
+            Ed25519AuthProvider::with_public_key(keyring.as_bytes()).expect("public key ring");
+        let claims = test_claims();
+        let old_token = old_signer.mint_token(&claims).expect("old token");
+        let new_token = new_signer.mint_token(&claims).expect("new token");
+        assert_eq!(
+            verifier.verify_token(&old_token).expect("old verifies"),
+            claims
+        );
+        assert_eq!(
+            verifier.verify_token(&new_token).expect("new verifies"),
+            claims
+        );
+    }
+
+    #[test]
+    fn signing_provider_accepts_old_key_during_rotation() {
+        let old_seed = test_seed();
+        let mut new_seed = test_seed();
+        new_seed.reverse();
+        let old_signer = Ed25519AuthProvider::new(&old_seed).expect("old signer");
+        let old_public = hex::encode(SigningKey::from_bytes(&old_seed).verifying_key().to_bytes());
+        let rotating =
+            Ed25519AuthProvider::new_with_public_keyring(&new_seed, old_public.as_bytes())
+                .expect("rotating provider");
+        let claims = test_claims();
+        let old_token = old_signer.mint_token(&claims).expect("old token");
+        let new_token = rotating.mint_token(&claims).expect("new token");
+        assert_eq!(
+            rotating.verify_token(&old_token).expect("old verifies"),
+            claims
+        );
+        assert_eq!(
+            rotating.verify_token(&new_token).expect("new verifies"),
+            claims
+        );
+    }
+
+    #[test]
+    fn public_keyring_is_bounded() {
+        let keys = (0..=MAX_VERIFYING_KEYS)
+            .map(|offset| {
+                let mut seed = test_seed();
+                seed[0] = u8::try_from(offset + 1).expect("bounded test offset");
+                hex::encode(SigningKey::from_bytes(&seed).verifying_key().to_bytes())
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let error = Ed25519AuthProvider::with_public_key(keys.as_bytes()).unwrap_err();
+        assert!(error.to_string().contains("32-key limit"));
     }
 
     #[test]

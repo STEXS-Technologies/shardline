@@ -50,7 +50,7 @@ Status meanings:
 | Database | Covered | Postgres kill/restart, mid-transaction loss, stale fencing, serialization/deadlock behavior and atomic migrations are exercised; typed migration failpoints cover apply/revert immediately before and after commit and require a rerun to reach the complete schema; a protocol-aware TCP proxy drops `CommandComplete(COMMIT)` only after PostgreSQL commits and proves idempotent recovery; lock-induced statement timeout and bounded pool exhaustion both prove recovery; a real PostgreSQL 16 streaming standby replays acknowledged state, is promoted after a primary `SIGKILL`, and the unchanged Shardline process reconnects through a stable endpoint, reconstructs pre-failover bytes and publishes fresh exact bytes | Extend the promotion matrix across supported PostgreSQL/HA-provider versions |
 | Network | Covered | API/transfer and MinIO/Postgres partitions, connection stalls and reconnect recovery; a real Linux `tc netem` drill injects packet delay, jitter, duplication and reordering, then a one-way 100% MinIO response loss, and requires exact acknowledged bytes plus fresh post-recovery publication | Extend the netem matrix with new deployment topologies and provider versions |
 | Cluster | Covered | `multinode_chaos` kills either role, partitions split roles and replaces roles during traffic | True N-1/N mixed-binary tests remain upgrade evidence, not basic cluster-failure evidence |
-| Concurrency | Covered | Upload/overwrite/delete/GC/reconstruction/cache/provider/OCI races plus Loom models | Extend models whenever a new shared mutable state machine is introduced |
+| Concurrency | Covered | Upload/overwrite/delete/GC/reconstruction/provider/OCI races plus Loom models; live Redis replicas serialize cold reconstruction with operation-scoped random owner tokens, bounded leases, heartbeat renewal, cancellation takeover, and atomic stale-owner rejection | Extend models whenever a new shared mutable state machine is introduced |
 | Resource pressure | Covered | Request/body/list bounds, admission and concurrency stress exist; isolated `RLIMIT_NOFILE` and Linux `RLIMIT_AS` regressions exhaust descriptors/address space, preserve committed state, release pressure and verify exact-byte recovery; deterministic execution-pool saturation rejects without queueing; a disposable Tokio runtime blocks every worker, proves queued storage work remains invisible, then releases the workers and requires exact publication | Extend the pressure matrix when a new process-wide resource becomes correctness-relevant |
 | Time | Covered | GC injects forward clock jumps and fails closed without stamping or deleting; Postgres-backed lifecycle repair takes shared retention time from PostgreSQL rather than replica clocks and verifies epoch results across extreme session timezones; two real Shardline processes sharing Postgres/S3 run with independent `-120s` and `+120s` wall clocks while monotonic time remains real, exercise the same near-expiry token, reject beyond each verifier's clock without side effects, and agree on tokens outside the tested skew window; fencing is epoch/lock based and clock-independent | Extend the skew magnitude/provider matrix and keep production clock monitoring within the documented operational bound |
 | Data corruption | Covered | Corrupt chunks, hashes, ranges, metadata, cache entries and protocol inputs are rejected or repaired; Xet range transfers validate the complete addressed xorb before exposing bytes; fsck is an independent oracle | Add sampled corruption campaigns over restored production-scale inventories |
@@ -64,10 +64,11 @@ silently relabeled Stable based only on line coverage.
 
 ## Required failure-boundary model
 
-`LocalPublishBoundary`, `LocalPublishFault` and `UploadLifecycleBoundary` are the explicit
-typed fault vocabulary shared by production code and deterministic tests. They cover local
-write, file-sync, installation, directory-sync, durable intent, object-work, metadata-commit
-and visibility transitions without string matching. The complete write path now distinguishes:
+`LocalPublishBoundary`, `LocalPublishFault`, `UploadLifecycleBoundary`, and
+`S3DeleteBoundary` are the explicit typed fault vocabulary shared by production code and
+deterministic tests. They cover local write, file-sync, installation, directory-sync,
+durable intent, object-work, metadata-commit, deletion, and visibility transitions without
+string matching. The complete write path now distinguishes:
 
 ```text
 validated

@@ -3,12 +3,16 @@ use std::time::Duration;
 
 use futures_util::TryStreamExt;
 use serde_json::to_vec;
-use sqlx::{Postgres, Row, Transaction, postgres::PgRow, query, query_scalar, types::Json};
+use sqlx::{
+    Connection as _, PgConnection, Postgres, Row, Transaction, postgres::PgRow, query,
+    query_scalar, types::Json,
+};
 
 use super::{PostgresMetadataStoreError, PostgresRecordLocator, RecordKind, i64_to_u64};
 use crate::{
     DedupeShardMapping, FileRecord, RecordMutation, RecordStoreFuture, RecordTraversal,
-    RepositoryRecordScope, StoredRecord,
+    RepositoryRecordScope, ResumableCompletionFence, S3ObjectEntry, S3PublishCondition,
+    StoredRecord,
     record_key::record_key as shared_record_key,
     record_key::{
         repository_record_scope_key as shared_repository_record_scope_key,
@@ -49,6 +53,210 @@ impl super::PostgresRecordStore {
         upsert_record_in_transaction(&mut transaction, &latest_locator, record).await?;
         transaction.commit().await?;
         Ok(())
+    }
+
+    /// Atomically publishes an S3 record version, its latest alias, and the
+    /// listing row through a lock-owning Postgres connection.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the entry does not describe `record`, metadata
+    /// serialization fails, or Postgres cannot commit the transaction.
+    pub async fn publish_s3_object_on_connection(
+        &self,
+        connection: &mut PgConnection,
+        record: &FileRecord,
+        entry: &S3ObjectEntry,
+        condition: &S3PublishCondition,
+        completion_fence: Option<&ResumableCompletionFence>,
+    ) -> Result<bool, PostgresMetadataStoreError> {
+        if entry.file_id != record.file_id
+            || entry.content_hash != record.content_hash
+            || entry.size_bytes != record.total_bytes
+        {
+            return Err(PostgresMetadataStoreError::S3PublicationMismatch);
+        }
+        let metadata = serde_json::to_string(&entry.user_metadata)?;
+        let mut transaction = connection.begin().await?;
+        if let Some(fence) = completion_fence {
+            let owns_completion = query_scalar::<_, i32>(
+                "SELECT 1 FROM shardline_resumable_sessions
+                 WHERE session_id = $1 AND state = 'completing' AND fence_epoch = $2
+                   AND expires_at > clock_timestamp()
+                 FOR UPDATE",
+            )
+            .bind(fence.session_id())
+            .bind(super::u64_to_i64(fence.epoch().get())?)
+            .fetch_optional(&mut *transaction)
+            .await?
+            .is_some();
+            if !owns_completion {
+                transaction.rollback().await?;
+                return Ok(false);
+            }
+        }
+        let version = self.version_record_locator(record);
+        upsert_record_in_transaction(&mut transaction, &version, record).await?;
+        let latest = self.latest_record_locator(record);
+        upsert_record_in_transaction(&mut transaction, &latest, record).await?;
+        let publication = match condition {
+            S3PublishCondition::Unconditional => {
+                query(
+                    "INSERT INTO shardline_s3_objects (
+                 scope_namespace, object_key, file_id, size_bytes, content_hash, etag,
+                 user_metadata, updated_at_unix_seconds
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+             ON CONFLICT (scope_namespace, object_key)
+             DO UPDATE SET file_id = EXCLUDED.file_id, size_bytes = EXCLUDED.size_bytes,
+                 content_hash = EXCLUDED.content_hash, etag = EXCLUDED.etag,
+                 user_metadata = EXCLUDED.user_metadata,
+                 updated_at_unix_seconds = EXCLUDED.updated_at_unix_seconds",
+                )
+                .bind(&entry.scope_namespace)
+                .bind(&entry.object_key)
+                .bind(&entry.file_id)
+                .bind(super::u64_to_i64(entry.size_bytes)?)
+                .bind(&entry.content_hash)
+                .bind(&entry.etag)
+                .bind(&metadata)
+                .bind(entry.updated_at_unix_seconds)
+                .execute(&mut *transaction)
+                .await?
+            }
+            S3PublishCondition::IfUnchanged(Some(expected)) => {
+                let expected_metadata = serde_json::to_string(&expected.user_metadata)?;
+                query(
+                    "UPDATE shardline_s3_objects
+                     SET file_id = $3, size_bytes = $4, content_hash = $5, etag = $6,
+                         user_metadata = $7, updated_at_unix_seconds = $8
+                     WHERE scope_namespace = $1 AND object_key = $2
+                       AND file_id = $9 AND size_bytes = $10 AND content_hash = $11
+                       AND etag = $12 AND user_metadata = $13
+                       AND updated_at_unix_seconds = $14",
+                )
+                .bind(&entry.scope_namespace)
+                .bind(&entry.object_key)
+                .bind(&entry.file_id)
+                .bind(super::u64_to_i64(entry.size_bytes)?)
+                .bind(&entry.content_hash)
+                .bind(&entry.etag)
+                .bind(&metadata)
+                .bind(entry.updated_at_unix_seconds)
+                .bind(&expected.file_id)
+                .bind(super::u64_to_i64(expected.size_bytes)?)
+                .bind(&expected.content_hash)
+                .bind(&expected.etag)
+                .bind(expected_metadata)
+                .bind(expected.updated_at_unix_seconds)
+                .execute(&mut *transaction)
+                .await?
+            }
+            S3PublishCondition::IfUnchanged(None) => {
+                query(
+                    "INSERT INTO shardline_s3_objects (
+                     scope_namespace, object_key, file_id, size_bytes, content_hash, etag,
+                     user_metadata, updated_at_unix_seconds
+                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                 ON CONFLICT (scope_namespace, object_key) DO NOTHING",
+                )
+                .bind(&entry.scope_namespace)
+                .bind(&entry.object_key)
+                .bind(&entry.file_id)
+                .bind(super::u64_to_i64(entry.size_bytes)?)
+                .bind(&entry.content_hash)
+                .bind(&entry.etag)
+                .bind(&metadata)
+                .bind(entry.updated_at_unix_seconds)
+                .execute(&mut *transaction)
+                .await?
+            }
+        };
+        if publication.rows_affected() != 1 {
+            transaction.rollback().await?;
+            return Ok(false);
+        }
+        if let Some(fence) = completion_fence {
+            let completed = query(
+                "UPDATE shardline_resumable_sessions
+                 SET state = 'completed', updated_at = now()
+                 WHERE session_id = $1 AND state = 'completing' AND fence_epoch = $2",
+            )
+            .bind(fence.session_id())
+            .bind(super::u64_to_i64(fence.epoch().get())?)
+            .execute(&mut *transaction)
+            .await?;
+            if completed.rows_affected() != 1 {
+                transaction.rollback().await?;
+                return Ok(false);
+            }
+        }
+        transaction.commit().await?;
+        Ok(true)
+    }
+
+    /// Atomically removes an S3 listing row and the record version it made
+    /// visible through a lock-owning Postgres connection.
+    ///
+    /// When no listing row exists, the current global latest alias is removed
+    /// for compatibility with objects written before the S3 listing index.
+    /// Immutable chunks remain for writer-excluding GC.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when Postgres cannot commit the deletion transaction.
+    pub async fn delete_s3_object_on_connection(
+        &self,
+        connection: &mut PgConnection,
+        scope_namespace: &str,
+        object_key: &str,
+        fallback_file_id: &str,
+    ) -> Result<bool, PostgresMetadataStoreError> {
+        let mut transaction = connection.begin().await?;
+        let deleted_entry = query(
+            "DELETE FROM shardline_s3_objects
+             WHERE scope_namespace = $1 AND object_key = $2
+             RETURNING file_id, content_hash",
+        )
+        .bind(scope_namespace)
+        .bind(object_key)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let scope_key = shared_repository_scope_key(None);
+        let (file_id, visible_hash) = if let Some(row) = deleted_entry.as_ref() {
+            (
+                row.try_get::<String, _>("file_id")?,
+                Some(row.try_get::<String, _>("content_hash")?),
+            )
+        } else {
+            let hash = query_scalar::<_, String>(
+                "SELECT content_hash FROM shardline_file_records
+                 WHERE scope_key = $1 AND file_id = $2 AND record_kind = 'latest'
+                 FOR UPDATE",
+            )
+            .bind(&scope_key)
+            .bind(fallback_file_id)
+            .fetch_optional(&mut *transaction)
+            .await?;
+            (fallback_file_id.to_owned(), hash)
+        };
+        let deleted_records = if let Some(content_hash) = visible_hash {
+            query(
+                "DELETE FROM shardline_file_records
+                 WHERE scope_key = $1 AND file_id = $2
+                   AND (record_kind = 'latest'
+                        OR (record_kind = 'version' AND content_hash = $3))",
+            )
+            .bind(scope_key)
+            .bind(file_id)
+            .bind(content_hash)
+            .execute(&mut *transaction)
+            .await?
+            .rows_affected()
+        } else {
+            0
+        };
+        transaction.commit().await?;
+        Ok(deleted_entry.is_some() || deleted_records > 0)
     }
 
     /// Atomically removes a visible file reference and its immutable version record.
@@ -687,7 +895,10 @@ mod tests {
 
     use super::RecordKind;
     use super::record_locator;
-    use crate::{FileChunkRecord, FileRecord};
+    use crate::{
+        FileChunkRecord, FileRecord, ResumableSession, ResumableSessionProtocol, S3ObjectEntry,
+        S3PublishCondition,
+    };
 
     fn sample_record(repo_scope: Option<RepositoryScope>) -> FileRecord {
         FileRecord {
@@ -772,5 +983,184 @@ mod tests {
         // Without scope, the key should still be valid
         assert!(!locator.record_key().is_empty());
         assert_eq!(locator.file_id(), "test.bin");
+    }
+
+    #[tokio::test]
+    async fn s3_publication_rolls_back_records_when_condition_loses() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&url).await.unwrap();
+        let store = super::super::PostgresRecordStore::new(pool.clone());
+        let suffix = chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default();
+        let mut record = sample_record(None);
+        record.file_id = format!("atomic-s3-{}-{suffix}", std::process::id());
+        let entry = S3ObjectEntry {
+            scope_namespace: format!("scope-{suffix}"),
+            object_key: "models/weights.bin".to_owned(),
+            file_id: record.file_id.clone(),
+            size_bytes: record.total_bytes,
+            content_hash: record.content_hash.clone(),
+            etag: "etag-new".to_owned(),
+            user_metadata: vec![("owner".to_owned(), "alice".to_owned())],
+            updated_at_unix_seconds: 1,
+        };
+        let mut expected = entry.clone();
+        expected.etag = "etag-that-does-not-exist".to_owned();
+        let mut connection = pool.acquire().await.unwrap();
+        assert!(
+            !store
+                .publish_s3_object_on_connection(
+                    &mut connection,
+                    &record,
+                    &entry,
+                    &S3PublishCondition::IfUnchanged(Some(expected)),
+                    None,
+                )
+                .await
+                .unwrap()
+        );
+        let record_count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM shardline_file_records WHERE file_id = $1")
+                .bind(&record.file_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(record_count, 0);
+
+        assert!(
+            store
+                .publish_s3_object_on_connection(
+                    &mut connection,
+                    &record,
+                    &entry,
+                    &S3PublishCondition::Unconditional,
+                    None,
+                )
+                .await
+                .unwrap()
+        );
+        let record_count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM shardline_file_records WHERE file_id = $1")
+                .bind(&record.file_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(record_count, 2);
+
+        assert!(
+            store
+                .delete_s3_object_on_connection(
+                    &mut connection,
+                    &entry.scope_namespace,
+                    &entry.object_key,
+                    &entry.file_id,
+                )
+                .await
+                .unwrap()
+        );
+        let record_count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM shardline_file_records WHERE file_id = $1")
+                .bind(&record.file_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(record_count, 0);
+        let listing_count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM shardline_s3_objects
+             WHERE scope_namespace = $1 AND object_key = $2",
+        )
+        .bind(&entry.scope_namespace)
+        .bind(&entry.object_key)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(listing_count, 0);
+    }
+
+    #[tokio::test]
+    async fn stale_multipart_completion_cannot_publish() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&url).await.unwrap();
+        let record_store = super::super::PostgresRecordStore::new(pool.clone());
+        let index_store = super::super::PostgresIndexStore::new(pool.clone());
+        let suffix = chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default();
+        let session = ResumableSession::new(
+            format!("fenced-completion-{suffix}"),
+            ResumableSessionProtocol::S3Multipart,
+            format!("scope-{suffix}"),
+            "large.bin".to_owned(),
+            std::time::Duration::from_secs(
+                u64::try_from(chrono::Utc::now().timestamp()).unwrap() + 3_600,
+            ),
+        );
+        assert!(
+            index_store
+                .create_resumable_session(&session)
+                .await
+                .unwrap()
+        );
+        let first = index_store
+            .begin_resumable_completion(session.session_id())
+            .await
+            .unwrap()
+            .unwrap()
+            .0;
+        let second = index_store
+            .begin_resumable_completion(session.session_id())
+            .await
+            .unwrap()
+            .unwrap()
+            .0;
+        assert!(second.fence_epoch() > first.fence_epoch());
+
+        let mut record = sample_record(None);
+        record.file_id = format!("fenced-record-{suffix}");
+        let entry = S3ObjectEntry {
+            scope_namespace: session.scope_namespace().to_owned(),
+            object_key: session.target_key().to_owned(),
+            file_id: record.file_id.clone(),
+            size_bytes: record.total_bytes,
+            content_hash: record.content_hash.clone(),
+            etag: "etag".to_owned(),
+            user_metadata: Vec::new(),
+            updated_at_unix_seconds: 1,
+        };
+        let mut connection = pool.acquire().await.unwrap();
+        assert!(
+            !record_store
+                .publish_s3_object_on_connection(
+                    &mut connection,
+                    &record,
+                    &entry,
+                    &S3PublishCondition::Unconditional,
+                    Some(&first.completion_fence()),
+                )
+                .await
+                .unwrap()
+        );
+        assert!(
+            record_store
+                .publish_s3_object_on_connection(
+                    &mut connection,
+                    &record,
+                    &entry,
+                    &S3PublishCondition::Unconditional,
+                    Some(&second.completion_fence()),
+                )
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            index_store
+                .resumable_session_by_id(session.session_id())
+                .await
+                .unwrap()
+                .unwrap()
+                .state(),
+            crate::ResumableSessionState::Completed
+        );
     }
 }
