@@ -3,6 +3,7 @@ mod oci_objects;
 mod oci_tags;
 mod provider_mutation;
 mod record_store;
+mod resumable_sessions;
 mod s3_objects;
 mod tree_store;
 mod types;

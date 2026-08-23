@@ -5,7 +5,7 @@ use sqlx::{Error as SqlxError, PgPool};
 use thiserror::Error;
 
 use crate::{
-    OciObjectKindParseError, QuarantineCandidateError, RetentionHoldError,
+    OciObjectKindParseError, QuarantineCandidateError, ResumableSessionError, RetentionHoldError,
     UploadIntentConflictError, WebhookDeliveryError,
 };
 
@@ -154,6 +154,9 @@ pub enum PostgresMetadataStoreError {
         #[source]
         UploadIntentConflictError,
     ),
+    /// Stored resumable-session data violated the typed contract.
+    #[error("invalid resumable-session metadata")]
+    ResumableSession(#[from] ResumableSessionError),
 }
 
 impl From<SqlxError> for PostgresMetadataStoreError {
