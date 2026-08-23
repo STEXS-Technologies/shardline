@@ -28,6 +28,7 @@ write throughput, so Postgres is the production multi-replica metadata backend.
 | upload intent ID | one immutable `(object key, hash, length)` identity and monotonic lifecycle | store-level identity check and legal-state transition check |
 | S3 conditional object write | exactly one matching writer wins | metadata-row insert-if-absent or compare-and-swap; loser receives `412` |
 | S3 unconditional write | one complete version is visible, last metadata commit wins | immutable record first, atomic metadata-row swap second |
+| S3 object deletion | delete and competing publication have one cross-replica order; no listing row points at removed record metadata | per-key distributed fence plus one transaction removing listing and visible record aliases |
 | Hub ref/revision mutation | stale parent loses; delete cannot interleave with a push | SQLite transaction or Postgres repository-row lock |
 | OCI tag | one authoritative digest; a stale lock owner cannot retarget it | unique metadata key plus transactional publication on the lock-owning fenced Postgres session |
 | OCI manifest/tag/blob deletion | deletion is immediately visible without an unfenced object-store side effect | repository-scoped lock plus transactional tombstone; manifest tags are removed in the same commit |

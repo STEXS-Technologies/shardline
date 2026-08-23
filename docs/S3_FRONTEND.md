@@ -177,8 +177,9 @@ durability guarantees:
   backend. fsck validates the record↔chunk contract; GC reachability protects
   the chunks via the record.
 - **The S3 listing index is a derived snapshot, GC inert, and not a
-  reachability source** — deleting a listing row never touches chunks or
-  records. Delete ordering is crash-safe: index row first, then record+object.
+  reachability source** — deletion takes the same distributed per-key fence as
+  publication and atomically removes the listing row plus visible record aliases.
+  Immutable chunks are reclaimed later by writer-excluding GC.
 - **Listing nuance** — `ListObjectsV2` serves the snapshot (size/hash/mtime from
   the index row); `HeadObject`/`GetObject` always resolve through the
   authoritative `FileRecord`. A listing row can lag the record until the next
