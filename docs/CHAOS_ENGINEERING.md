@@ -64,10 +64,11 @@ silently relabeled Stable based only on line coverage.
 
 ## Required failure-boundary model
 
-`LocalPublishBoundary`, `LocalPublishFault` and `UploadLifecycleBoundary` are the explicit
-typed fault vocabulary shared by production code and deterministic tests. They cover local
-write, file-sync, installation, directory-sync, durable intent, object-work, metadata-commit
-and visibility transitions without string matching. The complete write path now distinguishes:
+`LocalPublishBoundary`, `LocalPublishFault`, `UploadLifecycleBoundary`, and
+`S3DeleteBoundary` are the explicit typed fault vocabulary shared by production code and
+deterministic tests. They cover local write, file-sync, installation, directory-sync,
+durable intent, object-work, metadata-commit, deletion, and visibility transitions without
+string matching. The complete write path now distinguishes:
 
 ```text
 validated

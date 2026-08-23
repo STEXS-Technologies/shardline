@@ -879,6 +879,74 @@ async fn s3_delete_object_is_idempotent() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_delete_interruption_cannot_resurrect_legacy_direct_bytes() {
+    let (state, _tmp) = build_test_state().await;
+    let repository = RepositoryScope::new(RepositoryProvider::Generic, OWNER, NAME, None).unwrap();
+    let namespace = crate::protocol_support::scope_namespace(Some(&repository));
+    let key = "legacy/crash-window.bin";
+    let object_key = shardline_s3_adapter::s3_object_key(&namespace, key).unwrap();
+    state
+        .backend
+        .put_object_bytes_overwrite(&object_key, b"legacy-direct".to_vec())
+        .await
+        .unwrap();
+    crate::backend::s3_delete_fault_injection::arm(
+        crate::backend::s3_delete_fault_injection::S3DeleteBoundary::AfterDirectDelete,
+        object_key.as_str(),
+    );
+    let app = s3_router(state);
+    let uri = format!("/{BUCKET}/{key}");
+    let interrupted = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(uri.clone())
+                .header(
+                    header::AUTHORIZATION,
+                    sigv4_auth(&mint_token(TokenScope::Write, OWNER, NAME)),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(interrupted.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+    let get = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(uri.clone())
+                .header(
+                    header::AUTHORIZATION,
+                    sigv4_auth(&mint_token(TokenScope::Read, OWNER, NAME)),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get.status(), StatusCode::NOT_FOUND);
+
+    let retry = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(uri)
+                .header(
+                    header::AUTHORIZATION,
+                    sigv4_auth(&mint_token(TokenScope::Write, OWNER, NAME)),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(retry.status(), StatusCode::NO_CONTENT);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn s3_post_without_sub_resource_returns_501_not_implemented() {
     let (state, _tmp) = build_test_state().await;
     let app = s3_router(state);

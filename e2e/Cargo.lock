@@ -3264,6 +3264,7 @@ dependencies = [
  "shardline-xet-core",
  "sqlx",
  "subtle",
+ "tempfile",
  "thiserror",
  "tokio",
  "toml",

@@ -18,10 +18,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
   bounded durable accounting, and fenced completion.
 - Cross-replica tests for all three resumable protocols, including out-of-order
   and overlapping LFS ranges.
+- A typed S3 delete interruption boundary that permanently regresses the
+  direct-byte removal crash window.
 - GC inventory and counters for private resumable staging objects and terminal
   session metadata.
 
 ### Changed
+- E2E CI now installs checksum-pinned Git LFS 3.7.1 and Bazelisk 1.29.0,
+  pins Bazel 8.7.0, and explicitly runs the native Bazel cache flows instead
+  of silently skipping unavailable clients.
 - Scaled API replicas now keep incomplete payload fragments in object storage
   and coordination in Postgres; a lock-coherent RWX volume is no longer part of
   the production topology.
