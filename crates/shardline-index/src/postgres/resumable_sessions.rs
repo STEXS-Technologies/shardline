@@ -4,9 +4,11 @@ use sqlx::{Postgres, Row, Transaction};
 
 use super::{PostgresIndexStore, PostgresMetadataStoreError, i64_to_u64, u64_to_i64};
 use crate::{
-    ResumableSession, ResumableSessionError, ResumableSessionPart, ResumableSessionProtocol,
-    ResumableSessionState,
+    CreateResumableSessionOutcome, PublishResumablePartOutcome, ResumableSession,
+    ResumableSessionError, ResumableSessionPart, ResumableSessionProtocol, ResumableSessionState,
 };
+
+const SESSION_ACCOUNTING_LOCK_ID: i64 = 0x5348_5244_5345_5353;
 
 fn session_from_row(
     row: &sqlx::postgres::PgRow,
@@ -25,6 +27,7 @@ fn session_from_row(
         protocol,
         row.try_get("scope_namespace")?,
         row.try_get("target_key")?,
+        row.try_get("attributes_json")?,
         state,
         i64_to_u64(row.try_get("generation")?)?,
         i64_to_u64(row.try_get("fence_epoch")?)?,
@@ -79,15 +82,16 @@ impl PostgresIndexStore {
         .ok_or_else(|| PostgresMetadataStoreError::IntegerOutOfRange("invalid expiry".into()))?;
         let result = sqlx::query(
             "INSERT INTO shardline_resumable_sessions (
-                 session_id, protocol, scope_namespace, target_key, state,
+                 session_id, protocol, scope_namespace, target_key, attributes_json, state,
                  generation, fence_epoch, expires_at
-             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
              ON CONFLICT (session_id) DO NOTHING",
         )
         .bind(session.session_id())
         .bind(session.protocol().as_str())
         .bind(session.scope_namespace())
         .bind(session.target_key())
+        .bind(session.attributes_json())
         .bind(session.state().as_str())
         .bind(u64_to_i64(session.generation().get())?)
         .bind(u64_to_i64(session.fence_epoch().get())?)
@@ -95,6 +99,67 @@ impl PostgresIndexStore {
         .execute(self.pool())
         .await?;
         Ok(result.rows_affected() == 1)
+    }
+
+    /// Creates a session while transactionally enforcing a per-protocol active ceiling.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when values cannot be represented or Postgres rejects the transaction.
+    pub async fn create_resumable_session_bounded(
+        &self,
+        session: &ResumableSession,
+        max_active: usize,
+    ) -> Result<CreateResumableSessionOutcome, PostgresMetadataStoreError> {
+        let max_active = i64::try_from(max_active)
+            .map_err(|error| PostgresMetadataStoreError::IntegerOutOfRange(error.to_string()))?;
+        let expires_at = chrono::DateTime::<chrono::Utc>::from_timestamp(
+            i64::try_from(session.expires_at().as_secs()).map_err(|error| {
+                PostgresMetadataStoreError::IntegerOutOfRange(error.to_string())
+            })?,
+            0,
+        )
+        .ok_or_else(|| PostgresMetadataStoreError::IntegerOutOfRange("invalid expiry".into()))?;
+        let mut transaction = self.pool().begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(SESSION_ACCOUNTING_LOCK_ID)
+            .execute(&mut *transaction)
+            .await?;
+        let active: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM shardline_resumable_sessions
+             WHERE protocol = $1 AND state = 'active' AND expires_at > clock_timestamp()",
+        )
+        .bind(session.protocol().as_str())
+        .fetch_one(&mut *transaction)
+        .await?;
+        if active >= max_active {
+            transaction.rollback().await?;
+            return Ok(CreateResumableSessionOutcome::TooManyActive);
+        }
+        let result = sqlx::query(
+            "INSERT INTO shardline_resumable_sessions (
+                 session_id, protocol, scope_namespace, target_key, attributes_json, state,
+                 generation, fence_epoch, expires_at
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+             ON CONFLICT (session_id) DO NOTHING",
+        )
+        .bind(session.session_id())
+        .bind(session.protocol().as_str())
+        .bind(session.scope_namespace())
+        .bind(session.target_key())
+        .bind(session.attributes_json())
+        .bind(session.state().as_str())
+        .bind(u64_to_i64(session.generation().get())?)
+        .bind(u64_to_i64(session.fence_epoch().get())?)
+        .bind(expires_at)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(if result.rows_affected() == 1 {
+            CreateResumableSessionOutcome::Created
+        } else {
+            CreateResumableSessionOutcome::AlreadyExists
+        })
     }
 
     /// Loads a resumable session by opaque ID.
@@ -107,7 +172,7 @@ impl PostgresIndexStore {
         session_id: &str,
     ) -> Result<Option<ResumableSession>, PostgresMetadataStoreError> {
         sqlx::query(
-            "SELECT session_id, protocol, scope_namespace, target_key, state,
+            "SELECT session_id, protocol, scope_namespace, target_key, attributes_json, state,
                     generation, fence_epoch, expires_at
              FROM shardline_resumable_sessions WHERE session_id = $1",
         )
@@ -178,6 +243,132 @@ impl PostgresIndexStore {
         )))
     }
 
+    /// Publishes a staged part while transactionally enforcing all byte and part ceilings.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a bound cannot be represented or Postgres rejects the transaction.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn publish_resumable_part_bounded(
+        &self,
+        session_id: &str,
+        part_number: NonZeroU64,
+        staging_key: &str,
+        size_bytes: u64,
+        etag: Option<&str>,
+        session_max_bytes: u64,
+        aggregate_max_bytes: u64,
+        max_active_parts: usize,
+    ) -> Result<PublishResumablePartOutcome, PostgresMetadataStoreError> {
+        let mut transaction = self.pool().begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(SESSION_ACCOUNTING_LOCK_ID)
+            .execute(&mut *transaction)
+            .await?;
+        let generation: Option<i64> = sqlx::query_scalar(
+            "UPDATE shardline_resumable_sessions
+             SET generation = generation + 1, updated_at = now()
+             WHERE session_id = $1 AND state = 'active' AND expires_at > clock_timestamp()
+             RETURNING generation",
+        )
+        .bind(session_id)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let Some(generation) = generation else {
+            transaction.rollback().await?;
+            return Ok(PublishResumablePartOutcome::SessionUnavailable);
+        };
+        let part_number_i64 = u64_to_i64(part_number.get())?;
+        let previous_size: Option<i64> = sqlx::query_scalar(
+            "SELECT size_bytes FROM shardline_resumable_session_parts
+             WHERE session_id = $1 AND part_number = $2",
+        )
+        .bind(session_id)
+        .bind(part_number_i64)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let session_bytes: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(sum(size_bytes), 0)::bigint
+             FROM shardline_resumable_session_parts WHERE session_id = $1",
+        )
+        .bind(session_id)
+        .fetch_one(&mut *transaction)
+        .await?;
+        let aggregate_bytes: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(sum(parts.size_bytes), 0)::bigint
+             FROM shardline_resumable_session_parts AS parts
+             JOIN shardline_resumable_sessions AS sessions USING (session_id)
+             WHERE sessions.state = 'active' AND sessions.expires_at > clock_timestamp()",
+        )
+        .fetch_one(&mut *transaction)
+        .await?;
+        let active_parts: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM shardline_resumable_session_parts AS parts
+             JOIN shardline_resumable_sessions AS sessions USING (session_id)
+             WHERE sessions.state = 'active' AND sessions.expires_at > clock_timestamp()",
+        )
+        .fetch_one(&mut *transaction)
+        .await?;
+        let replacing_existing_part = previous_size.is_some();
+        let previous_size = i64_to_u64(previous_size.unwrap_or_default())?;
+        let projected_session = i64_to_u64(session_bytes)?
+            .checked_sub(previous_size)
+            .and_then(|bytes| bytes.checked_add(size_bytes))
+            .ok_or_else(|| {
+                PostgresMetadataStoreError::IntegerOutOfRange("session quota overflow".into())
+            })?;
+        let projected_aggregate = i64_to_u64(aggregate_bytes)?
+            .checked_sub(previous_size)
+            .and_then(|bytes| bytes.checked_add(size_bytes))
+            .ok_or_else(|| {
+                PostgresMetadataStoreError::IntegerOutOfRange("aggregate quota overflow".into())
+            })?;
+        if projected_session > session_max_bytes {
+            transaction.rollback().await?;
+            return Ok(PublishResumablePartOutcome::SessionQuotaExceeded);
+        }
+        if projected_aggregate > aggregate_max_bytes {
+            transaction.rollback().await?;
+            return Ok(PublishResumablePartOutcome::AggregateQuotaExceeded);
+        }
+        if !replacing_existing_part
+            && active_parts
+                >= i64::try_from(max_active_parts).map_err(|error| {
+                    PostgresMetadataStoreError::IntegerOutOfRange(error.to_string())
+                })?
+        {
+            transaction.rollback().await?;
+            return Ok(PublishResumablePartOutcome::TooManyParts);
+        }
+        sqlx::query(
+            "INSERT INTO shardline_resumable_session_parts (
+                 session_id, part_number, generation, staging_key, size_bytes, etag
+             ) VALUES ($1, $2, $3, $4, $5, $6)
+             ON CONFLICT (session_id, part_number) DO UPDATE SET
+                 generation = EXCLUDED.generation, staging_key = EXCLUDED.staging_key,
+                 size_bytes = EXCLUDED.size_bytes, etag = EXCLUDED.etag",
+        )
+        .bind(session_id)
+        .bind(part_number_i64)
+        .bind(generation)
+        .bind(staging_key)
+        .bind(u64_to_i64(size_bytes)?)
+        .bind(etag)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(PublishResumablePartOutcome::Published(
+            ResumableSessionPart::new(
+                part_number,
+                NonZeroU64::new(i64_to_u64(generation)?)
+                    .ok_or(ResumableSessionError::ZeroGeneration)?,
+                staging_key.to_owned(),
+                size_bytes,
+                etag.map(str::to_owned),
+            ),
+        ))
+    }
+
     /// Pins the current part map and moves an active session to `completing`.
     ///
     /// # Errors
@@ -194,7 +385,7 @@ impl PostgresIndexStore {
              SET state = 'completing', generation = generation + 1,
                  fence_epoch = fence_epoch + 1, updated_at = now()
              WHERE session_id = $1 AND state = 'active' AND expires_at > clock_timestamp()
-             RETURNING session_id, protocol, scope_namespace, target_key, state,
+             RETURNING session_id, protocol, scope_namespace, target_key, attributes_json, state,
                        generation, fence_epoch, expires_at",
         )
         .bind(session_id)
@@ -312,12 +503,77 @@ mod tests {
     fn session(prefix: &str, expires_at: Duration) -> ResumableSession {
         let suffix = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         ResumableSession::new(
-            format!("{prefix}-{suffix}"),
+            format!("{prefix}-{}-{suffix}", std::process::id()),
             ResumableSessionProtocol::S3Multipart,
             "owner/repository".to_owned(),
             "large/model.bin".to_owned(),
             expires_at,
         )
+    }
+
+    #[tokio::test]
+    async fn postgres_bounded_creation_and_part_accounting_are_atomic() {
+        let Some(store) = store().await else {
+            eprintln!("skipping: no reachable DATABASE_URL");
+            return;
+        };
+        let expiry = Duration::from_secs(
+            u64::try_from(chrono::Utc::now().timestamp()).unwrap_or_default() + 3600,
+        );
+        let first = session("bounded-first", expiry)
+            .with_attributes_json(r#"{"bucket":"models"}"#.to_owned())
+            .expect("valid attributes");
+        assert_eq!(
+            store
+                .create_resumable_session_bounded(&first, 100_000)
+                .await
+                .unwrap(),
+            CreateResumableSessionOutcome::Created
+        );
+        assert_eq!(
+            store
+                .publish_resumable_part_bounded(
+                    first.session_id(),
+                    NonZeroU64::MIN,
+                    "staging/first",
+                    4,
+                    Some("etag-1"),
+                    5,
+                    u64::MAX,
+                    100_000,
+                )
+                .await
+                .unwrap(),
+            PublishResumablePartOutcome::Published(ResumableSessionPart::new(
+                NonZeroU64::MIN,
+                NonZeroU64::new(2).unwrap(),
+                "staging/first".to_owned(),
+                4,
+                Some("etag-1".to_owned()),
+            ))
+        );
+        assert_eq!(
+            store
+                .publish_resumable_part_bounded(
+                    first.session_id(),
+                    NonZeroU64::new(2).unwrap(),
+                    "staging/too-large",
+                    2,
+                    None,
+                    5,
+                    u64::MAX,
+                    100_000,
+                )
+                .await
+                .unwrap(),
+            PublishResumablePartOutcome::SessionQuotaExceeded
+        );
+        let loaded = store
+            .resumable_session_by_id(first.session_id())
+            .await
+            .unwrap()
+            .expect("session exists");
+        assert_eq!(loaded.attributes_json(), r#"{"bucket":"models"}"#);
     }
 
     #[tokio::test]
