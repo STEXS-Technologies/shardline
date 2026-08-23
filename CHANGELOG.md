@@ -7,6 +7,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 ## [Unreleased]
 
 ### Added
+
+- Add bounded Ed25519 public-key rings and overlapping old/new verification so signing
+  keys can rotate without rejecting unexpired tokens during a rolling deployment.
 - Durable Postgres resumable-session state for Git LFS PATCH, OCI blob uploads,
   and S3 multipart uploads, with typed range/part maps, database-clock expiry,
   bounded durable accounting, and fenced completion.

@@ -911,14 +911,12 @@ async fn build_auth_provider(config: &ServerConfig) -> Result<Option<ServerAuth>
         AuthProviderKind::Ed25519 => {
             let provider = match (config.ed25519_private_key(), config.ed25519_public_key()) {
                 (Some(private_key), None) => Ed25519AuthProvider::new(private_key),
+                (Some(private_key), Some(public_keyring)) => {
+                    Ed25519AuthProvider::new_with_public_keyring(private_key, public_keyring)
+                }
                 (None, Some(public_key)) => Ed25519AuthProvider::with_public_key(public_key),
                 (None, None) => {
                     return Err(ServerError::Config(ServerConfigError::MissingEd25519Key));
-                }
-                (Some(_private_key), Some(_public_key)) => {
-                    return Err(ServerError::Config(
-                        ServerConfigError::ConflictingEd25519Keys,
-                    ));
                 }
             }
             .map_err(|e| {
