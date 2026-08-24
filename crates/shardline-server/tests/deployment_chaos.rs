@@ -2382,7 +2382,7 @@ async fn drill_deploy_l_postgres_kill_mid_oci_blob_upload() {
     let mut server = DeploymentServer::spawn(
         &binary,
         &[
-            ("SHARDLINE_SERVER_FRONTENDS", "s3"),
+            ("SHARDLINE_SERVER_FRONTENDS", "oci"),
             ("SHARDLINE_S3_ENDPOINT", &stack.s3_endpoint),
         ],
         tmp.path(),
@@ -2422,6 +2422,10 @@ async fn drill_deploy_l_postgres_kill_mid_oci_blob_upload() {
     .await;
     migrate_chaos_postgres(&stack.pg_url).await;
     guard.recovered(CONTAINER_POSTGRES);
+
+    // Re-stage the remaining bytes after Postgres recovery.
+    let retry = oci_patch_upload(&base, &token, &session_id, rest).await;
+    assert_eq!(retry, 202, "oci PATCH after postgres recovery must succeed");
 
     let finalize = oci_finalize_upload(&base, &token, &session_id, &digest).await;
     assert_eq!(finalize, 201, "oci finalize after postgres recovery must succeed");
