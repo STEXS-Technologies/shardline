@@ -2580,8 +2580,10 @@ async fn handler_lfs_batch_xet_transfer_negotiated_with_auth() {
     impl AuthProvider for XetProvider {
         fn verify_token(&self, _token: &str) -> Result<TokenClaims, AuthError> {
             let repo =
-                RepositoryScope::new(RepositoryProvider::Generic, "alice", "own", None).unwrap();
-            Ok(TokenClaims::new("issuer", "alice", TokenScope::Write, repo, u64::MAX).unwrap())
+                RepositoryScope::new(RepositoryProvider::Generic, "alice", "own", None)
+                    .map_err(|_| AuthError::InvalidToken)?;
+            TokenClaims::new("issuer", "alice", TokenScope::Write, repo, u64::MAX)
+                .map_err(|_| AuthError::InvalidToken)
         }
         fn mint_token(&self, _claims: &TokenClaims) -> Result<String, AuthError> {
             Ok("alice-token".into())
