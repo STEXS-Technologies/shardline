@@ -47,7 +47,6 @@ pub(crate) async fn lfs_batch(
     // Determine the transfer adapter. Prefer "xet" when the client supports it
     // and the server has an auth provider to mint CAS tokens. Fall back to "basic".
     let supports_xet = request.transfers.iter().any(|t| t == "xet");
-    let supports_basic = request.transfers.iter().any(|t| t == "basic");
     let use_xet = supports_xet && state.auth.is_some() && capability.claims().is_some();
     let transfer = if use_xet {
         "xet"
