@@ -28,10 +28,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
   stateless multi-replica storage path — Postgres-kill and MinIO-kill mid-LFS-PATCH
   (the durable session and staging survive the outage and the object completes
   byte-exact after recovery), network partition during overlapping LFS PATCH repair,
-  an N-1→N mixed-version rollout of a resumable LFS PATCH object, and Postgres-kill
-  mid-S3 multipart upload (durable session survives, missing part re-uploaded after
-  recovery, object byte-exact). OCI blob-upload resumable drill is present but
-  skipped pending index-adapter configuration for the deployment profile.
+  an N-1→N mixed-version rollout of a resumable LFS PATCH object (skips when the
+  N-1 binary predates the durable path), and Postgres-kill mid-S3 multipart upload
+  (durable session survives, missing part re-uploaded after recovery, object
+  byte-exact). OCI blob-upload resumable drill is present but skipped pending
+  index-adapter configuration for the deployment profile. The shardline binary
+  resolver now falls back to `target/release` when `target/debug` is absent.
 
 ### Changed
 - E2E CI now installs checksum-pinned Git LFS 3.7.1 and Bazelisk 1.29.0,
