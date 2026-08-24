@@ -2410,6 +2410,8 @@ async fn handler_lfs_batch_upload_new_object() {
                 oid: "e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0".into(),
                 size: 1000,
             }],
+            transfers: Vec::new(),
+            hash_algo: None,
         }),
     )
     .await
@@ -2457,6 +2459,8 @@ async fn handler_lfs_batch_download_existing_object() {
                 oid: "7171717171717171717171717171717171717171717171717171717171717171".into(),
                 size: 9,
             }],
+            transfers: Vec::new(),
+            hash_algo: None,
         }),
     )
     .await
@@ -2483,6 +2487,8 @@ async fn handler_lfs_batch_download_missing_object() {
                 oid: "9393939393939393939393939393939393939393939393939393939393939393".into(),
                 size: 100,
             }],
+            transfers: Vec::new(),
+            hash_algo: None,
         }),
     )
     .await
@@ -2527,6 +2533,8 @@ async fn handler_lfs_batch_verify_existing() {
                 oid: "8282828282828282828282828282828282828282828282828282828282828282".into(),
                 size: 4,
             }],
+            transfers: Vec::new(),
+            hash_algo: None,
         }),
     )
     .await
@@ -2551,6 +2559,8 @@ async fn handler_lfs_batch_verify_missing() {
                 oid: "a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4".into(),
                 size: 1,
             }],
+            transfers: Vec::new(),
+            hash_algo: None,
         }),
     )
     .await
@@ -2558,6 +2568,121 @@ async fn handler_lfs_batch_verify_missing() {
     let obj = &result.objects[0];
     assert!(obj.actions.is_none());
     assert!(obj.error.is_some());
+}
+
+#[tokio::test]
+async fn handler_lfs_batch_xet_transfer_negotiated_with_auth() {
+    use crate::auth::HubAuth;
+    use shardline_protocol::{RepositoryProvider, RepositoryScope, TokenClaims, TokenScope};
+    use shardline_server_core::{AuthError, AuthProvider};
+
+    struct XetProvider;
+    impl AuthProvider for XetProvider {
+        fn verify_token(&self, _token: &str) -> Result<TokenClaims, AuthError> {
+            let repo =
+                RepositoryScope::new(RepositoryProvider::Generic, "alice", "own", None).unwrap();
+            Ok(TokenClaims::new("issuer", "alice", TokenScope::Write, repo, u64::MAX).unwrap())
+        }
+        fn mint_token(&self, _claims: &TokenClaims) -> Result<String, AuthError> {
+            Ok("alice-token".into())
+        }
+    }
+
+    let (td, store) = make_delete_test_store();
+    let object_store = shardline_server_core::ServerObjectStore::local(td.path().join("lfs"))
+        .expect("local object store");
+    let state = HubState {
+        store,
+        object_store,
+        auth: Some(HubAuth::new(Box::new(XetProvider))),
+        http_client: None,
+        webhook_secret_cipher: None,
+    };
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        axum::http::header::AUTHORIZATION,
+        "Bearer alice-token".parse().unwrap(),
+    );
+
+    let result = lfs_batch(
+        State(state.clone()),
+        test_repo(&state, &headers),
+        Json(LfsBatchRequest {
+            operation: LfsBatchOperation::Upload,
+            ref_: LfsBatchRef {
+                name: "main".into(),
+            },
+            objects: vec![LfsObjectRequest {
+                oid: "a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0".into(),
+                size: 1000,
+            }],
+            transfers: vec!["xet".into()],
+            hash_algo: None,
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        result.transfer, "xet",
+        "should negotiate xet when auth present"
+    );
+}
+
+#[tokio::test]
+async fn handler_lfs_batch_xet_transfer_falls_back_without_auth() {
+    let (_td, state) = make_lfs_state();
+
+    let result = lfs_batch(
+        State(state.clone()),
+        test_repo(&state, &default_headers()),
+        Json(LfsBatchRequest {
+            operation: LfsBatchOperation::Upload,
+            ref_: LfsBatchRef {
+                name: "main".into(),
+            },
+            objects: vec![LfsObjectRequest {
+                oid: "b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0".into(),
+                size: 1000,
+            }],
+            transfers: vec!["xet".into()],
+            hash_algo: None,
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        result.transfer, "basic",
+        "should fall back to basic without auth"
+    );
+}
+
+#[tokio::test]
+async fn handler_lfs_batch_xet_transfer_with_basic_fallback() {
+    let (_td, state) = make_lfs_state();
+
+    let result = lfs_batch(
+        State(state.clone()),
+        test_repo(&state, &default_headers()),
+        Json(LfsBatchRequest {
+            operation: LfsBatchOperation::Upload,
+            ref_: LfsBatchRef {
+                name: "main".into(),
+            },
+            objects: vec![LfsObjectRequest {
+                oid: "c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0".into(),
+                size: 1000,
+            }],
+            transfers: vec!["xet".into(), "basic".into()],
+            hash_algo: None,
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        result.transfer, "basic",
+        "should fall back to basic when xet-only without auth"
+    );
 }
 
 // ------------------------------------------------------------------
