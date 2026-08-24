@@ -28,10 +28,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
   stateless multi-replica storage path — Postgres-kill and MinIO-kill mid-LFS-PATCH
   (the durable session and staging survive the outage and the object completes
   byte-exact after recovery), network partition during overlapping LFS PATCH repair,
-  and Postgres-kill mid-S3 multipart upload (durable session survives, missing part
-  re-uploaded after recovery, object byte-exact). Mixed-version rollout is covered
-  by the existing drill F (S3 PUT). OCI blob-upload resumable drill is present but
-  skipped pending index-adapter configuration for the deployment profile.
+  Postgres-kill mid-OCI blob-upload (durable session survives, remaining bytes
+  re-staged after recovery, blob byte-exact), and Postgres-kill mid-S3 multipart
+  upload (durable session survives, missing part re-uploaded after recovery, object
+  byte-exact). Mixed-version rollout is covered by the existing drill F (S3 PUT).
 
 ### Changed
 - E2E CI now installs checksum-pinned Git LFS 3.7.1 and Bazelisk 1.29.0,
