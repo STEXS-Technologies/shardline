@@ -352,6 +352,12 @@ pub struct LfsBatchRequest {
     pub ref_: LfsBatchRef,
     /// Objects.
     pub objects: Vec<LfsObjectRequest>,
+    /// Requested transfer adapters (e.g. `["xet", "basic"]`).
+    #[serde(default)]
+    pub transfers: Vec<String>,
+    /// Hash algorithm (only `sha256` is supported).
+    #[serde(default)]
+    pub hash_algo: Option<String>,
 }
 
 /// LFS batch operation type.
