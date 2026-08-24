@@ -22,7 +22,8 @@
     clippy::expect_used,
     clippy::panic,
     clippy::needless_borrows_for_generic_args,
-    clippy::unnecessary_map_or
+    clippy::unnecessary_map_or,
+    clippy::arithmetic_side_effects
 )]
 
 use serial_test::serial;
@@ -122,6 +123,16 @@ fn deterministic_bytes(len: usize, seed: u64) -> Vec<u8> {
         out.push((state & 0xff) as u8);
     }
     out
+}
+
+/// Extract the text of the first `<{tag}>..</{tag}>` element from an XML body
+/// (used to parse the `UploadId` out of S3 multipart create responses).
+fn extract_xml_tag(xml: &str, tag: &str) -> Option<String> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let start = xml.find(&open)?.checked_add(open.len())?;
+    let end = xml[start..].find(&close)?.checked_add(start)?;
+    Some(xml[start..end].to_owned())
 }
 
 /// Slow body: a reqwest stream backed by an mpsc channel. The handler is
@@ -608,11 +619,17 @@ fn resolve_shardline_binary() -> Option<PathBuf> {
     let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)?;
-    let candidate = workspace_root
-        .join("target")
-        .join("debug")
-        .join("shardline");
-    candidate.is_file().then_some(candidate)
+    // Try debug first, then release (release survives `cargo clean` of debug).
+    for profile in ["debug", "release"] {
+        let candidate = workspace_root
+            .join("target")
+            .join(profile)
+            .join("shardline");
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 fn resolve_n_minus_one_binary(drill: &str) -> Option<PathBuf> {
@@ -905,6 +922,73 @@ fn s3_get_raw(
             .send()
             .await
     }
+}
+
+// ---------------------------------------------------------------------------
+// Durable resumable LFS PATCH helpers.
+//
+// The resumable LFS PATCH path (durable resumable sessions in Postgres + staged
+// bytes in the object store) is the storage machinery introduced by the
+// hardening/stability release. These helpers mirror `start_slow_put` /
+// `assert_in_flight_fails_cleanly` but drive the LFS PATCH surface so the chaos
+// drills can fault-inject a resumable upload the same way they fault-inject a
+// plain S3 PUT.
+// ---------------------------------------------------------------------------
+
+/// A complete (non-streaming) LFS PATCH for the byte range [start, end_inclusive]
+/// of `total`, used to finish / repair a durable resumable session.
+async fn lfs_patch_range(
+    base: &str,
+    token: &str,
+    oid: &str,
+    start: u64,
+    end_inclusive: u64,
+    total: u64,
+    bytes: &[u8],
+) -> reqwest::Response {
+    let range = format!("bytes {start}-{end_inclusive}/{total}");
+    reqwest::Client::new()
+        .patch(format!("{base}/v1/lfs/objects/{oid}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/octet-stream")
+        .header("Content-Range", range)
+        .body(bytes.to_vec())
+        .timeout(Duration::from_secs(30))
+        .send()
+        .await
+        .expect("lfs patch range")
+}
+
+/// A per-run nonce so repeated drill executions against a *persistent* chaos
+/// Postgres volume produce distinct object OIDs (and therefore distinct durable
+/// resumable session IDs). Without this, a second run collides with the
+/// terminal session left by the first and the LFS PATCH returns 409.
+fn lfs_run_nonce() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(1)
+}
+
+/// GETs the fully assembled LFS object and asserts byte-exact equality.
+async fn assert_lfs_object_byte_exact(base: &str, token: &str, oid: &str, expected: &[u8]) {
+    let resp = reqwest::Client::new()
+        .get(format!("{base}/v1/lfs/objects/{oid}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .expect("lfs object get");
+    assert_eq!(
+        resp.status().as_u16(),
+        200,
+        "lfs object {oid} must be readable after durable resumable completion"
+    );
+    let body = resp.bytes().await.unwrap();
+    assert_eq!(
+        body.as_ref(),
+        expected,
+        "lfs object {oid} must be byte-exact after resumable completion"
+    );
 }
 
 // ===========================================================================
@@ -1848,4 +1932,601 @@ async fn chaos_workload_against_deployment() {
         assert_eq!(gone.status().as_u16(), 404, "burst delete {key} removes it");
     }
     eprintln!("chaos({drill}): PASS — 5-key put/get/delete burst against deployment");
+}
+
+// ===========================================================================
+// POSTGRES KILL MID-LFS-PATCH: durable resumable session survives.
+//
+// The LFS PATCH path introduced by the hardening/stability release persists its
+// resumable session (range/part map, generation ownership, completion fence) in
+// Postgres and stages immutable bytes in the object store. This drill opens a slow
+// streaming PATCH (which creates the durable session + stages the first chunk),
+// then kills the *metadata* backend (Postgres) mid-body. The in-flight PATCH must
+// fail cleanly, the host server must stay up, and the durable session must
+// survive the outage so the object can be completed on a later PATCH and read
+// back byte-exact.
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn drill_deploy_postgres_kill_mid_lfs_patch() {
+    let drill = "drill_deploy_postgres_kill_mid_lfs_patch";
+    let Some(stack) = boot_chaos_stack(drill).await else {
+        return;
+    };
+    let Some(binary) = resolve_shardline_binary() else {
+        eprintln!("SKIPPED: {drill} - shardline binary not found; run `cargo build -p shardline`");
+        return;
+    };
+    let mut guard = ServiceRecoveryGuard::new();
+    migrate_chaos_postgres(&stack.pg_url).await;
+
+    let tmp = TempDir::new().unwrap();
+    let mut server = DeploymentServer::spawn(
+        &binary,
+        &[
+            ("SHARDLINE_SERVER_FRONTENDS", "lfs"),
+            ("SHARDLINE_S3_ENDPOINT", &stack.s3_endpoint),
+        ],
+        tmp.path(),
+    );
+    server.wait_ready(Duration::from_secs(10)).await;
+
+    let token = mint_token("drill", "drill", TokenScope::Write);
+    let base = server.base_url();
+
+    let full_content = deterministic_bytes(1024, 777 ^ lfs_run_nonce());
+    let oid = sha256_hex(&full_content);
+    let total = full_content.len() as u64;
+
+    // Open the durable resumable session and commit the first chunk. This writes
+    // the session (range/part map, generation, completion fence) to Postgres and
+    // stages the chunk in the object store.
+    let first_half = &full_content[0..512];
+    let p1 = lfs_patch_range(&base, &token, &oid, 0, 511, total, first_half).await;
+    assert_eq!(
+        p1.status().as_u16(),
+        200,
+        "first PATCH opens durable session"
+    );
+
+    // Kill the metadata backend. The durable session row in Postgres must
+    // survive the outage.
+    guard.stop(CONTAINER_POSTGRES).await;
+
+    // A completion PATCH during the outage must fail cleanly (never 2xx): the
+    // server cannot reach the durable session store.
+    let rest = &full_content[512..];
+    let in_flight = lfs_patch_range(&base, &token, &oid, 512, total - 1, total, rest).await;
+    assert!(
+        in_flight.status().as_u16() >= 400,
+        "completion PATCH must fail (never 2xx) while postgres is down"
+    );
+
+    // The HOST server process survives the metadata outage.
+    assert!(server.alive(), "server must stay alive after postgres kill");
+    let health = reqwest::Client::new()
+        .get(format!("{base}/healthz"))
+        .timeout(Duration::from_secs(2))
+        .send()
+        .await;
+    assert!(
+        matches!(health, Ok(r) if r.status().as_u16() == 200),
+        "healthz must stay 200 after postgres kill"
+    );
+
+    // Restore Postgres. The durable resumable session must still exist so the
+    // object can be completed.
+    restart_and_wait(
+        CONTAINER_POSTGRES,
+        || tcp_ready("127.0.0.1", 15432),
+        Duration::from_secs(60),
+    )
+    .await;
+    migrate_chaos_postgres(&stack.pg_url).await;
+    guard.recovered(CONTAINER_POSTGRES);
+
+    // Complete the object with the remainder of the content (overlapping repair
+    // is permitted by the durable session's bounded accounting).
+    let repair = lfs_patch_range(&base, &token, &oid, 512, total - 1, total, rest).await;
+    assert_eq!(
+        repair.status().as_u16(),
+        200,
+        "resume PATCH after postgres recovery must succeed"
+    );
+
+    assert_lfs_object_byte_exact(&base, &token, &oid, &full_content).await;
+    eprintln!(
+        "chaos({drill}): PASS - durable resumable session survived postgres kill; object byte-exact after resume"
+    );
+}
+
+// ===========================================================================
+// MINIO KILL MID-LFS-PATCH STAGING: object-store outage recoverable.
+// The durable resumable path stages immutable bytes in the object store and
+// records them in the Postgres part map. Killing the object store after the
+// durable session is opened must leave the session metadata (Postgres) intact
+// and drop only the in-flight staging; the object can be completed after the
+// store returns.
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn drill_deploy_minio_kill_mid_lfs_patch_staging() {
+    let drill = "drill_deploy_minio_kill_mid_lfs_patch_staging";
+    let Some(stack) = boot_chaos_stack(drill).await else {
+        return;
+    };
+    let Some(binary) = resolve_shardline_binary() else {
+        eprintln!("SKIPPED: {drill} - shardline binary not found; run `cargo build -p shardline`");
+        return;
+    };
+    let mut guard = ServiceRecoveryGuard::new();
+    migrate_chaos_postgres(&stack.pg_url).await;
+
+    let tmp = TempDir::new().unwrap();
+    let mut server = DeploymentServer::spawn(
+        &binary,
+        &[
+            ("SHARDLINE_SERVER_FRONTENDS", "lfs"),
+            ("SHARDLINE_S3_ENDPOINT", &stack.s3_endpoint),
+        ],
+        tmp.path(),
+    );
+    server.wait_ready(Duration::from_secs(10)).await;
+
+    let token = mint_token("drill", "drill", TokenScope::Write);
+    let base = server.base_url();
+
+    let full_content = deterministic_bytes(1024, 909 ^ lfs_run_nonce());
+    let oid = sha256_hex(&full_content);
+    let total = full_content.len() as u64;
+
+    // Open the durable resumable session and stage the first chunk.
+    let first_half = &full_content[0..512];
+    let p1 = lfs_patch_range(&base, &token, &oid, 0, 511, total, first_half).await;
+    assert_eq!(
+        p1.status().as_u16(),
+        200,
+        "first PATCH opens durable session"
+    );
+
+    // Kill the object store. The durable session metadata in Postgres survives;
+    // the in-flight staging attempt must be the only thing dropped.
+    guard.stop(CONTAINER_MINIO).await;
+
+    let rest = &full_content[512..];
+    let in_flight = lfs_patch_range(&base, &token, &oid, 512, total - 1, total, rest).await;
+    assert!(
+        in_flight.status().as_u16() >= 400,
+        "completion PATCH must fail (never 2xx) while minio is down"
+    );
+    assert!(server.alive(), "server must stay alive after minio kill");
+
+    restart_and_wait(
+        CONTAINER_MINIO,
+        || minio_health_ok(&stack.s3_endpoint),
+        Duration::from_secs(60),
+    )
+    .await;
+    guard.recovered(CONTAINER_MINIO);
+
+    // Re-stage + complete the object after the store returns.
+    let repair = lfs_patch_range(&base, &token, &oid, 512, total - 1, total, rest).await;
+    assert_eq!(
+        repair.status().as_u16(),
+        200,
+        "resume PATCH after minio recovery must succeed"
+    );
+
+    assert_lfs_object_byte_exact(&base, &token, &oid, &full_content).await;
+    eprintln!(
+        "chaos({drill}): PASS - durable resumable staging recovered after minio kill; object byte-exact"
+    );
+}
+
+// ===========================================================================
+// NETWORK PARTITION DURING OVERLAPPING LFS PATCH REPAIR.
+// The durable resumable session permits bounded *overlapping* ranges so a later
+// PATCH can repair bytes written by an earlier one (the fix in the stability
+// release). This drill partitions the server from Postgres mid-repair and
+// verifies the already-staged bytes and the durable session reconcile to a
+// consistent, byte-exact object with no corruption.
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn drill_deploy_partition_during_lfs_patch_repair() {
+    let drill = "drill_deploy_partition_during_lfs_patch_repair";
+    let Some(stack) = boot_chaos_stack(drill).await else {
+        return;
+    };
+    let Some(binary) = resolve_shardline_binary() else {
+        eprintln!("SKIPPED: {drill} - shardline binary not found; run `cargo build -p shardline`");
+        return;
+    };
+    let mut guard = ServiceRecoveryGuard::new();
+    migrate_chaos_postgres(&stack.pg_url).await;
+
+    let tmp = TempDir::new().unwrap();
+    let mut server = DeploymentServer::spawn(
+        &binary,
+        &[
+            ("SHARDLINE_SERVER_FRONTENDS", "lfs"),
+            ("SHARDLINE_S3_ENDPOINT", &stack.s3_endpoint),
+        ],
+        tmp.path(),
+    );
+    server.wait_ready(Duration::from_secs(10)).await;
+
+    let token = mint_token("drill", "drill", TokenScope::Write);
+    let base = server.base_url();
+
+    let full_content = deterministic_bytes(1024, 313 ^ lfs_run_nonce());
+    let oid = sha256_hex(&full_content);
+    let total = full_content.len() as u64;
+
+    // Stage the first half normally (committed to the durable session + store).
+    let first_half = &full_content[0..512];
+    let p1 = lfs_patch_range(&base, &token, &oid, 0, 511, total, first_half).await;
+    assert_eq!(p1.status().as_u16(), 200, "first-half PATCH must commit");
+
+    // Partition Postgres from the server with a total packet loss on its network
+    // namespace (mirrors the drill_e asymmetric-partition pattern), then issue an
+    // overlapping repair PATCH that re-writes an already-staged region (the
+    // overlapping-repair feature).
+    guard.replace_netem(CONTAINER_POSTGRES, "loss 100%").await;
+
+    let repair_region = &full_content[256..768];
+    let repair = lfs_patch_range(&base, &token, &oid, 256, 767, total, repair_region).await;
+    assert!(
+        repair.status().as_u16() >= 400,
+        "overlapping repair PATCH must fail (never 2xx) while partitioned from metadata"
+    );
+    assert!(server.alive(), "server must stay alive while partitioned");
+
+    // Heal the partition and complete the object with the remaining bytes.
+    guard.clear_netem(CONTAINER_POSTGRES).await;
+    guard.recovered(CONTAINER_POSTGRES);
+
+    let second_half = &full_content[512..];
+    let p2 = lfs_patch_range(&base, &token, &oid, 512, total - 1, total, second_half).await;
+    assert_eq!(
+        p2.status().as_u16(),
+        200,
+        "completion PATCH after heal must succeed"
+    );
+
+    assert_lfs_object_byte_exact(&base, &token, &oid, &full_content).await;
+    eprintln!(
+        "chaos({drill}): PASS - overlapping repair during partition dropped cleanly; object byte-exact after heal"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// OCI blob-upload + S3 multipart resumable helpers.
+//
+// These mirror the LFS PATCH helpers but drive the other two durable resumable
+// protocols (OCI blob uploads and S3 multipart) so they can be fault-injected
+// the same way. Both persist their resumable session in Postgres + stage bytes
+// in the object store via the same ResumableSession store as LFS PATCH.
+// ---------------------------------------------------------------------------
+
+const OCI_REPO: &str = "v2/drill/drill/blobs";
+
+/// POSTs an OCI blob-upload session and returns the session id extracted from the
+/// `Location` header (`.../blobs/uploads/{id}`), or `None` if the init fails.
+async fn oci_init_upload(base: &str, token: &str) -> Option<String> {
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/{OCI_REPO}/uploads/"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .expect("oci init upload");
+    let status = resp.status().as_u16();
+    if status != 202 {
+        eprintln!(
+            "oci init upload returned {status}: {}",
+            resp.text().await.unwrap_or_default()
+        );
+        return None;
+    }
+    let location = resp
+        .headers()
+        .get(reqwest::header::LOCATION)
+        .expect("location header")
+        .to_str()
+        .unwrap()
+        .to_owned();
+    Some(location.rsplit('/').next().unwrap_or_default().to_owned())
+}
+
+/// PATCHes bytes into an OCI blob-upload session.
+async fn oci_patch_upload(base: &str, token: &str, session_id: &str, bytes: &[u8]) -> u16 {
+    reqwest::Client::new()
+        .patch(format!("{base}/{OCI_REPO}/uploads/{session_id}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/octet-stream")
+        .body(bytes.to_vec())
+        .timeout(Duration::from_secs(30))
+        .send()
+        .await
+        .expect("oci patch upload")
+        .status()
+        .as_u16()
+}
+
+/// Finalizes an OCI blob-upload session with the content digest.
+async fn oci_finalize_upload(base: &str, token: &str, session_id: &str, digest: &str) -> u16 {
+    reqwest::Client::new()
+        .put(format!(
+            "{base}/{OCI_REPO}/uploads/{session_id}?digest=sha256:{digest}"
+        ))
+        .header("Authorization", format!("Bearer {token}"))
+        .timeout(Duration::from_secs(30))
+        .send()
+        .await
+        .expect("oci finalize upload")
+        .status()
+        .as_u16()
+}
+
+/// GETs a finalized OCI blob and asserts byte-exact equality.
+async fn assert_oci_blob_byte_exact(base: &str, token: &str, digest: &str, expected: &[u8]) {
+    let resp = reqwest::Client::new()
+        .get(format!("{base}/{OCI_REPO}/sha256:{digest}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .expect("oci blob get");
+    assert_eq!(
+        resp.status().as_u16(),
+        200,
+        "oci blob must be readable after durable resumable completion"
+    );
+    let body = resp.bytes().await.unwrap();
+    assert_eq!(
+        body.as_ref(),
+        expected,
+        "oci blob must be byte-exact after resumable completion"
+    );
+}
+
+/// POSTs `?uploads`, returning the UploadId parsed from the XML response.
+async fn s3_create_multipart_deployment(base: &str, token: &str, key: &str) -> String {
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/{BUCKET}/{key}?uploads"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .expect("s3 create multipart")
+        .text()
+        .await
+        .unwrap();
+    extract_xml_tag(&resp, "UploadId").expect("UploadId in create-multipart response")
+}
+
+/// PUTs one multipart part.
+async fn s3_upload_part_deployment(
+    base: &str,
+    token: &str,
+    key: &str,
+    upload_id: &str,
+    part_number: u32,
+    bytes: &[u8],
+) -> u16 {
+    reqwest::Client::new()
+        .put(format!(
+            "{base}/{BUCKET}/{key}?partNumber={part_number}&uploadId={upload_id}"
+        ))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/octet-stream")
+        .body(bytes.to_vec())
+        .timeout(Duration::from_secs(30))
+        .send()
+        .await
+        .expect("s3 upload part")
+        .status()
+        .as_u16()
+}
+
+/// POSTs `?uploadId` to complete a multipart upload.
+async fn s3_complete_multipart_deployment(
+    base: &str,
+    token: &str,
+    key: &str,
+    upload_id: &str,
+    part_numbers: &[u32],
+) -> u16 {
+    let mut body = String::from(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+         <CompleteMultipartUpload xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\n",
+    );
+    for part in part_numbers {
+        use std::fmt::Write;
+        let _ = writeln!(
+            body,
+            "  <Part><PartNumber>{part}</PartNumber><ETag>\"{upload_id}-{part}\"</ETag></Part>"
+        );
+    }
+    body.push_str("</CompleteMultipartUpload>\n");
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/{BUCKET}/{key}?uploadId={upload_id}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/xml")
+        .body(body)
+        .timeout(Duration::from_secs(30))
+        .send()
+        .await
+        .expect("s3 complete multipart");
+    resp.status().as_u16()
+}
+
+// ===========================================================================
+// POSTGRES KILL MID-OCI BLOB-UPLOAD: durable resumable session
+// survives. Mirrors drill H but drives the OCI blob-upload resumable protocol:
+// open the session + PATCH bytes, kill Postgres, assert the finalizing PUT fails
+// cleanly, restore, finalize, and verify the blob is byte-exact.
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn drill_deploy_postgres_kill_mid_oci_blob_upload() {
+    let drill = "drill_deploy_postgres_kill_mid_oci_blob_upload";
+    let Some(stack) = boot_chaos_stack(drill).await else {
+        return;
+    };
+    let Some(binary) = resolve_shardline_binary() else {
+        eprintln!("SKIPPED: {drill} - shardline binary not found; run `cargo build -p shardline`");
+        return;
+    };
+    let mut guard = ServiceRecoveryGuard::new();
+    migrate_chaos_postgres(&stack.pg_url).await;
+
+    let tmp = TempDir::new().unwrap();
+    let mut server = DeploymentServer::spawn(
+        &binary,
+        &[
+            ("SHARDLINE_SERVER_FRONTENDS", "oci"),
+            ("SHARDLINE_S3_ENDPOINT", &stack.s3_endpoint),
+        ],
+        tmp.path(),
+    );
+    server.wait_ready(Duration::from_secs(10)).await;
+
+    let token = mint_token("drill", "drill", TokenScope::Write);
+    let base = server.base_url();
+
+    let full_content = deterministic_bytes(1024, 1515 ^ lfs_run_nonce());
+    let digest = sha256_hex(&full_content);
+    let Some(session_id) = oci_init_upload(&base, &token).await else {
+        eprintln!(
+            "chaos({drill}): SKIPPED — OCI blob-upload init failed (index adapter not configured for this deployment profile)"
+        );
+        return;
+    };
+    let first_half = &full_content[0..512];
+    let p1 = oci_patch_upload(&base, &token, &session_id, first_half).await;
+    assert_eq!(p1, 202, "oci PATCH opens durable resumable session");
+
+    guard.stop(CONTAINER_POSTGRES).await;
+
+    let rest = &full_content[512..];
+    let in_flight = oci_patch_upload(&base, &token, &session_id, rest).await;
+    assert!(
+        in_flight >= 400,
+        "oci PATCH during postgres outage must fail (never 2xx)"
+    );
+    assert!(server.alive(), "server must stay alive after postgres kill");
+
+    restart_and_wait(
+        CONTAINER_POSTGRES,
+        || tcp_ready("127.0.0.1", 15432),
+        Duration::from_secs(60),
+    )
+    .await;
+    migrate_chaos_postgres(&stack.pg_url).await;
+    guard.recovered(CONTAINER_POSTGRES);
+
+    // Re-stage the remaining bytes after Postgres recovery.
+    let retry = oci_patch_upload(&base, &token, &session_id, rest).await;
+    assert_eq!(retry, 202, "oci PATCH after postgres recovery must succeed");
+
+    let finalize = oci_finalize_upload(&base, &token, &session_id, &digest).await;
+    assert_eq!(
+        finalize, 201,
+        "oci finalize after postgres recovery must succeed"
+    );
+    assert_oci_blob_byte_exact(&base, &token, &digest, &full_content).await;
+    eprintln!(
+        "chaos({drill}): PASS - durable resumable OCI blob upload survived postgres kill; blob byte-exact after recovery"
+    );
+}
+
+// ===========================================================================
+// POSTGRES KILL MID-S3 MULTIPART: durable resumable session survives.
+// Mirrors drill H/I but drives the S3 multipart resumable protocol: create the
+// upload + PUT part 1, kill Postgres, assert the completion fails cleanly,
+// restore, complete, and verify the object is byte-exact.
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn drill_deploy_postgres_kill_mid_s3_multipart() {
+    let drill = "drill_deploy_postgres_kill_mid_s3_multipart";
+    let Some(stack) = boot_chaos_stack(drill).await else {
+        return;
+    };
+    let Some(binary) = resolve_shardline_binary() else {
+        eprintln!("SKIPPED: {drill} - shardline binary not found; run `cargo build -p shardline`");
+        return;
+    };
+    let mut guard = ServiceRecoveryGuard::new();
+    migrate_chaos_postgres(&stack.pg_url).await;
+
+    let tmp = TempDir::new().unwrap();
+    let mut server = DeploymentServer::spawn(
+        &binary,
+        &[
+            ("SHARDLINE_SERVER_FRONTENDS", "s3"),
+            ("SHARDLINE_S3_ENDPOINT", &stack.s3_endpoint),
+        ],
+        tmp.path(),
+    );
+    server.wait_ready(Duration::from_secs(10)).await;
+
+    let token = mint_token("drill", "drill", TokenScope::Write);
+    let base = server.base_url();
+    let key = format!("drill-m-{}-obj", lfs_run_nonce());
+
+    let full_content = deterministic_bytes(12 * 1024 * 1024, 2626 ^ lfs_run_nonce());
+    let upload_id = s3_create_multipart_deployment(&base, &token, &key).await;
+    let part1_size = 6 * 1024 * 1024;
+    let first_half = &full_content[..part1_size];
+    let p1 = s3_upload_part_deployment(&base, &token, &key, &upload_id, 1, first_half).await;
+    assert_eq!(p1, 200, "s3 part 1 opens durable resumable session");
+
+    guard.stop(CONTAINER_POSTGRES).await;
+
+    let rest = &full_content[part1_size..];
+    let p2 = s3_upload_part_deployment(&base, &token, &key, &upload_id, 2, rest).await;
+    assert!(
+        p2 >= 400,
+        "s3 part upload during postgres outage must fail (never 2xx)"
+    );
+    assert!(server.alive(), "server must stay alive after postgres kill");
+
+    restart_and_wait(
+        CONTAINER_POSTGRES,
+        || tcp_ready("127.0.0.1", 15432),
+        Duration::from_secs(60),
+    )
+    .await;
+    migrate_chaos_postgres(&stack.pg_url).await;
+    guard.recovered(CONTAINER_POSTGRES);
+
+    // Upload the missing part 2 after postgres recovery.
+    let rest = &full_content[part1_size..];
+    let p2_after = s3_upload_part_deployment(&base, &token, &key, &upload_id, 2, rest).await;
+    assert_eq!(
+        p2_after, 200,
+        "s3 part 2 upload after postgres recovery must succeed"
+    );
+
+    let complete = s3_complete_multipart_deployment(&base, &token, &key, &upload_id, &[1, 2]).await;
+    assert_eq!(
+        complete, 200,
+        "s3 complete after postgres recovery must succeed"
+    );
+
+    let get = s3_get(&base, &token, &key).await;
+    assert_eq!(get.status().as_u16(), 200, "s3 multipart object readable");
+    assert_eq!(
+        get.bytes().await.unwrap().as_ref(),
+        full_content.as_slice(),
+        "s3 multipart object byte-exact after recovery"
+    );
+    eprintln!(
+        "chaos({drill}): PASS - durable resumable S3 multipart survived postgres kill; object byte-exact after recovery"
+    );
 }
