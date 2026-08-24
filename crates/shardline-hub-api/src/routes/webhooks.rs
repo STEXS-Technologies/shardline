@@ -686,6 +686,7 @@ mod tests {
             auth: None,
             http_client: None,
             webhook_secret_cipher: Some(cipher),
+            public_base_url: "http://127.0.0.1:8080".to_owned(),
         };
         (ts, state)
     }
@@ -706,6 +707,7 @@ mod tests {
             auth: None,
             http_client: None,
             webhook_secret_cipher: None,
+            public_base_url: "http://127.0.0.1:8080".to_owned(),
         };
         let headers = axum::http::HeaderMap::new();
 
@@ -869,6 +871,7 @@ mod tests {
             auth: None,
             http_client: None,
             webhook_secret_cipher: None,
+            public_base_url: "http://127.0.0.1:8080".to_owned(),
         };
         state
             .store
@@ -904,6 +907,7 @@ mod tests {
         // was removed after rows were encrypted at rest.
         let no_cipher_state = HubState {
             webhook_secret_cipher: None,
+            public_base_url: "http://127.0.0.1:8080".to_owned(),
             ..state
         };
         let wh = no_cipher_state.store.list_webhooks(repo).unwrap().remove(0);

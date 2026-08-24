@@ -80,6 +80,7 @@ fn make_test_state() -> (tempfile::TempDir, HubState) {
         auth: None,
         http_client: None,
         webhook_secret_cipher: None,
+        public_base_url: "http://127.0.0.1:8080".to_owned(),
     };
     (td, state)
 }
@@ -1037,6 +1038,7 @@ async fn handler_repo_list_with_repos() {
         auth: None,
         http_client: None,
         webhook_secret_cipher: None,
+        public_base_url: "http://127.0.0.1:8080".to_owned(),
     };
     let result = repo_list(State(state.clone()), test_repo(&state, &default_headers()))
         .await
@@ -1110,6 +1112,7 @@ async fn handler_repo_search_finds_matching() {
         auth: None,
         http_client: None,
         webhook_secret_cipher: None,
+        public_base_url: "http://127.0.0.1:8080".to_owned(),
     };
     // The search uses LIKE 'q%' on repo_id, so prefix-match the full ID.
     let result = repo_search(
@@ -1201,6 +1204,7 @@ fn make_scoped_alice_auth_state(
         auth: Some(HubAuth::new(Box::new(AliceProvider { scope }))),
         http_client: None,
         webhook_secret_cipher: None,
+        public_base_url: "http://127.0.0.1:8080".to_owned(),
     };
     (td, state)
 }
@@ -1343,6 +1347,7 @@ async fn repo_list_hides_oidc_owner_same_namespace_private_repos() {
         auth: Some(HubAuth::new(Box::new(OidcUser1Provider))),
         http_client: None,
         webhook_secret_cipher: None,
+        public_base_url: "http://127.0.0.1:8080".to_owned(),
     };
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -1391,6 +1396,7 @@ async fn handler_repo_info_returns_repo() {
         auth: None,
         http_client: None,
         webhook_secret_cipher: None,
+        public_base_url: "http://127.0.0.1:8080".to_owned(),
     };
     let result = repo_info(
         State(state.clone()),
@@ -1431,6 +1437,7 @@ async fn handler_repo_info_with_card_data() {
         auth: None,
         http_client: None,
         webhook_secret_cipher: None,
+        public_base_url: "http://127.0.0.1:8080".to_owned(),
     };
     let result = repo_info(
         State(state.clone()),
@@ -1475,6 +1482,7 @@ async fn handler_repo_modelcard_no_readme() {
         auth: None,
         http_client: None,
         webhook_secret_cipher: None,
+        public_base_url: "http://127.0.0.1:8080".to_owned(),
     };
     let result = repo_modelcard(
         State(state.clone()),
@@ -1513,6 +1521,7 @@ async fn handler_repo_modelcard_with_readme() {
         auth: None,
         http_client: None,
         webhook_secret_cipher: None,
+        public_base_url: "http://127.0.0.1:8080".to_owned(),
     };
     let result = repo_modelcard(
         State(state.clone()),
@@ -1548,6 +1557,7 @@ async fn handler_repo_revisions_with_revisions() {
         auth: None,
         http_client: None,
         webhook_secret_cipher: None,
+        public_base_url: "http://127.0.0.1:8080".to_owned(),
     };
     let result = repo_revisions(
         State(state.clone()),
@@ -1671,6 +1681,7 @@ async fn handler_repo_delete_success() {
         auth: None,
         http_client: None,
         webhook_secret_cipher: None,
+        public_base_url: "http://127.0.0.1:8080".to_owned(),
     };
     let result = repo_delete(
         State(state.clone()),
@@ -1738,6 +1749,7 @@ async fn handler_preupload_checks_existence() {
         auth: None,
         http_client: None,
         webhook_secret_cipher: None,
+        public_base_url: "http://127.0.0.1:8080".to_owned(),
     };
     let result = preupload(
         State(state.clone()),
@@ -1815,6 +1827,7 @@ async fn handler_commit_inline_file_success() {
         auth: None,
         http_client: None,
         webhook_secret_cipher: None,
+        public_base_url: "http://127.0.0.1:8080".to_owned(),
     };
     let body = r#"{"header":{"message":"add readme"}}
 {"file":{"path":"README.md","content":"SGVsbG8gV29ybGQ="}}
@@ -1850,6 +1863,7 @@ async fn handler_commit_lfs_pointer_success() {
         auth: None,
         http_client: None,
         webhook_secret_cipher: None,
+        public_base_url: "http://127.0.0.1:8080".to_owned(),
     };
     // Valid SHA-256 OID (64 hex chars)
     let oid = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
@@ -1897,6 +1911,7 @@ async fn handler_commit_delete_file() {
         auth: None,
         http_client: None,
         webhook_secret_cipher: None,
+        public_base_url: "http://127.0.0.1:8080".to_owned(),
     };
     let body = r#"{"header":{"message":"delete file"}}
 {"deletedEntry":{"path":"old.txt"}}
@@ -1933,6 +1948,7 @@ async fn handler_commit_parent_mismatch() {
         auth: None,
         http_client: None,
         webhook_secret_cipher: None,
+        public_base_url: "http://127.0.0.1:8080".to_owned(),
     };
     // Body specifies parentCommit that does NOT match URL resolution
     let body = r#"{"header":{"message":"mismatch","parentCommit":"wrong_parent_sha"}}
@@ -1975,6 +1991,7 @@ async fn handler_apply_commit_inline_file() {
         auth: None,
         http_client: None,
         webhook_secret_cipher: None,
+        public_base_url: "http://127.0.0.1:8080".to_owned(),
     };
     let parsed = ParsedCommit {
         message: "apply inline".into(),
@@ -2018,6 +2035,7 @@ async fn handler_apply_commit_lfs_pointer() {
         auth: None,
         http_client: None,
         webhook_secret_cipher: None,
+        public_base_url: "http://127.0.0.1:8080".to_owned(),
     };
     let oid = "1111222233334444555566667777888899990000aaaabbbbccccddddeeeeffff";
     let parsed = ParsedCommit {
@@ -2067,6 +2085,7 @@ async fn handler_apply_commit_delete() {
         auth: None,
         http_client: None,
         webhook_secret_cipher: None,
+        public_base_url: "http://127.0.0.1:8080".to_owned(),
     };
     let parsed = ParsedCommit {
         message: "delete file".into(),
@@ -2101,6 +2120,7 @@ async fn handler_apply_commit_parent_mismatch() {
         auth: None,
         http_client: None,
         webhook_secret_cipher: None,
+        public_base_url: "http://127.0.0.1:8080".to_owned(),
     };
     let parsed = ParsedCommit {
         message: "bad parent".into(),
@@ -2157,6 +2177,7 @@ async fn handler_file_tree_basic() {
         auth: None,
         http_client: None,
         webhook_secret_cipher: None,
+        public_base_url: "http://127.0.0.1:8080".to_owned(),
     };
     let entries = file_tree(
         State(state.clone()),
@@ -2209,6 +2230,7 @@ async fn handler_file_tree_recursive() {
         auth: None,
         http_client: None,
         webhook_secret_cipher: None,
+        public_base_url: "http://127.0.0.1:8080".to_owned(),
     };
     let entries = file_tree(
         State(state.clone()),
@@ -2267,6 +2289,7 @@ async fn handler_file_tree_with_limit_and_cursor() {
         auth: None,
         http_client: None,
         webhook_secret_cipher: None,
+        public_base_url: "http://127.0.0.1:8080".to_owned(),
     };
     let entries = file_tree(
         State(state.clone()),
@@ -2324,6 +2347,7 @@ async fn handler_resolve_file_inline() {
         auth: None,
         http_client: None,
         webhook_secret_cipher: None,
+        public_base_url: "http://127.0.0.1:8080".to_owned(),
     };
     let result = resolve_file(
         State(state.clone()),
@@ -2360,6 +2384,7 @@ async fn handler_resolve_file_not_found() {
         auth: None,
         http_client: None,
         webhook_secret_cipher: None,
+        public_base_url: "http://127.0.0.1:8080".to_owned(),
     };
     let result = resolve_file(
         State(state.clone()),
@@ -2391,6 +2416,7 @@ fn make_lfs_state() -> (tempfile::TempDir, HubState) {
         auth: None,
         http_client: None,
         webhook_secret_cipher: None,
+        public_base_url: "http://127.0.0.1:8080".to_owned(),
     };
     (td, state)
 }
@@ -2598,6 +2624,7 @@ async fn handler_lfs_batch_xet_transfer_negotiated_with_auth() {
         auth: Some(HubAuth::new(Box::new(XetProvider))),
         http_client: None,
         webhook_secret_cipher: None,
+        public_base_url: "http://127.0.0.1:8080".to_owned(),
     };
 
     let mut headers = HeaderMap::new();
@@ -2763,6 +2790,7 @@ async fn handler_lfs_batch_xet_transfer_includes_cas_header() {
         auth: Some(HubAuth::new(Box::new(XetProvider))),
         http_client: None,
         webhook_secret_cipher: None,
+        public_base_url: "http://127.0.0.1:8080".to_owned(),
     };
 
     let mut headers = HeaderMap::new();
@@ -2797,6 +2825,10 @@ async fn handler_lfs_batch_xet_transfer_includes_cas_header() {
     assert_eq!(
         header.get("X-Xet-Content-CAS-Access").unwrap(),
         "cas-token-123"
+    );
+    assert_eq!(
+        header.get("X-Xet-Content-CAS-URL").unwrap(),
+        "http://127.0.0.1:8080"
     );
 }
 
@@ -2938,6 +2970,7 @@ async fn handler_repo_revisions_has_initial() {
         auth: None,
         http_client: None,
         webhook_secret_cipher: None,
+        public_base_url: "http://127.0.0.1:8080".to_owned(),
     };
     let result = repo_revisions(
         State(state.clone()),
@@ -2963,6 +2996,7 @@ async fn handler_git_head_with_revision() {
         auth: None,
         http_client: None,
         webhook_secret_cipher: None,
+        public_base_url: "http://127.0.0.1:8080".to_owned(),
     };
     let result = git_head(
         State(state.clone()),
@@ -2990,6 +3024,7 @@ async fn handler_commit_no_revision() {
         auth: None,
         http_client: None,
         webhook_secret_cipher: None,
+        public_base_url: "http://127.0.0.1:8080".to_owned(),
     };
     // "nonexistent_rev" isn't a known ref or SHA → revision not found
     let result = commit(
@@ -3038,6 +3073,7 @@ async fn handler_dataset_parquet_lists_files() {
         auth: None,
         http_client: None,
         webhook_secret_cipher: None,
+        public_base_url: "http://127.0.0.1:8080".to_owned(),
     };
     let result = dataset_parquet(
         State(state.clone()),
@@ -3085,6 +3121,7 @@ async fn handler_dataset_parquet_csv_and_jsonl_included() {
         auth: None,
         http_client: None,
         webhook_secret_cipher: None,
+        public_base_url: "http://127.0.0.1:8080".to_owned(),
     };
     let result = dataset_parquet(
         State(state.clone()),
@@ -3112,6 +3149,7 @@ async fn handler_dataset_first_rows_empty_dataset() {
         auth: None,
         http_client: None,
         webhook_secret_cipher: None,
+        public_base_url: "http://127.0.0.1:8080".to_owned(),
     };
     let result = dataset_first_rows(
         State(state.clone()),
@@ -3156,6 +3194,7 @@ async fn handler_dataset_first_rows_with_jsonl() {
         auth: None,
         http_client: None,
         webhook_secret_cipher: None,
+        public_base_url: "http://127.0.0.1:8080".to_owned(),
     };
     let result = dataset_first_rows(
         State(state.clone()),
@@ -3206,6 +3245,7 @@ async fn handler_dataset_viewer_with_data() {
         auth: None,
         http_client: None,
         webhook_secret_cipher: None,
+        public_base_url: "http://127.0.0.1:8080".to_owned(),
     };
     let result = dataset_viewer(
         State(state.clone()),
@@ -3252,6 +3292,7 @@ async fn handler_dataset_viewer_pagination() {
         auth: None,
         http_client: None,
         webhook_secret_cipher: None,
+        public_base_url: "http://127.0.0.1:8080".to_owned(),
     };
     let result = dataset_viewer(
         State(state.clone()),
@@ -3286,6 +3327,7 @@ async fn handler_webhook_create_success() {
         auth: None,
         http_client: None,
         webhook_secret_cipher: None,
+        public_base_url: "http://127.0.0.1:8080".to_owned(),
     };
     let (status, resp) = webhook_create(
         State(state.clone()),
@@ -3315,6 +3357,7 @@ async fn handler_webhook_create_invalid_url() {
         auth: None,
         http_client: None,
         webhook_secret_cipher: None,
+        public_base_url: "http://127.0.0.1:8080".to_owned(),
     };
     let result = webhook_create(
         State(state.clone()),
@@ -3346,6 +3389,7 @@ async fn handler_webhook_create_too_many_events() {
         auth: None,
         http_client: None,
         webhook_secret_cipher: None,
+        public_base_url: "http://127.0.0.1:8080".to_owned(),
     };
     let events: Vec<String> = (0..51).map(|i| format!("event_{i}")).collect();
     let result = webhook_create(
@@ -3382,6 +3426,7 @@ async fn handler_webhook_list_empty() {
         auth: None,
         http_client: None,
         webhook_secret_cipher: None,
+        public_base_url: "http://127.0.0.1:8080".to_owned(),
     };
     let result = webhook_list(
         State(state.clone()),
@@ -3420,6 +3465,7 @@ async fn handler_webhook_list_with_webhooks() {
         auth: None,
         http_client: None,
         webhook_secret_cipher: None,
+        public_base_url: "http://127.0.0.1:8080".to_owned(),
     };
     let result = webhook_list(
         State(state.clone()),
@@ -3454,6 +3500,7 @@ async fn handler_webhook_delete_success() {
         auth: None,
         http_client: None,
         webhook_secret_cipher: None,
+        public_base_url: "http://127.0.0.1:8080".to_owned(),
     };
     let result = webhook_delete(
         State(state.clone()),
@@ -3506,6 +3553,7 @@ fn route_authorize_with_auth_and_no_header_is_err() {
         auth: Some(HubAuth::new(Box::new(MockProvider))),
         http_client: None,
         webhook_secret_cipher: None,
+        public_base_url: "http://127.0.0.1:8080".to_owned(),
     };
     let headers = HeaderMap::new();
     let result = authorize(&state, &headers, TokenScope::Read);
@@ -3533,6 +3581,7 @@ async fn handler_apply_commit_empty_instructions() {
         auth: None,
         http_client: None,
         webhook_secret_cipher: None,
+        public_base_url: "http://127.0.0.1:8080".to_owned(),
     };
     let parsed = ParsedCommit {
         message: "empty commit".into(),
@@ -3568,6 +3617,7 @@ async fn handler_dataset_parquet_non_dataset_repo_errors() {
         auth: None,
         http_client: None,
         webhook_secret_cipher: None,
+        public_base_url: "http://127.0.0.1:8080".to_owned(),
     };
     let result = dataset_parquet(
         State(state.clone()),
@@ -3599,6 +3649,7 @@ async fn handler_dataset_first_rows_non_dataset_errors() {
         auth: None,
         http_client: None,
         webhook_secret_cipher: None,
+        public_base_url: "http://127.0.0.1:8080".to_owned(),
     };
     let result = dataset_first_rows(
         State(state.clone()),
@@ -3635,6 +3686,7 @@ async fn handler_dataset_viewer_non_dataset_errors() {
         auth: None,
         http_client: None,
         webhook_secret_cipher: None,
+        public_base_url: "http://127.0.0.1:8080".to_owned(),
     };
     let result = dataset_viewer(
         State(state.clone()),
@@ -3673,6 +3725,7 @@ async fn handler_repo_search_sort_by_last_modified_asc() {
         auth: None,
         http_client: None,
         webhook_secret_cipher: None,
+        public_base_url: "http://127.0.0.1:8080".to_owned(),
     };
     let result = repo_search(
         State(state.clone()),
@@ -3705,6 +3758,7 @@ async fn handler_repo_search_sort_likes_noop() {
         auth: None,
         http_client: None,
         webhook_secret_cipher: None,
+        public_base_url: "http://127.0.0.1:8080".to_owned(),
     };
     // "likes" sort is currently a no-op — just verify it doesn't error.
     let result = repo_search(
@@ -3738,6 +3792,7 @@ async fn handler_repo_search_sort_downloads_noop() {
         auth: None,
         http_client: None,
         webhook_secret_cipher: None,
+        public_base_url: "http://127.0.0.1:8080".to_owned(),
     };
     // "downloads" sort is currently a no-op — just verify it doesn't error.
     let result = repo_search(
@@ -3775,6 +3830,7 @@ async fn handler_repo_search_unknown_sort_keeps_default_order() {
         auth: None,
         http_client: None,
         webhook_secret_cipher: None,
+        public_base_url: "http://127.0.0.1:8080".to_owned(),
     };
     let result = repo_search(
         State(state.clone()),
@@ -3839,6 +3895,7 @@ async fn handler_dataset_first_rows_content_not_inline() {
         auth: None,
         http_client: None,
         webhook_secret_cipher: None,
+        public_base_url: "http://127.0.0.1:8080".to_owned(),
     };
     let result = dataset_first_rows(
         State(state.clone()),
@@ -3870,6 +3927,7 @@ async fn handler_dataset_viewer_split_not_found() {
         auth: None,
         http_client: None,
         webhook_secret_cipher: None,
+        public_base_url: "http://127.0.0.1:8080".to_owned(),
     };
     let result = dataset_viewer(
         State(state.clone()),
@@ -3991,6 +4049,7 @@ async fn handler_repo_revision_info_returns_siblings() {
         auth: None,
         http_client: None,
         webhook_secret_cipher: None,
+        public_base_url: "http://127.0.0.1:8080".to_owned(),
     };
     let result = repo_revision_info(
         State(state.clone()),
@@ -4038,6 +4097,7 @@ async fn handler_repo_delete_compat_success() {
         auth: None,
         http_client: None,
         webhook_secret_cipher: None,
+        public_base_url: "http://127.0.0.1:8080".to_owned(),
     };
     let result = repo_delete_compat(
         State(state.clone()),
@@ -4064,6 +4124,7 @@ async fn handler_repo_delete_compat_with_organization() {
         auth: None,
         http_client: None,
         webhook_secret_cipher: None,
+        public_base_url: "http://127.0.0.1:8080".to_owned(),
     };
     let result = repo_delete_compat(
         State(state.clone()),
@@ -4104,6 +4165,7 @@ async fn handler_file_tree_at_root_returns_files() {
         auth: None,
         http_client: None,
         webhook_secret_cipher: None,
+        public_base_url: "http://127.0.0.1:8080".to_owned(),
     };
     let entries = file_tree_at_root(
         State(state.clone()),
@@ -4141,6 +4203,7 @@ async fn handler_git_head_returns_ref() {
         auth: None,
         http_client: None,
         webhook_secret_cipher: None,
+        public_base_url: "http://127.0.0.1:8080".to_owned(),
     };
     let result = git_head(
         State(state.clone()),
@@ -4204,6 +4267,7 @@ async fn handler_repo_create_conflict() {
         auth: None,
         http_client: None,
         webhook_secret_cipher: None,
+        public_base_url: "http://127.0.0.1:8080".to_owned(),
     };
     let req = RepoCreateRequest {
         repo_type: RepoType::Model,
@@ -4392,6 +4456,7 @@ async fn handler_webhook_create_duplicate_url() {
         auth: None,
         http_client: None,
         webhook_secret_cipher: None,
+        public_base_url: "http://127.0.0.1:8080".to_owned(),
     };
     let result = webhook_create(
         State(state.clone()),
@@ -4424,6 +4489,7 @@ async fn handler_lfs_upload_and_download_roundtrip() {
         auth: None,
         http_client: None,
         webhook_secret_cipher: None,
+        public_base_url: "http://127.0.0.1:8080".to_owned(),
     };
     // Upload
     let result = lfs_upload(
@@ -4480,6 +4546,7 @@ async fn handler_dataset_parquet_finds_data_files() {
         auth: None,
         http_client: None,
         webhook_secret_cipher: None,
+        public_base_url: "http://127.0.0.1:8080".to_owned(),
     };
     let resp = dataset_parquet(
         State(state.clone()),
@@ -4523,6 +4590,7 @@ async fn handler_webhook_list_with_hooks() {
         auth: None,
         http_client: None,
         webhook_secret_cipher: None,
+        public_base_url: "http://127.0.0.1:8080".to_owned(),
     };
     let resp = webhook_list(
         State(state.clone()),
