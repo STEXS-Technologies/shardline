@@ -55,6 +55,10 @@ pub enum HubApiError {
     #[error("invalid path: {0}")]
     PathValidation(String),
 
+    /// Bad request (e.g. unsupported transfer adapter, hash algorithm).
+    #[error("bad request: {0}")]
+    BadRequest(String),
+
     /// CAS (content-addressable storage) error.
     #[error("cas error: {0}")]
     CasError(String),
@@ -97,7 +101,9 @@ impl IntoResponse for HubApiError {
             Self::Unauthorized | Self::InvalidToken => (StatusCode::UNAUTHORIZED, self.to_string()),
             Self::Forbidden => (StatusCode::FORBIDDEN, self.to_string()),
             Self::Conflict(_) => (StatusCode::CONFLICT, self.to_string()),
-            Self::PathValidation(_) => (StatusCode::BAD_REQUEST, self.to_string()),
+            Self::PathValidation(_) | Self::BadRequest(_) => {
+                (StatusCode::BAD_REQUEST, self.to_string())
+            }
         };
         let body = ErrorBody { error: message };
         (status, Json(body)).into_response()

@@ -395,6 +395,9 @@ pub struct LfsBatchResponse {
     pub transfer: String,
     /// Objects with actions.
     pub objects: Vec<LfsObjectResponse>,
+    /// Hash algorithm used (always `"sha256"`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hash_algo: Option<String>,
 }
 
 /// LFS object response in a batch.

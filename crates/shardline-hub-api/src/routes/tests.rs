@@ -2579,9 +2579,8 @@ async fn handler_lfs_batch_xet_transfer_negotiated_with_auth() {
     struct XetProvider;
     impl AuthProvider for XetProvider {
         fn verify_token(&self, _token: &str) -> Result<TokenClaims, AuthError> {
-            let repo =
-                RepositoryScope::new(RepositoryProvider::Generic, "alice", "own", None)
-                    .map_err(|_| AuthError::InvalidToken)?;
+            let repo = RepositoryScope::new(RepositoryProvider::Generic, "alice", "own", None)
+                .map_err(|_| AuthError::InvalidToken)?;
             TokenClaims::new("issuer", "alice", TokenScope::Write, repo, u64::MAX)
                 .map_err(|_| AuthError::InvalidToken)
         }
@@ -2685,6 +2684,144 @@ async fn handler_lfs_batch_xet_transfer_with_basic_fallback() {
         result.transfer, "basic",
         "should fall back to basic when xet-only without auth"
     );
+}
+
+#[tokio::test]
+async fn handler_lfs_batch_rejects_unsupported_hash_algo() {
+    let (_td, state) = make_lfs_state();
+    let result = lfs_batch(
+        State(state.clone()),
+        test_repo(&state, &default_headers()),
+        Json(LfsBatchRequest {
+            operation: LfsBatchOperation::Upload,
+            ref_: LfsBatchRef {
+                name: "main".into(),
+            },
+            objects: vec![LfsObjectRequest {
+                oid: "d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0".into(),
+                size: 1000,
+            }],
+            transfers: Vec::new(),
+            hash_algo: Some("md5".into()),
+        }),
+    )
+    .await;
+    assert!(result.is_err(), "should reject md5 hash algorithm");
+}
+
+#[tokio::test]
+async fn handler_lfs_batch_rejects_too_many_objects() {
+    let (_td, state) = make_lfs_state();
+    let objects: Vec<LfsObjectRequest> = (0..1025)
+        .map(|i| LfsObjectRequest {
+            oid: format!("{i:064x}"),
+            size: 1,
+        })
+        .collect();
+    let result = lfs_batch(
+        State(state.clone()),
+        test_repo(&state, &default_headers()),
+        Json(LfsBatchRequest {
+            operation: LfsBatchOperation::Upload,
+            ref_: LfsBatchRef {
+                name: "main".into(),
+            },
+            objects,
+            transfers: Vec::new(),
+            hash_algo: None,
+        }),
+    )
+    .await;
+    assert!(result.is_err(), "should reject > 1024 objects");
+}
+
+#[tokio::test]
+async fn handler_lfs_batch_xet_transfer_includes_cas_header() {
+    use crate::auth::HubAuth;
+    use shardline_protocol::{RepositoryProvider, RepositoryScope, TokenClaims, TokenScope};
+    use shardline_server_core::{AuthError, AuthProvider};
+
+    struct XetProvider;
+    impl AuthProvider for XetProvider {
+        fn verify_token(&self, _token: &str) -> Result<TokenClaims, AuthError> {
+            let repo = RepositoryScope::new(RepositoryProvider::Generic, "alice", "own", None)
+                .map_err(|_| AuthError::InvalidToken)?;
+            TokenClaims::new("issuer", "alice", TokenScope::Write, repo, u64::MAX)
+                .map_err(|_| AuthError::InvalidToken)
+        }
+        fn mint_token(&self, _claims: &TokenClaims) -> Result<String, AuthError> {
+            Ok("cas-token-123".into())
+        }
+    }
+
+    let (td, store) = make_delete_test_store();
+    let object_store = shardline_server_core::ServerObjectStore::local(td.path().join("lfs"))
+        .expect("local object store");
+    let state = HubState {
+        store,
+        object_store,
+        auth: Some(HubAuth::new(Box::new(XetProvider))),
+        http_client: None,
+        webhook_secret_cipher: None,
+    };
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        axum::http::header::AUTHORIZATION,
+        "Bearer alice-token".parse().unwrap(),
+    );
+
+    let result = lfs_batch(
+        State(state.clone()),
+        test_repo(&state, &headers),
+        Json(LfsBatchRequest {
+            operation: LfsBatchOperation::Upload,
+            ref_: LfsBatchRef {
+                name: "main".into(),
+            },
+            objects: vec![LfsObjectRequest {
+                oid: "e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0".into(),
+                size: 1000,
+            }],
+            transfers: vec!["xet".into()],
+            hash_algo: None,
+        }),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result.transfer, "xet");
+    let actions = result.objects[0].actions.as_ref().unwrap();
+    let upload = actions.upload.as_ref().expect("upload action");
+    let header = upload.header.as_ref().expect("CAS header");
+    assert_eq!(
+        header.get("X-Xet-Content-CAS-Access").unwrap(),
+        "cas-token-123"
+    );
+}
+
+#[tokio::test]
+async fn handler_lfs_batch_returns_hash_algo() {
+    let (_td, state) = make_lfs_state();
+    let result = lfs_batch(
+        State(state.clone()),
+        test_repo(&state, &default_headers()),
+        Json(LfsBatchRequest {
+            operation: LfsBatchOperation::Upload,
+            ref_: LfsBatchRef {
+                name: "main".into(),
+            },
+            objects: vec![LfsObjectRequest {
+                oid: "f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0".into(),
+                size: 1000,
+            }],
+            transfers: Vec::new(),
+            hash_algo: None,
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.hash_algo.as_deref(), Some("sha256"));
 }
 
 // ------------------------------------------------------------------
