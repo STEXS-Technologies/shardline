@@ -1984,7 +1984,11 @@ async fn drill_deploy_h_postgres_kill_mid_lfs_patch_durable_session() {
     // stages the chunk in the object store.
     let first_half = &full_content[0..512];
     let p1 = lfs_patch_range(&base, &token, &oid, 0, 511, total, first_half).await;
-    assert_eq!(p1.status().as_u16(), 200, "first PATCH opens durable session");
+    assert_eq!(
+        p1.status().as_u16(),
+        200,
+        "first PATCH opens durable session"
+    );
 
     // Kill the metadata backend. The durable session row in Postgres must
     // survive the outage.
@@ -2081,7 +2085,11 @@ async fn drill_deploy_i_minio_kill_mid_lfs_patch_staging() {
     // Open the durable resumable session and stage the first chunk.
     let first_half = &full_content[0..512];
     let p1 = lfs_patch_range(&base, &token, &oid, 0, 511, total, first_half).await;
-    assert_eq!(p1.status().as_u16(), 200, "first PATCH opens durable session");
+    assert_eq!(
+        p1.status().as_u16(),
+        200,
+        "first PATCH opens durable session"
+    );
 
     // Kill the object store. The durable session metadata in Postgres survives;
     // the in-flight staging attempt must be the only thing dropped.
@@ -2116,7 +2124,6 @@ async fn drill_deploy_i_minio_kill_mid_lfs_patch_staging() {
         "chaos({drill}): PASS - durable resumable staging recovered after minio kill; object byte-exact"
     );
 }
-
 
 // ===========================================================================
 // DRILL J — NETWORK PARTITION DURING OVERLAPPING LFS PATCH REPAIR.
@@ -2184,7 +2191,11 @@ async fn drill_deploy_j_partition_during_lfs_patch_repair() {
 
     let second_half = &full_content[512..];
     let p2 = lfs_patch_range(&base, &token, &oid, 512, total - 1, total, second_half).await;
-    assert_eq!(p2.status().as_u16(), 200, "completion PATCH after heal must succeed");
+    assert_eq!(
+        p2.status().as_u16(),
+        200,
+        "completion PATCH after heal must succeed"
+    );
 
     assert_lfs_object_byte_exact(&base, &token, &oid, &full_content).await;
     eprintln!(
@@ -2227,13 +2238,7 @@ async fn oci_init_upload(base: &str, token: &str) -> Option<String> {
         .to_str()
         .unwrap()
         .to_owned();
-    Some(
-        location
-            .rsplit('/')
-            .next()
-            .unwrap_or_default()
-            .to_owned(),
-    )
+    Some(location.rsplit('/').next().unwrap_or_default().to_owned())
 }
 
 /// PATCHes bytes into an OCI blob-upload session.
@@ -2428,7 +2433,10 @@ async fn drill_deploy_l_postgres_kill_mid_oci_blob_upload() {
     assert_eq!(retry, 202, "oci PATCH after postgres recovery must succeed");
 
     let finalize = oci_finalize_upload(&base, &token, &session_id, &digest).await;
-    assert_eq!(finalize, 201, "oci finalize after postgres recovery must succeed");
+    assert_eq!(
+        finalize, 201,
+        "oci finalize after postgres recovery must succeed"
+    );
     assert_oci_blob_byte_exact(&base, &token, &digest, &full_content).await;
     eprintln!(
         "chaos({drill}): PASS - durable resumable OCI blob upload survived postgres kill; blob byte-exact after recovery"
@@ -2500,10 +2508,16 @@ async fn drill_deploy_m_postgres_kill_mid_s3_multipart() {
     // Upload the missing part 2 after postgres recovery.
     let rest = &full_content[part1_size..];
     let p2_after = s3_upload_part_deployment(&base, &token, &key, &upload_id, 2, rest).await;
-    assert_eq!(p2_after, 200, "s3 part 2 upload after postgres recovery must succeed");
+    assert_eq!(
+        p2_after, 200,
+        "s3 part 2 upload after postgres recovery must succeed"
+    );
 
     let complete = s3_complete_multipart_deployment(&base, &token, &key, &upload_id, &[1, 2]).await;
-    assert_eq!(complete, 200, "s3 complete after postgres recovery must succeed");
+    assert_eq!(
+        complete, 200,
+        "s3 complete after postgres recovery must succeed"
+    );
 
     let get = s3_get(&base, &token, &key).await;
     assert_eq!(get.status().as_u16(), 200, "s3 multipart object readable");
