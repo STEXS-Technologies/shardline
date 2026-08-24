@@ -2604,6 +2604,7 @@ async fn handler_lfs_batch_xet_transfer_negotiated_with_auth() {
 
     struct XetProvider;
     impl AuthProvider for XetProvider {
+        #[allow(clippy::map_err_ignore)]
         fn verify_token(&self, _token: &str) -> Result<TokenClaims, AuthError> {
             let repo = RepositoryScope::new(RepositoryProvider::Generic, "alice", "own", None)
                 .map_err(|_| AuthError::InvalidToken)?;
@@ -2770,6 +2771,7 @@ async fn handler_lfs_batch_xet_transfer_includes_cas_header() {
 
     struct XetProvider;
     impl AuthProvider for XetProvider {
+        #[allow(clippy::map_err_ignore)]
         fn verify_token(&self, _token: &str) -> Result<TokenClaims, AuthError> {
             let repo = RepositoryScope::new(RepositoryProvider::Generic, "alice", "own", None)
                 .map_err(|_| AuthError::InvalidToken)?;
