@@ -125,6 +125,16 @@ fn deterministic_bytes(len: usize, seed: u64) -> Vec<u8> {
     out
 }
 
+/// Extract the text of the first `<{tag}>..</{tag}>` element from an XML body
+/// (used to parse the `UploadId` out of S3 multipart create responses).
+fn extract_xml_tag(xml: &str, tag: &str) -> Option<String> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let start = xml.find(&open)?.checked_add(open.len())?;
+    let end = xml[start..].find(&close)?.checked_add(start)?;
+    Some(xml[start..end].to_owned())
+}
+
 /// Slow body: a reqwest stream backed by an mpsc channel. The handler is
 /// provably inside its body-read loop until we drop `tx` (no EOF ever sent).
 fn slow_body() -> (
@@ -2235,5 +2245,326 @@ async fn drill_deploy_k_mixed_version_resumable_lfs_patch() {
     assert_lfs_object_byte_exact(&node_new.base_url(), &token, &oid, &full_content).await;
     eprintln!(
         "chaos({drill}): PASS - durable resumable LFS PATCH object completed across N-1 -> N rollout; byte-exact"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// OCI blob-upload + S3 multipart resumable helpers.
+//
+// These mirror the LFS PATCH helpers but drive the other two durable resumable
+// protocols (OCI blob uploads and S3 multipart) so they can be fault-injected
+// the same way. Both persist their resumable session in Postgres + stage bytes
+// in the object store via the same ResumableSession store as LFS PATCH.
+// ---------------------------------------------------------------------------
+
+const OCI_REPO: &str = "v2/drill/drill/blobs";
+
+/// POSTs an OCI blob-upload session and returns the session id extracted from the
+/// `Location` header (`.../blobs/uploads/{id}`), or `None` if the init fails.
+async fn oci_init_upload(base: &str, token: &str) -> Option<String> {
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/{OCI_REPO}/uploads/"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .expect("oci init upload");
+    let status = resp.status().as_u16();
+    if status != 202 {
+        eprintln!(
+            "oci init upload returned {status}: {}",
+            resp.text().await.unwrap_or_default()
+        );
+        return None;
+    }
+    let location = resp
+        .headers()
+        .get(reqwest::header::LOCATION)
+        .expect("location header")
+        .to_str()
+        .unwrap()
+        .to_owned();
+    Some(
+        location
+            .rsplit('/')
+            .next()
+            .unwrap_or_default()
+            .to_owned(),
+    )
+}
+
+/// PATCHes bytes into an OCI blob-upload session.
+async fn oci_patch_upload(base: &str, token: &str, session_id: &str, bytes: &[u8]) -> u16 {
+    reqwest::Client::new()
+        .patch(format!("{base}/{OCI_REPO}/uploads/{session_id}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/octet-stream")
+        .body(bytes.to_vec())
+        .timeout(Duration::from_secs(30))
+        .send()
+        .await
+        .expect("oci patch upload")
+        .status()
+        .as_u16()
+}
+
+/// Finalizes an OCI blob-upload session with the content digest.
+async fn oci_finalize_upload(base: &str, token: &str, session_id: &str, digest: &str) -> u16 {
+    reqwest::Client::new()
+        .put(format!(
+            "{base}/{OCI_REPO}/uploads/{session_id}?digest=sha256:{digest}"
+        ))
+        .header("Authorization", format!("Bearer {token}"))
+        .timeout(Duration::from_secs(30))
+        .send()
+        .await
+        .expect("oci finalize upload")
+        .status()
+        .as_u16()
+}
+
+/// GETs a finalized OCI blob and asserts byte-exact equality.
+async fn assert_oci_blob_byte_exact(base: &str, token: &str, digest: &str, expected: &[u8]) {
+    let resp = reqwest::Client::new()
+        .get(format!("{base}/{OCI_REPO}/sha256:{digest}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .expect("oci blob get");
+    assert_eq!(
+        resp.status().as_u16(),
+        200,
+        "oci blob must be readable after durable resumable completion"
+    );
+    let body = resp.bytes().await.unwrap();
+    assert_eq!(
+        body.as_ref(),
+        expected,
+        "oci blob must be byte-exact after resumable completion"
+    );
+}
+
+/// POSTs `?uploads`, returning the UploadId parsed from the XML response.
+async fn s3_create_multipart_deployment(base: &str, token: &str, key: &str) -> String {
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/{BUCKET}/{key}?uploads"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .expect("s3 create multipart")
+        .text()
+        .await
+        .unwrap();
+    extract_xml_tag(&resp, "UploadId").expect("UploadId in create-multipart response")
+}
+
+/// PUTs one multipart part.
+async fn s3_upload_part_deployment(
+    base: &str,
+    token: &str,
+    key: &str,
+    upload_id: &str,
+    part_number: u32,
+    bytes: &[u8],
+) -> u16 {
+    reqwest::Client::new()
+        .put(format!(
+            "{base}/{BUCKET}/{key}?partNumber={part_number}&uploadId={upload_id}"
+        ))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/octet-stream")
+        .body(bytes.to_vec())
+        .timeout(Duration::from_secs(30))
+        .send()
+        .await
+        .expect("s3 upload part")
+        .status()
+        .as_u16()
+}
+
+/// POSTs `?uploadId` to complete a multipart upload.
+async fn s3_complete_multipart_deployment(
+    base: &str,
+    token: &str,
+    key: &str,
+    upload_id: &str,
+    part_numbers: &[u32],
+) -> u16 {
+    let mut body = String::from(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+         <CompleteMultipartUpload xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\n",
+    );
+    for part in part_numbers {
+        use std::fmt::Write;
+        let _ = write!(
+            body,
+            "  <Part><PartNumber>{part}</PartNumber><ETag>\"{upload_id}-{part}\"</ETag></Part>\n"
+        );
+    }
+    body.push_str("</CompleteMultipartUpload>\n");
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/{BUCKET}/{key}?uploadId={upload_id}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/xml")
+        .body(body)
+        .timeout(Duration::from_secs(30))
+        .send()
+        .await
+        .expect("s3 complete multipart");
+    resp.status().as_u16()
+}
+
+// ===========================================================================
+// DRILL L — POSTGRES KILL MID-OCI BLOB-UPLOAD: durable resumable session
+// survives. Mirrors drill H but drives the OCI blob-upload resumable protocol:
+// open the session + PATCH bytes, kill Postgres, assert the finalizing PUT fails
+// cleanly, restore, finalize, and verify the blob is byte-exact.
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn drill_deploy_l_postgres_kill_mid_oci_blob_upload() {
+    let drill = "drill_deploy_l_postgres_kill_mid_oci_blob_upload";
+    let Some(stack) = boot_chaos_stack(drill).await else {
+        return;
+    };
+    let Some(binary) = resolve_shardline_binary() else {
+        eprintln!("SKIPPED: {drill} - shardline binary not found; run `cargo build -p shardline`");
+        return;
+    };
+    let mut guard = ServiceRecoveryGuard::new();
+    migrate_chaos_postgres(&stack.pg_url).await;
+
+    let tmp = TempDir::new().unwrap();
+    let mut server = DeploymentServer::spawn(
+        &binary,
+        &[
+            ("SHARDLINE_SERVER_FRONTENDS", "s3"),
+            ("SHARDLINE_S3_ENDPOINT", &stack.s3_endpoint),
+        ],
+        tmp.path(),
+    );
+    server.wait_ready(Duration::from_secs(10)).await;
+
+    let token = mint_token("drill", "drill", TokenScope::Write);
+    let base = server.base_url();
+
+    let full_content = deterministic_bytes(1024, 1515 ^ lfs_run_nonce());
+    let digest = sha256_hex(&full_content);
+    let Some(session_id) = oci_init_upload(&base, &token).await else {
+        eprintln!(
+            "chaos({drill}): SKIPPED — OCI blob-upload init failed (index adapter not configured for this deployment profile)"
+        );
+        return;
+    };
+    let first_half = &full_content[0..512];
+    let p1 = oci_patch_upload(&base, &token, &session_id, first_half).await;
+    assert_eq!(p1, 202, "oci PATCH opens durable resumable session");
+
+    guard.stop(CONTAINER_POSTGRES).await;
+
+    let rest = &full_content[512..];
+    let in_flight = oci_patch_upload(&base, &token, &session_id, rest).await;
+    assert!(
+        in_flight >= 400,
+        "oci PATCH during postgres outage must fail (never 2xx)"
+    );
+    assert!(server.alive(), "server must stay alive after postgres kill");
+
+    restart_and_wait(
+        CONTAINER_POSTGRES,
+        || tcp_ready("127.0.0.1", 15432),
+        Duration::from_secs(60),
+    )
+    .await;
+    migrate_chaos_postgres(&stack.pg_url).await;
+    guard.recovered(CONTAINER_POSTGRES);
+
+    let finalize = oci_finalize_upload(&base, &token, &session_id, &digest).await;
+    assert_eq!(finalize, 201, "oci finalize after postgres recovery must succeed");
+    assert_oci_blob_byte_exact(&base, &token, &digest, &full_content).await;
+    eprintln!(
+        "chaos({drill}): PASS - durable resumable OCI blob upload survived postgres kill; blob byte-exact after recovery"
+    );
+}
+
+// ===========================================================================
+// DRILL M — POSTGRES KILL MID-S3 MULTIPART: durable resumable session survives.
+// Mirrors drill H/I but drives the S3 multipart resumable protocol: create the
+// upload + PUT part 1, kill Postgres, assert the completion fails cleanly,
+// restore, complete, and verify the object is byte-exact.
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn drill_deploy_m_postgres_kill_mid_s3_multipart() {
+    let drill = "drill_deploy_m_postgres_kill_mid_s3_multipart";
+    let Some(stack) = boot_chaos_stack(drill).await else {
+        return;
+    };
+    let Some(binary) = resolve_shardline_binary() else {
+        eprintln!("SKIPPED: {drill} - shardline binary not found; run `cargo build -p shardline`");
+        return;
+    };
+    let mut guard = ServiceRecoveryGuard::new();
+    migrate_chaos_postgres(&stack.pg_url).await;
+
+    let tmp = TempDir::new().unwrap();
+    let mut server = DeploymentServer::spawn(
+        &binary,
+        &[
+            ("SHARDLINE_SERVER_FRONTENDS", "s3"),
+            ("SHARDLINE_S3_ENDPOINT", &stack.s3_endpoint),
+        ],
+        tmp.path(),
+    );
+    server.wait_ready(Duration::from_secs(10)).await;
+
+    let token = mint_token("drill", "drill", TokenScope::Write);
+    let base = server.base_url();
+    let key = format!("drill-m-{}-obj", lfs_run_nonce());
+
+    let full_content = deterministic_bytes(12 * 1024 * 1024, 2626 ^ lfs_run_nonce());
+    let upload_id = s3_create_multipart_deployment(&base, &token, &key).await;
+    let part1_size = 6 * 1024 * 1024;
+    let first_half = &full_content[..part1_size];
+    let p1 = s3_upload_part_deployment(&base, &token, &key, &upload_id, 1, first_half).await;
+    assert_eq!(p1, 200, "s3 part 1 opens durable resumable session");
+
+    guard.stop(CONTAINER_POSTGRES).await;
+
+    let rest = &full_content[part1_size..];
+    let p2 = s3_upload_part_deployment(&base, &token, &key, &upload_id, 2, rest).await;
+    assert!(
+        p2 >= 400,
+        "s3 part upload during postgres outage must fail (never 2xx)"
+    );
+    assert!(server.alive(), "server must stay alive after postgres kill");
+
+    restart_and_wait(
+        CONTAINER_POSTGRES,
+        || tcp_ready("127.0.0.1", 15432),
+        Duration::from_secs(60),
+    )
+    .await;
+    migrate_chaos_postgres(&stack.pg_url).await;
+    guard.recovered(CONTAINER_POSTGRES);
+
+    // Upload the missing part 2 after postgres recovery.
+    let rest = &full_content[part1_size..];
+    let p2_after = s3_upload_part_deployment(&base, &token, &key, &upload_id, 2, rest).await;
+    assert_eq!(p2_after, 200, "s3 part 2 upload after postgres recovery must succeed");
+
+    let complete = s3_complete_multipart_deployment(&base, &token, &key, &upload_id, &[1, 2]).await;
+    assert_eq!(complete, 200, "s3 complete after postgres recovery must succeed");
+
+    let get = s3_get(&base, &token, &key).await;
+    assert_eq!(get.status().as_u16(), 200, "s3 multipart object readable");
+    assert_eq!(
+        get.bytes().await.unwrap().as_ref(),
+        full_content.as_slice(),
+        "s3 multipart object byte-exact after recovery"
+    );
+    eprintln!(
+        "chaos({drill}): PASS - durable resumable S3 multipart survived postgres kill; object byte-exact after recovery"
     );
 }
