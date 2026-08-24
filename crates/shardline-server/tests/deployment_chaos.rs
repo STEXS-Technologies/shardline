@@ -1935,7 +1935,7 @@ async fn chaos_workload_against_deployment() {
 }
 
 // ===========================================================================
-// DRILL H — POSTGRES KILL MID-LFS-PATCH: durable resumable session survives.
+// POSTGRES KILL MID-LFS-PATCH: durable resumable session survives.
 //
 // The LFS PATCH path introduced by the hardening/stability release persists its
 // resumable session (range/part map, generation ownership, completion fence) in
@@ -1949,8 +1949,8 @@ async fn chaos_workload_against_deployment() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
-async fn drill_deploy_h_postgres_kill_mid_lfs_patch_durable_session() {
-    let drill = "drill_deploy_h_postgres_kill_mid_lfs_patch_durable_session";
+async fn drill_deploy_postgres_kill_mid_lfs_patch() {
+    let drill = "drill_deploy_postgres_kill_mid_lfs_patch";
     let Some(stack) = boot_chaos_stack(drill).await else {
         return;
     };
@@ -2042,7 +2042,7 @@ async fn drill_deploy_h_postgres_kill_mid_lfs_patch_durable_session() {
 }
 
 // ===========================================================================
-// DRILL I - MINIO KILL MID-LFS-PATCH STAGING: object-store outage recoverable.
+// MINIO KILL MID-LFS-PATCH STAGING: object-store outage recoverable.
 // The durable resumable path stages immutable bytes in the object store and
 // records them in the Postgres part map. Killing the object store after the
 // durable session is opened must leave the session metadata (Postgres) intact
@@ -2052,8 +2052,8 @@ async fn drill_deploy_h_postgres_kill_mid_lfs_patch_durable_session() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
-async fn drill_deploy_i_minio_kill_mid_lfs_patch_staging() {
-    let drill = "drill_deploy_i_minio_kill_mid_lfs_patch_staging";
+async fn drill_deploy_minio_kill_mid_lfs_patch_staging() {
+    let drill = "drill_deploy_minio_kill_mid_lfs_patch_staging";
     let Some(stack) = boot_chaos_stack(drill).await else {
         return;
     };
@@ -2126,7 +2126,7 @@ async fn drill_deploy_i_minio_kill_mid_lfs_patch_staging() {
 }
 
 // ===========================================================================
-// DRILL J — NETWORK PARTITION DURING OVERLAPPING LFS PATCH REPAIR.
+// NETWORK PARTITION DURING OVERLAPPING LFS PATCH REPAIR.
 // The durable resumable session permits bounded *overlapping* ranges so a later
 // PATCH can repair bytes written by an earlier one (the fix in the stability
 // release). This drill partitions the server from Postgres mid-repair and
@@ -2136,8 +2136,8 @@ async fn drill_deploy_i_minio_kill_mid_lfs_patch_staging() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
-async fn drill_deploy_j_partition_during_lfs_patch_repair() {
-    let drill = "drill_deploy_j_partition_during_lfs_patch_repair";
+async fn drill_deploy_partition_during_lfs_patch_repair() {
+    let drill = "drill_deploy_partition_during_lfs_patch_repair";
     let Some(stack) = boot_chaos_stack(drill).await else {
         return;
     };
@@ -2363,7 +2363,7 @@ async fn s3_complete_multipart_deployment(
 }
 
 // ===========================================================================
-// DRILL L — POSTGRES KILL MID-OCI BLOB-UPLOAD: durable resumable session
+// POSTGRES KILL MID-OCI BLOB-UPLOAD: durable resumable session
 // survives. Mirrors drill H but drives the OCI blob-upload resumable protocol:
 // open the session + PATCH bytes, kill Postgres, assert the finalizing PUT fails
 // cleanly, restore, finalize, and verify the blob is byte-exact.
@@ -2371,8 +2371,8 @@ async fn s3_complete_multipart_deployment(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
-async fn drill_deploy_l_postgres_kill_mid_oci_blob_upload() {
-    let drill = "drill_deploy_l_postgres_kill_mid_oci_blob_upload";
+async fn drill_deploy_postgres_kill_mid_oci_blob_upload() {
+    let drill = "drill_deploy_postgres_kill_mid_oci_blob_upload";
     let Some(stack) = boot_chaos_stack(drill).await else {
         return;
     };
@@ -2444,7 +2444,7 @@ async fn drill_deploy_l_postgres_kill_mid_oci_blob_upload() {
 }
 
 // ===========================================================================
-// DRILL M — POSTGRES KILL MID-S3 MULTIPART: durable resumable session survives.
+// POSTGRES KILL MID-S3 MULTIPART: durable resumable session survives.
 // Mirrors drill H/I but drives the S3 multipart resumable protocol: create the
 // upload + PUT part 1, kill Postgres, assert the completion fails cleanly,
 // restore, complete, and verify the object is byte-exact.
@@ -2452,8 +2452,8 @@ async fn drill_deploy_l_postgres_kill_mid_oci_blob_upload() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
-async fn drill_deploy_m_postgres_kill_mid_s3_multipart() {
-    let drill = "drill_deploy_m_postgres_kill_mid_s3_multipart";
+async fn drill_deploy_postgres_kill_mid_s3_multipart() {
+    let drill = "drill_deploy_postgres_kill_mid_s3_multipart";
     let Some(stack) = boot_chaos_stack(drill).await else {
         return;
     };
