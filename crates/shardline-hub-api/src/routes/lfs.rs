@@ -71,7 +71,10 @@ pub(crate) async fn lfs_batch(
     };
     let cas_header: Option<BTreeMap<String, String>> = cas_token.map(|token| {
         let mut h = BTreeMap::new();
-        h.insert("X-Xet-Content-CAS-URL".to_owned(), String::new());
+        h.insert(
+            "X-Xet-Content-CAS-URL".to_owned(),
+            state.public_base_url.trim_end_matches('/').to_owned(),
+        );
         h.insert("X-Xet-Content-CAS-Access".to_owned(), token);
         h.insert(
             "X-Xet-Content-CAS-Token-Expiration".to_owned(),
