@@ -818,6 +818,7 @@ fn build_hub_state(
         auth: hub_auth,
         http_client,
         webhook_secret_cipher,
+        public_base_url: app_state.config.public_base_url().to_owned(),
     })
 }
 
