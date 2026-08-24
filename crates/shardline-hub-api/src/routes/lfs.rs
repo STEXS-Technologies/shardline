@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use axum::{
     Json,
     extract::{Path, State},
@@ -9,6 +11,9 @@ use crate::{commit, error::HubApiError, models::*};
 use shardline_storage::ObjectStore;
 
 use super::{HubRepository, HubState, lfs_object_key};
+
+/// Maximum number of objects allowed in a single batch request.
+const MAX_LFS_BATCH_OBJECTS: usize = 1024;
 
 // ---- LFS batch (requires Read) ----
 
@@ -23,6 +28,22 @@ pub(crate) async fn lfs_batch(
     // request and namespace the LFS object keys.
     let capability = repo.capability();
 
+    // Validate batch size.
+    if request.objects.len() > MAX_LFS_BATCH_OBJECTS {
+        return Err(HubApiError::BadRequest(
+            "too many objects in batch request".to_owned(),
+        ));
+    }
+
+    // Validate hash algorithm.
+    if let Some(hash_algo) = request.hash_algo.as_deref()
+        && hash_algo != "sha256"
+    {
+        return Err(HubApiError::BadRequest(
+            "unsupported hash algorithm".to_owned(),
+        ));
+    }
+
     // Determine the transfer adapter. Prefer "xet" when the client supports it
     // and the server has an auth provider to mint CAS tokens. Fall back to "basic".
     let supports_xet = request.transfers.iter().any(|t| t == "xet");
@@ -30,13 +51,34 @@ pub(crate) async fn lfs_batch(
     let use_xet = supports_xet && state.auth.is_some() && capability.claims().is_some();
     let transfer = if use_xet {
         "xet"
-    } else if request.transfers.is_empty() || supports_basic {
-        "basic"
     } else {
-        // Client advertised xet-only but server can't negotiate it; fall back
-        // to basic so git-lfs still functions (it will use the basic transfer).
+        // Fall back to basic: either the client supports basic, or we
+        // degrade gracefully when xet-only was requested but unsupported.
         "basic"
     };
+
+    // Mint a CAS token when using xet transfer. The existing claims are
+    // re-signed so git-xet receives a scoped token for the CAS layer.
+    let cas_token = if use_xet {
+        capability.claims().and_then(|claims| {
+            state
+                .auth
+                .as_ref()
+                .and_then(|server_auth| server_auth.provider().mint_token(claims).ok())
+        })
+    } else {
+        None
+    };
+    let cas_header: Option<BTreeMap<String, String>> = cas_token.map(|token| {
+        let mut h = BTreeMap::new();
+        h.insert("X-Xet-Content-CAS-URL".to_owned(), String::new());
+        h.insert("X-Xet-Content-CAS-Access".to_owned(), token);
+        h.insert(
+            "X-Xet-Content-CAS-Token-Expiration".to_owned(),
+            "0".to_owned(),
+        );
+        h
+    });
 
     let objects: Vec<LfsObjectResponse> = request
         .objects
@@ -63,7 +105,7 @@ pub(crate) async fn lfs_batch(
                         Some(LfsObjectActions {
                             download: Some(LfsObjectAction {
                                 href: format!("/lfs/objects/{}", obj.oid),
-                                header: None,
+                                header: cas_header.clone(),
                                 ssh: None,
                             }),
                             upload: None,
@@ -89,7 +131,7 @@ pub(crate) async fn lfs_batch(
                             download: None,
                             upload: Some(LfsObjectAction {
                                 href: format!("/lfs/objects/{}", obj.oid),
-                                header: None,
+                                header: cas_header.clone(),
                                 ssh: None,
                             }),
                             verify: None,
@@ -137,6 +179,7 @@ pub(crate) async fn lfs_batch(
     Ok(Json(LfsBatchResponse {
         transfer: transfer.to_owned(),
         objects,
+        hash_algo: Some("sha256".to_owned()),
     }))
 }
 
