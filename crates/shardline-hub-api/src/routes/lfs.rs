@@ -23,6 +23,21 @@ pub(crate) async fn lfs_batch(
     // request and namespace the LFS object keys.
     let capability = repo.capability();
 
+    // Determine the transfer adapter. Prefer "xet" when the client supports it
+    // and the server has an auth provider to mint CAS tokens. Fall back to "basic".
+    let supports_xet = request.transfers.iter().any(|t| t == "xet");
+    let supports_basic = request.transfers.iter().any(|t| t == "basic");
+    let use_xet = supports_xet && state.auth.is_some() && capability.claims().is_some();
+    let transfer = if use_xet {
+        "xet"
+    } else if request.transfers.is_empty() || supports_basic {
+        "basic"
+    } else {
+        // Client advertised xet-only but server can't negotiate it; fall back
+        // to basic so git-lfs still functions (it will use the basic transfer).
+        "basic"
+    };
+
     let objects: Vec<LfsObjectResponse> = request
         .objects
         .iter()
@@ -120,7 +135,7 @@ pub(crate) async fn lfs_batch(
         .collect();
 
     Ok(Json(LfsBatchResponse {
-        transfer: "basic".to_owned(),
+        transfer: transfer.to_owned(),
         objects,
     }))
 }
