@@ -2344,9 +2344,9 @@ async fn s3_complete_multipart_deployment(
     );
     for part in part_numbers {
         use std::fmt::Write;
-        let _ = write!(
+        let _ = writeln!(
             body,
-            "  <Part><PartNumber>{part}</PartNumber><ETag>\"{upload_id}-{part}\"</ETag></Part>\n"
+            "  <Part><PartNumber>{part}</PartNumber><ETag>\"{upload_id}-{part}\"</ETag></Part>"
         );
     }
     body.push_str("</CompleteMultipartUpload>\n");
