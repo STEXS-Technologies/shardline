@@ -135,6 +135,7 @@ fn build_state() -> (TempDir, HubState) {
         ))),
         http_client: None,
         webhook_secret_cipher: None,
+        public_base_url: "http://127.0.0.1:8080".to_owned(),
     };
     (tmp, state)
 }
