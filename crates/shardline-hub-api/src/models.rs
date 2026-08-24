@@ -352,6 +352,12 @@ pub struct LfsBatchRequest {
     pub ref_: LfsBatchRef,
     /// Objects.
     pub objects: Vec<LfsObjectRequest>,
+    /// Requested transfer adapters (e.g. `["xet", "basic"]`).
+    #[serde(default)]
+    pub transfers: Vec<String>,
+    /// Hash algorithm (only `sha256` is supported).
+    #[serde(default)]
+    pub hash_algo: Option<String>,
 }
 
 /// LFS batch operation type.
@@ -389,6 +395,9 @@ pub struct LfsBatchResponse {
     pub transfer: String,
     /// Objects with actions.
     pub objects: Vec<LfsObjectResponse>,
+    /// Hash algorithm used (always `"sha256"`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hash_algo: Option<String>,
 }
 
 /// LFS object response in a batch.

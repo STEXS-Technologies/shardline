@@ -603,6 +603,7 @@ fn make_hub_state() -> (tempfile::TempDir, HubState) {
         auth: None,
         http_client: None,
         webhook_secret_cipher: None,
+        public_base_url: "http://127.0.0.1:8080".to_owned(),
     };
     (tmp, state)
 }
@@ -1414,6 +1415,7 @@ fn authorize_read_with_auth_rejects_missing_token() {
         auth: Some(crate::auth::HubAuth::new(Box::new(MockAuth))),
         http_client: None,
         webhook_secret_cipher: None,
+        public_base_url: "http://127.0.0.1:8080".to_owned(),
     };
     let headers = axum::http::HeaderMap::new();
     let result = authorize_read(&state, &headers);
@@ -1559,6 +1561,7 @@ fn authorize_write_with_auth_rejects_missing_token() {
         auth: Some(crate::auth::HubAuth::new(Box::new(MockAuth))),
         http_client: None,
         webhook_secret_cipher: None,
+        public_base_url: "http://127.0.0.1:8080".to_owned(),
     };
     let headers = axum::http::HeaderMap::new();
     let result = authorize_write(&state, &headers);
