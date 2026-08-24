@@ -24,6 +24,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
   session metadata.
 - Operation-scoped Redis cold-load reservations with random owner tokens,
   lease heartbeats, bounded waiter latency, and live two-replica regressions.
+- Durable resumable-session chaos drills: `deployment_chaos` now fault-injects the
+  stateless multi-replica storage path — Postgres-kill and MinIO-kill mid-LFS-PATCH
+  (the durable session and staging survive the outage and the object completes
+  byte-exact after recovery), network partition during overlapping LFS PATCH repair,
+  Postgres-kill mid-OCI blob-upload (durable session survives, remaining bytes
+  re-staged after recovery, blob byte-exact), and Postgres-kill mid-S3 multipart
+  upload (durable session survives, missing part re-uploaded after recovery, object
+  byte-exact). Mixed-version rollout is covered by the existing drill F (S3 PUT).
 
 ### Changed
 - E2E CI now installs checksum-pinned Git LFS 3.7.1 and Bazelisk 1.29.0,
