@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+## [1.8.0] - 2026-08-25
+
+Stateless multi-replica hardening release. Eliminates the shared filesystem
+dependency from scaled API replicas, making pods disposable and cross-replica
+upload retries routine. Adds durable Postgres-coordinated resumable sessions
+for all three upload protocols (LFS PATCH, OCI blob-upload, S3 multipart),
+chaos-drills the new storage paths, and fixes Git LFS ↔ Hub API xet transfer
+negotiation so `git-xet` can delegate uploads to the Xet/CAS path.
+
 ### Added
 
 - Add bounded Ed25519 public-key rings and overlapping old/new verification so signing
@@ -49,6 +58,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
   lookup through publish, failure cleanup, heartbeat, and cancellation.
 
 ### Fixed
+- Hub API `/objects/batch` endpoint now negotiates `xet` transfer when the client
+  advertises it and the server has an auth provider, including CAS token minting
+  and `X-Xet-Content-CAS-*` headers. Previously hardcoded `"basic"` regardless of
+  client capabilities. Also validates `hash_algo` (rejects non-sha256), enforces
+  the 1024-object batch limit, and returns `hash_algo` in the response.
 - Re-baseline the line-coverage ratchet to 92.8% to reflect the single-replica
   role split, inline resumable-session reconstruction, and longer-lived durable
   staging paths landed in this release.
