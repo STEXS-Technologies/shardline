@@ -235,6 +235,12 @@ Set `SHARDLINE_METRICS_TOKEN_FILE` in production so the route requires
 `Authorization: Bearer <metrics-token>`. `/readyz` is for Kubernetes probes and
 service-local diagnostics, not public ingress.
 
+The versioned read-only administration routes under `/api/v1/*` are disabled
+unless `SHARDLINE_ADMIN_READ_TOKEN` or `SHARDLINE_ADMIN_READ_TOKEN_FILE` is set.
+Keep them on an internal operator endpoint. See
+[Read-Only Administration API](ADMIN_READ_API.md) for their security and
+consistency contract.
+
 ## Container Requirements
 
 The container image:
@@ -296,6 +302,7 @@ server_role = "all"
 frontends = ["xet", "oci", "hub"]
 root_dir = "/var/lib/shardline"
 chunk_size_bytes = 65536
+admin_read_token_path = "/run/secrets/shardline-admin-read-token"
 
 [storage]
 adapter = "s3"
@@ -357,6 +364,7 @@ SHARDLINE_MAX_SHARD_RECONSTRUCTION_TERMS=65536
 SHARDLINE_MAX_SHARD_XORB_CHUNKS=65536
 SHARDLINE_TOKEN_SIGNING_KEY_FILE=/run/secrets/shardline-token-key
 SHARDLINE_METRICS_TOKEN_FILE=/run/secrets/shardline-metrics-token
+SHARDLINE_ADMIN_READ_TOKEN_FILE=/run/secrets/shardline-admin-read-token
 SHARDLINE_PROVIDER_CONFIG_FILE=/etc/shardline/providers.json
 SHARDLINE_PROVIDER_API_KEY_FILE=/run/secrets/shardline-provider-key
 SHARDLINE_PROVIDER_TOKEN_ISSUER=shardline-provider
@@ -922,6 +930,11 @@ full procedure, recommended order, and rollback steps.
 `GET /metrics` emits Prometheus text format.
 When `SHARDLINE_METRICS_TOKEN_FILE` is set, the endpoint rejects unauthenticated scrape
 requests and requires `Authorization: Bearer <metrics-token>`.
+
+For bounded JSON snapshots suitable for dashboards, configure the separate
+`SHARDLINE_ADMIN_READ_TOKEN_FILE` secret and use the
+[read-only administration API](ADMIN_READ_API.md). The two tokens are not
+interchangeable.
 
 50+ metrics across 9 categories:
 

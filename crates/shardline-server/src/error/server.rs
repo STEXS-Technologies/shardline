@@ -71,6 +71,9 @@ pub enum ServerError {
     /// Request query exceeded the bounded metadata parser budget.
     #[error("request query exceeded the bounded metadata parser budget")]
     RequestQueryTooLarge,
+    /// A read-only administration API query was malformed or unsupported.
+    #[error("administration API query was invalid")]
+    InvalidAdminQuery,
     /// Request body frame slicing exceeded checked bounds.
     #[error("request body frame exceeded checked bounds")]
     RequestBodyFrameOutOfBounds,
@@ -307,6 +310,7 @@ impl ServerError {
             | Self::Json(_)
             | Self::RequestBodyRead(_)
             | Self::RequestQueryTooLarge
+            | Self::InvalidAdminQuery
             | Self::RequestBodyFrameOutOfBounds
             | Self::NumericConversion(_)
             | Self::HashParse(_)
@@ -382,6 +386,7 @@ impl ServerError {
             | Self::TooManyBatchReconstructionFileIds
             | Self::RequestBodyTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
             Self::RequestQueryTooLarge => StatusCode::URI_TOO_LONG,
+            Self::InvalidAdminQuery => StatusCode::BAD_REQUEST,
             Self::RequestBodyRead(_) | Self::RequestBodyFrameOutOfBounds => StatusCode::BAD_REQUEST,
             Self::ExpectedBodyHashMismatch => StatusCode::BAD_REQUEST,
             Self::NotFound | Self::UnknownProvider | Self::ProviderTokensDisabled => {
@@ -758,6 +763,7 @@ impl shardline_s3_adapter::S3ErrorClassify for ServerError {
             | Self::RequestBodyRead(_)
             | Self::RequestBodyTooLarge
             | Self::RequestQueryTooLarge
+            | Self::InvalidAdminQuery
             | Self::RequestBodyFrameOutOfBounds
             | Self::NumericConversion(_)
             | Self::HashParse(_)

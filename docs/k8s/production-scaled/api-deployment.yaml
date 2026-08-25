@@ -66,6 +66,8 @@ spec:
               value: /run/secrets/shardline/token-signing-key
             - name: SHARDLINE_METRICS_TOKEN_FILE
               value: /run/secrets/shardline/metrics-token
+            - name: SHARDLINE_ADMIN_READ_TOKEN_FILE
+              value: /run/secrets/shardline/admin-read-token
             - name: SHARDLINE_PROVIDER_API_KEY_FILE
               value: /run/secrets/shardline/provider-api-key
             - name: SHARDLINE_PROVIDER_CONFIG_FILE
@@ -118,6 +120,8 @@ spec:
               value: /run/secrets/shardline/token-signing-key
             - name: SHARDLINE_METRICS_TOKEN_FILE
               value: /run/secrets/shardline/metrics-token
+            - name: SHARDLINE_ADMIN_READ_TOKEN_FILE
+              value: /run/secrets/shardline/admin-read-token
             - name: SHARDLINE_PROVIDER_API_KEY_FILE
               value: /run/secrets/shardline/provider-api-key
             - name: SHARDLINE_PROVIDER_CONFIG_FILE
@@ -185,6 +189,8 @@ spec:
                 path: token-signing-key
               - key: metrics-token
                 path: metrics-token
+              - key: admin-read-token
+                path: admin-read-token
               - key: provider-api-key
                 path: provider-api-key
               - key: config-secret-key

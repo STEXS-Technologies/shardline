@@ -314,6 +314,7 @@ fn test_load_toml_config_found() {
 bind_addr = "127.0.0.1:9090"
 server_role = "api"
 frontends = ["xet", "oci"]
+admin_read_token_path = "/run/secrets/shardline-admin-read-token"
 "#,
     );
     let config_path = dir.path().join("shardline.toml");
@@ -328,6 +329,10 @@ frontends = ["xet", "oci"]
     assert_eq!(srv.bind_addr.unwrap(), "127.0.0.1:9090");
     assert_eq!(srv.server_role.unwrap(), "api");
     assert_eq!(srv.frontends.unwrap(), vec!["xet", "oci"]);
+    assert_eq!(
+        srv.admin_read_token_path.as_deref(),
+        Some("/run/secrets/shardline-admin-read-token")
+    );
 }
 
 #[test]

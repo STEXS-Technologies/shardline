@@ -21,9 +21,9 @@ use super::{
     DEFAULT_S3_MIN_PART_BYTES, DEFAULT_S3_UPLOAD_MAX_ACTIVE_PART_FILES,
     DEFAULT_S3_UPLOAD_MAX_ACTIVE_SESSIONS, DEFAULT_S3_UPLOAD_SESSION_MAX_BYTES,
     DEFAULT_S3_UPLOAD_SESSION_TTL_SECONDS, DEFAULT_S3_UPLOAD_TOTAL_MAX_BYTES, DeploymentMode,
-    HUB_WEBHOOK_SECRET_KEY_BYTES, MAX_ED25519_KEY_BYTES, MAX_METRICS_TOKEN_BYTES,
-    MAX_TOKEN_SIGNING_KEY_BYTES, ObjectStorageAdapter, ServerConfig, ServerConfigError,
-    ShardMetadataLimits, default_transfer_max_in_flight_chunks,
+    HUB_WEBHOOK_SECRET_KEY_BYTES, MAX_ADMIN_READ_TOKEN_BYTES, MAX_ED25519_KEY_BYTES,
+    MAX_METRICS_TOKEN_BYTES, MAX_TOKEN_SIGNING_KEY_BYTES, ObjectStorageAdapter, ServerConfig,
+    ServerConfigError, ShardMetadataLimits, default_transfer_max_in_flight_chunks,
     default_upload_max_in_flight_chunks, parse_byte_size,
 };
 use crate::{
@@ -387,6 +387,25 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
             observed_bytes: observed,
         },
     )?;
+    let admin_read_token = load_secret_from_env_or_file_with_conflict_check(
+        (
+            "SHARDLINE_ADMIN_READ_TOKEN",
+            "SHARDLINE_ADMIN_READ_TOKEN_FILE",
+        ),
+        MAX_ADMIN_READ_TOKEN_BYTES,
+        false,
+        ServerConfigError::EmptyAdminReadToken,
+        |env, file_env| ServerConfigError::SecretSourceConflict { env, file_env },
+        ServerConfigError::AdminReadToken,
+        |observed, maximum| ServerConfigError::AdminReadTokenTooLarge {
+            observed_bytes: observed,
+            maximum_bytes: maximum,
+        },
+        |expected, observed| ServerConfigError::AdminReadTokenLengthMismatch {
+            expected_bytes: expected,
+            observed_bytes: observed,
+        },
+    )?;
     let provider_config_path = var("SHARDLINE_PROVIDER_CONFIG_FILE")
         .ok()
         .map(PathBuf::from);
@@ -546,6 +565,9 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
     }
     if let Some(metrics_token) = metrics_token {
         config = config.with_metrics_token(metrics_token)?;
+    }
+    if let Some(admin_read_token) = admin_read_token {
+        config = config.with_admin_read_token(admin_read_token)?;
     }
 
     if let Some(deployment_mode) = deployment_mode_from_env()? {
@@ -843,6 +865,12 @@ pub fn load_server_config_from_env_with_toml(
             "SHARDLINE_TRANSFER_MAX_IN_FLIGHT_CHUNKS",
             srv.transfer_max_in_flight_chunks.map(|v| v.to_string()),
         );
+        if var("SHARDLINE_ADMIN_READ_TOKEN").is_err() {
+            set_if_unset(
+                "SHARDLINE_ADMIN_READ_TOKEN_FILE",
+                srv.admin_read_token_path.clone(),
+            );
+        }
     }
 
     if let Some(stg) = &toml.storage {
@@ -1310,6 +1338,121 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
         ));
         remove_env_var("SHARDLINE_METRICS_TOKEN");
         remove_env_var("SHARDLINE_METRICS_TOKEN_FILE");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn load_server_config_admin_read_token_from_file() {
+        use std::io::Write;
+        let mut token_file = tempfile::NamedTempFile::new().unwrap();
+        token_file.write_all(b"admin-read-token").unwrap();
+        token_file.flush().unwrap();
+
+        set_env_var(
+            "SHARDLINE_ADMIN_READ_TOKEN_FILE",
+            token_file.path().to_str().unwrap(),
+        );
+        remove_env_var("SHARDLINE_ADMIN_READ_TOKEN");
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_admin_read_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+
+        let config = super::load_server_config_from_env().unwrap();
+        assert_eq!(
+            config.admin_read_token(),
+            Some(b"admin-read-token".as_slice())
+        );
+
+        remove_env_var("SHARDLINE_ADMIN_READ_TOKEN_FILE");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn load_server_config_admin_read_token_from_direct_env() {
+        set_env_var("SHARDLINE_ADMIN_READ_TOKEN", "direct-admin-read-token");
+        remove_env_var("SHARDLINE_ADMIN_READ_TOKEN_FILE");
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_admin_read_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+
+        let config = super::load_server_config_from_env().unwrap();
+        assert_eq!(
+            config.admin_read_token(),
+            Some(b"direct-admin-read-token".as_slice())
+        );
+
+        remove_env_var("SHARDLINE_ADMIN_READ_TOKEN");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn load_server_config_admin_read_token_rejects_conflicting_sources() {
+        set_env_var("SHARDLINE_ADMIN_READ_TOKEN", "direct-token");
+        set_env_var("SHARDLINE_ADMIN_READ_TOKEN_FILE", "/tmp/admin-read-token");
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_admin_read_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+
+        let result = super::load_server_config_from_env();
+        assert!(matches!(
+            result,
+            Err(super::ServerConfigError::SecretSourceConflict { .. })
+        ));
+
+        remove_env_var("SHARDLINE_ADMIN_READ_TOKEN");
+        remove_env_var("SHARDLINE_ADMIN_READ_TOKEN_FILE");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn load_server_config_admin_read_token_from_toml() {
+        use std::io::Write;
+        let mut token_file = tempfile::NamedTempFile::new().unwrap();
+        token_file.write_all(b"toml-admin-read-token").unwrap();
+        token_file.flush().unwrap();
+        let toml: super::ShardlineTomlConfig = toml::from_str(&format!(
+            "[server]\nadmin_read_token_path = {:?}\n",
+            token_file.path().to_str().unwrap()
+        ))
+        .unwrap();
+
+        remove_env_var("SHARDLINE_ADMIN_READ_TOKEN");
+        remove_env_var("SHARDLINE_ADMIN_READ_TOKEN_FILE");
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_admin_read_toml_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+        let config = load_server_config_from_env_with_toml(&toml).unwrap();
+        assert_eq!(
+            config.admin_read_token(),
+            Some(b"toml-admin-read-token".as_slice())
+        );
+
+        remove_env_var("SHARDLINE_ADMIN_READ_TOKEN_FILE");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn direct_admin_read_token_overrides_toml_file_path() {
+        let toml: super::ShardlineTomlConfig =
+            toml::from_str("[server]\nadmin_read_token_path = \"/does/not/exist\"\n").unwrap();
+
+        set_env_var("SHARDLINE_ADMIN_READ_TOKEN", "environment-token");
+        remove_env_var("SHARDLINE_ADMIN_READ_TOKEN_FILE");
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_admin_read_toml_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+        let config = load_server_config_from_env_with_toml(&toml).unwrap();
+        assert_eq!(
+            config.admin_read_token(),
+            Some(b"environment-token".as_slice())
+        );
+
+        remove_env_var("SHARDLINE_ADMIN_READ_TOKEN");
         remove_env_var("SHARDLINE_ROOT_DIR");
         remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
     }
