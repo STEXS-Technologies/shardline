@@ -12,10 +12,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
   GC, integrity, node, task, replication, metrics, and future plugin status.
   The surface uses a dedicated constant-time bearer-token boundary, honest
   authoritative/process/external state semantics, admission control, no-store
-  responses, and is available on every runtime role for external dashboards.
+  responses, bounded cursor pagination and typed collection filtering, and is
+  available on every runtime role for external dashboards. The complete field,
+  pagination, failure, compatibility, and applicable-threat contract is
+  documented for API clients. Wire models live in an explicit v1 DTO module;
+  page limits, filters, cursor tokens, cursor keys, and cursor state are typed
+  instead of being passed through as unstructured primitives.
   The Postgres-kill deployment drill now verifies degraded/recovered status and
-  fail-closed authorization while the durable metadata dependency is unavailable;
-  the strict TOML schema has property and fuzz coverage for the new secret-file setting.
+  fail-closed authorization/query handling plus sanitized errors while the durable
+  metadata dependency is unavailable; cancellation/restart regressions verify
+  polling cannot mutate inventory, and dedicated property and fuzz targets cover
+  both the strict TOML secret-file setting and administration query parser plus
+  versioned cursor DTO/newtype deserialization.
 - Extend storage statistics with authoritative total object count and physical
   object bytes while preserving the existing CAS chunk/file counters.
 

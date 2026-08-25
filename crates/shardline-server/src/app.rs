@@ -68,6 +68,8 @@ use admin_api::{
     plugins as admin_plugins, replication as admin_replication, status as admin_status,
     storage as admin_storage, tasks as admin_tasks,
 };
+#[cfg(feature = "fuzzing")]
+pub(crate) use admin_api::{parse_admin_cursor_for_fuzzing, parse_admin_query_for_fuzzing};
 use metadata_routes::{
     create_revision, delete_path, delete_revision, list_revisions, register_path, tree_lookup,
 };
@@ -948,6 +950,7 @@ pub(super) async fn security_headers_middleware(
     request: axum::extract::Request,
     next: Next,
 ) -> axum::response::Response {
+    let is_admin_api = request.uri().path().starts_with("/api/v1/");
     let response = next.run(request).await;
     let (mut parts, body) = response.into_parts();
     let headers = &mut parts.headers;
@@ -973,6 +976,16 @@ pub(super) async fn security_headers_middleware(
         headers.insert(
             header::REFERRER_POLICY,
             header::HeaderValue::from_static("strict-origin-when-cross-origin"),
+        );
+    }
+    if is_admin_api {
+        headers.insert(
+            header::CACHE_CONTROL,
+            header::HeaderValue::from_static("no-store"),
+        );
+        headers.insert(
+            header::CONTENT_SECURITY_POLICY,
+            header::HeaderValue::from_static("default-src 'none'; frame-ancestors 'none'"),
         );
     }
     axum::response::Response::from_parts(parts, body)
