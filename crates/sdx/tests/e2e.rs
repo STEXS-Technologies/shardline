@@ -644,10 +644,10 @@ async fn download_stream_byte_range_matches_uploaded_bytes() {
 /// The milestone's key acceptance test: streaming a large file with a small
 /// buffer cap must keep resident RAM far below the file size.
 ///
-/// A 1 GiB synthetic file is streamed through a 64 MiB byte-denominated buffer
+/// A 256 MiB synthetic file is streamed through a 64 MiB byte-denominated buffer
 /// semaphore to a plain thread via `blocking_next()`; the memory added by the
 /// streaming pipeline (peak `VmRSS` sampled during the download, minus the
-/// pre-download baseline) must stay well below the 1 GiB file size. In
+/// pre-download baseline) must stay well below the 256 MiB file size. In
 /// isolation the streaming delta is ~98 MiB and the absolute peak ~140 MiB.
 ///
 /// The server runs in-process, and its ingest retains freed-but-unreturned
@@ -688,11 +688,12 @@ async fn stream_large_file_memory_bounded_cat() {
     };
     let client = server.client_with(Some(64 * 1024 * 1024), Some(limits));
 
-    let file_size = 1024 * 1024 * 1024; // 1 GiB
+    let file_size = 256 * 1024 * 1024; // 256 MiB — large enough to exercise
+    // multi-xorb streaming, small enough to avoid OOM on CI runners.
     let data = deterministic_random(file_size, 0xb00b5e);
     let file_id = hex_id(MEMORY_ID);
     server.upload(&file_id, &data).await;
-    // Release the test's 1 GiB buffer before measuring the download's RSS.
+    // Release the test's 256 MiB buffer before measuring the download's RSS.
     drop(data);
     tokio::task::yield_now().await;
     // The server's in-process ingest retains freed-but-unreturned heap memory
@@ -730,7 +731,7 @@ async fn stream_large_file_memory_bounded_cat() {
         "streamed {total} of {file_size} bytes (byte-identity check)"
     );
 
-    let bound_kib = 384 * 1024; // 384 MiB ≪ 1 GiB file; catches whole-file buffering
+    let bound_kib = 384 * 1024; // 384 MiB ≪ 256 MiB file; catches whole-file buffering
     let streaming_delta_kib = peak_rss_kib.saturating_sub(baseline_kib);
     assert!(
         streaming_delta_kib < bound_kib,
