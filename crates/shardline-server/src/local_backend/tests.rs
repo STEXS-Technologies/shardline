@@ -91,6 +91,8 @@ async fn local_backend_reuses_unchanged_chunks() {
         stats.chunks,
         first.inserted_chunks
     );
+    assert!(stats.objects >= stats.chunks);
+    assert!(stats.object_bytes >= stats.chunk_bytes);
 }
 
 #[cfg(unix)]

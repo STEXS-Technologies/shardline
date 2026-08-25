@@ -172,9 +172,13 @@ impl LocalBackend {
     pub async fn stats(&self) -> Result<ServerStatsResponse, ServerError> {
         let object_store = self.object_store();
         let prefix = ObjectPrefix::parse("").map_err(|_error| ServerError::InvalidContentHash)?;
+        let mut objects = 0_u64;
+        let mut object_bytes = 0_u64;
         let mut chunks = 0_u64;
         let mut chunk_bytes = 0_u64;
         visit_object_prefix(&object_store, &prefix, |metadata| {
+            objects = checked_increment(objects)?;
+            object_bytes = checked_add(object_bytes, metadata.length())?;
             let is_chunk = chunk_hash_from_chunk_object_key_if_present(metadata.key())?.is_some();
             if is_chunk {
                 chunks = checked_increment(chunks)?;
@@ -190,6 +194,8 @@ impl LocalBackend {
         )?;
 
         Ok(ServerStatsResponse {
+            objects,
+            object_bytes,
             chunks,
             chunk_bytes,
             files,
@@ -1017,6 +1023,8 @@ mod tests {
         .await
         .unwrap();
         let stats = backend.stats().await.unwrap();
+        assert_eq!(stats.objects, 0);
+        assert_eq!(stats.object_bytes, 0);
         assert_eq!(stats.chunks, 0);
         assert_eq!(stats.chunk_bytes, 0);
         assert_eq!(stats.files, 0);

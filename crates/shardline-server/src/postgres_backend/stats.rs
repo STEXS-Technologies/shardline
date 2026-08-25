@@ -18,9 +18,13 @@ impl super::PostgresBackend {
     pub async fn stats(&self) -> Result<ServerStatsResponse, ServerError> {
         let object_store = self.object_store();
         let prefix = ObjectPrefix::parse("").map_err(|_error| ServerError::InvalidContentHash)?;
+        let mut objects = 0_u64;
+        let mut object_bytes = 0_u64;
         let mut chunks = 0_u64;
         let mut chunk_bytes = 0_u64;
         visit_object_prefix(&object_store, &prefix, |metadata| {
+            objects = checked_increment(objects)?;
+            object_bytes = checked_add(object_bytes, metadata.length())?;
             let is_chunk = chunk_hash_from_chunk_object_key_if_present(metadata.key())?.is_some();
             if is_chunk {
                 chunks = checked_increment(chunks)?;
@@ -37,6 +41,8 @@ impl super::PostgresBackend {
         .await?;
 
         Ok(ServerStatsResponse {
+            objects,
+            object_bytes,
             chunks,
             chunk_bytes,
             files,
@@ -82,11 +88,15 @@ mod tests {
     #[test]
     fn server_stats_response_default_fields() {
         let response = ServerStatsResponse {
+            objects: 0,
+            object_bytes: 0,
             chunks: 0,
             chunk_bytes: 0,
             files: 0,
         };
         assert_eq!(response.chunks, 0);
+        assert_eq!(response.objects, 0);
+        assert_eq!(response.object_bytes, 0);
         assert_eq!(response.chunk_bytes, 0);
         assert_eq!(response.files, 0);
     }
@@ -94,11 +104,15 @@ mod tests {
     #[test]
     fn server_stats_response_arbitrary_values() {
         let response = ServerStatsResponse {
+            objects: 84,
+            object_bytes: 2_000_000,
             chunks: 42,
             chunk_bytes: 1_000_000,
             files: 7,
         };
         assert_eq!(response.chunks, 42);
+        assert_eq!(response.objects, 84);
+        assert_eq!(response.object_bytes, 2_000_000);
         assert_eq!(response.chunk_bytes, 1_000_000);
         assert_eq!(response.files, 7);
     }

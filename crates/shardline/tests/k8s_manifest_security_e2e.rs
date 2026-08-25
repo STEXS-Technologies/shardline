@@ -11,8 +11,12 @@ fn production_api_manifest_pins_secret_volume_permissions() {
     assert!(manifest.contains("secretName: shardline-provider-catalog"));
     assert!(manifest.contains("SHARDLINE_S3_ACCESS_KEY_ID_FILE"));
     assert!(manifest.contains("SHARDLINE_S3_SECRET_ACCESS_KEY_FILE"));
+    assert!(manifest.contains("SHARDLINE_ADMIN_READ_TOKEN_FILE"));
+    assert!(manifest.contains("value: /run/secrets/shardline/admin-read-token"));
+    assert!(manifest.contains("- key: admin-read-token\n                path: admin-read-token"));
     assert!(!manifest.contains("SHARDLINE_S3_ACCESS_KEY_ID\n"));
     assert!(!manifest.contains("SHARDLINE_S3_SECRET_ACCESS_KEY\n"));
+    assert!(!manifest.contains("SHARDLINE_ADMIN_READ_TOKEN\n"));
     assert!(manifest.contains("- name: root\n          emptyDir: {}"));
     assert!(!manifest.contains("persistentVolumeClaim:"));
 }
@@ -27,8 +31,12 @@ fn production_transfer_manifest_pins_secret_volume_permissions() {
     assert!(manifest.contains("defaultMode: 0440"));
     assert!(manifest.contains("SHARDLINE_S3_ACCESS_KEY_ID_FILE"));
     assert!(manifest.contains("SHARDLINE_S3_SECRET_ACCESS_KEY_FILE"));
+    assert!(manifest.contains("SHARDLINE_ADMIN_READ_TOKEN_FILE"));
+    assert!(manifest.contains("value: /run/secrets/shardline/admin-read-token"));
+    assert!(manifest.contains("- key: admin-read-token\n                path: admin-read-token"));
     assert!(!manifest.contains("SHARDLINE_S3_ACCESS_KEY_ID\n"));
     assert!(!manifest.contains("SHARDLINE_S3_SECRET_ACCESS_KEY\n"));
+    assert!(!manifest.contains("SHARDLINE_ADMIN_READ_TOKEN\n"));
 }
 
 #[test]
