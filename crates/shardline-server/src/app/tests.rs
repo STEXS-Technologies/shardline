@@ -187,7 +187,7 @@ async fn security_headers_middleware_adds_xss_protection_headers() {
     assert_eq!(headers.get(header::X_FRAME_OPTIONS).unwrap(), "DENY");
     assert_eq!(
         headers.get(header::STRICT_TRANSPORT_SECURITY).unwrap(),
-        "max-age=31536000"
+        "max-age=31536000; includeSubDomains"
     );
     assert_eq!(
         headers.get(header::REFERRER_POLICY).unwrap(),
