@@ -123,6 +123,7 @@ SHARDLINE_RECONSTRUCTION_CACHE_ADAPTER=redis
 SHARDLINE_RECONSTRUCTION_CACHE_REDIS_URL=redis://default:replace-me@garnet.example.com:6379
 SHARDLINE_TOKEN_SIGNING_KEY_FILE=/etc/shardline/token-signing-key
 SHARDLINE_METRICS_TOKEN_FILE=/etc/shardline/metrics-token
+SHARDLINE_ADMIN_READ_TOKEN_FILE=/etc/shardline/admin-read-token
 SHARDLINE_PROVIDER_CONFIG_FILE=/etc/shardline/providers.json
 SHARDLINE_PROVIDER_API_KEY_FILE=/etc/shardline/provider-api-key
 ```

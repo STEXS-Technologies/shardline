@@ -39,6 +39,16 @@ The production Kubernetes package already follows that model:
 - topology spread across nodes
 - externalized S3, Postgres, and Redis-cache dependencies
 
+## Read-only operational API
+
+External dashboards and operators can consume versioned JSON snapshots without
+embedding a management UI in Shardline. Configure the dedicated admin-read
+token and keep `/api/v1/*` on an internal endpoint. These routes report storage,
+GC, integrity, node, task, replication, metrics, and future plugin state; they
+never start or mutate an operation. See
+[Read-Only Administration API](ADMIN_READ_API.md) for endpoint schemas,
+authentication, and cluster/process consistency semantics.
+
 ## Scaling Model
 
 Shardline scales by separating control-plane traffic from transfer traffic.

@@ -697,11 +697,15 @@ async fn test_complete_workflow() {
 #[test]
 fn test_server_stats_response_default() {
     let stats = ServerStatsResponse {
+        objects: 0,
+        object_bytes: 0,
         chunks: 0,
         chunk_bytes: 0,
         files: 0,
     };
     assert_eq!(stats.chunks, 0);
+    assert_eq!(stats.objects, 0);
+    assert_eq!(stats.object_bytes, 0);
     assert_eq!(stats.chunk_bytes, 0);
     assert_eq!(stats.files, 0);
 }
@@ -709,11 +713,15 @@ fn test_server_stats_response_default() {
 #[test]
 fn test_server_stats_response_arbitrary() {
     let stats = ServerStatsResponse {
+        objects: 12,
+        object_bytes: 4096,
         chunks: 10,
         chunk_bytes: 2048,
         files: 3,
     };
     assert_eq!(stats.chunks, 10);
+    assert_eq!(stats.objects, 12);
+    assert_eq!(stats.object_bytes, 4096);
     assert_eq!(stats.chunk_bytes, 2048);
     assert_eq!(stats.files, 3);
 }

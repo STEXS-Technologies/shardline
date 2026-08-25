@@ -11,8 +11,12 @@ fn production_api_manifest_pins_secret_volume_permissions() {
     assert!(manifest.contains("secretName: shardline-provider-catalog"));
     assert!(manifest.contains("SHARDLINE_S3_ACCESS_KEY_ID_FILE"));
     assert!(manifest.contains("SHARDLINE_S3_SECRET_ACCESS_KEY_FILE"));
+    assert!(manifest.contains("SHARDLINE_ADMIN_READ_TOKEN_FILE"));
+    assert!(manifest.contains("value: /run/secrets/shardline/admin-read-token"));
+    assert!(manifest.contains("- key: admin-read-token\n                path: admin-read-token"));
     assert!(!manifest.contains("SHARDLINE_S3_ACCESS_KEY_ID\n"));
     assert!(!manifest.contains("SHARDLINE_S3_SECRET_ACCESS_KEY\n"));
+    assert!(!manifest.contains("SHARDLINE_ADMIN_READ_TOKEN\n"));
     assert!(manifest.contains("- name: root\n          emptyDir: {}"));
     assert!(!manifest.contains("persistentVolumeClaim:"));
 }
@@ -27,8 +31,12 @@ fn production_transfer_manifest_pins_secret_volume_permissions() {
     assert!(manifest.contains("defaultMode: 0440"));
     assert!(manifest.contains("SHARDLINE_S3_ACCESS_KEY_ID_FILE"));
     assert!(manifest.contains("SHARDLINE_S3_SECRET_ACCESS_KEY_FILE"));
+    assert!(manifest.contains("SHARDLINE_ADMIN_READ_TOKEN_FILE"));
+    assert!(manifest.contains("value: /run/secrets/shardline/admin-read-token"));
+    assert!(manifest.contains("- key: admin-read-token\n                path: admin-read-token"));
     assert!(!manifest.contains("SHARDLINE_S3_ACCESS_KEY_ID\n"));
     assert!(!manifest.contains("SHARDLINE_S3_SECRET_ACCESS_KEY\n"));
+    assert!(!manifest.contains("SHARDLINE_ADMIN_READ_TOKEN\n"));
 }
 
 #[test]
@@ -124,6 +132,20 @@ fn production_and_kind_configs_use_a_supported_auth_provider() {
         let manifest = read_manifest(manifest_path);
         assert!(manifest.contains("provider = \"local\""));
         assert!(!manifest.contains("provider = \"local-hmac\""));
+    }
+}
+
+#[test]
+fn kind_runtime_secret_provides_every_new_projected_admin_key() {
+    let dependencies = read_manifest("tests/k8s/kind/dependencies.yaml");
+    assert!(dependencies.contains("name: shardline-runtime"));
+    assert!(dependencies.contains("admin-read-token: kind-smoke-admin-read-token"));
+
+    for deployment in ["api-deployment.yaml", "transfer-deployment.yaml"] {
+        let manifest = read_manifest(&format!("docs/k8s/production-scaled/{deployment}"));
+        assert!(
+            manifest.contains("- key: admin-read-token\n                path: admin-read-token")
+        );
     }
 }
 

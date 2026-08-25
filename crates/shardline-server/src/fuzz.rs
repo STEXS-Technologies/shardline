@@ -6,7 +6,10 @@ use shardline_server_core::AuthorizedRepository;
 
 use crate::{
     BazelCacheKind, InvalidReconstructionResponseError, InvalidSerializedShardError, ServerError,
-    app::{parse_oci_path, parse_upload_content_range},
+    app::{
+        parse_admin_cursor_for_fuzzing, parse_admin_query_for_fuzzing, parse_oci_path,
+        parse_upload_content_range,
+    },
     bazel_cache_object_key,
     config::ShardMetadataLimits,
     lfs_object_key,
@@ -25,6 +28,24 @@ use crate::{
         reconstruction_v2_from_v1, retained_shard_chunk_hashes, validate_serialized_xorb,
     },
 };
+
+/// Exercise the bounded administration query and cursor parser.
+///
+/// # Errors
+///
+/// Returns the parser's bounded validation error for malformed input.
+pub fn fuzz_admin_api_query(input: &str) -> Result<(), ServerError> {
+    parse_admin_query_for_fuzzing(input)
+}
+
+/// Exercise deserialization and validation of the versioned cursor DTO and its newtypes.
+///
+/// # Errors
+///
+/// Returns the parser's bounded validation error for malformed input.
+pub fn fuzz_admin_api_cursor(input: &[u8]) -> Result<(), ServerError> {
+    parse_admin_cursor_for_fuzzing(input)
+}
 
 /// Summary of Git LFS frontend validation used by fuzz targets.
 #[derive(Debug, Clone, PartialEq, Eq)]
