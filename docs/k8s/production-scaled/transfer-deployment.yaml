@@ -68,6 +68,8 @@ spec:
               value: /run/secrets/shardline/token-signing-key
             - name: SHARDLINE_METRICS_TOKEN_FILE
               value: /run/secrets/shardline/metrics-token
+            - name: SHARDLINE_ADMIN_READ_TOKEN_FILE
+              value: /run/secrets/shardline/admin-read-token
           volumeMounts:
             - name: config
               mountPath: /etc/shardline
@@ -118,6 +120,8 @@ spec:
               value: /run/secrets/shardline/token-signing-key
             - name: SHARDLINE_METRICS_TOKEN_FILE
               value: /run/secrets/shardline/metrics-token
+            - name: SHARDLINE_ADMIN_READ_TOKEN_FILE
+              value: /run/secrets/shardline/admin-read-token
           volumeMounts:
             - name: config
               mountPath: /etc/shardline
@@ -176,6 +180,8 @@ spec:
                 path: token-signing-key
               - key: metrics-token
                 path: metrics-token
+              - key: admin-read-token
+                path: admin-read-token
               - key: s3-access-key-id
                 path: s3-access-key-id
               - key: s3-secret-access-key

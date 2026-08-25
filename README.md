@@ -48,7 +48,7 @@ frontends over the same hardened storage core.
 - **Pluggable auth** — local HMAC, Ed25519, OIDC, JWKS, or passthrough provider adapters
 - **Self-hosted or cloud** — local filesystem, S3-compatible storage, Postgres metadata
 - **Operational tooling** — health checks, migrations, integrity verification, garbage
-  collection, backups
+  collection, backups, and a token-gated read-only API for external dashboards
 - **Provider integration** — optional webhooks and token issuance for GitHub, GitLab,
   Gitea, Codeberg
 
@@ -117,6 +117,7 @@ Provider integration is optional.
 | [HuggingFace Hub API](docs/HUGGINGFACE_HUB_API.md) | Hub API compatibility for huggingface-cli |
 | [S3 Frontend](docs/S3_FRONTEND.md) | S3-compatible object API for lakehouse and s3:// clients |
 | [Operations](docs/OPERATIONS.md) | Day-to-day operations runbook |
+| [Read-Only Administration API](docs/ADMIN_READ_API.md) | Stable operational data for dashboards and operators |
 | [CLI Reference](docs/CLI.md) | All commands and flags |
 | [Compatibility Status](docs/COMPATIBILITY_STATUS.md) | Surface maturity tiers and validated route coverage |
 | [Architecture](docs/ARCHITECTURE.md) | System design and runtime shape |

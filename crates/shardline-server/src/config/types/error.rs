@@ -333,6 +333,31 @@ pub enum ServerConfigError {
         "strict deployment mode requires a metrics token (set SHARDLINE_METRICS_TOKEN or SHARDLINE_METRICS_TOKEN_FILE)"
     )]
     MissingMetricsToken,
+    /// The read-only admin API token file could not be read.
+    #[error("admin read token could not be read")]
+    AdminReadToken(#[source] IoError),
+    /// The read-only admin API bearer token was empty.
+    #[error("admin read token must not be empty")]
+    EmptyAdminReadToken,
+    /// The read-only admin API token cannot be represented in an HTTP bearer header.
+    #[error("admin read token must contain only visible ASCII bytes without whitespace")]
+    InvalidAdminReadToken,
+    /// The read-only admin API bearer token exceeded the parser ceiling.
+    #[error("admin read token exceeded the bounded parser ceiling")]
+    AdminReadTokenTooLarge {
+        /// Observed secret file length in bytes.
+        observed_bytes: u64,
+        /// Maximum accepted secret file length in bytes.
+        maximum_bytes: u64,
+    },
+    /// The read-only admin API token changed after validation.
+    #[error("admin read token changed during bounded read")]
+    AdminReadTokenLengthMismatch {
+        /// Validated secret file length in bytes.
+        expected_bytes: u64,
+        /// Observed secret file length in bytes after bounded read.
+        observed_bytes: u64,
+    },
     /// The selected role uses the local HMAC provider and would expose CAS routes
     /// without bearer-token verification.
     #[error("served shardline routes require shardline token signing key configuration")]

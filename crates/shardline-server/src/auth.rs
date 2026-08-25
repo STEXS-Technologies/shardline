@@ -121,6 +121,9 @@ pub(crate) fn authorize_static_bearer_token(
     headers: &HeaderMap,
     expected_token: &[u8],
 ) -> Result<(), ServerError> {
+    if headers.get_all(AUTHORIZATION).iter().count() > 1 {
+        return Err(ServerError::InvalidAuthorizationHeader);
+    }
     let header = headers
         .get(AUTHORIZATION)
         .ok_or(ServerError::MissingAuthorization)?;

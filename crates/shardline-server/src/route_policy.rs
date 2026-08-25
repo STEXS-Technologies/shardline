@@ -82,6 +82,21 @@ pub(crate) fn register_route_policies(registry: &mut RoutePolicyRegistry) {
     // Metrics — separately protected (token file)
     registry.register("GET", "/metrics", RouteAuthPolicy::SeparatelyProtected);
 
+    // Read-only administrative API — separately protected by its own token.
+    for path in [
+        "/api/v1/status",
+        "/api/v1/storage",
+        "/api/v1/gc",
+        "/api/v1/integrity",
+        "/api/v1/nodes",
+        "/api/v1/tasks",
+        "/api/v1/metrics",
+        "/api/v1/plugins",
+        "/api/v1/replication",
+    ] {
+        registry.register("GET", path, RouteAuthPolicy::SeparatelyProtected);
+    }
+
     // Stats — authenticated
     registry.register("GET", "/v1/stats", RouteAuthPolicy::Authenticated);
 
