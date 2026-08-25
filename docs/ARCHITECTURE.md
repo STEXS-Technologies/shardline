@@ -462,6 +462,12 @@ Shardline uses `tracing` for structured logging and `prometheus` for metrics.
 
 Token-gated in production via `SHARDLINE_METRICS_TOKEN_FILE`.
 
+The core server also owns a separately authenticated, versioned read-only
+administration contract under `/api/v1/*`. It exposes bounded operational
+snapshots to external dashboards without granting mutation authority or direct
+database/object-store access. See
+[Read-Only Administration API](ADMIN_READ_API.md).
+
 ## Database Migrations
 
 Shardline ships 18 bundled migrations applied via `shardline db migrate up`:

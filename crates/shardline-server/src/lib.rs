@@ -180,6 +180,8 @@ pub(crate) mod xet_adapter {
 
 pub use app::{serve, serve_with_listener};
 pub use backup::{BackupManifestReport, write_backup_manifest};
+#[cfg(feature = "fuzzing")]
+pub use config::file::parse_toml_config_for_fuzzing;
 pub use config::{
     AuthProviderKind, DeploymentMode, ObjectStorageAdapter, ServerConfig, ServerConfigError,
     ShardMetadataLimits, file::load_toml_config, load_server_config_from_env_with_toml,

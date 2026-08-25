@@ -65,6 +65,10 @@ pub struct UploadFileResponse {
 /// Storage stats response.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ServerStatsResponse {
+    /// Number of objects stored across the configured object namespace.
+    pub objects: u64,
+    /// Total physical bytes stored across the configured object namespace.
+    pub object_bytes: u64,
     /// Number of chunk objects stored.
     pub chunks: u64,
     /// Total bytes stored across chunk objects.
@@ -303,6 +307,8 @@ mod tests {
     #[test]
     fn server_stats_response_serde_round_trip() {
         let original = ServerStatsResponse {
+            objects: 20,
+            object_bytes: 81_920,
             chunks: 10,
             chunk_bytes: 40960,
             files: 5,

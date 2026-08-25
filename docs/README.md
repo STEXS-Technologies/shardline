@@ -17,6 +17,7 @@ docs that match your use case.
 - [Compatibility Status](COMPATIBILITY_STATUS.md)
 - [Stability Graduation Policy](STABILITY_GRADUATION.md)
 - [CLI](CLI.md)
+- [Read-Only Administration API](ADMIN_READ_API.md)
 
 ## Setup And Rollout
 

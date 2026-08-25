@@ -265,6 +265,12 @@ test = false
 doc = false
 
 [[bin]]
+name = "shardline_server_config_toml"
+path = "fuzz_targets/shardline/server_config_toml.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "shardline_auth_ed25519"
 path = "fuzz_targets/shardline/auth_ed25519.rs"
 test = false

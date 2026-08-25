@@ -98,6 +98,7 @@ fn server_config_keeps_bind_address_and_public_url() {
     assert_eq!(config.index_postgres_url(), None);
     assert_eq!(config.token_signing_key(), None);
     assert_eq!(config.metrics_token(), None);
+    assert_eq!(config.admin_read_token(), None);
     assert_eq!(config.provider_config_path(), None);
 }
 
@@ -136,6 +137,63 @@ fn server_config_rejects_empty_metrics_token() {
         config,
         Err(super::ServerConfigError::EmptyMetricsToken)
     ));
+}
+
+#[test]
+fn server_config_accepts_and_redacts_admin_read_token() {
+    let config = ServerConfig::new(
+        "127.0.0.1:8080".parse().unwrap(),
+        "https://assets.example.test".to_owned(),
+        PathBuf::from("/tmp/shardline"),
+        NonZeroUsize::MIN,
+    )
+    .with_admin_read_token(b"admin-read-token".to_vec())
+    .unwrap();
+
+    assert_eq!(
+        config.admin_read_token(),
+        Some(b"admin-read-token".as_slice())
+    );
+    let debug = format!("{config:?}");
+    assert!(debug.contains("admin_read_token"));
+    assert!(!debug.contains("admin-read-token"));
+}
+
+#[test]
+fn server_config_rejects_empty_admin_read_token() {
+    let result = ServerConfig::new(
+        "127.0.0.1:8080".parse().unwrap(),
+        "https://assets.example.test".to_owned(),
+        PathBuf::from("/tmp/shardline"),
+        NonZeroUsize::MIN,
+    )
+    .with_admin_read_token(Vec::new());
+
+    assert!(matches!(
+        result,
+        Err(super::ServerConfigError::EmptyAdminReadToken)
+    ));
+}
+
+#[test]
+fn server_config_rejects_unusable_admin_read_tokens() {
+    for token in [
+        b"contains space".as_slice(),
+        b"contains\nnewline".as_slice(),
+        &[0xff],
+    ] {
+        let result = ServerConfig::new(
+            "127.0.0.1:8080".parse().unwrap(),
+            "http://localhost:8080".to_owned(),
+            PathBuf::from("/tmp/shardline"),
+            NonZeroUsize::new(65_536).unwrap(),
+        )
+        .with_admin_read_token(token.to_vec());
+        assert!(matches!(
+            result,
+            Err(super::ServerConfigError::InvalidAdminReadToken)
+        ));
+    }
 }
 
 #[test]

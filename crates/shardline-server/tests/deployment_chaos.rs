@@ -72,6 +72,7 @@ const CONTAINER_REDIS: &str = "chaos-redis";
 const NETEM_IMAGE: &str = "nicolaka/netshoot:v0.13";
 
 const TEST_SIGNING_KEY: &[u8] = b"0123456789abcdef0123456789abcdef";
+const ADMIN_READ_TOKEN: &str = "deployment-chaos-admin-read-token";
 const CHUNK_SIZE: usize = 65536;
 
 // ---------------------------------------------------------------------------
@@ -810,6 +811,33 @@ async fn s3_get(base: &str, token: &str, key: &str) -> reqwest::Response {
         .expect("s3 GET request")
 }
 
+async fn admin_status(base: &str, token: &str) -> reqwest::Response {
+    reqwest::Client::new()
+        .get(format!("{base}/api/v1/status"))
+        .header("Authorization", format!("Bearer {token}"))
+        .timeout(Duration::from_secs(20))
+        .send()
+        .await
+        .expect("admin status request completed within its bound")
+}
+
+async fn assert_admin_state(base: &str, expected: &str) {
+    let response = admin_status(base, ADMIN_READ_TOKEN).await;
+    assert_eq!(response.status().as_u16(), 200, "admin status response");
+    assert_eq!(
+        response
+            .headers()
+            .get("cache-control")
+            .and_then(|value| value.to_str().ok()),
+        Some("no-store")
+    );
+    let body: serde_json::Value = response.json().await.expect("admin status JSON");
+    assert_eq!(body["api_version"], "v1");
+    assert_eq!(body["state"], expected);
+    assert_eq!(body["durable_storage_state"], expected);
+    assert!(!body.to_string().contains(ADMIN_READ_TOKEN));
+}
+
 async fn assert_s3_bytes(base: &str, token: &str, key: &str, expected: &[u8], context: &str) {
     let response = s3_get(base, token, key).await;
     assert_eq!(response.status().as_u16(), 200, "{context}: GET {key}");
@@ -1035,6 +1063,7 @@ async fn drill_deploy_a_postgres_kill_mid_upload_no_lost_commits() {
         &[
             ("SHARDLINE_SERVER_FRONTENDS", "s3"),
             ("SHARDLINE_S3_ENDPOINT", &stack.s3_endpoint),
+            ("SHARDLINE_ADMIN_READ_TOKEN", ADMIN_READ_TOKEN),
         ],
         tmp.path(),
     );
@@ -1042,6 +1071,7 @@ async fn drill_deploy_a_postgres_kill_mid_upload_no_lost_commits() {
 
     let token = mint_token("drill", "drill", TokenScope::Write);
     let base = server.base_url();
+    assert_admin_state(&base, "ready").await;
 
     // Seed two acked objects (durable commits before the outage).
     let k1 = "a-k1";
@@ -1082,6 +1112,15 @@ async fn drill_deploy_a_postgres_kill_mid_upload_no_lost_commits() {
         matches!(health, Ok(r) if r.status().as_u16() == 200),
         "healthz must stay 200 after postgres kill"
     );
+    assert_admin_state(&base, "degraded").await;
+    assert_eq!(
+        admin_status(&base, "wrong-admin-token")
+            .await
+            .status()
+            .as_u16(),
+        401,
+        "dependency failure must not weaken the admin authorization boundary"
+    );
 
     // Restore Postgres; verify no committed data was lost.
     restart_and_wait(
@@ -1092,6 +1131,22 @@ async fn drill_deploy_a_postgres_kill_mid_upload_no_lost_commits() {
     .await;
     migrate_chaos_postgres(&stack.pg_url).await;
     guard.recovered(CONTAINER_POSTGRES);
+    assert!(
+        ready_within(
+            || async {
+                let response = admin_status(&base, ADMIN_READ_TOKEN).await;
+                response.status().as_u16() == 200
+                    && response
+                        .json::<serde_json::Value>()
+                        .await
+                        .map(|body| body["state"] == "ready")
+                        .unwrap_or(false)
+            },
+            Duration::from_secs(30),
+        )
+        .await,
+        "admin status must recover to ready after Postgres recovery"
+    );
 
     for (key, expected) in [(&k1, &v1), (&k2a, &v2a)] {
         let resp = s3_get(&base, &token, key).await;
