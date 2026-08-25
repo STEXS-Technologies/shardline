@@ -143,7 +143,9 @@ fn kind_runtime_secret_provides_every_new_projected_admin_key() {
 
     for deployment in ["api-deployment.yaml", "transfer-deployment.yaml"] {
         let manifest = read_manifest(&format!("docs/k8s/production-scaled/{deployment}"));
-        assert!(manifest.contains("- key: admin-read-token\n                path: admin-read-token"));
+        assert!(
+            manifest.contains("- key: admin-read-token\n                path: admin-read-token")
+        );
     }
 }
 
