@@ -206,10 +206,10 @@ pub use fuzz::{
     FuzzBazelHttpFrontendSummary, FuzzLfsFrontendSummary, FuzzLifecycleRepairSummary,
     FuzzOciFrontendSummary, FuzzProtocolFrontendSummary, FuzzQuarantineAction,
     FuzzReconstructionResponseSummary, FuzzRetainedShardSummary, FuzzRetentionAction,
-    FuzzValidatedXorbSummary, FuzzWebhookAction, fuzz_bazel_http_frontend_summary,
-    fuzz_classify_quarantine, fuzz_classify_retention, fuzz_classify_webhook,
-    fuzz_lfs_frontend_summary, fuzz_lifecycle_repair_summary, fuzz_normalize_and_validate_xorb,
-    fuzz_oci_frontend_summary, fuzz_protocol_frontend_summary,
+    FuzzValidatedXorbSummary, FuzzWebhookAction, fuzz_admin_api_cursor, fuzz_admin_api_query,
+    fuzz_bazel_http_frontend_summary, fuzz_classify_quarantine, fuzz_classify_retention,
+    fuzz_classify_webhook, fuzz_lfs_frontend_summary, fuzz_lifecycle_repair_summary,
+    fuzz_normalize_and_validate_xorb, fuzz_oci_frontend_summary, fuzz_protocol_frontend_summary,
     fuzz_reconstruction_response_summary, fuzz_retained_shard_chunk_hashes,
 };
 pub use gc::{
