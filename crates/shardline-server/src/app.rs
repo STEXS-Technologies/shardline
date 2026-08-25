@@ -37,7 +37,7 @@ use axum::{
 use shardline_protocol::{RepositoryScope, TokenScope};
 use tokio::net::TcpListener;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot};
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 
 use shardline_server_core::{VerifiedAuthContext, auth::Ed25519AuthProvider};
 
@@ -334,15 +334,12 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
     }
 
     let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods([
-            Method::GET,
-            Method::HEAD,
-            Method::POST,
-            Method::PUT,
-            Method::PATCH,
-            Method::DELETE,
-        ])
+        .allow_origin(AllowOrigin::predicate(
+            |_origin: &axum::http::HeaderValue, parts: &axum::http::request::Parts| {
+                !parts.uri.path().starts_with("/api/v1/")
+            },
+        ))
+        .allow_methods([Method::GET, Method::HEAD])
         .allow_headers(Any);
 
     let mut app = Router::new()
@@ -969,7 +966,7 @@ pub(super) async fn security_headers_middleware(
     if !headers.contains_key(header::STRICT_TRANSPORT_SECURITY) {
         headers.insert(
             header::STRICT_TRANSPORT_SECURITY,
-            header::HeaderValue::from_static("max-age=31536000"),
+            header::HeaderValue::from_static("max-age=31536000; includeSubDomains"),
         );
     }
     if !headers.contains_key(header::REFERRER_POLICY) {

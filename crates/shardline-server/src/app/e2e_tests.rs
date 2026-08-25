@@ -6941,7 +6941,7 @@ async fn security_headers_present() {
             .unwrap()
             .to_str()
             .unwrap(),
-        "max-age=31536000"
+        "max-age=31536000; includeSubDomains"
     );
     assert_eq!(
         headers
