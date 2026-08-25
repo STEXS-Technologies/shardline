@@ -812,13 +812,17 @@ async fn s3_get(base: &str, token: &str, key: &str) -> reqwest::Response {
 }
 
 async fn admin_status(base: &str, token: &str) -> reqwest::Response {
+    admin_get(base, "/api/v1/status", token).await
+}
+
+async fn admin_get(base: &str, path: &str, token: &str) -> reqwest::Response {
     reqwest::Client::new()
-        .get(format!("{base}/api/v1/status"))
+        .get(format!("{base}{path}"))
         .header("Authorization", format!("Bearer {token}"))
         .timeout(Duration::from_secs(20))
         .send()
         .await
-        .expect("admin status request completed within its bound")
+        .expect("admin request completed within its bound")
 }
 
 async fn assert_admin_state(base: &str, expected: &str) {
@@ -1121,6 +1125,24 @@ async fn drill_deploy_a_postgres_kill_mid_upload_no_lost_commits() {
         401,
         "dependency failure must not weaken the admin authorization boundary"
     );
+    let malformed = admin_get(&base, "/api/v1/nodes?limit=1&limit=2", ADMIN_READ_TOKEN).await;
+    assert_eq!(
+        malformed.status().as_u16(),
+        400,
+        "query validation must remain fail-closed during dependency failure"
+    );
+    let failed_storage = admin_get(&base, "/api/v1/storage", ADMIN_READ_TOKEN).await;
+    assert!(
+        failed_storage.status().is_server_error(),
+        "authoritative inventory must fail instead of returning fabricated data"
+    );
+    let failed_storage_body = failed_storage.text().await.expect("admin error body");
+    for secret in [ADMIN_READ_TOKEN, "shardline-dev-password", PG_URL] {
+        assert!(
+            !failed_storage_body.contains(secret),
+            "admin dependency error must not disclose {secret}"
+        );
+    }
 
     // Restore Postgres; verify no committed data was lost.
     restart_and_wait(

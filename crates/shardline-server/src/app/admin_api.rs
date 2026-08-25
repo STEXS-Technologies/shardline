@@ -1,171 +1,172 @@
 use std::sync::Arc;
 
+mod v1;
+
 use axum::{
     Json,
-    extract::State,
-    http::{HeaderMap, HeaderValue, header::CACHE_CONTROL},
+    extract::{RawQuery, State},
+    http::{
+        HeaderMap, HeaderValue,
+        header::{CACHE_CONTROL, CONTENT_SECURITY_POLICY, X_CONTENT_TYPE_OPTIONS},
+    },
 };
-use serde::Serialize;
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use serde::{Deserialize, Serialize};
 
 use crate::{
     ServerError, admission::weights, app::AppState, auth::authorize_static_bearer_token,
-    clock::unix_now_seconds_checked, model::ServerStatsResponse,
+    clock::unix_now_seconds_checked,
 };
 
-const ADMIN_API_VERSION: &str = "v1";
+use self::v1::{
+    API_VERSION as ADMIN_API_VERSION, GcResponse as AdminGcResponse,
+    IntegrityResponse as AdminIntegrityResponse, MetricsResponse as AdminMetricsResponse,
+    Node as AdminNode, NodesResponse as AdminNodesResponse, OperationalState, Page as AdminPage,
+    Plugin as AdminPlugin, PluginsResponse as AdminPluginsResponse, Replica as AdminReplica,
+    ReplicationResponse as AdminReplicationResponse, StatusResponse as AdminStatusResponse,
+    StorageProcessCounters as AdminStorageProcessCounters, StorageResponse as AdminStorageResponse,
+    Task as AdminTask, TasksResponse as AdminTasksResponse,
+};
+
 const NO_STORE: HeaderValue = HeaderValue::from_static("no-store");
+const NOSNIFF: HeaderValue = HeaderValue::from_static("nosniff");
+const API_CONTENT_SECURITY_POLICY: HeaderValue =
+    HeaderValue::from_static("default-src 'none'; frame-ancestors 'none'");
+const DEFAULT_PAGE_LIMIT: usize = 100;
+const MAX_PAGE_LIMIT: usize = 1_000;
+const MAX_ADMIN_QUERY_BYTES: usize = 4_096;
+const MAX_ADMIN_FILTER_BYTES: usize = 128;
+const MAX_ADMIN_CURSOR_BYTES: usize = 1_024;
 
 type AdminJson<T> = (HeaderMap, Json<T>);
 
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-enum OperationalState {
-    Ready,
-    Degraded,
-    External,
-    Unsupported,
+impl OperationalState {
+    fn parse(value: &str) -> Result<Self, ServerError> {
+        match value {
+            "ready" => Ok(Self::Ready),
+            "degraded" => Ok(Self::Degraded),
+            "external" => Ok(Self::External),
+            "unsupported" => Ok(Self::Unsupported),
+            _ => Err(ServerError::InvalidAdminQuery),
+        }
+    }
 }
 
-#[derive(Debug, Serialize, PartialEq, Eq)]
-pub(super) struct AdminStatusResponse {
-    api_version: &'static str,
-    shardline_version: &'static str,
-    observed_at_unix_seconds: u64,
-    state: OperationalState,
-    durable_storage_state: OperationalState,
-    cache_state: OperationalState,
-    server_role: String,
-    server_frontends: Vec<String>,
-    metadata_backend: String,
-    object_backend: String,
-    cache_backend: String,
-    plugin_registry: OperationalState,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AdminPageLimit(usize);
+
+impl AdminPageLimit {
+    fn parse(value: &str) -> Result<Self, ServerError> {
+        let value = value
+            .parse::<usize>()
+            .map_err(|_error| ServerError::InvalidAdminQuery)?;
+        if !(1..=MAX_PAGE_LIMIT).contains(&value) {
+            return Err(ServerError::InvalidAdminQuery);
+        }
+        Ok(Self(value))
+    }
+
+    const fn get(self) -> usize {
+        self.0
+    }
 }
 
-#[derive(Debug, Serialize, PartialEq, Eq)]
-pub(super) struct AdminStorageResponse {
-    api_version: &'static str,
-    observed_at_unix_seconds: u64,
-    authoritative: ServerStatsResponse,
-    process_lifetime: AdminStorageProcessCounters,
-    deduplication_ratio_state: OperationalState,
-    deduplication_ratio: Option<AdminRatio>,
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(transparent)]
+struct AdminPrefix(String);
+
+impl AdminPrefix {
+    fn new(value: String) -> Result<Self, ServerError> {
+        if value.len() > MAX_ADMIN_FILTER_BYTES || value.chars().any(char::is_control) {
+            return Err(ServerError::InvalidAdminQuery);
+        }
+        Ok(Self(value))
+    }
+
+    fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
-#[derive(Debug, Serialize, PartialEq, Eq)]
-struct AdminStorageProcessCounters {
-    objects_written: u64,
-    object_bytes_written: u64,
-    xorbs_written: u64,
-    xorb_bytes_written: u64,
-    shards_written: i64,
-    deduplicated_bytes: u64,
-    compression_saved_bytes: u64,
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(transparent)]
+struct AdminCapability(String);
+
+impl AdminCapability {
+    fn new(value: String) -> Result<Self, ServerError> {
+        if value.is_empty()
+            || value.len() > MAX_ADMIN_FILTER_BYTES
+            || value.chars().any(char::is_control)
+        {
+            return Err(ServerError::InvalidAdminQuery);
+        }
+        Ok(Self(value))
+    }
+
+    fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
-#[derive(Debug, Serialize, PartialEq, Eq)]
-struct AdminRatio {
-    numerator_bytes: u64,
-    denominator_bytes: u64,
-    basis_points: u64,
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AdminCursorToken(String);
+
+impl AdminCursorToken {
+    fn new(value: String) -> Result<Self, ServerError> {
+        if value.is_empty() || value.len() > MAX_ADMIN_CURSOR_BYTES {
+            return Err(ServerError::InvalidAdminQuery);
+        }
+        Ok(Self(value))
+    }
+
+    fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
-#[derive(Debug, Serialize, PartialEq, Eq)]
-pub(super) struct AdminGcResponse {
-    api_version: &'static str,
-    observed_at_unix_seconds: u64,
-    state: OperationalState,
-    execution: OperationalState,
-    runs_observed_by_process: u64,
-    objects_collected_by_process: u64,
-    bytes_collected_by_process: u64,
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(transparent)]
+struct AdminItemKey(String);
+
+impl AdminItemKey {
+    fn new(value: String) -> Result<Self, ServerError> {
+        if value.is_empty()
+            || value.len() > MAX_ADMIN_FILTER_BYTES
+            || value.chars().any(char::is_control)
+        {
+            return Err(ServerError::InvalidAdminQuery);
+        }
+        Ok(Self(value))
+    }
+
+    fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
-#[derive(Debug, Serialize, PartialEq, Eq)]
-pub(super) struct AdminIntegrityResponse {
-    api_version: &'static str,
-    observed_at_unix_seconds: u64,
-    state: OperationalState,
-    execution: OperationalState,
-    fsck_runs_observed_by_process: u64,
-    errors_observed_by_process: u64,
+#[derive(Debug, Default, PartialEq, Eq)]
+struct AdminCollectionQuery {
+    limit: Option<AdminPageLimit>,
+    cursor: Option<AdminCursorToken>,
+    state: Option<OperationalState>,
+    prefix: Option<AdminPrefix>,
+    capability: Option<AdminCapability>,
 }
 
-#[derive(Debug, Serialize, PartialEq, Eq)]
-pub(super) struct AdminNodesResponse {
-    api_version: &'static str,
-    observed_at_unix_seconds: u64,
-    discovery: OperationalState,
-    nodes: Vec<AdminNode>,
+#[derive(Debug, Clone, Copy)]
+struct AllowedFilters {
+    state: bool,
+    prefix: bool,
+    capability: bool,
 }
 
-#[derive(Debug, Serialize, PartialEq, Eq)]
-struct AdminNode {
-    scope: &'static str,
-    state: OperationalState,
-    server_role: String,
-    server_frontends: Vec<String>,
-}
-
-#[derive(Debug, Serialize, PartialEq, Eq)]
-pub(super) struct AdminTasksResponse {
-    api_version: &'static str,
-    observed_at_unix_seconds: u64,
-    scheduler: OperationalState,
-    tasks: Vec<AdminTask>,
-}
-
-#[derive(Debug, Serialize, PartialEq, Eq)]
-struct AdminTask {
-    id: String,
-    state: OperationalState,
-}
-
-#[derive(Debug, Serialize, PartialEq, Eq)]
-pub(super) struct AdminMetricsResponse {
-    api_version: &'static str,
-    observed_at_unix_seconds: u64,
-    prometheus_path: &'static str,
-    active_connections: i64,
-    admitted_requests: u64,
-    queued_requests: u64,
-    rejected_requests: u64,
-    upload_requests: u64,
-    upload_bytes: u64,
-    download_requests: u64,
-    download_bytes: u64,
-    range_requests: u64,
-}
-
-#[derive(Debug, Serialize, PartialEq, Eq)]
-pub(super) struct AdminPluginsResponse {
-    api_version: &'static str,
-    observed_at_unix_seconds: u64,
-    registry: OperationalState,
-    plugins: Vec<AdminPlugin>,
-}
-
-#[derive(Debug, Serialize, PartialEq, Eq)]
-pub(super) struct AdminReplicationResponse {
-    api_version: &'static str,
-    observed_at_unix_seconds: u64,
-    state: OperationalState,
-    coordinator: OperationalState,
-    replicas: Vec<AdminReplica>,
-}
-
-#[derive(Debug, Serialize, PartialEq, Eq)]
-struct AdminReplica {
-    id: String,
-    state: OperationalState,
-}
-
-#[derive(Debug, Serialize, PartialEq, Eq)]
-struct AdminPlugin {
-    id: String,
-    version: String,
-    state: OperationalState,
-    capabilities: Vec<String>,
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+struct AdminCursor {
+    version: u8,
+    after: AdminItemKey,
+    state: Option<OperationalState>,
+    prefix: Option<AdminPrefix>,
+    capability: Option<AdminCapability>,
 }
 
 fn authorize_admin(state: &AppState, headers: &HeaderMap) -> Result<(), ServerError> {
@@ -183,7 +184,206 @@ fn observed_at() -> Result<u64, ServerError> {
 fn admin_json<T>(value: T) -> AdminJson<T> {
     let mut headers = HeaderMap::new();
     headers.insert(CACHE_CONTROL, NO_STORE);
+    headers.insert(X_CONTENT_TYPE_OPTIONS, NOSNIFF);
+    headers.insert(CONTENT_SECURITY_POLICY, API_CONTENT_SECURITY_POLICY);
     (headers, Json(value))
+}
+
+fn validate_raw_query(raw_query: Option<&str>) -> Result<&str, ServerError> {
+    let raw_query = raw_query.unwrap_or_default();
+    if raw_query.len() > MAX_ADMIN_QUERY_BYTES {
+        return Err(ServerError::RequestQueryTooLarge);
+    }
+    let bytes = raw_query.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut encoded = bytes.iter().copied();
+    while let Some(byte) = encoded.next() {
+        if byte == b'%' {
+            let Some(high_byte) = encoded.next() else {
+                return Err(ServerError::InvalidAdminQuery);
+            };
+            let Some(low_byte) = encoded.next() else {
+                return Err(ServerError::InvalidAdminQuery);
+            };
+            let high = (high_byte as char)
+                .to_digit(16)
+                .ok_or(ServerError::InvalidAdminQuery)?;
+            let low = (low_byte as char)
+                .to_digit(16)
+                .ok_or(ServerError::InvalidAdminQuery)?;
+            decoded.push(
+                u8::try_from((high << 4) | low).map_err(|_error| ServerError::InvalidAdminQuery)?,
+            );
+        } else {
+            decoded.push(byte);
+        }
+    }
+    std::str::from_utf8(&decoded).map_err(|_error| ServerError::InvalidAdminQuery)?;
+    Ok(raw_query)
+}
+
+fn reject_query(raw_query: Option<&str>) -> Result<(), ServerError> {
+    if validate_raw_query(raw_query)?.is_empty() {
+        Ok(())
+    } else {
+        Err(ServerError::InvalidAdminQuery)
+    }
+}
+
+fn parse_collection_query(
+    raw_query: Option<&str>,
+    allowed: AllowedFilters,
+) -> Result<AdminCollectionQuery, ServerError> {
+    let raw_query = validate_raw_query(raw_query)?;
+    let mut query = AdminCollectionQuery::default();
+    let mut seen = std::collections::HashSet::new();
+    for (name, value) in url::form_urlencoded::parse(raw_query.as_bytes()) {
+        if name.is_empty() || !seen.insert(name.to_string()) {
+            return Err(ServerError::InvalidAdminQuery);
+        }
+        if value.chars().any(char::is_control) {
+            return Err(ServerError::InvalidAdminQuery);
+        }
+        match name.as_ref() {
+            "limit" => {
+                query.limit = Some(AdminPageLimit::parse(&value)?);
+            }
+            "cursor" => {
+                query.cursor = Some(AdminCursorToken::new(value.into_owned())?);
+            }
+            "state" if allowed.state => query.state = Some(OperationalState::parse(&value)?),
+            "prefix" if allowed.prefix => {
+                query.prefix = Some(AdminPrefix::new(value.into_owned())?);
+            }
+            "capability" if allowed.capability => {
+                query.capability = Some(AdminCapability::new(value.into_owned())?);
+            }
+            _ => return Err(ServerError::InvalidAdminQuery),
+        }
+    }
+    Ok(query)
+}
+
+#[cfg(feature = "fuzzing")]
+pub(crate) fn parse_admin_query_for_fuzzing(raw_query: &str) -> Result<(), ServerError> {
+    let query = parse_collection_query(
+        Some(raw_query),
+        AllowedFilters {
+            state: true,
+            prefix: true,
+            capability: true,
+        },
+    )?;
+    if let Some(cursor) = query.cursor.as_ref() {
+        decode_cursor(cursor.as_str(), &query)?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "fuzzing")]
+pub(crate) fn parse_admin_cursor_for_fuzzing(bytes: &[u8]) -> Result<(), ServerError> {
+    if bytes.len() > MAX_ADMIN_CURSOR_BYTES {
+        return Err(ServerError::InvalidAdminQuery);
+    }
+    let encoded = URL_SAFE_NO_PAD.encode(bytes);
+    let query = AdminCollectionQuery::default();
+    decode_cursor(&encoded, &query).map(|_cursor| ())
+}
+
+fn encode_cursor(after: &str, query: &AdminCollectionQuery) -> Result<String, ServerError> {
+    let cursor = AdminCursor {
+        version: 1,
+        after: AdminItemKey::new(after.to_owned())?,
+        state: query.state,
+        prefix: query.prefix.clone(),
+        capability: query.capability.clone(),
+    };
+    let bytes = serde_json::to_vec(&cursor)?;
+    Ok(URL_SAFE_NO_PAD.encode(bytes))
+}
+
+fn decode_cursor(encoded: &str, query: &AdminCollectionQuery) -> Result<AdminCursor, ServerError> {
+    if encoded.len() > MAX_ADMIN_CURSOR_BYTES {
+        return Err(ServerError::InvalidAdminQuery);
+    }
+    let bytes = URL_SAFE_NO_PAD
+        .decode(encoded)
+        .map_err(|_error| ServerError::InvalidAdminQuery)?;
+    if bytes.len() > MAX_ADMIN_CURSOR_BYTES {
+        return Err(ServerError::InvalidAdminQuery);
+    }
+    let cursor: AdminCursor =
+        serde_json::from_slice(&bytes).map_err(|_error| ServerError::InvalidAdminQuery)?;
+    if cursor.version != 1
+        || AdminItemKey::new(cursor.after.0.clone()).is_err()
+        || cursor.state != query.state
+        || cursor.prefix != query.prefix
+        || cursor.capability != query.capability
+        || cursor
+            .prefix
+            .as_ref()
+            .is_some_and(|value| AdminPrefix::new(value.0.clone()).is_err())
+        || cursor
+            .capability
+            .as_ref()
+            .is_some_and(|value| AdminCapability::new(value.0.clone()).is_err())
+    {
+        return Err(ServerError::InvalidAdminQuery);
+    }
+    Ok(cursor)
+}
+
+fn paginate<T, Key, State, Capability>(
+    mut items: Vec<T>,
+    query: &AdminCollectionQuery,
+    key: Key,
+    state: State,
+    has_capability: Capability,
+) -> Result<(Vec<T>, AdminPage), ServerError>
+where
+    Key: Fn(&T) -> &str,
+    State: Fn(&T) -> OperationalState,
+    Capability: Fn(&T, &str) -> bool,
+{
+    items.retain(|item| {
+        query.state.is_none_or(|expected| state(item) == expected)
+            && query
+                .prefix
+                .as_ref()
+                .is_none_or(|prefix| key(item).starts_with(prefix.as_str()))
+            && query
+                .capability
+                .as_ref()
+                .is_none_or(|capability| has_capability(item, capability.as_str()))
+    });
+    items.sort_by(|left, right| key(left).cmp(key(right)));
+
+    let after = query
+        .cursor
+        .as_ref()
+        .map(|cursor| decode_cursor(cursor.as_str(), query))
+        .transpose()?
+        .map(|cursor| cursor.after);
+    let start = after.as_ref().map_or(0, |after| {
+        items.partition_point(|item| key(item) <= after.as_str())
+    });
+    let limit = query.limit.map_or(DEFAULT_PAGE_LIMIT, AdminPageLimit::get);
+    let has_more = items.len().saturating_sub(start) > limit;
+    let page_items: Vec<T> = items.into_iter().skip(start).take(limit).collect();
+    let next_cursor = if has_more {
+        page_items
+            .last()
+            .map(|item| encode_cursor(key(item), query))
+            .transpose()?
+    } else {
+        None
+    };
+    let page = AdminPage {
+        limit,
+        returned: page_items.len(),
+        next_cursor,
+    };
+    Ok((page_items, page))
 }
 
 fn frontends(state: &AppState) -> Vec<String> {
@@ -198,8 +398,10 @@ fn frontends(state: &AppState) -> Vec<String> {
 pub(super) async fn status(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
 ) -> Result<AdminJson<AdminStatusResponse>, ServerError> {
     authorize_admin(&state, &headers)?;
+    reject_query(raw_query.as_deref())?;
     let ready = state.backend.ready().await.is_ok();
     let cache_ready =
         !state.role.uses_reconstruction_cache() || state.reconstruction_cache.ready().await.is_ok();
@@ -234,8 +436,10 @@ pub(super) async fn status(
 pub(super) async fn storage(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
 ) -> Result<AdminJson<AdminStorageResponse>, ServerError> {
     authorize_admin(&state, &headers)?;
+    reject_query(raw_query.as_deref())?;
     let _permit = state
         .admission
         .try_acquire(weights::STATS)
@@ -266,8 +470,10 @@ pub(super) async fn storage(
 pub(super) async fn gc(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
 ) -> Result<AdminJson<AdminGcResponse>, ServerError> {
     authorize_admin(&state, &headers)?;
+    reject_query(raw_query.as_deref())?;
     let metrics = shardline_metrics::metrics();
     Ok(admin_json(AdminGcResponse {
         api_version: ADMIN_API_VERSION,
@@ -283,8 +489,10 @@ pub(super) async fn gc(
 pub(super) async fn integrity(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
 ) -> Result<AdminJson<AdminIntegrityResponse>, ServerError> {
     authorize_admin(&state, &headers)?;
+    reject_query(raw_query.as_deref())?;
     let metrics = shardline_metrics::metrics();
     Ok(admin_json(AdminIntegrityResponse {
         api_version: ADMIN_API_VERSION,
@@ -299,14 +507,20 @@ pub(super) async fn integrity(
 pub(super) async fn nodes(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
 ) -> Result<AdminJson<AdminNodesResponse>, ServerError> {
     authorize_admin(&state, &headers)?;
+    let query = parse_collection_query(
+        raw_query.as_deref(),
+        AllowedFilters {
+            state: true,
+            prefix: true,
+            capability: false,
+        },
+    )?;
     let ready = state.backend.ready().await.is_ok();
-    Ok(admin_json(AdminNodesResponse {
-        api_version: ADMIN_API_VERSION,
-        observed_at_unix_seconds: observed_at()?,
-        discovery: OperationalState::Unsupported,
-        nodes: vec![AdminNode {
+    let (nodes, page) = paginate(
+        vec![AdminNode {
             scope: "current_process",
             state: if ready {
                 OperationalState::Ready
@@ -316,27 +530,57 @@ pub(super) async fn nodes(
             server_role: state.role.as_str().to_owned(),
             server_frontends: frontends(&state),
         }],
+        &query,
+        |node| node.scope,
+        |node| node.state,
+        |_node, _capability| false,
+    )?;
+    Ok(admin_json(AdminNodesResponse {
+        api_version: ADMIN_API_VERSION,
+        observed_at_unix_seconds: observed_at()?,
+        discovery: OperationalState::Unsupported,
+        nodes,
+        page,
     }))
 }
 
 pub(super) async fn tasks(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
 ) -> Result<AdminJson<AdminTasksResponse>, ServerError> {
     authorize_admin(&state, &headers)?;
+    let query = parse_collection_query(
+        raw_query.as_deref(),
+        AllowedFilters {
+            state: true,
+            prefix: true,
+            capability: false,
+        },
+    )?;
+    let (tasks, page) = paginate(
+        Vec::new(),
+        &query,
+        |task: &AdminTask| task.id.as_str(),
+        |task| task.state,
+        |_task, _capability| false,
+    )?;
     Ok(admin_json(AdminTasksResponse {
         api_version: ADMIN_API_VERSION,
         observed_at_unix_seconds: observed_at()?,
         scheduler: OperationalState::External,
-        tasks: Vec::new(),
+        tasks,
+        page,
     }))
 }
 
 pub(super) async fn metrics(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
 ) -> Result<AdminJson<AdminMetricsResponse>, ServerError> {
     authorize_admin(&state, &headers)?;
+    reject_query(raw_query.as_deref())?;
     let metrics = shardline_metrics::metrics();
     Ok(admin_json(AdminMetricsResponse {
         api_version: ADMIN_API_VERSION,
@@ -357,21 +601,59 @@ pub(super) async fn metrics(
 pub(super) async fn plugins(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
 ) -> Result<AdminJson<AdminPluginsResponse>, ServerError> {
     authorize_admin(&state, &headers)?;
+    let query = parse_collection_query(
+        raw_query.as_deref(),
+        AllowedFilters {
+            state: true,
+            prefix: true,
+            capability: true,
+        },
+    )?;
+    let (plugins, page) = paginate(
+        Vec::new(),
+        &query,
+        |plugin: &AdminPlugin| plugin.id.as_str(),
+        |plugin| plugin.state,
+        |plugin, capability| {
+            plugin
+                .capabilities
+                .iter()
+                .any(|candidate| candidate == capability)
+        },
+    )?;
     Ok(admin_json(AdminPluginsResponse {
         api_version: ADMIN_API_VERSION,
         observed_at_unix_seconds: observed_at()?,
         registry: OperationalState::Unsupported,
-        plugins: Vec::new(),
+        plugins,
+        page,
     }))
 }
 
 pub(super) async fn replication(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
 ) -> Result<AdminJson<AdminReplicationResponse>, ServerError> {
     authorize_admin(&state, &headers)?;
+    let query = parse_collection_query(
+        raw_query.as_deref(),
+        AllowedFilters {
+            state: true,
+            prefix: true,
+            capability: false,
+        },
+    )?;
+    let (replicas, page) = paginate(
+        Vec::new(),
+        &query,
+        |replica: &AdminReplica| replica.id.as_str(),
+        |replica| replica.state,
+        |_replica, _capability| false,
+    )?;
     Ok(admin_json(AdminReplicationResponse {
         api_version: ADMIN_API_VERSION,
         observed_at_unix_seconds: observed_at()?,
@@ -380,7 +662,8 @@ pub(super) async fn replication(
         // reported authoritatively, so keep this surface explicit and empty.
         state: OperationalState::External,
         coordinator: OperationalState::External,
-        replicas: Vec::new(),
+        replicas,
+        page,
     }))
 }
 
@@ -392,6 +675,7 @@ mod tests {
         body::{Body, to_bytes},
         http::{Method, Request, StatusCode, header::AUTHORIZATION},
     };
+    use proptest::prelude::*;
     use serde_json::Value;
     use tempfile::TempDir;
     use tower::ServiceExt;
@@ -411,6 +695,29 @@ mod tests {
         "/api/v1/plugins",
         "/api/v1/replication",
     ];
+
+    proptest! {
+        #[test]
+        fn arbitrary_collection_queries_are_deterministic_and_never_panic(raw in any::<String>()) {
+            let allowed = AllowedFilters {
+                state: true,
+                prefix: true,
+                capability: true,
+            };
+            let first = parse_collection_query(Some(&raw), allowed);
+            let second = parse_collection_query(Some(&raw), allowed);
+            prop_assert_eq!(format!("{first:?}"), format!("{second:?}"));
+        }
+
+        #[test]
+        fn arbitrary_v1_cursor_dtos_are_deterministic_and_never_panic(bytes in proptest::collection::vec(any::<u8>(), 0..=MAX_ADMIN_CURSOR_BYTES)) {
+            let encoded = URL_SAFE_NO_PAD.encode(bytes);
+            let query = AdminCollectionQuery::default();
+            let first = decode_cursor(&encoded, &query);
+            let second = decode_cursor(&encoded, &query);
+            prop_assert_eq!(format!("{first:?}"), format!("{second:?}"));
+        }
+    }
 
     async fn app_with_config(
         admin_token: Option<&str>,
@@ -502,6 +809,33 @@ mod tests {
             );
             let body = json_body(get_response).await;
             assert_eq!(body["api_version"], ADMIN_API_VERSION, "{path}");
+            if [
+                "/api/v1/nodes",
+                "/api/v1/tasks",
+                "/api/v1/plugins",
+                "/api/v1/replication",
+            ]
+            .contains(&path)
+            {
+                assert_eq!(body["page"]["limit"], DEFAULT_PAGE_LIMIT, "{path}");
+                assert!(body["page"]["returned"].is_number(), "{path}");
+                assert!(body["page"]["next_cursor"].is_null(), "{path}");
+            }
+
+            let head_response = app
+                .clone()
+                .oneshot(request(Method::HEAD, path, Some(ADMIN_TOKEN)))
+                .await
+                .expect("HEAD response");
+            assert_eq!(head_response.status(), StatusCode::OK, "{path}");
+            assert_eq!(head_response.headers().get(CACHE_CONTROL), Some(&NO_STORE));
+            assert!(
+                to_bytes(head_response.into_body(), 1)
+                    .await
+                    .expect("HEAD body")
+                    .is_empty(),
+                "{path} HEAD must not return a body"
+            );
 
             for method in [Method::POST, Method::PUT, Method::PATCH, Method::DELETE] {
                 let mutation_response = app
@@ -696,5 +1030,313 @@ mod tests {
                 "unexpected bounded-poll status {status}"
             );
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn polling_and_cancelled_polls_do_not_mutate_durable_inventory() {
+        let temp = TempDir::new().expect("temp dir");
+        let make_config = || {
+            ServerConfig::new(
+                "127.0.0.1:0".parse().expect("bind address"),
+                "http://127.0.0.1:8080".to_owned(),
+                temp.path().to_path_buf(),
+                NonZeroUsize::new(65_536).expect("chunk size"),
+            )
+            .with_server_frontends([ServerFrontend::Xet])
+            .expect("frontends")
+            .with_admin_read_token(ADMIN_TOKEN.as_bytes().to_vec())
+            .expect("admin token")
+        };
+        let app = router(make_config()).await.expect("first router");
+        let before = json_body(
+            app.clone()
+                .oneshot(request(Method::GET, "/api/v1/storage", Some(ADMIN_TOKEN)))
+                .await
+                .expect("initial inventory"),
+        )
+        .await["authoritative"]
+            .clone();
+
+        let mut polls = tokio::task::JoinSet::new();
+        for index in 0..256 {
+            let app = app.clone();
+            let path = ADMIN_PATHS[index % ADMIN_PATHS.len()];
+            polls.spawn(async move {
+                app.oneshot(request(Method::GET, path, Some(ADMIN_TOKEN)))
+                    .await
+            });
+        }
+        for _ in 0..64 {
+            polls.abort_all();
+            tokio::task::yield_now().await;
+        }
+        while polls.join_next().await.is_some() {}
+
+        drop(app);
+        let restarted = router(make_config()).await.expect("restarted router");
+        let after = json_body(
+            restarted
+                .oneshot(request(Method::GET, "/api/v1/storage", Some(ADMIN_TOKEN)))
+                .await
+                .expect("inventory after restart"),
+        )
+        .await["authoritative"]
+            .clone();
+        assert_eq!(
+            after, before,
+            "read-only polling must not mutate durable state"
+        );
+    }
+
+    #[tokio::test]
+    async fn collection_filters_are_bounded_typed_and_not_reflected() {
+        let (app, _temp) = app(Some(ADMIN_TOKEN)).await;
+        let matching = app
+            .clone()
+            .oneshot(request(
+                Method::GET,
+                "/api/v1/nodes?limit=1&state=ready&prefix=current",
+                Some(ADMIN_TOKEN),
+            ))
+            .await
+            .expect("matching response");
+        assert_eq!(matching.status(), StatusCode::OK);
+        let body = json_body(matching).await;
+        assert_eq!(body["nodes"].as_array().map(Vec::len), Some(1));
+        assert_eq!(body["page"]["limit"], 1);
+        assert_eq!(body["page"]["returned"], 1);
+
+        let injection = "%27%20OR%201%3D1%20--%3Cscript%3E";
+        let filtered = app
+            .clone()
+            .oneshot(request(
+                Method::GET,
+                &format!("/api/v1/nodes?prefix={injection}"),
+                Some(ADMIN_TOKEN),
+            ))
+            .await
+            .expect("filtered response");
+        assert_eq!(filtered.status(), StatusCode::OK);
+        let body = json_body(filtered).await;
+        assert_eq!(body["nodes"].as_array().map(Vec::len), Some(0));
+        assert!(!body.to_string().contains("<script>"));
+
+        let unsupported_filter = app
+            .oneshot(request(
+                Method::GET,
+                "/api/v1/nodes?capability=storage.read",
+                Some(ADMIN_TOKEN),
+            ))
+            .await
+            .expect("unsupported-filter response");
+        assert_eq!(unsupported_filter.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn query_validation_happens_after_concealment_and_authentication() {
+        let malformed_path = "/api/v1/nodes?limit=invalid&limit=2";
+        let (disabled, _temp) = app(None).await;
+        let disabled_response = disabled
+            .oneshot(request(Method::GET, malformed_path, Some(ADMIN_TOKEN)))
+            .await
+            .expect("disabled response");
+        assert_eq!(disabled_response.status(), StatusCode::NOT_FOUND);
+
+        let (enabled, _temp) = app(Some(ADMIN_TOKEN)).await;
+        let unauthorized = enabled
+            .clone()
+            .oneshot(request(Method::GET, malformed_path, None))
+            .await
+            .expect("unauthorized response");
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+        let authorized = enabled
+            .oneshot(request(Method::GET, malformed_path, Some(ADMIN_TOKEN)))
+            .await
+            .expect("authorized response");
+        assert_eq!(authorized.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn malformed_oversized_and_polluted_queries_fail_closed() {
+        let (app, _temp) = app(Some(ADMIN_TOKEN)).await;
+        for path in [
+            "/api/v1/nodes?limit=0",
+            "/api/v1/nodes?limit=1001",
+            "/api/v1/nodes?state=unknown",
+            "/api/v1/nodes?unknown=value",
+            "/api/v1/nodes?prefix=%ZZ",
+            "/api/v1/nodes?prefix=%FF",
+            "/api/v1/nodes?prefix=%0d%0aInjected%3Ayes",
+            "/api/v1/nodes?cursor=not-base64",
+            "/api/v1/status?limit=1",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(request(Method::GET, path, Some(ADMIN_TOKEN)))
+                .await
+                .expect("response");
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{path}");
+        }
+
+        let oversized = format!("/api/v1/nodes?prefix={}", "a".repeat(MAX_ADMIN_QUERY_BYTES));
+        let response = app
+            .oneshot(request(Method::GET, &oversized, Some(ADMIN_TOKEN)))
+            .await
+            .expect("oversized response");
+        assert_eq!(response.status(), StatusCode::URI_TOO_LONG);
+    }
+
+    #[tokio::test]
+    async fn security_headers_cover_success_auth_failure_and_disabled_responses() {
+        for (configured, token, expected) in [
+            (Some(ADMIN_TOKEN), Some(ADMIN_TOKEN), StatusCode::OK),
+            (Some(ADMIN_TOKEN), Some("wrong"), StatusCode::UNAUTHORIZED),
+            (None, Some(ADMIN_TOKEN), StatusCode::NOT_FOUND),
+        ] {
+            let (app, _temp) = app(configured).await;
+            let response = app
+                .oneshot(request(Method::GET, "/api/v1/status", token))
+                .await
+                .expect("response");
+            assert_eq!(response.status(), expected);
+            assert_eq!(response.headers().get(CACHE_CONTROL), Some(&NO_STORE));
+            assert_eq!(
+                response.headers().get(X_CONTENT_TYPE_OPTIONS),
+                Some(&NOSNIFF)
+            );
+            assert_eq!(
+                response.headers().get(CONTENT_SECURITY_POLICY),
+                Some(&API_CONTENT_SECURITY_POLICY)
+            );
+            assert!(
+                response
+                    .headers()
+                    .get("access-control-allow-credentials")
+                    .is_none()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn method_confusion_never_reaches_a_mutation_handler() {
+        let (app, _temp) = app(Some(ADMIN_TOKEN)).await;
+        for method in [
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::DELETE,
+            Method::CONNECT,
+            Method::TRACE,
+        ] {
+            let response = app
+                .clone()
+                .oneshot(request(method.clone(), "/api/v1/status", Some(ADMIN_TOKEN)))
+                .await
+                .expect("response");
+            assert_eq!(
+                response.status(),
+                StatusCode::METHOD_NOT_ALLOWED,
+                "{method}"
+            );
+        }
+
+        let preflight = Request::builder()
+            .method(Method::OPTIONS)
+            .uri("/api/v1/status")
+            .header("origin", "https://dashboard.example")
+            .header("access-control-request-method", "GET")
+            .body(Body::empty())
+            .expect("preflight request");
+        let response = app.oneshot(preflight).await.expect("preflight response");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            response
+                .headers()
+                .get("access-control-allow-credentials")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn keyset_cursor_pages_stably_and_is_bound_to_filters() {
+        let query = AdminCollectionQuery {
+            limit: Some(AdminPageLimit(2)),
+            state: Some(OperationalState::External),
+            ..AdminCollectionQuery::default()
+        };
+        let tasks = vec![
+            AdminTask {
+                id: "task-c".to_owned(),
+                state: OperationalState::External,
+            },
+            AdminTask {
+                id: "task-a".to_owned(),
+                state: OperationalState::External,
+            },
+            AdminTask {
+                id: "task-b".to_owned(),
+                state: OperationalState::External,
+            },
+        ];
+        let (first, first_page) = paginate(
+            tasks.clone(),
+            &query,
+            |task| task.id.as_str(),
+            |task| task.state,
+            |_task, _capability| false,
+        )
+        .expect("first page");
+        assert_eq!(
+            first
+                .iter()
+                .map(|task| task.id.as_str())
+                .collect::<Vec<_>>(),
+            ["task-a", "task-b"]
+        );
+        let mut second_query = query;
+        second_query.cursor = first_page
+            .next_cursor
+            .map(AdminCursorToken::new)
+            .transpose()
+            .expect("valid generated cursor");
+        let (second, second_page) = paginate(
+            tasks,
+            &second_query,
+            |task| task.id.as_str(),
+            |task| task.state,
+            |_task, _capability| false,
+        )
+        .expect("second page");
+        assert_eq!(
+            second
+                .iter()
+                .map(|task| task.id.as_str())
+                .collect::<Vec<_>>(),
+            ["task-c"]
+        );
+        assert!(second_page.next_cursor.is_none());
+
+        second_query.prefix = Some(AdminPrefix::new("different".to_owned()).expect("valid prefix"));
+        assert!(matches!(
+            paginate(
+                vec![AdminTask {
+                    id: "task-c".to_owned(),
+                    state: OperationalState::External,
+                }],
+                &second_query,
+                |task| task.id.as_str(),
+                |task| task.state,
+                |_task, _capability| false,
+            ),
+            Err(ServerError::InvalidAdminQuery)
+        ));
+
+        let invalid_newtype_cursor = URL_SAFE_NO_PAD.encode(
+            br#"{"version":1,"after":"task-c","state":null,"prefix":"\u0000","capability":null}"#,
+        );
+        assert!(matches!(
+            decode_cursor(&invalid_newtype_cursor, &AdminCollectionQuery::default()),
+            Err(ServerError::InvalidAdminQuery)
+        ));
     }
 }
