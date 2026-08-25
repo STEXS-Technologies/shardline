@@ -33,6 +33,10 @@ impl fmt::Debug for ServerConfig {
                 "metrics_token",
                 &self.metrics_token.as_ref().map(|_token| "***"),
             )
+            .field(
+                "admin_read_token",
+                &self.admin_read_token.as_ref().map(|_token| "***"),
+            )
             .field("auth", &self.auth)
             .field("oci", &self.oci)
             .field("cache", &self.cache)

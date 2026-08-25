@@ -184,6 +184,10 @@ The example does not expose `/metrics` on the public ingress.
 Scrape it through the API Service or an internal monitoring ingress.
 The production manifests configure `SHARDLINE_METRICS_TOKEN_FILE`, so scrapers must send
 `Authorization: Bearer <metrics-token>` when reading `/metrics`.
+They also configure `SHARDLINE_ADMIN_READ_TOKEN_FILE` on both runtime roles for
+the versioned `/api/v1/*` operational snapshots. Keep these routes internal and
+use the distinct admin-read token; see
+[Read-Only Administration API](../ADMIN_READ_API.md).
 
 ## Scaling
 

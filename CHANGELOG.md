@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+### Added
+
+- Add a disabled-by-default, versioned read-only administration API for storage,
+  GC, integrity, node, task, replication, metrics, and future plugin status.
+  The surface uses a dedicated constant-time bearer-token boundary, honest
+  authoritative/process/external state semantics, admission control, no-store
+  responses, and is available on every runtime role for external dashboards.
+  The Postgres-kill deployment drill now verifies degraded/recovered status and
+  fail-closed authorization while the durable metadata dependency is unavailable;
+  the strict TOML schema has property and fuzz coverage for the new secret-file setting.
+- Extend storage statistics with authoritative total object count and physical
+  object bytes while preserving the existing CAS chunk/file counters.
+
 ## [1.8.0] - 2026-08-25
 
 Stateless multi-replica hardening release. Eliminates the shared filesystem

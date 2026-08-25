@@ -1,3 +1,4 @@
+mod admin_api;
 mod metadata_routes;
 mod operational;
 mod protocol_routes;
@@ -61,6 +62,11 @@ use crate::{
         XET_PATH_ROUTE, XET_READ_TOKEN_ROUTE, XET_REVISION_ROUTE, XET_REVISIONS_ROUTE,
         XET_TREE_ROUTE, XET_WRITE_TOKEN_ROUTE, XORB_TRANSFER_ROUTE,
     },
+};
+use admin_api::{
+    gc as admin_gc, integrity as admin_integrity, metrics as admin_metrics, nodes as admin_nodes,
+    plugins as admin_plugins, replication as admin_replication, status as admin_status,
+    storage as admin_storage, tasks as admin_tasks,
 };
 use metadata_routes::{
     create_revision, delete_path, delete_revision, list_revisions, register_path, tree_lookup,
@@ -341,6 +347,15 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
         .route("/healthz", get(health))
         .route("/readyz", get(ready))
         .route("/metrics", get(metrics))
+        .route("/api/v1/status", get(admin_status))
+        .route("/api/v1/storage", get(admin_storage))
+        .route("/api/v1/gc", get(admin_gc))
+        .route("/api/v1/integrity", get(admin_integrity))
+        .route("/api/v1/nodes", get(admin_nodes))
+        .route("/api/v1/tasks", get(admin_tasks))
+        .route("/api/v1/metrics", get(admin_metrics))
+        .route("/api/v1/plugins", get(admin_plugins))
+        .route("/api/v1/replication", get(admin_replication))
         .layer(MetricsLayer)
         .layer(middleware::from_fn(request_timeout_middleware))
         .layer(middleware::from_fn(security_headers_middleware));

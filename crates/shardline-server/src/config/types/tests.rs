@@ -1806,6 +1806,40 @@ fn server_config_error_display_metrics_token_length_mismatch() {
 }
 
 #[test]
+fn server_config_error_display_admin_read_token_variants() {
+    let io_err = std::io::Error::other("file error");
+    assert_eq!(
+        ServerConfigError::AdminReadToken(io_err).to_string(),
+        "admin read token could not be read"
+    );
+    assert_eq!(
+        ServerConfigError::EmptyAdminReadToken.to_string(),
+        "admin read token must not be empty"
+    );
+    assert!(
+        ServerConfigError::InvalidAdminReadToken
+            .to_string()
+            .contains("visible ASCII")
+    );
+    assert!(
+        ServerConfigError::AdminReadTokenTooLarge {
+            observed_bytes: 5000,
+            maximum_bytes: 4096,
+        }
+        .to_string()
+        .contains("exceeded")
+    );
+    assert!(
+        ServerConfigError::AdminReadTokenLengthMismatch {
+            expected_bytes: 100,
+            observed_bytes: 200,
+        }
+        .to_string()
+        .contains("changed during bounded read")
+    );
+}
+
+#[test]
 fn server_config_error_display_provider_api_key() {
     let io_err = std::io::Error::other("file error");
     let err = ServerConfigError::ProviderApiKey(io_err);
@@ -2040,6 +2074,21 @@ fn server_config_builder_with_metrics_token_rejects_too_large() {
     assert!(matches!(
         result,
         Err(ServerConfigError::MetricsTokenTooLarge { .. })
+    ));
+}
+
+#[test]
+fn server_config_builder_with_admin_read_token_rejects_too_large() {
+    let config = ServerConfig::new(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+        "http://localhost:8080".to_owned(),
+        PathBuf::from("/tmp/test"),
+        NonZeroUsize::new(4096).unwrap(),
+    );
+    let result = config.with_admin_read_token(vec![0_u8; 5000]);
+    assert!(matches!(
+        result,
+        Err(ServerConfigError::AdminReadTokenTooLarge { .. })
     ));
 }
 

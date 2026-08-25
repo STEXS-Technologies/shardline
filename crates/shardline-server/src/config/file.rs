@@ -34,6 +34,9 @@ pub struct ServerSection {
     pub chunk_size_bytes: Option<u64>,
     pub upload_max_in_flight_chunks: Option<u64>,
     pub transfer_max_in_flight_chunks: Option<u64>,
+    /// Path to the dedicated read-only administration API bearer token.
+    /// Secret values are intentionally not accepted inline in TOML.
+    pub admin_read_token_path: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -179,12 +182,37 @@ pub fn load_toml_config(config_path: Option<&Path>) -> Result<Option<ShardlineTo
     Ok(Some(config))
 }
 
+/// Parses the server TOML schema without touching the filesystem.
+///
+/// This narrow hook keeps the production parser under continuous fuzzing
+/// without exposing its internal representation as public API.
+///
+/// # Errors
+///
+/// Returns the TOML parser error when the document does not satisfy the strict
+/// server configuration schema.
+#[cfg(feature = "fuzzing")]
+pub fn parse_toml_config_for_fuzzing(input: &str) -> Result<(), String> {
+    toml::from_str::<ShardlineTomlConfig>(input)
+        .map(|_config| ())
+        .map_err(|error| error.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
+    proptest! {
+        #[test]
+        fn arbitrary_toml_parsing_is_deterministic_and_never_panics(input in any::<String>()) {
+            let first = toml::from_str::<ShardlineTomlConfig>(&input);
+            let second = toml::from_str::<ShardlineTomlConfig>(&input);
+            prop_assert_eq!(format!("{first:?}"), format!("{second:?}"));
+        }
+    }
     #[test]
     fn test_expand_tilde_no_tilde() {
         let result = expand_tilde("/etc/shardline/shardline.toml");
