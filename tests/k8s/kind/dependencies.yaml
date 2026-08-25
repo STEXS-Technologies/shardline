@@ -16,6 +16,7 @@ stringData:
   s3-secret-access-key: kind-smoke-minio-secret
   token-signing-key: kind-smoke-token-signing-key-at-least-32-bytes
   metrics-token: kind-smoke-metrics-token
+  admin-read-token: kind-smoke-admin-read-token
   provider-api-key: kind-smoke-provider-key
   config-secret-key: 0123456789abcdef0123456789abcdef
 ---
