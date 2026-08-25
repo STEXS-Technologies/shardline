@@ -135,6 +135,18 @@ fn production_and_kind_configs_use_a_supported_auth_provider() {
     }
 }
 
+#[test]
+fn kind_runtime_secret_provides_every_new_projected_admin_key() {
+    let dependencies = read_manifest("tests/k8s/kind/dependencies.yaml");
+    assert!(dependencies.contains("name: shardline-runtime"));
+    assert!(dependencies.contains("admin-read-token: kind-smoke-admin-read-token"));
+
+    for deployment in ["api-deployment.yaml", "transfer-deployment.yaml"] {
+        let manifest = read_manifest(&format!("docs/k8s/production-scaled/{deployment}"));
+        assert!(manifest.contains("- key: admin-read-token\n                path: admin-read-token"));
+    }
+}
+
 fn read_manifest(path: &str) -> String {
     let result = read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR"))
