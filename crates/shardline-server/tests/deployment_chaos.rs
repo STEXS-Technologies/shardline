@@ -288,12 +288,32 @@ impl ServiceRecoveryGuard {
         }
     }
 
-    /// `docker stop` a service and remember to restore it on drop.
+    /// `docker stop` a service with zero grace period (immediate SIGKILL) and
+    /// wait until its TCP port is unreachable, then remember to restore it on
+    /// drop. The zero-timeout stop avoids the race between the 10s SIGTERM
+    /// grace period and the caller's fault injection.
     async fn stop(&mut self, name: &'static str) {
-        let out = docker_run(&["stop", name]).await;
+        let out = docker_run(&["stop", "--time", "0", name]).await;
         assert!(out.status.success(), "docker stop {name}");
         if !self.stopped.contains(&name) {
             self.stopped.push(name);
+        }
+        // Wait for the service's TCP port to become unreachable so the server's
+        // connection pool drops any cached connections before the caller injects
+        // the next fault.
+        let port = match name {
+            CONTAINER_POSTGRES => Some(15432u16),
+            CONTAINER_MINIO => Some(39000u16),
+            CONTAINER_REDIS => Some(16380u16),
+            _ => None,
+        };
+        if let Some(p) = port {
+            wait_for(
+                &format!("{name} TCP unreachable on port {p}"),
+                || async move { !tcp_ready("127.0.0.1", p).await },
+                Duration::from_secs(15),
+            )
+            .await;
         }
     }
 
