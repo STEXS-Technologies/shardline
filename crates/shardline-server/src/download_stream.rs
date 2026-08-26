@@ -312,9 +312,11 @@ pub(crate) async fn file_record_byte_stream(
                 let data: Vec<u8> = if is_compressed {
                     // New format (XorbCdcV1): LZ4-compressed. Decompress and verify hash.
                     const MAX_DECOMPRESSED_CHUNK: u64 = 2 * 1024 * 1024;
+                    // lz4_flex::compress_prepend_size writes an 8-byte LE u64 size prefix.
+                    // Read all 8 bytes to avoid a 4-byte truncation bypass.
                     let decompressed_size = compressed
-                        .first_chunk::<4>()
-                        .map(|header| u32::from_le_bytes(*header) as u64)
+                        .first_chunk::<8>()
+                        .map(|header| u64::from_le_bytes(*header))
                         .unwrap_or(u64::MAX);
                     if decompressed_size > MAX_DECOMPRESSED_CHUNK {
                         return Err(ServerError::Overflow);
