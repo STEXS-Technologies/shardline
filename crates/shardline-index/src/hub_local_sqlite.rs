@@ -595,7 +595,8 @@ impl HubStore for LocalIndexStore {
              FROM shardline_hub_webhooks
              WHERE repo_id = ?1 AND active = 1 AND (',' || events || ',') LIKE ('%,' || ?2 || ',%')",
         )?;
-        let rows = stmt.query_map(params![repo_id, event], |row| {
+        let escaped_event = escape_like(event);
+        let rows = stmt.query_map(params![repo_id, escaped_event], |row| {
             let events_str: String = row.get(3)?;
             let active: i64 = row.get(5)?;
             Ok(HubWebhook {
