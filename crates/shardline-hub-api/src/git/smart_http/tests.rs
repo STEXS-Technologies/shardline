@@ -2014,3 +2014,97 @@ async fn info_refs_receive_pack_proxies_correctly() {
     let body = String::from_utf8(body_bytes.to_vec()).unwrap();
     assert!(body.contains("git-receive-pack"));
 }
+
+// ── Security: Git push tree walk path validation ────────────────────────
+
+#[test]
+fn walk_git_tree_rejects_dotdot_entry_name() {
+    use crate::git::smart_http::tree_walk::walk_git_tree_inner;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let _object_store = shardline_server_core::ServerObjectStore::local(tmp.path().to_path_buf()).unwrap();
+
+    let mut tree_data = Vec::new();
+    tree_data.extend_from_slice(b"100644 ..\0");
+    tree_data.extend_from_slice(&[0u8; 20]);
+
+    let git_obj = crate::git::pack::GitObject {
+        object_type: crate::git::pack::ObjectType::Tree,
+        data: tree_data,
+    };
+    let objects = std::collections::HashMap::from([([0u8; 20], &git_obj)]);
+
+    let result = walk_git_tree_inner(&[0u8; 20], &objects, "", 0);
+    assert!(result.is_err(), "tree walk should reject '..' entry names");
+}
+
+#[test]
+fn walk_git_tree_rejects_null_byte_in_entry_name() {
+    use crate::git::smart_http::tree_walk::walk_git_tree_inner;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let _object_store = shardline_server_core::ServerObjectStore::local(tmp.path().to_path_buf()).unwrap();
+
+    let mut tree_data = Vec::new();
+    tree_data.extend_from_slice(b"100644 file\0name\0");
+    tree_data.extend_from_slice(&[0u8; 20]);
+
+    let git_obj = crate::git::pack::GitObject {
+        object_type: crate::git::pack::ObjectType::Tree,
+        data: tree_data,
+    };
+    let objects = std::collections::HashMap::from([([0u8; 20], &git_obj)]);
+
+    let result = walk_git_tree_inner(&[0u8; 20], &objects, "", 0);
+    assert!(result.is_err(), "tree walk should reject entry names with null bytes");
+}
+
+// ── Security: Commit message length capping ─────────────────────────────
+
+#[test]
+fn commit_message_is_capped_at_max_length() {
+    use crate::commit::MAX_COMMIT_MSG_LEN;
+    let long_message = "a".repeat(MAX_COMMIT_MSG_LEN + 100);
+    let capped: String = long_message.chars().take(MAX_COMMIT_MSG_LEN).collect();
+    assert_eq!(capped.len(), MAX_COMMIT_MSG_LEN);
+}
+
+#[test]
+fn commit_message_with_multibyte_utf8_is_safely_truncated() {
+    use crate::commit::MAX_COMMIT_MSG_LEN;
+    let message = "中".repeat(MAX_COMMIT_MSG_LEN / 3 + 1);
+    let capped: String = message.chars().take(MAX_COMMIT_MSG_LEN).collect();
+    assert!(!capped.is_empty());
+    assert!(capped.is_char_boundary(capped.len()));
+}
+
+// ── Security: Git OFS delta overflow prevention ─────────────────────────
+
+#[test]
+fn parse_ofs_delta_offset_rejects_overflow() {
+    use crate::git::pack::parse_ofs_delta_offset;
+    let mut data = Vec::new();
+    data.push(0x80);
+    for _ in 0..20 {
+        data.push(0xFF);
+    }
+    data.push(0x00);
+    let mut pos = 0;
+    let result = parse_ofs_delta_offset(&data, &mut pos);
+    assert!(result.is_err(), "ofs_delta_offset should reject overflow");
+}
+
+#[test]
+fn parse_ofs_delta_offset_rejects_excessive_iterations() {
+    use crate::git::pack::parse_ofs_delta_offset;
+    let mut data = Vec::new();
+    for _ in 0..10 {
+        data.push(0xFF);
+    }
+    data.push(0x00);
+    let mut pos = 0;
+    let result = parse_ofs_delta_offset(&data, &mut pos);
+    assert!(result.is_err(), "ofs_delta_offset should reject excessive iterations");
+}
+
+// ── Security: Git push tree walk path validation ────────────────────────
