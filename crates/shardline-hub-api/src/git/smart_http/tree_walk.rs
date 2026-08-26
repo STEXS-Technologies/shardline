@@ -57,7 +57,7 @@ pub fn walk_git_tree(
     walk_git_tree_inner(tree_sha, objects, prefix, 0)
 }
 
-fn walk_git_tree_inner(
+pub(crate) fn walk_git_tree_inner(
     tree_sha: &[u8; 20],
     objects: &HashMap<[u8; 20], &GitObject>,
     prefix: &str,
