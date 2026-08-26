@@ -130,6 +130,14 @@ fn expand_tilde(path: &str) -> PathBuf {
 /// auto-detected candidate exists.
 pub(crate) fn resolve_config_content(explicit: Option<&Path>) -> Result<Option<String>, String> {
     if let Some(path) = explicit {
+        let meta = fs::symlink_metadata(path)
+            .map_err(|e| format!("failed to stat config file {}: {e}", path.display()))?;
+        if meta.file_type().is_symlink() {
+            return Err(format!(
+                "config file {} must not be a symlink",
+                path.display()
+            ));
+        }
         return fs::read_to_string(path)
             .map(Some)
             .map_err(|error| format!("failed to read config file {}: {error}", path.display()));
@@ -137,6 +145,15 @@ pub(crate) fn resolve_config_content(explicit: Option<&Path>) -> Result<Option<S
     for candidate in CONFIG_FILE_CANDIDATES {
         let expanded = expand_tilde(candidate);
         if expanded.exists() {
+            let meta = fs::symlink_metadata(&expanded)
+                .map_err(|e| format!("failed to stat config file {}: {e}", expanded.display()))?;
+            if meta.file_type().is_symlink() {
+                tracing::warn!(
+                    "skipping symlinked config candidate {}",
+                    expanded.display()
+                );
+                continue;
+            }
             return fs::read_to_string(&expanded).map(Some).map_err(|error| {
                 format!("failed to read config file {}: {error}", expanded.display())
             });
