@@ -380,6 +380,10 @@ pub(crate) async fn validate_yaml(
     shardline_metrics::record_hub_api_request("validate_yaml", "POST", 200);
     authorize(&state, &headers, TokenScope::Read)?;
 
+    // NOTE: This is an intentionally unimplemented stub for HuggingFace Hub API
+    // compatibility. Clients should perform their own YAML validation. This endpoint
+    // returns empty warnings/errors to indicate "validation passed" without actually
+    // validating the content.
     let response = serde_json::json!({
         "warnings": [],
         "errors": []
