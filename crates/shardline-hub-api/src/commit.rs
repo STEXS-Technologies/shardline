@@ -16,7 +16,7 @@ const MAX_COMMIT_INSTRUCTIONS: usize = 100_000;
 const MAX_INLINE_FILE_BYTES: usize = 10 * 1024 * 1024; // 10 MiB
 
 /// Maximum commit message length to prevent log injection and database bloat.
-const MAX_COMMIT_MSG_LEN: usize = 4096;
+pub const MAX_COMMIT_MSG_LEN: usize = 4096;
 
 /// Validates a commit file path to prevent path traversal and injection.
 ///
