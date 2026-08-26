@@ -111,6 +111,12 @@ impl ProviderTokenService {
         if api_key.is_empty() {
             return Err(ProviderServiceError::EmptyApiKey);
         }
+        if api_key.len() < 16 {
+            tracing::warn!(
+                key_length = api_key.len(),
+                "provider bootstrap API key is shorter than 16 bytes — brute-force risk in production"
+            );
+        }
         if api_key.len() > MAX_PROVIDER_API_KEY_HEADER_BYTES {
             return Err(ProviderServiceError::ApiKeyTooLarge);
         }
