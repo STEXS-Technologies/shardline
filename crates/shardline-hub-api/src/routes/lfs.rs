@@ -14,6 +14,8 @@ use super::{HubRepository, HubState, lfs_object_key};
 
 /// Maximum number of objects allowed in a single batch request.
 const MAX_LFS_BATCH_OBJECTS: usize = 1024;
+/// Maximum body size for a single LFS upload (64 MiB, matches server-side default).
+const MAX_LFS_UPLOAD_BYTES: usize = 64 * 1024 * 1024;
 
 // ---- LFS batch (requires Read) ----
 
@@ -196,6 +198,20 @@ pub(crate) async fn lfs_upload(
     shardline_metrics::record_hub_api_request("lfs_upload", "PUT", 200);
     shardline_metrics::record_hub_api_file_upload();
     commit::validate_lfs_oid(&oid)?;
+
+    if body.len() > MAX_LFS_UPLOAD_BYTES {
+        return Err(HubApiError::BadRequest(format!(
+            "upload body exceeds maximum size of {} bytes",
+            MAX_LFS_UPLOAD_BYTES
+        )));
+    }
+
+    if body.len() > MAX_LFS_UPLOAD_BYTES {
+        return Err(HubApiError::BadRequest(format!(
+            "upload body exceeds maximum size of {} bytes",
+            MAX_LFS_UPLOAD_BYTES
+        )));
+    }
 
     use shardline_storage::{ObjectBody, ObjectIntegrity};
     let key = lfs_object_key(&oid, repo.capability())?;
