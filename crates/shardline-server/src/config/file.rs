@@ -98,6 +98,7 @@ pub struct JwksSection {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OidcSection {
     pub issuer_url: Option<String>,
     pub audience: Option<String>,
