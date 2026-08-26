@@ -138,6 +138,7 @@ pub(crate) fn repo_response_for_request(
     let host = headers
         .get(axum::http::header::HOST)
         .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty() && !value.contains('/') && !value.contains('\n'))
         .unwrap_or("localhost");
     let path = match repo.repo_type {
         HubRepoType::Model => repo.repo_id.as_str(),
