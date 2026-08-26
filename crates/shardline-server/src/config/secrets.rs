@@ -1,5 +1,5 @@
 #[cfg(unix)]
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::{
     env::var,
     fs::{self, File, OpenOptions},
@@ -317,10 +317,26 @@ fn strip_one_trailing_newline(mut bytes: Vec<u8>) -> Vec<u8> {
 #[cfg(unix)]
 fn open_secret_file(path: &Path) -> io::Result<File> {
     let resolved_path = resolve_secret_file_path(path)?;
-    OpenOptions::new()
+    let file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW)
-        .open(resolved_path)
+        .open(&resolved_path)?;
+    // Reject world-readable or group-readable secret files to prevent
+    // credential theft on multi-user systems.
+    let mode = file.metadata()?.permissions().mode();
+    const S_IRGRP: u32 = 0o040;
+    const S_IROTH: u32 = 0o004;
+    if mode & (S_IRGRP | S_IROTH) != 0 {
+        return Err(IoError::new(
+            ErrorKind::PermissionDenied,
+            format!(
+                "secret file {} has overly permissive mode {:o}; expected 0600 or stricter",
+                resolved_path.display(),
+                mode & 0o777,
+            ),
+        ));
+    }
+    Ok(file)
 }
 
 #[cfg(not(unix))]
