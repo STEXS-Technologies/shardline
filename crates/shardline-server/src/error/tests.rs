@@ -364,7 +364,7 @@ fn server_error_display_signing_key_error() {
     let err = ServerError::SigningKeyError("bad format".to_owned());
     assert_eq!(
         err.to_string(),
-        "token signing key is misconfigured: bad format"
+        "token signing key is misconfigured"
     );
 }
 
