@@ -54,8 +54,6 @@ spec:
                   value: /run/secrets/shardline/s3-access-key-id
                 - name: SHARDLINE_S3_SECRET_ACCESS_KEY_FILE
                   value: /run/secrets/shardline/s3-secret-access-key
-                - name: SHARDLINE_TOKEN_SIGNING_KEY_FILE
-                  value: /run/secrets/shardline/token-signing-key
               envFrom:
                 - configMapRef:
                     name: shardline-config
@@ -89,8 +87,6 @@ spec:
                 secretName: shardline-runtime
                 defaultMode: 0440
                 items:
-                  - key: token-signing-key
-                    path: token-signing-key
                   - key: s3-access-key-id
                     path: s3-access-key-id
                   - key: s3-secret-access-key

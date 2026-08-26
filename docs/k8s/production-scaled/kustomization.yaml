@@ -10,6 +10,18 @@ resources:
   - networkpolicy-default-deny-ingress.yaml
   - networkpolicy-allow-ingress-nginx.yaml
   - networkpolicy-allow-monitoring.yaml
+  # SECURITY: Include the egress NetworkPolicy after customizing the template
+  # with your actual CIDR blocks. Without it, pods have unrestricted outbound access.
+  # - networkpolicy-allow-runtime-egress.yaml
+  # SECURITY: Include the egress NetworkPolicy after customizing the template
+  # with your actual CIDR blocks. Without it, pods have unrestricted outbound access.
+  # - networkpolicy-allow-runtime-egress.yaml
+  # SECURITY: Include the egress NetworkPolicy after customizing the template
+  # with your actual CIDR blocks. Without it, pods have unrestricted outbound access.
+  # - networkpolicy-allow-runtime-egress.yaml
+  # SECURITY: Include the egress NetworkPolicy after customizing the template
+  # with your actual CIDR blocks. Without it, pods have unrestricted outbound access.
+  # - networkpolicy-allow-runtime-egress.yaml
   - api-service.yaml
   - api-deployment.yaml
   - api-pdb.yaml
