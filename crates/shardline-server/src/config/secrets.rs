@@ -259,7 +259,7 @@ pub(super) fn read_secret_file_bytes(
     error: impl Fn(u64, u64) -> ServerConfigError + Copy,
     length_mismatch_error: impl Fn(u64, u64) -> ServerConfigError + Copy,
 ) -> Result<SecretBytes, ServerConfigError> {
-    let mut file = open_secret_file(path).map_err(read_error)?;
+    let file = open_secret_file(path).map_err(read_error)?;
 
     // Stat BEFORE reading so an oversized secret file is rejected without ever
     // being buffered into memory (bounded read). Fixed-length key files may
@@ -277,8 +277,12 @@ pub(super) fn read_secret_file_bytes(
 
     run_before_secret_file_read_hook_for_tests(path);
 
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes).map_err(read_error)?;
+    let mut bytes = Vec::with_capacity(initial_len.min(size_bound) as usize);
+    // Bounded read: limit to size_bound + 1 bytes so we can detect growth
+    // between stat and read (TOCTOU). The extra byte allows us to detect
+    // whether the file grew beyond the bound without allocating unboundedly.
+    let mut handle = (&file).take(size_bound.saturating_add(1));
+    handle.read_to_end(&mut bytes).map_err(read_error)?;
 
     // Detect a length change between the pre-read stat and the read itself
     // (the file was rotated or appended underneath us): the length-mismatch

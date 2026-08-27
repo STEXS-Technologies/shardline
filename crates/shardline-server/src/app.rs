@@ -989,11 +989,6 @@ pub(super) async fn security_headers_middleware(
             header::CACHE_CONTROL,
             header::HeaderValue::from_static("private, no-store"),
         );
-    } else if !headers.contains_key(header::CACHE_CONTROL) {
-        headers.insert(
-            header::CACHE_CONTROL,
-            header::HeaderValue::from_static("private, no-store"),
-        );
     }
     axum::response::Response::from_parts(parts, body)
 }
