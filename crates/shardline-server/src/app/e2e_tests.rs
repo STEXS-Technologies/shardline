@@ -597,7 +597,7 @@ async fn test_app_with_provider_tokens(frontends: &[ServerFrontend]) -> (Router,
 
     let provider_tokens = ProviderTokenService::from_file(
         &config_path,
-        b"bootstrap".to_vec(),
+        b"bootstrap-key-16bytes".to_vec(),
         "test-issuer",
         NonZeroU64::MIN,
         b"a]32-byte-signing-key-for-testing!",
@@ -3050,7 +3050,7 @@ async fn provider_token_exchange_tracks_metric() {
                 .method("POST")
                 .uri("/v1/providers/github/tokens")
                 .header("content-type", "application/json")
-                .header("x-shardline-provider-key", "bootstrap")
+                .header("x-shardline-provider-key", "bootstrap-key-16bytes")
                 .body(Body::from(
                     r#"{"subject":"github-user-1","owner":"team","repo":"assets","revision":"refs/heads/main","scope":"Read"}"#,
                 ))
@@ -7308,7 +7308,7 @@ async fn provider_token_issuance_with_valid_bootstrap_key() {
                 .method("POST")
                 .uri("/v1/providers/github/tokens")
                 .header(header::CONTENT_TYPE, "application/json")
-                .header("x-shardline-provider-key", "bootstrap")
+                .header("x-shardline-provider-key", "bootstrap-key-16bytes")
                 .body(Body::from(r#"{"subject":"github-user-1","owner":"team","repo":"assets","revision":"refs/heads/main","scope":"Read"}"#))
                 .unwrap(),
         )
@@ -7352,7 +7352,7 @@ async fn provider_token_rejected_unknown_provider() {
                 .method("POST")
                 .uri("/v1/providers/gitlab/tokens")
                 .header(header::CONTENT_TYPE, "application/json")
-                .header("x-shardline-provider-key", "bootstrap")
+                .header("x-shardline-provider-key", "bootstrap-key-16bytes")
                 .body(Body::from(r#"{"subject":"user","owner":"team","repo":"assets","revision":"main","scope":"Read"}"#))
                 .unwrap(),
         )
@@ -7371,7 +7371,7 @@ async fn provider_token_rejected_unauthorized_subject() {
                 .method("POST")
                 .uri("/v1/providers/github/tokens")
                 .header(header::CONTENT_TYPE, "application/json")
-                .header("x-shardline-provider-key", "bootstrap")
+                .header("x-shardline-provider-key", "bootstrap-key-16bytes")
                 .body(Body::from(r#"{"subject":"unknown-user","owner":"team","repo":"assets","revision":"main","scope":"Read"}"#))
                 .unwrap(),
         )
@@ -7389,7 +7389,7 @@ async fn xet_read_token_with_provider_tokens() {
             Request::builder()
                 .method("GET")
                 .uri("/api/github/team/assets/xet-read-token/main?subject=github-user-1")
-                .header("x-shardline-provider-key", "bootstrap")
+                .header("x-shardline-provider-key", "bootstrap-key-16bytes")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -7409,7 +7409,7 @@ async fn xet_write_token_with_provider_tokens() {
             Request::builder()
                 .method("GET")
                 .uri("/api/github/team/assets/xet-write-token/main?subject=github-user-1")
-                .header("x-shardline-provider-key", "bootstrap")
+                .header("x-shardline-provider-key", "bootstrap-key-16bytes")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -7430,7 +7430,7 @@ async fn git_lfs_authenticate_with_provider_token() {
                 .method("POST")
                 .uri("/v1/providers/github/git-lfs-authenticate")
                 .header(header::CONTENT_TYPE, "application/json")
-                .header("x-shardline-provider-key", "bootstrap")
+                .header("x-shardline-provider-key", "bootstrap-key-16bytes")
                 .body(Body::from(r#"{"subject":"github-user-1","owner":"team","repo":"assets","revision":"refs/heads/main","scope":"Read"}"#))
                 .unwrap(),
         )
