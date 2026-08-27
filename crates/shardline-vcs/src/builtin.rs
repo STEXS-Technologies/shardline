@@ -302,11 +302,24 @@ pub(crate) fn verify_constant_time_secret(
     let Some(actual) = actual else {
         return Err(BuiltInProviderError::MissingWebhookAuthentication);
     };
-    if actual.len() != expected.len() {
-        return Err(BuiltInProviderError::InvalidWebhookAuthentication);
-    }
-    if expected.as_bytes().ct_eq(actual.as_bytes()).into() {
-        return Ok(());
+    // Always perform constant-time comparison to avoid leaking secret length
+    // via timing side-channel. Pad the shorter value with zeros to equal length.
+    let max_len = expected.len().max(actual.len());
+    let expected_padded: Vec<u8> = expected
+        .bytes()
+        .chain(std::iter::repeat(0))
+        .take(max_len)
+        .collect();
+    let actual_padded: Vec<u8> = actual
+        .bytes()
+        .chain(std::iter::repeat(0))
+        .take(max_len)
+        .collect();
+    if expected_padded.ct_eq(&actual_padded).into() {
+        // Also verify exact length match after constant-time comparison
+        if expected.len() == actual.len() {
+            return Ok(());
+        }
     }
 
     Err(BuiltInProviderError::InvalidWebhookAuthentication)
