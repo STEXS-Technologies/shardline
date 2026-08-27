@@ -212,10 +212,24 @@ impl ProviderTokenService {
         if actual.len() > MAX_PROVIDER_API_KEY_HEADER_BYTES {
             return Err(ProviderServiceError::InvalidApiKey);
         }
-        if actual.len() != self.api_key.len() {
-            return Err(ProviderServiceError::InvalidApiKey);
-        }
-        if self.api_key.expose_secret().ct_eq(actual).into() {
+        // Always perform constant-time comparison to avoid leaking secret length
+        // via timing side-channel. Pad the shorter value with zeros to equal length.
+        let max_len = self.api_key.len().max(actual.len());
+        let expected_padded: Vec<u8> = self
+            .api_key
+            .expose_secret()
+            .iter()
+            .copied()
+            .chain(std::iter::repeat(0))
+            .take(max_len)
+            .collect();
+        let actual_padded: Vec<u8> = actual
+            .iter()
+            .copied()
+            .chain(std::iter::repeat(0))
+            .take(max_len)
+            .collect();
+        if expected_padded.ct_eq(&actual_padded).into() && self.api_key.len() == actual.len() {
             return Ok(());
         }
 
