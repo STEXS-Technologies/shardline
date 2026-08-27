@@ -405,7 +405,7 @@ mod tests {
         // Build ProviderTokenService from the config file
         let service = crate::provider::ProviderTokenService::from_file(
             &config_path,
-            b"bootstrap".to_vec(),
+            b"bootstrap-key-16bytes".to_vec(),
             "test-issuer",
             std::num::NonZeroU64::MIN,
             b"a]32-byte-signing-key-for-testing!",
