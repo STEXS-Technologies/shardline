@@ -611,6 +611,77 @@ async fn auth_provider_oidc_with_unreachable_url_errors() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn auth_provider_oidc_requires_audience() {
+    let tmp = TempDir::new().unwrap();
+    let chunk_size = NonZeroUsize::new(65536).unwrap();
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        tmp.path().to_path_buf(),
+        chunk_size,
+    )
+    .with_auth_provider(AuthProviderKind::Oidc)
+    .with_token_signing_key(vec![0u8; 32])
+    .unwrap()
+    .with_auth_oidc_issuer("http://127.0.0.1:1/not-exist".to_owned());
+    // No with_auth_oidc_audience() → startup must fail closed: without a
+    // configured audience any aud-bearing token from the issuer is accepted.
+    let app = router(config).await;
+    assert!(
+        matches!(app.err().unwrap(), ServerError::Config(_)),
+        "OIDC without a configured audience must be rejected at startup"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn auth_provider_passthrough_strict_mode_rejected() {
+    let tmp = TempDir::new().unwrap();
+    let chunk_size = NonZeroUsize::new(65536).unwrap();
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        tmp.path().to_path_buf(),
+        chunk_size,
+    )
+    .with_auth_provider(AuthProviderKind::Passthrough)
+    .with_deployment_mode(crate::config::DeploymentMode::Strict)
+    .with_token_signing_key(vec![0u8; 32])
+    .unwrap()
+    .with_metrics_token(b"strict-metrics-token".to_vec())
+    .unwrap();
+    // Passthrough trusts every inbound token — Strict mode must reject it.
+    let app = router(config).await;
+    assert!(
+        matches!(app.err().unwrap(), ServerError::Config(_)),
+        "Strict mode with passthrough auth must be rejected at startup"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn auth_provider_passthrough_authenticated_trusted_proxy_carve_out() {
+    let tmp = TempDir::new().unwrap();
+    let chunk_size = NonZeroUsize::new(65536).unwrap();
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        tmp.path().to_path_buf(),
+        chunk_size,
+    )
+    .with_auth_provider(AuthProviderKind::Passthrough)
+    .with_deployment_mode(crate::config::DeploymentMode::Authenticated)
+    .with_token_signing_key(vec![0u8; 32])
+    .unwrap();
+    // Authenticated + Passthrough is the documented trusted-proxy carve-out:
+    // the reverse proxy performs the real authentication. Must keep building.
+    let app = router(config).await;
+    assert!(
+        app.is_ok(),
+        "trusted-proxy carve-out (Authenticated + Passthrough) must keep building: {:?}",
+        app.err()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn auth_provider_jwks_with_unreachable_url_errors() {
     let tmp = TempDir::new().unwrap();
     let chunk_size = NonZeroUsize::new(65536).unwrap();

@@ -50,8 +50,15 @@ pub use shardline_server_core::DEFAULT_SHARD_METADATA_LIMITS;
 pub use shardline_server_core::ShardMetadataLimits;
 
 /// Validated bearer token for the read-only administration boundary.
+///
+/// The SHA-256 digest is precomputed once at construction so per-request
+/// authorization compares against a static digest instead of re-hashing the
+/// operator's token on every admin API call.
 #[derive(Clone, PartialEq, Eq)]
-pub(crate) struct AdminReadToken(SecretBytes);
+pub(crate) struct AdminReadToken {
+    token: SecretBytes,
+    sha256: [u8; 32],
+}
 
 impl AdminReadToken {
     fn new(value: SecretBytes) -> Result<Self, ServerConfigError> {
@@ -69,11 +76,21 @@ impl AdminReadToken {
         if !value.expose_secret().iter().all(u8::is_ascii_graphic) {
             return Err(ServerConfigError::InvalidAdminReadToken);
         }
-        Ok(Self(value))
+        use sha2::{Digest, Sha256};
+        let sha256: [u8; 32] = Sha256::digest(value.expose_secret()).into();
+        Ok(Self {
+            token: value,
+            sha256,
+        })
     }
 
     fn expose_secret(&self) -> &[u8] {
-        self.0.expose_secret()
+        self.token.expose_secret()
+    }
+
+    /// The precomputed SHA-256 digest of the token bytes.
+    pub(crate) const fn sha256(&self) -> &[u8; 32] {
+        &self.sha256
     }
 }
 
@@ -652,6 +669,19 @@ impl ServerConfig {
         self.admin_read_token
             .as_ref()
             .map(AdminReadToken::expose_secret)
+    }
+
+    /// Returns the precomputed SHA-256 digest of the admin read token.
+    ///
+    /// Authorization compares request tokens against this static digest, so
+    /// the operator's token is hashed once at config load rather than on
+    /// every admin API request.
+    #[must_use]
+    pub const fn admin_read_token_sha256(&self) -> Option<&[u8; 32]> {
+        match &self.admin_read_token {
+            Some(token) => Some(token.sha256()),
+            None => None,
+        }
     }
 
     /// Returns the deployment security mode.
