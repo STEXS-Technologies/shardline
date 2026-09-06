@@ -889,6 +889,13 @@ async fn build_auth_provider(config: &ServerConfig) -> Result<Option<ServerAuth>
             Ok(Some(ServerAuth::new(key)?))
         }
         AuthProviderKind::Passthrough => {
+            if config.deployment_mode() != crate::config::DeploymentMode::Insecure {
+                return Err(ServerError::Config(ServerConfigError::ConfigFileError(
+                    "passthrough auth provider is only allowed in insecure deployment mode; \
+                     use SHARDLINE_AUTH_PROVIDER=local or SHARDLINE_DEPLOYMENT_MODE=insecure"
+                        .into(),
+                )));
+            }
             let provider = Box::new(shardline_server_core::auth::PassthroughProvider);
             Ok(Some(ServerAuth::from_provider(provider)))
         }
