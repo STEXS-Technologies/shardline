@@ -2022,7 +2022,8 @@ fn walk_git_tree_rejects_dotdot_entry_name() {
     use crate::git::smart_http::tree_walk::walk_git_tree_inner;
 
     let tmp = tempfile::tempdir().unwrap();
-    let _object_store = shardline_server_core::ServerObjectStore::local(tmp.path().to_path_buf()).unwrap();
+    let _object_store =
+        shardline_server_core::ServerObjectStore::local(tmp.path().to_path_buf()).unwrap();
 
     let mut tree_data = Vec::new();
     tree_data.extend_from_slice(b"100644 ..\0");
@@ -2043,7 +2044,8 @@ fn walk_git_tree_rejects_null_byte_in_entry_name() {
     use crate::git::smart_http::tree_walk::walk_git_tree_inner;
 
     let tmp = tempfile::tempdir().unwrap();
-    let _object_store = shardline_server_core::ServerObjectStore::local(tmp.path().to_path_buf()).unwrap();
+    let _object_store =
+        shardline_server_core::ServerObjectStore::local(tmp.path().to_path_buf()).unwrap();
 
     let mut tree_data = Vec::new();
     tree_data.extend_from_slice(b"100644 file\0name\0");
@@ -2056,7 +2058,10 @@ fn walk_git_tree_rejects_null_byte_in_entry_name() {
     let objects = std::collections::HashMap::from([([0u8; 20], &git_obj)]);
 
     let result = walk_git_tree_inner(&[0u8; 20], &objects, "", 0);
-    assert!(result.is_err(), "tree walk should reject entry names with null bytes");
+    assert!(
+        result.is_err(),
+        "tree walk should reject entry names with null bytes"
+    );
 }
 
 // ── Security: Commit message length capping ─────────────────────────────
@@ -2104,7 +2109,10 @@ fn parse_ofs_delta_offset_rejects_excessive_iterations() {
     data.push(0x00);
     let mut pos = 0;
     let result = parse_ofs_delta_offset(&data, &mut pos);
-    assert!(result.is_err(), "ofs_delta_offset should reject excessive iterations");
+    assert!(
+        result.is_err(),
+        "ofs_delta_offset should reject excessive iterations"
+    );
 }
 
 // ── Security: Git push tree walk path validation ────────────────────────

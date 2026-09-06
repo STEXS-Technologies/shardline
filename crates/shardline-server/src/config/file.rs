@@ -156,10 +156,7 @@ pub(crate) fn resolve_config_content(explicit: Option<&Path>) -> Result<Option<S
             let meta = fs::symlink_metadata(&expanded)
                 .map_err(|e| format!("failed to stat config file {}: {e}", expanded.display()))?;
             if meta.file_type().is_symlink() {
-                tracing::warn!(
-                    "skipping symlinked config candidate {}",
-                    expanded.display()
-                );
+                tracing::warn!("skipping symlinked config candidate {}", expanded.display());
                 continue;
             }
             // Use O_NOFOLLOW to prevent TOCTOU symlink swap.

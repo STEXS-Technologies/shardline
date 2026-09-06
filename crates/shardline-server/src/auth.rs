@@ -121,6 +121,24 @@ pub(crate) fn authorize_static_bearer_token(
     headers: &HeaderMap,
     expected_token: &[u8],
 ) -> Result<(), ServerError> {
+    // Callers that authenticate against a static config token on every request
+    // should prefer [`authorize_static_bearer_token_hash`] with a digest
+    // precomputed at config-load time; this wrapper keeps raw-token call
+    // sites (tests, one-shot checks) working.
+    use sha2::{Digest, Sha256};
+    let expected_hash: [u8; 32] = Sha256::digest(expected_token).into();
+    authorize_static_bearer_token_hash(headers, &expected_hash)
+}
+
+/// Authorizes a request whose bearer token must hash to `expected_hash`.
+///
+/// Identical to [`authorize_static_bearer_token`] except the expected digest
+/// is supplied precomputed — static config tokens hash once at startup
+/// instead of on every request.
+pub(crate) fn authorize_static_bearer_token_hash(
+    headers: &HeaderMap,
+    expected_hash: &[u8; 32],
+) -> Result<(), ServerError> {
     if headers.get_all(AUTHORIZATION).iter().count() > 1 {
         return Err(ServerError::InvalidAuthorizationHeader);
     }
@@ -134,9 +152,8 @@ pub(crate) fn authorize_static_bearer_token(
     let actual = token.as_bytes();
 
     use sha2::{Digest, Sha256};
-    let actual_hash = Sha256::digest(actual);
-    let expected_hash = Sha256::digest(expected_token);
-    if bool::from(actual_hash.ct_eq(&expected_hash)) {
+    let actual_hash: [u8; 32] = Sha256::digest(actual).into();
+    if bool::from(actual_hash.ct_eq(expected_hash)) {
         return Ok(());
     }
 

@@ -464,13 +464,22 @@ impl MDBFileInfoView {
 
         let n_structs = 1usize
             .checked_add(n)
-            .and_then(|v| if contains_verification { v.checked_add(n) } else { Some(v) })
-            .and_then(|v| if contains_metadata_ext { v.checked_add(1) } else { Some(v) })
+            .and_then(|v| {
+                if contains_verification {
+                    v.checked_add(n)
+                } else {
+                    Some(v)
+                }
+            })
+            .and_then(|v| {
+                if contains_metadata_ext {
+                    v.checked_add(1)
+                } else {
+                    Some(v)
+                }
+            })
             .ok_or_else(|| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "file entry count overflow",
-                )
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "file entry count overflow")
             })?;
 
         if data.len() < n_structs * MDB_FILE_INFO_ENTRY_SIZE {

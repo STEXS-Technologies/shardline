@@ -889,13 +889,13 @@ async fn build_auth_provider(config: &ServerConfig) -> Result<Option<ServerAuth>
             Ok(Some(ServerAuth::new(key)?))
         }
         AuthProviderKind::Passthrough => {
-            if config.deployment_mode() != crate::config::DeploymentMode::Insecure {
-                return Err(ServerError::Config(ServerConfigError::ConfigFileError(
-                    "passthrough auth provider is only allowed in insecure deployment mode; \
-                     use SHARDLINE_AUTH_PROVIDER=local or SHARDLINE_DEPLOYMENT_MODE=insecure"
-                        .into(),
-                )));
-            }
+            // Trusted-proxy carve-out: Passthrough trusts every inbound token,
+            // so the real control is the loopback-bind requirement and the
+            // deployment-mode contract enforced in
+            // `ServerConfig::validate_runtime_requirements` (Strict rejects it
+            // outright; Authenticated warns that it must sit behind a trusted
+            // proxy). Enforcing mode checks here as well would break the
+            // documented Authenticated+Passthrough trusted-proxy deployment.
             let provider = Box::new(shardline_server_core::auth::PassthroughProvider);
             Ok(Some(ServerAuth::from_provider(provider)))
         }
@@ -903,17 +903,21 @@ async fn build_auth_provider(config: &ServerConfig) -> Result<Option<ServerAuth>
             let issuer = config
                 .auth_oidc_issuer()
                 .ok_or_else(|| ServerError::Config(ServerConfigError::InvalidAuthProvider))?;
-            let audience = config.auth_oidc_audience();
-            if audience.is_none() {
-                tracing::warn!(
-                    "OIDC auth provider has no SHARDLINE_AUTH_OIDC_AUDIENCE configured; the \
-                     token aud claim is not validated and any aud-bearing token is accepted \
-                     (set SHARDLINE_AUTH_OIDC_AUDIENCE to require a specific audience)"
-                );
-            }
+            // Audience validation is mandatory: without a configured audience
+            // the verifier accepts ANY aud-bearing token minted by the issuer
+            // (including tokens for unrelated services at the same issuer),
+            // broadening token acceptance across service boundaries.
+            let audience = config.auth_oidc_audience().ok_or_else(|| {
+                ServerError::Config(ServerConfigError::ConfigFileError(
+                    "SHARDLINE_AUTH_OIDC_AUDIENCE is required when \
+                     SHARDLINE_AUTH_PROVIDER=oidc; without it any aud-bearing token \
+                     from the issuer is accepted"
+                        .into(),
+                ))
+            })?;
             let provider = OidcProvider::new(
                 issuer,
-                audience.map(str::to_owned),
+                Some(audience.to_owned()),
                 config.auth_oidc_jwks_host_allowlist().unwrap_or(&[]),
             )
             .await
