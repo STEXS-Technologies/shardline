@@ -42,7 +42,7 @@ fn provider_service_rejects_missing_bootstrap_key() {
         return;
     };
     let service = ProviderTokenService {
-        api_key: SecretBytes::from_slice(b"bootstrap"),
+        api_key: SecretBytes::from_slice(b"bootstrap-key-16bytes"),
         issuer,
         registry: ProviderRegistry {
             providers: HashMap::new(),
@@ -120,7 +120,7 @@ fn provider_service_rejects_oversized_bootstrap_key_header() {
         return;
     };
     let service = ProviderTokenService {
-        api_key: SecretBytes::from_slice(b"bootstrap"),
+        api_key: SecretBytes::from_slice(b"bootstrap-key-16bytes"),
         issuer,
         registry: ProviderRegistry {
             providers: HashMap::new(),
@@ -159,7 +159,7 @@ fn provider_service_rejects_mismatched_bootstrap_key_length_before_lookup() {
         return;
     };
     let service = ProviderTokenService {
-        api_key: SecretBytes::from_slice(b"bootstrap"),
+        api_key: SecretBytes::from_slice(b"bootstrap-key-16bytes"),
         issuer,
         registry: ProviderRegistry {
             providers: HashMap::new(),
@@ -215,7 +215,7 @@ fn provider_service_issues_token_for_allowed_subject() {
     let mut headers = HeaderMap::new();
     headers.insert(
         "x-shardline-provider-key",
-        HeaderValue::from_static("bootstrap"),
+        HeaderValue::from_static("bootstrap-key-16bytes"),
     );
     let issuer = ProviderTokenIssuer::new(
         "issuer",
@@ -227,7 +227,7 @@ fn provider_service_issues_token_for_allowed_subject() {
         return;
     };
     let service = ProviderTokenService {
-        api_key: SecretBytes::from_slice(b"bootstrap"),
+        api_key: SecretBytes::from_slice(b"bootstrap-key-16bytes"),
         issuer,
         registry: {
             let provider = github_provider();
@@ -267,7 +267,7 @@ fn provider_service_issues_token_for_allowed_subject() {
 #[test]
 fn provider_service_parses_github_repository_deleted_webhook() {
     let service = ProviderTokenService {
-        api_key: SecretBytes::from_slice(b"bootstrap"),
+        api_key: SecretBytes::from_slice(b"bootstrap-key-16bytes"),
         issuer: {
             let issuer = ProviderTokenIssuer::new(
                 "issuer",
@@ -330,7 +330,7 @@ fn provider_service_parses_github_repository_deleted_webhook() {
 #[test]
 fn provider_service_rejects_oversized_webhook_delivery_header_before_adapter_parsing() {
     let service = ProviderTokenService {
-        api_key: SecretBytes::from_slice(b"bootstrap"),
+        api_key: SecretBytes::from_slice(b"bootstrap-key-16bytes"),
         issuer: {
             let issuer = ProviderTokenIssuer::new(
                 "issuer",
@@ -389,7 +389,7 @@ fn provider_service_rejects_oversized_webhook_delivery_header_before_adapter_par
 #[test]
 fn provider_service_rejects_oversized_webhook_auth_header_before_adapter_parsing() {
     let service = ProviderTokenService {
-        api_key: SecretBytes::from_slice(b"bootstrap"),
+        api_key: SecretBytes::from_slice(b"bootstrap-key-16bytes"),
         issuer: {
             let issuer = ProviderTokenIssuer::new(
                 "issuer",
@@ -441,7 +441,7 @@ fn provider_service_rejects_oversized_webhook_auth_header_before_adapter_parsing
 #[test]
 fn provider_service_rejects_non_utf8_webhook_auth_header_before_adapter_parsing() {
     let service = ProviderTokenService {
-        api_key: SecretBytes::from_slice(b"bootstrap"),
+        api_key: SecretBytes::from_slice(b"bootstrap-key-16bytes"),
         issuer: {
             let issuer = ProviderTokenIssuer::new(
                 "issuer",
@@ -557,7 +557,7 @@ fn provider_service_rejects_oversized_configuration_before_json_parsing() {
 
     let service = ProviderTokenService::from_file(
         config.path(),
-        b"bootstrap".to_vec(),
+        b"bootstrap-key-16bytes".to_vec(),
         "issuer",
         NonZeroU64::MIN,
         b"a]32-byte-signing-key-for-testing!",
@@ -600,7 +600,7 @@ fn provider_service_rejects_configuration_growth_after_validation() {
 
     let service = ProviderTokenService::from_file(
         config.path(),
-        b"bootstrap".to_vec(),
+        b"bootstrap-key-16bytes".to_vec(),
         "issuer",
         NonZeroU64::MIN,
         b"a]32-byte-signing-key-for-testing!",
@@ -636,7 +636,7 @@ fn provider_service_accepts_projected_secret_symlink_configuration_path() {
 
     let service = ProviderTokenService::from_file(
         &link,
-        b"bootstrap".to_vec(),
+        b"bootstrap-key-16bytes".to_vec(),
         "issuer",
         NonZeroU64::MIN,
         b"a]32-byte-signing-key-for-testing!",
@@ -667,7 +667,7 @@ fn provider_service_rejects_symlinked_configuration_path_outside_directory() {
 
     let service = ProviderTokenService::from_file(
         &link,
-        b"bootstrap".to_vec(),
+        b"bootstrap-key-16bytes".to_vec(),
         "issuer",
         NonZeroU64::MIN,
         b"a]32-byte-signing-key-for-testing!",
@@ -1380,7 +1380,7 @@ fn provider_authorize_bootstrap_key_validates_api_key() {
     )
     .unwrap();
     let service = ProviderTokenService {
-        api_key: SecretBytes::from_slice(b"bootstrap"),
+        api_key: SecretBytes::from_slice(b"bootstrap-key-16bytes"),
         issuer,
         registry: ProviderRegistry {
             providers: HashMap::new(),
@@ -1390,7 +1390,7 @@ fn provider_authorize_bootstrap_key_validates_api_key() {
     let mut headers = HeaderMap::new();
     headers.insert(
         "x-shardline-provider-key",
-        HeaderValue::from_static("bootstrap"),
+        HeaderValue::from_static("bootstrap-key-16bytes"),
     );
     let result = service.authorize_bootstrap_key(&headers);
     assert!(result.is_ok());
@@ -1405,7 +1405,7 @@ fn provider_authorize_bootstrap_key_rejects_missing_key() {
     )
     .unwrap();
     let service = ProviderTokenService {
-        api_key: SecretBytes::from_slice(b"bootstrap"),
+        api_key: SecretBytes::from_slice(b"bootstrap-key-16bytes"),
         issuer,
         registry: ProviderRegistry {
             providers: HashMap::new(),
@@ -1461,7 +1461,7 @@ fn provider_parse_webhook_unknown_provider_returns_error() {
     )
     .unwrap();
     let service = ProviderTokenService {
-        api_key: SecretBytes::from_slice(b"bootstrap"),
+        api_key: SecretBytes::from_slice(b"bootstrap-key-16bytes"),
         issuer,
         registry: ProviderRegistry {
             providers: HashMap::new(),
@@ -1499,7 +1499,7 @@ fn provider_authorize_bootstrap_key_rejects_invalid_key() {
     )
     .unwrap();
     let service = ProviderTokenService {
-        api_key: SecretBytes::from_slice(b"bootstrap"),
+        api_key: SecretBytes::from_slice(b"bootstrap-key-16bytes"),
         issuer,
         registry: ProviderRegistry {
             providers: HashMap::new(),
@@ -1522,7 +1522,7 @@ fn provider_issue_token_rejects_empty_subject() {
     let mut headers = HeaderMap::new();
     headers.insert(
         "x-shardline-provider-key",
-        HeaderValue::from_static("bootstrap"),
+        HeaderValue::from_static("bootstrap-key-16bytes"),
     );
     let issuer = ProviderTokenIssuer::new(
         "issuer",
@@ -1531,7 +1531,7 @@ fn provider_issue_token_rejects_empty_subject() {
     )
     .unwrap();
     let service = ProviderTokenService {
-        api_key: SecretBytes::from_slice(b"bootstrap"),
+        api_key: SecretBytes::from_slice(b"bootstrap-key-16bytes"),
         issuer,
         registry: {
             let provider = github_provider();
@@ -1568,7 +1568,7 @@ fn provider_issue_token_denies_unauthorized_subject() {
     let mut headers = HeaderMap::new();
     headers.insert(
         "x-shardline-provider-key",
-        HeaderValue::from_static("bootstrap"),
+        HeaderValue::from_static("bootstrap-key-16bytes"),
     );
     let issuer = ProviderTokenIssuer::new(
         "issuer",
@@ -1577,7 +1577,7 @@ fn provider_issue_token_denies_unauthorized_subject() {
     )
     .unwrap();
     let service = ProviderTokenService {
-        api_key: SecretBytes::from_slice(b"bootstrap"),
+        api_key: SecretBytes::from_slice(b"bootstrap-key-16bytes"),
         issuer,
         registry: {
             let provider = github_provider();
@@ -1611,7 +1611,7 @@ fn provider_issue_token_denies_unauthorized_subject() {
 #[test]
 fn provider_parse_webhook_malformed_json_body() {
     let service = ProviderTokenService {
-        api_key: SecretBytes::from_slice(b"bootstrap"),
+        api_key: SecretBytes::from_slice(b"bootstrap-key-16bytes"),
         issuer: {
             let issuer = ProviderTokenIssuer::new(
                 "issuer",
@@ -1667,7 +1667,7 @@ fn provider_parse_webhook_malformed_json_body() {
 #[test]
 fn provider_parse_webhook_missing_required_fields() {
     let service = ProviderTokenService {
-        api_key: SecretBytes::from_slice(b"bootstrap"),
+        api_key: SecretBytes::from_slice(b"bootstrap-key-16bytes"),
         issuer: {
             let issuer = ProviderTokenIssuer::new(
                 "issuer",
@@ -1726,7 +1726,7 @@ fn provider_parse_webhook_missing_required_fields() {
 fn provider_service_from_file_rejects_missing_config_path() {
     let result = ProviderTokenService::from_file(
         std::path::Path::new("/nonexistent/path/providers.json"),
-        b"bootstrap".to_vec(),
+        b"bootstrap-key-16bytes".to_vec(),
         "issuer",
         NonZeroU64::MIN,
         b"a]32-byte-signing-key-for-testing!",
@@ -1744,7 +1744,7 @@ fn provider_service_from_file_rejects_malformed_json() {
 
     let result = ProviderTokenService::from_file(
         config.path(),
-        b"bootstrap".to_vec(),
+        b"bootstrap-key-16bytes".to_vec(),
         "issuer",
         NonZeroU64::MIN,
         b"a]32-byte-signing-key-for-testing!",
@@ -1818,7 +1818,7 @@ fn provider_config_encrypted_write_read_round_trips_in_memory() {
     // Reading with the key decrypts the secret in memory and builds the registry.
     let service = ProviderTokenService::from_file(
         config.path(),
-        b"bootstrap".to_vec(),
+        b"bootstrap-key-16bytes".to_vec(),
         "issuer",
         NonZeroU64::MIN,
         b"a]32-byte-signing-key-for-testing!",
@@ -1838,7 +1838,7 @@ fn provider_config_wrong_key_fails_loud() {
     let wrong = AtRestCipher::new(at_rest_wrong_key()).unwrap();
     let result = ProviderTokenService::from_file(
         config.path(),
-        b"bootstrap".to_vec(),
+        b"bootstrap-key-16bytes".to_vec(),
         "issuer",
         NonZeroU64::MIN,
         b"a]32-byte-signing-key-for-testing!",
@@ -1859,7 +1859,7 @@ fn provider_config_encrypted_without_key_fails_loud() {
 
     let result = ProviderTokenService::from_file(
         config.path(),
-        b"bootstrap".to_vec(),
+        b"bootstrap-key-16bytes".to_vec(),
         "issuer",
         NonZeroU64::MIN,
         b"a]32-byte-signing-key-for-testing!",
@@ -1881,7 +1881,7 @@ fn provider_config_aad_binds_secret_to_provider_identity() {
 
     let result = ProviderTokenService::from_file(
         config.path(),
-        b"bootstrap".to_vec(),
+        b"bootstrap-key-16bytes".to_vec(),
         "issuer",
         NonZeroU64::MIN,
         b"a]32-byte-signing-key-for-testing!",
@@ -1900,7 +1900,7 @@ fn provider_config_legacy_plaintext_parses_with_and_without_key() {
     // Without a key: legacy plaintext is used as-is.
     let service = ProviderTokenService::from_file(
         config.path(),
-        b"bootstrap".to_vec(),
+        b"bootstrap-key-16bytes".to_vec(),
         "issuer",
         NonZeroU64::MIN,
         b"a]32-byte-signing-key-for-testing!",
@@ -1913,7 +1913,7 @@ fn provider_config_legacy_plaintext_parses_with_and_without_key() {
     let cipher = AtRestCipher::new(at_rest_test_key()).unwrap();
     let service = ProviderTokenService::from_file(
         config.path(),
-        b"bootstrap".to_vec(),
+        b"bootstrap-key-16bytes".to_vec(),
         "issuer",
         NonZeroU64::MIN,
         b"a]32-byte-signing-key-for-testing!",

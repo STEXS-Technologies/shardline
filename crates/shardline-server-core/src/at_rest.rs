@@ -152,16 +152,18 @@ impl AtRestCipher {
         };
         let Ok(blob) = base64::engine::general_purpose::STANDARD.decode(encoded) else {
             // Not valid base64, so this is legacy plaintext that merely begins
-            // with the magic prefix.
+            // with the magic prefix. Strip the prefix to return the actual plaintext.
+            let stripped = stored.strip_prefix(MAGIC_PREFIX).unwrap_or(stored);
             return Ok(DecryptedSecret {
-                secret: SecretString::from_secret(stored),
+                secret: SecretString::from_secret(stripped),
                 needs_upgrade: true,
             });
         };
         if blob.len() < NONCE_LEN {
             // Decodes as base64 but is too short to carry a nonce + ciphertext.
+            let stripped = stored.strip_prefix(MAGIC_PREFIX).unwrap_or(stored);
             return Ok(DecryptedSecret {
-                secret: SecretString::from_secret(stored),
+                secret: SecretString::from_secret(stripped),
                 needs_upgrade: true,
             });
         }
@@ -285,10 +287,11 @@ mod tests {
         let cipher = AtRestCipher::new(test_key()).unwrap();
         // A legacy secret that merely begins with the magic prefix but whose
         // suffix is not valid base64 must be treated as plaintext and upgraded,
-        // never as malformed ciphertext.
+        // never as malformed ciphertext. The prefix is STRIPPED so the caller
+        // re-encrypts the actual secret, not the prefix + secret composite.
         let dec = cipher.decrypt("org/model", "sse1:my-secret").unwrap();
         assert!(dec.needs_upgrade);
-        assert_eq!(dec.secret.expose_secret(), "sse1:my-secret");
+        assert_eq!(dec.secret.expose_secret(), "my-secret");
     }
 
     #[test]
@@ -296,11 +299,12 @@ mod tests {
         let cipher = AtRestCipher::new(test_key()).unwrap();
         // base64("short") decodes but is shorter than the 12-byte nonce, so it
         // is not structurally valid ciphertext and must be legacy plaintext.
+        // The magic prefix is stripped on the upgrade path.
         let encoded = base64::engine::general_purpose::STANDARD.encode("short");
         let stored = format!("{MAGIC_PREFIX}{encoded}");
         let dec = cipher.decrypt("org/model", &stored).unwrap();
         assert!(dec.needs_upgrade);
-        assert_eq!(dec.secret.expose_secret(), stored);
+        assert_eq!(dec.secret.expose_secret(), encoded);
     }
 
     #[test]

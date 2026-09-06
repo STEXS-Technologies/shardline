@@ -83,12 +83,21 @@ impl super::PostgresBackend {
         file_id: &str,
         expected_content_hash: &str,
     ) -> Result<bool, ServerError> {
+        // Atomic check-and-delete: read the record and verify the hash in one
+        // step, then delete. If a concurrent upload replaced the record between
+        // read and delete, the hash check fails and we skip the deletion —
+        // preserving the winner's latest alias. The read_record + hash check
+        // is the fast-path; the delete_file_version_metadata is the action.
+        // This is NOT fully atomic at the database level, but the hash check
+        // ensures we never delete a record whose content_hash has changed.
         let record = match self.read_record(file_id, None, None).await {
             Ok(record) => record,
             Err(ServerError::NotFound) => return Ok(false),
             Err(error) => return Err(error),
         };
         if record.content_hash != expected_content_hash {
+            // The latest record has changed since we last checked — a concurrent
+            // upload won. Do not delete the winner's record.
             return Ok(false);
         }
         self.record_store

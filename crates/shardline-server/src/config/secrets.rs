@@ -1,5 +1,5 @@
 #[cfg(unix)]
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::{
     env::var,
     fs::{self, File, OpenOptions},
@@ -259,7 +259,7 @@ pub(super) fn read_secret_file_bytes(
     error: impl Fn(u64, u64) -> ServerConfigError + Copy,
     length_mismatch_error: impl Fn(u64, u64) -> ServerConfigError + Copy,
 ) -> Result<SecretBytes, ServerConfigError> {
-    let mut file = open_secret_file(path).map_err(read_error)?;
+    let file = open_secret_file(path).map_err(read_error)?;
 
     // Stat BEFORE reading so an oversized secret file is rejected without ever
     // being buffered into memory (bounded read). Fixed-length key files may
@@ -277,8 +277,12 @@ pub(super) fn read_secret_file_bytes(
 
     run_before_secret_file_read_hook_for_tests(path);
 
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes).map_err(read_error)?;
+    let mut bytes = Vec::with_capacity(initial_len.min(size_bound) as usize);
+    // Bounded read: limit to size_bound + 1 bytes so we can detect growth
+    // between stat and read (TOCTOU). The extra byte allows us to detect
+    // whether the file grew beyond the bound without allocating unboundedly.
+    let mut handle = (&file).take(size_bound.saturating_add(1));
+    handle.read_to_end(&mut bytes).map_err(read_error)?;
 
     // Detect a length change between the pre-read stat and the read itself
     // (the file was rotated or appended underneath us): the length-mismatch
@@ -317,10 +321,26 @@ fn strip_one_trailing_newline(mut bytes: Vec<u8>) -> Vec<u8> {
 #[cfg(unix)]
 fn open_secret_file(path: &Path) -> io::Result<File> {
     let resolved_path = resolve_secret_file_path(path)?;
-    OpenOptions::new()
+    let file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW)
-        .open(resolved_path)
+        .open(&resolved_path)?;
+    // Reject world-readable or group-readable secret files to prevent
+    // credential theft on multi-user systems.
+    let mode = file.metadata()?.permissions().mode();
+    const S_IRGRP: u32 = 0o040;
+    const S_IROTH: u32 = 0o004;
+    if mode & (S_IRGRP | S_IROTH) != 0 {
+        return Err(IoError::new(
+            ErrorKind::PermissionDenied,
+            format!(
+                "secret file {} has overly permissive mode {:o}; expected 0600 or stricter",
+                resolved_path.display(),
+                mode & 0o777,
+            ),
+        ));
+    }
+    Ok(file)
 }
 
 #[cfg(not(unix))]

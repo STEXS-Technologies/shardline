@@ -57,7 +57,7 @@ pub fn walk_git_tree(
     walk_git_tree_inner(tree_sha, objects, prefix, 0)
 }
 
-fn walk_git_tree_inner(
+pub(crate) fn walk_git_tree_inner(
     tree_sha: &[u8; 20],
     objects: &HashMap<[u8; 20], &GitObject>,
     prefix: &str,
@@ -153,6 +153,15 @@ fn walk_git_tree_inner(
         } else {
             format!("{prefix}/{name}")
         };
+
+        // Validate path components to prevent traversal via git tree entries.
+        // Reject ".." and "." components, null bytes, and control characters.
+        if name == ".." || name == "." || name.contains('\0') {
+            return Err(SmartHttpError::TreeInvalidEntryName(name.to_owned()));
+        }
+        if name.bytes().any(|b| b < 0x20 || b == 0x7f) {
+            return Err(SmartHttpError::TreeInvalidEntryName(name.to_owned()));
+        }
 
         if mode_str == "40000" {
             // Directory — recurse into subtree.

@@ -26,7 +26,6 @@ use crate::{
     },
     auth::authorize_static_bearer_token,
     metrics,
-    model::ReadyResponse,
     upload_ingest::{RequestBodyReader, read_body_to_bytes},
     xet_adapter::{validate_hash_path, validate_xorb_transfer_namespace},
 };
@@ -41,18 +40,8 @@ pub(super) async fn ready(State(state): State<Arc<AppState>>) -> impl IntoRespon
     match state.backend.ready().await {
         Ok(()) => (
             StatusCode::OK,
-            Json(ReadyResponse {
+            Json(HealthResponse {
                 status: "ok".to_owned(),
-                server_role: state.role.as_str().to_owned(),
-                server_frontends: state
-                    .config
-                    .server_frontends()
-                    .iter()
-                    .map(|frontend| frontend.as_str().to_owned())
-                    .collect(),
-                metadata_backend: state.backend.backend_name().to_owned(),
-                object_backend: state.backend.object_backend_name().to_owned(),
-                cache_backend: state.reconstruction_cache.backend_name().to_owned(),
             }),
         )
             .into_response(),

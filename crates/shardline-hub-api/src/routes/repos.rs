@@ -103,9 +103,13 @@ pub(crate) async fn repo_create_type(
     Path((repo_type, _ns, _repo_name)): Path<(String, String, String)>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<(StatusCode, Json<RepoResponse>), HubApiError> {
-    // Repository creation is deliberately global (same rationale as repo_create),
-    // so the extractor performs the Write-scope check but skips the
-    // token→repository binding.
+    // SECURITY NOTE: Repository creation is deliberately global (same rationale as
+    // repo_create), so the extractor performs the Write-scope check but skips the
+    // token→repository binding. This means a Write token scoped to alice/own can
+    // create repos in any namespace (e.g. bob/secret). However, the attacker
+    // cannot access repos outside their token scope (binding enforced on all
+    // access paths). The main risk is resource exhaustion via mass repo creation —
+    // operators should implement rate limiting at the reverse proxy layer.
     let rt = RepoType::from_api_str(&repo_type)
         .map(Into::into)
         .ok_or_else(|| HubApiError::PathValidation(format!("invalid repo type: {repo_type}")))?;
@@ -138,6 +142,7 @@ pub(crate) fn repo_response_for_request(
     let host = headers
         .get(axum::http::header::HOST)
         .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty() && !value.contains('/') && !value.contains('\n'))
         .unwrap_or("localhost");
     let path = match repo.repo_type {
         HubRepoType::Model => repo.repo_id.as_str(),
@@ -282,9 +287,12 @@ pub(crate) async fn repo_search(
     Query(query): Query<RepoSearchQuery>,
 ) -> Result<Json<RepoListResponse>, HubApiError> {
     shardline_metrics::record_hub_api_request("repo_search", "GET", 200);
-    // Intentionally global: searches across all repositories, not a single repo,
-    // so there is no repository binding to enforce. The caller's identity comes
-    // from the capability's claims.
+    // SECURITY NOTE: This endpoint is intentionally global — it searches across
+    // all repositories on the instance, not scoped to the caller's token.
+    // The HubRepository extractor provides authentication (Read scope) but the
+    // repo binding is a no-op for this pathless route. Cross-tenant private repo
+    // data is protected by the `repo_visible_to_owner` filter below. This matches
+    // HF Hub behavior where any authenticated user can search public repos.
     let caller_repo_id = repo.capability().claims().map(|claims| {
         let r = claims.repository();
         format!("{}/{}", r.owner(), r.name())
@@ -295,6 +303,16 @@ pub(crate) async fn repo_search(
     if query.q.len() < 2 {
         return Err(HubApiError::PathValidation(
             "search query must be at least 2 characters".to_owned(),
+        ));
+    }
+    if query.q.len() > 200 {
+        return Err(HubApiError::PathValidation(
+            "search query must not exceed 200 characters".to_owned(),
+        ));
+    }
+    if query.author.is_some() {
+        return Err(HubApiError::PathValidation(
+            "author filter is not yet supported".to_owned(),
         ));
     }
     let limit = query.limit.min(200);
@@ -379,6 +397,10 @@ pub(crate) async fn validate_yaml(
     shardline_metrics::record_hub_api_request("validate_yaml", "POST", 200);
     authorize(&state, &headers, TokenScope::Read)?;
 
+    // NOTE: This is an intentionally unimplemented stub for HuggingFace Hub API
+    // compatibility. Clients should perform their own YAML validation. This endpoint
+    // returns empty warnings/errors to indicate "validation passed" without actually
+    // validating the content.
     let response = serde_json::json!({
         "warnings": [],
         "errors": []

@@ -65,6 +65,12 @@ impl S3ObjectStore {
     /// Returns [`S3ObjectStoreError`] when configuration or runtime initialization
     /// fails.
     pub fn new(config: S3ObjectStoreConfig) -> Result<Self, S3ObjectStoreError> {
+        if config.allow_http {
+            eprintln!(
+                "[shardline-s3] WARNING: allow_http is enabled for bucket '{}' — credentials and data will be transmitted over plaintext HTTP",
+                config.bucket
+            );
+        }
         super::credentials::validate_s3_config(&config)?;
         let inner = super::client::build_amazon_s3_client(&config)?;
 

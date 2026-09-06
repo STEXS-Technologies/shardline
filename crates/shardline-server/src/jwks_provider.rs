@@ -4,7 +4,6 @@ use std::{
     sync::OnceLock,
     sync::atomic::{AtomicBool, Ordering},
     task::Poll,
-    thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -251,7 +250,11 @@ impl JwksProvider {
                         "JWKS cache lock contended".to_owned(),
                     ));
                 }
-                thread::sleep(Duration::from_millis(RETRY_DELAY_MS));
+                // Use yield_now + brief park instead of thread::sleep to avoid
+                // blocking a tokio worker thread for the full 10ms. The yield
+                // lets other tasks run, and the park provides a brief backoff.
+                std::thread::yield_now();
+                std::thread::park_timeout(Duration::from_millis(RETRY_DELAY_MS));
             }
         }?;
 

@@ -1,5 +1,6 @@
 use std::{
-    fs,
+    fs::{self, OpenOptions},
+    os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
 };
 
@@ -98,6 +99,7 @@ pub struct JwksSection {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OidcSection {
     pub issuer_url: Option<String>,
     pub audience: Option<String>,
@@ -129,16 +131,44 @@ fn expand_tilde(path: &str) -> PathBuf {
 /// auto-detected candidate exists.
 pub(crate) fn resolve_config_content(explicit: Option<&Path>) -> Result<Option<String>, String> {
     if let Some(path) = explicit {
-        return fs::read_to_string(path)
-            .map(Some)
-            .map_err(|error| format!("failed to read config file {}: {error}", path.display()));
+        let meta = fs::symlink_metadata(path)
+            .map_err(|e| format!("failed to stat config file {}: {e}", path.display()))?;
+        if meta.file_type().is_symlink() {
+            return Err(format!(
+                "config file {} must not be a symlink",
+                path.display()
+            ));
+        }
+        // Use O_NOFOLLOW to prevent TOCTOU symlink swap between stat and read.
+        let mut file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path)
+            .map_err(|e| format!("failed to open config file {}: {e}", path.display()))?;
+        let mut content = String::new();
+        std::io::Read::read_to_string(&mut file, &mut content)
+            .map_err(|e| format!("failed to read config file {}: {e}", path.display()))?;
+        return Ok(Some(content));
     }
     for candidate in CONFIG_FILE_CANDIDATES {
         let expanded = expand_tilde(candidate);
         if expanded.exists() {
-            return fs::read_to_string(&expanded).map(Some).map_err(|error| {
-                format!("failed to read config file {}: {error}", expanded.display())
-            });
+            let meta = fs::symlink_metadata(&expanded)
+                .map_err(|e| format!("failed to stat config file {}: {e}", expanded.display()))?;
+            if meta.file_type().is_symlink() {
+                tracing::warn!("skipping symlinked config candidate {}", expanded.display());
+                continue;
+            }
+            // Use O_NOFOLLOW to prevent TOCTOU symlink swap.
+            let mut file = OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW)
+                .open(&expanded)
+                .map_err(|e| format!("failed to open config file {}: {e}", expanded.display()))?;
+            let mut content = String::new();
+            std::io::Read::read_to_string(&mut file, &mut content)
+                .map_err(|e| format!("failed to read config file {}: {e}", expanded.display()))?;
+            return Ok(Some(content));
         }
     }
     Ok(None)

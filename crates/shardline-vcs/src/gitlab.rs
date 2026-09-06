@@ -58,6 +58,12 @@ impl ProviderAdapter for GitLabAdapter {
     ) -> Result<Option<RepositoryWebhookEvent>, Self::Error> {
         if let Some(token) = &self.webhook_token {
             verify_constant_time_secret(token.expose_secret(), request.signature())?;
+        } else {
+            eprintln!(
+                "[shardline] WARNING: gitlab webhook token verification SKIPPED — \
+                 no webhook token configured; deployers MUST set a webhook token \
+                 to prevent forged webhook injection"
+            );
         }
 
         let payload = parse_webhook_json(request.body())?;

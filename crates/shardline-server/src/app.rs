@@ -37,7 +37,7 @@ use axum::{
 use shardline_protocol::{RepositoryScope, TokenScope};
 use tokio::net::TcpListener;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot};
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 
 use shardline_server_core::{VerifiedAuthContext, auth::Ed25519AuthProvider};
 
@@ -334,15 +334,12 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
     }
 
     let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods([
-            Method::GET,
-            Method::HEAD,
-            Method::POST,
-            Method::PUT,
-            Method::PATCH,
-            Method::DELETE,
-        ])
+        .allow_origin(AllowOrigin::predicate(
+            |_origin: &axum::http::HeaderValue, parts: &axum::http::request::Parts| {
+                !parts.uri.path().starts_with("/api/v1/")
+            },
+        ))
+        .allow_methods([Method::GET, Method::HEAD])
         .allow_headers(Any);
 
     let mut app = Router::new()
@@ -892,6 +889,13 @@ async fn build_auth_provider(config: &ServerConfig) -> Result<Option<ServerAuth>
             Ok(Some(ServerAuth::new(key)?))
         }
         AuthProviderKind::Passthrough => {
+            // Trusted-proxy carve-out: Passthrough trusts every inbound token,
+            // so the real control is the loopback-bind requirement and the
+            // deployment-mode contract enforced in
+            // `ServerConfig::validate_runtime_requirements` (Strict rejects it
+            // outright; Authenticated warns that it must sit behind a trusted
+            // proxy). Enforcing mode checks here as well would break the
+            // documented Authenticated+Passthrough trusted-proxy deployment.
             let provider = Box::new(shardline_server_core::auth::PassthroughProvider);
             Ok(Some(ServerAuth::from_provider(provider)))
         }
@@ -899,17 +903,21 @@ async fn build_auth_provider(config: &ServerConfig) -> Result<Option<ServerAuth>
             let issuer = config
                 .auth_oidc_issuer()
                 .ok_or_else(|| ServerError::Config(ServerConfigError::InvalidAuthProvider))?;
-            let audience = config.auth_oidc_audience();
-            if audience.is_none() {
-                tracing::warn!(
-                    "OIDC auth provider has no SHARDLINE_AUTH_OIDC_AUDIENCE configured; the \
-                     token aud claim is not validated and any aud-bearing token is accepted \
-                     (set SHARDLINE_AUTH_OIDC_AUDIENCE to require a specific audience)"
-                );
-            }
+            // Audience validation is mandatory: without a configured audience
+            // the verifier accepts ANY aud-bearing token minted by the issuer
+            // (including tokens for unrelated services at the same issuer),
+            // broadening token acceptance across service boundaries.
+            let audience = config.auth_oidc_audience().ok_or_else(|| {
+                ServerError::Config(ServerConfigError::ConfigFileError(
+                    "SHARDLINE_AUTH_OIDC_AUDIENCE is required when \
+                     SHARDLINE_AUTH_PROVIDER=oidc; without it any aud-bearing token \
+                     from the issuer is accepted"
+                        .into(),
+                ))
+            })?;
             let provider = OidcProvider::new(
                 issuer,
-                audience.map(str::to_owned),
+                Some(audience.to_owned()),
                 config.auth_oidc_jwks_host_allowlist().unwrap_or(&[]),
             )
             .await
@@ -969,7 +977,7 @@ pub(super) async fn security_headers_middleware(
     if !headers.contains_key(header::STRICT_TRANSPORT_SECURITY) {
         headers.insert(
             header::STRICT_TRANSPORT_SECURITY,
-            header::HeaderValue::from_static("max-age=31536000"),
+            header::HeaderValue::from_static("max-age=31536000; includeSubDomains"),
         );
     }
     if !headers.contains_key(header::REFERRER_POLICY) {
@@ -986,6 +994,11 @@ pub(super) async fn security_headers_middleware(
         headers.insert(
             header::CONTENT_SECURITY_POLICY,
             header::HeaderValue::from_static("default-src 'none'; frame-ancestors 'none'"),
+        );
+    } else if !headers.contains_key(header::CACHE_CONTROL) {
+        headers.insert(
+            header::CACHE_CONTROL,
+            header::HeaderValue::from_static("private, no-store"),
         );
     }
     axum::response::Response::from_parts(parts, body)
