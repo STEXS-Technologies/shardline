@@ -463,7 +463,6 @@ pub fn parse_ofs_delta_offset(data: &[u8], pos: &mut usize) -> Result<usize, Pac
             .and_then(|v| v.checked_shl(7))
             .ok_or(PackError::InvalidDelta)?;
         offset |= (byte & 0x7f) as usize;
-        offset |= (byte & 0x7f) as usize;
     }
     Ok(offset)
 }

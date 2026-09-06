@@ -190,20 +190,12 @@ async fn store_push_objects(
     let (tree_sha_hex, _parent_sha, message) = parse_commit_object(&commit_obj.data)?;
 
     // Cap commit message length to prevent database bloat and log injection,
-    // matching the NDJSON commit API limit.
-    let message = if message.len() > crate::commit::MAX_COMMIT_MSG_LEN {
-        message[..crate::commit::MAX_COMMIT_MSG_LEN].to_owned()
-    } else {
-        message
-    };
-
-    // Cap commit message length to prevent database bloat and log injection,
-    // matching the NDJSON commit API limit.
-    let message = if message.len() > crate::commit::MAX_COMMIT_MSG_LEN {
-        message[..crate::commit::MAX_COMMIT_MSG_LEN].to_owned()
-    } else {
-        message
-    };
+    // matching the NDJSON commit API limit. Use char-boundary-safe truncation
+    // to avoid panicking on multi-byte UTF-8 characters.
+    let message: String = message
+        .chars()
+        .take(crate::commit::MAX_COMMIT_MSG_LEN)
+        .collect();
 
     // Walk the tree to collect file entries.
     let tree_sha_bytes =
