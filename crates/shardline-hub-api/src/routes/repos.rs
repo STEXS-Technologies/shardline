@@ -103,9 +103,13 @@ pub(crate) async fn repo_create_type(
     Path((repo_type, _ns, _repo_name)): Path<(String, String, String)>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<(StatusCode, Json<RepoResponse>), HubApiError> {
-    // Repository creation is deliberately global (same rationale as repo_create),
-    // so the extractor performs the Write-scope check but skips the
-    // token→repository binding.
+    // SECURITY NOTE: Repository creation is deliberately global (same rationale as
+    // repo_create), so the extractor performs the Write-scope check but skips the
+    // token→repository binding. This means a Write token scoped to alice/own can
+    // create repos in any namespace (e.g. bob/secret). However, the attacker
+    // cannot access repos outside their token scope (binding enforced on all
+    // access paths). The main risk is resource exhaustion via mass repo creation —
+    // operators should implement rate limiting at the reverse proxy layer.
     let rt = RepoType::from_api_str(&repo_type)
         .map(Into::into)
         .ok_or_else(|| HubApiError::PathValidation(format!("invalid repo type: {repo_type}")))?;
@@ -283,9 +287,12 @@ pub(crate) async fn repo_search(
     Query(query): Query<RepoSearchQuery>,
 ) -> Result<Json<RepoListResponse>, HubApiError> {
     shardline_metrics::record_hub_api_request("repo_search", "GET", 200);
-    // Intentionally global: searches across all repositories, not a single repo,
-    // so there is no repository binding to enforce. The caller's identity comes
-    // from the capability's claims.
+    // SECURITY NOTE: This endpoint is intentionally global — it searches across
+    // all repositories on the instance, not scoped to the caller's token.
+    // The HubRepository extractor provides authentication (Read scope) but the
+    // repo binding is a no-op for this pathless route. Cross-tenant private repo
+    // data is protected by the `repo_visible_to_owner` filter below. This matches
+    // HF Hub behavior where any authenticated user can search public repos.
     let caller_repo_id = repo.capability().claims().map(|claims| {
         let r = claims.repository();
         format!("{}/{}", r.owner(), r.name())
