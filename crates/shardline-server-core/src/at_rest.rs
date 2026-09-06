@@ -152,16 +152,18 @@ impl AtRestCipher {
         };
         let Ok(blob) = base64::engine::general_purpose::STANDARD.decode(encoded) else {
             // Not valid base64, so this is legacy plaintext that merely begins
-            // with the magic prefix.
+            // with the magic prefix. Strip the prefix to return the actual plaintext.
+            let stripped = stored.strip_prefix(MAGIC_PREFIX).unwrap_or(stored);
             return Ok(DecryptedSecret {
-                secret: SecretString::from_secret(stored),
+                secret: SecretString::from_secret(stripped),
                 needs_upgrade: true,
             });
         };
         if blob.len() < NONCE_LEN {
             // Decodes as base64 but is too short to carry a nonce + ciphertext.
+            let stripped = stored.strip_prefix(MAGIC_PREFIX).unwrap_or(stored);
             return Ok(DecryptedSecret {
-                secret: SecretString::from_secret(stored),
+                secret: SecretString::from_secret(stripped),
                 needs_upgrade: true,
             });
         }

@@ -298,6 +298,16 @@ pub(crate) async fn repo_search(
             "search query must be at least 2 characters".to_owned(),
         ));
     }
+    if query.q.len() > 200 {
+        return Err(HubApiError::PathValidation(
+            "search query must not exceed 200 characters".to_owned(),
+        ));
+    }
+    if query.author.is_some() {
+        return Err(HubApiError::PathValidation(
+            "author filter is not yet supported".to_owned(),
+        ));
+    }
     let limit = query.limit.min(200);
     let mut repos = state
         .store

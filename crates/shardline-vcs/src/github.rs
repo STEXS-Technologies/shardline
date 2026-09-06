@@ -65,6 +65,12 @@ impl ProviderAdapter for GitHubAdapter {
                 "sha256=",
                 request.body(),
             )?;
+        } else {
+            eprintln!(
+                "[shardline] WARNING: github webhook signature verification SKIPPED — \
+                 no webhook secret configured; deployers MUST set a webhook secret \
+                 to prevent forged webhook injection"
+            );
         }
 
         match request.event_name() {
