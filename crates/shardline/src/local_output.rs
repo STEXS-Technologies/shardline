@@ -108,7 +108,10 @@ pub fn write_output_bytes(path: &Path, bytes: &[u8], create_parent: bool) -> io:
             if meta.file_type().is_symlink() {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    format!("output path {} is a symlink; refusing to follow", path.display()),
+                    format!(
+                        "output path {} is a symlink; refusing to follow",
+                        path.display()
+                    ),
                 ));
             }
         }

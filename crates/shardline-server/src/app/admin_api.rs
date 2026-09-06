@@ -14,7 +14,7 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ServerError, admission::weights, app::AppState, auth::authorize_static_bearer_token,
+    ServerError, admission::weights, app::AppState, auth::authorize_static_bearer_token_hash,
     clock::unix_now_seconds_checked,
 };
 
@@ -170,11 +170,11 @@ struct AdminCursor {
 }
 
 fn authorize_admin(state: &AppState, headers: &HeaderMap) -> Result<(), ServerError> {
-    let token = state
+    let expected_hash = state
         .config
-        .admin_read_token()
+        .admin_read_token_sha256()
         .ok_or(ServerError::NotFound)?;
-    authorize_static_bearer_token(headers, token)
+    authorize_static_bearer_token_hash(headers, expected_hash)
 }
 
 fn observed_at() -> Result<u64, ServerError> {
