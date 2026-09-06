@@ -65,6 +65,12 @@ impl ProviderAdapter for GenericAdapter {
                 "sha256=",
                 request.body(),
             )?;
+        } else {
+            eprintln!(
+                "[shardline] WARNING: generic webhook signature verification SKIPPED — \
+                 no webhook secret configured; deployers MUST set a webhook secret \
+                 to prevent forged webhook injection"
+            );
         }
 
         if request.event_name() == "ping" {
