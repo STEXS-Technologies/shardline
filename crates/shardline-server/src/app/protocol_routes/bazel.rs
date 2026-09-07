@@ -520,7 +520,7 @@ mod tests {
         )
         .expect("cleanup key");
         let cleanup_id = protocol_object_file_id(&cleanup_key);
-        let _ = state.backend.delete_file_reference(&cleanup_id).await;
+        state.backend.delete_file_reference(&cleanup_id).await.ok();
         let app = bazel_router(state);
 
         // --- CAS PUT -> HEAD -> GET (byte-exact) ---
