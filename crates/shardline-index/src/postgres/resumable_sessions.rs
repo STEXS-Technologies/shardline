@@ -11,6 +11,14 @@ use crate::{
 
 const SESSION_ACCOUNTING_LOCK_ID: i64 = 0x5348_5244_5345_5353;
 
+/// Escapes LIKE wildcards in user-supplied values to prevent pattern injection.
+fn escape_like(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+}
+
 fn session_from_row(
     row: &sqlx::postgres::PgRow,
 ) -> Result<ResumableSession, PostgresMetadataStoreError> {
@@ -694,6 +702,82 @@ impl PostgresIndexStore {
             .map(|row| row.try_get("session_id").map_err(Into::into))
             .collect()
     }
+
+    /// Returns up to `limit` resumable sessions with an id strictly greater than
+    /// `after_session_id`, optionally filtered by lifecycle `state` and a
+    /// case-sensitive `session_id` prefix. Reads are a fresh keyset-paginated
+    /// snapshot; no transaction is used. Use this for bounded, authoritative
+    /// admin inspection, never an unbounded scan.
+    ///
+    /// # Errors
+    /// Returns an error when a bound cannot be represented or Postgres rejects the query.
+    pub async fn list_resumable_sessions(
+        &self,
+        after_session_id: Option<&str>,
+        state: Option<ResumableSessionState>,
+        prefix: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<ResumableSession>, PostgresMetadataStoreError> {
+        let limit = i64::try_from(limit)
+            .map_err(|error| PostgresMetadataStoreError::IntegerOutOfRange(error.to_string()))?;
+        let state_str = state.map(ResumableSessionState::as_str);
+        let escaped_prefix = prefix.map(escape_like);
+        let rows = sqlx::query(
+            "SELECT session_id, protocol, scope_namespace, target_key, attributes_json,
+                    state, generation, fence_epoch, expires_at
+             FROM shardline_resumable_sessions
+             WHERE ($1::text IS NULL OR session_id > $1)
+               AND ($2::text IS NULL OR state = $2)
+               AND ($3::text IS NULL OR session_id LIKE $3 || '%' ESCAPE '\\')
+             ORDER BY session_id
+             LIMIT $4",
+        )
+        .bind(after_session_id)
+        .bind(state_str)
+        .bind(escaped_prefix.as_deref())
+        .bind(limit)
+        .fetch_all(self.pool())
+        .await?;
+        rows.iter().map(session_from_row).collect()
+    }
+
+    /// Returns up to `limit` in-flight (active or completing) resumable
+    /// sessions with an id strictly greater than `after_session_id`, optionally
+    /// restricted to a case-sensitive `session_id` prefix.
+    ///
+    /// Terminal sessions are excluded so a keyset window is always a bounded,
+    /// authoritative page of the live work the server owns; a caller can never
+    /// observe a short page caused by interleaved historical rows. Reads are a
+    /// fresh snapshot; no transaction is used.
+    ///
+    /// # Errors
+    /// Returns an error when a bound cannot be represented or Postgres rejects the query.
+    pub async fn list_inflight_resumable_sessions(
+        &self,
+        after_session_id: Option<&str>,
+        prefix: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<ResumableSession>, PostgresMetadataStoreError> {
+        let limit = i64::try_from(limit)
+            .map_err(|error| PostgresMetadataStoreError::IntegerOutOfRange(error.to_string()))?;
+        let escaped_prefix = prefix.map(escape_like);
+        let rows = sqlx::query(
+            "SELECT session_id, protocol, scope_namespace, target_key, attributes_json,
+                    state, generation, fence_epoch, expires_at
+             FROM shardline_resumable_sessions
+             WHERE ($1::text IS NULL OR session_id > $1)
+               AND state IN ('active', 'completing')
+               AND ($2::text IS NULL OR session_id LIKE $2 || '%' ESCAPE '\\')
+             ORDER BY session_id
+             LIMIT $3",
+        )
+        .bind(after_session_id)
+        .bind(escaped_prefix.as_deref())
+        .bind(limit)
+        .fetch_all(self.pool())
+        .await?;
+        rows.iter().map(session_from_row).collect()
+    }
 }
 
 #[cfg(test)]
@@ -726,6 +810,25 @@ mod tests {
         .await
         .ok()?;
         Some(PostgresIndexStore::new(pool))
+    }
+
+    /// Removes rows whose `session_id` begins with one of `prefixes` so tests
+    /// that assert exact result counts are idempotent across repeated runs.
+    async fn cleanup_session_prefixes(store: &PostgresIndexStore, prefixes: &[&str]) {
+        for prefix in prefixes {
+            let escaped = prefix
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_");
+            sqlx::query(
+                "DELETE FROM shardline_resumable_sessions
+                 WHERE session_id LIKE $1 || '%' ESCAPE '\\'",
+            )
+            .bind(escaped)
+            .execute(store.pool())
+            .await
+            .ok();
+        }
     }
 
     fn session(prefix: &str, expires_at: Duration) -> ResumableSession {
@@ -1014,5 +1117,250 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+    }
+
+    #[tokio::test]
+    async fn postgres_list_resumable_sessions_bounded_keyset_pagination() {
+        let Some(store) = store().await else {
+            eprintln!("skipping: no reachable DATABASE_URL");
+            return;
+        };
+        let expiry = Duration::from_secs(
+            u64::try_from(chrono::Utc::now().timestamp()).unwrap_or_default() + 3600,
+        );
+        // Seed a deterministic set of active sessions whose ids sort in a known
+        // order. The session() helper already prefixes ids with "keyset", so
+        // query on that shared prefix.
+        cleanup_session_prefixes(&store, &["keyset-"]).await;
+        let mut expected: Vec<String> = Vec::new();
+        for _ in 0..5u32 {
+            let s = session("keyset", expiry);
+            assert!(store.create_resumable_session(&s).await.unwrap());
+            expected.push(s.session_id().to_owned());
+        }
+        expected.sort();
+
+        // Walk the full set with the sentinel pattern: request limit+1 rows and
+        // treat the extra row as the has-more signal. Each page's next cursor is
+        // the last returned id (the query keyset is `session_id > $after`).
+        let mut collected: Vec<String> = Vec::new();
+        let mut cursor: Option<&str> = None;
+        for _ in 0..10 {
+            let page = store
+                .list_resumable_sessions(cursor, None, Some("keyset-"), 3)
+                .await
+                .expect("list page");
+            let has_more = page.len() > 2;
+            let page = page.into_iter().take(2).collect::<Vec<_>>();
+            collected.extend(page.iter().map(|s| s.session_id().to_owned()));
+            if !has_more {
+                break;
+            }
+            cursor = collected.last().map(String::as_str);
+        }
+
+        // The full set is returned exactly once, in ascending keyset order.
+        assert_eq!(
+            collected.len(),
+            5,
+            "keyset pagination must be lossless and total"
+        );
+        assert_eq!(
+            collected, expected,
+            "keyset pagination must return every session exactly once, in order"
+        );
+        assert!(
+            collected
+                .iter()
+                .zip(collected.iter().skip(1))
+                .all(|(left, right)| left < right),
+            "ids must be ascending"
+        );
+    }
+
+    #[tokio::test]
+    async fn postgres_list_resumable_sessions_filters_by_state_and_prefix() {
+        let Some(store) = store().await else {
+            eprintln!("skipping: no reachable DATABASE_URL");
+            return;
+        };
+        let expiry = Duration::from_secs(
+            u64::try_from(chrono::Utc::now().timestamp()).unwrap_or_default() + 3600,
+        );
+        cleanup_session_prefixes(&store, &["special-"]).await;
+        // Insert an active session with a literal % and _ in its id.
+        let special = ResumableSession::new(
+            format!("special-a%b_1-{}", std::process::id()),
+            ResumableSessionProtocol::S3Multipart,
+            "owner/repository".to_owned(),
+            "large/model.bin".to_owned(),
+            expiry,
+        );
+        assert!(store.create_resumable_session(&special).await.unwrap());
+        // Insert another session that would match if % and _ were wildcards.
+        let plain = ResumableSession::new(
+            format!("special-aXbY1-{}", std::process::id()),
+            ResumableSessionProtocol::S3Multipart,
+            "owner/repository".to_owned(),
+            "large/model.bin".to_owned(),
+            expiry,
+        );
+        assert!(store.create_resumable_session(&plain).await.unwrap());
+        // Insert an active session with a distinct prefix.
+        let other = session("other-prefix", expiry);
+        assert!(store.create_resumable_session(&other).await.unwrap());
+
+        // Prefix filter with literal % — only the literal id should match,
+        // not the one where %/ _ behave as wildcards.
+        let prefix = format!("special-a%b_1-{}", std::process::id());
+        let results = store
+            .list_resumable_sessions(None, None, Some(&prefix), 100)
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results.first().unwrap().session_id(), special.session_id());
+
+        // State filter: Active only — all newly created sessions are active.
+        let active_only = store
+            .list_resumable_sessions(
+                None,
+                Some(ResumableSessionState::Active),
+                Some("special-"),
+                100,
+            )
+            .await
+            .unwrap();
+        assert!(
+            active_only
+                .iter()
+                .any(|s| s.session_id() == special.session_id()),
+            "active filter must include the special session"
+        );
+
+        // State filter for terminal: should not return active sessions.
+        let terminal = store
+            .list_resumable_sessions(
+                None,
+                Some(ResumableSessionState::Completed),
+                Some("special-"),
+                100,
+            )
+            .await
+            .unwrap();
+        assert!(terminal.is_empty());
+    }
+
+    #[tokio::test]
+    async fn postgres_list_inflight_excludes_terminal_sessions_from_keyset_window() {
+        let Some(store) = store().await else {
+            eprintln!("skipping: no reachable DATABASE_URL");
+            return;
+        };
+        let expiry = Duration::from_secs(
+            u64::try_from(chrono::Utc::now().timestamp()).unwrap_or_default() + 3600,
+        );
+        // Seed interleaved active/completing/terminal ids under one prefix.
+        cleanup_session_prefixes(&store, &["inflight-"]).await;
+        let mut seeded: Vec<(ResumableSession, ResumableSessionState)> = Vec::new();
+        for i in 0..5u32 {
+            let state = if i % 2 == 0 {
+                ResumableSessionState::Active
+            } else {
+                ResumableSessionState::Completed
+            };
+            let s = ResumableSession::new(
+                format!("inflight-{}-{}", i, std::process::id()),
+                ResumableSessionProtocol::S3Multipart,
+                "owner/repository".to_owned(),
+                "large/model.bin".to_owned(),
+                expiry,
+            );
+            seeded.push((s, state));
+        }
+        // One completing session too.
+        let completing = ResumableSession::new(
+            format!("inflight-completing-{}", std::process::id()),
+            ResumableSessionProtocol::LfsPatch,
+            "owner/repository".to_owned(),
+            "large/model.bin".to_owned(),
+            expiry,
+        );
+        seeded.push((completing, ResumableSessionState::Completing));
+        for (session, target_state) in &seeded {
+            assert!(store.create_resumable_session(session).await.unwrap());
+            let fence = session.fence_epoch();
+            if *target_state == ResumableSessionState::Active {
+                continue;
+            }
+            // Every seeded session is created Active. Move it to its target
+            // through the legal transitions (Completing is one hop from
+            // Active; Completed requires Active -> Completing -> Completed).
+            let to_completing = store
+                .transition_resumable_session(
+                    session.session_id(),
+                    ResumableSessionState::Active,
+                    fence,
+                    ResumableSessionState::Completing,
+                )
+                .await
+                .unwrap();
+            assert!(
+                to_completing,
+                "session {} should transition from active to completing",
+                session.session_id()
+            );
+            if *target_state == ResumableSessionState::Completing {
+                continue;
+            }
+            assert_eq!(*target_state, ResumableSessionState::Completed);
+            let to_completed = store
+                .transition_resumable_session(
+                    session.session_id(),
+                    ResumableSessionState::Completing,
+                    fence,
+                    ResumableSessionState::Completed,
+                )
+                .await
+                .unwrap();
+            assert!(
+                to_completed,
+                "session {} should transition from completing to completed",
+                session.session_id()
+            );
+        }
+
+        // In-flight list must include active + completing, never terminal, and
+        // paginate losslessly over just those.
+        let page = store
+            .list_inflight_resumable_sessions(None, Some("inflight-"), 100)
+            .await
+            .unwrap();
+        let inflight_ids: Vec<&str> = page.iter().map(|s| s.session_id()).collect();
+        assert_eq!(
+            inflight_ids.len(),
+            4,
+            "3 active + 1 completing, terminal excluded"
+        );
+        assert!(
+            inflight_ids
+                .iter()
+                .any(|id| id.starts_with("inflight-completing-")),
+            "completing session must be included as in-flight"
+        );
+        for (session, state) in &seeded {
+            let present = inflight_ids.contains(&session.session_id());
+            if matches!(
+                state,
+                ResumableSessionState::Active | ResumableSessionState::Completing
+            ) {
+                assert!(present, "{} must be surfaced", session.session_id());
+            } else {
+                assert!(
+                    !present,
+                    "terminal {} must not be surfaced",
+                    session.session_id()
+                );
+            }
+        }
     }
 }

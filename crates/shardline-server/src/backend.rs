@@ -525,6 +525,21 @@ impl ServerBackend {
             .await?)
     }
 
+    pub(crate) async fn list_inflight_resumable_sessions(
+        &self,
+        after_session_id: Option<&str>,
+        prefix: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<ResumableSession>, ServerError> {
+        let Self::Postgres(backend) = self else {
+            return Err(ServerError::StaleResourceFence);
+        };
+        Ok(backend
+            .index_store()
+            .list_inflight_resumable_sessions(after_session_id, prefix, limit)
+            .await?)
+    }
+
     pub(crate) async fn resumable_session_snapshot(
         &self,
         session_id: &str,

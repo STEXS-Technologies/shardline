@@ -558,13 +558,51 @@ pub(super) async fn tasks(
             capability: false,
         },
     )?;
-    let (tasks, page) = paginate(
-        Vec::new(),
-        &query,
-        |task: &AdminTask| task.id.as_str(),
-        |task| task.state,
-        |_task, _capability| false,
-    )?;
+    let after = query
+        .cursor
+        .as_ref()
+        .map(|cursor| decode_cursor(cursor.as_str(), &query))
+        .transpose()?
+        .map(|cursor| cursor.after);
+    let after_session_id = after.as_ref().map(|a| a.as_str());
+    let prefix = query.prefix.as_ref().map(AdminPrefix::as_str);
+    let limit = query.limit.map_or(DEFAULT_PAGE_LIMIT, AdminPageLimit::get);
+    let sessions = match state
+        .backend
+        .list_inflight_resumable_sessions(after_session_id, prefix, limit.saturating_add(1))
+        .await
+    {
+        Ok(sessions) => sessions,
+        Err(ServerError::StaleResourceFence) => Vec::new(),
+        Err(error) => return Err(error),
+    };
+    let has_more = sessions.len() > limit;
+    let sessions = if has_more {
+        sessions.get(..limit).unwrap_or(&sessions)
+    } else {
+        &sessions
+    };
+    let tasks: Vec<AdminTask> = sessions
+        .iter()
+        .map(|session| AdminTask {
+            id: session.session_id().to_owned(),
+            state: OperationalState::Ready,
+        })
+        .filter(|task| query.state.is_none_or(|expected| task.state == expected))
+        .collect();
+    let next_cursor = if has_more && !tasks.is_empty() {
+        tasks
+            .last()
+            .map(|task| encode_cursor(&task.id, &query))
+            .transpose()?
+    } else {
+        None
+    };
+    let page = AdminPage {
+        limit,
+        returned: tasks.len(),
+        next_cursor,
+    };
     Ok(admin_json(AdminTasksResponse {
         api_version: ADMIN_API_VERSION,
         observed_at_unix_seconds: observed_at()?,
@@ -1338,5 +1376,325 @@ mod tests {
             decode_cursor(&invalid_newtype_cursor, &AdminCollectionQuery::default()),
             Err(ServerError::InvalidAdminQuery)
         ));
+    }
+
+    #[tokio::test]
+    async fn tasks_endpoint_lists_active_resumable_sessions() {
+        let Ok(database_url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let temp = TempDir::new().expect("temp dir");
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(4)
+            .connect(&database_url)
+            .await
+            .expect("connect");
+        crate::apply_database_migrations(&pool)
+            .await
+            .expect("migrations");
+        let config = ServerConfig::new(
+            "127.0.0.1:0".parse().expect("bind"),
+            "http://127.0.0.1:8080".to_owned(),
+            temp.path().to_path_buf(),
+            NonZeroUsize::new(65_536).expect("chunk size"),
+        )
+        .with_server_frontends([ServerFrontend::Xet])
+        .expect("frontends")
+        .with_index_postgres_url(database_url)
+        .expect("postgres url")
+        .with_admin_read_token(ADMIN_TOKEN.as_bytes().to_vec())
+        .expect("admin token");
+        let app = router(config).await.expect("router");
+
+        // Idempotency: clear rows from any prior run before seeding, since the
+        // seeded session ids embed only the process id and persist in the DB.
+        sqlx::query("DELETE FROM shardline_resumable_sessions WHERE session_id LIKE $1 || '%'")
+            .bind("admin-task-")
+            .execute(&pool)
+            .await
+            .expect("cleanup sessions");
+
+        // Insert two active sessions and one terminal session.
+        let expiry = chrono::Utc::now() + chrono::Duration::hours(1);
+        let pid = std::process::id();
+        let id_active_1 = format!("admin-task-active-1-{pid}");
+        let id_active_2 = format!("admin-task-active-2-{pid}");
+        let id_terminal = format!("admin-task-terminal-{pid}");
+        for (sid, state) in [
+            (&id_active_1, "active"),
+            (&id_active_2, "active"),
+            (&id_terminal, "completed"),
+        ] {
+            sqlx::query(
+                "INSERT INTO shardline_resumable_sessions \
+                 (session_id, protocol, scope_namespace, target_key, attributes_json, \
+                  state, generation, fence_epoch, expires_at) \
+                 VALUES ($1, 's3_multipart', 'owner/repo', 'key.bin', '{}', $2, 1, 1, $3)",
+            )
+            .bind(sid)
+            .bind(state)
+            .bind(expiry)
+            .execute(&pool)
+            .await
+            .expect("insert session");
+        }
+
+        let response = app
+            .oneshot(request(Method::GET, "/api/v1/tasks", Some(ADMIN_TOKEN)))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["scheduler"], "external");
+        let tasks = body["tasks"].as_array().expect("tasks array");
+        let ids: Vec<&str> = tasks.iter().map(|t| t["id"].as_str().unwrap()).collect();
+        assert!(
+            ids.contains(&id_active_1.as_str()),
+            "active-1 must be present: {ids:?}"
+        );
+        assert!(
+            ids.contains(&id_active_2.as_str()),
+            "active-2 must be present: {ids:?}"
+        );
+        assert!(
+            !ids.contains(&id_terminal.as_str()),
+            "terminal session must not be surfaced: {ids:?}"
+        );
+        for task in tasks {
+            assert_eq!(task["state"], "ready");
+        }
+        assert_eq!(body["page"]["limit"], DEFAULT_PAGE_LIMIT);
+    }
+
+    #[tokio::test]
+    async fn tasks_endpoint_filters_and_paginates() {
+        let Ok(database_url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let temp = TempDir::new().expect("temp dir");
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(4)
+            .connect(&database_url)
+            .await
+            .expect("connect");
+        crate::apply_database_migrations(&pool)
+            .await
+            .expect("migrations");
+        let config = ServerConfig::new(
+            "127.0.0.1:0".parse().expect("bind"),
+            "http://127.0.0.1:8080".to_owned(),
+            temp.path().to_path_buf(),
+            NonZeroUsize::new(65_536).expect("chunk size"),
+        )
+        .with_server_frontends([ServerFrontend::Xet])
+        .expect("frontends")
+        .with_index_postgres_url(database_url)
+        .expect("postgres url")
+        .with_admin_read_token(ADMIN_TOKEN.as_bytes().to_vec())
+        .expect("admin token");
+        let app = router(config).await.expect("router");
+
+        // Idempotency: clear rows from any prior run before seeding.
+        sqlx::query("DELETE FROM shardline_resumable_sessions WHERE session_id LIKE $1 || '%'")
+            .bind("admin-paginate-")
+            .execute(&pool)
+            .await
+            .expect("cleanup sessions");
+
+        let expiry = chrono::Utc::now() + chrono::Duration::hours(1);
+        let pid = std::process::id();
+        for i in 0..4u32 {
+            let sid = format!("admin-paginate-{i}-{pid}");
+            sqlx::query(
+                "INSERT INTO shardline_resumable_sessions \
+                 (session_id, protocol, scope_namespace, target_key, attributes_json, \
+                  state, generation, fence_epoch, expires_at) \
+                 VALUES ($1, 's3_multipart', 'owner/repo', 'key.bin', '{}', 'active', 1, 1, $2)",
+            )
+            .bind(&sid)
+            .bind(expiry)
+            .execute(&pool)
+            .await
+            .expect("insert session");
+        }
+        // Also insert a terminal session with the same prefix to ensure it is filtered.
+        let terminal_id = format!("admin-paginate-terminal-{pid}");
+        sqlx::query(
+            "INSERT INTO shardline_resumable_sessions \
+             (session_id, protocol, scope_namespace, target_key, attributes_json, \
+              state, generation, fence_epoch, expires_at) \
+             VALUES ($1, 's3_multipart', 'owner/repo', 'key.bin', '{}', 'completed', 1, 1, $2)",
+        )
+        .bind(&terminal_id)
+        .bind(expiry)
+        .execute(&pool)
+        .await
+        .expect("insert terminal session");
+
+        // Page 1: limit=2 with prefix filter.
+        let url = "/api/v1/tasks?limit=2&prefix=admin-paginate-".to_owned();
+        let response = app
+            .clone()
+            .oneshot(request(Method::GET, &url, Some(ADMIN_TOKEN)))
+            .await
+            .expect("page 1");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        let tasks = body["tasks"].as_array().expect("tasks array");
+        assert_eq!(tasks.len(), 2, "page 1 must return 2 tasks");
+        for task in tasks {
+            assert_eq!(task["state"], "ready");
+            assert!(
+                task["id"].as_str().unwrap().starts_with("admin-paginate-"),
+                "task id must match prefix: {}",
+                task["id"]
+            );
+        }
+        let next_cursor = body["page"]["next_cursor"]
+            .as_str()
+            .expect("next_cursor present");
+        assert_eq!(body["page"]["returned"], 2);
+
+        // Page 2 via cursor.
+        let url2 = format!("/api/v1/tasks?limit=2&prefix=admin-paginate-&cursor={next_cursor}",);
+        let response2 = app
+            .clone()
+            .oneshot(request(Method::GET, &url2, Some(ADMIN_TOKEN)))
+            .await
+            .expect("page 2");
+        assert_eq!(response2.status(), StatusCode::OK);
+        let body2 = json_body(response2).await;
+        let tasks2 = body2["tasks"].as_array().expect("tasks array");
+        assert!(tasks2.len() <= 2, "page 2 must return at most 2 tasks");
+        assert!(
+            !tasks2.is_empty(),
+            "page 2 must not be empty with 4 active sessions"
+        );
+
+        // State filter: query for "degraded" should yield zero results
+        // (no session maps to degraded).
+        let state_url = "/api/v1/tasks?state=degraded&prefix=admin-paginate-".to_owned();
+        let state_response = app
+            .clone()
+            .oneshot(request(Method::GET, &state_url, Some(ADMIN_TOKEN)))
+            .await
+            .expect("state filter");
+        assert_eq!(state_response.status(), StatusCode::OK);
+        let state_body = json_body(state_response).await;
+        assert_eq!(state_body["tasks"].as_array().map(Vec::len), Some(0));
+    }
+
+    #[tokio::test]
+    async fn tasks_endpoint_pagination_unaffected_by_terminal_interleaving() {
+        let Ok(database_url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let temp = TempDir::new().expect("temp dir");
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(4)
+            .connect(&database_url)
+            .await
+            .expect("connect");
+        crate::apply_database_migrations(&pool)
+            .await
+            .expect("migrations");
+        let config = ServerConfig::new(
+            "127.0.0.1:0".parse().expect("bind"),
+            "http://127.0.0.1:8080".to_owned(),
+            temp.path().to_path_buf(),
+            NonZeroUsize::new(65_536).expect("chunk size"),
+        )
+        .with_server_frontends([ServerFrontend::Xet])
+        .expect("frontends")
+        .with_index_postgres_url(database_url)
+        .expect("postgres url")
+        .with_admin_read_token(ADMIN_TOKEN.as_bytes().to_vec())
+        .expect("admin token");
+        let app = router(config).await.expect("router");
+
+        // Idempotency: clear rows from any prior run before seeding.
+        sqlx::query("DELETE FROM shardline_resumable_sessions WHERE session_id LIKE $1 || '%'")
+            .bind("admin-interleave-")
+            .execute(&pool)
+            .await
+            .expect("cleanup sessions");
+
+        let expiry = chrono::Utc::now() + chrono::Duration::hours(1);
+        let pid = std::process::id();
+        // Terminal sessions interleave between active sessions in keyset order
+        // so a naive in-memory filter over an unfiltered SQL window would
+        // under-return and falsely signal end-of-list.
+        let states: [(&str, &str); 5] = [
+            ("admin-interleave-1", "active"),
+            ("admin-interleave-2", "completed"),
+            ("admin-interleave-3", "active"),
+            ("admin-interleave-4", "completed"),
+            ("admin-interleave-5", "active"),
+        ];
+        for (id, state) in states {
+            let sid = format!("{id}-{pid}");
+            sqlx::query(
+                "INSERT INTO shardline_resumable_sessions \
+                 (session_id, protocol, scope_namespace, target_key, attributes_json, \
+                  state, generation, fence_epoch, expires_at) \
+                 VALUES ($1, 's3_multipart', 'owner/repo', 'key.bin', '{}', $2, 1, 1, $3)",
+            )
+            .bind(&sid)
+            .bind(state)
+            .bind(expiry)
+            .execute(&pool)
+            .await
+            .expect("insert session");
+        }
+
+        // Page through with limit=1, following cursors to the end.
+        let mut collected_ids: Vec<String> = Vec::new();
+        let mut cursor: Option<String> = None;
+        let mut page_count = 0;
+        loop {
+            let url = cursor.as_ref().map_or_else(
+                || "/api/v1/tasks?limit=1&prefix=admin-interleave-".to_owned(),
+                |c| format!("/api/v1/tasks?limit=1&prefix=admin-interleave-&cursor={c}"),
+            );
+            let response = app
+                .clone()
+                .oneshot(request(Method::GET, &url, Some(ADMIN_TOKEN)))
+                .await
+                .expect("page response");
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = json_body(response).await;
+            let tasks = body["tasks"].as_array().expect("tasks array");
+            assert!(tasks.len() <= 1, "limit=1 page must return at most 1 task");
+            page_count += 1;
+            for task in tasks {
+                collected_ids.push(task["id"].as_str().expect("task id").to_owned());
+            }
+            match body["page"]["next_cursor"].as_str() {
+                Some(next) => cursor = Some(next.to_owned()),
+                None => break,
+            }
+        }
+
+        assert_eq!(page_count, 3, "three active sessions across three pages");
+        assert_eq!(collected_ids.len(), 3, "only active sessions surfaced");
+        for (id, _) in states.iter().filter(|(_, state)| *state == "active") {
+            assert!(
+                collected_ids
+                    .iter()
+                    .any(|collected| { collected == &format!("{id}-{pid}") }),
+                "active session {id}-{pid} must be surfaced"
+            );
+        }
+        for (id, _) in states.iter().filter(|(_, state)| *state != "active") {
+            assert!(
+                !collected_ids
+                    .iter()
+                    .any(|collected| collected == &format!("{id}-{pid}")),
+                "terminal session {id}-{pid} must not be surfaced"
+            );
+        }
     }
 }
