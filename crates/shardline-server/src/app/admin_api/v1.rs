@@ -102,6 +102,11 @@ pub(crate) struct Node {
     pub(super) state: OperationalState,
     pub(super) server_role: String,
     pub(super) server_frontends: Vec<String>,
+    pub(super) bind_addr: String,
+    pub(super) bin_version: String,
+    pub(super) metadata_backend: String,
+    pub(super) object_backend: String,
+    pub(super) cache_backend: String,
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
