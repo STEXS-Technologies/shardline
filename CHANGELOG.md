@@ -22,6 +22,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
   frontends, and readiness. Fields are additive and expose no repository
   identifiers, addresses, or credentials.
 
+### Removed
+
+- **Breaking:** Removed the admin `/api/v1/plugins` and `/api/v1/replication`
+  endpoints and the `plugin_registry` status field. They returned only
+  hard-coded `unsupported`/`external` states with empty arrays because no
+  plugin registry or asynchronous replication controller exists; keeping them
+  risked dashboards misreading "no plugins/replicas" as a healthy empty
+  collection. Clients polling them now receive `404`, the same response they
+  already handle when the admin API is disabled. No other endpoints or fields
+  are affected; `/api/v1/gc`, `/api/v1/integrity`, and `deduplication_ratio`
+  remain (they report real process-lifetime counters or an explicitly nullable
+  field).
+
 ## [1.9.0] - 2026-09-07
 
 Comprehensive security-hardening release that also ships the new read-only
