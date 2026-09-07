@@ -165,10 +165,12 @@ reset on restart and are not cluster totals.
 | --- | --- | --- |
 | `api_version`, `observed_at_unix_seconds` | common | Common fields. |
 | `scheduler` | operational state | `external`: scheduled maintenance belongs to an operator/CronJob. |
-| `tasks` | array | Empty until an authoritative bounded task registry exists. |
-| `tasks[].id` | string | Stable opaque task identifier and pagination key. |
-| `tasks[].state` | operational state | Task lifecycle/health state. |
+| `tasks` | array | In-flight durable resumable upload sessions (Git LFS PATCH, OCI blob, S3 multipart) owned by the Postgres-coordinated store. Each entry is a live session whose lifecycle is `active` or `completing`; terminal (`completed`/`aborted`/`expired`) sessions are historical records and are never listed, so the page is always a bounded window of the server's current work. Empty on backends without durable resumable sessions. |
+| `tasks[].id` | string | Stable opaque resumable-session id; the pagination key. |
+| `tasks[].state` | operational state | `ready` for every listed session (the session is live and server-owned). No session ever maps to `degraded`/`external`/`unsupported`, so a `state` filter for those values returns an empty page. |
 | `page` | page object | Cursor metadata described below. |
+
+Pagination is keyset-ordered by session id and pushed into the store query, so a filtered page always returns a full bounded window of matching sessions; terminal sessions interleaved in id order never truncate a page or falsify the end of the list.
 
 ### `GET /api/v1/metrics`
 
@@ -251,9 +253,10 @@ closed. Treat cursors as opaque, short-lived pointers, not durable bookmarks.
 Ordering is ascending by stable item key. Each request is a fresh snapshot;
 there is no transaction spanning pages. If a collection changes between page
 requests, deleted entries disappear and newly inserted entries whose keys sort
-at or before the cursor are not revisited. The current node collection is a
-single process entry, and the other registries are presently empty, but this
-contract applies when they gain entries.
+at or before the cursor are not revisited. The node collection is a single
+process entry and the plugin/replication registries are presently empty, but
+the tasks collection is backed by the durable resumable-session store and this
+contract applies to all collections as they gain entries.
 
 ## Status and failure behavior
 
