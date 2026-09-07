@@ -374,6 +374,7 @@ mod tests {
         ServerFrontend, ServerRole, TransferLimiter, app::AppState, bazel_cache_object_key,
     };
     use shardline_server_core::AuthorizedRepository;
+    use shardline_server_core::protocol_support::protocol_object_file_id;
 
     use super::{
         bazel_get, bazel_get_ac, bazel_get_cas, bazel_head, bazel_head_ac, bazel_head_cas,
@@ -504,6 +505,22 @@ mod tests {
         let Some((state, _tmp)) = build_bazel_postgres_test_state().await else {
             return;
         };
+        // Flush any record a PRIOR run committed for this deterministic
+        // content. The test content/hash are fixed, so a stale record left in
+        // the shared Postgres store would make the CAS PUT's _if_absent probe
+        // report AlreadyExists and skip writing to the fresh (empty) object
+        // store -> a later GET resolves the stale record but finds no bytes
+        // (ObjectStore NotFound). Purging guarantees the PUT observes absent
+        // and actually stores the object.
+        let cas_cleanup_hash = test_content_hash();
+        let cleanup_key = bazel_cache_object_key(
+            BazelCacheKind::Cas,
+            &cas_cleanup_hash,
+            &AuthorizedRepository::anonymous_full_access(),
+        )
+        .expect("cleanup key");
+        let cleanup_id = protocol_object_file_id(&cleanup_key);
+        let _ = state.backend.delete_file_reference(&cleanup_id).await;
         let app = bazel_router(state);
 
         // --- CAS PUT -> HEAD -> GET (byte-exact) ---
