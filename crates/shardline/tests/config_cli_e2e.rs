@@ -21,6 +21,12 @@ async fn config_check_uses_explicit_config_path_with_spaces() {
     let config = config_dir.join("active config.toml");
     let signing_key = workspace.path().join("token-signing-key");
     fs::write(&signing_key, b"0123456789abcdef0123456789abcdef").unwrap();
+    // The secret-file gate rejects group/world-readable keys (mode > 0600).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&signing_key, fs::Permissions::from_mode(0o600)).unwrap();
+    }
     fs::write(
         &config,
         format!(
