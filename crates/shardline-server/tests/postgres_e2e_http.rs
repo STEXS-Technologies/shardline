@@ -1183,7 +1183,7 @@ async fn test_provider_issue_token_with_valid_key() {
 
     let resp = client
         .post(server.url("/v1/providers/generic/tokens"))
-        .header("x-shardline-provider-key", "test-api-key")
+        .header("x-shardline-provider-key", "test-api-key-16bytes")
         .header("Content-Type", "application/json")
         .json(&serde_json::json!({
             "subject": "test-user",
@@ -1259,7 +1259,7 @@ async fn test_provider_git_lfs_authenticate() {
 
     let resp = client
         .post(server.url("/v1/providers/generic/git-lfs-authenticate"))
-        .header("x-shardline-provider-key", "test-api-key")
+        .header("x-shardline-provider-key", "test-api-key-16bytes")
         .header("Content-Type", "application/json")
         .json(&serde_json::json!({
             "subject": "test-user",
@@ -1290,7 +1290,7 @@ async fn test_provider_xet_read_token() {
 
     let resp = client
         .get(server.url("/api/generic/test/test/xet-read-token/main?subject=test-user"))
-        .header("x-shardline-provider-key", "test-api-key")
+        .header("x-shardline-provider-key", "test-api-key-16bytes")
         .send()
         .await
         .unwrap();
@@ -1308,7 +1308,7 @@ async fn test_provider_xet_write_token() {
 
     let resp = client
         .get(server.url("/api/generic/test/test/xet-write-token/main?subject=test-user"))
-        .header("x-shardline-provider-key", "test-api-key")
+        .header("x-shardline-provider-key", "test-api-key-16bytes")
         .send()
         .await
         .unwrap();
@@ -3950,7 +3950,7 @@ async fn test_provider_token_request_at_max_body() {
 
     let resp = client
         .post(server.url("/v1/providers/generic/tokens"))
-        .header("x-shardline-provider-key", "test-api-key")
+        .header("x-shardline-provider-key", "test-api-key-16bytes")
         .header("Content-Type", "application/json")
         .body(body_str.clone())
         .send()

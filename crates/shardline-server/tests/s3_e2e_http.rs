@@ -784,6 +784,17 @@ async fn test_all_frontends_health_and_ready() {
     assert_eq!(resp.status(), 200);
     let json: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(json["status"], "ok");
+
+    // Backend topology is exposed on the AUTHENTICATED admin status endpoint,
+    // not the unauthenticated /readyz.
+    let resp = client
+        .get(server.url("/api/v1/status"))
+        .header("Authorization", format!("Bearer {TEST_ADMIN_TOKEN}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let json: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(json["metadata_backend"], "local");
     assert_eq!(json["object_backend"], "s3");
     assert!(json["server_frontends"].as_array().unwrap().len() >= 5);
@@ -1463,7 +1474,7 @@ async fn test_s3_provider_issue_token_with_valid_key() {
 
     let resp = client
         .post(server.url("/v1/providers/generic/tokens"))
-        .header("x-shardline-provider-key", "test-api-key")
+        .header("x-shardline-provider-key", "test-api-key-16bytes")
         .header("Content-Type", "application/json")
         .json(&serde_json::json!({
             "subject": "test-user",
@@ -1511,7 +1522,7 @@ async fn test_s3_provider_git_lfs_authenticate() {
 
     let resp = client
         .post(server.url("/v1/providers/generic/git-lfs-authenticate"))
-        .header("x-shardline-provider-key", "test-api-key")
+        .header("x-shardline-provider-key", "test-api-key-16bytes")
         .header("Content-Type", "application/json")
         .json(&serde_json::json!({
             "subject": "test-user",
@@ -1536,7 +1547,7 @@ async fn test_s3_provider_xet_read_token() {
 
     let resp = client
         .get(server.url("/api/generic/test/test/xet-read-token/main?subject=test-user"))
-        .header("x-shardline-provider-key", "test-api-key")
+        .header("x-shardline-provider-key", "test-api-key-16bytes")
         .send()
         .await
         .unwrap();
@@ -1553,7 +1564,7 @@ async fn test_s3_provider_xet_write_token() {
 
     let resp = client
         .get(server.url("/api/generic/test/test/xet-write-token/main?subject=test-user"))
-        .header("x-shardline-provider-key", "test-api-key")
+        .header("x-shardline-provider-key", "test-api-key-16bytes")
         .send()
         .await
         .unwrap();

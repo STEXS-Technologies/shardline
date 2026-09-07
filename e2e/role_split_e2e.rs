@@ -23,9 +23,14 @@ use shardline_protocol::{
     RepositoryProvider, RepositoryScope, TokenClaims, TokenScope, TokenSigner,
 };
 use shardline_server::{
-    ReadyResponse, ServerConfig, ServerError, ServerFrontend, ServerRole, serve_with_listener,
+    ServerConfig, ServerError, ServerFrontend, ServerRole, serve_with_listener,
 };
 use support::ServerE2eInvariantError;
+
+/// Admin read token wired into spawned servers so tests verify runtime
+/// topology through the authenticated admin API (the unauthenticated /readyz
+/// no longer carries runtime metadata).
+const TEST_ADMIN_TOKEN: &str = "role-split-admin-read-token";
 use tokio::{
     net::TcpListener,
     spawn,
@@ -64,9 +69,9 @@ async fn api_role_serves_control_plane_routes_only() {
         return;
     };
 
-    assert_eq!(ready.server_role, "api");
-    assert_eq!(ready.server_frontends, vec!["xet".to_owned()]);
-    assert_eq!(ready.cache_backend, "memory");
+    assert_eq!(ready["server_role"], "api");
+    assert_eq!(ready["server_frontends"], serde_json::json!(["xet"]));
+    assert_eq!(ready["cache_backend"], "memory");
     assert_eq!(recon_status, StatusCode::METHOD_NOT_ALLOWED);
     assert_eq!(chunk_status, StatusCode::NOT_FOUND);
 }
@@ -80,10 +85,10 @@ async fn transfer_role_serves_transfer_routes_only() {
         return;
     };
 
-    assert_eq!(ready.server_role, "transfer");
-    assert_eq!(ready.server_frontends, vec!["xet".to_owned()]);
-    assert_eq!(ready.object_backend, "local");
-    assert_eq!(ready.cache_backend, "disabled");
+    assert_eq!(ready["server_role"], "transfer");
+    assert_eq!(ready["server_frontends"], serde_json::json!(["xet"]));
+    assert_eq!(ready["object_backend"], "local");
+    assert_eq!(ready["cache_backend"], "disabled");
     assert_eq!(recon_status, StatusCode::NOT_FOUND);
     assert_eq!(chunk_status, StatusCode::METHOD_NOT_ALLOWED);
 }
@@ -120,7 +125,7 @@ async fn transfer_role_serves_oci_transfer_routes_but_not_oci_api_routes() {
 
 async fn exercise_role(
     role: ServerRole,
-) -> Result<(ReadyResponse, StatusCode, StatusCode), Box<dyn Error>> {
+) -> Result<(serde_json::Value, StatusCode, StatusCode), Box<dyn Error>> {
     let storage = tempfile::tempdir()?;
     let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).await?;
     let addr = listener.local_addr()?;
@@ -132,18 +137,24 @@ async fn exercise_role(
         NonZeroUsize::new(128).ok_or("chunk size")?,
     )
     .with_server_role(role)
-    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())?;
+    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())?
+    .with_admin_read_token(TEST_ADMIN_TOKEN.as_bytes().to_vec())?;
     let server = spawn(async move { serve_with_listener(config, listener).await });
 
     let client = Client::new();
     wait_for_health(&client, &base_url).await?;
 
+    // /readyz reports health only; runtime topology comes from the
+    // authenticated admin status endpoint.
+    let readyz = client.get(format!("{base_url}/readyz")).send().await?.error_for_status()?;
+    assert_eq!(readyz.status(), StatusCode::OK, "readyz should be healthy");
     let ready = client
-        .get(format!("{base_url}/readyz"))
+        .get(format!("{base_url}/api/v1/status"))
+        .header("Authorization", format!("Bearer {TEST_ADMIN_TOKEN}"))
         .send()
         .await?
         .error_for_status()?
-        .json::<ReadyResponse>()
+        .json::<serde_json::Value>()
         .await?;
     let reconstruction_status = client
         .request(
@@ -208,6 +219,7 @@ async fn start_frontend_role_runtime(
     )
     .with_server_role(role)
     .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())?
+    .with_admin_read_token(TEST_ADMIN_TOKEN.as_bytes().to_vec())?
     .with_server_frontends(frontends.iter().copied())?;
     let server = spawn(async move { serve_with_listener(config, listener).await });
     let client = Client::new();
