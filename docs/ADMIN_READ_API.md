@@ -300,7 +300,7 @@ absence of every future vulnerability.
 | SSRF | No endpoint accepts URLs, hosts, callbacks, paths, or other outbound-request targets. |
 | Path traversal / file disclosure | No endpoint accepts filesystem or object paths, and backend names are fixed implementation identifiers. |
 | Request smuggling / method confusion | Duplicate authorization fails; ambiguous duplicate query fields fail; mutation and uncommon methods cannot reach handlers. HTTP framing remains the responsibility of the HTTP stack and ingress. |
-| Resource exhaustion | Query/filter/cursor/page bounds, bounded fixed projections, weighted storage admission, and request timeouts are exercised. No endpoint returns raw labels or unbounded identifiers. |
+| Resource exhaustion | Query/filter/cursor/page bounds, bounded fixed projections, and request timeouts cover the lightweight admin reads (health/status/nodes/tasks use bounded probes or primary-key keyset queries with at most `MAX_PAGE_LIMIT + 1` rows); the unbounded authoritative-inventory scan (`/api/v1/storage`) is additionally gated by weighted admission (`weights::STATS`) and returns `503` when saturated. No endpoint returns raw labels or unbounded identifiers. |
 | Sensitive-data exposure / caching | Fixed response DTOs omit keys, tenants, credentials, URLs, and backend errors. `no-store` and sanitized-outage regressions cover success and failure. |
 | Replay | Reads are idempotent snapshots; replay cannot mutate state. Bearer replay remains possible until token rotation, so protect transport and token files. |
 | Unsafe API consumption | The API consumes no third-party response or attacker-selected remote data. Backend failures are converted to bounded states or sanitized errors. |
