@@ -157,6 +157,11 @@ reset on restart and are not cluster totals.
 | `nodes[].state` | operational state | Current process durable-backend readiness. |
 | `nodes[].server_role` | string | This entry's runtime role. |
 | `nodes[].server_frontends` | array of strings | Frontends enabled on this entry. |
+| `nodes[].bind_addr` | string | Configured listen socket address (e.g. `0.0.0.0:8080`). Identifies this process by its network binding. Not a hostname or secret. Stable across requests; changes only when configuration changes. |
+| `nodes[].bin_version` | string | Package version of this running binary. Detects version skew across replicas during rolling deploys. |
+| `nodes[].metadata_backend` | string | Configured metadata implementation name (e.g. `local`, `postgres`). No address, connection string, or credentials are included. |
+| `nodes[].object_backend` | string | Configured object-storage implementation name (e.g. `local`, `s3`). No bucket, endpoint, or credentials are included. |
+| `nodes[].cache_backend` | string | Configured reconstruction-cache implementation name (e.g. `memory`, `redis`, `disabled`). |
 | `page` | page object | Cursor metadata described below. |
 
 ### `GET /api/v1/tasks`
