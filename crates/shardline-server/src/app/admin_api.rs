@@ -22,10 +22,9 @@ use self::v1::{
     API_VERSION as ADMIN_API_VERSION, GcResponse as AdminGcResponse,
     IntegrityResponse as AdminIntegrityResponse, MetricsResponse as AdminMetricsResponse,
     Node as AdminNode, NodesResponse as AdminNodesResponse, OperationalState, Page as AdminPage,
-    Plugin as AdminPlugin, PluginsResponse as AdminPluginsResponse, Replica as AdminReplica,
-    ReplicationResponse as AdminReplicationResponse, StatusResponse as AdminStatusResponse,
-    StorageProcessCounters as AdminStorageProcessCounters, StorageResponse as AdminStorageResponse,
-    Task as AdminTask, TasksResponse as AdminTasksResponse,
+    StatusResponse as AdminStatusResponse, StorageProcessCounters as AdminStorageProcessCounters,
+    StorageResponse as AdminStorageResponse, Task as AdminTask,
+    TasksResponse as AdminTasksResponse,
 };
 
 const NO_STORE: HeaderValue = HeaderValue::from_static("no-store");
@@ -429,7 +428,6 @@ pub(super) async fn status(
         metadata_backend: state.backend.backend_name().to_owned(),
         object_backend: state.backend.object_backend_name().to_owned(),
         cache_backend: state.reconstruction_cache.backend_name().to_owned(),
-        plugin_registry: OperationalState::Unsupported,
     }))
 }
 
@@ -676,75 +674,6 @@ pub(super) async fn metrics(
     }))
 }
 
-pub(super) async fn plugins(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    RawQuery(raw_query): RawQuery,
-) -> Result<AdminJson<AdminPluginsResponse>, ServerError> {
-    authorize_admin(&state, &headers)?;
-    let query = parse_collection_query(
-        raw_query.as_deref(),
-        AllowedFilters {
-            state: true,
-            prefix: true,
-            capability: true,
-        },
-    )?;
-    let (plugins, page) = paginate(
-        Vec::new(),
-        &query,
-        |plugin: &AdminPlugin| plugin.id.as_str(),
-        |plugin| plugin.state,
-        |plugin, capability| {
-            plugin
-                .capabilities
-                .iter()
-                .any(|candidate| candidate == capability)
-        },
-    )?;
-    Ok(admin_json(AdminPluginsResponse {
-        api_version: ADMIN_API_VERSION,
-        observed_at_unix_seconds: observed_at()?,
-        registry: OperationalState::Unsupported,
-        plugins,
-        page,
-    }))
-}
-
-pub(super) async fn replication(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    RawQuery(raw_query): RawQuery,
-) -> Result<AdminJson<AdminReplicationResponse>, ServerError> {
-    authorize_admin(&state, &headers)?;
-    let query = parse_collection_query(
-        raw_query.as_deref(),
-        AllowedFilters {
-            state: true,
-            prefix: true,
-            capability: false,
-        },
-    )?;
-    let (replicas, page) = paginate(
-        Vec::new(),
-        &query,
-        |replica: &AdminReplica| replica.id.as_str(),
-        |replica| replica.state,
-        |_replica, _capability| false,
-    )?;
-    Ok(admin_json(AdminReplicationResponse {
-        api_version: ADMIN_API_VERSION,
-        observed_at_unix_seconds: observed_at()?,
-        // Shardline coordinates writers over shared durable state. It does not
-        // own an asynchronous replication controller whose lag could be
-        // reported authoritatively, so keep this surface explicit and empty.
-        state: OperationalState::External,
-        coordinator: OperationalState::External,
-        replicas,
-        page,
-    }))
-}
-
 #[cfg(test)]
 mod tests {
     use std::num::NonZeroUsize;
@@ -762,7 +691,7 @@ mod tests {
     use crate::{DeploymentMode, ServerConfig, ServerFrontend, ServerRole, app::router};
 
     const ADMIN_TOKEN: &str = "admin-read-secret";
-    const ADMIN_PATHS: [&str; 9] = [
+    const ADMIN_PATHS: [&str; 7] = [
         "/api/v1/status",
         "/api/v1/storage",
         "/api/v1/gc",
@@ -770,8 +699,6 @@ mod tests {
         "/api/v1/nodes",
         "/api/v1/tasks",
         "/api/v1/metrics",
-        "/api/v1/plugins",
-        "/api/v1/replication",
     ];
 
     proptest! {
@@ -887,14 +814,7 @@ mod tests {
             );
             let body = json_body(get_response).await;
             assert_eq!(body["api_version"], ADMIN_API_VERSION, "{path}");
-            if [
-                "/api/v1/nodes",
-                "/api/v1/tasks",
-                "/api/v1/plugins",
-                "/api/v1/replication",
-            ]
-            .contains(&path)
-            {
+            if ["/api/v1/nodes", "/api/v1/tasks"].contains(&path) {
                 assert_eq!(body["page"]["limit"], DEFAULT_PAGE_LIMIT, "{path}");
                 assert!(body["page"]["returned"].is_number(), "{path}");
                 assert!(body["page"]["next_cursor"].is_null(), "{path}");
@@ -1015,7 +935,6 @@ mod tests {
         assert_eq!(body["cache_state"], "ready");
         assert_eq!(body["server_role"], "all");
         assert_eq!(body["server_frontends"], serde_json::json!(["xet"]));
-        assert_eq!(body["plugin_registry"], "unsupported");
         assert!(!body.to_string().contains(ADMIN_TOKEN));
     }
 
@@ -1049,7 +968,7 @@ mod tests {
             assert_eq!(body["state"], "external", "{path}");
             assert_eq!(body["execution"], "external", "{path}");
         }
-        for path in ["/api/v1/tasks", "/api/v1/replication"] {
+        for path in ["/api/v1/tasks"] {
             let response = app
                 .clone()
                 .oneshot(request(Method::GET, path, Some(ADMIN_TOKEN)))
@@ -1057,7 +976,7 @@ mod tests {
                 .expect("response");
             let body = json_body(response).await;
             assert_eq!(
-                body.get("scheduler").or_else(|| body.get("coordinator")),
+                body.get("scheduler"),
                 Some(&Value::String("external".to_owned())),
                 "{path}"
             );
