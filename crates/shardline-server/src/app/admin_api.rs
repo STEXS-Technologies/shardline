@@ -549,6 +549,14 @@ pub(super) async fn nodes(
     }))
 }
 
+/// Lists the current process's in-flight durable resumable upload sessions as
+/// bounded, keyset-paginated admin tasks.
+///
+/// Unlike the authoritative `/api/v1/storage` inventory (an O(N) store walk
+/// that is admission-gated at `weights::STATS`), this handler issues a bounded
+/// primary-key keyset query (at most `MAX_PAGE_LIMIT + 1` rows). Bounded admin
+/// reads are controlled by query/cursor/page bounds rather than weighted
+/// admission; only the unbounded authoritative-inventory scan takes a permit.
 pub(super) async fn tasks(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,

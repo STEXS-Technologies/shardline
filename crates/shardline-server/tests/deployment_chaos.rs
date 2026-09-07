@@ -1144,6 +1144,31 @@ async fn drill_deploy_a_postgres_kill_mid_upload_no_lost_commits() {
         );
     }
 
+    // /api/v1/tasks is backed by the durable resumable-session store: during a
+    // metadata outage it must fail closed with a sanitized server error (never
+    // return fabricated/partial work, never weaken auth, never leak the token
+    // or connection string).
+    let failed_tasks = admin_get(&base, "/api/v1/tasks", ADMIN_READ_TOKEN).await;
+    assert!(
+        failed_tasks.status().is_server_error(),
+        "tasks listing must fail closed during a metadata outage, not fabricate an empty page"
+    );
+    let failed_tasks_body = failed_tasks.text().await.expect("admin error body");
+    for secret in [ADMIN_READ_TOKEN, "shardline-dev-password", PG_URL] {
+        assert!(
+            !failed_tasks_body.contains(secret),
+            "tasks dependency error must not disclose {secret}"
+        );
+    }
+    assert_eq!(
+        admin_status(&base, "wrong-admin-token")
+            .await
+            .status()
+            .as_u16(),
+        401,
+        "tasks failure must not weaken the admin authorization boundary"
+    );
+
     // Restore Postgres; verify no committed data was lost.
     restart_and_wait(
         CONTAINER_POSTGRES,
@@ -1168,6 +1193,24 @@ async fn drill_deploy_a_postgres_kill_mid_upload_no_lost_commits() {
         )
         .await,
         "admin status must recover to ready after Postgres recovery"
+    );
+    // The /tasks listing recovers with the metadata store: it must return a
+    // well-formed page again (200), never a cached outage error.
+    let recovered_tasks = admin_get(&base, "/api/v1/tasks", ADMIN_READ_TOKEN).await;
+    assert_eq!(
+        recovered_tasks.status().as_u16(),
+        200,
+        "tasks listing must recover to 200 after Postgres recovery"
+    );
+    let recovered_tasks_body: serde_json::Value =
+        recovered_tasks.json().await.expect("tasks recovery body");
+    assert_eq!(
+        recovered_tasks_body["api_version"], "v1",
+        "recovered tasks body must be versioned"
+    );
+    assert!(
+        recovered_tasks_body["tasks"].is_array(),
+        "recovered tasks must contain a tasks array"
     );
 
     for (key, expected) in [(&k1, &v1), (&k2a, &v2a)] {
