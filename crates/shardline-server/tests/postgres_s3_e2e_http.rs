@@ -94,6 +94,10 @@ fn s3_config(key_prefix: &str) -> S3ObjectStoreConfig {
 // ---------------------------------------------------------------------------
 
 const TEST_SIGNING_KEY: &[u8] = b"0123456789abcdef0123456789abcdef";
+/// Admin read token wired into spawned servers so tests verify runtime
+/// topology through the authenticated admin API (the unauthenticated /readyz
+/// no longer carries runtime metadata).
+const TEST_ADMIN_TOKEN: &str = "pg-s3-e2e-admin-read-token";
 
 /// Mint a Write-scoped bearer token bound to an arbitrary `owner/name` repo.
 ///
@@ -141,6 +145,8 @@ impl TestServer {
         .with_index_postgres_url(pg_url.to_owned())
         .unwrap()
         .with_reconstruction_cache_disabled()
+        .with_admin_read_token(TEST_ADMIN_TOKEN.as_bytes().to_vec())
+        .unwrap()
         .with_object_storage(ObjectStorageAdapter::S3, Some(s3_config(s3_prefix)));
 
         config.validate_runtime_requirements().unwrap();
@@ -284,13 +290,15 @@ impl TestServerBuilder {
         .with_index_postgres_url(pg_url.to_owned())
         .unwrap()
         .with_reconstruction_cache_disabled()
+        .with_admin_read_token(TEST_ADMIN_TOKEN.as_bytes().to_vec())
+        .unwrap()
         .with_object_storage(ObjectStorageAdapter::S3, Some(s3_config(s3_prefix)));
 
         if let Some((_provider_tmp, config_path)) = self.provider_config.as_ref() {
             config = config
                 .with_provider_runtime(
                     config_path.clone(),
-                    b"test-api-key".to_vec(),
+                    b"test-api-key-16bytes".to_vec(),
                     "test-issuer".to_owned(),
                     NonZeroU64::new(3600).unwrap(),
                 )
@@ -372,6 +380,16 @@ async fn test_readyz_returns_postgres_and_s3_backends() {
     assert_eq!(resp.status(), 200);
     let json: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(json["status"], "ok");
+    // Backend topology is exposed on the AUTHENTICATED admin status endpoint,
+    // not the unauthenticated /readyz.
+    let resp = client
+        .get(server.url("/api/v1/status"))
+        .header("Authorization", format!("Bearer {TEST_ADMIN_TOKEN}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let json: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(json["metadata_backend"], "postgres");
     assert_eq!(json["object_backend"], "s3");
 }
@@ -710,6 +728,17 @@ async fn test_all_frontends_health_and_ready() {
     assert_eq!(resp.status(), 200);
     let json: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(json["status"], "ok");
+
+    // Backend topology is exposed on the AUTHENTICATED admin status endpoint,
+    // not the unauthenticated /readyz.
+    let resp = client
+        .get(server.url("/api/v1/status"))
+        .header("Authorization", format!("Bearer {TEST_ADMIN_TOKEN}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let json: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(json["metadata_backend"], "postgres");
     assert_eq!(json["object_backend"], "s3");
     assert!(json["server_frontends"].as_array().unwrap().len() >= 5);
@@ -1339,7 +1368,7 @@ async fn test_pgs3_provider_issue_token_with_valid_key() {
 
     let resp = client
         .post(server.url("/v1/providers/generic/tokens"))
-        .header("x-shardline-provider-key", "test-api-key")
+        .header("x-shardline-provider-key", "test-api-key-16bytes")
         .header("Content-Type", "application/json")
         .json(&serde_json::json!({
             "subject": "test-user",
@@ -1387,7 +1416,7 @@ async fn test_pgs3_provider_git_lfs_authenticate() {
 
     let resp = client
         .post(server.url("/v1/providers/generic/git-lfs-authenticate"))
-        .header("x-shardline-provider-key", "test-api-key")
+        .header("x-shardline-provider-key", "test-api-key-16bytes")
         .header("Content-Type", "application/json")
         .json(&serde_json::json!({
             "subject": "test-user",
@@ -1412,7 +1441,7 @@ async fn test_pgs3_provider_xet_read_token() {
 
     let resp = client
         .get(server.url("/api/generic/test/test/xet-read-token/main?subject=test-user"))
-        .header("x-shardline-provider-key", "test-api-key")
+        .header("x-shardline-provider-key", "test-api-key-16bytes")
         .send()
         .await
         .unwrap();
@@ -1429,7 +1458,7 @@ async fn test_pgs3_provider_xet_write_token() {
 
     let resp = client
         .get(server.url("/api/generic/test/test/xet-write-token/main?subject=test-user"))
-        .header("x-shardline-provider-key", "test-api-key")
+        .header("x-shardline-provider-key", "test-api-key-16bytes")
         .send()
         .await
         .unwrap();

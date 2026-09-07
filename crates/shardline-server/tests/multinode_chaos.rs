@@ -79,7 +79,7 @@ use reqwest::Client;
 use sha2::{Digest, Sha256};
 use shardline_protocol::{RepositoryProvider, RepositoryScope, TokenClaims, TokenScope};
 use shardline_server::{
-    ReadyResponse, ServerConfig, ServerError, ServerFrontend, ServerRole, serve_with_listener,
+    ServerConfig, ServerError, ServerFrontend, ServerRole, serve_with_listener,
 };
 use shardline_server_core::{AuthProvider, auth::LocalHmacProvider};
 use tokio::{
@@ -93,6 +93,10 @@ use xet_data::processing::{
 };
 
 const SIGNING_KEY: &[u8] = b"test-signing-key-32-bytes-long!!";
+/// Admin read token wired into every spawned role. The chaos drills verify
+/// process roles through the authenticated admin status endpoint — the
+/// unauthenticated /readyz deliberately no longer carries runtime metadata.
+const MN_ADMIN_TOKEN: &str = "mn-chaos-admin-read-token";
 const BUCKET: &str = "mn.mn";
 const CHUNK: usize = 65536;
 /// The API role must also mount S3: the Xet frontend alone does not register
@@ -377,6 +381,7 @@ async fn spawn_role(
     )
     .with_server_role(role)
     .with_token_signing_key(SIGNING_KEY.to_vec())?
+    .with_admin_read_token(MN_ADMIN_TOKEN.as_bytes().to_vec())?
     .with_server_frontends(frontends.iter().copied())?;
     let server = tokio::spawn(async move { serve_with_listener(config, listener).await });
     let client = Client::new();
@@ -442,13 +447,22 @@ async fn wait_for_server_down(client: &Client, base_url: &str) -> Result<(), Box
     Err(format!("server at {base_url} did not go down after stop").into())
 }
 
-async fn ready_response(client: &Client, base_url: &str) -> Result<ReadyResponse, Box<dyn Error>> {
+/// Probes the authenticated admin status endpoint for the process' server
+/// role. The unauthenticated /readyz deliberately no longer carries runtime
+/// metadata (deployment-topology disclosure), so role verification flows
+/// through the admin API instead.
+async fn ready_response(client: &Client, base_url: &str) -> Result<String, Box<dyn Error>> {
     let response = client
-        .get(format!("{base_url}/readyz"))
+        .get(format!("{base_url}/api/v1/status"))
+        .header("Authorization", format!("Bearer {MN_ADMIN_TOKEN}"))
         .send()
         .await?
         .error_for_status()?;
-    Ok(response.json::<ReadyResponse>().await?)
+    let body: serde_json::Value = response.json().await?;
+    Ok(body["server_role"]
+        .as_str()
+        .ok_or_else(|| "admin status response missing server_role".to_owned())?
+        .to_owned())
 }
 
 /// Probes the two role-specific surfaces: returns (reconstruction-route
@@ -762,10 +776,10 @@ impl MultiNodeHarness {
 
     async fn assert_both_ready_and_surfaces(&self) -> Result<(), Box<dyn Error>> {
         let api_ready = ready_response(&self.client, self.role(ServerRole::Api).base_url()).await?;
-        assert_eq!(api_ready.server_role, ServerRole::Api.as_str());
+        assert_eq!(api_ready, ServerRole::Api.as_str());
         let transfer_ready =
             ready_response(&self.client, self.role(ServerRole::Transfer).base_url()).await?;
-        assert_eq!(transfer_ready.server_role, ServerRole::Transfer.as_str());
+        assert_eq!(transfer_ready, ServerRole::Transfer.as_str());
         assert_eq!(
             role_surface_statuses(&self.client, self.role(ServerRole::Api).base_url()).await?,
             expected_surface(ServerRole::Api)
@@ -975,9 +989,9 @@ async fn exercise_kill_role_mid_traffic(killed: ServerRole) -> Result<(), Box<dy
         }
     }
 
-    // Steady role never blinked: ready, correct server_role, full surface.
+    // Steady role never blinked: ready, correct role, full surface.
     let steady_ready = ready_response(&harness.client, harness.role(steady).base_url()).await?;
-    assert_eq!(steady_ready.server_role, steady.as_str());
+    assert_eq!(steady_ready, steady.as_str());
     assert_eq!(
         role_surface_statuses(&harness.client, harness.role(steady).base_url()).await?,
         expected_surface(steady)
@@ -1160,13 +1174,13 @@ async fn exercise_partition_between_api_and_transfer() -> Result<(), Box<dyn Err
     // Both nodes stay up.
     let api_ready =
         ready_response(&harness.client, harness.role(ServerRole::Api).base_url()).await?;
-    assert_eq!(api_ready.server_role, "api");
+    assert_eq!(api_ready, "api");
     let transfer_ready = ready_response(
         &harness.client,
         harness.role(ServerRole::Transfer).base_url(),
     )
     .await?;
-    assert_eq!(transfer_ready.server_role, "transfer");
+    assert_eq!(transfer_ready, "transfer");
 
     // Metadata path unaffected (api role serves reconstruction), transfer
     // routes black-holed with 502.
@@ -1381,10 +1395,10 @@ async fn exercise_mid_traffic_upgrade(
     // The old listener is provably gone before the same-port re-bind.
     wait_for_server_down(&harness.client, &upgraded_base).await?;
 
-    // Steady role kept serving: ready, correct server_role, full surface, and
+    // Steady role kept serving: ready, correct role, full surface, and
     // previously-acked data through its surface.
     let steady_ready = ready_response(&harness.client, harness.role(steady).base_url()).await?;
-    assert_eq!(steady_ready.server_role, steady.as_str());
+    assert_eq!(steady_ready, steady.as_str());
     assert_eq!(
         role_surface_statuses(&harness.client, harness.role(steady).base_url()).await?,
         expected_surface(steady)
@@ -1435,7 +1449,7 @@ async fn exercise_mid_traffic_upgrade(
     harness.put_role(upgrade, restarted);
     wait_for_ready(&harness.client, harness.role(upgrade).base_url()).await?;
     let restarted_ready = ready_response(&harness.client, harness.role(upgrade).base_url()).await?;
-    assert_eq!(restarted_ready.server_role, upgrade.as_str());
+    assert_eq!(restarted_ready, upgrade.as_str());
     assert_eq!(
         role_surface_statuses(&harness.client, harness.role(upgrade).base_url()).await?,
         expected_surface(upgrade)

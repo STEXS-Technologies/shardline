@@ -1,5 +1,6 @@
 use std::{
-    fs,
+    fs::{self, OpenOptions},
+    os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
 };
 
@@ -98,6 +99,7 @@ pub struct JwksSection {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OidcSection {
     pub issuer_url: Option<String>,
     pub audience: Option<String>,
@@ -121,24 +123,73 @@ fn expand_tilde(path: &str) -> PathBuf {
     PathBuf::from(path)
 }
 
-/// Resolves the active shardline.toml path.
-/// Returns `None` when neither an explicit `--config` path nor any
-/// auto-detected candidate exists.
+/// Resolves a config file path to its canonical location, verifying the
+/// resolved target is a regular file that stays inside `path`'s parent
+/// directory.
+///
+/// Kubernetes projects ConfigMap and Secret volume mounts through a `..data`
+/// indirection: `/etc/shardline/shardline.toml` is a symlink to
+/// `../..data/shardline.toml`, and `..data` is itself a symlink to a
+/// versioned directory. Those symlinks never escape the mount's parent
+/// directory, so they are legitimate. A symlink whose canonical target lands
+/// outside the parent (a config-manipulation / symlink-swap attack) is
+/// rejected. The caller must still open with `O_NOFOLLOW` on the resolved
+/// path to close the TOCTOU window between resolve and read.
+fn resolve_within_parent(path: &Path) -> Result<PathBuf, String> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let canonical_parent = fs::canonicalize(parent)
+        .map_err(|e| format!("failed to resolve config dir {}: {e}", parent.display()))?;
+    let resolved = fs::canonicalize(path)
+        .map_err(|e| format!("failed to resolve config file {}: {e}", path.display()))?;
+    if !resolved.starts_with(&canonical_parent) {
+        return Err(format!(
+            "config file {} resolves outside its directory; refusing symlinked config",
+            path.display()
+        ));
+    }
+    Ok(resolved)
+}
+
 /// Resolves the active shardline.toml content as a string.
 /// Returns `None` when neither an explicit `--config` path nor any
 /// auto-detected candidate exists.
 pub(crate) fn resolve_config_content(explicit: Option<&Path>) -> Result<Option<String>, String> {
     if let Some(path) = explicit {
-        return fs::read_to_string(path)
-            .map(Some)
-            .map_err(|error| format!("failed to read config file {}: {error}", path.display()));
+        let resolved = resolve_within_parent(path)?;
+        // Use O_NOFOLLOW to prevent TOCTOU symlink swap between resolve and read.
+        let mut file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&resolved)
+            .map_err(|e| format!("failed to open config file {}: {e}", resolved.display()))?;
+        let mut content = String::new();
+        std::io::Read::read_to_string(&mut file, &mut content)
+            .map_err(|e| format!("failed to read config file {}: {e}", resolved.display()))?;
+        return Ok(Some(content));
     }
     for candidate in CONFIG_FILE_CANDIDATES {
         let expanded = expand_tilde(candidate);
         if expanded.exists() {
-            return fs::read_to_string(&expanded).map(Some).map_err(|error| {
-                format!("failed to read config file {}: {error}", expanded.display())
-            });
+            let resolved = match resolve_within_parent(&expanded) {
+                Ok(resolved) => resolved,
+                Err(error) => {
+                    tracing::warn!("skipping config candidate {}: {error}", expanded.display());
+                    continue;
+                }
+            };
+            // Use O_NOFOLLOW to prevent TOCTOU symlink swap.
+            let mut file = OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW)
+                .open(&resolved)
+                .map_err(|e| format!("failed to open config file {}: {e}", resolved.display()))?;
+            let mut content = String::new();
+            std::io::Read::read_to_string(&mut file, &mut content)
+                .map_err(|e| format!("failed to read config file {}: {e}", resolved.display()))?;
+            return Ok(Some(content));
         }
     }
     Ok(None)
@@ -250,5 +301,49 @@ mod tests {
         // In a test environment none should exist, so returns None.
         let content = resolve_config_content(None).unwrap();
         assert!(content.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_resolve_config_content_accepts_projected_symlink_within_directory() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path().join("..data");
+        std::fs::create_dir(&data_dir).unwrap();
+        let target = data_dir.join("shardline.toml");
+        std::fs::write(
+            &target,
+            "[server]\nbind_addr = \"0.0.0.0:8080\"\npublic_base_url = \"http://shardline\"\n",
+        )
+        .unwrap();
+        // Kubernetes ConfigMap projection: /etc/shardline/shardline.toml ->
+        // ../..data/shardline.toml (..data is a symlink to a versioned dir).
+        let link = temp.path().join("shardline.toml");
+        symlink(Path::new("..data").join("shardline.toml"), &link).unwrap();
+
+        let content = resolve_config_content(Some(&link)).unwrap();
+        assert!(content.is_some());
+        assert!(content.unwrap().contains("0.0.0.0:8080"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_resolve_config_content_rejects_symlink_escaping_directory() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            outside.path(),
+            "[server]\nbind_addr = \"0.0.0.0:9999\"\npublic_base_url = \"http://evil\"\n",
+        )
+        .unwrap();
+        let link = temp.path().join("shardline.toml");
+        symlink(outside.path(), &link).unwrap();
+
+        let result = resolve_config_content(Some(&link));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("outside its directory"));
     }
 }

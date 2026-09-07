@@ -450,10 +450,22 @@ pub fn parse_ofs_delta_offset(data: &[u8], pos: &mut usize) -> Result<usize, Pac
     let mut byte = data.get(*pos).copied().ok_or(PackError::InvalidDelta)?;
     *pos = (*pos).wrapping_add(1);
     let mut offset = (byte & 0x7f) as usize;
+    // The offset accumulator is bounds-checked with checked arithmetic; the
+    // iteration budget uses a saturating counter (wrapping is unreachable —
+    // the loop exits after at most MAX_DELTA_VARINT_BYTES iterations).
+    let mut iterations = 0usize;
     while byte & 0x80 != 0 {
+        iterations = iterations.wrapping_add(1);
+        if iterations >= MAX_DELTA_VARINT_BYTES {
+            return Err(PackError::InvalidDelta);
+        }
         byte = data.get(*pos).copied().ok_or(PackError::InvalidDelta)?;
         *pos = (*pos).wrapping_add(1);
-        offset = offset.wrapping_add(1).wrapping_shl(7) | (byte & 0x7f) as usize;
+        offset = offset
+            .checked_add(1)
+            .and_then(|v| v.checked_shl(7))
+            .ok_or(PackError::InvalidDelta)?;
+        offset |= (byte & 0x7f) as usize;
     }
     Ok(offset)
 }

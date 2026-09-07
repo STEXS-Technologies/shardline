@@ -315,6 +315,7 @@ pub(super) fn map_provider_issue_error(error: ProviderServiceError) -> ServerErr
             ServerError::InvalidProviderTokenRequest
         }
         other @ ProviderServiceError::EmptyApiKey
+        | other @ ProviderServiceError::ApiKeyTooShort
         | other @ ProviderServiceError::ApiKeyTooLarge
         | other @ ProviderServiceError::ConfigTooLarge { .. }
         | other @ ProviderServiceError::ConfigLengthMismatch

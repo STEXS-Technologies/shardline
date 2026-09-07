@@ -116,7 +116,7 @@ impl ResumableSessionState {
                 Self::Active | Self::Completing | Self::Aborted | Self::Expired
             ) | (
                 Self::Completing,
-                Self::Completing | Self::Active | Self::Completed | Self::Aborted | Self::Expired
+                Self::Completing | Self::Completed | Self::Aborted | Self::Expired
             ) | (Self::Completed, Self::Completed)
                 | (Self::Aborted, Self::Aborted)
                 | (Self::Expired, Self::Expired)

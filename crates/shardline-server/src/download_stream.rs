@@ -312,6 +312,7 @@ pub(crate) async fn file_record_byte_stream(
                 let data: Vec<u8> = if is_compressed {
                     // New format (XorbCdcV1): LZ4-compressed. Decompress and verify hash.
                     const MAX_DECOMPRESSED_CHUNK: u64 = 2 * 1024 * 1024;
+                    // lz4_flex::compress_prepend_size writes a 4-byte LE u32 size prefix.
                     let decompressed_size = compressed
                         .first_chunk::<4>()
                         .map(|header| u32::from_le_bytes(*header) as u64)
@@ -348,9 +349,20 @@ pub(crate) async fn file_record_byte_stream(
                     decompressed
                 } else {
                     // Old format (FixedChunkV1 / pre-CDC): raw (uncompressed) data.
-                    // The stored bytes are the raw chunk data; the hash in the
-                    // file record is computed from raw bytes, so the hash stored
-                    // in the record matches the data on disk directly.
+                    // Verify content hash to detect bit-rot or storage corruption.
+                    let actual_hash = chunk_hash(&compressed);
+                    let actual_hex = xet_hash_hex_string(actual_hash);
+                    if actual_hex != expected_hash_hex {
+                        warn!(
+                            expected = %expected_hash_hex,
+                            actual = %actual_hex,
+                            chunk_len = compressed.len(),
+                            "chunk integrity mismatch for uncompressed chunk"
+                        );
+                        return Err(ServerError::ObjectStore(
+                            ObjectStoreError::StoredLengthMismatch,
+                        ));
+                    }
                     compressed
                 };
                 // Apply byte range on the data

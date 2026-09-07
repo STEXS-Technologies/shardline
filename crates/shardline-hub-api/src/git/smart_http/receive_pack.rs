@@ -189,6 +189,14 @@ async fn store_push_objects(
     // Parse commit to extract tree, parent, and message.
     let (tree_sha_hex, _parent_sha, message) = parse_commit_object(&commit_obj.data)?;
 
+    // Cap commit message length to prevent database bloat and log injection,
+    // matching the NDJSON commit API limit. Use char-boundary-safe truncation
+    // to avoid panicking on multi-byte UTF-8 characters.
+    let message: String = message
+        .chars()
+        .take(crate::commit::MAX_COMMIT_MSG_LEN)
+        .collect();
+
     // Walk the tree to collect file entries.
     let tree_sha_bytes =
         hex::decode(&tree_sha_hex).map_err(|e| SmartHttpError::InvalidTreeSha(e.to_string()))?;

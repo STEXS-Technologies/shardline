@@ -251,7 +251,6 @@ fn collect_digest_refs<'value>(value: &'value serde_json::Value, out: &mut Vec<&
         serde_json::Value::Object(map) => {
             if let Some(serde_json::Value::String(digest)) = map.get("digest") {
                 out.push(digest.as_str());
-                return;
             }
             for v in map.values() {
                 collect_digest_refs(v, out);
@@ -392,18 +391,17 @@ mod tests {
     }
 
     #[test]
-    fn collect_digest_refs_skips_object_with_digest_returns_early() {
-        // Line 269: when an object has a "digest" field, collect it and return
-        // early without recursing into other fields.
+    fn collect_digest_refs_finds_all_digests_including_sibling_objects() {
+        // When an object has a "digest" field, collect it AND recurse into
+        // sibling values to find all digest references.
         let doc = serde_json::json!({
             "digest": DIGEST_A,
             "annotations": { "digest": DIGEST_B }
         });
         let mut refs = Vec::new();
         collect_digest_refs(&doc, &mut refs);
-        // Only DIGEST_A should be found because the function returns early
-        // after the first "digest" key in an object.
-        assert_eq!(refs.len(), 1);
+        assert_eq!(refs.len(), 2);
         assert!(refs.contains(&DIGEST_A));
+        assert!(refs.contains(&DIGEST_B));
     }
 }
