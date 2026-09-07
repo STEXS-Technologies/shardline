@@ -325,16 +325,19 @@ fn open_secret_file(path: &Path) -> io::Result<File> {
         .read(true)
         .custom_flags(libc::O_NOFOLLOW)
         .open(&resolved_path)?;
-    // Reject world-readable or group-readable secret files to prevent
-    // credential theft on multi-user systems.
+    // Reject world-readable secret files to prevent credential theft on
+    // multi-user systems. Owner/group-readable modes (0600, 0640, 0440) are
+    // permitted: the Kubernetes deployment security context runs the container
+    // with a dedicated `runAsGroup`/`fsGroup` and mounts secrets with
+    // `defaultMode: 0440`, relying on group-read for the service account.
+    // Only world-readable ownership (`S_IROTH` set) is treated as exposed.
     let mode = file.metadata()?.permissions().mode();
-    const S_IRGRP: u32 = 0o040;
     const S_IROTH: u32 = 0o004;
-    if mode & (S_IRGRP | S_IROTH) != 0 {
+    if mode & S_IROTH != 0 {
         return Err(IoError::new(
             ErrorKind::PermissionDenied,
             format!(
-                "secret file {} has overly permissive mode {:o}; expected 0600 or stricter",
+                "secret file {} has overly permissive mode {:o}; expected 0640 or stricter (not world-readable)",
                 resolved_path.display(),
                 mode & 0o777,
             ),
@@ -792,6 +795,47 @@ mod tests {
         // Symlinks are resolved to their target and opened successfully.
         let result = open_secret_file(&symlink_path);
         assert!(result.is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_secret_file_group_readable_mode_is_ok() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        // k8s projected secrets use defaultMode: 0440 (owner+group read only).
+        std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o440)).unwrap();
+
+        let result = open_secret_file(tmp.path());
+        assert!(result.is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_secret_file_owner_group_readable_mode_is_ok() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        // systemd-style 0640 (owner rw, group read) is a documented mode.
+        std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o640)).unwrap();
+
+        let result = open_secret_file(tmp.path());
+        assert!(result.is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_secret_file_world_readable_mode_is_err() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        // World-readable secrets are exposed to every local user and must be rejected.
+        std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o444)).unwrap();
+
+        let result = open_secret_file(tmp.path());
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("overly permissive mode"));
     }
 
     // -----------------------------------------------------------------------
