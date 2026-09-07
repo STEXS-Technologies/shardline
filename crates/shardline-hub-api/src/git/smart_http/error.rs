@@ -74,6 +74,8 @@ pub enum SmartHttpError {
     TreeShaRangeOutOfBounds,
     #[error("tree depth overflow")]
     TreeDepthOverflow,
+    #[error("invalid tree entry name: {0}")]
+    TreeInvalidEntryName(String),
     #[error("blob object not found: {0}")]
     BlobObjectNotFound(String),
     #[error("expected blob object for file, got {0:?}")]

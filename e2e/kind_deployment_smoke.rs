@@ -3,13 +3,14 @@ use std::{env, error::Error, time::Duration};
 use futures_util::future::try_join_all;
 use reqwest::{Client, StatusCode};
 use serde_json::json;
-use shardline_server::{ProviderTokenIssueResponse, ReadyResponse, test_fixtures};
+use shardline_server::{ProviderTokenIssueResponse, test_fixtures};
 use tokio::time::sleep;
 
 type TestError = Box<dyn Error + Send + Sync>;
 
 const PROVIDER_KEY: &str = "kind-smoke-provider-key";
 const METRICS_TOKEN: &str = "kind-smoke-metrics-token";
+const ADMIN_TOKEN: &str = "kind-smoke-admin-read-token";
 const CONCURRENT_SPLIT_ROLE_REQUESTS: usize = 8;
 
 #[derive(Debug)]
@@ -288,11 +289,21 @@ async fn assert_ready(
         StatusCode::OK,
         "{expected_role} is not ready"
     );
-    let ready = response.json::<ReadyResponse>().await?;
-    assert_eq!(ready.server_role, expected_role);
-    assert_eq!(ready.metadata_backend, expected_metadata);
-    assert_eq!(ready.object_backend, expected_object);
-    assert_eq!(ready.cache_backend, expected_cache);
+    // The unauthenticated /readyz reports health only; backend topology is
+    // exposed on the authenticated admin status endpoint.
+    let ready = response.json::<serde_json::Value>().await?;
+    assert_eq!(ready["status"], "ok");
+    let admin = client
+        .get(format!("{base_url}/api/v1/status"))
+        .bearer_auth(ADMIN_TOKEN)
+        .send()
+        .await?;
+    assert_eq!(admin.status(), StatusCode::OK, "{expected_role} admin status");
+    let admin: serde_json::Value = admin.json().await?;
+    assert_eq!(admin["server_role"], expected_role);
+    assert_eq!(admin["metadata_backend"], expected_metadata);
+    assert_eq!(admin["object_backend"], expected_object);
+    assert_eq!(admin["cache_backend"], expected_cache);
     Ok(())
 }
 

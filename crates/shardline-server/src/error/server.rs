@@ -151,7 +151,7 @@ pub enum ServerError {
     #[error("bearer token was invalid")]
     InvalidToken(TokenCodecError),
     /// The token signing key is misconfigured.
-    #[error("token signing key is misconfigured: {0}")]
+    #[error("token signing key is misconfigured")]
     SigningKeyError(String),
     /// The bearer token did not grant the required scope.
     #[error("bearer token does not grant the required scope")]

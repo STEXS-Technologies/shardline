@@ -15,6 +15,9 @@ const MAX_COMMIT_INSTRUCTIONS: usize = 100_000;
 /// Files exceeding this limit must use LFS.
 const MAX_INLINE_FILE_BYTES: usize = 10 * 1024 * 1024; // 10 MiB
 
+/// Maximum commit message length to prevent log injection and database bloat.
+pub const MAX_COMMIT_MSG_LEN: usize = 4096;
+
 /// Validates a commit file path to prevent path traversal and injection.
 ///
 /// Rejects paths that:
@@ -24,6 +27,11 @@ const MAX_INLINE_FILE_BYTES: usize = 10 * 1024 * 1024; // 10 MiB
 /// - Contain control characters (ASCII 0x00–0x1F, 0x7F)
 /// - Exceed the maximum allowed length
 fn validate_commit_path(path: &str) -> Result<(), HubApiError> {
+    if path.is_empty() {
+        return Err(HubApiError::PathValidation(
+            "commit path must not be empty".to_owned(),
+        ));
+    }
     if path.len() > MAX_COMMIT_PATH_LEN {
         return Err(HubApiError::PathValidation(format!(
             "commit path exceeds maximum length of {MAX_COMMIT_PATH_LEN}"
@@ -272,6 +280,12 @@ pub fn parse_ndjson_commit(body: &str) -> Result<ParsedCommit, HubApiError> {
         return Err(HubApiError::PathValidation(
             "commit header with message (or summary) is required".to_owned(),
         ));
+    }
+
+    if message.len() > MAX_COMMIT_MSG_LEN {
+        return Err(HubApiError::PathValidation(format!(
+            "commit message exceeds maximum length of {MAX_COMMIT_MSG_LEN}"
+        )));
     }
 
     Ok(ParsedCommit {

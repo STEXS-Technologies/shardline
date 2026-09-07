@@ -1083,6 +1083,9 @@ fn read_secret_file_bytes_accepts_projected_secret_symlink_within_directory() {
     let link = temp.path().join("linked-secret");
     let write = write_file(&target, b"test-signing-key-32-bytes-long!!");
     assert!(write.is_ok());
+    // Set restrictive permissions (0600) to pass the permission check
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
     let linked = symlink(Path::new("..data").join("target-secret"), &link);
     assert!(linked.is_ok());
 
