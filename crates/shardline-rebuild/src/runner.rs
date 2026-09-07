@@ -274,6 +274,12 @@ where
         }
     }
 
+    // SECURITY NOTE: This deletion runs without a GC/write barrier. A shard write
+    // in progress (temp file not yet hardlinked) will appear in `desired` from the
+    // scan above, so its mapping survives. However, a shard appearing BETWEEN scan
+    // and delete could lose its mapping temporarily. The next rebuild pass self-
+    // heals. Data loss is prevented because individual chunk objects within the
+    // shard are still protected by record references.
     for (chunk_hash_hex, _mapping) in existing {
         if desired.contains_key(&chunk_hash_hex) {
             continue;

@@ -19,7 +19,7 @@ use tokio::{net::TcpListener, spawn, sync::Semaphore, time::timeout};
 
 use shardline_server::{
     AppState, ExecutionPools, FileReconstructionResponse, LocalBackend, ProtocolMetrics,
-    ReadyResponse, ReconstructionCacheService, STREAM_READ_BUFFER_BYTES, ServerBackend,
+    ReconstructionCacheService, STREAM_READ_BUFFER_BYTES, ServerBackend,
     ServerConfig, ServerRole, TransferLimiter, WeightedAdmission, XorbUploadResponse,
     acquire_chunk_transfer_permit, chunk_hash, clear_repository_reference_probe_filter,
     full_byte_stream_response, lock_repository_reference_probe_test,
@@ -28,6 +28,11 @@ use shardline_server::{
     test_fixtures::{single_chunk_xorb, single_file_shard},
 };
 use support::{bearer_token, test_byte_stream, wait_for_health};
+
+/// Admin read token wired into spawned servers so tests verify runtime
+/// topology through the authenticated admin API (the unauthenticated /readyz
+/// no longer carries runtime metadata).
+const TEST_ADMIN_TOKEN: &str = "transfer-http-admin-read-token";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn protocol_xorb_and_shard_routes_register_reconstruction() {
@@ -52,7 +57,8 @@ async fn protocol_xorb_and_shard_routes_register_reconstruction() {
         storage.path().to_path_buf(),
         NonZeroUsize::new(128).unwrap_or(NonZeroUsize::MIN),
     )
-    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec());
+    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
+    .and_then(|c| c.with_admin_read_token(TEST_ADMIN_TOKEN.as_bytes().to_vec()));
     assert!(config.is_ok());
     let Ok(config) = config else {
         return;
@@ -343,7 +349,8 @@ async fn native_hash_path_routes_reject_non_xet_hashes() {
         storage.path().to_path_buf(),
         NonZeroUsize::new(128).unwrap_or(NonZeroUsize::MIN),
     )
-    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec());
+    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
+    .and_then(|c| c.with_admin_read_token(TEST_ADMIN_TOKEN.as_bytes().to_vec()));
     assert!(config.is_ok());
     let Ok(config) = config else {
         return;
@@ -446,7 +453,8 @@ async fn xorb_transfer_route_requires_range_and_serves_partial_content() {
         storage.path().to_path_buf(),
         NonZeroUsize::new(128).unwrap_or(NonZeroUsize::MIN),
     )
-    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec());
+    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
+    .and_then(|c| c.with_admin_read_token(TEST_ADMIN_TOKEN.as_bytes().to_vec()));
     assert!(config.is_ok());
     let Ok(config) = config else {
         return;
@@ -754,7 +762,8 @@ async fn xorb_routes_reject_missing_hashes_before_repository_reference_scan() {
         storage.path().to_path_buf(),
         NonZeroUsize::new(128).unwrap_or(NonZeroUsize::MIN),
     )
-    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec());
+    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
+    .and_then(|c| c.with_admin_read_token(TEST_ADMIN_TOKEN.as_bytes().to_vec()));
     assert!(config.is_ok());
     let Ok(config) = config else {
         return;
@@ -835,7 +844,8 @@ async fn chunk_routes_reject_missing_hashes_before_repository_reference_scan() {
         storage.path().to_path_buf(),
         NonZeroUsize::new(128).unwrap_or(NonZeroUsize::MIN),
     )
-    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec());
+    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
+    .and_then(|c| c.with_admin_read_token(TEST_ADMIN_TOKEN.as_bytes().to_vec()));
     assert!(config.is_ok());
     let Ok(config) = config else {
         return;
@@ -1107,7 +1117,8 @@ async fn readiness_route_reports_local_backend_for_initialized_storage() {
         storage.path().to_path_buf(),
         NonZeroUsize::new(128).unwrap_or(NonZeroUsize::MIN),
     )
-    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec());
+    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
+    .and_then(|c| c.with_admin_read_token(TEST_ADMIN_TOKEN.as_bytes().to_vec()));
     assert!(config.is_ok());
     let Ok(config) = config else {
         return;
@@ -1124,18 +1135,29 @@ async fn readiness_route_reports_local_backend_for_initialized_storage() {
         return;
     };
     assert_eq!(response.status(), StatusCode::OK);
-    let ready = response.json::<ReadyResponse>().await;
+    let ready = response.json::<serde_json::Value>().await;
     assert!(ready.is_ok());
     let Ok(ready) = ready else {
         server.abort();
         return;
     };
-    assert_eq!(ready.status, "ok");
-    assert_eq!(ready.server_role, "all");
-    assert_eq!(ready.server_frontends, vec!["xet".to_owned()]);
-    assert_eq!(ready.metadata_backend, "local");
-    assert_eq!(ready.object_backend, "local");
-    assert_eq!(ready.cache_backend, "memory");
+    assert_eq!(ready["status"], "ok");
+
+    // Runtime topology is exposed on the authenticated admin status endpoint.
+    let admin = Client::new()
+        .get(format!("{base_url}/api/v1/status"))
+        .header("Authorization", format!("Bearer {TEST_ADMIN_TOKEN}"))
+        .send()
+        .await;
+    assert!(admin.is_ok());
+    let admin = admin.unwrap();
+    assert_eq!(admin.status(), StatusCode::OK);
+    let admin_body: serde_json::Value = admin.json().await.unwrap();
+    assert_eq!(admin_body["server_role"], "all");
+    assert_eq!(admin_body["server_frontends"], serde_json::json!(["xet"]));
+    assert_eq!(admin_body["metadata_backend"], "local");
+    assert_eq!(admin_body["object_backend"], "local");
+    assert_eq!(admin_body["cache_backend"], "memory");
 
     server.abort();
 }
@@ -1304,7 +1326,8 @@ async fn shard_route_rejects_missing_xorbs() {
         storage.path().to_path_buf(),
         NonZeroUsize::new(128).unwrap_or(NonZeroUsize::MIN),
     )
-    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec());
+    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
+    .and_then(|c| c.with_admin_read_token(TEST_ADMIN_TOKEN.as_bytes().to_vec()));
     assert!(config.is_ok());
     let Ok(config) = config else {
         return;
@@ -1369,7 +1392,8 @@ async fn routes_require_bearer_token_when_auth_is_enabled() {
         storage.path().to_path_buf(),
         NonZeroUsize::new(128).unwrap_or(NonZeroUsize::MIN),
     )
-    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec());
+    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
+    .and_then(|c| c.with_admin_read_token(TEST_ADMIN_TOKEN.as_bytes().to_vec()));
     assert!(config.is_ok());
     let Ok(config) = config else {
         return;
@@ -1417,7 +1441,8 @@ async fn write_routes_reject_read_only_tokens() {
         storage.path().to_path_buf(),
         NonZeroUsize::new(128).unwrap_or(NonZeroUsize::MIN),
     )
-    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec());
+    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
+    .and_then(|c| c.with_admin_read_token(TEST_ADMIN_TOKEN.as_bytes().to_vec()));
     assert!(config.is_ok());
     let Ok(config) = config else {
         return;
@@ -1483,7 +1508,8 @@ async fn routes_accept_matching_scope_tokens() {
         storage.path().to_path_buf(),
         NonZeroUsize::new(128).unwrap_or(NonZeroUsize::MIN),
     )
-    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec());
+    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
+    .and_then(|c| c.with_admin_read_token(TEST_ADMIN_TOKEN.as_bytes().to_vec()));
     assert!(config.is_ok());
     let Ok(config) = config else {
         return;
@@ -1649,7 +1675,8 @@ async fn stats_route_requires_auth_when_token_auth_is_configured() {
         storage.path().to_path_buf(),
         NonZeroUsize::new(128).unwrap_or(NonZeroUsize::MIN),
     )
-    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec());
+    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
+    .and_then(|c| c.with_admin_read_token(TEST_ADMIN_TOKEN.as_bytes().to_vec()));
     assert!(config.is_ok());
     let Ok(config) = config else {
         return;
@@ -1696,7 +1723,8 @@ async fn authenticated_chunk_route_requires_file_version_context() {
         storage.path().to_path_buf(),
         NonZeroUsize::new(128).unwrap_or(NonZeroUsize::MIN),
     )
-    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec());
+    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
+    .and_then(|c| c.with_admin_read_token(TEST_ADMIN_TOKEN.as_bytes().to_vec()));
     assert!(config.is_ok());
     let Ok(config) = config else {
         return;
@@ -1851,7 +1879,8 @@ async fn reconstruction_transfer_urls_work_and_stay_repository_scoped() {
         storage.path().to_path_buf(),
         NonZeroUsize::new(128).unwrap_or(NonZeroUsize::MIN),
     )
-    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec());
+    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
+    .and_then(|c| c.with_admin_read_token(TEST_ADMIN_TOKEN.as_bytes().to_vec()));
     assert!(config.is_ok());
     let Ok(config) = config else {
         return;

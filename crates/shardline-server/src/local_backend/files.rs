@@ -29,6 +29,10 @@ impl LocalBackend {
         source_file_id: &str,
         destination_file_id: &str,
     ) -> Result<bool, ServerError> {
+        // Hold the metadata_write_lock for the entire check-and-commit to prevent
+        // TOCTOU races where two concurrent callers both observe NotFound and
+        // both commit, creating duplicate version records.
+        let _guard = self.metadata_write_lock.lock().await;
         match self.read_record(destination_file_id, None, None).await {
             Ok(_record) => return Ok(false),
             Err(ServerError::NotFound) => {}
@@ -222,6 +226,9 @@ impl LocalBackend {
             (),
             CasLimits::new(NonZeroU64::MAX, NonZeroU64::MAX, NonZeroU64::MAX),
         );
+        // Hold the metadata_write_lock for the entire shard commit to prevent
+        // interleaved metadata writes from concurrent shard uploads.
+        let _metadata_guard = self.metadata_write_lock.lock().await;
         coordinator
             .with_upload_intent(&intent, move || async move {
                 register_uploaded_shard_bytes(

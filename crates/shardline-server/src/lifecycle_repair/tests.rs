@@ -105,10 +105,13 @@ fn classify_retention_hold_no_release_is_keep_when_object_exists() {
 }
 
 #[test]
-fn classify_retention_hold_no_release_is_delete_missing_when_object_missing() {
+fn classify_retention_hold_permanent_hold_kept_when_object_missing() {
+    // Permanent holds (release_after = None) are NEVER removed by lifecycle repair,
+    // even if the object is temporarily missing — preventing transient metadata
+    // backend hiccups from silently dropping operator-placed protection.
     assert_eq!(
         classify_retention_hold_repair_action(None, 10, false, 100),
-        RetentionHoldRepairAction::DeleteMissing
+        RetentionHoldRepairAction::Keep
     );
 }
 
@@ -1726,7 +1729,7 @@ async fn repair_retention_hold_never_release_is_keep_when_object_exists() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn repair_retention_hold_never_release_is_delete_missing_when_object_missing() {
+async fn repair_retention_hold_permanent_hold_kept_when_object_missing() {
     let (_root, record_store, index_store, object_store) = make_test_stores();
     let options = LifecycleRepairOptions::default();
     let now = 1000;
@@ -1749,10 +1752,10 @@ async fn repair_retention_hold_never_release_is_delete_missing_when_object_missi
 
     assert_eq!(report.scanned_retention_holds, 1);
     assert_eq!(report.removed_expired_retention_holds, 0);
-    assert_eq!(report.removed_missing_retention_holds, 1);
+    assert_eq!(report.removed_missing_retention_holds, 0);
 
     let holds_after = index_store.list_retention_holds().unwrap();
-    assert_eq!(holds_after.len(), 0);
+    assert_eq!(holds_after.len(), 1);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

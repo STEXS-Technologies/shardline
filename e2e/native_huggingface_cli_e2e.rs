@@ -404,7 +404,7 @@ async fn start_runtime(frontends: &[ServerFrontend]) -> Result<HubRuntime, TestE
     .with_deployment_mode(shardline_server::DeploymentMode::Insecure)
     .with_provider_runtime(
         provider_config,
-        b"test-api-key".to_vec(),
+        b"test-api-key-16bytes".to_vec(),
         "test-issuer".to_owned(),
         NonZeroU64::new(3600).ok_or("test provider ttl must be non-zero")?,
     )?;

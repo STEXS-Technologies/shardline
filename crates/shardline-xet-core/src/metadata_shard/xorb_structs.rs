@@ -258,8 +258,19 @@ impl MDBXorbInfoView {
         data: Bytes,
     ) -> std::io::Result<Self> {
         let n = header.num_entries as usize;
-        let n_bytes =
-            size_of::<XorbChunkSequenceHeader>() + n * size_of::<XorbChunkSequenceEntry>();
+        let n_bytes = size_of::<XorbChunkSequenceHeader>()
+            .checked_add(
+                n.checked_mul(size_of::<XorbChunkSequenceEntry>())
+                    .ok_or_else(|| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "xorb entry count overflow",
+                        )
+                    })?,
+            )
+            .ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "xorb entry count overflow")
+            })?;
         if data.len() < n_bytes {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::UnexpectedEof,

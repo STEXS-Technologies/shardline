@@ -30,7 +30,11 @@ pub(crate) const fn classify_retention_hold_repair_action(
     {
         return RetentionHoldRepairAction::DeleteExpired;
     }
-    if !object_exists {
+    // Only delete time-bounded holds for missing objects. Permanent holds
+    // (release_after = None) are NEVER removed by lifecycle repair — they
+    // require explicit operator intervention, preventing transient metadata
+    // backend hiccups from silently dropping operator-placed protection.
+    if !object_exists && release_after_unix_seconds.is_some() {
         return RetentionHoldRepairAction::DeleteMissing;
     }
     RetentionHoldRepairAction::Keep

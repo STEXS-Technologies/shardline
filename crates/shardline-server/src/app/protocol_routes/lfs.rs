@@ -931,10 +931,14 @@ pub(crate) async fn lfs_batch(
         .trim_end_matches('/')
         .to_owned();
     let xet_action_header = cas_token.as_ref().map(|token| {
+        let expiration = auth
+            .claims()
+            .map(|c| c.expires_at_unix_seconds().to_string())
+            .unwrap_or_else(|| "0".to_owned());
         json!({
             URL: &cas_url,
             ACCESS_TOKEN: token,
-            TOKEN_EXPIRATION: "0"
+            TOKEN_EXPIRATION: expiration
         })
     });
 

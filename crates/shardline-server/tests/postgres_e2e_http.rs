@@ -73,6 +73,10 @@ async fn ensure_pg() -> &'static str {
 // ---------------------------------------------------------------------------
 
 const TEST_SIGNING_KEY: &[u8] = b"0123456789abcdef0123456789abcdef";
+/// Admin read token wired into every spawned server so tests can verify
+/// runtime metadata through the authenticated admin API (the unauthenticated
+/// /readyz deliberately no longer carries runtime metadata).
+const TEST_ADMIN_TOKEN: &str = "pg-e2e-admin-read-token";
 
 /// Mint a Write-scoped bearer token bound to an arbitrary `owner/name` repo.
 ///
@@ -119,7 +123,9 @@ impl TestServer {
         .with_deployment_mode(shardline_server::DeploymentMode::Insecure)
         .with_index_postgres_url(pg_url.to_owned())
         .unwrap()
-        .with_reconstruction_cache_disabled();
+        .with_reconstruction_cache_disabled()
+        .with_admin_read_token(TEST_ADMIN_TOKEN.as_bytes().to_vec())
+        .unwrap();
 
         config.validate_runtime_requirements().unwrap();
 
@@ -254,7 +260,7 @@ impl TestServerBuilder {
             config = config
                 .with_provider_runtime(
                     config_path.clone(),
-                    b"test-api-key".to_vec(),
+                    b"test-api-key-16bytes".to_vec(),
                     "test-issuer".to_owned(),
                     NonZeroU64::new(3600).unwrap(),
                 )
@@ -328,7 +334,7 @@ async fn test_healthz_returns_200() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_readyz_returns_postgres_backend() {
+async fn test_readyz_returns_ok_and_admin_reports_postgres_backend() {
     let server = TestServer::start(&[ServerFrontend::Xet]).await;
     let client = reqwest::Client::new();
 
@@ -337,6 +343,16 @@ async fn test_readyz_returns_postgres_backend() {
     assert_eq!(resp.status(), 200);
     let json: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(json["status"], "ok");
+    // Runtime backend topology is exposed on the AUTHENTICATED admin status
+    // endpoint, not the unauthenticated /readyz.
+    let resp = client
+        .get(server.url("/api/v1/status"))
+        .header("Authorization", format!("Bearer {TEST_ADMIN_TOKEN}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let json: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(json["metadata_backend"], "postgres");
 }
 
@@ -710,6 +726,17 @@ async fn test_all_frontends_health_and_ready() {
     assert_eq!(resp.status(), 200);
     let json: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(json["status"], "ok");
+
+    // Runtime topology (metadata backend + frontends) is exposed on the
+    // AUTHENTICATED admin status endpoint, not the unauthenticated /readyz.
+    let resp = client
+        .get(server.url("/api/v1/status"))
+        .header("Authorization", format!("Bearer {TEST_ADMIN_TOKEN}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let json: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(json["metadata_backend"], "postgres");
     assert!(json["server_frontends"].as_array().unwrap().len() >= 5);
 }
@@ -1156,7 +1183,7 @@ async fn test_provider_issue_token_with_valid_key() {
 
     let resp = client
         .post(server.url("/v1/providers/generic/tokens"))
-        .header("x-shardline-provider-key", "test-api-key")
+        .header("x-shardline-provider-key", "test-api-key-16bytes")
         .header("Content-Type", "application/json")
         .json(&serde_json::json!({
             "subject": "test-user",
@@ -1232,7 +1259,7 @@ async fn test_provider_git_lfs_authenticate() {
 
     let resp = client
         .post(server.url("/v1/providers/generic/git-lfs-authenticate"))
-        .header("x-shardline-provider-key", "test-api-key")
+        .header("x-shardline-provider-key", "test-api-key-16bytes")
         .header("Content-Type", "application/json")
         .json(&serde_json::json!({
             "subject": "test-user",
@@ -1263,7 +1290,7 @@ async fn test_provider_xet_read_token() {
 
     let resp = client
         .get(server.url("/api/generic/test/test/xet-read-token/main?subject=test-user"))
-        .header("x-shardline-provider-key", "test-api-key")
+        .header("x-shardline-provider-key", "test-api-key-16bytes")
         .send()
         .await
         .unwrap();
@@ -1281,7 +1308,7 @@ async fn test_provider_xet_write_token() {
 
     let resp = client
         .get(server.url("/api/generic/test/test/xet-write-token/main?subject=test-user"))
-        .header("x-shardline-provider-key", "test-api-key")
+        .header("x-shardline-provider-key", "test-api-key-16bytes")
         .send()
         .await
         .unwrap();
@@ -1572,7 +1599,8 @@ async fn test_reconstruction_cache_hit() {
         assert_eq!(body.as_ref(), content, "GET iteration {i} body mismatch");
     }
 
-    // Also verify /readyz reports the cache backend as "memory".
+    // Also verify /readyz still reports healthy (the unauthenticated endpoint
+    // now exposes only status; runtime topology lives on the admin API).
     let ready_req = axum::http::Request::builder()
         .uri("/readyz")
         .body(axum::body::Body::empty())
@@ -1585,10 +1613,7 @@ async fn test_reconstruction_cache_hit() {
             .unwrap(),
     )
     .unwrap();
-    assert_eq!(
-        ready_json["cache_backend"], "memory",
-        "readyz should report memory cache backend"
-    );
+    assert_eq!(ready_json["status"], "ok");
 }
 
 // ===========================================================================
@@ -3353,10 +3378,12 @@ async fn test_cors_headers_hub_api() {
         cors_header.is_some(),
         "Hub API response should include Access-Control-Allow-Origin header"
     );
+    // Non-admin routes reflect the requesting origin (admin /api/v1/* paths are
+    // the ones excluded from CORS).
     assert_eq!(
         cors_header.unwrap().to_str().unwrap(),
-        "*",
-        "Hub API should use the same allow-all CORS policy as the protocol frontends"
+        "http://127.0.0.1:8080",
+        "Hub API should reflect the requesting origin"
     );
 }
 
@@ -3923,7 +3950,7 @@ async fn test_provider_token_request_at_max_body() {
 
     let resp = client
         .post(server.url("/v1/providers/generic/tokens"))
-        .header("x-shardline-provider-key", "test-api-key")
+        .header("x-shardline-provider-key", "test-api-key-16bytes")
         .header("Content-Type", "application/json")
         .body(body_str.clone())
         .send()
@@ -5059,8 +5086,8 @@ async fn test_cors_headers_on_lfs_endpoint() {
     );
     assert_eq!(
         cors_header.unwrap().to_str().unwrap(),
-        "*",
-        "LFS should allow all origins"
+        "http://example.com",
+        "LFS should reflect the requesting origin"
     );
 
     // Also verify a normal GET request includes CORS headers

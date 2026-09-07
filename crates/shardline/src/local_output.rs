@@ -100,6 +100,21 @@ pub fn write_output_bytes(path: &Path, bytes: &[u8], create_parent: bool) -> io:
         if create_parent {
             ensure_parent_directory(path)?;
         }
+        // Reject if the output path is a symlink to prevent write-through-symlink attacks
+        if path.exists() || path.symlink_metadata().is_ok() {
+            let meta = path.symlink_metadata().map_err(|e| {
+                io::Error::new(e.kind(), format!("failed to stat output path: {e}"))
+            })?;
+            if meta.file_type().is_symlink() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "output path {} is a symlink; refusing to follow",
+                        path.display()
+                    ),
+                ));
+            }
+        }
         fs::write(path, bytes)
     }
 }

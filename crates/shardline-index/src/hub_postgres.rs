@@ -707,7 +707,7 @@ impl HubStore for PostgresIndexStore {
     ) -> Result<Vec<HubWebhook>, Self::Error> {
         let pool = self.pool().clone();
         let repo_id = repo_id.to_owned();
-        let event = event.to_owned();
+        let event = escape_like(event);
 
         block_on_async(async {
             let mut rows = sqlx::query(

@@ -1,5 +1,5 @@
 #[cfg(unix)]
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::{
     env::var,
     fs::{self, File, OpenOptions},
@@ -259,7 +259,7 @@ pub(super) fn read_secret_file_bytes(
     error: impl Fn(u64, u64) -> ServerConfigError + Copy,
     length_mismatch_error: impl Fn(u64, u64) -> ServerConfigError + Copy,
 ) -> Result<SecretBytes, ServerConfigError> {
-    let mut file = open_secret_file(path).map_err(read_error)?;
+    let file = open_secret_file(path).map_err(read_error)?;
 
     // Stat BEFORE reading so an oversized secret file is rejected without ever
     // being buffered into memory (bounded read). Fixed-length key files may
@@ -277,8 +277,12 @@ pub(super) fn read_secret_file_bytes(
 
     run_before_secret_file_read_hook_for_tests(path);
 
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes).map_err(read_error)?;
+    let mut bytes = Vec::with_capacity(initial_len.min(size_bound) as usize);
+    // Bounded read: limit to size_bound + 1 bytes so we can detect growth
+    // between stat and read (TOCTOU). The extra byte allows us to detect
+    // whether the file grew beyond the bound without allocating unboundedly.
+    let mut handle = (&file).take(size_bound.saturating_add(1));
+    handle.read_to_end(&mut bytes).map_err(read_error)?;
 
     // Detect a length change between the pre-read stat and the read itself
     // (the file was rotated or appended underneath us): the length-mismatch
@@ -317,10 +321,29 @@ fn strip_one_trailing_newline(mut bytes: Vec<u8>) -> Vec<u8> {
 #[cfg(unix)]
 fn open_secret_file(path: &Path) -> io::Result<File> {
     let resolved_path = resolve_secret_file_path(path)?;
-    OpenOptions::new()
+    let file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW)
-        .open(resolved_path)
+        .open(&resolved_path)?;
+    // Reject world-readable secret files to prevent credential theft on
+    // multi-user systems. Owner/group-readable modes (0600, 0640, 0440) are
+    // permitted: the Kubernetes deployment security context runs the container
+    // with a dedicated `runAsGroup`/`fsGroup` and mounts secrets with
+    // `defaultMode: 0440`, relying on group-read for the service account.
+    // Only world-readable ownership (`S_IROTH` set) is treated as exposed.
+    let mode = file.metadata()?.permissions().mode();
+    const S_IROTH: u32 = 0o004;
+    if mode & S_IROTH != 0 {
+        return Err(IoError::new(
+            ErrorKind::PermissionDenied,
+            format!(
+                "secret file {} has overly permissive mode {:o}; expected 0640 or stricter (not world-readable)",
+                resolved_path.display(),
+                mode & 0o777,
+            ),
+        ));
+    }
+    Ok(file)
 }
 
 #[cfg(not(unix))]
@@ -772,6 +795,47 @@ mod tests {
         // Symlinks are resolved to their target and opened successfully.
         let result = open_secret_file(&symlink_path);
         assert!(result.is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_secret_file_group_readable_mode_is_ok() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        // k8s projected secrets use defaultMode: 0440 (owner+group read only).
+        std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o440)).unwrap();
+
+        let result = open_secret_file(tmp.path());
+        assert!(result.is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_secret_file_owner_group_readable_mode_is_ok() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        // systemd-style 0640 (owner rw, group read) is a documented mode.
+        std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o640)).unwrap();
+
+        let result = open_secret_file(tmp.path());
+        assert!(result.is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_secret_file_world_readable_mode_is_err() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        // World-readable secrets are exposed to every local user and must be rejected.
+        std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o444)).unwrap();
+
+        let result = open_secret_file(tmp.path());
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("overly permissive mode"));
     }
 
     // -----------------------------------------------------------------------

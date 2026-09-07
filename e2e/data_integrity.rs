@@ -14,6 +14,11 @@ use tokio::net::TcpListener;
 static POSTGRES_E2E_LOCK: LazyLock<tokio::sync::Mutex<()>> =
     LazyLock::new(|| tokio::sync::Mutex::new(()));
 
+/// Admin read token wired into every spawned server so tests verify runtime
+/// topology through the authenticated admin API (the unauthenticated /readyz
+/// no longer carries runtime metadata).
+const TEST_ADMIN_TOKEN: &str = "data-integrity-admin-read-token";
+
 async fn start_server() -> Result<
     (
         String,
@@ -89,9 +94,10 @@ async fn try_start_server(
     }
     let config = config
         .with_deployment_mode(shardline_server::DeploymentMode::Insecure)
+        .with_admin_read_token(TEST_ADMIN_TOKEN.as_bytes().to_vec())?
         .with_provider_runtime(
         config_path,
-        b"test-api-key".to_vec(),
+        b"test-api-key-16bytes".to_vec(),
         "test-issuer".to_owned(),
         NonZeroU64::new(3600).unwrap(),
     )?;
@@ -224,7 +230,7 @@ async fn xet_read_token_issuance_succeeds() {
             "{base_url}/api/github/test-owner/test-repo/xet-read-token/main?subject=test-subject"
         ))
         .header("Authorization", format!("Bearer {token}"))
-        .header("x-shardline-provider-key", "test-api-key")
+        .header("x-shardline-provider-key", "test-api-key-16bytes")
         .send()
         .await
         .unwrap();
@@ -244,7 +250,7 @@ async fn xet_write_token_issuance_succeeds() {
             "{base_url}/api/github/test-owner/test-repo/xet-write-token/main?subject=test-subject"
         ))
         .header("Authorization", format!("Bearer {token}"))
-        .header("x-shardline-provider-key", "test-api-key")
+        .header("x-shardline-provider-key", "test-api-key-16bytes")
         .send()
         .await
         .unwrap();
@@ -269,7 +275,7 @@ async fn xet_routes_disabled_when_role_api_only() {
             "{base_url}/api/github/test-owner/test-repo/xet-read-token/main?subject=test-subject"
         ))
         .header("Authorization", format!("Bearer {token}"))
-        .header("x-shardline-provider-key", "test-api-key")
+        .header("x-shardline-provider-key", "test-api-key-16bytes")
         .send()
         .await
         .unwrap();
@@ -355,7 +361,7 @@ async fn xet_routes_disabled_without_xet_frontend() {
             "{base_url}/api/github/test-owner/test-repo/xet-read-token/main?subject=test-subject"
         ))
         .header("Authorization", format!("Bearer {token}"))
-        .header("x-shardline-provider-key", "test-api-key")
+        .header("x-shardline-provider-key", "test-api-key-16bytes")
         .send()
         .await
         .unwrap();
@@ -419,7 +425,7 @@ async fn lfs_routes_disabled_without_lfs_frontend() {
             "{base_url}/api/github/test-owner/test-repo/xet-read-token/main?subject=test-subject"
         ))
         .header("Authorization", format!("Bearer {token}"))
-        .header("x-shardline-provider-key", "test-api-key")
+        .header("x-shardline-provider-key", "test-api-key-16bytes")
         .send()
         .await
         .unwrap();
@@ -5610,7 +5616,7 @@ async fn lfs_objects_survive_gc_when_referenced() {
     .with_deployment_mode(shardline_server::DeploymentMode::Insecure)
     .with_provider_runtime(
         config_path,
-        b"test-api-key".to_vec(),
+        b"test-api-key-16bytes".to_vec(),
         "test-issuer".to_owned(),
         NonZeroU64::new(3600).unwrap(),
     )
@@ -5677,7 +5683,7 @@ async fn lfs_objects_survive_gc_when_referenced() {
     .with_deployment_mode(shardline_server::DeploymentMode::Insecure)
     .with_provider_runtime(
         write_provider_config(storage.path()).unwrap(),
-        b"test-api-key".to_vec(),
+        b"test-api-key-16bytes".to_vec(),
         "test-issuer".to_owned(),
         NonZeroU64::new(3600).unwrap(),
     )
@@ -5969,7 +5975,7 @@ async fn try_start_hub_server() -> Result<
     .with_deployment_mode(shardline_server::DeploymentMode::Insecure)
     .with_provider_runtime(
         config_path,
-        b"test-api-key".to_vec(),
+        b"test-api-key-16bytes".to_vec(),
         "test-issuer".to_owned(),
         NonZeroU64::new(3600).unwrap(),
     )
@@ -6131,10 +6137,21 @@ async fn readyz_returns_success() {
     assert_eq!(status, 200, "readyz: {status} body={text}");
     let body: serde_json::Value = serde_json::from_str(&text).unwrap();
     assert_eq!(body["status"], "ok");
-    assert!(body["server_role"].is_string());
-    assert!(body["server_frontends"].is_array());
-    assert!(body["metadata_backend"].is_string());
-    assert!(body["object_backend"].is_string());
+
+    // Runtime topology (role, frontends, backends) is exposed on the
+    // AUTHENTICATED admin status endpoint, not the unauthenticated /readyz.
+    let admin = client
+        .get(format!("{base_url}/api/v1/status"))
+        .header("Authorization", format!("Bearer {TEST_ADMIN_TOKEN}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(admin.status(), 200);
+    let admin_body: serde_json::Value = admin.json().await.unwrap();
+    assert!(admin_body["server_role"].is_string());
+    assert!(admin_body["server_frontends"].is_array());
+    assert!(admin_body["metadata_backend"].is_string());
+    assert!(admin_body["object_backend"].is_string());
     server.abort();
 }
 
@@ -6160,14 +6177,25 @@ async fn readyz_without_auth() {
 async fn readyz_metadata_backend_info() {
     let (base_url, server) = start_server().await.unwrap();
     let client = Client::new();
-    let body: serde_json::Value = client
+    // The unauthenticated /readyz reports health only; backend topology lives
+    // on the authenticated admin status endpoint.
+    let resp = client
         .get(format!("{base_url}/readyz"))
         .send()
         .await
-        .unwrap()
-        .json()
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["status"], "ok");
+
+    let admin = client
+        .get(format!("{base_url}/api/v1/status"))
+        .header("Authorization", format!("Bearer {TEST_ADMIN_TOKEN}"))
+        .send()
         .await
         .unwrap();
+    assert_eq!(admin.status(), 200);
+    let body: serde_json::Value = admin.json().await.unwrap();
     assert_eq!(body["metadata_backend"], "local");
     assert_eq!(body["object_backend"], "local");
     assert_eq!(body["cache_backend"], "memory");
@@ -6291,7 +6319,7 @@ async fn frontend_only_xet() {
             "{base_url}/api/github/test-owner/test-repo/xet-read-token/main?subject=test-subject"
         ))
         .header("Authorization", format!("Bearer {token}"))
-        .header("x-shardline-provider-key", "test-api-key")
+        .header("x-shardline-provider-key", "test-api-key-16bytes")
         .send()
         .await
         .unwrap();
@@ -7713,7 +7741,7 @@ async fn frontends_all_serves_everything() {
             "{base_url}/api/github/test-owner/test-repo/xet-read-token/main?subject=test-subject"
         ))
         .header("Authorization", format!("Bearer {token}"))
-        .header("x-shardline-provider-key", "test-api-key")
+        .header("x-shardline-provider-key", "test-api-key-16bytes")
         .send()
         .await
         .unwrap();
@@ -7846,7 +7874,7 @@ async fn frontends_xet_lfs_oci_triple() {
             "{base_url}/api/github/test-owner/test-repo/xet-read-token/main?subject=test-subject"
         ))
         .header("Authorization", format!("Bearer {token}"))
-        .header("x-shardline-provider-key", "test-api-key")
+        .header("x-shardline-provider-key", "test-api-key-16bytes")
         .send()
         .await
         .unwrap();
@@ -7957,7 +7985,7 @@ async fn health_check_during_gc() {
     .with_deployment_mode(shardline_server::DeploymentMode::Insecure)
     .with_provider_runtime(
         config_path,
-        b"test-api-key".to_vec(),
+        b"test-api-key-16bytes".to_vec(),
         "test-issuer".to_owned(),
         NonZeroU64::new(3600).unwrap(),
     )
@@ -8185,7 +8213,7 @@ async fn gc_does_not_remove_referenced_chunks() {
     .with_deployment_mode(shardline_server::DeploymentMode::Insecure)
     .with_provider_runtime(
         config_path,
-        b"test-api-key".to_vec(),
+        b"test-api-key-16bytes".to_vec(),
         "test-issuer".to_owned(),
         NonZeroU64::new(3600).unwrap(),
     )
@@ -8808,7 +8836,7 @@ async fn postgres_backend_lfs_round_trip() {
     .with_deployment_mode(shardline_server::DeploymentMode::Insecure)
     .with_provider_runtime(
         config_path,
-        b"test-api-key".to_vec(),
+        b"test-api-key-16bytes".to_vec(),
         "test-issuer".to_owned(),
         NonZeroU64::new(3600).unwrap(),
     )
@@ -8854,7 +8882,7 @@ async fn xet_full_pipeline_upload_xorb_shard_reconstruct() {
             "{base_url}/api/github/test-owner/test-repo/xet-write-token/main?subject=test-subject"
         ))
         .header("Authorization", format!("Bearer {token}"))
-        .header("x-shardline-provider-key", "test-api-key")
+        .header("x-shardline-provider-key", "test-api-key-16bytes")
         .send()
         .await
         .unwrap();
@@ -8927,7 +8955,7 @@ async fn config_validation_chunk_size_too_large() {
     .with_deployment_mode(shardline_server::DeploymentMode::Insecure)
     .with_provider_runtime(
         config_path.clone(),
-        b"test-api-key".to_vec(),
+        b"test-api-key-16bytes".to_vec(),
         "test-issuer".to_owned(),
         NonZeroU64::new(3600).unwrap(),
     )
@@ -8968,7 +8996,7 @@ async fn config_validation_chunk_size_too_large() {
     .with_deployment_mode(shardline_server::DeploymentMode::Insecure)
     .with_provider_runtime(
         config_path,
-        b"test-api-key".to_vec(),
+        b"test-api-key-16bytes".to_vec(),
         "test-issuer".to_owned(),
         NonZeroU64::new(3600).unwrap(),
     )
@@ -9366,7 +9394,7 @@ async fn s3_backend_lfs_round_trip() {
     .with_deployment_mode(shardline_server::DeploymentMode::Insecure)
     .with_provider_runtime(
         config_path,
-        b"test-api-key".to_vec(),
+        b"test-api-key-16bytes".to_vec(),
         "test-issuer".to_owned(),
         NonZeroU64::new(3600).unwrap(),
     )
@@ -9480,7 +9508,7 @@ async fn s3_backend_dedup_cross_frontend() {
     .with_deployment_mode(shardline_server::DeploymentMode::Insecure)
     .with_provider_runtime(
         config_path,
-        b"test-api-key".to_vec(),
+        b"test-api-key-16bytes".to_vec(),
         "test-issuer".to_owned(),
         NonZeroU64::new(3600).unwrap(),
     )
@@ -9571,7 +9599,7 @@ async fn postgres_backend_oci_manifest_push_pull() {
     .with_deployment_mode(shardline_server::DeploymentMode::Insecure)
     .with_provider_runtime(
         config_path,
-        b"test-api-key".to_vec(),
+        b"test-api-key-16bytes".to_vec(),
         "test-issuer".to_owned(),
         NonZeroU64::new(3600).unwrap(),
     )
@@ -9805,7 +9833,7 @@ async fn xet_multi_file_shard_reconstruct_each_independently() {
             "{base_url}/api/github/test-owner/test-repo/xet-write-token/main?subject=test-subject"
         ))
         .header("Authorization", format!("Bearer {token}"))
-        .header("x-shardline-provider-key", "test-api-key")
+        .header("x-shardline-provider-key", "test-api-key-16bytes")
         .send()
         .await
         .unwrap();
@@ -9852,7 +9880,7 @@ async fn xet_reconstruction_content_hash_matches() {
             "{base_url}/api/github/test-owner/test-repo/xet-write-token/main?subject=test-subject"
         ))
         .header("Authorization", format!("Bearer {token}"))
-        .header("x-shardline-provider-key", "test-api-key")
+        .header("x-shardline-provider-key", "test-api-key-16bytes")
         .send()
         .await
         .unwrap();
@@ -9889,7 +9917,7 @@ async fn xet_empty_file_xorb_and_shard() {
             "{base_url}/api/github/test-owner/test-repo/xet-write-token/main?subject=test-subject"
         ))
         .header("Authorization", format!("Bearer {token}"))
-        .header("x-shardline-provider-key", "test-api-key")
+        .header("x-shardline-provider-key", "test-api-key-16bytes")
         .send()
         .await
         .unwrap();
@@ -9924,7 +9952,7 @@ async fn xet_multi_chunk_xorb_reconstruct() {
             "{base_url}/api/github/test-owner/test-repo/xet-write-token/main?subject=test-subject"
         ))
         .header("Authorization", format!("Bearer {token}"))
-        .header("x-shardline-provider-key", "test-api-key")
+        .header("x-shardline-provider-key", "test-api-key-16bytes")
         .send()
         .await
         .unwrap();
@@ -9961,7 +9989,7 @@ async fn dedup_identical_content_same_chunk_hashes() {
             "{base_url}/api/github/test-owner/test-repo/xet-write-token/main?subject=test-subject"
         ))
         .header("Authorization", format!("Bearer {token}"))
-        .header("x-shardline-provider-key", "test-api-key")
+        .header("x-shardline-provider-key", "test-api-key-16bytes")
         .send()
         .await
         .unwrap();
@@ -9992,7 +10020,7 @@ async fn xet_large_reconstruction_chain_ten_xorbs() {
             "{base_url}/api/github/test-owner/test-repo/xet-write-token/main?subject=test-subject"
         ))
         .header("Authorization", format!("Bearer {token}"))
-        .header("x-shardline-provider-key", "test-api-key")
+        .header("x-shardline-provider-key", "test-api-key-16bytes")
         .send()
         .await
         .unwrap();
@@ -10039,7 +10067,7 @@ async fn xet_reconstruction_fails_when_xorb_missing() {
             "{base_url}/api/github/test-owner/test-repo/xet-write-token/main?subject=test-subject"
         ))
         .header("Authorization", format!("Bearer {token}"))
-        .header("x-shardline-provider-key", "test-api-key")
+        .header("x-shardline-provider-key", "test-api-key-16bytes")
         .send()
         .await
         .unwrap();
@@ -10084,7 +10112,7 @@ async fn different_content_produces_different_chunk_hashes() {
             "{base_url}/api/github/test-owner/test-repo/xet-write-token/main?subject=test-subject"
         ))
         .header("Authorization", format!("Bearer {token}"))
-        .header("x-shardline-provider-key", "test-api-key")
+        .header("x-shardline-provider-key", "test-api-key-16bytes")
         .send()
         .await
         .unwrap();
@@ -10116,7 +10144,7 @@ async fn xet_multiple_files_sharing_single_xorb() {
             "{base_url}/api/github/test-owner/test-repo/xet-write-token/main?subject=test-subject"
         ))
         .header("Authorization", format!("Bearer {token}"))
-        .header("x-shardline-provider-key", "test-api-key")
+        .header("x-shardline-provider-key", "test-api-key-16bytes")
         .send()
         .await
         .unwrap();
@@ -10296,7 +10324,7 @@ async fn upload_during_gc() {
     .with_deployment_mode(shardline_server::DeploymentMode::Insecure)
     .with_provider_runtime(
         config_path,
-        b"test-api-key".to_vec(),
+        b"test-api-key-16bytes".to_vec(),
         "test-issuer".to_owned(),
         NonZeroU64::new(3600).unwrap(),
     )
@@ -12363,7 +12391,7 @@ async fn s3_backend_oci_session_upload() {
     .with_deployment_mode(shardline_server::DeploymentMode::Insecure)
     .with_provider_runtime(
         config_path,
-        b"test-api-key".to_vec(),
+        b"test-api-key-16bytes".to_vec(),
         "test-issuer".to_owned(),
         NonZeroU64::new(3600).unwrap(),
     )
@@ -12511,7 +12539,7 @@ async fn s3_backend_oci_session_abort() {
     .with_deployment_mode(shardline_server::DeploymentMode::Insecure)
     .with_provider_runtime(
         config_path,
-        b"test-api-key".to_vec(),
+        b"test-api-key-16bytes".to_vec(),
         "test-issuer".to_owned(),
         NonZeroU64::new(3600).unwrap(),
     )

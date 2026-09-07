@@ -203,7 +203,7 @@ async fn try_start_hub_server() -> Result<ServerGuard, Box<dyn std::error::Error
     .with_deployment_mode(shardline_server::DeploymentMode::Insecure)
     .with_provider_runtime(
         config_path,
-        b"test-api-key".to_vec(),
+        b"test-api-key-16bytes".to_vec(),
         "test-issuer".to_owned(),
         NonZeroU64::new(3600).unwrap(),
     )?;
