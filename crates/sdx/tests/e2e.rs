@@ -41,8 +41,9 @@ use tokio::{net::TcpListener, task::JoinHandle};
 
 /// Signing key shared by the server auth layer and provider token service.
 const SIGNING_KEY: &[u8] = b"0123456789abcdef0123456789abcdef";
-/// Provider bootstrap API key.
-const BOOTSTRAP_KEY: &str = "bootstrap";
+/// Provider bootstrap API key (>= 16 bytes: the provider service rejects
+/// shorter keys as brute-forceable).
+const BOOTSTRAP_KEY: &str = "bootstrap-key-16bytes";
 /// Provider subject authorized for read+write on the test repository.
 const SUBJECT: &str = "github-user-1";
 
