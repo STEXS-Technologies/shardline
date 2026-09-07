@@ -26,7 +26,7 @@ use std::{
 use axum::http::{Method, StatusCode};
 use reqwest::Client;
 use shardline_server::{
-    ReadyResponse, ServerConfig, ServerError, ServerFrontend, ServerRole, serve_with_listener,
+    ServerConfig, ServerError, ServerFrontend, ServerRole, serve_with_listener,
 };
 use support::ServerE2eInvariantError;
 use tokio::{
@@ -36,6 +36,9 @@ use tokio::{
 };
 
 const SIGNING_KEY: &[u8] = b"test-signing-key-32-bytes-long!!";
+/// Admin read token wired into spawned servers so tests verify runtime
+/// topology through the authenticated admin API.
+const TEST_ADMIN_TOKEN: &str = "rolling-upgrade-admin-read-token";
 const FRONTENDS: [ServerFrontend; 1] = [ServerFrontend::Xet];
 
 /// A running role-split server runtime.
@@ -116,10 +119,10 @@ async fn exercise_rolling_upgrade(
 
     let upgrade_ready = ready_response(&client, upgrade.base_url()).await?;
     let steady_ready = ready_response(&client, steady.base_url()).await?;
-    assert_eq!(upgrade_ready.server_role, upgrade_role.as_str());
-    assert_eq!(steady_ready.server_role, steady_role.as_str());
-    assert_eq!(upgrade_ready.server_frontends, vec!["xet".to_owned()]);
-    assert_eq!(steady_ready.server_frontends, vec!["xet".to_owned()]);
+    assert_eq!(upgrade_ready["server_role"], upgrade_role.as_str());
+    assert_eq!(steady_ready["server_role"], steady_role.as_str());
+    assert_eq!(upgrade_ready["server_frontends"], serde_json::json!(["xet"]));
+    assert_eq!(steady_ready["server_frontends"], serde_json::json!(["xet"]));
     assert_eq!(
         role_surface_statuses(&client, upgrade.base_url()).await?,
         expected_surface(upgrade_role)
@@ -140,7 +143,7 @@ async fn exercise_rolling_upgrade(
     // role surface (api-only reconstruction route and transfer-only chunk
     // route) still answer exactly as before.
     let steady_ready = ready_response(&client, steady.base_url()).await?;
-    assert_eq!(steady_ready.server_role, steady_role.as_str());
+    assert_eq!(steady_ready["server_role"], steady_role.as_str());
     assert_eq!(
         role_surface_statuses(&client, steady.base_url()).await?,
         expected_surface(steady_role)
@@ -156,8 +159,8 @@ async fn exercise_rolling_upgrade(
     .await?;
     wait_for_ready(&client, upgraded_restarted.base_url()).await?;
     let restarted_ready = ready_response(&client, upgraded_restarted.base_url()).await?;
-    assert_eq!(restarted_ready.server_role, upgrade_role.as_str());
-    assert_eq!(restarted_ready.server_frontends, vec!["xet".to_owned()]);
+    assert_eq!(restarted_ready["server_role"], upgrade_role.as_str());
+    assert_eq!(restarted_ready["server_frontends"], serde_json::json!(["xet"]));
     assert_eq!(
         role_surface_statuses(&client, upgraded_restarted.base_url()).await?,
         expected_surface(upgrade_role)
@@ -165,7 +168,7 @@ async fn exercise_rolling_upgrade(
 
     // The steady server is still serving alongside the rolled-back one.
     let steady_ready = ready_response(&client, steady.base_url()).await?;
-    assert_eq!(steady_ready.server_role, steady_role.as_str());
+    assert_eq!(steady_ready["server_role"], steady_role.as_str());
 
     upgraded_restarted.stop().await?;
     steady.stop().await?;
@@ -192,6 +195,7 @@ async fn start_role_runtime(
     )
     .with_server_role(role)
     .with_token_signing_key(SIGNING_KEY.to_vec())?
+    .with_admin_read_token(TEST_ADMIN_TOKEN.as_bytes().to_vec())?
     .with_server_frontends(frontends.iter().copied())?;
     let server = tokio::spawn(async move { serve_with_listener(config, listener).await });
     let client = Client::new();
@@ -276,13 +280,22 @@ async fn wait_for_server_down(client: &Client, base_url: &str) -> Result<(), Box
 async fn ready_response(
     client: &Client,
     base_url: &str,
-) -> Result<ReadyResponse, Box<dyn Error>> {
-    let response = client
+) -> Result<serde_json::Value, Box<dyn Error>> {
+    // /readyz reports health only; runtime topology comes from the
+    // authenticated admin status endpoint.
+    let readyz = client
         .get(format!("{base_url}/readyz"))
         .send()
         .await?
         .error_for_status()?;
-    Ok(response.json::<ReadyResponse>().await?)
+    assert_eq!(readyz.status(), reqwest::StatusCode::OK, "readyz should be healthy");
+    let response = client
+        .get(format!("{base_url}/api/v1/status"))
+        .header("Authorization", format!("Bearer {TEST_ADMIN_TOKEN}"))
+        .send()
+        .await?
+        .error_for_status()?;
+    Ok(response.json::<serde_json::Value>().await?)
 }
 
 /// Probes the two role-specific surfaces, mirroring `role_split_e2e.rs`:
