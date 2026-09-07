@@ -254,7 +254,7 @@ impl TestServerBuilder {
             config = config
                 .with_provider_runtime(
                     config_path.clone(),
-                    b"test-api-key".to_vec(),
+                    b"test-api-key-16bytes".to_vec(),
                     "test-issuer".to_owned(),
                     NonZeroU64::new(3600).unwrap(),
                 )
