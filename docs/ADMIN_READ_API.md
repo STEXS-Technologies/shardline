@@ -192,6 +192,34 @@ Pagination is keyset-ordered by session id and pushed into the store query, so a
 | `download_requests` | unsigned integer | Download requests observed during this process lifetime. |
 | `download_bytes` | unsigned integer | Download bytes observed during this process lifetime. |
 | `range_requests` | unsigned integer | Range requests observed during this process lifetime. |
+| `server_uptime_seconds` | signed integer | Seconds since the server process started. |
+| `reconstruction_requests` | unsigned integer | Total reconstruction requests. |
+| `reconstruction_cache_hits` | unsigned integer | Reconstruction cache hits. |
+| `reconstruction_cache_misses` | unsigned integer | Reconstruction cache misses. |
+| `reconstruction_chunks_fetched` | unsigned integer | Chunks fetched for reconstructions. |
+| `gc_runs` | unsigned integer | Garbage-collection runs. |
+| `gc_objects_collected` | unsigned integer | Objects collected by GC. |
+| `gc_bytes_collected` | unsigned integer | Bytes collected by GC. |
+| `fsck_runs` | unsigned integer | Integrity-check runs. |
+| `fsck_errors_found` | unsigned integer | Errors found during integrity checks. |
+| `storage_objects_total` | signed integer | Total objects currently stored. |
+| `storage_objects_bytes_total` | unsigned integer | Total bytes stored across all objects. |
+| `storage_dedup_saves_bytes_total` | unsigned integer | Bytes saved by deduplication. |
+| `storage_compression_saved_bytes_total` | unsigned integer | Bytes saved by LZ4 compression. |
+| `s3_requests` | unsigned integer | S3 API requests made. |
+| `s3_errors` | unsigned integer | S3 API errors. |
+| `local_io_operations` | unsigned integer | Local filesystem IO operations. |
+| `lfs_upload_requests` | unsigned integer | Git LFS upload requests. |
+| `lfs_download_requests` | unsigned integer | Git LFS download requests. |
+| `oci_upload_requests` | unsigned integer | OCI upload requests. |
+| `oci_download_requests` | unsigned integer | OCI download requests. |
+| `hub_api_requests` | unsigned integer | Hub API requests. |
+| `hub_api_file_uploads` | unsigned integer | Hub API file uploads. |
+| `hub_api_file_downloads` | unsigned integer | Hub API file downloads. |
+| `xet_dedupe_shard_queries` | unsigned integer | Xet dedupe shard lookups. |
+| `xet_dedupe_shard_hits` | unsigned integer | Xet dedupe shard cache hits. |
+
+This endpoint returns a bounded dashboard summary of process-lifetime integer counters and gauges. For full time-series data including histograms, labeled dimensions, and scrape-compatible formatting, use `GET /metrics` with the separate `SHARDLINE_METRICS_TOKEN`.
 
 ### `GET /api/v1/plugins`
 

@@ -646,6 +646,33 @@ pub(super) async fn metrics(
         download_requests: metrics.transfer.download_requests.get(),
         download_bytes: metrics.transfer.download_bytes.get(),
         range_requests: metrics.transfer.range_requests.get(),
+        // process-lifetime gauges and counters
+        server_uptime_seconds: metrics.system.server_uptime.get(),
+        reconstruction_requests: metrics.reconstruction.requests.get(),
+        reconstruction_cache_hits: metrics.reconstruction.cache_hits.get(),
+        reconstruction_cache_misses: metrics.reconstruction.cache_misses.get(),
+        reconstruction_chunks_fetched: metrics.reconstruction.chunks_fetched.get(),
+        gc_runs: metrics.gc.runs.get(),
+        gc_objects_collected: metrics.gc.objects_collected.get(),
+        gc_bytes_collected: metrics.gc.bytes_collected.get(),
+        fsck_runs: metrics.fsck.runs.get(),
+        fsck_errors_found: metrics.fsck.errors_found.get(),
+        storage_objects_total: metrics.storage.objects_total.get(),
+        storage_objects_bytes_total: metrics.storage.objects_bytes_total.get(),
+        storage_dedup_saves_bytes_total: metrics.storage.dedup_saves_bytes_total.get(),
+        storage_compression_saved_bytes_total: metrics.storage.compression_saved_bytes_total.get(),
+        s3_requests: metrics.backend.s3_requests.get(),
+        s3_errors: metrics.backend.s3_errors.get(),
+        local_io_operations: metrics.backend.local_io_operations.get(),
+        lfs_upload_requests: metrics.protocol.lfs_uploads.get(),
+        lfs_download_requests: metrics.protocol.lfs_downloads.get(),
+        oci_upload_requests: metrics.protocol.oci_uploads.get(),
+        oci_download_requests: metrics.protocol.oci_downloads.get(),
+        hub_api_requests: metrics.protocol.hub_api_requests.get(),
+        hub_api_file_uploads: metrics.protocol.hub_api_file_uploads.get(),
+        hub_api_file_downloads: metrics.protocol.hub_api_file_downloads.get(),
+        xet_dedupe_shard_queries: metrics.xet.dedupe_shard_queries.get(),
+        xet_dedupe_shard_hits: metrics.xet.dedupe_shard_hits.get(),
     }))
 }
 
@@ -1753,6 +1780,60 @@ mod tests {
                     .iter()
                     .any(|collected| collected == &format!("{id}-{pid}")),
                 "terminal session {id}-{pid} must not be surfaced"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn metrics_endpoint_returns_enriched_process_counters() {
+        let (app, _temp) = app(Some(ADMIN_TOKEN)).await;
+        let response = app
+            .oneshot(request(Method::GET, "/api/v1/metrics", Some(ADMIN_TOKEN)))
+            .await
+            .expect("metrics response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["api_version"], ADMIN_API_VERSION);
+
+        // existing fields still present
+        assert!(body["upload_requests"].is_number(), "upload_requests");
+        assert!(body["active_connections"].is_number(), "active_connections");
+        assert!(body["admitted_requests"].is_number(), "admitted_requests");
+        assert!(body["download_requests"].is_number(), "download_requests");
+
+        // new process-lifetime fields
+        for field in [
+            "server_uptime_seconds",
+            "reconstruction_requests",
+            "reconstruction_cache_hits",
+            "reconstruction_cache_misses",
+            "reconstruction_chunks_fetched",
+            "gc_runs",
+            "gc_objects_collected",
+            "gc_bytes_collected",
+            "fsck_runs",
+            "fsck_errors_found",
+            "storage_objects_total",
+            "storage_objects_bytes_total",
+            "storage_dedup_saves_bytes_total",
+            "storage_compression_saved_bytes_total",
+            "s3_requests",
+            "s3_errors",
+            "local_io_operations",
+            "lfs_upload_requests",
+            "lfs_download_requests",
+            "oci_upload_requests",
+            "oci_download_requests",
+            "hub_api_requests",
+            "hub_api_file_uploads",
+            "hub_api_file_downloads",
+            "xet_dedupe_shard_queries",
+            "xet_dedupe_shard_hits",
+        ] {
+            assert!(
+                body[field].is_number(),
+                "{field} must be numeric, got: {}",
+                body[field]
             );
         }
     }
