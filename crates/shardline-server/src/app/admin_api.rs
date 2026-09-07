@@ -529,6 +529,11 @@ pub(super) async fn nodes(
             },
             server_role: state.role.as_str().to_owned(),
             server_frontends: frontends(&state),
+            bind_addr: state.config.bind_addr().to_string(),
+            bin_version: env!("CARGO_PKG_VERSION").to_owned(),
+            metadata_backend: state.backend.backend_name().to_owned(),
+            object_backend: state.backend.object_backend_name().to_owned(),
+            cache_backend: state.reconstruction_cache.backend_name().to_owned(),
         }],
         &query,
         |node| node.scope,
@@ -1168,6 +1173,52 @@ mod tests {
             .await
             .expect("unsupported-filter response");
         assert_eq!(unsupported_filter.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn nodes_entry_reports_real_identity_and_backend_fields() {
+        let (app, _temp) = app(Some(ADMIN_TOKEN)).await;
+        let response = app
+            .oneshot(request(Method::GET, "/api/v1/nodes", Some(ADMIN_TOKEN)))
+            .await
+            .expect("nodes response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        let nodes = body["nodes"].as_array().expect("nodes array");
+        assert_eq!(nodes.len(), 1, "expected exactly one current-process node");
+        let entry = &nodes[0];
+        assert_eq!(entry["scope"], "current_process");
+        assert_eq!(entry["state"], "ready");
+        assert!(
+            !entry["bind_addr"].as_str().unwrap_or("").is_empty(),
+            "bind_addr must be non-empty"
+        );
+        assert!(
+            !entry["bin_version"].as_str().unwrap_or("").is_empty(),
+            "bin_version must be non-empty"
+        );
+        assert!(
+            !entry["metadata_backend"].as_str().unwrap_or("").is_empty(),
+            "metadata_backend must be non-empty"
+        );
+        assert!(
+            !entry["object_backend"].as_str().unwrap_or("").is_empty(),
+            "object_backend must be non-empty"
+        );
+        assert!(
+            !entry["cache_backend"].as_str().unwrap_or("").is_empty(),
+            "cache_backend must be non-empty"
+        );
+        let encoded = body.to_string();
+        assert!(!encoded.contains("/tmp/"), "must not leak temp-dir path");
+        assert!(
+            !encoded.contains("owner/"),
+            "must not contain repository owner prefix"
+        );
+        assert_eq!(
+            body["discovery"], "unsupported",
+            "discovery must be unsupported"
+        );
     }
 
     #[tokio::test]
