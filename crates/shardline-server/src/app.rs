@@ -339,7 +339,19 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
                 !parts.uri.path().starts_with("/api/v1/")
             },
         ))
-        .allow_methods([Method::GET, Method::HEAD])
+        // Admin routes are protected by the origin predicate above (they get no
+        // Access-Control-Allow-Origin, so the browser blocks any cross-origin
+        // read regardless of method). Protocol frontends legitimately use
+        // POST/PUT/DELETE for browser-based uploads (LFS batch, OCI blobs), so
+        // the full method set must remain available on those routes.
+        .allow_methods([
+            Method::GET,
+            Method::HEAD,
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::DELETE,
+        ])
         .allow_headers(Any);
 
     let mut app = Router::new()

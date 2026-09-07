@@ -3378,10 +3378,12 @@ async fn test_cors_headers_hub_api() {
         cors_header.is_some(),
         "Hub API response should include Access-Control-Allow-Origin header"
     );
+    // Non-admin routes reflect the requesting origin (admin /api/v1/* paths are
+    // the ones excluded from CORS).
     assert_eq!(
         cors_header.unwrap().to_str().unwrap(),
-        "*",
-        "Hub API should use the same allow-all CORS policy as the protocol frontends"
+        "http://127.0.0.1:8080",
+        "Hub API should reflect the requesting origin"
     );
 }
 
@@ -5084,8 +5086,8 @@ async fn test_cors_headers_on_lfs_endpoint() {
     );
     assert_eq!(
         cors_header.unwrap().to_str().unwrap(),
-        "*",
-        "LFS should allow all origins"
+        "http://example.com",
+        "LFS should reflect the requesting origin"
     );
 
     // Also verify a normal GET request includes CORS headers
