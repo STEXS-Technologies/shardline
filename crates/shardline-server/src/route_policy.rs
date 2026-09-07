@@ -91,8 +91,6 @@ pub(crate) fn register_route_policies(registry: &mut RoutePolicyRegistry) {
         "/api/v1/nodes",
         "/api/v1/tasks",
         "/api/v1/metrics",
-        "/api/v1/plugins",
-        "/api/v1/replication",
     ] {
         registry.register("GET", path, RouteAuthPolicy::SeparatelyProtected);
     }
@@ -279,11 +277,11 @@ mod tests {
         register_route_policies(&mut registry);
         // When adding a new route, update this count AND add its policy above.
         // This test ensures no route is added without an auth policy.
-        // 31 pre-S3 entries + GET / (ListBuckets) + 10 S3 routes + 5
-        // trailing-slash bucket aliases (incl. POST for DeleteObjects) = 47.
+        // 29 pre-S3 entries + GET / (ListBuckets) + 10 S3 routes + 5
+        // trailing-slash bucket aliases (incl. POST for DeleteObjects) = 45.
         assert!(
-            registry.len() >= 47,
-            "Expected at least 47 registered routes, got {}. Add a policy for new routes.",
+            registry.len() >= 45,
+            "Expected at least 45 registered routes, got {}. Add a policy for new routes.",
             registry.len()
         );
     }

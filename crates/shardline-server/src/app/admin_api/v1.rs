@@ -35,7 +35,6 @@ pub(crate) struct StatusResponse {
     pub(super) metadata_backend: String,
     pub(super) object_backend: String,
     pub(super) cache_backend: String,
-    pub(super) plugin_registry: OperationalState,
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -165,37 +164,4 @@ pub(crate) struct MetricsResponse {
     pub(super) hub_api_file_downloads: u64,
     pub(super) xet_dedupe_shard_queries: u64,
     pub(super) xet_dedupe_shard_hits: u64,
-}
-
-#[derive(Debug, Serialize, PartialEq, Eq)]
-pub(crate) struct PluginsResponse {
-    pub(super) api_version: &'static str,
-    pub(super) observed_at_unix_seconds: u64,
-    pub(super) registry: OperationalState,
-    pub(super) plugins: Vec<Plugin>,
-    pub(super) page: Page,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub(crate) struct Plugin {
-    pub(super) id: String,
-    pub(super) version: String,
-    pub(super) state: OperationalState,
-    pub(super) capabilities: Vec<String>,
-}
-
-#[derive(Debug, Serialize, PartialEq, Eq)]
-pub(crate) struct ReplicationResponse {
-    pub(super) api_version: &'static str,
-    pub(super) observed_at_unix_seconds: u64,
-    pub(super) state: OperationalState,
-    pub(super) coordinator: OperationalState,
-    pub(super) replicas: Vec<Replica>,
-    pub(super) page: Page,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub(crate) struct Replica {
-    pub(super) id: String,
-    pub(super) state: OperationalState,
 }

@@ -65,8 +65,7 @@ use crate::{
 };
 use admin_api::{
     gc as admin_gc, integrity as admin_integrity, metrics as admin_metrics, nodes as admin_nodes,
-    plugins as admin_plugins, replication as admin_replication, status as admin_status,
-    storage as admin_storage, tasks as admin_tasks,
+    status as admin_status, storage as admin_storage, tasks as admin_tasks,
 };
 #[cfg(feature = "fuzzing")]
 pub(crate) use admin_api::{parse_admin_cursor_for_fuzzing, parse_admin_query_for_fuzzing};
@@ -365,8 +364,6 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
         .route("/api/v1/nodes", get(admin_nodes))
         .route("/api/v1/tasks", get(admin_tasks))
         .route("/api/v1/metrics", get(admin_metrics))
-        .route("/api/v1/plugins", get(admin_plugins))
-        .route("/api/v1/replication", get(admin_replication))
         .layer(MetricsLayer)
         .layer(middleware::from_fn(request_timeout_middleware))
         .layer(middleware::from_fn(security_headers_middleware));

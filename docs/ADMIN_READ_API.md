@@ -96,7 +96,6 @@ per-process or cluster-wide visibility.
 | `metadata_backend` | string | Configured metadata implementation name. No address or credentials are included. |
 | `object_backend` | string | Configured object-storage implementation name. No bucket, endpoint, or credentials are included. |
 | `cache_backend` | string | Configured reconstruction-cache implementation name. |
-| `plugin_registry` | operational state | `unsupported` until a server plugin registry exists. |
 
 ### `GET /api/v1/storage`
 
@@ -221,35 +220,10 @@ Pagination is keyset-ordered by session id and pushed into the store query, so a
 
 This endpoint returns a bounded dashboard summary of process-lifetime integer counters and gauges. For full time-series data including histograms, labeled dimensions, and scrape-compatible formatting, use `GET /metrics` with the separate `SHARDLINE_METRICS_TOKEN`.
 
-### `GET /api/v1/plugins`
-
-| Field | Type | Scope and meaning |
-| --- | --- | --- |
-| `api_version`, `observed_at_unix_seconds` | common | Common fields. |
-| `registry` | operational state | `unsupported` until the plugin registry exists. |
-| `plugins` | array | Empty while the registry is unsupported. |
-| `plugins[].id` | string | Stable bounded plugin identifier and pagination key. |
-| `plugins[].version` | string | Plugin implementation version. |
-| `plugins[].state` | operational state | Plugin lifecycle/health state. |
-| `plugins[].capabilities` | array of strings | Declared bounded capabilities, used by the `capability` exact-match filter. |
-| `page` | page object | Cursor metadata described below. |
-
-### `GET /api/v1/replication`
-
-| Field | Type | Scope and meaning |
-| --- | --- | --- |
-| `api_version`, `observed_at_unix_seconds` | common | Common fields. |
-| `state` | operational state | `external`: replication belongs to the configured storage provider. |
-| `coordinator` | operational state | `external`: Shardline has no asynchronous replication controller to report. |
-| `replicas` | array | Empty until an authoritative replication registry exists. |
-| `replicas[].id` | string | Stable opaque replica identifier and pagination key. |
-| `replicas[].state` | operational state | Replica health/lifecycle state. |
-| `page` | page object | Cursor metadata described below. |
-
 ## Cursor pagination and filtering
 
-`nodes`, `tasks`, `plugins`, and `replication` are keyset-paginated. Other
-endpoints reject all query parameters.
+`nodes` and `tasks` are keyset-paginated. Other endpoints reject all query
+parameters.
 
 | Parameter | Applicable endpoints | Contract |
 | --- | --- | --- |
@@ -257,7 +231,6 @@ endpoints reject all query parameters.
 | `cursor` | all collections | Optional opaque URL-safe base64 cursor returned as `next_cursor`; maximum 1024 bytes. |
 | `state` | all collections | Exact operational-state match. |
 | `prefix` | all collections | Case-sensitive prefix of the stable item key; maximum 128 decoded bytes. |
-| `capability` | `plugins` only | Exact declared-capability match; non-empty and at most 128 decoded bytes. |
 
 Every collection contains:
 
@@ -271,10 +244,10 @@ Pass the cursor back with the same filters:
 
 ```bash
 curl -H "Authorization: Bearer $SHARDLINE_ADMIN_READ_TOKEN" \
-  'https://cas.example.com/api/v1/plugins?limit=100&state=ready&capability=storage.read'
+  'https://cas.example.com/api/v1/tasks?limit=100&state=ready'
 
 curl -H "Authorization: Bearer $SHARDLINE_ADMIN_READ_TOKEN" \
-  'https://cas.example.com/api/v1/plugins?limit=100&state=ready&capability=storage.read&cursor=...'
+  'https://cas.example.com/api/v1/tasks?limit=100&state=ready&cursor=...'
 ```
 
 Cursors are versioned, integrity-checked structurally, and bound to `state`,
@@ -287,8 +260,7 @@ Ordering is ascending by stable item key. Each request is a fresh snapshot;
 there is no transaction spanning pages. If a collection changes between page
 requests, deleted entries disappear and newly inserted entries whose keys sort
 at or before the cursor are not revisited. The node collection is a single
-process entry and the plugin/replication registries are presently empty, but
-the tasks collection is backed by the durable resumable-session store and this
+process entry, and the tasks collection is backed by the durable resumable-session store and this
 contract applies to all collections as they gain entries.
 
 ## Status and failure behavior
@@ -307,9 +279,9 @@ contract applies to all collections as they gain entries.
 A dependency outage changes readiness-bearing fields to `degraded`; it never
 weakens authentication. Authoritative storage inventory fails rather than
 returning stale or fabricated data. Process counters and external/unsupported
-capability responses remain available when they do not need the failed
-dependency. No endpoint triggers GC, repair, fsck, replication, plugin
-lifecycle, publication, or another durable transition.
+state responses remain available when they do not need the failed
+dependency. No endpoint triggers GC, repair, fsck, publication, or another
+durable transition.
 
 ## Security threat model and verification
 
