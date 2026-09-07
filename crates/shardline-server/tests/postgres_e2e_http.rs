@@ -73,6 +73,10 @@ async fn ensure_pg() -> &'static str {
 // ---------------------------------------------------------------------------
 
 const TEST_SIGNING_KEY: &[u8] = b"0123456789abcdef0123456789abcdef";
+/// Admin read token wired into every spawned server so tests can verify
+/// runtime metadata through the authenticated admin API (the unauthenticated
+/// /readyz deliberately no longer carries runtime metadata).
+const TEST_ADMIN_TOKEN: &str = "pg-e2e-admin-read-token";
 
 /// Mint a Write-scoped bearer token bound to an arbitrary `owner/name` repo.
 ///
@@ -119,7 +123,9 @@ impl TestServer {
         .with_deployment_mode(shardline_server::DeploymentMode::Insecure)
         .with_index_postgres_url(pg_url.to_owned())
         .unwrap()
-        .with_reconstruction_cache_disabled();
+        .with_reconstruction_cache_disabled()
+        .with_admin_read_token(TEST_ADMIN_TOKEN.as_bytes().to_vec())
+        .unwrap();
 
         config.validate_runtime_requirements().unwrap();
 
@@ -328,7 +334,7 @@ async fn test_healthz_returns_200() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_readyz_returns_postgres_backend() {
+async fn test_readyz_returns_ok_and_admin_reports_postgres_backend() {
     let server = TestServer::start(&[ServerFrontend::Xet]).await;
     let client = reqwest::Client::new();
 
@@ -337,6 +343,16 @@ async fn test_readyz_returns_postgres_backend() {
     assert_eq!(resp.status(), 200);
     let json: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(json["status"], "ok");
+    // Runtime backend topology is exposed on the AUTHENTICATED admin status
+    // endpoint, not the unauthenticated /readyz.
+    let resp = client
+        .get(server.url("/api/v1/status"))
+        .header("Authorization", format!("Bearer {TEST_ADMIN_TOKEN}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let json: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(json["metadata_backend"], "postgres");
 }
 
@@ -710,6 +726,17 @@ async fn test_all_frontends_health_and_ready() {
     assert_eq!(resp.status(), 200);
     let json: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(json["status"], "ok");
+
+    // Runtime topology (metadata backend + frontends) is exposed on the
+    // AUTHENTICATED admin status endpoint, not the unauthenticated /readyz.
+    let resp = client
+        .get(server.url("/api/v1/status"))
+        .header("Authorization", format!("Bearer {TEST_ADMIN_TOKEN}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let json: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(json["metadata_backend"], "postgres");
     assert!(json["server_frontends"].as_array().unwrap().len() >= 5);
 }
@@ -1572,7 +1599,8 @@ async fn test_reconstruction_cache_hit() {
         assert_eq!(body.as_ref(), content, "GET iteration {i} body mismatch");
     }
 
-    // Also verify /readyz reports the cache backend as "memory".
+    // Also verify /readyz still reports healthy (the unauthenticated endpoint
+    // now exposes only status; runtime topology lives on the admin API).
     let ready_req = axum::http::Request::builder()
         .uri("/readyz")
         .body(axum::body::Body::empty())
@@ -1585,10 +1613,7 @@ async fn test_reconstruction_cache_hit() {
             .unwrap(),
     )
     .unwrap();
-    assert_eq!(
-        ready_json["cache_backend"], "memory",
-        "readyz should report memory cache backend"
-    );
+    assert_eq!(ready_json["status"], "ok");
 }
 
 // ===========================================================================
