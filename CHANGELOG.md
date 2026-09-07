@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+### Added
+
+- The admin read-only API's `/api/v1/tasks` endpoint now reports the server's
+  in-flight durable resumable upload sessions (Git LFS PATCH, OCI blob, and S3
+  multipart) instead of an empty list. Listing is bounded and keyset-paginated
+  against the Postgres store with `state`/`prefix`/`cursor`/`limit` filtering
+  pushed into the query, so terminal sessions never truncate a page or falsify
+  the end of the list; only live `active`/`completing` sessions are surfaced and
+  each maps to `state: ready`. Local (non-Postgres) backends keep reporting an
+  empty list.
+- The admin `/api/v1/nodes` current-process entry now reports real identity and
+  topology fields: configured `bind_addr`, the running binary version, and the
+  configured metadata/object/cache backend names, alongside the existing role,
+  frontends, and readiness. Fields are additive and expose no repository
+  identifiers, addresses, or credentials.
+
 ## [1.9.0] - 2026-09-07
 
 Comprehensive security-hardening release that also ships the new read-only
