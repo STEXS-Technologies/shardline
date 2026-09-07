@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+## [1.9.0] - 2026-09-07
+
+Comprehensive security-hardening release that also ships the new read-only
+administration API. An adversarial audit cycle closed findings across
+authentication, the Git/Hub/LFS protocol surfaces, storage, configuration, and
+the reference Kubernetes deployment — constant-time credential checks,
+checked-arithmetic overflow fixes, symlink/TOCTOU hardening, disclosure
+reduction on `/readyz` and error paths, and stronger deployment defaults
+(mandatory OIDC audience, enforced 16-byte provider bootstrap keys,
+CORS-restricted admin surface, per-endpoint `Cache-Control`). The administration
+API is disabled by default and additive; operator-visible behavioral changes are
+listed under *Changed* — notably `/readyz` is now health-only by design.
+
 ### Added
 
 - Add a disabled-by-default, versioned read-only administration API for storage,
@@ -24,8 +37,91 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
   polling cannot mutate inventory, and dedicated property and fuzz targets cover
   both the strict TOML secret-file setting and administration query parser plus
   versioned cursor DTO/newtype deserialization.
+- The authenticated admin status endpoint (`/api/v1/status`) exposes runtime
+  topology (server role, enabled frontends, and metadata/object/cache backend
+  identities) that the unauthenticated `/readyz` previously disclosed.
 - Extend storage statistics with authoritative total object count and physical
   object bytes while preserving the existing CAS chunk/file counters.
+- Hub repository search implements an `author` filter (`{author}/` repo-id
+  prefix match) instead of rejecting the query parameter.
+
+### Changed
+
+- `/readyz` is now health-only and returns `{"status": "ok"}`. Runtime topology
+  is no longer served without authentication; it is available on the
+  authenticated admin `/api/v1/status` endpoint. Integration and e2e assertions
+  were re-routed accordingly.
+- CORS: the admin surface (`/api/v1/*`) no longer emits
+  `Access-Control-Allow-Origin`, making it same-origin only. Non-admin routes
+  reflect the requesting origin and restore the full method set
+  (`GET/HEAD/POST/PUT/PATCH/DELETE`, needed for LFS/OCI uploads).
+- HSTS now includes the `includeSubDomains` directive.
+- All authenticated endpoints send `Cache-Control: private, no-store`, preventing
+  CDN/proxy caching of sensitive responses.
+- OIDC `audience` is now mandatory at startup (fail closed); tokens minted for
+  unrelated services at the same issuer are refused.
+- Provider bootstrap API keys shorter than 16 bytes are rejected at startup
+  (previously only a warning).
+- The passthrough provider is rejected unless `deployment_mode` is `insecure`;
+  `Passthrough + Authenticated` remains the documented trusted-proxy carve-out,
+  while `Passthrough + Strict` is refused by config validation.
+- The reference Kubernetes manifests no longer mount the token-signing-key into
+  the GC CronJob (reduced blast radius), and the egress NetworkPolicy template
+  requirement is documented.
+- Secret-file mode policy permits owner/group-readable modes
+  (`0600`/`0640`/`0440`) and rejects only world-readable files — matching the
+  `defaultMode: 0440` + `fsGroup` Kubernetes deployment model. Config-file
+  loading accepts Kubernetes `..data` symlink projections that resolve inside
+  the config directory; symlinks escaping the directory are still refused, with
+  `O_NOFOLLOW` on the resolved path closing the TOCTOU window.
+- Hub repository search enforces a 200-character query limit, and the Hub Host
+  header is sanitized when building repository URLs.
+
+### Fixed
+
+- Git LFS batch responses return the real token expiration from the issued
+  claims instead of a hard-coded `TOKEN_EXPIRATION = 0`.
+- Resumable-session state machine corrections: completion failures transition
+  to Aborted/Expired (the invalid Completing → Active edge was removed), and
+  Aborted/Expired sessions can be retried after operator intervention.
+- `collect_digest_refs` regression test updated for the corrected
+  non-early-return behavior.
+
+### Security
+
+- **Constant-time credential comparison**: provider API-key validation no longer
+  leaks key length through a timing side channel.
+- **Checked-arithmetic overflow fixes**: Git pack `ofs_delta` offset parsing and
+  `xet-core` bounds checks use checked arithmetic with a varint byte cap,
+  closing crafted-input integer overflows; a duplicate bitwise OR in
+  `ofs_delta_offset` was removed.
+- **Decompression-bomb fix**: the LZ4 size prefix is read in full (8 bytes)
+  before allocation, closing the u32-truncation bypass of the size guard.
+- **Content-hash verification** for `FixedChunkV1` downloads prevents silent
+  delivery of corrupted storage objects.
+- **Path traversal**: git tree entries containing `..`, `.`, NUL, or control
+  characters are rejected; symlinked backup outputs are refused; secret and
+  config files must resolve within their parent directory.
+- **TOCTOU/race hardening**: config reads open the resolved path with
+  `O_NOFOLLOW`; copy and upload-shard metadata commits are wrapped in
+  `metadata_write_lock`; the delete-file reference race is documented with its
+  hash-check mitigation.
+- **Retention safety**: lifecycle repair never removes permanent
+  (`release_after = None`) retention holds, even when an object is temporarily
+  missing.
+- **Webhook signing**: all VCS adapters warn loudly when the webhook secret is
+  unconfigured (signature verification would be skipped); the at-rest cipher
+  strips a legacy `sse1:` prefix from the plaintext fallback so HMACs are
+  computed over the correct bytes.
+- **Disclosure reduction**: `/readyz` no longer leaks topology; signing-key and
+  provider errors return a generic message to clients (JWKS `kid`, OIDC issuer
+  URLs, and key paths are logged at warn level only).
+- **Hardening defaults**: `deny_unknown_fields` on the OIDC config section, Hub
+  LFS upload bodies capped at 64 MiB, commit messages capped at 4096 bytes
+  (NDJSON and git protocol), Hub webhook LIKE filters escape `%` and `_`
+  (Postgres + SQLite), S3 startup warns when `allow_http = true`, JWKS
+  cache-lock waits no longer block Tokio workers, and the admin read token
+  SHA-256 digest is precomputed once at config load.
 
 ## [1.8.0] - 2026-08-25
 
@@ -894,7 +990,12 @@ There are no intentional breaking API or configuration changes from `1.0.0`.
 - Documented async storage TOCTOU races with 1.2M-run fuzz validation (`40ef000`)
 - Updated all architecture, deployment, and Hub API docs for 20-crate structure (`1203d8e`)
 
-[Unreleased]: https://github.com/STEXS-Technologies/shardline/compare/v1.4.0...HEAD
+[Unreleased]: https://github.com/STEXS-Technologies/shardline/compare/v1.9.0...HEAD
+[1.9.0]: https://github.com/STEXS-Technologies/shardline/compare/v1.8.0...v1.9.0
+[1.8.0]: https://github.com/STEXS-Technologies/shardline/compare/v1.7.0...v1.8.0
+[1.7.0]: https://github.com/STEXS-Technologies/shardline/compare/v1.6.0...v1.7.0
+[1.6.0]: https://github.com/STEXS-Technologies/shardline/compare/v1.5.0...v1.6.0
+[1.5.0]: https://github.com/STEXS-Technologies/shardline/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/STEXS-Technologies/shardline/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/STEXS-Technologies/shardline/compare/v1.2.2...v1.3.0
 [1.2.2]: https://github.com/STEXS-Technologies/shardline/compare/v1.2.1...v1.2.2
