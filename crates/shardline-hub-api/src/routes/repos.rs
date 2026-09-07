@@ -310,11 +310,6 @@ pub(crate) async fn repo_search(
             "search query must not exceed 200 characters".to_owned(),
         ));
     }
-    if query.author.is_some() {
-        return Err(HubApiError::PathValidation(
-            "author filter is not yet supported".to_owned(),
-        ));
-    }
     let limit = query.limit.min(200);
     let mut repos = state
         .store
@@ -354,6 +349,14 @@ pub(crate) async fn repo_search(
     let visible: Vec<_> = repos
         .into_iter()
         .filter(|r| repo_visible_to_owner(r, caller_repo_id.as_deref()))
+        // Optional author filter: restrict results to repositories owned by
+        // the requested author (`repo_id` is `{owner}/{name}`).
+        .filter(|r| {
+            query
+                .author
+                .as_deref()
+                .is_none_or(|author| r.repo_id.starts_with(&format!("{author}/")))
+        })
         .collect();
     let response = RepoListResponse {
         repos: visible.iter().map(repo_response_from_hub).collect(),
