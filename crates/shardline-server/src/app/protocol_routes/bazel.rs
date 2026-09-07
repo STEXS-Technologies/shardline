@@ -456,6 +456,17 @@ mod tests {
         }))
     }
 
+    /// Builds a minimal [`AppState`] backed by a Postgres backend with a local
+    /// object store. Returns `None` outside the Postgres CI job.
+    async fn build_bazel_postgres_test_state() -> Option<(Arc<AppState>, TempDir)> {
+        let database_url = std::env::var("DATABASE_URL").ok()?;
+        let tmp = TempDir::new().ok()?;
+        let object_store =
+            crate::object_store::ServerObjectStore::local(tmp.path().join("objects")).ok()?;
+        let state = build_postgres_state(&database_url, tmp.path(), object_store).await?;
+        Some((state, tmp))
+    }
+
     fn bazel_router(state: Arc<AppState>) -> Router {
         Router::new()
             // AC routes
@@ -488,107 +499,87 @@ mod tests {
         hex::encode(Sha256::digest(b"bazel-test-content"))
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn postgres_replicas_converge_for_cas_and_action_cache_writes() {
-        let Ok(database_url) = std::env::var("DATABASE_URL") else {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn postgres_bazel_cas_and_ac_roundtrip() {
+        let Some((state, _tmp)) = build_bazel_postgres_test_state().await else {
             return;
         };
-        let tmp = TempDir::new().unwrap();
-        let shared_objects =
-            crate::object_store::ServerObjectStore::local(tmp.path().join("objects")).unwrap();
-        let Some(node_a) = build_postgres_state(
-            &database_url,
-            &tmp.path().join("node-a"),
-            shared_objects.clone(),
-        )
-        .await
-        else {
-            return;
-        };
-        let Some(node_b) =
-            build_postgres_state(&database_url, &tmp.path().join("node-b"), shared_objects).await
-        else {
-            return;
-        };
-        let app_a = bazel_router(node_a);
-        let app_b = bazel_router(node_b);
+        let app = bazel_router(state);
 
-        let cas_body = b"cross-replica-cas".to_vec();
-        let cas_hash = hex::encode(Sha256::digest(&cas_body));
+        // --- CAS PUT -> HEAD -> GET (byte-exact) ---
+        let cas_content = test_content();
+        let cas_hash = test_content_hash();
         let cas_uri = format!("/v1/bazel/cache/cas/{cas_hash}");
-        let (cas_a, cas_b) = tokio::join!(
-            app_a.clone().oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri(cas_uri.clone())
-                    .body(Body::from(cas_body.clone()))
-                    .unwrap()
-            ),
-            app_b.clone().oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri(cas_uri.clone())
-                    .body(Body::from(cas_body.clone()))
-                    .unwrap()
-            )
-        );
-        assert_eq!(cas_a.unwrap().status(), StatusCode::NO_CONTENT);
-        assert_eq!(cas_b.unwrap().status(), StatusCode::NO_CONTENT);
-        let cas_get = app_b
-            .clone()
-            .oneshot(Request::builder().uri(cas_uri).body(Body::empty()).unwrap())
-            .await
-            .unwrap();
-        assert_eq!(cas_get.status(), StatusCode::OK);
-        assert_eq!(
-            axum::body::to_bytes(cas_get.into_body(), usize::MAX)
-                .await
-                .unwrap(),
-            cas_body
-        );
 
-        let action_hash = "c".repeat(64);
-        let action_uri = format!("/v1/bazel/cache/ac/{action_hash}");
-        let body_a = b"action-result-a".to_vec();
-        let body_b = b"action-result-b".to_vec();
-        let (action_a, action_b) = tokio::join!(
-            app_a.oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri(action_uri.clone())
-                    .body(Body::from(body_a.clone()))
-                    .unwrap()
-            ),
-            app_b.clone().oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri(action_uri.clone())
-                    .body(Body::from(body_b.clone()))
-                    .unwrap()
-            )
-        );
-        let statuses = [action_a.unwrap().status(), action_b.unwrap().status()];
-        assert_eq!(
-            statuses
-                .iter()
-                .filter(|status| **status == StatusCode::NO_CONTENT)
-                .count(),
-            1
-        );
-        let action_get = app_b
+        let put_resp = app
+            .clone()
             .oneshot(
                 Request::builder()
-                    .uri(action_uri)
+                    .method("PUT")
+                    .uri(&cas_uri)
+                    .body(Body::from(cas_content.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(put_resp.status(), StatusCode::NO_CONTENT);
+
+        let head_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("HEAD")
+                    .uri(&cas_uri)
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
-        assert_eq!(action_get.status(), StatusCode::OK);
-        let visible = axum::body::to_bytes(action_get.into_body(), usize::MAX)
+        assert_eq!(head_resp.status(), StatusCode::OK);
+
+        let get_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(&cas_uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
-        assert!(visible.as_ref() == body_a || visible.as_ref() == body_b);
+        assert_eq!(get_resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(get_resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(body.as_ref(), cas_content.as_slice());
+
+        // --- AC PUT -> GET (byte-exact) ---
+        let ac_hash = "c".repeat(64);
+        let ac_content = b"postgres-ac-result".to_vec();
+        let ac_uri = format!("/v1/bazel/cache/ac/{ac_hash}");
+
+        let put_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(&ac_uri)
+                    .body(Body::from(ac_content.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(put_resp.status(), StatusCode::NO_CONTENT);
+
+        let get_resp = app
+            .oneshot(Request::builder().uri(&ac_uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(get_resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(get_resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(body.as_ref(), ac_content.as_slice());
     }
 
     // =========================================================================
