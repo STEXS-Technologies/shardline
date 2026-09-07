@@ -423,20 +423,22 @@ mod tests {
             ("github", "owner", "repo"),
             ("github", "owner", "other-repo"),
         ] {
-            let _ = sqlx::query("DELETE FROM shardline_tree_entries WHERE provider = $1 AND owner = $2 AND repo = $3")
+            sqlx::query("DELETE FROM shardline_tree_entries WHERE provider = $1 AND owner = $2 AND repo = $3")
                 .bind(provider)
                 .bind(owner)
                 .bind(repo)
                 .execute(pool)
-                .await;
-            let _ = sqlx::query(
+                .await
+                .ok();
+            sqlx::query(
                 "DELETE FROM shardline_revisions WHERE provider = $1 AND owner = $2 AND repo = $3",
             )
             .bind(provider)
             .bind(owner)
             .bind(repo)
             .execute(pool)
-            .await;
+            .await
+            .ok();
         }
     }
 
