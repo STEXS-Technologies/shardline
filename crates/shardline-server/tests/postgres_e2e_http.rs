@@ -1170,6 +1170,121 @@ async fn test_lfs_patch_object() {
     assert_eq!(body.as_ref(), full_content.as_slice());
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_admin_tasks_reflects_inflight_lfs_patch_session_lifecycle() {
+    let server = TestServer::start(&[ServerFrontend::Lfs]).await;
+    let client = reqwest::Client::new();
+
+    let chunk1 = b"admin-tasks-patch-initial-";
+    let chunk2 = b"-final";
+    let full_content = [chunk1.to_vec(), chunk2.to_vec()].concat();
+    let oid = sha256_hex(&full_content);
+    let total = full_content.len() as u64;
+
+    // The admin /tasks view is empty before any upload session exists.
+    let tasks_before = client
+        .get(server.url("/api/v1/tasks"))
+        .header("Authorization", format!("Bearer {TEST_ADMIN_TOKEN}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(tasks_before.status(), 200);
+    let before_body: serde_json::Value = tasks_before.json().await.unwrap();
+    assert!(
+        before_body["tasks"].as_array().is_some(),
+        "tasks must be a JSON array"
+    );
+
+    // Begin a resumable LFS PATCH: chunk 1 leaves the session in-flight
+    // (active/completing), so the admin /tasks view must now report it as
+    // ready server-owned work.
+    let range1 = format!("bytes 0-{}/{}", chunk1.len() as u64 - 1, total);
+    let patch1 = client
+        .patch(server.url(&format!("/v1/lfs/objects/{oid}")))
+        .header("Authorization", format!("Bearer {}", server.auth_header()))
+        .header("Content-Type", "application/octet-stream")
+        .header("Content-Range", &range1)
+        .body(chunk1.to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(patch1.status(), 200, "PATCH chunk1 failed");
+
+    let tasks_mid = client
+        .get(server.url("/api/v1/tasks"))
+        .header("Authorization", format!("Bearer {TEST_ADMIN_TOKEN}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(tasks_mid.status(), 200);
+    let mid_body: serde_json::Value = tasks_mid.json().await.unwrap();
+    let mid_tasks = mid_body["tasks"].as_array().expect("tasks array");
+    assert!(
+        !mid_tasks.is_empty(),
+        "an in-flight LFS PATCH must surface on /api/v1/tasks"
+    );
+    for task in mid_tasks {
+        assert_eq!(task["state"], "ready", "in-flight task must be ready");
+        assert!(
+            task["id"].as_str().is_some_and(|id| !id.is_empty()),
+            "in-flight task must carry a non-empty session id"
+        );
+    }
+
+    // Complete the upload with chunk 2; the session transitions to a terminal
+    // (completed) state, which is historical and must no longer be listed.
+    let range2 = format!("bytes {}-{}/{}", chunk1.len(), total - 1, total);
+    let patch2 = client
+        .patch(server.url(&format!("/v1/lfs/objects/{oid}")))
+        .header("Authorization", format!("Bearer {}", server.auth_header()))
+        .header("Content-Type", "application/octet-stream")
+        .header("Content-Range", &range2)
+        .body(chunk2.to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(patch2.status(), 200, "PATCH chunk2 failed");
+
+    // GET and verify full content so the session fully completes.
+    let get_resp = client
+        .get(server.url(&format!("/v1/lfs/objects/{oid}")))
+        .header("Authorization", format!("Bearer {}", server.auth_header()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get_resp.status(), 200);
+    assert_eq!(
+        get_resp.bytes().await.unwrap().as_ref(),
+        full_content.as_slice()
+    );
+
+    // After the upload completes, the session is terminal and must be absent
+    // from the in-flight /tasks view (poll until the store settles).
+    let mut tasks_after: Option<serde_json::Value> = None;
+    for _ in 0..20 {
+        let after_resp = client
+            .get(server.url("/api/v1/tasks"))
+            .header("Authorization", format!("Bearer {TEST_ADMIN_TOKEN}"))
+            .send()
+            .await
+            .unwrap();
+        let after_body: serde_json::Value = after_resp.json().await.unwrap();
+        if after_body["tasks"]
+            .as_array()
+            .is_some_and(|tasks| tasks.is_empty())
+        {
+            tasks_after = Some(after_body);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let after_body = tasks_after.expect("tasks view must become empty after completion");
+    assert!(
+        after_body["tasks"].as_array().map(Vec::len) == Some(0),
+        "completed LFS PATCH session must not remain on /api/v1/tasks"
+    );
+}
+
 // ===========================================================================
 // 17. Provider token tests
 // ===========================================================================

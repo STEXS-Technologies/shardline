@@ -22,10 +22,9 @@ use self::v1::{
     API_VERSION as ADMIN_API_VERSION, GcResponse as AdminGcResponse,
     IntegrityResponse as AdminIntegrityResponse, MetricsResponse as AdminMetricsResponse,
     Node as AdminNode, NodesResponse as AdminNodesResponse, OperationalState, Page as AdminPage,
-    Plugin as AdminPlugin, PluginsResponse as AdminPluginsResponse, Replica as AdminReplica,
-    ReplicationResponse as AdminReplicationResponse, StatusResponse as AdminStatusResponse,
-    StorageProcessCounters as AdminStorageProcessCounters, StorageResponse as AdminStorageResponse,
-    Task as AdminTask, TasksResponse as AdminTasksResponse,
+    StatusResponse as AdminStatusResponse, StorageProcessCounters as AdminStorageProcessCounters,
+    StorageResponse as AdminStorageResponse, Task as AdminTask,
+    TasksResponse as AdminTasksResponse,
 };
 
 const NO_STORE: HeaderValue = HeaderValue::from_static("no-store");
@@ -429,7 +428,6 @@ pub(super) async fn status(
         metadata_backend: state.backend.backend_name().to_owned(),
         object_backend: state.backend.object_backend_name().to_owned(),
         cache_backend: state.reconstruction_cache.backend_name().to_owned(),
-        plugin_registry: OperationalState::Unsupported,
     }))
 }
 
@@ -529,6 +527,11 @@ pub(super) async fn nodes(
             },
             server_role: state.role.as_str().to_owned(),
             server_frontends: frontends(&state),
+            bind_addr: state.config.bind_addr().to_string(),
+            bin_version: env!("CARGO_PKG_VERSION").to_owned(),
+            metadata_backend: state.backend.backend_name().to_owned(),
+            object_backend: state.backend.object_backend_name().to_owned(),
+            cache_backend: state.reconstruction_cache.backend_name().to_owned(),
         }],
         &query,
         |node| node.scope,
@@ -544,6 +547,14 @@ pub(super) async fn nodes(
     }))
 }
 
+/// Lists the current process's in-flight durable resumable upload sessions as
+/// bounded, keyset-paginated admin tasks.
+///
+/// Unlike the authoritative `/api/v1/storage` inventory (an O(N) store walk
+/// that is admission-gated at `weights::STATS`), this handler issues a bounded
+/// primary-key keyset query (at most `MAX_PAGE_LIMIT + 1` rows). Bounded admin
+/// reads are controlled by query/cursor/page bounds rather than weighted
+/// admission; only the unbounded authoritative-inventory scan takes a permit.
 pub(super) async fn tasks(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -558,13 +569,51 @@ pub(super) async fn tasks(
             capability: false,
         },
     )?;
-    let (tasks, page) = paginate(
-        Vec::new(),
-        &query,
-        |task: &AdminTask| task.id.as_str(),
-        |task| task.state,
-        |_task, _capability| false,
-    )?;
+    let after = query
+        .cursor
+        .as_ref()
+        .map(|cursor| decode_cursor(cursor.as_str(), &query))
+        .transpose()?
+        .map(|cursor| cursor.after);
+    let after_session_id = after.as_ref().map(|a| a.as_str());
+    let prefix = query.prefix.as_ref().map(AdminPrefix::as_str);
+    let limit = query.limit.map_or(DEFAULT_PAGE_LIMIT, AdminPageLimit::get);
+    let sessions = match state
+        .backend
+        .list_inflight_resumable_sessions(after_session_id, prefix, limit.saturating_add(1))
+        .await
+    {
+        Ok(sessions) => sessions,
+        Err(ServerError::StaleResourceFence) => Vec::new(),
+        Err(error) => return Err(error),
+    };
+    let has_more = sessions.len() > limit;
+    let sessions = if has_more {
+        sessions.get(..limit).unwrap_or(&sessions)
+    } else {
+        &sessions
+    };
+    let tasks: Vec<AdminTask> = sessions
+        .iter()
+        .map(|session| AdminTask {
+            id: session.session_id().to_owned(),
+            state: OperationalState::Ready,
+        })
+        .filter(|task| query.state.is_none_or(|expected| task.state == expected))
+        .collect();
+    let next_cursor = if has_more && !tasks.is_empty() {
+        tasks
+            .last()
+            .map(|task| encode_cursor(&task.id, &query))
+            .transpose()?
+    } else {
+        None
+    };
+    let page = AdminPage {
+        limit,
+        returned: tasks.len(),
+        next_cursor,
+    };
     Ok(admin_json(AdminTasksResponse {
         api_version: ADMIN_API_VERSION,
         observed_at_unix_seconds: observed_at()?,
@@ -595,75 +644,33 @@ pub(super) async fn metrics(
         download_requests: metrics.transfer.download_requests.get(),
         download_bytes: metrics.transfer.download_bytes.get(),
         range_requests: metrics.transfer.range_requests.get(),
-    }))
-}
-
-pub(super) async fn plugins(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    RawQuery(raw_query): RawQuery,
-) -> Result<AdminJson<AdminPluginsResponse>, ServerError> {
-    authorize_admin(&state, &headers)?;
-    let query = parse_collection_query(
-        raw_query.as_deref(),
-        AllowedFilters {
-            state: true,
-            prefix: true,
-            capability: true,
-        },
-    )?;
-    let (plugins, page) = paginate(
-        Vec::new(),
-        &query,
-        |plugin: &AdminPlugin| plugin.id.as_str(),
-        |plugin| plugin.state,
-        |plugin, capability| {
-            plugin
-                .capabilities
-                .iter()
-                .any(|candidate| candidate == capability)
-        },
-    )?;
-    Ok(admin_json(AdminPluginsResponse {
-        api_version: ADMIN_API_VERSION,
-        observed_at_unix_seconds: observed_at()?,
-        registry: OperationalState::Unsupported,
-        plugins,
-        page,
-    }))
-}
-
-pub(super) async fn replication(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    RawQuery(raw_query): RawQuery,
-) -> Result<AdminJson<AdminReplicationResponse>, ServerError> {
-    authorize_admin(&state, &headers)?;
-    let query = parse_collection_query(
-        raw_query.as_deref(),
-        AllowedFilters {
-            state: true,
-            prefix: true,
-            capability: false,
-        },
-    )?;
-    let (replicas, page) = paginate(
-        Vec::new(),
-        &query,
-        |replica: &AdminReplica| replica.id.as_str(),
-        |replica| replica.state,
-        |_replica, _capability| false,
-    )?;
-    Ok(admin_json(AdminReplicationResponse {
-        api_version: ADMIN_API_VERSION,
-        observed_at_unix_seconds: observed_at()?,
-        // Shardline coordinates writers over shared durable state. It does not
-        // own an asynchronous replication controller whose lag could be
-        // reported authoritatively, so keep this surface explicit and empty.
-        state: OperationalState::External,
-        coordinator: OperationalState::External,
-        replicas,
-        page,
+        // process-lifetime gauges and counters
+        server_uptime_seconds: metrics.system.server_uptime.get(),
+        reconstruction_requests: metrics.reconstruction.requests.get(),
+        reconstruction_cache_hits: metrics.reconstruction.cache_hits.get(),
+        reconstruction_cache_misses: metrics.reconstruction.cache_misses.get(),
+        reconstruction_chunks_fetched: metrics.reconstruction.chunks_fetched.get(),
+        gc_runs: metrics.gc.runs.get(),
+        gc_objects_collected: metrics.gc.objects_collected.get(),
+        gc_bytes_collected: metrics.gc.bytes_collected.get(),
+        fsck_runs: metrics.fsck.runs.get(),
+        fsck_errors_found: metrics.fsck.errors_found.get(),
+        storage_objects_total: metrics.storage.objects_total.get(),
+        storage_objects_bytes_total: metrics.storage.objects_bytes_total.get(),
+        storage_dedup_saves_bytes_total: metrics.storage.dedup_saves_bytes_total.get(),
+        storage_compression_saved_bytes_total: metrics.storage.compression_saved_bytes_total.get(),
+        s3_requests: metrics.backend.s3_requests.get(),
+        s3_errors: metrics.backend.s3_errors.get(),
+        local_io_operations: metrics.backend.local_io_operations.get(),
+        lfs_upload_requests: metrics.protocol.lfs_uploads.get(),
+        lfs_download_requests: metrics.protocol.lfs_downloads.get(),
+        oci_upload_requests: metrics.protocol.oci_uploads.get(),
+        oci_download_requests: metrics.protocol.oci_downloads.get(),
+        hub_api_requests: metrics.protocol.hub_api_requests.get(),
+        hub_api_file_uploads: metrics.protocol.hub_api_file_uploads.get(),
+        hub_api_file_downloads: metrics.protocol.hub_api_file_downloads.get(),
+        xet_dedupe_shard_queries: metrics.xet.dedupe_shard_queries.get(),
+        xet_dedupe_shard_hits: metrics.xet.dedupe_shard_hits.get(),
     }))
 }
 
@@ -684,7 +691,7 @@ mod tests {
     use crate::{DeploymentMode, ServerConfig, ServerFrontend, ServerRole, app::router};
 
     const ADMIN_TOKEN: &str = "admin-read-secret";
-    const ADMIN_PATHS: [&str; 9] = [
+    const ADMIN_PATHS: [&str; 7] = [
         "/api/v1/status",
         "/api/v1/storage",
         "/api/v1/gc",
@@ -692,8 +699,6 @@ mod tests {
         "/api/v1/nodes",
         "/api/v1/tasks",
         "/api/v1/metrics",
-        "/api/v1/plugins",
-        "/api/v1/replication",
     ];
 
     proptest! {
@@ -809,14 +814,7 @@ mod tests {
             );
             let body = json_body(get_response).await;
             assert_eq!(body["api_version"], ADMIN_API_VERSION, "{path}");
-            if [
-                "/api/v1/nodes",
-                "/api/v1/tasks",
-                "/api/v1/plugins",
-                "/api/v1/replication",
-            ]
-            .contains(&path)
-            {
+            if ["/api/v1/nodes", "/api/v1/tasks"].contains(&path) {
                 assert_eq!(body["page"]["limit"], DEFAULT_PAGE_LIMIT, "{path}");
                 assert!(body["page"]["returned"].is_number(), "{path}");
                 assert!(body["page"]["next_cursor"].is_null(), "{path}");
@@ -937,7 +935,6 @@ mod tests {
         assert_eq!(body["cache_state"], "ready");
         assert_eq!(body["server_role"], "all");
         assert_eq!(body["server_frontends"], serde_json::json!(["xet"]));
-        assert_eq!(body["plugin_registry"], "unsupported");
         assert!(!body.to_string().contains(ADMIN_TOKEN));
     }
 
@@ -971,7 +968,7 @@ mod tests {
             assert_eq!(body["state"], "external", "{path}");
             assert_eq!(body["execution"], "external", "{path}");
         }
-        for path in ["/api/v1/tasks", "/api/v1/replication"] {
+        for path in ["/api/v1/tasks"] {
             let response = app
                 .clone()
                 .oneshot(request(Method::GET, path, Some(ADMIN_TOKEN)))
@@ -979,7 +976,7 @@ mod tests {
                 .expect("response");
             let body = json_body(response).await;
             assert_eq!(
-                body.get("scheduler").or_else(|| body.get("coordinator")),
+                body.get("scheduler"),
                 Some(&Value::String("external".to_owned())),
                 "{path}"
             );
@@ -1130,6 +1127,52 @@ mod tests {
             .await
             .expect("unsupported-filter response");
         assert_eq!(unsupported_filter.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn nodes_entry_reports_real_identity_and_backend_fields() {
+        let (app, _temp) = app(Some(ADMIN_TOKEN)).await;
+        let response = app
+            .oneshot(request(Method::GET, "/api/v1/nodes", Some(ADMIN_TOKEN)))
+            .await
+            .expect("nodes response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        let nodes = body["nodes"].as_array().expect("nodes array");
+        assert_eq!(nodes.len(), 1, "expected exactly one current-process node");
+        let entry = &nodes[0];
+        assert_eq!(entry["scope"], "current_process");
+        assert_eq!(entry["state"], "ready");
+        assert!(
+            !entry["bind_addr"].as_str().unwrap_or("").is_empty(),
+            "bind_addr must be non-empty"
+        );
+        assert!(
+            !entry["bin_version"].as_str().unwrap_or("").is_empty(),
+            "bin_version must be non-empty"
+        );
+        assert!(
+            !entry["metadata_backend"].as_str().unwrap_or("").is_empty(),
+            "metadata_backend must be non-empty"
+        );
+        assert!(
+            !entry["object_backend"].as_str().unwrap_or("").is_empty(),
+            "object_backend must be non-empty"
+        );
+        assert!(
+            !entry["cache_backend"].as_str().unwrap_or("").is_empty(),
+            "cache_backend must be non-empty"
+        );
+        let encoded = body.to_string();
+        assert!(!encoded.contains("/tmp/"), "must not leak temp-dir path");
+        assert!(
+            !encoded.contains("owner/"),
+            "must not contain repository owner prefix"
+        );
+        assert_eq!(
+            body["discovery"], "unsupported",
+            "discovery must be unsupported"
+        );
     }
 
     #[tokio::test]
@@ -1338,5 +1381,429 @@ mod tests {
             decode_cursor(&invalid_newtype_cursor, &AdminCollectionQuery::default()),
             Err(ServerError::InvalidAdminQuery)
         ));
+    }
+
+    #[tokio::test]
+    async fn tasks_endpoint_lists_active_resumable_sessions() {
+        let Ok(database_url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let temp = TempDir::new().expect("temp dir");
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(4)
+            .connect(&database_url)
+            .await
+            .expect("connect");
+        crate::apply_database_migrations(&pool)
+            .await
+            .expect("migrations");
+        let config = ServerConfig::new(
+            "127.0.0.1:0".parse().expect("bind"),
+            "http://127.0.0.1:8080".to_owned(),
+            temp.path().to_path_buf(),
+            NonZeroUsize::new(65_536).expect("chunk size"),
+        )
+        .with_server_frontends([ServerFrontend::Xet])
+        .expect("frontends")
+        .with_index_postgres_url(database_url)
+        .expect("postgres url")
+        .with_admin_read_token(ADMIN_TOKEN.as_bytes().to_vec())
+        .expect("admin token");
+        let app = router(config).await.expect("router");
+
+        // Idempotency: clear rows from any prior run before seeding, since the
+        // seeded session ids embed only the process id and persist in the DB.
+        sqlx::query("DELETE FROM shardline_resumable_sessions WHERE session_id LIKE $1 || '%'")
+            .bind("admin-task-")
+            .execute(&pool)
+            .await
+            .expect("cleanup sessions");
+
+        // Insert two active sessions and one terminal session.
+        let expiry = chrono::Utc::now() + chrono::Duration::hours(1);
+        let pid = std::process::id();
+        let id_active_1 = format!("admin-task-active-1-{pid}");
+        let id_active_2 = format!("admin-task-active-2-{pid}");
+        let id_terminal = format!("admin-task-terminal-{pid}");
+        for (sid, state) in [
+            (&id_active_1, "active"),
+            (&id_active_2, "active"),
+            (&id_terminal, "completed"),
+        ] {
+            sqlx::query(
+                "INSERT INTO shardline_resumable_sessions \
+                 (session_id, protocol, scope_namespace, target_key, attributes_json, \
+                  state, generation, fence_epoch, expires_at) \
+                 VALUES ($1, 's3_multipart', 'owner/repo', 'key.bin', '{}', $2, 1, 1, $3)",
+            )
+            .bind(sid)
+            .bind(state)
+            .bind(expiry)
+            .execute(&pool)
+            .await
+            .expect("insert session");
+        }
+
+        let response = app
+            .oneshot(request(Method::GET, "/api/v1/tasks", Some(ADMIN_TOKEN)))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["scheduler"], "external");
+        let tasks = body["tasks"].as_array().expect("tasks array");
+        let ids: Vec<&str> = tasks.iter().map(|t| t["id"].as_str().unwrap()).collect();
+        assert!(
+            ids.contains(&id_active_1.as_str()),
+            "active-1 must be present: {ids:?}"
+        );
+        assert!(
+            ids.contains(&id_active_2.as_str()),
+            "active-2 must be present: {ids:?}"
+        );
+        assert!(
+            !ids.contains(&id_terminal.as_str()),
+            "terminal session must not be surfaced: {ids:?}"
+        );
+        for task in tasks {
+            assert_eq!(task["state"], "ready");
+        }
+        assert_eq!(body["page"]["limit"], DEFAULT_PAGE_LIMIT);
+    }
+
+    #[tokio::test]
+    async fn tasks_endpoint_filters_and_paginates() {
+        let Ok(database_url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let temp = TempDir::new().expect("temp dir");
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(4)
+            .connect(&database_url)
+            .await
+            .expect("connect");
+        crate::apply_database_migrations(&pool)
+            .await
+            .expect("migrations");
+        let config = ServerConfig::new(
+            "127.0.0.1:0".parse().expect("bind"),
+            "http://127.0.0.1:8080".to_owned(),
+            temp.path().to_path_buf(),
+            NonZeroUsize::new(65_536).expect("chunk size"),
+        )
+        .with_server_frontends([ServerFrontend::Xet])
+        .expect("frontends")
+        .with_index_postgres_url(database_url)
+        .expect("postgres url")
+        .with_admin_read_token(ADMIN_TOKEN.as_bytes().to_vec())
+        .expect("admin token");
+        let app = router(config).await.expect("router");
+
+        // Idempotency: clear rows from any prior run before seeding.
+        sqlx::query("DELETE FROM shardline_resumable_sessions WHERE session_id LIKE $1 || '%'")
+            .bind("admin-paginate-")
+            .execute(&pool)
+            .await
+            .expect("cleanup sessions");
+
+        let expiry = chrono::Utc::now() + chrono::Duration::hours(1);
+        let pid = std::process::id();
+        for i in 0..4u32 {
+            let sid = format!("admin-paginate-{i}-{pid}");
+            sqlx::query(
+                "INSERT INTO shardline_resumable_sessions \
+                 (session_id, protocol, scope_namespace, target_key, attributes_json, \
+                  state, generation, fence_epoch, expires_at) \
+                 VALUES ($1, 's3_multipart', 'owner/repo', 'key.bin', '{}', 'active', 1, 1, $2)",
+            )
+            .bind(&sid)
+            .bind(expiry)
+            .execute(&pool)
+            .await
+            .expect("insert session");
+        }
+        // Also insert a terminal session with the same prefix to ensure it is filtered.
+        let terminal_id = format!("admin-paginate-terminal-{pid}");
+        sqlx::query(
+            "INSERT INTO shardline_resumable_sessions \
+             (session_id, protocol, scope_namespace, target_key, attributes_json, \
+              state, generation, fence_epoch, expires_at) \
+             VALUES ($1, 's3_multipart', 'owner/repo', 'key.bin', '{}', 'completed', 1, 1, $2)",
+        )
+        .bind(&terminal_id)
+        .bind(expiry)
+        .execute(&pool)
+        .await
+        .expect("insert terminal session");
+
+        // Page 1: limit=2 with prefix filter.
+        let url = "/api/v1/tasks?limit=2&prefix=admin-paginate-".to_owned();
+        let response = app
+            .clone()
+            .oneshot(request(Method::GET, &url, Some(ADMIN_TOKEN)))
+            .await
+            .expect("page 1");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        let tasks = body["tasks"].as_array().expect("tasks array");
+        assert_eq!(tasks.len(), 2, "page 1 must return 2 tasks");
+        for task in tasks {
+            assert_eq!(task["state"], "ready");
+            assert!(
+                task["id"].as_str().unwrap().starts_with("admin-paginate-"),
+                "task id must match prefix: {}",
+                task["id"]
+            );
+        }
+        let next_cursor = body["page"]["next_cursor"]
+            .as_str()
+            .expect("next_cursor present");
+        assert_eq!(body["page"]["returned"], 2);
+
+        // Page 2 via cursor.
+        let url2 = format!("/api/v1/tasks?limit=2&prefix=admin-paginate-&cursor={next_cursor}",);
+        let response2 = app
+            .clone()
+            .oneshot(request(Method::GET, &url2, Some(ADMIN_TOKEN)))
+            .await
+            .expect("page 2");
+        assert_eq!(response2.status(), StatusCode::OK);
+        let body2 = json_body(response2).await;
+        let tasks2 = body2["tasks"].as_array().expect("tasks array");
+        assert!(tasks2.len() <= 2, "page 2 must return at most 2 tasks");
+        assert!(
+            !tasks2.is_empty(),
+            "page 2 must not be empty with 4 active sessions"
+        );
+
+        // State filter: query for "degraded" should yield zero results
+        // (no session maps to degraded).
+        let state_url = "/api/v1/tasks?state=degraded&prefix=admin-paginate-".to_owned();
+        let state_response = app
+            .clone()
+            .oneshot(request(Method::GET, &state_url, Some(ADMIN_TOKEN)))
+            .await
+            .expect("state filter");
+        assert_eq!(state_response.status(), StatusCode::OK);
+        let state_body = json_body(state_response).await;
+        assert_eq!(state_body["tasks"].as_array().map(Vec::len), Some(0));
+    }
+
+    #[tokio::test]
+    async fn tasks_endpoint_pagination_unaffected_by_terminal_interleaving() {
+        let Ok(database_url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let temp = TempDir::new().expect("temp dir");
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(4)
+            .connect(&database_url)
+            .await
+            .expect("connect");
+        crate::apply_database_migrations(&pool)
+            .await
+            .expect("migrations");
+        let config = ServerConfig::new(
+            "127.0.0.1:0".parse().expect("bind"),
+            "http://127.0.0.1:8080".to_owned(),
+            temp.path().to_path_buf(),
+            NonZeroUsize::new(65_536).expect("chunk size"),
+        )
+        .with_server_frontends([ServerFrontend::Xet])
+        .expect("frontends")
+        .with_index_postgres_url(database_url)
+        .expect("postgres url")
+        .with_admin_read_token(ADMIN_TOKEN.as_bytes().to_vec())
+        .expect("admin token");
+        let app = router(config).await.expect("router");
+
+        // Idempotency: clear rows from any prior run before seeding.
+        sqlx::query("DELETE FROM shardline_resumable_sessions WHERE session_id LIKE $1 || '%'")
+            .bind("admin-interleave-")
+            .execute(&pool)
+            .await
+            .expect("cleanup sessions");
+
+        let expiry = chrono::Utc::now() + chrono::Duration::hours(1);
+        let pid = std::process::id();
+        // Terminal sessions interleave between active sessions in keyset order
+        // so a naive in-memory filter over an unfiltered SQL window would
+        // under-return and falsely signal end-of-list.
+        let states: [(&str, &str); 5] = [
+            ("admin-interleave-1", "active"),
+            ("admin-interleave-2", "completed"),
+            ("admin-interleave-3", "active"),
+            ("admin-interleave-4", "completed"),
+            ("admin-interleave-5", "active"),
+        ];
+        for (id, state) in states {
+            let sid = format!("{id}-{pid}");
+            sqlx::query(
+                "INSERT INTO shardline_resumable_sessions \
+                 (session_id, protocol, scope_namespace, target_key, attributes_json, \
+                  state, generation, fence_epoch, expires_at) \
+                 VALUES ($1, 's3_multipart', 'owner/repo', 'key.bin', '{}', $2, 1, 1, $3)",
+            )
+            .bind(&sid)
+            .bind(state)
+            .bind(expiry)
+            .execute(&pool)
+            .await
+            .expect("insert session");
+        }
+
+        // Page through with limit=1, following cursors to the end.
+        let mut collected_ids: Vec<String> = Vec::new();
+        let mut cursor: Option<String> = None;
+        let mut page_count = 0;
+        loop {
+            let url = cursor.as_ref().map_or_else(
+                || "/api/v1/tasks?limit=1&prefix=admin-interleave-".to_owned(),
+                |c| format!("/api/v1/tasks?limit=1&prefix=admin-interleave-&cursor={c}"),
+            );
+            let response = app
+                .clone()
+                .oneshot(request(Method::GET, &url, Some(ADMIN_TOKEN)))
+                .await
+                .expect("page response");
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = json_body(response).await;
+            let tasks = body["tasks"].as_array().expect("tasks array");
+            assert!(tasks.len() <= 1, "limit=1 page must return at most 1 task");
+            page_count += 1;
+            for task in tasks {
+                collected_ids.push(task["id"].as_str().expect("task id").to_owned());
+            }
+            match body["page"]["next_cursor"].as_str() {
+                Some(next) => cursor = Some(next.to_owned()),
+                None => break,
+            }
+        }
+
+        assert_eq!(page_count, 3, "three active sessions across three pages");
+        assert_eq!(collected_ids.len(), 3, "only active sessions surfaced");
+        for (id, _) in states.iter().filter(|(_, state)| *state == "active") {
+            assert!(
+                collected_ids
+                    .iter()
+                    .any(|collected| { collected == &format!("{id}-{pid}") }),
+                "active session {id}-{pid} must be surfaced"
+            );
+        }
+        for (id, _) in states.iter().filter(|(_, state)| *state != "active") {
+            assert!(
+                !collected_ids
+                    .iter()
+                    .any(|collected| collected == &format!("{id}-{pid}")),
+                "terminal session {id}-{pid} must not be surfaced"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn metrics_endpoint_returns_enriched_process_counters() {
+        let (app, _temp) = app(Some(ADMIN_TOKEN)).await;
+        let response = app
+            .oneshot(request(Method::GET, "/api/v1/metrics", Some(ADMIN_TOKEN)))
+            .await
+            .expect("metrics response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["api_version"], ADMIN_API_VERSION);
+
+        // existing fields still present
+        assert!(body["upload_requests"].is_number(), "upload_requests");
+        assert!(body["active_connections"].is_number(), "active_connections");
+        assert!(body["admitted_requests"].is_number(), "admitted_requests");
+        assert!(body["download_requests"].is_number(), "download_requests");
+
+        // new process-lifetime fields
+        for field in [
+            "server_uptime_seconds",
+            "reconstruction_requests",
+            "reconstruction_cache_hits",
+            "reconstruction_cache_misses",
+            "reconstruction_chunks_fetched",
+            "gc_runs",
+            "gc_objects_collected",
+            "gc_bytes_collected",
+            "fsck_runs",
+            "fsck_errors_found",
+            "storage_objects_total",
+            "storage_objects_bytes_total",
+            "storage_dedup_saves_bytes_total",
+            "storage_compression_saved_bytes_total",
+            "s3_requests",
+            "s3_errors",
+            "local_io_operations",
+            "lfs_upload_requests",
+            "lfs_download_requests",
+            "oci_upload_requests",
+            "oci_download_requests",
+            "hub_api_requests",
+            "hub_api_file_uploads",
+            "hub_api_file_downloads",
+            "xet_dedupe_shard_queries",
+            "xet_dedupe_shard_hits",
+        ] {
+            assert!(
+                body[field].is_number(),
+                "{field} must be numeric, got: {}",
+                body[field]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn gc_and_integrity_report_real_process_lifetime_counters() {
+        let (app, _temp) = app(Some(ADMIN_TOKEN)).await;
+
+        let gc = app
+            .clone()
+            .oneshot(request(Method::GET, "/api/v1/gc", Some(ADMIN_TOKEN)))
+            .await
+            .expect("gc response");
+        assert_eq!(gc.status(), StatusCode::OK);
+        let gc_body = json_body(gc).await;
+        assert_eq!(gc_body["api_version"], ADMIN_API_VERSION);
+        assert_eq!(gc_body["state"], "external");
+        assert_eq!(gc_body["execution"], "external");
+        let metrics = shardline_metrics::metrics();
+        assert_eq!(
+            gc_body["runs_observed_by_process"],
+            metrics.gc.runs.get(),
+            "gc must surface the real process-lifetime run counter"
+        );
+        assert!(
+            gc_body["objects_collected_by_process"].is_number(),
+            "objects_collected_by_process"
+        );
+        assert!(
+            gc_body["bytes_collected_by_process"].is_number(),
+            "bytes_collected_by_process"
+        );
+
+        let integrity = app
+            .clone()
+            .oneshot(request(Method::GET, "/api/v1/integrity", Some(ADMIN_TOKEN)))
+            .await
+            .expect("integrity response");
+        assert_eq!(integrity.status(), StatusCode::OK);
+        let integrity_body = json_body(integrity).await;
+        assert_eq!(integrity_body["api_version"], ADMIN_API_VERSION);
+        assert_eq!(integrity_body["state"], "external");
+        assert_eq!(integrity_body["execution"], "external");
+        assert_eq!(
+            integrity_body["fsck_runs_observed_by_process"],
+            metrics.fsck.runs.get(),
+            "integrity must surface the real process-lifetime fsck-run counter"
+        );
+        assert!(
+            integrity_body["errors_observed_by_process"].is_number(),
+            "errors_observed_by_process"
+        );
     }
 }

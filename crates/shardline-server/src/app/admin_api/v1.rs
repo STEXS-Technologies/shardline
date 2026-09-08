@@ -35,7 +35,6 @@ pub(crate) struct StatusResponse {
     pub(super) metadata_backend: String,
     pub(super) object_backend: String,
     pub(super) cache_backend: String,
-    pub(super) plugin_registry: OperationalState,
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -102,6 +101,11 @@ pub(crate) struct Node {
     pub(super) state: OperationalState,
     pub(super) server_role: String,
     pub(super) server_frontends: Vec<String>,
+    pub(super) bind_addr: String,
+    pub(super) bin_version: String,
+    pub(super) metadata_backend: String,
+    pub(super) object_backend: String,
+    pub(super) cache_backend: String,
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -133,37 +137,31 @@ pub(crate) struct MetricsResponse {
     pub(super) download_requests: u64,
     pub(super) download_bytes: u64,
     pub(super) range_requests: u64,
-}
-
-#[derive(Debug, Serialize, PartialEq, Eq)]
-pub(crate) struct PluginsResponse {
-    pub(super) api_version: &'static str,
-    pub(super) observed_at_unix_seconds: u64,
-    pub(super) registry: OperationalState,
-    pub(super) plugins: Vec<Plugin>,
-    pub(super) page: Page,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub(crate) struct Plugin {
-    pub(super) id: String,
-    pub(super) version: String,
-    pub(super) state: OperationalState,
-    pub(super) capabilities: Vec<String>,
-}
-
-#[derive(Debug, Serialize, PartialEq, Eq)]
-pub(crate) struct ReplicationResponse {
-    pub(super) api_version: &'static str,
-    pub(super) observed_at_unix_seconds: u64,
-    pub(super) state: OperationalState,
-    pub(super) coordinator: OperationalState,
-    pub(super) replicas: Vec<Replica>,
-    pub(super) page: Page,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub(crate) struct Replica {
-    pub(super) id: String,
-    pub(super) state: OperationalState,
+    // process-lifetime gauges and counters
+    pub(super) server_uptime_seconds: i64,
+    pub(super) reconstruction_requests: u64,
+    pub(super) reconstruction_cache_hits: u64,
+    pub(super) reconstruction_cache_misses: u64,
+    pub(super) reconstruction_chunks_fetched: u64,
+    pub(super) gc_runs: u64,
+    pub(super) gc_objects_collected: u64,
+    pub(super) gc_bytes_collected: u64,
+    pub(super) fsck_runs: u64,
+    pub(super) fsck_errors_found: u64,
+    pub(super) storage_objects_total: i64,
+    pub(super) storage_objects_bytes_total: u64,
+    pub(super) storage_dedup_saves_bytes_total: u64,
+    pub(super) storage_compression_saved_bytes_total: u64,
+    pub(super) s3_requests: u64,
+    pub(super) s3_errors: u64,
+    pub(super) local_io_operations: u64,
+    pub(super) lfs_upload_requests: u64,
+    pub(super) lfs_download_requests: u64,
+    pub(super) oci_upload_requests: u64,
+    pub(super) oci_download_requests: u64,
+    pub(super) hub_api_requests: u64,
+    pub(super) hub_api_file_uploads: u64,
+    pub(super) hub_api_file_downloads: u64,
+    pub(super) xet_dedupe_shard_queries: u64,
+    pub(super) xet_dedupe_shard_hits: u64,
 }
