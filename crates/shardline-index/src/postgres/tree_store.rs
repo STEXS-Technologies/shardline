@@ -407,10 +407,39 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
     use super::*;
+    use serial_test::serial;
 
     async fn connect_postgres() -> Option<sqlx::PgPool> {
         let url = std::env::var("DATABASE_URL").ok()?;
         sqlx::PgPool::connect(&url).await.ok()
+    }
+
+    /// Removes every tree-entry and revision row for the shared repos used by
+    /// these tests. The store is a long-lived dev/CI Postgres; a test that
+    /// panics mid-way can otherwise leak rows that break absolute-count
+    /// assertions in later runs, so each test purges its own repos first.
+    async fn cleanup_shared_repos(pool: &sqlx::PgPool) {
+        for (provider, owner, repo) in [
+            ("github", "owner", "repo"),
+            ("github", "owner", "other-repo"),
+        ] {
+            sqlx::query("DELETE FROM shardline_tree_entries WHERE provider = $1 AND owner = $2 AND repo = $3")
+                .bind(provider)
+                .bind(owner)
+                .bind(repo)
+                .execute(pool)
+                .await
+                .ok();
+            sqlx::query(
+                "DELETE FROM shardline_revisions WHERE provider = $1 AND owner = $2 AND repo = $3",
+            )
+            .bind(provider)
+            .bind(owner)
+            .bind(repo)
+            .execute(pool)
+            .await
+            .ok();
+        }
     }
 
     fn tree_key(revision: &str) -> TreeKey {
@@ -436,12 +465,15 @@ mod tests {
 
     /// Round-trips the Postgres TreeStore against a migrated schema (created by
     /// `shardline -- db migrate up`, which the `postgres` CI job runs first).
+    /// Exercises tree upsert / scan with cursor / delete round-trip.
     #[tokio::test(flavor = "multi_thread")]
+    #[serial]
     async fn pg_tree_store_upsert_scan_delete_roundtrip() {
         let Some(pool) = connect_postgres().await else {
             eprintln!("skipping: no DATABASE_URL");
             return;
         };
+        cleanup_shared_repos(&pool).await;
         let store = PostgresIndexStore::new(pool);
         let key = tree_key("main");
 
@@ -496,11 +528,13 @@ mod tests {
 
     /// Exercises the revision registry (upsert / read / list / delete cascade).
     #[tokio::test(flavor = "multi_thread")]
+    #[serial]
     async fn pg_revision_registry_lifecycle() {
         let Some(pool) = connect_postgres().await else {
             eprintln!("skipping: no DATABASE_URL");
             return;
         };
+        cleanup_shared_repos(&pool).await;
         let store = PostgresIndexStore::new(pool);
         let rev = RevisionRecord {
             provider: "github".to_owned(),
@@ -551,11 +585,13 @@ mod tests {
     /// are evicted (created-at ordering, not name ordering), tree rows
     /// cascade, and other repos are untouched.
     #[tokio::test(flavor = "multi_thread")]
+    #[serial]
     async fn pg_prune_revisions_over_cap_removes_oldest_down_to_cap() {
         let Some(pool) = connect_postgres().await else {
             eprintln!("skipping: no DATABASE_URL");
             return;
         };
+        cleanup_shared_repos(&pool).await;
         let store = PostgresIndexStore::new(pool);
         let cap = 2usize;
         // created_at deliberately NOT aligned with name order.
@@ -594,11 +630,13 @@ mod tests {
 
     /// The prune is a no-op at/below the cap and does not touch other repos.
     #[tokio::test(flavor = "multi_thread")]
+    #[serial]
     async fn pg_prune_revisions_over_cap_at_cap_and_other_repo_untouched() {
         let Some(pool) = connect_postgres().await else {
             eprintln!("skipping: no DATABASE_URL");
             return;
         };
+        cleanup_shared_repos(&pool).await;
         let store = PostgresIndexStore::new(pool);
         let other = RepoKey::new("github", "owner", "other-repo");
         let cap = 5usize;
@@ -650,29 +688,43 @@ mod tests {
 
     /// Lists the distinct repos present in the revision registry.
     #[tokio::test(flavor = "multi_thread")]
+    #[serial]
     async fn pg_list_revision_repo_keys_returns_distinct_repos() {
         let Some(pool) = connect_postgres().await else {
             eprintln!("skipping: no DATABASE_URL");
             return;
         };
+        cleanup_shared_repos(&pool).await;
         let store = PostgresIndexStore::new(pool);
         let repo = repo_key();
         let other = RepoKey::new("github", "owner", "other-repo");
-        for key in [&repo, &repo, &other] {
-            let rev = RevisionRecord {
-                provider: key.provider.clone(),
-                owner: key.owner.clone(),
-                repo: key.repo.clone(),
-                revision: "main".to_owned(),
-                created_at_unix_seconds: 1,
-                updated_at_unix_seconds: 1,
-            };
-            assert!(
-                TreeStore::upsert_revision(&store, &rev)
-                    .await
-                    .expect("upsert")
-            );
-        }
+        // The first upsert of a repo+revision creates it; a repeat upsert of the
+        // same repo+revision is idempotent (not created). Both repos must appear
+        // in the distinct-key listing regardless.
+        let rev_for = |key: &RepoKey| RevisionRecord {
+            provider: key.provider.clone(),
+            owner: key.owner.clone(),
+            repo: key.repo.clone(),
+            revision: "main".to_owned(),
+            created_at_unix_seconds: 1,
+            updated_at_unix_seconds: 1,
+        };
+        assert!(
+            TreeStore::upsert_revision(&store, &rev_for(&repo))
+                .await
+                .expect("upsert")
+        );
+        assert!(
+            !TreeStore::upsert_revision(&store, &rev_for(&repo))
+                .await
+                .expect("upsert"),
+            "repeat upsert of the same repo+revision is idempotent"
+        );
+        assert!(
+            TreeStore::upsert_revision(&store, &rev_for(&other))
+                .await
+                .expect("upsert")
+        );
         let keys = TreeStore::list_revision_repo_keys(&store)
             .await
             .expect("list repo keys");
@@ -689,11 +741,13 @@ mod tests {
 
     /// Counts tree-entry rows per repo (F-103 cap gate) across revisions.
     #[tokio::test(flavor = "multi_thread")]
+    #[serial]
     async fn pg_count_tree_entries_counts_only_the_matching_repo() {
         let Some(pool) = connect_postgres().await else {
             eprintln!("skipping: no DATABASE_URL");
             return;
         };
+        cleanup_shared_repos(&pool).await;
         let store = PostgresIndexStore::new(pool);
         let repo = repo_key();
         let other = RepoKey::new("github", "owner", "other-repo");
