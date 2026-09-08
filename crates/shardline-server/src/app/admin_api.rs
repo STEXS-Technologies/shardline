@@ -1756,4 +1756,54 @@ mod tests {
             );
         }
     }
+
+    #[tokio::test]
+    async fn gc_and_integrity_report_real_process_lifetime_counters() {
+        let (app, _temp) = app(Some(ADMIN_TOKEN)).await;
+
+        let gc = app
+            .clone()
+            .oneshot(request(Method::GET, "/api/v1/gc", Some(ADMIN_TOKEN)))
+            .await
+            .expect("gc response");
+        assert_eq!(gc.status(), StatusCode::OK);
+        let gc_body = json_body(gc).await;
+        assert_eq!(gc_body["api_version"], ADMIN_API_VERSION);
+        assert_eq!(gc_body["state"], "external");
+        assert_eq!(gc_body["execution"], "external");
+        let metrics = shardline_metrics::metrics();
+        assert_eq!(
+            gc_body["runs_observed_by_process"],
+            metrics.gc.runs.get(),
+            "gc must surface the real process-lifetime run counter"
+        );
+        assert!(
+            gc_body["objects_collected_by_process"].is_number(),
+            "objects_collected_by_process"
+        );
+        assert!(
+            gc_body["bytes_collected_by_process"].is_number(),
+            "bytes_collected_by_process"
+        );
+
+        let integrity = app
+            .clone()
+            .oneshot(request(Method::GET, "/api/v1/integrity", Some(ADMIN_TOKEN)))
+            .await
+            .expect("integrity response");
+        assert_eq!(integrity.status(), StatusCode::OK);
+        let integrity_body = json_body(integrity).await;
+        assert_eq!(integrity_body["api_version"], ADMIN_API_VERSION);
+        assert_eq!(integrity_body["state"], "external");
+        assert_eq!(integrity_body["execution"], "external");
+        assert_eq!(
+            integrity_body["fsck_runs_observed_by_process"],
+            metrics.fsck.runs.get(),
+            "integrity must surface the real process-lifetime fsck-run counter"
+        );
+        assert!(
+            integrity_body["errors_observed_by_process"].is_number(),
+            "errors_observed_by_process"
+        );
+    }
 }
