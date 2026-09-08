@@ -1394,6 +1394,13 @@ mod tests {
             eprintln!("skipping: no DATABASE_URL");
             return;
         };
+        // A prior (possibly interrupted) run may have left this fixed id behind
+        // in another state; purge it so the assertions observe a fresh row.
+        sqlx::query("DELETE FROM shardline_upload_intents WHERE intent_id = $1")
+            .bind("test-intent-1")
+            .execute(&pool)
+            .await
+            .expect("clean fixture");
         let store = make_pg_store(pool);
         let intent = UploadIntent::new(
             "test-intent-1".into(),
@@ -1713,6 +1720,14 @@ mod tests {
             eprintln!("skipping: no DATABASE_URL");
             return;
         };
+        // Purge the fixed fixture ids so assertions observe only this run's rows.
+        for id in ["query-state-a", "query-state-b"] {
+            sqlx::query("DELETE FROM shardline_upload_intents WHERE intent_id = $1")
+                .bind(id)
+                .execute(&pool)
+                .await
+                .expect("clean fixture");
+        }
         let store = make_pg_store(pool);
         // Create two intents with different states
         let a = UploadIntent::new("query-state-a".into(), "test/a".into(), "01".repeat(32), 10);

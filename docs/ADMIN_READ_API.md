@@ -96,7 +96,6 @@ per-process or cluster-wide visibility.
 | `metadata_backend` | string | Configured metadata implementation name. No address or credentials are included. |
 | `object_backend` | string | Configured object-storage implementation name. No bucket, endpoint, or credentials are included. |
 | `cache_backend` | string | Configured reconstruction-cache implementation name. |
-| `plugin_registry` | operational state | `unsupported` until a server plugin registry exists. |
 
 ### `GET /api/v1/storage`
 
@@ -157,6 +156,11 @@ reset on restart and are not cluster totals.
 | `nodes[].state` | operational state | Current process durable-backend readiness. |
 | `nodes[].server_role` | string | This entry's runtime role. |
 | `nodes[].server_frontends` | array of strings | Frontends enabled on this entry. |
+| `nodes[].bind_addr` | string | Configured listen socket address (e.g. `0.0.0.0:8080`). Identifies this process by its network binding. Not a hostname or secret. Stable across requests; changes only when configuration changes. |
+| `nodes[].bin_version` | string | Package version of this running binary. Detects version skew across replicas during rolling deploys. |
+| `nodes[].metadata_backend` | string | Configured metadata implementation name (e.g. `local`, `postgres`). No address, connection string, or credentials are included. |
+| `nodes[].object_backend` | string | Configured object-storage implementation name (e.g. `local`, `s3`). No bucket, endpoint, or credentials are included. |
+| `nodes[].cache_backend` | string | Configured reconstruction-cache implementation name (e.g. `memory`, `redis`, `disabled`). |
 | `page` | page object | Cursor metadata described below. |
 
 ### `GET /api/v1/tasks`
@@ -165,10 +169,12 @@ reset on restart and are not cluster totals.
 | --- | --- | --- |
 | `api_version`, `observed_at_unix_seconds` | common | Common fields. |
 | `scheduler` | operational state | `external`: scheduled maintenance belongs to an operator/CronJob. |
-| `tasks` | array | Empty until an authoritative bounded task registry exists. |
-| `tasks[].id` | string | Stable opaque task identifier and pagination key. |
-| `tasks[].state` | operational state | Task lifecycle/health state. |
+| `tasks` | array | In-flight durable resumable upload sessions (Git LFS PATCH, OCI blob, S3 multipart) owned by the Postgres-coordinated store. Each entry is a live session whose lifecycle is `active` or `completing`; terminal (`completed`/`aborted`/`expired`) sessions are historical records and are never listed, so the page is always a bounded window of the server's current work. Empty on backends without durable resumable sessions. |
+| `tasks[].id` | string | Stable opaque resumable-session id; the pagination key. |
+| `tasks[].state` | operational state | `ready` for every listed session (the session is live and server-owned). No session ever maps to `degraded`/`external`/`unsupported`, so a `state` filter for those values returns an empty page. |
 | `page` | page object | Cursor metadata described below. |
+
+Pagination is keyset-ordered by session id and pushed into the store query, so a filtered page always returns a full bounded window of matching sessions; terminal sessions interleaved in id order never truncate a page or falsify the end of the list.
 
 ### `GET /api/v1/metrics`
 
@@ -185,36 +191,39 @@ reset on restart and are not cluster totals.
 | `download_requests` | unsigned integer | Download requests observed during this process lifetime. |
 | `download_bytes` | unsigned integer | Download bytes observed during this process lifetime. |
 | `range_requests` | unsigned integer | Range requests observed during this process lifetime. |
+| `server_uptime_seconds` | signed integer | Seconds since the server process started. |
+| `reconstruction_requests` | unsigned integer | Total reconstruction requests. |
+| `reconstruction_cache_hits` | unsigned integer | Reconstruction cache hits. |
+| `reconstruction_cache_misses` | unsigned integer | Reconstruction cache misses. |
+| `reconstruction_chunks_fetched` | unsigned integer | Chunks fetched for reconstructions. |
+| `gc_runs` | unsigned integer | Garbage-collection runs. |
+| `gc_objects_collected` | unsigned integer | Objects collected by GC. |
+| `gc_bytes_collected` | unsigned integer | Bytes collected by GC. |
+| `fsck_runs` | unsigned integer | Integrity-check runs. |
+| `fsck_errors_found` | unsigned integer | Errors found during integrity checks. |
+| `storage_objects_total` | signed integer | Total objects currently stored. |
+| `storage_objects_bytes_total` | unsigned integer | Total bytes stored across all objects. |
+| `storage_dedup_saves_bytes_total` | unsigned integer | Bytes saved by deduplication. |
+| `storage_compression_saved_bytes_total` | unsigned integer | Bytes saved by LZ4 compression. |
+| `s3_requests` | unsigned integer | S3 API requests made. |
+| `s3_errors` | unsigned integer | S3 API errors. |
+| `local_io_operations` | unsigned integer | Local filesystem IO operations. |
+| `lfs_upload_requests` | unsigned integer | Git LFS upload requests. |
+| `lfs_download_requests` | unsigned integer | Git LFS download requests. |
+| `oci_upload_requests` | unsigned integer | OCI upload requests. |
+| `oci_download_requests` | unsigned integer | OCI download requests. |
+| `hub_api_requests` | unsigned integer | Hub API requests. |
+| `hub_api_file_uploads` | unsigned integer | Hub API file uploads. |
+| `hub_api_file_downloads` | unsigned integer | Hub API file downloads. |
+| `xet_dedupe_shard_queries` | unsigned integer | Xet dedupe shard lookups. |
+| `xet_dedupe_shard_hits` | unsigned integer | Xet dedupe shard cache hits. |
 
-### `GET /api/v1/plugins`
-
-| Field | Type | Scope and meaning |
-| --- | --- | --- |
-| `api_version`, `observed_at_unix_seconds` | common | Common fields. |
-| `registry` | operational state | `unsupported` until the plugin registry exists. |
-| `plugins` | array | Empty while the registry is unsupported. |
-| `plugins[].id` | string | Stable bounded plugin identifier and pagination key. |
-| `plugins[].version` | string | Plugin implementation version. |
-| `plugins[].state` | operational state | Plugin lifecycle/health state. |
-| `plugins[].capabilities` | array of strings | Declared bounded capabilities, used by the `capability` exact-match filter. |
-| `page` | page object | Cursor metadata described below. |
-
-### `GET /api/v1/replication`
-
-| Field | Type | Scope and meaning |
-| --- | --- | --- |
-| `api_version`, `observed_at_unix_seconds` | common | Common fields. |
-| `state` | operational state | `external`: replication belongs to the configured storage provider. |
-| `coordinator` | operational state | `external`: Shardline has no asynchronous replication controller to report. |
-| `replicas` | array | Empty until an authoritative replication registry exists. |
-| `replicas[].id` | string | Stable opaque replica identifier and pagination key. |
-| `replicas[].state` | operational state | Replica health/lifecycle state. |
-| `page` | page object | Cursor metadata described below. |
+This endpoint returns a bounded dashboard summary of process-lifetime integer counters and gauges. For full time-series data including histograms, labeled dimensions, and scrape-compatible formatting, use `GET /metrics` with the separate `SHARDLINE_METRICS_TOKEN`.
 
 ## Cursor pagination and filtering
 
-`nodes`, `tasks`, `plugins`, and `replication` are keyset-paginated. Other
-endpoints reject all query parameters.
+`nodes` and `tasks` are keyset-paginated. Other endpoints reject all query
+parameters.
 
 | Parameter | Applicable endpoints | Contract |
 | --- | --- | --- |
@@ -222,7 +231,6 @@ endpoints reject all query parameters.
 | `cursor` | all collections | Optional opaque URL-safe base64 cursor returned as `next_cursor`; maximum 1024 bytes. |
 | `state` | all collections | Exact operational-state match. |
 | `prefix` | all collections | Case-sensitive prefix of the stable item key; maximum 128 decoded bytes. |
-| `capability` | `plugins` only | Exact declared-capability match; non-empty and at most 128 decoded bytes. |
 
 Every collection contains:
 
@@ -236,10 +244,10 @@ Pass the cursor back with the same filters:
 
 ```bash
 curl -H "Authorization: Bearer $SHARDLINE_ADMIN_READ_TOKEN" \
-  'https://cas.example.com/api/v1/plugins?limit=100&state=ready&capability=storage.read'
+  'https://cas.example.com/api/v1/tasks?limit=100&state=ready'
 
 curl -H "Authorization: Bearer $SHARDLINE_ADMIN_READ_TOKEN" \
-  'https://cas.example.com/api/v1/plugins?limit=100&state=ready&capability=storage.read&cursor=...'
+  'https://cas.example.com/api/v1/tasks?limit=100&state=ready&cursor=...'
 ```
 
 Cursors are versioned, integrity-checked structurally, and bound to `state`,
@@ -251,9 +259,9 @@ closed. Treat cursors as opaque, short-lived pointers, not durable bookmarks.
 Ordering is ascending by stable item key. Each request is a fresh snapshot;
 there is no transaction spanning pages. If a collection changes between page
 requests, deleted entries disappear and newly inserted entries whose keys sort
-at or before the cursor are not revisited. The current node collection is a
-single process entry, and the other registries are presently empty, but this
-contract applies when they gain entries.
+at or before the cursor are not revisited. The node collection is a single
+process entry, and the tasks collection is backed by the durable resumable-session store and this
+contract applies to all collections as they gain entries.
 
 ## Status and failure behavior
 
@@ -271,9 +279,9 @@ contract applies when they gain entries.
 A dependency outage changes readiness-bearing fields to `degraded`; it never
 weakens authentication. Authoritative storage inventory fails rather than
 returning stale or fabricated data. Process counters and external/unsupported
-capability responses remain available when they do not need the failed
-dependency. No endpoint triggers GC, repair, fsck, replication, plugin
-lifecycle, publication, or another durable transition.
+state responses remain available when they do not need the failed
+dependency. No endpoint triggers GC, repair, fsck, publication, or another
+durable transition.
 
 ## Security threat model and verification
 
@@ -292,7 +300,7 @@ absence of every future vulnerability.
 | SSRF | No endpoint accepts URLs, hosts, callbacks, paths, or other outbound-request targets. |
 | Path traversal / file disclosure | No endpoint accepts filesystem or object paths, and backend names are fixed implementation identifiers. |
 | Request smuggling / method confusion | Duplicate authorization fails; ambiguous duplicate query fields fail; mutation and uncommon methods cannot reach handlers. HTTP framing remains the responsibility of the HTTP stack and ingress. |
-| Resource exhaustion | Query/filter/cursor/page bounds, bounded fixed projections, weighted storage admission, and request timeouts are exercised. No endpoint returns raw labels or unbounded identifiers. |
+| Resource exhaustion | Query/filter/cursor/page bounds, bounded fixed projections, and request timeouts cover the lightweight admin reads (health/status/nodes/tasks use bounded probes or primary-key keyset queries with at most `MAX_PAGE_LIMIT + 1` rows); the unbounded authoritative-inventory scan (`/api/v1/storage`) is additionally gated by weighted admission (`weights::STATS`) and returns `503` when saturated. No endpoint returns raw labels or unbounded identifiers. |
 | Sensitive-data exposure / caching | Fixed response DTOs omit keys, tenants, credentials, URLs, and backend errors. `no-store` and sanitized-outage regressions cover success and failure. |
 | Replay | Reads are idempotent snapshots; replay cannot mutate state. Bearer replay remains possible until token rotation, so protect transport and token files. |
 | Unsafe API consumption | The API consumes no third-party response or attacker-selected remote data. Backend failures are converted to bounded states or sanitized errors. |
