@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+## [1.10.0] - 2026-09-08
+
+Completes the read-only administration API introduced in v1.9.0: every
+endpoint now reports real, authoritative data or has been removed. The
+`/api/v1/tasks`, `/nodes`, and `/metrics` endpoints are backed by real durable
+state and process-lifetime counters, while the `/api/v1/plugins` and
+`/api/v1/replication` endpoints — whose backing subsystems (a plugin registry
+and an asynchronous replication controller) do not exist and could never return
+real data — are removed rather than kept as empty `unsupported` stubs. This is
+an operator-visible API change (the removed endpoints return `404`, the same
+response clients already handle when the admin API is disabled).
+
 ### Added
 
 - The admin read-only API's `/api/v1/tasks` endpoint now reports the server's
@@ -21,6 +33,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
   configured metadata/object/cache backend names, alongside the existing role,
   frontends, and readiness. Fields are additive and expose no repository
   identifiers, addresses, or credentials.
+- The admin `/api/v1/metrics` summary now surfaces 26 additive
+  process-lifetime counters and gauges beyond the original system/transfer
+  fields: reconstruction cache hit/miss/requests, GC and fsck activity, storage
+  object totals and dedup/compression bytes saved, S3/local-IO and error counts,
+  per-protocol LFS/OCI/Hub traffic, and Xet dedupe shard hits. It remains a
+  bounded JSON summary; `GET /metrics` stays authoritative for histograms and
+  labeled time series.
 
 ### Removed
 
@@ -1019,7 +1038,8 @@ There are no intentional breaking API or configuration changes from `1.0.0`.
 - Documented async storage TOCTOU races with 1.2M-run fuzz validation (`40ef000`)
 - Updated all architecture, deployment, and Hub API docs for 20-crate structure (`1203d8e`)
 
-[Unreleased]: https://github.com/STEXS-Technologies/shardline/compare/v1.9.0...HEAD
+[Unreleased]: https://github.com/STEXS-Technologies/shardline/compare/v1.10.0...HEAD
+[1.10.0]: https://github.com/STEXS-Technologies/shardline/compare/v1.9.0...v1.10.0
 [1.9.0]: https://github.com/STEXS-Technologies/shardline/compare/v1.8.0...v1.9.0
 [1.8.0]: https://github.com/STEXS-Technologies/shardline/compare/v1.7.0...v1.8.0
 [1.7.0]: https://github.com/STEXS-Technologies/shardline/compare/v1.6.0...v1.7.0
