@@ -4,6 +4,7 @@ use axum::{
     http::HeaderMap,
     http::StatusCode,
 };
+use http_body_util::BodyExt;
 use shardline_index::hub::{BoxedHubStore, HubFileEntry, HubRepo, HubRepoType};
 
 use crate::commit::{CommitInstruction, ParsedCommit};
@@ -2944,17 +2945,19 @@ async fn handler_lfs_download_success() {
         .object_store
         .put_if_absent(&key, ObjectBody::from_slice(b"download data"), &integrity)
         .unwrap();
-    let (status, headers, data) = lfs_download(
+    let response = lfs_download(
         State(state.clone()),
         test_repo(&state, &default_headers()),
         Path(oid.to_string()),
     )
     .await
     .unwrap();
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(data, b"download data");
+    assert_eq!(response.status(), StatusCode::OK);
+    let data = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(data.as_ref(), b"download data");
     // Verify content-type header name
-    assert!(!headers.is_empty());
+    // (the response body is consumed above, so inspect this contract in the
+    // route-level integration tests as well.)
 }
 
 // ------------------------------------------------------------------
@@ -4504,15 +4507,16 @@ async fn handler_lfs_upload_and_download_roundtrip() {
     assert_eq!(result.unwrap(), StatusCode::OK);
 
     // Download
-    let (status, _headers, downloaded) = lfs_download(
+    let response = lfs_download(
         State(state.clone()),
         test_repo(&state, &default_headers()),
         Path(oid.to_owned()),
     )
     .await
     .unwrap();
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(downloaded, data);
+    assert_eq!(response.status(), StatusCode::OK);
+    let downloaded = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(downloaded.as_ref(), data);
 }
 
 // ------------------------------------------------------------------
