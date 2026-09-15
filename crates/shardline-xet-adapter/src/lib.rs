@@ -62,7 +62,9 @@ pub use frontend::{
     XET_WRITE_TOKEN_ROUTE, XORB_TRANSFER_ROUTE, build_xorb_transfer_url, validate_hash_path,
     validate_optional_content_hash, validate_xorb_transfer_namespace,
 };
-pub use ingest::{register_uploaded_shard_bytes, store_uploaded_xorb_bytes};
+pub use ingest::{
+    register_uploaded_shard_bytes, register_uploaded_shard_file, store_uploaded_xorb_bytes,
+};
 pub use model::{
     BatchReconstructionResponse, FileReconstructionResponse, FileReconstructionV2Response,
     ReconstructionChunkRange, ReconstructionFetchInfo, ReconstructionMultiRangeFetch,
@@ -74,8 +76,8 @@ pub use reconstruction::{
     build_reconstruction_response_with_metrics, reconstruction_v2_from_v1,
 };
 pub use shard_store::{
-    dedupe_shard_mapping, parse_uploaded_shard, parse_uploaded_shard_with_metrics,
-    resolve_dedupe_shard_object, retained_shard_chunk_hashes,
+    dedupe_shard_mapping, parse_uploaded_shard, parse_uploaded_shard_file,
+    parse_uploaded_shard_with_metrics, resolve_dedupe_shard_object, retained_shard_chunk_hashes,
     retained_shard_chunk_hashes_from_reader, shard_hash_from_object_key_if_present,
     shard_object_key,
 };
