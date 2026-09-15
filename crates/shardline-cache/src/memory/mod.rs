@@ -66,6 +66,10 @@ const LOADER_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 /// the first orphan bound.
 const LOADER_ALIVE_GRACE: Duration = Duration::from_secs(10);
 
+/// Hard process-local payload budget for the memory adapter. Entry count alone
+/// is insufficient because one serialized reconstruction can be large.
+const MAX_MEMORY_CACHE_BYTES: usize = 256 * 1024 * 1024;
+
 /// Bounded in-memory reconstruction cache adapter.
 #[derive(Debug, Clone)]
 pub struct MemoryReconstructionCache {
@@ -493,20 +497,28 @@ impl AsyncReconstructionCache for MemoryReconstructionCache {
             let now = Instant::now();
             let expires_at = now.checked_add(self.ttl).unwrap_or(now);
             let mut inner = self.inner.write().await;
-            if !inner.entries.contains_key(key) && inner.entries.len() >= self.max_entries.get() {
-                inner.evict_oldest();
+            if payload.len() <= MAX_MEMORY_CACHE_BYTES {
+                while (!inner.entries.contains_key(key)
+                    && inner.entries.len() >= self.max_entries.get())
+                    || inner.total_bytes.saturating_add(payload.len()) > MAX_MEMORY_CACHE_BYTES
+                {
+                    if inner.entries.is_empty() {
+                        break;
+                    }
+                    inner.evict_oldest();
+                }
+                let seq = inner.next_seq;
+                inner.next_seq = inner.next_seq.saturating_add(1);
+                inner.insert(
+                    key,
+                    MemoryEntry {
+                        payload: Arc::new(payload.to_vec()),
+                        expires_at,
+                        inserted_at: now,
+                        seq,
+                    },
+                );
             }
-            let seq = inner.next_seq;
-            inner.next_seq = inner.next_seq.saturating_add(1);
-            inner.insert(
-                key,
-                MemoryEntry {
-                    payload: Arc::new(payload.to_vec()),
-                    expires_at,
-                    inserted_at: now,
-                    seq,
-                },
-            );
             let released = {
                 let mut loading = self
                     .loading

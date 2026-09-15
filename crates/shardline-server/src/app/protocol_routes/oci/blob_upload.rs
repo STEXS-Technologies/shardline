@@ -180,7 +180,6 @@ pub(crate) async fn oci_patch_blob_upload(
     let repository = repo.repository();
     let auth = repo.capability();
     let mut body = RequestBodyReader::from_body(body, state.config.max_request_body_bytes())?;
-    let bytes = read_body_to_bytes(&mut body).await?;
     if durable_oci_sessions_enabled(state) {
         return durable_oci_patch_blob_upload(
             state,
@@ -188,12 +187,12 @@ pub(crate) async fn oci_patch_blob_upload(
             repository,
             auth.namespace(),
             session_id,
-            &bytes,
+            &mut body,
         )
         .await;
     }
     let _lock = lock_upload_sessions(state.config.root_dir()).await?;
-    let session = read_upload_session(
+    let mut session = read_upload_session(
         state.config.root_dir(),
         session_id,
         state.config.oci_upload_session_ttl_seconds(),
@@ -209,7 +208,7 @@ pub(crate) async fn oci_patch_blob_upload(
     } else {
         upload_length(state.config.root_dir(), session_id).await?
     };
-    if let Some(content_range) = headers.get(CONTENT_RANGE) {
+    let expected_range = if let Some(content_range) = headers.get(CONTENT_RANGE) {
         let content_range = content_range.to_str().map_err(|e| {
             tracing::warn!(error = %e, "invalid content-range header utf-8");
             ServerError::InvalidRangeHeader
@@ -218,31 +217,42 @@ pub(crate) async fn oci_patch_blob_upload(
         if expected_range.start() != current_length {
             return Err(ServerError::RangeNotSatisfiable);
         }
-        let observed_end = expected_range
-            .start()
-            .checked_add(u64::try_from(bytes.len())?)
-            .and_then(|value| value.checked_sub(1))
-            .ok_or(ServerError::Overflow)?;
-        if observed_end != expected_range.end_inclusive() {
-            return Err(ServerError::RangeNotSatisfiable);
+        Some(expected_range)
+    } else {
+        None
+    };
+    let mut new_length = current_length;
+    while let Some(bytes) = body.next_bytes().await? {
+        ensure_upload_growth_within_limit(state, new_length, bytes.len())?;
+        new_length = if session.use_s3_multipart {
+            let (updated_session, length) = append_s3_multipart_upload_bytes(
+                state.config.root_dir(),
+                &state.backend,
+                session_id,
+                session,
+                &bytes,
+            )
+            .await?;
+            session = updated_session;
+            length
+        } else {
+            append_upload_bytes(state.config.root_dir(), session_id, &bytes).await?
+        };
+        if let Some(expected_range) = expected_range {
+            let observed_end = new_length.checked_sub(1).ok_or(ServerError::Overflow)?;
+            if observed_end > expected_range.end_inclusive() {
+                return Err(ServerError::RangeNotSatisfiable);
+            }
         }
     }
-    ensure_upload_growth_within_limit(state, current_length, bytes.len())?;
-    let new_length = if session.use_s3_multipart {
-        let (_session, new_length) = append_s3_multipart_upload_bytes(
-            state.config.root_dir(),
-            &state.backend,
-            session_id,
-            session,
-            &bytes,
-        )
-        .await?;
-        new_length
-    } else {
-        let new_length = append_upload_bytes(state.config.root_dir(), session_id, &bytes).await?;
+    if let Some(expected_range) = expected_range
+        && new_length.checked_sub(1) != Some(expected_range.end_inclusive())
+    {
+        return Err(ServerError::RangeNotSatisfiable);
+    }
+    if !session.use_s3_multipart {
         touch_upload_session(state.config.root_dir(), session_id, session).await?;
-        new_length
-    };
+    }
     let last = new_length.saturating_sub(1);
     Response::builder()
         .status(StatusCode::ACCEPTED)
@@ -261,7 +271,7 @@ async fn durable_oci_patch_blob_upload(
     repository: &str,
     repository_scope: Option<&shardline_protocol::RepositoryScope>,
     session_id: &str,
-    bytes: &[u8],
+    body: &mut RequestBodyReader,
 ) -> Result<Response, ServerError> {
     let expected_scope = scope_namespace(repository_scope);
     let (session, parts) = state
@@ -288,24 +298,19 @@ async fn durable_oci_patch_blob_upload(
         if expected_range.start() != current_length {
             return Err(ServerError::RangeNotSatisfiable);
         }
-        let observed_end = current_length
-            .checked_add(u64::try_from(bytes.len())?)
-            .and_then(|value| value.checked_sub(1))
-            .ok_or(ServerError::Overflow)?;
-        if observed_end != expected_range.end_inclusive() {
-            return Err(ServerError::RangeNotSatisfiable);
-        }
     }
-    ensure_upload_growth_within_limit(state, current_length, bytes.len())?;
-    if !bytes.is_empty() {
-        let part_number = parts
-            .last()
-            .map_or(1_u64, |part| part.part_number().get().saturating_add(1));
-        let part_number = std::num::NonZeroU64::new(part_number).ok_or(ServerError::Overflow)?;
+    let mut new_length = current_length;
+    let mut next_part_number = parts
+        .last()
+        .map_or(1_u64, |part| part.part_number().get().saturating_add(1));
+    while let Some(bytes) = body.next_bytes().await? {
+        ensure_upload_growth_within_limit(state, new_length, bytes.len())?;
+        let part_number =
+            std::num::NonZeroU64::new(next_part_number).ok_or(ServerError::Overflow)?;
         let (key, integrity) = stage_bytes_content_addressed(
             &state.backend.object_store(),
             &format!("staging/resumable/oci/{session_id}/{}", part_number.get()),
-            bytes,
+            &bytes,
         )
         .await?;
         let max_bytes = u64::try_from(state.config.max_request_body_bytes().get())?;
@@ -336,10 +341,13 @@ async fn durable_oci_patch_blob_upload(
                 return Err(ServerError::TooManyUploadSessions);
             }
         }
+        new_length = new_length
+            .checked_add(u64::try_from(bytes.len())?)
+            .ok_or(ServerError::Overflow)?;
+        next_part_number = next_part_number
+            .checked_add(1)
+            .ok_or(ServerError::Overflow)?;
     }
-    let new_length = current_length
-        .checked_add(u64::try_from(bytes.len())?)
-        .ok_or(ServerError::Overflow)?;
     Response::builder()
         .status(StatusCode::ACCEPTED)
         .header(LOCATION, upload_session_location(repository, session_id))
