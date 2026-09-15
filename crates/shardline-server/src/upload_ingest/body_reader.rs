@@ -206,6 +206,36 @@ pub(crate) async fn read_body_to_bytes(
     Ok(body)
 }
 
+/// Drains a request body into a temporary file while hashing it. This keeps
+/// request-sized protocol objects out of the heap; callers can pass the file
+/// directly to a file-capable object store.
+pub(crate) async fn stage_body_to_tempfile(
+    reader: &mut RequestBodyReader,
+) -> Result<
+    (
+        tempfile::NamedTempFile,
+        u64,
+        shardline_protocol::ShardlineHash,
+    ),
+    ServerError,
+> {
+    let temporary = tempfile::NamedTempFile::new()?;
+    let mut output = tokio::fs::File::create(temporary.path()).await?;
+    let mut hasher = blake3::Hasher::new();
+    let mut length = 0_u64;
+    while let Some(bytes) = reader.next_bytes().await? {
+        hasher.update(&bytes);
+        length = checked_add(length, u64::try_from(bytes.len())?)?;
+        tokio::io::AsyncWriteExt::write_all(&mut output, &bytes).await?;
+    }
+    tokio::io::AsyncWriteExt::flush(&mut output).await?;
+    Ok((
+        temporary,
+        length,
+        shardline_protocol::ShardlineHash::from_bytes(*hasher.finalize().as_bytes()),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use axum::body::Bytes;
