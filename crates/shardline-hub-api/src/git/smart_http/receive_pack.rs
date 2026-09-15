@@ -115,7 +115,9 @@ pub async fn receive_pack(
     build_report_response(&results, true)
 }
 
-pub(super) fn parse_receive_pack_request(body: &[u8]) -> (Vec<(String, String, String)>, Vec<u8>) {
+pub(super) fn parse_receive_pack_request<'a>(
+    body: &'a [u8],
+) -> (Vec<(String, String, String)>, &'a [u8]) {
     let mut updates = Vec::new();
     let mut pack_start = 0;
 
@@ -153,9 +155,9 @@ pub(super) fn parse_receive_pack_request(body: &[u8]) -> (Vec<(String, String, S
     }
 
     let pack_data = if pack_start < body.len() {
-        body.get(pack_start..).unwrap_or(&[]).to_vec()
+        body.get(pack_start..).unwrap_or(&[])
     } else {
-        Vec::new()
+        &[]
     };
 
     (updates, pack_data)
