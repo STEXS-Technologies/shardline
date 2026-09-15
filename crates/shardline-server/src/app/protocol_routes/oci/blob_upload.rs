@@ -24,10 +24,10 @@ use crate::{
     object_store::{materialize_object_to_file, stage_bytes_content_addressed},
     oci_adapter::{
         abort_s3_multipart_upload_session, append_s3_multipart_upload_bytes, append_upload_bytes,
-        create_upload_session, delete_upload_session, lock_upload_sessions, new_upload_session_id,
-        oci_blob_location, read_upload_session, touch_upload_session, upload_body_integrity,
-        upload_body_path_for_session, upload_length, upload_session_length,
-        upload_session_location, validate_repository,
+        create_upload_session, delete_upload_session, finalize_s3_multipart_upload_session,
+        lock_upload_sessions, new_upload_session_id, oci_blob_location, read_upload_session,
+        touch_upload_session, upload_body_integrity, upload_body_path_for_session, upload_length,
+        upload_session_length, upload_session_location, validate_repository,
     },
     protocol_support::{parse_sha256_digest, scope_namespace},
     upload_ingest::RequestBodyReader,
@@ -407,6 +407,62 @@ pub(crate) async fn oci_put_blob_upload(
         || session.scope_namespace != scope_namespace(auth.namespace())
     {
         return Err(ServerError::NotFound);
+    }
+    if session.use_s3_multipart {
+        let current_length = upload_session_length(&session).unwrap_or(0);
+        let expected_range = headers
+            .get(CONTENT_RANGE)
+            .map(|value| {
+                value
+                    .to_str()
+                    .map_err(|_error| ServerError::InvalidRangeHeader)
+                    .and_then(parse_upload_content_range)
+            })
+            .transpose()?;
+        if let Some(expected_range) = expected_range
+            && expected_range.start() != current_length
+        {
+            return Err(ServerError::RangeNotSatisfiable);
+        }
+        let mut s3_session = session;
+        let mut new_length = current_length;
+        while let Some(bytes) = body.next_bytes().await? {
+            ensure_upload_growth_within_limit(state, new_length, bytes.len())?;
+            let (updated, length) = append_s3_multipart_upload_bytes(
+                state.config.root_dir(),
+                &state.backend,
+                session_id,
+                s3_session,
+                &bytes,
+            )
+            .await?;
+            s3_session = updated;
+            new_length = length;
+        }
+        if let Some(expected_range) = expected_range
+            && new_length.checked_sub(1) != Some(expected_range.end_inclusive())
+        {
+            return Err(ServerError::RangeNotSatisfiable);
+        }
+        let object_key = oci_blob_key(repository, &digest_hex, auth)?;
+        finalize_s3_multipart_upload_session(
+            state.config.root_dir(),
+            &state.backend,
+            session_id,
+            s3_session,
+            &object_key,
+            &digest_hex,
+            &[],
+        )
+        .await
+        .map_err(ServerError::from)?;
+        publish_oci_blob(state, repository, auth, &digest_hex).await?;
+        delete_upload_session(state.config.root_dir(), session_id).await?;
+        metrics().protocol.record_oci_upload();
+        return oci_created_response(
+            &oci_blob_location(repository, &digest_hex),
+            Some(&digest_hex),
+        );
     }
     let current_length = if let Some(length) = upload_session_length(&session) {
         length

@@ -37,6 +37,11 @@ use super::{
     try_for_each_serialized_xorb_chunk_async, validate_serialized_xorb,
 };
 
+/// Legacy git-xet clients can send footerless xorbs that require a
+/// compatibility normalization pass. Keep that fallback explicitly bounded;
+/// canonical uploads continue through the file-backed streaming path.
+const MAX_COMPAT_XORB_NORMALIZE_BYTES: u64 = 16 * 1024 * 1024;
+
 #[derive(Debug)]
 pub struct StoredXorbUpload {
     pub was_inserted: bool,
@@ -313,8 +318,20 @@ pub async fn store_uploaded_xorb_file(
     let expected_hash_value = parse_xet_hash_hex(expected_hash)?;
     let mut file = File::open(path).map_err(XetAdapterError::Io)?;
     let canonical_length = file.metadata().map_err(XetAdapterError::Io)?.len();
-    let validated =
-        validate_serialized_xorb(&mut file, expected_hash_value).map_err(XetAdapterError::from)?;
+    let validated = match validate_serialized_xorb(&mut file, expected_hash_value) {
+        Ok(validated) => validated,
+        Err(error) => {
+            // Older git-xet releases omit the footer that Shardline uses for
+            // zero-copy validation. Preserve interoperability for small
+            // compatibility xorbs without reopening whole-file buffering for
+            // arbitrary uploads.
+            if canonical_length > MAX_COMPAT_XORB_NORMALIZE_BYTES {
+                return Err(XetAdapterError::from(error));
+            }
+            let bytes = std::fs::read(path).map_err(XetAdapterError::Io)?;
+            return store_uploaded_xorb(object_store, expected_hash, &bytes).await;
+        }
+    };
     let unpacked_length = Arc::new(AtomicU64::new(0));
     let stored_bytes = Arc::new(AtomicU64::new(0));
     try_for_each_serialized_xorb_chunk_async(&mut file, &validated, {
