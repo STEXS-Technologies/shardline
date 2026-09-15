@@ -24,13 +24,13 @@ use crate::{
     object_store::{materialize_object_to_file, stage_bytes_content_addressed},
     oci_adapter::{
         abort_s3_multipart_upload_session, append_s3_multipart_upload_bytes, append_upload_bytes,
-        create_upload_session, delete_upload_session, finalize_s3_multipart_upload_session,
-        lock_upload_sessions, new_upload_session_id, oci_blob_location, read_upload_session,
-        touch_upload_session, upload_body_integrity, upload_body_path_for_session, upload_length,
-        upload_session_length, upload_session_location, validate_repository,
+        create_upload_session, delete_upload_session, lock_upload_sessions, new_upload_session_id,
+        oci_blob_location, read_upload_session, touch_upload_session, upload_body_integrity,
+        upload_body_path_for_session, upload_length, upload_session_length,
+        upload_session_location, validate_repository,
     },
     protocol_support::{parse_sha256_digest, scope_namespace},
-    upload_ingest::{RequestBodyReader, read_body_to_bytes},
+    upload_ingest::RequestBodyReader,
 };
 
 const fn durable_oci_sessions_enabled(state: &AppState) -> bool {
@@ -396,7 +396,6 @@ pub(crate) async fn oci_put_blob_upload(
         )
         .await;
     }
-    let final_bytes = read_body_to_bytes(&mut body).await?;
     let _lock = lock_upload_sessions(state.config.root_dir()).await?;
     let session = read_upload_session(
         state.config.root_dir(),
@@ -414,7 +413,7 @@ pub(crate) async fn oci_put_blob_upload(
     } else {
         upload_length(state.config.root_dir(), session_id).await?
     };
-    if let Some(content_range) = headers.get(CONTENT_RANGE) {
+    let expected_range = if let Some(content_range) = headers.get(CONTENT_RANGE) {
         let content_range = content_range.to_str().map_err(|e| {
             tracing::warn!(error = %e, "invalid content-range header utf-8");
             ServerError::InvalidRangeHeader
@@ -423,39 +422,28 @@ pub(crate) async fn oci_put_blob_upload(
         if expected_range.start() != current_length {
             return Err(ServerError::RangeNotSatisfiable);
         }
-        let observed_end = expected_range
-            .start()
-            .checked_add(u64::try_from(final_bytes.len())?)
-            .and_then(|value| value.checked_sub(1))
-            .ok_or(ServerError::Overflow)?;
-        if observed_end != expected_range.end_inclusive() {
-            return Err(ServerError::RangeNotSatisfiable);
+        Some(expected_range)
+    } else {
+        None
+    };
+    let mut new_length = current_length;
+    while let Some(bytes) = body.next_bytes().await? {
+        ensure_upload_growth_within_limit(state, new_length, bytes.len())?;
+        new_length = append_upload_bytes(state.config.root_dir(), session_id, &bytes).await?;
+        if let Some(expected_range) = expected_range {
+            if new_length.checked_sub(1).ok_or(ServerError::Overflow)?
+                > expected_range.end_inclusive()
+            {
+                return Err(ServerError::RangeNotSatisfiable);
+            }
         }
     }
-    ensure_upload_growth_within_limit(state, current_length, final_bytes.len())?;
+    if let Some(expected_range) = expected_range
+        && new_length.checked_sub(1) != Some(expected_range.end_inclusive())
+    {
+        return Err(ServerError::RangeNotSatisfiable);
+    }
     let object_key = oci_blob_key(repository, &digest_hex, auth)?;
-    if session.use_s3_multipart {
-        let _stored = finalize_s3_multipart_upload_session(
-            state.config.root_dir(),
-            &state.backend,
-            session_id,
-            session,
-            &object_key,
-            &digest_hex,
-            &final_bytes,
-        )
-        .await?;
-        publish_oci_blob(state, repository, auth, &digest_hex).await?;
-        delete_upload_session(state.config.root_dir(), session_id).await?;
-        return oci_created_response(
-            &oci_blob_location(repository, &digest_hex),
-            Some(&digest_hex),
-        );
-    }
-    if !final_bytes.is_empty() {
-        let _new_length =
-            append_upload_bytes(state.config.root_dir(), session_id, &final_bytes).await?;
-    }
     let (observed, integrity) = upload_body_integrity(state.config.root_dir(), session_id).await?;
     if observed != digest_hex {
         return Err(ServerError::ExpectedBodyHashMismatch);
