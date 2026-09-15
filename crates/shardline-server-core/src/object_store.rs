@@ -201,6 +201,11 @@ impl ServerObjectStore {
     /// Materializes an object into an unlinked temporary file using bounded
     /// range reads. This is for random-access parsers (xorb/shard formats),
     /// not for HTTP delivery; callers must stream the resulting file onward.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the temporary file cannot be created, a range
+    /// read fails, or the stored object length does not match `length`.
     pub fn materialize_object_to_tempfile(
         &self,
         object_key: &ObjectKey,
@@ -224,18 +229,28 @@ impl ServerObjectStore {
         const CHUNK_BYTES: u64 = 1024 * 1024;
         let mut offset = 0_u64;
         while offset < length {
-            let end = (offset + CHUNK_BYTES).min(length) - 1;
+            let end_exclusive = offset
+                .checked_add(CHUNK_BYTES)
+                .ok_or(ServerObjectStoreError::Overflow)?
+                .min(length);
+            let end = end_exclusive
+                .checked_sub(1)
+                .ok_or(ServerObjectStoreError::Overflow)?;
             let range =
-                ByteRange::new(offset, end).map_err(|_| ServerObjectStoreError::Overflow)?;
+                ByteRange::new(offset, end).map_err(|_error| ServerObjectStoreError::Overflow)?;
             let bytes = ObjectStore::read_range(self, object_key, range)?;
+            let expected_u64 = end
+                .checked_sub(offset)
+                .and_then(|value| value.checked_add(1))
+                .ok_or(ServerObjectStoreError::Overflow)?;
             let expected =
-                usize::try_from(end - offset + 1).map_err(|_| ServerObjectStoreError::Overflow)?;
+                usize::try_from(expected_u64).map_err(|_error| ServerObjectStoreError::Overflow)?;
             if bytes.len() != expected {
                 return Err(ServerObjectStoreError::StoredObjectLengthMismatch);
             }
             std::io::Write::write_all(output.as_file_mut(), &bytes)
                 .map_err(ServerObjectStoreError::Io)?;
-            offset = end + 1;
+            offset = end_exclusive;
         }
         Ok(output)
     }
