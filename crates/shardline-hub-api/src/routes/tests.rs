@@ -2870,7 +2870,7 @@ async fn handler_lfs_upload_invalid_oid() {
         State(state.clone()),
         test_repo(&state, &default_headers()),
         Path("bad-oid".to_string()),
-        bytes::Bytes::from_static(b"data"),
+        axum::body::Body::from(bytes::Bytes::from_static(b"data")),
     )
     .await;
     assert!(result.is_err());
@@ -2889,7 +2889,7 @@ async fn handler_lfs_upload_success() {
         State(state.clone()),
         test_repo(&state, &default_headers()),
         Path(oid.to_string()),
-        bytes::Bytes::from_static(b"some lfs data"),
+        axum::body::Body::from(bytes::Bytes::from_static(b"some lfs data")),
     )
     .await;
     assert!(result.is_ok());
@@ -4501,7 +4501,7 @@ async fn handler_lfs_upload_and_download_roundtrip() {
         State(state.clone()),
         test_repo(&state, &default_headers()),
         Path(oid.to_owned()),
-        bytes::Bytes::from_static(data),
+        axum::body::Body::from(bytes::Bytes::from_static(data)),
     )
     .await;
     assert_eq!(result.unwrap(), StatusCode::OK);
