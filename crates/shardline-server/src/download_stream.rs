@@ -1,5 +1,5 @@
 use std::{
-    io::{Error as IoError, ErrorKind, SeekFrom},
+    io::{Error as IoError, ErrorKind, Seek, SeekFrom},
     pin::Pin,
 };
 
@@ -17,8 +17,7 @@ use tracing::{debug, trace, warn};
 
 use crate::{
     ServerError, chunk_store::chunk_object_key, error::ObjectStoreError, local_backend::chunk_hash,
-    object_store::ServerObjectStore, object_store::read_full_object,
-    object_store::run_before_local_object_read_hook,
+    object_store::ServerObjectStore, object_store::run_before_local_object_read_hook,
 };
 
 pub const STREAM_READ_BUFFER_BYTES: u64 = 1024 * 1024;
@@ -48,9 +47,9 @@ pub(crate) fn validated_xorb_byte_range_stream(
         return Err(ServerError::RangeNotSatisfiable);
     }
 
-    let xorb_data = read_full_object(object_store, object_key, total_length)?;
+    let mut xorb_data = object_store.materialize_object_to_tempfile(object_key, total_length)?;
     let expected_hash = parse_xet_hash_hex(hash_hex)?;
-    let mut cursor = std::io::Cursor::new(xorb_data.as_slice());
+    let mut cursor = xorb_data.as_file_mut();
     crate::xet_adapter::validate_serialized_xorb(&mut cursor, expected_hash)?;
 
     let start = usize::try_from(range.start())?;
@@ -60,7 +59,11 @@ pub(crate) fn validated_xorb_byte_range_stream(
             .checked_add(1)
             .ok_or(ServerError::Overflow)?,
     )?;
-    let bytes = Bytes::from(xorb_data).slice(start..end_exclusive);
+    use std::io::Read;
+    let mut bytes = vec![0_u8; end_exclusive - start];
+    cursor.seek(std::io::SeekFrom::Start(start as u64))?;
+    cursor.read_exact(&mut bytes)?;
+    let bytes = Bytes::from(bytes);
     Ok(Box::pin(stream::once(async move { Ok(bytes) })))
 }
 
@@ -98,11 +101,11 @@ async fn read_xorb_backed_chunks(
         .metadata(&xorb_key)?
         .ok_or(ServerError::NotFound)?;
     let xorb_length = metadata.length();
-    let xorb_data = read_full_object(&object_store, &xorb_key, xorb_length)?;
+    let mut xorb_data = object_store.materialize_object_to_tempfile(&xorb_key, xorb_length)?;
 
     // 2. Parse and validate the xorb (verifies xorb hash against expected hash).
     let expected_hash = parse_xet_hash_hex(xorb_hash_hex)?;
-    let mut cursor = std::io::Cursor::new(xorb_data.as_slice());
+    let mut cursor = xorb_data.as_file_mut();
     let validated = crate::xet_adapter::validate_serialized_xorb(&mut cursor, expected_hash)?;
 
     // 3. Decode all chunks (decompresses and verifies per-chunk content hashes).

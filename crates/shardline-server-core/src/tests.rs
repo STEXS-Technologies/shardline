@@ -471,6 +471,52 @@ fn read_full_object_nonexistent_returns_error() {
     );
 }
 
+#[test]
+fn materialize_object_to_tempfile_copies_large_object_in_bounded_chunks() {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let storage = shardline_test_support::TempStorage::new();
+    let store = ServerObjectStore::local(storage.path().join("objects")).unwrap();
+    let key =
+        ObjectKey::parse("aa/2222222222222222222222222222222222222222222222222222222222222222")
+            .unwrap();
+    let body: Vec<u8> = (0..(2 * 1024 * 1024 + 17))
+        .map(|index| (index % 251) as u8)
+        .collect();
+    let integrity = ObjectIntegrity::new(chunk_hash(&body), body.len() as u64);
+    store
+        .put_if_absent(&key, ObjectBody::from_slice(&body), &integrity)
+        .unwrap();
+
+    let mut temp = store
+        .materialize_object_to_tempfile(&key, body.len() as u64)
+        .unwrap();
+    temp.as_file_mut().seek(SeekFrom::Start(0)).unwrap();
+    let mut recovered = Vec::new();
+    temp.as_file_mut().read_to_end(&mut recovered).unwrap();
+    assert_eq!(recovered, body);
+}
+
+#[test]
+fn materialize_object_to_tempfile_rejects_length_mismatch() {
+    let storage = shardline_test_support::TempStorage::new();
+    let store = ServerObjectStore::local(storage.path().join("objects")).unwrap();
+    let key =
+        ObjectKey::parse("aa/3333333333333333333333333333333333333333333333333333333333333333")
+            .unwrap();
+    let body = b"short";
+    let integrity = ObjectIntegrity::new(chunk_hash(body), body.len() as u64);
+    store
+        .put_if_absent(&key, ObjectBody::from_slice(body), &integrity)
+        .unwrap();
+
+    let result = store.materialize_object_to_tempfile(&key, 100);
+    assert!(matches!(
+        result,
+        Err(ServerObjectStoreError::StoredObjectLengthMismatch)
+    ));
+}
+
 // ── copy_if_absent ────────────────────────────────────────────────
 
 #[test]
