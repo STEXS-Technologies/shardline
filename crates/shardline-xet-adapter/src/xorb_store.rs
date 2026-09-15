@@ -1,6 +1,8 @@
 use std::{
     borrow::Cow,
+    fs::File,
     io::Cursor,
+    path::Path,
     sync::Arc,
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -296,6 +298,90 @@ pub async fn store_uploaded_xorb(
         was_inserted: matches!(serialized_outcome, PutOutcome::Inserted),
         stored_bytes,
     })
+}
+
+/// Stores a canonical serialized xorb directly from a seekable file. The
+/// decoder keeps only one decompressed chunk in memory. Non-canonical
+/// footerless inputs are rejected here because normalizing them requires a
+/// second complete container; callers may use the legacy byte API for those
+/// explicitly bounded compatibility uploads.
+pub async fn store_uploaded_xorb_file(
+    object_store: &ServerObjectStore,
+    expected_hash: &str,
+    path: &Path,
+) -> Result<StoredXorbUpload, XetAdapterError> {
+    let expected_hash_value = parse_xet_hash_hex(expected_hash)?;
+    let mut file = File::open(path).map_err(XetAdapterError::Io)?;
+    let canonical_length = file.metadata().map_err(XetAdapterError::Io)?.len();
+    let validated =
+        validate_serialized_xorb(&mut file, expected_hash_value).map_err(XetAdapterError::from)?;
+    let unpacked_length = Arc::new(AtomicU64::new(0));
+    let stored_bytes = Arc::new(AtomicU64::new(0));
+    try_for_each_serialized_xorb_chunk_async(&mut file, &validated, {
+        let unpacked_length = Arc::clone(&unpacked_length);
+        let stored_bytes = Arc::clone(&stored_bytes);
+        move |decoded_chunk| {
+            let unpacked_length = Arc::clone(&unpacked_length);
+            let stored_bytes = Arc::clone(&stored_bytes);
+            async move {
+                let chunk_hash_hex = xet_hash_hex_string(decoded_chunk.descriptor().hash());
+                let chunk_length = u64::try_from(decoded_chunk.data().len())?;
+                let total = unpacked_length
+                    .fetch_add(chunk_length, Ordering::Relaxed)
+                    .checked_add(chunk_length)
+                    .ok_or(XetAdapterError::Overflow)?;
+                if total > MAX_XORB_UNPACKED_BYTES {
+                    return Err(XetAdapterError::XorbUnpackedLengthExceedsCap);
+                }
+                let integrity =
+                    ObjectIntegrity::new(chunk_hash(decoded_chunk.data()), chunk_length);
+                let key = chunk_object_key_local(&chunk_hash_hex)?;
+                let outcome = AsyncObjectStore::put_if_absent(
+                    object_store,
+                    &key,
+                    ObjectBody::from_slice(decoded_chunk.data()),
+                    &integrity,
+                )
+                .await?;
+                if matches!(outcome, PutOutcome::Inserted) {
+                    stored_bytes.fetch_add(chunk_length, Ordering::Relaxed);
+                }
+                Ok::<(), XetAdapterError>(())
+            }
+        }
+    })
+    .await
+    .map_err(map_xorb_visit_error)?;
+    if unpacked_length.load(Ordering::Relaxed) != validated.unpacked_length() {
+        return Err(XetAdapterError::InvalidSerializedXorb);
+    }
+    let key = xorb_object_key(expected_hash)?;
+    let integrity = ObjectIntegrity::new(chunk_hash_file(path)?, canonical_length);
+    let store = object_store.clone();
+    let key_for_store = key.clone();
+    let path_for_store = path.to_owned();
+    let outcome = tokio::task::spawn_blocking(move || {
+        store.put_content_addressed_file(&key_for_store, &path_for_store, &integrity)
+    })
+    .await
+    .map_err(|error| XetAdapterError::Io(std::io::Error::other(error)))??;
+    let mut stored = stored_bytes.load(Ordering::Relaxed);
+    if matches!(outcome, PutOutcome::Inserted) {
+        stored = stored
+            .checked_add(canonical_length)
+            .ok_or(XetAdapterError::Overflow)?;
+    }
+    Ok(StoredXorbUpload {
+        was_inserted: matches!(outcome, PutOutcome::Inserted),
+        stored_bytes: stored,
+    })
+}
+
+fn chunk_hash_file(path: &Path) -> Result<ShardlineHash, XetAdapterError> {
+    let mut file = File::open(path).map_err(XetAdapterError::Io)?;
+    let mut hasher = blake3::Hasher::new();
+    std::io::copy(&mut file, &mut hasher).map_err(XetAdapterError::Io)?;
+    Ok(ShardlineHash::from_bytes(*hasher.finalize().as_bytes()))
 }
 
 /// # Errors

@@ -64,6 +64,7 @@ pub use frontend::{
 };
 pub use ingest::{
     register_uploaded_shard_bytes, register_uploaded_shard_file, store_uploaded_xorb_bytes,
+    store_uploaded_xorb_file_path,
 };
 pub use model::{
     BatchReconstructionResponse, FileReconstructionResponse, FileReconstructionV2Response,
@@ -87,8 +88,9 @@ pub use xorb::{
     try_for_each_serialized_xorb_chunk_async, validate_serialized_xorb,
 };
 pub use xorb_store::{
-    normalize_serialized_xorb, store_uploaded_xorb, store_uploaded_xorb_with_metrics,
-    visit_stored_xorb_chunk_hashes, xorb_chunks_cache_hash_from_key_if_present,
-    xorb_hash_from_object_key_if_present, xorb_object_key,
+    normalize_serialized_xorb, store_uploaded_xorb, store_uploaded_xorb_file,
+    store_uploaded_xorb_with_metrics, visit_stored_xorb_chunk_hashes,
+    xorb_chunks_cache_hash_from_key_if_present, xorb_hash_from_object_key_if_present,
+    xorb_object_key,
 };
 pub use xorb_visit::map_xorb_visit_error;

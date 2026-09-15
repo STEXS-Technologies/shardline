@@ -9,13 +9,12 @@ use crate::{
     ServerError, ShardMetadataLimits,
     model::UploadFileResponse,
     upload_ingest::{
-        FileUploadIngestor, RequestBodyReader, read_body_to_bytes, stage_body_to_tempfile,
-        upload_attempt_id,
+        FileUploadIngestor, RequestBodyReader, stage_body_to_tempfile, upload_attempt_id,
     },
     validation::validate_identifier,
     xet_adapter::{
         ShardUploadResponse, XorbUploadResponse, register_uploaded_shard_file,
-        store_uploaded_xorb_bytes, xorb_object_key,
+        store_uploaded_xorb_file_path, xorb_object_key,
     },
 };
 
@@ -163,14 +162,14 @@ impl super::PostgresBackend {
         expected_hash: &str,
         mut body: RequestBodyReader,
     ) -> Result<XorbUploadResponse, ServerError> {
-        let uploaded_body = read_body_to_bytes(&mut body).await?;
+        let (temporary, body_length, _body_hash) = stage_body_to_tempfile(&mut body).await?;
         let intent_id = format!("xorb-{expected_hash}");
         let object_key = xorb_object_key(expected_hash).map_err(ServerError::from)?;
         let intent = UploadIntent::new(
             intent_id.clone(),
             object_key.as_str().to_owned(),
             expected_hash.to_owned(),
-            uploaded_body.len() as u64,
+            body_length,
         );
         let object_store = self.object_store();
         let coordinator = CasCoordinator::new(
@@ -181,7 +180,7 @@ impl super::PostgresBackend {
         );
         coordinator
             .with_upload_intent(&intent, move || async move {
-                store_uploaded_xorb_bytes(&object_store, expected_hash, &uploaded_body)
+                store_uploaded_xorb_file_path(&object_store, expected_hash, temporary.path())
                     .await
                     .map_err(ServerError::from)
             })

@@ -11,6 +11,7 @@ description = "Xet xorb and shard adapter for the Shardline server ecosystem."
 
 [dependencies]
 axum.workspace = true
+blake3.workspace = true
 serde = { workspace = true, features = ["derive"] }
 shardline-index.workspace = true
 shardline-metrics.workspace = true

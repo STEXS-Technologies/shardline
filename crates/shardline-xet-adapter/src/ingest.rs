@@ -12,6 +12,7 @@ use crate::{
 
 use super::{
     dedupe_shard_mapping, parse_uploaded_shard, parse_uploaded_shard_file, store_uploaded_xorb,
+    store_uploaded_xorb_file,
 };
 
 /// # Errors
@@ -24,6 +25,17 @@ pub async fn store_uploaded_xorb_bytes(
 ) -> Result<XorbUploadResponse, XetAdapterError> {
     let stored = store_uploaded_xorb(object_store, expected_hash, uploaded_body).await?;
 
+    Ok(XorbUploadResponse {
+        was_inserted: stored.was_inserted,
+    })
+}
+
+pub async fn store_uploaded_xorb_file_path(
+    object_store: &ServerObjectStore,
+    expected_hash: &str,
+    path: &Path,
+) -> Result<XorbUploadResponse, XetAdapterError> {
+    let stored = store_uploaded_xorb_file(object_store, expected_hash, path).await?;
     Ok(XorbUploadResponse {
         was_inserted: stored.was_inserted,
     })
