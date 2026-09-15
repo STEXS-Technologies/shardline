@@ -1,7 +1,7 @@
 //! Upload-pack implementation for clone/fetch.
 
 use axum::{
-    body::Bytes,
+    body::{Body, to_bytes},
     extract::{Path, State},
     http::{HeaderMap, HeaderValue},
     response::{IntoResponse, Response},
@@ -9,6 +9,7 @@ use axum::{
 
 use super::super::pack::{GitObject, create_commit_object, empty_pack, generate_pack};
 use super::super::pktline::{self, FLUSH};
+use super::MAX_UPLOAD_PACK_REQUEST_BYTES;
 use super::ref_advertisement::{
     GitRef, authorize_read_with_context, collect_refs, resolve_repo_id,
 };
@@ -30,13 +31,18 @@ pub async fn upload_pack(
     State(state): State<HubState>,
     Path((repo_type, ns, repo)): Path<(String, String, String)>,
     headers: HeaderMap,
-    body: Bytes,
+    body: Body,
 ) -> Result<Response, HubApiError> {
     let auth_ctx = authorize_read_with_context(&state, &headers)?;
     require_repository_binding(auth_ctx.as_ref(), &ns, &repo)?;
 
     let repo_id = resolve_repo_id(&repo_type, &ns, &repo);
 
+    let body = to_bytes(body, MAX_UPLOAD_PACK_REQUEST_BYTES)
+        .await
+        .map_err(|error| {
+            HubApiError::BadRequest(format!("upload-pack request too large: {error}"))
+        })?;
     let request_lines = pktline::decode_lines(&body);
     let _wants = parse_wants(&request_lines);
     let _haves = parse_haves(&request_lines);
