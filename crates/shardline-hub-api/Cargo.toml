@@ -32,6 +32,7 @@ shardline-protocol.workspace = true
 shardline-protocol-adapters.workspace = true
 shardline-server-core.workspace = true
 shardline-storage.workspace = true
+tempfile.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt", "sync", "time"] }
 tower-http = { workspace = true, features = ["cors", "set-header"] }
@@ -43,7 +44,6 @@ http-body-util = "0.1"
 proptest.workspace = true
 rusqlite.workspace = true
 serial_test = "3"
-tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }
 tower = { version = "0.5", features = ["util"] }
 

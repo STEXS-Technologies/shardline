@@ -2,15 +2,17 @@ use std::collections::BTreeMap;
 
 use axum::{
     Json,
+    body::Body,
     extract::{Path, State},
     http::StatusCode,
     response::IntoResponse,
     response::Response,
 };
-use bytes::Bytes;
+use futures_util::StreamExt;
+use shardline_protocol::ShardlineHash;
+use shardline_storage::{ObjectIntegrity, ObjectStore};
 
 use crate::{commit, error::HubApiError, models::*};
-use shardline_storage::ObjectStore;
 
 use super::{HubRepository, HubState, lfs_object_key, stream_object};
 
@@ -195,36 +197,47 @@ pub(crate) async fn lfs_upload(
     State(state): State<HubState>,
     repo: HubRepository<true>,
     Path(oid): Path<String>,
-    body: Bytes,
+    body: Body,
 ) -> Result<StatusCode, HubApiError> {
     shardline_metrics::record_hub_api_request("lfs_upload", "PUT", 200);
     shardline_metrics::record_hub_api_file_upload();
     commit::validate_lfs_oid(&oid)?;
 
-    if body.len() > MAX_LFS_UPLOAD_BYTES {
-        return Err(HubApiError::BadRequest(format!(
-            "upload body exceeds maximum size of {} bytes",
-            MAX_LFS_UPLOAD_BYTES
-        )));
+    let temporary =
+        tempfile::NamedTempFile::new().map_err(|e| HubApiError::CasError(e.to_string()))?;
+    let mut output = tokio::fs::File::create(temporary.path())
+        .await
+        .map_err(|e| HubApiError::CasError(e.to_string()))?;
+    let mut length = 0_usize;
+    let mut hasher = blake3::Hasher::new();
+    let mut stream = body.into_data_stream();
+    while let Some(frame) = stream.next().await {
+        let bytes = frame.map_err(|e| HubApiError::CasError(e.to_string()))?;
+        length = length
+            .checked_add(bytes.len())
+            .ok_or_else(|| HubApiError::BadRequest("upload too large".to_owned()))?;
+        if length > MAX_LFS_UPLOAD_BYTES {
+            return Err(HubApiError::BadRequest(format!(
+                "upload body exceeds maximum size of {} bytes",
+                MAX_LFS_UPLOAD_BYTES
+            )));
+        }
+        hasher.update(&bytes);
+        tokio::io::AsyncWriteExt::write_all(&mut output, &bytes)
+            .await
+            .map_err(|e| HubApiError::CasError(e.to_string()))?;
     }
-
-    if body.len() > MAX_LFS_UPLOAD_BYTES {
-        return Err(HubApiError::BadRequest(format!(
-            "upload body exceeds maximum size of {} bytes",
-            MAX_LFS_UPLOAD_BYTES
-        )));
-    }
-
-    use shardline_storage::{ObjectBody, ObjectIntegrity};
+    tokio::io::AsyncWriteExt::flush(&mut output)
+        .await
+        .map_err(|e| HubApiError::CasError(e.to_string()))?;
     let key = lfs_object_key(&oid, repo.capability())?;
-    let object_body = ObjectBody::from_slice(&body);
     let integrity = ObjectIntegrity::new(
-        shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(&body).as_bytes()),
-        body.len() as u64,
+        ShardlineHash::from_bytes(*hasher.finalize().as_bytes()),
+        length as u64,
     );
     state
         .object_store
-        .put_if_absent(&key, object_body, &integrity)
+        .put_content_addressed_file(&key, temporary.path(), &integrity)
         .map_err(|e: shardline_server_core::ServerObjectStoreError| {
             HubApiError::CasError(e.to_string())
         })?;
