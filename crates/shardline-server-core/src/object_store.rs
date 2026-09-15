@@ -529,6 +529,13 @@ impl ServerObjectStore {
         object_key: &ObjectKey,
         length: u64,
     ) -> Result<Vec<u8>, ServerObjectStoreError> {
+        // Whole-object reads are retained only for small metadata/format
+        // records. Large payloads must use `materialize_object_to_tempfile`
+        // or a range stream so memory use stays independent of file size.
+        const MAX_BUFFERED_OBJECT_BYTES: u64 = 64 * 1024 * 1024;
+        if length > MAX_BUFFERED_OBJECT_BYTES {
+            return Err(ServerObjectStoreError::Overflow);
+        }
         if length == 0 {
             return Ok(Vec::new());
         }
