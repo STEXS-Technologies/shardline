@@ -130,8 +130,10 @@ where
         return Ok(());
     };
     let expected_hash = parse_xet_hash_hex(xorb_hash_hex)?;
-    let xorb_bytes = read_full_object(object_store, object_key, metadata.length())?;
-    let mut cursor = Cursor::new(xorb_bytes);
+    let mut xorb_file = object_store
+        .materialize_object_to_tempfile(object_key, metadata.length())
+        .map_err(XetAdapterError::from)?;
+    let mut cursor = xorb_file.as_file_mut();
     let validated = validate_serialized_xorb(&mut cursor, expected_hash)?;
 
     // Collect chunk hashes, call the visitor, and write the cache sidecar.
