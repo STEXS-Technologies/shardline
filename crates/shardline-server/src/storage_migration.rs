@@ -133,12 +133,21 @@ pub fn run_storage_migration(
     let destination = endpoint_store(&options.destination)?;
     let prefix = ObjectPrefix::parse(&options.prefix)?;
     let mut report = StorageMigrationReport::new(options);
+    const MAX_BUFFERED_MIGRATION_OBJECT_BYTES: u64 = 64 * 1024 * 1024;
 
     visit_object_prefix(&source, &prefix, |metadata| {
         report.scanned_objects = checked_add(report.scanned_objects, 1)?;
         report.scanned_bytes = checked_add(report.scanned_bytes, metadata.length())?;
         if options.dry_run {
             return Ok(());
+        }
+
+        // The storage trait currently accepts byte bodies for cross-backend
+        // migration. Refuse oversized objects rather than turning migration
+        // into an unbounded RAM consumer; same-backend file-copy support can
+        // be added independently without weakening this guard.
+        if metadata.length() > MAX_BUFFERED_MIGRATION_OBJECT_BYTES {
+            return Err(ServerError::RequestBodyTooLarge);
         }
 
         let bytes = read_full_object(&source, metadata.key(), metadata.length())?;
