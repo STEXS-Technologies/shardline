@@ -71,6 +71,10 @@ pub fn parse_uploaded_shard(
 /// Parses a shard from a seekable file without copying the uploaded bytes into
 /// the process heap. Only the bounded metadata sections and normalized shard
 /// representation are retained.
+///
+/// # Errors
+///
+/// Returns an error when the file cannot be opened or the shard is invalid.
 pub fn parse_uploaded_shard_file(
     object_store: &ServerObjectStore,
     path: &Path,
@@ -167,6 +171,10 @@ pub fn retained_shard_chunk_hashes(
 
 /// Reads retained chunk metadata from a seekable shard without requiring the
 /// caller to first materialize the entire shard in memory.
+///
+/// # Errors
+///
+/// Returns an error when seeking, deserialization, or bounded section parsing fails.
 pub fn retained_shard_chunk_hashes_from_reader<R: Read + std::io::Seek>(
     mut shard_reader: &mut R,
     limits: ShardMetadataLimits,

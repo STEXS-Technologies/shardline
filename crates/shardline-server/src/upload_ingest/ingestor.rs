@@ -91,7 +91,13 @@ impl FileUploadIngestor {
             records: Vec::new(),
             sha256: compute_sha256.then(Sha256::new),
             cdc_chunker: Box::new(CdcChunker::new(chunk_size)),
-            raw_chunk_spool: tempfile::NamedTempFile::new().expect("raw chunk spool"),
+            raw_chunk_spool: match tempfile::NamedTempFile::new() {
+                Ok(file) => file,
+                Err(error) => {
+                    tracing::error!(error = %error, "failed to create raw chunk spool");
+                    std::process::abort();
+                }
+            },
             raw_chunk_offsets: Vec::new(),
         }
     }

@@ -310,6 +310,10 @@ pub async fn store_uploaded_xorb(
 /// footerless inputs are rejected here because normalizing them requires a
 /// second complete container; callers may use the legacy byte API for those
 /// explicitly bounded compatibility uploads.
+///
+/// # Errors
+///
+/// Returns an error when the file cannot be opened, validated, or stored.
 pub async fn store_uploaded_xorb_file(
     object_store: &ServerObjectStore,
     expected_hash: &str,

@@ -30,6 +30,9 @@ pub async fn store_uploaded_xorb_bytes(
     })
 }
 
+/// # Errors
+///
+/// Returns an error when the file cannot be opened, validated, or stored.
 pub async fn store_uploaded_xorb_file_path(
     object_store: &ServerObjectStore,
     expected_hash: &str,
@@ -76,6 +79,10 @@ where
 /// Registers a shard parsed directly from a temporary file. Metadata sections
 /// are bounded by `shard_metadata_limits`; the uploaded byte stream itself is
 /// never copied into a process-sized buffer.
+///
+/// # Errors
+///
+/// Returns an error when shard parsing or commit fails.
 pub async fn register_uploaded_shard_file<Commit, CommitFuture>(
     object_store: &ServerObjectStore,
     path: &Path,

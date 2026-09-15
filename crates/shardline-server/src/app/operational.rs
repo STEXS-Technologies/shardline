@@ -113,10 +113,10 @@ pub(super) async fn upload_xorb(
     validate_hash_path(&hash)?;
     let body_reader = RequestBodyReader::from_body(body, state.config.max_request_body_bytes())?;
     let response = state.backend.upload_xorb_stream(&hash, body_reader).await?;
-    if response.was_inserted {
-        if let Ok(length) = state.backend.xorb_length(&hash).await {
-            metrics::record_xorb_stored(length);
-        }
+    if response.was_inserted
+        && let Ok(length) = state.backend.xorb_length(&hash).await
+    {
+        metrics::record_xorb_stored(length);
     }
     Ok(Json(response))
 }

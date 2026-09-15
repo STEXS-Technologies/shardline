@@ -265,7 +265,7 @@ pub(crate) async fn lfs_download(
         axum::http::header::CONTENT_TYPE,
         "application/octet-stream"
             .parse()
-            .map_err(|_| HubApiError::NotFound)?,
+            .map_err(|_error| HubApiError::NotFound)?,
     );
     response
         .headers_mut()

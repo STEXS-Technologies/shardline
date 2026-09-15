@@ -486,12 +486,11 @@ pub(crate) async fn oci_put_blob_upload(
     while let Some(bytes) = body.next_bytes().await? {
         ensure_upload_growth_within_limit(state, new_length, bytes.len())?;
         new_length = append_upload_bytes(state.config.root_dir(), session_id, &bytes).await?;
-        if let Some(expected_range) = expected_range {
-            if new_length.checked_sub(1).ok_or(ServerError::Overflow)?
+        if let Some(expected_range) = expected_range
+            && new_length.checked_sub(1).ok_or(ServerError::Overflow)?
                 > expected_range.end_inclusive()
-            {
-                return Err(ServerError::RangeNotSatisfiable);
-            }
+        {
+            return Err(ServerError::RangeNotSatisfiable);
         }
     }
     if let Some(expected_range) = expected_range

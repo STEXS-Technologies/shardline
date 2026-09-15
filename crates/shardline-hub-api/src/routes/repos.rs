@@ -455,11 +455,11 @@ pub(crate) async fn repo_modelcard(
         axum::http::header::CONTENT_TYPE,
         "text/markdown; charset=utf-8"
             .parse()
-            .map_err(|_| HubApiError::NotFound)?,
+            .map_err(|_error| HubApiError::NotFound)?,
     );
     response.headers_mut().insert(
         "x-shardline-sha",
-        readme.sha.parse().map_err(|_| HubApiError::NotFound)?,
+        readme.sha.parse().map_err(|_error| HubApiError::NotFound)?,
     );
     response
         .headers_mut()

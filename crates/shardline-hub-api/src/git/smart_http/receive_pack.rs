@@ -72,7 +72,7 @@ pub async fn receive_pack(
         .iter()
         .any(|(_, new_sha, _)| new_sha != "0000000000000000000000000000000000000000");
     let objects = if has_object_updates {
-        match parse_pack_data(&pack_data) {
+        match parse_pack_data(pack_data) {
             Ok(objects) => objects,
             Err(e) => {
                 tracing::warn!("failed to parse receive-pack data: {e}");
@@ -115,9 +115,7 @@ pub async fn receive_pack(
     build_report_response(&results, true)
 }
 
-pub(super) fn parse_receive_pack_request<'a>(
-    body: &'a [u8],
-) -> (Vec<(String, String, String)>, &'a [u8]) {
+pub(super) fn parse_receive_pack_request(body: &[u8]) -> (Vec<(String, String, String)>, &[u8]) {
     let mut updates = Vec::new();
     let mut pack_start = 0;
 

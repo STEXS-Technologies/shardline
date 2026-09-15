@@ -152,7 +152,7 @@ pub(crate) async fn bazel_put_ac(
         .ok_or(ServerError::WorkQueueSaturated)?;
     let object_key = bazel_cache_object_key(BazelCacheKind::Ac, &hash, repo.capability())?;
     let mut body = RequestBodyReader::from_body(body, state.config.max_request_body_bytes())?;
-    let (temporary, length, hash) = stage_body_to_tempfile(&mut body).await?;
+    let (temporary, length, body_hash) = stage_body_to_tempfile(&mut body).await?;
     // Action Cache keys identify actions, not the serialized action result.
     // Unlike CAS, the action key is therefore not expected to hash the body.
     let _stored = state
@@ -160,7 +160,7 @@ pub(crate) async fn bazel_put_ac(
         .put_object_file_if_absent(
             &object_key,
             temporary.path(),
-            &shardline_storage::ObjectIntegrity::new(hash, length),
+            &shardline_storage::ObjectIntegrity::new(body_hash, length),
         )
         .await?;
     Ok(StatusCode::NO_CONTENT)
