@@ -18,6 +18,7 @@ blake3.workspace = true
 bytes.workspace = true
 chrono.workspace = true
 flate2.workspace = true
+futures-util.workspace = true
 hmac.workspace = true
 hex.workspace = true
 reqwest = { workspace = true, features = ["json"] }

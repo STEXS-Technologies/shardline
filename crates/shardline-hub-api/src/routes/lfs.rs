@@ -4,13 +4,15 @@ use axum::{
     Json,
     extract::{Path, State},
     http::StatusCode,
+    response::IntoResponse,
+    response::Response,
 };
 use bytes::Bytes;
 
 use crate::{commit, error::HubApiError, models::*};
 use shardline_storage::ObjectStore;
 
-use super::{HubRepository, HubState, lfs_object_key};
+use super::{HubRepository, HubState, lfs_object_key, stream_object};
 
 /// Maximum number of objects allowed in a single batch request.
 const MAX_LFS_BATCH_OBJECTS: usize = 1024;
@@ -235,14 +237,7 @@ pub(crate) async fn lfs_download(
     State(state): State<HubState>,
     repo: HubRepository,
     Path(oid): Path<String>,
-) -> Result<
-    (
-        StatusCode,
-        [(axum::http::header::HeaderName, &'static str); 1],
-        Vec<u8>,
-    ),
-    HubApiError,
-> {
+) -> Result<Response, HubApiError> {
     shardline_metrics::record_hub_api_request("lfs_download", "GET", 200);
     shardline_metrics::record_hub_api_file_download();
     let key = lfs_object_key(&oid, repo.capability())?;
@@ -251,16 +246,16 @@ pub(crate) async fn lfs_download(
         .metadata(&key)
         .map_err(|e| HubApiError::CasError(e.to_string()))?
         .ok_or(HubApiError::NotFound)?;
-    let range_end = meta.length().checked_sub(1).ok_or(HubApiError::NotFound)?;
-    let range = shardline_protocol::ByteRange::new(0, range_end)
-        .map_err(|_range_err| HubApiError::NotFound)?;
-    let data = state
-        .object_store
-        .read_range(&key, range)
-        .map_err(|e| HubApiError::CasError(e.to_string()))?;
-    Ok((
-        StatusCode::OK,
-        [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
-        data,
-    ))
+    let length = meta.length();
+    let mut response = stream_object(&state.object_store, key, length).into_response();
+    response.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        "application/octet-stream"
+            .parse()
+            .map_err(|_| HubApiError::NotFound)?,
+    );
+    response
+        .headers_mut()
+        .insert(axum::http::header::CONTENT_LENGTH, length.into());
+    Ok((StatusCode::OK, response).into_response())
 }
