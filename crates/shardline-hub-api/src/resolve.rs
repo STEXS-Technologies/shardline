@@ -1,6 +1,4 @@
-use shardline_protocol::ByteRange;
 use shardline_server_core::AuthorizedRepository;
-use shardline_storage::ObjectStore;
 
 use crate::{error::HubApiError, routes::HubState};
 
@@ -40,7 +38,7 @@ pub fn resolve_file_from_store_scoped(
     state: &HubState,
     commit_sha: &str,
     file_path: &str,
-    auth: &AuthorizedRepository,
+    _auth: &AuthorizedRepository,
 ) -> Result<DownloadResult, HubApiError> {
     let files = state
         .store
@@ -51,13 +49,10 @@ pub fn resolve_file_from_store_scoped(
         .find(|f| f.path == file_path)
         .ok_or(HubApiError::NotFound)?;
 
-    let content = get_object_store_content(state, &file.sha, auth);
-
     if file.size <= MAX_INLINE_SIZE {
         Ok(DownloadResult::Inline {
             size: file.size,
             sha: file.sha.clone(),
-            content,
         })
     } else if file.is_lfs {
         Ok(DownloadResult::LfsRedirect {
@@ -68,27 +63,12 @@ pub fn resolve_file_from_store_scoped(
         Ok(DownloadResult::Inline {
             size: file.size,
             sha: file.sha.clone(),
-            content,
         })
     }
 }
 
 /// Maximum inline file size (1 MiB).
 const MAX_INLINE_SIZE: u64 = 1_048_576;
-
-/// Reads file content from ObjectStore using its SHA, namespaced by the given
-/// repository scope so reads find the repository-scoped writes.
-fn get_object_store_content(
-    state: &HubState,
-    sha: &str,
-    auth: &AuthorizedRepository,
-) -> Option<Vec<u8>> {
-    let key = crate::routes::lfs_object_key(sha, auth).ok()?;
-    let size = state.object_store.metadata(&key).ok()??.length();
-    let range_end = size.checked_sub(1)?;
-    let range = ByteRange::new(0, range_end).ok()?;
-    state.object_store.read_range(&key, range).ok()
-}
 
 /// Result of resolving a file download.
 #[derive(Debug)]
@@ -99,8 +79,6 @@ pub enum DownloadResult {
         size: u64,
         /// File SHA.
         sha: String,
-        /// File content (if stored).
-        content: Option<Vec<u8>>,
     },
     /// File should be redirected to the LFS endpoint.
     LfsRedirect {
@@ -114,31 +92,25 @@ pub enum DownloadResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use shardline_storage::ObjectStore;
 
     // --- DownloadResult enum ---
 
     #[test]
     #[allow(clippy::panic)]
     fn download_result_inline_has_correct_fields() {
-        let content = vec![0u8; 100];
         let result = DownloadResult::Inline {
             size: 100,
             sha: "c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6".to_owned(),
-            content: Some(content.clone()),
         };
 
         match result {
-            DownloadResult::Inline {
-                size,
-                sha,
-                content: c,
-            } => {
+            DownloadResult::Inline { size, sha } => {
                 assert_eq!(size, 100);
                 assert_eq!(
                     sha,
                     "c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6"
                 );
-                assert_eq!(c.as_deref(), Some(content.as_slice()));
             }
             _ => panic!("expected Inline variant"),
         }
@@ -150,14 +122,12 @@ mod tests {
         let result = DownloadResult::Inline {
             size: 500,
             sha: "def456".to_owned(),
-            content: None,
         };
 
         match result {
-            DownloadResult::Inline { size, sha, content } => {
+            DownloadResult::Inline { size, sha } => {
                 assert_eq!(size, 500);
                 assert_eq!(sha, "def456");
-                assert!(content.is_none());
             }
             _ => panic!("expected Inline variant"),
         }
@@ -185,7 +155,6 @@ mod tests {
         let inline = DownloadResult::Inline {
             size: 1024,
             sha: "sha".to_owned(),
-            content: None,
         };
         let redirect = DownloadResult::LfsRedirect {
             oid: "oid".to_owned(),
@@ -202,7 +171,7 @@ mod tests {
     // without needing a full `HubState`. The logic is:
     //   file.size <= MAX_INLINE_SIZE         → Inline
     //   file.size > MAX_INLINE_SIZE && is_lfs → LfsRedirect
-    //   file.size > MAX_INLINE_SIZE && !is_lfs → Inline (content returned even if large)
+    //   file.size > MAX_INLINE_SIZE && !is_lfs → Inline (streamed by the route)
 
     #[test]
     fn small_file_should_be_inline() {
@@ -243,7 +212,6 @@ mod tests {
             DownloadResult::Inline {
                 size,
                 sha: String::new(),
-                content: None,
             }
         } else if is_lfs {
             DownloadResult::LfsRedirect {
@@ -254,7 +222,6 @@ mod tests {
             DownloadResult::Inline {
                 size,
                 sha: String::new(),
-                content: None,
             }
         }
     }
@@ -296,7 +263,6 @@ mod tests {
         let inline = DownloadResult::Inline {
             size: 10,
             sha: "sha".into(),
-            content: Some(vec![1, 2, 3]),
         };
         let debug_str = format!("{inline:?}");
         assert!(debug_str.contains("Inline"));
@@ -387,17 +353,12 @@ mod tests {
         );
         let result = resolve_file_from_store(&state, "sha_resolve", "readme.md").unwrap();
         match &result {
-            DownloadResult::Inline {
-                size,
-                sha,
-                content: c,
-            } => {
+            DownloadResult::Inline { size, sha } => {
                 assert_eq!(*size, content_data.len() as u64);
                 assert_eq!(
                     sha.as_str(),
                     "c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6"
                 );
-                assert_eq!(c, &Some(content_data));
             }
             _ => assert!(
                 matches!(result, DownloadResult::Inline { .. }),
@@ -481,11 +442,8 @@ mod tests {
         let (_ts, state) = setup_resolve_state(&files, &[]);
         let result = resolve_file_from_store(&state, "sha_resolve", "huge.txt").unwrap();
         match &result {
-            DownloadResult::Inline {
-                size: s, content, ..
-            } => {
+            DownloadResult::Inline { size: s, .. } => {
                 assert_eq!(*s, size);
-                assert!(content.is_none());
             }
             _ => assert!(
                 matches!(result, DownloadResult::Inline { .. }),

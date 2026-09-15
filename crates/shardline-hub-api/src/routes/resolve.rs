@@ -4,8 +4,9 @@ use axum::{
 };
 
 use crate::{error::HubApiError, resolve};
+use shardline_storage::ObjectStore;
 
-use super::{HubRepository, HubState};
+use super::{HubRepository, HubState, lfs_object_key, stream_object};
 
 // ---- File resolve (download, requires Read) ----
 
@@ -56,17 +57,34 @@ async fn resolve_file_for_repository(
     )?;
 
     match result {
-        resolve::DownloadResult::Inline { size, sha, content } => {
-            let data = content.ok_or(HubApiError::NotFound)?;
+        resolve::DownloadResult::Inline { size, sha, .. } => {
+            let key = lfs_object_key(&sha, repo.capability())
+                .map_err(|error| HubApiError::PathValidation(error.to_string()))?;
+            let actual_size = state
+                .object_store
+                .metadata(&key)
+                .map_err(|error| HubApiError::CasError(error.to_string()))?
+                .ok_or(HubApiError::NotFound)?
+                .length();
+            if actual_size != size {
+                return Err(HubApiError::CasError(
+                    "stored file length did not match revision metadata".to_owned(),
+                ));
+            }
             let content_length = size.to_string();
-            let resp_headers = [
-                ("Content-Type", "application/octet-stream"),
-                ("X-Shardline-SHA", sha.as_str()),
-                ("X-Repo-Commit", commit_sha.as_str()),
-                ("ETag", sha.as_str()),
-                ("Content-Length", content_length.as_str()),
-            ];
-            Ok((resp_headers, data).into_response())
+            let mut response = stream_object(&state.object_store, key, size).into_response();
+            for (name, value) in [
+                ("content-type", "application/octet-stream"),
+                ("x-shardline-sha", sha.as_str()),
+                ("x-repo-commit", commit_sha.as_str()),
+                ("etag", sha.as_str()),
+                ("content-length", content_length.as_str()),
+            ] {
+                response
+                    .headers_mut()
+                    .insert(name, value.parse().map_err(|_| HubApiError::NotFound)?);
+            }
+            Ok(response)
         }
         resolve::DownloadResult::LfsRedirect { oid, .. } => {
             let redirect_url = format!("/lfs/objects/{oid}");
