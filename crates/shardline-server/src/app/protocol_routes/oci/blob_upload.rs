@@ -375,19 +375,28 @@ pub(crate) async fn oci_put_blob_upload(
     let digest = query.get("digest").ok_or(ServerError::InvalidDigest)?;
     let digest_hex = parse_sha256_digest(digest)?;
     let mut body = RequestBodyReader::from_body(body, state.config.max_request_body_bytes())?;
-    let final_bytes = read_body_to_bytes(&mut body).await?;
     if durable_oci_sessions_enabled(state) {
-        return durable_oci_put_blob_upload(
+        let _ = durable_oci_patch_blob_upload(
             state,
             headers,
+            repository,
+            auth.namespace(),
+            session_id,
+            &mut body,
+        )
+        .await?;
+        return durable_oci_put_blob_upload(
+            state,
+            &HeaderMap::new(),
             repository,
             auth,
             session_id,
             &digest_hex,
-            &final_bytes,
+            &[],
         )
         .await;
     }
+    let final_bytes = read_body_to_bytes(&mut body).await?;
     let _lock = lock_upload_sessions(state.config.root_dir()).await?;
     let session = read_upload_session(
         state.config.root_dir(),
