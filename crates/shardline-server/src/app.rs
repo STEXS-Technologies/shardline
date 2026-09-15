@@ -103,6 +103,9 @@ pub const MAX_PROVIDER_WEBHOOK_BODY_BYTES: usize = 1_048_576;
 pub const MAX_PROVIDER_NAME_BYTES: usize = 64;
 pub const MAX_PROVIDER_SUBJECT_BYTES: usize = 512;
 pub const MAX_PROVIDER_BASIC_AUTH_HEADER_BYTES: usize = 4096;
+/// Maximum bytes accepted in a single LFS PATCH request. Large objects must
+/// be sent as multiple ranges so the server never buffers an entire object.
+pub const MAX_LFS_PATCH_CHUNK_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug)]
 pub struct AppState {
