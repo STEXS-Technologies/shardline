@@ -1063,6 +1063,25 @@ impl ServerBackend {
         .await?)
     }
 
+    pub(crate) async fn put_object_file_if_absent(
+        &self,
+        object_key: &ObjectKey,
+        path: &std::path::Path,
+        integrity: &ObjectIntegrity,
+    ) -> Result<PutOutcome, ServerError> {
+        let object_store = self.object_store();
+        let key = object_key.clone();
+        let path = path.to_owned();
+        let integrity = *integrity;
+        tokio::task::spawn_blocking(move || {
+            object_store
+                .put_content_addressed_file(&key, &path, &integrity)
+                .map_err(ServerError::from)
+        })
+        .await
+        .map_err(ServerError::BlockingTask)?
+    }
+
     pub(crate) async fn put_sha256_addressed_object_bytes_if_absent(
         &self,
         object_key: &ObjectKey,
