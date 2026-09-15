@@ -73,16 +73,17 @@ async fn resolve_file_for_repository(
             }
             let content_length = size.to_string();
             let mut response = stream_object(&state.object_store, key, size).into_response();
-            for (name, value) in [
+            for (header_name, value) in [
                 ("content-type", "application/octet-stream"),
                 ("x-shardline-sha", sha.as_str()),
                 ("x-repo-commit", commit_sha.as_str()),
                 ("etag", sha.as_str()),
                 ("content-length", content_length.as_str()),
             ] {
-                response
-                    .headers_mut()
-                    .insert(name, value.parse().map_err(|_| HubApiError::NotFound)?);
+                response.headers_mut().insert(
+                    header_name,
+                    value.parse().map_err(|_error| HubApiError::NotFound)?,
+                );
             }
             Ok(response)
         }

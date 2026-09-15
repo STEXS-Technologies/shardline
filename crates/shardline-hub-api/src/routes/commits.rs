@@ -103,7 +103,7 @@ pub(crate) async fn commit(
             HubApiError::CasError(e.to_string())
         })?
         .ok_or(HubApiError::RevisionNotFound)?;
-    let parsed = match commit::parse_ndjson_commit(&body) {
+    let parsed = match commit::parse_ndjson_commit(body) {
         Ok(p) => p,
         Err(e) => {
             tracing::error!(error = %e, repo = %name, "parse_ndjson_commit failed");

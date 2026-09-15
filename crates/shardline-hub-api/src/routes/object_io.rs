@@ -3,7 +3,6 @@
 //! The storage adapters expose range reads, not whole-object reads.  Keep that
 //! boundary visible here: previews consume a bounded prefix and downloads emit
 //! fixed-size ranges as an HTTP body stream.
-
 use std::{io, sync::Arc};
 
 use axum::body::Body;
@@ -32,21 +31,30 @@ pub(crate) fn read_object_prefix(
     let mut output = Vec::with_capacity(target as usize);
     let mut offset = 0_u64;
     while offset < target {
-        let end = (offset + OBJECT_STREAM_CHUNK_BYTES)
-            .min(target)
-            .saturating_sub(1);
-        let range = ByteRange::new(offset, end).map_err(|_| ServerObjectStoreError::Overflow)?;
+        let end_exclusive = offset
+            .checked_add(OBJECT_STREAM_CHUNK_BYTES)
+            .ok_or(ServerObjectStoreError::Overflow)?
+            .min(target);
+        let end = end_exclusive
+            .checked_sub(1)
+            .ok_or(ServerObjectStoreError::Overflow)?;
+        let range =
+            ByteRange::new(offset, end).map_err(|_error| ServerObjectStoreError::Overflow)?;
         let chunk = store.read_range(key, range)?;
         if chunk.is_empty() {
             return Err(ServerObjectStoreError::StoredObjectLengthMismatch);
         }
+        let expected_u64 = end
+            .checked_sub(offset)
+            .and_then(|value| value.checked_add(1))
+            .ok_or(ServerObjectStoreError::Overflow)?;
         let expected =
-            usize::try_from(end - offset + 1).map_err(|_| ServerObjectStoreError::Overflow)?;
+            usize::try_from(expected_u64).map_err(|_error| ServerObjectStoreError::Overflow)?;
         if chunk.len() != expected {
             return Err(ServerObjectStoreError::StoredObjectLengthMismatch);
         }
         output.extend_from_slice(&chunk);
-        offset = end + 1;
+        offset = end_exclusive;
     }
     Ok(output)
 }
@@ -57,33 +65,53 @@ pub(crate) fn read_object_prefix(
 /// and S3 adapters expose synchronous range reads through `ServerObjectStore`.
 pub(crate) fn stream_object(store: &ServerObjectStore, key: ObjectKey, object_length: u64) -> Body {
     let initial = (Arc::new(store.clone()), key, 0_u64);
-    let stream = stream::try_unfold(initial, move |(store, key, offset)| async move {
-        if offset >= object_length {
-            return Ok(None);
-        }
-        let end = (offset + OBJECT_STREAM_CHUNK_BYTES)
-            .min(object_length)
-            .saturating_sub(1);
-        let range = ByteRange::new(offset, end)
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid object range"))?;
-        let expected = usize::try_from(end - offset + 1)
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "object range overflow"))?;
-        let store_for_read = Arc::clone(&store);
-        let key_for_read = key.clone();
-        let chunk = tokio::task::spawn_blocking(move || {
-            store_for_read
-                .read_range(&key_for_read, range)
-                .map_err(|error| io::Error::other(error.to_string()))
-        })
-        .await
-        .map_err(|error| io::Error::other(error.to_string()))??;
-        if chunk.len() != expected {
-            return Err(io::Error::other(
-                "object range returned an unexpected length",
-            ));
-        }
-        Ok(Some((Bytes::from(chunk), (store, key, end + 1))))
-    });
+    let stream = stream::try_unfold(
+        initial,
+        move |(store_state, key_state, offset)| async move {
+            if offset >= object_length {
+                return Ok(None);
+            }
+            let end_exclusive = offset
+                .checked_add(OBJECT_STREAM_CHUNK_BYTES)
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "object range overflow")
+                })?
+                .min(object_length);
+            let end = end_exclusive.checked_sub(1).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "object range overflow")
+            })?;
+            let range = ByteRange::new(offset, end).map_err(|_error| {
+                io::Error::new(io::ErrorKind::InvalidInput, "invalid object range")
+            })?;
+            let expected_u64 = end
+                .checked_sub(offset)
+                .and_then(|value| value.checked_add(1))
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "object range overflow")
+                })?;
+            let expected = usize::try_from(expected_u64).map_err(|_error| {
+                io::Error::new(io::ErrorKind::InvalidInput, "object range overflow")
+            })?;
+            let store_for_read = Arc::clone(&store_state);
+            let key_for_read = key_state.clone();
+            let chunk = tokio::task::spawn_blocking(move || {
+                store_for_read
+                    .read_range(&key_for_read, range)
+                    .map_err(|error| io::Error::other(error.to_string()))
+            })
+            .await
+            .map_err(|error| io::Error::other(error.to_string()))??;
+            if chunk.len() != expected {
+                return Err(io::Error::other(
+                    "object range returned an unexpected length",
+                ));
+            }
+            Ok(Some((
+                Bytes::from(chunk),
+                (store_state, key_state, end_exclusive),
+            )))
+        },
+    );
     Body::from_stream(stream)
 }
 

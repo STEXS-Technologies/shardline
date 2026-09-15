@@ -63,19 +63,24 @@ pub(crate) fn validated_xorb_byte_range_stream(
         let cursor = xorb_data.as_file_mut();
         let mut offset = start;
         while offset <= end {
-            let length = (end - offset + 1).min(STREAM_READ_BUFFER_BYTES);
+            let length = end
+                .checked_sub(offset)
+                .and_then(|value| value.checked_add(1))
+                .unwrap_or(0)
+                .min(STREAM_READ_BUFFER_BYTES);
             let Ok(length) = usize::try_from(length) else {
-                let _ = sender.blocking_send(Err(ServerError::Overflow));
+                drop(sender.blocking_send(Err(ServerError::Overflow)));
                 return;
             };
             if cursor.seek(std::io::SeekFrom::Start(offset)).is_err() {
-                let _ =
-                    sender.blocking_send(Err(ServerError::Io(IoError::other("xorb seek failed"))));
+                drop(
+                    sender.blocking_send(Err(ServerError::Io(IoError::other("xorb seek failed")))),
+                );
                 return;
             }
             let mut bytes = vec![0_u8; length];
             if let Err(error) = cursor.read_exact(&mut bytes) {
-                let _ = sender.blocking_send(Err(ServerError::Io(error)));
+                drop(sender.blocking_send(Err(ServerError::Io(error))));
                 return;
             }
             if sender.blocking_send(Ok(Bytes::from(bytes))).is_err() {
@@ -184,14 +189,14 @@ async fn read_xorb_backed_chunks(
                         .to_vec();
                     sender
                         .blocking_send(Ok(Bytes::from(sliced)))
-                        .map_err(|_| ServerError::RequestBodyTooLarge)?;
+                        .map_err(|_error| ServerError::RequestBodyTooLarge)?;
                 }
                 Ok(())
             },
         );
         if let Err(error) = result.map_err(crate::server_frontend::xet::map_xorb_visit_error_server)
         {
-            let _ = sender.blocking_send(Err(error));
+            drop(sender.blocking_send(Err(error)));
         }
     });
     Ok(Box::pin(stream::unfold(receiver, |mut receiver| async {
