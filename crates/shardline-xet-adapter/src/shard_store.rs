@@ -136,6 +136,18 @@ pub fn retained_shard_chunk_hashes(
     limits: ShardMetadataLimits,
 ) -> Result<Vec<String>, XetAdapterError> {
     let mut shard_reader = Cursor::new(shard_bytes);
+    retained_shard_chunk_hashes_from_reader(&mut shard_reader, limits)
+}
+
+/// Reads retained chunk metadata from a seekable shard without requiring the
+/// caller to first materialize the entire shard in memory.
+pub fn retained_shard_chunk_hashes_from_reader<R: Read + std::io::Seek>(
+    mut shard_reader: &mut R,
+    limits: ShardMetadataLimits,
+) -> Result<Vec<String>, XetAdapterError> {
+    shard_reader
+        .seek(std::io::SeekFrom::Start(0))
+        .map_err(XetAdapterError::Io)?;
     let header = MDBShardFileHeader::deserialize(&mut shard_reader)
         .map_err(|error| invalid_serialized_shard(&error))?;
     read_bounded_shard_sections(&mut shard_reader, limits, header.version)
