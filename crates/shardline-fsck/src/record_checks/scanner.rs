@@ -350,6 +350,19 @@ pub(crate) fn inspect_chunks(
             }
         };
 
+        const MAX_CHUNK_BYTES: u64 = 2 * 1024 * 1024;
+        if metadata.length() > MAX_CHUNK_BYTES {
+            push_issue(
+                report,
+                FsckIssueKind::ChunkLengthMismatch,
+                chunk_location,
+                FsckIssueDetail::LengthMismatch {
+                    expected_length: MAX_CHUNK_BYTES,
+                    observed_length: metadata.length(),
+                },
+            )?;
+            continue;
+        }
         let chunk_bytes = read_full_object(object_store, &object_key, metadata.length())?;
         // XorbCdcV1 chunks are stored LZ4-compressed with a 4-byte
         // little-endian uncompressed-size prefix (mirror the download path in
@@ -550,6 +563,20 @@ pub(crate) fn inspect_native_xet_term(
             }
         };
 
+        const MAX_CHUNK_BYTES: u64 = 2 * 1024 * 1024;
+        if chunk_metadata.length() > MAX_CHUNK_BYTES {
+            push_issue(
+                report,
+                FsckIssueKind::ChunkLengthMismatch,
+                chunk_location,
+                FsckIssueDetail::LengthMismatch {
+                    expected_length: MAX_CHUNK_BYTES,
+                    observed_length: chunk_metadata.length(),
+                },
+            )?;
+            chunk_index = chunk_index.checked_add(1).ok_or(FsckError::Overflow)?;
+            return Ok(());
+        }
         let chunk_bytes =
             read_full_object(object_store, &chunk_object_key, chunk_metadata.length())?;
         let actual_chunk_hash = xet_hash_hex_string(chunk_hash(&chunk_bytes));
