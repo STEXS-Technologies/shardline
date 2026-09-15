@@ -527,9 +527,9 @@ fn load_xorb_range_info(
     let Some(metadata) = object_store.metadata(&key)? else {
         return Err(XetAdapterError::MissingReferencedXorb);
     };
-    let bytes = shardline_server_core::read_full_object(object_store, &key, metadata.length())?;
+    let mut file = object_store.materialize_object_to_tempfile(&key, metadata.length())?;
     let expected_hash = parse_xet_hash_hex(hash_hex)?;
-    let mut reader = Cursor::new(bytes);
+    let mut reader = file.as_file_mut();
     let validated = validate_serialized_xorb(&mut reader, expected_hash)?;
     let packed_chunk_ends = validated
         .chunks()
