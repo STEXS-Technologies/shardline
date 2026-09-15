@@ -11,7 +11,7 @@ use crate::{
     },
 };
 
-fn map_xorb_visit_error_server(error: XorbVisitError<ServerError>) -> ServerError {
+pub(crate) fn map_xorb_visit_error_server(error: XorbVisitError<ServerError>) -> ServerError {
     match error {
         XorbVisitError::Parse(error) => ServerError::from(error),
         XorbVisitError::Visitor(error) => error,

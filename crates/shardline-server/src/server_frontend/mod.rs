@@ -2,7 +2,7 @@ mod dispatch;
 mod kind;
 #[cfg(test)]
 mod tests;
-mod xet;
+pub(crate) mod xet;
 
 pub(crate) use dispatch::{
     append_referenced_term_bytes, optional_chunk_container_keys, referenced_term_object_key,
