@@ -1796,7 +1796,7 @@ async fn handler_commit_wrong_content_type() {
         default_headers(),
         test_repo(&state, &default_headers()),
         Path(("models".into(), "ns".into(), "r".into(), "main".into())),
-        "{}".to_string(),
+        axum::body::Body::from("{}"),
     )
     .await;
     assert!(result.is_err());
@@ -1843,7 +1843,7 @@ async fn handler_commit_inline_file_success() {
             "commit-test".into(),
             "main".into(),
         )),
-        body.to_string(),
+        axum::body::Body::from(body),
     )
     .await;
     assert!(result.is_ok(), "commit failed: {:?}", result.err());
@@ -1883,7 +1883,7 @@ async fn handler_commit_lfs_pointer_success() {
             "lfs-commit".into(),
             "main".into(),
         )),
-        body,
+        axum::body::Body::from(body),
     )
     .await;
     assert!(result.is_ok(), "commit failed: {:?}", result.err());
@@ -1927,7 +1927,7 @@ async fn handler_commit_delete_file() {
             "del-test".into(),
             "main".into(),
         )),
-        body.to_string(),
+        axum::body::Body::from(body),
     )
     .await;
     assert!(result.is_ok(), "commit failed: {:?}", result.err());
@@ -1965,7 +1965,7 @@ async fn handler_commit_parent_mismatch() {
             "parent-mismatch".into(),
             "main".into(),
         )),
-        body.to_string(),
+        axum::body::Body::from(body),
     )
     .await;
     assert!(result.is_err());
@@ -3042,7 +3042,7 @@ async fn handler_commit_no_revision() {
             "no-rev".into(),
             "nonexistent_rev".into(),
         )),
-        r#"{"header":{"message":"x"}}"#.to_string(),
+        axum::body::Body::from(r#"{"header":{"message":"x"}}"#),
     )
     .await;
     assert!(result.is_err());

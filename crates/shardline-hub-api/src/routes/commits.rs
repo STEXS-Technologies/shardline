@@ -1,3 +1,4 @@
+use axum::body::{Body, to_bytes};
 use axum::http::HeaderMap;
 use axum::{
     Json,
@@ -16,6 +17,11 @@ use shardline_index::hub::HubFileEntry;
 use shardline_server_core::AuthorizedRepository;
 
 use super::{HubRepository, HubState, deliver_webhook_events, lfs_object_key};
+
+/// Commit NDJSON is control metadata; inline files larger than this should use
+/// the LFS flow. Keeping the request bounded prevents a giant JSON envelope
+/// from becoming a heap-sized upload.
+const MAX_COMMIT_REQUEST_BYTES: usize = 16 * 1024 * 1024;
 
 // ---- Preupload (requires Write) ----
 
@@ -68,7 +74,7 @@ pub(crate) async fn commit(
     headers: HeaderMap,
     repo: HubRepository<true>,
     Path((_repo_type, ns, repo_name, rev)): Path<(String, String, String, String)>,
-    body: String,
+    body: Body,
 ) -> Result<Json<CommitResponse>, HubApiError> {
     // HF spec requires Content-Type to be application/x-ndjson or application/json.
     let ct_ok = headers
@@ -82,6 +88,12 @@ pub(crate) async fn commit(
             "commit requires Content-Type: application/x-ndjson or application/json".to_owned(),
         ));
     }
+    let body = to_bytes(body, MAX_COMMIT_REQUEST_BYTES)
+        .await
+        .map_err(|error| HubApiError::PathValidation(format!("commit body too large: {error}")))?;
+    let body = std::str::from_utf8(&body).map_err(|error| {
+        HubApiError::PathValidation(format!("commit body is not UTF-8: {error}"))
+    })?;
     let name = format!("{ns}/{repo_name}");
     let parent_sha = state
         .store
