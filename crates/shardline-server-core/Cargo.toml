@@ -24,12 +24,12 @@ shardline-protocol.workspace = true
 shardline-storage = { workspace = true, features = ["s3"] }
 shardline-validation.workspace = true
 thiserror.workspace = true
+tempfile.workspace = true
 
 [dev-dependencies]
 criterion = { workspace = true, features = ["cargo_bench_support"] }
 proptest.workspace = true
 shardline-test-support.workspace = true
-tempfile.workspace = true
 
 [[bench]]
 name = "auth_verify"
