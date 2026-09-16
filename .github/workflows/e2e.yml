@@ -49,9 +49,10 @@ jobs:
             | sha256sum --check --strict
           sudo chmod 0755 /usr/local/bin/bazelisk
           USE_BAZEL_VERSION=8.7.0 bazelisk version
-          pip3 install --break-system-packages huggingface_hub pyarrow awscli boto3 s3cmd
+          pip3 install --break-system-packages huggingface_hub pyarrow duckdb awscli boto3 s3cmd
           hf --version
           python3 -c "import pyarrow; print('pyarrow', pyarrow.__version__)"
+          python3 -c "import duckdb; print('duckdb', duckdb.__version__)"
           aws --version
           python3 -c "import boto3; print('boto3', boto3.__version__)"
           s3cmd --version
