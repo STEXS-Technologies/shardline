@@ -487,6 +487,7 @@ fn read_dataset_rows(
     tenant: &str,
     offset: usize,
     limit: usize,
+    cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<(Vec<String>, Vec<DatasetRow>), HubApiError> {
     let key = lfs_object_key(&file.sha, auth)
         .map_err(|error| HubApiError::PathValidation(error.to_string()))?;
@@ -508,11 +509,19 @@ fn read_dataset_rows(
             &[],
             &[],
             &[],
-            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            cancelled,
         )
         .map_err(|failure| failure.error);
     }
-    read_text_rows_streaming(&state.object_store, &key, size, &file.path, offset, limit)
+    read_text_rows_streaming(
+        &state.object_store,
+        &key,
+        size,
+        &file.path,
+        offset,
+        limit,
+        cancelled,
+    )
 }
 
 /// Range-backed line reader used by text previews. It retains one storage
@@ -525,10 +534,16 @@ struct RangeLineReader {
     scanned: u64,
     chunk: Vec<u8>,
     chunk_position: usize,
+    cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl RangeLineReader {
-    fn new(store: &shardline_server_core::ServerObjectStore, key: ObjectKey, length: u64) -> Self {
+    fn new(
+        store: &shardline_server_core::ServerObjectStore,
+        key: ObjectKey,
+        length: u64,
+        cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> Self {
         Self {
             store: store.clone(),
             key,
@@ -537,10 +552,16 @@ impl RangeLineReader {
             scanned: 0,
             chunk: Vec::new(),
             chunk_position: 0,
+            cancelled,
         }
     }
 
     fn refill(&mut self) -> Result<bool, HubApiError> {
+        if self.cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(HubApiError::PathValidation(
+                "dataset preview cancelled".to_owned(),
+            ));
+        }
         if self.position >= self.length {
             return Ok(false);
         }
@@ -587,6 +608,11 @@ impl RangeLineReader {
     fn next_line(&mut self) -> Result<Option<Vec<u8>>, HubApiError> {
         let mut line = Vec::new();
         loop {
+            if self.cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err(HubApiError::PathValidation(
+                    "dataset preview cancelled".to_owned(),
+                ));
+            }
             if self.chunk_position >= self.chunk.len() && !self.refill()? {
                 return if line.is_empty() {
                     Ok(None)
@@ -632,8 +658,9 @@ fn read_text_rows_streaming(
     path: &str,
     offset: usize,
     limit: usize,
+    cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<(Vec<String>, Vec<DatasetRow>), HubApiError> {
-    let mut reader = RangeLineReader::new(store, key.clone(), size);
+    let mut reader = RangeLineReader::new(store, key.clone(), size, cancelled);
     let is_csv = path.ends_with(".csv");
     let mut columns = Vec::new();
     if is_csv {
@@ -722,13 +749,34 @@ async fn read_dataset_rows_async(
     let file = file.clone();
     let auth = auth.clone();
     let tenant = tenant.to_owned();
-    tokio::task::spawn_blocking(move || {
-        read_dataset_rows(&state, &file, &auth, &tenant, offset, limit)
-    })
-    .await
-    .map_err(|_join_error| {
-        HubApiError::PathValidation("dataset preview worker failed".to_owned())
-    })?
+    let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let worker_cancelled = cancelled.clone();
+    let mut cancellation_guard = QueryCancellationGuard::new(cancelled);
+    let worker = tokio::task::spawn_blocking(move || {
+        read_dataset_rows(
+            &state,
+            &file,
+            &auth,
+            &tenant,
+            offset,
+            limit,
+            worker_cancelled,
+        )
+    });
+    match tokio::time::timeout(std::time::Duration::from_secs(30), worker).await {
+        Ok(join_result) => {
+            cancellation_guard.disarm();
+            join_result.map_err(|_join_error| {
+                HubApiError::PathValidation("dataset preview worker failed".to_owned())
+            })?
+        }
+        Err(_timeout_error) => {
+            cancellation_guard.cancel("deadline");
+            Err(HubApiError::PathValidation(
+                "dataset preview deadline exceeded".to_owned(),
+            ))
+        }
+    }
 }
 
 /// Parses a single CSV line, respecting double-quoted fields that may contain
@@ -795,7 +843,9 @@ pub(crate) fn parse_csv_line(line: &str) -> Vec<&str> {
 
 #[cfg(test)]
 mod cancellation_tests {
-    use super::QueryCancellationGuard;
+    use super::{QueryCancellationGuard, RangeLineReader};
+    use shardline_server_core::ServerObjectStore;
+    use shardline_storage::ObjectKey;
     use std::sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -816,5 +866,17 @@ mod cancellation_tests {
         guard.cancel("deadline");
         guard.cancel("deadline");
         assert!(cancelled.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn cancelled_text_reader_stops_before_fetching_another_range() {
+        let cancelled = Arc::new(AtomicBool::new(true));
+        let mut reader = RangeLineReader::new(
+            &ServerObjectStore::Blackhole,
+            ObjectKey::parse("preview").unwrap(),
+            1024,
+            cancelled,
+        );
+        assert!(reader.next_line().is_err());
     }
 }
