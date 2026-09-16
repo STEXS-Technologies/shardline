@@ -76,7 +76,9 @@ the request to the current immutable revision and exact file SHA, supports
 selected columns, bounded pagination, allow-listed predicates, and bounded
 aggregates. Parquet reads use range requests and enforce an 8 MiB request
 chunk and 128 MiB scanned-byte budget; execution is moved to a blocking worker
-with a 30-second deadline. Results and errors are bounded and do not expose
+with a 30-second deadline, an eight-query admission limit, and a 16 MiB result
+limit. Prometheus exposes query counts, rejection/cancellation counters,
+scanned/returned bytes and rows, and execution duration. Results and errors are bounded and do not expose
 SQL, credentials, or internal paths.
 
 ## Design and benchmark gate
