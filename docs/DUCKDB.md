@@ -10,7 +10,9 @@ Parquet schema discovery, projection and predicate pushdown, globs, joins,
 aggregates, and Parquet export while keeping analytical failures and resource
 usage outside the server process. The real-client E2E lane validates this path.
 
-An optional server-side query service remains a follow-up design. It must run
+The Hub now exposes a bounded native Arrow/Parquet query path for authorized
+dataset previews. DuckDB remains external for full SQL. An optional
+server-side DuckDB service remains a follow-up design. It must run
 in a separate role or process and accept a structured, revision-pinned request;
 raw SQL is not an API contract. Before implementation, benchmark that service
 against native Arrow/Parquet readers and the external-client path.
@@ -53,11 +55,11 @@ authorized by the token. Use exact object paths when a revision-pinned file
 identity is required; mutable globs are appropriate only for external ad-hoc
 analysis.
 
-## Server-side query boundary (future)
+## Server-side query boundary
 
-The typed, validation-only request contract is available as
+The typed request contract is available as
 `shardline_hub_api::query::DatasetQueryRequest`. If Hub previews later use an
-isolated query worker, the worker contract must
+an isolated DuckDB query worker, the worker contract must
 pin repository, immutable revision, split, and file SHA before execution and
 allow only selected columns, validated predicates, bounded ordering/cursors,
 limits, and a small aggregate allowlist. It must enforce read-only access,
@@ -68,6 +70,14 @@ rows, and stable error classes, but never SQL, credentials, paths, or row data.
 
 SQLite/Postgres remain authoritative for publication, authorization metadata,
 coordination, and GC; DuckDB is analytical only.
+
+The native endpoint is `POST /api/datasets/{namespace}/{repo}/query`. It pins
+the request to the current immutable revision and exact file SHA, supports
+selected columns, bounded pagination, allow-listed predicates, and bounded
+aggregates. Parquet reads use range requests and enforce an 8 MiB request
+chunk and 128 MiB scanned-byte budget; execution is moved to a blocking worker
+with a 30-second deadline. Results and errors are bounded and do not expose
+SQL, credentials, or internal paths.
 
 ## Design and benchmark gate
 
