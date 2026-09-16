@@ -78,7 +78,8 @@ aggregates. Parquet reads use range requests and enforce an 8 MiB request
 chunk and 128 MiB scanned-byte budget; execution is moved to a blocking worker
 with a 30-second deadline, an eight-query admission limit, and a 16 MiB result
 limit. Prometheus exposes query counts, rejection/failure/cancellation
-counters, range requests, queue/execution duration, and scanned/returned bytes
+counters (including stable `deadline` and `client_disconnect` cancellation
+reasons), range requests, queue/execution duration, and scanned/returned bytes
 and rows. Results and errors are bounded and do not expose
 SQL, credentials, or internal paths.
 
