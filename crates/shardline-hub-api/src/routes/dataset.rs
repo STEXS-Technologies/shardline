@@ -218,6 +218,7 @@ pub(crate) async fn dataset_query(
     }
     let predicates = request.predicates.clone();
     let aggregates = request.aggregates.clone();
+    let order_by = request.order_by.clone();
     let offset = request.offset as usize;
     let limit = request.limit as usize;
     let read = tokio::task::spawn_blocking(move || {
@@ -230,6 +231,7 @@ pub(crate) async fn dataset_query(
             &selected_columns,
             &predicates,
             &aggregates,
+            &order_by,
         )
     });
     let (output_columns, rows) = tokio::time::timeout(std::time::Duration::from_secs(30), read)
@@ -400,6 +402,7 @@ fn read_dataset_rows(
             size,
             offset,
             limit,
+            &[],
             &[],
             &[],
             &[],
