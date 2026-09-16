@@ -2909,6 +2909,26 @@ async fn handler_lfs_upload_success() {
     assert_eq!(data, b"some lfs data");
 }
 
+#[tokio::test]
+async fn handler_lfs_upload_rejects_oversized_streaming_body() {
+    let (_td, state) = make_test_state();
+    let oid = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let body = axum::body::Body::from_stream(futures_util::stream::iter([
+        Ok::<_, std::convert::Infallible>(bytes::Bytes::from(vec![0_u8; 64 * 1024 * 1024])),
+        Ok::<_, std::convert::Infallible>(bytes::Bytes::from_static(b"overflow")),
+    ]));
+    let result = lfs_upload(
+        State(state.clone()),
+        test_repo(&state, &default_headers()),
+        Path(oid.to_string()),
+        body,
+    )
+    .await;
+    assert!(
+        matches!(result, Err(HubApiError::BadRequest(message)) if message.contains("exceeds maximum size"))
+    );
+}
+
 // ------------------------------------------------------------------
 // lfs_download
 // ------------------------------------------------------------------

@@ -151,6 +151,22 @@ mod tests {
         assert_eq!(prefix, bytes[..100_003]);
     }
 
+    #[test]
+    fn prefix_read_allows_empty_object_and_zero_limit() {
+        let (_temp, store) = local_store();
+        let key = ObjectKey::parse("hub/empty.bin").expect("key");
+        put(&store, &key, b"");
+        assert!(read_object_prefix(&store, &key, 0, 128).unwrap().is_empty());
+        assert!(read_object_prefix(&store, &key, 1, 0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn prefix_read_reports_missing_object() {
+        let (_temp, store) = local_store();
+        let key = ObjectKey::parse("hub/missing.bin").expect("key");
+        assert!(read_object_prefix(&store, &key, 1, 1).is_err());
+    }
+
     #[tokio::test]
     async fn stream_surfaces_mid_object_storage_failure_and_recovers() {
         let (_temp, store) = local_store();
