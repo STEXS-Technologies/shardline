@@ -271,6 +271,26 @@ async fn dataset_first_rows_reads_parquet_with_bounded_range_reader() {
     let json: serde_json::Value =
         serde_json::from_slice(&collect_body_bytes(response).await).unwrap();
     assert_eq!(json["rows"][0]["columns"]["rows"], 3);
+
+    let forged = serde_json::json!({
+        "repository": "team/parquet-dataset", "revision": revision,
+        "file_sha": "1818181818181818181818181818181818181818181818181818181818181818",
+        "config": "default", "split": "train", "limit": 1
+    });
+    let response = app()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/datasets/team/parquet-dataset/query")
+                .header("content-type", "application/json")
+                .body(Body::from(forged.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body = collect_body_bytes(response).await;
+    assert!(!String::from_utf8_lossy(&body).contains("181818"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
