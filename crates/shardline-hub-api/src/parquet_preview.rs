@@ -4,7 +4,13 @@
 //! object store. It fetches only the footer and column/page ranges requested by
 //! the Parquet reader; it never materializes the object as one `Vec<u8>`.
 
-use std::io::{self, Cursor, Read};
+use std::{
+    io::{self, Cursor, Read},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+};
 
 use arrow_json::LineDelimitedWriter;
 use parquet::arrow::ProjectionMask;
@@ -19,12 +25,14 @@ use crate::{error::HubApiError, models::DatasetRow};
 
 const MAX_BATCH_ROWS: usize = 256;
 const RANGE_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_SCANNED_BYTES: u64 = 128 * 1024 * 1024;
 
 #[derive(Clone)]
 struct RangeReader {
     store: ServerObjectStore,
     key: ObjectKey,
     length: u64,
+    scanned: Arc<AtomicU64>,
 }
 
 impl Length for RangeReader {
@@ -59,6 +67,13 @@ impl ChunkReader for RangeReader {
             return Err(ParquetError::EOF("range past EOF".into()));
         }
         let range = ByteRange::new(start, end).map_err(|e| ParquetError::General(e.to_string()))?;
+        let scanned = self
+            .scanned
+            .fetch_add(length as u64, Ordering::Relaxed)
+            .saturating_add(length as u64);
+        if scanned > MAX_SCANNED_BYTES {
+            return Err(ParquetError::General("parquet scan limit exceeded".into()));
+        }
         self.store
             .read_range(&self.key, range)
             .map(|bytes| {
@@ -84,16 +99,16 @@ impl Read for RangedRead {
             if self.position >= self.reader.length {
                 return Ok(0);
             }
-            let count = (self.reader.length - self.position).min(RANGE_BYTES) as usize;
+            let remaining = self.reader.length.saturating_sub(self.position);
+            let count = remaining.min(RANGE_BYTES) as usize;
             let bytes = self
                 .reader
                 .get_bytes(self.position, count)
                 .map_err(|e| io::Error::other(e.to_string()))?;
             self.buffer = Cursor::new(bytes.to_vec());
-            self.position += count as u64;
+            self.position = self.position.saturating_add(count as u64);
         }
-        let result = self.buffer.read(output);
-        result
+        self.buffer.read(output)
     }
 }
 
@@ -110,6 +125,7 @@ pub fn read_rows(
         store: store.clone(),
         key,
         length: size,
+        scanned: Arc::new(AtomicU64::new(0)),
     };
     let mut builder = ParquetRecordBatchReaderBuilder::try_new(reader)
         .map_err(|e| HubApiError::PathValidation(format!("invalid parquet: {e}")))?
@@ -188,7 +204,20 @@ mod tests {
             store: ServerObjectStore::Blackhole,
             key: ObjectKey::parse("x").unwrap(),
             length: 10,
+            scanned: Arc::new(AtomicU64::new(0)),
         };
         assert!(reader.get_bytes(9, 2).is_err());
+    }
+
+    #[test]
+    fn reader_rejects_scanned_byte_budget() {
+        let scanned = Arc::new(AtomicU64::new(MAX_SCANNED_BYTES));
+        let reader = RangeReader {
+            store: ServerObjectStore::Blackhole,
+            key: ObjectKey::parse("x").unwrap(),
+            length: 10,
+            scanned,
+        };
+        assert!(reader.get_bytes(0, 1).is_err());
     }
 }
