@@ -67,6 +67,7 @@ pub mod commit;
 pub mod error;
 pub mod git;
 pub mod models;
+pub mod query;
 pub mod resolve;
 pub mod routes;
 pub mod secrets;
