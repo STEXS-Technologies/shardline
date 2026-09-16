@@ -17,11 +17,12 @@ use arrow_schema::{DataType, Field, Schema};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
-use parquet::arrow::ArrowWriter;
+use parquet::{arrow::ArrowWriter, file::properties::WriterProperties};
 use shardline_index::hub::{HubFileEntry, HubRepoType};
 use shardline_protocol::ShardlineHash;
 use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectStore};
 use std::sync::Arc;
+use tokio::net::TcpListener;
 use tower::ServiceExt;
 
 use common::{app, setup, state};
@@ -150,18 +151,23 @@ async fn dataset_first_rows_reads_parquet_with_bounded_range_reader() {
         Field::new("id", DataType::Int64, false),
         Field::new("name", DataType::Utf8, false),
     ]));
+    let ids: Vec<i64> = (1..=1000).collect();
+    let names: Vec<String> = ids.iter().map(|id| format!("name-{id}")).collect();
     let batch = RecordBatch::try_new(
         schema.clone(),
         vec![
-            Arc::new(Int64Array::from(vec![1, 2, 3])) as ArrayRef,
-            Arc::new(StringArray::from(vec!["alice", "bob", "charlie"])) as ArrayRef,
+            Arc::new(Int64Array::from(ids)) as ArrayRef,
+            Arc::new(StringArray::from(names)) as ArrayRef,
         ],
     )
     .unwrap();
     let mut parquet = Vec::new();
     {
         let cursor = std::io::Cursor::new(&mut parquet);
-        let mut writer = ArrowWriter::try_new(cursor, schema, None).unwrap();
+        let properties = WriterProperties::builder()
+            .set_max_row_group_size(100)
+            .build();
+        let mut writer = ArrowWriter::try_new(cursor, schema, Some(properties)).unwrap();
         writer.write(&batch).unwrap();
         writer.close().unwrap();
     }
@@ -204,7 +210,7 @@ async fn dataset_first_rows_reads_parquet_with_bounded_range_reader() {
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["columns"], serde_json::json!(["id", "name"]));
     assert_eq!(json["rows"].as_array().unwrap().len(), 2);
-    assert_eq!(json["rows"][0]["columns"]["name"], "alice");
+    assert_eq!(json["rows"][0]["columns"]["name"], "name-1");
 
     let unknown_column = serde_json::json!({
         "repository": "team/parquet-dataset", "revision": revision, "file_sha": sha,
@@ -262,7 +268,7 @@ async fn dataset_first_rows_reads_parquet_with_bounded_range_reader() {
     let body = collect_body_bytes(response).await;
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["columns"], serde_json::json!(["name"]));
-    assert_eq!(json["rows"][0]["columns"]["name"], "alice");
+    assert_eq!(json["rows"][0]["columns"]["name"], "name-1");
 
     let filtered = serde_json::json!({
         "repository": "team/parquet-dataset", "revision": revision, "file_sha": sha,
@@ -282,7 +288,7 @@ async fn dataset_first_rows_reads_parquet_with_bounded_range_reader() {
     assert_eq!(response.status(), StatusCode::OK);
     let json: serde_json::Value =
         serde_json::from_slice(&collect_body_bytes(response).await).unwrap();
-    assert_eq!(json["rows"].as_array().unwrap().len(), 2);
+    assert_eq!(json["rows"].as_array().unwrap().len(), 10);
 
     let aggregate = serde_json::json!({
         "repository": "team/parquet-dataset", "revision": revision, "file_sha": sha,
@@ -302,7 +308,7 @@ async fn dataset_first_rows_reads_parquet_with_bounded_range_reader() {
     assert_eq!(response.status(), StatusCode::OK);
     let json: serde_json::Value =
         serde_json::from_slice(&collect_body_bytes(response).await).unwrap();
-    assert_eq!(json["rows"][0]["columns"]["rows"], 3);
+    assert_eq!(json["rows"][0]["columns"]["rows"], 1000);
 
     let ordered = serde_json::json!({
         "repository": "team/parquet-dataset", "revision": revision, "file_sha": sha,
@@ -322,7 +328,7 @@ async fn dataset_first_rows_reads_parquet_with_bounded_range_reader() {
     assert_eq!(response.status(), StatusCode::OK);
     let json: serde_json::Value =
         serde_json::from_slice(&collect_body_bytes(response).await).unwrap();
-    assert_eq!(json["rows"][0]["columns"]["id"], 3);
+    assert_eq!(json["rows"][0]["columns"]["id"], 1000);
 
     let forged = serde_json::json!({
         "repository": "team/parquet-dataset", "revision": revision,
@@ -343,6 +349,95 @@ async fn dataset_first_rows_reads_parquet_with_bounded_range_reader() {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
     let body = collect_body_bytes(response).await;
     assert!(!String::from_utf8_lossy(&body).contains("181818"));
+}
+
+/// Exercises the native query endpoint over a real TCP connection.  This is
+/// deliberately separate from the `oneshot` coverage above: it catches
+/// release-only codec/configuration regressions (for example, a server built
+/// without Snappy support) and validates the production HTTP body path.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dataset_query_http_e2e_reads_compressed_multiple_row_groups() {
+    setup();
+    let repo = format!("team/http-e2e-{}", std::process::id());
+    let revision = format!("b{:039}", std::process::id());
+    let sha = format!("{:0>64}", "18");
+    let store = common::state().store.clone();
+    store
+        .create_repo(HubRepoType::Dataset, &repo, false)
+        .unwrap();
+
+    let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![Arc::new(Int64Array::from((1..=100).collect::<Vec<_>>())) as ArrayRef],
+    )
+    .unwrap();
+    let mut parquet = Vec::new();
+    {
+        let cursor = std::io::Cursor::new(&mut parquet);
+        let properties = WriterProperties::builder()
+            .set_max_row_group_size(10)
+            .build();
+        let mut writer = ArrowWriter::try_new(cursor, schema, Some(properties)).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+    }
+    let files = vec![HubFileEntry {
+        path: "data/train/data.parquet".into(),
+        size: parquet.len() as u64,
+        sha: sha.clone(),
+        is_lfs: false,
+    }];
+    store.store_files(&revision, &files).unwrap();
+    store
+        .create_revision(&repo, None, &revision, "main", "http e2e")
+        .unwrap();
+    let key = ObjectKey::parse(&format!("protocols/lfs/global/objects/{sha}")).unwrap();
+    common::state()
+        .object_store
+        .put_if_absent(
+            &key,
+            ObjectBody::from_slice(&parquet),
+            &ObjectIntegrity::new(
+                ShardlineHash::from_bytes(*blake3::hash(&parquet).as_bytes()),
+                parquet.len() as u64,
+            ),
+        )
+        .unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app())
+            .with_graceful_shutdown(async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+            .unwrap();
+    });
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!("http://{address}/api/datasets/{repo}/query"))
+        .json(&serde_json::json!({
+            "repository": repo,
+            "revision": revision,
+            "file_sha": sha,
+            "config": "default",
+            "split": "train",
+            "columns": ["id"],
+            "limit": 25
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(body["rows"].as_array().unwrap().len(), 25);
+    assert_eq!(body["rows"][0]["columns"]["id"], 1);
+
+    let _ = shutdown_tx.send(());
+    server.await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
