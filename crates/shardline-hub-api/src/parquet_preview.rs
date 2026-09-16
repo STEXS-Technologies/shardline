@@ -258,6 +258,14 @@ pub fn read_rows(
             break;
         }
     }
+    if scanned_rows >= MAX_QUERY_SCAN_ROWS
+        && (!predicates.is_empty() || !aggregates.is_empty() || !order_by.is_empty())
+    {
+        shardline_metrics::metrics().query.scan_limit_rejected.inc();
+        return Err(HubApiError::PathValidation(
+            "query row scan limit exceeded".to_owned(),
+        ));
+    }
     if !aggregates.is_empty() {
         let mut aggregate_row = std::collections::BTreeMap::new();
         for aggregate in aggregates {
