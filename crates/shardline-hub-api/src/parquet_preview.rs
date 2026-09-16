@@ -225,6 +225,10 @@ impl ChunkReader for RangeReader {
             if bytes.len() != chunk_length {
                 return Err(ParquetError::General("range length mismatch".into()));
             }
+            shardline_metrics::metrics()
+                .query
+                .reconstructed_bytes
+                .inc_by(chunk_length as u64);
             output.extend_from_slice(&bytes);
             chunk_start = chunk_start.saturating_add(chunk_length as u64);
             remaining = remaining.saturating_sub(chunk_length);

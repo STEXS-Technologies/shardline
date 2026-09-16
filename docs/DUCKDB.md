@@ -79,10 +79,10 @@ chunk and 128 MiB scanned-byte budget; execution is moved to a blocking worker
 with a 30-second deadline, an eight-query admission limit, and a 16 MiB result
 limit. Prometheus exposes query counts, rejection/failure/cancellation
 counters (including stable `deadline` and `client_disconnect` cancellation
-reasons), range requests, queue/execution duration, and scanned/returned bytes
-and rows, plus explicit cache hit/miss counters (the native path currently
-records a miss because it has no result cache). Results and errors are bounded
-and do not expose SQL, credentials, or internal paths.
+reasons), range requests, queue/execution duration, scanned/reconstructed and
+returned bytes and rows, plus explicit cache hit/miss counters (the native path
+currently records a miss because it has no result cache). Results and errors
+are bounded and do not expose SQL, credentials, or internal paths.
 
 The native route is enabled by default for backwards-compatible deployments.
 Set `SHARDLINE_ENABLE_DATASET_QUERY=false` (or `0`, `no`, or `off`) to omit

@@ -14,6 +14,7 @@ pub struct QueryMetrics {
     pub returned_rows: IntCounter,
     pub returned_bytes: IntCounter,
     pub scanned_bytes: IntCounter,
+    pub reconstructed_bytes: IntCounter,
     pub range_requests: IntCounter,
     pub cache_hits: IntCounter,
     pub cache_misses: IntCounter,
@@ -67,6 +68,10 @@ impl QueryMetrics {
             "shardline_query_range_requests_total",
             "Object-store range requests issued by bounded queries",
         );
+        let reconstructed_bytes = must_counter(
+            "shardline_query_reconstructed_bytes_total",
+            "Bytes reconstructed from CAS/object-store ranges for bounded queries",
+        );
         let cache_hits = must_counter(
             "shardline_query_cache_hits_total",
             "Bounded queries served from the query result cache",
@@ -104,6 +109,7 @@ impl QueryMetrics {
             &returned_rows,
             &returned_bytes,
             &scanned_bytes,
+            &reconstructed_bytes,
             &range_requests,
             &cache_hits,
             &cache_misses,
@@ -127,6 +133,7 @@ impl QueryMetrics {
             returned_rows,
             returned_bytes,
             scanned_bytes,
+            reconstructed_bytes,
             range_requests,
             cache_hits,
             cache_misses,
