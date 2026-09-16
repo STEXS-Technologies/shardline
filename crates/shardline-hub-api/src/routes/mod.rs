@@ -33,7 +33,7 @@ pub(crate) use self::lfs::*;
 pub(crate) use self::object_io::{read_object_prefix, stream_object};
 pub(crate) use self::repos::*;
 pub(crate) use self::resolve::*;
-pub use self::router::router;
+pub use self::router::{router, router_with_dataset_query};
 pub use self::state::HubState;
 pub(crate) use self::tokens::*;
 pub(crate) use self::tree::*;
