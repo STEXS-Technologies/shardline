@@ -482,6 +482,19 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn md5_tee_propagates_upstream_errors() {
+        let hasher = Arc::new(Mutex::new(Md5::new()));
+        let mut reader = RequestBodyReader::from_stream(futures_util::stream::once(async {
+            Err(crate::ServerError::RequestBodyTooLarge)
+        }))
+        .with_md5_tee(hasher);
+        assert!(matches!(
+            reader.next_bytes().await,
+            Err(crate::ServerError::RequestBodyTooLarge)
+        ));
+    }
+
     // ------------------------------------------------------------------
     // RequestBodyReader::from_reader (async file/reader feeder)
     // ------------------------------------------------------------------
