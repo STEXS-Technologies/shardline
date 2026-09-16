@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 
 pub const MAX_COLUMNS: usize = 128;
 pub const MAX_PREDICATES: usize = 32;
+pub const MAX_ORDER_TERMS: usize = 32;
+pub const MAX_AGGREGATES: usize = 32;
 pub const MAX_LIMIT: u32 = 10_000;
 pub const MAX_OFFSET: u64 = 1_000_000;
 
@@ -158,6 +160,12 @@ impl DatasetQueryRequest {
         if self.predicates.len() > MAX_PREDICATES {
             return Err(QueryValidationError::TooMany("predicates"));
         }
+        if self.order_by.len() > MAX_ORDER_TERMS {
+            return Err(QueryValidationError::TooMany("order terms"));
+        }
+        if self.aggregates.len() > MAX_AGGREGATES {
+            return Err(QueryValidationError::TooMany("aggregates"));
+        }
         if self.limit == 0 || self.limit > MAX_LIMIT {
             return Err(QueryValidationError::OutOfRange("limit"));
         }
@@ -248,6 +256,33 @@ mod tests {
         assert!(matches!(
             req.validate(),
             Err(QueryValidationError::InvalidIdentifier("file_sha"))
+        ));
+    }
+
+    #[test]
+    fn rejects_unbounded_order_and_aggregate_lists() {
+        let mut req = request();
+        req.order_by = (0..=MAX_ORDER_TERMS)
+            .map(|_| OrderTerm {
+                column: "id".into(),
+                descending: false,
+            })
+            .collect();
+        assert!(matches!(
+            req.validate(),
+            Err(QueryValidationError::TooMany("order terms"))
+        ));
+        req.order_by.clear();
+        req.aggregates = (0..=MAX_AGGREGATES)
+            .map(|_| Aggregate {
+                function: AggregateFunction::Count,
+                column: None,
+                alias: None,
+            })
+            .collect();
+        assert!(matches!(
+            req.validate(),
+            Err(QueryValidationError::TooMany("aggregates"))
         ));
     }
 

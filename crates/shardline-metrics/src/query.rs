@@ -13,6 +13,9 @@ pub struct QueryMetrics {
     pub returned_rows: IntCounter,
     pub returned_bytes: IntCounter,
     pub scanned_bytes: IntCounter,
+    pub range_requests: IntCounter,
+    pub failures: IntCounter,
+    pub queue_seconds: Histogram,
     pub execution_seconds: Histogram,
 }
 
@@ -48,6 +51,18 @@ impl QueryMetrics {
             "shardline_query_scanned_bytes_total",
             "Bytes fetched by bounded queries",
         );
+        let range_requests = must_counter(
+            "shardline_query_range_requests_total",
+            "Object-store range requests issued by bounded queries",
+        );
+        let failures = must_counter(
+            "shardline_query_failures_total",
+            "Bounded queries that failed after admission",
+        );
+        let queue_seconds = must_histogram(HistogramOpts::new(
+            "shardline_query_queue_seconds",
+            "Time spent waiting for bounded query admission",
+        ));
         let execution_seconds = must_histogram(HistogramOpts::new(
             "shardline_query_execution_seconds",
             "Bounded query execution time",
@@ -61,10 +76,13 @@ impl QueryMetrics {
             &returned_rows,
             &returned_bytes,
             &scanned_bytes,
+            &range_requests,
+            &failures,
         ] {
             registry.register(Box::new((*metric).clone())).ok();
         }
         registry.register(Box::new(execution_seconds.clone())).ok();
+        registry.register(Box::new(queue_seconds.clone())).ok();
         Self {
             requests,
             admissions_rejected,
@@ -74,6 +92,9 @@ impl QueryMetrics {
             returned_rows,
             returned_bytes,
             scanned_bytes,
+            range_requests,
+            failures,
+            queue_seconds,
             execution_seconds,
         }
     }
