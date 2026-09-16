@@ -11,6 +11,7 @@ pub struct QueryMetrics {
     pub result_limit_rejected: IntCounter,
     pub cancellations: IntCounter,
     pub returned_rows: IntCounter,
+    pub returned_bytes: IntCounter,
     pub scanned_bytes: IntCounter,
     pub execution_seconds: Histogram,
 }
@@ -39,6 +40,10 @@ impl QueryMetrics {
             "shardline_query_returned_rows_total",
             "Rows returned by bounded queries",
         );
+        let returned_bytes = must_counter(
+            "shardline_query_returned_bytes_total",
+            "Result bytes returned by bounded queries",
+        );
         let scanned_bytes = must_counter(
             "shardline_query_scanned_bytes_total",
             "Bytes fetched by bounded queries",
@@ -54,6 +59,7 @@ impl QueryMetrics {
             &result_limit_rejected,
             &cancellations,
             &returned_rows,
+            &returned_bytes,
             &scanned_bytes,
         ] {
             registry.register(Box::new((*metric).clone())).ok();
@@ -66,6 +72,7 @@ impl QueryMetrics {
             result_limit_rejected,
             cancellations,
             returned_rows,
+            returned_bytes,
             scanned_bytes,
             execution_seconds,
         }
