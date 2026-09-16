@@ -220,6 +220,7 @@ pub(crate) async fn dataset_query(
     let (output_columns, rows) = tokio::time::timeout(std::time::Duration::from_secs(30), read)
         .await
         .map_err(|_timeout_error| {
+            shardline_metrics::metrics().query.cancellations.inc();
             HubApiError::PathValidation("query deadline exceeded".to_owned())
         })?
         .map_err(|_join_error| HubApiError::PathValidation("query worker failed".to_owned()))??;

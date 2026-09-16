@@ -10,6 +10,7 @@ use std::{
         Arc, Mutex, OnceLock,
         atomic::{AtomicU64, Ordering},
     },
+    time::Instant,
 };
 
 use arrow_json::LineDelimitedWriter;
@@ -53,6 +54,7 @@ fn admit_query() -> Result<AdmissionGuard, HubApiError> {
             HubApiError::PathValidation("query admission unavailable".to_owned())
         })?;
     if *active >= MAX_CONCURRENT_QUERIES {
+        shardline_metrics::metrics().query.admissions_rejected.inc();
         return Err(HubApiError::PathValidation(
             "query concurrency limit exceeded".to_owned(),
         ));
@@ -106,8 +108,13 @@ impl ChunkReader for RangeReader {
             .fetch_add(length as u64, Ordering::Relaxed)
             .saturating_add(length as u64);
         if scanned > MAX_SCANNED_BYTES {
+            shardline_metrics::metrics().query.scan_limit_rejected.inc();
             return Err(ParquetError::General("parquet scan limit exceeded".into()));
         }
+        shardline_metrics::metrics()
+            .query
+            .scanned_bytes
+            .inc_by(length as u64);
         self.store
             .read_range(&self.key, range)
             .map(|bytes| {
@@ -158,6 +165,8 @@ pub fn read_rows(
     predicates: &[Predicate],
     aggregates: &[Aggregate],
 ) -> Result<(Vec<String>, Vec<DatasetRow>), HubApiError> {
+    shardline_metrics::metrics().query.requests.inc();
+    let started = Instant::now();
     let _admission = admit_query()?;
     let reader = RangeReader {
         store: store.clone(),
@@ -228,6 +237,10 @@ pub fn read_rows(
             {
                 result_bytes = result_bytes.saturating_add(value.len());
                 if result_bytes > MAX_RESULT_BYTES {
+                    shardline_metrics::metrics()
+                        .query
+                        .result_limit_rejected
+                        .inc();
                     return Err(HubApiError::PathValidation(
                         "query result limit exceeded".to_owned(),
                     ));
@@ -252,6 +265,11 @@ pub fn read_rows(
             let value = aggregate_value(&rows, aggregate)?;
             aggregate_row.insert(alias, value);
         }
+        shardline_metrics::metrics().query.returned_rows.inc();
+        shardline_metrics::metrics()
+            .query
+            .execution_seconds
+            .observe(started.elapsed().as_secs_f64());
         return Ok((
             aggregate_row.keys().cloned().collect(),
             vec![DatasetRow {
@@ -262,6 +280,15 @@ pub fn read_rows(
     // Arrow's limit starts at row zero; apply the requested offset after the
     // bounded decode so no unbounded scan or result allocation is possible.
     let skipped = offset.min(rows.len());
+    let result_rows = rows.len().saturating_sub(skipped).min(limit);
+    shardline_metrics::metrics()
+        .query
+        .returned_rows
+        .inc_by(result_rows as u64);
+    shardline_metrics::metrics()
+        .query
+        .execution_seconds
+        .observe(started.elapsed().as_secs_f64());
     Ok((
         columns,
         rows.into_iter().skip(skipped).take(limit).collect(),
