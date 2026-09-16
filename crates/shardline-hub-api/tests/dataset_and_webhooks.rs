@@ -453,6 +453,53 @@ async fn dataset_query_redacts_malformed_parquet_errors() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dataset_query_can_be_disabled_without_disabling_legacy_routes() {
+    setup();
+    common::state()
+        .store
+        .create_repo(HubRepoType::Dataset, "team/disabled", false)
+        .unwrap();
+    common::state()
+        .store
+        .store_files("e444444444444444444444444444444444444444", &[])
+        .unwrap();
+    common::state()
+        .store
+        .create_revision(
+            "team/disabled",
+            None,
+            "e444444444444444444444444444444444444444",
+            "main",
+            "init",
+        )
+        .unwrap();
+    let app =
+        shardline_hub_api::hub_routes_with_dataset_query(common::state().clone(), true, false);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/datasets/team/disabled/query")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let response =
+        shardline_hub_api::hub_routes_with_dataset_query(common::state().clone(), true, false)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/datasets/team/disabled/first-rows")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+    assert_ne!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dataset_first_rows_returns_csv_data() {
     setup();
     let store = common::state().store.clone();

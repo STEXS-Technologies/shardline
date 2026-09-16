@@ -82,6 +82,12 @@ counters, range requests, queue/execution duration, and scanned/returned bytes
 and rows. Results and errors are bounded and do not expose
 SQL, credentials, or internal paths.
 
+The native route is enabled by default for backwards-compatible deployments.
+Set `SHARDLINE_ENABLE_DATASET_QUERY=false` (or `0`, `no`, or `off`) to omit
+the route entirely while retaining the existing CSV/JSONL/Parquet preview
+endpoints. This is the supported opt-out when analytics should remain outside
+the Hub process.
+
 ## Design and benchmark gate
 
 The selected production boundary for this release is external DuckDB over the
