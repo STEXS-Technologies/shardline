@@ -95,3 +95,8 @@ latency regression, bounded RSS, and passing cancellation, redaction, and
 cross-repository authorization drills. Use `duckdb` plus the real-client E2E
 fixture as the reproducible baseline; do not promote a sidecar based on
 synthetic SQL-only benchmarks.
+
+Run `cargo make shardline-bench-duckdb` with the six required `SHARDLINE_*`
+variables documented in the script to record comparable native-versus-external
+latencies. Keep the raw CSV with the rollout evidence; benchmark results are
+not treated as a correctness or security test.
