@@ -486,6 +486,8 @@ con.execute("""CREATE SECRET shardline_s3 (
 
 exact = con.execute("SELECT id, \"group\" FROM read_parquet('s3://ac.assets/inputs/part-0.parquet') ORDER BY id").fetchall()
 assert exact == [(1, "a"), (2, "a"), (3, "b")], exact
+schema = con.execute("DESCRIBE SELECT * FROM read_parquet('s3://ac.assets/inputs/part-0.parquet')").fetchall()
+assert [(row[0], row[1]) for row in schema] == [("id", "BIGINT"), ("group", "VARCHAR")], schema
 filtered = con.execute("""SELECT id FROM read_parquet('s3://ac.assets/inputs/*.parquet')
     WHERE id >= 3 ORDER BY id""").fetchall()
 assert filtered == [(3,), (4,), (5,), (6,)], filtered
@@ -495,6 +497,15 @@ con.execute("""COPY (SELECT id, \"group\" FROM read_parquet('s3://ac.assets/inpu
     WHERE id % 2 = 0 ORDER BY id) TO 's3://ac.assets/results/even.parquet' (FORMAT PARQUET)""")
 written = con.execute("SELECT id FROM read_parquet('s3://ac.assets/results/even.parquet') ORDER BY id").fetchall()
 assert written == [(2,), (4,), (6,)], written
+
+# Exercise DuckDB's S3 listing behavior for both an empty prefix and a
+# continuation-token-sized prefix (>1000 objects).
+assert con.execute("SELECT count(*) FROM glob('s3://ac.assets/empty/*.parquet')").fetchone()[0] == 0
+for index in range(1005):
+    with s3.open_output_stream(f"ac.assets/paged/part-{index:04}.parquet") as out:
+        pq.write_table(pa.table({"id": [index]}), out)
+paged = con.execute("SELECT count(*) FROM glob('s3://ac.assets/paged/*.parquet')").fetchone()[0]
+assert paged == 1005, paged
 
 # Error redaction: malformed or missing objects must fail without leaking the
 # repository token into a DuckDB-facing exception.
