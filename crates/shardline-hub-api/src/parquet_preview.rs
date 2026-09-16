@@ -268,6 +268,10 @@ pub fn read_rows(
         shardline_metrics::metrics().query.returned_rows.inc();
         shardline_metrics::metrics()
             .query
+            .returned_bytes
+            .inc_by(result_bytes as u64);
+        shardline_metrics::metrics()
+            .query
             .execution_seconds
             .observe(started.elapsed().as_secs_f64());
         return Ok((
@@ -285,6 +289,10 @@ pub fn read_rows(
         .query
         .returned_rows
         .inc_by(result_rows as u64);
+    shardline_metrics::metrics()
+        .query
+        .returned_bytes
+        .inc_by(result_bytes as u64);
     shardline_metrics::metrics()
         .query
         .execution_seconds
