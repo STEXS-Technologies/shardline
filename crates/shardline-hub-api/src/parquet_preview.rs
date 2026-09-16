@@ -662,4 +662,20 @@ mod tests {
         assert!(admit_query("same-tenant").is_err());
         drop(guards);
     }
+
+    #[test]
+    fn admission_preserves_capacity_for_other_tenants() {
+        let _lock = admission_test_lock();
+        let same_tenant = [
+            admit_query("busy-tenant").unwrap(),
+            admit_query("busy-tenant").unwrap(),
+        ];
+        // A noisy tenant cannot consume the global budget: another tenant is
+        // admitted immediately while the first tenant is at its per-tenant
+        // ceiling. This is the fail-fast fairness guarantee used in lieu of
+        // an unbounded waiter queue.
+        let other = admit_query("other-tenant").unwrap();
+        drop(other);
+        drop(same_tenant);
+    }
 }
