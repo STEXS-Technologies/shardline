@@ -484,14 +484,14 @@ con.execute("""CREATE SECRET shardline_s3 (
     URL_STYLE 'path', USE_SSL false
 )""", [token, endpoint_host])
 
-exact = con.execute("SELECT id, group FROM read_parquet('s3://ac.assets/inputs/part-0.parquet') ORDER BY id").fetchall()
+exact = con.execute("SELECT id, \"group\" FROM read_parquet('s3://ac.assets/inputs/part-0.parquet') ORDER BY id").fetchall()
 assert exact == [(1, "a"), (2, "a"), (3, "b")], exact
 filtered = con.execute("""SELECT id FROM read_parquet('s3://ac.assets/inputs/*.parquet')
     WHERE id >= 3 ORDER BY id""").fetchall()
 assert filtered == [(3,), (4,), (5,), (6,)], filtered
 aggregate = con.execute("SELECT count(*), sum(id) FROM read_parquet('s3://ac.assets/inputs/*.parquet')").fetchone()
 assert aggregate == (6, 21), aggregate
-con.execute("""COPY (SELECT id, group FROM read_parquet('s3://ac.assets/inputs/*.parquet')
+con.execute("""COPY (SELECT id, \"group\" FROM read_parquet('s3://ac.assets/inputs/*.parquet')
     WHERE id % 2 = 0 ORDER BY id) TO 's3://ac.assets/results/even.parquet' (FORMAT PARQUET)""")
 written = con.execute("SELECT id FROM read_parquet('s3://ac.assets/results/even.parquet') ORDER BY id").fetchall()
 assert written == [(2,), (4,), (6,)], written
