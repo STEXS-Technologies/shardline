@@ -12,7 +12,7 @@
 
 mod common;
 
-use arrow_array::{ArrayRef, Int64Array, RecordBatch, StringArray};
+use arrow_array::{ArrayRef, Int64Array, RecordBatch, StringArray, StructArray};
 use arrow_schema::{DataType, Field, Schema};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -94,7 +94,9 @@ async fn dataset_first_rows_returns_jsonl_data() {
         .create_repo(HubRepoType::Dataset, "team/jsonl-dataset", false)
         .unwrap();
 
-    let jsonl_content = "{\"id\":1,\"name\":\"alice\"}\n{\"id\":2,\"name\":\"bob\"}\n{\"id\":3,\"name\":\"charlie\"}\n";
+    let jsonl_content: String = (1..=20_000)
+        .map(|id| format!("{{\"id\":{id},\"name\":\"name-{id}\"}}\n"))
+        .collect();
     let files = vec![HubFileEntry {
         path: "data.jsonl".to_owned(),
         size: jsonl_content.len() as u64,
@@ -135,9 +137,24 @@ async fn dataset_first_rows_returns_jsonl_data() {
     let rows = json["rows"].as_array().unwrap();
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0]["columns"]["id"], 1);
-    assert_eq!(rows[0]["columns"]["name"], "alice");
+    assert_eq!(rows[0]["columns"]["name"], "name-1");
     assert_eq!(rows[1]["columns"]["id"], 2);
-    assert_eq!(rows[1]["columns"]["name"], "bob");
+    assert_eq!(rows[1]["columns"]["name"], "name-2");
+
+    let response = app()
+        .oneshot(
+            Request::builder()
+                .uri("/api/datasets/team/jsonl-dataset/viewer/train?offset=19999&length=1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = collect_body_bytes(response).await;
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["rows"].as_array().unwrap().len(), 1);
+    assert_eq!(json["rows"][0]["columns"]["id"], 20_000);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -223,6 +240,24 @@ async fn dataset_first_rows_reads_parquet_with_bounded_range_reader() {
                 .uri("/api/datasets/team/parquet-dataset/query")
                 .header("content-type", "application/json")
                 .body(Body::from(unknown_column.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let unknown_order = serde_json::json!({
+        "repository": "team/parquet-dataset", "revision": revision, "file_sha": sha,
+        "config": "default", "split": "train",
+        "order_by": [{"column": "does_not_exist", "descending": true}], "limit": 1
+    });
+    let response = app()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/datasets/team/parquet-dataset/query")
+                .header("content-type", "application/json")
+                .body(Body::from(unknown_order.to_string()))
                 .unwrap(),
         )
         .await
@@ -349,6 +384,93 @@ async fn dataset_first_rows_reads_parquet_with_bounded_range_reader() {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
     let body = collect_body_bytes(response).await;
     assert!(!String::from_utf8_lossy(&body).contains("181818"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dataset_first_rows_preserves_nested_and_null_parquet_values() {
+    setup();
+    let store = common::state().store.clone();
+    let repo = "team/nested-null-parquet";
+    let revision = "d3333333333333333333333333333333333333";
+    let sha = "1718181818181818181818181818181818181818181818181818181818181818";
+    store
+        .create_repo(HubRepoType::Dataset, repo, false)
+        .unwrap();
+    let nested_field = Arc::new(Field::new("score", DataType::Int64, true));
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int64, false),
+        Field::new("label", DataType::Utf8, true),
+        Field::new(
+            "meta",
+            DataType::Struct(vec![nested_field.clone()].into()),
+            true,
+        ),
+    ]));
+    let nested = StructArray::new(
+        vec![nested_field].into(),
+        vec![Arc::new(Int64Array::from(vec![Some(7), None])) as ArrayRef],
+        None,
+    );
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(Int64Array::from(vec![1, 2])) as ArrayRef,
+            Arc::new(StringArray::from(vec![Some("ok"), None])) as ArrayRef,
+            Arc::new(nested) as ArrayRef,
+        ],
+    )
+    .unwrap();
+    let mut parquet = Vec::new();
+    {
+        let cursor = std::io::Cursor::new(&mut parquet);
+        let mut writer = ArrowWriter::try_new(cursor, schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+    }
+    store
+        .store_files(
+            revision,
+            &[HubFileEntry {
+                path: "data/train/data.parquet".into(),
+                size: parquet.len() as u64,
+                sha: sha.into(),
+                is_lfs: false,
+            }],
+        )
+        .unwrap();
+    store
+        .create_revision(repo, None, revision, "main", "nested null")
+        .unwrap();
+    let key = ObjectKey::parse(&format!("protocols/lfs/global/objects/{sha}")).unwrap();
+    common::state()
+        .object_store
+        .put_if_absent(
+            &key,
+            ObjectBody::from_slice(&parquet),
+            &ObjectIntegrity::new(
+                ShardlineHash::from_bytes(*blake3::hash(&parquet).as_bytes()),
+                parquet.len() as u64,
+            ),
+        )
+        .unwrap();
+
+    let response = app()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/datasets/{repo}/first-rows?limit=2"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let json: serde_json::Value =
+        serde_json::from_slice(&collect_body_bytes(response).await).unwrap();
+    assert_eq!(json["rows"].as_array().unwrap().len(), 2);
+    assert_eq!(json["rows"][0]["columns"]["label"], "ok");
+    assert!(json["rows"][1]["columns"]["label"].is_null());
+    assert_eq!(json["rows"][0]["columns"]["meta"]["score"], 7);
+    assert!(json["rows"][1]["columns"]["meta"]["score"].is_null());
 }
 
 /// Exercises the native query endpoint over a real TCP connection.  This is

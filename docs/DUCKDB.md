@@ -85,8 +85,10 @@ SQL, credentials, or internal paths.
 The native route is enabled by default for backwards-compatible deployments.
 Set `SHARDLINE_ENABLE_DATASET_QUERY=false` (or `0`, `no`, or `off`) to omit
 the route entirely while retaining the existing CSV/JSONL/Parquet preview
-endpoints. This is the supported opt-out when analytics should remain outside
-the Hub process.
+endpoints. CSV and JSONL previews use bounded range-backed line streaming as
+well: they retain only a storage chunk and the current line, support deep
+pagination, cap text scans at 128 MiB and individual lines at 8 MiB. This is
+the supported opt-out when analytics should remain outside the Hub process.
 
 ## Design and benchmark gate
 
