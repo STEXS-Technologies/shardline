@@ -70,7 +70,9 @@ pub(crate) fn read_full_object(
     object_key: &ObjectKey,
     length: u64,
 ) -> Result<Vec<u8>, ServerError> {
-    const MAX_FULL_OBJECT_READ_BYTES: u64 = 1_073_741_824;
+    // Legacy byte-returning callers are restricted to small records. Large
+    // objects must use range streams or materialize_object_to_tempfile.
+    const MAX_FULL_OBJECT_READ_BYTES: u64 = 64 * 1024 * 1024;
 
     if length > MAX_FULL_OBJECT_READ_BYTES {
         return Err(ServerError::RequestBodyTooLarge);

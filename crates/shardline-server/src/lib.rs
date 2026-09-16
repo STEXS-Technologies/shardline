@@ -166,9 +166,9 @@ pub(crate) mod xet_adapter {
         ShardUploadResponse, XET_PATH_ROUTE, XET_READ_TOKEN_ROUTE, XET_REVISION_ROUTE,
         XET_REVISIONS_ROUTE, XET_TREE_ROUTE, XET_WRITE_TOKEN_ROUTE, XORB_TRANSFER_ROUTE,
         XetAdapterError, XorbParseError, XorbVisitError, build_batch_reconstruction_response,
-        build_reconstruction_response, reconstruction_v2_from_v1, register_uploaded_shard_bytes,
+        build_reconstruction_response, reconstruction_v2_from_v1, register_uploaded_shard_file,
         resolve_dedupe_shard_object, shard_hash_from_object_key_if_present,
-        store_uploaded_xorb_bytes, validate_hash_path, validate_optional_content_hash,
+        store_uploaded_xorb_file_path, validate_hash_path, validate_optional_content_hash,
         validate_xorb_transfer_namespace, visit_stored_xorb_chunk_hashes,
         xorb_hash_from_object_key_if_present, xorb_object_key,
     };
