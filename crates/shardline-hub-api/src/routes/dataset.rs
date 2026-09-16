@@ -11,6 +11,47 @@ use shardline_index::hub::{HubFileEntry, HubRepoType};
 
 use super::{HubRepository, HubState, lfs_object_key};
 
+struct QueryCancellationGuard {
+    cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    armed: bool,
+}
+
+impl QueryCancellationGuard {
+    const fn new(cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Self {
+        Self {
+            cancelled,
+            armed: true,
+        }
+    }
+
+    fn cancel(&mut self, reason: &'static str) {
+        if !self.armed {
+            return;
+        }
+        self.cancelled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        shardline_metrics::metrics().query.cancellations.inc();
+        shardline_metrics::metrics()
+            .query
+            .cancellation_reasons
+            .with_label_values(&[reason])
+            .inc();
+        self.armed = false;
+    }
+
+    const fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for QueryCancellationGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            self.cancel("client_disconnect");
+        }
+    }
+}
+
 fn record_query_failure(error: &HubApiError) {
     let class = match error {
         HubApiError::CasError(_) | HubApiError::NotFound => "storage",
@@ -281,6 +322,7 @@ pub(crate) async fn dataset_query(
     let offset = request.offset as usize;
     let limit = request.limit as usize;
     let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut cancellation_guard = QueryCancellationGuard::new(cancelled.clone());
     let worker_cancelled = cancelled.clone();
     let read = tokio::task::spawn_blocking(move || {
         crate::parquet_preview::read_rows(
@@ -297,14 +339,20 @@ pub(crate) async fn dataset_query(
             worker_cancelled,
         )
     });
-    let worker_result = tokio::time::timeout(std::time::Duration::from_secs(30), read)
-        .await
-        .map_err(|_timeout_error| {
-            cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
-            shardline_metrics::metrics().query.cancellations.inc();
-            HubApiError::PathValidation("query deadline exceeded".to_owned())
-        })?
-        .map_err(|_join_error| HubApiError::PathValidation("query worker failed".to_owned()));
+    let worker_result = match tokio::time::timeout(std::time::Duration::from_secs(30), read).await {
+        Ok(join_result) => {
+            cancellation_guard.disarm();
+            join_result.map_err(|_join_error| {
+                HubApiError::PathValidation("query worker failed".to_owned())
+            })
+        }
+        Err(_timeout_error) => {
+            cancellation_guard.cancel("deadline");
+            Err(HubApiError::PathValidation(
+                "query deadline exceeded".to_owned(),
+            ))
+        }
+    };
     let (output_columns, rows) = match worker_result {
         Ok(Ok(result)) => result,
         Ok(Err(error)) | Err(error) => {
@@ -764,4 +812,30 @@ pub(crate) fn parse_csv_line(line: &str) -> Vec<&str> {
         fields.push("");
     }
     fields
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    use super::QueryCancellationGuard;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    #[test]
+    fn dropped_query_guard_cancels_worker() {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let guard = QueryCancellationGuard::new(cancelled.clone());
+        drop(guard);
+        assert!(cancelled.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn deadline_cancellation_is_idempotent() {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let mut guard = QueryCancellationGuard::new(cancelled.clone());
+        guard.cancel("deadline");
+        guard.cancel("deadline");
+        assert!(cancelled.load(Ordering::Relaxed));
+    }
 }
