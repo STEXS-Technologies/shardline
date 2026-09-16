@@ -165,7 +165,7 @@ async fn dataset_first_rows_reads_parquet_with_bounded_range_reader() {
         writer.write(&batch).unwrap();
         writer.close().unwrap();
     }
-    let sha = "1414141414141414141414141414141414141414141414141414141414141414";
+    let sha = "1717171717171717171717171717171717171717171717171717171717171717";
     let files = vec![HubFileEntry {
         path: "data/train/data.parquet".into(),
         size: parquet.len() as u64,
