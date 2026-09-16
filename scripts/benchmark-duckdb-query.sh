@@ -19,6 +19,15 @@ set -euo pipefail
 
 iterations="${SHARDLINE_ITERATIONS:-3}"
 duckdb_bin="${DUCKDB_BIN:-duckdb}"
+if ! [[ "$iterations" =~ ^[1-9][0-9]*$ ]]; then
+  printf 'SHARDLINE_ITERATIONS must be a positive integer\n' >&2
+  exit 2
+fi
+command -v curl >/dev/null || { printf 'curl is required\n' >&2; exit 2; }
+command -v "$duckdb_bin" >/dev/null || {
+  printf 'DuckDB executable not found: %s\n' "$duckdb_bin" >&2
+  exit 2
+}
 benchmark_tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/shardline-duckdb-benchmark.XXXXXX")"
 cleanup_benchmark_tmp() {
   rm -rf -- "$benchmark_tmp_dir"
