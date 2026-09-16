@@ -25,7 +25,7 @@ use shardline_storage::{ObjectKey, ObjectStore};
 use crate::{
     error::HubApiError,
     models::DatasetRow,
-    query::{Aggregate, AggregateFunction, Predicate, PredicateOp, Scalar},
+    query::{Aggregate, AggregateFunction, OrderTerm, Predicate, PredicateOp, Scalar},
 };
 
 const MAX_BATCH_ROWS: usize = 256;
@@ -164,6 +164,7 @@ pub fn read_rows(
     selected_columns: &[String],
     predicates: &[Predicate],
     aggregates: &[Aggregate],
+    order_by: &[OrderTerm],
 ) -> Result<(Vec<String>, Vec<DatasetRow>), HubApiError> {
     shardline_metrics::metrics().query.requests.inc();
     let started = Instant::now();
@@ -177,11 +178,13 @@ pub fn read_rows(
     let mut builder = ParquetRecordBatchReaderBuilder::try_new(reader)
         .map_err(|e| HubApiError::PathValidation(format!("invalid parquet: {e}")))?
         .with_batch_size(MAX_BATCH_ROWS)
-        .with_limit(if predicates.is_empty() && aggregates.is_empty() {
-            offset.saturating_add(limit)
-        } else {
-            MAX_QUERY_SCAN_ROWS
-        });
+        .with_limit(
+            if predicates.is_empty() && aggregates.is_empty() && order_by.is_empty() {
+                offset.saturating_add(limit)
+            } else {
+                MAX_QUERY_SCAN_ROWS
+            },
+        );
     if !selected_columns.is_empty() {
         let mask = ProjectionMask::columns(
             builder.parquet_schema(),
@@ -281,6 +284,24 @@ pub fn read_rows(
             }],
         ));
     }
+    if !order_by.is_empty() {
+        rows.sort_by(|left, right| {
+            for term in order_by {
+                let ordering = compare_values(
+                    left.columns.get(&term.column),
+                    right.columns.get(&term.column),
+                );
+                if ordering != std::cmp::Ordering::Equal {
+                    return if term.descending {
+                        ordering.reverse()
+                    } else {
+                        ordering
+                    };
+                }
+            }
+            std::cmp::Ordering::Equal
+        });
+    }
     // Arrow's limit starts at row zero; apply the requested offset after the
     // bounded decode so no unbounded scan or result allocation is possible.
     let skipped = offset.min(rows.len());
@@ -348,6 +369,25 @@ fn ordered_matches<F: FnOnce(std::cmp::Ordering) -> bool>(
         _ => None,
     };
     ordering.is_some_and(compare)
+}
+
+fn compare_values(
+    left: Option<&serde_json::Value>,
+    right: Option<&serde_json::Value>,
+) -> std::cmp::Ordering {
+    match (left, right) {
+        (Some(serde_json::Value::Number(a)), Some(serde_json::Value::Number(b))) => {
+            match (a.as_f64(), b.as_f64()) {
+                (Some(a), Some(b)) => a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal),
+                _ => std::cmp::Ordering::Equal,
+            }
+        }
+        (Some(serde_json::Value::String(a)), Some(serde_json::Value::String(b))) => a.cmp(b),
+        (Some(a), Some(b)) => a.to_string().cmp(&b.to_string()),
+        (None, None) => std::cmp::Ordering::Equal,
+        (None, Some(_)) => std::cmp::Ordering::Less,
+        (Some(_), None) => std::cmp::Ordering::Greater,
+    }
 }
 
 fn scalar_to_json(scalar: &Scalar) -> serde_json::Value {

@@ -272,6 +272,26 @@ async fn dataset_first_rows_reads_parquet_with_bounded_range_reader() {
         serde_json::from_slice(&collect_body_bytes(response).await).unwrap();
     assert_eq!(json["rows"][0]["columns"]["rows"], 3);
 
+    let ordered = serde_json::json!({
+        "repository": "team/parquet-dataset", "revision": revision, "file_sha": sha,
+        "config": "default", "split": "train", "order_by": [{"column": "id", "descending": true}], "limit": 1
+    });
+    let response = app()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/datasets/team/parquet-dataset/query")
+                .header("content-type", "application/json")
+                .body(Body::from(ordered.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let json: serde_json::Value =
+        serde_json::from_slice(&collect_body_bytes(response).await).unwrap();
+    assert_eq!(json["rows"][0]["columns"]["id"], 3);
+
     let forged = serde_json::json!({
         "repository": "team/parquet-dataset", "revision": revision,
         "file_sha": "1818181818181818181818181818181818181818181818181818181818181818",
