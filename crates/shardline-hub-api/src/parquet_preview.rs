@@ -21,11 +21,16 @@ use shardline_protocol::ByteRange;
 use shardline_server_core::ServerObjectStore;
 use shardline_storage::{ObjectKey, ObjectStore};
 
-use crate::{error::HubApiError, models::DatasetRow};
+use crate::{
+    error::HubApiError,
+    models::DatasetRow,
+    query::{Aggregate, AggregateFunction, Predicate, PredicateOp, Scalar},
+};
 
 const MAX_BATCH_ROWS: usize = 256;
 const RANGE_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_SCANNED_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_QUERY_SCAN_ROWS: usize = 100_000;
 
 #[derive(Clone)]
 struct RangeReader {
@@ -113,6 +118,7 @@ impl Read for RangedRead {
 }
 
 /// Read a bounded page of rows from a Parquet object through ranged reads.
+#[allow(clippy::too_many_arguments)]
 pub fn read_rows(
     store: &ServerObjectStore,
     key: ObjectKey,
@@ -120,6 +126,8 @@ pub fn read_rows(
     offset: usize,
     limit: usize,
     selected_columns: &[String],
+    predicates: &[Predicate],
+    aggregates: &[Aggregate],
 ) -> Result<(Vec<String>, Vec<DatasetRow>), HubApiError> {
     let reader = RangeReader {
         store: store.clone(),
@@ -130,7 +138,11 @@ pub fn read_rows(
     let mut builder = ParquetRecordBatchReaderBuilder::try_new(reader)
         .map_err(|e| HubApiError::PathValidation(format!("invalid parquet: {e}")))?
         .with_batch_size(MAX_BATCH_ROWS)
-        .with_limit(offset.saturating_add(limit));
+        .with_limit(if predicates.is_empty() && aggregates.is_empty() {
+            offset.saturating_add(limit)
+        } else {
+            MAX_QUERY_SCAN_ROWS
+        });
     if !selected_columns.is_empty() {
         let mask = ProjectionMask::columns(
             builder.parquet_schema(),
@@ -148,6 +160,7 @@ pub fn read_rows(
         .build()
         .map_err(|e| HubApiError::PathValidation(format!("invalid parquet: {e}")))?;
     let mut rows = Vec::new();
+    let mut scanned_rows = 0usize;
     for batch in batches {
         let batch =
             batch.map_err(|e| HubApiError::PathValidation(format!("invalid parquet: {e}")))?;
@@ -173,18 +186,41 @@ pub fn read_rows(
             .split(|byte| *byte == b'\n')
             .filter(|line| !line.is_empty())
         {
-            if rows.len() >= limit {
-                break;
-            }
             let row: std::collections::BTreeMap<String, serde_json::Value> =
                 serde_json::from_slice(value).map_err(|e| {
                     HubApiError::PathValidation(format!("invalid parquet row: {e}"))
                 })?;
-            rows.push(DatasetRow { columns: row });
+            scanned_rows = scanned_rows.saturating_add(1);
+            if predicates
+                .iter()
+                .all(|predicate| predicate_matches(&row, predicate))
+            {
+                rows.push(DatasetRow { columns: row });
+            }
+            if scanned_rows >= MAX_QUERY_SCAN_ROWS {
+                break;
+            }
         }
-        if rows.len() >= limit {
+        if scanned_rows >= MAX_QUERY_SCAN_ROWS {
             break;
         }
+    }
+    if !aggregates.is_empty() {
+        let mut aggregate_row = std::collections::BTreeMap::new();
+        for aggregate in aggregates {
+            let alias = aggregate
+                .alias
+                .clone()
+                .unwrap_or_else(|| format!("{:?}", aggregate.function).to_lowercase());
+            let value = aggregate_value(&rows, aggregate)?;
+            aggregate_row.insert(alias, value);
+        }
+        return Ok((
+            aggregate_row.keys().cloned().collect(),
+            vec![DatasetRow {
+                columns: aggregate_row,
+            }],
+        ));
     }
     // Arrow's limit starts at row zero; apply the requested offset after the
     // bounded decode so no unbounded scan or result allocation is possible.
@@ -193,6 +229,94 @@ pub fn read_rows(
         columns,
         rows.into_iter().skip(skipped).take(limit).collect(),
     ))
+}
+
+fn predicate_matches(
+    row: &std::collections::BTreeMap<String, serde_json::Value>,
+    predicate: &Predicate,
+) -> bool {
+    let value = row.get(&predicate.column);
+    match predicate.op {
+        PredicateOp::IsNull => value.is_none_or(serde_json::Value::is_null),
+        PredicateOp::IsNotNull => value.is_some_and(|v| !v.is_null()),
+        PredicateOp::Eq => value_matches(value, &predicate.value, |a, b| a == b),
+        PredicateOp::NotEq => value_matches(value, &predicate.value, |a, b| a != b),
+        PredicateOp::Lt => ordered_matches(value, &predicate.value, std::cmp::Ordering::is_lt),
+        PredicateOp::Lte => ordered_matches(value, &predicate.value, std::cmp::Ordering::is_le),
+        PredicateOp::Gt => ordered_matches(value, &predicate.value, std::cmp::Ordering::is_gt),
+        PredicateOp::Gte => ordered_matches(value, &predicate.value, std::cmp::Ordering::is_ge),
+    }
+}
+
+fn value_matches<F: FnOnce(&serde_json::Value, &serde_json::Value) -> bool>(
+    value: Option<&serde_json::Value>,
+    scalar: &Scalar,
+    compare: F,
+) -> bool {
+    value.is_some_and(|value| compare(value, &scalar_to_json(scalar)))
+}
+
+fn ordered_matches<F: FnOnce(std::cmp::Ordering) -> bool>(
+    value: Option<&serde_json::Value>,
+    scalar: &Scalar,
+    compare: F,
+) -> bool {
+    let Some(value) = value else {
+        return false;
+    };
+    let other = scalar_to_json(scalar);
+    let ordering = match (value, &other) {
+        (serde_json::Value::Number(a), serde_json::Value::Number(b)) => {
+            match (a.as_f64(), b.as_f64()) {
+                (Some(a), Some(b)) => a.partial_cmp(&b),
+                _ => None,
+            }
+        }
+        (serde_json::Value::String(a), serde_json::Value::String(b)) => Some(a.cmp(b)),
+        _ => None,
+    };
+    ordering.is_some_and(compare)
+}
+
+fn scalar_to_json(scalar: &Scalar) -> serde_json::Value {
+    match scalar {
+        Scalar::Null => serde_json::Value::Null,
+        Scalar::Bool(value) => serde_json::Value::Bool(*value),
+        Scalar::Integer(value) => serde_json::json!(value),
+        Scalar::Float(value) => value
+            .parse::<f64>()
+            .map_or(serde_json::Value::Null, |v| serde_json::json!(v)),
+        Scalar::Text(value) => serde_json::Value::String(value.clone()),
+    }
+}
+
+#[allow(clippy::float_arithmetic)]
+fn aggregate_value(
+    rows: &[DatasetRow],
+    aggregate: &Aggregate,
+) -> Result<serde_json::Value, HubApiError> {
+    if matches!(aggregate.function, AggregateFunction::Count) {
+        return Ok(serde_json::json!(rows.len()));
+    }
+    let column = aggregate
+        .column
+        .as_deref()
+        .ok_or_else(|| HubApiError::PathValidation("aggregate column required".to_owned()))?;
+    let values: Vec<f64> = rows
+        .iter()
+        .filter_map(|row| row.columns.get(column).and_then(serde_json::Value::as_f64))
+        .collect();
+    if values.is_empty() {
+        return Ok(serde_json::Value::Null);
+    }
+    let value = match aggregate.function {
+        AggregateFunction::Min => values.iter().copied().fold(f64::INFINITY, f64::min),
+        AggregateFunction::Max => values.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+        AggregateFunction::Sum => values.iter().sum(),
+        AggregateFunction::Avg => values.iter().sum::<f64>() / values.len() as f64,
+        AggregateFunction::Count => 0.0,
+    };
+    Ok(serde_json::json!(value))
 }
 
 #[cfg(test)]
