@@ -31,6 +31,7 @@ const MAX_BATCH_ROWS: usize = 256;
 const RANGE_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_SCANNED_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_QUERY_SCAN_ROWS: usize = 100_000;
+const MAX_RESULT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_CONCURRENT_QUERIES: usize = 8;
 static QUERY_ADMISSION: OnceLock<Mutex<usize>> = OnceLock::new();
 
@@ -190,6 +191,7 @@ pub fn read_rows(
         .map_err(|e| HubApiError::PathValidation(format!("invalid parquet: {e}")))?;
     let mut rows = Vec::new();
     let mut scanned_rows = 0usize;
+    let mut result_bytes = 0usize;
     for batch in batches {
         let batch =
             batch.map_err(|e| HubApiError::PathValidation(format!("invalid parquet: {e}")))?;
@@ -224,6 +226,12 @@ pub fn read_rows(
                 .iter()
                 .all(|predicate| predicate_matches(&row, predicate))
             {
+                result_bytes = result_bytes.saturating_add(value.len());
+                if result_bytes > MAX_RESULT_BYTES {
+                    return Err(HubApiError::PathValidation(
+                        "query result limit exceeded".to_owned(),
+                    ));
+                }
                 rows.push(DatasetRow { columns: row });
             }
             if scanned_rows >= MAX_QUERY_SCAN_ROWS {
