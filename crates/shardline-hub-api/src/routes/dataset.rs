@@ -52,38 +52,12 @@ impl Drop for QueryCancellationGuard {
     }
 }
 
-fn record_query_failure(error: &HubApiError) {
-    let class = match error {
-        HubApiError::CasError(_) | HubApiError::NotFound => "storage",
-        HubApiError::PathValidation(message) if message.contains("scan limit") => "scan_limit",
-        HubApiError::PathValidation(message) if message.contains("result limit") => "result_limit",
-        HubApiError::PathValidation(message) if message.contains("concurrency limit") => {
-            "admission"
-        }
-        HubApiError::PathValidation(message) if message.contains("invalid parquet") => {
-            "invalid_input"
-        }
-        HubApiError::PathValidation(message) if message.contains("worker") => "worker",
-        HubApiError::PathValidation(_) => "validation",
-        HubApiError::Io(_)
-        | HubApiError::Json(_)
-        | HubApiError::Unauthorized
-        | HubApiError::Forbidden
-        | HubApiError::Conflict(_)
-        | HubApiError::InvalidToken
-        | HubApiError::SigningKeyError(_)
-        | HubApiError::RepoNotFound
-        | HubApiError::RevisionNotFound
-        | HubApiError::BadRequest(_)
-        | HubApiError::PktLine(_)
-        | HubApiError::Pack(_)
-        | HubApiError::WebhookSecret(_) => "internal",
-    };
+fn record_query_failure(class: crate::parquet_preview::QueryFailureClass) {
     shardline_metrics::metrics().query.failures.inc();
     shardline_metrics::metrics()
         .query
         .failure_classes
-        .with_label_values(&[class])
+        .with_label_values(&[class.as_str()])
         .inc();
 }
 
@@ -343,21 +317,25 @@ pub(crate) async fn dataset_query(
         Ok(join_result) => {
             cancellation_guard.disarm();
             join_result.map_err(|_join_error| {
-                HubApiError::PathValidation("query worker failed".to_owned())
+                crate::parquet_preview::QueryFailure::new(
+                    HubApiError::PathValidation("query worker failed".to_owned()),
+                    crate::parquet_preview::QueryFailureClass::Worker,
+                )
             })
         }
         Err(_timeout_error) => {
             cancellation_guard.cancel("deadline");
-            Err(HubApiError::PathValidation(
-                "query deadline exceeded".to_owned(),
+            Err(crate::parquet_preview::QueryFailure::new(
+                HubApiError::PathValidation("query deadline exceeded".to_owned()),
+                crate::parquet_preview::QueryFailureClass::Worker,
             ))
         }
     };
     let (output_columns, rows) = match worker_result {
         Ok(Ok(result)) => result,
-        Ok(Err(error)) | Err(error) => {
-            record_query_failure(&error);
-            return Err(error);
+        Ok(Err(failure)) | Err(failure) => {
+            record_query_failure(failure.class);
+            return Err(failure.error);
         }
     };
     let (output_columns, rows) = if request.aggregates.is_empty() && !request.columns.is_empty() {
@@ -531,7 +509,8 @@ fn read_dataset_rows(
             &[],
             &[],
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        );
+        )
+        .map_err(|failure| failure.error);
     }
     read_text_rows_streaming(&state.object_store, &key, size, &file.path, offset, limit)
 }
@@ -623,25 +602,25 @@ impl RangeLineReader {
                 let segment = self.chunk.get(self.chunk_position..end).ok_or_else(|| {
                     HubApiError::PathValidation("dataset text cursor out of bounds".to_owned())
                 })?;
+                if line.len().saturating_add(segment.len()) > MAX_DATASET_LINE_BYTES {
+                    return Err(HubApiError::PathValidation(
+                        "dataset text line exceeds limit".to_owned(),
+                    ));
+                }
                 line.extend_from_slice(segment);
                 self.chunk_position = end.saturating_add(1);
                 if line.last() == Some(&b'\r') {
                     line.pop();
                 }
-                if line.len() > MAX_DATASET_LINE_BYTES {
-                    return Err(HubApiError::PathValidation(
-                        "dataset text line exceeds limit".to_owned(),
-                    ));
-                }
                 return Ok(Some(line));
             }
-            line.extend_from_slice(remaining);
-            self.chunk_position = self.chunk.len();
-            if line.len() > MAX_DATASET_LINE_BYTES {
+            if line.len().saturating_add(remaining.len()) > MAX_DATASET_LINE_BYTES {
                 return Err(HubApiError::PathValidation(
                     "dataset text line exceeds limit".to_owned(),
                 ));
             }
+            line.extend_from_slice(remaining);
+            self.chunk_position = self.chunk.len();
         }
     }
 }

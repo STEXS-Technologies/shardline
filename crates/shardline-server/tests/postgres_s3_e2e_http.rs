@@ -19,6 +19,8 @@ use shardline_storage::S3ObjectStoreConfig;
 use shardline_test_support::DockerLocalStack;
 use std::{
     num::{NonZeroU64, NonZeroUsize},
+    path::Path,
+    process::Command,
     time::Duration,
 };
 use tempfile::TempDir;
@@ -211,6 +213,81 @@ impl Drop for TestServer {
             let _ = tx.send(());
         }
     }
+}
+
+fn duckdb_available() -> bool {
+    Command::new("python3")
+        .args(["-c", "import duckdb, pyarrow"])
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
+
+fn run_duckdb_production_shape(
+    endpoint: &str,
+    token: &str,
+    script_path: &Path,
+) -> std::process::Output {
+    Command::new("python3")
+        .arg(script_path)
+        .env("S3_ENDPOINT", endpoint)
+        .env("S3_TOKEN", token)
+        .output()
+        .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn duckdb_real_client_postgres_s3_deployment_shape() {
+    if !duckdb_available() {
+        eprintln!("SKIP: python3 + duckdb + pyarrow not available");
+        return;
+    }
+    let server = TestServer::start(&[ServerFrontend::S3]).await;
+    let tmp = TempDir::new().unwrap();
+    let script = tmp.path().join("duckdb_pg_s3_check.py");
+    std::fs::write(
+        &script,
+        r#"
+import os
+import duckdb
+import pyarrow as pa
+import pyarrow.fs as fs
+import pyarrow.parquet as pq
+
+endpoint = os.environ["S3_ENDPOINT"]
+token = os.environ["S3_TOKEN"]
+s3 = fs.S3FileSystem(access_key=token, secret_key="unused", scheme="http",
+                      endpoint_override=endpoint, region="us-east-1")
+for name, values in (("part-0.parquet", [1, 2]), ("part-1.parquet", [3, 4])):
+    with s3.open_output_stream("test.test/duckdb-prod/" + name) as out:
+        pq.write_table(pa.table({"id": values, "label": ["x", "y"]}), out)
+
+con = duckdb.connect()
+host = endpoint.removeprefix("http://").removeprefix("https://")
+con.execute("""CREATE SECRET shardline_s3 (
+    TYPE S3, KEY_ID ?, SECRET 'unused', ENDPOINT ?, REGION 'us-east-1',
+    URL_STYLE 'path', USE_SSL false
+)""", [token, host])
+rows = con.execute("SELECT id FROM read_parquet('s3://test.test/duckdb-prod/*.parquet') WHERE id > 1 ORDER BY id").fetchall()
+assert rows == [(2,), (3,), (4,)], rows
+schema = con.execute("DESCRIBE SELECT * FROM read_parquet('s3://test.test/duckdb-prod/part-0.parquet')").fetchall()
+assert [(row[0], row[1]) for row in schema] == [("id", "BIGINT"), ("label", "VARCHAR")], schema
+con.execute("COPY (SELECT id FROM read_parquet('s3://test.test/duckdb-prod/*.parquet') ORDER BY id) TO 's3://test.test/duckdb-prod/result.parquet' (FORMAT PARQUET)")
+assert con.execute("SELECT count(*) FROM read_parquet('s3://test.test/duckdb-prod/result.parquet')").fetchone()[0] == 4
+print("ALL POSTGRES+S3 DUCKDB CHECKS PASSED")
+"#,
+    )
+    .unwrap();
+    let output = run_duckdb_production_shape(&server.base_url, &server.token, &script);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "DuckDB Postgres+S3 subprocess failed:\n{stdout}\n{stderr}"
+    );
+    assert!(
+        stdout.contains("ALL POSTGRES+S3 DUCKDB CHECKS PASSED"),
+        "DuckDB Postgres+S3 checks did not complete:\n{stdout}\n{stderr}"
+    );
 }
 
 // ---------------------------------------------------------------------------

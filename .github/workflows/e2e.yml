@@ -91,3 +91,9 @@ jobs:
 
       - name: Run S3 real-client e2e tests
         run: cargo nextest run -p shardline-server --test s3_real_client_e2e --no-tests=pass
+
+      - name: Run DuckDB against Postgres + MinIO deployment shape
+        run: >-
+          cargo nextest run -p shardline-server --features docker
+          --test postgres_s3_e2e_http --no-tests=pass
+          -E 'test(duckdb_real_client_postgres_s3_deployment_shape)'

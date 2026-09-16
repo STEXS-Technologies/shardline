@@ -95,7 +95,8 @@ the supported opt-out when analytics should remain outside the Hub process.
 
 The selected production boundary for this release is external DuckDB over the
 S3 frontend. This is the only path enabled by default and is covered by the
-real-client E2E lane. A server-side worker is not enabled until it beats the
+real-client E2E lane, including a Docker-backed Postgres + MinIO deployment
+shape. A server-side worker is not enabled until it beats the
 external path and a native range-backed reader on the same fixture. Record cold
 and warm latency, peak RSS, source/reconstructed bytes, range count, backend
 operations, spill bytes, and concurrent upload/download impact for: exact-file
