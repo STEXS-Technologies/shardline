@@ -105,5 +105,7 @@ synthetic SQL-only benchmarks.
 
 Run `cargo make shardline-bench-duckdb` with the six required `SHARDLINE_*`
 variables documented in the script to record comparable native-versus-external
-latencies. Keep the raw CSV with the rollout evidence; benchmark results are
-not treated as a correctness or security test.
+latencies. The harness configures DuckDB `httpfs` with the same scoped token;
+set `SHARDLINE_S3_ENDPOINT` when the S3 endpoint differs from the Hub URL.
+Keep the raw CSV with the rollout evidence; benchmark results are not treated
+as a correctness or security test.
