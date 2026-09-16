@@ -1,0 +1,68 @@
+# DuckDB integration
+
+Issue: [#61](https://github.com/STEXS-Technologies/shardline/issues/61)
+
+## Decision gate
+
+Shardline does not embed DuckDB in the main API process. The first supported
+capability is DuckDB as an external S3 client. This already provides SQL,
+Parquet schema discovery, projection and predicate pushdown, globs, joins,
+aggregates, and Parquet export while keeping analytical failures and resource
+usage outside the server process. The real-client E2E lane validates this path.
+
+An optional server-side query service remains a follow-up design. It must run
+in a separate role or process and accept a structured, revision-pinned request;
+raw SQL is not an API contract. Before implementation, benchmark that service
+against native Arrow/Parquet readers and the external-client path.
+
+## External DuckDB workflow
+
+Create a repository-scoped Shardline token and configure DuckDB's `httpfs`
+secret. The token is used as `KEY_ID`; the secret value is intentionally
+unused by Shardline's documented S3 compatibility layer. Production endpoints
+must use TLS.
+
+```sql
+INSTALL httpfs;
+LOAD httpfs;
+
+CREATE SECRET shardline (
+  TYPE S3,
+  KEY_ID 'REPOSITORY_SCOPED_TOKEN',
+  SECRET 'unused',
+  ENDPOINT 'shardline.example:443',
+  REGION 'us-east-1',
+  URL_STYLE 'path',
+  USE_SSL true
+);
+
+SELECT *
+FROM read_parquet('s3://owner.dataset/data/train/*.parquet')
+WHERE label = 'positive'
+LIMIT 100;
+
+COPY (
+  SELECT id, count(*) AS rows
+  FROM read_parquet('s3://owner.dataset/data/train/*.parquet')
+  GROUP BY id
+) TO 's3://owner.dataset/results/summary.parquet' (FORMAT PARQUET);
+```
+
+The bucket is the repository scope (`owner.dataset`), and every request is
+authorized by the token. Use exact object paths when a revision-pinned file
+identity is required; mutable globs are appropriate only for external ad-hoc
+analysis.
+
+## Server-side query boundary (future)
+
+If Hub previews later use an isolated query worker, the worker contract must
+pin repository, immutable revision, split, and file SHA before execution and
+allow only selected columns, validated predicates, bounded ordering/cursors,
+limits, and a small aggregate allowlist. It must enforce read-only access,
+deadlines, cancellation, memory/CPU/thread/scanned-byte/result-row limits,
+bounded spill space, tenant admission control, and no unapproved network or
+filesystem access. Metrics may record queue/execution time, ranges, bytes,
+rows, and stable error classes, but never SQL, credentials, paths, or row data.
+
+SQLite/Postgres remain authoritative for publication, authorization metadata,
+coordination, and GC; DuckDB is analytical only.
