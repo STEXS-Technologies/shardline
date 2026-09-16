@@ -318,16 +318,17 @@ fn validate_commit_handler_body_bounded_by_router() {
     );
 }
 
-/// Confirms the LFS upload handler is also bounded by the router body limit.
+/// Confirms the LFS upload handler consumes the request body as a stream.
 ///
-/// **[MITIGATED]**: Same as above — the router-level limit applies.
+/// **[FIXED]**: The handler accepts `axum::body::Body` and applies the explicit
+/// LFS upload cap while consuming frames incrementally.
 #[test]
 fn validate_lfs_upload_unbounded_body() {
     let routes_source = include_str!("../src/routes/lfs.rs");
 
     assert!(
-        routes_source.contains("body: Bytes") && routes_source.contains("async fn lfs_upload("),
-        "lfs_upload accepts body: bytes::Bytes — bounded by router DefaultBodyLimit"
+        routes_source.contains("body: Body") && routes_source.contains("async fn lfs_upload("),
+        "lfs_upload consumes an axum Body stream"
     );
 }
 
