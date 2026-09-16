@@ -5,6 +5,7 @@ use axum::{
 use shardline_server_core::AuthorizedRepository;
 use shardline_storage::ObjectStore;
 
+use crate::query::DatasetQueryRequest;
 use crate::{error::HubApiError, models::*};
 use shardline_index::hub::{HubFileEntry, HubRepoType};
 
@@ -97,13 +98,8 @@ pub(crate) async fn dataset_first_rows(
             }));
         }
     };
-    let content = read_dataset_preview(&state, &data_file.sha, repo.capability())?;
     let limit = query.limit.min(1000);
-    let rows = parse_rows_from_content(&content, &data_file.path, 0, limit)?;
-    let columns = rows
-        .first()
-        .map(|r| r.columns.keys().cloned().collect())
-        .unwrap_or_default();
+    let (columns, rows) = read_dataset_rows(&state, data_file, repo.capability(), 0, limit)?;
     Ok(Json(DatasetFirstRowsResponse { columns, rows }))
 }
 
@@ -138,13 +134,83 @@ pub(crate) async fn dataset_viewer(
     let data_file = find_dataset_file(&files, &query.config, &split).ok_or_else(|| {
         HubApiError::PathValidation("no data file found for config/split".to_owned())
     })?;
-    let content = read_dataset_preview(&state, &data_file.sha, repo.capability())?;
     let length = query.length.min(10000);
-    let rows = parse_rows_from_content(&content, &data_file.path, query.offset, length)?;
-    let columns = rows
-        .first()
-        .map(|r| r.columns.keys().cloned().collect())
-        .unwrap_or_default();
+    let (columns, rows) =
+        read_dataset_rows(&state, data_file, repo.capability(), query.offset, length)?;
+    Ok(Json(DatasetViewerResponse {
+        columns,
+        rows,
+        num_rows_total: None,
+    }))
+}
+
+/// Execute the bounded, revision-pinned query contract against one Parquet file.
+/// Filtering and aggregates are intentionally rejected until a worker with
+/// predicate pushdown is enabled; projection and pagination are range-backed.
+pub(crate) async fn dataset_query(
+    State(state): State<HubState>,
+    repo: HubRepository,
+    Path((ns, repo_name)): Path<(String, String)>,
+    Json(request): Json<DatasetQueryRequest>,
+) -> Result<Json<DatasetViewerResponse>, HubApiError> {
+    request
+        .validate()
+        .map_err(|e| HubApiError::PathValidation(e.to_string()))?;
+    if !request.predicates.is_empty() || !request.aggregates.is_empty() {
+        return Err(HubApiError::PathValidation(
+            "query operation is not enabled".to_owned(),
+        ));
+    }
+    let name = format!("{ns}/{repo_name}");
+    let entry = state
+        .store
+        .get_repo(&name)
+        .map_err(|e| HubApiError::CasError(e.to_string()))?
+        .ok_or(HubApiError::RepoNotFound)?;
+    if entry.repo_type != HubRepoType::Dataset {
+        return Err(HubApiError::PathValidation(
+            "not a dataset repository".to_owned(),
+        ));
+    }
+    let revision = state
+        .store
+        .resolve_revision(&name, &entry.default_branch)
+        .map_err(|e| HubApiError::CasError(e.to_string()))?
+        .ok_or(HubApiError::RevisionNotFound)?;
+    if revision != request.revision {
+        return Err(HubApiError::RevisionNotFound);
+    }
+    let files = state
+        .store
+        .get_files(&revision)
+        .map_err(|e| HubApiError::CasError(e.to_string()))?;
+    let file = find_dataset_file(&files, &request.config, &request.split).ok_or_else(|| {
+        HubApiError::PathValidation("no data file found for config/split".to_owned())
+    })?;
+    if file.sha != request.file_sha {
+        return Err(HubApiError::RevisionNotFound);
+    }
+    if !file.path.ends_with(".parquet") {
+        return Err(HubApiError::PathValidation(
+            "structured query requires parquet".to_owned(),
+        ));
+    }
+    let key = lfs_object_key(&file.sha, repo.capability())
+        .map_err(|e| HubApiError::PathValidation(e.to_string()))?;
+    let size = state
+        .object_store
+        .metadata(&key)
+        .map_err(|e| HubApiError::CasError(e.to_string()))?
+        .ok_or(HubApiError::NotFound)?
+        .length();
+    let (columns, rows) = crate::parquet_preview::read_rows(
+        &state.object_store,
+        key,
+        size,
+        request.offset as usize,
+        request.limit as usize,
+        &request.columns,
+    )?;
     Ok(Json(DatasetViewerResponse {
         columns,
         rows,
@@ -274,14 +340,14 @@ pub(crate) fn parse_csv_rows(
     Ok(rows)
 }
 
-/// Reads a file from the ObjectStore by its SHA, namespaced by repository so
-/// reads find the repository-scoped writes made during commits.
-fn read_dataset_preview(
+fn read_dataset_rows(
     state: &HubState,
-    sha: &str,
+    file: &HubFileEntry,
     auth: &AuthorizedRepository,
-) -> Result<Vec<u8>, HubApiError> {
-    let key = lfs_object_key(sha, auth)
+    offset: usize,
+    limit: usize,
+) -> Result<(Vec<String>, Vec<DatasetRow>), HubApiError> {
+    let key = lfs_object_key(&file.sha, auth)
         .map_err(|error| HubApiError::PathValidation(error.to_string()))?;
     let size = state
         .object_store
@@ -289,8 +355,24 @@ fn read_dataset_preview(
         .map_err(|error| HubApiError::CasError(error.to_string()))?
         .ok_or(HubApiError::NotFound)?
         .length();
-    read_object_prefix(&state.object_store, &key, size, MAX_DATASET_PREVIEW_BYTES)
-        .map_err(|error| HubApiError::CasError(error.to_string()))
+    if file.path.ends_with(".parquet") {
+        return crate::parquet_preview::read_rows(
+            &state.object_store,
+            key,
+            size,
+            offset,
+            limit,
+            &[],
+        );
+    }
+    let content = read_object_prefix(&state.object_store, &key, size, MAX_DATASET_PREVIEW_BYTES)
+        .map_err(|error| HubApiError::CasError(error.to_string()))?;
+    let rows = parse_rows_from_content(&content, &file.path, offset, limit)?;
+    let columns = rows
+        .first()
+        .map(|r| r.columns.keys().cloned().collect())
+        .unwrap_or_default();
+    Ok((columns, rows))
 }
 
 /// Parses a single CSV line, respecting double-quoted fields that may contain

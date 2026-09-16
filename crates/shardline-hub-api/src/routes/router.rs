@@ -79,6 +79,10 @@ pub fn router(register_xet_token_routes: bool) -> Router<HubState> {
             "/api/datasets/{ns}/{repo}/viewer/{split}",
             get(super::dataset_viewer),
         )
+        .route(
+            "/api/datasets/{ns}/{repo}/query",
+            post(super::dataset_query),
+        )
         // Webhook endpoints
         .route(
             "/api/{type}/{ns}/{repo}/webhooks",
