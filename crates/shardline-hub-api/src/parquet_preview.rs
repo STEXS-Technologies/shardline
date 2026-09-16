@@ -5,6 +5,7 @@
 //! the Parquet reader; it never materializes the object as one `Vec<u8>`.
 
 use std::{
+    collections::HashMap,
     io::{self, Cursor, Read},
     sync::{
         Arc, Mutex, OnceLock,
@@ -34,33 +35,60 @@ const MAX_SCANNED_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_QUERY_SCAN_ROWS: usize = 100_000;
 const MAX_RESULT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_CONCURRENT_QUERIES: usize = 8;
-static QUERY_ADMISSION: OnceLock<Mutex<usize>> = OnceLock::new();
+static QUERY_ADMISSION: OnceLock<Mutex<AdmissionState>> = OnceLock::new();
 
-struct AdmissionGuard;
+const MAX_QUERIES_PER_TENANT: usize = 2;
+
+#[derive(Default)]
+struct AdmissionState {
+    active: usize,
+    by_tenant: HashMap<String, usize>,
+}
+
+struct AdmissionGuard {
+    tenant: String,
+}
 
 impl Drop for AdmissionGuard {
     fn drop(&mut self) {
-        if let Ok(mut active) = QUERY_ADMISSION.get_or_init(|| Mutex::new(0)).lock() {
-            *active = active.saturating_sub(1);
+        if let Ok(mut state) = QUERY_ADMISSION
+            .get_or_init(|| Mutex::new(AdmissionState::default()))
+            .lock()
+        {
+            state.active = state.active.saturating_sub(1);
+            if let Some(active) = state.by_tenant.get_mut(&self.tenant) {
+                *active = active.saturating_sub(1);
+                if *active == 0 {
+                    state.by_tenant.remove(&self.tenant);
+                }
+            }
         }
     }
 }
 
-fn admit_query() -> Result<AdmissionGuard, HubApiError> {
-    let mut active = QUERY_ADMISSION
-        .get_or_init(|| Mutex::new(0))
+fn admit_query(tenant: &str) -> Result<AdmissionGuard, HubApiError> {
+    let mut state = QUERY_ADMISSION
+        .get_or_init(|| Mutex::new(AdmissionState::default()))
         .lock()
         .map_err(|_poisoned| {
             HubApiError::PathValidation("query admission unavailable".to_owned())
         })?;
-    if *active >= MAX_CONCURRENT_QUERIES {
+    let tenant_active = state.by_tenant.get(tenant).copied().unwrap_or(0);
+    if state.active >= MAX_CONCURRENT_QUERIES || tenant_active >= MAX_QUERIES_PER_TENANT {
         shardline_metrics::metrics().query.admissions_rejected.inc();
         return Err(HubApiError::PathValidation(
             "query concurrency limit exceeded".to_owned(),
         ));
     }
-    *active = active.saturating_add(1);
-    Ok(AdmissionGuard)
+    state.active = state.active.saturating_add(1);
+    state
+        .by_tenant
+        .entry(tenant.to_owned())
+        .and_modify(|active| *active = active.saturating_add(1))
+        .or_insert(1);
+    Ok(AdmissionGuard {
+        tenant: tenant.to_owned(),
+    })
 }
 
 #[derive(Clone)]
@@ -107,6 +135,7 @@ impl ChunkReader for RangeReader {
             return Err(ParquetError::EOF("range past EOF".into()));
         }
         let range = ByteRange::new(start, end).map_err(|e| ParquetError::General(e.to_string()))?;
+        shardline_metrics::metrics().query.range_requests.inc();
         let scanned = self
             .scanned
             .fetch_add(length as u64, Ordering::Relaxed)
@@ -163,6 +192,7 @@ pub fn read_rows(
     store: &ServerObjectStore,
     key: ObjectKey,
     size: u64,
+    tenant: &str,
     offset: usize,
     limit: usize,
     selected_columns: &[String],
@@ -173,7 +203,15 @@ pub fn read_rows(
 ) -> Result<(Vec<String>, Vec<DatasetRow>), HubApiError> {
     shardline_metrics::metrics().query.requests.inc();
     let started = Instant::now();
-    let _admission = admit_query()?;
+    let _admission = admit_query(tenant)?;
+    // Admission is fail-fast today (there is no unbounded waiter queue), so
+    // successful requests have zero queue delay. Keep the histogram explicit
+    // so a future fair scheduler can populate the same metric without a
+    // contract change.
+    shardline_metrics::metrics()
+        .query
+        .queue_seconds
+        .observe(0.0);
     let reader = RangeReader {
         store: store.clone(),
         key,
@@ -188,9 +226,17 @@ pub fn read_rows(
             if predicates.is_empty() && aggregates.is_empty() && order_by.is_empty() {
                 offset.saturating_add(limit)
             } else {
-                MAX_QUERY_SCAN_ROWS
+                MAX_QUERY_SCAN_ROWS.saturating_add(1)
             },
         );
+    let schema_fields = builder.parquet_schema().root_schema().get_fields();
+    for column in selected_columns {
+        if !schema_fields.iter().any(|field| field.name() == column) {
+            return Err(HubApiError::PathValidation(
+                "query references an unknown column".to_owned(),
+            ));
+        }
+    }
     if !selected_columns.is_empty() {
         let mask = ProjectionMask::columns(
             builder.parquet_schema(),
@@ -240,6 +286,12 @@ pub fn read_rows(
                     HubApiError::PathValidation(format!("invalid parquet row: {e}"))
                 })?;
             scanned_rows = scanned_rows.saturating_add(1);
+            if scanned_rows > MAX_QUERY_SCAN_ROWS {
+                shardline_metrics::metrics().query.scan_limit_rejected.inc();
+                return Err(HubApiError::PathValidation(
+                    "query row scan limit exceeded".to_owned(),
+                ));
+            }
             if predicates
                 .iter()
                 .all(|predicate| predicate_matches(&row, predicate))
@@ -256,21 +308,7 @@ pub fn read_rows(
                 }
                 rows.push(DatasetRow { columns: row });
             }
-            if scanned_rows >= MAX_QUERY_SCAN_ROWS {
-                break;
-            }
         }
-        if scanned_rows >= MAX_QUERY_SCAN_ROWS {
-            break;
-        }
-    }
-    if scanned_rows >= MAX_QUERY_SCAN_ROWS
-        && (!predicates.is_empty() || !aggregates.is_empty() || !order_by.is_empty())
-    {
-        shardline_metrics::metrics().query.scan_limit_rejected.inc();
-        return Err(HubApiError::PathValidation(
-            "query row scan limit exceeded".to_owned(),
-        ));
     }
     if !aggregates.is_empty() {
         let mut aggregate_row = std::collections::BTreeMap::new();
@@ -448,6 +486,16 @@ fn aggregate_value(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    static TEST_ADMISSION_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn admission_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        TEST_ADMISSION_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap()
+    }
+
     #[test]
     fn reader_rejects_ranges_past_eof() {
         let reader = RangeReader {
@@ -487,11 +535,23 @@ mod tests {
 
     #[test]
     fn admission_is_bounded() {
+        let _lock = admission_test_lock();
         let guards: Vec<_> = (0..MAX_CONCURRENT_QUERIES)
-            .map(|_| admit_query().unwrap())
+            .map(|index| admit_query(&format!("tenant-{index}")).unwrap())
             .collect();
-        assert!(admit_query().is_err());
+        assert!(admit_query("another-tenant").is_err());
         drop(guards);
-        assert!(admit_query().is_ok());
+        assert!(admit_query("another-tenant").is_ok());
+    }
+
+    #[test]
+    fn admission_limits_each_tenant_before_global_limit() {
+        let _lock = admission_test_lock();
+        let guards = [
+            admit_query("same-tenant").unwrap(),
+            admit_query("same-tenant").unwrap(),
+        ];
+        assert!(admit_query("same-tenant").is_err());
+        drop(guards);
     }
 }

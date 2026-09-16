@@ -59,7 +59,7 @@ analysis.
 
 The typed request contract is available as
 `shardline_hub_api::query::DatasetQueryRequest`. If Hub previews later use an
-an isolated DuckDB query worker, the worker contract must
+isolated DuckDB query worker, the worker contract must
 pin repository, immutable revision, split, and file SHA before execution and
 allow only selected columns, validated predicates, bounded ordering/cursors,
 limits, and a small aggregate allowlist. It must enforce read-only access,
@@ -72,13 +72,14 @@ SQLite/Postgres remain authoritative for publication, authorization metadata,
 coordination, and GC; DuckDB is analytical only.
 
 The native endpoint is `POST /api/datasets/{namespace}/{repo}/query`. It pins
-the request to the current immutable revision and exact file SHA, supports
+the request to an authorized immutable revision and exact file SHA, supports
 selected columns, bounded pagination, allow-listed predicates, and bounded
 aggregates. Parquet reads use range requests and enforce an 8 MiB request
 chunk and 128 MiB scanned-byte budget; execution is moved to a blocking worker
 with a 30-second deadline, an eight-query admission limit, and a 16 MiB result
-limit. Prometheus exposes query counts, rejection/cancellation counters,
-scanned/returned bytes and rows, and execution duration. Results and errors are bounded and do not expose
+limit. Prometheus exposes query counts, rejection/failure/cancellation
+counters, range requests, queue/execution duration, and scanned/returned bytes
+and rows. Results and errors are bounded and do not expose
 SQL, credentials, or internal paths.
 
 ## Design and benchmark gate

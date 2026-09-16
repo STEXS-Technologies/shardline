@@ -100,7 +100,7 @@ pub(crate) async fn dataset_first_rows(
     };
     let limit = query.limit.min(1000);
     let (columns, rows) =
-        read_dataset_rows_async(&state, data_file, repo.capability(), 0, limit).await?;
+        read_dataset_rows_async(&state, data_file, repo.capability(), &name, 0, limit).await?;
     Ok(Json(DatasetFirstRowsResponse { columns, rows }))
 }
 
@@ -136,8 +136,15 @@ pub(crate) async fn dataset_viewer(
         HubApiError::PathValidation("no data file found for config/split".to_owned())
     })?;
     let length = query.length.min(10000);
-    let (columns, rows) =
-        read_dataset_rows_async(&state, data_file, repo.capability(), query.offset, length).await?;
+    let (columns, rows) = read_dataset_rows_async(
+        &state,
+        data_file,
+        repo.capability(),
+        &name,
+        query.offset,
+        length,
+    )
+    .await?;
     Ok(Json(DatasetViewerResponse {
         columns,
         rows,
@@ -146,8 +153,8 @@ pub(crate) async fn dataset_viewer(
 }
 
 /// Execute the bounded, revision-pinned query contract against one Parquet file.
-/// Filtering and aggregates are intentionally rejected until a worker with
-/// predicate pushdown is enabled; projection and pagination are range-backed.
+/// The native reader uses bounded range requests and a blocking worker; it does
+/// not materialize the complete object in the async API process.
 pub(crate) async fn dataset_query(
     State(state): State<HubState>,
     repo: HubRepository,
@@ -159,6 +166,12 @@ pub(crate) async fn dataset_query(
         .validate()
         .map_err(|e| HubApiError::PathValidation(e.to_string()))?;
     let name = format!("{ns}/{repo_name}");
+    if request.repository != name {
+        // Keep the identity in the body and URL bound together.  This prevents
+        // callers from presenting a valid file identity for another repository
+        // while relying on the route path for authorization.
+        return Err(HubApiError::RevisionNotFound);
+    }
     let entry = state
         .store
         .get_repo(&name)
@@ -171,7 +184,7 @@ pub(crate) async fn dataset_query(
     }
     let revision = state
         .store
-        .resolve_revision(&name, &entry.default_branch)
+        .resolve_revision(&name, &request.revision)
         .map_err(|e| HubApiError::CasError(e.to_string()))?
         .ok_or(HubApiError::RevisionNotFound)?;
     if revision != request.revision {
@@ -229,6 +242,7 @@ pub(crate) async fn dataset_query(
             &object_store,
             key,
             size,
+            &name,
             offset,
             limit,
             &selected_columns,
@@ -238,14 +252,21 @@ pub(crate) async fn dataset_query(
             worker_cancelled,
         )
     });
-    let (output_columns, rows) = tokio::time::timeout(std::time::Duration::from_secs(30), read)
+    let worker_result = tokio::time::timeout(std::time::Duration::from_secs(30), read)
         .await
         .map_err(|_timeout_error| {
             cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
             shardline_metrics::metrics().query.cancellations.inc();
             HubApiError::PathValidation("query deadline exceeded".to_owned())
         })?
-        .map_err(|_join_error| HubApiError::PathValidation("query worker failed".to_owned()))??;
+        .map_err(|_join_error| HubApiError::PathValidation("query worker failed".to_owned()));
+    let (output_columns, rows) = match worker_result {
+        Ok(Ok(result)) => result,
+        Ok(Err(error)) | Err(error) => {
+            shardline_metrics::metrics().query.failures.inc();
+            return Err(error);
+        }
+    };
     let (output_columns, rows) = if request.aggregates.is_empty() && !request.columns.is_empty() {
         let mut rows = rows;
         for row in &mut rows {
@@ -389,6 +410,7 @@ fn read_dataset_rows(
     state: &HubState,
     file: &HubFileEntry,
     auth: &AuthorizedRepository,
+    tenant: &str,
     offset: usize,
     limit: usize,
 ) -> Result<(Vec<String>, Vec<DatasetRow>), HubApiError> {
@@ -405,6 +427,7 @@ fn read_dataset_rows(
             &state.object_store,
             key,
             size,
+            tenant,
             offset,
             limit,
             &[],
@@ -428,17 +451,21 @@ async fn read_dataset_rows_async(
     state: &HubState,
     file: &HubFileEntry,
     auth: &AuthorizedRepository,
+    tenant: &str,
     offset: usize,
     limit: usize,
 ) -> Result<(Vec<String>, Vec<DatasetRow>), HubApiError> {
     let state = state.clone();
     let file = file.clone();
     let auth = auth.clone();
-    tokio::task::spawn_blocking(move || read_dataset_rows(&state, &file, &auth, offset, limit))
-        .await
-        .map_err(|_join_error| {
-            HubApiError::PathValidation("dataset preview worker failed".to_owned())
-        })?
+    let tenant = tenant.to_owned();
+    tokio::task::spawn_blocking(move || {
+        read_dataset_rows(&state, &file, &auth, &tenant, offset, limit)
+    })
+    .await
+    .map_err(|_join_error| {
+        HubApiError::PathValidation("dataset preview worker failed".to_owned())
+    })?
 }
 
 /// Parses a single CSV line, respecting double-quoted fields that may contain

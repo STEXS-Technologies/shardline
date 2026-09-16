@@ -206,6 +206,38 @@ async fn dataset_first_rows_reads_parquet_with_bounded_range_reader() {
     assert_eq!(json["rows"].as_array().unwrap().len(), 2);
     assert_eq!(json["rows"][0]["columns"]["name"], "alice");
 
+    let unknown_column = serde_json::json!({
+        "repository": "team/parquet-dataset", "revision": revision, "file_sha": sha,
+        "config": "default", "split": "train", "columns": ["does_not_exist"], "limit": 1
+    });
+    let response = app()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/datasets/team/parquet-dataset/query")
+                .header("content-type", "application/json")
+                .body(Body::from(unknown_column.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    // Advance the branch. Structured queries must still be able to read the
+    // explicitly pinned immutable revision rather than silently switching to
+    // the new head.
+    let newer_revision = "c222222222222222222222222222222222222222";
+    store.store_files(newer_revision, &files).unwrap();
+    store
+        .create_revision(
+            "team/parquet-dataset",
+            Some(revision),
+            newer_revision,
+            "main",
+            "advance",
+        )
+        .unwrap();
+
     let query = serde_json::json!({
         "repository": "team/parquet-dataset",
         "revision": revision,
@@ -311,6 +343,51 @@ async fn dataset_first_rows_reads_parquet_with_bounded_range_reader() {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
     let body = collect_body_bytes(response).await;
     assert!(!String::from_utf8_lossy(&body).contains("181818"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dataset_query_rejects_body_repository_mismatch() {
+    setup();
+    let store = common::state().store.clone();
+    store
+        .create_repo(HubRepoType::Dataset, "team/query-boundary", false)
+        .unwrap();
+    let revision = "b222222222222222222222222222222222222222";
+    let sha = "1818181818181818181818181818181818181818181818181818181818181818";
+    store
+        .store_files(
+            revision,
+            &[HubFileEntry {
+                path: "data.parquet".into(),
+                size: 0,
+                sha: sha.into(),
+                is_lfs: false,
+            }],
+        )
+        .unwrap();
+    store
+        .create_revision("team/query-boundary", None, revision, "main", "init")
+        .unwrap();
+    let query = serde_json::json!({
+        "repository": "team/another-repository",
+        "revision": revision,
+        "file_sha": sha,
+        "config": "default",
+        "split": "train",
+        "limit": 1
+    });
+    let response = app()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/datasets/team/query-boundary/query")
+                .header("content-type", "application/json")
+                .body(Body::from(query.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
