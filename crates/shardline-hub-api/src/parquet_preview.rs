@@ -7,7 +7,7 @@
 use std::{
     io::{self, Cursor, Read},
     sync::{
-        Arc,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicU64, Ordering},
     },
 };
@@ -31,6 +31,34 @@ const MAX_BATCH_ROWS: usize = 256;
 const RANGE_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_SCANNED_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_QUERY_SCAN_ROWS: usize = 100_000;
+const MAX_CONCURRENT_QUERIES: usize = 8;
+static QUERY_ADMISSION: OnceLock<Mutex<usize>> = OnceLock::new();
+
+struct AdmissionGuard;
+
+impl Drop for AdmissionGuard {
+    fn drop(&mut self) {
+        if let Ok(mut active) = QUERY_ADMISSION.get_or_init(|| Mutex::new(0)).lock() {
+            *active = active.saturating_sub(1);
+        }
+    }
+}
+
+fn admit_query() -> Result<AdmissionGuard, HubApiError> {
+    let mut active = QUERY_ADMISSION
+        .get_or_init(|| Mutex::new(0))
+        .lock()
+        .map_err(|_poisoned| {
+            HubApiError::PathValidation("query admission unavailable".to_owned())
+        })?;
+    if *active >= MAX_CONCURRENT_QUERIES {
+        return Err(HubApiError::PathValidation(
+            "query concurrency limit exceeded".to_owned(),
+        ));
+    }
+    *active = active.saturating_add(1);
+    Ok(AdmissionGuard)
+}
 
 #[derive(Clone)]
 struct RangeReader {
@@ -129,6 +157,7 @@ pub fn read_rows(
     predicates: &[Predicate],
     aggregates: &[Aggregate],
 ) -> Result<(Vec<String>, Vec<DatasetRow>), HubApiError> {
+    let _admission = admit_query()?;
     let reader = RangeReader {
         store: store.clone(),
         key,
@@ -343,5 +372,15 @@ mod tests {
             scanned,
         };
         assert!(reader.get_bytes(0, 1).is_err());
+    }
+
+    #[test]
+    fn admission_is_bounded() {
+        let guards: Vec<_> = (0..MAX_CONCURRENT_QUERIES)
+            .map(|_| admit_query().unwrap())
+            .collect();
+        assert!(admit_query().is_err());
+        drop(guards);
+        assert!(admit_query().is_ok());
     }
 }
