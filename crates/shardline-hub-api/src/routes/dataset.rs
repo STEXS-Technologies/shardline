@@ -153,6 +153,7 @@ pub(crate) async fn dataset_query(
     Path((ns, repo_name)): Path<(String, String)>,
     Json(request): Json<DatasetQueryRequest>,
 ) -> Result<Json<DatasetViewerResponse>, HubApiError> {
+    shardline_metrics::record_hub_api_request("dataset_query", "POST", 200);
     request
         .validate()
         .map_err(|e| HubApiError::PathValidation(e.to_string()))?;
@@ -203,14 +204,17 @@ pub(crate) async fn dataset_query(
         .map_err(|e| HubApiError::CasError(e.to_string()))?
         .ok_or(HubApiError::NotFound)?
         .length();
-    let (columns, rows) = crate::parquet_preview::read_rows(
-        &state.object_store,
-        key,
-        size,
-        request.offset as usize,
-        request.limit as usize,
-        &request.columns,
-    )?;
+    let object_store = state.object_store.clone();
+    let columns = request.columns.clone();
+    let offset = request.offset as usize;
+    let limit = request.limit as usize;
+    let read = tokio::task::spawn_blocking(move || {
+        crate::parquet_preview::read_rows(&object_store, key, size, offset, limit, &columns)
+    });
+    let (columns, rows) = tokio::time::timeout(std::time::Duration::from_secs(30), read)
+        .await
+        .map_err(|_| HubApiError::PathValidation("query deadline exceeded".to_owned()))?
+        .map_err(|_| HubApiError::PathValidation("query worker failed".to_owned()))??;
     Ok(Json(DatasetViewerResponse {
         columns,
         rows,
