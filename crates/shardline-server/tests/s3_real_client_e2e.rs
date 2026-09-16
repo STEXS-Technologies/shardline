@@ -495,6 +495,17 @@ con.execute("""COPY (SELECT id, \"group\" FROM read_parquet('s3://ac.assets/inpu
     WHERE id % 2 = 0 ORDER BY id) TO 's3://ac.assets/results/even.parquet' (FORMAT PARQUET)""")
 written = con.execute("SELECT id FROM read_parquet('s3://ac.assets/results/even.parquet') ORDER BY id").fetchall()
 assert written == [(2,), (4,), (6,)], written
+
+# Error redaction: malformed or missing objects must fail without leaking the
+# repository token into a DuckDB-facing exception.
+with s3.open_output_stream("ac.assets/inputs/bad.parquet") as out:
+    out.write(b"not a parquet file")
+for path in ("s3://ac.assets/inputs/missing.parquet", "s3://ac.assets/inputs/bad.parquet"):
+    try:
+        con.execute("SELECT * FROM read_parquet(?)", [path]).fetchall()
+        raise AssertionError("expected DuckDB read failure for " + path)
+    except Exception as exc:
+        assert token not in str(exc), "credential leaked in DuckDB error"
 print("ALL DUCKDB CHECKS PASSED")
 "#,
     )
