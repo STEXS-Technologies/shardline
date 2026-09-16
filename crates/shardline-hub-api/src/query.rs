@@ -115,6 +115,12 @@ impl std::fmt::Display for QueryValidationError {
 impl std::error::Error for QueryValidationError {}
 
 impl DatasetQueryRequest {
+    /// Validate all fields before handing the request to an isolated worker.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable validation error when identity, identifiers, or
+    /// resource bounds are invalid.
     pub fn validate(&self) -> Result<(), QueryValidationError> {
         for (field, value) in [
             ("repository", &self.repository),
