@@ -200,7 +200,22 @@ pub(crate) async fn dataset_query(
         .ok_or(HubApiError::NotFound)?
         .length();
     let object_store = state.object_store.clone();
-    let selected_columns = request.columns.clone();
+    let mut selected_columns = request.columns.clone();
+    for predicate in &request.predicates {
+        if !selected_columns
+            .iter()
+            .any(|column| column == &predicate.column)
+        {
+            selected_columns.push(predicate.column.clone());
+        }
+    }
+    for aggregate in &request.aggregates {
+        if let Some(column) = &aggregate.column
+            && !selected_columns.iter().any(|selected| selected == column)
+        {
+            selected_columns.push(column.clone());
+        }
+    }
     let predicates = request.predicates.clone();
     let aggregates = request.aggregates.clone();
     let offset = request.offset as usize;
@@ -224,6 +239,16 @@ pub(crate) async fn dataset_query(
             HubApiError::PathValidation("query deadline exceeded".to_owned())
         })?
         .map_err(|_join_error| HubApiError::PathValidation("query worker failed".to_owned()))??;
+    let (output_columns, rows) = if request.aggregates.is_empty() && !request.columns.is_empty() {
+        let mut rows = rows;
+        for row in &mut rows {
+            row.columns
+                .retain(|column, _| request.columns.iter().any(|selected| selected == column));
+        }
+        (request.columns.clone(), rows)
+    } else {
+        (output_columns, rows)
+    };
     Ok(Json(DatasetViewerResponse {
         columns: output_columns,
         rows,
