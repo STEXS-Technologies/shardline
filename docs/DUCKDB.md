@@ -55,7 +55,9 @@ analysis.
 
 ## Server-side query boundary (future)
 
-If Hub previews later use an isolated query worker, the worker contract must
+The typed, validation-only request contract is available as
+`shardline_hub_api::query::DatasetQueryRequest`. If Hub previews later use an
+isolated query worker, the worker contract must
 pin repository, immutable revision, split, and file SHA before execution and
 allow only selected columns, validated predicates, bounded ordering/cursors,
 limits, and a small aggregate allowlist. It must enforce read-only access,
@@ -66,3 +68,18 @@ rows, and stable error classes, but never SQL, credentials, paths, or row data.
 
 SQLite/Postgres remain authoritative for publication, authorization metadata,
 coordination, and GC; DuckDB is analytical only.
+
+## Design and benchmark gate
+
+The selected production boundary for this release is external DuckDB over the
+S3 frontend. This is the only path enabled by default and is covered by the
+real-client E2E lane. A server-side worker is not enabled until it beats the
+external path and a native range-backed reader on the same fixture. Record cold
+and warm latency, peak RSS, source/reconstructed bytes, range count, backend
+operations, spill bytes, and concurrent upload/download impact for: exact-file
+schema reads, narrow projections, selective and non-selective filters, deep
+pagination, multi-file globs, and Parquet export. Rollout requires no API
+latency regression, bounded RSS, and passing cancellation, redaction, and
+cross-repository authorization drills. Use `duckdb` plus the real-client E2E
+fixture as the reproducible baseline; do not promote a sidecar based on
+synthetic SQL-only benchmarks.
