@@ -10,6 +10,7 @@ pub struct QueryMetrics {
     pub scan_limit_rejected: IntCounter,
     pub result_limit_rejected: IntCounter,
     pub cancellations: IntCounter,
+    pub cancellation_reasons: IntCounterVec,
     pub returned_rows: IntCounter,
     pub returned_bytes: IntCounter,
     pub scanned_bytes: IntCounter,
@@ -40,6 +41,14 @@ impl QueryMetrics {
             "shardline_query_cancellations_total",
             "Queries cancelled by deadline or client failure",
         );
+        let cancellation_reasons = IntCounterVec::new(
+            Opts::new(
+                "shardline_query_cancellations_by_reason_total",
+                "Bounded query cancellations by stable reason",
+            ),
+            &["reason"],
+        )
+        .unwrap_or_else(|_| std::process::abort());
         let returned_rows = must_counter(
             "shardline_query_returned_rows_total",
             "Rows returned by bounded queries",
@@ -93,12 +102,16 @@ impl QueryMetrics {
         registry.register(Box::new(execution_seconds.clone())).ok();
         registry.register(Box::new(queue_seconds.clone())).ok();
         registry.register(Box::new(failure_classes.clone())).ok();
+        registry
+            .register(Box::new(cancellation_reasons.clone()))
+            .ok();
         Self {
             requests,
             admissions_rejected,
             scan_limit_rejected,
             result_limit_rejected,
             cancellations,
+            cancellation_reasons,
             returned_rows,
             returned_bytes,
             scanned_bytes,
