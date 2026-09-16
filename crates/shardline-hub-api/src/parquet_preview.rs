@@ -34,6 +34,11 @@ const RANGE_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_SCANNED_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_QUERY_SCAN_ROWS: usize = 100_000;
 const MAX_RESULT_BYTES: usize = 16 * 1024 * 1024;
+// Keep each decoded Arrow batch bounded even when a Parquet page contains
+// unusually large values. The result budget alone is insufficient because
+// rows rejected by predicates must still be decoded before they are dropped.
+const MAX_BATCH_BYTES: usize = 16 * 1024 * 1024;
+const MAX_GET_BYTES: usize = 64 * 1024 * 1024;
 const MAX_CONCURRENT_QUERIES: usize = 8;
 static QUERY_ADMISSION: OnceLock<Mutex<AdmissionState>> = OnceLock::new();
 
@@ -43,6 +48,47 @@ fn invalid_parquet_error() -> HubApiError {
     // Keep parser/storage details out of the client response. They may contain
     // object keys, local paths, backend URLs, or provider error text.
     HubApiError::PathValidation("invalid parquet input".to_owned())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum QueryFailureClass {
+    ScanLimit,
+    ResultLimit,
+    Admission,
+    InvalidInput,
+    Worker,
+    Validation,
+}
+
+impl QueryFailureClass {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::ScanLimit => "scan_limit",
+            Self::ResultLimit => "result_limit",
+            Self::Admission => "admission",
+            Self::InvalidInput => "invalid_input",
+            Self::Worker => "worker",
+            Self::Validation => "validation",
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct QueryFailure {
+    pub(crate) error: HubApiError,
+    pub(crate) class: QueryFailureClass,
+}
+
+impl QueryFailure {
+    pub(crate) const fn new(error: HubApiError, class: QueryFailureClass) -> Self {
+        Self { error, class }
+    }
+}
+
+impl From<HubApiError> for QueryFailure {
+    fn from(error: HubApiError) -> Self {
+        Self::new(error, QueryFailureClass::Validation)
+    }
 }
 
 #[derive(Default)]
@@ -133,6 +179,11 @@ impl ChunkReader for RangeReader {
         if length == 0 {
             return Ok(bytes::Bytes::new());
         }
+        if length > MAX_GET_BYTES {
+            return Err(ParquetError::General(
+                "parquet range request exceeds limit".into(),
+            ));
+        }
         let end = start
             .checked_add(length as u64)
             .and_then(|n| n.checked_sub(1))
@@ -140,27 +191,45 @@ impl ChunkReader for RangeReader {
         if end >= self.length {
             return Err(ParquetError::EOF("range past EOF".into()));
         }
-        let range = ByteRange::new(start, end).map_err(|e| ParquetError::General(e.to_string()))?;
-        shardline_metrics::metrics().query.range_requests.inc();
-        let scanned = self
-            .scanned
-            .fetch_add(length as u64, Ordering::Relaxed)
-            .saturating_add(length as u64);
-        if scanned > MAX_SCANNED_BYTES {
-            shardline_metrics::metrics().query.scan_limit_rejected.inc();
-            return Err(ParquetError::General("parquet scan limit exceeded".into()));
+        let mut output = Vec::with_capacity(length);
+        let mut chunk_start = start;
+        let mut remaining = length;
+        while remaining > 0 {
+            if self.cancelled.load(Ordering::Relaxed) {
+                return Err(ParquetError::General("query cancelled".into()));
+            }
+            let chunk_length = remaining.min(RANGE_BYTES as usize);
+            let chunk_end = chunk_start
+                .checked_add(chunk_length as u64)
+                .and_then(|n| n.checked_sub(1))
+                .ok_or_else(|| ParquetError::General("range overflow".into()))?;
+            let range = ByteRange::new(chunk_start, chunk_end)
+                .map_err(|e| ParquetError::General(e.to_string()))?;
+            shardline_metrics::metrics().query.range_requests.inc();
+            let scanned = self
+                .scanned
+                .fetch_add(chunk_length as u64, Ordering::Relaxed)
+                .saturating_add(chunk_length as u64);
+            if scanned > MAX_SCANNED_BYTES {
+                shardline_metrics::metrics().query.scan_limit_rejected.inc();
+                return Err(ParquetError::General("parquet scan limit exceeded".into()));
+            }
+            shardline_metrics::metrics()
+                .query
+                .scanned_bytes
+                .inc_by(chunk_length as u64);
+            let bytes = self
+                .store
+                .read_range(&self.key, range)
+                .map_err(|e| ParquetError::General(e.to_string()))?;
+            if bytes.len() != chunk_length {
+                return Err(ParquetError::General("range length mismatch".into()));
+            }
+            output.extend_from_slice(&bytes);
+            chunk_start = chunk_start.saturating_add(chunk_length as u64);
+            remaining = remaining.saturating_sub(chunk_length);
         }
-        shardline_metrics::metrics()
-            .query
-            .scanned_bytes
-            .inc_by(length as u64);
-        self.store
-            .read_range(&self.key, range)
-            .map(|bytes| {
-                debug_assert_eq!(bytes.len(), length);
-                bytes::Bytes::from(bytes)
-            })
-            .map_err(|e| ParquetError::General(e.to_string()))
+        Ok(bytes::Bytes::from(output))
     }
 }
 
@@ -206,10 +275,11 @@ pub fn read_rows(
     aggregates: &[Aggregate],
     order_by: &[OrderTerm],
     cancelled: Arc<AtomicBool>,
-) -> Result<(Vec<String>, Vec<DatasetRow>), HubApiError> {
+) -> Result<(Vec<String>, Vec<DatasetRow>), QueryFailure> {
     shardline_metrics::metrics().query.requests.inc();
     let started = Instant::now();
-    let _admission = admit_query(tenant)?;
+    let _admission = admit_query(tenant)
+        .map_err(|error| QueryFailure::new(error, QueryFailureClass::Admission))?;
     // Admission is fail-fast today (there is no unbounded waiter queue), so
     // successful requests have zero queue delay. Keep the histogram explicit
     // so a future fair scheduler can populate the same metric without a
@@ -226,7 +296,9 @@ pub fn read_rows(
         cancelled,
     };
     let mut builder = ParquetRecordBatchReaderBuilder::try_new(reader)
-        .map_err(|_error| invalid_parquet_error())?
+        .map_err(|_error| {
+            QueryFailure::new(invalid_parquet_error(), QueryFailureClass::InvalidInput)
+        })?
         .with_batch_size(MAX_BATCH_ROWS)
         .with_limit(
             if predicates.is_empty() && aggregates.is_empty() && order_by.is_empty() {
@@ -238,8 +310,9 @@ pub fn read_rows(
     let schema_fields = builder.parquet_schema().root_schema().get_fields();
     for column in selected_columns {
         if !schema_fields.iter().any(|field| field.name() == column) {
-            return Err(HubApiError::PathValidation(
-                "query references an unknown column".to_owned(),
+            return Err(QueryFailure::new(
+                HubApiError::PathValidation("query references an unknown column".to_owned()),
+                QueryFailureClass::Validation,
             ));
         }
     }
@@ -256,12 +329,16 @@ pub fn read_rows(
         .iter()
         .map(|field| field.name().clone())
         .collect();
-    let batches = builder.build().map_err(|_error| invalid_parquet_error())?;
+    let batches = builder.build().map_err(|_error| {
+        QueryFailure::new(invalid_parquet_error(), QueryFailureClass::InvalidInput)
+    })?;
     let mut rows = Vec::new();
     let mut scanned_rows = 0usize;
     let mut result_bytes = 0usize;
     for batch in batches {
-        let batch = batch.map_err(|_error| invalid_parquet_error())?;
+        let batch = batch.map_err(|_error| {
+            QueryFailure::new(invalid_parquet_error(), QueryFailureClass::InvalidInput)
+        })?;
         if !selected_columns.is_empty() {
             columns = batch
                 .schema()
@@ -273,22 +350,37 @@ pub fn read_rows(
         let mut encoded = Vec::new();
         {
             let mut writer = LineDelimitedWriter::new(&mut encoded);
-            writer
-                .write(&batch)
-                .map_err(|_error| invalid_parquet_error())?;
-            writer.finish().map_err(|_error| invalid_parquet_error())?;
+            writer.write(&batch).map_err(|_error| {
+                QueryFailure::new(invalid_parquet_error(), QueryFailureClass::InvalidInput)
+            })?;
+            writer.finish().map_err(|_error| {
+                QueryFailure::new(invalid_parquet_error(), QueryFailureClass::InvalidInput)
+            })?;
+        }
+        if encoded.len() > MAX_BATCH_BYTES {
+            shardline_metrics::metrics()
+                .query
+                .result_limit_rejected
+                .inc();
+            return Err(QueryFailure::new(
+                HubApiError::PathValidation("query batch memory limit exceeded".to_owned()),
+                QueryFailureClass::ResultLimit,
+            ));
         }
         for value in encoded
             .split(|byte| *byte == b'\n')
             .filter(|line| !line.is_empty())
         {
             let row: std::collections::BTreeMap<String, serde_json::Value> =
-                serde_json::from_slice(value).map_err(|_error| invalid_parquet_error())?;
+                serde_json::from_slice(value).map_err(|_error| {
+                    QueryFailure::new(invalid_parquet_error(), QueryFailureClass::InvalidInput)
+                })?;
             scanned_rows = scanned_rows.saturating_add(1);
             if scanned_rows > MAX_QUERY_SCAN_ROWS {
                 shardline_metrics::metrics().query.scan_limit_rejected.inc();
-                return Err(HubApiError::PathValidation(
-                    "query row scan limit exceeded".to_owned(),
+                return Err(QueryFailure::new(
+                    HubApiError::PathValidation("query row scan limit exceeded".to_owned()),
+                    QueryFailureClass::ScanLimit,
                 ));
             }
             if predicates
@@ -301,8 +393,9 @@ pub fn read_rows(
                         .query
                         .result_limit_rejected
                         .inc();
-                    return Err(HubApiError::PathValidation(
-                        "query result limit exceeded".to_owned(),
+                    return Err(QueryFailure::new(
+                        HubApiError::PathValidation("query result limit exceeded".to_owned()),
+                        QueryFailureClass::ResultLimit,
                     ));
                 }
                 rows.push(DatasetRow { columns: row });
@@ -316,7 +409,7 @@ pub fn read_rows(
                 .alias
                 .clone()
                 .unwrap_or_else(|| format!("{:?}", aggregate.function).to_lowercase());
-            let value = aggregate_value(&rows, aggregate)?;
+            let value = aggregate_value(&rows, aggregate).map_err(QueryFailure::from)?;
             aggregate_row.insert(alias, value);
         }
         shardline_metrics::metrics().query.returned_rows.inc();
@@ -530,6 +623,22 @@ mod tests {
             cancelled: Arc::new(AtomicBool::new(true)),
         };
         assert!(reader.get_bytes(0, 1).is_err());
+    }
+
+    #[test]
+    fn reader_rejects_ranges_larger_than_chunk_budget() {
+        let reader = RangeReader {
+            store: ServerObjectStore::Blackhole,
+            key: ObjectKey::parse("x").unwrap(),
+            length: (MAX_GET_BYTES as u64).saturating_add(1),
+            scanned: Arc::new(AtomicU64::new(0)),
+            cancelled: Arc::new(AtomicBool::new(false)),
+        };
+        assert!(
+            reader
+                .get_bytes(0, MAX_GET_BYTES.saturating_add(1))
+                .is_err()
+        );
     }
 
     #[test]
