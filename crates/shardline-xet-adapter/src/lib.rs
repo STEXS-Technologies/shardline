@@ -62,7 +62,10 @@ pub use frontend::{
     XET_WRITE_TOKEN_ROUTE, XORB_TRANSFER_ROUTE, build_xorb_transfer_url, validate_hash_path,
     validate_optional_content_hash, validate_xorb_transfer_namespace,
 };
-pub use ingest::{register_uploaded_shard_bytes, store_uploaded_xorb_bytes};
+pub use ingest::{
+    register_uploaded_shard_bytes, register_uploaded_shard_file, store_uploaded_xorb_bytes,
+    store_uploaded_xorb_file_path,
+};
 pub use model::{
     BatchReconstructionResponse, FileReconstructionResponse, FileReconstructionV2Response,
     ReconstructionChunkRange, ReconstructionFetchInfo, ReconstructionMultiRangeFetch,
@@ -74,9 +77,10 @@ pub use reconstruction::{
     build_reconstruction_response_with_metrics, reconstruction_v2_from_v1,
 };
 pub use shard_store::{
-    dedupe_shard_mapping, parse_uploaded_shard, parse_uploaded_shard_with_metrics,
-    resolve_dedupe_shard_object, retained_shard_chunk_hashes,
-    shard_hash_from_object_key_if_present, shard_object_key,
+    dedupe_shard_mapping, parse_uploaded_shard, parse_uploaded_shard_file,
+    parse_uploaded_shard_with_metrics, resolve_dedupe_shard_object, retained_shard_chunk_hashes,
+    retained_shard_chunk_hashes_from_reader, shard_hash_from_object_key_if_present,
+    shard_object_key,
 };
 pub use xorb::{
     DecodedXorbChunk, ValidatedXorb, ValidatedXorbChunk, XorbParseError, XorbVisitError,
@@ -84,8 +88,9 @@ pub use xorb::{
     try_for_each_serialized_xorb_chunk_async, validate_serialized_xorb,
 };
 pub use xorb_store::{
-    normalize_serialized_xorb, store_uploaded_xorb, store_uploaded_xorb_with_metrics,
-    visit_stored_xorb_chunk_hashes, xorb_chunks_cache_hash_from_key_if_present,
-    xorb_hash_from_object_key_if_present, xorb_object_key,
+    normalize_serialized_xorb, store_uploaded_xorb, store_uploaded_xorb_file,
+    store_uploaded_xorb_with_metrics, visit_stored_xorb_chunk_hashes,
+    xorb_chunks_cache_hash_from_key_if_present, xorb_hash_from_object_key_if_present,
+    xorb_object_key,
 };
 pub use xorb_visit::map_xorb_visit_error;

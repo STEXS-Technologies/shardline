@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use tracing::trace;
 
 /// Gear hash (FastCDC) content-defined chunking implementation.
@@ -280,7 +278,6 @@ const GEAR_TABLE: [u64; 256] = [
 /// `min_chunk = target_chunk_size / 8` and `max_chunk = target_chunk_size * 2`.
 pub struct CdcChunker {
     hash: u64,
-    target_chunk_size: usize,
     min_chunk: usize,
     max_chunk: usize,
     mask: u64,
@@ -301,7 +298,6 @@ impl CdcChunker {
 
         Self {
             hash: 0,
-            target_chunk_size,
             min_chunk: target_chunk_size / 8,
             max_chunk: target_chunk_size.wrapping_mul(2),
             mask,
@@ -421,7 +417,6 @@ mod tests {
     #[test]
     fn cdc_chunker_creates_with_valid_size() {
         let chunker = CdcChunker::new(1024);
-        assert_eq!(chunker.target_chunk_size, 1024);
         assert_eq!(chunker.min_chunk, 128);
         assert_eq!(chunker.max_chunk, 2048);
     }

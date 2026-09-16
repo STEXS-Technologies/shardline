@@ -28,7 +28,9 @@ jobs:
         run: |
           set -euo pipefail
           sudo curl -fsSLo /usr/local/bin/mc \
-            https://dl.min.io/client/mc/release/linux-amd64/archive/mc.RELEASE.2025-08-13T08-35-41Z
+            https://github.com/minio/mc/releases/download/RELEASE.2025-08-13T08-35-41Z/mc.linux-amd64.RELEASE.2025-08-13T08-35-41Z
+          echo "01f866e9c5f9b87c2b09116fa5d7c06695b106242d829a8bb32990c00312e891  /usr/local/bin/mc" \
+            | sha256sum --check --strict
           sudo chmod +x /usr/local/bin/mc
           mc --version
           git_lfs_archive="${RUNNER_TEMP}/git-lfs-linux-amd64-v3.7.1.tar.gz"

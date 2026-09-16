@@ -1,5 +1,3 @@
-use std::io::Cursor;
-
 use shardline_index::{
     AsyncIndexStore, FileRecordStorageLayout, RecordStore, RecordTraversal, StorageRepresentation,
     parse_xet_hash_hex, xet_hash_hex_string,
@@ -10,7 +8,7 @@ use crate::{
     ServerError, ServerFrontend,
     chunk_store::chunk_object_key,
     local_backend::chunk_hash,
-    object_store::{ServerObjectStore, read_full_object},
+    object_store::ServerObjectStore,
     overflow::checked_increment,
     record_store::parse_stored_file_record_bytes,
     server_frontend::{
@@ -165,9 +163,10 @@ fn collect_xorb_member_chunk_references(
     };
     let xorb_hash_hex =
         xorb_hash_from_object_key_if_present(&xorb_key)?.ok_or(ServerError::InvalidContentHash)?;
-    let xorb_bytes = read_full_object(object_store, &xorb_key, metadata.length())?;
+    let mut xorb_file =
+        object_store.materialize_object_to_tempfile(&xorb_key, metadata.length())?;
     let expected_hash = parse_xet_hash_hex(xorb_hash_hex)?;
-    let mut reader = Cursor::new(xorb_bytes);
+    let mut reader = xorb_file.as_file_mut();
     let validated = validate_serialized_xorb(&mut reader, expected_hash)?;
     match try_for_each_serialized_xorb_chunk(&mut reader, &validated, |decoded| {
         let member_hash_hex = xet_hash_hex_string(chunk_hash(decoded.data()));

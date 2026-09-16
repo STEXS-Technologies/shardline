@@ -3,10 +3,10 @@ use std::path::{Path, PathBuf};
 use shardline_cas::ObjectReachability;
 use shardline_index::{AsyncIndexStore, FileRecord, FileRecordInvariantError, xet_hash_hex_string};
 use shardline_server_core::{
-    OpsRecordStore, ServerObjectStore, ShardMetadataLimits, checked_increment, read_full_object,
+    OpsRecordStore, ServerObjectStore, ShardMetadataLimits, checked_increment,
 };
 use shardline_storage::{ObjectKey, ObjectStore};
-use shardline_xet_adapter::{XetAdapterError, retained_shard_chunk_hashes};
+use shardline_xet_adapter::{XetAdapterError, retained_shard_chunk_hashes_from_reader};
 
 use crate::{
     FsckError, FsckIssue, FsckIssueDetail, FsckIssueKind, FsckReachability,
@@ -238,22 +238,24 @@ where
                     return Ok::<(), FsckError>(());
                 }
             };
-            let shard_bytes =
-                read_full_object(object_store, mapping.shard_object_key(), metadata.length())?;
-            let chunk_hashes =
-                match retained_shard_chunk_hashes(&shard_bytes, shard_metadata_limits) {
-                    Ok(chunk_hashes) => chunk_hashes,
-                    Err(XetAdapterError::InvalidSerializedShard(detail)) => {
-                        push_issue(
-                            report,
-                            FsckIssueKind::InvalidRetainedShard,
-                            shard_location,
-                            FsckIssueDetail::InvalidRetainedShard(detail),
-                        )?;
-                        return Ok::<(), FsckError>(());
-                    }
-                    Err(error) => return Err(error.into()),
-                };
+            let mut shard_file = object_store
+                .materialize_object_to_tempfile(mapping.shard_object_key(), metadata.length())?;
+            let chunk_hashes = match retained_shard_chunk_hashes_from_reader(
+                shard_file.as_file_mut(),
+                shard_metadata_limits,
+            ) {
+                Ok(chunk_hashes) => chunk_hashes,
+                Err(XetAdapterError::InvalidSerializedShard(detail)) => {
+                    push_issue(
+                        report,
+                        FsckIssueKind::InvalidRetainedShard,
+                        shard_location,
+                        FsckIssueDetail::InvalidRetainedShard(detail),
+                    )?;
+                    return Ok::<(), FsckError>(());
+                }
+                Err(error) => return Err(error.into()),
+            };
             if !chunk_hashes
                 .iter()
                 .any(|candidate| candidate == &chunk_hash_hex)

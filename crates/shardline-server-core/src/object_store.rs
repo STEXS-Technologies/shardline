@@ -10,6 +10,7 @@ use shardline_storage::{
     ObjectIntegrity, ObjectKey, ObjectMetadata, ObjectPrefix, ObjectStore, PutOutcome,
     S3ObjectStore, S3ObjectStoreConfig, S3ObjectStoreError,
 };
+use tempfile::NamedTempFile;
 use thiserror::Error;
 
 /// Object-store backend error.
@@ -197,6 +198,63 @@ impl AsyncObjectStore for ServerObjectStore {
 }
 
 impl ServerObjectStore {
+    /// Materializes an object into an unlinked temporary file using bounded
+    /// range reads. This is for random-access parsers (xorb/shard formats),
+    /// not for HTTP delivery; callers must stream the resulting file onward.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the temporary file cannot be created, a range
+    /// read fails, or the stored object length does not match `length`.
+    pub fn materialize_object_to_tempfile(
+        &self,
+        object_key: &ObjectKey,
+        length: u64,
+    ) -> Result<NamedTempFile, ServerObjectStoreError> {
+        let mut output = NamedTempFile::new().map_err(ServerObjectStoreError::Io)?;
+        if length == 0 {
+            return Ok(output);
+        }
+
+        if let Self::Local(store) = self {
+            let mut input = store.open_object_file(object_key)?;
+            let actual = input.metadata()?.len();
+            if actual != length {
+                return Err(ServerObjectStoreError::StoredObjectLengthMismatch);
+            }
+            std::io::copy(&mut input, output.as_file_mut()).map_err(ServerObjectStoreError::Io)?;
+            return Ok(output);
+        }
+
+        const CHUNK_BYTES: u64 = 1024 * 1024;
+        let mut offset = 0_u64;
+        while offset < length {
+            let end_exclusive = offset
+                .checked_add(CHUNK_BYTES)
+                .ok_or(ServerObjectStoreError::Overflow)?
+                .min(length);
+            let end = end_exclusive
+                .checked_sub(1)
+                .ok_or(ServerObjectStoreError::Overflow)?;
+            let range =
+                ByteRange::new(offset, end).map_err(|_error| ServerObjectStoreError::Overflow)?;
+            let bytes = ObjectStore::read_range(self, object_key, range)?;
+            let expected_u64 = end
+                .checked_sub(offset)
+                .and_then(|value| value.checked_add(1))
+                .ok_or(ServerObjectStoreError::Overflow)?;
+            let expected =
+                usize::try_from(expected_u64).map_err(|_error| ServerObjectStoreError::Overflow)?;
+            if bytes.len() != expected {
+                return Err(ServerObjectStoreError::StoredObjectLengthMismatch);
+            }
+            std::io::Write::write_all(output.as_file_mut(), &bytes)
+                .map_err(ServerObjectStoreError::Io)?;
+            offset = end_exclusive;
+        }
+        Ok(output)
+    }
+
     /// Creates a local filesystem object store rooted at the given path.
     ///
     /// # Examples
@@ -486,6 +544,13 @@ impl ServerObjectStore {
         object_key: &ObjectKey,
         length: u64,
     ) -> Result<Vec<u8>, ServerObjectStoreError> {
+        // Whole-object reads are retained only for small metadata/format
+        // records. Large payloads must use `materialize_object_to_tempfile`
+        // or a range stream so memory use stays independent of file size.
+        const MAX_BUFFERED_OBJECT_BYTES: u64 = 64 * 1024 * 1024;
+        if length > MAX_BUFFERED_OBJECT_BYTES {
+            return Err(ServerObjectStoreError::Overflow);
+        }
         if length == 0 {
             return Ok(Vec::new());
         }

@@ -1,4 +1,5 @@
 use std::future::Future;
+use std::path::Path;
 
 use shardline_index::{DedupeShardMapping, FileRecord};
 use shardline_protocol::RepositoryScope;
@@ -9,7 +10,10 @@ use crate::{
     model::{ShardUploadResponse, XorbUploadResponse},
 };
 
-use super::{dedupe_shard_mapping, parse_uploaded_shard, store_uploaded_xorb};
+use super::{
+    dedupe_shard_mapping, parse_uploaded_shard, parse_uploaded_shard_file, store_uploaded_xorb,
+    store_uploaded_xorb_file,
+};
 
 /// # Errors
 ///
@@ -21,6 +25,20 @@ pub async fn store_uploaded_xorb_bytes(
 ) -> Result<XorbUploadResponse, XetAdapterError> {
     let stored = store_uploaded_xorb(object_store, expected_hash, uploaded_body).await?;
 
+    Ok(XorbUploadResponse {
+        was_inserted: stored.was_inserted,
+    })
+}
+
+/// # Errors
+///
+/// Returns an error when the file cannot be opened, validated, or stored.
+pub async fn store_uploaded_xorb_file_path(
+    object_store: &ServerObjectStore,
+    expected_hash: &str,
+    path: &Path,
+) -> Result<XorbUploadResponse, XetAdapterError> {
+    let stored = store_uploaded_xorb_file(object_store, expected_hash, path).await?;
     Ok(XorbUploadResponse {
         was_inserted: stored.was_inserted,
     })
@@ -53,6 +71,37 @@ where
         .collect::<Result<Vec<_>, _>>()?;
     commit_metadata(parsed.records, mappings).await?;
 
+    Ok(ShardUploadResponse {
+        result: parsed.result,
+    })
+}
+
+/// Registers a shard parsed directly from a temporary file. Metadata sections
+/// are bounded by `shard_metadata_limits`; the uploaded byte stream itself is
+/// never copied into a process-sized buffer.
+///
+/// # Errors
+///
+/// Returns an error when shard parsing or commit fails.
+pub async fn register_uploaded_shard_file<Commit, CommitFuture>(
+    object_store: &ServerObjectStore,
+    path: &Path,
+    repository_scope: Option<&RepositoryScope>,
+    shard_metadata_limits: ShardMetadataLimits,
+    commit_metadata: Commit,
+) -> Result<ShardUploadResponse, XetAdapterError>
+where
+    Commit: FnOnce(Vec<FileRecord>, Vec<DedupeShardMapping>) -> CommitFuture,
+    CommitFuture: Future<Output = Result<(), XetAdapterError>>,
+{
+    let parsed =
+        parse_uploaded_shard_file(object_store, path, repository_scope, shard_metadata_limits)?;
+    let mappings = parsed
+        .dedupe_chunk_hashes
+        .iter()
+        .map(|chunk_hash_hex| dedupe_shard_mapping(chunk_hash_hex, &parsed.shard_key))
+        .collect::<Result<Vec<_>, _>>()?;
+    commit_metadata(parsed.records, mappings).await?;
     Ok(ShardUploadResponse {
         result: parsed.result,
     })

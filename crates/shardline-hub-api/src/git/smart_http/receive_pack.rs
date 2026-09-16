@@ -1,7 +1,7 @@
 //! Receive-pack implementation for push.
 
 use axum::{
-    body::Bytes,
+    body::{Body, to_bytes},
     extract::{Path, State},
     http::{HeaderMap, HeaderValue},
     response::{IntoResponse, Response},
@@ -10,6 +10,7 @@ use std::collections::HashMap;
 
 use super::super::pack::{GitObject, ObjectType};
 use super::super::pktline::{self, FLUSH};
+use super::MAX_RECEIVE_PACK_REQUEST_BYTES;
 use super::error::SmartHttpError;
 use super::pack_parse::parse_pack_data;
 use super::ref_advertisement::{authorize_write_with_context, is_valid_refname, resolve_repo_id};
@@ -36,7 +37,7 @@ pub async fn receive_pack(
     State(state): State<HubState>,
     Path((repo_type, ns, repo)): Path<(String, String, String)>,
     headers: HeaderMap,
-    body: Bytes,
+    body: Body,
 ) -> Result<Response, HubApiError> {
     let auth_ctx = authorize_write_with_context(&state, &headers)?;
     require_repository_binding(auth_ctx.as_ref(), &ns, &repo)?;
@@ -51,6 +52,11 @@ pub async fn receive_pack(
         None => AuthorizedRepository::anonymous_full_access(),
     };
 
+    let body = to_bytes(body, MAX_RECEIVE_PACK_REQUEST_BYTES)
+        .await
+        .map_err(|error| {
+            HubApiError::BadRequest(format!("receive-pack request too large: {error}"))
+        })?;
     let (updates, pack_data) = parse_receive_pack_request(&body);
 
     let updates: Vec<_> = updates
@@ -66,7 +72,7 @@ pub async fn receive_pack(
         .iter()
         .any(|(_, new_sha, _)| new_sha != "0000000000000000000000000000000000000000");
     let objects = if has_object_updates {
-        match parse_pack_data(&pack_data) {
+        match parse_pack_data(pack_data) {
             Ok(objects) => objects,
             Err(e) => {
                 tracing::warn!("failed to parse receive-pack data: {e}");
@@ -109,7 +115,7 @@ pub async fn receive_pack(
     build_report_response(&results, true)
 }
 
-pub(super) fn parse_receive_pack_request(body: &[u8]) -> (Vec<(String, String, String)>, Vec<u8>) {
+pub(super) fn parse_receive_pack_request(body: &[u8]) -> (Vec<(String, String, String)>, &[u8]) {
     let mut updates = Vec::new();
     let mut pack_start = 0;
 
@@ -147,9 +153,9 @@ pub(super) fn parse_receive_pack_request(body: &[u8]) -> (Vec<(String, String, S
     }
 
     let pack_data = if pack_start < body.len() {
-        body.get(pack_start..).unwrap_or(&[]).to_vec()
+        body.get(pack_start..).unwrap_or(&[])
     } else {
-        Vec::new()
+        &[]
     };
 
     (updates, pack_data)

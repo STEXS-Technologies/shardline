@@ -1,3 +1,4 @@
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::mem;
 use std::num::NonZeroUsize;
 
@@ -49,9 +50,11 @@ pub(crate) struct FileUploadIngestor {
     pub(super) records: Vec<FileChunkRecord>,
     pub(super) sha256: Option<Sha256>,
     pub(super) cdc_chunker: Box<CdcChunker>,
-    /// Raw (uncompressed) chunk data collected during streaming for
-    /// xorb packing at finish time.
-    pub(super) raw_chunk_data: Vec<Vec<u8>>,
+    /// Raw chunk bytes are spooled to disk so xorb packing never retains the
+    /// complete logical file in process memory. Only one bounded batch is
+    /// loaded while finalizing.
+    pub(super) raw_chunk_spool: tempfile::NamedTempFile,
+    pub(super) raw_chunk_offsets: Vec<(u64, u64)>,
 }
 
 impl FileUploadIngestor {
@@ -88,7 +91,14 @@ impl FileUploadIngestor {
             records: Vec::new(),
             sha256: compute_sha256.then(Sha256::new),
             cdc_chunker: Box::new(CdcChunker::new(chunk_size)),
-            raw_chunk_data: Vec::new(),
+            raw_chunk_spool: match tempfile::NamedTempFile::new() {
+                Ok(file) => file,
+                Err(error) => {
+                    tracing::error!(error = %error, "failed to create raw chunk spool");
+                    std::process::abort();
+                }
+            },
+            raw_chunk_offsets: Vec::new(),
         }
     }
 
@@ -160,11 +170,12 @@ impl FileUploadIngestor {
         // also bounds integrity validation before a requested range is exposed.
         // Individual chunks remain authoritative fallback for any batch that
         // cannot be packed or stored.
-        if !self.raw_chunk_data.is_empty() {
-            pack_and_store_xorb_batches(
+        if !self.raw_chunk_offsets.is_empty() {
+            pack_and_store_xorb_spool(
                 object_store,
                 file_id,
-                mem::take(&mut self.raw_chunk_data),
+                &mut self.raw_chunk_spool,
+                &self.raw_chunk_offsets,
                 &mut self.records,
             )
             .await?;
@@ -223,8 +234,7 @@ impl FileUploadIngestor {
         boundary: usize,
     ) -> Result<(), ServerError> {
         let chunk = self.pending.split_to(boundary);
-        // Buffer raw data for xorb packing in finish().
-        self.raw_chunk_data.push(chunk.to_vec());
+        self.spool_raw_chunk(&chunk)?;
         let sequence = self.next_sequence;
         self.next_sequence = checked_increment(self.next_sequence)?;
         let offset = self.next_offset;
@@ -273,8 +283,7 @@ impl FileUploadIngestor {
     ) -> Result<(), ServerError> {
         let replacement = self.take_pending_buffer();
         let chunk = mem::replace(&mut self.pending, replacement);
-        // Buffer raw data for xorb packing in finish().
-        self.raw_chunk_data.push(chunk.to_vec());
+        self.spool_raw_chunk(&chunk)?;
         let sequence = self.next_sequence;
         self.next_sequence = checked_increment(self.next_sequence)?;
         let offset = self.next_offset;
@@ -367,6 +376,15 @@ impl FileUploadIngestor {
         self.reusable_pending_buffers.push(buffer);
     }
 
+    fn spool_raw_chunk(&mut self, chunk: &[u8]) -> Result<(), ServerError> {
+        let spool = self.raw_chunk_spool.as_file_mut();
+        let offset = spool.seek(SeekFrom::End(0))?;
+        spool.write_all(chunk)?;
+        self.raw_chunk_offsets
+            .push((offset, u64::try_from(chunk.len())?));
+        Ok(())
+    }
+
     /// `windows(2)` always yields slices of exactly two elements, so indexing
     /// at 0 and 1 is infallible.
     fn record_completed_chunks(&mut self) -> Result<(), ServerError> {
@@ -438,13 +456,14 @@ impl FileUploadIngestor {
     }
 }
 
-async fn pack_and_store_xorb_batches(
+async fn pack_and_store_xorb_spool(
     object_store: &ServerObjectStore,
     file_id: &str,
-    raw_chunks: Vec<Vec<u8>>,
+    spool: &mut tempfile::NamedTempFile,
+    offsets: &[(u64, u64)],
     records: &mut [FileChunkRecord],
 ) -> Result<(), ServerError> {
-    if raw_chunks.len() != records.len() {
+    if offsets.len() != records.len() {
         return Err(ServerError::Overflow);
     }
 
@@ -452,7 +471,12 @@ async fn pack_and_store_xorb_batches(
     let mut batch_raw_bytes = 0usize;
     let mut batch_record_start = 0usize;
 
-    for (record_index, raw_chunk) in raw_chunks.into_iter().enumerate() {
+    let file = spool.as_file_mut();
+    for (record_index, &(offset, length)) in offsets.iter().enumerate() {
+        file.seek(SeekFrom::Start(offset))?;
+        let length = usize::try_from(length)?;
+        let mut raw_chunk = vec![0_u8; length];
+        file.read_exact(&mut raw_chunk)?;
         let next_raw_bytes = batch_raw_bytes
             .checked_add(raw_chunk.len())
             .ok_or(ServerError::Overflow)?;

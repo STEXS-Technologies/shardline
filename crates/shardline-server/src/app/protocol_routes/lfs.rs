@@ -35,7 +35,7 @@ use shardline_storage::{DeleteOutcome, ObjectIntegrity, ObjectKey};
 use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _, AsyncWriteExt as _};
 
 use super::{MAX_LFS_BATCH_OBJECTS, direct_object_response};
-use crate::app::{AppState, authorize};
+use crate::app::{AppState, MAX_LFS_PATCH_CHUNK_BYTES, authorize};
 use crate::{
     LFS_CONTENT_TYPE, LfsBatchRequest, LfsBatchResponse, LfsObjectError, LfsObjectResponse,
     LfsOperation, ServerError, TransferAdapter,
@@ -1246,6 +1246,14 @@ pub(crate) async fn lfs_patch_object(
         .ok_or(ServerError::Overflow)?
         .checked_add(1)
         .ok_or(ServerError::Overflow)?;
+    if expected_chunk_size > MAX_LFS_PATCH_CHUNK_BYTES as u64 {
+        return Ok((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            [(CONTENT_TYPE, LFS_CONTENT_TYPE)],
+            Json(json!({ "message": "LFS PATCH chunks must be at most 8 MiB; split the range" })),
+        )
+            .into_response());
+    }
 
     let content_length = headers
         .get(CONTENT_LENGTH)
@@ -1262,8 +1270,10 @@ pub(crate) async fn lfs_patch_object(
     }
 
     let start = Instant::now();
-    let mut body_reader =
-        RequestBodyReader::from_body(body, state.config.max_request_body_bytes())?;
+    let configured_limit = state.config.max_request_body_bytes().get();
+    let chunk_limit = std::num::NonZeroUsize::new(configured_limit.min(MAX_LFS_PATCH_CHUNK_BYTES))
+        .ok_or(ServerError::Overflow)?;
+    let mut body_reader = RequestBodyReader::from_body(body, chunk_limit)?;
     let chunk_bytes: Vec<u8> = read_body_to_bytes(&mut body_reader).await?;
     let chunk_size = chunk_bytes.len() as u64;
 

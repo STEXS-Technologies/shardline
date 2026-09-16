@@ -1652,7 +1652,7 @@ async fn upload_pack_empty_refs_returns_empty_pack() {
         State(state),
         Path(("models".into(), "empty".into(), "repo".into())),
         axum::http::HeaderMap::new(),
-        bytes::Bytes::from(body),
+        axum::body::Body::from(body),
     )
     .await;
     assert!(result.is_ok(), "upload_pack should succeed: {result:?}");
@@ -1817,7 +1817,7 @@ async fn receive_pack_malformed_pack_data_returns_ng_refs() {
         State(state),
         Path(("models".into(), "org".into(), "rp-bad".into())),
         axum::http::HeaderMap::new(),
-        bytes::Bytes::from(body),
+        axum::body::Body::from(body),
     )
     .await;
     // Should return a response (even with errors) rather than fail
@@ -1877,7 +1877,7 @@ async fn receive_pack_non_fast_forward_denied_leaves_no_side_effects() {
         State(state.clone()),
         Path(("models".into(), "org".into(), "rp-nff".into())),
         axum::http::HeaderMap::new(),
-        bytes::Bytes::from(body),
+        axum::body::Body::from(body),
     )
     .await
     .expect("receive_pack returns a report response");

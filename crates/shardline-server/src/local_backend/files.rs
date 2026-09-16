@@ -15,11 +15,13 @@ use crate::{
     download_stream::{ServerByteStream, file_record_byte_stream},
     model::UploadFileResponse,
     object_store::{read_full_object, reconstruct_file_record_bytes},
-    upload_ingest::{FileUploadIngestor, RequestBodyReader, read_body_to_bytes, upload_attempt_id},
+    upload_ingest::{
+        FileUploadIngestor, RequestBodyReader, stage_body_to_tempfile, upload_attempt_id,
+    },
     validation::validate_identifier,
     xet_adapter::{
         FileReconstructionResponse, ShardUploadResponse, build_reconstruction_response,
-        register_uploaded_shard_bytes,
+        register_uploaded_shard_file,
     },
 };
 
@@ -206,18 +208,12 @@ impl LocalBackend {
         repository_scope: Option<&RepositoryScope>,
         shard_metadata_limits: ShardMetadataLimits,
     ) -> Result<ShardUploadResponse, ServerError> {
-        let uploaded_body = read_body_to_bytes(&mut body).await?;
-        let body_hash = blake3::hash(&uploaded_body);
+        let (temporary, body_length, body_hash) = stage_body_to_tempfile(&mut body).await?;
         let intent_id = format!("shard-{}", hex::encode(body_hash.as_bytes()));
         let body_hash_hex = hex::encode(body_hash.as_bytes());
         let prefix = &body_hash_hex[..2];
         let object_key = format!("shards/{prefix}/{body_hash_hex}.shard");
-        let intent = UploadIntent::new(
-            intent_id.clone(),
-            object_key,
-            body_hash_hex,
-            uploaded_body.len() as u64,
-        );
+        let intent = UploadIntent::new(intent_id.clone(), object_key, body_hash_hex, body_length);
         let record_store = self.record_store.clone();
         let object_store = self.object_store();
         let coordinator = CasCoordinator::new(
@@ -231,12 +227,13 @@ impl LocalBackend {
         let _metadata_guard = self.metadata_write_lock.lock().await;
         coordinator
             .with_upload_intent(&intent, move || async move {
-                register_uploaded_shard_bytes(
+                register_uploaded_shard_file(
                     &object_store,
-                    &uploaded_body,
+                    temporary.path(),
                     repository_scope,
                     shard_metadata_limits,
-                    move |records, mappings| async move {
+                    move |records: Vec<shardline_index::FileRecord>,
+                          mappings: Vec<shardline_index::DedupeShardMapping>| async move {
                         record_store
                             .commit_native_shard_metadata(&records, &mappings)
                             .await?;
