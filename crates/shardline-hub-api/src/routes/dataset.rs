@@ -221,6 +221,8 @@ pub(crate) async fn dataset_query(
     let order_by = request.order_by.clone();
     let offset = request.offset as usize;
     let limit = request.limit as usize;
+    let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let worker_cancelled = cancelled.clone();
     let read = tokio::task::spawn_blocking(move || {
         crate::parquet_preview::read_rows(
             &object_store,
@@ -232,11 +234,13 @@ pub(crate) async fn dataset_query(
             &predicates,
             &aggregates,
             &order_by,
+            worker_cancelled,
         )
     });
     let (output_columns, rows) = tokio::time::timeout(std::time::Duration::from_secs(30), read)
         .await
         .map_err(|_timeout_error| {
+            cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
             shardline_metrics::metrics().query.cancellations.inc();
             HubApiError::PathValidation("query deadline exceeded".to_owned())
         })?
@@ -406,6 +410,7 @@ fn read_dataset_rows(
             &[],
             &[],
             &[],
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         );
     }
     let content = read_object_prefix(&state.object_store, &key, size, MAX_DATASET_PREVIEW_BYTES)

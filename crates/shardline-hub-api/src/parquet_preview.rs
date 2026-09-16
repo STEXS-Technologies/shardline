@@ -8,7 +8,7 @@ use std::{
     io::{self, Cursor, Read},
     sync::{
         Arc, Mutex, OnceLock,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Instant,
 };
@@ -69,6 +69,7 @@ struct RangeReader {
     key: ObjectKey,
     length: u64,
     scanned: Arc<AtomicU64>,
+    cancelled: Arc<AtomicBool>,
 }
 
 impl Length for RangeReader {
@@ -92,6 +93,9 @@ impl ChunkReader for RangeReader {
     }
 
     fn get_bytes(&self, start: u64, length: usize) -> ParquetResult<bytes::Bytes> {
+        if self.cancelled.load(Ordering::Relaxed) {
+            return Err(ParquetError::General("query cancelled".into()));
+        }
         if length == 0 {
             return Ok(bytes::Bytes::new());
         }
@@ -165,6 +169,7 @@ pub fn read_rows(
     predicates: &[Predicate],
     aggregates: &[Aggregate],
     order_by: &[OrderTerm],
+    cancelled: Arc<AtomicBool>,
 ) -> Result<(Vec<String>, Vec<DatasetRow>), HubApiError> {
     shardline_metrics::metrics().query.requests.inc();
     let started = Instant::now();
@@ -174,6 +179,7 @@ pub fn read_rows(
         key,
         length: size,
         scanned: Arc::new(AtomicU64::new(0)),
+        cancelled,
     };
     let mut builder = ParquetRecordBatchReaderBuilder::try_new(reader)
         .map_err(|e| HubApiError::PathValidation(format!("invalid parquet: {e}")))?
@@ -449,6 +455,7 @@ mod tests {
             key: ObjectKey::parse("x").unwrap(),
             length: 10,
             scanned: Arc::new(AtomicU64::new(0)),
+            cancelled: Arc::new(AtomicBool::new(false)),
         };
         assert!(reader.get_bytes(9, 2).is_err());
     }
@@ -461,6 +468,19 @@ mod tests {
             key: ObjectKey::parse("x").unwrap(),
             length: 10,
             scanned,
+            cancelled: Arc::new(AtomicBool::new(false)),
+        };
+        assert!(reader.get_bytes(0, 1).is_err());
+    }
+
+    #[test]
+    fn reader_stops_after_cancellation() {
+        let reader = RangeReader {
+            store: ServerObjectStore::Blackhole,
+            key: ObjectKey::parse("x").unwrap(),
+            length: 10,
+            scanned: Arc::new(AtomicU64::new(0)),
+            cancelled: Arc::new(AtomicBool::new(true)),
         };
         assert!(reader.get_bytes(0, 1).is_err());
     }
