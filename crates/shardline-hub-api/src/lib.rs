@@ -91,6 +91,21 @@ use tower_http::set_header::SetResponseHeaderLayer;
 /// into any Axum router. Call this with the [`HubState`](routes::HubState) that
 /// should back all handlers.
 pub fn hub_routes(state: routes::HubState, register_xet_token_routes: bool) -> Router {
+    hub_routes_with_dataset_query(
+        state,
+        register_xet_token_routes,
+        routes::router::dataset_query_enabled_from_environment(),
+    )
+}
+
+/// Builds Hub routes with an explicit native dataset-query feature gate.
+/// Passing `false` keeps all existing Hub and legacy dataset-preview routes but
+/// omits the structured Parquet query endpoint.
+pub fn hub_routes_with_dataset_query(
+    state: routes::HubState,
+    register_xet_token_routes: bool,
+    dataset_query_enabled: bool,
+) -> Router {
     let cors = CorsLayer::new()
         .allow_origin([
             HeaderValue::from_static("http://127.0.0.1:8080"),
@@ -110,7 +125,7 @@ pub fn hub_routes(state: routes::HubState, register_xet_token_routes: bool) -> R
         axum::http::HeaderValue::from_static("nosniff"),
     );
 
-    routes::router(register_xet_token_routes)
+    routes::router_with_dataset_query(register_xet_token_routes, dataset_query_enabled)
         .with_state(state)
         .route_layer(DefaultBodyLimit::max(64 * 1024 * 1024)) // 64 MB
         .layer(cors)
