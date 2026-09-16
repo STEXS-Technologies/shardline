@@ -231,6 +231,46 @@ async fn dataset_first_rows_reads_parquet_with_bounded_range_reader() {
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["columns"], serde_json::json!(["name"]));
     assert_eq!(json["rows"][0]["columns"]["name"], "alice");
+
+    let filtered = serde_json::json!({
+        "repository": "team/parquet-dataset", "revision": revision, "file_sha": sha,
+        "config": "default", "split": "train", "predicates": [{"column": "id", "op": "gt", "value": 1}], "limit": 10
+    });
+    let response = app()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/datasets/team/parquet-dataset/query")
+                .header("content-type", "application/json")
+                .body(Body::from(filtered.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let json: serde_json::Value =
+        serde_json::from_slice(&collect_body_bytes(response).await).unwrap();
+    assert_eq!(json["rows"].as_array().unwrap().len(), 2);
+
+    let aggregate = serde_json::json!({
+        "repository": "team/parquet-dataset", "revision": revision, "file_sha": sha,
+        "config": "default", "split": "train", "aggregates": [{"function": "count", "alias": "rows"}], "limit": 10
+    });
+    let response = app()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/datasets/team/parquet-dataset/query")
+                .header("content-type", "application/json")
+                .body(Body::from(aggregate.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let json: serde_json::Value =
+        serde_json::from_slice(&collect_body_bytes(response).await).unwrap();
+    assert_eq!(json["rows"][0]["columns"]["rows"], 3);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -157,11 +157,6 @@ pub(crate) async fn dataset_query(
     request
         .validate()
         .map_err(|e| HubApiError::PathValidation(e.to_string()))?;
-    if !request.predicates.is_empty() || !request.aggregates.is_empty() {
-        return Err(HubApiError::PathValidation(
-            "query operation is not enabled".to_owned(),
-        ));
-    }
     let name = format!("{ns}/{repo_name}");
     let entry = state
         .store
@@ -205,18 +200,31 @@ pub(crate) async fn dataset_query(
         .ok_or(HubApiError::NotFound)?
         .length();
     let object_store = state.object_store.clone();
-    let columns = request.columns.clone();
+    let selected_columns = request.columns.clone();
+    let predicates = request.predicates.clone();
+    let aggregates = request.aggregates.clone();
     let offset = request.offset as usize;
     let limit = request.limit as usize;
     let read = tokio::task::spawn_blocking(move || {
-        crate::parquet_preview::read_rows(&object_store, key, size, offset, limit, &columns)
+        crate::parquet_preview::read_rows(
+            &object_store,
+            key,
+            size,
+            offset,
+            limit,
+            &selected_columns,
+            &predicates,
+            &aggregates,
+        )
     });
-    let (columns, rows) = tokio::time::timeout(std::time::Duration::from_secs(30), read)
+    let (output_columns, rows) = tokio::time::timeout(std::time::Duration::from_secs(30), read)
         .await
-        .map_err(|_| HubApiError::PathValidation("query deadline exceeded".to_owned()))?
-        .map_err(|_| HubApiError::PathValidation("query worker failed".to_owned()))??;
+        .map_err(|_timeout_error| {
+            HubApiError::PathValidation("query deadline exceeded".to_owned())
+        })?
+        .map_err(|_join_error| HubApiError::PathValidation("query worker failed".to_owned()))??;
     Ok(Json(DatasetViewerResponse {
-        columns,
+        columns: output_columns,
         rows,
         num_rows_total: None,
     }))
@@ -366,6 +374,8 @@ fn read_dataset_rows(
             size,
             offset,
             limit,
+            &[],
+            &[],
             &[],
         );
     }
