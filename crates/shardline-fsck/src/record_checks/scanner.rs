@@ -1,4 +1,4 @@
-use std::{io::Cursor, path::Path};
+use std::path::Path;
 
 // ── Re-exported to parent module so tests (via super::*) can see them ──
 pub(super) use shardline_index::{
@@ -350,6 +350,19 @@ pub(crate) fn inspect_chunks(
             }
         };
 
+        const MAX_CHUNK_BYTES: u64 = 2 * 1024 * 1024;
+        if metadata.length() > MAX_CHUNK_BYTES {
+            push_issue(
+                report,
+                FsckIssueKind::ChunkLengthMismatch,
+                chunk_location,
+                FsckIssueDetail::LengthMismatch {
+                    expected_length: MAX_CHUNK_BYTES,
+                    observed_length: metadata.length(),
+                },
+            )?;
+            continue;
+        }
         let chunk_bytes = read_full_object(object_store, &object_key, metadata.length())?;
         // XorbCdcV1 chunks are stored LZ4-compressed with a 4-byte
         // little-endian uncompressed-size prefix (mirror the download path in
@@ -473,13 +486,14 @@ pub(crate) fn inspect_native_xet_term(
         }
     };
 
-    let xorb_bytes = read_full_object(object_store, &object_key, metadata.length())?;
+    let mut xorb_file =
+        object_store.materialize_object_to_tempfile(&object_key, metadata.length())?;
     let expected_hash = parse_xet_hash_hex(&chunk.hash)?;
-    let mut reader = Cursor::new(xorb_bytes);
+    let mut reader = xorb_file.as_file_mut();
     // A stored container whose bytes fail to parse or validate is corrupt:
     // report it as a chunk hash mismatch instead of failing the whole fsck
-    // run. The reader is an in-memory cursor over already-read bytes, so any
-    // parse error here (including Io from out-of-bounds seeks) is corruption.
+    // run. The reader is backed by a bounded temporary file, so validation
+    // does not scale process memory with the xorb size.
     let validated = match validate_serialized_xorb(&mut reader, expected_hash) {
         Ok(validated) => validated,
         Err(_error) => {
@@ -549,6 +563,20 @@ pub(crate) fn inspect_native_xet_term(
             }
         };
 
+        const MAX_CHUNK_BYTES: u64 = 2 * 1024 * 1024;
+        if chunk_metadata.length() > MAX_CHUNK_BYTES {
+            push_issue(
+                report,
+                FsckIssueKind::ChunkLengthMismatch,
+                chunk_location,
+                FsckIssueDetail::LengthMismatch {
+                    expected_length: MAX_CHUNK_BYTES,
+                    observed_length: chunk_metadata.length(),
+                },
+            )?;
+            chunk_index = chunk_index.checked_add(1).ok_or(FsckError::Overflow)?;
+            return Ok(());
+        }
         let chunk_bytes =
             read_full_object(object_store, &chunk_object_key, chunk_metadata.length())?;
         let actual_chunk_hash = xet_hash_hex_string(chunk_hash(&chunk_bytes));

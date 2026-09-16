@@ -1,6 +1,8 @@
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
-    io::{Cursor, Read},
+    fs::File,
+    io::{Cursor, Read, Seek},
+    path::Path,
 };
 
 use shardline_index::{
@@ -62,7 +64,35 @@ pub fn parse_uploaded_shard(
     repository_scope: Option<&RepositoryScope>,
     limits: ShardMetadataLimits,
 ) -> Result<ParsedShardUpload, XetAdapterError> {
-    let parsed_shard = parse_shard_records(uploaded_shard, object_store, repository_scope, limits)?;
+    let mut reader = Cursor::new(uploaded_shard);
+    parse_uploaded_shard_from_reader(&mut reader, object_store, repository_scope, limits)
+}
+
+/// Parses a shard from a seekable file without copying the uploaded bytes into
+/// the process heap. Only the bounded metadata sections and normalized shard
+/// representation are retained.
+///
+/// # Errors
+///
+/// Returns an error when the file cannot be opened or the shard is invalid.
+pub fn parse_uploaded_shard_file(
+    object_store: &ServerObjectStore,
+    path: &Path,
+    repository_scope: Option<&RepositoryScope>,
+    limits: ShardMetadataLimits,
+) -> Result<ParsedShardUpload, XetAdapterError> {
+    let mut file = File::open(path).map_err(XetAdapterError::Io)?;
+    parse_uploaded_shard_from_reader(&mut file, object_store, repository_scope, limits)
+}
+
+fn parse_uploaded_shard_from_reader<R: Read + Seek>(
+    reader: &mut R,
+    object_store: &ServerObjectStore,
+    repository_scope: Option<&RepositoryScope>,
+    limits: ShardMetadataLimits,
+) -> Result<ParsedShardUpload, XetAdapterError> {
+    let parsed_shard =
+        parse_shard_records_from_reader(reader, object_store, repository_scope, limits)?;
     let shard_key = shard_object_key_local(&parsed_shard.shard_hash_hex)?;
     let was_present = object_store.metadata(&shard_key)?.is_some();
     let shard_length = u64::try_from(parsed_shard.normalized_bytes.len())?;
@@ -136,6 +166,22 @@ pub fn retained_shard_chunk_hashes(
     limits: ShardMetadataLimits,
 ) -> Result<Vec<String>, XetAdapterError> {
     let mut shard_reader = Cursor::new(shard_bytes);
+    retained_shard_chunk_hashes_from_reader(&mut shard_reader, limits)
+}
+
+/// Reads retained chunk metadata from a seekable shard without requiring the
+/// caller to first materialize the entire shard in memory.
+///
+/// # Errors
+///
+/// Returns an error when seeking, deserialization, or bounded section parsing fails.
+pub fn retained_shard_chunk_hashes_from_reader<R: Read + std::io::Seek>(
+    mut shard_reader: &mut R,
+    limits: ShardMetadataLimits,
+) -> Result<Vec<String>, XetAdapterError> {
+    shard_reader
+        .seek(std::io::SeekFrom::Start(0))
+        .map_err(XetAdapterError::Io)?;
     let header = MDBShardFileHeader::deserialize(&mut shard_reader)
         .map_err(|error| invalid_serialized_shard(&error))?;
     read_bounded_shard_sections(&mut shard_reader, limits, header.version)
@@ -149,13 +195,15 @@ struct NormalizedShardUpload {
     dedupe_chunk_hashes: Vec<String>,
 }
 
-fn parse_shard_records(
-    uploaded_shard: &[u8],
+fn parse_shard_records_from_reader<R: Read + Seek>(
+    mut shard_reader: &mut R,
     object_store: &ServerObjectStore,
     repository_scope: Option<&RepositoryScope>,
     limits: ShardMetadataLimits,
 ) -> Result<NormalizedShardUpload, XetAdapterError> {
-    let mut shard_reader = Cursor::new(uploaded_shard);
+    shard_reader
+        .seek(std::io::SeekFrom::Start(0))
+        .map_err(XetAdapterError::Io)?;
     let header = MDBShardFileHeader::deserialize(&mut shard_reader)
         .map_err(|error| invalid_serialized_shard(&error))?;
     let version = header.version;
@@ -527,9 +575,9 @@ fn load_xorb_range_info(
     let Some(metadata) = object_store.metadata(&key)? else {
         return Err(XetAdapterError::MissingReferencedXorb);
     };
-    let bytes = shardline_server_core::read_full_object(object_store, &key, metadata.length())?;
+    let mut file = object_store.materialize_object_to_tempfile(&key, metadata.length())?;
     let expected_hash = parse_xet_hash_hex(hash_hex)?;
-    let mut reader = Cursor::new(bytes);
+    let mut reader = file.as_file_mut();
     let validated = validate_serialized_xorb(&mut reader, expected_hash)?;
     let packed_chunk_ends = validated
         .chunks()

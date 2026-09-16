@@ -1,5 +1,5 @@
 use std::{
-    io::{Error as IoError, ErrorKind, SeekFrom},
+    io::{Error as IoError, ErrorKind, Seek, SeekFrom},
     pin::Pin,
 };
 
@@ -12,13 +12,13 @@ use shardline_storage::{LocalObjectStore, ObjectKey, ObjectStore, S3ObjectStore}
 use tokio::{
     fs::File,
     io::{AsyncReadExt, AsyncSeekExt},
+    sync::mpsc,
 };
 use tracing::{debug, trace, warn};
 
 use crate::{
     ServerError, chunk_store::chunk_object_key, error::ObjectStoreError, local_backend::chunk_hash,
-    object_store::ServerObjectStore, object_store::read_full_object,
-    object_store::run_before_local_object_read_hook,
+    object_store::ServerObjectStore, object_store::run_before_local_object_read_hook,
 };
 
 pub const STREAM_READ_BUFFER_BYTES: u64 = 1024 * 1024;
@@ -48,20 +48,53 @@ pub(crate) fn validated_xorb_byte_range_stream(
         return Err(ServerError::RangeNotSatisfiable);
     }
 
-    let xorb_data = read_full_object(object_store, object_key, total_length)?;
+    let mut xorb_data = object_store.materialize_object_to_tempfile(object_key, total_length)?;
     let expected_hash = parse_xet_hash_hex(hash_hex)?;
-    let mut cursor = std::io::Cursor::new(xorb_data.as_slice());
-    crate::xet_adapter::validate_serialized_xorb(&mut cursor, expected_hash)?;
+    {
+        let mut cursor = xorb_data.as_file_mut();
+        crate::xet_adapter::validate_serialized_xorb(&mut cursor, expected_hash)?;
+    }
 
-    let start = usize::try_from(range.start())?;
-    let end_exclusive = usize::try_from(
-        range
-            .end_inclusive()
-            .checked_add(1)
-            .ok_or(ServerError::Overflow)?,
-    )?;
-    let bytes = Bytes::from(xorb_data).slice(start..end_exclusive);
-    Ok(Box::pin(stream::once(async move { Ok(bytes) })))
+    let start = range.start();
+    let end = range.end_inclusive();
+    let (sender, receiver) = mpsc::channel::<Result<Bytes, ServerError>>(2);
+    tokio::task::spawn_blocking(move || {
+        use std::io::Read;
+        let cursor = xorb_data.as_file_mut();
+        let mut offset = start;
+        while offset <= end {
+            let length = end
+                .checked_sub(offset)
+                .and_then(|value| value.checked_add(1))
+                .unwrap_or(0)
+                .min(STREAM_READ_BUFFER_BYTES);
+            let Ok(length) = usize::try_from(length) else {
+                drop(sender.blocking_send(Err(ServerError::Overflow)));
+                return;
+            };
+            if cursor.seek(std::io::SeekFrom::Start(offset)).is_err() {
+                drop(
+                    sender.blocking_send(Err(ServerError::Io(IoError::other("xorb seek failed")))),
+                );
+                return;
+            }
+            let mut bytes = vec![0_u8; length];
+            if let Err(error) = cursor.read_exact(&mut bytes) {
+                drop(sender.blocking_send(Err(ServerError::Io(error))));
+                return;
+            }
+            if sender.blocking_send(Ok(Bytes::from(bytes))).is_err() {
+                return;
+            }
+            offset = match offset.checked_add(u64::try_from(length).unwrap_or(0)) {
+                Some(next) => next,
+                None => break,
+            };
+        }
+    });
+    Ok(Box::pin(stream::unfold(receiver, |mut receiver| async {
+        receiver.recv().await.map(|item| (item, receiver))
+    })))
 }
 
 /// Returns whether a serialized xorb object is stored under `hash_hex`.
@@ -98,19 +131,18 @@ async fn read_xorb_backed_chunks(
         .metadata(&xorb_key)?
         .ok_or(ServerError::NotFound)?;
     let xorb_length = metadata.length();
-    let xorb_data = read_full_object(&object_store, &xorb_key, xorb_length)?;
+    let mut xorb_data = object_store.materialize_object_to_tempfile(&xorb_key, xorb_length)?;
 
     // 2. Parse and validate the xorb (verifies xorb hash against expected hash).
     let expected_hash = parse_xet_hash_hex(xorb_hash_hex)?;
-    let mut cursor = std::io::Cursor::new(xorb_data.as_slice());
-    let validated = crate::xet_adapter::validate_serialized_xorb(&mut cursor, expected_hash)?;
+    let validated = {
+        let mut cursor = xorb_data.as_file_mut();
+        crate::xet_adapter::validate_serialized_xorb(&mut cursor, expected_hash)?
+    };
 
-    // 3. Decode all chunks (decompresses and verifies per-chunk content hashes).
-    std::io::Seek::seek(&mut cursor, SeekFrom::Start(0))?;
-    let decoded_chunks =
-        crate::xet_adapter::decode_serialized_xorb_chunks(&mut cursor, &validated)?;
-
-    // 4. Filter and slice by the requested byte range.
+    // 3. Decode and emit one chunk at a time. A bounded channel provides
+    // backpressure from the HTTP response to the decoder and keeps decoded
+    // memory proportional to one chunk rather than the complete xorb.
     let requested_start = range.map_or(0, |value| value.start());
     let requested_end = range.map_or_else(
         || {
@@ -122,41 +154,54 @@ async fn read_xorb_backed_chunks(
         |value| Ok(value.end_inclusive()),
     )?;
 
-    let mut terms = Vec::new();
-    for chunk in &record.chunks {
-        let chunk_end = chunk
-            .offset
-            .checked_add(chunk.length)
-            .and_then(|v| v.checked_sub(1))
-            .ok_or(ServerError::Overflow)?;
-        let start = requested_start.max(chunk.offset);
-        let end = requested_end.min(chunk_end);
-        if start > end {
-            continue;
+    let (sender, receiver) = mpsc::channel::<Result<Bytes, ServerError>>(2);
+    let chunks = record.chunks.clone();
+    tokio::task::spawn_blocking(move || {
+        let mut cursor = xorb_data.as_file_mut();
+        let result = crate::xet_adapter::try_for_each_serialized_xorb_chunk(
+            &mut cursor,
+            &validated,
+            |decoded| {
+                let chunk_index = decoded.descriptor().unpacked_start();
+                let Some(chunk) = chunks.iter().find(|chunk| chunk.offset == chunk_index) else {
+                    return Err(ServerError::Overflow);
+                };
+                let chunk_end = chunk
+                    .offset
+                    .checked_add(chunk.length)
+                    .and_then(|v| v.checked_sub(1))
+                    .ok_or(ServerError::Overflow)?;
+                let start = requested_start.max(chunk.offset);
+                let end = requested_end.min(chunk_end);
+                if start <= end {
+                    let relative_start = usize::try_from(
+                        start
+                            .checked_sub(chunk.offset)
+                            .ok_or(ServerError::Overflow)?,
+                    )?;
+                    let relative_end = usize::try_from(
+                        end.checked_sub(chunk.offset).ok_or(ServerError::Overflow)?,
+                    )?;
+                    let sliced = decoded
+                        .data()
+                        .get(relative_start..=relative_end)
+                        .ok_or(ServerError::Overflow)?
+                        .to_vec();
+                    sender
+                        .blocking_send(Ok(Bytes::from(sliced)))
+                        .map_err(|_error| ServerError::RequestBodyTooLarge)?;
+                }
+                Ok(())
+            },
+        );
+        if let Err(error) = result.map_err(crate::server_frontend::xet::map_xorb_visit_error_server)
+        {
+            drop(sender.blocking_send(Err(error)));
         }
-        let relative_start = start
-            .checked_sub(chunk.offset)
-            .ok_or(ServerError::Overflow)?;
-        let relative_end = end.checked_sub(chunk.offset).ok_or(ServerError::Overflow)?;
-
-        // Look up the decoded chunk by its index within the xorb.
-        let chunk_index = chunk.range_start as usize;
-        let decoded = decoded_chunks
-            .get(chunk_index)
-            .ok_or(ServerError::Overflow)?;
-        let decoded_data = decoded.data();
-
-        let range_start = usize::try_from(relative_start)?;
-        let range_end = usize::try_from(relative_end)?;
-        let sliced = decoded_data
-            .get(range_start..=range_end)
-            .ok_or(ServerError::Overflow)?
-            .to_vec();
-        terms.push(Bytes::from(sliced));
-    }
-
-    let stream = stream::iter(terms).map(Ok::<Bytes, ServerError>);
-    Ok(Box::pin(stream))
+    });
+    Ok(Box::pin(stream::unfold(receiver, |mut receiver| async {
+        receiver.recv().await.map(|item| (item, receiver))
+    })))
 }
 
 /// Streams a chunk-backed file record without materializing the complete object.

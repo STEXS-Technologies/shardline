@@ -54,6 +54,7 @@ pub(super) struct CacheInner {
     pub(super) entries: HashMap<ReconstructionCacheKey, MemoryEntry>,
     pub(super) eviction_order: BTreeMap<EvictionKey, ReconstructionCacheKey>,
     pub(super) next_seq: u64,
+    pub(super) total_bytes: usize,
 }
 
 impl CacheInner {
@@ -62,6 +63,7 @@ impl CacheInner {
             entries: HashMap::new(),
             eviction_order: BTreeMap::new(),
             next_seq: 0,
+            total_bytes: 0,
         }
     }
 
@@ -69,15 +71,20 @@ impl CacheInner {
         let inserted_at = entry.inserted_at;
         let seq = entry.seq;
         if let Some(old) = self.entries.insert(key.clone(), entry) {
+            self.total_bytes = self.total_bytes.saturating_sub(old.payload.len());
             self.eviction_order
                 .remove(&EvictionKey(old.inserted_at, old.seq));
         }
         self.eviction_order
             .insert(EvictionKey(inserted_at, seq), key.clone());
+        if let Some(current) = self.entries.get(key) {
+            self.total_bytes = self.total_bytes.saturating_add(current.payload.len());
+        }
     }
 
     pub(super) fn remove(&mut self, key: &ReconstructionCacheKey) -> Option<MemoryEntry> {
         if let Some(entry) = self.entries.remove(key) {
+            self.total_bytes = self.total_bytes.saturating_sub(entry.payload.len());
             self.eviction_order
                 .remove(&EvictionKey(entry.inserted_at, entry.seq));
             Some(entry)
@@ -89,7 +96,9 @@ impl CacheInner {
     pub(super) fn evict_oldest(&mut self) {
         while let Some((_eviction_key, key)) = self.eviction_order.pop_first() {
             if self.entries.contains_key(&key) {
-                self.entries.remove(&key);
+                if let Some(entry) = self.entries.remove(&key) {
+                    self.total_bytes = self.total_bytes.saturating_sub(entry.payload.len());
+                }
                 return;
             }
         }

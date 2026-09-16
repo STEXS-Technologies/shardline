@@ -3074,6 +3074,7 @@ dependencies = [
  "bytes",
  "chrono",
  "flate2",
+ "futures-util",
  "getrandom 0.3.4",
  "hex",
  "hmac",
@@ -3088,6 +3089,7 @@ dependencies = [
  "shardline-protocol-adapters",
  "shardline-server-core",
  "shardline-storage",
+ "tempfile",
  "thiserror",
  "tokio",
  "tower-http",
@@ -3293,6 +3295,7 @@ dependencies = [
  "shardline-protocol",
  "shardline-storage",
  "shardline-validation",
+ "tempfile",
  "thiserror",
 ]
 
@@ -3345,6 +3348,7 @@ name = "shardline-xet-adapter"
 version = "1.10.0"
 dependencies = [
  "axum",
+ "blake3",
  "serde",
  "shardline-index",
  "shardline-metrics",

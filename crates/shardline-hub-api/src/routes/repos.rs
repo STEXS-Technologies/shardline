@@ -8,7 +8,6 @@ use axum::{
     response::IntoResponse,
 };
 
-use shardline_protocol::ByteRange;
 use shardline_server_core::AuthorizedRepository;
 use shardline_storage::ObjectStore;
 
@@ -20,7 +19,12 @@ use crate::{
 use shardline_index::hub::HubRepoType;
 use shardline_protocol::TokenScope;
 
-use super::{HubRepository, HubState, authorize, lfs_object_key, repo_type_path};
+use super::{
+    HubRepository, HubState, authorize, lfs_object_key, read_object_prefix, repo_type_path,
+    stream_object,
+};
+
+const MAX_README_FRONT_MATTER_BYTES: usize = 64 * 1024;
 
 // ---- Repo create (generic, requires Write) ----
 
@@ -438,13 +442,29 @@ pub(crate) async fn repo_modelcard(
         .iter()
         .find(|f| f.path == "README.md")
         .ok_or(HubApiError::NotFound)?;
-    let resp_headers = [
-        ("Content-Type", "text/markdown; charset=utf-8"),
-        ("X-Shardline-SHA", readme.sha.as_str()),
-    ];
-    let content = read_file_from_object_store(&state, &readme.sha, repo.capability())
-        .ok_or(HubApiError::NotFound)?;
-    Ok((resp_headers, content).into_response())
+    let key = lfs_object_key(&readme.sha, repo.capability())
+        .map_err(|error| HubApiError::PathValidation(error.to_string()))?;
+    let length = state
+        .object_store
+        .metadata(&key)
+        .map_err(|error| HubApiError::CasError(error.to_string()))?
+        .ok_or(HubApiError::NotFound)?
+        .length();
+    let mut response = stream_object(&state.object_store, key, length).into_response();
+    response.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        "text/markdown; charset=utf-8"
+            .parse()
+            .map_err(|_error| HubApiError::NotFound)?,
+    );
+    response.headers_mut().insert(
+        "x-shardline-sha",
+        readme.sha.parse().map_err(|_error| HubApiError::NotFound)?,
+    );
+    response
+        .headers_mut()
+        .insert(axum::http::header::CONTENT_LENGTH, length.into());
+    Ok(response)
 }
 
 // ---- Repo revisions (requires Read) ----
@@ -500,7 +520,8 @@ pub(crate) async fn repo_info(
         && let Some(sha) = commit_sha
         && let Ok(files) = state.store.get_files(&sha)
         && let Some(readme) = files.iter().find(|f| f.path == "README.md")
-        && let Some(content) = read_file_from_object_store(&state, &readme.sha, repo.capability())
+        && let Some(content) =
+            read_file_prefix_from_object_store(&state, &readme.sha, repo.capability())
     {
         response.card_data = parse_yaml_frontmatter(&content);
     }
@@ -573,16 +594,20 @@ pub(crate) async fn repo_delete_compat(
 
 /// Reads a file from the ObjectStore by its SHA, using the repository-scoped
 /// LFS key so reads find the namespaced writes made by `apply_commit`.
-fn read_file_from_object_store(
+fn read_file_prefix_from_object_store(
     state: &HubState,
     sha: &str,
     auth: &AuthorizedRepository,
 ) -> Option<Vec<u8>> {
     let key = lfs_object_key(sha, auth).ok()?;
     let size = state.object_store.metadata(&key).ok()??.length();
-    let range_end = size.checked_sub(1)?;
-    let range = ByteRange::new(0, range_end).ok()?;
-    state.object_store.read_range(&key, range).ok()
+    read_object_prefix(
+        &state.object_store,
+        &key,
+        size,
+        MAX_README_FRONT_MATTER_BYTES,
+    )
+    .ok()
 }
 
 /// Splits a `owner/name` repository identifier into `(owner, name)`. When no

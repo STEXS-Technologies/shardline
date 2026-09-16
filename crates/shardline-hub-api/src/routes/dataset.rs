@@ -2,14 +2,17 @@ use axum::{
     Json,
     extract::{Path, Query, State},
 };
-use shardline_protocol::ByteRange;
 use shardline_server_core::AuthorizedRepository;
 use shardline_storage::ObjectStore;
 
 use crate::{error::HubApiError, models::*};
 use shardline_index::hub::{HubFileEntry, HubRepoType};
 
-use super::{HubRepository, HubState, lfs_object_key};
+use super::{HubRepository, HubState, lfs_object_key, read_object_prefix};
+
+/// Upper bound for bytes retained by the lightweight CSV/JSONL preview path.
+/// The complete object is never materialized merely to return a small page.
+const MAX_DATASET_PREVIEW_BYTES: usize = 8 * 1024 * 1024;
 
 // ---- Dataset viewer endpoints ----
 
@@ -94,10 +97,7 @@ pub(crate) async fn dataset_first_rows(
             }));
         }
     };
-    let content = read_file_from_object_store(&state, &data_file.sha, repo.capability())
-        .ok_or_else(|| {
-            HubApiError::PathValidation("file content not available in store".to_owned())
-        })?;
+    let content = read_dataset_preview(&state, &data_file.sha, repo.capability())?;
     let limit = query.limit.min(1000);
     let rows = parse_rows_from_content(&content, &data_file.path, 0, limit)?;
     let columns = rows
@@ -138,10 +138,7 @@ pub(crate) async fn dataset_viewer(
     let data_file = find_dataset_file(&files, &query.config, &split).ok_or_else(|| {
         HubApiError::PathValidation("no data file found for config/split".to_owned())
     })?;
-    let content = read_file_from_object_store(&state, &data_file.sha, repo.capability())
-        .ok_or_else(|| {
-            HubApiError::PathValidation("file content not available in store".to_owned())
-        })?;
+    let content = read_dataset_preview(&state, &data_file.sha, repo.capability())?;
     let length = query.length.min(10000);
     let rows = parse_rows_from_content(&content, &data_file.path, query.offset, length)?;
     let columns = rows
@@ -279,16 +276,21 @@ pub(crate) fn parse_csv_rows(
 
 /// Reads a file from the ObjectStore by its SHA, namespaced by repository so
 /// reads find the repository-scoped writes made during commits.
-fn read_file_from_object_store(
+fn read_dataset_preview(
     state: &HubState,
     sha: &str,
     auth: &AuthorizedRepository,
-) -> Option<Vec<u8>> {
-    let key = lfs_object_key(sha, auth).ok()?;
-    let size = state.object_store.metadata(&key).ok()??.length();
-    let range_end = size.checked_sub(1)?;
-    let range = ByteRange::new(0, range_end).ok()?;
-    state.object_store.read_range(&key, range).ok()
+) -> Result<Vec<u8>, HubApiError> {
+    let key = lfs_object_key(sha, auth)
+        .map_err(|error| HubApiError::PathValidation(error.to_string()))?;
+    let size = state
+        .object_store
+        .metadata(&key)
+        .map_err(|error| HubApiError::CasError(error.to_string()))?
+        .ok_or(HubApiError::NotFound)?
+        .length();
+    read_object_prefix(&state.object_store, &key, size, MAX_DATASET_PREVIEW_BYTES)
+        .map_err(|error| HubApiError::CasError(error.to_string()))
 }
 
 /// Parses a single CSV line, respecting double-quoted fields that may contain

@@ -26,7 +26,7 @@ use crate::{
     },
     auth::authorize_static_bearer_token,
     metrics,
-    upload_ingest::{RequestBodyReader, read_body_to_bytes},
+    upload_ingest::RequestBodyReader,
     xet_adapter::{validate_hash_path, validate_xorb_transfer_namespace},
 };
 
@@ -111,19 +111,12 @@ pub(super) async fn upload_xorb(
         .try_acquire()
         .ok_or(ServerError::WorkQueueSaturated)?;
     validate_hash_path(&hash)?;
-    let mut body_reader =
-        RequestBodyReader::from_body(body, state.config.max_request_body_bytes())?;
-    let body_bytes = read_body_to_bytes(&mut body_reader).await?;
-    let xorb_length = body_bytes.len() as u64;
-    let response = state
-        .backend
-        .upload_xorb_stream(
-            &hash,
-            RequestBodyReader::from_bytes(bytes::Bytes::from(body_bytes)),
-        )
-        .await?;
-    if response.was_inserted {
-        metrics::record_xorb_stored(xorb_length);
+    let body_reader = RequestBodyReader::from_body(body, state.config.max_request_body_bytes())?;
+    let response = state.backend.upload_xorb_stream(&hash, body_reader).await?;
+    if response.was_inserted
+        && let Ok(length) = state.backend.xorb_length(&hash).await
+    {
+        metrics::record_xorb_stored(length);
     }
     Ok(Json(response))
 }

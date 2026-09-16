@@ -1,11 +1,9 @@
-use std::io::Cursor;
-
 use shardline_index::{FileChunkRecord, parse_xet_hash_hex};
 use shardline_storage::{ObjectKey, ObjectStore};
 
 use crate::{
     InvalidSerializedShardError, ServerError,
-    object_store::{ServerObjectStore, read_full_object},
+    object_store::ServerObjectStore,
     xet_adapter::{
         XetAdapterError, XorbVisitError, try_for_each_serialized_xorb_chunk,
         validate_serialized_xorb, visit_stored_xorb_chunk_hashes,
@@ -13,7 +11,7 @@ use crate::{
     },
 };
 
-fn map_xorb_visit_error_server(error: XorbVisitError<ServerError>) -> ServerError {
+pub(crate) fn map_xorb_visit_error_server(error: XorbVisitError<ServerError>) -> ServerError {
     match error {
         XorbVisitError::Parse(error) => ServerError::from(error),
         XorbVisitError::Visitor(error) => error,
@@ -73,9 +71,10 @@ pub(super) fn append_referenced_term_bytes(
     let Some(metadata) = object_store.metadata(&xorb_key)? else {
         return Err(ServerError::MissingReferencedXorb);
     };
-    let xorb_bytes = read_full_object(object_store, &xorb_key, metadata.length())?;
+    let mut xorb_file =
+        object_store.materialize_object_to_tempfile(&xorb_key, metadata.length())?;
     let expected_hash = parse_xet_hash_hex(&term.hash)?;
-    let mut reader = Cursor::new(xorb_bytes);
+    let mut reader = xorb_file.as_file_mut();
     let validated = validate_serialized_xorb(&mut reader, expected_hash)?;
     let range_start = usize::try_from(term.range_start)?;
     let range_end = usize::try_from(term.range_end)?;

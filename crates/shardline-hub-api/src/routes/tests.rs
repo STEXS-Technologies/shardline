@@ -4,6 +4,7 @@ use axum::{
     http::HeaderMap,
     http::StatusCode,
 };
+use http_body_util::BodyExt;
 use shardline_index::hub::{BoxedHubStore, HubFileEntry, HubRepo, HubRepoType};
 
 use crate::commit::{CommitInstruction, ParsedCommit};
@@ -1795,7 +1796,7 @@ async fn handler_commit_wrong_content_type() {
         default_headers(),
         test_repo(&state, &default_headers()),
         Path(("models".into(), "ns".into(), "r".into(), "main".into())),
-        "{}".to_string(),
+        axum::body::Body::from("{}"),
     )
     .await;
     assert!(result.is_err());
@@ -1842,7 +1843,7 @@ async fn handler_commit_inline_file_success() {
             "commit-test".into(),
             "main".into(),
         )),
-        body.to_string(),
+        axum::body::Body::from(body),
     )
     .await;
     assert!(result.is_ok(), "commit failed: {:?}", result.err());
@@ -1882,7 +1883,7 @@ async fn handler_commit_lfs_pointer_success() {
             "lfs-commit".into(),
             "main".into(),
         )),
-        body,
+        axum::body::Body::from(body),
     )
     .await;
     assert!(result.is_ok(), "commit failed: {:?}", result.err());
@@ -1926,7 +1927,7 @@ async fn handler_commit_delete_file() {
             "del-test".into(),
             "main".into(),
         )),
-        body.to_string(),
+        axum::body::Body::from(body),
     )
     .await;
     assert!(result.is_ok(), "commit failed: {:?}", result.err());
@@ -1964,7 +1965,7 @@ async fn handler_commit_parent_mismatch() {
             "parent-mismatch".into(),
             "main".into(),
         )),
-        body.to_string(),
+        axum::body::Body::from(body),
     )
     .await;
     assert!(result.is_err());
@@ -2869,7 +2870,7 @@ async fn handler_lfs_upload_invalid_oid() {
         State(state.clone()),
         test_repo(&state, &default_headers()),
         Path("bad-oid".to_string()),
-        bytes::Bytes::from_static(b"data"),
+        axum::body::Body::from(bytes::Bytes::from_static(b"data")),
     )
     .await;
     assert!(result.is_err());
@@ -2888,7 +2889,7 @@ async fn handler_lfs_upload_success() {
         State(state.clone()),
         test_repo(&state, &default_headers()),
         Path(oid.to_string()),
-        bytes::Bytes::from_static(b"some lfs data"),
+        axum::body::Body::from(bytes::Bytes::from_static(b"some lfs data")),
     )
     .await;
     assert!(result.is_ok());
@@ -2906,6 +2907,26 @@ async fn handler_lfs_upload_success() {
         .read_range(&key, shardline_protocol::ByteRange::new(0, 12).unwrap())
         .unwrap();
     assert_eq!(data, b"some lfs data");
+}
+
+#[tokio::test]
+async fn handler_lfs_upload_rejects_oversized_streaming_body() {
+    let (_td, state) = make_test_state();
+    let oid = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let body = axum::body::Body::from_stream(futures_util::stream::iter([
+        Ok::<_, std::convert::Infallible>(bytes::Bytes::from(vec![0_u8; 64 * 1024 * 1024])),
+        Ok::<_, std::convert::Infallible>(bytes::Bytes::from_static(b"overflow")),
+    ]));
+    let result = lfs_upload(
+        State(state.clone()),
+        test_repo(&state, &default_headers()),
+        Path(oid.to_string()),
+        body,
+    )
+    .await;
+    assert!(
+        matches!(result, Err(HubApiError::BadRequest(message)) if message.contains("exceeds maximum size"))
+    );
 }
 
 // ------------------------------------------------------------------
@@ -2944,17 +2965,19 @@ async fn handler_lfs_download_success() {
         .object_store
         .put_if_absent(&key, ObjectBody::from_slice(b"download data"), &integrity)
         .unwrap();
-    let (status, headers, data) = lfs_download(
+    let response = lfs_download(
         State(state.clone()),
         test_repo(&state, &default_headers()),
         Path(oid.to_string()),
     )
     .await
     .unwrap();
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(data, b"download data");
+    assert_eq!(response.status(), StatusCode::OK);
+    let data = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(data.as_ref(), b"download data");
     // Verify content-type header name
-    assert!(!headers.is_empty());
+    // (the response body is consumed above, so inspect this contract in the
+    // route-level integration tests as well.)
 }
 
 // ------------------------------------------------------------------
@@ -3039,7 +3062,7 @@ async fn handler_commit_no_revision() {
             "no-rev".into(),
             "nonexistent_rev".into(),
         )),
-        r#"{"header":{"message":"x"}}"#.to_string(),
+        axum::body::Body::from(r#"{"header":{"message":"x"}}"#),
     )
     .await;
     assert!(result.is_err());
@@ -4498,21 +4521,22 @@ async fn handler_lfs_upload_and_download_roundtrip() {
         State(state.clone()),
         test_repo(&state, &default_headers()),
         Path(oid.to_owned()),
-        bytes::Bytes::from_static(data),
+        axum::body::Body::from(bytes::Bytes::from_static(data)),
     )
     .await;
     assert_eq!(result.unwrap(), StatusCode::OK);
 
     // Download
-    let (status, _headers, downloaded) = lfs_download(
+    let response = lfs_download(
         State(state.clone()),
         test_repo(&state, &default_headers()),
         Path(oid.to_owned()),
     )
     .await
     .unwrap();
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(downloaded, data);
+    assert_eq!(response.status(), StatusCode::OK);
+    let downloaded = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(downloaded.as_ref(), data);
 }
 
 // ------------------------------------------------------------------

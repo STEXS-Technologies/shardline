@@ -206,11 +206,44 @@ pub(crate) async fn read_body_to_bytes(
     Ok(body)
 }
 
+/// Drains a request body into a temporary file while hashing it. This keeps
+/// request-sized protocol objects out of the heap; callers can pass the file
+/// directly to a file-capable object store.
+pub(crate) async fn stage_body_to_tempfile(
+    reader: &mut RequestBodyReader,
+) -> Result<
+    (
+        tempfile::NamedTempFile,
+        u64,
+        shardline_protocol::ShardlineHash,
+    ),
+    ServerError,
+> {
+    let temporary = tempfile::NamedTempFile::new()?;
+    let mut output = tokio::fs::File::create(temporary.path()).await?;
+    let mut hasher = blake3::Hasher::new();
+    let mut length = 0_u64;
+    while let Some(bytes) = reader.next_bytes().await? {
+        hasher.update(&bytes);
+        length = checked_add(length, u64::try_from(bytes.len())?)?;
+        tokio::io::AsyncWriteExt::write_all(&mut output, &bytes).await?;
+    }
+    tokio::io::AsyncWriteExt::flush(&mut output).await?;
+    Ok((
+        temporary,
+        length,
+        shardline_protocol::ShardlineHash::from_bytes(*hasher.finalize().as_bytes()),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use axum::body::Bytes;
+    use md5::{Digest, Md5};
+    use std::sync::{Arc, Mutex};
+    use tokio::io::AsyncReadExt;
 
-    use super::{ChunkBuffer, RequestBodyReader, read_body_to_bytes};
+    use super::{ChunkBuffer, RequestBodyReader, read_body_to_bytes, stage_body_to_tempfile};
 
     // ------------------------------------------------------------------
     // ChunkBuffer
@@ -404,6 +437,62 @@ mod tests {
         assert!(second.is_some());
         let third = reader.next_bytes().await.unwrap();
         assert!(third.is_none());
+    }
+
+    #[tokio::test]
+    async fn reader_chain_streams_multiple_readers_in_order() {
+        let readers = vec![
+            std::io::Cursor::new(b"first-".to_vec()),
+            std::io::Cursor::new(b"second".to_vec()),
+        ];
+        let mut reader = RequestBodyReader::from_reader_chain(readers, 3);
+        let mut output = Vec::new();
+        while let Some(chunk) = reader.next_bytes().await.unwrap() {
+            output.extend_from_slice(&chunk);
+        }
+        assert_eq!(output, b"first-second");
+    }
+
+    #[tokio::test]
+    async fn md5_tee_hashes_streamed_chunks_without_buffering() {
+        let hasher = Arc::new(Mutex::new(Md5::new()));
+        let mut reader = RequestBodyReader::from_bytes(Bytes::from_static(b"stream me"))
+            .with_md5_tee(hasher.clone());
+        let mut output = Vec::new();
+        while let Some(chunk) = reader.next_bytes().await.unwrap() {
+            output.extend_from_slice(&chunk);
+        }
+        let digest = hasher.lock().unwrap().clone().finalize();
+        assert_eq!(output, b"stream me");
+        assert_eq!(format!("{digest:x}"), "514d2e08c72387a27d4420217482a513");
+    }
+
+    #[tokio::test]
+    async fn stage_body_to_tempfile_streams_and_returns_integrity() {
+        let mut reader = RequestBodyReader::from_bytes(Bytes::from_static(b"stage this"));
+        let (temporary, length, hash) = stage_body_to_tempfile(&mut reader).await.unwrap();
+        assert_eq!(length, 10);
+        let mut file = tokio::fs::File::open(temporary.path()).await.unwrap();
+        let mut contents = Vec::new();
+        file.read_to_end(&mut contents).await.unwrap();
+        assert_eq!(contents, b"stage this");
+        assert_eq!(
+            hash,
+            shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(b"stage this").as_bytes())
+        );
+    }
+
+    #[tokio::test]
+    async fn md5_tee_propagates_upstream_errors() {
+        let hasher = Arc::new(Mutex::new(Md5::new()));
+        let mut reader = RequestBodyReader::from_stream(futures_util::stream::once(async {
+            Err(crate::ServerError::RequestBodyTooLarge)
+        }))
+        .with_md5_tee(hasher);
+        assert!(matches!(
+            reader.next_bytes().await,
+            Err(crate::ServerError::RequestBodyTooLarge)
+        ));
     }
 
     // ------------------------------------------------------------------
