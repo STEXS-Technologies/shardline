@@ -15,6 +15,8 @@ pub struct QueryMetrics {
     pub returned_bytes: IntCounter,
     pub scanned_bytes: IntCounter,
     pub range_requests: IntCounter,
+    pub cache_hits: IntCounter,
+    pub cache_misses: IntCounter,
     pub failures: IntCounter,
     pub failure_classes: IntCounterVec,
     pub queue_seconds: Histogram,
@@ -65,6 +67,14 @@ impl QueryMetrics {
             "shardline_query_range_requests_total",
             "Object-store range requests issued by bounded queries",
         );
+        let cache_hits = must_counter(
+            "shardline_query_cache_hits_total",
+            "Bounded queries served from the query result cache",
+        );
+        let cache_misses = must_counter(
+            "shardline_query_cache_misses_total",
+            "Bounded queries not served from the query result cache",
+        );
         let failures = must_counter(
             "shardline_query_failures_total",
             "Bounded queries that failed after admission",
@@ -95,6 +105,8 @@ impl QueryMetrics {
             &returned_bytes,
             &scanned_bytes,
             &range_requests,
+            &cache_hits,
+            &cache_misses,
             &failures,
         ] {
             registry.register(Box::new((*metric).clone())).ok();
@@ -116,6 +128,8 @@ impl QueryMetrics {
             returned_bytes,
             scanned_bytes,
             range_requests,
+            cache_hits,
+            cache_misses,
             failures,
             failure_classes,
             queue_seconds,
@@ -135,8 +149,11 @@ mod tests {
         metrics.requests.inc();
         metrics.scan_limit_rejected.inc();
         metrics.returned_rows.inc_by(3);
+        metrics.cache_misses.inc();
         assert_eq!(metrics.requests.get(), 1);
         assert_eq!(metrics.scan_limit_rejected.get(), 1);
         assert_eq!(metrics.returned_rows.get(), 3);
+        assert_eq!(metrics.cache_misses.get(), 1);
+        assert_eq!(metrics.cache_hits.get(), 0);
     }
 }

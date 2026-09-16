@@ -277,6 +277,10 @@ pub fn read_rows(
     cancelled: Arc<AtomicBool>,
 ) -> Result<(Vec<String>, Vec<DatasetRow>), QueryFailure> {
     shardline_metrics::metrics().query.requests.inc();
+    // Native execution intentionally has no result cache yet. Record this
+    // explicitly so cache behavior remains observable when a cache is added
+    // or when the external DuckDB path is compared with this reader.
+    shardline_metrics::metrics().query.cache_misses.inc();
     let started = Instant::now();
     let _admission = admit_query(tenant)
         .map_err(|error| QueryFailure::new(error, QueryFailureClass::Admission))?;
