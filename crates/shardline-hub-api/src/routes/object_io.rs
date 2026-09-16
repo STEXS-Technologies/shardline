@@ -210,6 +210,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stream_empty_object_completes_without_storage_read() {
+        let (_temp, store) = local_store();
+        let key = ObjectKey::parse("hub/empty-stream.bin").expect("key");
+        let mut body = stream_object(&store, key, 0);
+        assert!(body.frame().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn stream_small_object_returns_exact_bytes_then_end() {
+        let (_temp, store) = local_store();
+        let key = ObjectKey::parse("hub/small-stream.bin").expect("key");
+        put(&store, &key, b"small");
+        let mut body = stream_object(&store, key, 5);
+        let frame = body
+            .frame()
+            .await
+            .expect("data frame")
+            .expect("valid frame");
+        assert_eq!(
+            frame.into_data().expect("data"),
+            Bytes::from_static(b"small")
+        );
+        assert!(body.frame().await.is_none());
+    }
+
+    #[tokio::test]
     async fn blackhole_stream_fails_without_buffering_or_panicking() {
         let store = ServerObjectStore::blackhole();
         let key = ObjectKey::parse("hub/missing.bin").expect("key");
