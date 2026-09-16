@@ -39,6 +39,12 @@ static QUERY_ADMISSION: OnceLock<Mutex<AdmissionState>> = OnceLock::new();
 
 const MAX_QUERIES_PER_TENANT: usize = 2;
 
+fn invalid_parquet_error() -> HubApiError {
+    // Keep parser/storage details out of the client response. They may contain
+    // object keys, local paths, backend URLs, or provider error text.
+    HubApiError::PathValidation("invalid parquet input".to_owned())
+}
+
 #[derive(Default)]
 struct AdmissionState {
     active: usize,
@@ -220,7 +226,7 @@ pub fn read_rows(
         cancelled,
     };
     let mut builder = ParquetRecordBatchReaderBuilder::try_new(reader)
-        .map_err(|e| HubApiError::PathValidation(format!("invalid parquet: {e}")))?
+        .map_err(|_error| invalid_parquet_error())?
         .with_batch_size(MAX_BATCH_ROWS)
         .with_limit(
             if predicates.is_empty() && aggregates.is_empty() && order_by.is_empty() {
@@ -250,15 +256,12 @@ pub fn read_rows(
         .iter()
         .map(|field| field.name().clone())
         .collect();
-    let batches = builder
-        .build()
-        .map_err(|e| HubApiError::PathValidation(format!("invalid parquet: {e}")))?;
+    let batches = builder.build().map_err(|_error| invalid_parquet_error())?;
     let mut rows = Vec::new();
     let mut scanned_rows = 0usize;
     let mut result_bytes = 0usize;
     for batch in batches {
-        let batch =
-            batch.map_err(|e| HubApiError::PathValidation(format!("invalid parquet: {e}")))?;
+        let batch = batch.map_err(|_error| invalid_parquet_error())?;
         if !selected_columns.is_empty() {
             columns = batch
                 .schema()
@@ -272,19 +275,15 @@ pub fn read_rows(
             let mut writer = LineDelimitedWriter::new(&mut encoded);
             writer
                 .write(&batch)
-                .map_err(|e| HubApiError::PathValidation(format!("invalid parquet row: {e}")))?;
-            writer
-                .finish()
-                .map_err(|e| HubApiError::PathValidation(format!("invalid parquet row: {e}")))?;
+                .map_err(|_error| invalid_parquet_error())?;
+            writer.finish().map_err(|_error| invalid_parquet_error())?;
         }
         for value in encoded
             .split(|byte| *byte == b'\n')
             .filter(|line| !line.is_empty())
         {
             let row: std::collections::BTreeMap<String, serde_json::Value> =
-                serde_json::from_slice(value).map_err(|e| {
-                    HubApiError::PathValidation(format!("invalid parquet row: {e}"))
-                })?;
+                serde_json::from_slice(value).map_err(|_error| invalid_parquet_error())?;
             scanned_rows = scanned_rows.saturating_add(1);
             if scanned_rows > MAX_QUERY_SCAN_ROWS {
                 shardline_metrics::metrics().query.scan_limit_rejected.inc();

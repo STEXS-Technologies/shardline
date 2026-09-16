@@ -391,6 +391,68 @@ async fn dataset_query_rejects_body_repository_mismatch() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dataset_query_redacts_malformed_parquet_errors() {
+    setup();
+    let store = common::state().store.clone();
+    store
+        .create_repo(HubRepoType::Dataset, "team/malformed-query", false)
+        .unwrap();
+    let revision = "d333333333333333333333333333333333333333";
+    let sha = "1919191919191919191919191919191919191919191919191919191919191919";
+    let content = b"not parquet: provider-secret-token";
+    store
+        .store_files(
+            revision,
+            &[HubFileEntry {
+                path: "data.parquet".into(),
+                size: content.len() as u64,
+                sha: sha.into(),
+                is_lfs: false,
+            }],
+        )
+        .unwrap();
+    store
+        .create_revision("team/malformed-query", None, revision, "main", "init")
+        .unwrap();
+    let key = ObjectKey::parse(&format!("protocols/lfs/global/objects/{sha}")).unwrap();
+    common::state()
+        .object_store
+        .put_if_absent(
+            &key,
+            ObjectBody::from_slice(content),
+            &ObjectIntegrity::new(
+                ShardlineHash::from_bytes(*blake3::hash(content).as_bytes()),
+                content.len() as u64,
+            ),
+        )
+        .unwrap();
+    let request = serde_json::json!({
+        "repository": "team/malformed-query",
+        "revision": revision,
+        "file_sha": sha,
+        "config": "default",
+        "split": "train",
+        "limit": 1
+    });
+    let response = app()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/datasets/team/malformed-query/query")
+                .header("content-type", "application/json")
+                .body(Body::from(request.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = String::from_utf8_lossy(&collect_body_bytes(response).await).into_owned();
+    assert!(body.contains("invalid parquet input"));
+    assert!(!body.contains("provider-secret-token"));
+    assert!(!body.contains(sha));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dataset_first_rows_returns_csv_data() {
     setup();
     let store = common::state().store.clone();

@@ -1,4 +1,4 @@
-use prometheus::{Histogram, HistogramOpts, IntCounter, Registry};
+use prometheus::{Histogram, HistogramOpts, IntCounter, IntCounterVec, Opts, Registry};
 
 use crate::{must_counter, must_histogram};
 
@@ -15,6 +15,7 @@ pub struct QueryMetrics {
     pub scanned_bytes: IntCounter,
     pub range_requests: IntCounter,
     pub failures: IntCounter,
+    pub failure_classes: IntCounterVec,
     pub queue_seconds: Histogram,
     pub execution_seconds: Histogram,
 }
@@ -59,6 +60,14 @@ impl QueryMetrics {
             "shardline_query_failures_total",
             "Bounded queries that failed after admission",
         );
+        let failure_classes = IntCounterVec::new(
+            Opts::new(
+                "shardline_query_failures_by_class_total",
+                "Bounded query failures by stable non-sensitive class",
+            ),
+            &["class"],
+        )
+        .unwrap_or_else(|_| std::process::abort());
         let queue_seconds = must_histogram(HistogramOpts::new(
             "shardline_query_queue_seconds",
             "Time spent waiting for bounded query admission",
@@ -83,6 +92,7 @@ impl QueryMetrics {
         }
         registry.register(Box::new(execution_seconds.clone())).ok();
         registry.register(Box::new(queue_seconds.clone())).ok();
+        registry.register(Box::new(failure_classes.clone())).ok();
         Self {
             requests,
             admissions_rejected,
@@ -94,6 +104,7 @@ impl QueryMetrics {
             scanned_bytes,
             range_requests,
             failures,
+            failure_classes,
             queue_seconds,
             execution_seconds,
         }

@@ -11,6 +11,41 @@ use shardline_index::hub::{HubFileEntry, HubRepoType};
 
 use super::{HubRepository, HubState, lfs_object_key, read_object_prefix};
 
+fn record_query_failure(error: &HubApiError) {
+    let class = match error {
+        HubApiError::CasError(_) | HubApiError::NotFound => "storage",
+        HubApiError::PathValidation(message) if message.contains("scan limit") => "scan_limit",
+        HubApiError::PathValidation(message) if message.contains("result limit") => "result_limit",
+        HubApiError::PathValidation(message) if message.contains("concurrency limit") => {
+            "admission"
+        }
+        HubApiError::PathValidation(message) if message.contains("invalid parquet") => {
+            "invalid_input"
+        }
+        HubApiError::PathValidation(message) if message.contains("worker") => "worker",
+        HubApiError::PathValidation(_) => "validation",
+        HubApiError::Io(_)
+        | HubApiError::Json(_)
+        | HubApiError::Unauthorized
+        | HubApiError::Forbidden
+        | HubApiError::Conflict(_)
+        | HubApiError::InvalidToken
+        | HubApiError::SigningKeyError(_)
+        | HubApiError::RepoNotFound
+        | HubApiError::RevisionNotFound
+        | HubApiError::BadRequest(_)
+        | HubApiError::PktLine(_)
+        | HubApiError::Pack(_)
+        | HubApiError::WebhookSecret(_) => "internal",
+    };
+    shardline_metrics::metrics().query.failures.inc();
+    shardline_metrics::metrics()
+        .query
+        .failure_classes
+        .with_label_values(&[class])
+        .inc();
+}
+
 /// Upper bound for bytes retained by the lightweight CSV/JSONL preview path.
 /// The complete object is never materialized merely to return a small page.
 const MAX_DATASET_PREVIEW_BYTES: usize = 8 * 1024 * 1024;
@@ -263,7 +298,7 @@ pub(crate) async fn dataset_query(
     let (output_columns, rows) = match worker_result {
         Ok(Ok(result)) => result,
         Ok(Err(error)) | Err(error) => {
-            shardline_metrics::metrics().query.failures.inc();
+            record_query_failure(&error);
             return Err(error);
         }
     };
