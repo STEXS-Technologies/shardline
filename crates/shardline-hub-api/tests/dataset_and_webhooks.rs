@@ -12,11 +12,16 @@
 
 mod common;
 
+use arrow_array::{ArrayRef, Int64Array, RecordBatch, StringArray};
+use arrow_schema::{DataType, Field, Schema};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
+use parquet::arrow::ArrowWriter;
 use shardline_index::hub::{HubFileEntry, HubRepoType};
+use shardline_protocol::ShardlineHash;
 use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectStore};
+use std::sync::Arc;
 use tower::ServiceExt;
 
 use common::{app, setup, state};
@@ -132,6 +137,100 @@ async fn dataset_first_rows_returns_jsonl_data() {
     assert_eq!(rows[0]["columns"]["name"], "alice");
     assert_eq!(rows[1]["columns"]["id"], 2);
     assert_eq!(rows[1]["columns"]["name"], "bob");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dataset_first_rows_reads_parquet_with_bounded_range_reader() {
+    setup();
+    let store = common::state().store.clone();
+    store
+        .create_repo(HubRepoType::Dataset, "team/parquet-dataset", false)
+        .unwrap();
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int64, false),
+        Field::new("name", DataType::Utf8, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(Int64Array::from(vec![1, 2, 3])) as ArrayRef,
+            Arc::new(StringArray::from(vec!["alice", "bob", "charlie"])) as ArrayRef,
+        ],
+    )
+    .unwrap();
+    let mut parquet = Vec::new();
+    {
+        let cursor = std::io::Cursor::new(&mut parquet);
+        let mut writer = ArrowWriter::try_new(cursor, schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+    }
+    let sha = "1414141414141414141414141414141414141414141414141414141414141414";
+    let files = vec![HubFileEntry {
+        path: "data/train/data.parquet".into(),
+        size: parquet.len() as u64,
+        sha: sha.into(),
+        is_lfs: false,
+    }];
+    let revision = "a111111111111111111111111111111111111111";
+    store.store_files(revision, &files).unwrap();
+    store
+        .create_revision("team/parquet-dataset", None, revision, "main", "init")
+        .unwrap();
+    let key = ObjectKey::parse(&format!("protocols/lfs/global/objects/{sha}")).unwrap();
+    common::state()
+        .object_store
+        .put_if_absent(
+            &key,
+            ObjectBody::from_slice(&parquet),
+            &ObjectIntegrity::new(
+                ShardlineHash::from_bytes(*blake3::hash(&parquet).as_bytes()),
+                parquet.len() as u64,
+            ),
+        )
+        .unwrap();
+    let response = app()
+        .oneshot(
+            Request::builder()
+                .uri("/api/datasets/team/parquet-dataset/first-rows?limit=2")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = collect_body_bytes(response).await;
+    assert_eq!(status, StatusCode::OK, "body={body:?}");
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["columns"], serde_json::json!(["id", "name"]));
+    assert_eq!(json["rows"].as_array().unwrap().len(), 2);
+    assert_eq!(json["rows"][0]["columns"]["name"], "alice");
+
+    let query = serde_json::json!({
+        "repository": "team/parquet-dataset",
+        "revision": revision,
+        "file_sha": sha,
+        "config": "default",
+        "split": "train",
+        "columns": ["name"],
+        "limit": 1
+    });
+    let response = app()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/datasets/team/parquet-dataset/query")
+                .header("content-type", "application/json")
+                .body(Body::from(query.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = collect_body_bytes(response).await;
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["columns"], serde_json::json!(["name"]));
+    assert_eq!(json["rows"][0]["columns"]["name"], "alice");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -67,6 +67,7 @@ pub mod commit;
 pub mod error;
 pub mod git;
 pub mod models;
+mod parquet_preview;
 pub mod query;
 pub mod resolve;
 pub mod routes;
