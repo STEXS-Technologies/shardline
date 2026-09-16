@@ -99,7 +99,8 @@ pub(crate) async fn dataset_first_rows(
         }
     };
     let limit = query.limit.min(1000);
-    let (columns, rows) = read_dataset_rows(&state, data_file, repo.capability(), 0, limit)?;
+    let (columns, rows) =
+        read_dataset_rows_async(&state, data_file, repo.capability(), 0, limit).await?;
     Ok(Json(DatasetFirstRowsResponse { columns, rows }))
 }
 
@@ -136,7 +137,7 @@ pub(crate) async fn dataset_viewer(
     })?;
     let length = query.length.min(10000);
     let (columns, rows) =
-        read_dataset_rows(&state, data_file, repo.capability(), query.offset, length)?;
+        read_dataset_rows_async(&state, data_file, repo.capability(), query.offset, length).await?;
     Ok(Json(DatasetViewerResponse {
         columns,
         rows,
@@ -421,6 +422,23 @@ fn read_dataset_rows(
         .map(|r| r.columns.keys().cloned().collect())
         .unwrap_or_default();
     Ok((columns, rows))
+}
+
+async fn read_dataset_rows_async(
+    state: &HubState,
+    file: &HubFileEntry,
+    auth: &AuthorizedRepository,
+    offset: usize,
+    limit: usize,
+) -> Result<(Vec<String>, Vec<DatasetRow>), HubApiError> {
+    let state = state.clone();
+    let file = file.clone();
+    let auth = auth.clone();
+    tokio::task::spawn_blocking(move || read_dataset_rows(&state, &file, &auth, offset, limit))
+        .await
+        .map_err(|_join_error| {
+            HubApiError::PathValidation("dataset preview worker failed".to_owned())
+        })?
 }
 
 /// Parses a single CSV line, respecting double-quoted fields that may contain
