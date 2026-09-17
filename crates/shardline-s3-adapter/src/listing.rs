@@ -702,4 +702,25 @@ mod tests {
         assert_eq!(params.prefix, "dir/");
         assert_eq!(params.max_keys, MAX_LIST_KEYS);
     }
+
+    #[test]
+    fn parse_v1_params_extracts_values_and_ignores_v2_fields() {
+        let params = parse_list_objects_v1_params(&query(&[
+            ("prefix", "dir/"),
+            ("delimiter", "/"),
+            ("max-keys", "12"),
+            ("marker", "dir/old"),
+            ("continuation-token", "ignored"),
+            ("start-after", "ignored"),
+            ("fetch-owner", "true"),
+        ]))
+        .unwrap();
+        assert_eq!(params.prefix, "dir/");
+        assert_eq!(params.delimiter, Some(Delimiter('/')));
+        assert_eq!(params.max_keys, 12);
+        assert_eq!(params.marker.as_deref(), Some("dir/old"));
+        assert!(parse_list_objects_v1_params(&query(&[("max-keys", "0")])).is_err());
+        assert!(parse_list_objects_v1_params(&query(&[("max-keys", "bad")])).is_err());
+        assert!(parse_list_objects_v1_params(&query(&[("delimiter", "//")])).is_err());
+    }
 }
