@@ -650,6 +650,178 @@ mod tests {
     }
 
     #[test]
+    fn reader_rejects_invalid_read_start_and_accepts_empty_range() {
+        let reader = RangeReader {
+            store: ServerObjectStore::Blackhole,
+            key: ObjectKey::parse("x").unwrap(),
+            length: 10,
+            scanned: Arc::new(AtomicU64::new(0)),
+            cancelled: Arc::new(AtomicBool::new(false)),
+        };
+        assert!(reader.get_read(11).is_err());
+        assert!(reader.get_bytes(0, 0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn predicates_cover_null_equality_and_ordered_values() {
+        let row = std::collections::BTreeMap::from([
+            ("id".to_owned(), serde_json::json!(3)),
+            ("label".to_owned(), serde_json::json!("ok")),
+            ("empty".to_owned(), serde_json::Value::Null),
+        ]);
+        for (op, value, expected) in [
+            (PredicateOp::Eq, Scalar::Integer(3), true),
+            (PredicateOp::NotEq, Scalar::Integer(4), true),
+            (PredicateOp::Lt, Scalar::Integer(4), true),
+            (PredicateOp::Lte, Scalar::Integer(3), true),
+            (PredicateOp::Gt, Scalar::Integer(2), true),
+            (PredicateOp::Gte, Scalar::Integer(3), true),
+        ] {
+            assert_eq!(
+                predicate_matches(
+                    &row,
+                    &Predicate {
+                        column: "id".into(),
+                        op,
+                        value
+                    }
+                ),
+                expected
+            );
+        }
+        assert!(predicate_matches(
+            &row,
+            &Predicate {
+                column: "empty".into(),
+                op: PredicateOp::IsNull,
+                value: Scalar::Null
+            }
+        ));
+        assert!(predicate_matches(
+            &row,
+            &Predicate {
+                column: "label".into(),
+                op: PredicateOp::IsNotNull,
+                value: Scalar::Null
+            }
+        ));
+        assert!(predicate_matches(
+            &row,
+            &Predicate {
+                column: "missing".into(),
+                op: PredicateOp::IsNull,
+                value: Scalar::Null
+            }
+        ));
+        assert!(!predicate_matches(
+            &row,
+            &Predicate {
+                column: "missing".into(),
+                op: PredicateOp::Gt,
+                value: Scalar::Integer(1)
+            }
+        ));
+    }
+
+    #[test]
+    fn scalar_conversion_and_value_ordering_are_bounded() {
+        assert_eq!(scalar_to_json(&Scalar::Null), serde_json::Value::Null);
+        assert_eq!(scalar_to_json(&Scalar::Bool(true)), serde_json::json!(true));
+        assert_eq!(scalar_to_json(&Scalar::Integer(2)), serde_json::json!(2));
+        assert_eq!(
+            scalar_to_json(&Scalar::Float("1.5".into())),
+            serde_json::json!(1.5)
+        );
+        assert_eq!(
+            scalar_to_json(&Scalar::Float("bad".into())),
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            scalar_to_json(&Scalar::Text("x".into())),
+            serde_json::json!("x")
+        );
+        assert!(compare_values(Some(&serde_json::json!(1)), Some(&serde_json::json!(2))).is_lt());
+        assert!(
+            compare_values(Some(&serde_json::json!("b")), Some(&serde_json::json!("a"))).is_gt()
+        );
+        assert!(compare_values(None, Some(&serde_json::json!(1))).is_lt());
+        assert!(compare_values(Some(&serde_json::json!(1)), None).is_gt());
+        assert_eq!(compare_values(None, None), std::cmp::Ordering::Equal);
+    }
+
+    #[test]
+    fn aggregate_functions_cover_empty_and_numeric_values() {
+        let rows = vec![
+            DatasetRow {
+                columns: std::collections::BTreeMap::from([(
+                    "value".into(),
+                    serde_json::json!(2.0),
+                )]),
+            },
+            DatasetRow {
+                columns: std::collections::BTreeMap::from([(
+                    "value".into(),
+                    serde_json::json!(4.0),
+                )]),
+            },
+        ];
+        assert_eq!(
+            aggregate_value(
+                &rows,
+                &Aggregate {
+                    function: AggregateFunction::Count,
+                    column: None,
+                    alias: None
+                }
+            )
+            .unwrap(),
+            serde_json::json!(2)
+        );
+        for (function, expected) in [
+            (AggregateFunction::Min, 2.0),
+            (AggregateFunction::Max, 4.0),
+            (AggregateFunction::Sum, 6.0),
+            (AggregateFunction::Avg, 3.0),
+        ] {
+            assert_eq!(
+                aggregate_value(
+                    &rows,
+                    &Aggregate {
+                        function,
+                        column: Some("value".into()),
+                        alias: None
+                    }
+                )
+                .unwrap(),
+                serde_json::json!(expected)
+            );
+        }
+        assert!(
+            aggregate_value(
+                &rows,
+                &Aggregate {
+                    function: AggregateFunction::Sum,
+                    column: None,
+                    alias: None
+                }
+            )
+            .is_err()
+        );
+        assert_eq!(
+            aggregate_value(
+                &rows,
+                &Aggregate {
+                    function: AggregateFunction::Sum,
+                    column: Some("missing".into()),
+                    alias: None
+                }
+            )
+            .unwrap(),
+            serde_json::Value::Null
+        );
+    }
+
+    #[test]
     fn admission_is_bounded() {
         let _lock = admission_test_lock();
         let guards: Vec<_> = (0..MAX_CONCURRENT_QUERIES)
