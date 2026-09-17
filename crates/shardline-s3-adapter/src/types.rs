@@ -1176,4 +1176,34 @@ mod tests {
              </CopyObjectResult>\n"
         );
     }
+
+    #[test]
+    fn list_bucket_v1_and_empty_bucket_xml_escape_fields() {
+        let result = ListBucketResultV1 {
+            contents: vec![Contents {
+                key: "a&b".to_owned(),
+                size_bytes: 7,
+                etag: "deadbeef".to_owned(),
+                last_modified_iso8601: "2026-01-01T00:00:00Z".to_owned(),
+            }],
+            common_prefixes: vec!["dir/".to_owned()],
+            name: "bucket&name".to_owned(),
+            prefix: "a<".to_owned(),
+            marker: "m>".to_owned(),
+            max_keys: 7,
+            delimiter: Some("/".to_owned()),
+            is_truncated: true,
+            next_marker: Some("next&".to_owned()),
+        };
+        let xml = result.to_xml();
+        assert!(xml.contains("<Name>bucket&amp;name</Name>"));
+        assert!(xml.contains("<Prefix>a&lt;</Prefix>"));
+        assert!(xml.contains("<NextMarker>next&amp;</NextMarker>"));
+        let empty = ListBucketsResult {
+            buckets: Vec::new(),
+        }
+        .to_xml();
+        assert!(empty.contains("<Buckets>"));
+        assert!(empty.contains("</Buckets>"));
+    }
 }
