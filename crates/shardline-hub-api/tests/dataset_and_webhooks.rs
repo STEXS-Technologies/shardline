@@ -18,6 +18,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use parquet::{arrow::ArrowWriter, file::properties::WriterProperties};
+use serial_test::serial;
 use shardline_index::hub::{HubFileEntry, HubRepoType};
 use shardline_protocol::ShardlineHash;
 use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectStore};
@@ -29,6 +30,7 @@ use common::{app, setup, state};
 
 // ---- Dataset viewer tests ----
 
+#[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dataset_parquet_lists_data_files() {
     setup();
@@ -85,6 +87,7 @@ async fn dataset_parquet_lists_data_files() {
     assert!(paths.contains(&"default/test/data.csv"));
 }
 
+#[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dataset_first_rows_returns_jsonl_data() {
     setup();
@@ -157,6 +160,7 @@ async fn dataset_first_rows_returns_jsonl_data() {
     assert_eq!(json["rows"][0]["columns"]["id"], 20_000);
 }
 
+#[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dataset_first_rows_reads_parquet_with_bounded_range_reader() {
     setup();
@@ -386,6 +390,7 @@ async fn dataset_first_rows_reads_parquet_with_bounded_range_reader() {
     assert!(!String::from_utf8_lossy(&body).contains("181818"));
 }
 
+#[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dataset_first_rows_preserves_nested_and_null_parquet_values() {
     setup();
@@ -477,6 +482,7 @@ async fn dataset_first_rows_preserves_nested_and_null_parquet_values() {
 /// deliberately separate from the `oneshot` coverage above: it catches
 /// release-only codec/configuration regressions (for example, a server built
 /// without Snappy support) and validates the production HTTP body path.
+#[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dataset_query_http_e2e_reads_compressed_multiple_row_groups() {
     setup();
@@ -562,6 +568,7 @@ async fn dataset_query_http_e2e_reads_compressed_multiple_row_groups() {
     server.await.unwrap();
 }
 
+#[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dataset_query_rejects_body_repository_mismatch() {
     setup();
@@ -607,6 +614,7 @@ async fn dataset_query_rejects_body_repository_mismatch() {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
+#[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dataset_query_redacts_malformed_parquet_errors() {
     setup();
@@ -669,6 +677,7 @@ async fn dataset_query_redacts_malformed_parquet_errors() {
     assert!(!body.contains(sha));
 }
 
+#[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dataset_query_can_be_disabled_without_disabling_legacy_routes() {
     setup();
@@ -716,6 +725,7 @@ async fn dataset_query_can_be_disabled_without_disabling_legacy_routes() {
     assert_ne!(response.status(), StatusCode::NOT_FOUND);
 }
 
+#[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dataset_first_rows_returns_csv_data() {
     setup();
@@ -770,6 +780,7 @@ async fn dataset_first_rows_returns_csv_data() {
     assert_eq!(rows[0]["columns"]["value"], 100);
 }
 
+#[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dataset_viewer_returns_paginated_rows() {
     setup();
@@ -825,6 +836,7 @@ async fn dataset_viewer_returns_paginated_rows() {
     assert_eq!(rows[1]["columns"]["index"], 4);
 }
 
+#[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dataset_parquet_rejects_non_dataset_repo() {
     setup();
@@ -852,6 +864,7 @@ async fn dataset_parquet_rejects_non_dataset_repo() {
 
 // ---- Webhook tests ----
 
+#[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn webhook_crud_lifecycle() {
     setup();
@@ -937,6 +950,7 @@ async fn webhook_crud_lifecycle() {
     assert!(webhooks.is_empty());
 }
 
+#[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn webhook_create_rejects_nonexistent_repo() {
     setup();
