@@ -296,4 +296,124 @@ mod tests {
         }];
         assert_eq!(req.validate(), Err(QueryValidationError::InvalidAggregate));
     }
+
+    #[test]
+    fn serde_defaults_limit_and_optional_fields() {
+        let value: DatasetQueryRequest = serde_json::from_str(
+            r#"{"repository":"org/data","revision":"aaaaaaaaaaaaaaaa","file_sha":"bbbbbbbbbbbbbbbb","config":"default","split":"train"}"#,
+        )
+        .unwrap();
+        assert_eq!(value.limit, 100);
+        assert!(value.columns.is_empty());
+        assert!(value.validate().is_ok());
+    }
+
+    #[test]
+    fn rejects_empty_and_malformed_identity_fields() {
+        let mut values = Vec::new();
+        let mut value = request();
+        value.repository.clear();
+        values.push(value);
+        let mut value = request();
+        value.revision.clear();
+        values.push(value);
+        let mut value = request();
+        value.file_sha.clear();
+        values.push(value);
+        let mut value = request();
+        value.config.clear();
+        values.push(value);
+        let mut value = request();
+        value.split.clear();
+        values.push(value);
+        for value in values {
+            assert!(matches!(
+                value.validate(),
+                Err(QueryValidationError::EmptyField(_))
+            ));
+        }
+        for repository in ["org", "org/data/extra", "/data", "org/"] {
+            let mut value = request();
+            value.repository = repository.into();
+            assert!(matches!(
+                value.validate(),
+                Err(QueryValidationError::InvalidIdentifier("repository"))
+            ));
+        }
+    }
+
+    #[test]
+    fn rejects_each_resource_bound_and_invalid_operation_identifier() {
+        let mut value = request();
+        value.columns = (0..=MAX_COLUMNS).map(|_| "id".into()).collect();
+        assert!(matches!(
+            value.validate(),
+            Err(QueryValidationError::TooMany("columns"))
+        ));
+        value = request();
+        value.predicates = (0..=MAX_PREDICATES)
+            .map(|_| Predicate {
+                column: "id".into(),
+                op: PredicateOp::Eq,
+                value: Scalar::Integer(1),
+            })
+            .collect();
+        assert!(matches!(
+            value.validate(),
+            Err(QueryValidationError::TooMany("predicates"))
+        ));
+        value = request();
+        value.limit = 0;
+        assert!(matches!(
+            value.validate(),
+            Err(QueryValidationError::OutOfRange("limit"))
+        ));
+        value = request();
+        value.offset = MAX_OFFSET + 1;
+        assert!(matches!(
+            value.validate(),
+            Err(QueryValidationError::OutOfRange("offset"))
+        ));
+        value = request();
+        value.predicates = vec![Predicate {
+            column: "bad.column".into(),
+            op: PredicateOp::Eq,
+            value: Scalar::Null,
+        }];
+        assert!(matches!(
+            value.validate(),
+            Err(QueryValidationError::InvalidIdentifier("predicate column"))
+        ));
+        value = request();
+        value.aggregates = vec![Aggregate {
+            function: AggregateFunction::Count,
+            column: None,
+            alias: Some("bad.alias".into()),
+        }];
+        assert!(matches!(
+            value.validate(),
+            Err(QueryValidationError::InvalidIdentifier("aggregate alias"))
+        ));
+    }
+
+    #[test]
+    fn validation_errors_have_stable_display_text() {
+        assert_eq!(
+            QueryValidationError::EmptyField("x").to_string(),
+            "x must not be empty"
+        );
+        assert_eq!(
+            QueryValidationError::InvalidIdentifier("x").to_string(),
+            "invalid x identifier"
+        );
+        assert_eq!(QueryValidationError::TooMany("x").to_string(), "too many x");
+        assert_eq!(
+            QueryValidationError::OutOfRange("x").to_string(),
+            "x is out of range"
+        );
+        assert_eq!(
+            QueryValidationError::InvalidAggregate.to_string(),
+            "invalid aggregate"
+        );
+    }
 }
