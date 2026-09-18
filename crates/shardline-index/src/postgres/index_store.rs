@@ -1528,6 +1528,17 @@ mod tests {
             eprintln!("skipping: no DATABASE_URL");
             return;
         };
+        // Establish one connection with a startup-sized timeout first.  The
+        // assertion below is about bounded acquisition after the pool is
+        // ready; a busy CI Postgres service must not make pool bootstrap
+        // itself look like an exhaustion failure.
+        let bootstrap_pool = PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(Duration::from_secs(10))
+            .connect(&database_url)
+            .await
+            .expect("bootstrap Postgres pool");
+        bootstrap_pool.close().await;
         let pool = PgPoolOptions::new()
             .max_connections(1)
             .acquire_timeout(Duration::from_millis(100))

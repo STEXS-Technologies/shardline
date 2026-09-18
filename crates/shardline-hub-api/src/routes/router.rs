@@ -12,6 +12,19 @@ use crate::git::{info_refs, receive_pack, upload_pack};
 /// xet-write-token routes are omitted to avoid conflicts with the Xet
 /// protocol frontend when both are enabled simultaneously.
 pub fn router(register_xet_token_routes: bool) -> Router<HubState> {
+    router_with_dataset_query(
+        register_xet_token_routes,
+        dataset_query_enabled_from_environment(),
+    )
+}
+
+/// Builds the Hub router with an explicit native dataset-query feature gate.
+/// Existing deployments keep the feature enabled by default; callers that do
+/// not want analytics can omit the route while retaining all legacy previews.
+pub fn router_with_dataset_query(
+    register_xet_token_routes: bool,
+    dataset_query_enabled: bool,
+) -> Router<HubState> {
     let mut r = Router::new()
         .route("/health", get(super::health))
         .route("/api/whoami-v2", get(super::whoami));
@@ -103,5 +116,20 @@ pub fn router(register_xet_token_routes: bool) -> Router<HubState> {
         .route("/{type}/{ns}/{repo}/HEAD", get(super::git_head))
         .route("/{type}/{ns}/{repo}/git-upload-pack", post(upload_pack))
         .route("/{type}/{ns}/{repo}/git-receive-pack", post(receive_pack));
+    if dataset_query_enabled {
+        r = r.route(
+            "/api/datasets/{ns}/{repo}/query",
+            post(super::dataset_query),
+        );
+    }
     r
+}
+
+pub(crate) fn dataset_query_enabled_from_environment() -> bool {
+    std::env::var("SHARDLINE_ENABLE_DATASET_QUERY").map_or(true, |value| {
+        !matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "no" | "off"
+        )
+    })
 }

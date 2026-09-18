@@ -204,6 +204,12 @@ description = "Run the full performance baseline (reconstruction + S3 I/O)"
 workspace = false
 dependencies = ["shardline-bench-reconstruction", "shardline-bench-s3"]
 
+[tasks.shardline-bench-duckdb]
+description = "Compare bounded Hub queries with external DuckDB scans"
+workspace = false
+command = "bash"
+args = ["scripts/benchmark-duckdb-query.sh", "${@}"]
+
 [tasks.shardline-perf-e2e]
 description = "Record a perf profile for the optimized shardline end-to-end benchmark suite"
 workspace = false

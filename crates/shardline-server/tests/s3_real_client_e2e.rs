@@ -1,5 +1,5 @@
 //! Real-client end-to-end tests for the S3 frontend: `mc` (MinIO client),
-//! `aws` CLI, boto3 (AWS SDK), `s3cmd`, `rclone`, and pyarrow, driven against
+//! `aws` CLI, boto3 (AWS SDK), DuckDB, `s3cmd`, `rclone`, and pyarrow, driven against
 //! an in-process `app::router` on a random port.
 //!
 //! These tests are **skip-gated**: if a client is not on `PATH`, the
@@ -199,6 +199,14 @@ fn assert_no_leaked_mc_artifacts() {
 fn pyarrow_available() -> bool {
     std::process::Command::new("python3")
         .args(["-c", "import pyarrow"])
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
+
+/// Returns whether Python DuckDB and PyArrow are available.
+fn duckdb_available() -> bool {
+    std::process::Command::new("python3")
+        .args(["-c", "import duckdb, pyarrow"])
         .output()
         .is_ok_and(|output| output.status.success())
 }
@@ -441,6 +449,108 @@ async fn pyarrow_parquet_write_read_info() {
     );
 
     assert_no_leaked_mc_artifacts();
+}
+
+// ---------------------------------------------------------------------------
+// DuckDB
+// ---------------------------------------------------------------------------
+
+/// Exercises DuckDB's real S3 client against exact and glob Parquet reads,
+/// projection/filter pushdown, aggregates, and Parquet output upload.
+fn run_duckdb(endpoint: &str, token: &str, tmp: &TempDir) -> std::process::Output {
+    let script = tmp.path().join("duckdb_check.py");
+    std::fs::write(
+        &script,
+        r#"
+import os
+import duckdb
+import pyarrow as pa
+import pyarrow.fs as fs
+import pyarrow.parquet as pq
+
+endpoint = os.environ["S3_ENDPOINT"]
+token = os.environ["S3_TOKEN"]
+s3 = fs.S3FileSystem(access_key=token, secret_key="unused", scheme="http",
+                      endpoint_override=endpoint, region="us-east-1")
+for name, values in (("part-0.parquet", [1, 2, 3]), ("part-1.parquet", [4, 5, 6])):
+    table = pa.table({"id": values, "group": ["a", "a", "b"]})
+    with s3.open_output_stream("ac.assets/inputs/" + name) as out:
+        pq.write_table(table, out)
+
+con = duckdb.connect()
+endpoint_host = endpoint.removeprefix("http://").removeprefix("https://")
+con.execute("""CREATE SECRET shardline_s3 (
+    TYPE S3, KEY_ID ?, SECRET 'unused', ENDPOINT ?, REGION 'us-east-1',
+    URL_STYLE 'path', USE_SSL false
+)""", [token, endpoint_host])
+
+exact = con.execute("SELECT id, \"group\" FROM read_parquet('s3://ac.assets/inputs/part-0.parquet') ORDER BY id").fetchall()
+assert exact == [(1, "a"), (2, "a"), (3, "b")], exact
+schema = con.execute("DESCRIBE SELECT * FROM read_parquet('s3://ac.assets/inputs/part-0.parquet')").fetchall()
+assert [(row[0], row[1]) for row in schema] == [("id", "BIGINT"), ("group", "VARCHAR")], schema
+filtered = con.execute("""SELECT id FROM read_parquet('s3://ac.assets/inputs/*.parquet')
+    WHERE id >= 3 ORDER BY id""").fetchall()
+assert filtered == [(3,), (4,), (5,), (6,)], filtered
+aggregate = con.execute("SELECT count(*), sum(id) FROM read_parquet('s3://ac.assets/inputs/*.parquet')").fetchone()
+assert aggregate == (6, 21), aggregate
+con.execute("""COPY (SELECT id, \"group\" FROM read_parquet('s3://ac.assets/inputs/*.parquet')
+    WHERE id % 2 = 0 ORDER BY id) TO 's3://ac.assets/results/even.parquet' (FORMAT PARQUET)""")
+written = con.execute("SELECT id FROM read_parquet('s3://ac.assets/results/even.parquet') ORDER BY id").fetchall()
+assert written == [(2,), (4,), (6,)], written
+
+# Exercise DuckDB's S3 listing behavior for both an empty prefix and a
+# continuation-token-sized prefix (>1000 objects).
+assert con.execute("SELECT count(*) FROM glob('s3://ac.assets/empty/*.parquet')").fetchone()[0] == 0
+for index in range(1005):
+    with s3.open_output_stream(f"ac.assets/paged/part-{index:04}.parquet") as out:
+        pq.write_table(pa.table({"id": [index]}), out)
+paged = con.execute("SELECT count(*) FROM glob('s3://ac.assets/paged/*.parquet')").fetchone()[0]
+assert paged == 1005, paged
+
+# Error redaction: malformed or missing objects must fail without leaking the
+# repository token into a DuckDB-facing exception.
+with s3.open_output_stream("ac.assets/inputs/bad.parquet") as out:
+    out.write(b"not a parquet file")
+for path in ("s3://ac.assets/inputs/missing.parquet", "s3://ac.assets/inputs/bad.parquet"):
+    try:
+        con.execute("SELECT * FROM read_parquet(?)", [path]).fetchall()
+        raise AssertionError("expected DuckDB read failure for " + path)
+    except Exception as exc:
+        assert token not in str(exc), "credential leaked in DuckDB error"
+print("ALL DUCKDB CHECKS PASSED")
+"#,
+    )
+    .unwrap();
+    std::process::Command::new("python3")
+        .arg(script.to_str().unwrap())
+        .env("S3_ENDPOINT", endpoint)
+        .env("S3_TOKEN", token)
+        .output()
+        .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn duckdb_parquet_glob_filter_aggregate_and_write() {
+    if !duckdb_available() {
+        eprintln!(
+            "SKIP: python3 + duckdb + pyarrow not available (skipping duckdb_parquet_glob_filter_aggregate_and_write)"
+        );
+        return;
+    }
+    let server = TestServer::start().await;
+    let token = mint_token(OWNER, NAME);
+    let tmp = TempDir::new().unwrap();
+    let output = run_duckdb(&server.base_url, &token, &tmp);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "DuckDB subprocess failed:\n{stdout}\n{stderr}"
+    );
+    assert!(
+        stdout.contains("ALL DUCKDB CHECKS PASSED"),
+        "DuckDB checks did not complete:\n{stdout}\n{stderr}"
+    );
 }
 
 // ---------------------------------------------------------------------------

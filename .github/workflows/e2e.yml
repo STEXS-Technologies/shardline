@@ -49,9 +49,10 @@ jobs:
             | sha256sum --check --strict
           sudo chmod 0755 /usr/local/bin/bazelisk
           USE_BAZEL_VERSION=8.7.0 bazelisk version
-          pip3 install --break-system-packages huggingface_hub pyarrow awscli boto3 s3cmd
+          pip3 install --break-system-packages huggingface_hub pyarrow duckdb awscli boto3 s3cmd
           hf --version
           python3 -c "import pyarrow; print('pyarrow', pyarrow.__version__)"
+          python3 -c "import duckdb; print('duckdb', duckdb.__version__)"
           aws --version
           python3 -c "import boto3; print('boto3', boto3.__version__)"
           s3cmd --version
@@ -90,3 +91,9 @@ jobs:
 
       - name: Run S3 real-client e2e tests
         run: cargo nextest run -p shardline-server --test s3_real_client_e2e --no-tests=pass
+
+      - name: Run DuckDB against Postgres + MinIO deployment shape
+        run: >-
+          cargo nextest run -p shardline-server --features docker
+          --test postgres_s3_e2e_http --no-tests=pass
+          -E 'test(duckdb_real_client_postgres_s3_deployment_shape)'
