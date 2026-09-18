@@ -6,8 +6,8 @@ use prometheus::{
 
 use crate::{
     backend::StorageBackendMetrics, fsck::FsckMetrics, gc::GcMetrics, protocol::ProtocolMetrics,
-    provider::ProviderMetrics, reconstruction::ReconstructionMetrics, storage::StorageMetrics,
-    system::SystemMetrics, transfer::TransferMetrics, xet::XetMetrics,
+    provider::ProviderMetrics, query::QueryMetrics, reconstruction::ReconstructionMetrics,
+    storage::StorageMetrics, system::SystemMetrics, transfer::TransferMetrics, xet::XetMetrics,
 };
 
 // ── Infallible metric constructors ────────────────────────────────────────
@@ -47,6 +47,7 @@ pub struct CasMetrics {
     pub fsck: FsckMetrics,
     pub backend: StorageBackendMetrics,
     pub provider: ProviderMetrics,
+    pub query: QueryMetrics,
     pub system: SystemMetrics,
 }
 
@@ -69,6 +70,7 @@ impl CasMetrics {
             fsck: FsckMetrics::new(registry),
             backend: StorageBackendMetrics::new(registry),
             provider: ProviderMetrics::new(registry),
+            query: QueryMetrics::new(registry),
             system: SystemMetrics::new(registry),
         }
     }

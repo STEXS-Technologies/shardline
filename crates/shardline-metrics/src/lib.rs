@@ -48,6 +48,7 @@ pub mod gc;
 pub mod middleware;
 pub mod protocol;
 pub mod provider;
+pub mod query;
 pub mod reconstruction;
 pub mod recorders;
 pub mod storage;
