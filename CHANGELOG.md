@@ -4,7 +4,36 @@ All notable changes to Shardline are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [1.11.0] - 2026-09-18
+
+This release makes bounded, streaming dataset analytics production-ready while
+continuing the server-wide streaming and fault-injection hardening from the
+1.10.0 development cycle.
+
+### Added
+
+- Added a constrained DuckDB query service for Parquet datasets, including
+  bounded predicates, projections, aggregates, schema discovery, pagination,
+  tenant isolation, cancellation, and sanitized failures.
+- Added native S3-backed analytics coverage and reproducible DuckDB comparison
+  benchmarks.
+- Added query and reconstructed-result byte metrics, cache behavior metrics,
+  and explicit query admission/fairness coverage.
+
+### Changed
+
+- Parquet previews and dataset reads now stream bounded results without loading
+  whole files or prefixes into server memory.
+- Query workers are cooperatively cancelled when clients disconnect or deadlines
+  expire, and incomplete scans are rejected rather than returning partial data.
+- Legacy S3 and compressed-Parquet paths are covered by end-to-end tests, with
+  tenant-level query limits and concurrency isolation enforced.
+
+### Reliability
+
+- Expanded streaming boundary, storage, S3, PostgreSQL, and chaos/fault-drill
+  coverage, including abort-and-recovery GC validation and bounded pool recovery.
+- Hardened CI coverage and timing-sensitive drills for instrumented builds.
 
 ## [1.10.0] - 2026-09-08
 
@@ -1038,7 +1067,7 @@ There are no intentional breaking API or configuration changes from `1.0.0`.
 - Documented async storage TOCTOU races with 1.2M-run fuzz validation (`40ef000`)
 - Updated all architecture, deployment, and Hub API docs for 20-crate structure (`1203d8e`)
 
-[Unreleased]: https://github.com/STEXS-Technologies/shardline/compare/v1.10.0...HEAD
+[1.11.0]: https://github.com/STEXS-Technologies/shardline/compare/v1.10.0...v1.11.0
 [1.10.0]: https://github.com/STEXS-Technologies/shardline/compare/v1.9.0...v1.10.0
 [1.9.0]: https://github.com/STEXS-Technologies/shardline/compare/v1.8.0...v1.9.0
 [1.8.0]: https://github.com/STEXS-Technologies/shardline/compare/v1.7.0...v1.8.0
