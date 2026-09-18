@@ -230,6 +230,7 @@ environment.
 
 ## References
 
+- `docs/DUCKDB.md` · external DuckDB workflow and query safety gate
 - Issue #15 · design review (oracle, 2026-08-13)
 - `docs/ARCHITECTURE.md` · `docs/COMPATIBILITY_STATUS.md`
 

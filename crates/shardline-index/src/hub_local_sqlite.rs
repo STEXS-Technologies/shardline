@@ -23,6 +23,7 @@ fn sqlite_store_error(error: &LocalIndexStoreError) -> rusqlite::Error {
 fn open_hub_connection(root: &Path) -> Result<Connection, LocalIndexStoreError> {
     let database_path = root.join("metadata.sqlite3");
     let connection = Connection::open(&database_path)?;
+    connection.busy_timeout(std::time::Duration::from_secs(30))?;
     Ok(connection)
 }
 
@@ -36,7 +37,7 @@ fn open_hub_connection(root: &Path) -> Result<Connection, LocalIndexStoreError> 
 fn open_hub_connection_rw(root: &Path) -> Result<Connection, LocalIndexStoreError> {
     let database_path = root.join("metadata.sqlite3");
     let connection = Connection::open(&database_path)?;
-    connection.busy_timeout(std::time::Duration::from_secs(5))?;
+    connection.busy_timeout(std::time::Duration::from_secs(30))?;
     Ok(connection)
 }
 

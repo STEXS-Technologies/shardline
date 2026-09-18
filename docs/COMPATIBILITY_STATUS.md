@@ -92,3 +92,7 @@ reachable record remain protected.
   behavior and client flows covered by the repository tests.
 - Patch releases publish the internal crate graph in dependency order before publishing
   the `shardline` CLI crate.
+DuckDB analytics compatibility and the real-client validation workflow are
+documented in [`DUCKDB.md`](DUCKDB.md). The supported production boundary is
+external DuckDB over the authenticated S3 frontend; no arbitrary SQL endpoint
+is exposed by the Hub API.
