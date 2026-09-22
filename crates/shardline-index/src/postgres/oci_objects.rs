@@ -1,6 +1,11 @@
+use serde_json::to_value;
+use shardline_reliability::resumable_session_event;
 use sqlx::{Connection as _, PgConnection, Row as _, query, query_scalar};
 
-use super::{PostgresIndexStore, PostgresMetadataStoreError};
+use super::{
+    PostgresIndexStore, PostgresMetadataStoreError, insert_reliability_event_json,
+    next_reliability_sequence,
+};
 use crate::{
     OciObjectKey, OciObjectKind, OciObjectStore, OciObjectTombstone, OciTagEntry,
     ResumableCompletionFence,
@@ -62,21 +67,22 @@ impl PostgresIndexStore {
         fence: &ResumableCompletionFence,
     ) -> Result<bool, PostgresMetadataStoreError> {
         let mut transaction = connection.begin().await?;
-        let owns_completion = query_scalar::<_, i32>(
-            "SELECT 1 FROM shardline_resumable_sessions
+        let owns_completion = query(
+            "SELECT scope_namespace, target_key FROM shardline_resumable_sessions
              WHERE session_id = $1 AND state = 'completing' AND fence_epoch = $2
-               AND expires_at > clock_timestamp()
+             AND expires_at > clock_timestamp()
              FOR UPDATE",
         )
         .bind(fence.session_id())
         .bind(super::u64_to_i64(fence.epoch().get())?)
         .fetch_optional(&mut *transaction)
-        .await?
-        .is_some();
-        if !owns_completion {
+        .await?;
+        let Some(owns_completion) = owns_completion else {
             transaction.rollback().await?;
             return Ok(false);
-        }
+        };
+        let scope_namespace: String = owns_completion.try_get("scope_namespace")?;
+        let target_key: String = owns_completion.try_get("target_key")?;
         query(
             "DELETE FROM shardline_oci_object_tombstones
              WHERE scope_namespace = $1 AND repository = $2
@@ -114,6 +120,25 @@ impl PostgresIndexStore {
             transaction.rollback().await?;
             return Ok(false);
         }
+        let sequence =
+            next_reliability_sequence(transaction.as_mut(), "ResumableSession", fence.session_id())
+                .await?;
+        let event = resumable_session_event(
+            scope_namespace,
+            fence.session_id(),
+            target_key,
+            sequence,
+            "completing",
+            "completed",
+        )?;
+        insert_reliability_event_json(
+            transaction.as_mut(),
+            "ResumableSession",
+            fence.session_id(),
+            sequence,
+            to_value(event)?,
+        )
+        .await?;
         transaction.commit().await?;
         Ok(true)
     }
@@ -247,7 +272,8 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
-    use crate::OciTagStore as _;
+    use crate::{OciTagStore as _, ResumableSession, ResumableSessionProtocol};
+    use std::time::Duration;
 
     async fn connect_postgres() -> Option<sqlx::PgPool> {
         let url = std::env::var("DATABASE_URL").ok()?;
@@ -340,5 +366,53 @@ mod tests {
                 .await
                 .unwrap()
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pg_oci_completion_records_the_resumable_transition_atomically() {
+        let Some(pool) = connect_postgres().await else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let suffix = chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default();
+        let session = ResumableSession::new(
+            format!("oci-completion-{suffix}"),
+            ResumableSessionProtocol::OciBlob,
+            format!("oci-completion-scope-{suffix}"),
+            "team/assets".to_owned(),
+            Duration::from_secs(u64::try_from(chrono::Utc::now().timestamp()).unwrap() + 3_600),
+        );
+        let store = PostgresIndexStore::new(pool);
+        assert!(store.create_resumable_session(&session).await.unwrap());
+        let claimed = store
+            .begin_resumable_completion(session.session_id())
+            .await
+            .unwrap()
+            .unwrap()
+            .0;
+        let key = OciObjectKey {
+            scope_namespace: session.scope_namespace().to_owned(),
+            repository: session.target_key().to_owned(),
+            kind: OciObjectKind::Manifest,
+            digest_hex: "b".repeat(64),
+        };
+        let mut connection = store.pool().acquire().await.unwrap();
+        assert!(
+            store
+                .publish_oci_object_completion_on_connection(
+                    &mut connection,
+                    &key,
+                    &[],
+                    &claimed.completion_fence(),
+                )
+                .await
+                .unwrap()
+        );
+        let events = store
+            .resumable_reliability_events(session.session_id())
+            .await
+            .unwrap();
+        shardline_reliability::verify_state_transition_chain(&events).unwrap();
+        assert_eq!(events.last().unwrap().after, "completed");
     }
 }

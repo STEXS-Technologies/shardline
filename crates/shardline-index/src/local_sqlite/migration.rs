@@ -6,7 +6,7 @@ pub(crate) struct LocalSqliteMigration {
     pub(crate) down_sql: &'static str,
 }
 
-pub(crate) const LOCAL_SQLITE_MIGRATIONS: [LocalSqliteMigration; 21] = [
+pub(crate) const LOCAL_SQLITE_MIGRATIONS: [LocalSqliteMigration; 23] = [
     LocalSqliteMigration {
         version: "20260417000000",
         name: "metadata_store",
@@ -138,5 +138,17 @@ pub(crate) const LOCAL_SQLITE_MIGRATIONS: [LocalSqliteMigration; 21] = [
         name: "resumable_sessions",
         up_sql: include_str!("../../migrations/20260823000000_resumable_sessions.up.sql"),
         down_sql: include_str!("../../migrations/20260823000000_resumable_sessions.down.sql"),
+    },
+    LocalSqliteMigration {
+        version: "20260922000000",
+        name: "reliability_events",
+        up_sql: include_str!("../../migrations/20260922000000_reliability_events.up.sql"),
+        down_sql: include_str!("../../migrations/20260922000000_reliability_events.down.sql"),
+    },
+    LocalSqliteMigration {
+        version: "20260923000000",
+        name: "reliability_event_kinds",
+        up_sql: include_str!("../../migrations/20260923000000_reliability_event_kinds.up.sql"),
+        down_sql: include_str!("../../migrations/20260923000000_reliability_event_kinds.down.sql"),
     },
 ];

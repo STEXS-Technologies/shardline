@@ -6,6 +6,7 @@ use shardline_index::{
     S3ObjectIndexStore, TreeEntry, TreeKey, TreeStore,
 };
 use shardline_protocol::unix_now_seconds_lossy;
+use shardline_reliability::{upload_lifecycle_event, verify_lifecycle_chain};
 use shardline_storage::{ObjectPrefix, ObjectStore};
 
 use crate::{
@@ -241,6 +242,12 @@ impl LocalBackend {
                 }
             };
             for intent in &intents {
+                let reliability_events = self
+                    .index_store
+                    .reliability_events(intent.intent_id())
+                    .await?;
+                verify_lifecycle_chain(&reliability_events)
+                    .map_err(|error| ServerError::Io(std::io::Error::other(error.to_string())))?;
                 let now = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap_or(Duration::ZERO);
@@ -268,23 +275,31 @@ impl LocalBackend {
                     // The atomic file-record commit is the visibility boundary.
                     // Walk every durable boundary so recovery remains valid even
                     // when the process stopped while the intent was still Stored.
+                    let mut recovery_from = intent.state();
                     for recovery_state in [
                         UploadIntentState::Storing,
                         UploadIntentState::Stored,
                         UploadIntentState::MetadataCommitted,
                         UploadIntentState::Visible,
                     ] {
-                        if let Err(error) = self
-                            .index_store
-                            .transition_intent(intent.intent_id(), recovery_state)
-                            .await
-                        {
-                            tracing::warn!(
-                                intent_id = %intent.intent_id(),
-                                %error,
-                                "intent recovery transition failed"
-                            );
-                            return Err(error.into());
+                        let transitioned = transition_intent_with_reliability_event(
+                            &self.index_store,
+                            intent,
+                            recovery_from,
+                            recovery_state,
+                        )
+                        .await;
+                        match transitioned {
+                            Ok(true) => recovery_from = recovery_state,
+                            Ok(false) => {}
+                            Err(error) => {
+                                tracing::warn!(
+                                    intent_id = %intent.intent_id(),
+                                    %error,
+                                    "intent recovery transition failed"
+                                );
+                                return Err(error);
+                            }
                         }
                     }
                     reconciled = reconciled.saturating_add(1);
@@ -317,14 +332,20 @@ impl LocalBackend {
                 let Some(target_state) = target_state else {
                     continue;
                 };
-                if let Err(e) = self
-                    .index_store
-                    .transition_intent(intent.intent_id(), target_state)
-                    .await
+                match transition_intent_with_reliability_event(
+                    &self.index_store,
+                    intent,
+                    intent.state(),
+                    target_state,
+                )
+                .await
                 {
-                    tracing::warn!(intent_id = %intent.intent_id(), error = %e, "intent transition failed, skipping");
-                } else {
-                    reconciled = reconciled.saturating_add(1);
+                    Ok(_) => reconciled = reconciled.saturating_add(1),
+                    Err(error) => tracing::warn!(
+                        intent_id = %intent.intent_id(),
+                        error = %error,
+                        "intent transition failed, skipping"
+                    ),
                 }
             }
         }
@@ -681,6 +702,36 @@ impl LocalBackend {
         let removed = self.index_store.delete_revision(key, rev).await?;
         Ok(removed > 0)
     }
+}
+
+async fn transition_intent_with_reliability_event(
+    store: &shardline_index::LocalIndexStore,
+    intent: &shardline_index::UploadIntent,
+    before: shardline_index::UploadIntentState,
+    after: shardline_index::UploadIntentState,
+) -> Result<bool, ServerError> {
+    if !before.can_transition_to(after) {
+        return Ok(false);
+    }
+    let event = upload_lifecycle_event(
+        "shardline",
+        "default",
+        intent.intent_id(),
+        intent.object_key(),
+        intent.object_hash(),
+        before,
+        after,
+    )
+    .map_err(|error| ServerError::Io(std::io::Error::other(error.to_string())))?;
+    Ok(
+        shardline_index::UploadIntentStore::transition_intent_with_event(
+            store,
+            intent.intent_id(),
+            after,
+            &event,
+        )
+        .await?,
+    )
 }
 
 /// Computes the BLAKE3 content hash used to address a chunk.

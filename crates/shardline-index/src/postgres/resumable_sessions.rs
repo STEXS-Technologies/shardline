@@ -1,8 +1,13 @@
 use std::{num::NonZeroU64, time::Duration};
 
+use serde_json::to_value;
+use shardline_reliability::{StateTransitionEvent, resumable_session_event};
 use sqlx::{Postgres, Row, Transaction};
 
-use super::{PostgresIndexStore, PostgresMetadataStoreError, i64_to_u64, u64_to_i64};
+use super::{
+    PostgresIndexStore, PostgresMetadataStoreError, i64_to_u64, insert_reliability_event_json,
+    next_reliability_sequence, u64_to_i64,
+};
 use crate::{
     CreateResumableSessionOutcome, PublishResumablePartOutcome, ResumablePartRange,
     ResumableSession, ResumableSessionError, ResumableSessionGcInventory, ResumableSessionPart,
@@ -240,6 +245,28 @@ impl PostgresIndexStore {
             .bind(expires_at)
             .execute(&mut *transaction)
             .await?;
+            let sequence = next_reliability_sequence(
+                transaction.as_mut(),
+                "ResumableSession",
+                session.session_id(),
+            )
+            .await?;
+            let event = resumable_session_event(
+                stored.scope_namespace(),
+                session.session_id(),
+                stored.target_key(),
+                sequence,
+                stored.state().as_str(),
+                ResumableSessionState::Active.as_str(),
+            )?;
+            insert_reliability_event_json(
+                transaction.as_mut(),
+                "ResumableSession",
+                session.session_id(),
+                sequence,
+                to_value(event)?,
+            )
+            .await?;
             transaction.commit().await?;
             return Ok(CreateResumableSessionOutcome::Created);
         }
@@ -269,6 +296,7 @@ impl PostgresIndexStore {
             0,
         )
         .ok_or_else(|| PostgresMetadataStoreError::IntegerOutOfRange("invalid expiry".into()))?;
+        let mut transaction = self.pool().begin().await?;
         let result = sqlx::query(
             "INSERT INTO shardline_resumable_sessions (
                  session_id, protocol, scope_namespace, target_key, attributes_json, state,
@@ -285,9 +313,36 @@ impl PostgresIndexStore {
         .bind(u64_to_i64(session.generation().get())?)
         .bind(u64_to_i64(session.fence_epoch().get())?)
         .bind(expires_at)
-        .execute(self.pool())
+        .execute(&mut *transaction)
         .await?;
-        Ok(result.rows_affected() == 1)
+        if result.rows_affected() != 1 {
+            transaction.rollback().await?;
+            return Ok(false);
+        }
+        let sequence = next_reliability_sequence(
+            transaction.as_mut(),
+            "ResumableSession",
+            session.session_id(),
+        )
+        .await?;
+        let event = resumable_session_event(
+            session.scope_namespace(),
+            session.session_id(),
+            session.target_key(),
+            sequence,
+            ResumableSessionState::Active.as_str(),
+            ResumableSessionState::Active.as_str(),
+        )?;
+        insert_reliability_event_json(
+            transaction.as_mut(),
+            "ResumableSession",
+            session.session_id(),
+            sequence,
+            to_value(event)?,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(true)
     }
 
     /// Creates a session while transactionally enforcing a per-protocol active ceiling.
@@ -343,8 +398,33 @@ impl PostgresIndexStore {
         .bind(expires_at)
         .execute(&mut *transaction)
         .await?;
+        let created = result.rows_affected() == 1;
+        if created {
+            let sequence = next_reliability_sequence(
+                transaction.as_mut(),
+                "ResumableSession",
+                session.session_id(),
+            )
+            .await?;
+            let event = resumable_session_event(
+                session.scope_namespace(),
+                session.session_id(),
+                session.target_key(),
+                sequence,
+                ResumableSessionState::Active.as_str(),
+                ResumableSessionState::Active.as_str(),
+            )?;
+            insert_reliability_event_json(
+                transaction.as_mut(),
+                "ResumableSession",
+                session.session_id(),
+                sequence,
+                to_value(event)?,
+            )
+            .await?;
+        }
         transaction.commit().await?;
-        Ok(if result.rows_affected() == 1 {
+        Ok(if created {
             CreateResumableSessionOutcome::Created
         } else {
             CreateResumableSessionOutcome::AlreadyExists
@@ -371,6 +451,38 @@ impl PostgresIndexStore {
         .as_ref()
         .map(session_from_row)
         .transpose()
+    }
+
+    /// Loads and verifies the tamper-evident resumable-session lifecycle journal.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the journal cannot be read or contains malformed
+    /// reliability evidence.
+    pub async fn resumable_reliability_events(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<StateTransitionEvent>, PostgresMetadataStoreError> {
+        let rows = sqlx::query(
+            "SELECT sequence, event_json
+             FROM shardline_reliability_events
+             WHERE operation_kind = $1 AND operation_id = $2 ORDER BY sequence",
+        )
+        .bind("ResumableSession")
+        .bind(session_id)
+        .fetch_all(self.pool())
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                let sequence: i64 = row.try_get("sequence")?;
+                if sequence < 0 {
+                    return Err(PostgresMetadataStoreError::IntegerOutOfRange(
+                        "reliability sequence".into(),
+                    ));
+                }
+                Ok(serde_json::from_value(row.try_get("event_json")?)?)
+            })
+            .collect()
     }
 
     /// Loads one active, unexpired session and its ordered authoritative parts
@@ -614,6 +726,21 @@ impl PostgresIndexStore {
     ) -> Result<Option<(ResumableSession, Vec<ResumableSessionPart>)>, PostgresMetadataStoreError>
     {
         let mut transaction = self.pool().begin().await?;
+        let previous_state: Option<String> = sqlx::query_scalar(
+            "SELECT state FROM shardline_resumable_sessions
+             WHERE session_id = $1 AND state IN ('active', 'completing')
+               AND expires_at > clock_timestamp()
+             FOR UPDATE",
+        )
+        .bind(session_id)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let Some(previous_state) = previous_state else {
+            transaction.rollback().await?;
+            return Ok(None);
+        };
+        let previous_state = ResumableSessionState::parse(&previous_state)
+            .ok_or_else(|| ResumableSessionError::UnknownState(previous_state.clone()))?;
         let row = sqlx::query(
             "UPDATE shardline_resumable_sessions
              SET state = 'completing', generation = generation + 1,
@@ -632,6 +759,24 @@ impl PostgresIndexStore {
         };
         let session = session_from_row(&row)?;
         let parts = parts_on_transaction(&mut transaction, session_id).await?;
+        let sequence =
+            next_reliability_sequence(transaction.as_mut(), "ResumableSession", session_id).await?;
+        let event = resumable_session_event(
+            session.scope_namespace(),
+            session.session_id(),
+            session.target_key(),
+            sequence,
+            previous_state.as_str(),
+            session.state().as_str(),
+        )?;
+        insert_reliability_event_json(
+            transaction.as_mut(),
+            "ResumableSession",
+            session_id,
+            sequence,
+            to_value(event)?,
+        )
+        .await?;
         transaction.commit().await?;
         Ok(Some((session, parts)))
     }
@@ -651,6 +796,7 @@ impl PostgresIndexStore {
         if !expected_state.can_transition_to(next_state) {
             return Ok(false);
         }
+        let mut transaction = self.pool().begin().await?;
         let result = sqlx::query(
             "UPDATE shardline_resumable_sessions
              SET state = $1, updated_at = now()
@@ -661,9 +807,41 @@ impl PostgresIndexStore {
         .bind(session_id)
         .bind(expected_state.as_str())
         .bind(u64_to_i64(expected_fence_epoch.get())?)
-        .execute(self.pool())
+        .execute(&mut *transaction)
         .await?;
-        Ok(result.rows_affected() == 1)
+        if result.rows_affected() != 1 {
+            transaction.rollback().await?;
+            return Ok(false);
+        }
+        let row = sqlx::query(
+            "SELECT scope_namespace, target_key FROM shardline_resumable_sessions
+             WHERE session_id = $1",
+        )
+        .bind(session_id)
+        .fetch_one(&mut *transaction)
+        .await?;
+        let scope_namespace: String = row.try_get("scope_namespace")?;
+        let target_key: String = row.try_get("target_key")?;
+        let sequence =
+            next_reliability_sequence(transaction.as_mut(), "ResumableSession", session_id).await?;
+        let event = resumable_session_event(
+            scope_namespace,
+            session_id,
+            target_key,
+            sequence,
+            expected_state.as_str(),
+            next_state.as_str(),
+        )?;
+        insert_reliability_event_json(
+            transaction.as_mut(),
+            "ResumableSession",
+            session_id,
+            sequence,
+            to_value(event)?,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(true)
     }
 
     /// Atomically expires up to `limit` active sessions using the database clock.
@@ -680,27 +858,58 @@ impl PostgresIndexStore {
     ) -> Result<Vec<String>, PostgresMetadataStoreError> {
         let limit = i64::try_from(limit)
             .map_err(|error| PostgresMetadataStoreError::IntegerOutOfRange(error.to_string()))?;
+        let mut transaction = self.pool().begin().await?;
         let rows = sqlx::query(
-            "WITH expired AS (
-                 SELECT session_id FROM shardline_resumable_sessions
-                 WHERE state IN ('active', 'completing') AND expires_at <= clock_timestamp()
-                 ORDER BY expires_at, session_id
-                 FOR UPDATE SKIP LOCKED
-                 LIMIT $1
-             )
-             UPDATE shardline_resumable_sessions AS sessions
-             SET state = 'expired', generation = generation + 1,
-                 fence_epoch = fence_epoch + 1, updated_at = now()
-             FROM expired
-             WHERE sessions.session_id = expired.session_id
-             RETURNING sessions.session_id",
+            "SELECT session_id, state, scope_namespace, target_key
+             FROM shardline_resumable_sessions
+             WHERE state IN ('active', 'completing') AND expires_at <= clock_timestamp()
+             ORDER BY expires_at, session_id
+             FOR UPDATE SKIP LOCKED
+             LIMIT $1",
         )
         .bind(limit)
-        .fetch_all(self.pool())
+        .fetch_all(&mut *transaction)
         .await?;
-        rows.into_iter()
-            .map(|row| row.try_get("session_id").map_err(Into::into))
-            .collect()
+        let mut expired = Vec::with_capacity(rows.len());
+        for row in rows {
+            let session_id: String = row.try_get("session_id")?;
+            let previous_state_text: String = row.try_get("state")?;
+            let previous_state = ResumableSessionState::parse(&previous_state_text)
+                .ok_or_else(|| ResumableSessionError::UnknownState(previous_state_text.clone()))?;
+            let scope_namespace: String = row.try_get("scope_namespace")?;
+            let target_key: String = row.try_get("target_key")?;
+            sqlx::query(
+                "UPDATE shardline_resumable_sessions
+                 SET state = 'expired', generation = generation + 1,
+                     fence_epoch = fence_epoch + 1, updated_at = now()
+                 WHERE session_id = $1",
+            )
+            .bind(&session_id)
+            .execute(&mut *transaction)
+            .await?;
+            let sequence =
+                next_reliability_sequence(transaction.as_mut(), "ResumableSession", &session_id)
+                    .await?;
+            let event = resumable_session_event(
+                scope_namespace,
+                &session_id,
+                target_key,
+                sequence,
+                previous_state.as_str(),
+                ResumableSessionState::Expired.as_str(),
+            )?;
+            insert_reliability_event_json(
+                transaction.as_mut(),
+                "ResumableSession",
+                &session_id,
+                sequence,
+                to_value(event)?,
+            )
+            .await?;
+            expired.push(session_id);
+        }
+        transaction.commit().await?;
+        Ok(expired)
     }
 
     /// Returns up to `limit` resumable sessions with an id strictly greater than
@@ -809,6 +1018,30 @@ mod tests {
         .execute(&pool)
         .await
         .ok()?;
+        sqlx::raw_sql(include_str!(
+            "../../../../migrations/20260922000000_reliability_events.up.sql"
+        ))
+        .execute(&pool)
+        .await
+        .ok()?;
+        let has_operation_kind: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                 SELECT 1 FROM information_schema.columns
+                 WHERE table_name = 'shardline_reliability_events'
+                   AND column_name = 'operation_kind'
+             )",
+        )
+        .fetch_one(&pool)
+        .await
+        .ok()?;
+        if !has_operation_kind {
+            sqlx::raw_sql(include_str!(
+                "../../../../migrations/20260923000000_reliability_event_kinds.up.sql"
+            ))
+            .execute(&pool)
+            .await
+            .ok()?;
+        }
         Some(PostgresIndexStore::new(pool))
     }
 
@@ -825,6 +1058,15 @@ mod tests {
                  WHERE session_id LIKE $1 || '%' ESCAPE '\\'",
             )
             .bind(escaped)
+            .execute(store.pool())
+            .await
+            .ok();
+            sqlx::query(
+                "DELETE FROM shardline_reliability_events
+                 WHERE operation_kind = $1 AND operation_id LIKE $2 || '%' ESCAPE '\\'",
+            )
+            .bind("ResumableSession")
+            .bind(prefix)
             .execute(store.pool())
             .await
             .ok();
@@ -907,6 +1149,61 @@ mod tests {
             .unwrap()
             .expect("session exists");
         assert_eq!(loaded.attributes_json(), r#"{"bucket":"models"}"#);
+    }
+
+    #[tokio::test]
+    async fn postgres_terminal_session_reuse_is_journaled() {
+        let Some(store) = store().await else {
+            eprintln!("skipping: no reachable DATABASE_URL");
+            return;
+        };
+        let expiry = Duration::from_secs(
+            u64::try_from(chrono::Utc::now().timestamp()).unwrap_or_default() + 3600,
+        );
+        let original = session("reuse", expiry);
+        assert!(store.create_resumable_session(&original).await.unwrap());
+        assert!(
+            store
+                .transition_resumable_session(
+                    original.session_id(),
+                    ResumableSessionState::Active,
+                    NonZeroU64::MIN,
+                    ResumableSessionState::Expired,
+                )
+                .await
+                .unwrap()
+        );
+
+        let recreated = ResumableSession::new(
+            original.session_id().to_owned(),
+            original.protocol(),
+            original.scope_namespace().to_owned(),
+            original.target_key().to_owned(),
+            expiry,
+        );
+        assert_eq!(
+            store
+                .ensure_resumable_session_bounded(&recreated, 100_000)
+                .await
+                .unwrap(),
+            CreateResumableSessionOutcome::Created
+        );
+        let events = store
+            .resumable_reliability_events(original.session_id())
+            .await
+            .unwrap();
+        shardline_reliability::verify_state_transition_chain(&events).unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| (event.before.as_str(), event.after.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("active", "active"),
+                ("active", "expired"),
+                ("expired", "active")
+            ]
+        );
     }
 
     #[tokio::test]
@@ -998,6 +1295,24 @@ mod tests {
                 )
                 .await
                 .unwrap()
+        );
+        let events = store
+            .resumable_reliability_events(session.session_id())
+            .await
+            .unwrap();
+        shardline_reliability::verify_state_transition_chain(&events).unwrap();
+        assert_eq!(events.len(), 3);
+        let transitions: Vec<_> = events
+            .iter()
+            .map(|event| (event.before.as_str(), event.after.as_str()))
+            .collect();
+        assert_eq!(
+            transitions,
+            vec![
+                ("active", "active"),
+                ("active", "completing"),
+                ("completing", "completed")
+            ]
         );
     }
 

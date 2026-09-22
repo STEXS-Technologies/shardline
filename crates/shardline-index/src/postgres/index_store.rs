@@ -1,6 +1,7 @@
 use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use shardline_protocol::{ChunkRange, RepositoryProvider, ShardlineHash};
+use shardline_reliability::{LifecycleEvent, upload_lifecycle_event};
 use shardline_storage::ObjectKey;
 use sqlx::{Row, postgres::PgRow, query, query_scalar, types::Json};
 
@@ -788,23 +789,61 @@ impl UploadIntentStore for super::PostgresIndexStore {
         if !current.state().can_transition_to(new_state) {
             return Ok(false);
         }
+        let event = upload_lifecycle_event(
+            "shardline",
+            "default",
+            current.intent_id(),
+            current.object_key(),
+            current.object_hash(),
+            current.state(),
+            new_state,
+        )?;
+        if self
+            .transition_intent_with_event(intent_id, new_state, &event)
+            .await?
+        {
+            return Ok(true);
+        }
+        Ok(self
+            .intent_by_id(intent_id)
+            .await?
+            .is_some_and(|intent| intent.state() == new_state))
+    }
+
+    async fn transition_intent_with_event(
+        &self,
+        intent_id: &str,
+        new_state: UploadIntentState,
+        event: &LifecycleEvent,
+    ) -> Result<bool, Self::Error> {
+        let current = self.intent_by_id(intent_id).await?;
+        let Some(current) = current else {
+            return Ok(false);
+        };
+        if current.state() == new_state {
+            return Ok(true);
+        }
+        if !current.state().can_transition_to(new_state) {
+            return Ok(false);
+        }
+        event.validate_for_transition(intent_id, current.state(), new_state)?;
+        let mut transaction = self.pool.begin().await?;
         let rows = sqlx::query(
-            "UPDATE shardline_upload_intents SET state = $1, updated_at = now() WHERE intent_id = $2 AND state = $3"
+            "UPDATE shardline_upload_intents SET state = $1, updated_at = now()
+             WHERE intent_id = $2 AND state = $3",
         )
         .bind(new_state.as_str())
         .bind(intent_id)
         .bind(current.state().as_str())
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await?;
-        if rows.rows_affected() > 0 {
-            return Ok(true);
+        if rows.rows_affected() == 0 {
+            transaction.rollback().await?;
+            return Ok(false);
         }
-        // Race: a concurrent caller advanced the state between our read and the
-        // conditional UPDATE, so zero rows matched. If the intent is now already
-        // in the target state, the transition is effectively complete — report
-        // success instead of a spurious invalid transition.
-        let now = self.intent_by_id(intent_id).await?;
-        Ok(now.is_some_and(|intent| intent.state() == new_state))
+        insert_reliability_event(transaction.as_mut(), event).await?;
+        transaction.commit().await?;
+        Ok(true)
     }
 
     async fn intent_by_id(&self, intent_id: &str) -> Result<Option<UploadIntent>, Self::Error> {
@@ -904,6 +943,111 @@ impl UploadIntentStore for super::PostgresIndexStore {
             .collect::<Result<Vec<_>, PostgresMetadataStoreError>>()?;
         Ok(intents)
     }
+
+    async fn record_reliability_event(&self, event: &LifecycleEvent) -> Result<(), Self::Error> {
+        insert_reliability_event(&self.pool, event).await?;
+        Ok(())
+    }
+
+    async fn reliability_events(
+        &self,
+        operation_id: &str,
+    ) -> Result<Vec<LifecycleEvent>, Self::Error> {
+        let rows = sqlx::query(
+            "SELECT sequence, event_json
+             FROM shardline_reliability_events
+             WHERE operation_kind = $1 AND operation_id = $2
+             ORDER BY sequence",
+        )
+        .bind("Upload")
+        .bind(operation_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                let sequence: i64 = row.try_get("sequence")?;
+                if sequence < 0 {
+                    return Err(PostgresMetadataStoreError::IntegerOutOfRange(
+                        "reliability sequence".into(),
+                    ));
+                }
+                let event = serde_json::from_value(row.try_get("event_json")?)?;
+                Ok(event)
+            })
+            .collect()
+    }
+}
+
+async fn insert_reliability_event<'executor, E>(
+    executor: E,
+    event: &LifecycleEvent,
+) -> Result<(), PostgresMetadataStoreError>
+where
+    E: sqlx::Executor<'executor, Database = sqlx::Postgres>,
+{
+    insert_reliability_event_json(
+        executor,
+        event.operation.kind.as_str(),
+        &event.operation.operation_id,
+        event.sequence,
+        serde_json::to_value(event)?,
+    )
+    .await
+}
+
+pub(crate) async fn insert_reliability_event_json<'executor, E>(
+    executor: E,
+    operation_kind: &str,
+    operation_id: &str,
+    event_sequence: u64,
+    event_json: serde_json::Value,
+) -> Result<(), PostgresMetadataStoreError>
+where
+    E: sqlx::Executor<'executor, Database = sqlx::Postgres>,
+{
+    let sequence = i64::try_from(event_sequence).map_err(|_error| {
+        PostgresMetadataStoreError::IntegerOutOfRange("reliability sequence".into())
+    })?;
+    let row = sqlx::query(
+        "INSERT INTO shardline_reliability_events (operation_kind, operation_id, sequence, event_json)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (operation_kind, operation_id, sequence) DO UPDATE
+         SET event_json = shardline_reliability_events.event_json
+         WHERE shardline_reliability_events.event_json = EXCLUDED.event_json
+         RETURNING event_json",
+    )
+    .bind(operation_kind)
+    .bind(operation_id)
+    .bind(sequence)
+    .bind(event_json)
+    .fetch_optional(executor)
+    .await?;
+    if row.is_none() {
+        return Err(PostgresMetadataStoreError::ReliabilityEventConflict(
+            operation_id.to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) async fn next_reliability_sequence<'executor, E>(
+    executor: E,
+    operation_kind: &str,
+    operation_id: &str,
+) -> Result<u64, PostgresMetadataStoreError>
+where
+    E: sqlx::Executor<'executor, Database = sqlx::Postgres>,
+{
+    let sequence: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(MAX(sequence), 0) + 1
+         FROM shardline_reliability_events
+         WHERE operation_kind = $1 AND operation_id = $2",
+    )
+    .bind(operation_kind)
+    .bind(operation_id)
+    .fetch_one(executor)
+    .await?;
+    i64_to_u64(sequence)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

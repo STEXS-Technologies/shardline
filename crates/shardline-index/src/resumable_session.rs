@@ -65,70 +65,8 @@ impl ResumableSessionProtocol {
     }
 }
 
-/// Durable lifecycle of a resumable upload session.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ResumableSessionState {
-    /// Parts or ranges may be published.
-    Active,
-    /// The part/range map is pinned and publication is in progress.
-    Completing,
-    /// Final object publication completed.
-    Completed,
-    /// A client or operator aborted the session.
-    Aborted,
-    /// The database-clock TTL expired.
-    Expired,
-}
-
-impl ResumableSessionState {
-    /// Stable database representation.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Active => "active",
-            Self::Completing => "completing",
-            Self::Completed => "completed",
-            Self::Aborted => "aborted",
-            Self::Expired => "expired",
-        }
-    }
-
-    /// Parses the stable database representation.
-    #[must_use]
-    pub fn parse(value: &str) -> Option<Self> {
-        match value {
-            "active" => Some(Self::Active),
-            "completing" => Some(Self::Completing),
-            "completed" => Some(Self::Completed),
-            "aborted" => Some(Self::Aborted),
-            "expired" => Some(Self::Expired),
-            _ => None,
-        }
-    }
-
-    /// Returns whether a compare-and-set lifecycle transition is legal.
-    #[must_use]
-    pub const fn can_transition_to(self, next: Self) -> bool {
-        matches!(
-            (self, next),
-            (
-                Self::Active,
-                Self::Active | Self::Completing | Self::Aborted | Self::Expired
-            ) | (
-                Self::Completing,
-                Self::Completing | Self::Completed | Self::Aborted | Self::Expired
-            ) | (Self::Completed, Self::Completed)
-                | (Self::Aborted, Self::Aborted)
-                | (Self::Expired, Self::Expired)
-        )
-    }
-
-    /// True after no new part or range may become authoritative.
-    #[must_use]
-    pub const fn is_terminal(self) -> bool {
-        matches!(self, Self::Completed | Self::Aborted | Self::Expired)
-    }
-}
+/// Compatibility name for the canonical reliability resumable-session state.
+pub use shardline_reliability::ResumableLifecycleState as ResumableSessionState;
 
 /// Immutable staged object selected by a session's authoritative part map.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -528,7 +466,10 @@ mod tests {
             let state = *STATES.get(index).unwrap_or(&ResumableSessionState::Active);
             if state.is_terminal() {
                 for candidate in STATES {
-                    prop_assert_eq!(state.can_transition_to(candidate), state == candidate);
+                    prop_assert_eq!(
+                        state.can_transition_to(candidate),
+                        state == candidate || candidate == ResumableSessionState::Active
+                    );
                 }
             }
         }

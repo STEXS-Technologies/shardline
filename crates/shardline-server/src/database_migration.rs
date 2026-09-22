@@ -1,4 +1,9 @@
+use serde_json::to_value;
+use shardline_index::{ResumableSessionState, UploadIntentState};
 use shardline_protocol::SecretString;
+use shardline_reliability::{
+    UploadLifecycleState, baseline_resumable_session_events, baseline_upload_lifecycle_events,
+};
 use sqlx::{
     Error as SqlxError, PgPool, Postgres, Row, Transaction, postgres::PgPoolOptions, query, raw_sql,
 };
@@ -191,6 +196,9 @@ pub enum DatabaseMigrationError {
         /// Hash recorded in the database.
         observed_checksum: String,
     },
+    /// Existing durable state could not be converted into canonical evidence.
+    #[error("reliability evidence backfill failed: {0}")]
+    Backfill(String),
     /// A test interrupted execution at a typed transactional boundary.
     #[error("database migration interrupted at {boundary:?}")]
     InjectedInterruption {
@@ -209,7 +217,7 @@ struct AppliedMigration {
 const MIGRATION_HISTORY_TABLE: &str = "shardline_schema_migrations";
 const MIGRATION_ADVISORY_LOCK_KEY: i64 = 0x5348_4152_444d_4701;
 
-const SHARDLINE_MIGRATIONS: [DatabaseMigration; 21] = [
+const SHARDLINE_MIGRATIONS: [DatabaseMigration; 23] = [
     DatabaseMigration {
         version: "20260417000000",
         name: "metadata_store",
@@ -340,6 +348,18 @@ const SHARDLINE_MIGRATIONS: [DatabaseMigration; 21] = [
         up_sql: include_str!("../migrations/20260823000000_resumable_sessions.up.sql"),
         down_sql: include_str!("../migrations/20260823000000_resumable_sessions.down.sql"),
     },
+    DatabaseMigration {
+        version: "20260922000000",
+        name: "reliability_events",
+        up_sql: include_str!("../migrations/20260922000000_reliability_events.up.sql"),
+        down_sql: include_str!("../migrations/20260922000000_reliability_events.down.sql"),
+    },
+    DatabaseMigration {
+        version: "20260923000000",
+        name: "reliability_event_kinds",
+        up_sql: include_str!("../migrations/20260923000000_reliability_event_kinds.up.sql"),
+        down_sql: include_str!("../migrations/20260923000000_reliability_event_kinds.down.sql"),
+    },
 ];
 
 /// Returns the bundled Shardline migration list in application order.
@@ -362,6 +382,7 @@ pub async fn apply_database_migrations(pool: &PgPool) -> Result<(), DatabaseMigr
     for migration in pending_migrations(pool).await? {
         apply_one_migration(pool, migration).await?;
     }
+    backfill_reliability_events(pool).await?;
 
     Ok(())
 }
@@ -414,6 +435,10 @@ pub async fn run_database_migration(
         DatabaseMigrationCommand::Status => (0, 0),
     };
 
+    if matches!(options.command(), DatabaseMigrationCommand::Up { .. }) {
+        backfill_reliability_events(&pool).await?;
+    }
+
     let migrations = migration_status_entries(&pool).await?;
     let applied_total_count =
         u64::try_from(migrations.iter().filter(|entry| entry.applied).count()).unwrap_or(u64::MAX);
@@ -443,6 +468,115 @@ async fn ensure_migration_history_table(pool: &PgPool) -> Result<(), SqlxError> 
     .execute(pool)
     .await?;
 
+    Ok(())
+}
+
+/// Gives pre-journal durable state a deterministic, verifiable evidence
+/// prefix. This runs under the migration advisory lock and is idempotent: a
+/// row with any evidence already present is left untouched.
+async fn backfill_reliability_events(pool: &PgPool) -> Result<(), DatabaseMigrationError> {
+    let mut transaction = pool.begin().await?;
+    let upload_rows = query(
+        "SELECT i.intent_id, i.object_key, i.object_hash, i.state
+         FROM shardline_upload_intents AS i
+         WHERE NOT EXISTS (
+             SELECT 1 FROM shardline_reliability_events AS e
+             WHERE e.operation_kind = 'Upload' AND e.operation_id = i.intent_id
+         )
+         FOR UPDATE OF i",
+    )
+    .fetch_all(&mut *transaction)
+    .await?;
+    for row in upload_rows {
+        let state_text: String = row.try_get("state")?;
+        let state = UploadIntentState::parse(&state_text).ok_or_else(|| {
+            DatabaseMigrationError::Backfill(format!(
+                "unknown upload intent state during reliability backfill: {state_text}"
+            ))
+        })?;
+        let final_state = UploadLifecycleState::parse(state.as_str()).ok_or_else(|| {
+            DatabaseMigrationError::Backfill(format!(
+                "upload intent state has no reliability mapping: {state_text}"
+            ))
+        })?;
+        let events = baseline_upload_lifecycle_events(
+            "shardline",
+            "default",
+            row.try_get::<String, _>("intent_id")?,
+            row.try_get::<String, _>("object_key")?,
+            row.try_get::<String, _>("object_hash")?,
+            final_state,
+        )
+        .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?;
+        for event in events {
+            let operation_kind = event.operation.kind.as_str();
+            let operation_id = event.operation.operation_id.clone();
+            let sequence = i64::try_from(event.sequence)
+                .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?;
+            let event_json = to_value(&event)
+                .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?;
+            query(
+                "INSERT INTO shardline_reliability_events
+                    (operation_kind, operation_id, sequence, event_json)
+                 VALUES ($1, $2, $3, $4)
+                 ON CONFLICT (operation_kind, operation_id, sequence) DO NOTHING",
+            )
+            .bind(operation_kind)
+            .bind(operation_id)
+            .bind(sequence)
+            .bind(event_json)
+            .execute(&mut *transaction)
+            .await?;
+        }
+    }
+
+    let session_rows = query(
+        "SELECT s.session_id, s.scope_namespace, s.target_key, s.state
+         FROM shardline_resumable_sessions AS s
+         WHERE NOT EXISTS (
+             SELECT 1 FROM shardline_reliability_events AS e
+             WHERE e.operation_kind = 'ResumableSession' AND e.operation_id = s.session_id
+         )
+         FOR UPDATE OF s",
+    )
+    .fetch_all(&mut *transaction)
+    .await?;
+    for row in session_rows {
+        let state_text: String = row.try_get("state")?;
+        let state = ResumableSessionState::parse(&state_text).ok_or_else(|| {
+            DatabaseMigrationError::Backfill(format!(
+                "unknown resumable session state during reliability backfill: {state_text}"
+            ))
+        })?;
+        let events = baseline_resumable_session_events(
+            row.try_get::<String, _>("scope_namespace")?,
+            row.try_get::<String, _>("session_id")?,
+            row.try_get::<String, _>("target_key")?,
+            state,
+        )
+        .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?;
+        for event in events {
+            let operation_kind = event.operation.kind.as_str();
+            let operation_id = event.operation.operation_id.clone();
+            let sequence = i64::try_from(event.sequence)
+                .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?;
+            let event_json = to_value(&event)
+                .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?;
+            query(
+                "INSERT INTO shardline_reliability_events
+                    (operation_kind, operation_id, sequence, event_json)
+                 VALUES ($1, $2, $3, $4)
+                 ON CONFLICT (operation_kind, operation_id, sequence) DO NOTHING",
+            )
+            .bind(operation_kind)
+            .bind(operation_id)
+            .bind(sequence)
+            .bind(event_json)
+            .execute(&mut *transaction)
+            .await?;
+        }
+    }
+    transaction.commit().await?;
     Ok(())
 }
 
@@ -636,7 +770,7 @@ mod tests {
 
     #[test]
     fn bundled_migrations_have_expected_count() {
-        assert_eq!(bundled_database_migrations().len(), 21);
+        assert_eq!(bundled_database_migrations().len(), 23);
     }
 
     #[test]
@@ -695,6 +829,17 @@ mod tests {
                 .down_sql
                 .contains("shardline_resumable_session_parts")
         );
+    }
+
+    #[test]
+    fn bundled_migrations_include_reliability_events() {
+        let migration = bundled_database_migrations()
+            .iter()
+            .find(|migration| migration.name == "reliability_events")
+            .expect("reliability event migration must be registered");
+        assert_eq!(migration.version, "20260922000000");
+        assert!(migration.up_sql.contains("shardline_reliability_events"));
+        assert!(migration.down_sql.contains("shardline_reliability_events"));
     }
 
     #[tokio::test(flavor = "multi_thread")]

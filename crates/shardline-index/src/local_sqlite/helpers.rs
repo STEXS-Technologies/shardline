@@ -20,6 +20,10 @@ use rusqlite::{
 };
 use serde_json::{from_slice, from_str, to_string};
 use shardline_protocol::{RepositoryScope, unix_now_seconds_lossy};
+use shardline_reliability::{
+    ResumableLifecycleState, UploadLifecycleState, baseline_resumable_session_events,
+    baseline_upload_lifecycle_events,
+};
 use shardline_storage::{
     DirectoryPathError, ObjectKey, ObjectKeyError,
     ensure_directory_path_components_are_not_symlinked as ensure_directory_path_components_are_not_symlinked_shared,
@@ -161,6 +165,122 @@ pub(crate) fn apply_pending_local_migrations(
         transaction.commit()?;
     }
 
+    backfill_reliability_events(connection)?;
+
+    Ok(())
+}
+
+/// Gives pre-journal local metadata a deterministic evidence prefix. Existing
+/// operation rows are left untouched when any journal evidence is present.
+fn backfill_reliability_events(connection: &mut Connection) -> Result<(), LocalIndexStoreError> {
+    let transaction = connection.transaction()?;
+    let mut upload_rows = Vec::new();
+    {
+        let mut statement = transaction.prepare(
+            "SELECT i.intent_id, i.object_key, i.object_hash, i.state
+             FROM shardline_upload_intents AS i
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM shardline_reliability_events AS e
+                 WHERE e.operation_kind = 'Upload' AND e.operation_id = i.intent_id
+             )",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?;
+        for row in rows {
+            upload_rows.push(row?);
+        }
+    }
+    for (intent_id, object_key, object_hash, state_text) in upload_rows {
+        let state = UploadLifecycleState::parse(&state_text).ok_or_else(|| {
+            LocalIndexStoreError::Reliability(shardline_reliability::ReliabilityError::EmptyField(
+                "unknown upload intent state",
+            ))
+        })?;
+        let final_state = UploadLifecycleState::parse(state.as_str()).ok_or_else(|| {
+            LocalIndexStoreError::Reliability(shardline_reliability::ReliabilityError::EmptyField(
+                "unmapped upload intent state",
+            ))
+        })?;
+        let events = baseline_upload_lifecycle_events(
+            "shardline",
+            "default",
+            intent_id,
+            object_key,
+            object_hash,
+            final_state,
+        )?;
+        for event in events {
+            transaction.execute(
+                "INSERT OR IGNORE INTO shardline_reliability_events
+                    (operation_kind, operation_id, sequence, event_json, created_at_unix_seconds)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    event.operation.kind.as_str(),
+                    event.operation.operation_id,
+                    i64::try_from(event.sequence).map_err(|error| {
+                        LocalIndexStoreError::IntegerOutOfRange(error.to_string())
+                    })?,
+                    to_string(&event)?,
+                    u64_to_i64(unix_now_seconds_lossy())?,
+                ],
+            )?;
+        }
+    }
+
+    let mut session_rows = Vec::new();
+    {
+        let mut statement = transaction.prepare(
+            "SELECT s.session_id, s.scope_namespace, s.target_key, s.state
+             FROM shardline_resumable_sessions AS s
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM shardline_reliability_events AS e
+                 WHERE e.operation_kind = 'ResumableSession' AND e.operation_id = s.session_id
+             )",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?;
+        for row in rows {
+            session_rows.push(row?);
+        }
+    }
+    for (session_id, scope_namespace, target_key, state_text) in session_rows {
+        let state = ResumableLifecycleState::parse(&state_text).ok_or_else(|| {
+            LocalIndexStoreError::Reliability(shardline_reliability::ReliabilityError::EmptyField(
+                "unknown resumable session state",
+            ))
+        })?;
+        let events =
+            baseline_resumable_session_events(scope_namespace, session_id, target_key, state)?;
+        for event in events {
+            transaction.execute(
+                "INSERT OR IGNORE INTO shardline_reliability_events
+                    (operation_kind, operation_id, sequence, event_json, created_at_unix_seconds)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    event.operation.kind.as_str(),
+                    event.operation.operation_id,
+                    i64::try_from(event.sequence).map_err(|error| {
+                        LocalIndexStoreError::IntegerOutOfRange(error.to_string())
+                    })?,
+                    to_string(&event)?,
+                    u64_to_i64(unix_now_seconds_lossy())?,
+                ],
+            )?;
+        }
+    }
+    transaction.commit()?;
     Ok(())
 }
 
@@ -1144,6 +1264,8 @@ pub(crate) fn read_sqlite_record_bytes(value: ValueRef<'_>) -> Result<Vec<u8>, S
         | other @ LocalIndexStoreError::WebhookDelivery(_)
         | other @ LocalIndexStoreError::UploadIntentConflict(_)
         | other @ LocalIndexStoreError::IntegerOutOfRange(_)
+        | other @ LocalIndexStoreError::ReliabilityEventConflict(_)
+        | other @ LocalIndexStoreError::Reliability(_)
         | other @ LocalIndexStoreError::InvalidRecordKind
         | other @ LocalIndexStoreError::InvalidOciObjectKind(_)
         | other @ LocalIndexStoreError::InvalidLegacyImportState

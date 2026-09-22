@@ -2,98 +2,13 @@ use std::time::Duration;
 
 use thiserror::Error;
 
-/// Persisted state of a content-addressed upload intent.
+use shardline_reliability::LifecycleEvent;
+/// Compatibility name for the canonical reliability lifecycle state.
 ///
-/// An upload normally moves
-/// [`Created`](UploadIntentState::Created) → [`Storing`](UploadIntentState::Storing)
-/// → [`Stored`](UploadIntentState::Stored) →
-/// [`MetadataCommitted`](UploadIntentState::MetadataCommitted) →
-/// [`Visible`](UploadIntentState::Visible), or to
-/// [`Failed`](UploadIntentState::Failed) from any pre-`Visible` state. Use
-/// [`UploadIntentState::can_transition_to`] to check whether a move is valid.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UploadIntentState {
-    /// Intent was created but no bytes have been written yet.
-    Created,
-    /// Bytes are being written to the object store.
-    Storing,
-    /// Bytes have been written, metadata commit has not started.
-    Stored,
-    /// Metadata write has started but not completed.
-    MetadataCommitted,
-    /// The upload completed successfully and the record is visible.
-    Visible,
-    /// Durable inspection established that the upload failed and it should be
-    /// quarantined. A request error alone must not select this state because an
-    /// external commit acknowledgement may have been lost.
-    Failed,
-}
-
-impl UploadIntentState {
-    /// Returns the database string representation.
-    #[must_use]
-    pub const fn as_str(&self) -> &'static str {
-        match self {
-            Self::Created => "created",
-            Self::Storing => "storing",
-            Self::Stored => "stored",
-            Self::MetadataCommitted => "metadata_committed",
-            Self::Visible => "visible",
-            Self::Failed => "failed",
-        }
-    }
-
-    /// Parses a database string.
-    #[must_use]
-    pub fn parse(s: &str) -> Option<Self> {
-        match s {
-            "created" => Some(Self::Created),
-            "storing" => Some(Self::Storing),
-            "stored" => Some(Self::Stored),
-            "metadata_committed" => Some(Self::MetadataCommitted),
-            "visible" => Some(Self::Visible),
-            "failed" => Some(Self::Failed),
-            _ => None,
-        }
-    }
-
-    /// Returns whether a durable intent may move to the requested next state.
-    ///
-    /// Repeating a state is permitted so retries are idempotent. A failed
-    /// operation is terminal and no state may skip a persistence boundary.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use shardline_index::UploadIntentState;
-    ///
-    /// assert!(UploadIntentState::Created.can_transition_to(UploadIntentState::Storing));
-    /// assert!(UploadIntentState::Stored.can_transition_to(UploadIntentState::MetadataCommitted));
-    /// assert!(UploadIntentState::MetadataCommitted.can_transition_to(UploadIntentState::Visible));
-    ///
-    /// // States cannot be skipped, and `Failed` is terminal.
-    /// assert!(!UploadIntentState::Created.can_transition_to(UploadIntentState::Visible));
-    /// assert!(!UploadIntentState::Failed.can_transition_to(UploadIntentState::Created));
-    /// ```
-    #[must_use]
-    pub const fn can_transition_to(self, next: Self) -> bool {
-        matches!(
-            (self, next),
-            (Self::Created, Self::Created | Self::Storing | Self::Failed)
-                | (Self::Storing, Self::Storing | Self::Stored | Self::Failed)
-                | (
-                    Self::Stored,
-                    Self::Stored | Self::MetadataCommitted | Self::Failed
-                )
-                | (
-                    Self::MetadataCommitted,
-                    Self::MetadataCommitted | Self::Visible | Self::Failed
-                )
-                | (Self::Visible, Self::Visible)
-                | (Self::Failed, Self::Failed)
-        )
-    }
-}
+/// The alias preserves every existing Shardline call site and persisted
+/// spelling while making the reliability crate the single owner of transition
+/// validation.
+pub use shardline_reliability::UploadLifecycleState as UploadIntentState;
 
 /// A durable upload intent record.
 #[derive(Debug, Clone)]
@@ -278,6 +193,21 @@ pub trait UploadIntentStore: Send + Sync {
         new_state: UploadIntentState,
     ) -> Result<bool, Self::Error>;
 
+    /// Atomically transitions an intent and records its correlated reliability
+    /// boundary when the adapter supports transactional persistence.
+    async fn transition_intent_with_event(
+        &self,
+        intent_id: &str,
+        new_state: UploadIntentState,
+        event: &LifecycleEvent,
+    ) -> Result<bool, Self::Error> {
+        let transitioned = self.transition_intent(intent_id, new_state).await?;
+        if transitioned {
+            self.record_reliability_event(event).await?;
+        }
+        Ok(transitioned)
+    }
+
     /// Loads an intent by ID.
     ///
     /// # Errors
@@ -306,6 +236,24 @@ pub trait UploadIntentStore: Send + Sync {
         state: UploadIntentState,
         older_than: Duration,
     ) -> Result<Vec<UploadIntent>, Self::Error>;
+
+    /// Persists one correlated lifecycle boundary.
+    ///
+    /// Existing adapters may retain the default no-op while migrating. The
+    /// production Postgres and SQLite adapters override this method and store
+    /// the immutable event with a uniqueness constraint on operation/sequence.
+    async fn record_reliability_event(&self, _event: &LifecycleEvent) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    /// Loads immutable reliability boundaries in sequence order for audit and
+    /// startup reconciliation.
+    async fn reliability_events(
+        &self,
+        _operation_id: &str,
+    ) -> Result<Vec<LifecycleEvent>, Self::Error> {
+        Ok(Vec::new())
+    }
 }
 
 #[cfg(test)]

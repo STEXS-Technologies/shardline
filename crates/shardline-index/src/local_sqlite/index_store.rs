@@ -1,5 +1,6 @@
 use rusqlite::{OptionalExtension, params};
 use shardline_protocol::{RepositoryProvider, ShardlineHash, unix_now_seconds_lossy};
+use shardline_reliability::{LifecycleEvent, upload_lifecycle_event};
 use shardline_storage::ObjectKey;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -629,34 +630,89 @@ impl UploadIntentStore for super::LocalIndexStore {
         if !current.state().can_transition_to(new_state) {
             return Ok(false);
         }
+        let event = upload_lifecycle_event(
+            "shardline",
+            "default",
+            current.intent_id(),
+            current.object_key(),
+            current.object_hash(),
+            current.state(),
+            new_state,
+        )?;
+        if self
+            .transition_intent_with_event(intent_id, new_state, &event)
+            .await?
+        {
+            return Ok(true);
+        }
+        Ok(self
+            .intent_by_id(intent_id)
+            .await?
+            .is_some_and(|intent| intent.state() == new_state))
+    }
+
+    async fn transition_intent_with_event(
+        &self,
+        intent_id: &str,
+        new_state: UploadIntentState,
+        event: &LifecycleEvent,
+    ) -> Result<bool, Self::Error> {
+        let current = self.intent_by_id(intent_id).await?;
+        let Some(current) = current else {
+            return Ok(false);
+        };
+        if current.state() == new_state {
+            return Ok(true);
+        }
+        if !current.state().can_transition_to(new_state) {
+            return Ok(false);
+        }
+        event.validate_for_transition(intent_id, current.state(), new_state)?;
         let store = self.clone();
         let intent_id = intent_id.to_owned();
-        let read_id = intent_id.clone();
         let current_state = current.state();
+        let event_json = serde_json::to_string(event)?;
+        let operation_id = event.operation.operation_id.clone();
+        let operation_kind = event.operation.kind.as_str().to_owned();
+        let sequence = i64::try_from(event.sequence).map_err(|_error| {
+            LocalIndexStoreError::IntegerOutOfRange("reliability sequence".into())
+        })?;
         let transitioned = tokio::task::spawn_blocking(move || -> Result<bool, LocalIndexStoreError> {
-            let conn = store.open_connection()?;
+            let mut conn = store.open_connection()?;
+            let transaction = conn.transaction()?;
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or(Duration::ZERO)
                 .as_secs() as i64;
-            let rows = conn.execute(
+            let rows = transaction.execute(
                 "UPDATE shardline_upload_intents SET state = ?1, updated_at_unix_seconds = ?2 WHERE intent_id = ?3 AND state = ?4",
                 rusqlite::params![new_state.as_str(), now, intent_id, current_state.as_str()],
             )?;
-            Ok(rows > 0)
+            if rows == 0 {
+                transaction.rollback()?;
+                return Ok(false);
+            }
+            transaction.execute(
+                "INSERT OR IGNORE INTO shardline_reliability_events (operation_kind, operation_id, sequence, event_json, created_at_unix_seconds) VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![&operation_kind, &operation_id, sequence, &event_json, now],
+            )?;
+            let stored_event: String = transaction.query_row(
+                "SELECT event_json FROM shardline_reliability_events WHERE operation_kind = ?1 AND operation_id = ?2 AND sequence = ?3",
+                rusqlite::params![&operation_kind, operation_id, sequence],
+                |row| row.get(0),
+            )?;
+            if stored_event != event_json {
+                transaction.rollback()?;
+                return Err(LocalIndexStoreError::ReliabilityEventConflict(
+                    operation_id,
+                ));
+            }
+            transaction.commit()?;
+            Ok(true)
         })
         .await
         .map_err(|e| LocalIndexStoreError::Io(std::io::Error::other(e)))??;
-        if transitioned {
-            return Ok(true);
-        }
-        // Race: a concurrent caller advanced the state between our read and the
-        // conditional UPDATE, so the UPDATE matched zero rows. If the intent is
-        // now already in the target state, the transition is effectively complete
-        // — report success so the caller does not see a spurious invalid
-        // transition.
-        let now = self.intent_by_id(&read_id).await?;
-        Ok(now.is_some_and(|intent| intent.state() == new_state))
+        Ok(transitioned)
     }
 
     async fn intent_by_id(&self, intent_id: &str) -> Result<Option<UploadIntent>, Self::Error> {
@@ -763,6 +819,71 @@ impl UploadIntentStore for super::LocalIndexStore {
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(LocalIndexStoreError::from)?;
             Ok(intents)
+        })
+        .await
+        .map_err(|e| LocalIndexStoreError::Io(std::io::Error::other(e)))?
+    }
+
+    async fn record_reliability_event(&self, event: &LifecycleEvent) -> Result<(), Self::Error> {
+        let store = self.clone();
+        let event_json = serde_json::to_string(event)?;
+        let operation_id = event.operation.operation_id.clone();
+        let operation_kind = event.operation.kind.as_str().to_owned();
+        let sequence = i64::try_from(event.sequence).map_err(|_error| {
+            LocalIndexStoreError::IntegerOutOfRange("reliability sequence".into())
+        })?;
+        tokio::task::spawn_blocking(move || {
+            let conn = store.open_connection()?;
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or(Duration::ZERO)
+                .as_secs() as i64;
+            conn.execute(
+                "INSERT OR IGNORE INTO shardline_reliability_events (operation_kind, operation_id, sequence, event_json, created_at_unix_seconds) VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![&operation_kind, &operation_id, sequence, &event_json, now],
+            )?;
+            let stored_event: String = conn.query_row(
+                "SELECT event_json FROM shardline_reliability_events WHERE operation_kind = ?1 AND operation_id = ?2 AND sequence = ?3",
+                rusqlite::params![&operation_kind, &operation_id, sequence],
+                |row| row.get(0),
+            )?;
+            if stored_event != event_json {
+                return Err(LocalIndexStoreError::ReliabilityEventConflict(
+                    operation_id,
+                ));
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|e| LocalIndexStoreError::Io(std::io::Error::other(e)))?
+    }
+
+    async fn reliability_events(
+        &self,
+        operation_id: &str,
+    ) -> Result<Vec<LifecycleEvent>, Self::Error> {
+        let store = self.clone();
+        let operation_id = operation_id.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let conn = store.open_connection()?;
+            let mut statement = conn.prepare(
+                "SELECT event_json
+                 FROM shardline_reliability_events
+                 WHERE operation_kind = ?1 AND operation_id = ?2
+                 ORDER BY sequence",
+            )?;
+            let rows = statement.query_map(rusqlite::params!["Upload", operation_id], |row| {
+                let event_json: String = row.get(0)?;
+                serde_json::from_str(&event_json).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        0,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(LocalIndexStoreError::from)
         })
         .await
         .map_err(|e| LocalIndexStoreError::Io(std::io::Error::other(e)))?
@@ -1443,6 +1564,124 @@ mod tests {
             .block_on(store.transition_intent("same-state-intent", UploadIntentState::Storing))
             .unwrap();
         assert!(second, "same-state transition must be idempotent");
+    }
+
+    #[test]
+    fn transition_with_reliability_event_is_atomic_and_verifiable() {
+        use shardline_reliability::{
+            LifecycleEvent, OperationIdentity, OperationKind, verify_lifecycle_chain,
+        };
+
+        let store = make_store();
+        let intent = UploadIntent::new(
+            "reliability-intent".to_owned(),
+            "objects/reliability".to_owned(),
+            "a".repeat(64),
+            42,
+        );
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(store.create_intent(&intent)).unwrap();
+        let event = LifecycleEvent::new(
+            OperationIdentity::new(
+                "shardline",
+                "default",
+                intent.intent_id(),
+                OperationKind::Upload,
+            )
+            .unwrap()
+            .with_object_key(intent.object_key())
+            .with_content_sha256(intent.object_hash()),
+            1,
+            shardline_reliability::UploadLifecycleState::Created,
+            shardline_reliability::UploadLifecycleState::Storing,
+        )
+        .unwrap();
+
+        assert!(
+            rt.block_on(store.transition_intent_with_event(
+                intent.intent_id(),
+                UploadIntentState::Storing,
+                &event,
+            ))
+            .unwrap()
+        );
+        let events = rt
+            .block_on(store.reliability_events(intent.intent_id()))
+            .unwrap();
+        verify_lifecycle_chain(&events).unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events.last(), Some(&event));
+        assert_eq!(
+            rt.block_on(store.intent_by_id(intent.intent_id()))
+                .unwrap()
+                .unwrap()
+                .state(),
+            UploadIntentState::Storing
+        );
+    }
+
+    #[test]
+    fn conflicting_reliability_evidence_rolls_back_the_state_transition() {
+        use shardline_reliability::{
+            LifecycleEvent, OperationIdentity, OperationKind, UploadLifecycleState,
+        };
+
+        let store = make_store();
+        let intent = UploadIntent::new(
+            "reliability-conflict".to_owned(),
+            "objects/reliability-conflict".to_owned(),
+            "b".repeat(64),
+            42,
+        );
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(store.create_intent(&intent)).unwrap();
+        let operation = OperationIdentity::new(
+            "shardline",
+            "default",
+            intent.intent_id(),
+            OperationKind::Upload,
+        )
+        .unwrap()
+        .with_object_key(intent.object_key())
+        .with_content_sha256(intent.object_hash());
+        let first = LifecycleEvent::new(
+            operation.clone(),
+            1,
+            UploadLifecycleState::Created,
+            UploadLifecycleState::Storing,
+        )
+        .unwrap();
+        assert!(
+            rt.block_on(store.transition_intent_with_event(
+                intent.intent_id(),
+                UploadIntentState::Storing,
+                &first,
+            ))
+            .unwrap()
+        );
+
+        let conflicting = LifecycleEvent::new(
+            operation.with_object_key("objects/different"),
+            1,
+            UploadLifecycleState::Storing,
+            UploadLifecycleState::Stored,
+        )
+        .unwrap();
+        assert!(matches!(
+            rt.block_on(store.transition_intent_with_event(
+                intent.intent_id(),
+                UploadIntentState::Stored,
+                &conflicting,
+            )),
+            Err(LocalIndexStoreError::ReliabilityEventConflict(_))
+        ));
+        assert_eq!(
+            rt.block_on(store.intent_by_id(intent.intent_id()))
+                .unwrap()
+                .unwrap()
+                .state(),
+            UploadIntentState::Storing
+        );
     }
 
     #[test]

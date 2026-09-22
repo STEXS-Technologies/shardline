@@ -15,6 +15,7 @@ use crate::{
     download_stream::{ServerByteStream, file_record_byte_stream},
     model::UploadFileResponse,
     object_store::{read_full_object, reconstruct_file_record_bytes},
+    protocol_support::reliability_repository_scope,
     upload_ingest::{
         FileUploadIngestor, RequestBodyReader, stage_body_to_tempfile, upload_attempt_id,
     },
@@ -138,6 +139,7 @@ impl LocalBackend {
         expected_sha256: Option<&str>,
     ) -> Result<UploadFileResponse, ServerError> {
         validate_identifier(file_id)?;
+        let reliability_repository = reliability_repository_scope(repository_scope);
 
         let intent = expected_sha256.map(|expected_hash| {
             UploadIntent::new(
@@ -157,7 +159,12 @@ impl LocalBackend {
             let _metadata_guard = self.metadata_write_lock.lock().await;
             coordinator.begin_upload(intent).await?;
             coordinator
-                .transition_upload(intent.intent_id(), UploadIntentState::Storing)
+                .transition_upload_scoped(
+                    "shardline",
+                    &reliability_repository,
+                    intent.intent_id(),
+                    UploadIntentState::Storing,
+                )
                 .await?;
         }
         let object_store = self.object_store();
@@ -177,7 +184,12 @@ impl LocalBackend {
             let _metadata_guard = self.metadata_write_lock.lock().await;
             if let Some(intent) = &intent {
                 coordinator
-                    .transition_upload(intent.intent_id(), UploadIntentState::Stored)
+                    .transition_upload_scoped(
+                        "shardline",
+                        &reliability_repository,
+                        intent.intent_id(),
+                        UploadIntentState::Stored,
+                    )
                     .await?;
             }
             self.record_store
@@ -185,10 +197,20 @@ impl LocalBackend {
                 .await?;
             if let Some(intent) = &intent {
                 coordinator
-                    .transition_upload(intent.intent_id(), UploadIntentState::MetadataCommitted)
+                    .transition_upload_scoped(
+                        "shardline",
+                        &reliability_repository,
+                        intent.intent_id(),
+                        UploadIntentState::MetadataCommitted,
+                    )
                     .await?;
                 coordinator
-                    .transition_upload(intent.intent_id(), UploadIntentState::Visible)
+                    .transition_upload_scoped(
+                        "shardline",
+                        &reliability_repository,
+                        intent.intent_id(),
+                        UploadIntentState::Visible,
+                    )
                     .await?;
             }
             Ok(response)
@@ -225,9 +247,14 @@ impl LocalBackend {
         // Hold the metadata_write_lock for the entire shard commit to prevent
         // interleaved metadata writes from concurrent shard uploads.
         let _metadata_guard = self.metadata_write_lock.lock().await;
+        let reliability_repository = reliability_repository_scope(repository_scope);
         coordinator
-            .with_upload_intent(&intent, move || async move {
-                register_uploaded_shard_file(
+            .with_upload_intent_scoped(
+                "shardline",
+                reliability_repository,
+                &intent,
+                move || async move {
+                    register_uploaded_shard_file(
                     &object_store,
                     temporary.path(),
                     repository_scope,
@@ -242,7 +269,8 @@ impl LocalBackend {
                 )
                 .await
                 .map_err(ServerError::from)
-            })
+                },
+            )
             .await
     }
 
@@ -414,6 +442,7 @@ mod tests {
 
     use sha2::{Digest, Sha256};
     use shardline_index::{UploadIntentState, UploadIntentStore};
+    use shardline_reliability::verify_lifecycle_chain;
 
     use super::LocalBackend;
     use crate::chunk_store::chunk_object_key;
@@ -509,6 +538,22 @@ mod tests {
         assert_eq!(visible.len(), 1);
         assert_eq!(visible[0].object_key(), "record/verified-record");
         assert_eq!(visible[0].object_hash(), digest);
+        let events = backend
+            .index_store
+            .reliability_events(visible[0].intent_id())
+            .await
+            .unwrap();
+        verify_lifecycle_chain(&events).unwrap();
+        assert_eq!(
+            events.iter().map(|event| event.after).collect::<Vec<_>>(),
+            vec![
+                shardline_reliability::UploadLifecycleState::Created,
+                shardline_reliability::UploadLifecycleState::Storing,
+                shardline_reliability::UploadLifecycleState::Stored,
+                shardline_reliability::UploadLifecycleState::MetadataCommitted,
+                shardline_reliability::UploadLifecycleState::Visible,
+            ]
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

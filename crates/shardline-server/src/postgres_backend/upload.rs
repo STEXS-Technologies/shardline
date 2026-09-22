@@ -8,6 +8,7 @@ use shardline_protocol::RepositoryScope;
 use crate::{
     ServerError, ShardMetadataLimits,
     model::UploadFileResponse,
+    protocol_support::reliability_repository_scope,
     upload_ingest::{
         FileUploadIngestor, RequestBodyReader, stage_body_to_tempfile, upload_attempt_id,
     },
@@ -80,6 +81,7 @@ impl super::PostgresBackend {
         expected_sha256: Option<&str>,
     ) -> Result<UploadFileResponse, ServerError> {
         validate_identifier(file_id)?;
+        let reliability_repository = reliability_repository_scope(repository_scope);
 
         let intent = expected_sha256.map(|expected_hash| {
             UploadIntent::new(
@@ -98,7 +100,12 @@ impl super::PostgresBackend {
         if let Some(intent) = &intent {
             coordinator.begin_upload(intent).await?;
             coordinator
-                .transition_upload(intent.intent_id(), UploadIntentState::Storing)
+                .transition_upload_scoped(
+                    "shardline",
+                    &reliability_repository,
+                    intent.intent_id(),
+                    UploadIntentState::Storing,
+                )
                 .await?;
         }
         let object_store = self.object_store();
@@ -117,7 +124,12 @@ impl super::PostgresBackend {
                 .await?;
             if let Some(intent) = &intent {
                 coordinator
-                    .transition_upload(intent.intent_id(), UploadIntentState::Stored)
+                    .transition_upload_scoped(
+                        "shardline",
+                        &reliability_repository,
+                        intent.intent_id(),
+                        UploadIntentState::Stored,
+                    )
                     .await?;
             }
             self.record_store
@@ -125,10 +137,20 @@ impl super::PostgresBackend {
                 .await?;
             if let Some(intent) = &intent {
                 coordinator
-                    .transition_upload(intent.intent_id(), UploadIntentState::MetadataCommitted)
+                    .transition_upload_scoped(
+                        "shardline",
+                        &reliability_repository,
+                        intent.intent_id(),
+                        UploadIntentState::MetadataCommitted,
+                    )
                     .await?;
                 coordinator
-                    .transition_upload(intent.intent_id(), UploadIntentState::Visible)
+                    .transition_upload_scoped(
+                        "shardline",
+                        &reliability_repository,
+                        intent.intent_id(),
+                        UploadIntentState::Visible,
+                    )
                     .await?;
             }
             Ok(response)
@@ -213,9 +235,14 @@ impl super::PostgresBackend {
             (),
             CasLimits::new(NonZeroU64::MAX, NonZeroU64::MAX, NonZeroU64::MAX),
         );
+        let reliability_repository = reliability_repository_scope(repository_scope);
         coordinator
-            .with_upload_intent(&intent, move || async move {
-                register_uploaded_shard_file(
+            .with_upload_intent_scoped(
+                "shardline",
+                reliability_repository,
+                &intent,
+                move || async move {
+                    register_uploaded_shard_file(
                     &object_store,
                     temporary.path(),
                     repository_scope,
@@ -230,7 +257,8 @@ impl super::PostgresBackend {
                 )
                 .await
                 .map_err(ServerError::from)
-            })
+                },
+            )
             .await
     }
 }

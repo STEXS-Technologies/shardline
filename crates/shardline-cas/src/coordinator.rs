@@ -1,4 +1,8 @@
 use shardline_index::{AsyncIndexStore, StoredObjectId};
+use shardline_reliability::{
+    OperationIdentity, OperationKind, ReliabilityError, UploadLifecycleState,
+    upload_lifecycle_event,
+};
 use shardline_storage::{AsyncObjectStore, ObjectBody, ObjectIntegrity, ObjectKey, PutOutcome};
 
 use crate::reachability::ObjectReachability;
@@ -38,6 +42,33 @@ impl<I, O, R> CasCoordinator<I, O, R> {
 
     pub const fn limits(&self) -> CasLimits {
         self.limits
+    }
+
+    /// Derives the stable reliability identity for an upload without changing
+    /// the existing Shardline intent or object-key semantics.
+    ///
+    /// The caller supplies the tenant and repository because the historical
+    /// [`UploadIntent`] model intentionally stores only object identity. The
+    /// returned identity is consumed by the StateChronicle/Penelope composition
+    /// root; the CAS coordinator remains usable without those adapters.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ReliabilityError`] when the supplied operation coordinates or
+    /// content identity are invalid.
+    pub fn upload_operation_identity(
+        tenant: impl Into<String>,
+        repository: impl Into<String>,
+        intent: &shardline_index::UploadIntent,
+    ) -> Result<OperationIdentity, ReliabilityError> {
+        Ok(OperationIdentity::new(
+            tenant,
+            repository,
+            intent.intent_id(),
+            OperationKind::Upload,
+        )?
+        .with_object_key(intent.object_key())
+        .with_content_sha256(intent.object_hash()))
     }
 }
 
@@ -100,6 +131,33 @@ where
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = Result<T, E>>,
     {
+        self.with_upload_intent_scoped("shardline", "default", intent, work)
+            .await
+    }
+
+    /// Executes upload work with an explicit reliability scope.
+    ///
+    /// The scope affects only the StateChronicle/Penelope operation identity;
+    /// Shardline's intent ID, object key, and content hash remain untouched.
+    ///
+    /// # Errors
+    ///
+    /// Returns the caller's work error or [`CasError`] converted into `E` when
+    /// an upload lifecycle persistence boundary fails.
+    pub async fn with_upload_intent_scoped<F, Fut, T, E>(
+        &self,
+        tenant: impl Into<String>,
+        repository: impl Into<String>,
+        intent: &shardline_index::UploadIntent,
+        work: F,
+    ) -> Result<T, E>
+    where
+        E: From<CasError>,
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<T, E>>,
+    {
+        let tenant = tenant.into();
+        let repository = repository.into();
         self.begin_upload(intent).await.map_err(E::from)?;
         upload_lifecycle_failpoint(
             intent.intent_id(),
@@ -127,7 +185,9 @@ where
         if current.state() == shardline_index::UploadIntentState::Failed {
             return Err(E::from(CasError::InvalidUploadTransition));
         }
-        self.transition_upload(
+        self.transition_upload_in_scope(
+            &tenant,
+            &repository,
             intent.intent_id(),
             shardline_index::UploadIntentState::Storing,
         )
@@ -143,7 +203,9 @@ where
                     UploadLifecycleBoundary::AfterObjectWork,
                 )
                 .map_err(E::from)?;
-                self.transition_upload(
+                self.transition_upload_in_scope(
+                    &tenant,
+                    &repository,
                     intent.intent_id(),
                     shardline_index::UploadIntentState::Stored,
                 )
@@ -154,7 +216,9 @@ where
                     UploadLifecycleBoundary::AfterStored,
                 )
                 .map_err(E::from)?;
-                self.transition_upload(
+                self.transition_upload_in_scope(
+                    &tenant,
+                    &repository,
                     intent.intent_id(),
                     shardline_index::UploadIntentState::MetadataCommitted,
                 )
@@ -165,7 +229,9 @@ where
                     UploadLifecycleBoundary::AfterMetadataCommitted,
                 )
                 .map_err(E::from)?;
-                self.transition_upload(
+                self.transition_upload_in_scope(
+                    &tenant,
+                    &repository,
                     intent.intent_id(),
                     shardline_index::UploadIntentState::Visible,
                 )
@@ -229,6 +295,34 @@ where
         intent_id: &str,
         next: shardline_index::UploadIntentState,
     ) -> Result<(), CasError> {
+        self.transition_upload_in_scope("shardline", "default", intent_id, next)
+            .await
+    }
+
+    /// Records a lifecycle transition with an explicit reliability scope.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CasError`] when the intent is missing, the transition is
+    /// invalid, or the durable index cannot persist the boundary.
+    pub async fn transition_upload_scoped(
+        &self,
+        tenant: &str,
+        repository: &str,
+        intent_id: &str,
+        next: shardline_index::UploadIntentState,
+    ) -> Result<(), CasError> {
+        self.transition_upload_in_scope(tenant, repository, intent_id, next)
+            .await
+    }
+
+    async fn transition_upload_in_scope(
+        &self,
+        tenant: &str,
+        repository: &str,
+        intent_id: &str,
+        next: shardline_index::UploadIntentState,
+    ) -> Result<(), CasError> {
         let current = self
             .index
             .intent_by_id(intent_id)
@@ -251,9 +345,19 @@ where
         {
             return Ok(());
         }
+        let event = upload_lifecycle_event(
+            tenant,
+            repository,
+            intent_id,
+            current.object_key(),
+            current.object_hash(),
+            upload_lifecycle_state(current.state()),
+            upload_lifecycle_state(next),
+        )
+        .map_err(|error| CasError::Record(error.to_string()))?;
         let transitioned = self
             .index
-            .transition_intent(intent_id, next)
+            .transition_intent_with_event(intent_id, next, &event)
             .await
             .map_err(CasError::from_record)?;
         if transitioned {
@@ -313,6 +417,19 @@ const fn committed_state_rank(state: shardline_index::UploadIntentState) -> u8 {
         shardline_index::UploadIntentState::MetadataCommitted => 3,
         shardline_index::UploadIntentState::Visible => 4,
         shardline_index::UploadIntentState::Failed => 0,
+    }
+}
+
+const fn upload_lifecycle_state(state: shardline_index::UploadIntentState) -> UploadLifecycleState {
+    match state {
+        shardline_index::UploadIntentState::Created => UploadLifecycleState::Created,
+        shardline_index::UploadIntentState::Storing => UploadLifecycleState::Storing,
+        shardline_index::UploadIntentState::Stored => UploadLifecycleState::Stored,
+        shardline_index::UploadIntentState::MetadataCommitted => {
+            UploadLifecycleState::MetadataCommitted
+        }
+        shardline_index::UploadIntentState::Visible => UploadLifecycleState::Visible,
+        shardline_index::UploadIntentState::Failed => UploadLifecycleState::Failed,
     }
 }
 
@@ -485,6 +602,29 @@ mod tests {
         assert_eq!(c.object_store(), &"store");
         assert_eq!(c.record_store(), &"records");
         assert_eq!(c.limits(), limits);
+    }
+
+    #[test]
+    fn upload_operation_identity_preserves_existing_intent_identity() {
+        let intent = UploadIntent::new(
+            "intent-identity".to_owned(),
+            "chunks/aa/object".to_owned(),
+            "a".repeat(64),
+            12,
+        );
+        let identity = CasCoordinator::<IndexProbe, ObjectStoreProbe, RecordStoreProbe>::upload_operation_identity(
+            "tenant-a",
+            "repository-a",
+            &intent,
+        )
+        .expect("valid reliability identity");
+
+        assert_eq!(identity.operation_id, "intent-identity");
+        assert_eq!(identity.object_key.as_deref(), Some("chunks/aa/object"));
+        assert_eq!(
+            identity.content_sha256.as_deref(),
+            Some("a".repeat(64).as_str())
+        );
     }
 
     #[test]

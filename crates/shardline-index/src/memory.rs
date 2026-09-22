@@ -6,6 +6,7 @@ use std::{
 
 use serde_json::{Error as SerdeJsonError, to_vec};
 use shardline_protocol::{RepositoryProvider, RepositoryScope, ShardlineHash};
+use shardline_reliability::{LifecycleEvent, upload_lifecycle_event, verify_lifecycle_chain};
 use shardline_storage::ObjectKey;
 use thiserror::Error;
 
@@ -404,24 +405,109 @@ impl UploadIntentStore for MemoryIndexStore {
         intent_id: &str,
         new_state: UploadIntentState,
     ) -> Result<bool, Self::Error> {
+        let Some(intent) = self.intent_by_id(intent_id).await? else {
+            return Ok(false);
+        };
+        if intent.state() == new_state {
+            return Ok(true);
+        }
+        if !intent.state().can_transition_to(new_state) {
+            return Ok(false);
+        }
+        let event = upload_lifecycle_event(
+            "shardline",
+            "default",
+            intent.intent_id(),
+            intent.object_key(),
+            intent.object_hash(),
+            intent.state(),
+            new_state,
+        )
+        .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
+        self.transition_intent_with_event(intent_id, new_state, &event)
+            .await
+    }
+
+    async fn transition_intent_with_event(
+        &self,
+        intent_id: &str,
+        new_state: UploadIntentState,
+        event: &LifecycleEvent,
+    ) -> Result<bool, Self::Error> {
         let mut state = self.lock_state()?;
-        let intent = state.upload_intents.get(intent_id).cloned();
-        intent.map_or(Ok(false), |intent| {
-            if !intent.state().can_transition_to(new_state) {
-                return Ok(false);
+        let Some(intent) = state.upload_intents.get(intent_id).cloned() else {
+            return Ok(false);
+        };
+        if intent.state() == new_state {
+            return Ok(true);
+        }
+        if !intent.state().can_transition_to(new_state) {
+            return Ok(false);
+        }
+        event
+            .validate_for_transition(intent_id, intent.state(), new_state)
+            .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
+        let mut candidate = state
+            .reliability_events
+            .get(intent_id)
+            .cloned()
+            .unwrap_or_default();
+        candidate.push(event.clone());
+        verify_lifecycle_chain(&candidate)
+            .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
+        let updated = UploadIntent::from_parts(
+            intent.intent_id().to_owned(),
+            intent.object_key().to_owned(),
+            intent.object_hash().to_owned(),
+            intent.object_length(),
+            new_state,
+            intent.created_at(),
+            Duration::ZERO,
+        );
+        state.upload_intents.insert(intent_id.to_owned(), updated);
+        state
+            .reliability_events
+            .insert(intent_id.to_owned(), candidate);
+        Ok(true)
+    }
+
+    async fn record_reliability_event(&self, event: &LifecycleEvent) -> Result<(), Self::Error> {
+        event
+            .verify_integrity()
+            .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
+        let mut state = self.lock_state()?;
+        let events = state
+            .reliability_events
+            .entry(event.operation.operation_id.clone())
+            .or_default();
+        if let Some(existing) = events
+            .iter()
+            .find(|existing| existing.sequence == event.sequence)
+        {
+            if existing != event {
+                return Err(MemoryIndexStoreError::ReliabilityEventConflict(
+                    event.operation.operation_id.clone(),
+                ));
             }
-            let updated = UploadIntent::from_parts(
-                intent.intent_id().to_owned(),
-                intent.object_key().to_owned(),
-                intent.object_hash().to_owned(),
-                intent.object_length(),
-                new_state,
-                intent.created_at(),
-                Duration::ZERO,
-            );
-            state.upload_intents.insert(intent_id.to_owned(), updated);
-            Ok(true)
-        })
+            return Ok(());
+        }
+        events.push(event.clone());
+        events.sort_by_key(|stored_event| stored_event.sequence);
+        verify_lifecycle_chain(events)
+            .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
+        Ok(())
+    }
+
+    async fn reliability_events(
+        &self,
+        operation_id: &str,
+    ) -> Result<Vec<LifecycleEvent>, Self::Error> {
+        Ok(self
+            .lock_state()?
+            .reliability_events
+            .get(operation_id)
+            .cloned()
+            .unwrap_or_default())
     }
 
     async fn intent_by_id(&self, intent_id: &str) -> Result<Option<UploadIntent>, Self::Error> {
@@ -807,6 +893,12 @@ pub enum MemoryIndexStoreError {
         #[source]
         UploadIntentConflictError,
     ),
+    /// Reliability evidence was malformed or could not be replayed.
+    #[error("memory reliability evidence failed: {0}")]
+    Reliability(String),
+    /// A reliability sequence was already bound to different evidence.
+    #[error("reliability event conflict: {0}")]
+    ReliabilityEventConflict(String),
 }
 
 #[derive(Debug, Default)]
@@ -819,6 +911,7 @@ struct MemoryIndexState {
     webhook_deliveries: HashMap<MemoryWebhookDeliveryKey, WebhookDelivery>,
     provider_repository_states: HashMap<MemoryProviderRepositoryStateKey, ProviderRepositoryState>,
     upload_intents: HashMap<String, UploadIntent>,
+    reliability_events: HashMap<String, Vec<LifecycleEvent>>,
     tree_entries: BTreeMap<MemoryTreeKey, TreeEntry>,
     revisions: BTreeMap<MemoryRevisionKey, RevisionRecord>,
 }

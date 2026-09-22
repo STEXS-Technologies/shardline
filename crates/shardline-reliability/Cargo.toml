@@ -1,0 +1,22 @@
+[package]
+name = "shardline-reliability"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Durable lifecycle identities and compatibility boundaries for Shardline."
+
+[dependencies]
+penelope.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+sha2.workspace = true
+statechronicle.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true

@@ -2,13 +2,17 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use futures_util::TryStreamExt;
-use serde_json::to_vec;
+use serde_json::{to_value, to_vec};
+use shardline_reliability::resumable_session_event;
 use sqlx::{
     Connection as _, PgConnection, Postgres, Row, Transaction, postgres::PgRow, query,
     query_scalar, types::Json,
 };
 
-use super::{PostgresMetadataStoreError, PostgresRecordLocator, RecordKind, i64_to_u64};
+use super::{
+    PostgresMetadataStoreError, PostgresRecordLocator, RecordKind, i64_to_u64,
+    insert_reliability_event_json, next_reliability_sequence,
+};
 use crate::{
     DedupeShardMapping, FileRecord, RecordMutation, RecordStoreFuture, RecordTraversal,
     RepositoryRecordScope, ResumableCompletionFence, S3ObjectEntry, S3PublishCondition,
@@ -78,23 +82,27 @@ impl super::PostgresRecordStore {
         }
         let metadata = serde_json::to_string(&entry.user_metadata)?;
         let mut transaction = connection.begin().await?;
-        if let Some(fence) = completion_fence {
-            let owns_completion = query_scalar::<_, i32>(
-                "SELECT 1 FROM shardline_resumable_sessions
+        let completion_identity = if let Some(fence) = completion_fence {
+            let owns_completion = query(
+                "SELECT scope_namespace, target_key FROM shardline_resumable_sessions
                  WHERE session_id = $1 AND state = 'completing' AND fence_epoch = $2
-                   AND expires_at > clock_timestamp()
+                 AND expires_at > clock_timestamp()
                  FOR UPDATE",
             )
             .bind(fence.session_id())
             .bind(super::u64_to_i64(fence.epoch().get())?)
             .fetch_optional(&mut *transaction)
-            .await?
-            .is_some();
-            if !owns_completion {
+            .await?;
+            let Some(owns_completion) = owns_completion else {
                 transaction.rollback().await?;
                 return Ok(false);
-            }
-        }
+            };
+            let scope_namespace: String = owns_completion.try_get("scope_namespace")?;
+            let target_key: String = owns_completion.try_get("target_key")?;
+            Some((scope_namespace, target_key))
+        } else {
+            None
+        };
         let version = self.version_record_locator(record);
         upsert_record_in_transaction(&mut transaction, &version, record).await?;
         let latest = self.latest_record_locator(record);
@@ -189,6 +197,32 @@ impl super::PostgresRecordStore {
                 transaction.rollback().await?;
                 return Ok(false);
             }
+            let Some((scope_namespace, target_key)) = completion_identity else {
+                transaction.rollback().await?;
+                return Ok(false);
+            };
+            let sequence = next_reliability_sequence(
+                transaction.as_mut(),
+                "ResumableSession",
+                fence.session_id(),
+            )
+            .await?;
+            let event = resumable_session_event(
+                scope_namespace,
+                fence.session_id(),
+                target_key,
+                sequence,
+                "completing",
+                "completed",
+            )?;
+            insert_reliability_event_json(
+                transaction.as_mut(),
+                "ResumableSession",
+                fence.session_id(),
+                sequence,
+                to_value(event)?,
+            )
+            .await?;
         }
         transaction.commit().await?;
         Ok(true)
@@ -1161,6 +1195,23 @@ mod tests {
                 .unwrap()
                 .state(),
             crate::ResumableSessionState::Completed
+        );
+        let events = index_store
+            .resumable_reliability_events(session.session_id())
+            .await
+            .unwrap();
+        shardline_reliability::verify_state_transition_chain(&events).unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| (event.before.as_str(), event.after.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("active", "active"),
+                ("active", "completing"),
+                ("completing", "completing"),
+                ("completing", "completed"),
+            ]
         );
     }
 }

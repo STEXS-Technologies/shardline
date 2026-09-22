@@ -20,6 +20,7 @@ futures-util.workspace = true
 hex.workspace = true
 libfuzzer-sys.workspace = true
 object_store = { workspace = true, default-features = true }
+penelope.workspace = true
 sdx.workspace = true
 shardline.workspace = true
 shardline-auth.workspace = true
@@ -31,6 +32,7 @@ shardline-index.workspace = true
 shardline-oci-adapter.workspace = true
 shardline-protocol.workspace = true
 shardline-protocol-adapters.workspace = true
+shardline-reliability.workspace = true
 shardline-rebuild.workspace = true
 shardline-s3-adapter.workspace = true
 shardline-server = { workspace = true, features = ["fuzzing"] }
@@ -351,6 +353,18 @@ doc = false
 [[bin]]
 name = "shardline_admin_api_v1_cursor"
 path = "fuzz_targets/shardline/admin_api_v1_cursor.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "shardline_reliability_lifecycle"
+path = "fuzz_targets/shardline/reliability_lifecycle.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "shardline_resumable_session_state"
+path = "fuzz_targets/shardline/resumable_session_state.rs"
 test = false
 doc = false
 
