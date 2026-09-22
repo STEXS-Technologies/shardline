@@ -1,6 +1,8 @@
-use rusqlite::{OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use shardline_protocol::{RepositoryProvider, ShardlineHash, unix_now_seconds_lossy};
-use shardline_reliability::{LifecycleEvent, upload_lifecycle_event};
+use shardline_reliability::{
+    LifecycleEvent, upload_lifecycle_event, verify_upload_lifecycle_events,
+};
 use shardline_storage::ObjectKey;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -12,6 +14,39 @@ use crate::{
     upload_intent::{UploadIntent, UploadIntentState, UploadIntentStore},
     xet_hash_hex_string,
 };
+
+fn verify_sqlite_intent_evidence(
+    connection: &Connection,
+    intent: &UploadIntent,
+) -> Result<(), LocalIndexStoreError> {
+    let mut statement = connection.prepare(
+        "SELECT event_json
+         FROM shardline_reliability_events
+         WHERE operation_kind = ?1 AND operation_id = ?2
+         ORDER BY sequence",
+    )?;
+    let rows = statement.query_map(params!["Upload", intent.intent_id()], |row| {
+        let event_json: String = row.get(0)?;
+        serde_json::from_str(&event_json).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                0,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })
+    })?;
+    let events = rows.collect::<Result<Vec<LifecycleEvent>, _>>()?;
+    verify_upload_lifecycle_events(
+        &events,
+        "shardline",
+        "default",
+        intent.intent_id(),
+        intent.object_key(),
+        intent.object_hash(),
+        intent.state(),
+    )
+    .map_err(LocalIndexStoreError::Reliability)
+}
 
 impl ReconstructionStore for LocalIndexStore {
     type Error = LocalIndexStoreError;
@@ -762,7 +797,10 @@ impl UploadIntentStore for super::LocalIndexStore {
                 ))
             });
             match result {
-                Ok(intent) => Ok(Some(intent)),
+                Ok(intent) => {
+                    verify_sqlite_intent_evidence(&conn, &intent)?;
+                    Ok(Some(intent))
+                }
                 Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
                 Err(e) => Err(LocalIndexStoreError::from(e)),
             }
@@ -800,6 +838,9 @@ impl UploadIntentStore for super::LocalIndexStore {
                 .map_err(LocalIndexStoreError::from)?
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(LocalIndexStoreError::from)?;
+            for intent in &intents {
+                verify_sqlite_intent_evidence(&conn, intent)?;
+            }
             Ok(intents)
         })
         .await
@@ -841,6 +882,9 @@ impl UploadIntentStore for super::LocalIndexStore {
                 .map_err(LocalIndexStoreError::from)?
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(LocalIndexStoreError::from)?;
+            for intent in &intents {
+                verify_sqlite_intent_evidence(&conn, intent)?;
+            }
             Ok(intents)
         })
         .await

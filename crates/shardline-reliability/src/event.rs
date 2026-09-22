@@ -241,6 +241,41 @@ pub fn verify_lifecycle_chain_ends_at(
     }
 }
 
+/// Verifies an upload-intent journal against the immutable operation identity
+/// and the state currently stored for that intent.
+pub fn verify_upload_lifecycle_events(
+    events: &[LifecycleEvent],
+    tenant: &str,
+    repository: &str,
+    operation_id: &str,
+    object_key: &str,
+    content_sha256: &str,
+    expected_state: UploadLifecycleState,
+) -> Result<(), ReliabilityError> {
+    verify_lifecycle_chain(events)?;
+    let Some(first) = events.first() else {
+        return Err(ReliabilityError::OperationMismatch);
+    };
+    let operation = &first.operation;
+    if operation.kind != OperationKind::Upload
+        || operation.tenant != tenant
+        || operation.repository != repository
+        || operation.operation_id != operation_id
+        || operation.object_key.as_deref() != Some(object_key)
+        || operation.content_sha256.as_deref() != Some(content_sha256)
+    {
+        return Err(ReliabilityError::OperationMismatch);
+    }
+    if events
+        .last()
+        .is_some_and(|event| event.after == expected_state)
+    {
+        Ok(())
+    } else {
+        Err(ReliabilityError::StateMismatch)
+    }
+}
+
 const fn lifecycle_sequence(before: UploadLifecycleState, after: UploadLifecycleState) -> u64 {
     match after {
         UploadLifecycleState::Created => 0,

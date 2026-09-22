@@ -19,6 +19,7 @@ use crate::{
 
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
 pub(crate) struct PersistedOciUploadSession {
+    #[serde(flatten)]
     pub(crate) session: OciUploadSession,
     #[serde(default)]
     pub(crate) evidence: SessionEvidenceLog,

@@ -22,7 +22,7 @@ pub use event::{
     LifecycleEvent, StateTransitionEvent, baseline_resumable_session_events,
     baseline_upload_lifecycle_events, resumable_session_event, upload_lifecycle_event,
     verify_lifecycle_chain, verify_lifecycle_chain_ends_at, verify_state_transition_chain,
-    verify_state_transition_chain_ends_at,
+    verify_state_transition_chain_ends_at, verify_upload_lifecycle_events,
 };
 pub use operation::{OperationIdentity, OperationKind};
 pub use session_evidence::SessionEvidenceLog;

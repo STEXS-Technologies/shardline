@@ -132,6 +132,55 @@ fn terminal_state_must_match_the_verified_evidence_chain() {
 }
 
 #[test]
+fn upload_evidence_is_bound_to_identity_and_current_state() {
+    let hash = "a".repeat(64);
+    let events = baseline_upload_lifecycle_events(
+        "tenant",
+        "repo",
+        "upload-verified",
+        "object",
+        &hash,
+        UploadLifecycleState::Visible,
+    )
+    .unwrap();
+
+    verify_upload_lifecycle_events(
+        &events,
+        "tenant",
+        "repo",
+        "upload-verified",
+        "object",
+        &hash,
+        UploadLifecycleState::Visible,
+    )
+    .unwrap();
+    assert!(matches!(
+        verify_upload_lifecycle_events(
+            &events,
+            "tenant",
+            "repo",
+            "upload-verified",
+            "other-object",
+            &hash,
+            UploadLifecycleState::Visible,
+        ),
+        Err(ReliabilityError::OperationMismatch)
+    ));
+    assert!(matches!(
+        verify_upload_lifecycle_events(
+            &events,
+            "tenant",
+            "repo",
+            "upload-verified",
+            "object",
+            &hash,
+            UploadLifecycleState::Stored,
+        ),
+        Err(ReliabilityError::StateMismatch)
+    ));
+}
+
+#[test]
 fn resumable_terminal_reuse_is_an_explicit_recovery_transition() {
     assert!(ResumableLifecycleState::Completed.can_transition_to(ResumableLifecycleState::Active));
     assert!(ResumableLifecycleState::Aborted.can_transition_to(ResumableLifecycleState::Active));

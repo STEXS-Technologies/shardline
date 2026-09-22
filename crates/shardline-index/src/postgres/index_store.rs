@@ -1,7 +1,9 @@
 use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use shardline_protocol::{ChunkRange, RepositoryProvider, ShardlineHash};
-use shardline_reliability::{LifecycleEvent, upload_lifecycle_event};
+use shardline_reliability::{
+    LifecycleEvent, upload_lifecycle_event, verify_upload_lifecycle_events,
+};
 use shardline_storage::ObjectKey;
 use sqlx::{Row, postgres::PgRow, query, query_scalar, types::Json};
 
@@ -14,6 +16,27 @@ use crate::{
     upload_intent::{UploadIntent, UploadIntentState, UploadIntentStore},
     xet_hash_hex_string,
 };
+
+async fn verify_postgres_intent_evidence(
+    store: &super::PostgresIndexStore,
+    intent: &crate::UploadIntent,
+) -> Result<(), PostgresMetadataStoreError> {
+    let events = <super::PostgresIndexStore as UploadIntentStore>::reliability_events(
+        store,
+        intent.intent_id(),
+    )
+    .await?;
+    verify_upload_lifecycle_events(
+        &events,
+        "shardline",
+        "default",
+        intent.intent_id(),
+        intent.object_key(),
+        intent.object_hash(),
+        intent.state(),
+    )?;
+    Ok(())
+}
 
 impl AsyncIndexStore for super::PostgresIndexStore {
     type Error = PostgresMetadataStoreError;
@@ -873,7 +896,7 @@ impl UploadIntentStore for super::PostgresIndexStore {
                 })?;
                 let created_dur = std::time::Duration::from_secs(created.timestamp() as u64);
                 let updated_dur = std::time::Duration::from_secs(updated.timestamp() as u64);
-                Ok(Some(UploadIntent::from_parts(
+                let intent = UploadIntent::from_parts(
                     id,
                     key,
                     hash,
@@ -881,7 +904,9 @@ impl UploadIntentStore for super::PostgresIndexStore {
                     state,
                     created_dur,
                     updated_dur,
-                )))
+                );
+                verify_postgres_intent_evidence(self, &intent).await?;
+                Ok(Some(intent))
             }
             None => Ok(None),
         }
@@ -914,6 +939,9 @@ impl UploadIntentStore for super::PostgresIndexStore {
                 ))
             })
             .collect::<Result<Vec<_>, PostgresMetadataStoreError>>()?;
+        for intent in &intents {
+            verify_postgres_intent_evidence(self, intent).await?;
+        }
         Ok(intents)
     }
 
@@ -954,6 +982,9 @@ impl UploadIntentStore for super::PostgresIndexStore {
                 ))
             })
             .collect::<Result<Vec<_>, PostgresMetadataStoreError>>()?;
+        for intent in &intents {
+            verify_postgres_intent_evidence(self, intent).await?;
+        }
         Ok(intents)
     }
 

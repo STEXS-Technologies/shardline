@@ -6,7 +6,9 @@ use std::{
 
 use serde_json::{Error as SerdeJsonError, to_vec};
 use shardline_protocol::{RepositoryProvider, RepositoryScope, ShardlineHash};
-use shardline_reliability::{LifecycleEvent, upload_lifecycle_event, verify_lifecycle_chain};
+use shardline_reliability::{
+    LifecycleEvent, upload_lifecycle_event, verify_lifecycle_chain, verify_upload_lifecycle_events,
+};
 use shardline_storage::ObjectKey;
 use thiserror::Error;
 
@@ -527,20 +529,29 @@ impl UploadIntentStore for MemoryIndexStore {
     }
 
     async fn intent_by_id(&self, intent_id: &str) -> Result<Option<UploadIntent>, Self::Error> {
-        Ok(self.lock_state()?.upload_intents.get(intent_id).cloned())
+        let state = self.lock_state()?;
+        let Some(intent) = state.upload_intents.get(intent_id).cloned() else {
+            return Ok(None);
+        };
+        verify_memory_intent_evidence(&state, &intent)?;
+        Ok(Some(intent))
     }
 
     async fn intents_by_state(
         &self,
         state: UploadIntentState,
     ) -> Result<Vec<UploadIntent>, Self::Error> {
-        Ok(self
-            .lock_state()?
+        let state_data = self.lock_state()?;
+        let intents = state_data
             .upload_intents
             .values()
             .filter(|i| i.state() == state)
             .cloned()
-            .collect())
+            .collect::<Vec<_>>();
+        for intent in &intents {
+            verify_memory_intent_evidence(&state_data, intent)?;
+        }
+        Ok(intents)
     }
 
     async fn stale_intents(
@@ -552,14 +563,39 @@ impl UploadIntentStore for MemoryIndexStore {
             .duration_since(UNIX_EPOCH)
             .unwrap_or(Duration::ZERO);
         let cutoff = now.saturating_sub(older_than);
-        Ok(self
-            .lock_state()?
+        let state_data = self.lock_state()?;
+        let intents = state_data
             .upload_intents
             .values()
             .filter(|i| i.state() == state && i.created_at() < cutoff)
             .cloned()
-            .collect())
+            .collect::<Vec<_>>();
+        for intent in &intents {
+            verify_memory_intent_evidence(&state_data, intent)?;
+        }
+        Ok(intents)
     }
+}
+
+fn verify_memory_intent_evidence(
+    state: &MemoryIndexState,
+    intent: &UploadIntent,
+) -> Result<(), MemoryIndexStoreError> {
+    let events = state
+        .reliability_events
+        .get(intent.intent_id())
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    verify_upload_lifecycle_events(
+        events,
+        "shardline",
+        "default",
+        intent.intent_id(),
+        intent.object_key(),
+        intent.object_hash(),
+        intent.state(),
+    )
+    .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))
 }
 
 impl AsyncIndexStore for MemoryIndexStore {
