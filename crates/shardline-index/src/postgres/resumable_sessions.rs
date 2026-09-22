@@ -489,6 +489,10 @@ impl PostgresIndexStore {
         &self,
         session_id: &str,
     ) -> Result<Vec<StateTransitionEvent>, PostgresMetadataStoreError> {
+        let mut transaction = self.pool().begin().await?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+            .execute(&mut *transaction)
+            .await?;
         let rows = sqlx::query(
             "SELECT sequence, event_json
              FROM shardline_reliability_events
@@ -496,7 +500,7 @@ impl PostgresIndexStore {
         )
         .bind("ResumableSession")
         .bind(session_id)
-        .fetch_all(self.pool())
+        .fetch_all(&mut *transaction)
         .await?;
         let events = rows
             .into_iter()
@@ -510,7 +514,36 @@ impl PostgresIndexStore {
                 Ok(serde_json::from_value(row.try_get("event_json")?)?)
             })
             .collect::<Result<Vec<_>, PostgresMetadataStoreError>>()?;
-        shardline_reliability::verify_state_transition_chain(&events)?;
+        let session = sqlx::query(
+            "SELECT scope_namespace, target_key, state
+             FROM shardline_resumable_sessions
+             WHERE session_id = $1",
+        )
+        .bind(session_id)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        if let Some(session) = session {
+            let scope_namespace: String = session.try_get("scope_namespace")?;
+            let target_key: String = session.try_get("target_key")?;
+            let state_text: String = session.try_get("state")?;
+            let state = crate::ResumableSessionState::parse(&state_text).ok_or_else(|| {
+                PostgresMetadataStoreError::Reliability(
+                    shardline_reliability::ReliabilityError::EmptyField(
+                        "unknown resumable session state",
+                    ),
+                )
+            })?;
+            shardline_reliability::verify_resumable_session_events(
+                &events,
+                &scope_namespace,
+                session_id,
+                &target_key,
+                state,
+            )?;
+        } else {
+            shardline_reliability::verify_state_transition_chain(&events)?;
+        }
+        transaction.commit().await?;
         Ok(events)
     }
 
