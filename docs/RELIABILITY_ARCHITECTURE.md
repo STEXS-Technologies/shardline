@@ -44,10 +44,12 @@ completion, abort cleanup, and stale-session sweeps validate or append the
 canonical evidence. The existing `.meta`, `.ranges`, and staging files remain
 the materialized data-plane representation and retain their previous layout.
 
-All completion owners—including LFS, OCI, and S3 Postgres completion paths—use
-the same fenced transition evidence. Publication metadata and the transition
-to `completed` commit together, so a successful publication cannot exist
-without a verifiable terminal lifecycle event.
+All completion owners—including local LFS, OCI, and S3 Postgres completion
+paths—use the same canonical transition evidence. Where the backend supports
+fenced publication, publication metadata and the transition to `completed`
+commit together; the local LFS path records the equivalent terminal evidence
+around its atomic promotion and cleanup. A successful publication therefore
+cannot exist without a verifiable terminal lifecycle event.
 
 Resumable part publication is an `active -> active` evidence boundary in every
 adapter, including both Postgres publication methods and the file-backed
