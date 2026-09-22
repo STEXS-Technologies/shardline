@@ -989,7 +989,74 @@ impl UploadIntentStore for super::PostgresIndexStore {
     }
 
     async fn record_reliability_event(&self, event: &LifecycleEvent) -> Result<(), Self::Error> {
-        insert_reliability_event(&self.pool, event).await?;
+        event.verify_integrity()?;
+        let mut transaction = self.pool.begin().await?;
+        let owner = sqlx::query(
+            "SELECT object_key, object_hash, state
+             FROM shardline_upload_intents
+             WHERE intent_id = $1
+             FOR UPDATE",
+        )
+        .bind(&event.operation.operation_id)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or_else(|| {
+            PostgresMetadataStoreError::Reliability(
+                shardline_reliability::ReliabilityError::EmptyField(
+                    "reliability event has no authoritative upload intent",
+                ),
+            )
+        })?;
+        let object_key: String = owner.try_get("object_key")?;
+        let object_hash: String = owner.try_get("object_hash")?;
+        let state_text: String = owner.try_get("state")?;
+        let state = UploadIntentState::parse(&state_text).ok_or_else(|| {
+            PostgresMetadataStoreError::Reliability(
+                shardline_reliability::ReliabilityError::EmptyField("unknown upload intent state"),
+            )
+        })?;
+        let rows = sqlx::query(
+            "SELECT event_json
+             FROM shardline_reliability_events
+             WHERE operation_kind = $1 AND operation_id = $2
+             ORDER BY sequence",
+        )
+        .bind("Upload")
+        .bind(&event.operation.operation_id)
+        .fetch_all(&mut *transaction)
+        .await?;
+        let mut events = rows
+            .into_iter()
+            .map(
+                |row| -> Result<LifecycleEvent, PostgresMetadataStoreError> {
+                    Ok(serde_json::from_value(row.try_get("event_json")?)?)
+                },
+            )
+            .collect::<Result<Vec<LifecycleEvent>, PostgresMetadataStoreError>>()?;
+        if let Some(existing) = events
+            .iter()
+            .find(|existing| existing.sequence == event.sequence)
+        {
+            if existing != event {
+                return Err(PostgresMetadataStoreError::ReliabilityEventConflict(
+                    event.operation.operation_id.clone(),
+                ));
+            }
+        } else {
+            events.push(event.clone());
+            events.sort_by_key(|stored_event| stored_event.sequence);
+        }
+        verify_upload_lifecycle_events(
+            &events,
+            "shardline",
+            "default",
+            &event.operation.operation_id,
+            &object_key,
+            &object_hash,
+            state,
+        )?;
+        insert_reliability_event(transaction.as_mut(), event).await?;
+        transaction.commit().await?;
         Ok(())
     }
 

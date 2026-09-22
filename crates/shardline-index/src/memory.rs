@@ -491,6 +491,15 @@ impl UploadIntentStore for MemoryIndexStore {
             .verify_integrity()
             .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
         let mut state = self.lock_state()?;
+        let Some(intent) = state
+            .upload_intents
+            .get(&event.operation.operation_id)
+            .cloned()
+        else {
+            return Err(MemoryIndexStoreError::Reliability(
+                "reliability event has no authoritative upload intent".into(),
+            ));
+        };
         let events = state
             .reliability_events
             .entry(event.operation.operation_id.clone())
@@ -508,8 +517,16 @@ impl UploadIntentStore for MemoryIndexStore {
         }
         events.push(event.clone());
         events.sort_by_key(|stored_event| stored_event.sequence);
-        verify_lifecycle_chain(events)
-            .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
+        verify_upload_lifecycle_events(
+            events,
+            "shardline",
+            "default",
+            intent.intent_id(),
+            intent.object_key(),
+            intent.object_hash(),
+            intent.state(),
+        )
+        .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
         Ok(())
     }
 
