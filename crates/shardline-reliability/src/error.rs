@@ -23,4 +23,6 @@ pub enum ReliabilityError {
     SequenceRegression,
     #[error("lifecycle event chain is discontinuous")]
     ChainDiscontinuity,
+    #[error("durable state does not match the terminal reliability event")]
+    StateMismatch,
 }

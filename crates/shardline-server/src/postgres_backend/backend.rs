@@ -4,7 +4,7 @@ use shardline_index::{
     PostgresIndexStore, PostgresRecordStore, RepoKey, RevisionRecord, TreeEntry, TreeKey, TreeStore,
 };
 use shardline_protocol::unix_now_seconds_lossy;
-use shardline_reliability::{upload_lifecycle_event, verify_lifecycle_chain};
+use shardline_reliability::{upload_lifecycle_event, verify_lifecycle_chain_ends_at};
 
 use super::connect_postgres_metadata_pool;
 use crate::{
@@ -175,7 +175,7 @@ impl PostgresBackend {
                     .index_store
                     .reliability_events(intent.intent_id())
                     .await?;
-                verify_lifecycle_chain(&reliability_events)
+                verify_lifecycle_chain_ends_at(&reliability_events, intent.state())
                     .map_err(|error| ServerError::Io(std::io::Error::other(error.to_string())))?;
                 let now = SystemTime::now()
                     .duration_since(UNIX_EPOCH)

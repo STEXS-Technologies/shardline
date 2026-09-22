@@ -114,6 +114,24 @@ fn resumable_evidence_keeps_existing_lowercase_json_spelling() {
 }
 
 #[test]
+fn terminal_state_must_match_the_verified_evidence_chain() {
+    let events = baseline_upload_lifecycle_events(
+        "tenant",
+        "repo",
+        "upload-terminal",
+        "object",
+        "hash",
+        UploadLifecycleState::Visible,
+    )
+    .unwrap();
+    assert!(verify_lifecycle_chain_ends_at(&events, UploadLifecycleState::Visible).is_ok());
+    assert!(matches!(
+        verify_lifecycle_chain_ends_at(&events, UploadLifecycleState::Stored),
+        Err(ReliabilityError::StateMismatch)
+    ));
+}
+
+#[test]
 fn resumable_terminal_reuse_is_an_explicit_recovery_transition() {
     assert!(ResumableLifecycleState::Completed.can_transition_to(ResumableLifecycleState::Active));
     assert!(ResumableLifecycleState::Aborted.can_transition_to(ResumableLifecycleState::Active));

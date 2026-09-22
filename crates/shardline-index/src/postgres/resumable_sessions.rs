@@ -132,6 +132,12 @@ impl PostgresIndexStore {
             .map(session_from_row)
             .collect::<Result<Vec<_>, _>>()?;
         transaction.commit().await?;
+        for session in &reclaimable_sessions {
+            let events = self
+                .resumable_reliability_events(session.session_id())
+                .await?;
+            shardline_reliability::verify_state_transition_chain_ends_at(&events, session.state())?;
+        }
         Ok(ResumableSessionGcInventory::new(
             protected_staging_keys,
             reclaimable_sessions,

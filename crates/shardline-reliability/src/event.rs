@@ -90,6 +90,18 @@ pub fn verify_state_transition_chain(
     Ok(())
 }
 
+pub fn verify_state_transition_chain_ends_at(
+    events: &[StateTransitionEvent],
+    expected: ResumableLifecycleState,
+) -> Result<(), ReliabilityError> {
+    verify_state_transition_chain(events)?;
+    if events.last().is_some_and(|event| event.after == expected) {
+        Ok(())
+    } else {
+        Err(ReliabilityError::StateMismatch)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LifecycleEvent {
     pub operation: OperationIdentity,
@@ -215,6 +227,18 @@ pub fn verify_lifecycle_chain(events: &[LifecycleEvent]) -> Result<(), Reliabili
         previous_sequence = Some(event.sequence);
     }
     Ok(())
+}
+
+pub fn verify_lifecycle_chain_ends_at(
+    events: &[LifecycleEvent],
+    expected: UploadLifecycleState,
+) -> Result<(), ReliabilityError> {
+    verify_lifecycle_chain(events)?;
+    if events.last().is_some_and(|event| event.after == expected) {
+        Ok(())
+    } else {
+        Err(ReliabilityError::StateMismatch)
+    }
 }
 
 const fn lifecycle_sequence(before: UploadLifecycleState, after: UploadLifecycleState) -> u64 {
