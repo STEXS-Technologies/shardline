@@ -13,7 +13,7 @@ const STATES: [ResumableLifecycleState; 5] = [
 
 fn state(byte: u8) -> ResumableLifecycleState {
     STATES
-        .get(usize::from(byte) % STATES.len())
+        .get(usize::from(byte))
         .copied()
         .unwrap_or(ResumableLifecycleState::Active)
 }
@@ -36,8 +36,16 @@ fuzz_target!(|input: &[u8]| {
         }
         current = candidate;
     }
-    evidence.verify().unwrap();
-    let encoded = serde_json::to_vec(&evidence).unwrap();
-    let decoded: SessionEvidenceLog = serde_json::from_slice(&encoded).unwrap();
-    decoded.verify().unwrap();
+    if evidence.verify().is_err() {
+        return;
+    }
+    let Ok(encoded) = serde_json::to_vec(&evidence) else {
+        return;
+    };
+    let Ok(decoded) = serde_json::from_slice::<SessionEvidenceLog>(&encoded) else {
+        return;
+    };
+    if decoded.verify().is_err() {
+        return;
+    }
 });

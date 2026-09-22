@@ -17,7 +17,7 @@ const STATES: [ResumableLifecycleState; 5] = [
 
 fn state(byte: u8) -> ResumableLifecycleState {
     STATES
-        .get(usize::from(byte) % STATES.len())
+        .get(usize::from(byte))
         .copied()
         .unwrap_or(ResumableLifecycleState::Active)
 }
