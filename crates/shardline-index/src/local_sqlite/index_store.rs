@@ -570,12 +570,23 @@ impl UploadIntentStore for super::LocalIndexStore {
         let store = self.clone();
         let intent = intent.clone();
         tokio::task::spawn_blocking(move || {
-            let conn = store.open_connection()?;
+            let mut conn = store.open_connection()?;
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or(Duration::ZERO)
                 .as_secs() as i64;
-            let inserted = conn.execute(
+            let created_event = upload_lifecycle_event(
+                "shardline",
+                "default",
+                intent.intent_id(),
+                intent.object_key(),
+                intent.object_hash(),
+                shardline_reliability::UploadLifecycleState::Created,
+                shardline_reliability::UploadLifecycleState::Created,
+            )?;
+            let event_json = serde_json::to_string(&created_event)?;
+            let transaction = conn.transaction()?;
+            let inserted = transaction.execute(
                 "INSERT OR IGNORE INTO shardline_upload_intents (intent_id, object_key, object_hash, object_length, state, created_at_unix_seconds, updated_at_unix_seconds) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 rusqlite::params![
                     intent.intent_id(),
@@ -588,7 +599,7 @@ impl UploadIntentStore for super::LocalIndexStore {
                 ],
             )?;
             if inserted == 0 {
-                let matches_identity = conn.query_row(
+                let matches_identity = transaction.query_row(
                     "SELECT EXISTS(
                         SELECT 1 FROM shardline_upload_intents
                         WHERE intent_id = ?1 AND object_key = ?2 AND object_hash = ?3
@@ -605,7 +616,19 @@ impl UploadIntentStore for super::LocalIndexStore {
                 if !matches_identity {
                     return Err(crate::UploadIntentConflictError::new(intent.intent_id()).into());
                 }
+            } else {
+                transaction.execute(
+                    "INSERT INTO shardline_reliability_events (operation_kind, operation_id, sequence, event_json, created_at_unix_seconds) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    rusqlite::params![
+                        created_event.operation.kind.as_str(),
+                        created_event.operation.operation_id,
+                        created_event.sequence as i64,
+                        event_json,
+                        now,
+                    ],
+                )?;
             }
+            transaction.commit()?;
             Ok(())
         })
         .await

@@ -749,6 +749,16 @@ impl UploadIntentStore for super::PostgresIndexStore {
     type Error = PostgresMetadataStoreError;
 
     async fn create_intent(&self, intent: &UploadIntent) -> Result<(), Self::Error> {
+        let created_event = upload_lifecycle_event(
+            "shardline",
+            "default",
+            intent.intent_id(),
+            intent.object_key(),
+            intent.object_hash(),
+            shardline_reliability::UploadLifecycleState::Created,
+            shardline_reliability::UploadLifecycleState::Created,
+        )?;
+        let mut transaction = self.pool.begin().await?;
         let result = sqlx::query(
             "INSERT INTO shardline_upload_intents (
                 intent_id, object_key, object_hash, object_length, state, created_at, updated_at
@@ -764,11 +774,14 @@ impl UploadIntentStore for super::PostgresIndexStore {
         .bind(intent.object_hash())
         .bind(intent.object_length() as i64)
         .bind(intent.state().as_str())
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await?;
         if result.rows_affected() == 0 {
+            transaction.rollback().await?;
             return Err(crate::UploadIntentConflictError::new(intent.intent_id()).into());
         }
+        insert_reliability_event(transaction.as_mut(), &created_event).await?;
+        transaction.commit().await?;
         Ok(())
     }
 

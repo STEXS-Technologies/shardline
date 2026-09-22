@@ -1563,22 +1563,22 @@ async fn upload_thousand_small_files() {
                 .send()
                 .await
                 .expect("upload request failed");
-            assert!(
-                upload.status().is_success(),
-                "upload {i} failed: {}",
-                upload.status()
-            );
+            if !upload.status().is_success() {
+                let status = upload.status();
+                let body = upload.text().await.unwrap_or_default();
+                panic!("upload {i} failed: {status}: {body}");
+            }
             let download = client
                 .get(&url)
                 .header("Authorization", &auth)
                 .send()
                 .await
                 .expect("download request failed");
-            assert!(
-                download.status().is_success(),
-                "download {i} failed: {}",
-                download.status()
-            );
+            if !download.status().is_success() {
+                let status = download.status();
+                let body = download.text().await.unwrap_or_default();
+                panic!("download {i} failed: {status}: {body}");
+            }
             let body = download.bytes().await.expect("download body failed");
             assert_eq!(
                 body.as_ref(),

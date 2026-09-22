@@ -394,7 +394,20 @@ impl UploadIntentStore for MemoryIndexStore {
                 }
             }
             std::collections::hash_map::Entry::Vacant(entry) => {
+                let created_event = upload_lifecycle_event(
+                    "shardline",
+                    "default",
+                    intent.intent_id(),
+                    intent.object_key(),
+                    intent.object_hash(),
+                    shardline_reliability::UploadLifecycleState::Created,
+                    shardline_reliability::UploadLifecycleState::Created,
+                )
+                .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
                 entry.insert(intent.clone());
+                state
+                    .reliability_events
+                    .insert(intent.intent_id().to_owned(), vec![created_event]);
             }
         }
         Ok(())

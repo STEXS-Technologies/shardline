@@ -1,4 +1,8 @@
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+    sync::{Mutex, OnceLock},
+};
 
 use rusqlite::{Connection, OptionalExtension, params};
 use shardline_protocol::unix_now_seconds_lossy;
@@ -10,7 +14,11 @@ use crate::{
     xet_hash_hex_string,
 };
 
-use super::{LOCAL_METADATA_DATABASE_FILE_NAME, LocalIndexStoreError, helpers};
+use super::{
+    LOCAL_METADATA_DATABASE_FILE_NAME, LOCAL_SCHEMA_MIGRATIONS_TABLE, LocalIndexStoreError, helpers,
+};
+
+static INITIALIZED_LOCAL_DATABASES: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
 
 /// Local SQLite implementation of [`IndexStore`](crate::IndexStore).
 #[derive(Debug, Clone)]
@@ -69,12 +77,53 @@ impl LocalIndexStore {
         helpers::initialize_local_metadata_root(&self.root)?;
         let database_path = self.database_path();
         helpers::ensure_sqlite_database_path_is_safe(&database_path)?;
+        let database_preexisted = database_path.exists();
         let mut connection =
-            Connection::open_with_flags(database_path, helpers::sqlite_open_flags())?;
+            Connection::open_with_flags(&database_path, helpers::sqlite_open_flags())?;
         helpers::prepare_connection(&mut connection)?;
-        helpers::ensure_local_schema_migrations_table(&connection)?;
-        helpers::apply_pending_local_migrations(&mut connection)?;
-        helpers::ensure_legacy_import_state(&mut connection, &self.root)?;
+        let mut initialized = INITIALIZED_LOCAL_DATABASES
+            .get_or_init(|| Mutex::new(HashSet::new()))
+            .lock()
+            .map_err(|error| {
+                LocalIndexStoreError::Io(std::io::Error::other(format!(
+                    "local metadata initialization lock poisoned: {error}"
+                )))
+            })?;
+        if !database_preexisted {
+            // A caller may remove and recreate a temporary/test root while a
+            // server task still owns the store. Treat the recreated file as a
+            // new database even if this process initialized the old inode.
+            initialized.remove(&database_path);
+        }
+        if initialized.contains(&database_path) {
+            let schema_table_exists = connection
+                .query_row(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                    [LOCAL_SCHEMA_MIGRATIONS_TABLE],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some();
+            if !schema_table_exists {
+                initialized.remove(&database_path);
+            }
+        }
+        if !initialized.contains(&database_path) {
+            helpers::ensure_local_schema_migrations_table(&connection)?;
+            helpers::apply_pending_local_migrations(&mut connection)?;
+            helpers::ensure_legacy_import_state(&mut connection, &self.root)?;
+            initialized.insert(database_path);
+        }
+        let import_state = connection
+            .query_row(
+                "SELECT value FROM shardline_local_metadata_meta WHERE key = ?1",
+                [super::LEGACY_IMPORT_COMPLETED_KEY],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        if import_state.as_deref().is_some_and(|state| state != "1") {
+            return Err(LocalIndexStoreError::InvalidLegacyImportState);
+        }
         Ok(connection)
     }
 

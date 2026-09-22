@@ -90,7 +90,15 @@ pub(crate) fn prepare_connection(connection: &mut Connection) -> Result<(), Loca
     // mode can otherwise fail immediately while another connection is writing.
     connection.busy_timeout(Duration::from_secs(5))?;
     let _enabled = connection.set_db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true)?;
-    connection.pragma_update(None, "journal_mode", "WAL")?;
+    // Reading the mode is connection-local and does not take the schema lock.
+    // Re-applying `journal_mode=WAL` for every request connection turns a
+    // harmless setup step into a write-style pragma that can race with active
+    // readers under concurrent protocol traffic.
+    let journal_mode: String =
+        connection.pragma_query_value(None, "journal_mode", |row| row.get(0))?;
+    if !journal_mode.eq_ignore_ascii_case("wal") {
+        connection.pragma_update(None, "journal_mode", "WAL")?;
+    }
     connection.pragma_update(None, "synchronous", "FULL")?;
     connection.pragma_update(None, "foreign_keys", "ON")?;
     connection.pragma_update(None, "trusted_schema", "OFF")?;
