@@ -25,6 +25,7 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
+use shardline_reliability::{ResumableLifecycleState, SessionEvidenceLog};
 use thiserror::Error;
 use tokio::{fs, sync::Mutex, task::spawn_blocking};
 
@@ -93,6 +94,9 @@ pub enum S3SessionError {
     /// Session JSON serialization or deserialization failed.
     #[error("s3 upload session json failed")]
     Json(#[from] serde_json::Error),
+    /// Canonical resumable-session evidence could not be validated.
+    #[error("s3 upload session reliability evidence failed")]
+    Reliability(String),
     /// The referenced upload session does not exist (or has expired).
     #[error("s3 upload session not found")]
     NotFound,
@@ -158,6 +162,13 @@ pub struct MultipartUploadSession {
     /// [`Self::created_at_unix_seconds`] so keep-alive parts cannot extend the
     /// session lifetime indefinitely).
     pub last_touched_unix_seconds: u64,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct PersistedMultipartUploadSession {
+    session: MultipartUploadSession,
+    #[serde(default)]
+    evidence: SessionEvidenceLog,
 }
 
 /// A held session-store lock (process mutex + advisory file lock).
@@ -409,7 +420,10 @@ pub async fn create_session(
         created_at_unix_seconds: now_unix_seconds,
         last_touched_unix_seconds: now_unix_seconds,
     };
-    persist_session(root, &upload_id, &session).await?;
+    let evidence =
+        SessionEvidenceLog::new(&session.scope_namespace, &session.upload_id, &session.key)
+            .map_err(|error| S3SessionError::Reliability(error.to_string()))?;
+    persist_session_with_evidence(root, &upload_id, &session, &evidence).await?;
     Ok(upload_id)
 }
 
@@ -429,12 +443,13 @@ pub async fn read_session(
 ) -> Result<MultipartUploadSession, S3SessionError> {
     validate_upload_id(upload_id)?;
     let now_unix_seconds = unix_now_seconds_checked()?;
-    load_session_at(
+    let (session, _evidence) = load_session_at(
         &session_dir(root, upload_id)?,
         ttl_seconds,
         now_unix_seconds,
     )
-    .await
+    .await?;
+    Ok(session)
 }
 
 /// Records a stored part's size in the session metadata.
@@ -501,7 +516,7 @@ pub async fn store_part_locked(
     validate_upload_id(upload_id)?;
     validate_part_number(part_number)?;
     let now_unix_seconds = unix_now_seconds_checked()?;
-    let mut session = load_session_at(
+    let (mut session, mut evidence) = load_session_at(
         &session_dir(root, upload_id)?,
         ttl_seconds,
         now_unix_seconds,
@@ -529,7 +544,16 @@ pub async fn store_part_locked(
         },
     );
     session.last_touched_unix_seconds = now_unix_seconds;
-    persist_session(root, upload_id, &session).await
+    evidence
+        .record(
+            &session.scope_namespace,
+            &session.upload_id,
+            &session.key,
+            ResumableLifecycleState::Active,
+            ResumableLifecycleState::Active,
+        )
+        .map_err(|error| S3SessionError::Reliability(error.to_string()))?;
+    persist_session_with_evidence(root, upload_id, &session, &evidence).await
 }
 
 /// Validates a part against the per-session and aggregate byte quotas and the
@@ -564,7 +588,7 @@ pub async fn validate_part_quota_locked(
     validate_upload_id(upload_id)?;
     validate_part_number(part_number)?;
     let now_unix_seconds = unix_now_seconds_checked()?;
-    let session = load_session_at(
+    let (session, _evidence) = load_session_at(
         &session_dir(root, upload_id)?,
         ttl_seconds,
         now_unix_seconds,
@@ -715,7 +739,7 @@ async fn load_session_at(
     dir: &Path,
     ttl_seconds: NonZeroU64,
     now_unix_seconds: u64,
-) -> Result<MultipartUploadSession, S3SessionError> {
+) -> Result<(MultipartUploadSession, SessionEvidenceLog), S3SessionError> {
     let bytes = match fs::read(dir.join("session.json")).await {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -723,23 +747,65 @@ async fn load_session_at(
         }
         Err(error) => return Err(S3SessionError::Io(error)),
     };
-    let session: MultipartUploadSession = serde_json::from_slice(&bytes)?;
+    let (session, stored_evidence) =
+        match serde_json::from_slice::<PersistedMultipartUploadSession>(&bytes) {
+            Ok(persisted) => (persisted.session, persisted.evidence),
+            Err(wrapper_error) => {
+                let session = serde_json::from_slice::<MultipartUploadSession>(&bytes)
+                    .map_err(|_legacy_error| wrapper_error)?;
+                (session, SessionEvidenceLog::default())
+            }
+        };
     if is_expired(&session, ttl_seconds, now_unix_seconds) {
         return Err(S3SessionError::NotFound);
     }
-    Ok(session)
+    let evidence = if stored_evidence.is_empty() {
+        SessionEvidenceLog::for_legacy_session(
+            &session.scope_namespace,
+            &session.upload_id,
+            &session.key,
+        )
+    } else {
+        stored_evidence
+            .verify_for(&session.scope_namespace, &session.upload_id, &session.key)
+            .map(|()| stored_evidence)
+    }
+    .map_err(|error| S3SessionError::Reliability(error.to_string()))?;
+    Ok((session, evidence))
 }
 
+#[allow(dead_code)]
 async fn persist_session(
     root: &Path,
     upload_id: &str,
     session: &MultipartUploadSession,
 ) -> Result<(), S3SessionError> {
+    let evidence = SessionEvidenceLog::for_legacy_session(
+        &session.scope_namespace,
+        &session.upload_id,
+        &session.key,
+    )
+    .map_err(|error| S3SessionError::Reliability(error.to_string()))?;
+    persist_session_with_evidence(root, upload_id, session, &evidence).await
+}
+
+async fn persist_session_with_evidence(
+    root: &Path,
+    upload_id: &str,
+    session: &MultipartUploadSession,
+    evidence: &SessionEvidenceLog,
+) -> Result<(), S3SessionError> {
+    evidence
+        .verify_for(&session.scope_namespace, &session.upload_id, &session.key)
+        .map_err(|error| S3SessionError::Reliability(error.to_string()))?;
     let path = session_metadata_path(root, upload_id)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).await?;
     }
-    let bytes = serde_json::to_vec(session)?;
+    let bytes = serde_json::to_vec(&PersistedMultipartUploadSession {
+        session: session.clone(),
+        evidence: evidence.clone(),
+    })?;
     write_file_atomically(&path, &bytes).await
 }
 
@@ -789,7 +855,7 @@ async fn sweep_expired_sessions_locked(
             continue;
         }
         let expired = match load_session_at(&path, ttl_seconds, now_unix_seconds).await {
-            Ok(session) => is_expired(&session, ttl_seconds, now_unix_seconds),
+            Ok((session, _evidence)) => is_expired(&session, ttl_seconds, now_unix_seconds),
             Err(S3SessionError::NotFound) => true,
             Err(_error) => continue,
         };
@@ -888,7 +954,9 @@ async fn total_active_usage_locked(
         if validate_upload_id(file_name).is_err() {
             continue;
         }
-        if let Ok(session) = load_session_at(&path, ttl_seconds, now_unix_seconds).await {
+        if let Ok((session, _evidence)) =
+            load_session_at(&path, ttl_seconds, now_unix_seconds).await
+        {
             let session_total = session
                 .parts
                 .values()
@@ -939,7 +1007,10 @@ mod tests {
     fn session_at(root: &Path, upload_id: &str) -> MultipartUploadSession {
         // Reads the session json directly for assertions.
         let bytes = std::fs::read(session_metadata_path(root, upload_id).unwrap()).unwrap();
-        serde_json::from_slice(&bytes).unwrap()
+        serde_json::from_slice::<PersistedMultipartUploadSession>(&bytes)
+            .map(|persisted| persisted.session)
+            .or_else(|_| serde_json::from_slice(&bytes))
+            .unwrap()
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

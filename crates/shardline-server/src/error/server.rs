@@ -628,6 +628,7 @@ impl From<OciAdapterError> for ServerError {
             OciAdapterError::TooManyUploadSessions => Self::TooManyUploadSessions,
             OciAdapterError::ExpectedBodyHashMismatch => Self::ExpectedBodyHashMismatch,
             OciAdapterError::BlockingTask(e) => Self::BlockingTask(e),
+            OciAdapterError::Reliability(e) => Self::Io(IoError::other(e)),
         }
     }
 }

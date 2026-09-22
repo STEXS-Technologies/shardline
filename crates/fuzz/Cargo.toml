@@ -22,6 +22,7 @@ libfuzzer-sys.workspace = true
 object_store = { workspace = true, default-features = true }
 penelope.workspace = true
 sdx.workspace = true
+serde_json.workspace = true
 shardline.workspace = true
 shardline-auth.workspace = true
 shardline-cas.workspace = true
@@ -371,6 +372,12 @@ doc = false
 [[bin]]
 name = "shardline_reliability_resumable_evidence"
 path = "fuzz_targets/shardline/reliability_resumable_evidence.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "shardline_reliability_session_evidence"
+path = "fuzz_targets/shardline/reliability_session_evidence.rs"
 test = false
 doc = false
 

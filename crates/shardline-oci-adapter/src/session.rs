@@ -19,10 +19,9 @@ use crate::{
     OciAdapterError,
     fs::{
         acquire_upload_session_file_lock, append_file_anchored, delete_file_anchored,
-        map_not_found, open_anchored_file, persist_upload_session, read_upload_file_async,
+        map_not_found, open_anchored_file, persist_upload_session, read_persisted_upload_session,
         unix_now_seconds_checked, upload_body_path, upload_dir, upload_file_exists_async,
         upload_file_len_async, upload_metadata_path, upload_session_lock_path, upload_tail_path,
-        write_upload_metadata,
     },
     key::validate_repository,
     protocol_support::{
@@ -89,18 +88,18 @@ pub async fn create_upload_session<B: OciBackend>(
     let session_id = new_upload_session_id();
     let upload_dir = upload_dir(root);
     fs::create_dir_all(&upload_dir).await?;
-    let metadata = serde_json::to_vec(&OciUploadSession {
+    let session = OciUploadSession {
         repository: repository.to_owned(),
         scope_namespace: scope_namespace(repository_scope),
         created_at_unix_seconds: now_unix_seconds,
         last_touched_unix_seconds: now_unix_seconds,
         use_s3_multipart,
         s3_multipart: None,
-    })?;
+    };
     if !use_s3_multipart {
         fs::write(upload_body_path(root, &session_id), []).await?;
     }
-    if let Err(error) = write_upload_metadata(root, &session_id, metadata).await {
+    if let Err(error) = persist_upload_session(root, &session_id, &session).await {
         delete_upload_session(root, &session_id).await?;
         return Err(error);
     }
@@ -116,17 +115,7 @@ pub async fn read_upload_session(
     ttl_seconds: NonZeroU64,
 ) -> Result<OciUploadSession, OciAdapterError> {
     validate_upload_session_id(session_id)?;
-    let metadata_path = upload_metadata_path(root, session_id);
-    let bytes = read_upload_file_async(root, &metadata_path)
-        .await
-        .map_err(|error| {
-            if error.kind() == std::io::ErrorKind::NotFound {
-                OciAdapterError::NotFound
-            } else {
-                OciAdapterError::Io(error)
-            }
-        })?;
-    let session: OciUploadSession = serde_json::from_slice(&bytes)?;
+    let (session, _evidence) = read_persisted_upload_session(root, session_id).await?;
     let now_unix_seconds = unix_now_seconds_checked()?;
     if upload_session_expired(&session, ttl_seconds, now_unix_seconds) {
         delete_upload_session(root, session_id).await?;
@@ -391,11 +380,11 @@ pub(crate) async fn count_active_upload_sessions(
         if path.extension() != Some(OsStr::new("json")) {
             continue;
         }
-        // Validate that the file contains a valid, unexpired session.
-        let Ok(bytes) = fs::read(&path).await else {
+        // Validate that the file contains a valid, evidenced, unexpired session.
+        let Some(stem) = path.file_stem().and_then(|value| value.to_str()) else {
             continue;
         };
-        let Ok(session): Result<OciUploadSession, _> = serde_json::from_slice(&bytes) else {
+        let Ok((session, _evidence)) = read_persisted_upload_session(root, stem).await else {
             continue;
         };
         if upload_session_expired(&session, ttl_seconds, now_unix_seconds) {
@@ -450,15 +439,9 @@ pub async fn purge_expired_upload_sessions<B: OciBackend>(
         if validate_upload_session_id(stem).is_err() {
             continue;
         }
-        let bytes = match fs::read(&path).await {
-            Ok(bytes) => bytes,
-            Err(_error) => {
-                delete_upload_session(root, stem).await?;
-                continue;
-            }
-        };
-        let session: OciUploadSession = match serde_json::from_slice(&bytes) {
-            Ok(session) => session,
+        let session_id = stem.to_owned();
+        let session = match read_persisted_upload_session(root, &session_id).await {
+            Ok((session, _evidence)) => session,
             Err(_error) => {
                 delete_upload_session(root, stem).await?;
                 continue;

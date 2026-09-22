@@ -31,6 +31,12 @@ The canonical state machines are:
 - resumable session lifecycle (`active` through `completed`, `aborted`, or
   `expired`).
 
+This same resumable lifecycle evidence is also persisted by the standalone
+file-backed S3 multipart and OCI upload-session adapters. Their legacy session
+files remain readable; new writes use an atomic session envelope containing the
+canonical `SessionEvidenceLog`, and reads/sweeps verify it before using the
+materialized progress.
+
 All completion owners—including LFS, OCI, and S3 Postgres completion paths—use
 the same fenced transition evidence. Publication metadata and the transition
 to `completed` commit together, so a successful publication cannot exist
@@ -41,12 +47,12 @@ existing transactional domain models and fencing rules. They do not create a
 second reliability protocol. Where they repair or reconcile an upload or
 session, they consume the canonical journal and verify it first.
 
-The following are data-plane recovery journals, not independent lifecycle
-state machines:
+The following are data-plane recovery materializations, not independent
+lifecycle state machines:
 
 - LFS patch-range append/compaction files;
-- S3 multipart session JSON and part files;
-- OCI staging/session material;
+- S3 multipart part files;
+- OCI staging/body and provider multipart material;
 - the SDK's process-local upload/session state.
 
 These records describe materialized progress and remain useful for restart

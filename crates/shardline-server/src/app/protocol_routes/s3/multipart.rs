@@ -98,6 +98,7 @@ fn store_error_to_s3(error: S3SessionError) -> S3Error {
         | other @ S3SessionError::SessionQuotaExceeded
         | other @ S3SessionError::AggregateQuotaExceeded
         | other @ S3SessionError::Overflow
+        | other @ S3SessionError::Reliability(_)
         | other @ S3SessionError::BlockingTask(_) => S3Error::from(other),
     }
 }

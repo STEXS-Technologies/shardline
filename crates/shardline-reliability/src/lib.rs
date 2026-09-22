@@ -11,6 +11,7 @@ mod digest;
 mod error;
 mod event;
 mod operation;
+mod session_evidence;
 mod states;
 
 #[cfg(test)]
@@ -24,4 +25,5 @@ pub use event::{
     verify_state_transition_chain_ends_at,
 };
 pub use operation::{OperationIdentity, OperationKind};
+pub use session_evidence::SessionEvidenceLog;
 pub use states::{ResumableLifecycleState, UploadLifecycleState};

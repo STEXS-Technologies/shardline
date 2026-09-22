@@ -162,3 +162,49 @@ fn baseline_events_are_replayable() {
     .unwrap();
     verify_state_transition_chain(&session).unwrap();
 }
+
+#[test]
+fn file_backed_session_evidence_is_replayable_and_tamper_evident() {
+    let mut evidence = SessionEvidenceLog::new("s3", "session-1", "bucket/key").unwrap();
+    evidence
+        .record(
+            "s3",
+            "session-1",
+            "bucket/key",
+            ResumableLifecycleState::Active,
+            ResumableLifecycleState::Active,
+        )
+        .unwrap();
+    evidence.verify().unwrap();
+    assert_eq!(evidence.events().len(), 2);
+
+    let mut tampered = evidence;
+    tampered
+        .events_mut()
+        .get_mut(1)
+        .expect("recorded evidence has baseline and mutation")
+        .after = ResumableLifecycleState::Completed;
+    assert!(matches!(
+        tampered.verify(),
+        Err(ReliabilityError::StateDigestMismatch) | Err(ReliabilityError::ProcessDigestMismatch)
+    ));
+}
+
+#[test]
+fn session_evidence_is_bound_to_one_identity() {
+    let evidence = SessionEvidenceLog::new("scope", "session", "object").unwrap();
+
+    evidence.verify_for("scope", "session", "object").unwrap();
+    assert!(matches!(
+        evidence.verify_for("other-scope", "session", "object"),
+        Err(ReliabilityError::OperationMismatch)
+    ));
+    assert!(matches!(
+        evidence.verify_for("scope", "other-session", "object"),
+        Err(ReliabilityError::OperationMismatch)
+    ));
+    assert!(matches!(
+        evidence.verify_for("scope", "session", "other-object"),
+        Err(ReliabilityError::OperationMismatch)
+    ));
+}

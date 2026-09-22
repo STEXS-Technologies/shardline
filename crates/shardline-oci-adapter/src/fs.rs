@@ -4,6 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use shardline_reliability::SessionEvidenceLog;
 #[cfg(unix)]
 use shardline_storage::{
     AnchoredPathOptions, ensure_parent_path_matches_anchor, open_anchored_target,
@@ -15,6 +16,13 @@ use crate::{
     OciAdapterError, protocol_support,
     types::{OCI_UPLOAD_DIR, OciFileLock, OciUploadSession},
 };
+
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+pub(crate) struct PersistedOciUploadSession {
+    pub(crate) session: OciUploadSession,
+    #[serde(default)]
+    pub(crate) evidence: SessionEvidenceLog,
+}
 
 // ── Path helpers ──────────────────────────────────────────────────────────────
 
@@ -81,8 +89,67 @@ pub(crate) async fn persist_upload_session(
     session_id: &str,
     session: &OciUploadSession,
 ) -> Result<(), OciAdapterError> {
-    let bytes = serde_json::to_vec(session)?;
+    let evidence = match read_persisted_upload_session(root, session_id).await {
+        Ok((_previous, evidence)) => {
+            let mut evidence = evidence;
+            evidence
+                .record(
+                    &session.scope_namespace,
+                    session_id,
+                    &session.repository,
+                    shardline_reliability::ResumableLifecycleState::Active,
+                    shardline_reliability::ResumableLifecycleState::Active,
+                )
+                .map_err(|error| OciAdapterError::Reliability(error.to_string()))?;
+            evidence
+        }
+        Err(OciAdapterError::NotFound) => {
+            SessionEvidenceLog::new(&session.scope_namespace, session_id, &session.repository)
+                .map_err(|error| OciAdapterError::Reliability(error.to_string()))?
+        }
+        Err(error) => return Err(error),
+    };
+    evidence
+        .verify_for(&session.scope_namespace, session_id, &session.repository)
+        .map_err(|error| OciAdapterError::Reliability(error.to_string()))?;
+    let bytes = serde_json::to_vec(&PersistedOciUploadSession {
+        session: session.clone(),
+        evidence,
+    })?;
     write_upload_metadata(root, session_id, bytes).await
+}
+
+pub(crate) async fn read_persisted_upload_session(
+    root: &Path,
+    session_id: &str,
+) -> Result<(OciUploadSession, SessionEvidenceLog), OciAdapterError> {
+    protocol_support::validate_upload_session_id(session_id)?;
+    let metadata_path = upload_metadata_path(root, session_id);
+    let bytes = read_upload_file_async(root, &metadata_path)
+        .await
+        .map_err(map_not_found)?;
+    let (session, stored_evidence) =
+        match serde_json::from_slice::<PersistedOciUploadSession>(&bytes) {
+            Ok(persisted) => (persisted.session, persisted.evidence),
+            Err(wrapper_error) => {
+                let session = serde_json::from_slice::<OciUploadSession>(&bytes)
+                    .map_err(|_legacy_error| OciAdapterError::Json(wrapper_error))?;
+                (session, SessionEvidenceLog::default())
+            }
+        };
+    let evidence = if stored_evidence.is_empty() {
+        SessionEvidenceLog::for_legacy_session(
+            &session.scope_namespace,
+            session_id,
+            &session.repository,
+        )
+    } else {
+        stored_evidence
+            .verify_for(&session.scope_namespace, session_id, &session.repository)
+            .map(|()| stored_evidence)
+    }
+    .map_err(|error| OciAdapterError::Reliability(error.to_string()))?;
+    Ok((session, evidence))
 }
 
 // ── Error mapping ────────────────────────────────────────────────────────────

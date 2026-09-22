@@ -14,6 +14,9 @@ pub enum OciAdapterError {
     /// JSON serialization or deserialization failed.
     #[error("json operation failed")]
     Json(#[from] serde_json::Error),
+    /// Canonical resumable-session evidence could not be validated.
+    #[error("oci upload session reliability evidence failed")]
+    Reliability(String),
     /// Numeric conversion exceeded supported bounds.
     #[error("numeric conversion exceeded supported bounds")]
     NumericConversion(#[from] TryFromIntError),
