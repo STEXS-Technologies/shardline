@@ -117,6 +117,20 @@ impl PostgresIndexStore {
             .into_iter()
             .map(|row| row.try_get("staging_key").map_err(Into::into))
             .collect::<Result<Vec<String>, PostgresMetadataStoreError>>()?;
+        let live_rows = sqlx::query(
+            "SELECT session_id, protocol, scope_namespace, target_key, attributes_json, state,
+                    generation, fence_epoch, expires_at
+             FROM shardline_resumable_sessions
+             WHERE state IN ('active', 'completing')
+               AND expires_at > clock_timestamp()
+             ORDER BY session_id",
+        )
+        .fetch_all(&mut *transaction)
+        .await?;
+        let live_sessions = live_rows
+            .iter()
+            .map(session_from_row)
+            .collect::<Result<Vec<_>, _>>()?;
         let candidate_rows = sqlx::query(
             "SELECT session_id, protocol, scope_namespace, target_key, attributes_json, state,
                     generation, fence_epoch, expires_at
@@ -132,6 +146,9 @@ impl PostgresIndexStore {
             .map(session_from_row)
             .collect::<Result<Vec<_>, _>>()?;
         transaction.commit().await?;
+        for session in &live_sessions {
+            self.verify_resumable_session_evidence(session).await?;
+        }
         for session in &reclaimable_sessions {
             let events = self
                 .resumable_reliability_events(session.session_id())
@@ -1328,6 +1345,11 @@ mod tests {
                 .await
                 .is_err()
         );
+        sqlx::query("DELETE FROM shardline_resumable_sessions WHERE session_id = $1")
+            .bind(session.session_id())
+            .execute(store.pool())
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
