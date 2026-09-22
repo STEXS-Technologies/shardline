@@ -5,6 +5,38 @@ use crate::{
     verify_state_transition_chain,
 };
 
+/// Verifies a persisted resumable-session journal against its canonical
+/// identity and current durable state.
+pub fn verify_resumable_session_events(
+    events: &[StateTransitionEvent],
+    scope_namespace: &str,
+    session_id: &str,
+    target_key: &str,
+    expected_state: ResumableLifecycleState,
+) -> Result<(), ReliabilityError> {
+    verify_state_transition_chain(events)?;
+    let Some(first) = events.first() else {
+        return Err(ReliabilityError::OperationMismatch);
+    };
+    let operation = &first.operation;
+    if operation.kind != crate::OperationKind::ResumableSession
+        || operation.tenant != "resumable-session"
+        || operation.repository != scope_namespace
+        || operation.operation_id != session_id
+        || operation.object_key.as_deref() != Some(target_key)
+    {
+        return Err(ReliabilityError::OperationMismatch);
+    }
+    if events
+        .last()
+        .is_some_and(|event| event.after == expected_state)
+    {
+        Ok(())
+    } else {
+        Err(ReliabilityError::StateMismatch)
+    }
+}
+
 /// Canonical evidence log for a file-backed resumable session.
 ///
 /// The log is deliberately a newtype so adapters cannot construct or interpret
@@ -83,20 +115,15 @@ impl SessionEvidenceLog {
         session_id: &str,
         target_key: &str,
     ) -> Result<(), ReliabilityError> {
-        self.verify()?;
-        let Some(first) = self.0.first() else {
-            return Err(ReliabilityError::OperationMismatch);
-        };
-        let operation = &first.operation;
-        if operation.kind != crate::OperationKind::ResumableSession
-            || operation.tenant != "resumable-session"
-            || operation.repository != scope_namespace
-            || operation.operation_id != session_id
-            || operation.object_key.as_deref() != Some(target_key)
-        {
-            return Err(ReliabilityError::OperationMismatch);
-        }
-        Ok(())
+        verify_resumable_session_events(
+            &self.0,
+            scope_namespace,
+            session_id,
+            target_key,
+            self.0
+                .last()
+                .map_or(ResumableLifecycleState::Active, |event| event.after),
+        )
     }
 
     /// Returns the evidence events in sequence order.

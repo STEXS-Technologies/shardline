@@ -26,4 +26,5 @@ pub use event::{
 };
 pub use operation::{OperationIdentity, OperationKind};
 pub use session_evidence::SessionEvidenceLog;
+pub use session_evidence::verify_resumable_session_events;
 pub use states::{ResumableLifecycleState, UploadLifecycleState};

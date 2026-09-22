@@ -446,17 +446,20 @@ impl PostgresIndexStore {
         &self,
         session_id: &str,
     ) -> Result<Option<ResumableSession>, PostgresMetadataStoreError> {
-        sqlx::query(
+        let row = sqlx::query(
             "SELECT session_id, protocol, scope_namespace, target_key, attributes_json, state,
                     generation, fence_epoch, expires_at
              FROM shardline_resumable_sessions WHERE session_id = $1",
         )
         .bind(session_id)
         .fetch_optional(self.pool())
-        .await?
-        .as_ref()
-        .map(session_from_row)
-        .transpose()
+        .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let session = session_from_row(&row)?;
+        self.verify_resumable_session_evidence(&session).await?;
+        Ok(Some(session))
     }
 
     /// Loads and verifies the tamper-evident resumable-session lifecycle journal.
@@ -522,6 +525,7 @@ impl PostgresIndexStore {
         let session = session_from_row(&row)?;
         let parts = parts_on_transaction(&mut transaction, session_id).await?;
         transaction.commit().await?;
+        self.verify_resumable_session_evidence(&session).await?;
         Ok(Some((session, parts)))
     }
 
@@ -576,6 +580,31 @@ impl PostgresIndexStore {
         .bind(Option::<i64>::None)
         .bind(Option::<i64>::None)
         .execute(&mut *transaction)
+        .await?;
+        let identity = sqlx::query(
+            "SELECT scope_namespace, target_key
+             FROM shardline_resumable_sessions WHERE session_id = $1",
+        )
+        .bind(session_id)
+        .fetch_one(&mut *transaction)
+        .await?;
+        let sequence =
+            next_reliability_sequence(transaction.as_mut(), "ResumableSession", session_id).await?;
+        let event = resumable_session_event(
+            identity.try_get::<String, _>("scope_namespace")?,
+            session_id,
+            identity.try_get::<String, _>("target_key")?,
+            sequence,
+            ResumableSessionState::Active,
+            ResumableSessionState::Active,
+        )?;
+        insert_reliability_event_json(
+            transaction.as_mut(),
+            "ResumableSession",
+            session_id,
+            sequence,
+            to_value(event)?,
+        )
         .await?;
         transaction.commit().await?;
         Ok(Some(ResumableSessionPart::new(
@@ -709,6 +738,31 @@ impl PostgresIndexStore {
                 .transpose()?,
         )
         .execute(&mut *transaction)
+        .await?;
+        let identity = sqlx::query(
+            "SELECT scope_namespace, target_key
+             FROM shardline_resumable_sessions WHERE session_id = $1",
+        )
+        .bind(session_id)
+        .fetch_one(&mut *transaction)
+        .await?;
+        let sequence =
+            next_reliability_sequence(transaction.as_mut(), "ResumableSession", session_id).await?;
+        let event = resumable_session_event(
+            identity.try_get::<String, _>("scope_namespace")?,
+            session_id,
+            identity.try_get::<String, _>("target_key")?,
+            sequence,
+            ResumableSessionState::Active,
+            ResumableSessionState::Active,
+        )?;
+        insert_reliability_event_json(
+            transaction.as_mut(),
+            "ResumableSession",
+            session_id,
+            sequence,
+            to_value(event)?,
+        )
         .await?;
         transaction.commit().await?;
         Ok(PublishResumablePartOutcome::Published(
@@ -956,7 +1010,14 @@ impl PostgresIndexStore {
         .bind(limit)
         .fetch_all(self.pool())
         .await?;
-        rows.iter().map(session_from_row).collect()
+        let sessions = rows
+            .iter()
+            .map(session_from_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        for session in &sessions {
+            self.verify_resumable_session_evidence(session).await?;
+        }
+        Ok(sessions)
     }
 
     /// Returns up to `limit` in-flight (active or completing) resumable
@@ -994,7 +1055,31 @@ impl PostgresIndexStore {
         .bind(limit)
         .fetch_all(self.pool())
         .await?;
-        rows.iter().map(session_from_row).collect()
+        let sessions = rows
+            .iter()
+            .map(session_from_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        for session in &sessions {
+            self.verify_resumable_session_evidence(session).await?;
+        }
+        Ok(sessions)
+    }
+
+    async fn verify_resumable_session_evidence(
+        &self,
+        session: &ResumableSession,
+    ) -> Result<(), PostgresMetadataStoreError> {
+        let events = self
+            .resumable_reliability_events(session.session_id())
+            .await?;
+        shardline_reliability::verify_resumable_session_events(
+            &events,
+            session.scope_namespace(),
+            session.session_id(),
+            session.target_key(),
+            session.state(),
+        )?;
+        Ok(())
     }
 }
 
@@ -1216,6 +1301,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn postgres_session_reads_reject_missing_reliability_evidence() {
+        let Some(store) = store().await else {
+            eprintln!("skipping: no reachable DATABASE_URL");
+            return;
+        };
+        let expiry = Duration::from_secs(
+            u64::try_from(chrono::Utc::now().timestamp()).unwrap_or_default() + 3600,
+        );
+        let session = session("read-evidence", expiry);
+        assert!(store.create_resumable_session(&session).await.unwrap());
+
+        sqlx::query(
+            "DELETE FROM shardline_reliability_events
+             WHERE operation_kind = $1 AND operation_id = $2",
+        )
+        .bind("ResumableSession")
+        .bind(session.session_id())
+        .execute(store.pool())
+        .await
+        .unwrap();
+
+        assert!(
+            store
+                .resumable_session_by_id(session.session_id())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
     async fn postgres_parts_are_pinned_and_completion_is_fenced() {
         let Some(store) = store().await else {
             eprintln!("skipping: no reachable DATABASE_URL");
@@ -1310,7 +1425,7 @@ mod tests {
             .await
             .unwrap();
         shardline_reliability::verify_state_transition_chain(&events).unwrap();
-        assert_eq!(events.len(), 3);
+        assert_eq!(events.len(), 5);
         let transitions: Vec<_> = events
             .iter()
             .map(|event| (event.before.as_str(), event.after.as_str()))
@@ -1318,6 +1433,8 @@ mod tests {
         assert_eq!(
             transitions,
             vec![
+                ("active", "active"),
+                ("active", "active"),
                 ("active", "active"),
                 ("active", "completing"),
                 ("completing", "completed")
