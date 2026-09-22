@@ -42,6 +42,12 @@ the same fenced transition evidence. Publication metadata and the transition
 to `completed` commit together, so a successful publication cannot exist
 without a verifiable terminal lifecycle event.
 
+Resumable part publication is an `active -> active` evidence boundary in every
+adapter, including both Postgres publication methods and the file-backed
+session stores. Session reads, bounded listings, snapshots, recovery, and GC
+verify the journal against the stored scope, session ID, target, and current
+state before returning or acting on the session.
+
 Provider metadata, manifests, tombstones, and CAS records retain their
 existing transactional domain models and fencing rules. They do not create a
 second reliability protocol. Where they repair or reconcile an upload or
