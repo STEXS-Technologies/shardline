@@ -37,6 +37,13 @@ files remain readable; new writes use an atomic session envelope containing the
 canonical `SessionEvidenceLog`, and reads/sweeps verify it before using the
 materialized progress.
 
+The local, non-fenced LFS PATCH path uses the same lifecycle evidence through
+an additive `{oid}.evidence` sidecar. Historical sessions without that sidecar
+are reconstructed as an active baseline, while new range writes, promotion,
+completion, abort cleanup, and stale-session sweeps validate or append the
+canonical evidence. The existing `.meta`, `.ranges`, and staging files remain
+the materialized data-plane representation and retain their previous layout.
+
 All completion owners—including LFS, OCI, and S3 Postgres completion paths—use
 the same fenced transition evidence. Publication metadata and the transition
 to `completed` commit together, so a successful publication cannot exist
@@ -56,7 +63,7 @@ session, they consume the canonical journal and verify it first.
 The following are data-plane recovery materializations, not independent
 lifecycle state machines:
 
-- LFS patch-range append/compaction files;
+- LFS patch-range append/compaction files and the last-touched `.meta` file;
 - S3 multipart part files;
 - OCI staging/body and provider multipart material;
 - the SDK's process-local upload/session state.

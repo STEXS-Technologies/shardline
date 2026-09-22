@@ -34,6 +34,7 @@ use futures_util::StreamExt;
 use shardline_storage::{DeleteOutcome, ObjectIntegrity, ObjectKey};
 use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _, AsyncWriteExt as _};
 
+use super::lfs_patch_evidence;
 use super::{MAX_LFS_BATCH_OBJECTS, direct_object_response};
 use crate::app::{AppState, MAX_LFS_PATCH_CHUNK_BYTES, authorize};
 use crate::{
@@ -452,6 +453,7 @@ fn sweep_lfs_patch_sessions_locked(
         let Some(oid) = name.strip_suffix(".meta") else {
             continue;
         };
+        lfs_patch_evidence::verify_integrity(dir, oid)?;
         let stale = match read_patch_last_touched(dir, oid) {
             Ok(touched) => touched.saturating_add(ttl_seconds.get()) <= now_unix_seconds,
             // An unreadable sidecar is crash debris; treat it as stale.
@@ -467,6 +469,7 @@ fn sweep_lfs_patch_sessions_locked(
             let ranges_path = dir.join(format!("{oid}.ranges"));
             let removed_ranges = fs::remove_file(&ranges_path);
             let removed_meta = fs::remove_file(lfs_patch_meta_path(dir, oid));
+            lfs_patch_evidence::remove(dir, oid);
             // Drop the session's in-memory range bookkeeping so a later PATCH
             // for the same OID re-derives it from the (now absent) file.
             evict_lfs_patch_ranges(&ranges_path);
@@ -807,6 +810,7 @@ fn consume_lfs_patch_session(tmp_path: &FsPath, ranges_path: &FsPath, tmp_dir: &
     drop(fs::remove_file(ranges_path));
     if let Ok(_store_guard) = lock_lfs_patch_store(tmp_dir) {
         drop(fs::remove_file(lfs_patch_meta_path(tmp_dir, oid)));
+        lfs_patch_evidence::remove(tmp_dir, oid);
     }
     evict_lfs_patch_ranges(ranges_path);
 }
@@ -826,6 +830,7 @@ fn consume_lfs_patch_session(tmp_path: &FsPath, ranges_path: &FsPath, tmp_dir: &
 /// never committed (F-59). The store lock is only taken inside
 /// [`consume_lfs_patch_session`], with NO per-OID guard held (F-31); the
 /// caller must have dropped the per-OID lock first.
+#[allow(clippy::too_many_arguments)]
 fn promote_lfs_patch_session(
     tmp_path: &FsPath,
     ranges_path: &FsPath,
@@ -834,7 +839,18 @@ fn promote_lfs_patch_session(
     backend: &crate::ServerBackend,
     object_key: &shardline_storage::ObjectKey,
     stream_chunk_size: usize,
+    scope_namespace: &str,
+    session_id: &str,
 ) -> Result<(), ServerError> {
+    lfs_patch_evidence::transition(
+        tmp_dir,
+        oid,
+        scope_namespace,
+        session_id,
+        object_key.as_str(),
+        shardline_reliability::ResumableLifecycleState::Active,
+        shardline_reliability::ResumableLifecycleState::Completing,
+    )?;
     let promotion = (|| {
         let promotion_body = bounded_file_stream(tmp_path, stream_chunk_size, MAX_LFS_OBJECT_SIZE)?;
         tokio::runtime::Handle::current().block_on(
@@ -846,8 +862,34 @@ fn promote_lfs_patch_session(
             ),
         )
     })();
-    consume_lfs_patch_session(tmp_path, ranges_path, tmp_dir, oid);
-    promotion.map(|_outcome| ())
+    match promotion {
+        Ok(_outcome) => {
+            let transition = lfs_patch_evidence::transition(
+                tmp_dir,
+                oid,
+                scope_namespace,
+                session_id,
+                object_key.as_str(),
+                shardline_reliability::ResumableLifecycleState::Completing,
+                shardline_reliability::ResumableLifecycleState::Completed,
+            );
+            consume_lfs_patch_session(tmp_path, ranges_path, tmp_dir, oid);
+            transition
+        }
+        Err(error) => {
+            drop(lfs_patch_evidence::transition(
+                tmp_dir,
+                oid,
+                scope_namespace,
+                session_id,
+                object_key.as_str(),
+                shardline_reliability::ResumableLifecycleState::Completing,
+                shardline_reliability::ResumableLifecycleState::Aborted,
+            ));
+            consume_lfs_patch_session(tmp_path, ranges_path, tmp_dir, oid);
+            Err(error)
+        }
+    }
 }
 
 #[tracing::instrument(skip(state, headers, request))]
@@ -1327,6 +1369,8 @@ pub(crate) async fn lfs_patch_object(
     let backend = state.backend.clone();
     let oid_for_closure = oid.clone();
     let object_key_for_closure = object_key.clone();
+    let scope_namespace_for_closure = scope_namespace(repo.capability().namespace());
+    let session_id_for_closure = durable_lfs_session_id(&scope_namespace_for_closure, &oid);
 
     let max_active_sessions = state.config.lfs_patch_max_active_sessions();
     let total_max_bytes = state.config.lfs_patch_total_max_bytes();
@@ -1433,6 +1477,13 @@ pub(crate) async fn lfs_patch_object(
             if object_present {
                 // The object made it into the store; only the staging cleanup
                 // was lost (or a concurrent promotion owns the commit).
+                lfs_patch_evidence::complete(
+                    &tmp_dir,
+                    &oid_for_closure,
+                    &scope_namespace_for_closure,
+                    &session_id_for_closure,
+                    object_key_for_closure.as_str(),
+                )?;
                 consume_lfs_patch_session(&tmp_path, &ranges_path, &tmp_dir, &oid_for_closure);
             } else {
                 promote_lfs_patch_session(
@@ -1443,6 +1494,8 @@ pub(crate) async fn lfs_patch_object(
                     &backend,
                     &object_key_for_closure,
                     stream_chunk_size,
+                    &scope_namespace_for_closure,
+                    &session_id_for_closure,
                 )?;
             }
             return Ok(());
@@ -1466,7 +1519,17 @@ pub(crate) async fn lfs_patch_object(
                 file.seek(SeekFrom::Start(offset))?;
                 file.write_all(&chunk_bytes)?;
             }
-            record_lfs_patch_range(&ranges_path, offset, end_exclusive, total)
+            let promote = record_lfs_patch_range(&ranges_path, offset, end_exclusive, total)?;
+            lfs_patch_evidence::record(
+                &tmp_dir,
+                &oid_for_closure,
+                &scope_namespace_for_closure,
+                &session_id_for_closure,
+                object_key_for_closure.as_str(),
+                shardline_reliability::ResumableLifecycleState::Active,
+                shardline_reliability::ResumableLifecycleState::Active,
+            )?;
+            Ok(promote)
         })();
         drop(lock);
         drop(file_lock);
@@ -1483,6 +1546,7 @@ pub(crate) async fn lfs_patch_object(
                         &tmp_dir,
                         &oid_for_closure,
                     )));
+                    lfs_patch_evidence::remove(&tmp_dir, &oid_for_closure);
                 }
                 evict_lfs_patch_ranges(&ranges_path);
                 return Err(error);
@@ -1506,6 +1570,8 @@ pub(crate) async fn lfs_patch_object(
                 &backend,
                 &object_key_for_closure,
                 stream_chunk_size,
+                &scope_namespace_for_closure,
+                &session_id_for_closure,
             )?;
         }
 

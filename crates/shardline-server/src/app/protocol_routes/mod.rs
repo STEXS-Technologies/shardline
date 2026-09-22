@@ -1,6 +1,7 @@
 mod bazel;
 mod helpers;
 mod lfs;
+mod lfs_patch_evidence;
 pub(super) mod oci;
 mod s3;
 
