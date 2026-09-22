@@ -11,8 +11,8 @@ use crate::{
 pub struct StateTransitionEvent {
     pub operation: OperationIdentity,
     pub sequence: u64,
-    pub before: String,
-    pub after: String,
+    pub before: ResumableLifecycleState,
+    pub after: ResumableLifecycleState,
     pub state_digest: statechronicle::ContentDigest,
     pub process_digest: PenelopeDigest,
 }
@@ -21,19 +21,18 @@ impl StateTransitionEvent {
     pub fn new(
         operation: OperationIdentity,
         sequence: u64,
-        before: impl Into<String>,
-        after: impl Into<String>,
+        before: ResumableLifecycleState,
+        after: ResumableLifecycleState,
     ) -> Result<Self, ReliabilityError> {
-        let before = before.into();
-        let after = after.into();
-        if before.is_empty() {
-            return Err(ReliabilityError::EmptyField("before"));
+        if !before.can_transition_to(after) {
+            return Err(ReliabilityError::InvalidTransition {
+                before: before.as_str(),
+                after: after.as_str(),
+            });
         }
-        if after.is_empty() {
-            return Err(ReliabilityError::EmptyField("after"));
-        }
-        let state_digest = canonical_state_digest(&after);
-        let process_digest = canonical_process_digest(&operation, sequence, &before, &after)?;
+        let state_digest = canonical_state_digest(after.as_str());
+        let process_digest =
+            canonical_process_digest(&operation, sequence, before.as_str(), after.as_str())?;
         Ok(Self {
             operation,
             sequence,
@@ -45,12 +44,17 @@ impl StateTransitionEvent {
     }
 
     pub fn verify_integrity(&self) -> Result<(), ReliabilityError> {
-        let expected_state = canonical_state_digest(&self.after);
+        let expected_state = canonical_state_digest(self.after.as_str());
         if self.state_digest != expected_state {
             return Err(ReliabilityError::StateDigestMismatch);
         }
         if self.process_digest
-            != canonical_process_digest(&self.operation, self.sequence, &self.before, &self.after)?
+            != canonical_process_digest(
+                &self.operation,
+                self.sequence,
+                self.before.as_str(),
+                self.after.as_str(),
+            )?
         {
             return Err(ReliabilityError::ProcessDigestMismatch);
         }
@@ -65,7 +69,7 @@ pub fn verify_state_transition_chain(
         return Ok(());
     };
     let operation = &first.operation;
-    let mut previous_after: Option<&str> = None;
+    let mut previous_after = None;
     let mut previous_sequence = None;
     for event in events {
         event.verify_integrity()?;
@@ -81,7 +85,7 @@ pub fn verify_state_transition_chain(
             return Err(ReliabilityError::ChainDiscontinuity);
         }
         previous_sequence = Some(event.sequence);
-        previous_after = Some(&event.after);
+        previous_after = Some(event.after);
     }
     Ok(())
 }
@@ -117,8 +121,8 @@ pub fn resumable_session_event(
     session_id: impl Into<String>,
     target_key: impl Into<String>,
     sequence: u64,
-    before: impl Into<String>,
-    after: impl Into<String>,
+    before: ResumableLifecycleState,
+    after: ResumableLifecycleState,
 ) -> Result<StateTransitionEvent, ReliabilityError> {
     let operation = OperationIdentity::new(
         "resumable-session",
@@ -308,16 +312,55 @@ pub fn baseline_resumable_session_events(
     let scope_namespace = scope_namespace.into();
     let session_id = session_id.into();
     let target_key = target_key.into();
-    let transitions: &[(&str, &str)] = match final_state {
-        ResumableLifecycleState::Active => &[("active", "active")],
-        ResumableLifecycleState::Completing => &[("active", "active"), ("active", "completing")],
-        ResumableLifecycleState::Completed => &[
-            ("active", "active"),
-            ("active", "completing"),
-            ("completing", "completed"),
+    let transitions: &[(ResumableLifecycleState, ResumableLifecycleState)] = match final_state {
+        ResumableLifecycleState::Active => &[(
+            ResumableLifecycleState::Active,
+            ResumableLifecycleState::Active,
+        )],
+        ResumableLifecycleState::Completing => &[
+            (
+                ResumableLifecycleState::Active,
+                ResumableLifecycleState::Active,
+            ),
+            (
+                ResumableLifecycleState::Active,
+                ResumableLifecycleState::Completing,
+            ),
         ],
-        ResumableLifecycleState::Aborted => &[("active", "active"), ("active", "aborted")],
-        ResumableLifecycleState::Expired => &[("active", "active"), ("active", "expired")],
+        ResumableLifecycleState::Completed => &[
+            (
+                ResumableLifecycleState::Active,
+                ResumableLifecycleState::Active,
+            ),
+            (
+                ResumableLifecycleState::Active,
+                ResumableLifecycleState::Completing,
+            ),
+            (
+                ResumableLifecycleState::Completing,
+                ResumableLifecycleState::Completed,
+            ),
+        ],
+        ResumableLifecycleState::Aborted => &[
+            (
+                ResumableLifecycleState::Active,
+                ResumableLifecycleState::Active,
+            ),
+            (
+                ResumableLifecycleState::Active,
+                ResumableLifecycleState::Aborted,
+            ),
+        ],
+        ResumableLifecycleState::Expired => &[
+            (
+                ResumableLifecycleState::Active,
+                ResumableLifecycleState::Active,
+            ),
+            (
+                ResumableLifecycleState::Active,
+                ResumableLifecycleState::Expired,
+            ),
+        ],
     };
     transitions
         .iter()

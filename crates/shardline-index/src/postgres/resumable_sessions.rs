@@ -256,8 +256,8 @@ impl PostgresIndexStore {
                 session.session_id(),
                 stored.target_key(),
                 sequence,
-                stored.state().as_str(),
-                ResumableSessionState::Active.as_str(),
+                stored.state(),
+                ResumableSessionState::Active,
             )?;
             insert_reliability_event_json(
                 transaction.as_mut(),
@@ -330,8 +330,8 @@ impl PostgresIndexStore {
             session.session_id(),
             session.target_key(),
             sequence,
-            ResumableSessionState::Active.as_str(),
-            ResumableSessionState::Active.as_str(),
+            ResumableSessionState::Active,
+            ResumableSessionState::Active,
         )?;
         insert_reliability_event_json(
             transaction.as_mut(),
@@ -411,8 +411,8 @@ impl PostgresIndexStore {
                 session.session_id(),
                 session.target_key(),
                 sequence,
-                ResumableSessionState::Active.as_str(),
-                ResumableSessionState::Active.as_str(),
+                ResumableSessionState::Active,
+                ResumableSessionState::Active,
             )?;
             insert_reliability_event_json(
                 transaction.as_mut(),
@@ -766,8 +766,8 @@ impl PostgresIndexStore {
             session.session_id(),
             session.target_key(),
             sequence,
-            previous_state.as_str(),
-            session.state().as_str(),
+            previous_state,
+            session.state(),
         )?;
         insert_reliability_event_json(
             transaction.as_mut(),
@@ -829,8 +829,8 @@ impl PostgresIndexStore {
             session_id,
             target_key,
             sequence,
-            expected_state.as_str(),
-            next_state.as_str(),
+            expected_state,
+            next_state,
         )?;
         insert_reliability_event_json(
             transaction.as_mut(),
@@ -895,8 +895,8 @@ impl PostgresIndexStore {
                 &session_id,
                 target_key,
                 sequence,
-                previous_state.as_str(),
-                ResumableSessionState::Expired.as_str(),
+                previous_state,
+                ResumableSessionState::Expired,
             )?;
             insert_reliability_event_json(
                 transaction.as_mut(),

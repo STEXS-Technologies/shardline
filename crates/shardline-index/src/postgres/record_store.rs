@@ -212,8 +212,8 @@ impl super::PostgresRecordStore {
                 fence.session_id(),
                 target_key,
                 sequence,
-                "completing",
-                "completed",
+                crate::ResumableSessionState::Completing,
+                crate::ResumableSessionState::Completed,
             )?;
             insert_reliability_event_json(
                 transaction.as_mut(),

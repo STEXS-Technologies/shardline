@@ -60,6 +60,7 @@ impl UploadLifecycleState {
 
 /// Durable lifecycle states for LFS, OCI, and S3 resumable sessions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ResumableLifecycleState {
     Active,
     Completing,

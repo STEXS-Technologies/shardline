@@ -51,15 +51,66 @@ fn generic_state_transition_chain_is_tamper_evident() {
     )
     .unwrap()
     .with_object_key("objects/session-1");
-    let first = StateTransitionEvent::new(operation.clone(), 1, "active", "completing").unwrap();
-    let second = StateTransitionEvent::new(operation, 2, "completing", "completed").unwrap();
+    let first = StateTransitionEvent::new(
+        operation.clone(),
+        1,
+        ResumableLifecycleState::Active,
+        ResumableLifecycleState::Completing,
+    )
+    .unwrap();
+    let second = StateTransitionEvent::new(
+        operation,
+        2,
+        ResumableLifecycleState::Completing,
+        ResumableLifecycleState::Completed,
+    )
+    .unwrap();
     verify_state_transition_chain(&[first.clone(), second]).unwrap();
     let mut tampered = first;
-    tampered.before = "tampered".to_owned();
+    tampered.before = ResumableLifecycleState::Expired;
     assert!(matches!(
         tampered.verify_integrity(),
         Err(ReliabilityError::ProcessDigestMismatch)
     ));
+}
+
+#[test]
+fn resumable_evidence_rejects_impossible_transitions() {
+    let operation = OperationIdentity::new(
+        "scope",
+        "resumable",
+        "session-invalid",
+        OperationKind::ResumableSession,
+    )
+    .unwrap();
+    let result = StateTransitionEvent::new(
+        operation,
+        1,
+        ResumableLifecycleState::Active,
+        ResumableLifecycleState::Completed,
+    );
+    assert!(matches!(
+        result,
+        Err(ReliabilityError::InvalidTransition { .. })
+    ));
+}
+
+#[test]
+fn resumable_evidence_keeps_existing_lowercase_json_spelling() {
+    let event = resumable_session_event(
+        "scope",
+        "session-json",
+        "object",
+        1,
+        ResumableLifecycleState::Active,
+        ResumableLifecycleState::Completing,
+    )
+    .unwrap();
+    let json = serde_json::to_string(&event).unwrap();
+    assert!(json.contains("\"before\":\"active\""));
+    assert!(json.contains("\"after\":\"completing\""));
+    let decoded: StateTransitionEvent = serde_json::from_str(&json).unwrap();
+    assert_eq!(decoded, event);
 }
 
 #[test]

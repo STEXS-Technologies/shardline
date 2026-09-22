@@ -128,8 +128,8 @@ impl PostgresIndexStore {
             fence.session_id(),
             target_key,
             sequence,
-            "completing",
-            "completed",
+            crate::ResumableSessionState::Completing,
+            crate::ResumableSessionState::Completed,
         )?;
         insert_reliability_event_json(
             transaction.as_mut(),
@@ -413,6 +413,9 @@ mod tests {
             .await
             .unwrap();
         shardline_reliability::verify_state_transition_chain(&events).unwrap();
-        assert_eq!(events.last().unwrap().after, "completed");
+        assert_eq!(
+            events.last().unwrap().after,
+            crate::ResumableSessionState::Completed
+        );
     }
 }
