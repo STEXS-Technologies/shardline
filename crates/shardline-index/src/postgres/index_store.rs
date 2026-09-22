@@ -997,6 +997,10 @@ impl UploadIntentStore for super::PostgresIndexStore {
         &self,
         operation_id: &str,
     ) -> Result<Vec<LifecycleEvent>, Self::Error> {
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+            .execute(&mut *transaction)
+            .await?;
         let rows = sqlx::query(
             "SELECT sequence, event_json
              FROM shardline_reliability_events
@@ -1005,7 +1009,7 @@ impl UploadIntentStore for super::PostgresIndexStore {
         )
         .bind("Upload")
         .bind(operation_id)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *transaction)
         .await?;
         let events = rows
             .into_iter()
@@ -1020,7 +1024,38 @@ impl UploadIntentStore for super::PostgresIndexStore {
                 Ok(event)
             })
             .collect::<Result<Vec<_>, PostgresMetadataStoreError>>()?;
-        shardline_reliability::verify_lifecycle_chain(&events)?;
+        let intent = sqlx::query(
+            "SELECT object_key, object_hash, state
+             FROM shardline_upload_intents
+             WHERE intent_id = $1",
+        )
+        .bind(operation_id)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        if let Some(intent) = intent {
+            let object_key: String = intent.try_get("object_key")?;
+            let object_hash: String = intent.try_get("object_hash")?;
+            let state_text: String = intent.try_get("state")?;
+            let state = UploadIntentState::parse(&state_text).ok_or_else(|| {
+                PostgresMetadataStoreError::Reliability(
+                    shardline_reliability::ReliabilityError::EmptyField(
+                        "unknown upload intent state",
+                    ),
+                )
+            })?;
+            verify_upload_lifecycle_events(
+                &events,
+                "shardline",
+                "default",
+                operation_id,
+                &object_key,
+                &object_hash,
+                state,
+            )?;
+        } else {
+            shardline_reliability::verify_lifecycle_chain(&events)?;
+        }
+        transaction.commit().await?;
         Ok(events)
     }
 }

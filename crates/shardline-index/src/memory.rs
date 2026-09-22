@@ -517,14 +517,27 @@ impl UploadIntentStore for MemoryIndexStore {
         &self,
         operation_id: &str,
     ) -> Result<Vec<LifecycleEvent>, Self::Error> {
-        let events = self
-            .lock_state()?
+        let state = self.lock_state()?;
+        let events = state
             .reliability_events
             .get(operation_id)
             .cloned()
             .unwrap_or_default();
-        verify_lifecycle_chain(&events)
+        if let Some(intent) = state.upload_intents.get(operation_id) {
+            verify_upload_lifecycle_events(
+                &events,
+                "shardline",
+                "default",
+                operation_id,
+                intent.object_key(),
+                intent.object_hash(),
+                intent.state(),
+            )
             .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
+        } else {
+            verify_lifecycle_chain(&events)
+                .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
+        }
         Ok(events)
     }
 

@@ -933,28 +933,66 @@ impl UploadIntentStore for super::LocalIndexStore {
         let store = self.clone();
         let operation_id = operation_id.to_owned();
         tokio::task::spawn_blocking(move || {
-            let conn = store.open_connection()?;
-            let mut statement = conn.prepare(
-                "SELECT event_json
-                 FROM shardline_reliability_events
-                 WHERE operation_kind = ?1 AND operation_id = ?2
-                 ORDER BY sequence",
-            )?;
-            let rows = statement.query_map(rusqlite::params!["Upload", operation_id], |row| {
-                let event_json: String = row.get(0)?;
-                serde_json::from_str(&event_json).map_err(|error| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        0,
-                        rusqlite::types::Type::Text,
-                        Box::new(error),
+            let mut conn = store.open_connection()?;
+            let transaction = conn.transaction()?;
+            let events = {
+                let mut statement = transaction.prepare(
+                    "SELECT event_json
+                     FROM shardline_reliability_events
+                     WHERE operation_kind = ?1 AND operation_id = ?2
+                     ORDER BY sequence",
+                )?;
+                let rows =
+                    statement.query_map(rusqlite::params!["Upload", &operation_id], |row| {
+                        let event_json: String = row.get(0)?;
+                        serde_json::from_str(&event_json).map_err(|error| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                0,
+                                rusqlite::types::Type::Text,
+                                Box::new(error),
+                            )
+                        })
+                    })?;
+                rows.collect::<Result<Vec<_>, _>>()
+                    .map_err(LocalIndexStoreError::from)?
+            };
+            let intent = transaction
+                .query_row(
+                    "SELECT object_key, object_hash, state
+                     FROM shardline_upload_intents
+                     WHERE intent_id = ?1",
+                    rusqlite::params![&operation_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            if let Some((object_key, object_hash, state_text)) = intent {
+                let state = UploadIntentState::parse(&state_text).ok_or_else(|| {
+                    LocalIndexStoreError::Reliability(
+                        shardline_reliability::ReliabilityError::EmptyField(
+                            "unknown upload intent state",
+                        ),
                     )
-                })
-            })?;
-            let events = rows
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(LocalIndexStoreError::from)?;
-            shardline_reliability::verify_lifecycle_chain(&events)
-                .map_err(LocalIndexStoreError::Reliability)?;
+                })?;
+                shardline_reliability::verify_upload_lifecycle_events(
+                    &events,
+                    "shardline",
+                    "default",
+                    &operation_id,
+                    &object_key,
+                    &object_hash,
+                    state,
+                )?;
+            } else {
+                shardline_reliability::verify_lifecycle_chain(&events)
+                    .map_err(LocalIndexStoreError::Reliability)?;
+            }
+            transaction.commit()?;
             Ok(events)
         })
         .await

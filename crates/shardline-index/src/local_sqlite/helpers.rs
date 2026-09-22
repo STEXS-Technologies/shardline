@@ -21,8 +21,9 @@ use rusqlite::{
 use serde_json::{from_slice, from_str, to_string};
 use shardline_protocol::{RepositoryScope, unix_now_seconds_lossy};
 use shardline_reliability::{
-    ResumableLifecycleState, UploadLifecycleState, baseline_resumable_session_events,
-    baseline_upload_lifecycle_events,
+    LifecycleEvent, ResumableLifecycleState, StateTransitionEvent, UploadLifecycleState,
+    baseline_resumable_session_events, baseline_upload_lifecycle_events,
+    verify_resumable_session_events, verify_upload_lifecycle_events,
 };
 use shardline_storage::{
     DirectoryPathError, ObjectKey, ObjectKeyError,
@@ -287,6 +288,104 @@ fn backfill_reliability_events(connection: &mut Connection) -> Result<(), LocalI
                 ],
             )?;
         }
+    }
+
+    // Rows with no evidence are backfilled above. Existing partial or
+    // tampered journals must not be silently carried forward by a successful
+    // local-database startup, so verify every authoritative row before the
+    // transaction commits.
+    let mut upload_verification_rows = Vec::new();
+    {
+        let mut statement = transaction.prepare(
+            "SELECT intent_id, object_key, object_hash, state
+             FROM shardline_upload_intents",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?;
+        for row in rows {
+            upload_verification_rows.push(row?);
+        }
+    }
+    for (intent_id, object_key, object_hash, state_text) in upload_verification_rows {
+        let state = UploadLifecycleState::parse(&state_text).ok_or_else(|| {
+            LocalIndexStoreError::Reliability(shardline_reliability::ReliabilityError::EmptyField(
+                "unknown upload intent state during verification",
+            ))
+        })?;
+        let mut statement = transaction.prepare(
+            "SELECT event_json
+             FROM shardline_reliability_events
+             WHERE operation_kind = 'Upload' AND operation_id = ?1
+             ORDER BY sequence",
+        )?;
+        let rows = statement.query_map(params![intent_id], |row| {
+            let event_json: String = row.get(0)?;
+            from_str::<LifecycleEvent>(&event_json).map_err(|error| {
+                SqliteError::FromSqlConversionFailure(0, Type::Text, Box::new(error))
+            })
+        })?;
+        let events = rows.collect::<Result<Vec<_>, _>>()?;
+        verify_upload_lifecycle_events(
+            &events,
+            "shardline",
+            "default",
+            &intent_id,
+            &object_key,
+            &object_hash,
+            state,
+        )?;
+    }
+
+    let mut session_verification_rows = Vec::new();
+    {
+        let mut statement = transaction.prepare(
+            "SELECT session_id, scope_namespace, target_key, state
+             FROM shardline_resumable_sessions",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?;
+        for row in rows {
+            session_verification_rows.push(row?);
+        }
+    }
+    for (session_id, scope_namespace, target_key, state_text) in session_verification_rows {
+        let state = ResumableLifecycleState::parse(&state_text).ok_or_else(|| {
+            LocalIndexStoreError::Reliability(shardline_reliability::ReliabilityError::EmptyField(
+                "unknown resumable session state during verification",
+            ))
+        })?;
+        let mut statement = transaction.prepare(
+            "SELECT event_json
+             FROM shardline_reliability_events
+             WHERE operation_kind = 'ResumableSession' AND operation_id = ?1
+             ORDER BY sequence",
+        )?;
+        let rows = statement.query_map(params![session_id], |row| {
+            let event_json: String = row.get(0)?;
+            from_str::<StateTransitionEvent>(&event_json).map_err(|error| {
+                SqliteError::FromSqlConversionFailure(0, Type::Text, Box::new(error))
+            })
+        })?;
+        let events = rows.collect::<Result<Vec<_>, _>>()?;
+        verify_resumable_session_events(
+            &events,
+            &scope_namespace,
+            &session_id,
+            &target_key,
+            state,
+        )?;
     }
     transaction.commit()?;
     Ok(())
