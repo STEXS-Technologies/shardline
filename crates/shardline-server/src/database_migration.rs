@@ -1,8 +1,10 @@
-use serde_json::to_value;
+use serde_json::{from_value, to_value};
 use shardline_index::{ResumableSessionState, UploadIntentState};
 use shardline_protocol::SecretString;
 use shardline_reliability::{
-    UploadLifecycleState, baseline_resumable_session_events, baseline_upload_lifecycle_events,
+    LifecycleEvent, StateTransitionEvent, UploadLifecycleState, baseline_resumable_session_events,
+    baseline_upload_lifecycle_events, verify_resumable_session_events,
+    verify_upload_lifecycle_events,
 };
 use sqlx::{
     Error as SqlxError, PgPool, Postgres, Row, Transaction, postgres::PgPoolOptions, query, raw_sql,
@@ -575,6 +577,102 @@ async fn backfill_reliability_events(pool: &PgPool) -> Result<(), DatabaseMigrat
             .execute(&mut *transaction)
             .await?;
         }
+    }
+
+    // A partially present journal is not a valid migration state. The
+    // backfill above repairs only rows that had no evidence at all; this pass
+    // verifies every row before committing so an interrupted or tampered
+    // journal cannot be silently carried forward by a successful migration.
+    let upload_verification_rows = query(
+        "SELECT intent_id, object_key, object_hash, state
+         FROM shardline_upload_intents
+         FOR UPDATE",
+    )
+    .fetch_all(&mut *transaction)
+    .await?;
+    for row in upload_verification_rows {
+        let intent_id: String = row.try_get("intent_id")?;
+        let object_key: String = row.try_get("object_key")?;
+        let object_hash: String = row.try_get("object_hash")?;
+        let state_text: String = row.try_get("state")?;
+        let state = UploadLifecycleState::parse(&state_text).ok_or_else(|| {
+            DatabaseMigrationError::Backfill(format!(
+                "unknown upload intent state during reliability verification: {state_text}"
+            ))
+        })?;
+        let event_rows = query(
+            "SELECT event_json
+             FROM shardline_reliability_events
+             WHERE operation_kind = 'Upload' AND operation_id = $1
+             ORDER BY sequence",
+        )
+        .bind(&intent_id)
+        .fetch_all(&mut *transaction)
+        .await?;
+        let events = event_rows
+            .into_iter()
+            .map(|event_row| {
+                let value: serde_json::Value = event_row.try_get("event_json")?;
+                from_value::<LifecycleEvent>(value)
+                    .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))
+            })
+            .collect::<Result<Vec<_>, DatabaseMigrationError>>()?;
+        verify_upload_lifecycle_events(
+            &events,
+            "shardline",
+            "default",
+            &intent_id,
+            &object_key,
+            &object_hash,
+            state,
+        )
+        .map_err(|error| {
+            DatabaseMigrationError::Backfill(format!(
+                "invalid upload reliability journal for {intent_id}: {error}"
+            ))
+        })?;
+    }
+
+    let session_verification_rows = query(
+        "SELECT session_id, scope_namespace, target_key, state
+         FROM shardline_resumable_sessions
+         FOR UPDATE",
+    )
+    .fetch_all(&mut *transaction)
+    .await?;
+    for row in session_verification_rows {
+        let session_id: String = row.try_get("session_id")?;
+        let scope_namespace: String = row.try_get("scope_namespace")?;
+        let target_key: String = row.try_get("target_key")?;
+        let state_text: String = row.try_get("state")?;
+        let state = ResumableSessionState::parse(&state_text).ok_or_else(|| {
+            DatabaseMigrationError::Backfill(format!(
+                "unknown resumable session state during reliability verification: {state_text}"
+            ))
+        })?;
+        let event_rows = query(
+            "SELECT event_json
+             FROM shardline_reliability_events
+             WHERE operation_kind = 'ResumableSession' AND operation_id = $1
+             ORDER BY sequence",
+        )
+        .bind(&session_id)
+        .fetch_all(&mut *transaction)
+        .await?;
+        let events = event_rows
+            .into_iter()
+            .map(|event_row| {
+                let value: serde_json::Value = event_row.try_get("event_json")?;
+                from_value::<StateTransitionEvent>(value)
+                    .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))
+            })
+            .collect::<Result<Vec<_>, DatabaseMigrationError>>()?;
+        verify_resumable_session_events(&events, &scope_namespace, &session_id, &target_key, state)
+            .map_err(|error| {
+                DatabaseMigrationError::Backfill(format!(
+                    "invalid resumable reliability journal for {session_id}: {error}"
+                ))
+            })?;
     }
     transaction.commit().await?;
     Ok(())
