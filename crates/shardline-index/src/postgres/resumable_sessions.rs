@@ -472,7 +472,8 @@ impl PostgresIndexStore {
         .bind(session_id)
         .fetch_all(self.pool())
         .await?;
-        rows.into_iter()
+        let events = rows
+            .into_iter()
             .map(|row| {
                 let sequence: i64 = row.try_get("sequence")?;
                 if sequence < 0 {
@@ -482,7 +483,9 @@ impl PostgresIndexStore {
                 }
                 Ok(serde_json::from_value(row.try_get("event_json")?)?)
             })
-            .collect()
+            .collect::<Result<Vec<_>, PostgresMetadataStoreError>>()?;
+        shardline_reliability::verify_state_transition_chain(&events)?;
+        Ok(events)
     }
 
     /// Loads one active, unexpired session and its ordered authoritative parts

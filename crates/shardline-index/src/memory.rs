@@ -502,12 +502,15 @@ impl UploadIntentStore for MemoryIndexStore {
         &self,
         operation_id: &str,
     ) -> Result<Vec<LifecycleEvent>, Self::Error> {
-        Ok(self
+        let events = self
             .lock_state()?
             .reliability_events
             .get(operation_id)
             .cloned()
-            .unwrap_or_default())
+            .unwrap_or_default();
+        verify_lifecycle_chain(&events)
+            .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
+        Ok(events)
     }
 
     async fn intent_by_id(&self, intent_id: &str) -> Result<Option<UploadIntent>, Self::Error> {

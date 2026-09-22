@@ -963,7 +963,8 @@ impl UploadIntentStore for super::PostgresIndexStore {
         .bind(operation_id)
         .fetch_all(&self.pool)
         .await?;
-        rows.into_iter()
+        let events = rows
+            .into_iter()
             .map(|row| {
                 let sequence: i64 = row.try_get("sequence")?;
                 if sequence < 0 {
@@ -974,7 +975,9 @@ impl UploadIntentStore for super::PostgresIndexStore {
                 let event = serde_json::from_value(row.try_get("event_json")?)?;
                 Ok(event)
             })
-            .collect()
+            .collect::<Result<Vec<_>, PostgresMetadataStoreError>>()?;
+        shardline_reliability::verify_lifecycle_chain(&events)?;
+        Ok(events)
     }
 }
 
@@ -985,6 +988,7 @@ async fn insert_reliability_event<'executor, E>(
 where
     E: sqlx::Executor<'executor, Database = sqlx::Postgres>,
 {
+    event.verify_integrity()?;
     insert_reliability_event_json(
         executor,
         event.operation.kind.as_str(),

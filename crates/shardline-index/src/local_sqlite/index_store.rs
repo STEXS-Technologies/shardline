@@ -825,6 +825,7 @@ impl UploadIntentStore for super::LocalIndexStore {
     }
 
     async fn record_reliability_event(&self, event: &LifecycleEvent) -> Result<(), Self::Error> {
+        event.verify_integrity()?;
         let store = self.clone();
         let event_json = serde_json::to_string(event)?;
         let operation_id = event.operation.operation_id.clone();
@@ -882,8 +883,12 @@ impl UploadIntentStore for super::LocalIndexStore {
                     )
                 })
             })?;
-            rows.collect::<Result<Vec<_>, _>>()
-                .map_err(LocalIndexStoreError::from)
+            let events = rows
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(LocalIndexStoreError::from)?;
+            shardline_reliability::verify_lifecycle_chain(&events)
+                .map_err(LocalIndexStoreError::Reliability)?;
+            Ok(events)
         })
         .await
         .map_err(|e| LocalIndexStoreError::Io(std::io::Error::other(e)))?
@@ -1682,6 +1687,63 @@ mod tests {
                 .state(),
             UploadIntentState::Storing
         );
+    }
+
+    #[test]
+    fn tampered_reliability_evidence_is_rejected_on_read() {
+        use shardline_reliability::{
+            LifecycleEvent, OperationIdentity, OperationKind, UploadLifecycleState,
+        };
+
+        let store = make_store();
+        let intent = UploadIntent::new(
+            "reliability-tamper".to_owned(),
+            "objects/reliability-tamper".to_owned(),
+            "c".repeat(64),
+            42,
+        );
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(store.create_intent(&intent)).unwrap();
+        let event = LifecycleEvent::new(
+            OperationIdentity::new(
+                "shardline",
+                "default",
+                intent.intent_id(),
+                OperationKind::Upload,
+            )
+            .unwrap()
+            .with_object_key(intent.object_key())
+            .with_content_sha256(intent.object_hash()),
+            1,
+            UploadLifecycleState::Created,
+            UploadLifecycleState::Storing,
+        )
+        .unwrap();
+        assert!(
+            rt.block_on(store.transition_intent_with_event(
+                intent.intent_id(),
+                UploadIntentState::Storing,
+                &event,
+            ))
+            .unwrap()
+        );
+
+        let connection = store.open_connection().unwrap();
+        let mut tampered: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&event).unwrap()).unwrap();
+        tampered["after"] = serde_json::Value::String("Stored".to_owned());
+        connection
+            .execute(
+                "UPDATE shardline_reliability_events SET event_json = ?1
+                 WHERE operation_kind = 'Upload' AND operation_id = ?2 AND sequence = 1",
+                rusqlite::params![tampered.to_string(), intent.intent_id()],
+            )
+            .unwrap();
+
+        assert!(matches!(
+            rt.block_on(store.reliability_events(intent.intent_id())),
+            Err(LocalIndexStoreError::Reliability(_))
+        ));
     }
 
     #[test]
