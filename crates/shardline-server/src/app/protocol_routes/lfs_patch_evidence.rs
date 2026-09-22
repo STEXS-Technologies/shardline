@@ -218,4 +218,68 @@ mod tests {
             ServerError::Io(ref io_error) if io_error.kind() == ErrorKind::InvalidData
         ));
     }
+
+    #[test]
+    fn completion_path_is_ordered_and_idempotent() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        record(
+            directory.path(),
+            OID,
+            SCOPE,
+            SESSION,
+            TARGET,
+            ResumableLifecycleState::Active,
+            ResumableLifecycleState::Active,
+        )
+        .expect("active evidence");
+        transition(
+            directory.path(),
+            OID,
+            SCOPE,
+            SESSION,
+            TARGET,
+            ResumableLifecycleState::Active,
+            ResumableLifecycleState::Completing,
+        )
+        .expect("completion claim");
+        complete(directory.path(), OID, SCOPE, SESSION, TARGET).expect("terminal evidence");
+        complete(directory.path(), OID, SCOPE, SESSION, TARGET)
+            .expect("repeated completion is idempotent");
+
+        let log = load(directory.path(), OID, SCOPE, SESSION, TARGET).expect("verified log");
+        assert_eq!(
+            log.events().last().expect("terminal event").after,
+            ResumableLifecycleState::Completed
+        );
+        assert_eq!(log.events().len(), 4);
+    }
+
+    #[test]
+    fn identity_mismatch_cannot_advance_a_valid_chain() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        record(
+            directory.path(),
+            OID,
+            SCOPE,
+            SESSION,
+            TARGET,
+            ResumableLifecycleState::Active,
+            ResumableLifecycleState::Active,
+        )
+        .expect("active evidence");
+        let error = transition(
+            directory.path(),
+            OID,
+            "other-scope",
+            SESSION,
+            TARGET,
+            ResumableLifecycleState::Active,
+            ResumableLifecycleState::Completing,
+        )
+        .expect_err("identity mismatch");
+        assert!(matches!(
+            error,
+            ServerError::Io(ref io_error) if io_error.kind() == ErrorKind::InvalidData
+        ));
+    }
 }
