@@ -146,7 +146,7 @@ pub(crate) async fn verify_resumable_state_digest(
     let row = sqlx::query(
         "SELECT session_id, protocol, scope_namespace, target_key, attributes_json, state,
                 generation, fence_epoch, expires_at, state_digest
-         FROM shardline_resumable_sessions WHERE session_id = $1",
+         FROM shardline_resumable_sessions WHERE session_id = $1 FOR SHARE",
     )
     .bind(session_id)
     .fetch_optional(&mut *transaction)
@@ -571,7 +571,7 @@ impl PostgresIndexStore {
         let row = sqlx::query(
             "SELECT session_id, protocol, scope_namespace, target_key, attributes_json, state,
                     generation, fence_epoch, expires_at, state_digest
-             FROM shardline_resumable_sessions WHERE session_id = $1",
+             FROM shardline_resumable_sessions WHERE session_id = $1 FOR SHARE",
         )
         .bind(session_id)
         .fetch_optional(&mut *transaction)
@@ -692,7 +692,8 @@ impl PostgresIndexStore {
             "SELECT session_id, protocol, scope_namespace, target_key, attributes_json, state,
                     generation, fence_epoch, expires_at, state_digest
              FROM shardline_resumable_sessions
-             WHERE session_id = $1 AND state = 'active' AND expires_at > clock_timestamp()",
+             WHERE session_id = $1 AND state = 'active' AND expires_at > clock_timestamp()
+             FOR SHARE",
         )
         .bind(session_id)
         .fetch_optional(&mut *transaction)
