@@ -3,19 +3,22 @@ use shardline_index::{ResumableSessionState, UploadIntentState};
 use shardline_protocol::SecretString;
 use shardline_protocol::unix_now_seconds_lossy;
 use shardline_reliability::{
-    EvidenceEventMetadata, LifecycleEvent, OciObjectEvidenceLog, OciObjectIdentity,
-    OciObjectLifecycleEvent, OciObjectLifecycleState, OciObjectSnapshot, OperationKind,
+    EvidenceEventMetadata, HubRefEvidenceLog, HubRefLifecycleEvent, HubRefSnapshot, LifecycleEvent,
+    OciObjectEvidenceLog, OciObjectIdentity, OciObjectLifecycleEvent, OciObjectLifecycleState,
+    OciObjectSnapshot, OciTagEvidenceLog, OciTagLifecycleEvent, OciTagSnapshot, OperationKind,
     ProviderEvidenceLog, ProviderLifecycleEvent, ProviderLifecycleObservations,
     ProviderLifecycleSnapshot, ProviderRepositoryIdentity, QuarantineEvidenceLog,
     QuarantineLifecycleEvent, QuarantineLifecycleState, QuarantineObjectIdentity,
     QuarantineSnapshot, RetentionEvidenceLog, RetentionHoldLifecycleEvent,
-    RetentionHoldLifecycleState, RetentionHoldSnapshot, RetentionObjectIdentity, SnapshotEvidence,
+    RetentionHoldLifecycleState, RetentionHoldSnapshot, RetentionObjectIdentity,
+    S3ObjectEvidenceLog, S3ObjectLifecycleEvent, S3ObjectSnapshot, S3ObjectState, SnapshotEvidence,
     StateTransitionEvent, UploadLifecycleState, WebhookDeliveryEvidenceLog,
     WebhookDeliveryIdentity, WebhookDeliveryLifecycleEvent, WebhookDeliveryLifecycleState,
     WebhookDeliverySnapshot, baseline_resumable_session_events, baseline_upload_lifecycle_events,
-    upload_lifecycle_identity, verify_oci_object_lifecycle_events, verify_persisted_event,
-    verify_provider_lifecycle_events, verify_quarantine_lifecycle_events,
-    verify_resumable_session_events, verify_retention_hold_lifecycle_events,
+    upload_lifecycle_identity, verify_hub_ref_events, verify_oci_object_lifecycle_events,
+    verify_oci_tag_events, verify_persisted_event, verify_provider_lifecycle_events,
+    verify_quarantine_lifecycle_events, verify_resumable_session_events,
+    verify_retention_hold_lifecycle_events, verify_s3_object_events,
     verify_upload_lifecycle_events, verify_webhook_delivery_events,
 };
 use sqlx::{
@@ -543,6 +546,23 @@ async fn persist_reliability_event<T: EvidenceEventMetadata>(
     Ok(())
 }
 
+async fn reliability_operation_exists(
+    transaction: &mut Transaction<'_, Postgres>,
+    operation_kind: OperationKind,
+    operation_id: &str,
+) -> Result<bool, DatabaseMigrationError> {
+    Ok(query_scalar(
+        "SELECT EXISTS(
+             SELECT 1 FROM shardline_reliability_events
+             WHERE operation_kind = $1 AND operation_id = $2
+         )",
+    )
+    .bind(operation_kind.as_str())
+    .bind(operation_id)
+    .fetch_one(&mut **transaction)
+    .await?)
+}
+
 async fn reconcile_reliability_events(
     pool: &PgPool,
     repair_missing: bool,
@@ -555,7 +575,10 @@ async fn reconcile_reliability_events(
              AND to_regclass('public.shardline_quarantine_candidates') IS NOT NULL
              AND to_regclass('public.shardline_oci_object_tombstones') IS NOT NULL
              AND to_regclass('public.shardline_retention_holds') IS NOT NULL
-             AND to_regclass('public.shardline_webhook_deliveries') IS NOT NULL",
+             AND to_regclass('public.shardline_webhook_deliveries') IS NOT NULL
+             AND to_regclass('public.shardline_hub_refs') IS NOT NULL
+             AND to_regclass('public.shardline_oci_tags') IS NOT NULL
+             AND to_regclass('public.shardline_s3_objects') IS NOT NULL",
     )
     .fetch_one(pool)
     .await?;
@@ -835,6 +858,127 @@ async fn reconcile_reliability_events(
         };
         if repair_missing && !legacy_exists {
             for event in events.events() {
+                persist_reliability_event(&mut transaction, event).await?;
+            }
+        }
+    }
+
+    let hub_ref_rows = query(
+        "SELECT repo_id, ref_name, sha
+         FROM shardline_hub_refs
+         FOR UPDATE",
+    )
+    .fetch_all(&mut *transaction)
+    .await?;
+    for row in hub_ref_rows {
+        let snapshot = HubRefSnapshot::new(
+            row.try_get::<String, _>("repo_id")?,
+            row.try_get::<String, _>("ref_name")?,
+            Some(row.try_get::<String, _>("sha")?),
+        )
+        .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?;
+        let operation = snapshot
+            .evidence_operation()
+            .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?;
+        if repair_missing
+            && !reliability_operation_exists(
+                &mut transaction,
+                OperationKind::MetadataCommit,
+                &operation.operation_id,
+            )
+            .await?
+        {
+            let evidence = HubRefEvidenceLog::baseline(snapshot)
+                .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?;
+            for event in evidence.events() {
+                persist_reliability_event(&mut transaction, event).await?;
+            }
+        }
+    }
+
+    let oci_tag_rows = query(
+        "SELECT scope_namespace, repository, tag, digest_hex
+         FROM shardline_oci_tags
+         FOR UPDATE",
+    )
+    .fetch_all(&mut *transaction)
+    .await?;
+    for row in oci_tag_rows {
+        let scope_namespace: String = row.try_get("scope_namespace")?;
+        let repository: String = row.try_get("repository")?;
+        let tag: String = row.try_get("tag")?;
+        let digest_hex: String = row.try_get("digest_hex")?;
+        let present = OciTagSnapshot::new(&scope_namespace, &repository, &tag, Some(digest_hex))
+            .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?;
+        let operation = present
+            .evidence_operation()
+            .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?;
+        if repair_missing
+            && !reliability_operation_exists(
+                &mut transaction,
+                OperationKind::OciTag,
+                &operation.operation_id,
+            )
+            .await?
+        {
+            let absent = OciTagSnapshot::new(&scope_namespace, &repository, &tag, None)
+                .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?;
+            let mut evidence = OciTagEvidenceLog::baseline(absent)
+                .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?;
+            evidence
+                .record(present)
+                .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?;
+            for event in evidence.events() {
+                persist_reliability_event(&mut transaction, event).await?;
+            }
+        }
+    }
+
+    let s3_object_rows = query(
+        "SELECT scope_namespace, object_key, file_id, size_bytes, content_hash,
+                etag, user_metadata, updated_at_unix_seconds
+         FROM shardline_s3_objects
+         FOR UPDATE",
+    )
+    .fetch_all(&mut *transaction)
+    .await?;
+    for row in s3_object_rows {
+        let scope_namespace: String = row.try_get("scope_namespace")?;
+        let object_key: String = row.try_get("object_key")?;
+        let present = S3ObjectSnapshot::new(
+            &scope_namespace,
+            &object_key,
+            Some(S3ObjectState {
+                file_id: row.try_get("file_id")?,
+                size_bytes: u64::try_from(row.try_get::<i64, _>("size_bytes")?)
+                    .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?,
+                content_hash: row.try_get("content_hash")?,
+                etag: row.try_get("etag")?,
+                user_metadata: serde_json::from_str(&row.try_get::<String, _>("user_metadata")?)
+                    .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?,
+                updated_at_unix_seconds: row.try_get("updated_at_unix_seconds")?,
+            }),
+        )
+        .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?;
+        let operation = present
+            .evidence_operation()
+            .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?;
+        if repair_missing
+            && !reliability_operation_exists(
+                &mut transaction,
+                OperationKind::S3Object,
+                &operation.operation_id,
+            )
+            .await?
+        {
+            let absent = S3ObjectSnapshot::new(&scope_namespace, &object_key, None)
+                .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?;
+            let mut evidence = S3ObjectEvidenceLog::baseline(absent)
+                .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?;
+            evidence
+                .record(present)
+                .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?;
+            for event in evidence.events() {
                 persist_reliability_event(&mut transaction, event).await?;
             }
         }
@@ -1138,6 +1282,211 @@ async fn reconcile_reliability_events(
                 "invalid webhook-delivery reliability journal for {delivery_id}: {error}"
             ))
         })?;
+    }
+
+    let hub_ref_verification_rows = query(
+        "SELECT repo_id, ref_name, sha
+         FROM shardline_hub_refs
+         FOR UPDATE",
+    )
+    .fetch_all(&mut *transaction)
+    .await?;
+    for row in hub_ref_verification_rows {
+        let repo_id: String = row.try_get("repo_id")?;
+        let ref_name: String = row.try_get("ref_name")?;
+        let snapshot =
+            HubRefSnapshot::new(repo_id, ref_name, Some(row.try_get::<String, _>("sha")?))
+                .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?;
+        let operation_id = snapshot
+            .evidence_operation()
+            .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?
+            .operation_id;
+        let event_rows = query(
+            "SELECT event_json
+             FROM shardline_reliability_events
+             WHERE operation_kind = 'MetadataCommit' AND operation_id = $1
+             ORDER BY sequence",
+        )
+        .bind(&operation_id)
+        .fetch_all(&mut *transaction)
+        .await?;
+        let events = event_rows
+            .into_iter()
+            .map(|event_row| {
+                let value: serde_json::Value = event_row.try_get("event_json")?;
+                from_value::<HubRefLifecycleEvent>(value)
+                    .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))
+            })
+            .collect::<Result<Vec<_>, DatabaseMigrationError>>()?;
+        if events.is_empty() {
+            if !repair_missing {
+                return Err(DatabaseMigrationError::Backfill(
+                    "missing hub-ref reliability journal".into(),
+                ));
+            }
+            let baseline = HubRefEvidenceLog::baseline(snapshot.clone())
+                .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?;
+            for event in baseline.events() {
+                persist_reliability_event(&mut transaction, event).await?;
+            }
+            verify_hub_ref_events(baseline.events(), &snapshot).map_err(|error| {
+                DatabaseMigrationError::Backfill(format!(
+                    "invalid hub-ref reliability baseline: {error}"
+                ))
+            })?;
+        } else {
+            verify_hub_ref_events(&events, &snapshot).map_err(|error| {
+                DatabaseMigrationError::Backfill(format!(
+                    "invalid hub-ref reliability journal: {error}"
+                ))
+            })?;
+        }
+    }
+
+    let oci_tag_verification_rows = query(
+        "SELECT scope_namespace, repository, tag, digest_hex
+         FROM shardline_oci_tags
+         FOR UPDATE",
+    )
+    .fetch_all(&mut *transaction)
+    .await?;
+    for row in oci_tag_verification_rows {
+        let scope_namespace: String = row.try_get("scope_namespace")?;
+        let repository: String = row.try_get("repository")?;
+        let tag: String = row.try_get("tag")?;
+        let snapshot = OciTagSnapshot::new(
+            &scope_namespace,
+            &repository,
+            &tag,
+            Some(row.try_get::<String, _>("digest_hex")?),
+        )
+        .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?;
+        let operation_id = snapshot
+            .evidence_operation()
+            .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?
+            .operation_id;
+        let event_rows = query(
+            "SELECT event_json
+             FROM shardline_reliability_events
+             WHERE operation_kind = 'OciTag' AND operation_id = $1
+             ORDER BY sequence",
+        )
+        .bind(&operation_id)
+        .fetch_all(&mut *transaction)
+        .await?;
+        let events = event_rows
+            .into_iter()
+            .map(|event_row| {
+                let value: serde_json::Value = event_row.try_get("event_json")?;
+                from_value::<OciTagLifecycleEvent>(value)
+                    .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))
+            })
+            .collect::<Result<Vec<_>, DatabaseMigrationError>>()?;
+        if events.is_empty() {
+            if !repair_missing {
+                return Err(DatabaseMigrationError::Backfill(
+                    "missing OCI-tag reliability journal".into(),
+                ));
+            }
+            let absent = OciTagSnapshot::new(&scope_namespace, &repository, &tag, None)
+                .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?;
+            let mut baseline = OciTagEvidenceLog::baseline(absent)
+                .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?;
+            baseline
+                .record(snapshot.clone())
+                .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?;
+            for event in baseline.events() {
+                persist_reliability_event(&mut transaction, event).await?;
+            }
+            verify_oci_tag_events(baseline.events(), &snapshot).map_err(|error| {
+                DatabaseMigrationError::Backfill(format!(
+                    "invalid OCI-tag reliability baseline: {error}"
+                ))
+            })?;
+        } else {
+            verify_oci_tag_events(&events, &snapshot).map_err(|error| {
+                DatabaseMigrationError::Backfill(format!(
+                    "invalid OCI-tag reliability journal: {error}"
+                ))
+            })?;
+        }
+    }
+
+    let s3_object_verification_rows = query(
+        "SELECT scope_namespace, object_key, file_id, size_bytes, content_hash,
+                etag, user_metadata, updated_at_unix_seconds
+         FROM shardline_s3_objects
+         FOR UPDATE",
+    )
+    .fetch_all(&mut *transaction)
+    .await?;
+    for row in s3_object_verification_rows {
+        let scope_namespace: String = row.try_get("scope_namespace")?;
+        let object_key: String = row.try_get("object_key")?;
+        let snapshot = S3ObjectSnapshot::new(
+            &scope_namespace,
+            &object_key,
+            Some(S3ObjectState {
+                file_id: row.try_get("file_id")?,
+                size_bytes: u64::try_from(row.try_get::<i64, _>("size_bytes")?)
+                    .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?,
+                content_hash: row.try_get("content_hash")?,
+                etag: row.try_get("etag")?,
+                user_metadata: serde_json::from_str(&row.try_get::<String, _>("user_metadata")?)
+                    .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?,
+                updated_at_unix_seconds: row.try_get("updated_at_unix_seconds")?,
+            }),
+        )
+        .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?;
+        let operation_id = snapshot
+            .evidence_operation()
+            .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?
+            .operation_id;
+        let event_rows = query(
+            "SELECT event_json
+             FROM shardline_reliability_events
+             WHERE operation_kind = 'S3Object' AND operation_id = $1
+             ORDER BY sequence",
+        )
+        .bind(&operation_id)
+        .fetch_all(&mut *transaction)
+        .await?;
+        let events = event_rows
+            .into_iter()
+            .map(|event_row| {
+                let value: serde_json::Value = event_row.try_get("event_json")?;
+                from_value::<S3ObjectLifecycleEvent>(value)
+                    .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))
+            })
+            .collect::<Result<Vec<_>, DatabaseMigrationError>>()?;
+        if events.is_empty() {
+            if !repair_missing {
+                return Err(DatabaseMigrationError::Backfill(
+                    "missing S3-object reliability journal".into(),
+                ));
+            }
+            let absent = S3ObjectSnapshot::new(&scope_namespace, &object_key, None)
+                .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?;
+            let mut baseline = S3ObjectEvidenceLog::baseline(absent)
+                .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?;
+            baseline
+                .record(snapshot.clone())
+                .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?;
+            for event in baseline.events() {
+                persist_reliability_event(&mut transaction, event).await?;
+            }
+            verify_s3_object_events(baseline.events(), &snapshot).map_err(|error| {
+                DatabaseMigrationError::Backfill(format!(
+                    "invalid S3-object reliability baseline: {error}"
+                ))
+            })?;
+        } else {
+            verify_s3_object_events(&events, &snapshot).map_err(|error| {
+                DatabaseMigrationError::Backfill(format!(
+                    "invalid S3-object reliability journal: {error}"
+                ))
+            })?;
+        }
     }
 
     let provider_verification_rows = query(
