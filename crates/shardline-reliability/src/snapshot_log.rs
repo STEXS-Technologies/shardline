@@ -49,7 +49,11 @@ impl<S: SnapshotEvidence> SnapshotEvidenceLog<S> {
             .map_or(0, |event| event.sequence.saturating_add(1));
         self.0
             .push(SnapshotEvidenceEvent::new(sequence, before, snapshot)?);
-        verify_snapshot_chain(&self.0)
+        let result = verify_snapshot_chain(&self.0);
+        if result.is_err() {
+            self.0.pop();
+        }
+        result
     }
 
     /// Verifies the chain and binds it to the current materialized snapshot.

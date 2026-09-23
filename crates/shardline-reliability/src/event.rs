@@ -95,7 +95,7 @@ impl<S: EvidenceState> LifecycleEvidenceEvent<S> {
     }
 }
 
-fn verify_evidence_chain<S: EvidenceState>(
+pub(crate) fn verify_evidence_chain<S: EvidenceState>(
     events: &[LifecycleEvidenceEvent<S>],
 ) -> Result<(), ReliabilityError> {
     let Some(first) = events.first() else {

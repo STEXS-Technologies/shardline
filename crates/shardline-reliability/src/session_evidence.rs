@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ReliabilityError, ResumableLifecycleState, StateTransitionEvent, resumable_session_event,
-    verify_state_transition_chain,
+    LifecycleEvidenceLog, ReliabilityError, ResumableLifecycleState, StateTransitionEvent,
+    resumable_session_event, verify_state_transition_chain,
 };
 
 /// Verifies a persisted resumable-session journal against its canonical
@@ -49,7 +49,7 @@ pub fn verify_resumable_session_events(
 /// a parallel digest format. Legacy session files may start empty; callers must
 /// use [`Self::for_legacy_session`] before accepting or mutating such state.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionEvidenceLog(Vec<StateTransitionEvent>);
+pub struct SessionEvidenceLog(LifecycleEvidenceLog<ResumableLifecycleState>);
 
 impl SessionEvidenceLog {
     /// Creates the initial active evidence for a newly created session.
@@ -69,7 +69,7 @@ impl SessionEvidenceLog {
             ResumableLifecycleState::Active,
             ResumableLifecycleState::Active,
         )?;
-        Ok(Self(vec![event]))
+        Ok(Self(LifecycleEvidenceLog::from_events(vec![event])?))
     }
 
     /// Reconstructs the initial active evidence for a pre-evidence session.
@@ -91,7 +91,7 @@ impl SessionEvidenceLog {
         after: ResumableLifecycleState,
     ) -> Result<(), ReliabilityError> {
         let sequence = self
-            .0
+            .events()
             .last()
             .map_or(1, |event| event.sequence.saturating_add(1));
         let event = resumable_session_event(
@@ -102,13 +102,12 @@ impl SessionEvidenceLog {
             before,
             after,
         )?;
-        self.0.push(event);
-        verify_state_transition_chain(&self.0)
+        self.0.append(event)
     }
 
     /// Verifies all stored digests, identity, ordering, and chain continuity.
     pub fn verify(&self) -> Result<(), ReliabilityError> {
-        verify_state_transition_chain(&self.0)
+        self.0.verify()
     }
 
     /// Verifies integrity and binds the chain to one canonical session
@@ -122,11 +121,11 @@ impl SessionEvidenceLog {
         target_key: &str,
     ) -> Result<(), ReliabilityError> {
         verify_resumable_session_events(
-            &self.0,
+            self.events(),
             scope_namespace,
             session_id,
             target_key,
-            self.0
+            self.events()
                 .last()
                 .map_or(ResumableLifecycleState::Active, |event| event.after),
         )
@@ -135,17 +134,17 @@ impl SessionEvidenceLog {
     /// Returns the evidence events in sequence order.
     #[must_use]
     pub fn events(&self) -> &[StateTransitionEvent] {
-        &self.0
+        self.0.events()
     }
 
     /// Returns whether no evidence has been recorded.
     #[must_use]
-    pub const fn is_empty(&self) -> bool {
-        self.0.is_empty()
+    pub fn is_empty(&self) -> bool {
+        self.0.events().is_empty()
     }
 
     #[cfg(test)]
     pub(crate) fn events_mut(&mut self) -> &mut [StateTransitionEvent] {
-        &mut self.0
+        self.0.events_mut()
     }
 }

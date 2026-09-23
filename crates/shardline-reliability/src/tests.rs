@@ -42,6 +42,57 @@ fn lifecycle_event_correlates_statechronicle_and_penelope_digests() {
 }
 
 #[test]
+fn generic_lifecycle_log_is_shared_by_upload_and_resumable_evidence() {
+    let upload_events = baseline_upload_lifecycle_events(
+        "tenant",
+        "repo",
+        "op-1",
+        "object",
+        "hash",
+        UploadLifecycleState::Visible,
+    )
+    .unwrap();
+    let upload_log = LifecycleEvidenceLog::from_events(upload_events).unwrap();
+    assert_eq!(upload_log.events().len(), 5);
+    upload_log.verify().unwrap();
+
+    let session_events = baseline_resumable_session_events(
+        "repo",
+        "session-1",
+        "objects/target",
+        ResumableLifecycleState::Completed,
+    )
+    .unwrap();
+    let session_log = LifecycleEvidenceLog::from_events(session_events).unwrap();
+    assert_eq!(
+        session_log.events().last().unwrap().after,
+        ResumableLifecycleState::Completed
+    );
+    session_log.verify().unwrap();
+}
+
+#[test]
+fn generic_lifecycle_log_rolls_back_rejected_append() {
+    let events = baseline_upload_lifecycle_events(
+        "tenant",
+        "repo",
+        "op-1",
+        "object",
+        "hash",
+        UploadLifecycleState::Storing,
+    )
+    .unwrap();
+    let mut log = LifecycleEvidenceLog::from_events(events).unwrap();
+    let original_len = log.events().len();
+    let mut invalid = log.events().last().unwrap().clone();
+    invalid.sequence = invalid.sequence.saturating_add(1);
+    invalid.before = UploadLifecycleState::Visible;
+    assert!(log.append(invalid).is_err());
+    assert_eq!(log.events().len(), original_len);
+    log.verify().unwrap();
+}
+
+#[test]
 fn lifecycle_evidence_reads_legacy_json_digests_after_canonical_migration() {
     let operation = OperationIdentity::new("tenant", "repo", "legacy-op", OperationKind::Upload)
         .unwrap()
