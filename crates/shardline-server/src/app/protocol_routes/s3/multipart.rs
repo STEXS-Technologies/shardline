@@ -53,7 +53,7 @@ use crate::{
     ServerError,
     app::AppState,
     metrics,
-    object_store::materialize_object_to_file,
+    object_store::{materialize_object_to_file, s3_resumable_parts_reader},
     upload_ingest::{RequestBodyReader, read_body_to_bytes},
 };
 
@@ -725,26 +725,34 @@ async fn durable_s3_complete_multipart_upload(
         }
     }
 
-    let temporary = tempfile::tempdir().map_err(io_to_s3)?;
-    let mut files = Vec::with_capacity(parts.len());
-    for part in &parts {
-        let key = ObjectKey::parse(part.staging_key()).map_err(|_error| S3Error::internal())?;
-        let destination = temporary
-            .path()
-            .join(format!("part-{}", part.part_number()));
-        materialize_object_to_file(
-            &state.backend.object_store(),
-            &key,
-            part.size_bytes(),
-            &destination,
-        )
-        .await?;
-        files.push(tokio::fs::File::open(destination).await.map_err(io_to_s3)?);
-    }
-    let chunk_size = state.config.chunk_size().get();
     let hasher = Arc::new(Mutex::new(Md5::new()));
-    let reader =
-        RequestBodyReader::from_reader_chain(files, chunk_size).with_md5_tee(hasher.clone());
+    let (reader, _temporary) = if let Some(reader) =
+        s3_resumable_parts_reader(&state.backend.object_store(), &parts).await?
+    {
+        (reader.with_md5_tee(hasher.clone()), None)
+    } else {
+        let temporary = tempfile::tempdir().map_err(io_to_s3)?;
+        let mut files = Vec::with_capacity(parts.len());
+        for part in &parts {
+            let key = ObjectKey::parse(part.staging_key()).map_err(|_error| S3Error::internal())?;
+            let destination = temporary
+                .path()
+                .join(format!("part-{}", part.part_number()));
+            materialize_object_to_file(
+                &state.backend.object_store(),
+                &key,
+                part.size_bytes(),
+                &destination,
+            )
+            .await?;
+            files.push(tokio::fs::File::open(destination).await.map_err(io_to_s3)?);
+        }
+        let chunk_size = state.config.chunk_size().get();
+        (
+            RequestBodyReader::from_reader_chain(files, chunk_size).with_md5_tee(hasher.clone()),
+            Some(temporary),
+        )
+    };
 
     let object_lock = acquire_object_upload_lock(context.object_key.as_str());
     let _object_guard = object_lock.lock().await;

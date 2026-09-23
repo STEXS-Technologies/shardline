@@ -21,7 +21,9 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use crate::{
     ServerError,
     admission::weights,
-    object_store::{materialize_object_to_file, stage_bytes_content_addressed},
+    object_store::{
+        materialize_object_to_file, s3_resumable_parts_reader, stage_bytes_content_addressed,
+    },
     oci_adapter::{
         abort_s3_multipart_upload_session, append_s3_multipart_upload_bytes, append_upload_bytes,
         create_upload_session, delete_upload_session, finalize_s3_multipart_upload_session,
@@ -599,57 +601,66 @@ async fn durable_oci_put_blob_upload(
         .begin_resumable_completion(session_id)
         .await?
         .ok_or(ServerError::NotFound)?;
-    let temporary = tempfile::tempdir()?;
-    let assembled_path = temporary.path().join("assembled");
-    let mut assembled = tokio::fs::File::create(&assembled_path).await?;
-    for part in &claimed_parts {
-        let key = shardline_storage::ObjectKey::parse(part.staging_key())
-            .map_err(|_error| ServerError::InvalidPath)?;
-        let path = temporary
-            .path()
-            .join(format!("part-{}", part.part_number()));
-        materialize_object_to_file(
-            &state.backend.object_store(),
-            &key,
-            part.size_bytes(),
-            &path,
-        )
-        .await?;
-        let mut input = tokio::fs::File::open(path).await?;
-        tokio::io::copy(&mut input, &mut assembled).await?;
-    }
-    assembled.flush().await?;
-    drop(assembled);
-
-    let mut input = tokio::fs::File::open(&assembled_path).await?;
-    let mut sha256 = Sha256::new();
-    let mut blake3 = blake3::Hasher::new();
-    let mut total = 0_u64;
-    let mut buffer = vec![0_u8; 1024 * 1024];
-    loop {
-        let read = input.read(&mut buffer).await?;
-        if read == 0 {
-            break;
-        }
-        let bytes = buffer.get(..read).ok_or(ServerError::Overflow)?;
-        sha256.update(bytes);
-        blake3.update(bytes);
-        total = total
-            .checked_add(u64::try_from(read)?)
-            .ok_or(ServerError::Overflow)?;
-    }
-    if hex::encode(sha256.finalize()) != digest_hex {
-        return Err(ServerError::ExpectedBodyHashMismatch);
-    }
-    let integrity = ObjectIntegrity::new(
-        ShardlineHash::from_bytes(*blake3.finalize().as_bytes()),
-        total,
-    );
     let object_key = oci_blob_key(repository, digest_hex, auth)?;
-    let _stored = state
-        .backend
-        .put_sha256_addressed_object_file(&object_key, digest_hex, &assembled_path, &integrity)
-        .await?;
+    let _stored = if let Some(reader) =
+        s3_resumable_parts_reader(&state.backend.object_store(), &claimed_parts).await?
+    {
+        state
+            .backend
+            .put_sha256_addressed_object_stream_if_absent(&object_key, digest_hex, reader)
+            .await?
+    } else {
+        let temporary = tempfile::tempdir()?;
+        let assembled_path = temporary.path().join("assembled");
+        let mut assembled = tokio::fs::File::create(&assembled_path).await?;
+        for part in &claimed_parts {
+            let key = shardline_storage::ObjectKey::parse(part.staging_key())
+                .map_err(|_error| ServerError::InvalidPath)?;
+            let path = temporary
+                .path()
+                .join(format!("part-{}", part.part_number()));
+            materialize_object_to_file(
+                &state.backend.object_store(),
+                &key,
+                part.size_bytes(),
+                &path,
+            )
+            .await?;
+            let mut input = tokio::fs::File::open(path).await?;
+            tokio::io::copy(&mut input, &mut assembled).await?;
+        }
+        assembled.flush().await?;
+        drop(assembled);
+
+        let mut input = tokio::fs::File::open(&assembled_path).await?;
+        let mut sha256 = Sha256::new();
+        let mut blake3 = blake3::Hasher::new();
+        let mut total = 0_u64;
+        let mut buffer = vec![0_u8; 1024 * 1024];
+        loop {
+            let read = input.read(&mut buffer).await?;
+            if read == 0 {
+                break;
+            }
+            let bytes = buffer.get(..read).ok_or(ServerError::Overflow)?;
+            sha256.update(bytes);
+            blake3.update(bytes);
+            total = total
+                .checked_add(u64::try_from(read)?)
+                .ok_or(ServerError::Overflow)?;
+        }
+        if hex::encode(sha256.finalize()) != digest_hex {
+            return Err(ServerError::ExpectedBodyHashMismatch);
+        }
+        let integrity = ObjectIntegrity::new(
+            ShardlineHash::from_bytes(*blake3.finalize().as_bytes()),
+            total,
+        );
+        state
+            .backend
+            .put_sha256_addressed_object_file(&object_key, digest_hex, &assembled_path, &integrity)
+            .await?
+    };
 
     let lock_key = shardline_index::ResourceLockKey::oci_repository(&expected_scope, repository);
     let mut guard = state

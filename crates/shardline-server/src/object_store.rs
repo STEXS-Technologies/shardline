@@ -8,9 +8,10 @@ use std::{
     path::Path,
 };
 
-use futures_util::StreamExt;
+use futures_util::{StreamExt, TryStreamExt, stream};
 use shardline_index::{
     FileChunkRecord, FileRecord, FileRecordInvariantError, FileRecordStorageLayout,
+    ResumableSessionPart,
 };
 use shardline_protocol::{ByteRange, ShardlineHash};
 pub use shardline_server_core::ServerObjectStore;
@@ -23,7 +24,7 @@ use tokio::io::AsyncWriteExt;
 use crate::error::{IndexError, ObjectStoreError};
 use crate::{
     ObjectStorageAdapter, ServerConfig, ServerError, ServerFrontend, chunk_store::chunk_object_key,
-    server_frontend::append_referenced_term_bytes,
+    server_frontend::append_referenced_term_bytes, upload_ingest::RequestBodyReader,
 };
 
 #[cfg(test)]
@@ -147,6 +148,45 @@ pub(crate) async fn materialize_object_to_file(
         }
         ServerObjectStore::Blackhole => Err(ServerError::NotFound),
     }
+}
+
+/// Builds a sequential reader over durable S3-resumable parts without a
+/// pod-local assembly file. The database-fenced part descriptors remain the
+/// source of truth; each ranged read is bounded to its recorded length.
+///
+/// Local deployments return `None` so their filesystem-backed staging path is
+/// preserved. The caller must retain its completion/session guards while the
+/// returned reader is consumed.
+pub(crate) async fn s3_resumable_parts_reader(
+    object_store: &ServerObjectStore,
+    parts: &[ResumableSessionPart],
+) -> Result<Option<RequestBodyReader>, ServerError> {
+    let ServerObjectStore::S3(store) = object_store else {
+        return Ok(None);
+    };
+    let ranges = parts
+        .iter()
+        .filter(|part| part.size_bytes() > 0)
+        .map(|part| {
+            let key =
+                ObjectKey::parse(part.staging_key()).map_err(|_error| ServerError::InvalidPath)?;
+            let end = part
+                .size_bytes()
+                .checked_sub(1)
+                .ok_or(ServerError::Overflow)?;
+            let range = ByteRange::new(0, end).map_err(|_error| ServerError::Overflow)?;
+            Ok((key, range))
+        })
+        .collect::<Result<Vec<_>, ServerError>>()?;
+    let store = store.clone();
+    let stream = stream::iter(ranges)
+        .then(move |(key, range)| {
+            let store = store.clone();
+            async move { store.stream_range(&key, range).await }
+        })
+        .try_flatten()
+        .map_err(ServerError::from);
+    Ok(Some(RequestBodyReader::from_stream(stream)))
 }
 
 /// Promotes bounded bytes through a pod-local temporary file into an immutable
