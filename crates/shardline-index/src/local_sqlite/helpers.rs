@@ -23,16 +23,17 @@ use shardline_protocol::{RepositoryScope, unix_now_seconds_lossy};
 use shardline_reliability::{
     EvidenceEventMetadata, HubRefEvidenceLog, HubRefLifecycleEvent, HubRefSnapshot, LifecycleEvent,
     OciObjectEvidenceLog, OciObjectIdentity, OciObjectLifecycleState, OciObjectSnapshot,
-    OciTagEvidenceLog, OciTagLifecycleEvent, OciTagSnapshot, ProviderEvidenceLog,
+    OciTagEvidenceLog, OciTagLifecycleEvent, OciTagSnapshot, OperationKind, ProviderEvidenceLog,
     ProviderLifecycleEvent, ProviderLifecycleSnapshot, QuarantineEvidenceLog,
     QuarantineLifecycleEvent, QuarantineLifecycleState, QuarantineObjectIdentity,
     QuarantineSnapshot, ResumableLifecycleState, RetentionEvidenceLog, RetentionHoldLifecycleEvent,
-    RetentionHoldLifecycleState, RetentionHoldSnapshot, RetentionObjectIdentity, SnapshotEvidence,
+    RetentionHoldLifecycleState, RetentionHoldSnapshot, RetentionObjectIdentity,
+    S3ObjectEvidenceLog, S3ObjectLifecycleEvent, S3ObjectSnapshot, S3ObjectState, SnapshotEvidence,
     StateTransitionEvent, UploadLifecycleState, WebhookDeliveryEvidenceLog,
     WebhookDeliveryIdentity, WebhookDeliveryLifecycleEvent, WebhookDeliveryLifecycleState,
     WebhookDeliverySnapshot, baseline_resumable_session_events, baseline_upload_lifecycle_events,
     verify_hub_ref_events, verify_oci_tag_events, verify_provider_lifecycle_events,
-    verify_resumable_session_events, verify_upload_lifecycle_events,
+    verify_resumable_session_events, verify_s3_object_events, verify_upload_lifecycle_events,
 };
 use shardline_storage::{
     DirectoryPathError, ObjectKey, ObjectKeyError,
@@ -332,6 +333,68 @@ pub(crate) fn current_oci_tag_evidence(
 pub(crate) fn persist_oci_tag_evidence(
     transaction: &Transaction<'_>,
     event: &OciTagLifecycleEvent,
+) -> Result<(), LocalIndexStoreError> {
+    persist_reliability_event(transaction, event)
+}
+
+pub(crate) fn s3_object_snapshot(
+    scope_namespace: &str,
+    object_key: &str,
+    entry: Option<&crate::S3ObjectEntry>,
+) -> Result<S3ObjectSnapshot, LocalIndexStoreError> {
+    let state = entry.map(|entry| S3ObjectState {
+        file_id: entry.file_id.clone(),
+        size_bytes: entry.size_bytes,
+        content_hash: entry.content_hash.clone(),
+        etag: entry.etag.clone(),
+        user_metadata: entry.user_metadata.clone(),
+        updated_at_unix_seconds: entry.updated_at_unix_seconds,
+    });
+    Ok(S3ObjectSnapshot::new(scope_namespace, object_key, state)?)
+}
+
+pub(crate) fn load_s3_object_evidence(
+    transaction: &Transaction<'_>,
+    scope_namespace: &str,
+    object_key: &str,
+) -> Result<S3ObjectEvidenceLog, LocalIndexStoreError> {
+    let operation = s3_object_snapshot(scope_namespace, object_key, None)?.evidence_operation()?;
+    let mut statement = transaction.prepare(
+        "SELECT event_json FROM shardline_reliability_events
+         WHERE operation_kind = ?1 AND operation_id = ?2 ORDER BY sequence",
+    )?;
+    let rows = statement.query_map(
+        params![OperationKind::S3Object.as_str(), operation.operation_id],
+        |row| {
+            let event_json: String = row.get(0)?;
+            from_str::<S3ObjectLifecycleEvent>(&event_json).map_err(|error| {
+                SqliteError::FromSqlConversionFailure(0, Type::Text, Box::new(error))
+            })
+        },
+    )?;
+    Ok(S3ObjectEvidenceLog::from_events(
+        rows.collect::<Result<Vec<_>, _>>()?,
+    )?)
+}
+
+pub(crate) fn current_s3_object_evidence(
+    transaction: &Transaction<'_>,
+    scope_namespace: &str,
+    object_key: &str,
+    entry: Option<&crate::S3ObjectEntry>,
+) -> Result<S3ObjectEvidenceLog, LocalIndexStoreError> {
+    let snapshot = s3_object_snapshot(scope_namespace, object_key, entry)?;
+    let evidence = load_s3_object_evidence(transaction, scope_namespace, object_key)?;
+    if evidence.events().is_empty() {
+        return Ok(S3ObjectEvidenceLog::baseline(snapshot)?);
+    }
+    verify_s3_object_events(evidence.events(), &snapshot)?;
+    Ok(evidence)
+}
+
+pub(crate) fn persist_s3_object_evidence(
+    transaction: &Transaction<'_>,
+    event: &S3ObjectLifecycleEvent,
 ) -> Result<(), LocalIndexStoreError> {
     persist_reliability_event(transaction, event)
 }

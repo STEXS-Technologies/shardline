@@ -9,6 +9,7 @@ fn operation_kind_persisted_discriminators_round_trip() {
         OperationKind::ResumableSession,
         OperationKind::MetadataCommit,
         OperationKind::OciTag,
+        OperationKind::S3Object,
         OperationKind::Visibility,
         OperationKind::ProviderEvent,
         OperationKind::Repair,

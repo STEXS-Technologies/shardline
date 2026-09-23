@@ -3,7 +3,8 @@ use serde_json::Value;
 use crate::{
     HubRefLifecycleEvent, LifecycleEvent, OciObjectLifecycleEvent, OciTagLifecycleEvent,
     OperationKind, ProviderLifecycleEvent, QuarantineLifecycleEvent, ReliabilityError,
-    RetentionHoldLifecycleEvent, StateTransitionEvent, WebhookDeliveryLifecycleEvent,
+    RetentionHoldLifecycleEvent, S3ObjectLifecycleEvent, StateTransitionEvent,
+    WebhookDeliveryLifecycleEvent,
 };
 
 /// Verifies one persisted reliability event using the canonical domain decoder.
@@ -30,6 +31,7 @@ pub fn verify_persisted_event(
         }
         OperationKind::Visibility => verify::<OciObjectLifecycleEvent>(operation_kind, event_json),
         OperationKind::OciTag => verify::<OciTagLifecycleEvent>(operation_kind, event_json),
+        OperationKind::S3Object => verify::<S3ObjectLifecycleEvent>(operation_kind, event_json),
         OperationKind::RetentionHold => {
             verify::<RetentionHoldLifecycleEvent>(operation_kind, event_json)
         }

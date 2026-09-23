@@ -438,5 +438,11 @@ path = "fuzz_targets/shardline/reliability_oci_tag_evidence.rs"
 test = false
 doc = false
 
+[[bin]]
+name = "shardline_reliability_s3_object_evidence"
+path = "fuzz_targets/shardline/reliability_s3_object_evidence.rs"
+test = false
+doc = false
+
 [lints]
 workspace = true

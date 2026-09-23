@@ -63,6 +63,15 @@ The canonical state machines and durable lifecycle snapshots are:
 - OCI tags, recorded as typed mutable-pointer snapshots. Tag retargets,
   insert-if-absent, digest-guarded deletion, reads, and listing all verify or
   append evidence in the same transaction as the tag row.
+- S3 listing-index objects, recorded as complete typed materialized-row
+  snapshots. Upsert, create-if-absent and conditional replacement, deletion,
+  exact reads, and listings verify or append evidence in the same transaction
+  as the index row; absence is an authenticated state rather than a missing
+  record that can silently diverge.
+- provider tree entries and revision registries, which are immutable-version
+  index records rebuilt from provider metadata rather than lifecycle state;
+  their existing transactional pruning and rebuild contracts remain the
+  source of truth and are intentionally not given a second lifecycle journal.
 
 This same resumable lifecycle evidence is also persisted by the standalone
 file-backed S3 multipart and OCI upload-session adapters. Their legacy session
@@ -160,6 +169,8 @@ The current durable-state inventory is intentionally explicit:
 | Webhook deliveries | Idempotency/recovery lifecycle snapshot | `WebhookDeliveryLifecycleEvent` plus unique delivery key and transactional insert |
 | Hub repository refs | Metadata/ref-head snapshot | `HubRefLifecycleEvent` plus optimistic ref compare-and-swap |
 | OCI tags | Mutable OCI pointer snapshot | `OciTagLifecycleEvent` plus tag-key uniqueness and digest-guarded CAS |
+| S3 object listing rows | Complete mutable materialized-row snapshot | `S3ObjectLifecycleEvent` plus object-key uniqueness and conditional CAS |
+| Provider tree entries and revisions | Immutable-version index/materialization | Existing transactional rebuild, pruning, and repository-key boundaries |
 | Resource fences | Concurrency epoch, not domain lifecycle state | Existing fenced transaction boundary |
 
 This inventory prevents either omission of an old state machine or accidental

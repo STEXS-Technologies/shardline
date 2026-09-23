@@ -20,6 +20,7 @@ mod persisted;
 mod provider_evidence;
 mod quarantine_evidence;
 mod retention_evidence;
+mod s3_object_evidence;
 mod session_evidence;
 mod snapshot_event;
 mod snapshot_log;
@@ -70,6 +71,10 @@ pub use retention_evidence::{
     RetentionEvidenceLog, RetentionHoldLifecycleEvent, RetentionHoldLifecycleState,
     RetentionHoldSnapshot, RetentionObjectIdentity, verify_retention_hold_lifecycle_chain,
     verify_retention_hold_lifecycle_events,
+};
+pub use s3_object_evidence::{
+    S3ObjectEvidenceLog, S3ObjectLifecycleEvent, S3ObjectOperationId, S3ObjectSnapshot,
+    S3ObjectState, verify_s3_object_events,
 };
 pub use session_evidence::SessionEvidenceLog;
 pub use session_evidence::verify_resumable_session_events;

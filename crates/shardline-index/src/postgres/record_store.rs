@@ -82,6 +82,12 @@ impl super::PostgresRecordStore {
         }
         let metadata = serde_json::to_string(&entry.user_metadata)?;
         let mut transaction = connection.begin().await?;
+        let previous_s3_entry = super::s3_objects::current_s3_object_on_connection(
+            &mut transaction,
+            &entry.scope_namespace,
+            &entry.object_key,
+        )
+        .await?;
         let completion_identity = if let Some(fence) = completion_fence {
             let owns_completion = query(
                 "SELECT scope_namespace, target_key FROM shardline_resumable_sessions
@@ -183,6 +189,12 @@ impl super::PostgresRecordStore {
             transaction.rollback().await?;
             return Ok(false);
         }
+        super::s3_objects::record_s3_object_transition(
+            &mut transaction,
+            previous_s3_entry.as_ref(),
+            Some(entry),
+        )
+        .await?;
         if let Some(fence) = completion_fence {
             let completed = query(
                 "UPDATE shardline_resumable_sessions
@@ -240,6 +252,12 @@ impl super::PostgresRecordStore {
         fallback_file_id: &str,
     ) -> Result<bool, PostgresMetadataStoreError> {
         let mut transaction = connection.begin().await?;
+        let previous_s3_entry = super::s3_objects::current_s3_object_on_connection(
+            &mut transaction,
+            scope_namespace,
+            object_key,
+        )
+        .await?;
         let deleted_entry = query(
             "DELETE FROM shardline_s3_objects
              WHERE scope_namespace = $1 AND object_key = $2
@@ -283,6 +301,14 @@ impl super::PostgresRecordStore {
         } else {
             0
         };
+        if deleted_entry.is_some() {
+            super::s3_objects::record_s3_object_transition(
+                &mut transaction,
+                previous_s3_entry.as_ref(),
+                None,
+            )
+            .await?;
+        }
         transaction.commit().await?;
         Ok(deleted_entry.is_some() || deleted_records > 0)
     }

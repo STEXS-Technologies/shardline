@@ -1,4 +1,6 @@
-use rusqlite::{Connection, params_from_iter};
+#[cfg(test)]
+use rusqlite::Connection;
+use rusqlite::{OptionalExtension, Transaction, params_from_iter};
 use std::fmt::Write as _;
 
 use super::{LocalIndexStore, LocalIndexStoreError, collect_rows, helpers};
@@ -33,10 +35,11 @@ fn user_metadata_to_json(
 }
 
 fn upsert_s3_object_sql(
-    connection: &Connection,
+    transaction: &Transaction<'_>,
     entry: &S3ObjectEntry,
 ) -> Result<(), LocalIndexStoreError> {
-    connection.execute(
+    let before = current_s3_object_sql(transaction, &entry.scope_namespace, &entry.object_key)?;
+    transaction.execute(
         "INSERT INTO shardline_s3_objects (
             scope_namespace, object_key, file_id, size_bytes, content_hash, etag,
             user_metadata, updated_at_unix_seconds
@@ -61,17 +64,18 @@ fn upsert_s3_object_sql(
             entry.updated_at_unix_seconds,
         ],
     )?;
+    record_s3_object_transition(transaction, before.as_ref(), Some(entry))?;
     Ok(())
 }
 
 fn compare_and_swap_s3_object_sql(
-    connection: &Connection,
+    transaction: &Transaction<'_>,
     expected: Option<&S3ObjectEntry>,
     replacement: &S3ObjectEntry,
 ) -> Result<bool, LocalIndexStoreError> {
     let replacement_metadata = user_metadata_to_json(&replacement.user_metadata)?;
     let changed = if let Some(expected) = expected {
-        connection.execute(
+        transaction.execute(
             "UPDATE shardline_s3_objects
              SET file_id = ?3, size_bytes = ?4, content_hash = ?5, etag = ?6,
                  user_metadata = ?7, updated_at_unix_seconds = ?8
@@ -97,7 +101,7 @@ fn compare_and_swap_s3_object_sql(
             ],
         )?
     } else {
-        connection.execute(
+        transaction.execute(
             "INSERT INTO shardline_s3_objects (
                 scope_namespace, object_key, file_id, size_bytes, content_hash, etag,
                 user_metadata, updated_at_unix_seconds
@@ -116,23 +120,74 @@ fn compare_and_swap_s3_object_sql(
             ],
         )?
     };
+    if changed == 1 {
+        let before = expected;
+        record_s3_object_transition(transaction, before, Some(replacement))?;
+    }
     Ok(changed == 1)
 }
 
 fn delete_s3_object_sql(
-    connection: &Connection,
+    transaction: &Transaction<'_>,
     scope_namespace: &str,
     object_key: &str,
 ) -> Result<bool, LocalIndexStoreError> {
-    let changed = connection.execute(
+    let before = current_s3_object_sql(transaction, scope_namespace, object_key)?;
+    let changed = transaction.execute(
         "DELETE FROM shardline_s3_objects WHERE scope_namespace = ?1 AND object_key = ?2",
         rusqlite::params![scope_namespace, object_key],
     )?;
+    if changed > 0 {
+        record_s3_object_transition(transaction, before.as_ref(), None)?;
+    }
     Ok(changed > 0)
 }
 
+fn current_s3_object_sql(
+    connection: &Transaction<'_>,
+    scope_namespace: &str,
+    object_key: &str,
+) -> Result<Option<S3ObjectEntry>, LocalIndexStoreError> {
+    let mut statement = connection.prepare(
+        "SELECT scope_namespace, object_key, file_id, size_bytes, content_hash, etag,
+                user_metadata, updated_at_unix_seconds
+         FROM shardline_s3_objects
+         WHERE scope_namespace = ?1 AND object_key = ?2 LIMIT 1",
+    )?;
+    Ok(statement
+        .query_row(
+            rusqlite::params![scope_namespace, object_key],
+            s3_object_entry_from_row,
+        )
+        .optional()?)
+}
+
+fn record_s3_object_transition(
+    transaction: &Transaction<'_>,
+    before: Option<&S3ObjectEntry>,
+    after: Option<&S3ObjectEntry>,
+) -> Result<(), LocalIndexStoreError> {
+    let (scope_namespace, object_key) = after
+        .or(before)
+        .map(|entry| (entry.scope_namespace.as_str(), entry.object_key.as_str()))
+        .ok_or_else(|| {
+            LocalIndexStoreError::Io(std::io::Error::other("missing S3 object identity"))
+        })?;
+    let mut evidence =
+        helpers::current_s3_object_evidence(transaction, scope_namespace, object_key, before)?;
+    evidence.record(helpers::s3_object_snapshot(
+        scope_namespace,
+        object_key,
+        after,
+    )?)?;
+    for event in evidence.events() {
+        helpers::persist_s3_object_evidence(transaction, event)?;
+    }
+    Ok(())
+}
+
 fn scan_s3_objects_sql(
-    connection: &Connection,
+    connection: &Transaction<'_>,
     scope_namespace: &str,
     prefix: &str,
     cursor: Option<&str>,
@@ -170,7 +225,7 @@ fn scan_s3_objects_sql(
 }
 
 fn scan_s3_object_exact_sql(
-    connection: &Connection,
+    connection: &Transaction<'_>,
     scope_namespace: &str,
     object_key: &str,
 ) -> Result<Option<S3ObjectEntry>, LocalIndexStoreError> {
@@ -197,7 +252,10 @@ impl S3ObjectIndexStore for LocalIndexStore {
         let entry = entry.clone();
         tokio::task::spawn_blocking(move || {
             let connection = store.open_connection()?;
-            upsert_s3_object_sql(&connection, &entry)
+            let transaction = connection.unchecked_transaction()?;
+            upsert_s3_object_sql(&transaction, &entry)?;
+            transaction.commit()?;
+            Ok(())
         })
         .await
         .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
@@ -233,7 +291,10 @@ impl S3ObjectIndexStore for LocalIndexStore {
         let object_key = object_key.to_owned();
         tokio::task::spawn_blocking(move || {
             let connection = store.open_connection()?;
-            delete_s3_object_sql(&connection, &scope_namespace, &object_key)
+            let transaction = connection.unchecked_transaction()?;
+            let deleted = delete_s3_object_sql(&transaction, &scope_namespace, &object_key)?;
+            transaction.commit()?;
+            Ok(deleted)
         })
         .await
         .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
@@ -252,13 +313,24 @@ impl S3ObjectIndexStore for LocalIndexStore {
         let cursor = cursor.map(ToOwned::to_owned);
         tokio::task::spawn_blocking(move || {
             let connection = store.open_connection()?;
-            scan_s3_objects_sql(
-                &connection,
+            let transaction = connection.unchecked_transaction()?;
+            let values = scan_s3_objects_sql(
+                &transaction,
                 &scope_namespace,
                 &prefix,
                 cursor.as_deref(),
                 limit,
-            )
+            )?;
+            for value in &values {
+                helpers::current_s3_object_evidence(
+                    &transaction,
+                    &value.scope_namespace,
+                    &value.object_key,
+                    Some(value),
+                )?;
+            }
+            transaction.commit()?;
+            Ok(values)
         })
         .await
         .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
@@ -274,7 +346,16 @@ impl S3ObjectIndexStore for LocalIndexStore {
         let object_key = object_key.to_owned();
         tokio::task::spawn_blocking(move || {
             let connection = store.open_connection()?;
-            scan_s3_object_exact_sql(&connection, &scope_namespace, &object_key)
+            let transaction = connection.unchecked_transaction()?;
+            let value = scan_s3_object_exact_sql(&transaction, &scope_namespace, &object_key)?;
+            helpers::current_s3_object_evidence(
+                &transaction,
+                &scope_namespace,
+                &object_key,
+                value.as_ref(),
+            )?;
+            transaction.commit()?;
+            Ok(value)
         })
         .await
         .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
@@ -569,6 +650,31 @@ mod tests {
         assert_eq!(
             scan(&store, "global", "a", None, 100).await,
             vec!["a/b", "a/b/c"]
+        );
+    }
+
+    #[tokio::test]
+    async fn s3_object_read_rejects_tampered_evidence() {
+        let storage = shardline_test_support::TempStorage::new();
+        let store = LocalIndexStore::new(storage.path_buf()).unwrap();
+        let value = entry("global", "model.bin", "file-a", 7, 1);
+        store.upsert_s3_object(&value).await.unwrap();
+
+        let connection = store.open_connection().unwrap();
+        connection
+            .execute(
+                "UPDATE shardline_reliability_events
+                 SET event_json = '{\"tampered\":true}'
+                 WHERE operation_kind = 'S3Object'",
+                [],
+            )
+            .unwrap();
+
+        assert!(
+            store
+                .scan_s3_object_exact("global", "model.bin")
+                .await
+                .is_err()
         );
     }
 

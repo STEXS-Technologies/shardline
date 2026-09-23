@@ -1,7 +1,12 @@
-use sqlx::{Row, postgres::PgRow, query};
+use serde_json::{from_value, to_value};
+use sqlx::{PgConnection, Row, postgres::PgRow, query};
 
 use super::{PostgresIndexStore, PostgresMetadataStoreError, i64_to_u64, u64_to_i64};
 use crate::{S3ObjectEntry, S3ObjectIndexStore};
+use shardline_reliability::{
+    OperationKind, S3ObjectEvidenceLog, S3ObjectLifecycleEvent, S3ObjectSnapshot, S3ObjectState,
+    SnapshotEvidence, verify_s3_object_events,
+};
 
 fn s3_object_entry_from_row(row: &PgRow) -> Result<S3ObjectEntry, PostgresMetadataStoreError> {
     Ok(S3ObjectEntry {
@@ -27,12 +32,138 @@ fn user_metadata_to_json(
     serde_json::to_string(user_metadata).map_err(PostgresMetadataStoreError::from)
 }
 
+fn s3_object_snapshot(
+    scope_namespace: &str,
+    object_key: &str,
+    entry: Option<&S3ObjectEntry>,
+) -> Result<S3ObjectSnapshot, PostgresMetadataStoreError> {
+    Ok(S3ObjectSnapshot::new(
+        scope_namespace,
+        object_key,
+        entry.map(|entry| S3ObjectState {
+            file_id: entry.file_id.clone(),
+            size_bytes: entry.size_bytes,
+            content_hash: entry.content_hash.clone(),
+            etag: entry.etag.clone(),
+            user_metadata: entry.user_metadata.clone(),
+            updated_at_unix_seconds: entry.updated_at_unix_seconds,
+        }),
+    )?)
+}
+
+async fn load_s3_object_evidence(
+    connection: &mut PgConnection,
+    scope_namespace: &str,
+    object_key: &str,
+) -> Result<S3ObjectEvidenceLog, PostgresMetadataStoreError> {
+    let operation = s3_object_snapshot(scope_namespace, object_key, None)?.evidence_operation()?;
+    let rows = query(
+        "SELECT event_json FROM shardline_reliability_events
+         WHERE operation_kind = $1 AND operation_id = $2 ORDER BY sequence",
+    )
+    .bind(OperationKind::S3Object.as_str())
+    .bind(&operation.operation_id)
+    .fetch_all(&mut *connection)
+    .await?;
+    let mut events = Vec::with_capacity(rows.len());
+    for row in rows {
+        events.push(from_value::<S3ObjectLifecycleEvent>(
+            row.try_get("event_json")?,
+        )?);
+    }
+    Ok(S3ObjectEvidenceLog::from_events(events)?)
+}
+
+async fn current_s3_object_evidence(
+    connection: &mut PgConnection,
+    scope_namespace: &str,
+    object_key: &str,
+    entry: Option<&S3ObjectEntry>,
+) -> Result<S3ObjectEvidenceLog, PostgresMetadataStoreError> {
+    let snapshot = s3_object_snapshot(scope_namespace, object_key, entry)?;
+    let evidence = load_s3_object_evidence(connection, scope_namespace, object_key).await?;
+    if evidence.events().is_empty() {
+        return Ok(S3ObjectEvidenceLog::baseline(snapshot)?);
+    }
+    verify_s3_object_events(evidence.events(), &snapshot)?;
+    Ok(evidence)
+}
+
+async fn persist_s3_object_evidence(
+    connection: &mut PgConnection,
+    evidence: &S3ObjectEvidenceLog,
+) -> Result<(), PostgresMetadataStoreError> {
+    for event in evidence.events() {
+        query(
+            "INSERT INTO shardline_reliability_events
+                (operation_kind, operation_id, sequence, event_json, created_at_unix_seconds)
+             VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT (operation_kind, operation_id, sequence) DO NOTHING",
+        )
+        .bind(event.operation.kind.as_str())
+        .bind(&event.operation.operation_id)
+        .bind(u64_to_i64(event.sequence)?)
+        .bind(to_value(event)?)
+        .bind(shardline_protocol::unix_now_seconds_lossy() as i64)
+        .execute(&mut *connection)
+        .await?;
+    }
+    Ok(())
+}
+
+pub(super) async fn current_s3_object_on_connection(
+    connection: &mut PgConnection,
+    scope_namespace: &str,
+    object_key: &str,
+) -> Result<Option<S3ObjectEntry>, PostgresMetadataStoreError> {
+    let row = query(
+        "SELECT scope_namespace, object_key, file_id, size_bytes, content_hash, etag,
+                user_metadata, updated_at_unix_seconds
+         FROM shardline_s3_objects WHERE scope_namespace = $1 AND object_key = $2 LIMIT 1",
+    )
+    .bind(scope_namespace)
+    .bind(object_key)
+    .fetch_optional(&mut *connection)
+    .await?;
+    row.map(|row| s3_object_entry_from_row(&row)).transpose()
+}
+
+pub(super) async fn record_s3_object_transition(
+    connection: &mut PgConnection,
+    before: Option<&S3ObjectEntry>,
+    after: Option<&S3ObjectEntry>,
+) -> Result<(), PostgresMetadataStoreError> {
+    let entry = after.or(before).ok_or_else(|| {
+        PostgresMetadataStoreError::Unsupported("missing S3 object identity".into())
+    })?;
+    let mut evidence = current_s3_object_evidence(
+        connection,
+        &entry.scope_namespace,
+        &entry.object_key,
+        before,
+    )
+    .await?;
+    evidence.record(s3_object_snapshot(
+        &entry.scope_namespace,
+        &entry.object_key,
+        after,
+    )?)?;
+    persist_s3_object_evidence(connection, &evidence).await
+}
+
 #[async_trait::async_trait]
 impl S3ObjectIndexStore for PostgresIndexStore {
     type Error = PostgresMetadataStoreError;
 
     async fn upsert_s3_object(&self, entry: &S3ObjectEntry) -> Result<(), Self::Error> {
         let user_metadata_json = user_metadata_to_json(&entry.user_metadata)?;
+        let mut transaction = self.pool.begin().await?;
+        let before = current_s3_object_on_connection(
+            &mut transaction,
+            &entry.scope_namespace,
+            &entry.object_key,
+        )
+        .await?;
         query(
             "INSERT INTO shardline_s3_objects (
                 scope_namespace, object_key, file_id, size_bytes, content_hash, etag,
@@ -56,8 +187,10 @@ impl S3ObjectIndexStore for PostgresIndexStore {
         .bind(&entry.etag)
         .bind(user_metadata_json)
         .bind(entry.updated_at_unix_seconds)
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await?;
+        record_s3_object_transition(&mut transaction, before.as_ref(), Some(entry)).await?;
+        transaction.commit().await?;
         Ok(())
     }
 
@@ -67,6 +200,7 @@ impl S3ObjectIndexStore for PostgresIndexStore {
         replacement: &S3ObjectEntry,
     ) -> Result<bool, Self::Error> {
         let replacement_metadata = user_metadata_to_json(&replacement.user_metadata)?;
+        let mut transaction = self.pool.begin().await?;
         let result = if let Some(expected) = expected {
             let expected_metadata = user_metadata_to_json(&expected.user_metadata)?;
             query(
@@ -92,7 +226,7 @@ impl S3ObjectIndexStore for PostgresIndexStore {
             .bind(&expected.etag)
             .bind(expected_metadata)
             .bind(expected.updated_at_unix_seconds)
-            .execute(&self.pool)
+            .execute(&mut *transaction)
             .await?
         } else {
             query(
@@ -111,10 +245,15 @@ impl S3ObjectIndexStore for PostgresIndexStore {
             .bind(&replacement.etag)
             .bind(replacement_metadata)
             .bind(replacement.updated_at_unix_seconds)
-            .execute(&self.pool)
+            .execute(&mut *transaction)
             .await?
         };
-        Ok(result.rows_affected() == 1)
+        let changed = result.rows_affected() == 1;
+        if changed {
+            record_s3_object_transition(&mut transaction, expected, Some(replacement)).await?;
+        }
+        transaction.commit().await?;
+        Ok(changed)
     }
 
     async fn delete_s3_object(
@@ -122,14 +261,22 @@ impl S3ObjectIndexStore for PostgresIndexStore {
         scope_namespace: &str,
         object_key: &str,
     ) -> Result<bool, Self::Error> {
+        let mut transaction = self.pool.begin().await?;
+        let before =
+            current_s3_object_on_connection(&mut transaction, scope_namespace, object_key).await?;
         let result = query(
             "DELETE FROM shardline_s3_objects WHERE scope_namespace = $1 AND object_key = $2",
         )
         .bind(scope_namespace)
         .bind(object_key)
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await?;
-        Ok(result.rows_affected() > 0)
+        let deleted = result.rows_affected() > 0;
+        if deleted {
+            record_s3_object_transition(&mut transaction, before.as_ref(), None).await?;
+        }
+        transaction.commit().await?;
+        Ok(deleted)
     }
 
     async fn scan_s3_objects(
@@ -163,8 +310,23 @@ impl S3ObjectIndexStore for PostgresIndexStore {
             q = q.bind(cursor);
         }
         q = q.bind(limit_i64);
-        let rows = q.fetch_all(&self.pool).await?;
-        rows.iter().map(s3_object_entry_from_row).collect()
+        let mut transaction = self.pool.begin().await?;
+        let rows = q.fetch_all(&mut *transaction).await?;
+        let values = rows
+            .iter()
+            .map(s3_object_entry_from_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        for value in &values {
+            current_s3_object_evidence(
+                &mut transaction,
+                &value.scope_namespace,
+                &value.object_key,
+                Some(value),
+            )
+            .await?;
+        }
+        transaction.commit().await?;
+        Ok(values)
     }
 
     async fn scan_s3_object_exact(
@@ -172,6 +334,7 @@ impl S3ObjectIndexStore for PostgresIndexStore {
         scope_namespace: &str,
         object_key: &str,
     ) -> Result<Option<S3ObjectEntry>, Self::Error> {
+        let mut transaction = self.pool.begin().await?;
         let rows = query(
             "SELECT scope_namespace, object_key, file_id, size_bytes, content_hash, etag,
                     user_metadata, updated_at_unix_seconds
@@ -181,13 +344,22 @@ impl S3ObjectIndexStore for PostgresIndexStore {
         )
         .bind(scope_namespace)
         .bind(object_key)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *transaction)
         .await?;
-        Ok(rows
+        let value = rows
             .iter()
             .map(s3_object_entry_from_row)
             .collect::<Result<Vec<_>, _>>()?
-            .pop())
+            .pop();
+        current_s3_object_evidence(
+            &mut transaction,
+            scope_namespace,
+            object_key,
+            value.as_ref(),
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(value)
     }
 }
 
@@ -337,6 +509,46 @@ mod tests {
         );
 
         cleanup(&pool, &scope).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pg_s3_object_read_rejects_tampered_evidence() {
+        let Some(pool) = connect_postgres().await else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let scope = format!("s3-tamper-{}", std::process::id());
+        let store = PostgresIndexStore::new(pool.clone());
+        let value = entry(&scope, "model.bin", "file-a");
+        S3ObjectIndexStore::upsert_s3_object(&store, &value)
+            .await
+            .expect("upsert");
+
+        query(
+            "UPDATE shardline_reliability_events
+             SET event_json = '{\"tampered\":true}'::jsonb
+             WHERE operation_kind = $1 AND operation_id LIKE $2",
+        )
+        .bind(OperationKind::S3Object.as_str())
+        .bind(format!("{}:%", scope.len()))
+        .execute(&pool)
+        .await
+        .expect("tamper evidence");
+
+        assert!(
+            S3ObjectIndexStore::scan_s3_object_exact(&store, &scope, "model.bin")
+                .await
+                .is_err()
+        );
+        cleanup(&pool, &scope).await;
+        query(
+            "DELETE FROM shardline_reliability_events WHERE operation_kind = $1 AND operation_id LIKE $2",
+        )
+        .bind(OperationKind::S3Object.as_str())
+        .bind(format!("{}:%", scope.len()))
+        .execute(&pool)
+        .await
+        .expect("cleanup s3 object evidence");
     }
 
     #[tokio::test(flavor = "multi_thread")]
