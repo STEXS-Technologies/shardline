@@ -1250,9 +1250,11 @@ impl UploadIntentStore for super::PostgresIndexStore {
         if !current.state().can_transition_to(new_state) {
             return Ok(false);
         }
+        let events = self.reliability_events(intent_id).await?;
+        let (tenant, repository) = upload_lifecycle_identity(&events);
         let event = upload_lifecycle_event(
-            "shardline",
-            "default",
+            tenant,
+            repository,
             current.intent_id(),
             current.object_key(),
             current.object_hash(),
@@ -1825,7 +1827,10 @@ mod tests {
     };
 
     use shardline_protocol::{ChunkRange, HashParseError, RepositoryProvider, ShardlineHash};
-    use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode};
+    use sqlx::{
+        Row,
+        postgres::{PgConnectOptions, PgPoolOptions, PgSslMode},
+    };
 
     use super::{PostgresFileReconstructionRecord, PostgresReconstructionTermRecord};
     use crate::{
@@ -2811,6 +2816,52 @@ mod tests {
             .expect("intent_by_id");
         assert!(loaded.is_some());
         assert_eq!(loaded.unwrap().state(), UploadIntentState::Visible);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pg_scoped_intent_legacy_transition_preserves_evidence_identity() {
+        let Some(pool) = connect_postgres().await else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let intent_id = "pg-scoped-legacy-transition";
+        sqlx::query("DELETE FROM shardline_upload_intents WHERE intent_id = $1")
+            .bind(intent_id)
+            .execute(&pool)
+            .await
+            .expect("clean leftover intent");
+        let store = make_pg_store(pool.clone());
+        let intent = UploadIntent::new(
+            intent_id.into(),
+            "objects/pg-scoped".into(),
+            "ab".repeat(32),
+            7,
+        );
+        store
+            .create_intent_scoped(&intent, "tenant-pg", "repo-pg")
+            .await
+            .expect("create scoped intent");
+        assert!(
+            store
+                .transition_intent(intent_id, UploadIntentState::Storing)
+                .await
+                .expect("transition scoped intent")
+        );
+        let rows = sqlx::query(
+            "SELECT event_json FROM shardline_reliability_events
+             WHERE operation_kind = 'Upload' AND operation_id = $1 ORDER BY sequence",
+        )
+        .bind(intent_id)
+        .fetch_all(&pool)
+        .await
+        .expect("load scoped events");
+        let events = rows
+            .into_iter()
+            .map(|row| serde_json::from_value(row.try_get("event_json").unwrap()).unwrap())
+            .collect::<Vec<shardline_reliability::LifecycleEvent>>();
+        assert!(events.iter().all(|event| {
+            event.operation.tenant == "tenant-pg" && event.operation.repository == "repo-pg"
+        }));
     }
 
     #[tokio::test(flavor = "multi_thread")]

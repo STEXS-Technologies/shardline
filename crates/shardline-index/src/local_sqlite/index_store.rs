@@ -1128,9 +1128,11 @@ impl UploadIntentStore for super::LocalIndexStore {
         if !current.state().can_transition_to(new_state) {
             return Ok(false);
         }
+        let events = self.reliability_events(intent_id).await?;
+        let (tenant, repository) = upload_lifecycle_identity(&events);
         let event = upload_lifecycle_event(
-            "shardline",
-            "default",
+            tenant,
+            repository,
             current.intent_id(),
             current.object_key(),
             current.object_hash(),
@@ -2347,22 +2349,8 @@ mod tests {
         runtime
             .block_on(store.create_intent_scoped(&intent, "tenant-a", "repo-a"))
             .unwrap();
-        let event = upload_lifecycle_event(
-            "tenant-a",
-            "repo-a",
-            intent.intent_id(),
-            intent.object_key(),
-            intent.object_hash(),
-            shardline_reliability::UploadLifecycleState::Created,
-            shardline_reliability::UploadLifecycleState::Storing,
-        )
-        .unwrap();
         runtime
-            .block_on(store.transition_intent_with_event(
-                intent.intent_id(),
-                UploadIntentState::Storing,
-                &event,
-            ))
+            .block_on(store.transition_intent(intent.intent_id(), UploadIntentState::Storing))
             .unwrap();
         let events = runtime
             .block_on(store.reliability_events(intent.intent_id()))

@@ -712,9 +712,11 @@ impl UploadIntentStore for MemoryIndexStore {
         if !intent.state().can_transition_to(new_state) {
             return Ok(false);
         }
+        let events = self.reliability_events(intent_id).await?;
+        let (tenant, repository) = upload_lifecycle_identity(&events);
         let event = upload_lifecycle_event(
-            "shardline",
-            "default",
+            tenant,
+            repository,
             intent.intent_id(),
             intent.object_key(),
             intent.object_hash(),
@@ -1919,9 +1921,35 @@ mod tests {
         LifecycleStore, LocalIndexStore, MemoryIndexStoreError, MemoryRecordStoreError,
         ProviderRepositoryState, QuarantineCandidate, ReconstructionStore, ReconstructionTerm,
         RecordMutation, RecordTraversal, RepositoryRecordScope, RetentionHold, StoredObjectId,
-        WebhookDelivery, XorbId,
+        UploadIntent, UploadIntentState, UploadIntentStore, WebhookDelivery, XorbId,
     };
     use crate::{memory::MemoryProviderRepositoryStateKey, provider_evidence::snapshot_from_state};
+
+    #[tokio::test]
+    async fn scoped_intent_legacy_transition_preserves_evidence_identity() {
+        let store = MemoryIndexStore::new();
+        let intent = UploadIntent::new(
+            "memory-scoped-transition".to_owned(),
+            "objects/memory-scoped".to_owned(),
+            "a".repeat(64),
+            7,
+        );
+        store
+            .create_intent_scoped(&intent, "tenant-memory", "repo-memory")
+            .await
+            .unwrap();
+
+        assert!(
+            store
+                .transition_intent(intent.intent_id(), UploadIntentState::Storing)
+                .await
+                .unwrap()
+        );
+        let events = store.reliability_events(intent.intent_id()).await.unwrap();
+        assert!(events.iter().all(|event| {
+            event.operation.tenant == "tenant-memory" && event.operation.repository == "repo-memory"
+        }));
+    }
 
     #[test]
     fn memory_index_store_satisfies_index_store_lifecycle_contract() {
