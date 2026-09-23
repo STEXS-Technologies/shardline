@@ -1,21 +1,22 @@
 use serde_json::{from_value, to_value};
 use shardline_index::{ResumableSessionState, UploadIntentState};
 use shardline_protocol::SecretString;
+use shardline_protocol::unix_now_seconds_lossy;
 use shardline_reliability::{
-    LifecycleEvent, OciObjectEvidenceLog, OciObjectIdentity, OciObjectLifecycleEvent,
-    OciObjectLifecycleState, OciObjectSnapshot, OperationKind, ProviderEvidenceLog,
-    ProviderLifecycleEvent, ProviderLifecycleObservations, ProviderLifecycleSnapshot,
-    ProviderRepositoryIdentity, QuarantineEvidenceLog, QuarantineLifecycleEvent,
-    QuarantineLifecycleState, QuarantineObjectIdentity, QuarantineSnapshot, RetentionEvidenceLog,
-    RetentionHoldLifecycleEvent, RetentionHoldLifecycleState, RetentionHoldSnapshot,
-    RetentionObjectIdentity, SnapshotEvidence, StateTransitionEvent, UploadLifecycleState,
-    WebhookDeliveryEvidenceLog, WebhookDeliveryIdentity, WebhookDeliveryLifecycleEvent,
-    WebhookDeliveryLifecycleState, WebhookDeliverySnapshot, baseline_resumable_session_events,
-    baseline_upload_lifecycle_events, upload_lifecycle_identity,
-    verify_oci_object_lifecycle_events, verify_persisted_event, verify_provider_lifecycle_events,
-    verify_quarantine_lifecycle_events, verify_resumable_session_events,
-    verify_retention_hold_lifecycle_events, verify_upload_lifecycle_events,
-    verify_webhook_delivery_events,
+    EvidenceEventMetadata, LifecycleEvent, OciObjectEvidenceLog, OciObjectIdentity,
+    OciObjectLifecycleEvent, OciObjectLifecycleState, OciObjectSnapshot, OperationKind,
+    ProviderEvidenceLog, ProviderLifecycleEvent, ProviderLifecycleObservations,
+    ProviderLifecycleSnapshot, ProviderRepositoryIdentity, QuarantineEvidenceLog,
+    QuarantineLifecycleEvent, QuarantineLifecycleState, QuarantineObjectIdentity,
+    QuarantineSnapshot, RetentionEvidenceLog, RetentionHoldLifecycleEvent,
+    RetentionHoldLifecycleState, RetentionHoldSnapshot, RetentionObjectIdentity, SnapshotEvidence,
+    StateTransitionEvent, UploadLifecycleState, WebhookDeliveryEvidenceLog,
+    WebhookDeliveryIdentity, WebhookDeliveryLifecycleEvent, WebhookDeliveryLifecycleState,
+    WebhookDeliverySnapshot, baseline_resumable_session_events, baseline_upload_lifecycle_events,
+    upload_lifecycle_identity, verify_oci_object_lifecycle_events, verify_persisted_event,
+    verify_provider_lifecycle_events, verify_quarantine_lifecycle_events,
+    verify_resumable_session_events, verify_retention_hold_lifecycle_events,
+    verify_upload_lifecycle_events, verify_webhook_delivery_events,
 };
 use sqlx::{
     Error as SqlxError, PgPool, Postgres, Row, Transaction, postgres::PgPoolOptions, query,
@@ -516,6 +517,32 @@ async fn verify_reliability_events(pool: &PgPool) -> Result<(), DatabaseMigratio
     reconcile_reliability_events(pool, false).await
 }
 
+async fn persist_reliability_event<T: EvidenceEventMetadata>(
+    transaction: &mut Transaction<'_, Postgres>,
+    event: &T,
+) -> Result<(), DatabaseMigrationError> {
+    event
+        .verify_integrity()
+        .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?;
+    query(
+        "INSERT INTO shardline_reliability_events
+            (operation_kind, operation_id, sequence, event_json, created_at_unix_seconds)
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (operation_kind, operation_id, sequence) DO NOTHING",
+    )
+    .bind(event.operation_identity().kind.as_str())
+    .bind(&event.operation_identity().operation_id)
+    .bind(
+        i64::try_from(event.sequence_number())
+            .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?,
+    )
+    .bind(to_value(event).map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?)
+    .bind(unix_now_seconds_lossy() as i64)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
 async fn reconcile_reliability_events(
     pool: &PgPool,
     repair_missing: bool,
@@ -574,24 +601,7 @@ async fn reconcile_reliability_events(
         .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?;
         if repair_missing {
             for event in events {
-                let operation_kind = event.operation.kind.as_str();
-                let operation_id = event.operation.operation_id.clone();
-                let sequence = i64::try_from(event.sequence)
-                    .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?;
-                let event_json = to_value(&event)
-                    .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?;
-                query(
-                    "INSERT INTO shardline_reliability_events
-                    (operation_kind, operation_id, sequence, event_json)
-                 VALUES ($1, $2, $3, $4)
-                 ON CONFLICT (operation_kind, operation_id, sequence) DO NOTHING",
-                )
-                .bind(operation_kind)
-                .bind(operation_id)
-                .bind(sequence)
-                .bind(event_json)
-                .execute(&mut *transaction)
-                .await?;
+                persist_reliability_event(&mut transaction, &event).await?;
             }
         }
     }
@@ -623,24 +633,7 @@ async fn reconcile_reliability_events(
         .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?;
         if repair_missing {
             for event in events {
-                let operation_kind = event.operation.kind.as_str();
-                let operation_id = event.operation.operation_id.clone();
-                let sequence = i64::try_from(event.sequence)
-                    .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?;
-                let event_json = to_value(&event)
-                    .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?;
-                query(
-                    "INSERT INTO shardline_reliability_events
-                    (operation_kind, operation_id, sequence, event_json)
-                 VALUES ($1, $2, $3, $4)
-                 ON CONFLICT (operation_kind, operation_id, sequence) DO NOTHING",
-                )
-                .bind(operation_kind)
-                .bind(operation_id)
-                .bind(sequence)
-                .bind(event_json)
-                .execute(&mut *transaction)
-                .await?;
+                persist_reliability_event(&mut transaction, &event).await?;
             }
         }
     }
@@ -671,24 +664,7 @@ async fn reconcile_reliability_events(
             .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?;
         if repair_missing {
             for event in events.events() {
-                query(
-                    "INSERT INTO shardline_reliability_events
-                    (operation_kind, operation_id, sequence, event_json)
-                 VALUES ($1, $2, $3, $4)
-                 ON CONFLICT (operation_kind, operation_id, sequence) DO NOTHING",
-                )
-                .bind(event.operation.kind.as_str())
-                .bind(&event.operation.operation_id)
-                .bind(
-                    i64::try_from(event.sequence)
-                        .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?,
-                )
-                .bind(
-                    to_value(event)
-                        .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?,
-                )
-                .execute(&mut *transaction)
-                .await?;
+                persist_reliability_event(&mut transaction, event).await?;
             }
         }
     }
@@ -723,24 +699,7 @@ async fn reconcile_reliability_events(
             .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?;
         if repair_missing {
             for event in events.events() {
-                query(
-                    "INSERT INTO shardline_reliability_events
-                    (operation_kind, operation_id, sequence, event_json)
-                 VALUES ($1, $2, $3, $4)
-                 ON CONFLICT (operation_kind, operation_id, sequence) DO NOTHING",
-                )
-                .bind(event.operation.kind.as_str())
-                .bind(&event.operation.operation_id)
-                .bind(
-                    i64::try_from(event.sequence)
-                        .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?,
-                )
-                .bind(
-                    to_value(event)
-                        .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?,
-                )
-                .execute(&mut *transaction)
-                .await?;
+                persist_reliability_event(&mut transaction, event).await?;
             }
         }
     }
@@ -779,24 +738,7 @@ async fn reconcile_reliability_events(
             .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?;
         if repair_missing {
             for event in events.events() {
-                query(
-                    "INSERT INTO shardline_reliability_events
-                    (operation_kind, operation_id, sequence, event_json)
-                 VALUES ($1, $2, $3, $4)
-                 ON CONFLICT (operation_kind, operation_id, sequence) DO NOTHING",
-                )
-                .bind(event.operation.kind.as_str())
-                .bind(&event.operation.operation_id)
-                .bind(
-                    i64::try_from(event.sequence)
-                        .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?,
-                )
-                .bind(
-                    to_value(event)
-                        .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?,
-                )
-                .execute(&mut *transaction)
-                .await?;
+                persist_reliability_event(&mut transaction, event).await?;
             }
         }
     }
@@ -834,24 +776,7 @@ async fn reconcile_reliability_events(
             .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?;
         if repair_missing {
             for event in events.events() {
-                query(
-                    "INSERT INTO shardline_reliability_events
-                    (operation_kind, operation_id, sequence, event_json)
-                 VALUES ($1, $2, $3, $4)
-                 ON CONFLICT (operation_kind, operation_id, sequence) DO NOTHING",
-                )
-                .bind(event.operation.kind.as_str())
-                .bind(&event.operation.operation_id)
-                .bind(
-                    i64::try_from(event.sequence)
-                        .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?,
-                )
-                .bind(
-                    to_value(event)
-                        .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?,
-                )
-                .execute(&mut *transaction)
-                .await?;
+                persist_reliability_event(&mut transaction, event).await?;
             }
         }
     }
@@ -910,24 +835,7 @@ async fn reconcile_reliability_events(
         };
         if repair_missing && !legacy_exists {
             for event in events.events() {
-                query(
-                    "INSERT INTO shardline_reliability_events
-                    (operation_kind, operation_id, sequence, event_json)
-                 VALUES ($1, $2, $3, $4)
-                 ON CONFLICT (operation_kind, operation_id, sequence) DO NOTHING",
-                )
-                .bind(event.operation.kind.as_str())
-                .bind(&event.operation.operation_id)
-                .bind(
-                    i64::try_from(event.sequence)
-                        .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?,
-                )
-                .bind(
-                    to_value(event)
-                        .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?,
-                )
-                .execute(&mut *transaction)
-                .await?;
+                persist_reliability_event(&mut transaction, event).await?;
             }
         }
     }
@@ -1277,24 +1185,7 @@ async fn reconcile_reliability_events(
             let baseline = ProviderEvidenceLog::baseline(snapshot.clone())
                 .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?;
             for event in baseline.events() {
-                query(
-                    "INSERT INTO shardline_reliability_events
-                        (operation_kind, operation_id, sequence, event_json)
-                     VALUES ($1, $2, $3, $4)
-                     ON CONFLICT (operation_kind, operation_id, sequence) DO NOTHING",
-                )
-                .bind(event.operation.kind.as_str())
-                .bind(&event.operation.operation_id)
-                .bind(
-                    i64::try_from(event.sequence)
-                        .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?,
-                )
-                .bind(
-                    to_value(event)
-                        .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?,
-                )
-                .execute(&mut *transaction)
-                .await?;
+                persist_reliability_event(&mut transaction, event).await?;
             }
             verify_provider_lifecycle_events(baseline.events(), &snapshot).map_err(|error| {
                 DatabaseMigrationError::Backfill(format!(

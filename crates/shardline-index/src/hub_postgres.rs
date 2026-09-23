@@ -1,5 +1,5 @@
 use futures_util::TryStreamExt;
-use serde_json::{from_value, to_value};
+use serde_json::from_value;
 use sqlx::Row;
 
 use shardline_protocol::SecretString;
@@ -69,22 +69,7 @@ async fn persist_hub_ref_evidence(
     evidence: &HubRefEvidenceLog,
 ) -> Result<(), PostgresMetadataStoreError> {
     for event in evidence.events() {
-        sqlx::query(
-            "INSERT INTO shardline_reliability_events
-                (operation_kind, operation_id, sequence, event_json)
-             VALUES ($1, $2, $3, $4)
-             ON CONFLICT (operation_kind, operation_id, sequence) DO NOTHING",
-        )
-        .bind(event.operation.kind.as_str())
-        .bind(&event.operation.operation_id)
-        .bind(
-            i64::try_from(event.sequence).map_err(|error| {
-                PostgresMetadataStoreError::IntegerOutOfRange(error.to_string())
-            })?,
-        )
-        .bind(to_value(event)?)
-        .execute(&mut **transaction)
-        .await?;
+        crate::postgres::insert_reliability_event(&mut **transaction, event).await?;
     }
     Ok(())
 }
@@ -1001,6 +986,17 @@ mod tests {
     }
 
     async fn cleanup_repo(store: &PostgresIndexStore, repo_id: &str) {
+        if let Err(e) = sqlx::query(
+            "DELETE FROM shardline_reliability_events
+             WHERE operation_kind = 'MetadataCommit'
+               AND event_json->'operation'->>'repository' = $1",
+        )
+        .bind(repo_id)
+        .execute(store.pool())
+        .await
+        {
+            eprintln!("cleanup: failed to delete repository evidence for {repo_id}: {e}");
+        }
         if let Err(e) = sqlx::query("DELETE FROM shardline_hub_file_entries WHERE commit_sha IN (SELECT sha FROM shardline_hub_revisions WHERE repo_id = $1)")
             .bind(repo_id)
             .execute(store.pool())

@@ -1607,8 +1607,9 @@ where
         PostgresMetadataStoreError::IntegerOutOfRange("reliability sequence".into())
     })?;
     let row = sqlx::query(
-        "INSERT INTO shardline_reliability_events (operation_kind, operation_id, sequence, event_json)
-         VALUES ($1, $2, $3, $4)
+        "INSERT INTO shardline_reliability_events
+            (operation_kind, operation_id, sequence, event_json, created_at_unix_seconds)
+         VALUES ($1, $2, $3, $4, $5)
          ON CONFLICT (operation_kind, operation_id, sequence) DO UPDATE
          SET event_json = shardline_reliability_events.event_json
          WHERE shardline_reliability_events.event_json = EXCLUDED.event_json
@@ -1618,6 +1619,7 @@ where
     .bind(&operation.operation_id)
     .bind(sequence)
     .bind(event_json)
+    .bind(shardline_protocol::unix_now_seconds_lossy() as i64)
     .fetch_optional(executor)
     .await?;
     if row.is_none() {
