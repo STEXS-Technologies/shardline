@@ -13,6 +13,8 @@ pub enum ReliabilityError {
     },
     #[error("could not canonicalize reliability identity: {0}")]
     Serialize(#[from] serde_json::Error),
+    #[error("could not canonicalize reliability value: {0}")]
+    Canonicalize(String),
     #[error("state digest does not match the lifecycle boundary")]
     StateDigestMismatch,
     #[error("process digest does not match the lifecycle boundary")]

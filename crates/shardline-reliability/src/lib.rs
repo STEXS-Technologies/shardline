@@ -20,6 +20,7 @@ mod states;
 #[cfg(test)]
 mod tests;
 
+pub use digest::DigestEncoding;
 pub use error::ReliabilityError;
 pub use event::{
     LifecycleEvent, StateTransitionEvent, baseline_resumable_session_events,

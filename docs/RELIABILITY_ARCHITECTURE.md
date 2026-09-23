@@ -12,6 +12,15 @@ Shardline has one reliability model for durable server-side state machines:
 5. Recovery, repair, and garbage collection read and verify that evidence
    before acting.
 
+New evidence uses the StateChronicle canonical BCS encoding for state and
+operation values, then uses Penelope's SHA-256 content digest for the process
+boundary. Existing journal rows remain readable and are explicitly tagged as
+legacy JSON evidence during deserialization; they are verified under their
+original encoding and can be followed by canonical events without changing
+the public state or retry behavior. Replaying an existing Postgres intent
+never replaces valid legacy evidence, while a missing baseline for a newly
+materialized `created` intent is repaired atomically.
+
 Reliability journal rows are namespace-keyed by `(operation_kind,
 operation_id, sequence)`. The operation kind is part of the durable key, not
 just an informational field in the JSON payload, so an upload intent and a

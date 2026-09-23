@@ -922,8 +922,10 @@ impl UploadIntentStore for super::PostgresIndexStore {
             .bind(intent.intent_id())
             .execute(&mut *transaction)
             .await?;
-        let existing = query_scalar::<_, i32>(
-            "SELECT 1 FROM shardline_upload_intents WHERE intent_id = $1 FOR UPDATE",
+        let existing = query(
+            "SELECT intent_id, object_key, object_hash, object_length, state,
+                    created_at, updated_at
+             FROM shardline_upload_intents WHERE intent_id = $1 FOR UPDATE",
         )
         .bind(intent.intent_id())
         .fetch_optional(&mut *transaction)
@@ -949,7 +951,59 @@ impl UploadIntentStore for super::PostgresIndexStore {
             transaction.rollback().await?;
             return Err(crate::UploadIntentConflictError::new(intent.intent_id()).into());
         }
-        if existing.is_none() {
+        if let Some(existing) = existing {
+            let state_text: String = existing.try_get("state")?;
+            let state = UploadIntentState::parse(&state_text).ok_or_else(|| {
+                PostgresMetadataStoreError::InvalidUploadIntentState(state_text.clone())
+            })?;
+            let durable_intent = UploadIntent::from_parts(
+                existing.try_get("intent_id")?,
+                existing.try_get("object_key")?,
+                existing.try_get("object_hash")?,
+                i64_to_u64(existing.try_get("object_length")?)?,
+                state,
+                std::time::Duration::from_secs(
+                    existing
+                        .try_get::<chrono::DateTime<chrono::Utc>, _>("created_at")?
+                        .timestamp() as u64,
+                ),
+                std::time::Duration::from_secs(
+                    existing
+                        .try_get::<chrono::DateTime<chrono::Utc>, _>("updated_at")?
+                        .timestamp() as u64,
+                ),
+            );
+            let event_rows = query(
+                "SELECT event_json FROM shardline_reliability_events
+                 WHERE operation_kind = 'Upload' AND operation_id = $1
+                 ORDER BY sequence",
+            )
+            .bind(intent.intent_id())
+            .fetch_all(&mut *transaction)
+            .await?;
+            if event_rows.is_empty() {
+                if durable_intent.state() != UploadIntentState::Created {
+                    return Err(PostgresMetadataStoreError::Reliability(
+                        shardline_reliability::ReliabilityError::StateMismatch,
+                    ));
+                }
+                insert_reliability_event(transaction.as_mut(), &created_event).await?;
+            } else {
+                let events = event_rows
+                    .into_iter()
+                    .map(|row| Ok(serde_json::from_value(row.try_get("event_json")?)?))
+                    .collect::<Result<Vec<LifecycleEvent>, PostgresMetadataStoreError>>()?;
+                verify_upload_lifecycle_events(
+                    &events,
+                    "shardline",
+                    "default",
+                    durable_intent.intent_id(),
+                    durable_intent.object_key(),
+                    durable_intent.object_hash(),
+                    durable_intent.state(),
+                )?;
+            }
+        } else {
             // A previously deleted materialized row may leave legacy evidence
             // behind. A newly created intent with the same identity starts a
             // new lifecycle, so discard only that orphaned Upload evidence
@@ -961,8 +1015,8 @@ impl UploadIntentStore for super::PostgresIndexStore {
             .bind(intent.intent_id())
             .execute(&mut *transaction)
             .await?;
+            insert_reliability_event(transaction.as_mut(), &created_event).await?;
         }
-        insert_reliability_event(transaction.as_mut(), &created_event).await?;
         transaction.commit().await?;
         Ok(())
     }

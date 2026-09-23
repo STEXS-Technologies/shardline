@@ -75,13 +75,14 @@ impl OperationIdentity {
 
     pub fn content_digest(&self) -> Result<ContentDigest, ReliabilityError> {
         self.validate()?;
-        let bytes = serde_json::to_vec(self).map_err(ReliabilityError::Serialize)?;
-        Ok(statechronicle::core::digest::hash_bytes(&bytes))
+        statechronicle::core::canonicalize::canonicalize_and_digest(self)
+            .map_err(|error| ReliabilityError::Canonicalize(error.to_string()))
     }
 
     pub fn penelope_digest(&self) -> Result<PenelopeDigest, ReliabilityError> {
         self.validate()?;
-        let bytes = serde_json::to_vec(self).map_err(ReliabilityError::Serialize)?;
+        let bytes = statechronicle::core::canonicalize::canonicalize(self)
+            .map_err(|error| ReliabilityError::Canonicalize(error.to_string()))?;
         Ok(PenelopeDigest::sha256(&bytes))
     }
 

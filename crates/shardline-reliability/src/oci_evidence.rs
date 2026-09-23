@@ -1,7 +1,10 @@
 use penelope::ContentDigest as PenelopeDigest;
 use serde::{Deserialize, Serialize};
 
-use crate::digest::{canonical_snapshot_digest, canonical_transition_process_digest};
+use crate::digest::{
+    DigestEncoding, canonical_snapshot_digest, canonical_transition_process_digest, process_digest,
+    state_digest,
+};
 use crate::{OperationIdentity, OperationKind, ReliabilityError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -128,6 +131,10 @@ pub struct OciObjectLifecycleEvent {
     pub sequence: u64,
     pub before: OciObjectSnapshot,
     pub after: OciObjectSnapshot,
+    /// Encoding used for the authenticated digests. Missing on legacy JSON
+    /// rows, which deserialize as [`DigestEncoding::LegacyJson`].
+    #[serde(default)]
+    pub digest_encoding: DigestEncoding,
     pub state_digest: statechronicle::ContentDigest,
     pub process_digest: PenelopeDigest,
 }
@@ -148,6 +155,7 @@ impl OciObjectLifecycleEvent {
             });
         }
         let operation = after.operation()?;
+        let digest_encoding = DigestEncoding::CanonicalBcsV1;
         let state_digest = canonical_snapshot_digest(&after)?;
         let process_digest =
             canonical_transition_process_digest(&operation, sequence, &before, &after)?;
@@ -156,6 +164,7 @@ impl OciObjectLifecycleEvent {
             sequence,
             before,
             after,
+            digest_encoding,
             state_digest,
             process_digest,
         })
@@ -165,15 +174,16 @@ impl OciObjectLifecycleEvent {
         if self.operation != self.after.operation()? {
             return Err(ReliabilityError::OperationMismatch);
         }
-        if self.state_digest != canonical_snapshot_digest(&self.after)? {
+        if self.state_digest != state_digest(&self.after, self.digest_encoding)? {
             return Err(ReliabilityError::StateDigestMismatch);
         }
         if self.process_digest
-            != canonical_transition_process_digest(
+            != process_digest(
                 &self.operation,
                 self.sequence,
                 &self.before,
                 &self.after,
+                self.digest_encoding,
             )?
         {
             return Err(ReliabilityError::ProcessDigestMismatch);

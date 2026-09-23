@@ -42,6 +42,53 @@ fn lifecycle_event_correlates_statechronicle_and_penelope_digests() {
 }
 
 #[test]
+fn lifecycle_evidence_reads_legacy_json_digests_after_canonical_migration() {
+    let operation = OperationIdentity::new("tenant", "repo", "legacy-op", OperationKind::Upload)
+        .unwrap()
+        .with_object_key("object")
+        .with_content_sha256("a".repeat(64));
+    let before = UploadLifecycleState::Created;
+    let after = UploadLifecycleState::Storing;
+    let state_digest = statechronicle::core::digest::hash_bytes(after.as_str().as_bytes());
+    let process_bytes =
+        serde_json::to_vec(&(&operation, 1_u64, before.as_str(), after.as_str())).unwrap();
+    let process_digest = penelope::ContentDigest::sha256(&process_bytes);
+    let legacy = serde_json::json!({
+        "operation": operation,
+        "sequence": 1,
+        "before": before,
+        "after": after,
+        "state_digest": state_digest,
+        "process_digest": process_digest,
+    });
+    let decoded: LifecycleEvent = serde_json::from_value(legacy).unwrap();
+
+    assert_eq!(decoded.digest_encoding, DigestEncoding::LegacyJson);
+    decoded.verify_integrity().unwrap();
+    verify_lifecycle_chain(&[decoded]).unwrap();
+}
+
+#[test]
+fn new_evidence_uses_canonical_bcs_digests() {
+    let event = upload_lifecycle_event(
+        "tenant",
+        "repo",
+        "canonical-op",
+        "object",
+        "a".repeat(64),
+        UploadLifecycleState::Created,
+        UploadLifecycleState::Storing,
+    )
+    .unwrap();
+
+    assert_eq!(event.digest_encoding, DigestEncoding::CanonicalBcsV1);
+    let legacy_state =
+        statechronicle::core::digest::hash_bytes(UploadLifecycleState::Storing.as_str().as_bytes());
+    assert_ne!(event.state_digest, legacy_state);
+    event.verify_integrity().unwrap();
+}
+
+#[test]
 fn generic_state_transition_chain_is_tamper_evident() {
     let operation = OperationIdentity::new(
         "tenant",

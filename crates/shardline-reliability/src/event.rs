@@ -1,7 +1,10 @@
 use penelope::ContentDigest as PenelopeDigest;
 use serde::{Deserialize, Serialize};
 
-use crate::digest::{canonical_process_digest, canonical_state_digest};
+use crate::digest::{
+    DigestEncoding, canonical_process_digest, canonical_state_digest, legacy_state_label_digest,
+    process_digest,
+};
 use crate::{
     OperationIdentity, OperationKind, ReliabilityError, ResumableLifecycleState,
     UploadLifecycleState,
@@ -13,6 +16,10 @@ pub struct StateTransitionEvent {
     pub sequence: u64,
     pub before: ResumableLifecycleState,
     pub after: ResumableLifecycleState,
+    /// Encoding used for the authenticated digests. Missing on legacy JSON
+    /// rows, which deserialize as [`DigestEncoding::LegacyJson`].
+    #[serde(default)]
+    pub digest_encoding: DigestEncoding,
     pub state_digest: statechronicle::ContentDigest,
     pub process_digest: PenelopeDigest,
 }
@@ -30,32 +37,41 @@ impl StateTransitionEvent {
                 after: after.as_str(),
             });
         }
-        let state_digest = canonical_state_digest(after.as_str());
-        let process_digest =
-            canonical_process_digest(&operation, sequence, before.as_str(), after.as_str())?;
+        let digest_encoding = DigestEncoding::CanonicalBcsV1;
+        let state_digest = canonical_state_digest(&after)?;
+        let process_digest = canonical_process_digest(&operation, sequence, &before, &after)?;
         Ok(Self {
             operation,
             sequence,
             before,
             after,
+            digest_encoding,
             state_digest,
             process_digest,
         })
     }
 
     pub fn verify_integrity(&self) -> Result<(), ReliabilityError> {
-        let expected_state = canonical_state_digest(self.after.as_str());
+        let expected_state = match self.digest_encoding {
+            DigestEncoding::LegacyJson => legacy_state_label_digest(self.after.as_str()),
+            DigestEncoding::CanonicalBcsV1 => canonical_state_digest(&self.after)?,
+        };
         if self.state_digest != expected_state {
             return Err(ReliabilityError::StateDigestMismatch);
         }
-        if self.process_digest
-            != canonical_process_digest(
+        let expected_process = match self.digest_encoding {
+            DigestEncoding::LegacyJson => process_digest(
                 &self.operation,
                 self.sequence,
-                self.before.as_str(),
-                self.after.as_str(),
-            )?
-        {
+                &self.before.as_str(),
+                &self.after.as_str(),
+                DigestEncoding::LegacyJson,
+            )?,
+            DigestEncoding::CanonicalBcsV1 => {
+                canonical_process_digest(&self.operation, self.sequence, &self.before, &self.after)?
+            }
+        };
+        if self.process_digest != expected_process {
             return Err(ReliabilityError::ProcessDigestMismatch);
         }
         Ok(())
@@ -108,6 +124,10 @@ pub struct LifecycleEvent {
     pub sequence: u64,
     pub before: UploadLifecycleState,
     pub after: UploadLifecycleState,
+    /// Encoding used for the authenticated digests. Missing on legacy JSON
+    /// rows, which deserialize as [`DigestEncoding::LegacyJson`].
+    #[serde(default)]
+    pub digest_encoding: DigestEncoding,
     pub state_digest: statechronicle::ContentDigest,
     pub process_digest: PenelopeDigest,
 }
@@ -159,30 +179,47 @@ impl LifecycleEvent {
                 after: after.as_str(),
             });
         }
-        let state_digest = canonical_state_digest(after.as_str());
-        let process_digest =
-            canonical_process_digest(&operation, sequence, before.as_str(), after.as_str())?;
+        let digest_encoding = DigestEncoding::CanonicalBcsV1;
+        let state_digest = canonical_state_digest(&after)?;
+        let process_digest = canonical_process_digest(&operation, sequence, &before, &after)?;
         Ok(Self {
             operation,
             sequence,
             before,
             after,
+            digest_encoding,
             state_digest,
             process_digest,
         })
     }
 
     pub fn verify_integrity(&self) -> Result<(), ReliabilityError> {
-        let expected = Self::new(
-            self.operation.clone(),
-            self.sequence,
-            self.before,
-            self.after,
-        )?;
-        if self.state_digest != expected.state_digest {
+        if !self.before.can_transition_to(self.after) {
+            return Err(ReliabilityError::InvalidTransition {
+                before: self.before.as_str(),
+                after: self.after.as_str(),
+            });
+        }
+        let expected_state = match self.digest_encoding {
+            DigestEncoding::LegacyJson => legacy_state_label_digest(self.after.as_str()),
+            DigestEncoding::CanonicalBcsV1 => canonical_state_digest(&self.after)?,
+        };
+        if self.state_digest != expected_state {
             return Err(ReliabilityError::StateDigestMismatch);
         }
-        if self.process_digest != expected.process_digest {
+        let expected_process = match self.digest_encoding {
+            DigestEncoding::LegacyJson => process_digest(
+                &self.operation,
+                self.sequence,
+                &self.before.as_str(),
+                &self.after.as_str(),
+                DigestEncoding::LegacyJson,
+            )?,
+            DigestEncoding::CanonicalBcsV1 => {
+                canonical_process_digest(&self.operation, self.sequence, &self.before, &self.after)?
+            }
+        };
+        if self.process_digest != expected_process {
             return Err(ReliabilityError::ProcessDigestMismatch);
         }
         Ok(())
