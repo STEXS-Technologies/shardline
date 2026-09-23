@@ -5,7 +5,7 @@ use super::{PostgresIndexStore, PostgresMetadataStoreError, i64_to_u64, u64_to_i
 use crate::{S3ObjectEntry, S3ObjectIndexStore};
 use shardline_reliability::{
     OperationKind, ReliabilityMerkleCommit, S3ObjectEvidenceLog, S3ObjectLifecycleEvent,
-    S3ObjectSnapshot, S3ObjectState, SnapshotEvidence,
+    S3ObjectSnapshot, S3ObjectState, SnapshotEvidence, persisted_event_sequence,
     reliability_merkle_commit_json_with_previous, verify_and_append_snapshot_transition,
     verify_or_repair_snapshot_evidence, verify_persisted_merkle_commit_with_previous,
     verify_snapshot_event, verify_snapshot_evidence,
@@ -427,6 +427,16 @@ impl S3ObjectIndexStore for PostgresIndexStore {
                     shardline_reliability::ReliabilityError::OperationMismatch,
                 )
             })?;
+            let evidence_sequence: Option<i64> = row.try_get("evidence_sequence")?;
+            let event_sequence =
+                persisted_event_sequence(OperationKind::S3Object, event_json.clone())?;
+            if evidence_sequence != Some(u64_to_i64(event_sequence)?) {
+                return Err(PostgresMetadataStoreError::Reliability(
+                    shardline_reliability::ReliabilityError::Merkle(
+                        "S3 evidence row sequence does not match its event".into(),
+                    ),
+                ));
+            }
             let event: S3ObjectLifecycleEvent = serde_json::from_value(event_json)?;
             let merkle_json: Option<serde_json::Value> = row.try_get("evidence_merkle_json")?;
             let previous_merkle_json: Option<serde_json::Value> =

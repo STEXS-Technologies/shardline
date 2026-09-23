@@ -56,9 +56,10 @@ use shardline_reliability::{
     LifecycleEvent, OciObjectEvidenceLog, OciObjectIdentity, OciObjectLifecycleState,
     OciObjectSnapshot, ReliabilityMerkleCommit, ResumableLifecycleState, StateTransitionEvent,
     UploadLifecycleState, baseline_resumable_session_events, baseline_upload_lifecycle_events,
-    build_persisted_merkle_commit_with_previous, reliability_merkle_commit_json_with_previous,
-    upload_lifecycle_identity, verify_persisted_event, verify_provider_lifecycle_events,
-    verify_resumable_session_events, verify_upload_lifecycle_events,
+    build_persisted_merkle_commit_with_previous, persisted_event_sequence,
+    reliability_merkle_commit_json_with_previous, upload_lifecycle_identity,
+    verify_provider_lifecycle_events, verify_resumable_session_events,
+    verify_upload_lifecycle_events,
 };
 
 use crate::{OciObjectKind, provider_evidence::snapshot_from_state};
@@ -243,13 +244,20 @@ pub(crate) fn repair_reliability_merkle_commits(
             ))
         })?;
         let event_json: Value = from_str(&event_json_text)?;
-        verify_persisted_event(operation_kind, event_json.clone()).map_err(|error| {
+        let event_sequence = persisted_event_sequence(operation_kind, event_json.clone()).map_err(|error| {
             LocalIndexStoreError::Reliability(shardline_reliability::ReliabilityError::Merkle(
                 format!(
                     "invalid persisted reliability event kind={operation_kind_text} operation={operation_id} sequence={sequence}: {error}"
                 ),
             ))
         })?;
+        if u64_to_i64(event_sequence)? != sequence {
+            return Err(LocalIndexStoreError::Reliability(
+                shardline_reliability::ReliabilityError::Merkle(format!(
+                    "persisted event sequence does not match row kind={operation_kind_text} operation={operation_id} row_sequence={sequence} event_sequence={event_sequence}"
+                )),
+            ));
+        }
         let previous = previous_operation
             .as_ref()
             .filter(|(kind, id, _)| kind == &operation_kind_text && id == &operation_id)
@@ -301,13 +309,20 @@ pub(crate) fn verify_reliability_events(
             ))
         })?;
         let event_json: Value = from_str(&event_json_text)?;
-        verify_persisted_event(operation_kind, event_json.clone()).map_err(|error| {
+        let event_sequence = persisted_event_sequence(operation_kind, event_json.clone()).map_err(|error| {
             LocalIndexStoreError::Reliability(shardline_reliability::ReliabilityError::Merkle(
                 format!(
                     "invalid persisted reliability event kind={operation_kind_text} operation={operation_id} sequence={sequence}: {error}"
                 ),
             ))
         })?;
+        if u64_to_i64(event_sequence)? != sequence {
+            return Err(LocalIndexStoreError::Reliability(
+                shardline_reliability::ReliabilityError::Merkle(format!(
+                    "persisted event sequence does not match row kind={operation_kind_text} operation={operation_id} row_sequence={sequence} event_sequence={event_sequence}"
+                )),
+            ));
+        }
         let merkle_json_text = merkle_json_text.ok_or_else(|| {
             LocalIndexStoreError::Reliability(shardline_reliability::ReliabilityError::Merkle(
                 format!(

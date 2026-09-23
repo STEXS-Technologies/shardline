@@ -68,7 +68,7 @@ pub use operation::{
 pub use penelope::ContentDigest as PenelopeDigest;
 pub use persisted::{
     build_persisted_merkle_commit, build_persisted_merkle_commit_with_previous,
-    verify_persisted_event, verify_persisted_merkle_commit,
+    persisted_event_sequence, verify_persisted_event, verify_persisted_merkle_commit,
     verify_persisted_merkle_commit_with_previous,
 };
 pub use provider_evidence::{

@@ -18,28 +18,42 @@ pub fn verify_persisted_event(
     operation_kind: OperationKind,
     event_json: Value,
 ) -> Result<(), ReliabilityError> {
+    persisted_event_sequence(operation_kind, event_json).map(|_| ())
+}
+
+/// Verifies a persisted event and returns the sequence encoded by its typed
+/// payload. Storage adapters use this to bind the database key to the event
+/// itself rather than trusting the row discriminator alone.
+pub fn persisted_event_sequence(
+    operation_kind: OperationKind,
+    event_json: Value,
+) -> Result<u64, ReliabilityError> {
     match operation_kind {
-        OperationKind::Upload => verify::<LifecycleEvent>(operation_kind, event_json),
-        OperationKind::MetadataCommit => verify::<HubRefLifecycleEvent>(operation_kind, event_json),
+        OperationKind::Upload => sequence::<LifecycleEvent>(operation_kind, event_json),
+        OperationKind::MetadataCommit => {
+            sequence::<HubRefLifecycleEvent>(operation_kind, event_json)
+        }
         OperationKind::ResumableSession => {
-            verify::<StateTransitionEvent>(operation_kind, event_json)
+            sequence::<StateTransitionEvent>(operation_kind, event_json)
         }
         OperationKind::ProviderEvent => {
-            verify::<ProviderLifecycleEvent>(operation_kind, event_json)
+            sequence::<ProviderLifecycleEvent>(operation_kind, event_json)
         }
         OperationKind::GarbageCollection => {
-            verify::<QuarantineLifecycleEvent>(operation_kind, event_json)
+            sequence::<QuarantineLifecycleEvent>(operation_kind, event_json)
         }
-        OperationKind::Visibility => verify::<OciObjectLifecycleEvent>(operation_kind, event_json),
-        OperationKind::OciTag => verify::<OciTagLifecycleEvent>(operation_kind, event_json),
-        OperationKind::S3Object => verify::<S3ObjectLifecycleEvent>(operation_kind, event_json),
+        OperationKind::Visibility => {
+            sequence::<OciObjectLifecycleEvent>(operation_kind, event_json)
+        }
+        OperationKind::OciTag => sequence::<OciTagLifecycleEvent>(operation_kind, event_json),
+        OperationKind::S3Object => sequence::<S3ObjectLifecycleEvent>(operation_kind, event_json),
         OperationKind::RetentionHold => {
-            verify::<RetentionHoldLifecycleEvent>(operation_kind, event_json)
+            sequence::<RetentionHoldLifecycleEvent>(operation_kind, event_json)
         }
         OperationKind::WebhookDelivery => {
-            verify::<WebhookDeliveryLifecycleEvent>(operation_kind, event_json)
+            sequence::<WebhookDeliveryLifecycleEvent>(operation_kind, event_json)
         }
-        OperationKind::Repair => verify::<RepairEvidenceEvent>(operation_kind, event_json),
+        OperationKind::Repair => sequence::<RepairEvidenceEvent>(operation_kind, event_json),
     }
 }
 
@@ -130,7 +144,7 @@ pub fn verify_persisted_merkle_commit_with_previous(
     Ok(())
 }
 
-fn verify<E>(operation_kind: OperationKind, event_json: Value) -> Result<(), ReliabilityError>
+fn sequence<E>(operation_kind: OperationKind, event_json: Value) -> Result<u64, ReliabilityError>
 where
     E: serde::de::DeserializeOwned + crate::event_metadata::EvidenceEventMetadata,
 {
@@ -138,7 +152,8 @@ where
     if event.operation_identity().kind != operation_kind {
         return Err(ReliabilityError::OperationMismatch);
     }
-    event.verify_integrity()
+    event.verify_integrity()?;
+    Ok(event.sequence_number())
 }
 
 fn build<E>(

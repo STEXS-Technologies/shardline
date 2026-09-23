@@ -15,9 +15,9 @@ use shardline_reliability::{
     StateTransitionEvent, UploadLifecycleState, WebhookDeliveryEvidenceLog,
     WebhookDeliveryIdentity, WebhookDeliveryLifecycleEvent, WebhookDeliveryLifecycleState,
     WebhookDeliverySnapshot, baseline_resumable_session_events, baseline_upload_lifecycle_events,
-    build_persisted_merkle_commit_with_previous, reliability_merkle_commit_json_with_previous,
-    upload_lifecycle_identity, verify_hub_ref_events, verify_oci_object_lifecycle_events,
-    verify_oci_tag_events, verify_persisted_event, verify_provider_lifecycle_events,
+    build_persisted_merkle_commit_with_previous, persisted_event_sequence,
+    reliability_merkle_commit_json_with_previous, upload_lifecycle_identity, verify_hub_ref_events,
+    verify_oci_object_lifecycle_events, verify_oci_tag_events, verify_provider_lifecycle_events,
     verify_quarantine_lifecycle_events, verify_resumable_session_events,
     verify_retention_hold_lifecycle_events, verify_s3_object_events,
     verify_upload_lifecycle_events, verify_webhook_delivery_events,
@@ -748,7 +748,7 @@ async fn repair_persisted_merkle_operation(
     for row in rows {
         let sequence: i64 = row.try_get("sequence")?;
         let event_json: serde_json::Value = row.try_get("event_json")?;
-        verify_persisted_event(operation_kind, event_json.clone()).map_err(|error| {
+        let event_sequence = persisted_event_sequence(operation_kind, event_json.clone()).map_err(|error| {
             DatabaseMigrationError::Backfill(format!(
                 "invalid persisted reliability event during explicit Merkle repair kind={} operation={} sequence={}: {error}",
                 operation_kind.as_str(),
@@ -756,6 +756,18 @@ async fn repair_persisted_merkle_operation(
                 sequence,
             ))
         })?;
+        if i64::try_from(event_sequence).map_err(|error| {
+            DatabaseMigrationError::Backfill(format!("event sequence out of range: {error}"))
+        })? != sequence
+        {
+            return Err(DatabaseMigrationError::Backfill(format!(
+                "persisted event sequence does not match row during explicit Merkle repair kind={} operation={} row_sequence={} event_sequence={}",
+                operation_kind.as_str(),
+                operation_id,
+                sequence,
+                event_sequence
+            )));
+        }
         let merkle_commit_json = build_persisted_merkle_commit_with_previous(
             operation_kind,
             event_json,
@@ -2082,11 +2094,19 @@ fn verify_persisted_reliability_row(
             "unknown reliability operation kind {operation_kind_text} for {operation_id} at sequence {sequence}"
         ))
     })?;
-    verify_persisted_event(operation_kind, event_json.clone()).map_err(|error| {
+    let event_sequence = persisted_event_sequence(operation_kind, event_json.clone()).map_err(|error| {
         DatabaseMigrationError::Backfill(format!(
             "invalid persisted reliability event kind={operation_kind_text} operation={operation_id} sequence={sequence}: {error}"
         ))
     })?;
+    if i64::try_from(event_sequence).map_err(|error| {
+        DatabaseMigrationError::Backfill(format!("event sequence out of range: {error}"))
+    })? != sequence
+    {
+        return Err(DatabaseMigrationError::Backfill(format!(
+            "persisted event sequence does not match row kind={operation_kind_text} operation={operation_id} row_sequence={sequence} event_sequence={event_sequence}"
+        )));
+    }
     let observed = merkle_commit_json.ok_or_else(|| {
         DatabaseMigrationError::Backfill(format!(
             "missing persisted Merkle commit kind={operation_kind_text} operation={operation_id} sequence={sequence}"
