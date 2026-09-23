@@ -79,8 +79,9 @@ the same evidence protocol in memory, SQLite, and Postgres. Retention holds
 remain policy records whose active/released result is derived from their
 timestamps; the last-GC clock anchor is explicitly an optimization-only
 materialization. OCI tombstones remain generation fences for logical deletion,
-not a second lifecycle interpretation, and are protected by their existing
-transactional compare-and-publish rules.
+but their published/deleted/reclaimed visibility transitions now use the same
+`OciObjectLifecycleEvent` evidence. Existing transactional compare-and-publish
+rules remain authoritative for behavior.
 
 The following are data-plane recovery materializations, not independent
 lifecycle state machines:
@@ -110,7 +111,7 @@ The current durable-state inventory is intentionally explicit:
 | Provider repository observations | Monotonic lifecycle snapshot | `ProviderLifecycleEvent` |
 | GC quarantine candidates | Retention lifecycle state machine | `QuarantineLifecycleEvent` |
 | Retention holds | Policy record; active/released is timestamp-derived | Existing transactional row and invariant validation |
-| OCI tombstones | Generation fence for logical deletion | Existing atomic compare-and-delete/publish fence |
+| OCI tombstones | Visibility/generation lifecycle state | `OciObjectLifecycleEvent` plus atomic compare-and-delete/publish fence |
 | Webhook deliveries | Idempotency claim, not a lifecycle machine | Unique delivery key and transactional insert |
 | Resource fences | Concurrency epoch, not domain lifecycle state | Existing fenced transaction boundary |
 

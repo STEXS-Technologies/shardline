@@ -10,6 +10,7 @@
 mod digest;
 mod error;
 mod event;
+mod oci_evidence;
 mod operation;
 mod provider_evidence;
 mod quarantine_evidence;
@@ -25,6 +26,10 @@ pub use event::{
     baseline_upload_lifecycle_events, resumable_session_event, upload_lifecycle_event,
     verify_lifecycle_chain, verify_lifecycle_chain_ends_at, verify_state_transition_chain,
     verify_state_transition_chain_ends_at, verify_upload_lifecycle_events,
+};
+pub use oci_evidence::{
+    OciObjectEvidenceLog, OciObjectIdentity, OciObjectLifecycleEvent, OciObjectLifecycleState,
+    OciObjectSnapshot, verify_oci_object_lifecycle_chain, verify_oci_object_lifecycle_events,
 };
 pub use operation::{OperationIdentity, OperationKind};
 pub use provider_evidence::{

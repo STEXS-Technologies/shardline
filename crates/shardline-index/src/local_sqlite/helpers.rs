@@ -21,7 +21,8 @@ use rusqlite::{
 use serde_json::{from_slice, from_str, to_string};
 use shardline_protocol::{RepositoryScope, unix_now_seconds_lossy};
 use shardline_reliability::{
-    LifecycleEvent, ProviderEvidenceLog, ProviderLifecycleEvent, ProviderLifecycleSnapshot,
+    LifecycleEvent, OciObjectEvidenceLog, OciObjectIdentity, OciObjectLifecycleState,
+    OciObjectSnapshot, ProviderEvidenceLog, ProviderLifecycleEvent, ProviderLifecycleSnapshot,
     QuarantineEvidenceLog, QuarantineLifecycleEvent, QuarantineLifecycleState,
     QuarantineObjectIdentity, QuarantineSnapshot, ResumableLifecycleState, StateTransitionEvent,
     UploadLifecycleState, baseline_resumable_session_events, baseline_upload_lifecycle_events,
@@ -42,10 +43,10 @@ use super::{
     StoredObjectPresenceRecord,
 };
 use crate::{
-    DedupeShardMapping, FileId, FileReconstruction, FileRecord, ProviderRepositoryState,
-    QuarantineCandidate, RetentionHold, WebhookDelivery, WebhookDeliveryError, parse_xet_hash_hex,
-    provider::parse_repository_provider, provider_evidence::snapshot_from_state,
-    record_key::record_key as shared_record_key,
+    DedupeShardMapping, FileId, FileReconstruction, FileRecord, OciObjectKind,
+    ProviderRepositoryState, QuarantineCandidate, RetentionHold, WebhookDelivery,
+    WebhookDeliveryError, parse_xet_hash_hex, provider::parse_repository_provider,
+    provider_evidence::snapshot_from_state, record_key::record_key as shared_record_key,
     record_key::repository_scope_key as shared_repository_scope_key, xet_hash_hex_string,
 };
 
@@ -477,6 +478,58 @@ fn backfill_reliability_events(connection: &mut Connection) -> Result<(), LocalI
         )?;
         let snapshot = quarantine_snapshot(&candidate, QuarantineLifecycleState::Active)?;
         let evidence = QuarantineEvidenceLog::baseline(snapshot)?;
+        for event in evidence.events() {
+            transaction.execute(
+                "INSERT OR IGNORE INTO shardline_reliability_events
+                    (operation_kind, operation_id, sequence, event_json, created_at_unix_seconds)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    event.operation.kind.as_str(),
+                    event.operation.operation_id,
+                    i64::try_from(event.sequence).map_err(|error| {
+                        LocalIndexStoreError::IntegerOutOfRange(error.to_string())
+                    })?,
+                    to_string(event)?,
+                    u64_to_i64(unix_now_seconds_lossy())?,
+                ],
+            )?;
+        }
+    }
+
+    let mut oci_tombstone_rows = Vec::new();
+    {
+        let mut statement = transaction.prepare(
+            "SELECT scope_namespace, repository, object_kind, digest_hex,
+                    deleted_at_unix_seconds
+             FROM shardline_oci_object_tombstones AS t
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM shardline_reliability_events AS e
+                 WHERE e.operation_kind = 'Visibility'
+                   AND e.operation_id = t.scope_namespace || ':' || t.repository || ':' ||
+                       t.object_kind || ':' || t.digest_hex
+             )",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, i64>(4)?,
+            ))
+        })?;
+        for row in rows {
+            oci_tombstone_rows.push(row?);
+        }
+    }
+    for (scope_namespace, repository, object_kind, digest_hex, deleted_at) in oci_tombstone_rows {
+        let _kind: OciObjectKind = object_kind.parse()?;
+        let snapshot = OciObjectSnapshot::new(
+            OciObjectIdentity::new(scope_namespace, repository, object_kind, digest_hex)?,
+            OciObjectLifecycleState::Deleted,
+            Some(i64_to_u64(deleted_at)?),
+        )?;
+        let evidence = OciObjectEvidenceLog::baseline(snapshot)?;
         for event in evidence.events() {
             transaction.execute(
                 "INSERT OR IGNORE INTO shardline_reliability_events

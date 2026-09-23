@@ -1,11 +1,93 @@
 use serde_json::to_value;
-use shardline_reliability::resumable_session_event;
+use shardline_reliability::{
+    OciObjectEvidenceLog, OciObjectIdentity, OciObjectLifecycleEvent, OciObjectLifecycleState,
+    OciObjectSnapshot, resumable_session_event,
+};
 use sqlx::{Connection as _, PgConnection, Row as _, query, query_scalar};
 
 use super::{
     PostgresIndexStore, PostgresMetadataStoreError, insert_reliability_event_json,
     next_reliability_sequence,
 };
+
+fn oci_snapshot(
+    key: &OciObjectKey,
+    state: OciObjectLifecycleState,
+    deleted_at: Option<u64>,
+) -> Result<OciObjectSnapshot, PostgresMetadataStoreError> {
+    Ok(OciObjectSnapshot::new(
+        OciObjectIdentity::new(
+            key.scope_namespace.clone(),
+            key.repository.clone(),
+            key.kind.as_str(),
+            key.digest_hex.clone(),
+        )?,
+        state,
+        deleted_at,
+    )?)
+}
+
+async fn load_oci_evidence(
+    executor: &mut sqlx::PgConnection,
+    key: &OciObjectKey,
+) -> Result<OciObjectEvidenceLog, PostgresMetadataStoreError> {
+    let operation_id = format!(
+        "{}:{}:{}:{}",
+        key.scope_namespace,
+        key.repository,
+        key.kind.as_str(),
+        key.digest_hex
+    );
+    let rows = query(
+        "SELECT event_json FROM shardline_reliability_events
+         WHERE operation_kind = 'Visibility' AND operation_id = $1 ORDER BY sequence",
+    )
+    .bind(operation_id)
+    .fetch_all(executor)
+    .await?;
+    let events = rows
+        .into_iter()
+        .map(|row| {
+            Ok(serde_json::from_value::<OciObjectLifecycleEvent>(
+                row.try_get("event_json")?,
+            )?)
+        })
+        .collect::<Result<Vec<_>, PostgresMetadataStoreError>>()?;
+    Ok(OciObjectEvidenceLog::from_events(events)?)
+}
+
+async fn record_oci_evidence(
+    executor: &mut sqlx::PgConnection,
+    key: &OciObjectKey,
+    state: OciObjectLifecycleState,
+    deleted_at: Option<u64>,
+    fallback_state: OciObjectLifecycleState,
+    fallback_deleted_at: Option<u64>,
+) -> Result<(), PostgresMetadataStoreError> {
+    let after = oci_snapshot(key, state, deleted_at)?;
+    let mut evidence = load_oci_evidence(executor, key).await?;
+    if evidence.events().is_empty() {
+        evidence = OciObjectEvidenceLog::baseline(oci_snapshot(
+            key,
+            fallback_state,
+            fallback_deleted_at,
+        )?)?;
+    }
+    evidence.record(after)?;
+    let event = evidence.events().last().ok_or_else(|| {
+        PostgresMetadataStoreError::Reliability(
+            shardline_reliability::ReliabilityError::EmptyField("OCI object evidence event"),
+        )
+    })?;
+    insert_reliability_event_json(
+        executor,
+        event.operation.kind.as_str(),
+        &event.operation.operation_id,
+        event.sequence,
+        to_value(event)?,
+    )
+    .await
+}
 use crate::{
     OciObjectKey, OciObjectKind, OciObjectStore, OciObjectTombstone, OciTagEntry,
     ResumableCompletionFence,
@@ -24,6 +106,20 @@ impl PostgresIndexStore {
         tags: &[OciTagEntry],
     ) -> Result<(), PostgresMetadataStoreError> {
         let mut transaction = connection.begin().await?;
+        let previous_deleted_at = query(
+            "SELECT deleted_at_unix_seconds FROM shardline_oci_object_tombstones
+             WHERE scope_namespace = $1 AND repository = $2 AND object_kind = $3 AND digest_hex = $4",
+        )
+        .bind(&key.scope_namespace)
+        .bind(&key.repository)
+        .bind(key.kind.as_str())
+        .bind(&key.digest_hex)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .map(|row| row.try_get::<i64, _>("deleted_at_unix_seconds"))
+        .transpose()?
+        .map(super::i64_to_u64)
+        .transpose()?;
         query(
             "DELETE FROM shardline_oci_object_tombstones
              WHERE scope_namespace = $1 AND repository = $2
@@ -49,6 +145,19 @@ impl PostgresIndexStore {
             .execute(&mut *transaction)
             .await?;
         }
+        record_oci_evidence(
+            transaction.as_mut(),
+            key,
+            OciObjectLifecycleState::Published,
+            None,
+            if previous_deleted_at.is_some() {
+                OciObjectLifecycleState::Deleted
+            } else {
+                OciObjectLifecycleState::Published
+            },
+            previous_deleted_at,
+        )
+        .await?;
         transaction.commit().await?;
         Ok(())
     }
@@ -108,6 +217,15 @@ impl PostgresIndexStore {
             .execute(&mut *transaction)
             .await?;
         }
+        record_oci_evidence(
+            transaction.as_mut(),
+            key,
+            OciObjectLifecycleState::Published,
+            None,
+            OciObjectLifecycleState::Published,
+            None,
+        )
+        .await?;
         let completed = query(
             "UPDATE shardline_resumable_sessions SET state = 'completed', updated_at = now()
              WHERE session_id = $1 AND state = 'completing' AND fence_epoch = $2",
@@ -154,6 +272,20 @@ impl PostgresIndexStore {
         key: &OciObjectKey,
     ) -> Result<(), PostgresMetadataStoreError> {
         let mut transaction = connection.begin().await?;
+        let previous_deleted_at = query(
+            "SELECT deleted_at_unix_seconds FROM shardline_oci_object_tombstones
+             WHERE scope_namespace = $1 AND repository = $2 AND object_kind = $3 AND digest_hex = $4",
+        )
+        .bind(&key.scope_namespace)
+        .bind(&key.repository)
+        .bind(key.kind.as_str())
+        .bind(&key.digest_hex)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .map(|row| row.try_get::<i64, _>("deleted_at_unix_seconds"))
+        .transpose()?
+        .map(super::i64_to_u64)
+        .transpose()?;
         query(
             "INSERT INTO shardline_oci_object_tombstones
                 (scope_namespace, repository, object_kind, digest_hex, deleted_at_unix_seconds)
@@ -178,6 +310,30 @@ impl PostgresIndexStore {
             .execute(&mut *transaction)
             .await?;
         }
+        let deleted_at: i64 = query_scalar(
+            "SELECT deleted_at_unix_seconds FROM shardline_oci_object_tombstones
+             WHERE scope_namespace = $1 AND repository = $2 AND object_kind = $3 AND digest_hex = $4",
+        )
+        .bind(&key.scope_namespace)
+        .bind(&key.repository)
+        .bind(key.kind.as_str())
+        .bind(&key.digest_hex)
+        .fetch_one(&mut *transaction)
+        .await?;
+        let deleted_at = super::i64_to_u64(deleted_at)?;
+        record_oci_evidence(
+            transaction.as_mut(),
+            key,
+            OciObjectLifecycleState::Deleted,
+            Some(deleted_at),
+            if previous_deleted_at.is_some() {
+                OciObjectLifecycleState::Deleted
+            } else {
+                OciObjectLifecycleState::Published
+            },
+            previous_deleted_at,
+        )
+        .await?;
         transaction.commit().await?;
         Ok(())
     }
@@ -188,7 +344,7 @@ impl OciObjectStore for PostgresIndexStore {
     type Error = PostgresMetadataStoreError;
 
     async fn oci_object_is_deleted(&self, key: &OciObjectKey) -> Result<bool, Self::Error> {
-        Ok(query_scalar::<_, i32>(
+        let found = query_scalar::<_, i32>(
             "SELECT 1 FROM shardline_oci_object_tombstones
              WHERE scope_namespace = $1 AND repository = $2
                AND object_kind = $3 AND digest_hex = $4",
@@ -198,8 +354,31 @@ impl OciObjectStore for PostgresIndexStore {
         .bind(key.kind.as_str())
         .bind(&key.digest_hex)
         .fetch_optional(&self.pool)
-        .await?
-        .is_some())
+        .await?;
+        let mut connection = self.pool.acquire().await?;
+        let evidence = load_oci_evidence(&mut connection, key).await?;
+        if !evidence.events().is_empty() {
+            if found.is_some() {
+                let deleted_at: i64 = query_scalar(
+                    "SELECT deleted_at_unix_seconds FROM shardline_oci_object_tombstones
+                     WHERE scope_namespace = $1 AND repository = $2 AND object_kind = $3 AND digest_hex = $4",
+                )
+                .bind(&key.scope_namespace)
+                .bind(&key.repository)
+                .bind(key.kind.as_str())
+                .bind(&key.digest_hex)
+                .fetch_one(&mut *connection)
+                .await?;
+                evidence.verify_for(&oci_snapshot(
+                    key,
+                    OciObjectLifecycleState::Deleted,
+                    Some(super::i64_to_u64(deleted_at)?),
+                )?)?;
+            } else {
+                shardline_reliability::verify_oci_object_lifecycle_chain(evidence.events())?;
+            }
+        }
+        Ok(found.is_some())
     }
 
     async fn publish_oci_object(
@@ -227,7 +406,9 @@ impl OciObjectStore for PostgresIndexStore {
         )
         .fetch_all(&self.pool)
         .await?;
-        rows.into_iter()
+        let mut connection = self.pool.acquire().await?;
+        let tombstones = rows
+            .into_iter()
             .map(|row| {
                 let object_kind: String = row.try_get("object_kind")?;
                 let kind = object_kind.parse()?;
@@ -243,13 +424,26 @@ impl OciObjectStore for PostgresIndexStore {
                     )?,
                 })
             })
-            .collect()
+            .collect::<Result<Vec<_>, Self::Error>>()?;
+        for tombstone in &tombstones {
+            let evidence = load_oci_evidence(&mut connection, &tombstone.key).await?;
+            if !evidence.events().is_empty() {
+                evidence.verify_for(&oci_snapshot(
+                    &tombstone.key,
+                    OciObjectLifecycleState::Deleted,
+                    Some(tombstone.deleted_at_unix_seconds),
+                )?)?;
+            }
+        }
+        Ok(tombstones)
     }
 
     async fn delete_oci_object_tombstone_if_unchanged(
         &self,
         tombstone: &OciObjectTombstone,
     ) -> Result<bool, Self::Error> {
+        let mut connection = self.pool.acquire().await?;
+        let mut transaction = connection.begin().await?;
         let result = query(
             "DELETE FROM shardline_oci_object_tombstones
              WHERE scope_namespace = $1 AND repository = $2
@@ -261,8 +455,20 @@ impl OciObjectStore for PostgresIndexStore {
         .bind(tombstone.key.kind.as_str())
         .bind(&tombstone.key.digest_hex)
         .bind(super::u64_to_i64(tombstone.deleted_at_unix_seconds)?)
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await?;
+        if result.rows_affected() != 0 {
+            record_oci_evidence(
+                transaction.as_mut(),
+                &tombstone.key,
+                OciObjectLifecycleState::Reclaimed,
+                Some(tombstone.deleted_at_unix_seconds),
+                OciObjectLifecycleState::Deleted,
+                Some(tombstone.deleted_at_unix_seconds),
+            )
+            .await?;
+        }
+        transaction.commit().await?;
         Ok(result.rows_affected() != 0)
     }
 }

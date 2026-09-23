@@ -1,14 +1,115 @@
 use rusqlite::{OptionalExtension, params};
+use shardline_reliability::{
+    OciObjectEvidenceLog, OciObjectIdentity, OciObjectLifecycleState, OciObjectSnapshot,
+    verify_oci_object_lifecycle_chain,
+};
 
 use super::{LocalIndexStore, LocalIndexStoreError, i64_to_u64};
 use crate::{OciObjectKey, OciObjectKind, OciObjectStore, OciObjectTombstone, OciTagEntry};
+
+fn oci_identity(key: &OciObjectKey) -> Result<OciObjectIdentity, LocalIndexStoreError> {
+    Ok(OciObjectIdentity::new(
+        key.scope_namespace.clone(),
+        key.repository.clone(),
+        key.kind.as_str(),
+        key.digest_hex.clone(),
+    )?)
+}
+
+fn oci_snapshot(
+    key: &OciObjectKey,
+    state: OciObjectLifecycleState,
+    deleted_at: Option<u64>,
+) -> Result<OciObjectSnapshot, LocalIndexStoreError> {
+    Ok(OciObjectSnapshot::new(
+        oci_identity(key)?,
+        state,
+        deleted_at,
+    )?)
+}
+
+fn load_oci_evidence(
+    transaction: &rusqlite::Transaction<'_>,
+    key: &OciObjectKey,
+) -> Result<OciObjectEvidenceLog, LocalIndexStoreError> {
+    let operation_id = format!(
+        "{}:{}:{}:{}",
+        key.scope_namespace,
+        key.repository,
+        key.kind.as_str(),
+        key.digest_hex
+    );
+    let mut statement = transaction.prepare(
+        "SELECT event_json FROM shardline_reliability_events
+         WHERE operation_kind = 'Visibility' AND operation_id = ?1 ORDER BY sequence",
+    )?;
+    let rows = statement.query_map(params![operation_id], |row| {
+        let json: String = row.get(0)?;
+        serde_json::from_str(json.as_str()).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                0,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })
+    })?;
+    Ok(OciObjectEvidenceLog::from_events(
+        rows.collect::<Result<Vec<_>, _>>()?,
+    )?)
+}
+
+fn persist_oci_evidence(
+    transaction: &rusqlite::Transaction<'_>,
+    event: &shardline_reliability::OciObjectLifecycleEvent,
+) -> Result<(), LocalIndexStoreError> {
+    transaction.execute(
+        "INSERT OR IGNORE INTO shardline_reliability_events
+            (operation_kind, operation_id, sequence, event_json, created_at_unix_seconds)
+         VALUES (?1, ?2, ?3, ?4, unixepoch())",
+        params![
+            event.operation.kind.as_str(),
+            event.operation.operation_id,
+            i64::try_from(event.sequence)
+                .map_err(|error| LocalIndexStoreError::IntegerOutOfRange(error.to_string()))?,
+            serde_json::to_string(event)?,
+        ],
+    )?;
+    Ok(())
+}
+
+fn record_oci_evidence(
+    transaction: &rusqlite::Transaction<'_>,
+    key: &OciObjectKey,
+    state: OciObjectLifecycleState,
+    deleted_at: Option<u64>,
+    fallback_state: OciObjectLifecycleState,
+    fallback_deleted_at: Option<u64>,
+) -> Result<(), LocalIndexStoreError> {
+    let after = oci_snapshot(key, state, deleted_at)?;
+    let mut evidence = load_oci_evidence(transaction, key)?;
+    if evidence.events().is_empty() {
+        evidence = OciObjectEvidenceLog::baseline(oci_snapshot(
+            key,
+            fallback_state,
+            fallback_deleted_at,
+        )?)?;
+    }
+    evidence.record(after)?;
+    let event = evidence.events().last().ok_or_else(|| {
+        LocalIndexStoreError::Reliability(shardline_reliability::ReliabilityError::EmptyField(
+            "OCI object evidence event",
+        ))
+    })?;
+    persist_oci_evidence(transaction, event)
+}
 
 impl LocalIndexStore {
     fn list_oci_object_tombstones_blocking(
         &self,
     ) -> Result<Vec<OciObjectTombstone>, LocalIndexStoreError> {
-        let connection = self.open_connection()?;
-        let mut statement = connection.prepare(
+        let mut connection = self.open_connection()?;
+        let transaction = connection.transaction()?;
+        let mut statement = transaction.prepare(
             "SELECT scope_namespace, repository, object_kind, digest_hex,
                     deleted_at_unix_seconds
              FROM shardline_oci_object_tombstones
@@ -37,6 +138,19 @@ impl LocalIndexStore {
                 deleted_at_unix_seconds: i64_to_u64(deleted_at)?,
             });
         }
+        drop(statement);
+        for tombstone in &tombstones {
+            let evidence = load_oci_evidence(&transaction, &tombstone.key)?;
+            if !evidence.events().is_empty() {
+                let expected = oci_snapshot(
+                    &tombstone.key,
+                    OciObjectLifecycleState::Deleted,
+                    Some(tombstone.deleted_at_unix_seconds),
+                )?;
+                evidence.verify_for(&expected)?;
+            }
+        }
+        transaction.commit()?;
         Ok(tombstones)
     }
 
@@ -47,6 +161,16 @@ impl LocalIndexStore {
     ) -> Result<(), LocalIndexStoreError> {
         let mut connection = self.open_connection()?;
         let transaction = connection.transaction()?;
+        let previous_deleted_at = transaction
+            .query_row(
+                "SELECT deleted_at_unix_seconds FROM shardline_oci_object_tombstones
+                 WHERE scope_namespace = ?1 AND repository = ?2 AND object_kind = ?3 AND digest_hex = ?4",
+                params![key.scope_namespace, key.repository, key.kind.as_str(), key.digest_hex],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+            .map(i64_to_u64)
+            .transpose()?;
         transaction.execute(
             "DELETE FROM shardline_oci_object_tombstones
              WHERE scope_namespace = ?1 AND repository = ?2
@@ -67,6 +191,18 @@ impl LocalIndexStore {
                 params![tag.scope_namespace, tag.repository, tag.tag, tag.digest_hex],
             )?;
         }
+        record_oci_evidence(
+            &transaction,
+            key,
+            OciObjectLifecycleState::Published,
+            None,
+            if previous_deleted_at.is_some() {
+                OciObjectLifecycleState::Deleted
+            } else {
+                OciObjectLifecycleState::Published
+            },
+            previous_deleted_at,
+        )?;
         transaction.commit()?;
         Ok(())
     }
@@ -74,6 +210,16 @@ impl LocalIndexStore {
     fn delete_oci_object_blocking(&self, key: &OciObjectKey) -> Result<(), LocalIndexStoreError> {
         let mut connection = self.open_connection()?;
         let transaction = connection.transaction()?;
+        let previous_deleted_at = transaction
+            .query_row(
+                "SELECT deleted_at_unix_seconds FROM shardline_oci_object_tombstones
+                 WHERE scope_namespace = ?1 AND repository = ?2 AND object_kind = ?3 AND digest_hex = ?4",
+                params![key.scope_namespace, key.repository, key.kind.as_str(), key.digest_hex],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+            .map(i64_to_u64)
+            .transpose()?;
         transaction.execute(
             "INSERT INTO shardline_oci_object_tombstones
                 (scope_namespace, repository, object_kind, digest_hex, deleted_at_unix_seconds)
@@ -94,6 +240,25 @@ impl LocalIndexStore {
                 params![key.scope_namespace, key.repository, key.digest_hex],
             )?;
         }
+        let deleted_at = transaction.query_row(
+            "SELECT deleted_at_unix_seconds FROM shardline_oci_object_tombstones
+             WHERE scope_namespace = ?1 AND repository = ?2 AND object_kind = ?3 AND digest_hex = ?4",
+            params![key.scope_namespace, key.repository, key.kind.as_str(), key.digest_hex],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(i64_to_u64)??;
+        record_oci_evidence(
+            &transaction,
+            key,
+            OciObjectLifecycleState::Deleted,
+            Some(deleted_at),
+            if previous_deleted_at.is_some() {
+                OciObjectLifecycleState::Deleted
+            } else {
+                OciObjectLifecycleState::Published
+            },
+            previous_deleted_at,
+        )?;
         transaction.commit()?;
         Ok(())
     }
@@ -107,10 +272,11 @@ impl OciObjectStore for LocalIndexStore {
         let store = self.clone();
         let key = key.clone();
         tokio::task::spawn_blocking(move || {
-            let found = store
-                .open_connection()?
+            let mut connection = store.open_connection()?;
+            let transaction = connection.transaction()?;
+            let deleted_at = transaction
                 .query_row(
-                    "SELECT 1 FROM shardline_oci_object_tombstones
+                    "SELECT deleted_at_unix_seconds FROM shardline_oci_object_tombstones
                      WHERE scope_namespace = ?1 AND repository = ?2
                        AND object_kind = ?3 AND digest_hex = ?4",
                     params![
@@ -119,10 +285,22 @@ impl OciObjectStore for LocalIndexStore {
                         key.kind.as_str(),
                         key.digest_hex
                     ],
-                    |_row| Ok(()),
+                    |row| row.get::<_, i64>(0),
                 )
-                .optional()?;
-            Ok(found.is_some())
+                .optional()?
+                .map(i64_to_u64)
+                .transpose()?;
+            let evidence = load_oci_evidence(&transaction, &key)?;
+            if !evidence.events().is_empty() {
+                verify_oci_object_lifecycle_chain(evidence.events())?;
+                if let Some(deleted_at) = deleted_at {
+                    let expected =
+                        oci_snapshot(&key, OciObjectLifecycleState::Deleted, Some(deleted_at))?;
+                    evidence.verify_for(&expected)?;
+                }
+            }
+            transaction.commit()?;
+            Ok(deleted_at.is_some())
         })
         .await
         .map_err(|error| LocalIndexStoreError::BlockingTask(error.to_string()))?
@@ -165,7 +343,25 @@ impl OciObjectStore for LocalIndexStore {
         tokio::task::spawn_blocking(move || {
             let deleted_at = i64::try_from(tombstone.deleted_at_unix_seconds)
                 .map_err(|error| LocalIndexStoreError::IntegerOutOfRange(error.to_string()))?;
-            let deleted = store.open_connection()?.execute(
+            let mut connection = store.open_connection()?;
+            let transaction = connection.transaction()?;
+            let found = transaction
+                .query_row(
+                    "SELECT deleted_at_unix_seconds FROM shardline_oci_object_tombstones
+                     WHERE scope_namespace = ?1 AND repository = ?2
+                       AND object_kind = ?3 AND digest_hex = ?4
+                       AND deleted_at_unix_seconds = ?5",
+                    params![
+                        tombstone.key.scope_namespace,
+                        tombstone.key.repository,
+                        tombstone.key.kind.as_str(),
+                        tombstone.key.digest_hex,
+                        deleted_at,
+                    ],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()?;
+            let deleted = transaction.execute(
                 "DELETE FROM shardline_oci_object_tombstones
                  WHERE scope_namespace = ?1 AND repository = ?2
                    AND object_kind = ?3 AND digest_hex = ?4
@@ -178,6 +374,17 @@ impl OciObjectStore for LocalIndexStore {
                     deleted_at,
                 ],
             )?;
+            if found.is_some() {
+                record_oci_evidence(
+                    &transaction,
+                    &tombstone.key,
+                    OciObjectLifecycleState::Reclaimed,
+                    Some(tombstone.deleted_at_unix_seconds),
+                    OciObjectLifecycleState::Deleted,
+                    Some(tombstone.deleted_at_unix_seconds),
+                )?;
+            }
+            transaction.commit()?;
             Ok(deleted != 0)
         })
         .await
@@ -306,5 +513,23 @@ mod tests {
                 .unwrap()
         );
         assert!(!store.oci_object_is_deleted(&blob).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn tampered_tombstone_evidence_is_rejected_on_read() {
+        let storage = shardline_test_support::TempStorage::new();
+        let store = LocalIndexStore::new(storage.path_buf()).unwrap();
+        let blob = object(OciObjectKind::Blob, 'e');
+        store.delete_oci_object(&blob).await.unwrap();
+        let connection = store.open_connection().unwrap();
+        connection
+            .execute(
+                "UPDATE shardline_reliability_events
+                 SET event_json = '{\"sequence\": 99}'
+                 WHERE operation_kind = 'Visibility'",
+                [],
+            )
+            .unwrap();
+        assert!(store.oci_object_is_deleted(&blob).await.is_err());
     }
 }
