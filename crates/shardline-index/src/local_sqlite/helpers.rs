@@ -123,7 +123,7 @@ const fn sqlite_error_is_busy(error: &LocalIndexStoreError) -> bool {
         error,
         LocalIndexStoreError::Sqlite(SqliteError::SqliteFailure(
             rusqlite::ffi::Error {
-                code: ErrorCode::DatabaseBusy,
+                code: ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked,
                 ..
             },
             _,
