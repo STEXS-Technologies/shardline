@@ -15,6 +15,7 @@ mod operation;
 mod provider_evidence;
 mod quarantine_evidence;
 mod session_evidence;
+mod snapshot_event;
 mod states;
 
 #[cfg(test)]

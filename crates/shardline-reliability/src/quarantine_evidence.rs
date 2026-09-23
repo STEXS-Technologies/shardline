@@ -1,10 +1,6 @@
-use penelope::ContentDigest as PenelopeDigest;
 use serde::{Deserialize, Serialize};
 
-use crate::digest::{
-    DigestEncoding, canonical_snapshot_digest, canonical_transition_process_digest, process_digest,
-    state_digest,
-};
+use crate::snapshot_event::{SnapshotEvidence, SnapshotEvidenceEvent, verify_snapshot_chain};
 use crate::{OperationIdentity, OperationKind, ReliabilityError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -93,99 +89,31 @@ impl QuarantineSnapshot {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct QuarantineLifecycleEvent {
-    pub operation: OperationIdentity,
-    pub sequence: u64,
-    pub before: QuarantineSnapshot,
-    pub after: QuarantineSnapshot,
-    /// Encoding used for the authenticated digests. Missing on legacy JSON
-    /// rows, which deserialize as [`DigestEncoding::LegacyJson`].
-    #[serde(default)]
-    pub digest_encoding: DigestEncoding,
-    pub state_digest: statechronicle::ContentDigest,
-    pub process_digest: PenelopeDigest,
-}
-
-impl QuarantineLifecycleEvent {
-    pub fn new(
-        sequence: u64,
-        before: QuarantineSnapshot,
-        after: QuarantineSnapshot,
-    ) -> Result<Self, ReliabilityError> {
-        if before.object_key != after.object_key {
-            return Err(ReliabilityError::OperationMismatch);
-        }
-        if !before.state.can_transition_to(after.state) {
-            return Err(ReliabilityError::InvalidTransition {
-                before: before.state.as_str(),
-                after: after.state.as_str(),
-            });
-        }
-        let operation = after.operation()?;
-        let digest_encoding = DigestEncoding::CanonicalBcsV1;
-        let state_digest = canonical_snapshot_digest(&after)?;
-        let process_digest =
-            canonical_transition_process_digest(&operation, sequence, &before, &after)?;
-        Ok(Self {
-            operation,
-            sequence,
-            before,
-            after,
-            digest_encoding,
-            state_digest,
-            process_digest,
-        })
+impl SnapshotEvidence for QuarantineSnapshot {
+    fn evidence_operation(&self) -> Result<OperationIdentity, ReliabilityError> {
+        self.operation()
     }
 
-    pub fn verify_integrity(&self) -> Result<(), ReliabilityError> {
-        if self.operation != self.after.operation()? {
+    fn validate_evidence_transition(&self, after: &Self) -> Result<(), ReliabilityError> {
+        if self.object_key != after.object_key {
             return Err(ReliabilityError::OperationMismatch);
         }
-        if self.state_digest != state_digest(&self.after, self.digest_encoding)? {
-            return Err(ReliabilityError::StateDigestMismatch);
-        }
-        if self.process_digest
-            != process_digest(
-                &self.operation,
-                self.sequence,
-                &self.before,
-                &self.after,
-                self.digest_encoding,
-            )?
-        {
-            return Err(ReliabilityError::ProcessDigestMismatch);
+        if !self.state.can_transition_to(after.state) {
+            return Err(ReliabilityError::InvalidTransition {
+                before: self.state.as_str(),
+                after: after.state.as_str(),
+            });
         }
         Ok(())
     }
 }
 
+pub type QuarantineLifecycleEvent = SnapshotEvidenceEvent<QuarantineSnapshot>;
+
 pub fn verify_quarantine_lifecycle_chain(
     events: &[QuarantineLifecycleEvent],
 ) -> Result<(), ReliabilityError> {
-    let Some(first) = events.first() else {
-        return Ok(());
-    };
-    if first.sequence != 0 || first.before != first.after {
-        return Err(ReliabilityError::ChainDiscontinuity);
-    }
-    let mut previous_after = None;
-    let mut previous_sequence = None;
-    for event in events {
-        event.verify_integrity()?;
-        if event.operation != first.operation {
-            return Err(ReliabilityError::OperationMismatch);
-        }
-        if previous_sequence.is_some_and(|sequence| event.sequence <= sequence) {
-            return Err(ReliabilityError::SequenceRegression);
-        }
-        if previous_after.is_some_and(|after| event.before != after) {
-            return Err(ReliabilityError::ChainDiscontinuity);
-        }
-        previous_sequence = Some(event.sequence);
-        previous_after = Some(event.after.clone());
-    }
-    Ok(())
+    verify_snapshot_chain(events)
 }
 
 pub fn verify_quarantine_lifecycle_events(
