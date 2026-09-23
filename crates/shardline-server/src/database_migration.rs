@@ -575,6 +575,13 @@ async fn repair_reliability_operation(
             "unknown reliability operation kind for explicit repair: {operation_kind}"
         ))
     })?;
+    if !authoritative_operation_exists(pool, operation_kind, operation_id).await? {
+        return Err(DatabaseMigrationError::Backfill(format!(
+            "cannot repair reliability operation kind={} operation={}: no authoritative materialized state exists",
+            operation_kind.as_str(),
+            operation_id
+        )));
+    }
     let mut transaction = pool.begin().await?;
     query(
         "DELETE FROM shardline_reliability_events
@@ -585,25 +592,123 @@ async fn repair_reliability_operation(
     .execute(&mut *transaction)
     .await?;
     transaction.commit().await?;
-    backfill_reliability_events(pool, usize::MAX).await?;
-    let repaired: bool = query_scalar(
-        "SELECT EXISTS(
+    const REPAIR_BACKFILL_BATCH_SIZE: usize = 256;
+    loop {
+        backfill_reliability_events(pool, REPAIR_BACKFILL_BATCH_SIZE).await?;
+        let repaired: bool = query_scalar(
+            "SELECT EXISTS(
              SELECT 1 FROM shardline_reliability_events
              WHERE operation_kind = $1 AND operation_id = $2
          )",
-    )
-    .bind(operation_kind.as_str())
-    .bind(operation_id)
-    .fetch_one(pool)
-    .await?;
-    if !repaired {
-        return Err(DatabaseMigrationError::Backfill(format!(
-            "cannot repair reliability operation kind={} operation={}: no authoritative materialized state exists",
-            operation_kind.as_str(),
-            operation_id
-        )));
+        )
+        .bind(operation_kind.as_str())
+        .bind(operation_id)
+        .fetch_one(pool)
+        .await?;
+        if repaired {
+            break;
+        }
     }
     verify_persisted_reliability_operation(pool, operation_kind, operation_id).await
+}
+
+async fn authoritative_operation_exists(
+    pool: &PgPool,
+    operation_kind: OperationKind,
+    operation_id: &str,
+) -> Result<bool, DatabaseMigrationError> {
+    let exists = match operation_kind {
+        OperationKind::Upload => query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM shardline_upload_intents WHERE intent_id = $1)",
+        )
+        .bind(operation_id)
+        .fetch_one(pool)
+        .await?,
+        OperationKind::ResumableSession => query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM shardline_resumable_sessions WHERE session_id = $1)",
+        )
+        .bind(operation_id)
+        .fetch_one(pool)
+        .await?,
+        OperationKind::ProviderEvent => query_scalar(
+            "SELECT EXISTS(
+                 SELECT 1 FROM shardline_provider_repository_states
+                 WHERE provider || ':' || owner || ':' || repo = $1
+             )",
+        )
+        .bind(operation_id)
+        .fetch_one(pool)
+        .await?,
+        OperationKind::GarbageCollection => query_scalar(
+            "SELECT EXISTS(
+                 SELECT 1 FROM shardline_quarantine_candidates WHERE object_key = $1
+             )",
+        )
+        .bind(operation_id)
+        .fetch_one(pool)
+        .await?,
+        OperationKind::Visibility => query_scalar(
+            "SELECT EXISTS(
+                 SELECT 1 FROM shardline_oci_object_tombstones
+                 WHERE scope_namespace || ':' || repository || ':' || object_kind || ':' || digest_hex = $1
+             )",
+        )
+        .bind(operation_id)
+        .fetch_one(pool)
+        .await?,
+        OperationKind::RetentionHold => query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM shardline_retention_holds WHERE object_key = $1)",
+        )
+        .bind(operation_id)
+        .fetch_one(pool)
+        .await?,
+        OperationKind::WebhookDelivery => query_scalar(
+            "SELECT EXISTS(
+                 SELECT 1 FROM shardline_webhook_deliveries
+                 WHERE octet_length(provider)::text || ':' || provider
+                       || octet_length(owner)::text || ':' || owner
+                       || octet_length(repo)::text || ':' || repo
+                       || octet_length(delivery_id)::text || ':' || delivery_id = $1
+                    OR delivery_id = $1
+             )",
+        )
+        .bind(operation_id)
+        .fetch_one(pool)
+        .await?,
+        OperationKind::MetadataCommit => query_scalar(
+            "SELECT EXISTS(
+                 SELECT 1 FROM shardline_hub_refs
+                 WHERE octet_length(repo_id)::text || ':' || repo_id
+                       || octet_length(ref_name)::text || ':' || ref_name = $1
+             )",
+        )
+        .bind(operation_id)
+        .fetch_one(pool)
+        .await?,
+        OperationKind::OciTag => query_scalar(
+            "SELECT EXISTS(
+                 SELECT 1 FROM shardline_oci_tags
+                 WHERE octet_length(scope_namespace)::text || ':' || scope_namespace
+                       || octet_length(repository)::text || ':' || repository
+                       || octet_length(tag)::text || ':' || tag = $1
+             )",
+        )
+        .bind(operation_id)
+        .fetch_one(pool)
+        .await?,
+        OperationKind::S3Object => query_scalar(
+            "SELECT EXISTS(
+                 SELECT 1 FROM shardline_s3_objects
+                 WHERE octet_length(scope_namespace)::text || ':' || scope_namespace
+                       || octet_length(object_key)::text || ':' || object_key = $1
+             )",
+        )
+        .bind(operation_id)
+        .fetch_one(pool)
+        .await?,
+        OperationKind::Repair => false,
+    };
+    Ok(exists)
 }
 
 /// Verifies every persisted reliability event for an operator-facing fsck run.
