@@ -1,7 +1,8 @@
 use rusqlite::{Connection, OptionalExtension, params};
 use shardline_protocol::{RepositoryProvider, ShardlineHash, unix_now_seconds_lossy};
 use shardline_reliability::{
-    LifecycleEvent, upload_lifecycle_event, verify_upload_lifecycle_events,
+    LifecycleEvent, ProviderEvidenceLog, upload_lifecycle_event, verify_provider_lifecycle_events,
+    verify_upload_lifecycle_events,
 };
 use shardline_storage::ObjectKey;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -11,6 +12,7 @@ use crate::{
     DedupeShardMapping, DedupeStore, FileId, FileReconstruction, LifecycleStore,
     ProviderRepositoryState, QuarantineCandidate, ReconstructionStore, RetentionHold,
     StoredObjectId, WebhookDelivery, parse_xet_hash_hex,
+    provider_evidence::snapshot_from_state,
     upload_intent::{UploadIntent, UploadIntentState, UploadIntentStore},
     xet_hash_hex_string,
 };
@@ -424,8 +426,9 @@ impl LifecycleStore for LocalIndexStore {
         owner: &str,
         repo: &str,
     ) -> Result<Option<ProviderRepositoryState>, Self::Error> {
-        let connection = self.open_connection()?;
-        connection
+        let mut connection = self.open_connection()?;
+        let transaction = connection.transaction()?;
+        let state = transaction
             .query_row(
                 "SELECT provider,
                         owner,
@@ -441,14 +444,28 @@ impl LifecycleStore for LocalIndexStore {
                 params![provider.as_str(), owner, repo],
                 super::helpers::provider_repository_state_from_row,
             )
-            .optional()
-            .map_err(LocalIndexStoreError::from)
+            .optional()?;
+        if let Some(state) = state.as_ref() {
+            let snapshot = snapshot_from_state(state)?;
+            let stored = super::helpers::load_provider_evidence(&transaction, &snapshot)?;
+            if stored.events().is_empty() {
+                verify_provider_lifecycle_events(
+                    ProviderEvidenceLog::baseline(snapshot.clone())?.events(),
+                    &snapshot,
+                )?;
+            } else {
+                stored.verify_for(&snapshot)?;
+            }
+        }
+        transaction.commit()?;
+        Ok(state)
     }
 
     fn list_provider_repository_states(&self) -> Result<Vec<ProviderRepositoryState>, Self::Error> {
-        let connection = self.open_connection()?;
-        let mut statement = connection.prepare(
-            "SELECT provider,
+        let mut connection = self.open_connection()?;
+        let states = {
+            let mut statement = connection.prepare(
+                "SELECT provider,
                     owner,
                     repo,
                     last_access_changed_at_unix_seconds,
@@ -459,9 +476,26 @@ impl LifecycleStore for LocalIndexStore {
                     last_drift_checked_at_unix_seconds
              FROM shardline_provider_repository_states
              ORDER BY provider, owner, repo",
-        )?;
-        let rows = statement.query_map([], super::helpers::provider_repository_state_from_row)?;
-        collect_rows(rows)
+            )?;
+            let rows =
+                statement.query_map([], super::helpers::provider_repository_state_from_row)?;
+            collect_rows(rows)?
+        };
+        let transaction = connection.transaction()?;
+        for state in &states {
+            let snapshot = snapshot_from_state(state)?;
+            let stored = super::helpers::load_provider_evidence(&transaction, &snapshot)?;
+            if stored.events().is_empty() {
+                verify_provider_lifecycle_events(
+                    ProviderEvidenceLog::baseline(snapshot.clone())?.events(),
+                    &snapshot,
+                )?;
+            } else {
+                stored.verify_for(&snapshot)?;
+            }
+        }
+        transaction.commit()?;
+        Ok(states)
     }
 
     fn visit_provider_repository_states<Visitor, VisitorError>(
@@ -482,9 +516,49 @@ impl LifecycleStore for LocalIndexStore {
         &self,
         state: &ProviderRepositoryState,
     ) -> Result<(), Self::Error> {
-        let connection = self.open_connection()?;
+        let mut connection = self.open_connection()?;
+        let transaction = connection.transaction()?;
+        let current = transaction
+            .query_row(
+                "SELECT provider,
+                        owner,
+                        repo,
+                        last_access_changed_at_unix_seconds,
+                        last_revision_pushed_at_unix_seconds,
+                        last_pushed_revision,
+                        last_cache_invalidated_at_unix_seconds,
+                        last_authorization_rechecked_at_unix_seconds,
+                        last_drift_checked_at_unix_seconds
+                 FROM shardline_provider_repository_states
+                 WHERE provider = ?1 AND owner = ?2 AND repo = ?3",
+                params![state.provider().as_str(), state.owner(), state.repo()],
+                super::helpers::provider_repository_state_from_row,
+            )
+            .optional()?;
+        let mut evidence = if let Some(current) = current.as_ref() {
+            let snapshot = snapshot_from_state(current)?;
+            let stored = super::helpers::load_provider_evidence(&transaction, &snapshot)?;
+            if stored.events().is_empty() {
+                ProviderEvidenceLog::baseline(snapshot)?
+            } else {
+                stored.verify_for(&snapshot)?;
+                stored
+            }
+        } else {
+            transaction.execute(
+                "DELETE FROM shardline_reliability_events
+                 WHERE operation_kind = 'ProviderEvent' AND operation_id = ?1",
+                params![format!(
+                    "{}:{}:{}",
+                    state.provider().as_str(),
+                    state.owner(),
+                    state.repo()
+                )],
+            )?;
+            ProviderEvidenceLog::default()
+        };
         let now = unix_now_seconds_lossy();
-        connection.execute(
+        transaction.execute(
             "INSERT INTO shardline_provider_repository_states (
                 provider,
                 owner,
@@ -578,6 +652,30 @@ impl LifecycleStore for LocalIndexStore {
                 u64_to_i64(now)?,
             ],
         )?;
+        let merged = transaction.query_row(
+            "SELECT provider,
+                    owner,
+                    repo,
+                    last_access_changed_at_unix_seconds,
+                    last_revision_pushed_at_unix_seconds,
+                    last_pushed_revision,
+                    last_cache_invalidated_at_unix_seconds,
+                    last_authorization_rechecked_at_unix_seconds,
+                    last_drift_checked_at_unix_seconds
+             FROM shardline_provider_repository_states
+             WHERE provider = ?1 AND owner = ?2 AND repo = ?3",
+            params![state.provider().as_str(), state.owner(), state.repo()],
+            super::helpers::provider_repository_state_from_row,
+        )?;
+        let snapshot = snapshot_from_state(&merged)?;
+        evidence.record(snapshot)?;
+        let event = evidence.events().last().ok_or_else(|| {
+            LocalIndexStoreError::Reliability(shardline_reliability::ReliabilityError::EmptyField(
+                "provider evidence",
+            ))
+        })?;
+        super::helpers::persist_provider_evidence(&transaction, event)?;
+        transaction.commit()?;
         Ok(())
     }
 
@@ -587,12 +685,19 @@ impl LifecycleStore for LocalIndexStore {
         owner: &str,
         repo: &str,
     ) -> Result<bool, Self::Error> {
-        let connection = self.open_connection()?;
-        let changed = connection.execute(
+        let mut connection = self.open_connection()?;
+        let transaction = connection.transaction()?;
+        let changed = transaction.execute(
             "DELETE FROM shardline_provider_repository_states
              WHERE provider = ?1 AND owner = ?2 AND repo = ?3",
             params![provider.as_str(), owner, repo],
         )?;
+        transaction.execute(
+            "DELETE FROM shardline_reliability_events
+             WHERE operation_kind = 'ProviderEvent' AND operation_id = ?1",
+            params![format!("{}:{}:{}", provider.as_str(), owner, repo)],
+        )?;
+        transaction.commit()?;
         Ok(changed > 0)
     }
 }
@@ -1526,6 +1631,72 @@ mod tests {
         )
         .expect("lookup should succeed");
         assert_eq!(loaded, Some(state));
+    }
+
+    #[test]
+    fn provider_repository_state_legacy_missing_evidence_remains_readable() {
+        let store = make_store();
+        let state = ProviderRepositoryState::new(
+            RepositoryProvider::GitHub,
+            "team".into(),
+            "legacy-provider".into(),
+            Some(100),
+            None,
+            None,
+        );
+        LifecycleStore::upsert_provider_repository_state(&store, &state).unwrap();
+        let connection = store.open_connection().unwrap();
+        connection
+            .execute(
+                "DELETE FROM shardline_reliability_events
+                 WHERE operation_kind = 'ProviderEvent'
+                   AND operation_id = 'github:team:legacy-provider'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            LifecycleStore::provider_repository_state(
+                &store,
+                RepositoryProvider::GitHub,
+                "team",
+                "legacy-provider",
+            )
+            .unwrap(),
+            Some(state)
+        );
+    }
+
+    #[test]
+    fn provider_repository_state_tampered_evidence_is_rejected_on_read() {
+        let store = make_store();
+        let state = ProviderRepositoryState::new(
+            RepositoryProvider::GitHub,
+            "team".into(),
+            "tampered-provider".into(),
+            Some(100),
+            None,
+            None,
+        );
+        LifecycleStore::upsert_provider_repository_state(&store, &state).unwrap();
+        let connection = store.open_connection().unwrap();
+        connection
+            .execute(
+                "UPDATE shardline_reliability_events
+                 SET event_json = '{\"sequence\": 99}'
+                 WHERE operation_kind = 'ProviderEvent'
+                   AND operation_id = 'github:team:tampered-provider'",
+                [],
+            )
+            .unwrap();
+        assert!(
+            LifecycleStore::provider_repository_state(
+                &store,
+                RepositoryProvider::GitHub,
+                "team",
+                "tampered-provider",
+            )
+            .is_err()
+        );
     }
 
     #[test]

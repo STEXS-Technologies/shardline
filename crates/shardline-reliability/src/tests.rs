@@ -257,3 +257,38 @@ fn session_evidence_is_bound_to_one_identity() {
         Err(ReliabilityError::OperationMismatch)
     ));
 }
+
+fn provider_snapshot(revision: Option<&str>) -> ProviderLifecycleSnapshot {
+    ProviderLifecycleSnapshot::from_parts(
+        ProviderRepositoryIdentity::new("github", "team", "repo"),
+        ProviderLifecycleObservations::new(
+            Some(100),
+            revision.map(ToOwned::to_owned).map(|_| 200),
+            revision.map(ToOwned::to_owned),
+            Some(300),
+            Some(400),
+            Some(500),
+        ),
+    )
+    .unwrap()
+}
+
+#[test]
+fn provider_evidence_binds_materialized_snapshot_and_digests() {
+    let initial = provider_snapshot(Some("a"));
+    let mut evidence = ProviderEvidenceLog::baseline(initial).unwrap();
+    evidence.record(provider_snapshot(Some("b"))).unwrap();
+    verify_provider_lifecycle_events(evidence.events(), &provider_snapshot(Some("b"))).unwrap();
+
+    let mut tampered = evidence;
+    tampered
+        .events_mut()
+        .get_mut(1)
+        .expect("provider evidence has a transition")
+        .after
+        .last_pushed_revision = Some("forged".to_owned());
+    assert!(matches!(
+        tampered.verify_for(&provider_snapshot(Some("b"))),
+        Err(ReliabilityError::StateDigestMismatch) | Err(ReliabilityError::ProcessDigestMismatch)
+    ));
+}

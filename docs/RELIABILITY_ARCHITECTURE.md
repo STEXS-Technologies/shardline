@@ -25,11 +25,15 @@ two interpretations of reliability.
 
 ## Scope boundaries
 
-The canonical state machines are:
+The canonical state machines and durable lifecycle snapshots are:
 
 - upload intent lifecycle (`created` through `visible` or `failed`);
 - resumable session lifecycle (`active` through `completed`, `aborted`, or
   `expired`).
+- provider-repository lifecycle observations (access, revision, cache,
+  authorization, and drift timestamps plus the associated revision), recorded
+  as complete materialized snapshots so monotonic merges cannot silently drift
+  away from their evidence.
 
 This same resumable lifecycle evidence is also persisted by the standalone
 file-backed S3 multipart and OCI upload-session adapters. Their legacy session
@@ -58,9 +62,13 @@ verify the journal against the stored scope, session ID, target, and current
 state before returning or acting on the session.
 
 Provider metadata, manifests, tombstones, and CAS records retain their
-existing transactional domain models and fencing rules. They do not create a
-second reliability protocol. Where they repair or reconcile an upload or
-session, they consume the canonical journal and verify it first.
+existing transactional domain models and fencing rules. Provider-repository
+lifecycle rows now also use the canonical snapshot evidence protocol: the
+memory, SQLite, and Postgres adapters append and verify the complete snapshot
+in the same mutation boundary, while migration backfills a self-baseline for
+legacy rows. They do not create a second reliability protocol. Where they
+repair or reconcile an upload or session, they consume the canonical journal
+and verify it first.
 
 The following are data-plane recovery materializations, not independent
 lifecycle state machines:

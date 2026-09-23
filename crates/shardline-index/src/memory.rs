@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet, hash_map::Entry},
     sync::{Arc, Mutex, MutexGuard},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -7,7 +7,8 @@ use std::{
 use serde_json::{Error as SerdeJsonError, to_vec};
 use shardline_protocol::{RepositoryProvider, RepositoryScope, ShardlineHash};
 use shardline_reliability::{
-    LifecycleEvent, upload_lifecycle_event, verify_lifecycle_chain, verify_upload_lifecycle_events,
+    LifecycleEvent, ProviderEvidenceLog, upload_lifecycle_event, verify_lifecycle_chain,
+    verify_provider_lifecycle_events, verify_upload_lifecycle_events,
 };
 use shardline_storage::ObjectKey;
 use thiserror::Error;
@@ -18,6 +19,7 @@ use crate::{
     ReconstructionStore, RecordMutation, RecordStoreFuture, RecordTraversal, RepoKey,
     RepositoryRecordScope, RetentionHold, RevisionRecord, StoredObjectId, StoredRecord, TreeEntry,
     TreeEntryOutcome, TreeKey, TreeStore, WebhookDelivery, XorbId,
+    provider_evidence::snapshot_from_state,
     upload_intent::{
         UploadIntent, UploadIntentConflictError, UploadIntentState, UploadIntentStore,
     },
@@ -114,11 +116,24 @@ impl MemoryIndexStore {
         state: &ProviderRepositoryState,
     ) -> Result<(), MemoryIndexStoreError> {
         let key = MemoryProviderRepositoryStateKey::from_domain(state);
-        self.lock_state()?
+        let mut store = self.lock_state()?;
+        let merged = store
             .provider_repository_states
-            .entry(key)
-            .and_modify(|current| *current = current.merge_monotonic(state))
-            .or_insert_with(|| state.clone());
+            .get(&key)
+            .map_or_else(|| state.clone(), |current| current.merge_monotonic(state));
+        let snapshot = snapshot_from_state(&merged)
+            .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
+        let evidence = match store.provider_repository_evidence.entry(key.clone()) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => entry.insert(
+                ProviderEvidenceLog::baseline(snapshot.clone())
+                    .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?,
+            ),
+        };
+        evidence
+            .record(snapshot)
+            .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
+        store.provider_repository_states.insert(key, merged);
         Ok(())
     }
 
@@ -334,16 +349,26 @@ impl LifecycleStore for MemoryIndexStore {
         repo: &str,
     ) -> Result<Option<ProviderRepositoryState>, Self::Error> {
         let key = MemoryProviderRepositoryStateKey::new(provider, owner, repo);
-        Ok(self
-            .lock_state()?
-            .provider_repository_states
+        let store = self.lock_state()?;
+        let Some(state) = store.provider_repository_states.get(&key).cloned() else {
+            return Ok(None);
+        };
+        let snapshot = snapshot_from_state(&state)
+            .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
+        let evidence = store
+            .provider_repository_evidence
             .get(&key)
-            .cloned())
+            .ok_or_else(|| {
+                MemoryIndexStoreError::Reliability("provider state evidence is missing".into())
+            })?;
+        verify_provider_lifecycle_events(evidence.events(), &snapshot)
+            .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
+        Ok(Some(state))
     }
 
     fn list_provider_repository_states(&self) -> Result<Vec<ProviderRepositoryState>, Self::Error> {
-        let mut states = self
-            .lock_state()?
+        let store = self.lock_state()?;
+        let mut states = store
             .provider_repository_states
             .values()
             .cloned()
@@ -354,6 +379,19 @@ impl LifecycleStore for MemoryIndexStore {
                 .then_with(|| left.owner().cmp(right.owner()))
                 .then_with(|| left.repo().cmp(right.repo()))
         });
+        for state in &states {
+            let key = MemoryProviderRepositoryStateKey::from_domain(state);
+            let snapshot = snapshot_from_state(state)
+                .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
+            let evidence = store
+                .provider_repository_evidence
+                .get(&key)
+                .ok_or_else(|| {
+                    MemoryIndexStoreError::Reliability("provider state evidence is missing".into())
+                })?;
+            verify_provider_lifecycle_events(evidence.events(), &snapshot)
+                .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
+        }
         Ok(states)
     }
 
@@ -371,11 +409,9 @@ impl LifecycleStore for MemoryIndexStore {
         repo: &str,
     ) -> Result<bool, Self::Error> {
         let key = MemoryProviderRepositoryStateKey::new(provider, owner, repo);
-        Ok(self
-            .lock_state()?
-            .provider_repository_states
-            .remove(&key)
-            .is_some())
+        let mut store = self.lock_state()?;
+        store.provider_repository_evidence.remove(&key);
+        Ok(store.provider_repository_states.remove(&key).is_some())
     }
 }
 
@@ -992,6 +1028,7 @@ struct MemoryIndexState {
     retention_holds: HashMap<ObjectKey, RetentionHold>,
     webhook_deliveries: HashMap<MemoryWebhookDeliveryKey, WebhookDelivery>,
     provider_repository_states: HashMap<MemoryProviderRepositoryStateKey, ProviderRepositoryState>,
+    provider_repository_evidence: HashMap<MemoryProviderRepositoryStateKey, ProviderEvidenceLog>,
     upload_intents: HashMap<String, UploadIntent>,
     reliability_events: HashMap<String, Vec<LifecycleEvent>>,
     tree_entries: BTreeMap<MemoryTreeKey, TreeEntry>,

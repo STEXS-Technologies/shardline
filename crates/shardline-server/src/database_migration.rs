@@ -2,12 +2,15 @@ use serde_json::{from_value, to_value};
 use shardline_index::{ResumableSessionState, UploadIntentState};
 use shardline_protocol::SecretString;
 use shardline_reliability::{
-    LifecycleEvent, StateTransitionEvent, UploadLifecycleState, baseline_resumable_session_events,
-    baseline_upload_lifecycle_events, verify_resumable_session_events,
+    LifecycleEvent, ProviderEvidenceLog, ProviderLifecycleEvent, ProviderLifecycleObservations,
+    ProviderLifecycleSnapshot, ProviderRepositoryIdentity, StateTransitionEvent,
+    UploadLifecycleState, baseline_resumable_session_events, baseline_upload_lifecycle_events,
+    verify_provider_lifecycle_events, verify_resumable_session_events,
     verify_upload_lifecycle_events,
 };
 use sqlx::{
-    Error as SqlxError, PgPool, Postgres, Row, Transaction, postgres::PgPoolOptions, query, raw_sql,
+    Error as SqlxError, PgPool, Postgres, Row, Transaction, postgres::PgPoolOptions, query,
+    query_scalar, raw_sql,
 };
 use thiserror::Error;
 
@@ -477,6 +480,17 @@ async fn ensure_migration_history_table(pool: &PgPool) -> Result<(), SqlxError> 
 /// prefix. This runs under the migration advisory lock and is idempotent: a
 /// row with any evidence already present is left untouched.
 async fn backfill_reliability_events(pool: &PgPool) -> Result<(), DatabaseMigrationError> {
+    let required_tables_exist: bool = query_scalar(
+        "SELECT to_regclass('public.shardline_reliability_events') IS NOT NULL
+             AND to_regclass('public.shardline_upload_intents') IS NOT NULL
+             AND to_regclass('public.shardline_resumable_sessions') IS NOT NULL
+             AND to_regclass('public.shardline_provider_repository_states') IS NOT NULL",
+    )
+    .fetch_one(pool)
+    .await?;
+    if !required_tables_exist {
+        return Ok(());
+    }
     let mut transaction = pool.begin().await?;
     let upload_rows = query(
         "SELECT i.intent_id, i.object_key, i.object_hash, i.state
@@ -579,6 +593,52 @@ async fn backfill_reliability_events(pool: &PgPool) -> Result<(), DatabaseMigrat
         }
     }
 
+    let provider_rows = query(
+        "SELECT s.provider,
+                s.owner,
+                s.repo,
+                s.last_access_changed_at_unix_seconds,
+                s.last_revision_pushed_at_unix_seconds,
+                s.last_pushed_revision,
+                s.last_cache_invalidated_at_unix_seconds,
+                s.last_authorization_rechecked_at_unix_seconds,
+                s.last_drift_checked_at_unix_seconds
+         FROM shardline_provider_repository_states AS s
+         WHERE NOT EXISTS (
+             SELECT 1 FROM shardline_reliability_events AS e
+             WHERE e.operation_kind = 'ProviderEvent'
+               AND e.operation_id = s.provider || ':' || s.owner || ':' || s.repo
+         )
+         FOR UPDATE OF s",
+    )
+    .fetch_all(&mut *transaction)
+    .await?;
+    for row in provider_rows {
+        let snapshot = provider_snapshot_from_row(&row)?;
+        let events = ProviderEvidenceLog::baseline(snapshot)
+            .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?;
+        for event in events.events() {
+            query(
+                "INSERT INTO shardline_reliability_events
+                    (operation_kind, operation_id, sequence, event_json)
+                 VALUES ($1, $2, $3, $4)
+                 ON CONFLICT (operation_kind, operation_id, sequence) DO NOTHING",
+            )
+            .bind(event.operation.kind.as_str())
+            .bind(&event.operation.operation_id)
+            .bind(
+                i64::try_from(event.sequence)
+                    .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?,
+            )
+            .bind(
+                to_value(event)
+                    .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?,
+            )
+            .execute(&mut *transaction)
+            .await?;
+        }
+    }
+
     // A partially present journal is not a valid migration state. The
     // backfill above repairs only rows that had no evidence at all; this pass
     // verifies every row before committing so an interrupted or tampered
@@ -674,8 +734,98 @@ async fn backfill_reliability_events(pool: &PgPool) -> Result<(), DatabaseMigrat
                 ))
             })?;
     }
+
+    let provider_verification_rows = query(
+        "SELECT provider,
+                owner,
+                repo,
+                last_access_changed_at_unix_seconds,
+                last_revision_pushed_at_unix_seconds,
+                last_pushed_revision,
+                last_cache_invalidated_at_unix_seconds,
+                last_authorization_rechecked_at_unix_seconds,
+                last_drift_checked_at_unix_seconds
+         FROM shardline_provider_repository_states
+         FOR UPDATE",
+    )
+    .fetch_all(&mut *transaction)
+    .await?;
+    for row in provider_verification_rows {
+        let snapshot = provider_snapshot_from_row(&row)?;
+        let operation_id = format!("{}:{}:{}", snapshot.provider, snapshot.owner, snapshot.repo);
+        let event_rows = query(
+            "SELECT event_json
+             FROM shardline_reliability_events
+             WHERE operation_kind = 'ProviderEvent' AND operation_id = $1
+             ORDER BY sequence",
+        )
+        .bind(operation_id)
+        .fetch_all(&mut *transaction)
+        .await?;
+        let events = event_rows
+            .into_iter()
+            .map(|event_row| {
+                let value: serde_json::Value = event_row.try_get("event_json")?;
+                from_value::<ProviderLifecycleEvent>(value)
+                    .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))
+            })
+            .collect::<Result<Vec<_>, DatabaseMigrationError>>()?;
+        if events.is_empty() {
+            let baseline = ProviderEvidenceLog::baseline(snapshot.clone())
+                .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?;
+            verify_provider_lifecycle_events(baseline.events(), &snapshot).map_err(|error| {
+                DatabaseMigrationError::Backfill(format!(
+                    "invalid provider reliability baseline for {}: {error}",
+                    snapshot.repo
+                ))
+            })?;
+        } else {
+            verify_provider_lifecycle_events(&events, &snapshot).map_err(|error| {
+                DatabaseMigrationError::Backfill(format!(
+                    "invalid provider reliability journal for {}: {error}",
+                    snapshot.repo
+                ))
+            })?;
+        }
+    }
     transaction.commit().await?;
     Ok(())
+}
+
+fn provider_snapshot_from_row(
+    row: &sqlx::postgres::PgRow,
+) -> Result<ProviderLifecycleSnapshot, DatabaseMigrationError> {
+    ProviderLifecycleSnapshot::from_parts(
+        ProviderRepositoryIdentity::new(
+            row.try_get::<String, _>("provider")?,
+            row.try_get::<String, _>("owner")?,
+            row.try_get::<String, _>("repo")?,
+        ),
+        ProviderLifecycleObservations::new(
+            row.try_get::<Option<i64>, _>("last_access_changed_at_unix_seconds")?
+                .map(u64::try_from)
+                .transpose()
+                .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?,
+            row.try_get::<Option<i64>, _>("last_revision_pushed_at_unix_seconds")?
+                .map(u64::try_from)
+                .transpose()
+                .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?,
+            row.try_get("last_pushed_revision")?,
+            row.try_get::<Option<i64>, _>("last_cache_invalidated_at_unix_seconds")?
+                .map(u64::try_from)
+                .transpose()
+                .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?,
+            row.try_get::<Option<i64>, _>("last_authorization_rechecked_at_unix_seconds")?
+                .map(u64::try_from)
+                .transpose()
+                .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?,
+            row.try_get::<Option<i64>, _>("last_drift_checked_at_unix_seconds")?
+                .map(u64::try_from)
+                .transpose()
+                .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?,
+        ),
+    )
+    .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))
 }
 
 async fn acquire_migration_lock(

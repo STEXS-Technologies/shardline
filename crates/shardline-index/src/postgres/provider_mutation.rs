@@ -1,12 +1,19 @@
 use shardline_protocol::RepositoryProvider;
-use sqlx::{Acquire, PgConnection, Postgres, Transaction, query, query_scalar};
+use shardline_reliability::{
+    ProviderEvidenceLog, ProviderLifecycleEvent, ProviderLifecycleSnapshot,
+    verify_provider_lifecycle_events,
+};
+use sqlx::{Acquire, PgConnection, Postgres, Row, Transaction, query, query_scalar};
 
 use super::{
     PostgresMetadataStoreError, PostgresRecordLocator, RecordKind,
     record_store::{record_locator, upsert_record_in_transaction},
     u64_to_i64,
 };
-use crate::{FileRecord, ProviderRepositoryState, ResourceLockKey, RetentionHold, WebhookDelivery};
+use crate::{
+    FileRecord, ProviderRepositoryState, ResourceLockKey, RetentionHold, WebhookDelivery,
+    provider_evidence::snapshot_from_state,
+};
 
 /// One durable fencing identity that must still match when a provider mutation commits.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -201,6 +208,18 @@ impl super::PostgresIndexStore {
             .bind(&key.repo)
             .execute(&mut *transaction)
             .await?;
+            query(
+                "DELETE FROM shardline_reliability_events
+                 WHERE operation_kind = 'ProviderEvent' AND operation_id = $1",
+            )
+            .bind(format!(
+                "{}:{}:{}",
+                key.provider.as_str(),
+                key.owner,
+                key.repo
+            ))
+            .execute(&mut *transaction)
+            .await?;
         }
 
         transaction.commit().await?;
@@ -239,10 +258,55 @@ async fn upsert_retention_hold(
     Ok(())
 }
 
-async fn upsert_provider_repository_state(
+pub(super) async fn upsert_provider_repository_state(
     transaction: &mut Transaction<'_, Postgres>,
     state: &ProviderRepositoryState,
 ) -> Result<(), PostgresMetadataStoreError> {
+    let current = query(
+        "SELECT provider,
+                owner,
+                repo,
+                last_access_changed_at_unix_seconds,
+                last_revision_pushed_at_unix_seconds,
+                last_pushed_revision,
+                last_cache_invalidated_at_unix_seconds,
+                last_authorization_rechecked_at_unix_seconds,
+                last_drift_checked_at_unix_seconds
+         FROM shardline_provider_repository_states
+         WHERE provider = $1 AND owner = $2 AND repo = $3
+         FOR UPDATE",
+    )
+    .bind(state.provider().as_str())
+    .bind(state.owner())
+    .bind(state.repo())
+    .fetch_optional(&mut **transaction)
+    .await?;
+    let mut evidence = if let Some(row) = current.as_ref() {
+        let current_state = super::index_store::provider_repository_state_from_row(row)?;
+        let current_snapshot = snapshot_from_state(&current_state)?;
+        let events = load_provider_evidence(transaction, &current_snapshot).await?;
+        if events.is_empty() {
+            ProviderEvidenceLog::baseline(current_snapshot)?
+        } else {
+            let log = ProviderEvidenceLog::from_events(events)?;
+            verify_provider_lifecycle_events(log.events(), &current_snapshot)?;
+            log
+        }
+    } else {
+        query(
+            "DELETE FROM shardline_reliability_events
+             WHERE operation_kind = 'ProviderEvent' AND operation_id = $1",
+        )
+        .bind(format!(
+            "{}:{}:{}",
+            state.provider().as_str(),
+            state.owner(),
+            state.repo()
+        ))
+        .execute(&mut **transaction)
+        .await?;
+        ProviderEvidenceLog::default()
+    };
     query(
         "INSERT INTO shardline_provider_repository_states (
             provider,
@@ -343,7 +407,59 @@ async fn upsert_provider_repository_state(
     )
     .execute(&mut **transaction)
     .await?;
+    let row = query(
+        "SELECT provider,
+                owner,
+                repo,
+                last_access_changed_at_unix_seconds,
+                last_revision_pushed_at_unix_seconds,
+                last_pushed_revision,
+                last_cache_invalidated_at_unix_seconds,
+                last_authorization_rechecked_at_unix_seconds,
+                last_drift_checked_at_unix_seconds
+         FROM shardline_provider_repository_states
+         WHERE provider = $1 AND owner = $2 AND repo = $3",
+    )
+    .bind(state.provider().as_str())
+    .bind(state.owner())
+    .bind(state.repo())
+    .fetch_one(&mut **transaction)
+    .await?;
+    let merged_state = super::index_store::provider_repository_state_from_row(&row)?;
+    evidence.record(snapshot_from_state(&merged_state)?)?;
+    let event = evidence.events().last().ok_or_else(|| {
+        PostgresMetadataStoreError::Reliability(
+            shardline_reliability::ReliabilityError::EmptyField("provider evidence"),
+        )
+    })?;
+    super::insert_reliability_event_json(
+        &mut **transaction,
+        event.operation.kind.as_str(),
+        &event.operation.operation_id,
+        event.sequence,
+        serde_json::to_value(event)?,
+    )
+    .await?;
     Ok(())
+}
+
+async fn load_provider_evidence(
+    transaction: &mut Transaction<'_, Postgres>,
+    snapshot: &ProviderLifecycleSnapshot,
+) -> Result<Vec<ProviderLifecycleEvent>, PostgresMetadataStoreError> {
+    let operation_id = format!("{}:{}:{}", snapshot.provider, snapshot.owner, snapshot.repo);
+    let rows = query(
+        "SELECT event_json
+         FROM shardline_reliability_events
+         WHERE operation_kind = 'ProviderEvent' AND operation_id = $1
+         ORDER BY sequence",
+    )
+    .bind(operation_id)
+    .fetch_all(&mut **transaction)
+    .await?;
+    rows.into_iter()
+        .map(|row| Ok(serde_json::from_value(row.try_get("event_json")?)?))
+        .collect()
 }
 
 #[cfg(test)]

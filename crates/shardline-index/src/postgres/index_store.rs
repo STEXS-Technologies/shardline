@@ -2,7 +2,8 @@ use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use shardline_protocol::{ChunkRange, RepositoryProvider, ShardlineHash};
 use shardline_reliability::{
-    LifecycleEvent, upload_lifecycle_event, verify_upload_lifecycle_events,
+    LifecycleEvent, ProviderEvidenceLog, ProviderLifecycleEvent, upload_lifecycle_event,
+    verify_provider_lifecycle_events, verify_upload_lifecycle_events,
 };
 use shardline_storage::ObjectKey;
 use sqlx::{Row, postgres::PgRow, query, query_scalar, types::Json};
@@ -35,6 +36,34 @@ async fn verify_postgres_intent_evidence(
         intent.object_hash(),
         intent.state(),
     )?;
+    Ok(())
+}
+
+async fn verify_postgres_provider_evidence(
+    store: &super::PostgresIndexStore,
+    state: &ProviderRepositoryState,
+) -> Result<(), PostgresMetadataStoreError> {
+    let snapshot = crate::provider_evidence::snapshot_from_state(state)?;
+    let operation_id = format!("{}:{}:{}", snapshot.provider, snapshot.owner, snapshot.repo);
+    let rows = query(
+        "SELECT event_json
+         FROM shardline_reliability_events
+         WHERE operation_kind = 'ProviderEvent' AND operation_id = $1
+         ORDER BY sequence",
+    )
+    .bind(operation_id)
+    .fetch_all(&store.pool)
+    .await?;
+    let events = rows
+        .into_iter()
+        .map(|row| Ok(serde_json::from_value(row.try_get("event_json")?)?))
+        .collect::<Result<Vec<ProviderLifecycleEvent>, PostgresMetadataStoreError>>()?;
+    if events.is_empty() {
+        let baseline = ProviderEvidenceLog::baseline(snapshot.clone())?;
+        verify_provider_lifecycle_events(baseline.events(), &snapshot)?;
+    } else {
+        verify_provider_lifecycle_events(&events, &snapshot)?;
+    }
     Ok(())
 }
 
@@ -589,9 +618,14 @@ impl AsyncIndexStore for super::PostgresIndexStore {
             .fetch_optional(&self.pool)
             .await?;
 
-            row.as_ref()
+            let state = row
+                .as_ref()
                 .map(provider_repository_state_from_row)
-                .transpose()
+                .transpose()?;
+            if let Some(state) = state.as_ref() {
+                verify_postgres_provider_evidence(self, state).await?;
+            }
+            Ok(state)
         })
     }
 
@@ -614,9 +648,14 @@ impl AsyncIndexStore for super::PostgresIndexStore {
             )
             .fetch_all(&self.pool)
             .await?;
-            rows.into_iter()
+            let states = rows
+                .into_iter()
                 .map(|row| provider_repository_state_from_row(&row))
-                .collect::<Result<Vec<_>, _>>()
+                .collect::<Result<Vec<_>, _>>()?;
+            for state in &states {
+                verify_postgres_provider_evidence(self, state).await?;
+            }
+            Ok(states)
         })
     }
 
@@ -625,106 +664,10 @@ impl AsyncIndexStore for super::PostgresIndexStore {
         state: &'operation ProviderRepositoryState,
     ) -> IndexStoreFuture<'operation, (), Self::Error> {
         Box::pin(async move {
-            query(
-                "INSERT INTO shardline_provider_repository_states (
-                    provider,
-                    owner,
-                    repo,
-                    last_access_changed_at_unix_seconds,
-                    last_revision_pushed_at_unix_seconds,
-                    last_pushed_revision,
-                    last_cache_invalidated_at_unix_seconds,
-                    last_authorization_rechecked_at_unix_seconds,
-                    last_drift_checked_at_unix_seconds
-                 )
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-                 ON CONFLICT (provider, owner, repo)
-                 DO UPDATE SET
-                    last_access_changed_at_unix_seconds = CASE
-                        WHEN EXCLUDED.last_access_changed_at_unix_seconds IS NULL
-                            THEN shardline_provider_repository_states.last_access_changed_at_unix_seconds
-                        WHEN shardline_provider_repository_states.last_access_changed_at_unix_seconds IS NULL
-                          OR EXCLUDED.last_access_changed_at_unix_seconds >= shardline_provider_repository_states.last_access_changed_at_unix_seconds
-                            THEN EXCLUDED.last_access_changed_at_unix_seconds
-                        ELSE shardline_provider_repository_states.last_access_changed_at_unix_seconds
-                    END,
-                    last_pushed_revision = CASE
-                        WHEN EXCLUDED.last_revision_pushed_at_unix_seconds IS NOT NULL
-                         AND (shardline_provider_repository_states.last_revision_pushed_at_unix_seconds IS NULL
-                           OR EXCLUDED.last_revision_pushed_at_unix_seconds >= shardline_provider_repository_states.last_revision_pushed_at_unix_seconds)
-                            THEN EXCLUDED.last_pushed_revision
-                        ELSE shardline_provider_repository_states.last_pushed_revision
-                    END,
-                    last_revision_pushed_at_unix_seconds = CASE
-                        WHEN EXCLUDED.last_revision_pushed_at_unix_seconds IS NULL
-                            THEN shardline_provider_repository_states.last_revision_pushed_at_unix_seconds
-                        WHEN shardline_provider_repository_states.last_revision_pushed_at_unix_seconds IS NULL
-                          OR EXCLUDED.last_revision_pushed_at_unix_seconds >= shardline_provider_repository_states.last_revision_pushed_at_unix_seconds
-                            THEN EXCLUDED.last_revision_pushed_at_unix_seconds
-                        ELSE shardline_provider_repository_states.last_revision_pushed_at_unix_seconds
-                    END,
-                    last_cache_invalidated_at_unix_seconds = CASE
-                        WHEN EXCLUDED.last_cache_invalidated_at_unix_seconds IS NULL
-                            THEN shardline_provider_repository_states.last_cache_invalidated_at_unix_seconds
-                        WHEN shardline_provider_repository_states.last_cache_invalidated_at_unix_seconds IS NULL
-                          OR EXCLUDED.last_cache_invalidated_at_unix_seconds >= shardline_provider_repository_states.last_cache_invalidated_at_unix_seconds
-                            THEN EXCLUDED.last_cache_invalidated_at_unix_seconds
-                        ELSE shardline_provider_repository_states.last_cache_invalidated_at_unix_seconds
-                    END,
-                    last_authorization_rechecked_at_unix_seconds = CASE
-                        WHEN EXCLUDED.last_authorization_rechecked_at_unix_seconds IS NULL
-                            THEN shardline_provider_repository_states.last_authorization_rechecked_at_unix_seconds
-                        WHEN shardline_provider_repository_states.last_authorization_rechecked_at_unix_seconds IS NULL
-                          OR EXCLUDED.last_authorization_rechecked_at_unix_seconds >= shardline_provider_repository_states.last_authorization_rechecked_at_unix_seconds
-                            THEN EXCLUDED.last_authorization_rechecked_at_unix_seconds
-                        ELSE shardline_provider_repository_states.last_authorization_rechecked_at_unix_seconds
-                    END,
-                    last_drift_checked_at_unix_seconds = CASE
-                        WHEN EXCLUDED.last_drift_checked_at_unix_seconds IS NULL
-                            THEN shardline_provider_repository_states.last_drift_checked_at_unix_seconds
-                        WHEN shardline_provider_repository_states.last_drift_checked_at_unix_seconds IS NULL
-                          OR EXCLUDED.last_drift_checked_at_unix_seconds >= shardline_provider_repository_states.last_drift_checked_at_unix_seconds
-                            THEN EXCLUDED.last_drift_checked_at_unix_seconds
-                        ELSE shardline_provider_repository_states.last_drift_checked_at_unix_seconds
-                    END,
-                    updated_at = now()",
-            )
-            .bind(state.provider().as_str())
-            .bind(state.owner())
-            .bind(state.repo())
-            .bind(
-                state
-                    .last_access_changed_at_unix_seconds()
-                    .map(u64_to_i64)
-                    .transpose()?,
-            )
-            .bind(
-                state
-                    .last_revision_pushed_at_unix_seconds()
-                    .map(u64_to_i64)
-                    .transpose()?,
-            )
-            .bind(state.last_pushed_revision())
-            .bind(
-                state
-                    .last_cache_invalidated_at_unix_seconds()
-                    .map(u64_to_i64)
-                    .transpose()?,
-            )
-            .bind(
-                state
-                    .last_authorization_rechecked_at_unix_seconds()
-                    .map(u64_to_i64)
-                    .transpose()?,
-            )
-            .bind(
-                state
-                    .last_drift_checked_at_unix_seconds()
-                    .map(u64_to_i64)
-                    .transpose()?,
-            )
-            .execute(&self.pool)
-            .await?;
+            let mut transaction = self.pool.begin().await?;
+            super::provider_mutation::upsert_provider_repository_state(&mut transaction, state)
+                .await?;
+            transaction.commit().await?;
             Ok(())
         })
     }
@@ -736,6 +679,7 @@ impl AsyncIndexStore for super::PostgresIndexStore {
         repo: &'operation str,
     ) -> IndexStoreFuture<'operation, bool, Self::Error> {
         Box::pin(async move {
+            let mut transaction = self.pool.begin().await?;
             let result = query(
                 "DELETE FROM shardline_provider_repository_states
                  WHERE provider = $1 AND owner = $2 AND repo = $3",
@@ -743,8 +687,16 @@ impl AsyncIndexStore for super::PostgresIndexStore {
             .bind(provider.as_str())
             .bind(owner)
             .bind(repo)
-            .execute(&self.pool)
+            .execute(&mut *transaction)
             .await?;
+            query(
+                "DELETE FROM shardline_reliability_events
+                 WHERE operation_kind = 'ProviderEvent' AND operation_id = $1",
+            )
+            .bind(format!("{}:{}:{}", provider.as_str(), owner, repo))
+            .execute(&mut *transaction)
+            .await?;
+            transaction.commit().await?;
             Ok(result.rows_affected() > 0)
         })
     }
@@ -1312,7 +1264,7 @@ fn webhook_delivery_from_row(row: &PgRow) -> Result<WebhookDelivery, PostgresMet
     .map_err(PostgresMetadataStoreError::from)
 }
 
-fn provider_repository_state_from_row(
+pub(super) fn provider_repository_state_from_row(
     row: &PgRow,
 ) -> Result<ProviderRepositoryState, PostgresMetadataStoreError> {
     let provider_name = row.try_get::<String, _>("provider")?;
@@ -1680,6 +1632,62 @@ mod tests {
             Some(180)
         );
         assert_eq!(loaded.last_drift_checked_at_unix_seconds(), Some(190));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pg_provider_repository_state_tampered_evidence_is_rejected_on_read() {
+        let Some(pool) = connect_postgres().await else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let store = make_pg_store(pool.clone());
+        store
+            .delete_provider_repository_state(
+                RepositoryProvider::GitHub,
+                "evidence-team",
+                "tampered",
+            )
+            .await
+            .expect("clean provider evidence fixture");
+        let state = ProviderRepositoryState::new(
+            RepositoryProvider::GitHub,
+            "evidence-team".into(),
+            "tampered".into(),
+            Some(100),
+            None,
+            None,
+        );
+        store
+            .upsert_provider_repository_state(&state)
+            .await
+            .expect("create provider evidence fixture");
+        sqlx::query(
+            "UPDATE shardline_reliability_events
+             SET event_json = '{}'::jsonb
+             WHERE operation_kind = 'ProviderEvent'
+               AND operation_id = $1",
+        )
+        .bind(format!(
+            "{}:evidence-team:tampered",
+            RepositoryProvider::GitHub.as_str()
+        ))
+        .execute(&pool)
+        .await
+        .expect("tamper provider evidence fixture");
+        assert!(
+            store
+                .provider_repository_state(RepositoryProvider::GitHub, "evidence-team", "tampered")
+                .await
+                .is_err()
+        );
+        store
+            .delete_provider_repository_state(
+                RepositoryProvider::GitHub,
+                "evidence-team",
+                "tampered",
+            )
+            .await
+            .expect("clean provider evidence fixture");
     }
 
     #[tokio::test(flavor = "multi_thread")]

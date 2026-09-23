@@ -71,6 +71,7 @@ mod oci_objects;
 mod oci_tags;
 mod postgres;
 mod provider;
+mod provider_evidence;
 mod reconstruction;
 mod record;
 mod record_key;

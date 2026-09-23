@@ -21,9 +21,11 @@ use rusqlite::{
 use serde_json::{from_slice, from_str, to_string};
 use shardline_protocol::{RepositoryScope, unix_now_seconds_lossy};
 use shardline_reliability::{
-    LifecycleEvent, ResumableLifecycleState, StateTransitionEvent, UploadLifecycleState,
+    LifecycleEvent, ProviderEvidenceLog, ProviderLifecycleEvent, ProviderLifecycleSnapshot,
+    ResumableLifecycleState, StateTransitionEvent, UploadLifecycleState,
     baseline_resumable_session_events, baseline_upload_lifecycle_events,
-    verify_resumable_session_events, verify_upload_lifecycle_events,
+    verify_provider_lifecycle_events, verify_resumable_session_events,
+    verify_upload_lifecycle_events,
 };
 use shardline_storage::{
     DirectoryPathError, ObjectKey, ObjectKeyError,
@@ -41,7 +43,8 @@ use super::{
 use crate::{
     DedupeShardMapping, FileId, FileReconstruction, FileRecord, ProviderRepositoryState,
     QuarantineCandidate, RetentionHold, WebhookDelivery, WebhookDeliveryError, parse_xet_hash_hex,
-    provider::parse_repository_provider, record_key::record_key as shared_record_key,
+    provider::parse_repository_provider, provider_evidence::snapshot_from_state,
+    record_key::record_key as shared_record_key,
     record_key::repository_scope_key as shared_repository_scope_key, xet_hash_hex_string,
 };
 
@@ -49,6 +52,53 @@ pub(crate) trait SqliteExecutor {
     fn execute_sql<P>(&self, sql: &str, params: P) -> SqliteResult<usize>
     where
         P: Params;
+}
+
+pub(crate) fn provider_evidence_operation_id(snapshot: &ProviderLifecycleSnapshot) -> String {
+    format!("{}:{}:{}", snapshot.provider, snapshot.owner, snapshot.repo)
+}
+
+pub(crate) fn load_provider_evidence(
+    transaction: &Transaction<'_>,
+    snapshot: &ProviderLifecycleSnapshot,
+) -> Result<ProviderEvidenceLog, LocalIndexStoreError> {
+    let operation_id = provider_evidence_operation_id(snapshot);
+    let mut statement = transaction.prepare(
+        "SELECT event_json
+         FROM shardline_reliability_events
+         WHERE operation_kind = 'ProviderEvent' AND operation_id = ?1
+         ORDER BY sequence",
+    )?;
+    let rows = statement.query_map(params![operation_id], |row| {
+        let event_json: String = row.get(0)?;
+        from_str::<ProviderLifecycleEvent>(&event_json)
+            .map_err(|error| SqliteError::FromSqlConversionFailure(0, Type::Text, Box::new(error)))
+    })?;
+    let events = rows.collect::<Result<Vec<_>, _>>()?;
+    Ok(ProviderEvidenceLog::from_events(events)?)
+}
+
+pub(crate) fn persist_provider_evidence(
+    transaction: &Transaction<'_>,
+    event: &ProviderLifecycleEvent,
+) -> Result<(), LocalIndexStoreError> {
+    let sequence = i64::try_from(event.sequence).map_err(|error| {
+        LocalIndexStoreError::IntegerOutOfRange(format!("provider evidence sequence: {error}"))
+    })?;
+    let event_json = to_string(event)?;
+    transaction.execute(
+        "INSERT OR IGNORE INTO shardline_reliability_events
+            (operation_kind, operation_id, sequence, event_json, created_at_unix_seconds)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            event.operation.kind.as_str(),
+            event.operation.operation_id,
+            sequence,
+            event_json,
+            u64_to_i64(unix_now_seconds_lossy())?,
+        ],
+    )?;
+    Ok(())
 }
 
 impl SqliteExecutor for Connection {
@@ -290,6 +340,51 @@ fn backfill_reliability_events(connection: &mut Connection) -> Result<(), LocalI
         }
     }
 
+    let mut provider_rows = Vec::new();
+    {
+        let mut statement = transaction.prepare(
+            "SELECT provider,
+                    owner,
+                    repo,
+                    last_access_changed_at_unix_seconds,
+                    last_revision_pushed_at_unix_seconds,
+                    last_pushed_revision,
+                    last_cache_invalidated_at_unix_seconds,
+                    last_authorization_rechecked_at_unix_seconds,
+                    last_drift_checked_at_unix_seconds
+             FROM shardline_provider_repository_states AS s
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM shardline_reliability_events AS e
+                 WHERE e.operation_kind = 'ProviderEvent'
+                   AND e.operation_id = s.provider || ':' || s.owner || ':' || s.repo
+             )",
+        )?;
+        let rows = statement.query_map([], provider_repository_state_from_row)?;
+        for row in rows {
+            provider_rows.push(row?);
+        }
+    }
+    for state in provider_rows {
+        let snapshot = snapshot_from_state(&state)?;
+        let events = shardline_reliability::ProviderEvidenceLog::baseline(snapshot)?;
+        for event in events.events() {
+            transaction.execute(
+                "INSERT OR IGNORE INTO shardline_reliability_events
+                    (operation_kind, operation_id, sequence, event_json, created_at_unix_seconds)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    event.operation.kind.as_str(),
+                    event.operation.operation_id,
+                    i64::try_from(event.sequence).map_err(|error| {
+                        LocalIndexStoreError::IntegerOutOfRange(error.to_string())
+                    })?,
+                    to_string(event)?,
+                    u64_to_i64(unix_now_seconds_lossy())?,
+                ],
+            )?;
+        }
+    }
+
     // Rows with no evidence are backfilled above. Existing partial or
     // tampered journals must not be silently carried forward by a successful
     // local-database startup, so verify every authoritative row before the
@@ -386,6 +481,31 @@ fn backfill_reliability_events(connection: &mut Connection) -> Result<(), LocalI
             &target_key,
             state,
         )?;
+    }
+
+    let mut provider_verification_rows = Vec::new();
+    {
+        let mut statement = transaction.prepare(
+            "SELECT provider,
+                    owner,
+                    repo,
+                    last_access_changed_at_unix_seconds,
+                    last_revision_pushed_at_unix_seconds,
+                    last_pushed_revision,
+                    last_cache_invalidated_at_unix_seconds,
+                    last_authorization_rechecked_at_unix_seconds,
+                    last_drift_checked_at_unix_seconds
+             FROM shardline_provider_repository_states",
+        )?;
+        let rows = statement.query_map([], provider_repository_state_from_row)?;
+        for row in rows {
+            provider_verification_rows.push(row?);
+        }
+    }
+    for state in provider_verification_rows {
+        let snapshot = snapshot_from_state(&state)?;
+        let evidence = load_provider_evidence(&transaction, &snapshot)?;
+        verify_provider_lifecycle_events(evidence.events(), &snapshot)?;
     }
     transaction.commit()?;
     Ok(())

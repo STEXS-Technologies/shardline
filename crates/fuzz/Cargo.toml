@@ -387,5 +387,11 @@ path = "fuzz_targets/shardline/reliability_upload_evidence.rs"
 test = false
 doc = false
 
+[[bin]]
+name = "shardline_reliability_provider_evidence"
+path = "fuzz_targets/shardline/reliability_provider_evidence.rs"
+test = false
+doc = false
+
 [lints]
 workspace = true
