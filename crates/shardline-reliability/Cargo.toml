@@ -10,7 +10,7 @@ description = "Durable lifecycle identities and compatibility boundaries for Sha
 [dependencies]
 chrono.workspace = true
 ed25519-dalek.workspace = true
-penelope.workspace = true
+penelope-domain.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 sha2.workspace = true

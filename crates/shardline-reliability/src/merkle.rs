@@ -35,16 +35,26 @@ use crate::{EvidenceEventMetadata, ReliabilityError, canonical_state_digest};
 const PROFILE_ID: &str = "shardline.reliability.v1";
 const EXECUTOR_ID: &str = "service:shardline.reliability";
 const STATUS: &str = "evidence_committed";
+/// Version of the durable Shardline Merkle envelope. The StateChronicle
+/// body remains independently versioned by its own `schema` field.
+pub const RELIABILITY_MERKLE_SCHEMA_VERSION: u8 = 1;
 
 /// A deterministic StateChronicle commit derived from one Shardline evidence
 /// event. The body is independently verifiable through its event Merkle root
 /// and sparse state root; signing is an explicit deployment boundary.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReliabilityMerkleCommit {
+    /// Stable Shardline envelope schema version.
+    #[serde(default = "default_reliability_merkle_schema_version")]
+    pub schema_version: u8,
     /// The StateChronicle commit body.
     pub body: Commit,
     /// The canonical synthetic event covered by `body.event_merkle_root`.
     pub event: Event,
+}
+
+const fn default_reliability_merkle_schema_version() -> u8 {
+    0
 }
 
 impl ReliabilityMerkleCommit {
@@ -170,6 +180,7 @@ pub fn build_reliability_merkle_commit_with_previous<T: EvidenceEventMetadata>(
         })
         .map_err(|error| ReliabilityError::Merkle(error.to_string()))?;
     Ok(ReliabilityMerkleCommit {
+        schema_version: RELIABILITY_MERKLE_SCHEMA_VERSION,
         body,
         event: protocol_event,
     })

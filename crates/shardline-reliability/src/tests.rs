@@ -308,7 +308,7 @@ fn lifecycle_evidence_reads_legacy_json_digests_after_canonical_migration() {
     let state_digest = statechronicle_core::digest::hash_bytes(after.as_str().as_bytes());
     let process_bytes =
         serde_json::to_vec(&(&operation, 1_u64, before.as_str(), after.as_str())).unwrap();
-    let process_digest = penelope::ContentDigest::sha256(&process_bytes);
+    let process_digest = penelope_domain::ContentDigest::sha256(&process_bytes);
     let legacy = serde_json::json!({
         "operation": operation,
         "sequence": 1,

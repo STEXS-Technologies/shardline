@@ -2745,21 +2745,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "penelope"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b8399031b76961e0e00b67570c197cef51dd61e544d75ecad55196caffdce61b"
-dependencies = [
- "penelope-core",
- "penelope-domain",
- "penelope-executor",
- "penelope-intent",
- "penelope-ports",
- "penelope-statechronicle",
- "thiserror 2.0.18",
-]
-
-[[package]]
 name = "penelope-core"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2775,57 +2760,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "penelope-executor"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ba61206675c9e64ddab330214160b7dd646079b5e2a45f4acc6125e7d652b556"
-dependencies = [
- "penelope-core",
- "penelope-domain",
- "penelope-intent",
- "penelope-ports",
- "serde",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "penelope-intent"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2d17e27ab410c18f13ddf961ee320261b075ad1de7b06952a8c0661302ab871a"
-dependencies = [
- "penelope-core",
- "penelope-domain",
- "serde_json",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "penelope-ports"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b0bbefa57160c79bdc06702cfcdabb59686e69de89f2b0f8e7b3db8a27ae602e"
-dependencies = [
- "async-trait",
- "penelope-domain",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "penelope-statechronicle"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1c90851caf7cdd788e4835240a2a07add5491653d2a357855360c78f3f49bf42"
-dependencies = [
- "penelope-domain",
- "penelope-ports",
- "serde",
  "thiserror 2.0.18",
 ]
 
@@ -4160,7 +4094,7 @@ version = "1.11.0"
 dependencies = [
  "chrono",
  "ed25519-dalek",
- "penelope",
+ "penelope-domain",
  "proptest",
  "serde",
  "serde_json",

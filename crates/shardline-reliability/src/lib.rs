@@ -44,7 +44,7 @@ pub use event::{
 pub use event_metadata::EvidenceEventMetadata;
 pub use lifecycle_log::LifecycleEvidenceLog;
 pub use merkle::{
-    ReliabilityMerkleCommit, build_reliability_merkle_commit,
+    RELIABILITY_MERKLE_SCHEMA_VERSION, ReliabilityMerkleCommit, build_reliability_merkle_commit,
     build_reliability_merkle_commit_with_previous, reliability_merkle_commit_json,
     reliability_merkle_commit_json_with_previous,
 };
@@ -65,7 +65,7 @@ pub use operation::{
     OperationIdentity, OperationKind, ResumableSessionSnapshotDomain,
     resumable_session_snapshot_identity,
 };
-pub use penelope::ContentDigest as PenelopeDigest;
+pub use penelope_domain::ContentDigest as PenelopeDigest;
 pub use persisted::{
     build_persisted_merkle_commit, build_persisted_merkle_commit_with_previous,
     persisted_event_sequence, verify_persisted_event, verify_persisted_merkle_commit,

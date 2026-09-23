@@ -135,7 +135,12 @@ pub fn verify_persisted_merkle_commit_with_previous(
     })?;
     let expected =
         build_persisted_merkle_commit_with_previous(operation_kind, event_json, previous_json)?;
-    if observed != expected {
+    let observed_commit = serde_json::from_value::<ReliabilityMerkleCommit>(observed)?;
+    let expected_commit = serde_json::from_value::<ReliabilityMerkleCommit>(expected)?;
+    if observed_commit.schema_version > crate::RELIABILITY_MERKLE_SCHEMA_VERSION
+        || observed_commit.body != expected_commit.body
+        || observed_commit.event != expected_commit.event
+    {
         return Err(ReliabilityError::Merkle(format!(
             "persisted Merkle commitment mismatch for {}",
             operation_kind.as_str()
@@ -205,6 +210,10 @@ mod tests {
         let json = serde_json::to_value(event).unwrap();
         let commit = build_persisted_merkle_commit(OperationKind::Upload, json).unwrap();
         assert_eq!(commit["body"]["event_count"], 1);
+        assert_eq!(
+            commit["schema_version"],
+            crate::RELIABILITY_MERKLE_SCHEMA_VERSION
+        );
         assert!(build_persisted_merkle_commit(OperationKind::ProviderEvent, commit).is_err());
     }
 
@@ -246,7 +255,7 @@ mod tests {
             OperationKind::Upload,
             second_json.clone(),
             Some(chained_commit.clone()),
-            Some(first_commit),
+            Some(first_commit.clone()),
         )
         .unwrap();
         assert!(
@@ -257,5 +266,29 @@ mod tests {
             )
             .is_err()
         );
+
+        let mut legacy_commit = build_persisted_merkle_commit_with_previous(
+            OperationKind::Upload,
+            serde_json::to_value(&second).unwrap(),
+            Some(
+                build_persisted_merkle_commit(
+                    OperationKind::Upload,
+                    serde_json::to_value(&first).unwrap(),
+                )
+                .unwrap(),
+            ),
+        )
+        .unwrap();
+        legacy_commit
+            .as_object_mut()
+            .unwrap()
+            .remove("schema_version");
+        verify_persisted_merkle_commit_with_previous(
+            OperationKind::Upload,
+            serde_json::to_value(second).unwrap(),
+            Some(legacy_commit),
+            Some(first_commit),
+        )
+        .unwrap();
     }
 }

@@ -1,4 +1,4 @@
-use penelope::ContentDigest as PenelopeDigest;
+use penelope_domain::ContentDigest as PenelopeDigest;
 use serde::{Deserialize, Serialize};
 use statechronicle_core::digest::ContentDigest;
 
