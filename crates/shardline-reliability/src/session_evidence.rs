@@ -95,10 +95,12 @@ impl SessionEvidenceLog {
         before: ResumableLifecycleState,
         after: ResumableLifecycleState,
     ) -> Result<(), ReliabilityError> {
-        let sequence = self
-            .events()
-            .last()
-            .map_or(1, |event| event.sequence.saturating_add(1));
+        let sequence = self.events().last().map_or(Ok(1), |event| {
+            event
+                .sequence
+                .checked_add(1)
+                .ok_or(ReliabilityError::ChainDiscontinuity)
+        })?;
         let event = resumable_session_event(
             scope_namespace,
             session_id,

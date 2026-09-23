@@ -227,6 +227,47 @@ fn snapshot_evidence_helpers_share_baseline_repair_and_append_policy() {
 }
 
 #[test]
+fn snapshot_evidence_rejects_sequence_overflow() {
+    let snapshot = HubRefSnapshot::new("repo", "main", None).unwrap();
+    let mut log = SnapshotEvidenceLog::baseline(snapshot.clone()).unwrap();
+    log.events_mut()[0].sequence = u64::MAX;
+    assert!(matches!(
+        log.record(snapshot),
+        Err(ReliabilityError::ChainDiscontinuity)
+    ));
+}
+
+#[test]
+fn session_evidence_rejects_sequence_overflow() {
+    let operation = OperationIdentity::new(
+        "resumable-session",
+        "scope",
+        "session",
+        OperationKind::ResumableSession,
+    )
+    .unwrap()
+    .with_object_key("object");
+    let event = StateTransitionEvent::new(
+        operation,
+        u64::MAX,
+        ResumableLifecycleState::Active,
+        ResumableLifecycleState::Active,
+    )
+    .unwrap();
+    let mut log = SessionEvidenceLog::from_events(vec![event]).unwrap();
+    assert!(matches!(
+        log.record(
+            "scope",
+            "session",
+            "object",
+            ResumableLifecycleState::Active,
+            ResumableLifecycleState::Active,
+        ),
+        Err(ReliabilityError::ChainDiscontinuity)
+    ));
+}
+
+#[test]
 fn snapshot_transition_helper_verifies_before_and_appends_after() {
     let before = HubRefSnapshot::new("repo", "main", Some("sha-1".into())).unwrap();
     let after = HubRefSnapshot::new("repo", "main", Some("sha-2".into())).unwrap();

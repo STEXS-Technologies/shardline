@@ -1008,6 +1008,9 @@ async fn reconcile_reliability_events(
     let batch_size = i64::try_from(batch_size.max(1)).unwrap_or(i64::MAX);
     let mut transaction = pool.begin().await?;
     if !repair_missing {
+        query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+            .execute(&mut *transaction)
+            .await?;
         verify_persisted_reliability_events(&mut transaction)
             .await
             .map_err(|error| {
@@ -1464,8 +1467,7 @@ async fn reconcile_reliability_events(
     // journal cannot be silently carried forward by a successful migration.
     let upload_verification_rows = query(
         "SELECT intent_id, object_key, object_hash, state
-         FROM shardline_upload_intents
-         FOR UPDATE",
+         FROM shardline_upload_intents",
     )
     .fetch_all(&mut *transaction)
     .await?;
@@ -1515,8 +1517,7 @@ async fn reconcile_reliability_events(
 
     let session_verification_rows = query(
         "SELECT session_id, scope_namespace, target_key, state
-         FROM shardline_resumable_sessions
-         FOR UPDATE",
+         FROM shardline_resumable_sessions",
     )
     .fetch_all(&mut *transaction)
     .await?;
@@ -1558,8 +1559,7 @@ async fn reconcile_reliability_events(
     let quarantine_verification_rows = query(
         "SELECT object_key, observed_length,
                 first_seen_unreachable_at_unix_seconds, delete_after_unix_seconds
-         FROM shardline_quarantine_candidates
-         FOR UPDATE",
+         FROM shardline_quarantine_candidates",
     )
     .fetch_all(&mut *transaction)
     .await?;
@@ -1604,8 +1604,7 @@ async fn reconcile_reliability_events(
     let oci_verification_rows = query(
         "SELECT scope_namespace, repository, object_kind, digest_hex,
                 deleted_at_unix_seconds
-         FROM shardline_oci_object_tombstones
-         FOR UPDATE",
+         FROM shardline_oci_object_tombstones",
     )
     .fetch_all(&mut *transaction)
     .await?;
@@ -1653,8 +1652,7 @@ async fn reconcile_reliability_events(
     let retention_verification_rows = query(
         "SELECT object_key, reason, held_at_unix_seconds,
                 release_after_unix_seconds
-         FROM shardline_retention_holds
-         FOR UPDATE",
+         FROM shardline_retention_holds",
     )
     .fetch_all(&mut *transaction)
     .await?;
@@ -1701,8 +1699,7 @@ async fn reconcile_reliability_events(
 
     let webhook_verification_rows = query(
         "SELECT provider, owner, repo, delivery_id, processed_at_unix_seconds
-         FROM shardline_webhook_deliveries
-         FOR UPDATE",
+         FROM shardline_webhook_deliveries",
     )
     .fetch_all(&mut *transaction)
     .await?;
@@ -1761,8 +1758,7 @@ async fn reconcile_reliability_events(
 
     let hub_ref_verification_rows = query(
         "SELECT repo_id, ref_name, sha
-         FROM shardline_hub_refs
-         FOR UPDATE",
+         FROM shardline_hub_refs",
     )
     .fetch_all(&mut *transaction)
     .await?;
@@ -1820,8 +1816,7 @@ async fn reconcile_reliability_events(
 
     let oci_tag_verification_rows = query(
         "SELECT scope_namespace, repository, tag, digest_hex
-         FROM shardline_oci_tags
-         FOR UPDATE",
+         FROM shardline_oci_tags",
     )
     .fetch_all(&mut *transaction)
     .await?;
@@ -1890,8 +1885,7 @@ async fn reconcile_reliability_events(
     let s3_object_verification_rows = query(
         "SELECT scope_namespace, object_key, file_id, size_bytes, content_hash,
                 etag, user_metadata, updated_at_unix_seconds
-         FROM shardline_s3_objects
-         FOR UPDATE",
+         FROM shardline_s3_objects",
     )
     .fetch_all(&mut *transaction)
     .await?;
@@ -1974,8 +1968,7 @@ async fn reconcile_reliability_events(
                 last_cache_invalidated_at_unix_seconds,
                 last_authorization_rechecked_at_unix_seconds,
                 last_drift_checked_at_unix_seconds
-         FROM shardline_provider_repository_states
-         FOR UPDATE",
+         FROM shardline_provider_repository_states",
     )
     .fetch_all(&mut *transaction)
     .await?;
@@ -2616,6 +2609,9 @@ mod tests {
             bundled_database_migrations().len() as u64
         );
         assert!(resumed.migrations.iter().all(|migration| migration.applied));
+        run_test_migration_command(&test_url, DatabaseMigrationCommand::Verify)
+            .await
+            .expect("read-only reliability verification should succeed on a complete schema");
 
         sqlx::query(&format!("DROP DATABASE {database_name} WITH (FORCE)"))
             .execute(&admin_pool)

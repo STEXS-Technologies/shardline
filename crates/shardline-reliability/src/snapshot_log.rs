@@ -43,10 +43,12 @@ impl<S: SnapshotEvidence> SnapshotEvidenceLog<S> {
             .last()
             .map(|event| event.after.clone())
             .unwrap_or_else(|| snapshot.clone());
-        let sequence = self
-            .0
-            .last()
-            .map_or(0, |event| event.sequence.saturating_add(1));
+        let sequence = self.0.last().map_or(Ok(0), |event| {
+            event
+                .sequence
+                .checked_add(1)
+                .ok_or(ReliabilityError::ChainDiscontinuity)
+        })?;
         self.0
             .push(SnapshotEvidenceEvent::new(sequence, before, snapshot)?);
         let result = verify_snapshot_chain(&self.0);
