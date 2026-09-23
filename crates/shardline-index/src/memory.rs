@@ -300,7 +300,19 @@ impl LifecycleStore for MemoryIndexStore {
         let mut state = self.lock_state()?;
         let key = candidate.object_key().clone();
         let snapshot = quarantine_snapshot(candidate, QuarantineLifecycleState::Active)?;
-        let mut evidence = state.quarantine_evidence.remove(&key).unwrap_or_default();
+        let mut evidence = state
+            .quarantine_evidence
+            .get(&key)
+            .cloned()
+            .unwrap_or_default();
+        if evidence.events().is_empty() {
+            evidence = QuarantineEvidenceLog::baseline(snapshot.clone())
+                .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
+        } else if let Some(current) = state.quarantine.get(&key) {
+            let current_snapshot = quarantine_snapshot(current, QuarantineLifecycleState::Active)?;
+            verify_quarantine_lifecycle_events(evidence.events(), &current_snapshot)
+                .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
+        }
         evidence
             .record(snapshot)
             .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
@@ -2876,6 +2888,42 @@ mod tests {
         let result = store.delete_quarantine_candidate(&key);
         assert!(matches!(result, Err(MemoryIndexStoreError::Reliability(_))));
         assert!(store.state.lock().unwrap().quarantine.contains_key(&key));
+    }
+
+    #[test]
+    fn memory_upsert_quarantine_candidate_preserves_tampered_evidence() {
+        let store = MemoryIndexStore::new();
+        let key = ObjectKey::parse("xorbs/tampered-upsert/key").unwrap();
+        let candidate = QuarantineCandidate::new(key.clone(), 4, 10, 20).unwrap();
+        store.upsert_quarantine_candidate(&candidate).unwrap();
+
+        let other_key = ObjectKey::parse("xorbs/other-upsert/key").unwrap();
+        let other_identity =
+            shardline_reliability::QuarantineObjectIdentity::new(other_key.as_str()).unwrap();
+        let other_snapshot = shardline_reliability::QuarantineSnapshot::new(
+            other_identity,
+            4,
+            10,
+            20,
+            shardline_reliability::QuarantineLifecycleState::Active,
+        )
+        .unwrap();
+        let tampered_evidence =
+            shardline_reliability::QuarantineEvidenceLog::baseline(other_snapshot).unwrap();
+        store
+            .state
+            .lock()
+            .unwrap()
+            .quarantine_evidence
+            .insert(key.clone(), tampered_evidence);
+
+        let replacement = QuarantineCandidate::new(key.clone(), 8, 10, 30).unwrap();
+        let result = store.upsert_quarantine_candidate(&replacement);
+        assert!(matches!(result, Err(MemoryIndexStoreError::Reliability(_))));
+        assert_eq!(
+            store.state.lock().unwrap().quarantine.get(&key),
+            Some(&candidate)
+        );
     }
 
     #[test]
