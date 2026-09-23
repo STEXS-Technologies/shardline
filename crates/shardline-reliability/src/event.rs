@@ -35,6 +35,21 @@ pub type StateTransitionEvent = LifecycleEvidenceEvent<ResumableLifecycleState>;
 /// Evidence for upload intents.
 pub type LifecycleEvent = LifecycleEvidenceEvent<UploadLifecycleState>;
 
+/// Builds the canonical identity for an upload lifecycle operation.
+pub fn upload_operation_identity(
+    tenant: impl Into<String>,
+    repository: impl Into<String>,
+    operation_id: impl Into<String>,
+    object_key: impl Into<String>,
+    content_sha256: impl Into<String>,
+) -> Result<OperationIdentity, ReliabilityError> {
+    Ok(
+        OperationIdentity::new(tenant, repository, operation_id, OperationKind::Upload)?
+            .with_object_key(object_key)
+            .with_content_sha256(content_sha256),
+    )
+}
+
 impl<S: EvidenceState> LifecycleEvidenceEvent<S> {
     pub fn new(
         operation: OperationIdentity,
@@ -151,9 +166,7 @@ pub fn upload_lifecycle_event(
     after: UploadLifecycleState,
 ) -> Result<LifecycleEvent, ReliabilityError> {
     let operation =
-        OperationIdentity::new(tenant, repository, operation_id, OperationKind::Upload)?
-            .with_object_key(object_key)
-            .with_content_sha256(content_sha256);
+        upload_operation_identity(tenant, repository, operation_id, object_key, content_sha256)?;
     LifecycleEvent::new(operation, lifecycle_sequence(before, after), before, after)
 }
 

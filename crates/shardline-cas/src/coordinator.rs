@@ -1,6 +1,6 @@
 use shardline_index::{AsyncIndexStore, StoredObjectId};
 use shardline_reliability::{
-    OperationIdentity, OperationKind, ReliabilityError, upload_lifecycle_event,
+    OperationIdentity, ReliabilityError, upload_lifecycle_event, upload_operation_identity,
 };
 use shardline_storage::{AsyncObjectStore, ObjectBody, ObjectIntegrity, ObjectKey, PutOutcome};
 
@@ -60,14 +60,13 @@ impl<I, O, R> CasCoordinator<I, O, R> {
         repository: impl Into<String>,
         intent: &shardline_index::UploadIntent,
     ) -> Result<OperationIdentity, ReliabilityError> {
-        Ok(OperationIdentity::new(
+        upload_operation_identity(
             tenant,
             repository,
             intent.intent_id(),
-            OperationKind::Upload,
-        )?
-        .with_object_key(intent.object_key())
-        .with_content_sha256(intent.object_hash()))
+            intent.object_key(),
+            intent.object_hash(),
+        )
     }
 }
 

@@ -65,6 +65,10 @@ fn lifecycle_event_correlates_statechronicle_and_penelope_digests() {
         UploadLifecycleState::Storing,
     )
     .unwrap();
+    assert_eq!(
+        event.operation,
+        upload_operation_identity("tenant", "repo", "op-1", "object", "hash").unwrap()
+    );
     assert_eq!(event.state_digest.as_str().len(), 71);
     assert_eq!(event.process_digest.0.len(), 32);
     event.verify_integrity().unwrap();
