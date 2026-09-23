@@ -1,7 +1,8 @@
 use shardline_protocol::RepositoryProvider;
 use shardline_reliability::{
-    ProviderEvidenceLog, ProviderLifecycleEvent, ProviderLifecycleSnapshot, RetentionEvidenceLog,
-    RetentionHoldLifecycleState, WebhookDeliveryEvidenceLog, WebhookDeliveryLifecycleState,
+    ProviderEvidenceLog, ProviderLifecycleEvent, ProviderLifecycleSnapshot,
+    ProviderRepositoryOperationId, RetentionEvidenceLog, RetentionHoldLifecycleState,
+    SnapshotEvidence, WebhookDeliveryEvidenceLog, WebhookDeliveryLifecycleState,
     append_or_baseline_snapshot_evidence, verify_and_append_snapshot_transition,
     verify_or_repair_snapshot_evidence, verify_provider_lifecycle_events,
 };
@@ -182,9 +183,10 @@ impl super::PostgresIndexStore {
             upsert_provider_repository_state(&mut transaction, state).await?;
         }
         for key in &mutation.state_deletes {
-            let operation_id = format!("{}:{}:{}", key.provider.as_str(), key.owner, key.repo);
+            let operation_id =
+                ProviderRepositoryOperationId::new(key.provider.as_str(), &key.owner, &key.repo);
             query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-                .bind(&operation_id)
+                .bind(operation_id.as_str())
                 .execute(&mut *transaction)
                 .await?;
             let current = query(
@@ -223,12 +225,7 @@ impl super::PostgresIndexStore {
                 "DELETE FROM shardline_reliability_events
                  WHERE operation_kind = 'ProviderEvent' AND operation_id = $1",
             )
-            .bind(format!(
-                "{}:{}:{}",
-                key.provider.as_str(),
-                key.owner,
-                key.repo
-            ))
+            .bind(operation_id.as_str())
             .execute(&mut *transaction)
             .await?;
         }
@@ -553,7 +550,7 @@ async fn load_provider_evidence(
     transaction: &mut Transaction<'_, Postgres>,
     snapshot: &ProviderLifecycleSnapshot,
 ) -> Result<Vec<ProviderLifecycleEvent>, PostgresMetadataStoreError> {
-    let operation_id = format!("{}:{}:{}", snapshot.provider, snapshot.owner, snapshot.repo);
+    let operation_id = snapshot.evidence_operation()?.operation_id;
     let rows = query(
         "SELECT event_json
          FROM shardline_reliability_events

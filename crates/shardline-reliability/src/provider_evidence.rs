@@ -4,6 +4,35 @@ use crate::snapshot_event::{SnapshotEvidence, SnapshotEvidenceEvent, verify_snap
 use crate::snapshot_log::SnapshotEvidenceLog;
 use crate::{OperationIdentity, OperationKind, ReliabilityError};
 
+/// Typed operation identifier for one provider repository lifecycle row.
+///
+/// The textual representation is intentionally kept identical to the
+/// pre-existing persisted key so this hardening change does not alter lookup
+/// or retry behavior. Centralizing construction prevents adapters and repair
+/// code from drifting into different identity formats.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderRepositoryOperationId(String);
+
+impl ProviderRepositoryOperationId {
+    /// Creates the stable provider lifecycle operation identifier.
+    #[must_use]
+    pub fn new(provider: &str, owner: &str, repo: &str) -> Self {
+        Self(format!("{provider}:{owner}:{repo}"))
+    }
+
+    /// Returns the persisted operation identifier.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Consumes the typed identifier into its persisted representation.
+    #[must_use]
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
 /// Canonical materialized snapshot for one provider repository lifecycle.
 ///
 /// This type deliberately contains the complete durable row, rather than an
@@ -113,7 +142,8 @@ impl ProviderLifecycleSnapshot {
         OperationIdentity::new(
             format!("provider:{}", self.provider),
             format!("{}/{}", self.owner, self.repo),
-            format!("{}:{}:{}", self.provider, self.owner, self.repo),
+            ProviderRepositoryOperationId::new(&self.provider, &self.owner, &self.repo)
+                .into_string(),
             OperationKind::ProviderEvent,
         )
     }

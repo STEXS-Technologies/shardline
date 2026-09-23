@@ -559,3 +559,13 @@ fn provider_evidence_binds_materialized_snapshot_and_digests() {
         Err(ReliabilityError::StateDigestMismatch) | Err(ReliabilityError::ProcessDigestMismatch)
     ));
 }
+
+#[test]
+fn provider_operation_id_is_shared_by_typed_and_snapshot_paths() {
+    let typed = ProviderRepositoryOperationId::new("github", "team", "repo");
+    let snapshot_operation = provider_snapshot(None).evidence_operation().unwrap();
+
+    assert_eq!(typed.as_str(), "github:team:repo");
+    assert_eq!(snapshot_operation.operation_id, typed.as_str());
+    assert_eq!(snapshot_operation.kind, OperationKind::ProviderEvent);
+}

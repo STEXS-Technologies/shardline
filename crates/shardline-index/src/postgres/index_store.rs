@@ -92,7 +92,7 @@ async fn verify_postgres_provider_evidence(
     state: &ProviderRepositoryState,
 ) -> Result<(), PostgresMetadataStoreError> {
     let snapshot = crate::provider_evidence::snapshot_from_state(state)?;
-    let operation_id = format!("{}:{}:{}", snapshot.provider, snapshot.owner, snapshot.repo);
+    let operation_id = snapshot.evidence_operation()?.operation_id;
     let mut transaction = store.pool.begin().await?;
     let rows = query(
         "SELECT event_json
@@ -1068,9 +1068,13 @@ impl AsyncIndexStore for super::PostgresIndexStore {
     ) -> IndexStoreFuture<'operation, bool, Self::Error> {
         Box::pin(async move {
             let mut transaction = self.pool.begin().await?;
-            let operation_id = format!("{}:{}:{}", provider.as_str(), owner, repo);
+            let operation_id = shardline_reliability::ProviderRepositoryOperationId::new(
+                provider.as_str(),
+                owner,
+                repo,
+            );
             query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-                .bind(&operation_id)
+                .bind(operation_id.as_str())
                 .execute(&mut *transaction)
                 .await?;
             let current = query(
@@ -1113,7 +1117,7 @@ impl AsyncIndexStore for super::PostgresIndexStore {
                 "DELETE FROM shardline_reliability_events
                  WHERE operation_kind = 'ProviderEvent' AND operation_id = $1",
             )
-            .bind(format!("{}:{}:{}", provider.as_str(), owner, repo))
+            .bind(operation_id.as_str())
             .execute(&mut *transaction)
             .await?;
             transaction.commit().await?;

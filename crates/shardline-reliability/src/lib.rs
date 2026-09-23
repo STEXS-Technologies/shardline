@@ -60,8 +60,8 @@ pub use penelope::ContentDigest as PenelopeDigest;
 pub use persisted::verify_persisted_event;
 pub use provider_evidence::{
     ProviderEvidenceLog, ProviderLifecycleEvent, ProviderLifecycleObservations,
-    ProviderLifecycleSnapshot, ProviderRepositoryIdentity, verify_provider_lifecycle_chain,
-    verify_provider_lifecycle_events,
+    ProviderLifecycleSnapshot, ProviderRepositoryIdentity, ProviderRepositoryOperationId,
+    verify_provider_lifecycle_chain, verify_provider_lifecycle_events,
 };
 pub use quarantine_evidence::{
     QuarantineEvidenceLog, QuarantineLifecycleEvent, QuarantineLifecycleState,

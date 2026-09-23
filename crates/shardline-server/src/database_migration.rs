@@ -1506,7 +1506,10 @@ async fn reconcile_reliability_events(
     .await?;
     for row in provider_verification_rows {
         let snapshot = provider_snapshot_from_row(&row)?;
-        let operation_id = format!("{}:{}:{}", snapshot.provider, snapshot.owner, snapshot.repo);
+        let operation_id = snapshot
+            .evidence_operation()
+            .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?
+            .operation_id;
         let event_rows = query(
             "SELECT event_json
              FROM shardline_reliability_events
