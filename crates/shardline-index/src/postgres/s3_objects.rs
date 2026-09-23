@@ -9,6 +9,12 @@ use shardline_reliability::{
 };
 
 fn s3_object_entry_from_row(row: &PgRow) -> Result<S3ObjectEntry, PostgresMetadataStoreError> {
+    let user_metadata_json: String = row.try_get("user_metadata")?;
+    let user_metadata = if user_metadata_json.is_empty() {
+        Vec::new()
+    } else {
+        serde_json::from_str(&user_metadata_json)?
+    };
     Ok(S3ObjectEntry {
         scope_namespace: row.try_get("scope_namespace")?,
         object_key: row.try_get("object_key")?,
@@ -16,11 +22,7 @@ fn s3_object_entry_from_row(row: &PgRow) -> Result<S3ObjectEntry, PostgresMetada
         size_bytes: i64_to_u64(row.try_get("size_bytes")?)?,
         content_hash: row.try_get("content_hash")?,
         etag: row.try_get("etag")?,
-        user_metadata: row
-            .try_get::<String, _>("user_metadata")
-            .ok()
-            .and_then(|json| serde_json::from_str(&json).ok())
-            .unwrap_or_default(),
+        user_metadata,
         updated_at_unix_seconds: row.try_get("updated_at_unix_seconds")?,
     })
 }
@@ -598,6 +600,38 @@ mod tests {
         .execute(&pool)
         .await
         .expect("tamper evidence");
+
+        assert!(
+            S3ObjectIndexStore::scan_s3_object_exact(&store, &scope, "model.bin")
+                .await
+                .is_err()
+        );
+        cleanup(&pool, &scope).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pg_s3_object_read_rejects_malformed_user_metadata() {
+        let Some(pool) = connect_postgres().await else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let scope = format!("s3-malformed-metadata-{}", std::process::id());
+        let store = PostgresIndexStore::new(pool.clone());
+        let value = entry(&scope, "model.bin", "file-a");
+        S3ObjectIndexStore::upsert_s3_object(&store, &value)
+            .await
+            .expect("upsert");
+
+        query(
+            "UPDATE shardline_s3_objects
+             SET user_metadata = '{not-json}'
+             WHERE scope_namespace = $1 AND object_key = $2",
+        )
+        .bind(&scope)
+        .bind("model.bin")
+        .execute(&pool)
+        .await
+        .expect("corrupt user metadata");
 
         assert!(
             S3ObjectIndexStore::scan_s3_object_exact(&store, &scope, "model.bin")
