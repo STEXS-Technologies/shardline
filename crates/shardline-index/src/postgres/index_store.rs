@@ -2,10 +2,10 @@ use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use shardline_protocol::{ChunkRange, RepositoryProvider, ShardlineHash};
 use shardline_reliability::{
-    LifecycleEvent, ProviderEvidenceLog, ProviderLifecycleEvent, QuarantineEvidenceLog,
-    QuarantineLifecycleEvent, QuarantineLifecycleState, QuarantineObjectIdentity,
-    QuarantineSnapshot, baseline_upload_lifecycle_events, upload_lifecycle_event,
-    verify_provider_lifecycle_events, verify_quarantine_lifecycle_events,
+    EvidenceEventMetadata, LifecycleEvent, ProviderEvidenceLog, ProviderLifecycleEvent,
+    QuarantineEvidenceLog, QuarantineLifecycleEvent, QuarantineLifecycleState,
+    QuarantineObjectIdentity, QuarantineSnapshot, baseline_upload_lifecycle_events,
+    upload_lifecycle_event, verify_provider_lifecycle_events, verify_quarantine_lifecycle_events,
     verify_upload_lifecycle_events,
 };
 use shardline_storage::ObjectKey;
@@ -70,13 +70,7 @@ async fn verify_postgres_provider_evidence(
                 shardline_reliability::ReliabilityError::EmptyField("provider evidence"),
             )
         })?;
-        insert_reliability_event_json(
-            &mut *transaction,
-            &event.operation,
-            event.sequence,
-            serde_json::to_value(event)?,
-        )
-        .await?;
+        insert_reliability_event(&mut *transaction, event).await?;
     } else {
         verify_provider_lifecycle_events(&events, &snapshot)?;
     }
@@ -496,13 +490,7 @@ impl AsyncIndexStore for super::PostgresIndexStore {
                     ),
                 )
             })?;
-            insert_reliability_event_json(
-                &mut *transaction,
-                &event.operation,
-                event.sequence,
-                serde_json::to_value(event)?,
-            )
-            .await?;
+            insert_reliability_event(&mut *transaction, event).await?;
             transaction.commit().await?;
             Ok(())
         })
@@ -549,22 +537,10 @@ impl AsyncIndexStore for super::PostgresIndexStore {
                 })?;
                 if evidence_was_empty {
                     for stored_event in evidence.events() {
-                        insert_reliability_event_json(
-                            &mut *transaction,
-                            &stored_event.operation,
-                            stored_event.sequence,
-                            serde_json::to_value(stored_event)?,
-                        )
-                        .await?;
+                        insert_reliability_event(&mut *transaction, stored_event).await?;
                     }
                 } else {
-                    insert_reliability_event_json(
-                        &mut *transaction,
-                        &event.operation,
-                        event.sequence,
-                        serde_json::to_value(event)?,
-                    )
-                    .await?;
+                    insert_reliability_event(&mut *transaction, event).await?;
                 }
             }
             transaction.commit().await?;
@@ -1385,24 +1361,25 @@ impl UploadIntentStore for super::PostgresIndexStore {
     }
 }
 
-async fn insert_reliability_event<'executor, E>(
+pub(crate) async fn insert_reliability_event<'executor, E, T>(
     executor: E,
-    event: &LifecycleEvent,
+    event: &T,
 ) -> Result<(), PostgresMetadataStoreError>
 where
     E: sqlx::Executor<'executor, Database = sqlx::Postgres>,
+    T: EvidenceEventMetadata + ?Sized,
 {
     event.verify_integrity()?;
-    insert_reliability_event_json(
+    insert_reliability_event_value(
         executor,
-        &event.operation,
-        event.sequence,
+        event.operation_identity(),
+        event.sequence_number(),
         serde_json::to_value(event)?,
     )
     .await
 }
 
-pub(crate) async fn insert_reliability_event_json<'executor, E>(
+async fn insert_reliability_event_value<'executor, E>(
     executor: E,
     operation: &shardline_reliability::OperationIdentity,
     event_sequence: u64,

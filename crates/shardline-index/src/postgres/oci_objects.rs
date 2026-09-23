@@ -1,4 +1,3 @@
-use serde_json::to_value;
 use shardline_reliability::{
     OciObjectEvidenceLog, OciObjectIdentity, OciObjectLifecycleEvent, OciObjectLifecycleState,
     OciObjectSnapshot, resumable_session_event,
@@ -6,7 +5,7 @@ use shardline_reliability::{
 use sqlx::{Connection as _, PgConnection, Row as _, query, query_scalar};
 
 use super::{
-    PostgresIndexStore, PostgresMetadataStoreError, insert_reliability_event_json,
+    PostgresIndexStore, PostgresMetadataStoreError, insert_reliability_event,
     next_reliability_sequence,
 };
 
@@ -82,18 +81,11 @@ async fn record_oci_evidence(
     })?;
     if evidence_was_empty {
         for stored_event in evidence.events() {
-            insert_reliability_event_json(
-                &mut *executor,
-                &stored_event.operation,
-                stored_event.sequence,
-                to_value(stored_event)?,
-            )
-            .await?;
+            insert_reliability_event(&mut *executor, stored_event).await?;
         }
         Ok(())
     } else {
-        insert_reliability_event_json(executor, &event.operation, event.sequence, to_value(event)?)
-            .await
+        insert_reliability_event(executor, event).await
     }
 }
 use crate::{
@@ -260,13 +252,7 @@ impl PostgresIndexStore {
             crate::ResumableSessionState::Completing,
             crate::ResumableSessionState::Completed,
         )?;
-        insert_reliability_event_json(
-            transaction.as_mut(),
-            &event.operation,
-            sequence,
-            to_value(&event)?,
-        )
-        .await?;
+        insert_reliability_event(transaction.as_mut(), &event).await?;
         transaction.commit().await?;
         Ok(true)
     }
@@ -388,13 +374,7 @@ impl OciObjectStore for PostgresIndexStore {
                 let baseline = OciObjectEvidenceLog::baseline(expected.clone())?;
                 baseline.verify_for(&expected)?;
                 for event in baseline.events() {
-                    insert_reliability_event_json(
-                        transaction.as_mut(),
-                        &event.operation,
-                        event.sequence,
-                        to_value(event)?,
-                    )
-                    .await?;
+                    insert_reliability_event(transaction.as_mut(), event).await?;
                 }
             } else {
                 evidence.verify_for(&expected)?;
@@ -462,13 +442,7 @@ impl OciObjectStore for PostgresIndexStore {
                 let baseline = OciObjectEvidenceLog::baseline(expected.clone())?;
                 baseline.verify_for(&expected)?;
                 for event in baseline.events() {
-                    insert_reliability_event_json(
-                        transaction.as_mut(),
-                        &event.operation,
-                        event.sequence,
-                        to_value(event)?,
-                    )
-                    .await?;
+                    insert_reliability_event(transaction.as_mut(), event).await?;
                 }
             } else {
                 evidence.verify_for(&expected)?;

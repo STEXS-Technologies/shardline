@@ -1,7 +1,7 @@
 use serde::Serialize;
 
 use crate::{
-    OperationIdentity,
+    OperationIdentity, ReliabilityError,
     event::LifecycleEvidenceEvent,
     snapshot_event::{SnapshotEvidence, SnapshotEvidenceEvent},
     states::EvidenceState,
@@ -17,6 +17,9 @@ pub trait EvidenceEventMetadata: Serialize {
 
     /// Returns the authenticated sequence number for the event.
     fn sequence_number(&self) -> u64;
+
+    /// Verifies the event before a storage adapter commits it.
+    fn verify_integrity(&self) -> Result<(), ReliabilityError>;
 }
 
 impl<S: EvidenceState> EvidenceEventMetadata for LifecycleEvidenceEvent<S> {
@@ -27,6 +30,10 @@ impl<S: EvidenceState> EvidenceEventMetadata for LifecycleEvidenceEvent<S> {
     fn sequence_number(&self) -> u64 {
         self.sequence
     }
+
+    fn verify_integrity(&self) -> Result<(), ReliabilityError> {
+        LifecycleEvidenceEvent::verify_integrity(self)
+    }
 }
 
 impl<S: SnapshotEvidence> EvidenceEventMetadata for SnapshotEvidenceEvent<S> {
@@ -36,5 +43,9 @@ impl<S: SnapshotEvidence> EvidenceEventMetadata for SnapshotEvidenceEvent<S> {
 
     fn sequence_number(&self) -> u64 {
         self.sequence
+    }
+
+    fn verify_integrity(&self) -> Result<(), ReliabilityError> {
+        SnapshotEvidenceEvent::verify_integrity(self)
     }
 }

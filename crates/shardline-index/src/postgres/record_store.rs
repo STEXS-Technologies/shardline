@@ -2,7 +2,7 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use futures_util::TryStreamExt;
-use serde_json::{to_value, to_vec};
+use serde_json::to_vec;
 use shardline_reliability::resumable_session_event;
 use sqlx::{
     Connection as _, PgConnection, Postgres, Row, Transaction, postgres::PgRow, query,
@@ -11,7 +11,7 @@ use sqlx::{
 
 use super::{
     PostgresMetadataStoreError, PostgresRecordLocator, RecordKind, i64_to_u64,
-    insert_reliability_event_json, next_reliability_sequence,
+    insert_reliability_event, next_reliability_sequence,
 };
 use crate::{
     DedupeShardMapping, FileRecord, RecordMutation, RecordStoreFuture, RecordTraversal,
@@ -215,13 +215,7 @@ impl super::PostgresRecordStore {
                 crate::ResumableSessionState::Completing,
                 crate::ResumableSessionState::Completed,
             )?;
-            insert_reliability_event_json(
-                transaction.as_mut(),
-                &event.operation,
-                sequence,
-                to_value(&event)?,
-            )
-            .await?;
+            insert_reliability_event(transaction.as_mut(), &event).await?;
         }
         transaction.commit().await?;
         Ok(true)

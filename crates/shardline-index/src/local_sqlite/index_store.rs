@@ -50,18 +50,7 @@ fn verify_sqlite_intent_evidence(
         )?;
         let now = u64_to_i64(unix_now_seconds_lossy())?;
         for event in &baseline {
-            transaction.execute(
-                "INSERT OR IGNORE INTO shardline_reliability_events
-                 (operation_kind, operation_id, sequence, event_json, created_at_unix_seconds)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![
-                    event.operation.kind.as_str(),
-                    event.operation.operation_id,
-                    u64_to_i64(event.sequence)?,
-                    serde_json::to_string(event)?,
-                    now,
-                ],
-            )?;
+            super::helpers::persist_reliability_event_at(transaction, event, now)?;
         }
         events = baseline;
     }
@@ -863,7 +852,6 @@ impl UploadIntentStore for super::LocalIndexStore {
                 shardline_reliability::UploadLifecycleState::Created,
                 shardline_reliability::UploadLifecycleState::Created,
             )?;
-            let event_json = serde_json::to_string(&created_event)?;
             let transaction = conn.transaction()?;
             let inserted = transaction.execute(
                 "INSERT OR IGNORE INTO shardline_upload_intents (intent_id, object_key, object_hash, object_length, state, created_at_unix_seconds, updated_at_unix_seconds) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -901,16 +889,7 @@ impl UploadIntentStore for super::LocalIndexStore {
                      WHERE operation_kind = 'Upload' AND operation_id = ?1",
                     rusqlite::params![intent.intent_id()],
                 )?;
-                transaction.execute(
-                    "INSERT INTO shardline_reliability_events (operation_kind, operation_id, sequence, event_json, created_at_unix_seconds) VALUES (?1, ?2, ?3, ?4, ?5)",
-                    rusqlite::params![
-                        created_event.operation.kind.as_str(),
-                        created_event.operation.operation_id,
-                        created_event.sequence as i64,
-                        event_json,
-                        now,
-                    ],
-                )?;
+                super::helpers::persist_reliability_event_at(&transaction, &created_event, now)?;
             }
             transaction.commit()?;
             Ok(())
@@ -979,11 +958,8 @@ impl UploadIntentStore for super::LocalIndexStore {
         let intent_id = intent_id.to_owned();
         let current_state = current.state();
         let event_json = serde_json::to_string(event)?;
+        let event = event.clone();
         let operation_id = event.operation.operation_id.clone();
-        let operation_kind = event.operation.kind.as_str().to_owned();
-        let sequence = i64::try_from(event.sequence).map_err(|_error| {
-            LocalIndexStoreError::IntegerOutOfRange("reliability sequence".into())
-        })?;
         let transitioned = tokio::task::spawn_blocking(move || -> Result<bool, LocalIndexStoreError> {
             let mut conn = store.open_connection()?;
             let transaction = conn.transaction()?;
@@ -999,13 +975,14 @@ impl UploadIntentStore for super::LocalIndexStore {
                 transaction.rollback()?;
                 return Ok(false);
             }
-            transaction.execute(
-                "INSERT OR IGNORE INTO shardline_reliability_events (operation_kind, operation_id, sequence, event_json, created_at_unix_seconds) VALUES (?1, ?2, ?3, ?4, ?5)",
-                rusqlite::params![&operation_kind, &operation_id, sequence, &event_json, now],
-            )?;
+            super::helpers::persist_reliability_event_at(&transaction, &event, now)?;
             let stored_event: String = transaction.query_row(
                 "SELECT event_json FROM shardline_reliability_events WHERE operation_kind = ?1 AND operation_id = ?2 AND sequence = ?3",
-                rusqlite::params![&operation_kind, operation_id, sequence],
+                rusqlite::params![
+                    event.operation.kind.as_str(),
+                    &event.operation.operation_id,
+                    u64_to_i64(event.sequence)?,
+                ],
                 |row| row.get(0),
             )?;
             if stored_event != event_json {
@@ -1159,10 +1136,6 @@ impl UploadIntentStore for super::LocalIndexStore {
         let event = event.clone();
         let event_json = serde_json::to_string(&event)?;
         let operation_id = event.operation.operation_id.clone();
-        let operation_kind = event.operation.kind.as_str().to_owned();
-        let sequence = i64::try_from(event.sequence).map_err(|_error| {
-            LocalIndexStoreError::IntegerOutOfRange("reliability sequence".into())
-        })?;
         tokio::task::spawn_blocking(move || {
             let mut conn = store.open_connection()?;
             let transaction = conn.transaction()?;
@@ -1241,13 +1214,14 @@ impl UploadIntentStore for super::LocalIndexStore {
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or(Duration::ZERO)
                 .as_secs() as i64;
-            transaction.execute(
-                "INSERT OR IGNORE INTO shardline_reliability_events (operation_kind, operation_id, sequence, event_json, created_at_unix_seconds) VALUES (?1, ?2, ?3, ?4, ?5)",
-                rusqlite::params![&operation_kind, &operation_id, sequence, &event_json, now],
-            )?;
+            super::helpers::persist_reliability_event_at(&transaction, &event, now)?;
             let stored_event: String = transaction.query_row(
                 "SELECT event_json FROM shardline_reliability_events WHERE operation_kind = ?1 AND operation_id = ?2 AND sequence = ?3",
-                rusqlite::params![&operation_kind, &operation_id, sequence],
+                rusqlite::params![
+                    event.operation.kind.as_str(),
+                    &event.operation.operation_id,
+                    u64_to_i64(event.sequence)?,
+                ],
                 |row| row.get(0),
             )?;
             if stored_event != event_json {
@@ -1326,18 +1300,7 @@ impl UploadIntentStore for super::LocalIndexStore {
                     )?;
                     let now = u64_to_i64(unix_now_seconds_lossy())?;
                     for event in &baseline {
-                        transaction.execute(
-                            "INSERT OR IGNORE INTO shardline_reliability_events
-                             (operation_kind, operation_id, sequence, event_json, created_at_unix_seconds)
-                             VALUES (?1, ?2, ?3, ?4, ?5)",
-                            rusqlite::params![
-                                event.operation.kind.as_str(),
-                                event.operation.operation_id,
-                                u64_to_i64(event.sequence)?,
-                                serde_json::to_string(event)?,
-                                now,
-                            ],
-                        )?;
+                        super::helpers::persist_reliability_event_at(&transaction, event, now)?;
                     }
                     events = baseline;
                 }

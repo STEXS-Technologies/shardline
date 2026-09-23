@@ -344,20 +344,7 @@ fn backfill_reliability_events(connection: &mut Connection) -> Result<(), LocalI
             final_state,
         )?;
         for event in events {
-            transaction.execute(
-                "INSERT OR IGNORE INTO shardline_reliability_events
-                    (operation_kind, operation_id, sequence, event_json, created_at_unix_seconds)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![
-                    event.operation.kind.as_str(),
-                    event.operation.operation_id,
-                    i64::try_from(event.sequence).map_err(|error| {
-                        LocalIndexStoreError::IntegerOutOfRange(error.to_string())
-                    })?,
-                    to_string(&event)?,
-                    u64_to_i64(unix_now_seconds_lossy())?,
-                ],
-            )?;
+            persist_reliability_event(&transaction, &event)?;
         }
     }
 
@@ -392,20 +379,7 @@ fn backfill_reliability_events(connection: &mut Connection) -> Result<(), LocalI
         let events =
             baseline_resumable_session_events(scope_namespace, session_id, target_key, state)?;
         for event in events {
-            transaction.execute(
-                "INSERT OR IGNORE INTO shardline_reliability_events
-                    (operation_kind, operation_id, sequence, event_json, created_at_unix_seconds)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![
-                    event.operation.kind.as_str(),
-                    event.operation.operation_id,
-                    i64::try_from(event.sequence).map_err(|error| {
-                        LocalIndexStoreError::IntegerOutOfRange(error.to_string())
-                    })?,
-                    to_string(&event)?,
-                    u64_to_i64(unix_now_seconds_lossy())?,
-                ],
-            )?;
+            persist_reliability_event(&transaction, &event)?;
         }
     }
 
@@ -437,20 +411,7 @@ fn backfill_reliability_events(connection: &mut Connection) -> Result<(), LocalI
         let snapshot = snapshot_from_state(&state)?;
         let events = shardline_reliability::ProviderEvidenceLog::baseline(snapshot)?;
         for event in events.events() {
-            transaction.execute(
-                "INSERT OR IGNORE INTO shardline_reliability_events
-                    (operation_kind, operation_id, sequence, event_json, created_at_unix_seconds)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![
-                    event.operation.kind.as_str(),
-                    event.operation.operation_id,
-                    i64::try_from(event.sequence).map_err(|error| {
-                        LocalIndexStoreError::IntegerOutOfRange(error.to_string())
-                    })?,
-                    to_string(event)?,
-                    u64_to_i64(unix_now_seconds_lossy())?,
-                ],
-            )?;
+            persist_reliability_event(&transaction, event)?;
         }
     }
 
@@ -488,20 +449,7 @@ fn backfill_reliability_events(connection: &mut Connection) -> Result<(), LocalI
         let snapshot = quarantine_snapshot(&candidate, QuarantineLifecycleState::Active)?;
         let evidence = QuarantineEvidenceLog::baseline(snapshot)?;
         for event in evidence.events() {
-            transaction.execute(
-                "INSERT OR IGNORE INTO shardline_reliability_events
-                    (operation_kind, operation_id, sequence, event_json, created_at_unix_seconds)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![
-                    event.operation.kind.as_str(),
-                    event.operation.operation_id,
-                    i64::try_from(event.sequence).map_err(|error| {
-                        LocalIndexStoreError::IntegerOutOfRange(error.to_string())
-                    })?,
-                    to_string(event)?,
-                    u64_to_i64(unix_now_seconds_lossy())?,
-                ],
-            )?;
+            persist_reliability_event(&transaction, event)?;
         }
     }
 
@@ -540,20 +488,7 @@ fn backfill_reliability_events(connection: &mut Connection) -> Result<(), LocalI
         )?;
         let evidence = OciObjectEvidenceLog::baseline(snapshot)?;
         for event in evidence.events() {
-            transaction.execute(
-                "INSERT OR IGNORE INTO shardline_reliability_events
-                    (operation_kind, operation_id, sequence, event_json, created_at_unix_seconds)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![
-                    event.operation.kind.as_str(),
-                    event.operation.operation_id,
-                    i64::try_from(event.sequence).map_err(|error| {
-                        LocalIndexStoreError::IntegerOutOfRange(error.to_string())
-                    })?,
-                    to_string(event)?,
-                    u64_to_i64(unix_now_seconds_lossy())?,
-                ],
-            )?;
+            persist_reliability_event(&transaction, event)?;
         }
     }
 

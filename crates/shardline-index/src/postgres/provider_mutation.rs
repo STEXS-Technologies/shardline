@@ -465,13 +465,7 @@ pub(super) async fn upsert_provider_repository_state(
             shardline_reliability::ReliabilityError::EmptyField("provider evidence"),
         )
     })?;
-    super::insert_reliability_event_json(
-        &mut **transaction,
-        &event.operation,
-        event.sequence,
-        serde_json::to_value(event)?,
-    )
-    .await?;
+    super::insert_reliability_event(&mut **transaction, event).await?;
     Ok(())
 }
 
@@ -508,13 +502,7 @@ pub(super) async fn verify_provider_repository_state_evidence(
                 shardline_reliability::ReliabilityError::EmptyField("provider evidence"),
             )
         })?;
-        super::insert_reliability_event_json(
-            &mut **transaction,
-            &event.operation,
-            event.sequence,
-            serde_json::to_value(event)?,
-        )
-        .await?;
+        super::insert_reliability_event(&mut **transaction, event).await?;
     } else {
         verify_provider_lifecycle_events(&evidence, &snapshot)?;
     }

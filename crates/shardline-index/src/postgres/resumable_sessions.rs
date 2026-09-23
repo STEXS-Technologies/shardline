@@ -1,13 +1,12 @@
 use std::{num::NonZeroU64, time::Duration};
 
-use serde_json::to_value;
 use shardline_reliability::{
     StateTransitionEvent, baseline_resumable_session_events, resumable_session_event,
 };
 use sqlx::{Postgres, Row, Transaction};
 
 use super::{
-    PostgresIndexStore, PostgresMetadataStoreError, i64_to_u64, insert_reliability_event_json,
+    PostgresIndexStore, PostgresMetadataStoreError, i64_to_u64, insert_reliability_event,
     next_reliability_sequence, u64_to_i64,
 };
 use crate::{
@@ -296,13 +295,7 @@ impl PostgresIndexStore {
                 stored.state(),
                 ResumableSessionState::Active,
             )?;
-            insert_reliability_event_json(
-                transaction.as_mut(),
-                &event.operation,
-                sequence,
-                to_value(&event)?,
-            )
-            .await?;
+            insert_reliability_event(transaction.as_mut(), &event).await?;
             transaction.commit().await?;
             return Ok(CreateResumableSessionOutcome::Created);
         }
@@ -369,13 +362,7 @@ impl PostgresIndexStore {
             ResumableSessionState::Active,
             ResumableSessionState::Active,
         )?;
-        insert_reliability_event_json(
-            transaction.as_mut(),
-            &event.operation,
-            sequence,
-            to_value(&event)?,
-        )
-        .await?;
+        insert_reliability_event(transaction.as_mut(), &event).await?;
         transaction.commit().await?;
         Ok(true)
     }
@@ -449,13 +436,7 @@ impl PostgresIndexStore {
                 ResumableSessionState::Active,
                 ResumableSessionState::Active,
             )?;
-            insert_reliability_event_json(
-                transaction.as_mut(),
-                &event.operation,
-                sequence,
-                to_value(&event)?,
-            )
-            .await?;
+            insert_reliability_event(transaction.as_mut(), &event).await?;
         }
         transaction.commit().await?;
         Ok(if created {
@@ -552,13 +533,7 @@ impl PostgresIndexStore {
                     state,
                 )?;
                 for event in &baseline {
-                    insert_reliability_event_json(
-                        transaction.as_mut(),
-                        &event.operation,
-                        event.sequence,
-                        to_value(event)?,
-                    )
-                    .await?;
+                    insert_reliability_event(transaction.as_mut(), event).await?;
                 }
                 events = baseline;
             } else {
@@ -682,13 +657,7 @@ impl PostgresIndexStore {
             ResumableSessionState::Active,
             ResumableSessionState::Active,
         )?;
-        insert_reliability_event_json(
-            transaction.as_mut(),
-            &event.operation,
-            sequence,
-            to_value(&event)?,
-        )
-        .await?;
+        insert_reliability_event(transaction.as_mut(), &event).await?;
         transaction.commit().await?;
         Ok(Some(ResumableSessionPart::new(
             part_number,
@@ -843,13 +812,7 @@ impl PostgresIndexStore {
             ResumableSessionState::Active,
             ResumableSessionState::Active,
         )?;
-        insert_reliability_event_json(
-            transaction.as_mut(),
-            &event.operation,
-            sequence,
-            to_value(&event)?,
-        )
-        .await?;
+        insert_reliability_event(transaction.as_mut(), &event).await?;
         transaction.commit().await?;
         Ok(PublishResumablePartOutcome::Published(
             ResumableSessionPart::new(
@@ -922,13 +885,7 @@ impl PostgresIndexStore {
             previous_state,
             session.state(),
         )?;
-        insert_reliability_event_json(
-            transaction.as_mut(),
-            &event.operation,
-            sequence,
-            to_value(&event)?,
-        )
-        .await?;
+        insert_reliability_event(transaction.as_mut(), &event).await?;
         transaction.commit().await?;
         Ok(Some((session, parts)))
     }
@@ -988,13 +945,7 @@ impl PostgresIndexStore {
             expected_state,
             next_state,
         )?;
-        insert_reliability_event_json(
-            transaction.as_mut(),
-            &event.operation,
-            sequence,
-            to_value(&event)?,
-        )
-        .await?;
+        insert_reliability_event(transaction.as_mut(), &event).await?;
         transaction.commit().await?;
         Ok(true)
     }
@@ -1056,13 +1007,7 @@ impl PostgresIndexStore {
                 previous_state,
                 ResumableSessionState::Expired,
             )?;
-            insert_reliability_event_json(
-                transaction.as_mut(),
-                &event.operation,
-                sequence,
-                to_value(&event)?,
-            )
-            .await?;
+            insert_reliability_event(transaction.as_mut(), &event).await?;
             expired.push(session_id);
         }
         transaction.commit().await?;
