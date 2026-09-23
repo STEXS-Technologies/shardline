@@ -11,8 +11,9 @@ use shardline_reliability::{
     QuarantineObjectIdentity, QuarantineSnapshot, RetentionEvidenceLog,
     RetentionHoldLifecycleState, RetentionHoldSnapshot, RetentionObjectIdentity,
     WebhookDeliveryEvidenceLog, WebhookDeliveryIdentity, WebhookDeliveryLifecycleState,
-    WebhookDeliverySnapshot, upload_lifecycle_event, verify_and_append_snapshot_transition,
-    verify_lifecycle_chain, verify_provider_lifecycle_events, verify_quarantine_lifecycle_events,
+    WebhookDeliverySnapshot, append_or_baseline_snapshot_evidence, upload_lifecycle_event,
+    verify_and_append_snapshot_transition, verify_lifecycle_chain,
+    verify_provider_lifecycle_events, verify_quarantine_lifecycle_events,
     verify_retention_hold_lifecycle_events, verify_upload_lifecycle_events,
 };
 use shardline_storage::ObjectKey;
@@ -117,7 +118,7 @@ impl MemoryIndexStore {
             .unwrap_or_default();
         let (evidence, _) = if evidence.events().is_empty() {
             (
-                WebhookDeliveryEvidenceLog::baseline(snapshot)
+                append_or_baseline_snapshot_evidence(evidence, snapshot)
                     .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?,
                 true,
             )

@@ -1,6 +1,7 @@
 use shardline_reliability::{
     OciObjectEvidenceLog, OciObjectIdentity, OciObjectLifecycleEvent, OciObjectLifecycleState,
     OciObjectSnapshot, resumable_session_event, verify_and_append_snapshot_transition,
+    verify_or_repair_snapshot_evidence,
 };
 use sqlx::{Connection as _, PgConnection, Row as _, query, query_scalar};
 
@@ -425,14 +426,11 @@ impl OciObjectStore for PostgresIndexStore {
                 OciObjectLifecycleState::Deleted,
                 Some(super::i64_to_u64(deleted_at)?),
             )?;
-            if evidence.events().is_empty() {
-                let baseline = OciObjectEvidenceLog::baseline(expected.clone())?;
-                baseline.verify_for(&expected)?;
-                for event in baseline.events() {
+            let (evidence, was_missing) = verify_or_repair_snapshot_evidence(evidence, expected)?;
+            if was_missing {
+                for event in evidence.events() {
                     insert_reliability_event(transaction.as_mut(), event).await?;
                 }
-            } else {
-                evidence.verify_for(&expected)?;
             }
         } else if !evidence.events().is_empty() {
             shardline_reliability::verify_oci_object_lifecycle_chain(evidence.events())?;
@@ -493,14 +491,11 @@ impl OciObjectStore for PostgresIndexStore {
                 OciObjectLifecycleState::Deleted,
                 Some(tombstone.deleted_at_unix_seconds),
             )?;
-            if evidence.events().is_empty() {
-                let baseline = OciObjectEvidenceLog::baseline(expected.clone())?;
-                baseline.verify_for(&expected)?;
-                for event in baseline.events() {
+            let (evidence, was_missing) = verify_or_repair_snapshot_evidence(evidence, expected)?;
+            if was_missing {
+                for event in evidence.events() {
                     insert_reliability_event(transaction.as_mut(), event).await?;
                 }
-            } else {
-                evidence.verify_for(&expected)?;
             }
         }
         transaction.commit().await?;

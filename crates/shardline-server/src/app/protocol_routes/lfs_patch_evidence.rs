@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use shardline_reliability::{
     DigestSnapshot, OperationIdentity, OperationKind, ResumableLifecycleState, SessionEvidenceLog,
-    SnapshotEvidenceLog, canonical_state_digest, verify_and_append_session_transition,
+    SnapshotEvidenceLog, append_or_baseline_snapshot_evidence, canonical_state_digest,
+    verify_and_append_session_transition,
 };
 
 use crate::ServerError;
@@ -83,11 +84,7 @@ pub(super) fn record_snapshot(
         Err(error) if error.kind() == ErrorKind::NotFound => SnapshotEvidenceLog::default(),
         Err(error) => return Err(error.into()),
     };
-    if log.events().is_empty() {
-        log = SnapshotEvidenceLog::baseline(snapshot).map_err(invalid_evidence)?;
-    } else {
-        log.record(snapshot).map_err(invalid_evidence)?;
-    }
+    log = append_or_baseline_snapshot_evidence(log, snapshot).map_err(invalid_evidence)?;
     let bytes = serde_json::to_vec(&log).map_err(invalid_evidence)?;
     let temporary = path.with_extension("snapshot.tmp");
     let mut file = fs::OpenOptions::new()
