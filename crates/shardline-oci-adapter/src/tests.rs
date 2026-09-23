@@ -456,6 +456,31 @@ async fn delete_upload_session_is_idempotent() {
 }
 
 #[tokio::test]
+async fn delete_upload_session_rejects_tampered_evidence() {
+    let root = temp_root();
+    let session_id = create_test_session(root.path(), false).await.unwrap();
+    let metadata_path = crate::upload_metadata_path(root.path(), &session_id);
+    let mut metadata: serde_json::Value =
+        serde_json::from_slice(&tokio::fs::read(&metadata_path).await.unwrap()).unwrap();
+    metadata["repository"] = serde_json::Value::String("tampered".to_owned());
+    tokio::fs::write(&metadata_path, serde_json::to_vec(&metadata).unwrap())
+        .await
+        .unwrap();
+
+    let result = delete_upload_session(root.path(), &session_id).await;
+    assert!(
+        matches!(result, Err(OciAdapterError::Reliability(_))),
+        "unexpected delete result: {result:?}"
+    );
+    assert!(tokio::fs::try_exists(&metadata_path).await.unwrap());
+    assert!(
+        tokio::fs::try_exists(crate::upload_body_path(root.path(), &session_id))
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
 async fn read_upload_session_returns_not_found_for_missing() {
     let root = temp_root();
     let result = read_upload_session(root.path(), "00000000000000000000000000000000", ttl()).await;
@@ -1439,7 +1464,7 @@ async fn purge_expired_orphaned_bin_files_cleaned() {
 }
 
 #[tokio::test]
-async fn purge_expired_corrupt_json_metadata_cleaned() {
+async fn purge_expired_corrupt_json_metadata_is_preserved() {
     let root = temp_root();
     let session_id = create_test_session(root.path(), false).await.unwrap();
 
@@ -1461,15 +1486,16 @@ async fn purge_expired_corrupt_json_metadata_cleaned() {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    purge_expired_upload_sessions::<TestBackend>(root.path(), NO_BACKEND, ttl(), now)
-        .await
-        .unwrap();
+    let result =
+        purge_expired_upload_sessions::<TestBackend>(root.path(), NO_BACKEND, ttl(), now).await;
+    assert!(matches!(result, Err(OciAdapterError::Json(_))));
 
-    // The corrupt metadata file and associated body should be gone
+    // Corrupt metadata and its associated body remain available for repair.
     assert!(
-        !bogus_meta.exists(),
-        "corrupt metadata should have been removed"
+        bogus_meta.exists(),
+        "corrupt metadata should be preserved for repair"
     );
+    assert!(bogus_body.exists(), "associated body should be preserved");
 
     // The valid session should still exist
     let session = read_upload_session(root.path(), &session_id, ttl())
@@ -2511,7 +2537,7 @@ async fn write_upload_tail_io_error_on_remove_direct() {
 // ── purge_expired read-error-on-metadata → delete + continue (line 1033) ─
 
 #[tokio::test]
-async fn purge_expired_read_error_deletes_with_permission_denied() {
+async fn purge_expired_read_error_is_preserved_with_permission_denied() {
     let root = temp_root();
     let session_id = create_test_session(root.path(), false).await.unwrap();
 
@@ -2537,20 +2563,20 @@ async fn purge_expired_read_error_deletes_with_permission_denied() {
         .as_secs()
         + 100_000;
 
-    purge_expired_upload_sessions::<TestBackend>(
+    let result = purge_expired_upload_sessions::<TestBackend>(
         root.path(),
         NO_BACKEND,
         NonZeroU64::new(1).unwrap(),
         far_future,
     )
-    .await
-    .unwrap();
+    .await;
+    assert!(matches!(result, Err(OciAdapterError::Io(_))));
 
-    // Session should be fully purged
-    let result = read_upload_session(root.path(), &session_id, ttl()).await;
+    // The unreadable session remains available for repair.
+    let read_result = read_upload_session(root.path(), &session_id, ttl()).await;
     assert!(
-        matches!(result, Err(OciAdapterError::NotFound)),
-        "session with unreadable metadata should be purged"
+        read_result.is_err(),
+        "unreadable metadata should not be purged"
     );
 }
 

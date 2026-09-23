@@ -291,6 +291,13 @@ async fn upload_body_integrity_impl(
 /// On non-Unix, falls back to `tokio::fs::remove_file`.
 pub async fn delete_upload_session(root: &Path, session_id: &str) -> Result<(), OciAdapterError> {
     validate_upload_session_id(session_id)?;
+    // Validate the lifecycle evidence before deleting any materialized state.
+    // A missing metadata file remains idempotent, but malformed or tampered
+    // metadata must be retained so repair tooling can inspect and recover it.
+    match read_persisted_upload_session(root, session_id).await {
+        Ok(_) | Err(OciAdapterError::NotFound) => {}
+        Err(error) => return Err(error),
+    }
     let paths = [
         upload_body_path(root, session_id),
         upload_tail_path(root, session_id),
@@ -442,10 +449,8 @@ pub async fn purge_expired_upload_sessions<B: OciBackend>(
         let session_id = stem.to_owned();
         let session = match read_persisted_upload_session(root, &session_id).await {
             Ok((session, _evidence)) => session,
-            Err(_error) => {
-                delete_upload_session(root, stem).await?;
-                continue;
-            }
+            Err(OciAdapterError::NotFound) => continue,
+            Err(error) => return Err(error),
         };
         let missing_local_body =
             !session.use_s3_multipart && fs::metadata(upload_body_path(root, stem)).await.is_err();
