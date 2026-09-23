@@ -961,10 +961,19 @@ async fn reconcile_reliability_events(
                     .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))
             })
             .collect::<Result<Vec<_>, DatabaseMigrationError>>()?;
+        let (tenant, repository) = events
+            .first()
+            .map(|event| {
+                (
+                    event.operation.tenant.as_str(),
+                    event.operation.repository.as_str(),
+                )
+            })
+            .unwrap_or(("shardline", "default"));
         verify_upload_lifecycle_events(
             &events,
-            "shardline",
-            "default",
+            tenant,
+            repository,
             &intent_id,
             &object_key,
             &object_hash,
