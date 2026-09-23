@@ -11,7 +11,7 @@ use shardline_reliability::{
     RetentionObjectIdentity, SnapshotEvidence, StateTransitionEvent, UploadLifecycleState,
     WebhookDeliveryEvidenceLog, WebhookDeliveryIdentity, WebhookDeliveryLifecycleEvent,
     WebhookDeliveryLifecycleState, WebhookDeliverySnapshot, baseline_resumable_session_events,
-    baseline_upload_lifecycle_events, verify_oci_object_lifecycle_events,
+    baseline_upload_lifecycle_events, verify_oci_object_lifecycle_events, verify_persisted_event,
     verify_provider_lifecycle_events, verify_quarantine_lifecycle_events,
     verify_resumable_session_events, verify_retention_hold_lifecycle_events,
     verify_upload_lifecycle_events, verify_webhook_delivery_events,
@@ -1322,36 +1322,7 @@ async fn verify_persisted_reliability_events(
                 "unknown reliability operation kind {operation_kind_text} for {operation_id} at sequence {sequence}"
             ))
         })?;
-        let result = match operation_kind {
-            OperationKind::Upload => from_value::<LifecycleEvent>(event_json)
-                .map_err(|error| error.to_string())
-                .and_then(|event| event.verify_integrity().map_err(|error| error.to_string())),
-            OperationKind::ResumableSession => from_value::<StateTransitionEvent>(event_json)
-                .map_err(|error| error.to_string())
-                .and_then(|event| event.verify_integrity().map_err(|error| error.to_string())),
-            OperationKind::ProviderEvent => from_value::<ProviderLifecycleEvent>(event_json)
-                .map_err(|error| error.to_string())
-                .and_then(|event| event.verify_integrity().map_err(|error| error.to_string())),
-            OperationKind::GarbageCollection => from_value::<QuarantineLifecycleEvent>(event_json)
-                .map_err(|error| error.to_string())
-                .and_then(|event| event.verify_integrity().map_err(|error| error.to_string())),
-            OperationKind::Visibility => from_value::<OciObjectLifecycleEvent>(event_json)
-                .map_err(|error| error.to_string())
-                .and_then(|event| event.verify_integrity().map_err(|error| error.to_string())),
-            OperationKind::RetentionHold => from_value::<RetentionHoldLifecycleEvent>(event_json)
-                .map_err(|error| error.to_string())
-                .and_then(|event| event.verify_integrity().map_err(|error| error.to_string())),
-            OperationKind::WebhookDelivery => {
-                from_value::<WebhookDeliveryLifecycleEvent>(event_json)
-                    .map_err(|error| error.to_string())
-                    .and_then(|event| event.verify_integrity().map_err(|error| error.to_string()))
-            }
-            OperationKind::MetadataCommit | OperationKind::Repair => Err(
-                "no canonical reliability event verifier is registered for this operation kind"
-                    .to_owned(),
-            ),
-        };
-        result.map_err(|error| {
+        verify_persisted_event(operation_kind, event_json).map_err(|error| {
             DatabaseMigrationError::Backfill(format!(
                 "invalid persisted reliability event kind={operation_kind_text} operation={operation_id} sequence={sequence}: {error}"
             ))

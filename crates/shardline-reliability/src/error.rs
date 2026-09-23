@@ -27,4 +27,6 @@ pub enum ReliabilityError {
     ChainDiscontinuity,
     #[error("durable state does not match the terminal reliability event")]
     StateMismatch,
+    #[error("no canonical reliability event verifier is registered for operation kind: {0}")]
+    UnsupportedOperationKind(&'static str),
 }

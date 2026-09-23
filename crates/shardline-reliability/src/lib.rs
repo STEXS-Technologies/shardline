@@ -14,6 +14,7 @@ mod event_metadata;
 mod lifecycle_log;
 mod oci_evidence;
 mod operation;
+mod persisted;
 mod provider_evidence;
 mod quarantine_evidence;
 mod retention_evidence;
@@ -44,6 +45,7 @@ pub use oci_evidence::{
 };
 pub use operation::{OperationIdentity, OperationKind};
 pub use penelope::ContentDigest as PenelopeDigest;
+pub use persisted::verify_persisted_event;
 pub use provider_evidence::{
     ProviderEvidenceLog, ProviderLifecycleEvent, ProviderLifecycleObservations,
     ProviderLifecycleSnapshot, ProviderRepositoryIdentity, verify_provider_lifecycle_chain,
