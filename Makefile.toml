@@ -276,6 +276,12 @@ workspace = false
 command = "bash"
 args = ["scripts/shardline/fuzz.sh", "reliability", "${@}"]
 
+[tasks.shardline-fuzz-reliability-list]
+description = "List StateChronicle/Penelope reliability fuzz targets"
+workspace = false
+command = "bash"
+args = ["scripts/shardline/fuzz.sh", "reliability-list"]
+
 [tasks.deny]
 description = "Check licenses and security advisories"
 workspace = false

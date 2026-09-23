@@ -27,27 +27,31 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  reliability_targets:
+    runs-on: ubuntu-latest
+    outputs:
+      targets: ${{ steps.targets.outputs.targets }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Setup Rust CI toolchain and tools
+        uses: ./.github/actions/rust-ci-setup
+
+      - name: Discover registered reliability fuzz targets
+        id: targets
+        shell: bash
+        run: |
+          targets="$(bash scripts/shardline/fuzz.sh reliability-list | jq -R -s -c 'split("\n") | map(select(length > 0) )')"
+          test "${targets}" != "[]"
+          echo "targets=${targets}" >> "${GITHUB_OUTPUT}"
+
   reliability-fuzz:
+    needs: reliability_targets
     strategy:
       fail-fast: false
       matrix:
-        target:
-          - shardline_reliability_lifecycle
-          - shardline_reliability_lifecycle_log
-          - shardline_reliability_resumable_evidence
-          - shardline_resumable_state_digest
-          - shardline_resumable_session_state
-          - shardline_reliability_session_evidence
-          - shardline_reliability_upload_evidence
-          - shardline_reliability_provider_evidence
-          - shardline_reliability_quarantine_evidence
-          - shardline_reliability_retention_evidence
-          - shardline_reliability_webhook_evidence
-          - shardline_reliability_oci_evidence
-          - shardline_reliability_metadata_evidence
-          - shardline_reliability_oci_tag_evidence
-          - shardline_reliability_s3_object_evidence
-          - shardline_reliability_persisted_event
+        target: ${{ fromJSON(needs.reliability_targets.outputs.targets) }}
     runs-on: ubuntu-latest
     timeout-minutes: 75
     env:

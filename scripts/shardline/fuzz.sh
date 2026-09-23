@@ -6,25 +6,6 @@ FUZZ_DIR="${ROOT_DIR}/crates/fuzz"
 DEFAULT_RUNS="${SHARDLINE_FUZZ_RUNS:-20000}"
 DEFAULT_RELIABILITY_DURATION_SECONDS="${SHARDLINE_FUZZ_DURATION_SECONDS:-3600}"
 
-reliability_targets=(
-    shardline_reliability_lifecycle
-    shardline_reliability_lifecycle_log
-    shardline_reliability_resumable_evidence
-    shardline_resumable_state_digest
-    shardline_resumable_session_state
-    shardline_reliability_session_evidence
-    shardline_reliability_upload_evidence
-    shardline_reliability_provider_evidence
-    shardline_reliability_quarantine_evidence
-    shardline_reliability_retention_evidence
-    shardline_reliability_webhook_evidence
-    shardline_reliability_oci_evidence
-    shardline_reliability_metadata_evidence
-    shardline_reliability_oci_tag_evidence
-    shardline_reliability_s3_object_evidence
-    shardline_reliability_persisted_event
-)
-
 default_fuzz_target() {
     local host
     host="$(rustc +nightly -vV | sed -n 's/^host: //p')"
@@ -43,6 +24,10 @@ FUZZ_TARGET="${SHARDLINE_FUZZ_TARGET:-$(default_fuzz_target)}"
 
 list_targets() {
     cargo +nightly fuzz list --fuzz-dir "${FUZZ_DIR}"
+}
+
+list_reliability_targets() {
+    list_targets | awk '/^shardline_reliability_/ || /^shardline_resumable_(state_digest|session_state)$/'
 }
 
 run_target() {
@@ -104,6 +89,12 @@ run_reliability() {
         exit 2
     fi
 
+    mapfile -t reliability_targets < <(list_reliability_targets)
+    if [ "${#reliability_targets[@]}" -eq 0 ]; then
+        printf 'no reliability fuzz targets found under %s\n' "${FUZZ_DIR}" >&2
+        exit 1
+    fi
+
     local target=""
     if [ "$#" -gt 1 ]; then
         printf 'usage: %s reliability [target]\n' "${0##*/}" >&2
@@ -143,13 +134,16 @@ main() {
             shift
             run_regression "$@"
             ;;
+        reliability-list)
+            list_reliability_targets
+            ;;
         reliability)
             shift
             run_reliability "$@"
             ;;
         *)
             printf 'unknown command: %s\n' "${command}" >&2
-            printf 'usage: %s [list|run|smoke|regression|reliability]\n' "${0##*/}" >&2
+            printf 'usage: %s [list|reliability-list|run|smoke|regression|reliability]\n' "${0##*/}" >&2
             exit 2
             ;;
     esac
