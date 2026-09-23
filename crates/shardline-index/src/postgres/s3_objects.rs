@@ -5,7 +5,7 @@ use super::{PostgresIndexStore, PostgresMetadataStoreError, i64_to_u64, u64_to_i
 use crate::{S3ObjectEntry, S3ObjectIndexStore};
 use shardline_reliability::{
     OperationKind, S3ObjectEvidenceLog, S3ObjectLifecycleEvent, S3ObjectSnapshot, S3ObjectState,
-    SnapshotEvidence, verify_or_repair_snapshot_evidence,
+    SnapshotEvidence, verify_and_append_snapshot_transition, verify_or_repair_snapshot_evidence,
 };
 
 fn s3_object_entry_from_row(row: &PgRow) -> Result<S3ObjectEntry, PostgresMetadataStoreError> {
@@ -141,18 +141,17 @@ pub(super) async fn record_s3_object_transition(
     let entry = after.or(before).ok_or_else(|| {
         PostgresMetadataStoreError::Unsupported("missing S3 object identity".into())
     })?;
-    let mut evidence = current_s3_object_evidence(
+    let before_snapshot = s3_object_snapshot(&entry.scope_namespace, &entry.object_key, before)?;
+    let after_snapshot = s3_object_snapshot(&entry.scope_namespace, &entry.object_key, after)?;
+    let stored = current_s3_object_evidence(
         connection,
         &entry.scope_namespace,
         &entry.object_key,
         before,
     )
     .await?;
-    evidence.record(s3_object_snapshot(
-        &entry.scope_namespace,
-        &entry.object_key,
-        after,
-    )?)?;
+    let evidence =
+        verify_and_append_snapshot_transition(stored, before_snapshot, after_snapshot)?.0;
     persist_s3_object_evidence(connection, &evidence).await
 }
 

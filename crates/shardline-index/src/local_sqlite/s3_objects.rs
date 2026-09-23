@@ -5,6 +5,7 @@ use std::fmt::Write as _;
 
 use super::{LocalIndexStore, LocalIndexStoreError, collect_rows, helpers};
 use crate::{S3ObjectEntry, S3ObjectIndexStore};
+use shardline_reliability::verify_and_append_snapshot_transition;
 
 fn s3_object_entry_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<S3ObjectEntry> {
     Ok(S3ObjectEntry {
@@ -173,13 +174,14 @@ fn record_s3_object_transition(
         .ok_or_else(|| {
             LocalIndexStoreError::Io(std::io::Error::other("missing S3 object identity"))
         })?;
-    let mut evidence =
-        helpers::current_s3_object_evidence(transaction, scope_namespace, object_key, before)?;
-    evidence.record(helpers::s3_object_snapshot(
-        scope_namespace,
-        object_key,
-        after,
-    )?)?;
+    let before_snapshot = helpers::s3_object_snapshot(scope_namespace, object_key, before)?;
+    let after_snapshot = helpers::s3_object_snapshot(scope_namespace, object_key, after)?;
+    let evidence = verify_and_append_snapshot_transition(
+        helpers::current_s3_object_evidence(transaction, scope_namespace, object_key, before)?,
+        before_snapshot,
+        after_snapshot,
+    )?
+    .0;
     for event in evidence.events() {
         helpers::persist_s3_object_evidence(transaction, event)?;
     }

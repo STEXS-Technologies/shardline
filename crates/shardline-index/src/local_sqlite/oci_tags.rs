@@ -5,6 +5,7 @@ use crate::{
     OciTagEntry, OciTagStore,
     local_sqlite::{current_oci_tag_evidence, oci_tag_snapshot, persist_oci_tag_evidence},
 };
+use shardline_reliability::verify_and_append_snapshot_transition;
 
 pub(crate) fn current_tag(
     transaction: &Transaction<'_>,
@@ -31,9 +32,14 @@ pub(crate) fn record_tag_transition(
     before: Option<String>,
     after: Option<String>,
 ) -> Result<(), LocalIndexStoreError> {
-    let mut evidence =
-        current_oci_tag_evidence(transaction, scope_namespace, repository, tag, before)?;
-    evidence.record(oci_tag_snapshot(scope_namespace, repository, tag, after)?)?;
+    let before_snapshot = oci_tag_snapshot(scope_namespace, repository, tag, before.clone())?;
+    let after_snapshot = oci_tag_snapshot(scope_namespace, repository, tag, after)?;
+    let evidence = verify_and_append_snapshot_transition(
+        current_oci_tag_evidence(transaction, scope_namespace, repository, tag, before)?,
+        before_snapshot,
+        after_snapshot,
+    )?
+    .0;
     for event in evidence.events() {
         persist_oci_tag_evidence(transaction, event)?;
     }
