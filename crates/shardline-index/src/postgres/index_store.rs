@@ -535,6 +535,7 @@ impl AsyncIndexStore for super::PostgresIndexStore {
                 let mut evidence =
                     load_postgres_quarantine_evidence(&mut *transaction, object_key.as_str())
                         .await?;
+                let evidence_was_empty = evidence.events().is_empty();
                 if evidence.events().is_empty() {
                     let active = quarantine_snapshot(&candidate, QuarantineLifecycleState::Active)?;
                     evidence = QuarantineEvidenceLog::baseline(active)?;
@@ -547,14 +548,27 @@ impl AsyncIndexStore for super::PostgresIndexStore {
                         ),
                     )
                 })?;
-                insert_reliability_event_json(
-                    &mut *transaction,
-                    event.operation.kind.as_str(),
-                    &event.operation.operation_id,
-                    event.sequence,
-                    serde_json::to_value(event)?,
-                )
-                .await?;
+                if evidence_was_empty {
+                    for stored_event in evidence.events() {
+                        insert_reliability_event_json(
+                            &mut *transaction,
+                            stored_event.operation.kind.as_str(),
+                            &stored_event.operation.operation_id,
+                            stored_event.sequence,
+                            serde_json::to_value(stored_event)?,
+                        )
+                        .await?;
+                    }
+                } else {
+                    insert_reliability_event_json(
+                        &mut *transaction,
+                        event.operation.kind.as_str(),
+                        &event.operation.operation_id,
+                        event.sequence,
+                        serde_json::to_value(event)?,
+                    )
+                    .await?;
+                }
             }
             transaction.commit().await?;
             Ok(result.rows_affected() > 0)
@@ -2122,6 +2136,68 @@ mod tests {
         .execute(&pool)
         .await
         .expect("clean quarantine evidence fixture");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pg_quarantine_delete_repairs_missing_baseline_chain() {
+        let Some(pool) = connect_postgres().await else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let store = make_pg_store(pool.clone());
+        let object_key = shardline_storage::ObjectKey::parse("gc/delete-repair").unwrap();
+        sqlx::query("DELETE FROM shardline_quarantine_candidates WHERE object_key = $1")
+            .bind(object_key.as_str())
+            .execute(&pool)
+            .await
+            .expect("clean quarantine fixture");
+        sqlx::query(
+            "DELETE FROM shardline_reliability_events
+             WHERE operation_kind = 'GarbageCollection' AND operation_id = $1",
+        )
+        .bind(object_key.as_str())
+        .execute(&pool)
+        .await
+        .expect("clean quarantine evidence fixture");
+        let candidate = QuarantineCandidate::new(object_key.clone(), 4, 100, 200).unwrap();
+        store
+            .upsert_quarantine_candidate(&candidate)
+            .await
+            .expect("create quarantine fixture");
+        sqlx::query(
+            "DELETE FROM shardline_reliability_events
+             WHERE operation_kind = 'GarbageCollection' AND operation_id = $1",
+        )
+        .bind(object_key.as_str())
+        .execute(&pool)
+        .await
+        .expect("remove quarantine evidence fixture");
+
+        assert!(
+            store
+                .delete_quarantine_candidate(&object_key)
+                .await
+                .expect("delete quarantine candidate")
+        );
+        let (count, minimum, maximum): (i64, i64, i64) = sqlx::query_as(
+            "SELECT COUNT(*), MIN(sequence), MAX(sequence)
+             FROM shardline_reliability_events
+             WHERE operation_kind = 'GarbageCollection' AND operation_id = $1",
+        )
+        .bind(object_key.as_str())
+        .fetch_one(&pool)
+        .await
+        .expect("inspect repaired quarantine evidence");
+        assert_eq!((count, minimum, maximum), (2, 0, 1));
+
+        sqlx::query(
+            "DELETE FROM shardline_reliability_events
+             WHERE operation_kind = 'GarbageCollection' AND operation_id = $1",
+        )
+        .bind(object_key.as_str())
+        .execute(&pool)
+        .await
+        .expect("clean repaired quarantine evidence");
     }
 
     #[tokio::test(flavor = "multi_thread")]

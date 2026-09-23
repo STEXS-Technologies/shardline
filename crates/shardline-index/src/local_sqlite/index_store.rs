@@ -317,6 +317,7 @@ impl LifecycleStore for LocalIndexStore {
             )?;
             let mut evidence =
                 super::helpers::load_quarantine_evidence(&transaction, object_key.as_str())?;
+            let evidence_was_empty = evidence.events().is_empty();
             if evidence.events().is_empty() {
                 let active = super::helpers::quarantine_snapshot(
                     &candidate,
@@ -332,7 +333,13 @@ impl LifecycleStore for LocalIndexStore {
                     ),
                 )
             })?;
-            super::helpers::persist_quarantine_evidence(&transaction, event)?;
+            if evidence_was_empty {
+                for stored_event in evidence.events() {
+                    super::helpers::persist_quarantine_evidence(&transaction, stored_event)?;
+                }
+            } else {
+                super::helpers::persist_quarantine_evidence(&transaction, event)?;
+            }
         }
         transaction.commit()?;
         Ok(changed > 0)
@@ -2317,5 +2324,45 @@ mod tests {
             )
             .unwrap();
         assert!(LifecycleStore::quarantine_candidate(&store, candidate.object_key()).is_err());
+    }
+
+    #[test]
+    fn quarantine_delete_repairs_missing_baseline_chain() {
+        let store = make_store();
+        let candidate = QuarantineCandidate::new(
+            ObjectKey::parse("aa/quarantine-repair").unwrap(),
+            42,
+            100,
+            200,
+        )
+        .unwrap();
+        LifecycleStore::upsert_quarantine_candidate(&store, &candidate).unwrap();
+        {
+            let connection = store.open_connection().unwrap();
+            connection
+                .execute(
+                    "DELETE FROM shardline_reliability_events
+                     WHERE operation_kind = 'GarbageCollection'
+                       AND operation_id = 'aa/quarantine-repair'",
+                    [],
+                )
+                .unwrap();
+        }
+
+        assert!(
+            LifecycleStore::delete_quarantine_candidate(&store, candidate.object_key()).unwrap()
+        );
+        let connection = store.open_connection().unwrap();
+        let (count, minimum, maximum): (i64, i64, i64) = connection
+            .query_row(
+                "SELECT COUNT(*), MIN(sequence), MAX(sequence)
+                 FROM shardline_reliability_events
+                 WHERE operation_kind = 'GarbageCollection'
+                   AND operation_id = 'aa/quarantine-repair'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!((count, minimum, maximum), (2, 0, 1));
     }
 }

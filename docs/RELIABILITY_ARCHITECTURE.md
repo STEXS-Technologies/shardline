@@ -95,6 +95,11 @@ but their published/deleted/reclaimed visibility transitions now use the same
 `OciObjectLifecycleEvent` evidence. Existing transactional compare-and-publish
 rules remain authoritative for behavior.
 
+When a quarantine candidate is released after its journal has been lost, the
+stores reconstruct and persist both the active baseline and the release event
+in one transaction. This preserves a complete sequence-0/sequence-1 chain
+instead of leaving an unverifiable terminal-only record.
+
 The following are data-plane recovery materializations, not independent
 lifecycle state machines:
 
