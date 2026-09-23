@@ -401,13 +401,36 @@ impl AsyncIndexStore for super::PostgresIndexStore {
             )
             .fetch(&self.pool);
 
+            let mut candidates = Vec::new();
             while let Some(row) = rows
                 .try_next()
                 .await
                 .map_err(Self::Error::from)
                 .map_err(Into::<VisitorError>::into)?
             {
-                let candidate = quarantine_candidate_from_row(&row).map_err(Into::into)?;
+                candidates.push(quarantine_candidate_from_row(&row).map_err(Into::into)?);
+            }
+
+            // This visitor feeds GC and repair directly. Verify every row at
+            // this boundary instead of relying on callers to have used the
+            // separately verified list API.
+            for candidate in candidates {
+                let snapshot = quarantine_snapshot(&candidate, QuarantineLifecycleState::Active)
+                    .map_err(Into::<VisitorError>::into)?;
+                let evidence =
+                    load_postgres_quarantine_evidence(&self.pool, candidate.object_key().as_str())
+                        .await
+                        .map_err(Into::<VisitorError>::into)?;
+                let evidence = if evidence.events().is_empty() {
+                    QuarantineEvidenceLog::baseline(snapshot.clone())
+                        .map_err(Self::Error::from)
+                        .map_err(Into::<VisitorError>::into)?
+                } else {
+                    evidence
+                };
+                verify_quarantine_lifecycle_events(evidence.events(), &snapshot)
+                    .map_err(Self::Error::from)
+                    .map_err(Into::<VisitorError>::into)?;
                 visitor(candidate)?;
             }
 
