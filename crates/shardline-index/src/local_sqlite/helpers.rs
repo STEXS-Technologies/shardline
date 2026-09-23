@@ -18,7 +18,7 @@ use rusqlite::{
     params,
     types::{Type, ValueRef},
 };
-use serde_json::{from_slice, from_str, to_string};
+use serde_json::{Value, from_slice, from_str, to_string};
 use shardline_protocol::{RepositoryScope, unix_now_seconds_lossy};
 use shardline_reliability::{
     EvidenceEventMetadata, HubRefEvidenceLog, HubRefLifecycleEvent, HubRefSnapshot,
@@ -57,7 +57,7 @@ use shardline_reliability::{
     OciObjectSnapshot, ResumableLifecycleState, StateTransitionEvent, UploadLifecycleState,
     baseline_resumable_session_events, baseline_upload_lifecycle_events,
     build_persisted_merkle_commit, reliability_merkle_commit_json, upload_lifecycle_identity,
-    verify_provider_lifecycle_events, verify_resumable_session_events,
+    verify_persisted_event, verify_provider_lifecycle_events, verify_resumable_session_events,
     verify_upload_lifecycle_events,
 };
 
@@ -169,6 +169,65 @@ pub(crate) fn backfill_reliability_merkle_commits(
         )?;
     }
     Ok(rows.len())
+}
+
+/// Verifies every local reliability event and its persisted Merkle body.
+pub(crate) fn verify_reliability_events(
+    connection: &Connection,
+) -> Result<(), LocalIndexStoreError> {
+    let mut statement = connection.prepare(
+        "SELECT operation_kind, operation_id, sequence, event_json, merkle_commit_json
+         FROM shardline_reliability_events
+         ORDER BY operation_kind, operation_id, sequence",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, i64>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, Option<String>>(4)?,
+        ))
+    })?;
+    for row in rows {
+        let (operation_kind_text, operation_id, sequence, event_json_text, merkle_json_text) = row?;
+        let operation_kind = OperationKind::parse(&operation_kind_text).ok_or_else(|| {
+            LocalIndexStoreError::Reliability(shardline_reliability::ReliabilityError::Merkle(
+                format!("unknown reliability operation kind {operation_kind_text}"),
+            ))
+        })?;
+        let event_json: Value = from_str(&event_json_text)?;
+        verify_persisted_event(operation_kind, event_json.clone()).map_err(|error| {
+            LocalIndexStoreError::Reliability(shardline_reliability::ReliabilityError::Merkle(
+                format!(
+                    "invalid persisted reliability event kind={operation_kind_text} operation={operation_id} sequence={sequence}: {error}"
+                ),
+            ))
+        })?;
+        let merkle_json_text = merkle_json_text.ok_or_else(|| {
+            LocalIndexStoreError::Reliability(shardline_reliability::ReliabilityError::Merkle(
+                format!(
+                    "missing persisted Merkle commitment kind={operation_kind_text} operation={operation_id} sequence={sequence}"
+                ),
+            ))
+        })?;
+        let observed: Value = from_str(&merkle_json_text)?;
+        let expected = build_persisted_merkle_commit(operation_kind, event_json).map_err(|error| {
+            LocalIndexStoreError::Reliability(shardline_reliability::ReliabilityError::Merkle(
+                format!(
+                    "could not rebuild persisted Merkle commitment kind={operation_kind_text} operation={operation_id} sequence={sequence}: {error}"
+                ),
+            ))
+        })?;
+        if observed != expected {
+            return Err(LocalIndexStoreError::Reliability(
+                shardline_reliability::ReliabilityError::Merkle(format!(
+                    "persisted Merkle commitment mismatch kind={operation_kind_text} operation={operation_id} sequence={sequence}"
+                )),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn reliability_operation_exists(
@@ -3004,5 +3063,6 @@ mod tests {
                 .unwrap();
             assert!(count > 0, "missing backfilled {operation_kind} evidence");
         }
+        verify_reliability_events(&connection).expect("backfilled Merkle evidence should verify");
     }
 }

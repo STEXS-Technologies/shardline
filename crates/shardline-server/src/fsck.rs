@@ -50,7 +50,7 @@ pub async fn run_fsck(config: ServerConfig) -> Result<LocalFsckReport, ServerErr
 
     let index_store = LocalIndexStore::open(config.root_dir().to_path_buf());
     let record_store = LocalRecordStore::open(config.root_dir().to_path_buf());
-    run_fsck_with_stores(
+    let mut report = run_fsck_with_stores(
         &record_store,
         &index_store,
         &object_root,
@@ -58,7 +58,17 @@ pub async fn run_fsck(config: ServerConfig) -> Result<LocalFsckReport, ServerErr
         config.shard_metadata_limits(),
     )
     .await
-    .map_err(ServerError::from)
+    .map_err(ServerError::from)?;
+    if let Err(error) = index_store.verify_reliability_events() {
+        report.issues.push(FsckIssue {
+            kind: FsckIssueKind::InvalidReliabilityEvidence,
+            location: "local SQLite reliability journal".to_owned(),
+            detail: FsckIssueDetail::ReliabilityEvidenceInvalid {
+                reason: error.to_string(),
+            },
+        });
+    }
+    Ok(report)
 }
 
 impl From<FsckError> for ServerError {

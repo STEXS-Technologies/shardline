@@ -1960,17 +1960,20 @@ fn verify_persisted_reliability_row(
             "invalid persisted reliability event kind={operation_kind_text} operation={operation_id} sequence={sequence}: {error}"
         ))
     })?;
-    if let Some(observed) = merkle_commit_json {
-        let expected = build_persisted_merkle_commit(operation_kind, event_json).map_err(|error| {
-            DatabaseMigrationError::Backfill(format!(
-                "could not rebuild persisted Merkle commit kind={operation_kind_text} operation={operation_id} sequence={sequence}: {error}"
-            ))
-        })?;
-        if observed != expected {
-            return Err(DatabaseMigrationError::Backfill(format!(
-                "persisted Merkle commit mismatch kind={operation_kind_text} operation={operation_id} sequence={sequence}"
-            )));
-        }
+    let observed = merkle_commit_json.ok_or_else(|| {
+        DatabaseMigrationError::Backfill(format!(
+            "missing persisted Merkle commit kind={operation_kind_text} operation={operation_id} sequence={sequence}"
+        ))
+    })?;
+    let expected = build_persisted_merkle_commit(operation_kind, event_json).map_err(|error| {
+        DatabaseMigrationError::Backfill(format!(
+            "could not rebuild persisted Merkle commit kind={operation_kind_text} operation={operation_id} sequence={sequence}: {error}"
+        ))
+    })?;
+    if observed != expected {
+        return Err(DatabaseMigrationError::Backfill(format!(
+            "persisted Merkle commit mismatch kind={operation_kind_text} operation={operation_id} sequence={sequence}"
+        )));
     }
     Ok(())
 }

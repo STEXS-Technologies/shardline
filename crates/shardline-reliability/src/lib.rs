@@ -64,7 +64,9 @@ pub use operation::{
     resumable_session_snapshot_identity,
 };
 pub use penelope::ContentDigest as PenelopeDigest;
-pub use persisted::{build_persisted_merkle_commit, verify_persisted_event};
+pub use persisted::{
+    build_persisted_merkle_commit, verify_persisted_event, verify_persisted_merkle_commit,
+};
 pub use provider_evidence::{
     ProviderEvidenceLog, ProviderLifecycleEvent, ProviderLifecycleObservations,
     ProviderLifecycleSnapshot, ProviderRepositoryIdentity, ProviderRepositoryOperationId,

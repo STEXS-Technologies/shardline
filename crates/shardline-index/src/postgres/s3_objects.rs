@@ -6,7 +6,8 @@ use crate::{S3ObjectEntry, S3ObjectIndexStore};
 use shardline_reliability::{
     OperationKind, S3ObjectEvidenceLog, S3ObjectLifecycleEvent, S3ObjectSnapshot, S3ObjectState,
     SnapshotEvidence, reliability_merkle_commit_json, verify_and_append_snapshot_transition,
-    verify_or_repair_snapshot_evidence, verify_snapshot_event, verify_snapshot_evidence,
+    verify_or_repair_snapshot_evidence, verify_persisted_merkle_commit, verify_snapshot_event,
+    verify_snapshot_evidence,
 };
 
 fn s3_object_entry_from_row(row: &PgRow) -> Result<S3ObjectEntry, PostgresMetadataStoreError> {
@@ -353,10 +354,11 @@ impl S3ObjectIndexStore for PostgresIndexStore {
             "SELECT objects.scope_namespace, objects.object_key, objects.file_id,
                     objects.size_bytes, objects.content_hash, objects.etag,
                     objects.user_metadata, objects.updated_at_unix_seconds,
-                    evidence.event_json AS evidence_json
+                    evidence.event_json AS evidence_json,
+                    evidence.merkle_commit_json AS evidence_merkle_json
              FROM shardline_s3_objects AS objects
              LEFT JOIN LATERAL (
-                 SELECT event_json
+                 SELECT event_json, merkle_commit_json
                  FROM shardline_reliability_events
                  WHERE operation_kind = 'S3Object'
                    AND operation_id = octet_length(objects.scope_namespace)::text || ':' || objects.scope_namespace
@@ -395,6 +397,12 @@ impl S3ObjectIndexStore for PostgresIndexStore {
                 )
             })?;
             let event: S3ObjectLifecycleEvent = serde_json::from_value(event_json)?;
+            let merkle_json: Option<serde_json::Value> = row.try_get("evidence_merkle_json")?;
+            verify_persisted_merkle_commit(
+                OperationKind::S3Object,
+                serde_json::to_value(&event)?,
+                merkle_json,
+            )?;
             let expected =
                 s3_object_snapshot(&value.scope_namespace, &value.object_key, Some(&value))?;
             verify_snapshot_event(&event, &expected)?;

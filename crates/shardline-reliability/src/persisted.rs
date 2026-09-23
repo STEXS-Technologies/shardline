@@ -63,6 +63,29 @@ pub fn build_persisted_merkle_commit(
     }
 }
 
+/// Verifies that a persisted Merkle body is the exact StateChronicle
+/// commitment derived from its typed Shardline event.
+pub fn verify_persisted_merkle_commit(
+    operation_kind: OperationKind,
+    event_json: Value,
+    merkle_commit_json: Option<Value>,
+) -> Result<(), ReliabilityError> {
+    let observed = merkle_commit_json.ok_or_else(|| {
+        ReliabilityError::Merkle(format!(
+            "missing persisted Merkle commitment for {}",
+            operation_kind.as_str()
+        ))
+    })?;
+    let expected = build_persisted_merkle_commit(operation_kind, event_json)?;
+    if observed != expected {
+        return Err(ReliabilityError::Merkle(format!(
+            "persisted Merkle commitment mismatch for {}",
+            operation_kind.as_str()
+        )));
+    }
+    Ok(())
+}
+
 fn verify<E>(operation_kind: OperationKind, event_json: Value) -> Result<(), ReliabilityError>
 where
     E: serde::de::DeserializeOwned + crate::event_metadata::EvidenceEventMetadata,

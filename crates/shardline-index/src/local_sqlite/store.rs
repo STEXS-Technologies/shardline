@@ -89,6 +89,13 @@ impl LocalIndexStore {
         Ok(updated)
     }
 
+    /// Verifies all local reliability events and their persisted Merkle
+    /// commitments without repairing anything.
+    pub fn verify_reliability_events(&self) -> Result<(), LocalIndexStoreError> {
+        let connection = self.open_connection()?;
+        helpers::verify_reliability_events(&connection)
+    }
+
     pub(crate) fn open_connection(&self) -> Result<Connection, LocalIndexStoreError> {
         helpers::initialize_local_metadata_root(&self.root)?;
         let database_path = self.database_path();
