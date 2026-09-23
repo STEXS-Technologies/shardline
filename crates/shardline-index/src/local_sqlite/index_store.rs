@@ -1420,10 +1420,19 @@ impl UploadIntentStore for super::LocalIndexStore {
                 events.push(event.clone());
                 events.sort_by_key(|stored_event| stored_event.sequence);
             }
+            let (tenant, repository) = events
+                .first()
+                .map(|stored_event| {
+                    (
+                        stored_event.operation.tenant.as_str(),
+                        stored_event.operation.repository.as_str(),
+                    )
+                })
+                .unwrap_or(("shardline", "default"));
             verify_upload_lifecycle_events(
                 &events,
-                "shardline",
-                "default",
+                tenant,
+                repository,
                 &operation_id,
                 &object_key,
                 &object_hash,
@@ -1524,10 +1533,19 @@ impl UploadIntentStore for super::LocalIndexStore {
                     }
                     events = baseline;
                 }
+                let (tenant, repository) = events
+                    .first()
+                    .map(|event| {
+                        (
+                            event.operation.tenant.as_str(),
+                            event.operation.repository.as_str(),
+                        )
+                    })
+                    .unwrap_or(("shardline", "default"));
                 shardline_reliability::verify_upload_lifecycle_events(
                     &events,
-                    "shardline",
-                    "default",
+                    tenant,
+                    repository,
                     &operation_id,
                     &object_key,
                     &object_hash,
@@ -2330,6 +2348,46 @@ mod tests {
             runtime.block_on(store.create_intent(&conflicting)),
             Err(LocalIndexStoreError::UploadIntentConflict(_))
         ));
+    }
+
+    #[test]
+    fn scoped_intent_baseline_and_transition_share_repository_identity() {
+        let store = make_store();
+        let intent = UploadIntent::new(
+            "scoped-intent".to_owned(),
+            "objects/scoped".to_owned(),
+            "a".repeat(64),
+            42,
+        );
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime
+            .block_on(store.create_intent_scoped(&intent, "tenant-a", "repo-a"))
+            .unwrap();
+        let event = upload_lifecycle_event(
+            "tenant-a",
+            "repo-a",
+            intent.intent_id(),
+            intent.object_key(),
+            intent.object_hash(),
+            shardline_reliability::UploadLifecycleState::Created,
+            shardline_reliability::UploadLifecycleState::Storing,
+        )
+        .unwrap();
+        runtime
+            .block_on(store.transition_intent_with_event(
+                intent.intent_id(),
+                UploadIntentState::Storing,
+                &event,
+            ))
+            .unwrap();
+        let events = runtime
+            .block_on(store.reliability_events(intent.intent_id()))
+            .unwrap();
+        assert_eq!(events.len(), 2);
+        assert!(events.iter().all(|stored_event| {
+            stored_event.operation.tenant == "tenant-a"
+                && stored_event.operation.repository == "repo-a"
+        }));
     }
 
     #[test]

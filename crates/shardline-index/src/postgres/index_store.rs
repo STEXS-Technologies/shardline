@@ -1479,10 +1479,19 @@ impl UploadIntentStore for super::PostgresIndexStore {
             events.push(event.clone());
             events.sort_by_key(|stored_event| stored_event.sequence);
         }
+        let (tenant, repository) = events
+            .first()
+            .map(|stored_event| {
+                (
+                    stored_event.operation.tenant.as_str(),
+                    stored_event.operation.repository.as_str(),
+                )
+            })
+            .unwrap_or(("shardline", "default"));
         verify_upload_lifecycle_events(
             &events,
-            "shardline",
-            "default",
+            tenant,
+            repository,
             &event.operation.operation_id,
             &object_key,
             &object_hash,
@@ -1557,10 +1566,19 @@ impl UploadIntentStore for super::PostgresIndexStore {
                 }
                 events = baseline;
             }
+            let (tenant, repository) = events
+                .first()
+                .map(|event| {
+                    (
+                        event.operation.tenant.as_str(),
+                        event.operation.repository.as_str(),
+                    )
+                })
+                .unwrap_or(("shardline", "default"));
             verify_upload_lifecycle_events(
                 &events,
-                "shardline",
-                "default",
+                tenant,
+                repository,
                 operation_id,
                 &object_key,
                 &object_hash,
