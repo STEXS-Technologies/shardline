@@ -112,7 +112,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tag_retarget_and_delete_are_authenticated() {
+    fn tag_retarget_and_delete_have_integrity_checked_events() {
         let absent = OciTagSnapshot::new("tenant", "repo", "latest", None).unwrap();
         let first = OciTagSnapshot::new("tenant", "repo", "latest", Some("a".repeat(64))).unwrap();
         let second = OciTagSnapshot::new("tenant", "repo", "latest", Some("b".repeat(64))).unwrap();

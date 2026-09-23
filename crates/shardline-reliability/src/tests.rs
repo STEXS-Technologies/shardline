@@ -331,7 +331,7 @@ fn new_evidence_uses_canonical_bcs_digests() {
 }
 
 #[test]
-fn generic_state_transition_chain_is_tamper_evident() {
+fn generic_state_transition_chain_detects_integrity_failures() {
     let operation = OperationIdentity::new(
         "tenant",
         "repository",
@@ -546,7 +546,7 @@ fn baseline_events_are_replayable() {
 }
 
 #[test]
-fn file_backed_session_evidence_is_replayable_and_tamper_evident() {
+fn file_backed_session_evidence_is_replayable_and_integrity_checked() {
     let mut evidence = SessionEvidenceLog::new("s3", "session-1", "bucket/key").unwrap();
     evidence
         .record(

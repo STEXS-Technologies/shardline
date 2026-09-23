@@ -571,7 +571,7 @@ impl PostgresIndexStore {
         Ok(Some(session))
     }
 
-    /// Loads and verifies the tamper-evident resumable-session lifecycle journal.
+    /// Loads and verifies the resumable-session lifecycle journal's integrity.
     ///
     /// # Errors
     ///

@@ -227,6 +227,14 @@ struct PersistedMultipartUploadSession {
     /// only after the append-only record is fsynced.
     #[serde(default)]
     journal_head: Option<u64>,
+    /// Last committed lifecycle sequence, allowing mutations to append
+    /// without rereading the growing journal.
+    #[serde(default)]
+    journal_evidence_sequence: Option<u64>,
+    /// Last committed snapshot sequence, allowing mutations to append
+    /// without rereading the growing journal.
+    #[serde(default)]
+    journal_snapshot_sequence: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -1049,6 +1057,8 @@ async fn persist_session(
         evidence,
         snapshot_evidence,
         journal_head: None,
+        journal_evidence_sequence: None,
+        journal_snapshot_sequence: None,
     })?;
     write_file_atomically(&path, &bytes).await
 }
@@ -1078,26 +1088,38 @@ async fn persist_session_with_evidence(
     let dir = path
         .parent()
         .ok_or_else(|| S3SessionError::Reliability("session path has no parent".into()))?;
-    let records = read_evidence_journal(dir).await?;
     let committed_head = existing
         .as_ref()
         .and_then(|value| value.journal_head)
         .unwrap_or(0);
-    let committed_head_usize =
-        usize::try_from(committed_head).map_err(|_| S3SessionError::Overflow)?;
-    let committed = records
-        .get(..committed_head_usize)
-        .ok_or_else(|| S3SessionError::Reliability("session journal head is invalid".into()))?;
-    let last_evidence_sequence = committed
-        .iter()
-        .flat_map(|record| record.evidence.last())
-        .map(|event| event.sequence)
-        .max();
-    let last_snapshot_sequence = committed
-        .iter()
-        .flat_map(|record| record.snapshot_evidence.last())
-        .map(|event| event.sequence)
-        .max();
+    let mut last_evidence_sequence = existing
+        .as_ref()
+        .and_then(|value| value.journal_evidence_sequence);
+    let mut last_snapshot_sequence = existing
+        .as_ref()
+        .and_then(|value| value.journal_snapshot_sequence);
+    if committed_head > 0 && (last_evidence_sequence.is_none() || last_snapshot_sequence.is_none())
+    {
+        // Compatibility path for metadata written before sequence sidecars
+        // existed. It runs once per legacy session; subsequent mutations use
+        // the durable sequence fields and do not reread the journal.
+        let records = read_evidence_journal(dir).await?;
+        let committed_head_usize =
+            usize::try_from(committed_head).map_err(|_| S3SessionError::Overflow)?;
+        let committed = records
+            .get(..committed_head_usize)
+            .ok_or_else(|| S3SessionError::Reliability("session journal head is invalid".into()))?;
+        last_evidence_sequence = committed
+            .iter()
+            .flat_map(|record| record.evidence.last())
+            .map(|event| event.sequence)
+            .max();
+        last_snapshot_sequence = committed
+            .iter()
+            .flat_map(|record| record.snapshot_evidence.last())
+            .map(|event| event.sequence)
+            .max();
+    }
     let new_record = SessionEvidenceJournalRecord {
         evidence: evidence
             .events()
@@ -1126,6 +1148,16 @@ async fn persist_session_with_evidence(
         evidence: SessionEvidenceLog::default(),
         snapshot_evidence: SnapshotEvidenceLog::default(),
         journal_head: Some(journal_head),
+        journal_evidence_sequence: new_record
+            .evidence
+            .last()
+            .map(|event| event.sequence)
+            .or(last_evidence_sequence),
+        journal_snapshot_sequence: new_record
+            .snapshot_evidence
+            .last()
+            .map(|event| event.sequence)
+            .or(last_snapshot_sequence),
     })?;
     write_file_atomically(&path, &bytes).await
 }
@@ -1574,6 +1606,10 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(snapshot_evidence.events().len(), 2);
+        let persisted: PersistedMultipartUploadSession =
+            serde_json::from_slice(&fs::read(&path).await.unwrap()).unwrap();
+        assert_eq!(persisted.journal_evidence_sequence, Some(2));
+        assert_eq!(persisted.journal_snapshot_sequence, Some(1));
 
         store_part(
             root.path(),

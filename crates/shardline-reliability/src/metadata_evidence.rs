@@ -103,7 +103,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ref_head_advances_and_deletes_with_authenticated_events() {
+    fn ref_head_advances_and_deletes_with_integrity_checked_events() {
         let empty = HubRefSnapshot::new("org/model", "feature", None).unwrap();
         let first = HubRefSnapshot::new("org/model", "feature", Some("sha-1".into())).unwrap();
         let mut log = HubRefEvidenceLog::baseline(empty).unwrap();

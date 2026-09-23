@@ -200,7 +200,7 @@ impl PostgresIndexStore {
             transaction.rollback().await?;
             return Ok(false);
         };
-        // Tag rows and their authenticated pointer histories share this
+        // Tag rows and their integrity-checked pointer histories share this
         // completion transaction, so a published manifest cannot expose an
         // unjournaled retarget.
         let scope_namespace: String = owns_completion.try_get("scope_namespace")?;

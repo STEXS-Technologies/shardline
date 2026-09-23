@@ -119,7 +119,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn object_replacement_and_absence_are_authenticated() {
+    fn object_replacement_and_absence_have_integrity_checked_events() {
         let absent = S3ObjectSnapshot::new("tenant", "model.bin", None).unwrap();
         let present = S3ObjectSnapshot::new(
             "tenant",
