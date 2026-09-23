@@ -150,8 +150,12 @@ impl HubStore for LocalIndexStore {
     }
 
     fn get_repo(&self, repo_id: &str) -> Result<Option<HubRepo>, Self::Error> {
-        let conn = open_hub_connection(self.root())?;
-        let result = conn
+        let root = self.root().to_owned();
+        let repo_id = repo_id.to_owned();
+        retry_sqlite_busy(|| {
+            let mut conn = open_hub_connection_rw(&root)?;
+            let tx = conn.transaction()?;
+            let result = tx
             .query_row(
                 "SELECT repo_id, repo_type, private, default_branch, created_at_unix_seconds, updated_at_unix_seconds
                  FROM shardline_hub_repos WHERE repo_id = ?1",
@@ -173,7 +177,20 @@ impl HubStore for LocalIndexStore {
                 },
             )
             .optional()?;
-        Ok(result)
+            if let Some(repo) = &result {
+                let evidence = current_hub_ref_evidence(
+                    &tx,
+                    &repo.repo_id,
+                    "main",
+                    Some(repo.default_branch.clone()),
+                )?;
+                for event in evidence.events() {
+                    persist_hub_ref_evidence(&tx, event)?;
+                }
+            }
+            tx.commit()?;
+            Ok(result)
+        })
     }
 
     fn list_repos(&self) -> Result<Vec<HubRepo>, Self::Error> {
@@ -863,6 +880,7 @@ mod tests {
             .expect("tamper evidence");
 
         assert!(store.list_refs("tamper-test").is_err());
+        assert!(store.get_repo("tamper-test").is_err());
     }
 
     #[test]

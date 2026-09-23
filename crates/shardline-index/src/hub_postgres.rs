@@ -189,19 +189,21 @@ impl HubStore for PostgresIndexStore {
         let repo_id = repo_id.to_owned();
 
         block_on_async(async {
+            let mut tx = pool.begin().await?;
             let row = sqlx::query(
                 "SELECT repo_id, repo_type, private, default_branch, created_at_unix_seconds, updated_at_unix_seconds
                  FROM shardline_hub_repos WHERE repo_id = $1",
             )
             .bind(&repo_id)
-            .fetch_optional(&pool)
+            .fetch_optional(&mut *tx)
             .await?;
 
             let Some(row) = row else {
+                tx.commit().await?;
                 return Ok(None);
             };
 
-            Ok(Some(HubRepo {
+            let repository = HubRepo {
                 repo_id: row.try_get("repo_id")?,
                 repo_type: repo_type_from_str(&row.try_get::<String, _>("repo_type")?)?,
                 private: row.try_get::<bool, _>("private")?,
@@ -212,7 +214,17 @@ impl HubStore for PostgresIndexStore {
                 updated_at_unix_seconds: i64_to_u64(
                     row.try_get::<i64, _>("updated_at_unix_seconds")?,
                 )?,
-            }))
+            };
+            let evidence = current_hub_ref_evidence(
+                &mut tx,
+                &repository.repo_id,
+                "main",
+                Some(repository.default_branch.clone()),
+            )
+            .await?;
+            persist_hub_ref_evidence(&mut tx, &evidence).await?;
+            tx.commit().await?;
+            Ok(Some(repository))
         })
     }
 
