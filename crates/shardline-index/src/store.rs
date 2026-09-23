@@ -97,6 +97,17 @@ macro_rules! impl_async_lifecycle_delegation {
             )
         }
 
+        fn delete_quarantine_candidate_if_matches<'operation>(
+            &'operation self,
+            candidate: &'operation QuarantineCandidate,
+        ) -> IndexStoreFuture<'operation, bool, Self::Error> {
+            let store = self.clone();
+            let candidate = candidate.clone();
+            Box::pin(async move {
+                LifecycleStore::delete_quarantine_candidate_if_matches(&store, &candidate)
+            })
+        }
+
         fn retention_hold<'operation>(
             &'operation self,
             object_key: &'operation ObjectKey,
@@ -129,6 +140,15 @@ macro_rules! impl_async_lifecycle_delegation {
             Box::pin(async move { LifecycleStore::delete_retention_hold(&store, &object_key) })
         }
 
+        fn delete_retention_hold_if_matches<'operation>(
+            &'operation self,
+            hold: &'operation RetentionHold,
+        ) -> IndexStoreFuture<'operation, bool, Self::Error> {
+            let store = self.clone();
+            let hold = hold.clone();
+            Box::pin(async move { LifecycleStore::delete_retention_hold_if_matches(&store, &hold) })
+        }
+
         fn record_webhook_delivery<'operation>(
             &'operation self,
             delivery: &'operation WebhookDelivery,
@@ -152,6 +172,17 @@ macro_rules! impl_async_lifecycle_delegation {
             let store = self.clone();
             let delivery = delivery.clone();
             Box::pin(async move { LifecycleStore::delete_webhook_delivery(&store, &delivery) })
+        }
+
+        fn delete_webhook_delivery_if_matches<'operation>(
+            &'operation self,
+            delivery: &'operation WebhookDelivery,
+        ) -> IndexStoreFuture<'operation, bool, Self::Error> {
+            let store = self.clone();
+            let delivery = delivery.clone();
+            Box::pin(async move {
+                LifecycleStore::delete_webhook_delivery_if_matches(&store, &delivery)
+            })
         }
 
         fn purge_webhook_deliveries_older_than<'operation>(
@@ -340,6 +371,26 @@ pub trait LifecycleStore {
     /// Returns the adapter error when persistence fails.
     fn delete_quarantine_candidate(&self, object_key: &ObjectKey) -> Result<bool, Self::Error>;
 
+    /// Deletes the candidate only when its complete materialized value still
+    /// matches the value observed by the caller.
+    ///
+    /// The default implementation preserves compatibility for adapters that do
+    /// not provide an atomic compare-and-swap primitive. Durable adapters should
+    /// override it so repair scans cannot delete a newer replacement.
+    ///
+    /// # Errors
+    ///
+    /// Returns the adapter error when the comparison or deletion fails.
+    fn delete_quarantine_candidate_if_matches(
+        &self,
+        candidate: &QuarantineCandidate,
+    ) -> Result<bool, Self::Error> {
+        if self.quarantine_candidate(candidate.object_key())?.as_ref() != Some(candidate) {
+            return Ok(false);
+        }
+        self.delete_quarantine_candidate(candidate.object_key())
+    }
+
     /// Loads durable retention-hold state for one object key.
     ///
     /// # Errors
@@ -370,6 +421,19 @@ pub trait LifecycleStore {
     /// Returns the adapter error when persistence fails.
     fn delete_retention_hold(&self, object_key: &ObjectKey) -> Result<bool, Self::Error>;
 
+    /// Deletes the hold only when its complete materialized value still matches
+    /// the value observed by the caller.
+    ///
+    /// # Errors
+    ///
+    /// Returns the adapter error when the comparison or deletion fails.
+    fn delete_retention_hold_if_matches(&self, hold: &RetentionHold) -> Result<bool, Self::Error> {
+        if self.retention_hold(hold.object_key())?.as_ref() != Some(hold) {
+            return Ok(false);
+        }
+        self.delete_retention_hold(hold.object_key())
+    }
+
     /// Records a processed provider webhook delivery once.
     ///
     /// Returns `true` when the delivery was newly recorded and `false` when the same
@@ -399,6 +463,28 @@ pub trait LifecycleStore {
     ///
     /// Returns the adapter error when persistence fails.
     fn delete_webhook_delivery(&self, delivery: &WebhookDelivery) -> Result<bool, Self::Error>;
+
+    /// Deletes the delivery only when its complete materialized value still
+    /// matches the value observed by the caller.
+    ///
+    /// # Errors
+    ///
+    /// Returns the adapter error when the comparison or deletion fails.
+    fn delete_webhook_delivery_if_matches(
+        &self,
+        delivery: &WebhookDelivery,
+    ) -> Result<bool, Self::Error> {
+        if self.list_webhook_deliveries()?.iter().find(|current| {
+            current.provider() == delivery.provider()
+                && current.owner() == delivery.owner()
+                && current.repo() == delivery.repo()
+                && current.delivery_id() == delivery.delivery_id()
+        }) != Some(delivery)
+        {
+            return Ok(false);
+        }
+        self.delete_webhook_delivery(delivery)
+    }
 
     /// Deletes every processed provider webhook delivery claim recorded strictly
     /// before `older_than_unix_seconds`, returning how many rows were removed.
@@ -598,6 +684,26 @@ pub trait AsyncIndexStore {
         object_key: &'operation ObjectKey,
     ) -> IndexStoreFuture<'operation, bool, Self::Error>;
 
+    /// Deletes a quarantine candidate only if its complete observed value is
+    /// unchanged since the repair scan.
+    fn delete_quarantine_candidate_if_matches<'operation>(
+        &'operation self,
+        candidate: &'operation QuarantineCandidate,
+    ) -> IndexStoreFuture<'operation, bool, Self::Error>
+    where
+        Self: Sync,
+    {
+        let candidate = candidate.clone();
+        Box::pin(async move {
+            let current = self.quarantine_candidate(candidate.object_key()).await?;
+            if current.as_ref() != Some(&candidate) {
+                return Ok(false);
+            }
+            self.delete_quarantine_candidate(candidate.object_key())
+                .await
+        })
+    }
+
     /// Loads durable retention-hold state for one object key.
     fn retention_hold<'operation>(
         &'operation self,
@@ -620,6 +726,25 @@ pub trait AsyncIndexStore {
         &'operation self,
         object_key: &'operation ObjectKey,
     ) -> IndexStoreFuture<'operation, bool, Self::Error>;
+
+    /// Deletes a retention hold only if its complete observed value is
+    /// unchanged since the repair scan.
+    fn delete_retention_hold_if_matches<'operation>(
+        &'operation self,
+        hold: &'operation RetentionHold,
+    ) -> IndexStoreFuture<'operation, bool, Self::Error>
+    where
+        Self: Sync,
+    {
+        let hold = hold.clone();
+        Box::pin(async move {
+            let current = self.retention_hold(hold.object_key()).await?;
+            if current.as_ref() != Some(&hold) {
+                return Ok(false);
+            }
+            self.delete_retention_hold(hold.object_key()).await
+        })
+    }
 
     /// Records a processed provider webhook delivery once.
     ///
@@ -644,6 +769,34 @@ pub trait AsyncIndexStore {
         &'operation self,
         delivery: &'operation WebhookDelivery,
     ) -> IndexStoreFuture<'operation, bool, Self::Error>;
+
+    /// Deletes a webhook delivery only if its complete observed value is
+    /// unchanged since the repair scan.
+    fn delete_webhook_delivery_if_matches<'operation>(
+        &'operation self,
+        delivery: &'operation WebhookDelivery,
+    ) -> IndexStoreFuture<'operation, bool, Self::Error>
+    where
+        Self: Sync,
+    {
+        let delivery = delivery.clone();
+        Box::pin(async move {
+            let current = self
+                .list_webhook_deliveries()
+                .await?
+                .into_iter()
+                .find(|current| {
+                    current.provider() == delivery.provider()
+                        && current.owner() == delivery.owner()
+                        && current.repo() == delivery.repo()
+                        && current.delivery_id() == delivery.delivery_id()
+                });
+            if current.as_ref() != Some(&delivery) {
+                return Ok(false);
+            }
+            self.delete_webhook_delivery(&delivery).await
+        })
+    }
 
     /// Deletes every processed provider webhook delivery claim recorded strictly
     /// before `older_than_unix_seconds`, returning how many rows were removed.

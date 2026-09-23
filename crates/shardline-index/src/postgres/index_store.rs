@@ -688,6 +688,74 @@ impl AsyncIndexStore for super::PostgresIndexStore {
         })
     }
 
+    fn delete_quarantine_candidate_if_matches<'operation>(
+        &'operation self,
+        expected: &'operation QuarantineCandidate,
+    ) -> IndexStoreFuture<'operation, bool, Self::Error> {
+        Box::pin(async move {
+            let mut transaction = self.pool.begin().await?;
+            let row = query(
+                "SELECT object_key, observed_length, first_seen_unreachable_at_unix_seconds, delete_after_unix_seconds
+                 FROM shardline_quarantine_candidates WHERE object_key = $1 FOR UPDATE",
+            )
+            .bind(expected.object_key().as_str())
+            .fetch_optional(&mut *transaction)
+            .await?;
+            let Some(row) = row else {
+                transaction.commit().await?;
+                return Ok(false);
+            };
+            let candidate = quarantine_candidate_from_row(&row)?;
+            if candidate != *expected {
+                transaction.commit().await?;
+                return Ok(false);
+            }
+            let active = quarantine_snapshot(&candidate, QuarantineLifecycleState::Active)?;
+            let released = quarantine_snapshot(&candidate, QuarantineLifecycleState::Released)?;
+            let evidence = load_postgres_quarantine_evidence(
+                &mut *transaction,
+                expected.object_key().as_str(),
+            )
+            .await?;
+            let (evidence, evidence_was_empty) =
+                verify_and_append_snapshot_transition(evidence, active, released)?;
+            let result = query(
+                "DELETE FROM shardline_quarantine_candidates
+                 WHERE object_key = $1 AND observed_length = $2
+                   AND first_seen_unreachable_at_unix_seconds = $3
+                   AND delete_after_unix_seconds = $4",
+            )
+            .bind(expected.object_key().as_str())
+            .bind(u64_to_i64(expected.observed_length())?)
+            .bind(u64_to_i64(
+                expected.first_seen_unreachable_at_unix_seconds(),
+            )?)
+            .bind(u64_to_i64(expected.delete_after_unix_seconds())?)
+            .execute(&mut *transaction)
+            .await?;
+            if result.rows_affected() == 0 {
+                transaction.commit().await?;
+                return Ok(false);
+            }
+            let event = evidence.events().last().ok_or_else(|| {
+                PostgresMetadataStoreError::Reliability(
+                    shardline_reliability::ReliabilityError::EmptyField(
+                        "quarantine evidence event",
+                    ),
+                )
+            })?;
+            if evidence_was_empty {
+                for stored_event in evidence.events() {
+                    insert_reliability_event(&mut *transaction, stored_event).await?;
+                }
+            } else {
+                insert_reliability_event(&mut *transaction, event).await?;
+            }
+            transaction.commit().await?;
+            Ok(true)
+        })
+    }
+
     fn retention_hold<'operation>(
         &'operation self,
         object_key: &'operation ObjectKey,
@@ -845,6 +913,67 @@ impl AsyncIndexStore for super::PostgresIndexStore {
         })
     }
 
+    fn delete_retention_hold_if_matches<'operation>(
+        &'operation self,
+        expected: &'operation RetentionHold,
+    ) -> IndexStoreFuture<'operation, bool, Self::Error> {
+        Box::pin(async move {
+            let mut transaction = self.pool.begin().await?;
+            let row = query(
+                "SELECT object_key, reason, held_at_unix_seconds, release_after_unix_seconds
+                 FROM shardline_retention_holds WHERE object_key = $1 FOR UPDATE",
+            )
+            .bind(expected.object_key().as_str())
+            .fetch_optional(&mut *transaction)
+            .await?;
+            let Some(row) = row else {
+                transaction.commit().await?;
+                return Ok(false);
+            };
+            let hold = retention_hold_from_row(&row)?;
+            if hold != *expected {
+                transaction.commit().await?;
+                return Ok(false);
+            }
+            let active = retention_snapshot(&hold, RetentionHoldLifecycleState::Active)?;
+            let released = retention_snapshot(&hold, RetentionHoldLifecycleState::Released)?;
+            let evidence =
+                load_postgres_retention_evidence(&mut *transaction, expected.object_key().as_str())
+                    .await?;
+            let (evidence, evidence_was_empty) =
+                verify_and_append_snapshot_transition(evidence, active, released)?;
+            let result = query(
+                "DELETE FROM shardline_retention_holds
+                 WHERE object_key = $1 AND reason = $2 AND held_at_unix_seconds = $3
+                   AND release_after_unix_seconds IS NOT DISTINCT FROM $4",
+            )
+            .bind(expected.object_key().as_str())
+            .bind(expected.reason())
+            .bind(u64_to_i64(expected.held_at_unix_seconds())?)
+            .bind(
+                expected
+                    .release_after_unix_seconds()
+                    .map(u64_to_i64)
+                    .transpose()?,
+            )
+            .execute(&mut *transaction)
+            .await?;
+            if result.rows_affected() == 0 {
+                transaction.commit().await?;
+                return Ok(false);
+            }
+            if evidence_was_empty {
+                for event in evidence.events() {
+                    insert_reliability_event(&mut *transaction, event).await?;
+                }
+            } else if let Some(event) = evidence.events().last() {
+                insert_reliability_event(&mut *transaction, event).await?;
+            }
+            transaction.commit().await?;
+            Ok(true)
+        })
+    }
+
     fn record_webhook_delivery<'operation>(
         &'operation self,
         delivery: &'operation WebhookDelivery,
@@ -929,6 +1058,66 @@ impl AsyncIndexStore for super::PostgresIndexStore {
             }
             transaction.commit().await?;
             Ok(result.rows_affected() > 0)
+        })
+    }
+
+    fn delete_webhook_delivery_if_matches<'operation>(
+        &'operation self,
+        expected: &'operation WebhookDelivery,
+    ) -> IndexStoreFuture<'operation, bool, Self::Error> {
+        Box::pin(async move {
+            let mut transaction = self.pool.begin().await?;
+            let row = query(
+                "SELECT provider, owner, repo, delivery_id, processed_at_unix_seconds
+                 FROM shardline_webhook_deliveries
+                 WHERE provider = $1 AND owner = $2 AND repo = $3 AND delivery_id = $4
+                 FOR UPDATE",
+            )
+            .bind(expected.provider().as_str())
+            .bind(expected.owner())
+            .bind(expected.repo())
+            .bind(expected.delivery_id())
+            .fetch_optional(&mut *transaction)
+            .await?;
+            let Some(row) = row else {
+                transaction.commit().await?;
+                return Ok(false);
+            };
+            let existing = webhook_delivery_from_row(&row)?;
+            if existing != *expected {
+                transaction.commit().await?;
+                return Ok(false);
+            }
+            let active = webhook_snapshot(&existing, WebhookDeliveryLifecycleState::Processed)?;
+            let released = webhook_snapshot(&existing, WebhookDeliveryLifecycleState::Released)?;
+            let evidence = load_postgres_webhook_evidence(&mut *transaction, &existing).await?;
+            let (evidence, evidence_was_empty) =
+                verify_and_append_snapshot_transition(evidence, active, released)?;
+            let result = query(
+                "DELETE FROM shardline_webhook_deliveries
+                 WHERE provider = $1 AND owner = $2 AND repo = $3 AND delivery_id = $4
+                   AND processed_at_unix_seconds = $5",
+            )
+            .bind(expected.provider().as_str())
+            .bind(expected.owner())
+            .bind(expected.repo())
+            .bind(expected.delivery_id())
+            .bind(u64_to_i64(expected.processed_at_unix_seconds())?)
+            .execute(&mut *transaction)
+            .await?;
+            if result.rows_affected() == 0 {
+                transaction.commit().await?;
+                return Ok(false);
+            }
+            if evidence_was_empty {
+                for event in evidence.events() {
+                    insert_reliability_event(&mut *transaction, event).await?;
+                }
+            } else if let Some(event) = evidence.events().last() {
+                insert_reliability_event(&mut *transaction, event).await?;
+            }
+            transaction.commit().await?;
+            Ok(true)
         })
     }
 

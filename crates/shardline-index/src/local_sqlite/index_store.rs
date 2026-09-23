@@ -380,6 +380,68 @@ impl LifecycleStore for LocalIndexStore {
         Ok(changed > 0)
     }
 
+    fn delete_quarantine_candidate_if_matches(
+        &self,
+        expected: &QuarantineCandidate,
+    ) -> Result<bool, Self::Error> {
+        let mut connection = self.open_connection()?;
+        let transaction = connection.transaction()?;
+        let candidate = transaction
+            .query_row(
+                "SELECT object_key, observed_length, first_seen_unreachable_at_unix_seconds, delete_after_unix_seconds
+                 FROM shardline_quarantine_candidates WHERE object_key = ?1",
+                params![expected.object_key().as_str()],
+                super::helpers::quarantine_candidate_from_row,
+            )
+            .optional()?;
+        let Some(candidate) = candidate else {
+            transaction.commit()?;
+            return Ok(false);
+        };
+        if candidate != *expected {
+            transaction.commit()?;
+            return Ok(false);
+        }
+        let active =
+            super::helpers::quarantine_snapshot(&candidate, QuarantineLifecycleState::Active)?;
+        let released =
+            super::helpers::quarantine_snapshot(&candidate, QuarantineLifecycleState::Released)?;
+        let evidence =
+            super::helpers::load_quarantine_evidence(&transaction, expected.object_key().as_str())?;
+        let (evidence, evidence_was_empty) =
+            verify_and_append_snapshot_transition(evidence, active, released)?;
+        let changed = transaction.execute(
+            "DELETE FROM shardline_quarantine_candidates
+             WHERE object_key = ?1 AND observed_length = ?2
+               AND first_seen_unreachable_at_unix_seconds = ?3
+               AND delete_after_unix_seconds = ?4",
+            params![
+                expected.object_key().as_str(),
+                u64_to_i64(expected.observed_length())?,
+                u64_to_i64(expected.first_seen_unreachable_at_unix_seconds())?,
+                u64_to_i64(expected.delete_after_unix_seconds())?,
+            ],
+        )?;
+        if changed == 0 {
+            transaction.commit()?;
+            return Ok(false);
+        }
+        let event = evidence.events().last().ok_or_else(|| {
+            LocalIndexStoreError::Reliability(shardline_reliability::ReliabilityError::EmptyField(
+                "quarantine evidence event",
+            ))
+        })?;
+        if evidence_was_empty {
+            for stored_event in evidence.events() {
+                super::helpers::persist_quarantine_evidence(&transaction, stored_event)?;
+            }
+        } else {
+            super::helpers::persist_quarantine_evidence(&transaction, event)?;
+        }
+        transaction.commit()?;
+        Ok(true)
+    }
+
     fn retention_hold(&self, object_key: &ObjectKey) -> Result<Option<RetentionHold>, Self::Error> {
         let mut connection = self.open_connection()?;
         let transaction = connection.transaction()?;
@@ -536,6 +598,62 @@ impl LifecycleStore for LocalIndexStore {
         Ok(changed > 0)
     }
 
+    fn delete_retention_hold_if_matches(
+        &self,
+        expected: &RetentionHold,
+    ) -> Result<bool, Self::Error> {
+        let mut connection = self.open_connection()?;
+        let transaction = connection.transaction()?;
+        let hold = transaction
+            .query_row(
+                "SELECT object_key, reason, held_at_unix_seconds, release_after_unix_seconds
+                 FROM shardline_retention_holds WHERE object_key = ?1",
+                params![expected.object_key().as_str()],
+                super::helpers::retention_hold_from_row,
+            )
+            .optional()?;
+        let Some(hold) = hold else {
+            transaction.commit()?;
+            return Ok(false);
+        };
+        if hold != *expected {
+            transaction.commit()?;
+            return Ok(false);
+        }
+        let active = retention_snapshot(&hold, RetentionHoldLifecycleState::Active)?;
+        let released = retention_snapshot(&hold, RetentionHoldLifecycleState::Released)?;
+        let evidence = load_retention_evidence(&transaction, expected.object_key().as_str())?;
+        let (evidence, evidence_was_empty) =
+            verify_and_append_snapshot_transition(evidence, active, released)?;
+        let changed = transaction.execute(
+            "DELETE FROM shardline_retention_holds
+             WHERE object_key = ?1 AND reason = ?2 AND held_at_unix_seconds = ?3
+               AND (release_after_unix_seconds IS ?4)",
+            params![
+                expected.object_key().as_str(),
+                expected.reason(),
+                u64_to_i64(expected.held_at_unix_seconds())?,
+                expected
+                    .release_after_unix_seconds()
+                    .map(u64_to_i64)
+                    .transpose()?,
+            ],
+        )?;
+        if changed == 0 {
+            transaction.commit()?;
+            return Ok(false);
+        }
+        if evidence_was_empty {
+            for event in evidence.events() {
+                persist_retention_evidence(&transaction, event)?;
+            }
+        } else if let Some(event) = evidence.events().last() {
+            persist_retention_evidence(&transaction, event)?;
+        }
+        transaction.commit()?;
+        Ok(true)
+    }
+
     fn record_webhook_delivery(&self, delivery: &WebhookDelivery) -> Result<bool, Self::Error> {
         let mut connection = self.open_connection()?;
         let transaction = connection.transaction()?;
@@ -679,6 +797,66 @@ impl LifecycleStore for LocalIndexStore {
         }
         transaction.commit()?;
         Ok(changed > 0)
+    }
+
+    fn delete_webhook_delivery_if_matches(
+        &self,
+        expected: &WebhookDelivery,
+    ) -> Result<bool, Self::Error> {
+        let mut connection = self.open_connection()?;
+        let transaction = connection.transaction()?;
+        let existing = transaction
+            .query_row(
+                "SELECT provider, owner, repo, delivery_id, processed_at_unix_seconds
+                 FROM shardline_webhook_deliveries
+                 WHERE provider = ?1 AND owner = ?2 AND repo = ?3 AND delivery_id = ?4",
+                params![
+                    expected.provider().as_str(),
+                    expected.owner(),
+                    expected.repo(),
+                    expected.delivery_id(),
+                ],
+                super::helpers::webhook_delivery_from_row,
+            )
+            .optional()?;
+        let Some(existing) = existing else {
+            transaction.commit()?;
+            return Ok(false);
+        };
+        if existing != *expected {
+            transaction.commit()?;
+            return Ok(false);
+        }
+        let active = webhook_snapshot(&existing, WebhookDeliveryLifecycleState::Processed)?;
+        let released = webhook_snapshot(&existing, WebhookDeliveryLifecycleState::Released)?;
+        let evidence = load_webhook_evidence(&transaction, &existing)?;
+        let (evidence, evidence_was_empty) =
+            verify_and_append_snapshot_transition(evidence, active, released)?;
+        let changed = transaction.execute(
+            "DELETE FROM shardline_webhook_deliveries
+             WHERE provider = ?1 AND owner = ?2 AND repo = ?3 AND delivery_id = ?4
+               AND processed_at_unix_seconds = ?5",
+            params![
+                expected.provider().as_str(),
+                expected.owner(),
+                expected.repo(),
+                expected.delivery_id(),
+                u64_to_i64(expected.processed_at_unix_seconds())?,
+            ],
+        )?;
+        if changed == 0 {
+            transaction.commit()?;
+            return Ok(false);
+        }
+        if evidence_was_empty {
+            for event in evidence.events() {
+                persist_webhook_evidence(&transaction, event)?;
+            }
+        } else if let Some(event) = evidence.events().last() {
+            persist_webhook_evidence(&transaction, event)?;
+        }
+        transaction.commit()?;
+        Ok(true)
     }
 
     fn purge_webhook_deliveries_older_than(
@@ -1760,6 +1938,24 @@ mod tests {
         );
     }
 
+    #[test]
+    fn quarantine_candidate_conditional_delete_preserves_replacement() {
+        let store = make_store();
+        let key = ObjectKey::parse("chunks/cc/conditional-candidate").unwrap();
+        let original = QuarantineCandidate::new(key.clone(), 300, 3000, 4000).unwrap();
+        let replacement = QuarantineCandidate::new(key, 301, 3000, 4000).unwrap();
+        LifecycleStore::upsert_quarantine_candidate(&store, &original).unwrap();
+        LifecycleStore::upsert_quarantine_candidate(&store, &replacement).unwrap();
+
+        assert!(
+            !LifecycleStore::delete_quarantine_candidate_if_matches(&store, &original).unwrap()
+        );
+        assert_eq!(
+            LifecycleStore::quarantine_candidate(&store, replacement.object_key()).unwrap(),
+            Some(replacement)
+        );
+    }
+
     // ── LifecycleStore: retention hold ─────────────────────────────────────
 
     #[test]
@@ -1807,6 +2003,24 @@ mod tests {
         assert!(
             !LifecycleStore::delete_retention_hold(&store, &key)
                 .expect("second delete should succeed")
+        );
+    }
+
+    #[test]
+    fn retention_hold_conditional_delete_preserves_replacement() {
+        let store = make_store();
+        let key = ObjectKey::parse("chunks/cc/conditional-hold").unwrap();
+        let original =
+            RetentionHold::new(key.clone(), "original".to_owned(), 3000, Some(4000)).unwrap();
+        let replacement =
+            RetentionHold::new(key, "replacement".to_owned(), 3000, Some(4000)).unwrap();
+        LifecycleStore::upsert_retention_hold(&store, &original).unwrap();
+        LifecycleStore::upsert_retention_hold(&store, &replacement).unwrap();
+
+        assert!(!LifecycleStore::delete_retention_hold_if_matches(&store, &original).unwrap());
+        assert_eq!(
+            LifecycleStore::retention_hold(&store, replacement.object_key()).unwrap(),
+            Some(replacement)
         );
     }
 
@@ -1917,6 +2131,37 @@ mod tests {
         assert!(
             !LifecycleStore::delete_webhook_delivery(&store, &delivery)
                 .expect("second delete should succeed")
+        );
+    }
+
+    #[test]
+    fn webhook_delivery_conditional_delete_rejects_different_observation() {
+        let store = make_store();
+        let delivery = WebhookDelivery::new(
+            RepositoryProvider::GitHub,
+            "owner".to_owned(),
+            "repo".to_owned(),
+            "conditional-delivery".to_owned(),
+            3000,
+        )
+        .unwrap();
+        let different_observation = WebhookDelivery::new(
+            RepositoryProvider::GitHub,
+            "owner".to_owned(),
+            "repo".to_owned(),
+            "conditional-delivery".to_owned(),
+            3001,
+        )
+        .unwrap();
+        LifecycleStore::record_webhook_delivery(&store, &delivery).unwrap();
+
+        assert!(
+            !LifecycleStore::delete_webhook_delivery_if_matches(&store, &different_observation)
+                .unwrap()
+        );
+        assert_eq!(
+            LifecycleStore::list_webhook_deliveries(&store).unwrap(),
+            vec![delivery]
         );
     }
 

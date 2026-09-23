@@ -441,6 +441,35 @@ impl LifecycleStore for MemoryIndexStore {
         Ok(true)
     }
 
+    fn delete_quarantine_candidate_if_matches(
+        &self,
+        expected: &QuarantineCandidate,
+    ) -> Result<bool, Self::Error> {
+        let mut state = self.lock_state()?;
+        let Some(candidate) = state.quarantine.get(expected.object_key()).cloned() else {
+            return Ok(false);
+        };
+        if candidate != *expected {
+            return Ok(false);
+        }
+        let active_snapshot = quarantine_snapshot(&candidate, QuarantineLifecycleState::Active)?;
+        let evidence = state
+            .quarantine_evidence
+            .get(expected.object_key())
+            .cloned()
+            .unwrap_or_default();
+        let released_snapshot =
+            quarantine_snapshot(&candidate, QuarantineLifecycleState::Released)?;
+        let (evidence, _) =
+            verify_and_append_snapshot_transition(evidence, active_snapshot, released_snapshot)
+                .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
+        state.quarantine.remove(expected.object_key());
+        state
+            .quarantine_evidence
+            .insert(expected.object_key().clone(), evidence);
+        Ok(true)
+    }
+
     fn retention_hold(&self, object_key: &ObjectKey) -> Result<Option<RetentionHold>, Self::Error> {
         let state = self.lock_state()?;
         let Some(hold) = state.retention_holds.get(object_key).cloned() else {
@@ -523,6 +552,35 @@ impl LifecycleStore for MemoryIndexStore {
         Ok(true)
     }
 
+    fn delete_retention_hold_if_matches(
+        &self,
+        expected: &RetentionHold,
+    ) -> Result<bool, Self::Error> {
+        let mut state = self.lock_state()?;
+        let Some(hold) = state.retention_holds.get(expected.object_key()).cloned() else {
+            return Ok(false);
+        };
+        if hold != *expected {
+            return Ok(false);
+        }
+        let evidence = state
+            .retention_evidence
+            .get(expected.object_key())
+            .cloned()
+            .unwrap_or_default();
+        let (evidence, _) = verify_and_append_snapshot_transition(
+            evidence,
+            retention_snapshot(&hold, RetentionHoldLifecycleState::Active)?,
+            retention_snapshot(&hold, RetentionHoldLifecycleState::Released)?,
+        )
+        .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
+        state
+            .retention_evidence
+            .insert(expected.object_key().clone(), evidence);
+        state.retention_holds.remove(expected.object_key());
+        Ok(true)
+    }
+
     fn record_webhook_delivery(&self, delivery: &WebhookDelivery) -> Result<bool, Self::Error> {
         self.record_webhook_delivery(delivery)
     }
@@ -553,6 +611,32 @@ impl LifecycleStore for MemoryIndexStore {
         let Some(current) = state.webhook_deliveries.get(&key).cloned() else {
             return Ok(false);
         };
+        let evidence = state.webhook_evidence.get(&key).cloned().ok_or_else(|| {
+            MemoryIndexStoreError::Reliability("webhook evidence is missing".into())
+        })?;
+        let (evidence, _) = verify_and_append_snapshot_transition(
+            evidence,
+            webhook_snapshot(&current, WebhookDeliveryLifecycleState::Processed)?,
+            webhook_snapshot(&current, WebhookDeliveryLifecycleState::Released)?,
+        )
+        .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
+        state.webhook_deliveries.remove(&key);
+        state.webhook_evidence.insert(key, evidence);
+        Ok(true)
+    }
+
+    fn delete_webhook_delivery_if_matches(
+        &self,
+        expected: &WebhookDelivery,
+    ) -> Result<bool, Self::Error> {
+        let key = MemoryWebhookDeliveryKey::from_domain(expected);
+        let mut state = self.lock_state()?;
+        let Some(current) = state.webhook_deliveries.get(&key).cloned() else {
+            return Ok(false);
+        };
+        if current != *expected {
+            return Ok(false);
+        }
         let evidence = state.webhook_evidence.get(&key).cloned().ok_or_else(|| {
             MemoryIndexStoreError::Reliability("webhook evidence is missing".into())
         })?;
