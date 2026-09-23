@@ -180,6 +180,18 @@ pub trait UploadIntentStore: Send + Sync {
     /// Returns the adapter error when the persistence operation fails.
     async fn create_intent(&self, intent: &UploadIntent) -> Result<(), Self::Error>;
 
+    /// Persists a new upload intent and binds its baseline evidence to the
+    /// caller's reliability identity.
+    async fn create_intent_scoped(
+        &self,
+        intent: &UploadIntent,
+        tenant: &str,
+        repository: &str,
+    ) -> Result<(), Self::Error> {
+        let _ = (tenant, repository);
+        self.create_intent(intent).await
+    }
+
     /// Transitions an intent to a new state.
     ///
     /// Returns `false` if the intent does not exist or the transition is invalid.

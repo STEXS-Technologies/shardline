@@ -157,7 +157,9 @@ where
     {
         let tenant = tenant.into();
         let repository = repository.into();
-        self.begin_upload(intent).await.map_err(E::from)?;
+        self.begin_upload_scoped(intent, &tenant, &repository)
+            .await
+            .map_err(E::from)?;
         upload_lifecycle_failpoint(
             intent.intent_id(),
             UploadLifecycleBoundary::AfterIntentCreated,
@@ -263,8 +265,18 @@ where
         &self,
         intent: &shardline_index::UploadIntent,
     ) -> Result<(), CasError> {
+        self.begin_upload_scoped(intent, "shardline", "default")
+            .await
+    }
+
+    async fn begin_upload_scoped(
+        &self,
+        intent: &shardline_index::UploadIntent,
+        tenant: &str,
+        repository: &str,
+    ) -> Result<(), CasError> {
         self.index
-            .create_intent(intent)
+            .create_intent_scoped(intent, tenant, repository)
             .await
             .map_err(map_upload_intent_store_error)?;
         let stored = self
@@ -680,6 +692,52 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(stored.state(), UploadIntentState::Visible);
+    }
+
+    #[test]
+    fn scoped_upload_intent_uses_one_reliability_identity_from_baseline_to_visible() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let storage = tempfile::tempdir().unwrap();
+        let index = MemoryIndexStore::new();
+        let object_store = SyncObjectStoreBridge::new(
+            LocalObjectStore::new(storage.path().join("objects")).unwrap(),
+        );
+        let coordinator = CasCoordinator::new(
+            index.clone(),
+            object_store,
+            (),
+            CasLimits::new(
+                NonZeroU64::new(100).unwrap(),
+                NonZeroU64::new(100).unwrap(),
+                NonZeroU64::new(100).unwrap(),
+            ),
+        );
+        let intent = UploadIntent::new(
+            "scoped-success-intent".to_owned(),
+            "objects/scoped-test".to_owned(),
+            "abcdef".to_owned(),
+            42,
+        );
+
+        let result: Result<(), CasError> = rt.block_on(coordinator.with_upload_intent_scoped(
+            "tenant-a",
+            "repo-a",
+            &intent,
+            || async { Ok(()) },
+        ));
+        assert_eq!(result, Ok(()));
+
+        let events = rt
+            .block_on(index.reliability_events(intent.intent_id()))
+            .unwrap();
+        assert_eq!(events.len(), 5);
+        assert!(events.iter().all(|event| {
+            event.operation.tenant == "tenant-a" && event.operation.repository == "repo-a"
+        }));
+        assert_eq!(
+            events.last().unwrap().after,
+            shardline_reliability::UploadLifecycleState::Visible
+        );
     }
 
     #[test]

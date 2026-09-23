@@ -657,6 +657,16 @@ impl UploadIntentStore for MemoryIndexStore {
     type Error = MemoryIndexStoreError;
 
     async fn create_intent(&self, intent: &UploadIntent) -> Result<(), Self::Error> {
+        self.create_intent_scoped(intent, "shardline", "default")
+            .await
+    }
+
+    async fn create_intent_scoped(
+        &self,
+        intent: &UploadIntent,
+        tenant: &str,
+        repository: &str,
+    ) -> Result<(), Self::Error> {
         // Idempotent, matching the SQL stores (INSERT OR IGNORE / ON CONFLICT
         // DO NOTHING): never overwrite an existing intent. Overwriting a fresh
         // `Created` intent over a concurrent caller's already-advanced intent
@@ -670,8 +680,8 @@ impl UploadIntentStore for MemoryIndexStore {
             }
             std::collections::hash_map::Entry::Vacant(entry) => {
                 let created_event = upload_lifecycle_event(
-                    "shardline",
-                    "default",
+                    tenant,
+                    repository,
                     intent.intent_id(),
                     intent.object_key(),
                     intent.object_hash(),
@@ -790,10 +800,19 @@ impl UploadIntentStore for MemoryIndexStore {
         }
         events.push(event.clone());
         events.sort_by_key(|stored_event| stored_event.sequence);
+        let (tenant, repository) = events
+            .first()
+            .map(|stored_event| {
+                (
+                    stored_event.operation.tenant.as_str(),
+                    stored_event.operation.repository.as_str(),
+                )
+            })
+            .unwrap_or(("shardline", "default"));
         verify_upload_lifecycle_events(
             events,
-            "shardline",
-            "default",
+            tenant,
+            repository,
             intent.intent_id(),
             intent.object_key(),
             intent.object_hash(),
@@ -814,10 +833,19 @@ impl UploadIntentStore for MemoryIndexStore {
             .cloned()
             .unwrap_or_default();
         if let Some(intent) = state.upload_intents.get(operation_id) {
+            let (tenant, repository) = events
+                .first()
+                .map(|event| {
+                    (
+                        event.operation.tenant.as_str(),
+                        event.operation.repository.as_str(),
+                    )
+                })
+                .unwrap_or(("shardline", "default"));
             verify_upload_lifecycle_events(
                 &events,
-                "shardline",
-                "default",
+                tenant,
+                repository,
                 operation_id,
                 intent.object_key(),
                 intent.object_hash(),
@@ -889,10 +917,19 @@ fn verify_memory_intent_evidence(
         .get(intent.intent_id())
         .map(Vec::as_slice)
         .unwrap_or_default();
+    let (tenant, repository) = events
+        .first()
+        .map(|event| {
+            (
+                event.operation.tenant.as_str(),
+                event.operation.repository.as_str(),
+            )
+        })
+        .unwrap_or(("shardline", "default"));
     verify_upload_lifecycle_events(
         events,
-        "shardline",
-        "default",
+        tenant,
+        repository,
         intent.intent_id(),
         intent.object_key(),
         intent.object_hash(),

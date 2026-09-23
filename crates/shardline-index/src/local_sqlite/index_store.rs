@@ -61,10 +61,19 @@ fn verify_sqlite_intent_evidence(
         }
         events = baseline;
     }
+    let (tenant, repository) = events
+        .first()
+        .map(|event| {
+            (
+                event.operation.tenant.as_str(),
+                event.operation.repository.as_str(),
+            )
+        })
+        .unwrap_or(("shardline", "default"));
     verify_upload_lifecycle_events(
         &events,
-        "shardline",
-        "default",
+        tenant,
+        repository,
         intent.intent_id(),
         intent.object_key(),
         intent.object_hash(),
@@ -1034,8 +1043,20 @@ impl UploadIntentStore for super::LocalIndexStore {
     type Error = LocalIndexStoreError;
 
     async fn create_intent(&self, intent: &UploadIntent) -> Result<(), Self::Error> {
+        self.create_intent_scoped(intent, "shardline", "default")
+            .await
+    }
+
+    async fn create_intent_scoped(
+        &self,
+        intent: &UploadIntent,
+        tenant: &str,
+        repository: &str,
+    ) -> Result<(), Self::Error> {
         let store = self.clone();
         let intent = intent.clone();
+        let tenant = tenant.to_owned();
+        let repository = repository.to_owned();
         tokio::task::spawn_blocking(move || {
             let mut conn = store.open_connection()?;
             let now = SystemTime::now()
@@ -1043,8 +1064,8 @@ impl UploadIntentStore for super::LocalIndexStore {
                 .unwrap_or(Duration::ZERO)
                 .as_secs() as i64;
             let created_event = upload_lifecycle_event(
-                "shardline",
-                "default",
+                &tenant,
+                &repository,
                 intent.intent_id(),
                 intent.object_key(),
                 intent.object_hash(),

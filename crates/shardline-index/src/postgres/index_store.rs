@@ -35,10 +35,19 @@ async fn verify_postgres_intent_evidence(
         intent.intent_id(),
     )
     .await?;
+    let (tenant, repository) = events
+        .first()
+        .map(|event| {
+            (
+                event.operation.tenant.as_str(),
+                event.operation.repository.as_str(),
+            )
+        })
+        .unwrap_or(("shardline", "default"));
     verify_upload_lifecycle_events(
         &events,
-        "shardline",
-        "default",
+        tenant,
+        repository,
         intent.intent_id(),
         intent.object_key(),
         intent.object_hash(),
@@ -1104,9 +1113,19 @@ impl UploadIntentStore for super::PostgresIndexStore {
     type Error = PostgresMetadataStoreError;
 
     async fn create_intent(&self, intent: &UploadIntent) -> Result<(), Self::Error> {
+        self.create_intent_scoped(intent, "shardline", "default")
+            .await
+    }
+
+    async fn create_intent_scoped(
+        &self,
+        intent: &UploadIntent,
+        tenant: &str,
+        repository: &str,
+    ) -> Result<(), Self::Error> {
         let created_event = upload_lifecycle_event(
-            "shardline",
-            "default",
+            tenant,
+            repository,
             intent.intent_id(),
             intent.object_key(),
             intent.object_hash(),
@@ -1179,8 +1198,8 @@ impl UploadIntentStore for super::PostgresIndexStore {
             .await?;
             if event_rows.is_empty() {
                 let baseline = baseline_upload_lifecycle_events(
-                    "shardline",
-                    "default",
+                    tenant,
+                    repository,
                     durable_intent.intent_id(),
                     durable_intent.object_key(),
                     durable_intent.object_hash(),
@@ -1196,8 +1215,8 @@ impl UploadIntentStore for super::PostgresIndexStore {
                     .collect::<Result<Vec<LifecycleEvent>, PostgresMetadataStoreError>>()?;
                 verify_upload_lifecycle_events(
                     &events,
-                    "shardline",
-                    "default",
+                    tenant,
+                    repository,
                     durable_intent.intent_id(),
                     durable_intent.object_key(),
                     durable_intent.object_hash(),
