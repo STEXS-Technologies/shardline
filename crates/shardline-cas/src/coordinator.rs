@@ -1,7 +1,6 @@
 use shardline_index::{AsyncIndexStore, StoredObjectId};
 use shardline_reliability::{
-    OperationIdentity, OperationKind, ReliabilityError, UploadLifecycleState,
-    upload_lifecycle_event,
+    OperationIdentity, OperationKind, ReliabilityError, upload_lifecycle_event,
 };
 use shardline_storage::{AsyncObjectStore, ObjectBody, ObjectIntegrity, ObjectKey, PutOutcome};
 
@@ -341,7 +340,7 @@ where
         // Already at or past the target in the committed chain: a concurrent
         // duplicate caller advanced it, so the boundary is effectively reached.
         if next != shardline_index::UploadIntentState::Failed
-            && committed_state_rank(current.state()) >= committed_state_rank(next)
+            && current.state().committed_rank() >= next.committed_rank()
         {
             return Ok(());
         }
@@ -351,8 +350,8 @@ where
             intent_id,
             current.object_key(),
             current.object_hash(),
-            upload_lifecycle_state(current.state()),
-            upload_lifecycle_state(next),
+            current.state(),
+            next,
         )
         .map_err(|error| CasError::Record(error.to_string()))?;
         let transitioned = self
@@ -382,7 +381,7 @@ where
             }
             Some(intent)
                 if next != shardline_index::UploadIntentState::Failed
-                    && committed_state_rank(intent.state()) >= committed_state_rank(next) =>
+                    && intent.state().committed_rank() >= next.committed_rank() =>
             {
                 Ok(())
             }
@@ -404,33 +403,6 @@ fn map_upload_intent_store_error(error: impl std::error::Error + 'static) -> Cas
         source = current.source();
     }
     CasError::Record(message)
-}
-
-/// Returns the order of an upload-intent state along the committed chain,
-/// used to detect "already at-or-past" for idempotent forward transitions.
-/// `Failed` is terminal and out of the chain (rank `u8::MAX`).
-const fn committed_state_rank(state: shardline_index::UploadIntentState) -> u8 {
-    match state {
-        shardline_index::UploadIntentState::Created => 0,
-        shardline_index::UploadIntentState::Storing => 1,
-        shardline_index::UploadIntentState::Stored => 2,
-        shardline_index::UploadIntentState::MetadataCommitted => 3,
-        shardline_index::UploadIntentState::Visible => 4,
-        shardline_index::UploadIntentState::Failed => 0,
-    }
-}
-
-const fn upload_lifecycle_state(state: shardline_index::UploadIntentState) -> UploadLifecycleState {
-    match state {
-        shardline_index::UploadIntentState::Created => UploadLifecycleState::Created,
-        shardline_index::UploadIntentState::Storing => UploadLifecycleState::Storing,
-        shardline_index::UploadIntentState::Stored => UploadLifecycleState::Stored,
-        shardline_index::UploadIntentState::MetadataCommitted => {
-            UploadLifecycleState::MetadataCommitted
-        }
-        shardline_index::UploadIntentState::Visible => UploadLifecycleState::Visible,
-        shardline_index::UploadIntentState::Failed => UploadLifecycleState::Failed,
-    }
 }
 
 #[async_trait::async_trait]

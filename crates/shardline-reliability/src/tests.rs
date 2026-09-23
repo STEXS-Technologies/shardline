@@ -12,6 +12,16 @@ fn lifecycle_preserves_shardline_transitions() {
 }
 
 #[test]
+fn upload_lifecycle_committed_rank_is_canonical() {
+    assert_eq!(UploadLifecycleState::Created.committed_rank(), 0);
+    assert_eq!(UploadLifecycleState::Storing.committed_rank(), 1);
+    assert_eq!(UploadLifecycleState::Stored.committed_rank(), 2);
+    assert_eq!(UploadLifecycleState::MetadataCommitted.committed_rank(), 3);
+    assert_eq!(UploadLifecycleState::Visible.committed_rank(), 4);
+    assert_eq!(UploadLifecycleState::Failed.committed_rank(), 0);
+}
+
+#[test]
 fn identity_digest_is_stable_and_bounded() {
     let identity = OperationIdentity::new("tenant", "repo", "op-1", OperationKind::Upload)
         .unwrap()

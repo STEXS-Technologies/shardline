@@ -21,6 +21,24 @@ pub enum UploadLifecycleState {
 }
 
 impl UploadLifecycleState {
+    /// Returns the committed forward-order rank used by idempotent callers.
+    ///
+    /// `Failed` is terminal and intentionally remains outside the successful
+    /// committed chain at rank zero. This is a policy-neutral primitive for
+    /// adapters and coordinators; transition validity remains governed by
+    /// [`Self::can_transition_to`].
+    #[must_use]
+    pub const fn committed_rank(self) -> u8 {
+        match self {
+            Self::Created => 0,
+            Self::Storing => 1,
+            Self::Stored => 2,
+            Self::MetadataCommitted => 3,
+            Self::Visible => 4,
+            Self::Failed => 0,
+        }
+    }
+
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
