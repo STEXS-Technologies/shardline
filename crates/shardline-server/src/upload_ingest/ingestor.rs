@@ -5,7 +5,8 @@ use std::num::NonZeroUsize;
 use bytes::BytesMut;
 use sha2::{Digest, Sha256};
 use shardline_index::{FileChunkRecord, FileRecord};
-use shardline_protocol::RepositoryScope;
+use shardline_protocol::{ByteRange, RepositoryScope};
+use shardline_storage::AsyncObjectStore;
 use tokio::task::JoinSet;
 use tracing::{debug, instrument, warn};
 
@@ -50,10 +51,10 @@ pub(crate) struct FileUploadIngestor {
     pub(super) records: Vec<FileChunkRecord>,
     pub(super) sha256: Option<Sha256>,
     pub(super) cdc_chunker: Box<CdcChunker>,
-    /// Raw chunk bytes are spooled to disk so xorb packing never retains the
-    /// complete logical file in process memory. Only one bounded batch is
-    /// loaded while finalizing.
-    pub(super) raw_chunk_spool: tempfile::NamedTempFile,
+    /// Local deployments spool raw chunks to their filesystem-backed object
+    /// store path. S3 deployments leave this unset and read already durable
+    /// chunks back in bounded batches during finalization.
+    pub(super) raw_chunk_spool: Option<tempfile::NamedTempFile>,
     pub(super) raw_chunk_offsets: Vec<(u64, u64)>,
 }
 
@@ -91,13 +92,7 @@ impl FileUploadIngestor {
             records: Vec::new(),
             sha256: compute_sha256.then(Sha256::new),
             cdc_chunker: Box::new(CdcChunker::new(chunk_size)),
-            raw_chunk_spool: match tempfile::NamedTempFile::new() {
-                Ok(file) => file,
-                Err(error) => {
-                    tracing::error!(error = %error, "failed to create raw chunk spool");
-                    std::process::abort();
-                }
-            },
+            raw_chunk_spool: None,
             raw_chunk_offsets: Vec::new(),
         }
     }
@@ -170,11 +165,14 @@ impl FileUploadIngestor {
         // also bounds integrity validation before a requested range is exposed.
         // Individual chunks remain authoritative fallback for any batch that
         // cannot be packed or stored.
-        if !self.raw_chunk_offsets.is_empty() {
+        if matches!(object_store, ServerObjectStore::S3(_)) {
+            pack_and_store_xorb_from_durable_chunks(object_store, file_id, &mut self.records)
+                .await?;
+        } else if !self.raw_chunk_offsets.is_empty() {
             pack_and_store_xorb_spool(
                 object_store,
                 file_id,
-                &mut self.raw_chunk_spool,
+                self.raw_chunk_spool.as_mut().ok_or(ServerError::Overflow)?,
                 &self.raw_chunk_offsets,
                 &mut self.records,
             )
@@ -234,7 +232,7 @@ impl FileUploadIngestor {
         boundary: usize,
     ) -> Result<(), ServerError> {
         let chunk = self.pending.split_to(boundary);
-        self.spool_raw_chunk(&chunk)?;
+        self.spool_raw_chunk(object_store, &chunk)?;
         let sequence = self.next_sequence;
         self.next_sequence = checked_increment(self.next_sequence)?;
         let offset = self.next_offset;
@@ -283,7 +281,7 @@ impl FileUploadIngestor {
     ) -> Result<(), ServerError> {
         let replacement = self.take_pending_buffer();
         let chunk = mem::replace(&mut self.pending, replacement);
-        self.spool_raw_chunk(&chunk)?;
+        self.spool_raw_chunk(object_store, &chunk)?;
         let sequence = self.next_sequence;
         self.next_sequence = checked_increment(self.next_sequence)?;
         let offset = self.next_offset;
@@ -376,8 +374,22 @@ impl FileUploadIngestor {
         self.reusable_pending_buffers.push(buffer);
     }
 
-    fn spool_raw_chunk(&mut self, chunk: &[u8]) -> Result<(), ServerError> {
-        let spool = self.raw_chunk_spool.as_file_mut();
+    fn spool_raw_chunk(
+        &mut self,
+        object_store: &ServerObjectStore,
+        chunk: &[u8],
+    ) -> Result<(), ServerError> {
+        if matches!(object_store, ServerObjectStore::S3(_)) {
+            return Ok(());
+        }
+        if self.raw_chunk_spool.is_none() {
+            self.raw_chunk_spool = Some(tempfile::NamedTempFile::new()?);
+        }
+        let spool = self
+            .raw_chunk_spool
+            .as_mut()
+            .ok_or(ServerError::Overflow)?
+            .as_file_mut();
         let offset = spool.seek(SeekFrom::End(0))?;
         spool.write_all(chunk)?;
         self.raw_chunk_offsets
@@ -454,6 +466,76 @@ impl FileUploadIngestor {
         });
         Ok(())
     }
+}
+
+/// Packs S3-backed chunks without creating a pod-local raw upload spool.
+/// Individual chunks are already durable and content-addressed by the time
+/// finalization runs, so they are read back in bounded Xorb batches. Local
+/// deployments retain the filesystem path below because their object store is
+/// itself filesystem-backed.
+async fn pack_and_store_xorb_from_durable_chunks(
+    object_store: &ServerObjectStore,
+    file_id: &str,
+    records: &mut [FileChunkRecord],
+) -> Result<(), ServerError> {
+    let mut batch = Vec::new();
+    let mut batch_raw_bytes = 0usize;
+    let mut batch_record_start = 0usize;
+
+    for record_index in 0..records.len() {
+        let record = records.get(record_index).ok_or(ServerError::Overflow)?;
+        let chunk_hash = record.hash.clone();
+        let chunk_offset = record.offset;
+        let chunk_length = record.length;
+        let compressed_start = record.packed_start;
+        let compressed_limit = record.packed_end;
+        let object_key = crate::chunk_store::chunk_object_key(&chunk_hash)?;
+        let compressed_length = compressed_limit
+            .checked_sub(compressed_start)
+            .ok_or(ServerError::Overflow)?;
+        let compressed_end = compressed_length
+            .checked_sub(1)
+            .ok_or(ServerError::Overflow)?;
+        let compressed = AsyncObjectStore::read_range(
+            object_store,
+            &object_key,
+            ByteRange::new(0, compressed_end).map_err(|_error| ServerError::Overflow)?,
+        )
+        .await
+        .map_err(ServerError::from)?;
+        let raw = lz4_flex::decompress_size_prepended(&compressed).map_err(|error| {
+            ServerError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("stored upload chunk could not be decompressed: {error}"),
+            ))
+        })?;
+        if u64::try_from(raw.len())? != chunk_length {
+            return Err(ServerError::ObjectStore(
+                crate::error::ObjectStoreError::StoredLengthMismatch,
+            ));
+        }
+
+        let next_raw_bytes = batch_raw_bytes
+            .checked_add(raw.len())
+            .ok_or(ServerError::Overflow)?;
+        if !batch.is_empty()
+            && (batch.len() >= MAX_XORB_CHUNKS || next_raw_bytes > MAX_SERVER_XORB_RAW_BYTES)
+        {
+            store_xorb_batch(object_store, file_id, &batch, records, batch_record_start).await;
+            batch.clear();
+            batch_raw_bytes = 0;
+            batch_record_start = record_index;
+        }
+        batch_raw_bytes = batch_raw_bytes
+            .checked_add(raw.len())
+            .ok_or(ServerError::Overflow)?;
+        batch.push((raw, chunk_offset));
+    }
+
+    if !batch.is_empty() {
+        store_xorb_batch(object_store, file_id, &batch, records, batch_record_start).await;
+    }
+    Ok(())
 }
 
 async fn pack_and_store_xorb_spool(
