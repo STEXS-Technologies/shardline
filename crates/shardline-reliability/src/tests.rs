@@ -238,6 +238,49 @@ fn resumable_terminal_reuse_is_an_explicit_recovery_transition() {
 }
 
 #[test]
+fn lifecycle_verifiers_reject_terminal_only_journals() {
+    let upload = baseline_upload_lifecycle_events(
+        "tenant",
+        "repo",
+        "upload-partial",
+        "object",
+        "hash",
+        UploadLifecycleState::Visible,
+    )
+    .unwrap();
+    assert!(matches!(
+        verify_upload_lifecycle_events(
+            upload.get(1..).expect("terminal-only upload suffix"),
+            "tenant",
+            "repo",
+            "upload-partial",
+            "object",
+            "hash",
+            UploadLifecycleState::Visible,
+        ),
+        Err(ReliabilityError::ChainDiscontinuity)
+    ));
+
+    let session = baseline_resumable_session_events(
+        "scope",
+        "session-partial",
+        "object",
+        ResumableLifecycleState::Completed,
+    )
+    .unwrap();
+    assert!(matches!(
+        verify_resumable_session_events(
+            session.get(1..).expect("terminal-only session suffix"),
+            "scope",
+            "session-partial",
+            "object",
+            ResumableLifecycleState::Completed,
+        ),
+        Err(ReliabilityError::ChainDiscontinuity)
+    ));
+}
+
+#[test]
 fn baseline_events_are_replayable() {
     let upload = baseline_upload_lifecycle_events(
         "tenant",

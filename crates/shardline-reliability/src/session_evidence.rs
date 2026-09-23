@@ -18,6 +18,12 @@ pub fn verify_resumable_session_events(
     let Some(first) = events.first() else {
         return Err(ReliabilityError::OperationMismatch);
     };
+    if !matches!(first.sequence, 0 | 1)
+        || first.before != ResumableLifecycleState::Active
+        || first.after != ResumableLifecycleState::Active
+    {
+        return Err(ReliabilityError::ChainDiscontinuity);
+    }
     let operation = &first.operation;
     if operation.kind != crate::OperationKind::ResumableSession
         || operation.tenant != "resumable-session"

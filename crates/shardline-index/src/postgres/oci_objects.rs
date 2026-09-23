@@ -568,6 +568,21 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
+        query(
+            "DELETE FROM shardline_reliability_events
+             WHERE operation_kind = 'Visibility'
+               AND operation_id = $1",
+        )
+        .bind(format!(
+            "{}:{}:{}:{}",
+            "oci-tombstone-pg",
+            "team/assets",
+            OciObjectKind::Manifest.as_str(),
+            "a".repeat(64)
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
         let store = PostgresIndexStore::new(pool);
         let manifest = object();
         let current = tag("latest", 'a');

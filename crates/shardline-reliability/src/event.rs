@@ -293,6 +293,12 @@ pub fn verify_upload_lifecycle_events(
     let Some(first) = events.first() else {
         return Err(ReliabilityError::OperationMismatch);
     };
+    if first.sequence != 0
+        || first.before != UploadLifecycleState::Created
+        || first.after != UploadLifecycleState::Created
+    {
+        return Err(ReliabilityError::ChainDiscontinuity);
+    }
     let operation = &first.operation;
     if operation.kind != OperationKind::Upload
         || operation.tenant != tenant

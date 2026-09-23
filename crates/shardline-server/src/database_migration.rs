@@ -881,6 +881,26 @@ async fn backfill_reliability_events(pool: &PgPool) -> Result<(), DatabaseMigrat
         if events.is_empty() {
             let baseline = ProviderEvidenceLog::baseline(snapshot.clone())
                 .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?;
+            for event in baseline.events() {
+                query(
+                    "INSERT INTO shardline_reliability_events
+                        (operation_kind, operation_id, sequence, event_json)
+                     VALUES ($1, $2, $3, $4)
+                     ON CONFLICT (operation_kind, operation_id, sequence) DO NOTHING",
+                )
+                .bind(event.operation.kind.as_str())
+                .bind(&event.operation.operation_id)
+                .bind(
+                    i64::try_from(event.sequence)
+                        .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?,
+                )
+                .bind(
+                    to_value(event)
+                        .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?,
+                )
+                .execute(&mut *transaction)
+                .await?;
+            }
             verify_provider_lifecycle_events(baseline.events(), &snapshot).map_err(|error| {
                 DatabaseMigrationError::Backfill(format!(
                     "invalid provider reliability baseline for {}: {error}",

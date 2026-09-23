@@ -196,6 +196,9 @@ pub fn verify_provider_lifecycle_chain(
     let Some(first) = events.first() else {
         return Ok(());
     };
+    if first.sequence != 0 || first.before != first.after {
+        return Err(ReliabilityError::ChainDiscontinuity);
+    }
     let mut previous_after = None;
     let mut previous_sequence = None;
     for event in events {
