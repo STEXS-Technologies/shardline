@@ -39,21 +39,22 @@ use shardline_index::{
     CreateResumableSessionOutcome, PublishResumablePartOutcome, ResourceLockKey, ResumableSession,
     ResumableSessionProtocol, ResumableSessionState, S3ObjectEntry, S3PublishCondition,
 };
-use shardline_protocol::ShardlineHash;
 use shardline_s3_adapter::{
     CompleteMultipartUploadResult, InitiateMultipartUploadResult, S3Error, S3SessionError,
     acquire_session_part_lock, create_session, delete_session_locked, lock_session_parts,
     lock_upload_sessions, new_upload_id, parse_complete_multipart_parts, part_file_path,
     read_session, store_part_locked, validate_part_quota_locked,
 };
-use shardline_storage::{ObjectIntegrity, ObjectKey};
+use shardline_storage::ObjectKey;
 use tokio::io::AsyncWriteExt;
 
 use crate::{
     ServerError,
     app::AppState,
     metrics,
-    object_store::{materialize_object_to_file, s3_resumable_parts_reader},
+    object_store::{
+        materialize_object_to_file, s3_resumable_parts_reader, stage_reader_content_addressed_s3,
+    },
     upload_ingest::{RequestBodyReader, read_body_to_bytes},
 };
 
@@ -445,36 +446,53 @@ async fn durable_s3_upload_part(
         reader = RequestBodyReader::from_stream(aws_chunked::decode_aws_chunked(reader, ceiling));
     }
 
-    let temporary = tempfile::NamedTempFile::new().map_err(io_to_s3)?;
-    let mut file = tokio::fs::File::from_std(temporary.reopen().map_err(io_to_s3)?);
-    let mut hasher = blake3::Hasher::new();
-    let mut size_bytes = 0_u64;
-    while let Some(chunk) = reader.next_bytes().await.map_err(S3Error::from)? {
-        size_bytes = size_bytes
-            .checked_add(u64::try_from(chunk.len()).map_err(|_error| S3Error::internal())?)
-            .ok_or_else(S3Error::internal)?;
-        hasher.update(&chunk);
-        file.write_all(&chunk).await.map_err(io_to_s3)?;
-    }
-    file.flush().await.map_err(io_to_s3)?;
-    drop(file);
-
-    let digest = hasher.finalize();
-    let staging_key = ObjectKey::parse(&format!(
-        "staging/resumable/s3/{upload_id}/{part_number}/{}",
-        hex::encode(digest.as_bytes())
-    ))
-    .map_err(|_error| S3Error::internal())?;
-    let integrity = ObjectIntegrity::new(ShardlineHash::from_bytes(*digest.as_bytes()), size_bytes);
     let store = state.backend.object_store();
-    let path = temporary.path().to_path_buf();
-    let durable_key = staging_key.clone();
-    tokio::task::spawn_blocking(move || {
-        store.put_content_addressed_file(&durable_key, &path, &integrity)
-    })
-    .await
-    .map_err(|error| io_to_s3(std::io::Error::other(error)))?
-    .map_err(ServerError::from)?;
+    let (staging_key, size_bytes) = match &store {
+        shardline_server_core::ServerObjectStore::S3(s3_store) => {
+            let prefix = format!("staging/resumable/s3/{upload_id}/{part_number}");
+            let (key, integrity) =
+                stage_reader_content_addressed_s3(s3_store, &prefix, &mut reader)
+                    .await
+                    .map_err(S3Error::from)?;
+            (key, integrity.length())
+        }
+        shardline_server_core::ServerObjectStore::Local(_)
+        | shardline_server_core::ServerObjectStore::Blackhole => {
+            let temporary = tempfile::NamedTempFile::new().map_err(io_to_s3)?;
+            let mut file = tokio::fs::File::from_std(temporary.reopen().map_err(io_to_s3)?);
+            let mut hasher = blake3::Hasher::new();
+            let mut size_bytes = 0_u64;
+            while let Some(chunk) = reader.next_bytes().await.map_err(S3Error::from)? {
+                size_bytes = size_bytes
+                    .checked_add(u64::try_from(chunk.len()).map_err(|_error| S3Error::internal())?)
+                    .ok_or_else(S3Error::internal)?;
+                hasher.update(&chunk);
+                file.write_all(&chunk).await.map_err(io_to_s3)?;
+            }
+            file.flush().await.map_err(io_to_s3)?;
+            drop(file);
+
+            let digest = hasher.finalize();
+            let staging_key = ObjectKey::parse(&format!(
+                "staging/resumable/s3/{upload_id}/{part_number}/{}",
+                hex::encode(digest.as_bytes())
+            ))
+            .map_err(|_error| S3Error::internal())?;
+            let integrity = shardline_storage::ObjectIntegrity::new(
+                shardline_protocol::ShardlineHash::from_bytes(*digest.as_bytes()),
+                size_bytes,
+            );
+            let path = temporary.path().to_path_buf();
+            let durable_key = staging_key.clone();
+            tokio::task::spawn_blocking(move || {
+                store.put_content_addressed_file(&durable_key, &path, &integrity)
+            })
+            .await
+            .map_err(|error| io_to_s3(std::io::Error::other(error)))?
+            .map_err(ServerError::from)?;
+            (staging_key, size_bytes)
+        }
+    };
 
     let part_number = NonZeroU64::new(u64::from(part_number)).ok_or_else(S3Error::invalid_part)?;
     let etag = format!("\"{upload_id}-{}\"", part_number.get());

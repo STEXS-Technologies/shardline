@@ -41,4 +41,8 @@ mod fixtures;
 #[cfg(feature = "docker")]
 mod s3_fault_proxy;
 
+#[cfg(feature = "docker")]
+pub use fixtures::{
+    DockerLocalStack, DockerLocalStackBuilder, S3FaultProxy, S3ProxyFault, S3RawConfig,
+};
 pub use fixtures::{InvariantError, TempStorage};

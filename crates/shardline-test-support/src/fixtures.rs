@@ -8,9 +8,9 @@ use std::{
 use thiserror::Error;
 
 #[cfg(feature = "docker")]
-pub use docker::{DockerLocalStack, DockerLocalStackBuilder, S3RawConfig};
+pub use crate::docker::{DockerLocalStack, DockerLocalStackBuilder, S3RawConfig};
 #[cfg(feature = "docker")]
-pub use s3_fault_proxy::{S3FaultProxy, S3ProxyFault};
+pub use crate::s3_fault_proxy::{S3FaultProxy, S3ProxyFault};
 
 /// Error type for test-only invariant failures.
 #[derive(Debug, Error)]

@@ -18,6 +18,7 @@ pub use shardline_server_core::ServerObjectStore;
 pub use shardline_server_core::ServerObjectStoreError;
 use shardline_storage::{
     ObjectBody, ObjectIntegrity, ObjectKey, ObjectMetadata, ObjectPrefix, ObjectStore,
+    S3ObjectStore,
 };
 use tokio::io::AsyncWriteExt;
 
@@ -187,6 +188,58 @@ pub(crate) async fn s3_resumable_parts_reader(
         .try_flatten()
         .map_err(ServerError::from);
     Ok(Some(RequestBodyReader::from_stream(stream)))
+}
+
+/// Streams a bounded durable upload part directly into S3 remote staging,
+/// hashing it as it crosses the process boundary. The digest-derived staging
+/// key is selected only after the stream is complete, then the remote object
+/// is conditionally promoted without a pod-local staging file.
+pub(crate) async fn stage_reader_content_addressed_s3(
+    store: &S3ObjectStore,
+    prefix: &str,
+    reader: &mut RequestBodyReader,
+) -> Result<(ObjectKey, ObjectIntegrity), ServerError> {
+    let (mut upload, temporary_key) = store.begin_stream_upload().await?;
+    let mut hasher = blake3::Hasher::new();
+    let mut size_bytes = 0_u64;
+    while let Some(chunk) = match reader.next_bytes().await {
+        Ok(chunk) => chunk,
+        Err(error) => {
+            let _ignored = upload.abort().await;
+            return Err(error);
+        }
+    } {
+        let chunk_len = match u64::try_from(chunk.len()) {
+            Ok(length) => length,
+            Err(error) => {
+                let _ignored = upload.abort().await;
+                return Err(error.into());
+            }
+        };
+        size_bytes = match size_bytes.checked_add(chunk_len) {
+            Some(total) => total,
+            None => {
+                let _ignored = upload.abort().await;
+                return Err(ServerError::Overflow);
+            }
+        };
+        hasher.update(&chunk);
+        upload.write(&chunk);
+        if let Err(error) = upload.wait_for_capacity(2).await {
+            let _ignored = upload.abort().await;
+            return Err(error.into());
+        }
+    }
+    let digest = hasher.finalize();
+    let key = ObjectKey::parse(&format!("{prefix}/{}", hex::encode(digest.as_bytes())))
+        .map_err(|_error| ServerError::InvalidPath)?;
+    store
+        .finish_stream_upload(upload, &temporary_key, &key)
+        .await?;
+    Ok((
+        key,
+        ObjectIntegrity::new(ShardlineHash::from_bytes(*digest.as_bytes()), size_bytes),
+    ))
 }
 
 /// Promotes bounded bytes through a pod-local temporary file into an immutable
