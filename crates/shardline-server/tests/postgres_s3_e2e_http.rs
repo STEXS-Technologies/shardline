@@ -25,7 +25,9 @@ use std::{
 };
 use tempfile::TempDir;
 use tokio::net::TcpListener;
+use tokio::runtime::Handle;
 use tokio::sync::OnceCell;
+use tokio::task::JoinHandle;
 use tower::ServiceExt;
 
 // ---------------------------------------------------------------------------
@@ -118,6 +120,7 @@ fn mint_token_for(owner: &str, name: &str) -> String {
 
 struct TestServer {
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
+    server_task: Option<JoinHandle<()>>,
     base_url: String,
     token: String,
     _tmp: TempDir,
@@ -163,7 +166,7 @@ impl TestServer {
 
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
-        tokio::spawn(async move {
+        let server_task = tokio::spawn(async move {
             axum::serve(listener, app)
                 .with_graceful_shutdown(async {
                     shutdown_rx.await.ok();
@@ -185,6 +188,7 @@ impl TestServer {
 
         Self {
             shutdown: Some(shutdown_tx),
+            server_task: Some(server_task),
             base_url,
             token,
             _tmp: tmp,
@@ -212,6 +216,23 @@ impl Drop for TestServer {
         if let Some(tx) = self.shutdown.take() {
             let _ = tx.send(());
         }
+        let Some(mut server_task) = self.server_task.take() else {
+            return;
+        };
+        let Ok(handle) = Handle::try_current() else {
+            server_task.abort();
+            return;
+        };
+        tokio::task::block_in_place(move || {
+            handle.block_on(async move {
+                if tokio::time::timeout(Duration::from_secs(5), &mut server_task)
+                    .await
+                    .is_err()
+                {
+                    server_task.abort();
+                }
+            });
+        });
     }
 }
 
@@ -391,7 +412,7 @@ impl TestServerBuilder {
 
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
-        tokio::spawn(async move {
+        let server_task = tokio::spawn(async move {
             axum::serve(listener, app)
                 .with_graceful_shutdown(async {
                     shutdown_rx.await.ok();
@@ -411,6 +432,7 @@ impl TestServerBuilder {
 
         TestServer {
             shutdown: Some(shutdown_tx),
+            server_task: Some(server_task),
             base_url,
             token,
             _tmp: tmp,
@@ -1342,16 +1364,14 @@ async fn test_hub_modelcard() {
         .body(format!("{{\"header\":{{\"message\":\"mc\",\"parentCommit\":\"\"}}}}\n{{\"file\":{{\"path\":\"README.md\",\"content\":\"{rb64}\"}}}}"))
         .send().await.unwrap();
 
-    assert_eq!(
-        client
-            .get(server.url(&format!("/api/models/{ns}/{name}/modelcard")))
-            .header("Authorization", auth())
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        200
-    );
+    let modelcard = client
+        .get(server.url(&format!("/api/models/{ns}/{name}/modelcard")))
+        .header("Authorization", auth())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(modelcard.status(), 200);
+    let _ = modelcard.bytes().await.unwrap();
 }
 
 // ===========================================================================
