@@ -148,3 +148,24 @@ impl SessionEvidenceLog {
         self.0.events_mut()
     }
 }
+
+/// Verifies persisted session evidence against its canonical identity, or
+/// reconstructs the active baseline for legacy data that predates evidence.
+///
+/// The boolean reports whether the returned log was repaired so adapters can
+/// persist the canonical envelope without duplicating legacy-state policy.
+pub fn verify_or_repair_session_evidence(
+    stored: SessionEvidenceLog,
+    scope_namespace: &str,
+    session_id: &str,
+    target_key: &str,
+) -> Result<(SessionEvidenceLog, bool), ReliabilityError> {
+    if stored.is_empty() {
+        return Ok((
+            SessionEvidenceLog::for_legacy_session(scope_namespace, session_id, target_key)?,
+            true,
+        ));
+    }
+    stored.verify_for(scope_namespace, session_id, target_key)?;
+    Ok((stored, false))
+}

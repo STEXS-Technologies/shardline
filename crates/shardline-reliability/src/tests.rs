@@ -145,6 +145,25 @@ fn snapshot_evidence_helpers_share_baseline_repair_and_append_policy() {
 }
 
 #[test]
+fn session_evidence_helper_shares_legacy_repair_and_identity_policy() {
+    let (repaired, was_missing) = verify_or_repair_session_evidence(
+        SessionEvidenceLog::default(),
+        "scope",
+        "session-1",
+        "target",
+    )
+    .unwrap();
+    assert!(was_missing);
+    assert_eq!(repaired.events().len(), 1);
+    repaired.verify_for("scope", "session-1", "target").unwrap();
+
+    assert!(matches!(
+        verify_or_repair_session_evidence(repaired, "scope", "session-1", "other-target"),
+        Err(ReliabilityError::OperationMismatch)
+    ));
+}
+
+#[test]
 fn lifecycle_evidence_reads_legacy_json_digests_after_canonical_migration() {
     let operation = OperationIdentity::new("tenant", "repo", "legacy-op", OperationKind::Upload)
         .unwrap()

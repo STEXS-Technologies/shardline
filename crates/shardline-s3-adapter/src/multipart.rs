@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 use shardline_reliability::{
     DigestSnapshot, OperationIdentity, OperationKind, ResumableLifecycleState, SessionEvidenceLog,
     SnapshotEvidenceLog, append_or_baseline_snapshot_evidence, canonical_state_digest,
-    verify_or_repair_snapshot_evidence,
+    verify_or_repair_session_evidence, verify_or_repair_snapshot_evidence,
 };
 use thiserror::Error;
 use tokio::{fs, io::AsyncWriteExt, sync::Mutex, task::spawn_blocking};
@@ -840,18 +840,12 @@ async fn load_session_with_snapshot(
                 )
             }
         };
-    let evidence_was_missing = stored_evidence.is_empty();
-    let evidence = if evidence_was_missing {
-        SessionEvidenceLog::for_legacy_session(
-            &session.scope_namespace,
-            &session.upload_id,
-            &session.key,
-        )
-    } else {
-        stored_evidence
-            .verify_for(&session.scope_namespace, &session.upload_id, &session.key)
-            .map(|()| stored_evidence)
-    }
+    let (evidence, evidence_was_missing) = verify_or_repair_session_evidence(
+        stored_evidence,
+        &session.scope_namespace,
+        &session.upload_id,
+        &session.key,
+    )
     .map_err(|error| S3SessionError::Reliability(error.to_string()))?;
     let snapshot = session_snapshot(&session)?;
     let (snapshot_evidence, snapshot_evidence_was_missing) =
