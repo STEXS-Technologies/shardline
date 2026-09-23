@@ -267,15 +267,17 @@ impl LocalRecordStore {
         let store = self.clone();
         let record = record.clone();
         tokio::task::spawn_blocking(move || {
-            let connection = store.open_connection()?;
-            let transaction = connection.unchecked_transaction()?;
-            let now = unix_now_seconds_lossy();
-            let version_locator = store.version_record_locator(&record);
-            helpers::upsert_file_record_row(&transaction, &version_locator, &record, now)?;
-            let latest_locator = store.latest_record_locator(&record);
-            helpers::upsert_file_record_row(&transaction, &latest_locator, &record, now)?;
-            transaction.commit()?;
-            Ok::<_, LocalIndexStoreError>(())
+            helpers::retry_sqlite_busy(|| {
+                let mut connection = store.open_connection()?;
+                let transaction = connection.transaction()?;
+                let now = unix_now_seconds_lossy();
+                let version_locator = store.version_record_locator(&record);
+                helpers::upsert_file_record_row(&transaction, &version_locator, &record, now)?;
+                let latest_locator = store.latest_record_locator(&record);
+                helpers::upsert_file_record_row(&transaction, &latest_locator, &record, now)?;
+                transaction.commit()?;
+                Ok::<_, LocalIndexStoreError>(())
+            })
         })
         .await
         .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
@@ -293,16 +295,18 @@ impl LocalRecordStore {
         let store = self.clone();
         let record = record.clone();
         tokio::task::spawn_blocking(move || {
-            let connection = store.open_connection()?;
-            let transaction = connection.unchecked_transaction()?;
-            let latest = store.latest_record_locator(&record);
-            let version = store.version_record_locator(&record);
-            transaction.execute(
-                "DELETE FROM shardline_file_records WHERE record_key IN (?1, ?2)",
-                params![latest.record_key(), version.record_key()],
-            )?;
-            transaction.commit()?;
-            Ok::<_, LocalIndexStoreError>(())
+            helpers::retry_sqlite_busy(|| {
+                let mut connection = store.open_connection()?;
+                let transaction = connection.transaction()?;
+                let latest = store.latest_record_locator(&record);
+                let version = store.version_record_locator(&record);
+                transaction.execute(
+                    "DELETE FROM shardline_file_records WHERE record_key IN (?1, ?2)",
+                    params![latest.record_key(), version.record_key()],
+                )?;
+                transaction.commit()?;
+                Ok::<_, LocalIndexStoreError>(())
+            })
         })
         .await
         .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
@@ -322,22 +326,24 @@ impl LocalRecordStore {
         let records = records.to_vec();
         let dedupe_mappings = dedupe_mappings.to_vec();
         tokio::task::spawn_blocking(move || {
-            let connection = store.open_connection()?;
-            let transaction = connection.unchecked_transaction()?;
-            let now = unix_now_seconds_lossy();
-            for record in &records {
-                let version_locator = store.version_record_locator(record);
-                helpers::upsert_file_record_row(&transaction, &version_locator, record, now)?;
-            }
-            for mapping in &dedupe_mappings {
-                helpers::upsert_dedupe_mapping_row(&transaction, mapping, now)?;
-            }
-            for record in &records {
-                let latest_locator = store.latest_record_locator(record);
-                helpers::upsert_file_record_row(&transaction, &latest_locator, record, now)?;
-            }
-            transaction.commit()?;
-            Ok::<_, LocalIndexStoreError>(())
+            helpers::retry_sqlite_busy(|| {
+                let mut connection = store.open_connection()?;
+                let transaction = connection.transaction()?;
+                let now = unix_now_seconds_lossy();
+                for record in &records {
+                    let version_locator = store.version_record_locator(record);
+                    helpers::upsert_file_record_row(&transaction, &version_locator, record, now)?;
+                }
+                for mapping in &dedupe_mappings {
+                    helpers::upsert_dedupe_mapping_row(&transaction, mapping, now)?;
+                }
+                for record in &records {
+                    let latest_locator = store.latest_record_locator(record);
+                    helpers::upsert_file_record_row(&transaction, &latest_locator, record, now)?;
+                }
+                transaction.commit()?;
+                Ok::<_, LocalIndexStoreError>(())
+            })
         })
         .await
         .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?

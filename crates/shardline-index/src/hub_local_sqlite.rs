@@ -10,7 +10,7 @@ use crate::{
     },
     local_sqlite::{
         LocalIndexStore, LocalIndexStoreError, current_hub_ref_evidence, hub_ref_snapshot,
-        i64_to_u64, persist_hub_ref_evidence, u64_to_i64,
+        i64_to_u64, persist_hub_ref_evidence, retry_sqlite_busy, u64_to_i64,
     },
 };
 use shardline_reliability::{HubRefEvidenceLog, SnapshotEvidence};
@@ -34,10 +34,9 @@ fn open_hub_connection(root: &Path) -> Result<Connection, LocalIndexStoreError> 
 /// Opens a read-write connection to the hub SQLite database.
 ///
 /// Same constraints as [`open_hub_connection`]: `rusqlite::Connection` is `!Send`,
-/// so connections are opened per-call rather than cached. Uses the default
-/// full-mutex mode so that concurrent `unchecked_transaction()` calls
-/// serialise through SQLite's built-in locking. A busy-timeout ensures
-/// brief contention retries gracefully.
+/// so connections are opened per-call rather than cached. A busy-timeout and
+/// the shared transaction retry boundary ensure brief contention retries
+/// gracefully without splitting a ref transition from its evidence.
 fn open_hub_connection_rw(root: &Path) -> Result<Connection, LocalIndexStoreError> {
     let database_path = root.join("metadata.sqlite3");
     let connection = Connection::open(&database_path)?;
@@ -109,34 +108,37 @@ impl HubStore for LocalIndexStore {
         name: &str,
         private: bool,
     ) -> Result<HubRepo, Self::Error> {
-        let conn = open_hub_connection_rw(self.root())?;
-        let now = unix_now_seconds_lossy();
+        let root = self.root().to_owned();
         let initial_sha = "4b825dc642cb6eb9a060e54bf899d69f8f5ce8e3".to_owned();
-        let tx = conn.unchecked_transaction()?;
-        tx.execute(
-            "INSERT INTO shardline_hub_repos (repo_id, repo_type, private, default_branch, created_at_unix_seconds, updated_at_unix_seconds)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![name, repo_type_to_str(repo_type), private as i64, initial_sha, u64_to_i64(now)?, u64_to_i64(now)?],
-        )?;
-        // Insert initial revision
-        tx.execute(
-            "INSERT INTO shardline_hub_revisions (repo_id, ref_name, sha, parent_sha, message, created_at_unix_seconds)
-             VALUES (?1, 'main', ?2, NULL, NULL, ?3)",
-            params![name, initial_sha, u64_to_i64(now)?],
-        )?;
-        tx.execute(
-            "INSERT INTO shardline_hub_refs (repo_id, ref_name, sha) VALUES (?1, 'main', ?2)",
-            params![name, initial_sha],
-        )?;
-        let evidence = HubRefEvidenceLog::baseline(hub_ref_snapshot(
-            name,
-            "main",
-            Some(initial_sha.clone()),
-        )?)?;
-        for event in evidence.events() {
-            persist_hub_ref_evidence(&tx, event)?;
-        }
-        tx.commit()?;
+        let now = unix_now_seconds_lossy();
+        retry_sqlite_busy(|| {
+            let mut conn = open_hub_connection_rw(&root)?;
+            let tx = conn.transaction()?;
+            tx.execute(
+                "INSERT INTO shardline_hub_repos (repo_id, repo_type, private, default_branch, created_at_unix_seconds, updated_at_unix_seconds)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![name, repo_type_to_str(repo_type), private as i64, initial_sha, u64_to_i64(now)?, u64_to_i64(now)?],
+            )?;
+            tx.execute(
+                "INSERT INTO shardline_hub_revisions (repo_id, ref_name, sha, parent_sha, message, created_at_unix_seconds)
+                 VALUES (?1, 'main', ?2, NULL, NULL, ?3)",
+                params![name, initial_sha, u64_to_i64(now)?],
+            )?;
+            tx.execute(
+                "INSERT INTO shardline_hub_refs (repo_id, ref_name, sha) VALUES (?1, 'main', ?2)",
+                params![name, initial_sha],
+            )?;
+            let evidence = HubRefEvidenceLog::baseline(hub_ref_snapshot(
+                name,
+                "main",
+                Some(initial_sha.clone()),
+            )?)?;
+            for event in evidence.events() {
+                persist_hub_ref_evidence(&tx, event)?;
+            }
+            tx.commit()?;
+            Ok(())
+        })?;
         Ok(HubRepo {
             repo_id: name.to_owned(),
             repo_type,
@@ -275,106 +277,117 @@ impl HubStore for LocalIndexStore {
         message: &str,
     ) -> Result<HubRevision, Self::Error> {
         let ref_name = canonical_ref_name(ref_name);
-        let conn = open_hub_connection_rw(self.root())?;
-        let tx = conn.unchecked_transaction()?;
-        let current_ref: Option<String> = tx
-            .query_row(
-                "SELECT sha FROM shardline_hub_refs WHERE repo_id = ?1 AND ref_name = ?2",
-                params![repo_id, ref_name],
-                |row| row.get(0),
-            )
-            .optional()?;
+        let root = self.root().to_owned();
+        let repo_id = repo_id.to_owned();
+        let parent_sha = parent_sha.map(ToOwned::to_owned);
+        let new_sha = new_sha.to_owned();
+        let ref_name = ref_name.to_owned();
+        let message = message.to_owned();
+        retry_sqlite_busy(|| {
+            let mut conn = open_hub_connection_rw(&root)?;
+            let tx = conn.transaction()?;
+            let current_ref: Option<String> = tx
+                .query_row(
+                    "SELECT sha FROM shardline_hub_refs WHERE repo_id = ?1 AND ref_name = ?2",
+                    params![repo_id, ref_name],
+                    |row| row.get(0),
+                )
+                .optional()?;
 
-        // Optimistic concurrency check
-        if let Some(parent) = parent_sha {
-            match current_ref.as_deref() {
-                Some(current) if current != parent => {
-                    return Err(rusqlite::Error::QueryReturnedNoRows.into());
-                }
-                None => {
-                    let parent_exists: bool = tx.query_row(
+            // Optimistic concurrency check
+            if let Some(parent) = parent_sha.as_deref() {
+                match current_ref.as_deref() {
+                    Some(current) if current != parent => {
+                        return Err(rusqlite::Error::QueryReturnedNoRows.into());
+                    }
+                    None => {
+                        let parent_exists: bool = tx.query_row(
                         "SELECT EXISTS(SELECT 1 FROM shardline_hub_revisions WHERE repo_id = ?1 AND sha = ?2)",
                         params![repo_id, parent],
                         |row| row.get(0),
                     )?;
-                    if !parent_exists {
-                        return Err(rusqlite::Error::QueryReturnedNoRows.into());
+                        if !parent_exists {
+                            return Err(rusqlite::Error::QueryReturnedNoRows.into());
+                        }
                     }
+                    _ => {}
                 }
-                _ => {}
             }
-        }
 
-        let now = unix_now_seconds_lossy();
+            let now = unix_now_seconds_lossy();
 
-        if ref_name == "main" {
-            tx.execute(
+            if ref_name == "main" {
+                tx.execute(
                 "UPDATE shardline_hub_repos SET default_branch = ?1, updated_at_unix_seconds = ?2
                  WHERE repo_id = ?3",
                 params![new_sha, u64_to_i64(now)?, repo_id],
             )?;
-        }
+            }
 
-        // Insert revision
-        tx.execute(
+            // Insert revision
+            tx.execute(
             "INSERT INTO shardline_hub_revisions (repo_id, ref_name, sha, parent_sha, message, created_at_unix_seconds)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![repo_id, ref_name, new_sha, parent_sha, message, u64_to_i64(now)?],
         )?;
-        tx.execute(
-            "INSERT INTO shardline_hub_refs (repo_id, ref_name, sha) VALUES (?1, ?2, ?3)
+            tx.execute(
+                "INSERT INTO shardline_hub_refs (repo_id, ref_name, sha) VALUES (?1, ?2, ?3)
              ON CONFLICT(repo_id, ref_name) DO UPDATE SET sha = excluded.sha",
-            params![repo_id, ref_name, new_sha],
-        )?;
-        let mut evidence = current_hub_ref_evidence(&tx, repo_id, ref_name, current_ref)?;
-        evidence.record(hub_ref_snapshot(
-            repo_id,
-            ref_name,
-            Some(new_sha.to_owned()),
-        )?)?;
-        for event in evidence.events() {
-            persist_hub_ref_evidence(&tx, event)?;
-        }
+                params![repo_id, ref_name, new_sha],
+            )?;
+            let mut evidence = current_hub_ref_evidence(&tx, &repo_id, &ref_name, current_ref)?;
+            evidence.record(hub_ref_snapshot(
+                &repo_id,
+                &ref_name,
+                Some(new_sha.clone()),
+            )?)?;
+            for event in evidence.events() {
+                persist_hub_ref_evidence(&tx, event)?;
+            }
 
-        tx.commit()?;
+            tx.commit()?;
 
-        Ok(HubRevision {
-            repo_id: repo_id.to_owned(),
-            ref_name: ref_name.to_owned(),
-            sha: new_sha.to_owned(),
-            parent_sha: parent_sha.map(ToOwned::to_owned),
-            message: Some(message.to_owned()),
-            created_at_unix_seconds: now,
+            Ok(HubRevision {
+                repo_id: repo_id.clone(),
+                ref_name: ref_name.clone(),
+                sha: new_sha.clone(),
+                parent_sha: parent_sha.clone(),
+                message: Some(message.clone()),
+                created_at_unix_seconds: now,
+            })
         })
     }
 
     fn list_refs(&self, repo_id: &str) -> Result<Vec<HubRef>, Self::Error> {
-        let conn = open_hub_connection_rw(self.root())?;
-        let tx = conn.unchecked_transaction()?;
-        let refs = {
-            let mut stmt = tx.prepare(
+        let root = self.root().to_owned();
+        retry_sqlite_busy(|| {
+            let mut conn = open_hub_connection_rw(&root)?;
+            let tx = conn.transaction()?;
+            let refs = {
+                let mut stmt = tx.prepare(
                 "SELECT repo_id, ref_name, sha FROM shardline_hub_refs WHERE repo_id = ?1 ORDER BY ref_name",
             )?;
-            let rows = stmt.query_map(params![repo_id], |row| {
-                Ok(HubRef {
-                    repo_id: row.get(0)?,
-                    ref_name: row.get(1)?,
-                    sha: row.get(2)?,
-                })
-            })?;
-            rows.collect::<Result<Vec<_>, _>>()?
-        };
-        for reference in &refs {
-            current_hub_ref_evidence(
-                &tx,
-                &reference.repo_id,
-                &reference.ref_name,
-                Some(reference.sha.clone()),
-            )
-            .map_err(|error| rusqlite::Error::InvalidParameterName(error.to_string()))?;
-        }
-        tx.commit()?;
-        Ok(refs)
+                let rows = stmt.query_map(params![repo_id], |row| {
+                    Ok(HubRef {
+                        repo_id: row.get(0)?,
+                        ref_name: row.get(1)?,
+                        sha: row.get(2)?,
+                    })
+                })?;
+                rows.collect::<Result<Vec<_>, _>>()?
+            };
+            for reference in &refs {
+                current_hub_ref_evidence(
+                    &tx,
+                    &reference.repo_id,
+                    &reference.ref_name,
+                    Some(reference.sha.clone()),
+                )
+                .map_err(|error| rusqlite::Error::InvalidParameterName(error.to_string()))?;
+            }
+            tx.commit()?;
+            Ok(refs)
+        })
     }
 
     fn delete_ref(
@@ -390,23 +403,29 @@ impl HubStore for LocalIndexStore {
             )
             .into());
         }
-        let conn = open_hub_connection_rw(self.root())?;
-        let tx = conn.unchecked_transaction()?;
-        let changed = tx.execute(
-            "DELETE FROM shardline_hub_refs WHERE repo_id = ?1 AND ref_name = ?2 AND sha = ?3",
-            params![repo_id, ref_name, expected_sha],
-        )?;
-        if changed != 1 {
-            return Err(rusqlite::Error::QueryReturnedNoRows.into());
-        }
-        let mut evidence =
-            current_hub_ref_evidence(&tx, repo_id, ref_name, Some(expected_sha.to_owned()))?;
-        evidence.record(hub_ref_snapshot(repo_id, ref_name, None)?)?;
-        for event in evidence.events() {
-            persist_hub_ref_evidence(&tx, event)?;
-        }
-        tx.commit()?;
-        Ok(())
+        let root = self.root().to_owned();
+        let repo_id = repo_id.to_owned();
+        let ref_name = ref_name.to_owned();
+        let expected_sha = expected_sha.to_owned();
+        retry_sqlite_busy(|| {
+            let mut conn = open_hub_connection_rw(&root)?;
+            let tx = conn.transaction()?;
+            let changed = tx.execute(
+                "DELETE FROM shardline_hub_refs WHERE repo_id = ?1 AND ref_name = ?2 AND sha = ?3",
+                params![repo_id, ref_name, expected_sha],
+            )?;
+            if changed != 1 {
+                return Err(rusqlite::Error::QueryReturnedNoRows.into());
+            }
+            let mut evidence =
+                current_hub_ref_evidence(&tx, &repo_id, &ref_name, Some(expected_sha.clone()))?;
+            evidence.record(hub_ref_snapshot(&repo_id, &ref_name, None)?)?;
+            for event in evidence.events() {
+                persist_hub_ref_evidence(&tx, event)?;
+            }
+            tx.commit()?;
+            Ok(())
+        })
     }
 
     fn list_revisions(&self, repo_id: &str) -> Result<Vec<HubRevision>, Self::Error> {
@@ -474,25 +493,30 @@ impl HubStore for LocalIndexStore {
     }
 
     fn store_files(&self, commit_sha: &str, files: &[HubFileEntry]) -> Result<(), Self::Error> {
-        let conn = open_hub_connection_rw(self.root())?;
-        let tx = conn.unchecked_transaction()?;
-        {
-            let mut stmt = tx.prepare(
-                "INSERT OR REPLACE INTO shardline_hub_file_entries (commit_sha, path, size, sha, is_lfs)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-            )?;
-            for file in files {
-                stmt.execute(params![
-                    commit_sha,
-                    file.path,
-                    u64_to_i64(file.size)?,
-                    file.sha,
-                    file.is_lfs as i64,
-                ])?;
+        let root = self.root().to_owned();
+        let commit_sha = commit_sha.to_owned();
+        let files = files.to_owned();
+        retry_sqlite_busy(|| {
+            let mut conn = open_hub_connection_rw(&root)?;
+            let tx = conn.transaction()?;
+            {
+                let mut stmt = tx.prepare(
+                    "INSERT OR REPLACE INTO shardline_hub_file_entries (commit_sha, path, size, sha, is_lfs)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                )?;
+                for file in &files {
+                    stmt.execute(params![
+                        commit_sha,
+                        file.path,
+                        u64_to_i64(file.size)?,
+                        file.sha,
+                        file.is_lfs as i64,
+                    ])?;
+                }
             }
-        }
-        tx.commit()?;
-        Ok(())
+            tx.commit()?;
+            Ok(())
+        })
     }
 
     fn get_files(&self, commit_sha: &str) -> Result<Vec<HubFileEntry>, Self::Error> {
@@ -517,51 +541,51 @@ impl HubStore for LocalIndexStore {
     }
 
     fn delete_repo(&self, repo_id: &str) -> Result<(), Self::Error> {
-        let conn = open_hub_connection_rw(self.root())?;
-        let tx = conn.unchecked_transaction()?;
-        let ref_names = {
-            let mut statement =
-                tx.prepare("SELECT ref_name FROM shardline_hub_refs WHERE repo_id = ?1")?;
-            statement
-                .query_map(params![repo_id], |row| row.get::<_, String>(0))?
-                .collect::<Result<Vec<_>, _>>()?
-        };
-        for ref_name in ref_names {
-            let operation = hub_ref_snapshot(repo_id, &ref_name, None)?
-                .evidence_operation()
-                .map_err(|error| rusqlite::Error::InvalidParameterName(error.to_string()))?;
+        let root = self.root().to_owned();
+        let repo_id = repo_id.to_owned();
+        retry_sqlite_busy(|| {
+            let mut conn = open_hub_connection_rw(&root)?;
+            let tx = conn.transaction()?;
+            let ref_names = {
+                let mut statement =
+                    tx.prepare("SELECT ref_name FROM shardline_hub_refs WHERE repo_id = ?1")?;
+                statement
+                    .query_map(params![repo_id], |row| row.get::<_, String>(0))?
+                    .collect::<Result<Vec<_>, _>>()?
+            };
+            for ref_name in ref_names {
+                let operation = hub_ref_snapshot(&repo_id, &ref_name, None)?
+                    .evidence_operation()
+                    .map_err(|error| rusqlite::Error::InvalidParameterName(error.to_string()))?;
+                tx.execute(
+                    "DELETE FROM shardline_reliability_events
+                     WHERE operation_kind = 'MetadataCommit' AND operation_id = ?1",
+                    params![operation.operation_id],
+                )?;
+            }
             tx.execute(
-                "DELETE FROM shardline_reliability_events
-                 WHERE operation_kind = 'MetadataCommit' AND operation_id = ?1",
-                params![operation.operation_id],
+                "DELETE FROM shardline_hub_file_entries WHERE commit_sha IN (SELECT sha FROM shardline_hub_revisions WHERE repo_id = ?1)",
+                params![repo_id],
             )?;
-        }
-        // Delete file entries for all revisions in this repo
-        tx.execute(
-            "DELETE FROM shardline_hub_file_entries WHERE commit_sha IN (SELECT sha FROM shardline_hub_revisions WHERE repo_id = ?1)",
-            params![repo_id],
-        )?;
-        tx.execute(
-            "DELETE FROM shardline_hub_refs WHERE repo_id = ?1",
-            params![repo_id],
-        )?;
-        // Delete revisions
-        tx.execute(
-            "DELETE FROM shardline_hub_revisions WHERE repo_id = ?1",
-            params![repo_id],
-        )?;
-        // Delete webhooks (already has ON DELETE CASCADE, but explicit is safer)
-        tx.execute(
-            "DELETE FROM shardline_hub_webhooks WHERE repo_id = ?1",
-            params![repo_id],
-        )?;
-        // Delete the repo itself
-        tx.execute(
-            "DELETE FROM shardline_hub_repos WHERE repo_id = ?1",
-            params![repo_id],
-        )?;
-        tx.commit()?;
-        Ok(())
+            tx.execute(
+                "DELETE FROM shardline_hub_refs WHERE repo_id = ?1",
+                params![repo_id],
+            )?;
+            tx.execute(
+                "DELETE FROM shardline_hub_revisions WHERE repo_id = ?1",
+                params![repo_id],
+            )?;
+            tx.execute(
+                "DELETE FROM shardline_hub_webhooks WHERE repo_id = ?1",
+                params![repo_id],
+            )?;
+            tx.execute(
+                "DELETE FROM shardline_hub_repos WHERE repo_id = ?1",
+                params![repo_id],
+            )?;
+            tx.commit()?;
+            Ok(())
+        })
     }
 
     fn create_webhook(
