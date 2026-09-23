@@ -20,6 +20,28 @@ pub enum OperationKind {
     WebhookDelivery,
 }
 
+/// Protocol-specific namespace for materialized resumable-session snapshots.
+///
+/// These namespaces are persisted in existing snapshot evidence. Keeping the
+/// mapping typed centralizes construction without changing stored keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResumableSessionSnapshotDomain {
+    OciUpload,
+    S3Multipart,
+    LfsPatch,
+}
+
+impl ResumableSessionSnapshotDomain {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::OciUpload => "oci-upload-session",
+            Self::S3Multipart => "s3-multipart-session",
+            Self::LfsPatch => "lfs-patch-session",
+        }
+    }
+}
+
 impl OperationKind {
     /// Parses the stable persisted operation discriminator.
     #[must_use]
@@ -133,4 +155,21 @@ impl OperationIdentity {
         }
         Ok(())
     }
+}
+
+/// Builds a protocol snapshot identity while preserving its established
+/// persisted namespace and operation shape.
+pub fn resumable_session_snapshot_identity(
+    domain: ResumableSessionSnapshotDomain,
+    scope_namespace: impl Into<String>,
+    session_id: impl Into<String>,
+    target_key: impl Into<String>,
+) -> Result<OperationIdentity, ReliabilityError> {
+    Ok(OperationIdentity::new(
+        domain.as_str(),
+        scope_namespace,
+        session_id,
+        OperationKind::ResumableSession,
+    )?
+    .with_object_key(target_key))
 }

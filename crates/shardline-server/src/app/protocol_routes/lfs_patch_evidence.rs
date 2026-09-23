@@ -4,9 +4,9 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 use shardline_reliability::{
-    DigestSnapshot, OperationIdentity, OperationKind, ResumableLifecycleState, SessionEvidenceLog,
+    DigestSnapshot, ResumableLifecycleState, ResumableSessionSnapshotDomain, SessionEvidenceLog,
     SnapshotEvidenceLog, append_or_baseline_snapshot_evidence, canonical_state_digest,
-    verify_and_append_session_transition,
+    resumable_session_snapshot_identity, verify_and_append_session_transition,
 };
 
 use crate::ServerError;
@@ -48,14 +48,13 @@ fn snapshot_path(dir: &Path, oid: &str) -> PathBuf {
 }
 
 fn materialized_snapshot(input: &LfsPatchSnapshotInput<'_>) -> Result<DigestSnapshot, ServerError> {
-    let operation = OperationIdentity::new(
-        "lfs-patch-session",
+    let operation = resumable_session_snapshot_identity(
+        ResumableSessionSnapshotDomain::LfsPatch,
         input.scope_namespace.to_owned(),
         input.session_id.to_owned(),
-        OperationKind::ResumableSession,
+        input.target_key.to_owned(),
     )
-    .map_err(invalid_evidence)?
-    .with_object_key(input.target_key.to_owned());
+    .map_err(invalid_evidence)?;
     let state = LfsPatchMaterializedState {
         oid: input.oid.to_owned(),
         scope_namespace: input.scope_namespace.to_owned(),

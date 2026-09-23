@@ -5,10 +5,10 @@ use std::{
 };
 
 use shardline_reliability::{
-    DigestSnapshot, OperationIdentity, OperationKind, SessionEvidenceLog, SnapshotEvidenceLog,
+    DigestSnapshot, ResumableSessionSnapshotDomain, SessionEvidenceLog, SnapshotEvidenceLog,
     append_or_baseline_snapshot_evidence, canonical_state_digest,
-    verify_and_append_session_transition, verify_or_repair_session_evidence,
-    verify_or_repair_snapshot_evidence,
+    resumable_session_snapshot_identity, verify_and_append_session_transition,
+    verify_or_repair_session_evidence, verify_or_repair_snapshot_evidence,
 };
 #[cfg(unix)]
 use shardline_storage::{
@@ -36,14 +36,13 @@ fn session_snapshot(
     session_id: &str,
     session: &OciUploadSession,
 ) -> Result<DigestSnapshot, OciAdapterError> {
-    let operation = OperationIdentity::new(
-        "oci-upload-session",
+    let operation = resumable_session_snapshot_identity(
+        ResumableSessionSnapshotDomain::OciUpload,
         session.scope_namespace.clone(),
         session_id,
-        OperationKind::ResumableSession,
+        session.repository.clone(),
     )
-    .map_err(|error| OciAdapterError::Reliability(error.to_string()))?
-    .with_object_key(session.repository.clone());
+    .map_err(|error| OciAdapterError::Reliability(error.to_string()))?;
     let digest = canonical_state_digest(session)
         .map_err(|error| OciAdapterError::Reliability(error.to_string()))?;
     Ok(DigestSnapshot::new(operation, digest))

@@ -72,6 +72,33 @@ fn lifecycle_event_correlates_statechronicle_and_penelope_digests() {
 }
 
 #[test]
+fn resumable_snapshot_domains_preserve_persisted_namespaces() {
+    let expected = [
+        (
+            ResumableSessionSnapshotDomain::OciUpload,
+            "oci-upload-session",
+        ),
+        (
+            ResumableSessionSnapshotDomain::S3Multipart,
+            "s3-multipart-session",
+        ),
+        (
+            ResumableSessionSnapshotDomain::LfsPatch,
+            "lfs-patch-session",
+        ),
+    ];
+    for (domain, namespace) in expected {
+        let identity =
+            resumable_session_snapshot_identity(domain, "scope", "session", "key").unwrap();
+        assert_eq!(identity.tenant, namespace);
+        assert_eq!(identity.repository, "scope");
+        assert_eq!(identity.operation_id, "session");
+        assert_eq!(identity.object_key.as_deref(), Some("key"));
+        assert_eq!(identity.kind, OperationKind::ResumableSession);
+    }
+}
+
+#[test]
 fn generic_lifecycle_log_is_shared_by_upload_and_resumable_evidence() {
     let upload_events = baseline_upload_lifecycle_events(
         "tenant",

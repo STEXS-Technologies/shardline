@@ -26,10 +26,10 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use shardline_reliability::{
-    DigestSnapshot, OperationIdentity, OperationKind, ResumableLifecycleState, SessionEvidenceLog,
+    DigestSnapshot, ResumableLifecycleState, ResumableSessionSnapshotDomain, SessionEvidenceLog,
     SnapshotEvidenceLog, append_or_baseline_snapshot_evidence, canonical_state_digest,
-    verify_and_append_session_transition, verify_or_repair_session_evidence,
-    verify_or_repair_snapshot_evidence,
+    resumable_session_snapshot_identity, verify_and_append_session_transition,
+    verify_or_repair_session_evidence, verify_or_repair_snapshot_evidence,
 };
 use thiserror::Error;
 use tokio::{fs, io::AsyncWriteExt, sync::Mutex, task::spawn_blocking};
@@ -179,14 +179,13 @@ struct PersistedMultipartUploadSession {
 }
 
 fn session_snapshot(session: &MultipartUploadSession) -> Result<DigestSnapshot, S3SessionError> {
-    let operation = OperationIdentity::new(
-        "s3-multipart-session",
+    let operation = resumable_session_snapshot_identity(
+        ResumableSessionSnapshotDomain::S3Multipart,
         session.scope_namespace.clone(),
         session.upload_id.clone(),
-        OperationKind::ResumableSession,
+        format!("{}/{}", session.bucket, session.key),
     )
-    .map_err(|error| S3SessionError::Reliability(error.to_string()))?
-    .with_object_key(format!("{}/{}", session.bucket, session.key));
+    .map_err(|error| S3SessionError::Reliability(error.to_string()))?;
     let digest = canonical_state_digest(session)
         .map_err(|error| S3SessionError::Reliability(error.to_string()))?;
     Ok(DigestSnapshot::new(operation, digest))

@@ -56,7 +56,10 @@ pub use oci_tag_evidence::{
     OciTagEvidenceLog, OciTagLifecycleEvent, OciTagOperationId, OciTagSnapshot,
     verify_oci_tag_events,
 };
-pub use operation::{OperationIdentity, OperationKind};
+pub use operation::{
+    OperationIdentity, OperationKind, ResumableSessionSnapshotDomain,
+    resumable_session_snapshot_identity,
+};
 pub use penelope::ContentDigest as PenelopeDigest;
 pub use persisted::verify_persisted_event;
 pub use provider_evidence::{
