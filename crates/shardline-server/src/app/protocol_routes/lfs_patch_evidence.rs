@@ -2,7 +2,7 @@ use std::fs;
 use std::io::{Error, ErrorKind, Write};
 use std::path::{Path, PathBuf};
 
-use serde::Serialize;
+use serde::{Serialize, de::DeserializeOwned};
 use shardline_reliability::{
     DigestSnapshot, ResumableLifecycleState, ResumableSessionSnapshotDomain, SessionEvidenceLog,
     SnapshotEvidenceLog, append_or_baseline_snapshot_evidence, canonical_state_digest,
@@ -15,6 +15,14 @@ use crate::ServerError;
 /// are reconstructed in memory and persisted by the next successful mutation.
 const EVIDENCE_SUFFIX: &str = ".evidence";
 const SNAPSHOT_SUFFIX: &str = ".snapshot";
+const EVIDENCE_JOURNAL_SCHEMA: &str = "shardline.lfs.evidence-journal.v1";
+const SNAPSHOT_JOURNAL_SCHEMA: &str = "shardline.lfs.snapshot-journal.v1";
+
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+struct JournalManifest {
+    schema: String,
+    head: u64,
+}
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 struct LfsPatchMaterializedStateV1 {
@@ -47,6 +55,95 @@ fn snapshot_path(dir: &Path, oid: &str) -> PathBuf {
     dir.join(format!("{oid}{SNAPSHOT_SUFFIX}"))
 }
 
+fn evidence_journal_path(dir: &Path, oid: &str) -> PathBuf {
+    dir.join(format!("{oid}{EVIDENCE_SUFFIX}.log"))
+}
+
+fn snapshot_journal_path(dir: &Path, oid: &str) -> PathBuf {
+    dir.join(format!("{oid}{SNAPSHOT_SUFFIX}.log"))
+}
+
+fn journal_head(path: &Path, schema: &str) -> Result<Option<u64>, ServerError> {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let manifest: JournalManifest = serde_json::from_slice(&bytes).map_err(invalid_evidence)?;
+    if manifest.schema != schema {
+        return Err(invalid_evidence(format!(
+            "unsupported LFS evidence journal schema: {}",
+            manifest.schema
+        )));
+    }
+    Ok(Some(manifest.head))
+}
+
+fn read_journal<T: DeserializeOwned>(
+    manifest_path: &Path,
+    journal_path: &Path,
+    schema: &str,
+) -> Result<Option<Vec<T>>, ServerError> {
+    let Some(head) = journal_head(manifest_path, schema)? else {
+        return Ok(None);
+    };
+    let bytes = fs::read(journal_path).map_err(|error| {
+        if error.kind() == ErrorKind::NotFound {
+            invalid_evidence("LFS evidence journal is missing its committed log")
+        } else {
+            ServerError::from(error)
+        }
+    })?;
+    let mut events = Vec::new();
+    for line in bytes
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+    {
+        let mut record: Vec<T> = serde_json::from_slice(line).map_err(invalid_evidence)?;
+        events.append(&mut record);
+    }
+    let count = usize::try_from(head).map_err(|_| invalid_evidence("LFS journal head overflow"))?;
+    if count > events.len() {
+        return Err(invalid_evidence(
+            "LFS evidence journal head exceeds its log",
+        ));
+    }
+    events.truncate(count);
+    Ok(Some(events))
+}
+
+fn append_journal<T: Serialize>(
+    dir: &Path,
+    manifest_path: &Path,
+    journal_path: &Path,
+    schema: &str,
+    previous_head: u64,
+    events: &[T],
+) -> Result<(), ServerError> {
+    if events.is_empty() {
+        return Ok(());
+    }
+    let mut bytes = serde_json::to_vec(events).map_err(invalid_evidence)?;
+    bytes.push(b'\n');
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(journal_path)?;
+    file.write_all(&bytes)?;
+    file.sync_all()?;
+    let manifest = JournalManifest {
+        schema: schema.to_owned(),
+        head: previous_head
+            .checked_add(
+                u64::try_from(events.len())
+                    .map_err(|_| invalid_evidence("LFS evidence journal event count overflow"))?,
+            )
+            .ok_or_else(|| invalid_evidence("LFS evidence journal head overflow"))?,
+    };
+    let manifest_bytes = serde_json::to_vec(&manifest).map_err(invalid_evidence)?;
+    write_sidecar_atomically(dir, manifest_path, &manifest_bytes)
+}
+
 fn materialized_snapshot(input: &LfsPatchSnapshotInput<'_>) -> Result<DigestSnapshot, ServerError> {
     let operation = resumable_session_snapshot_identity(
         ResumableSessionSnapshotDomain::LfsPatch,
@@ -75,17 +172,24 @@ pub(super) fn record_snapshot(
 ) -> Result<(), ServerError> {
     let snapshot = materialized_snapshot(input)?;
     let path = snapshot_path(dir, input.oid);
-    let mut log = match fs::read(&path) {
-        Ok(bytes) => {
-            let events: Vec<_> = serde_json::from_slice(&bytes).map_err(invalid_evidence)?;
-            SnapshotEvidenceLog::from_events(events).map_err(invalid_evidence)?
-        }
-        Err(error) if error.kind() == ErrorKind::NotFound => SnapshotEvidenceLog::default(),
-        Err(error) => return Err(error.into()),
-    };
+    let head = journal_head(&path, SNAPSHOT_JOURNAL_SCHEMA)?;
+    let previous = load_snapshot_log(dir, input.oid)?.unwrap_or_default();
+    let previous_len = previous.events().len();
+    let mut log = previous;
     log = append_or_baseline_snapshot_evidence(log, snapshot).map_err(invalid_evidence)?;
-    let bytes = serde_json::to_vec(&log).map_err(invalid_evidence)?;
-    write_sidecar_atomically(dir, &path, &bytes)
+    let events = if head.is_some() {
+        &log.events()[previous_len..]
+    } else {
+        log.events()
+    };
+    append_journal(
+        dir,
+        &path,
+        &snapshot_journal_path(dir, input.oid),
+        SNAPSHOT_JOURNAL_SCHEMA,
+        head.unwrap_or(0),
+        events,
+    )
 }
 
 /// Verifies the latest persisted materialized snapshot against the state the
@@ -95,16 +199,37 @@ pub(super) fn verify_snapshot(
     dir: &Path,
     input: &LfsPatchSnapshotInput<'_>,
 ) -> Result<(), ServerError> {
-    let path = snapshot_path(dir, input.oid);
-    let bytes = match fs::read(path) {
+    let Some(log) = load_snapshot_log(dir, input.oid)? else {
+        return Ok(());
+    };
+    let expected = materialized_snapshot(input)?;
+    log.verify_for(&expected).map_err(invalid_evidence)
+}
+
+fn load_snapshot_log(
+    dir: &Path,
+    oid: &str,
+) -> Result<Option<SnapshotEvidenceLog<DigestSnapshot>>, ServerError> {
+    if let Some(events) =
+        read_journal::<shardline_reliability::SnapshotEvidenceEvent<DigestSnapshot>>(
+            &snapshot_path(dir, oid),
+            &snapshot_journal_path(dir, oid),
+            SNAPSHOT_JOURNAL_SCHEMA,
+        )?
+    {
+        return SnapshotEvidenceLog::from_events(events)
+            .map(Some)
+            .map_err(invalid_evidence);
+    }
+    let bytes = match fs::read(snapshot_path(dir, oid)) {
         Ok(bytes) => bytes,
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error.into()),
     };
     let events = serde_json::from_slice(&bytes).map_err(invalid_evidence)?;
-    let log = SnapshotEvidenceLog::from_events(events).map_err(invalid_evidence)?;
-    let expected = materialized_snapshot(input)?;
-    log.verify_for(&expected).map_err(invalid_evidence)
+    SnapshotEvidenceLog::from_events(events)
+        .map(Some)
+        .map_err(invalid_evidence)
 }
 
 pub(super) fn load(
@@ -114,14 +239,21 @@ pub(super) fn load(
     session_id: &str,
     target_key: &str,
 ) -> Result<SessionEvidenceLog, ServerError> {
-    let path = evidence_path(dir, oid);
-    let log = match fs::read(&path) {
-        Ok(bytes) => serde_json::from_slice(&bytes).map_err(invalid_evidence)?,
-        Err(error) if error.kind() == ErrorKind::NotFound => {
-            SessionEvidenceLog::for_legacy_session(scope_namespace, session_id, target_key)
-                .map_err(invalid_evidence)?
+    let log = if let Some(events) = read_journal::<shardline_reliability::StateTransitionEvent>(
+        &evidence_path(dir, oid),
+        &evidence_journal_path(dir, oid),
+        EVIDENCE_JOURNAL_SCHEMA,
+    )? {
+        SessionEvidenceLog::from_events(events).map_err(invalid_evidence)?
+    } else {
+        match fs::read(evidence_path(dir, oid)) {
+            Ok(bytes) => serde_json::from_slice(&bytes).map_err(invalid_evidence)?,
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                SessionEvidenceLog::for_legacy_session(scope_namespace, session_id, target_key)
+                    .map_err(invalid_evidence)?
+            }
+            Err(error) => return Err(error.into()),
         }
-        Err(error) => return Err(error.into()),
     };
     log.verify_for(scope_namespace, session_id, target_key)
         .map_err(invalid_evidence)?;
@@ -137,7 +269,9 @@ pub(super) fn record(
     before: ResumableLifecycleState,
     after: ResumableLifecycleState,
 ) -> Result<(), ServerError> {
+    let head = journal_head(&evidence_path(dir, oid), EVIDENCE_JOURNAL_SCHEMA)?;
     let log = load(dir, oid, scope_namespace, session_id, target_key)?;
+    let previous_len = log.events().len();
     let (log, _) = verify_and_append_session_transition(
         log,
         scope_namespace,
@@ -147,9 +281,20 @@ pub(super) fn record(
         after,
     )
     .map_err(invalid_evidence)?;
-    let bytes = serde_json::to_vec(&log).map_err(invalid_evidence)?;
     let path = evidence_path(dir, oid);
-    write_sidecar_atomically(dir, &path, &bytes)
+    let events = if head.is_some() {
+        &log.events()[previous_len..]
+    } else {
+        log.events()
+    };
+    append_journal(
+        dir,
+        &path,
+        &evidence_journal_path(dir, oid),
+        EVIDENCE_JOURNAL_SCHEMA,
+        head.unwrap_or(0),
+        events,
+    )
 }
 
 /// Commits one evidence sidecar atomically and removes the staging file on
@@ -258,30 +403,31 @@ pub(super) fn complete(
 }
 
 pub(super) fn verify_integrity(dir: &Path, oid: &str) -> Result<(), ServerError> {
-    let evidence_file = evidence_path(dir, oid);
-    let evidence_bytes = match fs::read(evidence_file) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error.into()),
-    };
-    let log: SessionEvidenceLog =
-        serde_json::from_slice(&evidence_bytes).map_err(invalid_evidence)?;
-    log.verify().map_err(invalid_evidence)?;
-    let snapshot_file = snapshot_path(dir, oid);
-    let snapshot_bytes = match fs::read(snapshot_file) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error.into()),
-    };
-    let events = serde_json::from_slice(&snapshot_bytes).map_err(invalid_evidence)?;
-    let _: SnapshotEvidenceLog<DigestSnapshot> =
-        SnapshotEvidenceLog::from_events(events).map_err(invalid_evidence)?;
+    if let Some(events) = read_journal::<shardline_reliability::StateTransitionEvent>(
+        &evidence_path(dir, oid),
+        &evidence_journal_path(dir, oid),
+        EVIDENCE_JOURNAL_SCHEMA,
+    )? {
+        SessionEvidenceLog::from_events(events).map_err(invalid_evidence)?;
+    } else {
+        match fs::read(evidence_path(dir, oid)) {
+            Ok(bytes) => {
+                let events = serde_json::from_slice(&bytes).map_err(invalid_evidence)?;
+                SessionEvidenceLog::from_events(events).map_err(invalid_evidence)?;
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    let _ = load_snapshot_log(dir, oid)?;
     Ok(())
 }
 
 pub(super) fn remove(dir: &Path, oid: &str) {
     drop(fs::remove_file(evidence_path(dir, oid)));
+    drop(fs::remove_file(evidence_journal_path(dir, oid)));
     drop(fs::remove_file(snapshot_path(dir, oid)));
+    drop(fs::remove_file(snapshot_journal_path(dir, oid)));
 }
 
 fn invalid_evidence(error: impl std::fmt::Display) -> ServerError {
@@ -338,6 +484,31 @@ mod tests {
     }
 
     #[test]
+    fn uncommitted_lfs_journal_tail_is_ignored() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        record(
+            directory.path(),
+            OID,
+            SCOPE,
+            SESSION,
+            TARGET,
+            ResumableLifecycleState::Active,
+            ResumableLifecycleState::Active,
+        )
+        .expect("write evidence");
+        let journal = evidence_journal_path(directory.path(), OID);
+        let committed_record = fs::read_to_string(&journal).expect("journal");
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .open(&journal)
+            .expect("open journal");
+        file.write_all(committed_record.as_bytes())
+            .expect("append uncommitted tail");
+        let loaded = load(directory.path(), OID, SCOPE, SESSION, TARGET).expect("load evidence");
+        assert_eq!(loaded.events().len(), 2);
+    }
+
+    #[test]
     fn sidecar_write_failure_removes_temporary_file() {
         let directory = tempfile::tempdir().expect("tempdir");
         let path = evidence_path(directory.path(), OID);
@@ -388,16 +559,23 @@ mod tests {
             },
         )
         .expect("snapshot append");
-        let path = snapshot_path(directory.path(), OID);
-        let stored: SnapshotEvidenceLog<DigestSnapshot> =
-            serde_json::from_slice(&fs::read(&path).expect("snapshot bytes")).expect("snapshot");
+        let stored = load_snapshot_log(directory.path(), OID)
+            .expect("snapshot log")
+            .expect("snapshot");
         assert_eq!(stored.events().len(), 2);
         verify_integrity(directory.path(), OID).expect("snapshot chain verifies");
 
-        let mut value: serde_json::Value =
-            serde_json::from_slice(&fs::read(&path).expect("snapshot bytes")).expect("json");
+        let journal = snapshot_journal_path(directory.path(), OID);
+        let mut value: serde_json::Value = serde_json::from_str(
+            fs::read_to_string(&journal)
+                .expect("snapshot journal")
+                .lines()
+                .next()
+                .expect("snapshot journal record"),
+        )
+        .expect("json");
         value[0]["state_digest"] = serde_json::json!("tampered");
-        fs::write(&path, serde_json::to_vec(&value).expect("tampered json")).expect("rewrite");
+        fs::write(&journal, serde_json::to_vec(&value).expect("tampered json")).expect("rewrite");
         assert!(verify_integrity(directory.path(), OID).is_err());
     }
 
@@ -414,9 +592,15 @@ mod tests {
             ResumableLifecycleState::Active,
         )
         .expect("write evidence");
-        let path = evidence_path(directory.path(), OID);
-        let mut value: serde_json::Value =
-            serde_json::from_slice(&fs::read(&path).expect("evidence bytes")).expect("json");
+        let path = evidence_journal_path(directory.path(), OID);
+        let mut value: serde_json::Value = serde_json::from_str(
+            fs::read_to_string(&path)
+                .expect("evidence bytes")
+                .lines()
+                .next()
+                .expect("evidence journal record"),
+        )
+        .expect("json");
         value[0]["operation"]["repository"] = serde_json::json!("wrong-scope");
         fs::write(&path, serde_json::to_vec(&value).expect("tampered json")).expect("rewrite");
 
