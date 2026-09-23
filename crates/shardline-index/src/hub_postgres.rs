@@ -1053,6 +1053,48 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn pg_repo_list_and_search_reject_tampered_head_evidence() {
+        let Some(pool) = connect_postgres().await else {
+            eprintln!("skipping Postgres test: no DATABASE_URL");
+            return;
+        };
+        let store = make_store(pool.clone());
+        let repo_id = "pg-list-search-tampered";
+        cleanup_repo(&store, repo_id).await;
+
+        store
+            .create_repo(HubRepoType::Model, repo_id, false)
+            .expect("create_repo");
+        let operation_id = HubRefSnapshot::new(repo_id, "main", None)
+            .expect("valid hub ref snapshot")
+            .evidence_operation()
+            .expect("valid hub ref operation")
+            .operation_id;
+        sqlx::query(
+            "UPDATE shardline_reliability_events
+             SET event_json = '{}'::jsonb
+             WHERE operation_kind = 'MetadataCommit' AND operation_id = $1",
+        )
+        .bind(&operation_id)
+        .execute(&pool)
+        .await
+        .expect("tamper hub evidence");
+
+        assert!(store.list_repos().is_err());
+        assert!(store.search_repos(None, repo_id, 10).is_err());
+
+        sqlx::query(
+            "DELETE FROM shardline_reliability_events
+             WHERE operation_kind = 'MetadataCommit' AND operation_id = $1",
+        )
+        .bind(&operation_id)
+        .execute(&pool)
+        .await
+        .expect("clean up tampered hub evidence");
+        cleanup_repo(&store, repo_id).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn pg_get_repo_returns_none_for_missing() {
         let Some(pool) = connect_postgres().await else {
             eprintln!("skipping Postgres test: no DATABASE_URL");
