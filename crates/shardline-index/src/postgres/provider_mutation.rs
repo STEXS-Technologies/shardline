@@ -594,6 +594,7 @@ mod tests {
     #![allow(clippy::expect_used)]
 
     use shardline_protocol::RepositoryProvider;
+    use shardline_reliability::SnapshotEvidence;
     use sqlx::{PgPool, query, query_scalar};
 
     use super::*;
@@ -612,6 +613,17 @@ mod tests {
             1_800_000_000,
         )
         .expect("valid delivery")
+    }
+
+    fn webhook_operation_id(delivery: &WebhookDelivery) -> String {
+        super::super::index_store::webhook_snapshot(
+            delivery,
+            WebhookDeliveryLifecycleState::Processed,
+        )
+        .expect("valid webhook snapshot")
+        .evidence_operation()
+        .expect("valid webhook operation")
+        .operation_id
     }
 
     async fn set_fence(pool: &PgPool, resource: &str, epoch: i64) {
@@ -650,7 +662,7 @@ mod tests {
             "DELETE FROM shardline_reliability_events
              WHERE operation_kind = 'WebhookDelivery' AND operation_id = $1",
         )
-        .bind(delivery_id)
+        .bind(webhook_operation_id(&delivery(owner, repo, delivery_id)))
         .execute(&pool)
         .await
         .expect("clean delivery evidence fixture");
@@ -751,7 +763,7 @@ mod tests {
             "DELETE FROM shardline_reliability_events
              WHERE operation_kind = 'WebhookDelivery' AND operation_id = $1",
         )
-        .bind(delivery_id)
+        .bind(webhook_operation_id(&delivery(owner, repo, delivery_id)))
         .execute(&pool)
         .await
         .expect("clean evidence fixture");
@@ -789,7 +801,7 @@ mod tests {
             "SELECT COUNT(*) FROM shardline_reliability_events
              WHERE operation_kind = 'WebhookDelivery' AND operation_id = $1",
         )
-        .bind(delivery_id)
+        .bind(webhook_operation_id(&delivery))
         .fetch_one(&pool)
         .await
         .expect("evidence count");
@@ -800,7 +812,7 @@ mod tests {
              SET event_json = '{\"sequence\":99}'
              WHERE operation_kind = 'WebhookDelivery' AND operation_id = $1",
         )
-        .bind(delivery_id)
+        .bind(webhook_operation_id(&delivery))
         .execute(&pool)
         .await
         .expect("tamper evidence");
@@ -955,7 +967,11 @@ mod tests {
             "DELETE FROM shardline_reliability_events
              WHERE operation_kind = 'WebhookDelivery' AND operation_id = $1",
         )
-        .bind("delivery-tampered-seed")
+        .bind(webhook_operation_id(&delivery(
+            owner,
+            repo,
+            "delivery-tampered-seed",
+        )))
         .execute(&pool)
         .await
         .expect("clean seed delivery evidence fixture");
