@@ -8,6 +8,10 @@ use crate::{S3ObjectEntry, S3ObjectIndexStore};
 use shardline_reliability::verify_and_append_snapshot_transition;
 
 fn s3_object_entry_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<S3ObjectEntry> {
+    let user_metadata_json: String = row.get("user_metadata")?;
+    let user_metadata = serde_json::from_str(&user_metadata_json).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(6, rusqlite::types::Type::Text, Box::new(error))
+    })?;
     Ok(S3ObjectEntry {
         scope_namespace: row.get("scope_namespace")?,
         object_key: row.get("object_key")?,
@@ -21,8 +25,7 @@ fn s3_object_entry_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<S3Objec
         })?,
         content_hash: row.get("content_hash")?,
         etag: row.get("etag")?,
-        user_metadata: serde_json::from_str(&row.get::<_, String>("user_metadata")?)
-            .unwrap_or_default(),
+        user_metadata,
         updated_at_unix_seconds: row.get("updated_at_unix_seconds")?,
     })
 }
@@ -714,6 +717,32 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn s3_object_read_rejects_malformed_user_metadata() {
+        let storage = shardline_test_support::TempStorage::new();
+        let store = LocalIndexStore::new(storage.path_buf()).unwrap();
+        let mut value = entry("global", "metadata.bin", "file-a", 7, 1);
+        value.user_metadata = vec![("mode".to_owned(), "fast".to_owned())];
+        store.upsert_s3_object(&value).await.unwrap();
+
+        let connection = store.open_connection().unwrap();
+        connection
+            .execute(
+                "UPDATE shardline_s3_objects
+                 SET user_metadata = '{malformed:true}'
+                 WHERE scope_namespace = 'global' AND object_key = 'metadata.bin'",
+                [],
+            )
+            .unwrap();
+
+        assert!(matches!(
+            store.scan_s3_object_exact("global", "metadata.bin").await,
+            Err(LocalIndexStoreError::Sqlite(
+                rusqlite::Error::FromSqlConversionFailure(..)
+            ))
+        ));
     }
 
     #[tokio::test]
