@@ -116,3 +116,18 @@ pub fn verify_snapshot_chain<S: SnapshotEvidence>(
     }
     Ok(())
 }
+
+/// Verifies one latest materialized-state boundary without loading its full
+/// historical chain. Normal paginated listings use this bounded check;
+/// explicit fsck/recovery paths use [`verify_snapshot_chain`] as well.
+pub fn verify_snapshot_event<S: SnapshotEvidence>(
+    event: &SnapshotEvidenceEvent<S>,
+    expected: &S,
+) -> Result<(), ReliabilityError> {
+    event.verify_integrity()?;
+    if event.after == *expected {
+        Ok(())
+    } else {
+        Err(ReliabilityError::StateMismatch)
+    }
+}

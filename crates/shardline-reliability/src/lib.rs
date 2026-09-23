@@ -85,7 +85,7 @@ pub use session_evidence::{
     SessionEvidenceLog, verify_and_append_session_transition, verify_or_repair_session_evidence,
     verify_resumable_session_events, verify_session_evidence,
 };
-pub use snapshot_event::{SnapshotEvidence, SnapshotEvidenceEvent};
+pub use snapshot_event::{SnapshotEvidence, SnapshotEvidenceEvent, verify_snapshot_event};
 pub use snapshot_log::{
     SnapshotEvidenceLog, append_or_baseline_snapshot_evidence,
     verify_and_append_snapshot_transition, verify_or_repair_snapshot_evidence,

@@ -6,7 +6,7 @@ use crate::{S3ObjectEntry, S3ObjectIndexStore};
 use shardline_reliability::{
     OperationKind, S3ObjectEvidenceLog, S3ObjectLifecycleEvent, S3ObjectSnapshot, S3ObjectState,
     SnapshotEvidence, verify_and_append_snapshot_transition, verify_or_repair_snapshot_evidence,
-    verify_snapshot_evidence,
+    verify_snapshot_event, verify_snapshot_evidence,
 };
 
 fn s3_object_entry_from_row(row: &PgRow) -> Result<S3ObjectEntry, PostgresMetadataStoreError> {
@@ -343,10 +343,22 @@ impl S3ObjectIndexStore for PostgresIndexStore {
         use std::fmt::Write as _;
 
         let mut sql = String::from(
-            "SELECT scope_namespace, object_key, file_id, size_bytes, content_hash, etag,
-                    user_metadata, updated_at_unix_seconds
-             FROM shardline_s3_objects
-             WHERE scope_namespace = $1 AND substr(object_key, 1, length($2)) = $2",
+            "SELECT objects.scope_namespace, objects.object_key, objects.file_id,
+                    objects.size_bytes, objects.content_hash, objects.etag,
+                    objects.user_metadata, objects.updated_at_unix_seconds,
+                    evidence.event_json AS evidence_json
+             FROM shardline_s3_objects AS objects
+             LEFT JOIN LATERAL (
+                 SELECT event_json
+                 FROM shardline_reliability_events
+                 WHERE operation_kind = 'S3Object'
+                   AND operation_id = octet_length(objects.scope_namespace)::text || ':' || objects.scope_namespace
+                       || octet_length(objects.object_key)::text || ':' || objects.object_key
+                 ORDER BY sequence DESC
+                 LIMIT 1
+             ) AS evidence ON TRUE
+             WHERE objects.scope_namespace = $1
+               AND substr(objects.object_key, 1, length($2)) = $2",
         );
         let mut index = 3usize;
         if cursor.is_some() {
@@ -366,10 +378,21 @@ impl S3ObjectIndexStore for PostgresIndexStore {
         q = q.bind(limit_i64);
         let mut transaction = self.pool.begin().await?;
         let rows = q.fetch_all(&mut *transaction).await?;
-        let values = rows
-            .iter()
-            .map(s3_object_entry_from_row)
-            .collect::<Result<Vec<_>, _>>()?;
+        let mut values = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let value = s3_object_entry_from_row(row)?;
+            let event_json: Option<serde_json::Value> = row.try_get("evidence_json")?;
+            let event_json = event_json.ok_or_else(|| {
+                PostgresMetadataStoreError::Reliability(
+                    shardline_reliability::ReliabilityError::OperationMismatch,
+                )
+            })?;
+            let event: S3ObjectLifecycleEvent = serde_json::from_value(event_json)?;
+            let expected =
+                s3_object_snapshot(&value.scope_namespace, &value.object_key, Some(&value))?;
+            verify_snapshot_event(&event, &expected)?;
+            values.push(value);
+        }
         transaction.commit().await?;
         Ok(values)
     }
@@ -657,6 +680,11 @@ mod tests {
                 .await
                 .is_err()
         );
+        assert!(
+            S3ObjectIndexStore::scan_s3_objects(&store, &scope, "", None, 10)
+                .await
+                .is_err()
+        );
         cleanup(&pool, &scope).await;
     }
 
@@ -673,6 +701,17 @@ mod tests {
             .await
             .expect("upsert");
 
+        // Simulate storage corruption below the database gate. Production
+        // writes cannot commit this state; disabling only the test trigger
+        // lets the read verifier prove it still fails closed.
+        let mut corruption = pool.begin().await.expect("begin corruption transaction");
+        sqlx::raw_sql(
+            "ALTER TABLE shardline_s3_objects
+             DISABLE TRIGGER shardline_s3_object_reliability_gate",
+        )
+        .execute(&mut *corruption)
+        .await
+        .expect("disable test trigger");
         query(
             "UPDATE shardline_s3_objects
              SET user_metadata = '{not-json}'
@@ -680,9 +719,20 @@ mod tests {
         )
         .bind(&scope)
         .bind("model.bin")
-        .execute(&pool)
+        .execute(&mut *corruption)
         .await
         .expect("corrupt user metadata");
+        sqlx::raw_sql(
+            "ALTER TABLE shardline_s3_objects
+             ENABLE TRIGGER shardline_s3_object_reliability_gate",
+        )
+        .execute(&mut *corruption)
+        .await
+        .expect("restore test trigger");
+        corruption
+            .commit()
+            .await
+            .expect("commit corruption fixture");
 
         assert!(
             S3ObjectIndexStore::scan_s3_object_exact(&store, &scope, "model.bin")
@@ -719,6 +769,12 @@ mod tests {
             S3ObjectIndexStore::scan_s3_object_exact(&store, &scope, "repair.bin")
                 .await
                 .is_err()
+        );
+        assert!(
+            S3ObjectIndexStore::scan_s3_objects(&store, &scope, "", None, 10)
+                .await
+                .is_err(),
+            "paginated listings must fail closed when a returned row has no evidence"
         );
         let count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM shardline_reliability_events
@@ -795,6 +851,45 @@ mod tests {
             .expect("scan");
         assert_eq!(more.len(), 2);
 
+        cleanup(&pool, &scope).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pg_s3_same_key_legacy_writer_is_rejected_by_reliability_gate() {
+        let Some(pool) = connect_postgres().await else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let scope = format!("s3-mixed-version-{}", std::process::id());
+        let store = PostgresIndexStore::new(pool.clone());
+        let original = entry(&scope, "same-key.bin", "file-a");
+        S3ObjectIndexStore::upsert_s3_object(&store, &original)
+            .await
+            .expect("seed object");
+
+        let mut transaction = pool.begin().await.expect("begin legacy transaction");
+        sqlx::query(
+            "UPDATE shardline_s3_objects
+             SET file_id = $3
+             WHERE scope_namespace = $1 AND object_key = $2",
+        )
+        .bind(&scope)
+        .bind("same-key.bin")
+        .bind("legacy-overwrite")
+        .execute(&mut *transaction)
+        .await
+        .expect("legacy write reaches deferred gate");
+        assert!(
+            transaction.commit().await.is_err(),
+            "an N-1 same-key write must not commit without reliability evidence"
+        );
+
+        assert_eq!(
+            S3ObjectIndexStore::scan_s3_object_exact(&store, &scope, "same-key.bin")
+                .await
+                .expect("read after rejected write"),
+            Some(original)
+        );
         cleanup(&pool, &scope).await;
     }
 

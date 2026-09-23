@@ -1126,6 +1126,40 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     #[serial(hub_postgres)]
+    async fn pg_hub_same_ref_legacy_writer_is_rejected_by_reliability_gate() {
+        let Some(pool) = connect_postgres().await else {
+            eprintln!("skipping Postgres test: no DATABASE_URL");
+            return;
+        };
+        let store = make_store(pool.clone());
+        let repo_id = "pg-mixed-version-ref";
+        cleanup_repo(&store, repo_id).await;
+        let original = store
+            .create_repo(HubRepoType::Model, repo_id, false)
+            .expect("create repo");
+
+        let mut transaction = pool.begin().await.expect("begin legacy transaction");
+        sqlx::query(
+            "UPDATE shardline_hub_refs
+             SET sha = $3
+             WHERE repo_id = $1 AND ref_name = $2",
+        )
+        .bind(repo_id)
+        .bind("main")
+        .bind("legacy-overwrite")
+        .execute(&mut *transaction)
+        .await
+        .expect("legacy write reaches deferred gate");
+        assert!(transaction.commit().await.is_err());
+        assert_eq!(
+            store.get_repo(repo_id).expect("read after rejected write"),
+            Some(original)
+        );
+        cleanup_repo(&store, repo_id).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[serial(hub_postgres)]
     async fn pg_repo_list_and_search_reject_tampered_head_evidence() {
         let Some(pool) = connect_postgres().await else {
             eprintln!("skipping Postgres test: no DATABASE_URL");

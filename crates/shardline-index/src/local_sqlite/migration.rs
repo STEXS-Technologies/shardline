@@ -6,7 +6,7 @@ pub(crate) struct LocalSqliteMigration {
     pub(crate) down_sql: &'static str,
 }
 
-pub(crate) const LOCAL_SQLITE_MIGRATIONS: [LocalSqliteMigration; 23] = [
+pub(crate) const LOCAL_SQLITE_MIGRATIONS: [LocalSqliteMigration; 27] = [
     LocalSqliteMigration {
         version: "20260417000000",
         name: "metadata_store",
@@ -150,5 +150,37 @@ pub(crate) const LOCAL_SQLITE_MIGRATIONS: [LocalSqliteMigration; 23] = [
         name: "resumable_state_digest",
         up_sql: include_str!("../../migrations/20260924000000_resumable_state_digest.up.sql"),
         down_sql: include_str!("../../migrations/20260924000000_resumable_state_digest.down.sql"),
+    },
+    LocalSqliteMigration {
+        version: "20260926000000",
+        name: "reliability_write_gates",
+        up_sql: include_str!("../../migrations/20260926000000_reliability_write_gates.up.sql"),
+        down_sql: include_str!("../../migrations/20260926000000_reliability_write_gates.down.sql"),
+    },
+    LocalSqliteMigration {
+        version: "20260927000000",
+        name: "reliability_events_schema_compat",
+        up_sql: include_str!(
+            "../../migrations/20260927000000_reliability_events_schema_compat.up.sql"
+        ),
+        down_sql: include_str!(
+            "../../migrations/20260927000000_reliability_events_schema_compat.down.sql"
+        ),
+    },
+    LocalSqliteMigration {
+        version: "20260928000000",
+        name: "reliability_delete_gates",
+        up_sql: include_str!("../../migrations/20260928000000_reliability_delete_gates.up.sql"),
+        down_sql: include_str!("../../migrations/20260928000000_reliability_delete_gates.down.sql"),
+    },
+    LocalSqliteMigration {
+        version: "20260929000000",
+        name: "reliability_write_gate_state_match",
+        up_sql: include_str!(
+            "../../migrations/20260929000000_reliability_write_gate_state_match.up.sql"
+        ),
+        down_sql: include_str!(
+            "../../migrations/20260929000000_reliability_write_gate_state_match.down.sql"
+        ),
     },
 ];

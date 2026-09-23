@@ -1,7 +1,7 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use super::*;
-use crate::snapshot_event::{SnapshotEvidenceEvent, verify_snapshot_chain};
+use crate::snapshot_event::{SnapshotEvidenceEvent, verify_snapshot_chain, verify_snapshot_event};
 
 #[test]
 fn operation_kind_persisted_discriminators_round_trip() {
@@ -187,6 +187,20 @@ fn snapshot_chain_rejects_sequence_gaps() {
     assert!(matches!(
         verify_snapshot_chain(&[baseline, skipped]),
         Err(ReliabilityError::ChainDiscontinuity)
+    ));
+}
+
+#[test]
+fn latest_snapshot_event_verifier_checks_integrity_and_materialized_state() {
+    let before = HubRefSnapshot::new("repo", "main", Some("sha-1".to_owned())).unwrap();
+    let after = HubRefSnapshot::new("repo", "main", Some("sha-2".to_owned())).unwrap();
+    let event = SnapshotEvidenceEvent::new(1, before, after.clone()).unwrap();
+    verify_snapshot_event(&event, &after).unwrap();
+
+    let wrong = HubRefSnapshot::new("repo", "main", Some("sha-3".to_owned())).unwrap();
+    assert!(matches!(
+        verify_snapshot_event(&event, &wrong),
+        Err(ReliabilityError::StateMismatch)
     ));
 }
 

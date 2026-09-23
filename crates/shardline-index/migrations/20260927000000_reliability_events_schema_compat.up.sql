@@ -1,0 +1,2 @@
+-- Postgres reliability event schema compatibility is handled by the Postgres migration; SQLite has the released schema.
+-- Intentionally empty: this migration keeps local and Postgres version histories aligned.

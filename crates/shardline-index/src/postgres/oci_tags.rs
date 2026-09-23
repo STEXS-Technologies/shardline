@@ -684,4 +684,45 @@ mod tests {
         assert_eq!(count, 0);
         cleanup_tags(&pool, scope).await;
     }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pg_oci_same_tag_legacy_writer_is_rejected_by_reliability_gate() {
+        let Some(pool) = connect_postgres().await else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let scope = format!("oci-pg-mixed-version-{}", std::process::id());
+        cleanup_tags(&pool, &scope).await;
+        let store = PostgresIndexStore::new(pool.clone());
+        let value = OciTagEntry {
+            scope_namespace: scope.clone(),
+            repository: "team/assets".to_owned(),
+            tag: "latest".to_owned(),
+            digest_hex: "a".repeat(64),
+        };
+        store.upsert_oci_tag(&value).await.expect("seed tag");
+
+        let mut transaction = pool.begin().await.expect("begin legacy transaction");
+        query(
+            "UPDATE shardline_oci_tags
+             SET digest_hex = $4
+             WHERE scope_namespace = $1 AND repository = $2 AND tag = $3",
+        )
+        .bind(&scope)
+        .bind(&value.repository)
+        .bind(&value.tag)
+        .bind("b".repeat(64))
+        .execute(&mut *transaction)
+        .await
+        .expect("legacy write reaches deferred gate");
+        assert!(transaction.commit().await.is_err());
+        assert_eq!(
+            store
+                .oci_tag(&scope, &value.repository, &value.tag)
+                .await
+                .expect("read after rejected write"),
+            Some(value)
+        );
+        cleanup_tags(&pool, &scope).await;
+    }
 }
