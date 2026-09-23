@@ -145,6 +145,27 @@ fn snapshot_evidence_helpers_share_baseline_repair_and_append_policy() {
 }
 
 #[test]
+fn snapshot_transition_helper_verifies_before_and_appends_after() {
+    let before = HubRefSnapshot::new("repo", "main", Some("sha-1".into())).unwrap();
+    let after = HubRefSnapshot::new("repo", "main", Some("sha-2".into())).unwrap();
+    let (evidence, baseline_was_missing) = verify_and_append_snapshot_transition(
+        SnapshotEvidenceLog::default(),
+        before,
+        after.clone(),
+    )
+    .unwrap();
+    assert!(baseline_was_missing);
+    assert_eq!(evidence.events().len(), 2);
+    evidence.verify_for(&after).unwrap();
+
+    let wrong_before = HubRefSnapshot::new("repo", "main", Some("sha-x".into())).unwrap();
+    assert!(matches!(
+        verify_and_append_snapshot_transition(evidence, wrong_before, after),
+        Err(ReliabilityError::StateMismatch)
+    ));
+}
+
+#[test]
 fn session_evidence_helper_shares_legacy_repair_and_identity_policy() {
     let (repaired, was_missing) = verify_or_repair_session_evidence(
         SessionEvidenceLog::default(),

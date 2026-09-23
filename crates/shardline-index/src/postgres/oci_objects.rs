@@ -1,6 +1,6 @@
 use shardline_reliability::{
     OciObjectEvidenceLog, OciObjectIdentity, OciObjectLifecycleEvent, OciObjectLifecycleState,
-    OciObjectSnapshot, resumable_session_event, verify_or_repair_snapshot_evidence,
+    OciObjectSnapshot, resumable_session_event, verify_and_append_snapshot_transition,
 };
 use sqlx::{Connection as _, PgConnection, Row as _, query, query_scalar};
 
@@ -66,9 +66,8 @@ async fn record_oci_evidence(
     let after = oci_snapshot(key, state, deleted_at)?;
     let evidence = load_oci_evidence(executor, key).await?;
     let fallback = oci_snapshot(key, fallback_state, fallback_deleted_at)?;
-    let (mut evidence, evidence_was_empty) =
-        verify_or_repair_snapshot_evidence(evidence, fallback)?;
-    evidence.record(after)?;
+    let (evidence, evidence_was_empty) =
+        verify_and_append_snapshot_transition(evidence, fallback, after)?;
     let event = evidence.events().last().ok_or_else(|| {
         PostgresMetadataStoreError::Reliability(
             shardline_reliability::ReliabilityError::EmptyField("OCI object evidence event"),

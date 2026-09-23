@@ -1,7 +1,8 @@
 use rusqlite::{OptionalExtension, params};
 use shardline_reliability::{
     OciObjectEvidenceLog, OciObjectIdentity, OciObjectLifecycleState, OciObjectSnapshot,
-    verify_oci_object_lifecycle_chain, verify_or_repair_snapshot_evidence,
+    verify_and_append_snapshot_transition, verify_oci_object_lifecycle_chain,
+    verify_or_repair_snapshot_evidence,
 };
 
 use super::{LocalIndexStore, LocalIndexStoreError, i64_to_u64};
@@ -78,9 +79,8 @@ fn record_oci_evidence(
     let after = oci_snapshot(key, state, deleted_at)?;
     let evidence = load_oci_evidence(transaction, key)?;
     let fallback = oci_snapshot(key, fallback_state, fallback_deleted_at)?;
-    let (mut evidence, evidence_was_empty) =
-        verify_or_repair_snapshot_evidence(evidence, fallback)?;
-    evidence.record(after)?;
+    let (evidence, evidence_was_empty) =
+        verify_and_append_snapshot_transition(evidence, fallback, after)?;
     let event = evidence.events().last().ok_or_else(|| {
         LocalIndexStoreError::Reliability(shardline_reliability::ReliabilityError::EmptyField(
             "OCI object evidence event",

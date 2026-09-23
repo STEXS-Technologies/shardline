@@ -107,3 +107,19 @@ pub fn append_or_baseline_snapshot_evidence<S: SnapshotEvidence>(
     stored.record(snapshot)?;
     Ok(stored)
 }
+
+/// Verifies the materialized state before a transition, repairs a missing
+/// legacy baseline, and appends the next typed snapshot as one policy.
+///
+/// The boolean reports whether the returned log includes a reconstructed
+/// baseline that the caller must persist alongside the transition.
+pub fn verify_and_append_snapshot_transition<S: SnapshotEvidence>(
+    stored: SnapshotEvidenceLog<S>,
+    expected_before: S,
+    after: S,
+) -> Result<(SnapshotEvidenceLog<S>, bool), ReliabilityError> {
+    let (mut evidence, baseline_was_missing) =
+        verify_or_repair_snapshot_evidence(stored, expected_before)?;
+    evidence.record(after)?;
+    Ok((evidence, baseline_was_missing))
+}

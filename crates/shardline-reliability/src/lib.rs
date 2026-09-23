@@ -81,7 +81,8 @@ pub use session_evidence::{
 };
 pub use snapshot_event::SnapshotEvidence;
 pub use snapshot_log::{
-    SnapshotEvidenceLog, append_or_baseline_snapshot_evidence, verify_or_repair_snapshot_evidence,
+    SnapshotEvidenceLog, append_or_baseline_snapshot_evidence,
+    verify_and_append_snapshot_transition, verify_or_repair_snapshot_evidence,
 };
 pub use state_snapshot::DigestSnapshot;
 pub use statechronicle::ContentDigest as StateChronicleDigest;
