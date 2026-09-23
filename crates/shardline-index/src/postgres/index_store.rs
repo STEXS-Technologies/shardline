@@ -7,10 +7,11 @@ use shardline_reliability::{
     QuarantineObjectIdentity, QuarantineSnapshot, RetentionEvidenceLog,
     RetentionHoldLifecycleState, RetentionHoldSnapshot, RetentionObjectIdentity, SnapshotEvidence,
     WebhookDeliveryEvidenceLog, WebhookDeliveryIdentity, WebhookDeliveryLifecycleState,
-    WebhookDeliverySnapshot, baseline_upload_lifecycle_events, upload_lifecycle_event,
-    verify_or_repair_snapshot_evidence, verify_provider_lifecycle_events,
-    verify_quarantine_lifecycle_events, verify_retention_hold_lifecycle_events,
-    verify_upload_lifecycle_events, verify_webhook_delivery_events,
+    WebhookDeliverySnapshot, append_or_baseline_snapshot_evidence,
+    baseline_upload_lifecycle_events, upload_lifecycle_event,
+    verify_and_append_snapshot_transition, verify_or_repair_snapshot_evidence,
+    verify_provider_lifecycle_events, verify_quarantine_lifecycle_events,
+    verify_retention_hold_lifecycle_events, verify_upload_lifecycle_events,
 };
 use shardline_storage::ObjectKey;
 use sqlx::{Row, postgres::PgRow, query, query_scalar, types::Json};
@@ -528,6 +529,16 @@ impl AsyncIndexStore for super::PostgresIndexStore {
     ) -> IndexStoreFuture<'operation, (), Self::Error> {
         Box::pin(async move {
             let mut transaction = self.pool.begin().await?;
+            let previous = query(
+                "SELECT object_key, observed_length, first_seen_unreachable_at_unix_seconds, delete_after_unix_seconds
+                 FROM shardline_quarantine_candidates WHERE object_key = $1 FOR UPDATE",
+            )
+            .bind(candidate.object_key().as_str())
+            .fetch_optional(&mut *transaction)
+            .await?
+            .as_ref()
+            .map(quarantine_candidate_from_row)
+            .transpose()?;
             query(
                 "INSERT INTO shardline_quarantine_candidates (
                     object_key,
@@ -552,12 +563,23 @@ impl AsyncIndexStore for super::PostgresIndexStore {
             .execute(&mut *transaction)
             .await?;
             let snapshot = quarantine_snapshot(candidate, QuarantineLifecycleState::Active)?;
-            let mut evidence = load_postgres_quarantine_evidence(
+            let evidence = load_postgres_quarantine_evidence(
                 &mut *transaction,
                 candidate.object_key().as_str(),
             )
             .await?;
-            evidence.record(snapshot)?;
+            let (evidence, evidence_was_empty) = if let Some(previous) = previous {
+                let before = quarantine_snapshot(&previous, QuarantineLifecycleState::Active)?;
+                verify_and_append_snapshot_transition(evidence, before, snapshot)?
+            } else if evidence.events().is_empty() {
+                (
+                    append_or_baseline_snapshot_evidence(evidence, snapshot)?,
+                    true,
+                )
+            } else {
+                let released = quarantine_snapshot(candidate, QuarantineLifecycleState::Released)?;
+                verify_and_append_snapshot_transition(evidence, released, snapshot)?
+            };
             let event = evidence.events().last().ok_or_else(|| {
                 PostgresMetadataStoreError::Reliability(
                     shardline_reliability::ReliabilityError::EmptyField(
@@ -565,7 +587,13 @@ impl AsyncIndexStore for super::PostgresIndexStore {
                     ),
                 )
             })?;
-            insert_reliability_event(&mut *transaction, event).await?;
+            if evidence_was_empty {
+                for stored_event in evidence.events() {
+                    insert_reliability_event(&mut *transaction, stored_event).await?;
+                }
+            } else {
+                insert_reliability_event(&mut *transaction, event).await?;
+            }
             transaction.commit().await?;
             Ok(())
         })
@@ -593,16 +621,13 @@ impl AsyncIndexStore for super::PostgresIndexStore {
                 .execute(&mut *transaction)
                 .await?;
             if let Some(candidate) = candidate {
-                let snapshot = quarantine_snapshot(&candidate, QuarantineLifecycleState::Released)?;
-                let mut evidence =
+                let active = quarantine_snapshot(&candidate, QuarantineLifecycleState::Active)?;
+                let released = quarantine_snapshot(&candidate, QuarantineLifecycleState::Released)?;
+                let evidence =
                     load_postgres_quarantine_evidence(&mut *transaction, object_key.as_str())
                         .await?;
-                let evidence_was_empty = evidence.events().is_empty();
-                if evidence.events().is_empty() {
-                    let active = quarantine_snapshot(&candidate, QuarantineLifecycleState::Active)?;
-                    evidence = QuarantineEvidenceLog::baseline(active)?;
-                }
-                evidence.record(snapshot)?;
+                let (evidence, evidence_was_empty) =
+                    verify_and_append_snapshot_transition(evidence, active, released)?;
                 let event = evidence.events().last().ok_or_else(|| {
                     PostgresMetadataStoreError::Reliability(
                         shardline_reliability::ReliabilityError::EmptyField(
@@ -761,19 +786,12 @@ impl AsyncIndexStore for super::PostgresIndexStore {
                 .await?;
             if let Some(hold) = hold {
                 let active = retention_snapshot(&hold, RetentionHoldLifecycleState::Active)?;
-                let mut evidence =
+                let released = retention_snapshot(&hold, RetentionHoldLifecycleState::Released)?;
+                let evidence =
                     load_postgres_retention_evidence(&mut *transaction, object_key.as_str())
                         .await?;
-                let evidence_was_empty = evidence.events().is_empty();
-                if evidence_was_empty {
-                    evidence = RetentionEvidenceLog::baseline(active)?;
-                } else {
-                    verify_retention_hold_lifecycle_events(evidence.events(), &active)?;
-                }
-                evidence.record(retention_snapshot(
-                    &hold,
-                    RetentionHoldLifecycleState::Released,
-                )?)?;
+                let (evidence, evidence_was_empty) =
+                    verify_and_append_snapshot_transition(evidence, active, released)?;
                 if evidence_was_empty {
                     for event in evidence.events() {
                         insert_reliability_event(&mut *transaction, event).await?;
@@ -848,17 +866,10 @@ impl AsyncIndexStore for super::PostgresIndexStore {
             };
             let existing = webhook_delivery_from_row(&row)?;
             let active = webhook_snapshot(&existing, WebhookDeliveryLifecycleState::Processed)?;
-            let mut evidence = load_postgres_webhook_evidence(&mut *transaction, &existing).await?;
-            let evidence_was_empty = evidence.events().is_empty();
-            if evidence_was_empty {
-                evidence = WebhookDeliveryEvidenceLog::baseline(active)?;
-            } else {
-                verify_webhook_delivery_events(evidence.events(), &active)?;
-            }
-            evidence.record(webhook_snapshot(
-                &existing,
-                WebhookDeliveryLifecycleState::Released,
-            )?)?;
+            let evidence = load_postgres_webhook_evidence(&mut *transaction, &existing).await?;
+            let released = webhook_snapshot(&existing, WebhookDeliveryLifecycleState::Released)?;
+            let (evidence, evidence_was_empty) =
+                verify_and_append_snapshot_transition(evidence, active, released)?;
             let result = query(
                 "DELETE FROM shardline_webhook_deliveries
                  WHERE provider = $1 AND owner = $2 AND repo = $3 AND delivery_id = $4",
@@ -902,18 +913,10 @@ impl AsyncIndexStore for super::PostgresIndexStore {
                 .collect::<Result<Vec<_>, _>>()?;
             for delivery in &deliveries {
                 let active = webhook_snapshot(delivery, WebhookDeliveryLifecycleState::Processed)?;
-                let mut evidence =
-                    load_postgres_webhook_evidence(&mut *transaction, delivery).await?;
-                let evidence_was_empty = evidence.events().is_empty();
-                if evidence_was_empty {
-                    evidence = WebhookDeliveryEvidenceLog::baseline(active)?;
-                } else {
-                    verify_webhook_delivery_events(evidence.events(), &active)?;
-                }
-                evidence.record(webhook_snapshot(
-                    delivery,
-                    WebhookDeliveryLifecycleState::Released,
-                )?)?;
+                let evidence = load_postgres_webhook_evidence(&mut *transaction, delivery).await?;
+                let released = webhook_snapshot(delivery, WebhookDeliveryLifecycleState::Released)?;
+                let (evidence, evidence_was_empty) =
+                    verify_and_append_snapshot_transition(evidence, active, released)?;
                 query(
                     "DELETE FROM shardline_webhook_deliveries
                      WHERE provider = $1 AND owner = $2 AND repo = $3 AND delivery_id = $4",
