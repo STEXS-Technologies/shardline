@@ -284,6 +284,14 @@ impl PostgresIndexStore {
         // unverified or tampered terminal snapshot authorize deletion.
         for candidate in candidates {
             self.verify_resumable_session_evidence(candidate).await?;
+            match self.resumable_session_by_id(candidate.session_id()).await? {
+                Some(authoritative) if authoritative != *candidate => {
+                    return Err(PostgresMetadataStoreError::Reliability(
+                        shardline_reliability::ReliabilityError::StateMismatch,
+                    ));
+                }
+                _ => {}
+            }
             if !candidate.state().is_terminal() {
                 return Err(PostgresMetadataStoreError::Reliability(
                     shardline_reliability::ReliabilityError::StateMismatch,
@@ -1813,10 +1821,13 @@ mod tests {
         let tampered_result = store
             .delete_reclaimable_resumable_sessions(&[tampered_candidate])
             .await;
-        assert!(matches!(
-            tampered_result,
-            Err(PostgresMetadataStoreError::Reliability(_))
-        ));
+        assert!(
+            matches!(
+                &tampered_result,
+                Err(PostgresMetadataStoreError::Reliability(_))
+            ),
+            "unexpected tampered deletion result: {tampered_result:?}"
+        );
         assert!(
             store
                 .resumable_session_by_id(terminal.session_id())

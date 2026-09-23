@@ -1895,6 +1895,7 @@ mod tests {
     };
 
     use shardline_protocol::{ChunkRange, HashParseError, RepositoryProvider, ShardlineHash};
+    use shardline_reliability::baseline_upload_lifecycle_events;
     use sqlx::{
         Row,
         postgres::{PgConnectOptions, PgPoolOptions, PgSslMode},
@@ -2930,6 +2931,108 @@ mod tests {
         assert!(events.iter().all(|event| {
             event.operation.tenant == "tenant-pg" && event.operation.repository == "repo-pg"
         }));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pg_scoped_intent_migrates_valid_legacy_evidence_identity() {
+        let Some(pool) = connect_postgres().await else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let intent_id = "pg-scoped-legacy-identity-migration";
+        sqlx::query(
+            "DELETE FROM shardline_reliability_events
+             WHERE operation_kind = 'Upload' AND operation_id = $1",
+        )
+        .bind(intent_id)
+        .execute(&pool)
+        .await
+        .expect("clean legacy evidence fixture");
+        sqlx::query("DELETE FROM shardline_upload_intents WHERE intent_id = $1")
+            .bind(intent_id)
+            .execute(&pool)
+            .await
+            .expect("clean legacy intent fixture");
+
+        let intent = UploadIntent::new(
+            intent_id.into(),
+            "objects/pg-legacy-identity".into(),
+            "cd".repeat(32),
+            7,
+        );
+        sqlx::query(
+            "INSERT INTO shardline_upload_intents
+                (intent_id, object_key, object_hash, object_length, state, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, now(), now())",
+        )
+        .bind(intent.intent_id())
+        .bind(intent.object_key())
+        .bind(intent.object_hash())
+        .bind(intent.object_length() as i64)
+        .bind(UploadIntentState::Visible.as_str())
+        .execute(&pool)
+        .await
+        .expect("insert legacy intent fixture");
+
+        let legacy_events = baseline_upload_lifecycle_events(
+            "shardline",
+            "default",
+            intent.intent_id(),
+            intent.object_key(),
+            intent.object_hash(),
+            UploadIntentState::Visible,
+        )
+        .expect("build legacy evidence fixture");
+        for event in &legacy_events {
+            sqlx::query(
+                "INSERT INTO shardline_reliability_events
+                    (operation_kind, operation_id, sequence, event_json, created_at_unix_seconds)
+                 VALUES ($1, $2, $3, $4, 0)",
+            )
+            .bind(event.operation.kind.as_str())
+            .bind(event.operation.operation_id.as_str())
+            .bind(event.sequence as i64)
+            .bind(serde_json::to_value(event).expect("serialize legacy event"))
+            .execute(&pool)
+            .await
+            .expect("insert legacy evidence fixture");
+        }
+
+        let store = make_pg_store(pool.clone());
+        store
+            .create_intent_scoped(&intent, "tenant-pg", "repo-pg")
+            .await
+            .expect("migrate valid legacy identity");
+        let rows = sqlx::query(
+            "SELECT event_json FROM shardline_reliability_events
+             WHERE operation_kind = 'Upload' AND operation_id = $1 ORDER BY sequence",
+        )
+        .bind(intent_id)
+        .fetch_all(&pool)
+        .await
+        .expect("load migrated evidence");
+        let events = rows
+            .into_iter()
+            .map(|row| serde_json::from_value(row.try_get("event_json").unwrap()).unwrap())
+            .collect::<Vec<shardline_reliability::LifecycleEvent>>();
+        assert_eq!(events.len(), legacy_events.len());
+        assert!(events.iter().all(|event| {
+            event.operation.tenant == "tenant-pg" && event.operation.repository == "repo-pg"
+        }));
+
+        sqlx::query(
+            "DELETE FROM shardline_reliability_events
+             WHERE operation_kind = 'Upload' AND operation_id = $1",
+        )
+        .bind(intent_id)
+        .execute(&pool)
+        .await
+        .expect("clean migrated evidence fixture");
+        sqlx::query("DELETE FROM shardline_upload_intents WHERE intent_id = $1")
+            .bind(intent_id)
+            .execute(&pool)
+            .await
+            .expect("clean migrated intent fixture");
     }
 
     #[tokio::test(flavor = "multi_thread")]
