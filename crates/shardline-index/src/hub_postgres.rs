@@ -932,6 +932,7 @@ mod tests {
     )]
     use super::*;
     use crate::hub::{BoxedHubStore, HubRepoType, HubStore};
+    use serial_test::serial;
     use sqlx::postgres::{PgPool, PgPoolOptions};
 
     // ------------------------------------------------------------------
@@ -1055,6 +1056,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    #[serial(hub_postgres_listing)]
     async fn pg_repo_list_and_search_reject_tampered_head_evidence() {
         let Some(pool) = connect_postgres().await else {
             eprintln!("skipping Postgres test: no DATABASE_URL");
@@ -1366,6 +1368,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    #[serial(hub_postgres_listing)]
     async fn pg_boxed_hub_store_e2e() {
         let Some(pool) = connect_postgres().await else {
             eprintln!("skipping Postgres test: no DATABASE_URL");
