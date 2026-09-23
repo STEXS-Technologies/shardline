@@ -769,6 +769,30 @@ impl LifecycleStore for LocalIndexStore {
     ) -> Result<bool, Self::Error> {
         let mut connection = self.open_connection()?;
         let transaction = connection.transaction()?;
+        let current = transaction
+            .query_row(
+                "SELECT provider,
+                        owner,
+                        repo,
+                        last_access_changed_at_unix_seconds,
+                        last_revision_pushed_at_unix_seconds,
+                        last_pushed_revision,
+                        last_cache_invalidated_at_unix_seconds,
+                        last_authorization_rechecked_at_unix_seconds,
+                        last_drift_checked_at_unix_seconds
+                 FROM shardline_provider_repository_states
+                 WHERE provider = ?1 AND owner = ?2 AND repo = ?3",
+                params![provider.as_str(), owner, repo],
+                super::helpers::provider_repository_state_from_row,
+            )
+            .optional()?;
+        if let Some(state) = current {
+            let snapshot = snapshot_from_state(&state)?;
+            let evidence = super::helpers::load_provider_evidence(&transaction, &snapshot)?;
+            if !evidence.events().is_empty() {
+                verify_provider_lifecycle_events(evidence.events(), &snapshot)?;
+            }
+        }
         let changed = transaction.execute(
             "DELETE FROM shardline_provider_repository_states
              WHERE provider = ?1 AND owner = ?2 AND repo = ?3",
@@ -1776,6 +1800,48 @@ mod tests {
                 RepositoryProvider::GitHub,
                 "team",
                 "tampered-provider",
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn provider_repository_state_delete_rejects_tampered_evidence() {
+        let store = make_store();
+        let state = ProviderRepositoryState::new(
+            RepositoryProvider::GitHub,
+            "team".into(),
+            "tampered-delete".into(),
+            Some(100),
+            None,
+            None,
+        );
+        LifecycleStore::upsert_provider_repository_state(&store, &state).unwrap();
+        let connection = store.open_connection().unwrap();
+        connection
+            .execute(
+                "UPDATE shardline_reliability_events
+                 SET event_json = '{\"sequence\": 99}'
+                 WHERE operation_kind = 'ProviderEvent'
+                   AND operation_id = 'github:team:tampered-delete'",
+                [],
+            )
+            .unwrap();
+        assert!(
+            LifecycleStore::delete_provider_repository_state(
+                &store,
+                RepositoryProvider::GitHub,
+                "team",
+                "tampered-delete",
+            )
+            .is_err()
+        );
+        assert!(
+            LifecycleStore::provider_repository_state(
+                &store,
+                RepositoryProvider::GitHub,
+                "team",
+                "tampered-delete",
             )
             .is_err()
         );

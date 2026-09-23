@@ -199,6 +199,29 @@ impl super::PostgresIndexStore {
             upsert_provider_repository_state(&mut transaction, state).await?;
         }
         for key in &mutation.state_deletes {
+            let current = query(
+                "SELECT provider,
+                        owner,
+                        repo,
+                        last_access_changed_at_unix_seconds,
+                        last_revision_pushed_at_unix_seconds,
+                        last_pushed_revision,
+                        last_cache_invalidated_at_unix_seconds,
+                        last_authorization_rechecked_at_unix_seconds,
+                        last_drift_checked_at_unix_seconds
+                 FROM shardline_provider_repository_states
+                 WHERE provider = $1 AND owner = $2 AND repo = $3
+                 FOR UPDATE",
+            )
+            .bind(key.provider.as_str())
+            .bind(&key.owner)
+            .bind(&key.repo)
+            .fetch_optional(&mut *transaction)
+            .await?;
+            if let Some(row) = current {
+                let state = super::index_store::provider_repository_state_from_row(&row)?;
+                verify_provider_repository_state_evidence(&mut transaction, &state).await?;
+            }
             query(
                 "DELETE FROM shardline_provider_repository_states
                  WHERE provider = $1 AND owner = $2 AND repo = $3",
@@ -460,6 +483,18 @@ async fn load_provider_evidence(
     rows.into_iter()
         .map(|row| Ok(serde_json::from_value(row.try_get("event_json")?)?))
         .collect()
+}
+
+pub(super) async fn verify_provider_repository_state_evidence(
+    transaction: &mut Transaction<'_, Postgres>,
+    state: &ProviderRepositoryState,
+) -> Result<(), PostgresMetadataStoreError> {
+    let snapshot = snapshot_from_state(state)?;
+    let evidence = load_provider_evidence(transaction, &snapshot).await?;
+    if !evidence.is_empty() {
+        verify_provider_lifecycle_events(&evidence, &snapshot)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

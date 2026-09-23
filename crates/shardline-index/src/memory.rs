@@ -494,6 +494,18 @@ impl LifecycleStore for MemoryIndexStore {
     ) -> Result<bool, Self::Error> {
         let key = MemoryProviderRepositoryStateKey::new(provider, owner, repo);
         let mut store = self.lock_state()?;
+        if let Some(state) = store.provider_repository_states.get(&key) {
+            let snapshot = snapshot_from_state(state)
+                .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
+            let evidence = store
+                .provider_repository_evidence
+                .get(&key)
+                .ok_or_else(|| {
+                    MemoryIndexStoreError::Reliability("provider state evidence is missing".into())
+                })?;
+            verify_provider_lifecycle_events(evidence.events(), &snapshot)
+                .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
+        }
         store.provider_repository_evidence.remove(&key);
         Ok(store.provider_repository_states.remove(&key).is_some())
     }
@@ -1742,6 +1754,7 @@ mod tests {
 
     use serde_json::from_slice;
     use shardline_protocol::{ChunkRange, RepositoryProvider, RepositoryScope, ShardlineHash};
+    use shardline_reliability::ProviderEvidenceLog;
     use shardline_storage::ObjectKey;
 
     use super::{MemoryIndexStore, MemoryRecordStore};
@@ -1752,6 +1765,7 @@ mod tests {
         RecordMutation, RecordTraversal, RepositoryRecordScope, RetentionHold, StoredObjectId,
         WebhookDelivery, XorbId,
     };
+    use crate::{memory::MemoryProviderRepositoryStateKey, provider_evidence::snapshot_from_state};
 
     #[test]
     fn memory_index_store_satisfies_index_store_lifecycle_contract() {
@@ -2940,6 +2954,57 @@ mod tests {
             !store
                 .delete_provider_repository_state(RepositoryProvider::GitHub, "nonexistent", "repo")
                 .unwrap()
+        );
+    }
+
+    #[test]
+    fn memory_provider_repository_delete_rejects_tampered_evidence() {
+        let store = MemoryIndexStore::new();
+        let state = ProviderRepositoryState::new(
+            RepositoryProvider::GitHub,
+            "team".into(),
+            "tampered-delete".into(),
+            Some(100),
+            None,
+            None,
+        );
+        store.upsert_provider_repository_state(&state).unwrap();
+        let key = MemoryProviderRepositoryStateKey::from_domain(&state);
+        let other = ProviderRepositoryState::new(
+            RepositoryProvider::GitHub,
+            "team".into(),
+            "other".into(),
+            Some(999),
+            None,
+            None,
+        );
+        let wrong_snapshot = snapshot_from_state(&other).unwrap();
+        store
+            .state
+            .lock()
+            .unwrap()
+            .provider_repository_evidence
+            .insert(key, ProviderEvidenceLog::baseline(wrong_snapshot).unwrap());
+
+        assert!(matches!(
+            store.delete_provider_repository_state(
+                RepositoryProvider::GitHub,
+                "team",
+                "tampered-delete",
+            ),
+            Err(MemoryIndexStoreError::Reliability(_))
+        ));
+        assert!(
+            store
+                .state
+                .lock()
+                .unwrap()
+                .provider_repository_states
+                .contains_key(&MemoryProviderRepositoryStateKey::new(
+                    RepositoryProvider::GitHub,
+                    "team",
+                    "tampered-delete",
+                ))
         );
     }
 

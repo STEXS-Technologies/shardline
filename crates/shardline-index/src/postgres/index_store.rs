@@ -832,6 +832,33 @@ impl AsyncIndexStore for super::PostgresIndexStore {
     ) -> IndexStoreFuture<'operation, bool, Self::Error> {
         Box::pin(async move {
             let mut transaction = self.pool.begin().await?;
+            let current = query(
+                "SELECT provider,
+                        owner,
+                        repo,
+                        last_access_changed_at_unix_seconds,
+                        last_revision_pushed_at_unix_seconds,
+                        last_pushed_revision,
+                        last_cache_invalidated_at_unix_seconds,
+                        last_authorization_rechecked_at_unix_seconds,
+                        last_drift_checked_at_unix_seconds
+                 FROM shardline_provider_repository_states
+                 WHERE provider = $1 AND owner = $2 AND repo = $3
+                 FOR UPDATE",
+            )
+            .bind(provider.as_str())
+            .bind(owner)
+            .bind(repo)
+            .fetch_optional(&mut *transaction)
+            .await?;
+            if let Some(row) = current {
+                let state = provider_repository_state_from_row(&row)?;
+                super::provider_mutation::verify_provider_repository_state_evidence(
+                    &mut transaction,
+                    &state,
+                )
+                .await?;
+            }
             let result = query(
                 "DELETE FROM shardline_provider_repository_states
                  WHERE provider = $1 AND owner = $2 AND repo = $3",
