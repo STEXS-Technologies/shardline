@@ -680,7 +680,12 @@ pub async fn delete_session(root: &Path, upload_id: &str) -> Result<(), S3Sessio
 /// See [`delete_session`].
 pub async fn delete_session_locked(root: &Path, upload_id: &str) -> Result<(), S3SessionError> {
     validate_upload_id(upload_id)?;
-    delete_session_dir(&session_dir(root, upload_id)?).await
+    let dir = session_dir(root, upload_id)?;
+    match load_session(&dir).await {
+        Ok((_session, _evidence)) => delete_session_dir(&dir).await,
+        Err(S3SessionError::NotFound) => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 /// Removes every expired (or unreadable) session directory, returning the
@@ -740,6 +745,16 @@ async fn load_session_at(
     ttl_seconds: NonZeroU64,
     now_unix_seconds: u64,
 ) -> Result<(MultipartUploadSession, SessionEvidenceLog), S3SessionError> {
+    let (session, evidence) = load_session(dir).await?;
+    if is_expired(&session, ttl_seconds, now_unix_seconds) {
+        return Err(S3SessionError::NotFound);
+    }
+    Ok((session, evidence))
+}
+
+async fn load_session(
+    dir: &Path,
+) -> Result<(MultipartUploadSession, SessionEvidenceLog), S3SessionError> {
     let bytes = match fs::read(dir.join("session.json")).await {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -756,9 +771,6 @@ async fn load_session_at(
                 (session, SessionEvidenceLog::default())
             }
         };
-    if is_expired(&session, ttl_seconds, now_unix_seconds) {
-        return Err(S3SessionError::NotFound);
-    }
     let evidence = if stored_evidence.is_empty() {
         SessionEvidenceLog::for_legacy_session(
             &session.scope_namespace,
@@ -1226,6 +1238,36 @@ mod tests {
             read_session(root.path(), &upload_id, ttl(3600)).await,
             Err(S3SessionError::NotFound)
         ));
+    }
+
+    #[tokio::test]
+    async fn delete_session_rejects_tampered_evidence() {
+        let root = make_root().await;
+        let upload_id = create_session(
+            root.path(),
+            "acme.models",
+            "k",
+            "global",
+            ttl(3600),
+            cap(16),
+            quota(1 << 40),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+        let metadata_path = session_metadata_path(root.path(), &upload_id).unwrap();
+        let mut metadata: serde_json::Value =
+            serde_json::from_slice(&fs::read(&metadata_path).await.unwrap()).unwrap();
+        metadata["session"]["key"] = serde_json::Value::String("tampered".to_owned());
+        fs::write(&metadata_path, serde_json::to_vec(&metadata).unwrap())
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            delete_session(root.path(), &upload_id).await,
+            Err(S3SessionError::Reliability(_))
+        ));
+        assert!(metadata_path.exists());
     }
 
     #[tokio::test]
