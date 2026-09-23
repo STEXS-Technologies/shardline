@@ -322,12 +322,22 @@ pub(crate) fn current_oci_tag_evidence(
     digest_hex: Option<String>,
 ) -> Result<OciTagEvidenceLog, LocalIndexStoreError> {
     let snapshot = oci_tag_snapshot(scope_namespace, repository, tag, digest_hex)?;
-    let evidence = load_oci_tag_evidence(transaction, scope_namespace, repository, tag)?;
-    if evidence.events().is_empty() {
-        return Ok(OciTagEvidenceLog::baseline(snapshot)?);
+    let loaded = load_oci_tag_evidence(transaction, scope_namespace, repository, tag)?;
+    if loaded.events().is_empty() {
+        let baseline = OciTagEvidenceLog::baseline(snapshot)?;
+        if baseline
+            .events()
+            .first()
+            .is_some_and(|event| event.after.digest_hex.is_some())
+        {
+            for event in baseline.events() {
+                persist_oci_tag_evidence(transaction, event)?;
+            }
+        }
+        return Ok(baseline);
     }
-    verify_oci_tag_events(evidence.events(), &snapshot)?;
-    Ok(evidence)
+    verify_oci_tag_events(loaded.events(), &snapshot)?;
+    Ok(loaded)
 }
 
 pub(crate) fn persist_oci_tag_evidence(
@@ -384,12 +394,22 @@ pub(crate) fn current_s3_object_evidence(
     entry: Option<&crate::S3ObjectEntry>,
 ) -> Result<S3ObjectEvidenceLog, LocalIndexStoreError> {
     let snapshot = s3_object_snapshot(scope_namespace, object_key, entry)?;
-    let evidence = load_s3_object_evidence(transaction, scope_namespace, object_key)?;
-    if evidence.events().is_empty() {
-        return Ok(S3ObjectEvidenceLog::baseline(snapshot)?);
+    let loaded = load_s3_object_evidence(transaction, scope_namespace, object_key)?;
+    if loaded.events().is_empty() {
+        let baseline = S3ObjectEvidenceLog::baseline(snapshot)?;
+        if baseline
+            .events()
+            .first()
+            .is_some_and(|event| event.after.entry.is_some())
+        {
+            for event in baseline.events() {
+                persist_s3_object_evidence(transaction, event)?;
+            }
+        }
+        return Ok(baseline);
     }
-    verify_s3_object_events(evidence.events(), &snapshot)?;
-    Ok(evidence)
+    verify_s3_object_events(loaded.events(), &snapshot)?;
+    Ok(loaded)
 }
 
 pub(crate) fn persist_s3_object_evidence(

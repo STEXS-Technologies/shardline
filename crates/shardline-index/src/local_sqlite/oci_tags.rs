@@ -389,4 +389,40 @@ mod tests {
                 .is_err()
         );
     }
+
+    #[tokio::test]
+    async fn local_oci_tag_read_repairs_missing_baseline_evidence() {
+        let storage = shardline_test_support::TempStorage::new();
+        let store = LocalIndexStore::new(storage.path_buf()).unwrap();
+        let value = entry("latest", &"a".repeat(64));
+        store.upsert_oci_tag(&value).await.unwrap();
+
+        let connection = store.open_connection().unwrap();
+        connection
+            .execute(
+                "DELETE FROM shardline_reliability_events
+                 WHERE operation_kind = 'OciTag'",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+
+        assert_eq!(
+            store
+                .oci_tag(&value.scope_namespace, &value.repository, &value.tag)
+                .await
+                .unwrap(),
+            Some(value)
+        );
+        let repaired_connection = store.open_connection().unwrap();
+        let count: i64 = repaired_connection
+            .query_row(
+                "SELECT COUNT(*) FROM shardline_reliability_events
+                 WHERE operation_kind = 'OciTag'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+    }
 }

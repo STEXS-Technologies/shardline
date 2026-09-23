@@ -81,12 +81,20 @@ async fn current_s3_object_evidence(
     entry: Option<&S3ObjectEntry>,
 ) -> Result<S3ObjectEvidenceLog, PostgresMetadataStoreError> {
     let snapshot = s3_object_snapshot(scope_namespace, object_key, entry)?;
-    let evidence = load_s3_object_evidence(connection, scope_namespace, object_key).await?;
-    if evidence.events().is_empty() {
-        return Ok(S3ObjectEvidenceLog::baseline(snapshot)?);
+    let loaded = load_s3_object_evidence(connection, scope_namespace, object_key).await?;
+    if loaded.events().is_empty() {
+        let baseline = S3ObjectEvidenceLog::baseline(snapshot)?;
+        if baseline
+            .events()
+            .first()
+            .is_some_and(|event| event.after.entry.is_some())
+        {
+            persist_s3_object_evidence(connection, &baseline).await?;
+        }
+        return Ok(baseline);
     }
-    verify_s3_object_events(evidence.events(), &snapshot)?;
-    Ok(evidence)
+    verify_s3_object_events(loaded.events(), &snapshot)?;
+    Ok(loaded)
 }
 
 async fn persist_s3_object_evidence(
@@ -571,6 +579,57 @@ mod tests {
         cleanup(&pool, &scope).await;
         query(
             "DELETE FROM shardline_reliability_events WHERE operation_kind = $1 AND operation_id LIKE $2",
+        )
+        .bind(OperationKind::S3Object.as_str())
+        .bind(format!("{}:%", scope.len()))
+        .execute(&pool)
+        .await
+        .expect("cleanup s3 object evidence");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pg_s3_object_read_repairs_missing_baseline_evidence() {
+        let Some(pool) = connect_postgres().await else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let scope = format!("s3-repair-{}", std::process::id());
+        let store = PostgresIndexStore::new(pool.clone());
+        let value = entry(&scope, "repair.bin", "file-a");
+        S3ObjectIndexStore::upsert_s3_object(&store, &value)
+            .await
+            .expect("upsert");
+        query(
+            "DELETE FROM shardline_reliability_events
+             WHERE operation_kind = $1 AND operation_id LIKE $2",
+        )
+        .bind(OperationKind::S3Object.as_str())
+        .bind(format!("{}:%", scope.len()))
+        .execute(&pool)
+        .await
+        .expect("remove evidence");
+
+        assert_eq!(
+            S3ObjectIndexStore::scan_s3_object_exact(&store, &scope, "repair.bin")
+                .await
+                .expect("read")
+                .as_ref(),
+            Some(&value)
+        );
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM shardline_reliability_events
+             WHERE operation_kind = $1 AND operation_id LIKE $2",
+        )
+        .bind(OperationKind::S3Object.as_str())
+        .bind(format!("{}:%", scope.len()))
+        .fetch_one(&pool)
+        .await
+        .expect("count repaired evidence");
+        assert_eq!(count, 1);
+        cleanup(&pool, &scope).await;
+        query(
+            "DELETE FROM shardline_reliability_events
+             WHERE operation_kind = $1 AND operation_id LIKE $2",
         )
         .bind(OperationKind::S3Object.as_str())
         .bind(format!("{}:%", scope.len()))

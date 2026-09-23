@@ -1,7 +1,8 @@
 #[cfg(test)]
 use rusqlite::Connection;
-use rusqlite::{OptionalExtension, Transaction, params_from_iter};
+use rusqlite::{Error as SqliteError, ErrorCode, OptionalExtension, Transaction, params_from_iter};
 use std::fmt::Write as _;
+use std::time::Duration;
 
 use super::{LocalIndexStore, LocalIndexStoreError, collect_rows, helpers};
 use crate::{S3ObjectEntry, S3ObjectIndexStore};
@@ -186,6 +187,39 @@ fn record_s3_object_transition(
     Ok(())
 }
 
+fn retry_busy<T, Action>(mut action: Action) -> Result<T, LocalIndexStoreError>
+where
+    Action: FnMut() -> Result<T, LocalIndexStoreError>,
+{
+    const MAX_RETRIES: usize = 7;
+    let mut retries = 0usize;
+    loop {
+        match action() {
+            Ok(value) => return Ok(value),
+            Err(error) if is_busy(&error) && retries < MAX_RETRIES => {
+                retries = retries.saturating_add(1);
+                std::thread::sleep(Duration::from_millis(
+                    u64::try_from(retries).unwrap_or(u64::MAX).saturating_mul(5),
+                ));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+const fn is_busy(error: &LocalIndexStoreError) -> bool {
+    matches!(
+        error,
+        LocalIndexStoreError::Sqlite(SqliteError::SqliteFailure(
+            rusqlite::ffi::Error {
+                code: ErrorCode::DatabaseBusy,
+                ..
+            },
+            _,
+        ))
+    )
+}
+
 fn scan_s3_objects_sql(
     connection: &Transaction<'_>,
     scope_namespace: &str,
@@ -251,11 +285,17 @@ impl S3ObjectIndexStore for LocalIndexStore {
         let store = self.clone();
         let entry = entry.clone();
         tokio::task::spawn_blocking(move || {
-            let connection = store.open_connection()?;
-            let transaction = connection.unchecked_transaction()?;
-            upsert_s3_object_sql(&transaction, &entry)?;
-            transaction.commit()?;
-            Ok(())
+            retry_busy(|| {
+                let mut connection = store.open_connection()?;
+                // BEGIN IMMEDIATE prevents two unconditional upserts from both
+                // reading the old evidence chain and then racing while upgrading
+                // to a writer transaction. SQLite otherwise returns SQLITE_BUSY
+                // for the losing deferred-to-write upgrade.
+                let transaction = connection.transaction()?;
+                upsert_s3_object_sql(&transaction, &entry)?;
+                transaction.commit()?;
+                Ok(())
+            })
         })
         .await
         .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
@@ -270,12 +310,14 @@ impl S3ObjectIndexStore for LocalIndexStore {
         let expected = expected.cloned();
         let replacement = replacement.clone();
         tokio::task::spawn_blocking(move || {
-            let mut connection = store.open_connection()?;
-            let transaction = connection.transaction()?;
-            let changed =
-                compare_and_swap_s3_object_sql(&transaction, expected.as_ref(), &replacement)?;
-            transaction.commit()?;
-            Ok(changed)
+            retry_busy(|| {
+                let mut connection = store.open_connection()?;
+                let transaction = connection.transaction()?;
+                let changed =
+                    compare_and_swap_s3_object_sql(&transaction, expected.as_ref(), &replacement)?;
+                transaction.commit()?;
+                Ok(changed)
+            })
         })
         .await
         .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
@@ -290,11 +332,13 @@ impl S3ObjectIndexStore for LocalIndexStore {
         let scope_namespace = scope_namespace.to_owned();
         let object_key = object_key.to_owned();
         tokio::task::spawn_blocking(move || {
-            let connection = store.open_connection()?;
-            let transaction = connection.unchecked_transaction()?;
-            let deleted = delete_s3_object_sql(&transaction, &scope_namespace, &object_key)?;
-            transaction.commit()?;
-            Ok(deleted)
+            retry_busy(|| {
+                let mut connection = store.open_connection()?;
+                let transaction = connection.transaction()?;
+                let deleted = delete_s3_object_sql(&transaction, &scope_namespace, &object_key)?;
+                transaction.commit()?;
+                Ok(deleted)
+            })
         })
         .await
         .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
@@ -696,6 +740,42 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn s3_object_read_repairs_missing_baseline_evidence() {
+        let storage = shardline_test_support::TempStorage::new();
+        let store = LocalIndexStore::new(storage.path_buf()).unwrap();
+        let value = entry("global", "repair.bin", "file-a", 7, 1);
+        store.upsert_s3_object(&value).await.unwrap();
+
+        let connection = store.open_connection().unwrap();
+        connection
+            .execute(
+                "DELETE FROM shardline_reliability_events
+                 WHERE operation_kind = 'S3Object'",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+
+        assert_eq!(
+            store
+                .scan_s3_object_exact("global", "repair.bin")
+                .await
+                .unwrap(),
+            Some(value)
+        );
+        let connection = store.open_connection().unwrap();
+        let count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM shardline_reliability_events
+                 WHERE operation_kind = 'S3Object'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
     }
 
     #[test]

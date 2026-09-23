@@ -48,12 +48,20 @@ async fn current_tag_evidence(
     digest_hex: Option<String>,
 ) -> Result<OciTagEvidenceLog, PostgresMetadataStoreError> {
     let snapshot = OciTagSnapshot::new(scope_namespace, repository, tag, digest_hex)?;
-    let evidence = load_tag_evidence(connection, scope_namespace, repository, tag).await?;
-    if evidence.events().is_empty() {
-        return Ok(OciTagEvidenceLog::baseline(snapshot)?);
+    let loaded = load_tag_evidence(connection, scope_namespace, repository, tag).await?;
+    if loaded.events().is_empty() {
+        let baseline = OciTagEvidenceLog::baseline(snapshot)?;
+        if baseline
+            .events()
+            .first()
+            .is_some_and(|event| event.after.digest_hex.is_some())
+        {
+            persist_tag_evidence(connection, &baseline).await?;
+        }
+        return Ok(baseline);
     }
-    verify_oci_tag_events(evidence.events(), &snapshot)?;
-    Ok(evidence)
+    verify_oci_tag_events(loaded.events(), &snapshot)?;
+    Ok(loaded)
 }
 
 async fn persist_tag_evidence(
@@ -527,5 +535,77 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pg_oci_tag_read_repairs_missing_baseline_evidence() {
+        let Some(pool) = connect_postgres().await else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let scope = "oci-pg-repair";
+        query("DELETE FROM shardline_oci_tags WHERE scope_namespace = $1")
+            .bind(scope)
+            .execute(&pool)
+            .await
+            .unwrap();
+        query(
+            "DELETE FROM shardline_reliability_events
+             WHERE operation_kind = $1 AND operation_id LIKE $2",
+        )
+        .bind(shardline_reliability::OperationKind::OciTag.as_str())
+        .bind(format!("{}:%", scope.len()))
+        .execute(&pool)
+        .await
+        .unwrap();
+        let store = PostgresIndexStore::new(pool.clone());
+        let value = OciTagEntry {
+            scope_namespace: scope.to_owned(),
+            repository: "team/assets".to_owned(),
+            tag: "latest".to_owned(),
+            digest_hex: "a".repeat(64),
+        };
+        store.upsert_oci_tag(&value).await.unwrap();
+        query(
+            "DELETE FROM shardline_reliability_events
+             WHERE operation_kind = $1 AND operation_id LIKE $2",
+        )
+        .bind(shardline_reliability::OperationKind::OciTag.as_str())
+        .bind(format!("{}:%", scope.len()))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        assert_eq!(
+            store
+                .oci_tag(&value.scope_namespace, &value.repository, &value.tag)
+                .await
+                .unwrap(),
+            Some(value)
+        );
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM shardline_reliability_events
+             WHERE operation_kind = $1 AND operation_id LIKE $2",
+        )
+        .bind(shardline_reliability::OperationKind::OciTag.as_str())
+        .bind(format!("{}:%", scope.len()))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(count, 1);
+        query("DELETE FROM shardline_oci_tags WHERE scope_namespace = $1")
+            .bind(scope)
+            .execute(&pool)
+            .await
+            .unwrap();
+        query(
+            "DELETE FROM shardline_reliability_events
+             WHERE operation_kind = $1 AND operation_id LIKE $2",
+        )
+        .bind(shardline_reliability::OperationKind::OciTag.as_str())
+        .bind(format!("{}:%", scope.len()))
+        .execute(&pool)
+        .await
+        .unwrap();
     }
 }
