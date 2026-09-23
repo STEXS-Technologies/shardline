@@ -4,6 +4,26 @@ set -euo pipefail
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 FUZZ_DIR="${ROOT_DIR}/crates/fuzz"
 DEFAULT_RUNS="${SHARDLINE_FUZZ_RUNS:-20000}"
+DEFAULT_RELIABILITY_DURATION_SECONDS="${SHARDLINE_FUZZ_DURATION_SECONDS:-3600}"
+
+reliability_targets=(
+    shardline_reliability_lifecycle
+    shardline_reliability_lifecycle_log
+    shardline_reliability_resumable_evidence
+    shardline_resumable_state_digest
+    shardline_resumable_session_state
+    shardline_reliability_session_evidence
+    shardline_reliability_upload_evidence
+    shardline_reliability_provider_evidence
+    shardline_reliability_quarantine_evidence
+    shardline_reliability_retention_evidence
+    shardline_reliability_webhook_evidence
+    shardline_reliability_oci_evidence
+    shardline_reliability_metadata_evidence
+    shardline_reliability_oci_tag_evidence
+    shardline_reliability_s3_object_evidence
+    shardline_reliability_persisted_event
+)
 
 default_fuzz_target() {
     local host
@@ -73,6 +93,33 @@ run_regression() {
     done
 }
 
+run_reliability() {
+    local duration_seconds="${SHARDLINE_FUZZ_DURATION_SECONDS:-${DEFAULT_RELIABILITY_DURATION_SECONDS}}"
+    if [[ ! "${duration_seconds}" =~ ^[1-9][0-9]*$ ]]; then
+        printf 'SHARDLINE_FUZZ_DURATION_SECONDS must be a positive decimal integer\n' >&2
+        exit 2
+    fi
+
+    local target=""
+    if [ "$#" -gt 1 ]; then
+        printf 'usage: %s reliability [target]\n' "${0##*/}" >&2
+        exit 2
+    elif [ "$#" -eq 1 ]; then
+        target="$1"
+        if [[ ! " ${reliability_targets[*]} " == *" ${target} "* ]]; then
+            printf 'unknown reliability fuzz target: %s\n' "${target}" >&2
+            exit 2
+        fi
+        reliability_targets=("${target}")
+    fi
+
+    for target in "${reliability_targets[@]}"; do
+        printf '==> %s (%ss)\n' "${target}" "${duration_seconds}"
+        cargo +nightly fuzz run --fuzz-dir "${FUZZ_DIR}" --target "${FUZZ_TARGET}" \
+            "${target}" -- "-max_total_time=${duration_seconds}" "-timeout=20"
+    done
+}
+
 main() {
     local command="${1:-smoke}"
 
@@ -92,9 +139,13 @@ main() {
             shift
             run_regression "$@"
             ;;
+        reliability)
+            shift
+            run_reliability "$@"
+            ;;
         *)
             printf 'unknown command: %s\n' "${command}" >&2
-            printf 'usage: %s [list|run|smoke|regression]\n' "${0##*/}" >&2
+            printf 'usage: %s [list|run|smoke|regression|reliability]\n' "${0##*/}" >&2
             exit 2
             ;;
     esac
