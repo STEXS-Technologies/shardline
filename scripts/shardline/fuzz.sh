@@ -94,6 +94,10 @@ run_regression() {
 }
 
 run_reliability() {
+    if [ "$#" -gt 0 ] && [ "$1" = "--" ]; then
+        shift
+    fi
+
     local duration_seconds="${SHARDLINE_FUZZ_DURATION_SECONDS:-${DEFAULT_RELIABILITY_DURATION_SECONDS}}"
     if [[ ! "${duration_seconds}" =~ ^[1-9][0-9]*$ ]]; then
         printf 'SHARDLINE_FUZZ_DURATION_SECONDS must be a positive decimal integer\n' >&2
