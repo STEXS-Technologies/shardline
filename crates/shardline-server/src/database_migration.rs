@@ -527,6 +527,9 @@ async fn reconcile_reliability_events(
         return Ok(());
     }
     let mut transaction = pool.begin().await?;
+    if repair_missing {
+        repair_invalid_persisted_events(&mut transaction).await?;
+    }
     verify_persisted_reliability_events(&mut transaction).await?;
     let upload_rows = query(
         "SELECT i.intent_id, i.object_key, i.object_hash, i.state
@@ -1299,6 +1302,45 @@ async fn reconcile_reliability_events(
         }
     }
     transaction.commit().await?;
+    Ok(())
+}
+
+/// Removes malformed authenticated rows before the normal materialized-state
+/// reconciliation recreates canonical baselines. Invalid evidence cannot be
+/// trusted or replayed; deleting only those rows lets the existing per-state
+/// backfills restore the durable current state without changing user-visible
+/// records.
+async fn repair_invalid_persisted_events(
+    transaction: &mut Transaction<'_, Postgres>,
+) -> Result<(), DatabaseMigrationError> {
+    let rows = query(
+        "SELECT operation_kind, operation_id, sequence, event_json
+         FROM shardline_reliability_events
+         ORDER BY operation_kind, operation_id, sequence",
+    )
+    .fetch_all(&mut **transaction)
+    .await?;
+
+    for row in rows {
+        let operation_kind_text: String = row.try_get("operation_kind")?;
+        let operation_id: String = row.try_get("operation_id")?;
+        let sequence: i64 = row.try_get("sequence")?;
+        let event_json: serde_json::Value = row.try_get("event_json")?;
+        let operation_kind = OperationKind::parse(&operation_kind_text);
+        let valid =
+            operation_kind.is_some_and(|kind| verify_persisted_event(kind, event_json).is_ok());
+        if !valid {
+            query(
+                "DELETE FROM shardline_reliability_events
+                 WHERE operation_kind = $1 AND operation_id = $2 AND sequence = $3",
+            )
+            .bind(&operation_kind_text)
+            .bind(&operation_id)
+            .bind(sequence)
+            .execute(&mut **transaction)
+            .await?;
+        }
+    }
     Ok(())
 }
 
