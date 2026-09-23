@@ -56,6 +56,13 @@ The canonical state machines and durable lifecycle snapshots are:
   recorded as typed delivery snapshots. The delivery key remains the public
   idempotency boundary, while the evidence chain makes claims, deletion,
   purge, and re-processing after recovery verifiable.
+- Hub repository refs (`main` and named refs), recorded as typed metadata
+  snapshots. Ref updates and deletions use the same optimistic-concurrency
+  boundary as before, while the evidence chain authenticates the materialized
+  ref head and is verified on reads, writes, and repository cleanup.
+- OCI tags, recorded as typed mutable-pointer snapshots. Tag retargets,
+  insert-if-absent, digest-guarded deletion, reads, and listing all verify or
+  append evidence in the same transaction as the tag row.
 
 This same resumable lifecycle evidence is also persisted by the standalone
 file-backed S3 multipart and OCI upload-session adapters. Their legacy session
@@ -151,6 +158,8 @@ The current durable-state inventory is intentionally explicit:
 | Retention holds | Policy snapshot with timestamp-derived activity | `RetentionHoldLifecycleEvent` |
 | OCI tombstones | Visibility/generation lifecycle state | `OciObjectLifecycleEvent` plus atomic compare-and-delete/publish fence |
 | Webhook deliveries | Idempotency/recovery lifecycle snapshot | `WebhookDeliveryLifecycleEvent` plus unique delivery key and transactional insert |
+| Hub repository refs | Metadata/ref-head snapshot | `HubRefLifecycleEvent` plus optimistic ref compare-and-swap |
+| OCI tags | Mutable OCI pointer snapshot | `OciTagLifecycleEvent` plus tag-key uniqueness and digest-guarded CAS |
 | Resource fences | Concurrency epoch, not domain lifecycle state | Existing fenced transaction boundary |
 
 This inventory prevents either omission of an old state machine or accidental

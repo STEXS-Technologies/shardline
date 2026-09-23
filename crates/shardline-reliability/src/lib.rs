@@ -14,6 +14,7 @@ mod event_metadata;
 mod lifecycle_log;
 mod metadata_evidence;
 mod oci_evidence;
+mod oci_tag_evidence;
 mod operation;
 mod persisted;
 mod provider_evidence;
@@ -47,6 +48,10 @@ pub use metadata_evidence::{
 pub use oci_evidence::{
     OciObjectEvidenceLog, OciObjectIdentity, OciObjectLifecycleEvent, OciObjectLifecycleState,
     OciObjectSnapshot, verify_oci_object_lifecycle_chain, verify_oci_object_lifecycle_events,
+};
+pub use oci_tag_evidence::{
+    OciTagEvidenceLog, OciTagLifecycleEvent, OciTagOperationId, OciTagSnapshot,
+    verify_oci_tag_events,
 };
 pub use operation::{OperationIdentity, OperationKind};
 pub use penelope::ContentDigest as PenelopeDigest;

@@ -23,15 +23,16 @@ use shardline_protocol::{RepositoryScope, unix_now_seconds_lossy};
 use shardline_reliability::{
     EvidenceEventMetadata, HubRefEvidenceLog, HubRefLifecycleEvent, HubRefSnapshot, LifecycleEvent,
     OciObjectEvidenceLog, OciObjectIdentity, OciObjectLifecycleState, OciObjectSnapshot,
-    ProviderEvidenceLog, ProviderLifecycleEvent, ProviderLifecycleSnapshot, QuarantineEvidenceLog,
+    OciTagEvidenceLog, OciTagLifecycleEvent, OciTagSnapshot, ProviderEvidenceLog,
+    ProviderLifecycleEvent, ProviderLifecycleSnapshot, QuarantineEvidenceLog,
     QuarantineLifecycleEvent, QuarantineLifecycleState, QuarantineObjectIdentity,
     QuarantineSnapshot, ResumableLifecycleState, RetentionEvidenceLog, RetentionHoldLifecycleEvent,
     RetentionHoldLifecycleState, RetentionHoldSnapshot, RetentionObjectIdentity, SnapshotEvidence,
     StateTransitionEvent, UploadLifecycleState, WebhookDeliveryEvidenceLog,
     WebhookDeliveryIdentity, WebhookDeliveryLifecycleEvent, WebhookDeliveryLifecycleState,
     WebhookDeliverySnapshot, baseline_resumable_session_events, baseline_upload_lifecycle_events,
-    verify_hub_ref_events, verify_provider_lifecycle_events, verify_resumable_session_events,
-    verify_upload_lifecycle_events,
+    verify_hub_ref_events, verify_oci_tag_events, verify_provider_lifecycle_events,
+    verify_resumable_session_events, verify_upload_lifecycle_events,
 };
 use shardline_storage::{
     DirectoryPathError, ObjectKey, ObjectKeyError,
@@ -274,6 +275,65 @@ pub(crate) fn current_hub_ref_evidence(
     }
     verify_hub_ref_events(evidence.events(), &snapshot)?;
     Ok(evidence)
+}
+
+pub(crate) fn oci_tag_snapshot(
+    scope_namespace: &str,
+    repository: &str,
+    tag: &str,
+    digest_hex: Option<String>,
+) -> Result<OciTagSnapshot, LocalIndexStoreError> {
+    Ok(OciTagSnapshot::new(
+        scope_namespace,
+        repository,
+        tag,
+        digest_hex,
+    )?)
+}
+
+pub(crate) fn load_oci_tag_evidence(
+    transaction: &Transaction<'_>,
+    scope_namespace: &str,
+    repository: &str,
+    tag: &str,
+) -> Result<OciTagEvidenceLog, LocalIndexStoreError> {
+    let operation =
+        oci_tag_snapshot(scope_namespace, repository, tag, None)?.evidence_operation()?;
+    let mut statement = transaction.prepare(
+        "SELECT event_json FROM shardline_reliability_events
+         WHERE operation_kind = 'OciTag' AND operation_id = ?1 ORDER BY sequence",
+    )?;
+    let rows = statement.query_map(params![operation.operation_id], |row| {
+        let event_json: String = row.get(0)?;
+        from_str::<OciTagLifecycleEvent>(&event_json)
+            .map_err(|error| SqliteError::FromSqlConversionFailure(0, Type::Text, Box::new(error)))
+    })?;
+    Ok(OciTagEvidenceLog::from_events(
+        rows.collect::<Result<Vec<_>, _>>()?,
+    )?)
+}
+
+pub(crate) fn current_oci_tag_evidence(
+    transaction: &Transaction<'_>,
+    scope_namespace: &str,
+    repository: &str,
+    tag: &str,
+    digest_hex: Option<String>,
+) -> Result<OciTagEvidenceLog, LocalIndexStoreError> {
+    let snapshot = oci_tag_snapshot(scope_namespace, repository, tag, digest_hex)?;
+    let evidence = load_oci_tag_evidence(transaction, scope_namespace, repository, tag)?;
+    if evidence.events().is_empty() {
+        return Ok(OciTagEvidenceLog::baseline(snapshot)?);
+    }
+    verify_oci_tag_events(evidence.events(), &snapshot)?;
+    Ok(evidence)
+}
+
+pub(crate) fn persist_oci_tag_evidence(
+    transaction: &Transaction<'_>,
+    event: &OciTagLifecycleEvent,
+) -> Result<(), LocalIndexStoreError> {
+    persist_reliability_event(transaction, event)
 }
 
 pub(crate) trait SqliteExecutor {

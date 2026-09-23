@@ -266,6 +266,7 @@ fn validate_webhook_accepts_dangerous_urls_at_store_level() {
         );",
     )
     .unwrap();
+    shardline_index::hub::ensure_hub_tables(&root).unwrap();
 
     let store = LocalIndexStore::open(root);
     let boxed = BoxedHubStore::from_store(store);
@@ -567,6 +568,7 @@ async fn validate_commit_body_bounded_by_router() {
     )
     .unwrap();
     drop(conn);
+    shardline_index::hub::ensure_hub_tables(&root).unwrap();
 
     let store = LocalIndexStore::open(root.clone());
     let boxed = BoxedHubStore::from_store(store);

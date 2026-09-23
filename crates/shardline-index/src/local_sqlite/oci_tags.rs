@@ -1,7 +1,44 @@
-use rusqlite::{OptionalExtension, params};
+use rusqlite::{OptionalExtension, Transaction, params};
 
 use super::{LocalIndexStore, LocalIndexStoreError, collect_rows};
-use crate::{OciTagEntry, OciTagStore};
+use crate::{
+    OciTagEntry, OciTagStore,
+    local_sqlite::{current_oci_tag_evidence, oci_tag_snapshot, persist_oci_tag_evidence},
+};
+
+pub(crate) fn current_tag(
+    transaction: &Transaction<'_>,
+    scope_namespace: &str,
+    repository: &str,
+    tag: &str,
+) -> Result<Option<OciTagEntry>, LocalIndexStoreError> {
+    Ok(transaction
+        .query_row(
+            "SELECT scope_namespace, repository, tag, digest_hex
+             FROM shardline_oci_tags
+             WHERE scope_namespace = ?1 AND repository = ?2 AND tag = ?3",
+            params![scope_namespace, repository, tag],
+            entry_from_row,
+        )
+        .optional()?)
+}
+
+pub(crate) fn record_tag_transition(
+    transaction: &Transaction<'_>,
+    scope_namespace: &str,
+    repository: &str,
+    tag: &str,
+    before: Option<String>,
+    after: Option<String>,
+) -> Result<(), LocalIndexStoreError> {
+    let mut evidence =
+        current_oci_tag_evidence(transaction, scope_namespace, repository, tag, before)?;
+    evidence.record(oci_tag_snapshot(scope_namespace, repository, tag, after)?)?;
+    for event in evidence.events() {
+        persist_oci_tag_evidence(transaction, event)?;
+    }
+    Ok(())
+}
 
 fn entry_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OciTagEntry> {
     Ok(OciTagEntry {
@@ -20,7 +57,15 @@ impl OciTagStore for LocalIndexStore {
         let store = self.clone();
         let entry = entry.clone();
         tokio::task::spawn_blocking(move || {
-            store.open_connection()?.execute(
+            let connection = store.open_connection()?;
+            let transaction = connection.unchecked_transaction()?;
+            let before = current_tag(
+                &transaction,
+                &entry.scope_namespace,
+                &entry.repository,
+                &entry.tag,
+            )?;
+            transaction.execute(
                 "INSERT INTO shardline_oci_tags (scope_namespace, repository, tag, digest_hex)
                  VALUES (?1, ?2, ?3, ?4)
                  ON CONFLICT (scope_namespace, repository, tag)
@@ -32,6 +77,15 @@ impl OciTagStore for LocalIndexStore {
                     entry.digest_hex
                 ],
             )?;
+            record_tag_transition(
+                &transaction,
+                &entry.scope_namespace,
+                &entry.repository,
+                &entry.tag,
+                before.map(|value| value.digest_hex),
+                Some(entry.digest_hex.clone()),
+            )?;
+            transaction.commit()?;
             Ok(())
         })
         .await
@@ -42,7 +96,9 @@ impl OciTagStore for LocalIndexStore {
         let store = self.clone();
         let entry = entry.clone();
         tokio::task::spawn_blocking(move || {
-            let changed = store.open_connection()?.execute(
+            let connection = store.open_connection()?;
+            let transaction = connection.unchecked_transaction()?;
+            let changed = transaction.execute(
                 "INSERT INTO shardline_oci_tags (scope_namespace, repository, tag, digest_hex)
                  VALUES (?1, ?2, ?3, ?4)
                  ON CONFLICT (scope_namespace, repository, tag) DO NOTHING",
@@ -53,6 +109,30 @@ impl OciTagStore for LocalIndexStore {
                     entry.digest_hex
                 ],
             )?;
+            if changed == 1 {
+                record_tag_transition(
+                    &transaction,
+                    &entry.scope_namespace,
+                    &entry.repository,
+                    &entry.tag,
+                    None,
+                    Some(entry.digest_hex.clone()),
+                )?;
+            } else if let Some(current) = current_tag(
+                &transaction,
+                &entry.scope_namespace,
+                &entry.repository,
+                &entry.tag,
+            )? {
+                current_oci_tag_evidence(
+                    &transaction,
+                    &current.scope_namespace,
+                    &current.repository,
+                    &current.tag,
+                    Some(current.digest_hex),
+                )?;
+            }
+            transaction.commit()?;
             Ok(changed == 1)
         })
         .await
@@ -70,17 +150,18 @@ impl OciTagStore for LocalIndexStore {
         let repository = repository.to_owned();
         let tag = tag.to_owned();
         tokio::task::spawn_blocking(move || {
-            store
-                .open_connection()?
-                .query_row(
-                    "SELECT scope_namespace, repository, tag, digest_hex
-                     FROM shardline_oci_tags
-                     WHERE scope_namespace = ?1 AND repository = ?2 AND tag = ?3",
-                    params![scope_namespace, repository, tag],
-                    entry_from_row,
-                )
-                .optional()
-                .map_err(Into::into)
+            let connection = store.open_connection()?;
+            let transaction = connection.unchecked_transaction()?;
+            let value = current_tag(&transaction, &scope_namespace, &repository, &tag)?;
+            current_oci_tag_evidence(
+                &transaction,
+                &scope_namespace,
+                &repository,
+                &tag,
+                value.as_ref().map(|entry| entry.digest_hex.clone()),
+            )?;
+            transaction.commit()?;
+            Ok(value)
         })
         .await
         .map_err(|error| LocalIndexStoreError::BlockingTask(error.to_string()))?
@@ -99,10 +180,11 @@ impl OciTagStore for LocalIndexStore {
         let cursor = cursor.map(ToOwned::to_owned);
         tokio::task::spawn_blocking(move || {
             let connection = store.open_connection()?;
+            let transaction = connection.unchecked_transaction()?;
             let limit = i64::try_from(limit)
                 .map_err(|error| LocalIndexStoreError::IntegerOutOfRange(error.to_string()))?;
-            if let Some(cursor) = cursor {
-                let mut statement = connection.prepare(
+            let values = if let Some(cursor) = cursor {
+                let mut statement = transaction.prepare(
                     "SELECT scope_namespace, repository, tag, digest_hex
                      FROM shardline_oci_tags
                      WHERE scope_namespace = ?1 AND repository = ?2 AND tag > ?3
@@ -111,9 +193,9 @@ impl OciTagStore for LocalIndexStore {
                 collect_rows(statement.query_map(
                     params![scope_namespace, repository, cursor, limit],
                     entry_from_row,
-                )?)
+                )?)?
             } else {
-                let mut statement = connection.prepare(
+                let mut statement = transaction.prepare(
                     "SELECT scope_namespace, repository, tag, digest_hex
                      FROM shardline_oci_tags
                      WHERE scope_namespace = ?1 AND repository = ?2
@@ -122,8 +204,19 @@ impl OciTagStore for LocalIndexStore {
                 collect_rows(
                     statement
                         .query_map(params![scope_namespace, repository, limit], entry_from_row)?,
-                )
+                )?
+            };
+            for value in &values {
+                current_oci_tag_evidence(
+                    &transaction,
+                    &value.scope_namespace,
+                    &value.repository,
+                    &value.tag,
+                    Some(value.digest_hex.clone()),
+                )?;
             }
+            transaction.commit()?;
+            Ok(values)
         })
         .await
         .map_err(|error| LocalIndexStoreError::BlockingTask(error.to_string()))?
@@ -141,16 +234,30 @@ impl OciTagStore for LocalIndexStore {
         let digest_hex = digest_hex.to_owned();
         tokio::task::spawn_blocking(move || {
             let connection = store.open_connection()?;
-            let mut statement = connection.prepare(
-                "SELECT scope_namespace, repository, tag, digest_hex
-                 FROM shardline_oci_tags
-                 WHERE scope_namespace = ?1 AND repository = ?2 AND digest_hex = ?3
-                 ORDER BY tag",
-            )?;
-            collect_rows(statement.query_map(
-                params![scope_namespace, repository, digest_hex],
-                entry_from_row,
-            )?)
+            let transaction = connection.unchecked_transaction()?;
+            let values = {
+                let mut statement = transaction.prepare(
+                    "SELECT scope_namespace, repository, tag, digest_hex
+                     FROM shardline_oci_tags
+                     WHERE scope_namespace = ?1 AND repository = ?2 AND digest_hex = ?3
+                     ORDER BY tag",
+                )?;
+                collect_rows(statement.query_map(
+                    params![scope_namespace, repository, digest_hex],
+                    entry_from_row,
+                )?)?
+            };
+            for value in &values {
+                current_oci_tag_evidence(
+                    &transaction,
+                    &value.scope_namespace,
+                    &value.repository,
+                    &value.tag,
+                    Some(value.digest_hex.clone()),
+                )?;
+            }
+            transaction.commit()?;
+            Ok(values)
         })
         .await
         .map_err(|error| LocalIndexStoreError::BlockingTask(error.to_string()))?
@@ -169,11 +276,24 @@ impl OciTagStore for LocalIndexStore {
         let tag = tag.to_owned();
         let digest_hex = digest_hex.to_owned();
         tokio::task::spawn_blocking(move || {
-            let changed = store.open_connection()?.execute(
+            let connection = store.open_connection()?;
+            let transaction = connection.unchecked_transaction()?;
+            let changed = transaction.execute(
                 "DELETE FROM shardline_oci_tags
                  WHERE scope_namespace = ?1 AND repository = ?2 AND tag = ?3 AND digest_hex = ?4",
                 params![scope_namespace, repository, tag, digest_hex],
             )?;
+            if changed == 1 {
+                record_tag_transition(
+                    &transaction,
+                    &scope_namespace,
+                    &repository,
+                    &tag,
+                    Some(digest_hex),
+                    None,
+                )?;
+            }
+            transaction.commit()?;
             Ok(changed == 1)
         })
         .await
@@ -241,6 +361,32 @@ mod tests {
                 .await
                 .unwrap(),
             Some(retargeted)
+        );
+    }
+
+    #[tokio::test]
+    async fn local_oci_tag_read_rejects_tampered_evidence() {
+        let storage = shardline_test_support::TempStorage::new();
+        let store = LocalIndexStore::new(storage.path_buf()).unwrap();
+        let value = entry("latest", &"a".repeat(64));
+        store.upsert_oci_tag(&value).await.unwrap();
+
+        let connection =
+            rusqlite::Connection::open(storage.path().join("metadata.sqlite3")).unwrap();
+        connection
+            .execute(
+                "UPDATE shardline_reliability_events
+                 SET event_json = '{\"tampered\":true}'
+                 WHERE operation_kind = 'OciTag'",
+                [],
+            )
+            .unwrap();
+
+        assert!(
+            store
+                .oci_tag(&value.scope_namespace, &value.repository, &value.tag)
+                .await
+                .is_err()
         );
     }
 }

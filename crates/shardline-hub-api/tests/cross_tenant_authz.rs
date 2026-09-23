@@ -121,6 +121,7 @@ fn build_state() -> (TempDir, HubState) {
     let conn = rusqlite::Connection::open(&db_path).unwrap();
     conn.execute_batch(SCHEMA).unwrap();
     drop(conn);
+    shardline_index::hub::ensure_hub_tables(&root).unwrap();
 
     let store = LocalIndexStore::open(root.clone());
     let boxed = BoxedHubStore::from_store(store);

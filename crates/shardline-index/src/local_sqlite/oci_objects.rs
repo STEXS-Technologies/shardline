@@ -187,12 +187,26 @@ impl LocalIndexStore {
             ],
         )?;
         for tag in tags {
+            let before = super::oci_tags::current_tag(
+                &transaction,
+                &tag.scope_namespace,
+                &tag.repository,
+                &tag.tag,
+            )?;
             transaction.execute(
                 "INSERT INTO shardline_oci_tags (scope_namespace, repository, tag, digest_hex)
                  VALUES (?1, ?2, ?3, ?4)
                  ON CONFLICT (scope_namespace, repository, tag)
                  DO UPDATE SET digest_hex = excluded.digest_hex",
                 params![tag.scope_namespace, tag.repository, tag.tag, tag.digest_hex],
+            )?;
+            super::oci_tags::record_tag_transition(
+                &transaction,
+                &tag.scope_namespace,
+                &tag.repository,
+                &tag.tag,
+                before.map(|value| value.digest_hex),
+                Some(tag.digest_hex.clone()),
             )?;
         }
         record_oci_evidence(
@@ -238,11 +252,41 @@ impl LocalIndexStore {
             ],
         )?;
         if key.kind == OciObjectKind::Manifest {
+            let tags = {
+                let mut statement = transaction.prepare(
+                    "SELECT scope_namespace, repository, tag, digest_hex
+                     FROM shardline_oci_tags
+                     WHERE scope_namespace = ?1 AND repository = ?2 AND digest_hex = ?3",
+                )?;
+                statement
+                    .query_map(
+                        params![key.scope_namespace, key.repository, key.digest_hex],
+                        |row| {
+                            Ok(OciTagEntry {
+                                scope_namespace: row.get(0)?,
+                                repository: row.get(1)?,
+                                tag: row.get(2)?,
+                                digest_hex: row.get(3)?,
+                            })
+                        },
+                    )?
+                    .collect::<Result<Vec<_>, _>>()?
+            };
             transaction.execute(
                 "DELETE FROM shardline_oci_tags
                  WHERE scope_namespace = ?1 AND repository = ?2 AND digest_hex = ?3",
                 params![key.scope_namespace, key.repository, key.digest_hex],
             )?;
+            for tag in tags {
+                super::oci_tags::record_tag_transition(
+                    &transaction,
+                    &tag.scope_namespace,
+                    &tag.repository,
+                    &tag.tag,
+                    Some(tag.digest_hex),
+                    None,
+                )?;
+            }
         }
         let deleted_at = transaction.query_row(
             "SELECT deleted_at_unix_seconds FROM shardline_oci_object_tombstones

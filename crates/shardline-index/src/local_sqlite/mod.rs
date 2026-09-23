@@ -22,8 +22,9 @@ pub(crate) use constants::{
 };
 pub use error::LocalIndexStoreError;
 pub(crate) use helpers::{
-    collect_rows, current_hub_ref_evidence, hub_ref_snapshot, i64_to_u64, persist_hub_ref_evidence,
-    record_not_found_error, u64_to_i64,
+    collect_rows, current_hub_ref_evidence, current_oci_tag_evidence, hub_ref_snapshot, i64_to_u64,
+    oci_tag_snapshot, persist_hub_ref_evidence, persist_oci_tag_evidence, record_not_found_error,
+    u64_to_i64,
 };
 pub(crate) use migration::LOCAL_SQLITE_MIGRATIONS;
 pub(crate) use records::{

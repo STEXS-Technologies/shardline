@@ -132,6 +132,13 @@ impl PostgresIndexStore {
         .execute(&mut *transaction)
         .await?;
         for tag in tags {
+            let before = super::oci_tags::current_tag(
+                transaction.as_mut(),
+                &tag.scope_namespace,
+                &tag.repository,
+                &tag.tag,
+            )
+            .await?;
             query(
                 "INSERT INTO shardline_oci_tags (scope_namespace, repository, tag, digest_hex)
                  VALUES ($1, $2, $3, $4)
@@ -143,6 +150,15 @@ impl PostgresIndexStore {
             .bind(&tag.tag)
             .bind(&tag.digest_hex)
             .execute(&mut *transaction)
+            .await?;
+            super::oci_tags::record_tag_transition(
+                transaction.as_mut(),
+                &tag.scope_namespace,
+                &tag.repository,
+                &tag.tag,
+                before.map(|value| value.digest_hex),
+                Some(tag.digest_hex.clone()),
+            )
             .await?;
         }
         record_oci_evidence(
@@ -190,6 +206,9 @@ impl PostgresIndexStore {
             transaction.rollback().await?;
             return Ok(false);
         };
+        // Tag rows and their authenticated pointer histories share this
+        // completion transaction, so a published manifest cannot expose an
+        // unjournaled retarget.
         let scope_namespace: String = owns_completion.try_get("scope_namespace")?;
         let target_key: String = owns_completion.try_get("target_key")?;
         query(
@@ -204,6 +223,13 @@ impl PostgresIndexStore {
         .execute(&mut *transaction)
         .await?;
         for tag in tags {
+            let before = super::oci_tags::current_tag(
+                transaction.as_mut(),
+                &tag.scope_namespace,
+                &tag.repository,
+                &tag.tag,
+            )
+            .await?;
             query(
                 "INSERT INTO shardline_oci_tags (scope_namespace, repository, tag, digest_hex)
                  VALUES ($1, $2, $3, $4)
@@ -215,6 +241,15 @@ impl PostgresIndexStore {
             .bind(&tag.tag)
             .bind(&tag.digest_hex)
             .execute(&mut *transaction)
+            .await?;
+            super::oci_tags::record_tag_transition(
+                transaction.as_mut(),
+                &tag.scope_namespace,
+                &tag.repository,
+                &tag.tag,
+                before.map(|value| value.digest_hex),
+                Some(tag.digest_hex.clone()),
+            )
             .await?;
         }
         record_oci_evidence(
@@ -297,6 +332,16 @@ impl PostgresIndexStore {
         .execute(&mut *transaction)
         .await?;
         if key.kind == OciObjectKind::Manifest {
+            let tags = query(
+                "SELECT scope_namespace, repository, tag, digest_hex
+                 FROM shardline_oci_tags
+                 WHERE scope_namespace = $1 AND repository = $2 AND digest_hex = $3",
+            )
+            .bind(&key.scope_namespace)
+            .bind(&key.repository)
+            .bind(&key.digest_hex)
+            .fetch_all(&mut *transaction)
+            .await?;
             query(
                 "DELETE FROM shardline_oci_tags
                  WHERE scope_namespace = $1 AND repository = $2 AND digest_hex = $3",
@@ -306,6 +351,21 @@ impl PostgresIndexStore {
             .bind(&key.digest_hex)
             .execute(&mut *transaction)
             .await?;
+            for row in tags {
+                let scope_namespace: String = row.try_get("scope_namespace")?;
+                let repository: String = row.try_get("repository")?;
+                let tag: String = row.try_get("tag")?;
+                let digest_hex: String = row.try_get("digest_hex")?;
+                super::oci_tags::record_tag_transition(
+                    transaction.as_mut(),
+                    &scope_namespace,
+                    &repository,
+                    &tag,
+                    Some(digest_hex),
+                    None,
+                )
+                .await?;
+            }
         }
         let deleted_at: i64 = query_scalar(
             "SELECT deleted_at_unix_seconds FROM shardline_oci_object_tombstones

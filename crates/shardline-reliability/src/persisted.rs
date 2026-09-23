@@ -1,8 +1,8 @@
 use serde_json::Value;
 
 use crate::{
-    HubRefLifecycleEvent, LifecycleEvent, OciObjectLifecycleEvent, OperationKind,
-    ProviderLifecycleEvent, QuarantineLifecycleEvent, ReliabilityError,
+    HubRefLifecycleEvent, LifecycleEvent, OciObjectLifecycleEvent, OciTagLifecycleEvent,
+    OperationKind, ProviderLifecycleEvent, QuarantineLifecycleEvent, ReliabilityError,
     RetentionHoldLifecycleEvent, StateTransitionEvent, WebhookDeliveryLifecycleEvent,
 };
 
@@ -29,6 +29,7 @@ pub fn verify_persisted_event(
             verify::<QuarantineLifecycleEvent>(operation_kind, event_json)
         }
         OperationKind::Visibility => verify::<OciObjectLifecycleEvent>(operation_kind, event_json),
+        OperationKind::OciTag => verify::<OciTagLifecycleEvent>(operation_kind, event_json),
         OperationKind::RetentionHold => {
             verify::<RetentionHoldLifecycleEvent>(operation_kind, event_json)
         }
