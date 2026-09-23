@@ -1389,11 +1389,11 @@ async fn drill_deploy_c_redis_kill_mid_read_byte_exact_fallback() {
         .send()
         .await
         .unwrap();
-    assert!(
-        resp.status().is_success(),
-        "shard upload: {}",
-        resp.status()
-    );
+    let shard_upload_status = resp.status();
+    if !shard_upload_status.is_success() {
+        let shard_upload_body = resp.text().await.unwrap_or_default();
+        panic!("shard upload: {shard_upload_status}; response body: {shard_upload_body}");
+    }
 
     // Warm the reconstruction cache.
     let recon_url = format!("{base}/v1/reconstructions/{file_id}");

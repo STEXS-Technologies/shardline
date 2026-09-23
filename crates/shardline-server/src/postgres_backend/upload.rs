@@ -250,7 +250,7 @@ impl super::PostgresBackend {
             CasLimits::new(NonZeroU64::MAX, NonZeroU64::MAX, NonZeroU64::MAX),
         );
         let reliability_repository = reliability_repository_scope(repository_scope);
-        coordinator
+        let result = coordinator
             .with_upload_intent_scoped(
                 "shardline",
                 reliability_repository,
@@ -292,7 +292,14 @@ impl super::PostgresBackend {
                     .map_err(ServerError::from)
                 },
             )
-            .await
+            .await;
+        if let Err(error) = &result {
+            tracing::error!(
+                error = ?error,
+                "native shard upload failed after bounded parsing or metadata publication"
+            );
+        }
+        result
     }
 }
 

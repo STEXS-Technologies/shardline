@@ -1244,15 +1244,52 @@ impl UploadIntentStore for super::PostgresIndexStore {
                     .into_iter()
                     .map(|row| Ok(serde_json::from_value(row.try_get("event_json")?)?))
                     .collect::<Result<Vec<LifecycleEvent>, PostgresMetadataStoreError>>()?;
-                verify_upload_lifecycle_events(
-                    &events,
-                    tenant,
-                    repository,
-                    durable_intent.intent_id(),
-                    durable_intent.object_key(),
-                    durable_intent.object_hash(),
-                    durable_intent.state(),
-                )?;
+                let (stored_tenant, stored_repository) = upload_lifecycle_identity(&events);
+                if stored_tenant != tenant || stored_repository != repository {
+                    // Upload evidence predating repository-scoped identities was
+                    // written with the compatibility `default` repository. The
+                    // durable intent and its object identity are unchanged, so
+                    // migrate only the evidence identity while preserving the
+                    // authoritative lifecycle state. Invalid chains still fail
+                    // closed instead of being silently repaired.
+                    verify_upload_lifecycle_events(
+                        &events,
+                        stored_tenant,
+                        stored_repository,
+                        durable_intent.intent_id(),
+                        durable_intent.object_key(),
+                        durable_intent.object_hash(),
+                        durable_intent.state(),
+                    )?;
+                    sqlx::query(
+                        "DELETE FROM shardline_reliability_events
+                         WHERE operation_kind = 'Upload' AND operation_id = $1",
+                    )
+                    .bind(durable_intent.intent_id())
+                    .execute(&mut *transaction)
+                    .await?;
+                    let migrated = baseline_upload_lifecycle_events(
+                        tenant,
+                        repository,
+                        durable_intent.intent_id(),
+                        durable_intent.object_key(),
+                        durable_intent.object_hash(),
+                        durable_intent.state(),
+                    )?;
+                    for event in &migrated {
+                        insert_reliability_event(transaction.as_mut(), event).await?;
+                    }
+                } else {
+                    verify_upload_lifecycle_events(
+                        &events,
+                        tenant,
+                        repository,
+                        durable_intent.intent_id(),
+                        durable_intent.object_key(),
+                        durable_intent.object_hash(),
+                        durable_intent.state(),
+                    )?;
+                }
             }
         } else {
             // A previously deleted materialized row may leave legacy evidence
