@@ -2,8 +2,8 @@
 
 use libfuzzer_sys::fuzz_target;
 use shardline_reliability::{
-    LifecycleEvent, OperationIdentity, OperationKind, ReliabilityError, UploadLifecycleState,
-    verify_lifecycle_chain,
+    LifecycleEvent, OperationIdentity, OperationKind, PenelopeDigest, ReliabilityError,
+    UploadLifecycleState, verify_lifecycle_chain,
 };
 
 const CONTENT_SHA256: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -75,7 +75,7 @@ fuzz_target!(|input: &[u8]| {
     assert!(verify_lifecycle_chain(&events).is_ok());
 
     if let Some(event) = events.first_mut() {
-        event.process_digest = penelope::ContentDigest::sha256(b"tampered");
+        event.process_digest = PenelopeDigest::sha256(b"tampered");
         assert!(matches!(
             verify_lifecycle_chain(&events),
             Err(ReliabilityError::ProcessDigestMismatch)

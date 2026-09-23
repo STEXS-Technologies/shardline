@@ -20,7 +20,6 @@ futures-util.workspace = true
 hex.workspace = true
 libfuzzer-sys.workspace = true
 object_store = { workspace = true, default-features = true }
-penelope.workspace = true
 sdx.workspace = true
 serde_json.workspace = true
 shardline.workspace = true

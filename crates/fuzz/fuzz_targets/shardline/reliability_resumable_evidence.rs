@@ -1,10 +1,9 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use penelope::ContentDigest as PenelopeDigest;
 use shardline_reliability::{
-    OperationIdentity, OperationKind, ResumableLifecycleState, StateTransitionEvent,
-    verify_state_transition_chain,
+    OperationIdentity, OperationKind, PenelopeDigest, ResumableLifecycleState,
+    StateTransitionEvent, verify_state_transition_chain,
 };
 
 const STATES: [ResumableLifecycleState; 5] = [

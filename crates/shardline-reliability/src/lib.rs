@@ -34,6 +34,7 @@ pub use oci_evidence::{
     OciObjectSnapshot, verify_oci_object_lifecycle_chain, verify_oci_object_lifecycle_events,
 };
 pub use operation::{OperationIdentity, OperationKind};
+pub use penelope::ContentDigest as PenelopeDigest;
 pub use provider_evidence::{
     ProviderEvidenceLog, ProviderLifecycleEvent, ProviderLifecycleObservations,
     ProviderLifecycleSnapshot, ProviderRepositoryIdentity, verify_provider_lifecycle_chain,
@@ -46,4 +47,5 @@ pub use quarantine_evidence::{
 };
 pub use session_evidence::SessionEvidenceLog;
 pub use session_evidence::verify_resumable_session_events;
+pub use statechronicle::ContentDigest as StateChronicleDigest;
 pub use states::{ResumableLifecycleState, UploadLifecycleState};

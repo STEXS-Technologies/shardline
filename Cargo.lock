@@ -3930,7 +3930,6 @@ dependencies = [
  "hex",
  "libfuzzer-sys",
  "object_store",
- "penelope",
  "sdx",
  "serde_json",
  "shardline",
