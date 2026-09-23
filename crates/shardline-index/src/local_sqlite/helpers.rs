@@ -21,16 +21,16 @@ use rusqlite::{
 use serde_json::{from_slice, from_str, to_string};
 use shardline_protocol::{RepositoryScope, unix_now_seconds_lossy};
 use shardline_reliability::{
-    EvidenceEventMetadata, LifecycleEvent, OciObjectEvidenceLog, OciObjectIdentity,
-    OciObjectLifecycleState, OciObjectSnapshot, ProviderEvidenceLog, ProviderLifecycleEvent,
-    ProviderLifecycleSnapshot, QuarantineEvidenceLog, QuarantineLifecycleEvent,
-    QuarantineLifecycleState, QuarantineObjectIdentity, QuarantineSnapshot,
-    ResumableLifecycleState, RetentionEvidenceLog, RetentionHoldLifecycleEvent,
+    EvidenceEventMetadata, HubRefEvidenceLog, HubRefLifecycleEvent, HubRefSnapshot, LifecycleEvent,
+    OciObjectEvidenceLog, OciObjectIdentity, OciObjectLifecycleState, OciObjectSnapshot,
+    ProviderEvidenceLog, ProviderLifecycleEvent, ProviderLifecycleSnapshot, QuarantineEvidenceLog,
+    QuarantineLifecycleEvent, QuarantineLifecycleState, QuarantineObjectIdentity,
+    QuarantineSnapshot, ResumableLifecycleState, RetentionEvidenceLog, RetentionHoldLifecycleEvent,
     RetentionHoldLifecycleState, RetentionHoldSnapshot, RetentionObjectIdentity, SnapshotEvidence,
     StateTransitionEvent, UploadLifecycleState, WebhookDeliveryEvidenceLog,
     WebhookDeliveryIdentity, WebhookDeliveryLifecycleEvent, WebhookDeliveryLifecycleState,
     WebhookDeliverySnapshot, baseline_resumable_session_events, baseline_upload_lifecycle_events,
-    verify_provider_lifecycle_events, verify_resumable_session_events,
+    verify_hub_ref_events, verify_provider_lifecycle_events, verify_resumable_session_events,
     verify_upload_lifecycle_events,
 };
 use shardline_storage::{
@@ -224,6 +224,56 @@ pub(crate) fn persist_webhook_evidence(
     event: &WebhookDeliveryLifecycleEvent,
 ) -> Result<(), LocalIndexStoreError> {
     persist_reliability_event(transaction, event)
+}
+
+pub(crate) fn hub_ref_snapshot(
+    repository: &str,
+    ref_name: &str,
+    head_sha: Option<String>,
+) -> Result<HubRefSnapshot, LocalIndexStoreError> {
+    Ok(HubRefSnapshot::new(repository, ref_name, head_sha)?)
+}
+
+pub(crate) fn load_hub_ref_evidence(
+    transaction: &Transaction<'_>,
+    repository: &str,
+    ref_name: &str,
+) -> Result<HubRefEvidenceLog, LocalIndexStoreError> {
+    let operation = hub_ref_snapshot(repository, ref_name, None)?.evidence_operation()?;
+    let mut statement = transaction.prepare(
+        "SELECT event_json FROM shardline_reliability_events
+         WHERE operation_kind = 'MetadataCommit' AND operation_id = ?1 ORDER BY sequence",
+    )?;
+    let rows = statement.query_map(params![operation.operation_id], |row| {
+        let event_json: String = row.get(0)?;
+        from_str::<HubRefLifecycleEvent>(&event_json)
+            .map_err(|error| SqliteError::FromSqlConversionFailure(0, Type::Text, Box::new(error)))
+    })?;
+    Ok(HubRefEvidenceLog::from_events(
+        rows.collect::<Result<Vec<_>, _>>()?,
+    )?)
+}
+
+pub(crate) fn persist_hub_ref_evidence(
+    transaction: &Transaction<'_>,
+    event: &HubRefLifecycleEvent,
+) -> Result<(), LocalIndexStoreError> {
+    persist_reliability_event(transaction, event)
+}
+
+pub(crate) fn current_hub_ref_evidence(
+    transaction: &Transaction<'_>,
+    repository: &str,
+    ref_name: &str,
+    head_sha: Option<String>,
+) -> Result<HubRefEvidenceLog, LocalIndexStoreError> {
+    let snapshot = hub_ref_snapshot(repository, ref_name, head_sha)?;
+    let evidence = load_hub_ref_evidence(transaction, repository, ref_name)?;
+    if evidence.events().is_empty() {
+        return Ok(HubRefEvidenceLog::baseline(snapshot)?);
+    }
+    verify_hub_ref_events(evidence.events(), &snapshot)?;
+    Ok(evidence)
 }
 
 pub(crate) trait SqliteExecutor {

@@ -12,6 +12,7 @@ mod error;
 mod event;
 mod event_metadata;
 mod lifecycle_log;
+mod metadata_evidence;
 mod oci_evidence;
 mod operation;
 mod persisted;
@@ -39,6 +40,10 @@ pub use event::{
 };
 pub use event_metadata::EvidenceEventMetadata;
 pub use lifecycle_log::LifecycleEvidenceLog;
+pub use metadata_evidence::{
+    HubRefEvidenceLog, HubRefLifecycleEvent, HubRefSnapshot, MetadataCommitOperationId,
+    verify_hub_ref_events,
+};
 pub use oci_evidence::{
     OciObjectEvidenceLog, OciObjectIdentity, OciObjectLifecycleEvent, OciObjectLifecycleState,
     OciObjectSnapshot, verify_oci_object_lifecycle_chain, verify_oci_object_lifecycle_events,

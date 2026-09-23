@@ -2,11 +2,11 @@ use rusqlite::{OptionalExtension, Transaction, params};
 use shardline_protocol::{RepositoryProvider, ShardlineHash, unix_now_seconds_lossy};
 use shardline_reliability::{
     LifecycleEvent, ProviderEvidenceLog, QuarantineLifecycleState, RetentionEvidenceLog,
-    RetentionHoldLifecycleState, SnapshotEvidence, WebhookDeliveryEvidenceLog,
-    WebhookDeliveryLifecycleState, baseline_upload_lifecycle_events, upload_lifecycle_event,
-    verify_provider_lifecycle_events, verify_quarantine_lifecycle_events,
-    verify_retention_hold_lifecycle_chain, verify_retention_hold_lifecycle_events,
-    verify_upload_lifecycle_events, verify_webhook_delivery_chain, verify_webhook_delivery_events,
+    RetentionHoldLifecycleState, WebhookDeliveryEvidenceLog, WebhookDeliveryLifecycleState,
+    baseline_upload_lifecycle_events, upload_lifecycle_event, verify_provider_lifecycle_events,
+    verify_quarantine_lifecycle_events, verify_retention_hold_lifecycle_chain,
+    verify_retention_hold_lifecycle_events, verify_upload_lifecycle_events,
+    verify_webhook_delivery_chain, verify_webhook_delivery_events,
 };
 use shardline_storage::ObjectKey;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -1585,6 +1585,7 @@ mod tests {
         clippy::let_underscore_must_use
     )]
     use shardline_protocol::{ChunkRange, RepositoryProvider};
+    use shardline_reliability::SnapshotEvidence;
     use shardline_storage::ObjectKey;
 
     use super::*;

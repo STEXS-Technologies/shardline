@@ -8,8 +8,12 @@ use crate::{
         HubFileEntry, HubRef, HubRepo, HubRepoType, HubRevision, HubStore, HubWebhook,
         canonical_ref_name,
     },
-    local_sqlite::{LocalIndexStore, LocalIndexStoreError, i64_to_u64, u64_to_i64},
+    local_sqlite::{
+        LocalIndexStore, LocalIndexStoreError, current_hub_ref_evidence, hub_ref_snapshot,
+        i64_to_u64, persist_hub_ref_evidence, u64_to_i64,
+    },
 };
+use shardline_reliability::{HubRefEvidenceLog, SnapshotEvidence};
 
 fn sqlite_store_error(error: &LocalIndexStoreError) -> rusqlite::Error {
     rusqlite::Error::InvalidParameterName(error.to_string())
@@ -79,6 +83,14 @@ pub fn ensure_hub_tables(root: &std::path::Path) -> Result<(), Box<dyn std::erro
             active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
             created_at_unix_seconds INTEGER NOT NULL,
             FOREIGN KEY (repo_id) REFERENCES shardline_hub_repos(repo_id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS shardline_reliability_events (
+            operation_kind TEXT NOT NULL,
+            operation_id TEXT NOT NULL,
+            sequence INTEGER NOT NULL,
+            event_json TEXT NOT NULL,
+            created_at_unix_seconds INTEGER NOT NULL,
+            PRIMARY KEY (operation_kind, operation_id, sequence)
         );",
     )?;
     Ok(())
@@ -116,6 +128,14 @@ impl HubStore for LocalIndexStore {
             "INSERT INTO shardline_hub_refs (repo_id, ref_name, sha) VALUES (?1, 'main', ?2)",
             params![name, initial_sha],
         )?;
+        let evidence = HubRefEvidenceLog::baseline(hub_ref_snapshot(
+            name,
+            "main",
+            Some(initial_sha.clone()),
+        )?)?;
+        for event in evidence.events() {
+            persist_hub_ref_evidence(&tx, event)?;
+        }
         tx.commit()?;
         Ok(HubRepo {
             repo_id: name.to_owned(),
@@ -257,17 +277,17 @@ impl HubStore for LocalIndexStore {
         let ref_name = canonical_ref_name(ref_name);
         let conn = open_hub_connection_rw(self.root())?;
         let tx = conn.unchecked_transaction()?;
+        let current_ref: Option<String> = tx
+            .query_row(
+                "SELECT sha FROM shardline_hub_refs WHERE repo_id = ?1 AND ref_name = ?2",
+                params![repo_id, ref_name],
+                |row| row.get(0),
+            )
+            .optional()?;
 
         // Optimistic concurrency check
         if let Some(parent) = parent_sha {
-            let current_ref: Option<String> = tx
-                .query_row(
-                    "SELECT sha FROM shardline_hub_refs WHERE repo_id = ?1 AND ref_name = ?2",
-                    params![repo_id, ref_name],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            match current_ref {
+            match current_ref.as_deref() {
                 Some(current) if current != parent => {
                     return Err(rusqlite::Error::QueryReturnedNoRows.into());
                 }
@@ -306,6 +326,15 @@ impl HubStore for LocalIndexStore {
              ON CONFLICT(repo_id, ref_name) DO UPDATE SET sha = excluded.sha",
             params![repo_id, ref_name, new_sha],
         )?;
+        let mut evidence = current_hub_ref_evidence(&tx, repo_id, ref_name, current_ref)?;
+        evidence.record(hub_ref_snapshot(
+            repo_id,
+            ref_name,
+            Some(new_sha.to_owned()),
+        )?)?;
+        for event in evidence.events() {
+            persist_hub_ref_evidence(&tx, event)?;
+        }
 
         tx.commit()?;
 
@@ -320,18 +349,32 @@ impl HubStore for LocalIndexStore {
     }
 
     fn list_refs(&self, repo_id: &str) -> Result<Vec<HubRef>, Self::Error> {
-        let conn = open_hub_connection(self.root())?;
-        let mut stmt = conn.prepare(
-            "SELECT repo_id, ref_name, sha FROM shardline_hub_refs WHERE repo_id = ?1 ORDER BY ref_name",
-        )?;
-        let rows = stmt.query_map(params![repo_id], |row| {
-            Ok(HubRef {
-                repo_id: row.get(0)?,
-                ref_name: row.get(1)?,
-                sha: row.get(2)?,
-            })
-        })?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        let conn = open_hub_connection_rw(self.root())?;
+        let tx = conn.unchecked_transaction()?;
+        let refs = {
+            let mut stmt = tx.prepare(
+                "SELECT repo_id, ref_name, sha FROM shardline_hub_refs WHERE repo_id = ?1 ORDER BY ref_name",
+            )?;
+            let rows = stmt.query_map(params![repo_id], |row| {
+                Ok(HubRef {
+                    repo_id: row.get(0)?,
+                    ref_name: row.get(1)?,
+                    sha: row.get(2)?,
+                })
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        for reference in &refs {
+            current_hub_ref_evidence(
+                &tx,
+                &reference.repo_id,
+                &reference.ref_name,
+                Some(reference.sha.clone()),
+            )
+            .map_err(|error| rusqlite::Error::InvalidParameterName(error.to_string()))?;
+        }
+        tx.commit()?;
+        Ok(refs)
     }
 
     fn delete_ref(
@@ -355,6 +398,12 @@ impl HubStore for LocalIndexStore {
         )?;
         if changed != 1 {
             return Err(rusqlite::Error::QueryReturnedNoRows.into());
+        }
+        let mut evidence =
+            current_hub_ref_evidence(&tx, repo_id, ref_name, Some(expected_sha.to_owned()))?;
+        evidence.record(hub_ref_snapshot(repo_id, ref_name, None)?)?;
+        for event in evidence.events() {
+            persist_hub_ref_evidence(&tx, event)?;
         }
         tx.commit()?;
         Ok(())
@@ -470,6 +519,23 @@ impl HubStore for LocalIndexStore {
     fn delete_repo(&self, repo_id: &str) -> Result<(), Self::Error> {
         let conn = open_hub_connection_rw(self.root())?;
         let tx = conn.unchecked_transaction()?;
+        let ref_names = {
+            let mut statement =
+                tx.prepare("SELECT ref_name FROM shardline_hub_refs WHERE repo_id = ?1")?;
+            statement
+                .query_map(params![repo_id], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        for ref_name in ref_names {
+            let operation = hub_ref_snapshot(repo_id, &ref_name, None)?
+                .evidence_operation()
+                .map_err(|error| rusqlite::Error::InvalidParameterName(error.to_string()))?;
+            tx.execute(
+                "DELETE FROM shardline_reliability_events
+                 WHERE operation_kind = 'MetadataCommit' AND operation_id = ?1",
+                params![operation.operation_id],
+            )?;
+        }
         // Delete file entries for all revisions in this repo
         tx.execute(
             "DELETE FROM shardline_hub_file_entries WHERE commit_sha IN (SELECT sha FROM shardline_hub_revisions WHERE repo_id = ?1)",
@@ -707,6 +773,7 @@ mod tests {
         )
         .expect("create hub tables");
         drop(conn);
+        ensure_hub_tables(root).expect("create reliability evidence table");
 
         let store = LocalIndexStore::open(root.to_path_buf());
         (ts, store)
@@ -729,6 +796,26 @@ mod tests {
         let fetched = fetched.unwrap();
         assert_eq!(fetched.repo_id, "org/model");
         assert_eq!(fetched.repo_type, HubRepoType::Model);
+    }
+
+    #[test]
+    fn list_refs_rejects_tampered_metadata_commit_evidence() {
+        let (ts, store) = make_store();
+        store
+            .create_repo(HubRepoType::Model, "tamper-test", false)
+            .expect("create repo");
+
+        let connection = Connection::open(ts.path().join("metadata.sqlite3")).expect("open");
+        connection
+            .execute(
+                "UPDATE shardline_reliability_events
+                 SET event_json = '{\"tampered\":true}'
+                 WHERE operation_kind = 'MetadataCommit'",
+                [],
+            )
+            .expect("tamper evidence");
+
+        assert!(store.list_refs("tamper-test").is_err());
     }
 
     #[test]

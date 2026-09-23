@@ -1,4 +1,5 @@
 use futures_util::TryStreamExt;
+use serde_json::{from_value, to_value};
 use sqlx::Row;
 
 use shardline_protocol::SecretString;
@@ -9,6 +10,10 @@ use crate::{
         canonical_ref_name,
     },
     postgres::{PostgresIndexStore, PostgresMetadataStoreError, i64_to_u64, u64_to_i64},
+};
+use shardline_reliability::{
+    HubRefEvidenceLog, HubRefLifecycleEvent, HubRefSnapshot, SnapshotEvidence,
+    verify_hub_ref_events,
 };
 
 const fn repo_type_to_str(t: HubRepoType) -> &'static str {
@@ -25,6 +30,67 @@ fn escape_like(value: &str) -> String {
         .replace('\\', "\\\\")
         .replace('_', "\\_")
         .replace('%', "\\%")
+}
+
+async fn load_hub_ref_evidence(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    repository: &str,
+    ref_name: &str,
+) -> Result<HubRefEvidenceLog, PostgresMetadataStoreError> {
+    let operation = HubRefSnapshot::new(repository, ref_name, None)?.evidence_operation()?;
+    let rows = sqlx::query(
+        "SELECT event_json FROM shardline_reliability_events
+         WHERE operation_kind = 'MetadataCommit' AND operation_id = $1 ORDER BY sequence",
+    )
+    .bind(&operation.operation_id)
+    .fetch_all(&mut **transaction)
+    .await?;
+    let mut events = Vec::with_capacity(rows.len());
+    for row in rows {
+        let value: serde_json::Value = row.try_get("event_json")?;
+        events.push(from_value::<HubRefLifecycleEvent>(value)?);
+    }
+    Ok(HubRefEvidenceLog::from_events(events)?)
+}
+
+async fn current_hub_ref_evidence(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    repository: &str,
+    ref_name: &str,
+    head_sha: Option<String>,
+) -> Result<HubRefEvidenceLog, PostgresMetadataStoreError> {
+    let snapshot = HubRefSnapshot::new(repository, ref_name, head_sha)?;
+    let evidence = load_hub_ref_evidence(transaction, repository, ref_name).await?;
+    if evidence.events().is_empty() {
+        return Ok(HubRefEvidenceLog::baseline(snapshot)?);
+    }
+    verify_hub_ref_events(evidence.events(), &snapshot)?;
+    Ok(evidence)
+}
+
+async fn persist_hub_ref_evidence(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    evidence: &HubRefEvidenceLog,
+) -> Result<(), PostgresMetadataStoreError> {
+    for event in evidence.events() {
+        sqlx::query(
+            "INSERT INTO shardline_reliability_events
+                (operation_kind, operation_id, sequence, event_json)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (operation_kind, operation_id, sequence) DO NOTHING",
+        )
+        .bind(event.operation.kind.as_str())
+        .bind(&event.operation.operation_id)
+        .bind(
+            i64::try_from(event.sequence).map_err(|error| {
+                PostgresMetadataStoreError::IntegerOutOfRange(error.to_string())
+            })?,
+        )
+        .bind(to_value(event)?)
+        .execute(&mut **transaction)
+        .await?;
+    }
+    Ok(())
 }
 
 /// Runs an async future to completion on the current tokio runtime.
@@ -86,6 +152,12 @@ impl HubStore for PostgresIndexStore {
             .bind(&initial_sha)
             .execute(&mut *tx)
             .await?;
+            let evidence = HubRefEvidenceLog::baseline(HubRefSnapshot::new(
+                &name,
+                "main",
+                Some(initial_sha.clone()),
+            )?)?;
+            persist_hub_ref_evidence(&mut tx, &evidence).await?;
 
             let row = sqlx::query(
                 "SELECT repo_id, repo_type, private, default_branch, created_at_unix_seconds, updated_at_unix_seconds
@@ -262,17 +334,17 @@ impl HubStore for PostgresIndexStore {
                 return Err(PostgresMetadataStoreError::RecordNotFound);
             }
 
+            let current_ref: Option<String> = sqlx::query_scalar(
+                "SELECT sha FROM shardline_hub_refs WHERE repo_id = $1 AND ref_name = $2",
+            )
+            .bind(&repo_id)
+            .bind(&ref_name)
+            .fetch_optional(&mut *tx)
+            .await?;
+
             // Optimistic concurrency check
             if let Some(ref parent) = parent_sha {
-                let current_ref: Option<String> = sqlx::query_scalar::<_, String>(
-                    "SELECT sha FROM shardline_hub_refs WHERE repo_id = $1 AND ref_name = $2",
-                )
-                .bind(&repo_id)
-                .bind(&ref_name)
-                .fetch_optional(&mut *tx)
-                .await?;
-
-                match current_ref {
+                match current_ref.as_deref() {
                     Some(ref current) if current != parent => {
                         return Err(PostgresMetadataStoreError::RecordNotFound);
                     }
@@ -326,6 +398,15 @@ impl HubStore for PostgresIndexStore {
             .execute(&mut *tx)
             .await?;
 
+            let mut evidence =
+                current_hub_ref_evidence(&mut tx, &repo_id, &ref_name, current_ref).await?;
+            evidence.record(HubRefSnapshot::new(
+                &repo_id,
+                &ref_name,
+                Some(new_sha.clone()),
+            )?)?;
+            persist_hub_ref_evidence(&mut tx, &evidence).await?;
+
             let row = sqlx::query(
                 "SELECT repo_id, ref_name, sha, parent_sha, message, created_at_unix_seconds
                  FROM shardline_hub_revisions WHERE repo_id = $1 AND sha = $2",
@@ -355,19 +436,33 @@ impl HubStore for PostgresIndexStore {
         let repo_id = repo_id.to_owned();
 
         block_on_async(async {
-            let mut rows = sqlx::query(
-                "SELECT repo_id, ref_name, sha FROM shardline_hub_refs WHERE repo_id = $1 ORDER BY ref_name",
-            )
-            .bind(&repo_id)
-            .fetch(&pool);
-            let mut refs = Vec::new();
-            while let Some(row) = rows.try_next().await? {
-                refs.push(HubRef {
-                    repo_id: row.try_get("repo_id")?,
-                    ref_name: row.try_get("ref_name")?,
-                    sha: row.try_get("sha")?,
-                });
+            let mut tx = pool.begin().await?;
+            let refs = {
+                let mut rows = sqlx::query(
+                    "SELECT repo_id, ref_name, sha FROM shardline_hub_refs WHERE repo_id = $1 ORDER BY ref_name",
+                )
+                .bind(&repo_id)
+                .fetch(&mut *tx);
+                let mut refs = Vec::new();
+                while let Some(row) = rows.try_next().await? {
+                    refs.push(HubRef {
+                        repo_id: row.try_get("repo_id")?,
+                        ref_name: row.try_get("ref_name")?,
+                        sha: row.try_get("sha")?,
+                    });
+                }
+                refs
+            };
+            for reference in &refs {
+                current_hub_ref_evidence(
+                    &mut tx,
+                    &reference.repo_id,
+                    &reference.ref_name,
+                    Some(reference.sha.clone()),
+                )
+                .await?;
             }
+            tx.commit().await?;
             Ok(refs)
         })
     }
@@ -387,17 +482,23 @@ impl HubStore for PostgresIndexStore {
         let pool = self.pool().clone();
 
         block_on_async(async {
+            let mut tx = pool.begin().await?;
             let result = sqlx::query(
                 "DELETE FROM shardline_hub_refs WHERE repo_id = $1 AND ref_name = $2 AND sha = $3",
             )
             .bind(&repo_id)
             .bind(&ref_name)
             .bind(&expected_sha)
-            .execute(&pool)
+            .execute(&mut *tx)
             .await?;
             if result.rows_affected() != 1 {
                 return Err(PostgresMetadataStoreError::RecordNotFound);
             }
+            let mut evidence =
+                current_hub_ref_evidence(&mut tx, &repo_id, &ref_name, Some(expected_sha)).await?;
+            evidence.record(HubRefSnapshot::new(&repo_id, &ref_name, None)?)?;
+            persist_hub_ref_evidence(&mut tx, &evidence).await?;
+            tx.commit().await?;
             Ok(())
         })
     }
@@ -546,6 +647,23 @@ impl HubStore for PostgresIndexStore {
             .await?;
             if locked_repo.is_none() {
                 return Ok(());
+            }
+
+            let ref_names: Vec<String> =
+                sqlx::query_scalar("SELECT ref_name FROM shardline_hub_refs WHERE repo_id = $1")
+                    .bind(&repo_id)
+                    .fetch_all(&mut *tx)
+                    .await?;
+            for ref_name in ref_names {
+                let operation =
+                    HubRefSnapshot::new(&repo_id, &ref_name, None)?.evidence_operation()?;
+                sqlx::query(
+                    "DELETE FROM shardline_reliability_events
+                     WHERE operation_kind = 'MetadataCommit' AND operation_id = $1",
+                )
+                .bind(&operation.operation_id)
+                .execute(&mut *tx)
+                .await?;
             }
 
             // Delete file entries for all revisions in this repo

@@ -1,9 +1,9 @@
 use serde_json::Value;
 
 use crate::{
-    LifecycleEvent, OciObjectLifecycleEvent, OperationKind, ProviderLifecycleEvent,
-    QuarantineLifecycleEvent, ReliabilityError, RetentionHoldLifecycleEvent, StateTransitionEvent,
-    WebhookDeliveryLifecycleEvent,
+    HubRefLifecycleEvent, LifecycleEvent, OciObjectLifecycleEvent, OperationKind,
+    ProviderLifecycleEvent, QuarantineLifecycleEvent, ReliabilityError,
+    RetentionHoldLifecycleEvent, StateTransitionEvent, WebhookDeliveryLifecycleEvent,
 };
 
 /// Verifies one persisted reliability event using the canonical domain decoder.
@@ -18,6 +18,7 @@ pub fn verify_persisted_event(
 ) -> Result<(), ReliabilityError> {
     match operation_kind {
         OperationKind::Upload => verify::<LifecycleEvent>(operation_kind, event_json),
+        OperationKind::MetadataCommit => verify::<HubRefLifecycleEvent>(operation_kind, event_json),
         OperationKind::ResumableSession => {
             verify::<StateTransitionEvent>(operation_kind, event_json)
         }
@@ -34,9 +35,9 @@ pub fn verify_persisted_event(
         OperationKind::WebhookDelivery => {
             verify::<WebhookDeliveryLifecycleEvent>(operation_kind, event_json)
         }
-        OperationKind::MetadataCommit | OperationKind::Repair => Err(
-            ReliabilityError::UnsupportedOperationKind(operation_kind.as_str()),
-        ),
+        OperationKind::Repair => Err(ReliabilityError::UnsupportedOperationKind(
+            operation_kind.as_str(),
+        )),
     }
 }
 
