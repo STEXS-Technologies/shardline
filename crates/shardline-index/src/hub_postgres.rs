@@ -543,13 +543,21 @@ impl HubStore for PostgresIndexStore {
         let revision = revision.to_owned();
 
         block_on_async(async {
+            let mut tx = pool.begin().await?;
             if revision.is_empty() || revision == "main" {
                 let head: Option<String> = sqlx::query_scalar::<_, String>(
                     "SELECT default_branch FROM shardline_hub_repos WHERE repo_id = $1",
                 )
                 .bind(&repo_id)
-                .fetch_optional(&pool)
+                .fetch_optional(&mut *tx)
                 .await?;
+                if let Some(head) = &head {
+                    let evidence =
+                        current_hub_ref_evidence(&mut tx, &repo_id, "main", Some(head.clone()))
+                            .await?;
+                    persist_hub_ref_evidence(&mut tx, &evidence).await?;
+                }
+                tx.commit().await?;
                 return Ok(head);
             }
 
@@ -558,10 +566,11 @@ impl HubStore for PostgresIndexStore {
             )
             .bind(&repo_id)
             .bind(&revision)
-            .fetch_one(&pool)
+            .fetch_one(&mut *tx)
             .await?;
 
             if exists {
+                tx.commit().await?;
                 return Ok(Some(revision));
             }
 
@@ -571,8 +580,19 @@ impl HubStore for PostgresIndexStore {
             )
             .bind(&repo_id)
             .bind(ref_name)
-            .fetch_optional(&pool)
+            .fetch_optional(&mut *tx)
             .await?;
+            if let Some(current_sha) = &sha {
+                let evidence = current_hub_ref_evidence(
+                    &mut tx,
+                    &repo_id,
+                    ref_name,
+                    Some(current_sha.clone()),
+                )
+                .await?;
+                persist_hub_ref_evidence(&mut tx, &evidence).await?;
+            }
+            tx.commit().await?;
 
             Ok(sha)
         })

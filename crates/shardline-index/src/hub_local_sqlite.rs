@@ -457,39 +457,62 @@ impl HubStore for LocalIndexStore {
         repo_id: &str,
         revision: &str,
     ) -> Result<Option<String>, Self::Error> {
-        let conn = open_hub_connection(self.root())?;
+        let root = self.root().to_owned();
+        let repo_id = repo_id.to_owned();
+        let revision = revision.to_owned();
+        retry_sqlite_busy(|| {
+            let mut conn = open_hub_connection_rw(&root)?;
+            let tx = conn.transaction()?;
 
-        if revision.is_empty() || revision == "main" {
-            let head: Option<String> = conn
-                .query_row(
-                    "SELECT default_branch FROM shardline_hub_repos WHERE repo_id = ?1",
-                    params![repo_id],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            return Ok(head);
-        }
+            if revision.is_empty() || revision == "main" {
+                let head: Option<String> = tx
+                    .query_row(
+                        "SELECT default_branch FROM shardline_hub_repos WHERE repo_id = ?1",
+                        params![repo_id],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                if let Some(head) = &head {
+                    let evidence =
+                        current_hub_ref_evidence(&tx, &repo_id, "main", Some(head.clone()))?;
+                    for event in evidence.events() {
+                        persist_hub_ref_evidence(&tx, event)?;
+                    }
+                }
+                tx.commit()?;
+                return Ok(head);
+            }
 
-        // Direct SHA match
-        let exists: bool = conn.query_row(
+            // Direct SHA match
+            let exists: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM shardline_hub_revisions WHERE repo_id = ?1 AND sha = ?2)",
             params![repo_id, revision],
             |row| row.get(0),
         )?;
-        if exists {
-            return Ok(Some(revision.to_owned()));
-        }
+            if exists {
+                tx.commit()?;
+                return Ok(Some(revision.clone()));
+            }
 
-        // Active ref-name match
-        let ref_name = canonical_ref_name(revision);
-        let sha: Option<String> = conn
-            .query_row(
-                "SELECT sha FROM shardline_hub_refs WHERE repo_id = ?1 AND ref_name = ?2",
-                params![repo_id, ref_name],
-                |row| row.get(0),
-            )
-            .optional()?;
-        Ok(sha)
+            // Active ref-name match
+            let ref_name = canonical_ref_name(&revision);
+            let sha: Option<String> = tx
+                .query_row(
+                    "SELECT sha FROM shardline_hub_refs WHERE repo_id = ?1 AND ref_name = ?2",
+                    params![repo_id, ref_name],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if let Some(current_sha) = &sha {
+                let evidence =
+                    current_hub_ref_evidence(&tx, &repo_id, ref_name, Some(current_sha.clone()))?;
+                for event in evidence.events() {
+                    persist_hub_ref_evidence(&tx, event)?;
+                }
+            }
+            tx.commit()?;
+            Ok(sha)
+        })
     }
 
     fn store_files(&self, commit_sha: &str, files: &[HubFileEntry]) -> Result<(), Self::Error> {
@@ -840,6 +863,65 @@ mod tests {
             .expect("tamper evidence");
 
         assert!(store.list_refs("tamper-test").is_err());
+    }
+
+    #[test]
+    fn resolve_revision_rejects_tampered_metadata_commit_evidence() {
+        let (ts, store) = make_store();
+        store
+            .create_repo(HubRepoType::Model, "resolve-tamper-test", false)
+            .expect("create repo");
+
+        let connection = Connection::open(ts.path().join("metadata.sqlite3")).expect("open");
+        connection
+            .execute(
+                "UPDATE shardline_reliability_events
+                 SET event_json = '{\"tampered\":true}'
+                 WHERE operation_kind = 'MetadataCommit'",
+                [],
+            )
+            .expect("tamper evidence");
+
+        assert!(
+            store
+                .resolve_revision("resolve-tamper-test", "main")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn resolve_revision_repairs_missing_metadata_commit_baseline() {
+        let (ts, store) = make_store();
+        store
+            .create_repo(HubRepoType::Model, "resolve-repair-test", false)
+            .expect("create repo");
+
+        let connection = Connection::open(ts.path().join("metadata.sqlite3")).expect("open");
+        connection
+            .execute(
+                "DELETE FROM shardline_reliability_events
+                 WHERE operation_kind = 'MetadataCommit'",
+                [],
+            )
+            .expect("remove evidence");
+        drop(connection);
+
+        let initial_sha = store
+            .resolve_revision("resolve-repair-test", "main")
+            .expect("resolve main")
+            .expect("main head");
+        assert_eq!(initial_sha, "4b825dc642cb6eb9a060e54bf899d69f8f5ce8e3");
+
+        let repaired = Connection::open(ts.path().join("metadata.sqlite3")).expect("open");
+        let count: i64 = repaired
+            .query_row(
+                "SELECT COUNT(*) FROM shardline_reliability_events
+                 WHERE operation_kind = 'MetadataCommit'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count repaired evidence");
+        assert_eq!(count, 1);
     }
 
     #[test]
