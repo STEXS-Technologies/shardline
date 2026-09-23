@@ -453,6 +453,34 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn pg_s3_object_concurrent_unconditional_upserts_keep_a_verifiable_chain() {
+        let Some(pool) = connect_postgres().await else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let scope = format!("s3-concurrent-upsert-{}", std::process::id());
+        cleanup(&pool, &scope).await;
+        let first_store = PostgresIndexStore::new(pool.clone());
+        let second_store = PostgresIndexStore::new(pool.clone());
+        let first = entry(&scope, "model.bin", "first");
+        let second = entry(&scope, "model.bin", "second");
+
+        let (first_result, second_result) = tokio::join!(
+            first_store.upsert_s3_object(&first),
+            second_store.upsert_s3_object(&second),
+        );
+        first_result.unwrap();
+        second_result.unwrap();
+        let stored = first_store
+            .scan_s3_object_exact(&scope, "model.bin")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(stored == first || stored == second);
+        cleanup(&pool, &scope).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn pg_s3_object_upsert_overwrites_existing_row() {
         let Some(pool) = connect_postgres().await else {
             eprintln!("skipping: no DATABASE_URL");

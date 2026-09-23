@@ -430,6 +430,26 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_unconditional_upserts_keep_a_verifiable_chain() {
+        let store = make_store();
+        let first = entry("concurrent-upsert", "model.bin", &file_id(1), 10, 1);
+        let second = entry("concurrent-upsert", "model.bin", &file_id(2), 20, 2);
+
+        let (first_result, second_result) = tokio::join!(
+            store.upsert_s3_object(&first),
+            store.upsert_s3_object(&second),
+        );
+        first_result.unwrap();
+        second_result.unwrap();
+        let stored = store
+            .scan_s3_object_exact("concurrent-upsert", "model.bin")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(stored == first || stored == second);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn compare_and_swap_update_rejects_a_stale_expected_row() {
         let storage = shardline_test_support::TempStorage::new();
         let store = LocalIndexStore::new(storage.path_buf()).unwrap();
