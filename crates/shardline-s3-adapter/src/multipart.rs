@@ -1223,6 +1223,11 @@ mod tests {
         let repaired: PersistedMultipartUploadSession =
             serde_json::from_slice(&fs::read(path).await.unwrap()).unwrap();
         assert_eq!(repaired.evidence.events().len(), 1);
+        assert_eq!(repaired.snapshot_evidence.events().len(), 1);
+        repaired
+            .snapshot_evidence
+            .verify_for(&session_snapshot(&repaired.session).unwrap())
+            .unwrap();
     }
 
     #[test]

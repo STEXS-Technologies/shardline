@@ -321,6 +321,31 @@ async fn create_upload_session_persists_metadata() {
 }
 
 #[tokio::test]
+async fn read_upload_session_repairs_missing_canonical_evidence() {
+    let root = temp_root();
+    let session_id = create_test_session(root.path(), false).await.unwrap();
+    let metadata_path = crate::upload_metadata_path(root.path(), &session_id);
+    let mut metadata: serde_json::Value =
+        serde_json::from_slice(&tokio::fs::read(&metadata_path).await.unwrap()).unwrap();
+    metadata.as_object_mut().unwrap().remove("evidence");
+    metadata
+        .as_object_mut()
+        .unwrap()
+        .remove("snapshot_evidence");
+    tokio::fs::write(&metadata_path, serde_json::to_vec(&metadata).unwrap())
+        .await
+        .unwrap();
+
+    read_upload_session(root.path(), &session_id, ttl())
+        .await
+        .expect("legacy session should be repaired");
+    let repaired: crate::fs::PersistedOciUploadSession =
+        serde_json::from_slice(&tokio::fs::read(&metadata_path).await.unwrap()).unwrap();
+    assert_eq!(repaired.evidence.events().len(), 1);
+    assert_eq!(repaired.snapshot_evidence.events().len(), 1);
+}
+
+#[tokio::test]
 async fn oci_mutations_append_snapshot_evidence_instead_of_resetting_it() {
     let root = temp_root();
     let session_id = create_test_session(root.path(), false).await.unwrap();
