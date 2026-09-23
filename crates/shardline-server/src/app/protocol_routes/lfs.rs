@@ -1546,6 +1546,21 @@ pub(crate) async fn lfs_patch_object(
                 shardline_reliability::ResumableLifecycleState::Active,
                 shardline_reliability::ResumableLifecycleState::Active,
             )?;
+            let snapshot_state = load_lfs_patch_ranges_from_disk(&ranges_path, total)?;
+            let staging_length = fs::metadata(&tmp_path)?.len();
+            lfs_patch_evidence::record_snapshot(
+                &tmp_dir,
+                &lfs_patch_evidence::LfsPatchSnapshotInput {
+                    oid: &oid_for_closure,
+                    scope_namespace: &scope_namespace_for_closure,
+                    session_id: &session_id_for_closure,
+                    target_key: object_key_for_closure.as_str(),
+                    total_bytes: total,
+                    ranges: &snapshot_state.ranges,
+                    staging_length,
+                    last_touched_unix_seconds: now,
+                },
+            )?;
             Ok(promote)
         })();
         drop(lock);

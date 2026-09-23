@@ -2,16 +2,105 @@ use std::fs;
 use std::io::{Error, ErrorKind, Write};
 use std::path::{Path, PathBuf};
 
-use shardline_reliability::{ResumableLifecycleState, SessionEvidenceLog};
+use serde::Serialize;
+use shardline_reliability::{
+    DigestSnapshot, OperationIdentity, OperationKind, ResumableLifecycleState, SessionEvidenceLog,
+    SnapshotEvidenceLog, canonical_state_digest,
+};
 
 use crate::ServerError;
 
 /// The evidence sidecar is additive: historical LFS patch sessions without it
 /// are reconstructed with the canonical active baseline on first access.
 const EVIDENCE_SUFFIX: &str = ".evidence";
+const SNAPSHOT_SUFFIX: &str = ".snapshot";
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct LfsPatchMaterializedState {
+    oid: String,
+    scope_namespace: String,
+    session_id: String,
+    target_key: String,
+    total_bytes: u64,
+    ranges: Vec<(u64, u64)>,
+    staging_length: u64,
+    last_touched_unix_seconds: u64,
+}
+
+pub(super) struct LfsPatchSnapshotInput<'input> {
+    pub(super) oid: &'input str,
+    pub(super) scope_namespace: &'input str,
+    pub(super) session_id: &'input str,
+    pub(super) target_key: &'input str,
+    pub(super) total_bytes: u64,
+    pub(super) ranges: &'input [(u64, u64)],
+    pub(super) staging_length: u64,
+    pub(super) last_touched_unix_seconds: u64,
+}
 
 pub(super) fn evidence_path(dir: &Path, oid: &str) -> PathBuf {
     dir.join(format!("{oid}{EVIDENCE_SUFFIX}"))
+}
+
+fn snapshot_path(dir: &Path, oid: &str) -> PathBuf {
+    dir.join(format!("{oid}{SNAPSHOT_SUFFIX}"))
+}
+
+fn materialized_snapshot(input: &LfsPatchSnapshotInput<'_>) -> Result<DigestSnapshot, ServerError> {
+    let operation = OperationIdentity::new(
+        "lfs-patch-session",
+        input.scope_namespace.to_owned(),
+        input.session_id.to_owned(),
+        OperationKind::ResumableSession,
+    )
+    .map_err(invalid_evidence)?
+    .with_object_key(input.target_key.to_owned());
+    let state = LfsPatchMaterializedState {
+        oid: input.oid.to_owned(),
+        scope_namespace: input.scope_namespace.to_owned(),
+        session_id: input.session_id.to_owned(),
+        target_key: input.target_key.to_owned(),
+        total_bytes: input.total_bytes,
+        ranges: input.ranges.to_vec(),
+        staging_length: input.staging_length,
+        last_touched_unix_seconds: input.last_touched_unix_seconds,
+    };
+    let digest = canonical_state_digest(&state).map_err(invalid_evidence)?;
+    Ok(DigestSnapshot::new(operation, digest))
+}
+
+pub(super) fn record_snapshot(
+    dir: &Path,
+    input: &LfsPatchSnapshotInput<'_>,
+) -> Result<(), ServerError> {
+    let snapshot = materialized_snapshot(input)?;
+    let path = snapshot_path(dir, input.oid);
+    let mut log = match fs::read(&path) {
+        Ok(bytes) => {
+            let events: Vec<_> = serde_json::from_slice(&bytes).map_err(invalid_evidence)?;
+            SnapshotEvidenceLog::from_events(events).map_err(invalid_evidence)?
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => SnapshotEvidenceLog::default(),
+        Err(error) => return Err(error.into()),
+    };
+    if log.events().is_empty() {
+        log = SnapshotEvidenceLog::baseline(snapshot).map_err(invalid_evidence)?;
+    } else {
+        log.record(snapshot).map_err(invalid_evidence)?;
+    }
+    let bytes = serde_json::to_vec(&log).map_err(invalid_evidence)?;
+    let temporary = path.with_extension("snapshot.tmp");
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&temporary)?;
+    file.write_all(&bytes)?;
+    file.sync_all()?;
+    drop(file);
+    fs::rename(temporary, path)?;
+    sync_directory(dir)?;
+    Ok(())
 }
 
 pub(super) fn load(
@@ -165,18 +254,30 @@ pub(super) fn complete(
 }
 
 pub(super) fn verify_integrity(dir: &Path, oid: &str) -> Result<(), ServerError> {
-    let path = evidence_path(dir, oid);
-    let bytes = match fs::read(path) {
+    let evidence_file = evidence_path(dir, oid);
+    let evidence_bytes = match fs::read(evidence_file) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error.into()),
     };
-    let log: SessionEvidenceLog = serde_json::from_slice(&bytes).map_err(invalid_evidence)?;
-    log.verify().map_err(invalid_evidence)
+    let log: SessionEvidenceLog =
+        serde_json::from_slice(&evidence_bytes).map_err(invalid_evidence)?;
+    log.verify().map_err(invalid_evidence)?;
+    let snapshot_file = snapshot_path(dir, oid);
+    let snapshot_bytes = match fs::read(snapshot_file) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    let events = serde_json::from_slice(&snapshot_bytes).map_err(invalid_evidence)?;
+    let _: SnapshotEvidenceLog<DigestSnapshot> =
+        SnapshotEvidenceLog::from_events(events).map_err(invalid_evidence)?;
+    Ok(())
 }
 
 pub(super) fn remove(dir: &Path, oid: &str) {
     drop(fs::remove_file(evidence_path(dir, oid)));
+    drop(fs::remove_file(snapshot_path(dir, oid)));
 }
 
 fn invalid_evidence(error: impl std::fmt::Display) -> ServerError {
@@ -229,6 +330,60 @@ mod tests {
         .expect("record baseline-compatible mutation");
         let stored = load(directory.path(), OID, SCOPE, SESSION, TARGET).expect("stored evidence");
         assert_eq!(stored.events().len(), 2);
+    }
+
+    #[test]
+    fn materialized_snapshot_history_is_append_only_and_tamper_checked() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        record(
+            directory.path(),
+            OID,
+            SCOPE,
+            SESSION,
+            TARGET,
+            ResumableLifecycleState::Active,
+            ResumableLifecycleState::Active,
+        )
+        .expect("lifecycle baseline");
+        record_snapshot(
+            directory.path(),
+            &LfsPatchSnapshotInput {
+                oid: OID,
+                scope_namespace: SCOPE,
+                session_id: SESSION,
+                target_key: TARGET,
+                total_bytes: 10,
+                ranges: &[],
+                staging_length: 0,
+                last_touched_unix_seconds: 100,
+            },
+        )
+        .expect("snapshot baseline");
+        record_snapshot(
+            directory.path(),
+            &LfsPatchSnapshotInput {
+                oid: OID,
+                scope_namespace: SCOPE,
+                session_id: SESSION,
+                target_key: TARGET,
+                total_bytes: 10,
+                ranges: &[(0, 5)],
+                staging_length: 5,
+                last_touched_unix_seconds: 101,
+            },
+        )
+        .expect("snapshot append");
+        let path = snapshot_path(directory.path(), OID);
+        let stored: SnapshotEvidenceLog<DigestSnapshot> =
+            serde_json::from_slice(&fs::read(&path).expect("snapshot bytes")).expect("snapshot");
+        assert_eq!(stored.events().len(), 2);
+        verify_integrity(directory.path(), OID).expect("snapshot chain verifies");
+
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).expect("snapshot bytes")).expect("json");
+        value[0]["state_digest"] = serde_json::json!("tampered");
+        fs::write(&path, serde_json::to_vec(&value).expect("tampered json")).expect("rewrite");
+        assert!(verify_integrity(directory.path(), OID).is_err());
     }
 
     #[test]
