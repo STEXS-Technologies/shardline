@@ -12,7 +12,7 @@ use shardline_reliability::{
 use crate::ServerError;
 
 /// The evidence sidecar is additive: historical LFS patch sessions without it
-/// are reconstructed with the canonical active baseline on first access.
+/// are reconstructed in memory and persisted by the next successful mutation.
 const EVIDENCE_SUFFIX: &str = ".evidence";
 const SNAPSHOT_SUFFIX: &str = ".snapshot";
 
@@ -115,24 +115,16 @@ pub(super) fn load(
     target_key: &str,
 ) -> Result<SessionEvidenceLog, ServerError> {
     let path = evidence_path(dir, oid);
-    let (log, evidence_was_missing) = match fs::read(&path) {
-        Ok(bytes) => (
-            serde_json::from_slice(&bytes).map_err(invalid_evidence)?,
-            false,
-        ),
-        Err(error) if error.kind() == ErrorKind::NotFound => (
+    let log = match fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(invalid_evidence)?,
+        Err(error) if error.kind() == ErrorKind::NotFound => {
             SessionEvidenceLog::for_legacy_session(scope_namespace, session_id, target_key)
-                .map_err(invalid_evidence)?,
-            true,
-        ),
+                .map_err(invalid_evidence)?
+        }
         Err(error) => return Err(error.into()),
     };
     log.verify_for(scope_namespace, session_id, target_key)
         .map_err(invalid_evidence)?;
-    if evidence_was_missing {
-        let bytes = serde_json::to_vec(&log).map_err(invalid_evidence)?;
-        write_sidecar_atomically(dir, &path, &bytes)?;
-    }
     Ok(log)
 }
 
@@ -328,7 +320,7 @@ mod tests {
             log.events().last().expect("baseline event").after,
             ResumableLifecycleState::Active
         );
-        assert!(evidence_path(directory.path(), OID).is_file());
+        assert!(!evidence_path(directory.path(), OID).exists());
 
         record(
             directory.path(),
@@ -340,6 +332,7 @@ mod tests {
             ResumableLifecycleState::Active,
         )
         .expect("record baseline-compatible mutation");
+        assert!(evidence_path(directory.path(), OID).is_file());
         let stored = load(directory.path(), OID, SCOPE, SESSION, TARGET).expect("stored evidence");
         assert_eq!(stored.events().len(), 2);
     }
