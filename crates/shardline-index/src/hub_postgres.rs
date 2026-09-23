@@ -235,7 +235,7 @@ impl HubStore for PostgresIndexStore {
             {
                 let mut rows = sqlx::query(
                     "SELECT repo_id, repo_type, private, default_branch, created_at_unix_seconds, updated_at_unix_seconds
-                     FROM shardline_hub_repos ORDER BY repo_id",
+                     FROM shardline_hub_repos ORDER BY repo_id FOR SHARE",
                 )
                 .fetch(&mut *tx);
                 while let Some(row) = rows.try_next().await? {
