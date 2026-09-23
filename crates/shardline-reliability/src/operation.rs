@@ -15,6 +15,7 @@ pub enum OperationKind {
     Repair,
     GarbageCollection,
     RetentionHold,
+    WebhookDelivery,
 }
 
 impl OperationKind {
@@ -29,6 +30,7 @@ impl OperationKind {
             Self::Repair => "Repair",
             Self::GarbageCollection => "GarbageCollection",
             Self::RetentionHold => "RetentionHold",
+            Self::WebhookDelivery => "WebhookDelivery",
         }
     }
 }

@@ -1,8 +1,9 @@
 use shardline_protocol::RepositoryProvider;
 use shardline_reliability::{
     ProviderEvidenceLog, ProviderLifecycleEvent, ProviderLifecycleSnapshot, RetentionEvidenceLog,
-    RetentionHoldLifecycleState, verify_provider_lifecycle_events,
-    verify_retention_hold_lifecycle_chain, verify_retention_hold_lifecycle_events,
+    RetentionHoldLifecycleState, WebhookDeliveryEvidenceLog, WebhookDeliveryLifecycleState,
+    verify_provider_lifecycle_events, verify_retention_hold_lifecycle_chain,
+    verify_retention_hold_lifecycle_events, verify_webhook_delivery_chain,
 };
 use sqlx::{Acquire, PgConnection, Postgres, Row, Transaction, query, query_scalar};
 
@@ -152,27 +153,8 @@ impl super::PostgresIndexStore {
             }
         }
 
-        let delivery = &mutation.delivery;
-        let inserted = query(
-            "INSERT INTO shardline_webhook_deliveries (
-                provider,
-                owner,
-                repo,
-                delivery_id,
-                processed_at_unix_seconds
-             )
-             VALUES ($1, $2, $3, $4, $5)
-             ON CONFLICT (provider, owner, repo, delivery_id)
-             DO NOTHING",
-        )
-        .bind(delivery.provider().as_str())
-        .bind(delivery.owner())
-        .bind(delivery.repo())
-        .bind(delivery.delivery_id())
-        .bind(u64_to_i64(delivery.processed_at_unix_seconds())?)
-        .execute(&mut *transaction)
-        .await?;
-        if inserted.rows_affected() == 0 {
+        let inserted = record_webhook_delivery(&mut transaction, &mutation.delivery).await?;
+        if !inserted {
             transaction.rollback().await?;
             return Ok(PostgresProviderMutationOutcome::Duplicate);
         }
@@ -254,6 +236,77 @@ impl super::PostgresIndexStore {
         transaction.commit().await?;
         Ok(PostgresProviderMutationOutcome::Applied)
     }
+}
+
+pub(super) async fn record_webhook_delivery(
+    transaction: &mut Transaction<'_, Postgres>,
+    delivery: &WebhookDelivery,
+) -> Result<bool, PostgresMetadataStoreError> {
+    let existing_row = query(
+        "SELECT provider, owner, repo, delivery_id, processed_at_unix_seconds
+         FROM shardline_webhook_deliveries
+         WHERE provider = $1 AND owner = $2 AND repo = $3 AND delivery_id = $4
+         FOR UPDATE",
+    )
+    .bind(delivery.provider().as_str())
+    .bind(delivery.owner())
+    .bind(delivery.repo())
+    .bind(delivery.delivery_id())
+    .fetch_optional(&mut **transaction)
+    .await?;
+    if let Some(row) = existing_row {
+        let existing = super::index_store::webhook_delivery_from_row(&row)?;
+        let snapshot = super::index_store::webhook_snapshot(
+            &existing,
+            WebhookDeliveryLifecycleState::Processed,
+        )?;
+        let evidence =
+            super::index_store::load_postgres_webhook_evidence(&mut **transaction, &existing)
+                .await?;
+        let evidence = if evidence.events().is_empty() {
+            WebhookDeliveryEvidenceLog::baseline(snapshot.clone())?
+        } else {
+            evidence
+        };
+        shardline_reliability::verify_webhook_delivery_events(evidence.events(), &snapshot)?;
+        return Ok(false);
+    }
+    let snapshot =
+        super::index_store::webhook_snapshot(delivery, WebhookDeliveryLifecycleState::Processed)?;
+    let mut evidence =
+        super::index_store::load_postgres_webhook_evidence(&mut **transaction, delivery).await?;
+    let evidence_was_empty = evidence.events().is_empty();
+    if evidence_was_empty {
+        evidence = WebhookDeliveryEvidenceLog::baseline(snapshot)?;
+    } else {
+        verify_webhook_delivery_chain(evidence.events())?;
+        if evidence
+            .events()
+            .last()
+            .is_none_or(|event| event.after.state != WebhookDeliveryLifecycleState::Released)
+        {
+            return Err(PostgresMetadataStoreError::Reliability(
+                shardline_reliability::ReliabilityError::StateMismatch,
+            ));
+        }
+        evidence.record(snapshot)?;
+    }
+    query(
+        "INSERT INTO shardline_webhook_deliveries (
+            provider, owner, repo, delivery_id, processed_at_unix_seconds
+         ) VALUES ($1, $2, $3, $4, $5)",
+    )
+    .bind(delivery.provider().as_str())
+    .bind(delivery.owner())
+    .bind(delivery.repo())
+    .bind(delivery.delivery_id())
+    .bind(u64_to_i64(delivery.processed_at_unix_seconds())?)
+    .execute(&mut **transaction)
+    .await?;
+    for event in evidence.events() {
+        super::insert_reliability_event(&mut **transaction, event).await?;
+    }
+    Ok(true)
 }
 
 pub(super) async fn upsert_retention_hold(

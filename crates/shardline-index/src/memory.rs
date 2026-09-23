@@ -10,9 +10,11 @@ use shardline_reliability::{
     LifecycleEvent, ProviderEvidenceLog, QuarantineEvidenceLog, QuarantineLifecycleState,
     QuarantineObjectIdentity, QuarantineSnapshot, RetentionEvidenceLog,
     RetentionHoldLifecycleState, RetentionHoldSnapshot, RetentionObjectIdentity,
-    upload_lifecycle_event, verify_lifecycle_chain, verify_provider_lifecycle_events,
-    verify_quarantine_lifecycle_events, verify_retention_hold_lifecycle_chain,
-    verify_retention_hold_lifecycle_events, verify_upload_lifecycle_events,
+    WebhookDeliveryEvidenceLog, WebhookDeliveryIdentity, WebhookDeliveryLifecycleState,
+    WebhookDeliverySnapshot, upload_lifecycle_event, verify_lifecycle_chain,
+    verify_provider_lifecycle_events, verify_quarantine_lifecycle_events,
+    verify_retention_hold_lifecycle_chain, verify_retention_hold_lifecycle_events,
+    verify_upload_lifecycle_events, verify_webhook_delivery_chain,
 };
 use shardline_storage::ObjectKey;
 use thiserror::Error;
@@ -103,11 +105,41 @@ impl MemoryIndexStore {
         delivery: &WebhookDelivery,
     ) -> Result<bool, MemoryIndexStoreError> {
         let key = MemoryWebhookDeliveryKey::from_domain(delivery);
-        Ok(self
-            .lock_state()?
+        let mut state = self.lock_state()?;
+        if let Some(current) = state.webhook_deliveries.get(&key) {
+            verify_memory_webhook_evidence(&state, current)?;
+            return Ok(false);
+        }
+        let snapshot = webhook_snapshot(delivery, WebhookDeliveryLifecycleState::Processed)?;
+        let mut evidence = state
+            .webhook_evidence
+            .get(&key)
+            .cloned()
+            .unwrap_or_default();
+        if evidence.events().is_empty() {
+            evidence = WebhookDeliveryEvidenceLog::baseline(snapshot)
+                .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
+        } else {
+            verify_webhook_delivery_chain(evidence.events())
+                .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
+            if evidence
+                .events()
+                .last()
+                .is_none_or(|event| event.after.state != WebhookDeliveryLifecycleState::Released)
+            {
+                return Err(MemoryIndexStoreError::Reliability(
+                    "webhook evidence has no released materialized state".into(),
+                ));
+            }
+            evidence
+                .record(snapshot)
+                .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
+        }
+        state
             .webhook_deliveries
-            .insert(key, delivery.clone())
-            .is_none())
+            .insert(key.clone(), delivery.clone());
+        state.webhook_evidence.insert(key, evidence);
+        Ok(true)
     }
 
     /// Persists provider-derived repository lifecycle state in memory.
@@ -205,6 +237,36 @@ fn verify_memory_retention_evidence(
             MemoryIndexStoreError::Reliability("retention evidence is missing".into())
         })?;
     verify_retention_hold_lifecycle_events(evidence.events(), &snapshot)
+        .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))
+}
+
+fn webhook_snapshot(
+    delivery: &WebhookDelivery,
+    state: WebhookDeliveryLifecycleState,
+) -> Result<WebhookDeliverySnapshot, MemoryIndexStoreError> {
+    Ok(WebhookDeliverySnapshot::new(
+        WebhookDeliveryIdentity::new(
+            delivery.provider().as_str(),
+            delivery.owner(),
+            delivery.repo(),
+            delivery.delivery_id(),
+        )
+        .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?,
+        delivery.processed_at_unix_seconds(),
+        state,
+    ))
+}
+
+fn verify_memory_webhook_evidence(
+    state: &MemoryIndexState,
+    delivery: &WebhookDelivery,
+) -> Result<(), MemoryIndexStoreError> {
+    let snapshot = webhook_snapshot(delivery, WebhookDeliveryLifecycleState::Processed)?;
+    let evidence = state
+        .webhook_evidence
+        .get(&MemoryWebhookDeliveryKey::from_domain(delivery))
+        .ok_or_else(|| MemoryIndexStoreError::Reliability("webhook evidence is missing".into()))?;
+    shardline_reliability::verify_webhook_delivery_events(evidence.events(), &snapshot)
         .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))
 }
 
@@ -503,8 +565,8 @@ impl LifecycleStore for MemoryIndexStore {
     }
 
     fn list_webhook_deliveries(&self) -> Result<Vec<WebhookDelivery>, Self::Error> {
-        let mut deliveries = self
-            .lock_state()?
+        let state = self.lock_state()?;
+        let mut deliveries = state
             .webhook_deliveries
             .values()
             .cloned()
@@ -516,12 +578,31 @@ impl LifecycleStore for MemoryIndexStore {
                 .then_with(|| left.repo().cmp(right.repo()))
                 .then_with(|| left.delivery_id().cmp(right.delivery_id()))
         });
+        for delivery in &deliveries {
+            verify_memory_webhook_evidence(&state, delivery)?;
+        }
         Ok(deliveries)
     }
 
     fn delete_webhook_delivery(&self, delivery: &WebhookDelivery) -> Result<bool, Self::Error> {
         let key = MemoryWebhookDeliveryKey::from_domain(delivery);
-        Ok(self.lock_state()?.webhook_deliveries.remove(&key).is_some())
+        let mut state = self.lock_state()?;
+        let Some(current) = state.webhook_deliveries.get(&key).cloned() else {
+            return Ok(false);
+        };
+        verify_memory_webhook_evidence(&state, &current)?;
+        let mut evidence = state.webhook_evidence.get(&key).cloned().ok_or_else(|| {
+            MemoryIndexStoreError::Reliability("webhook evidence is missing".into())
+        })?;
+        evidence
+            .record(webhook_snapshot(
+                &current,
+                WebhookDeliveryLifecycleState::Released,
+            )?)
+            .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
+        state.webhook_deliveries.remove(&key);
+        state.webhook_evidence.insert(key, evidence);
+        Ok(true)
     }
 
     fn provider_repository_state(
@@ -1223,6 +1304,7 @@ struct MemoryIndexState {
     retention_holds: HashMap<ObjectKey, RetentionHold>,
     retention_evidence: HashMap<ObjectKey, RetentionEvidenceLog>,
     webhook_deliveries: HashMap<MemoryWebhookDeliveryKey, WebhookDelivery>,
+    webhook_evidence: HashMap<MemoryWebhookDeliveryKey, WebhookDeliveryEvidenceLog>,
     provider_repository_states: HashMap<MemoryProviderRepositoryStateKey, ProviderRepositoryState>,
     provider_repository_evidence: HashMap<MemoryProviderRepositoryStateKey, ProviderEvidenceLog>,
     upload_intents: HashMap<String, UploadIntent>,

@@ -22,6 +22,7 @@ mod snapshot_event;
 mod snapshot_log;
 mod state_snapshot;
 mod states;
+mod webhook_evidence;
 
 #[cfg(test)]
 mod tests;
@@ -60,7 +61,13 @@ pub use retention_evidence::{
 };
 pub use session_evidence::SessionEvidenceLog;
 pub use session_evidence::verify_resumable_session_events;
+pub use snapshot_event::SnapshotEvidence;
 pub use snapshot_log::SnapshotEvidenceLog;
 pub use state_snapshot::DigestSnapshot;
 pub use statechronicle::ContentDigest as StateChronicleDigest;
 pub use states::{ResumableLifecycleState, UploadLifecycleState};
+pub use webhook_evidence::{
+    WebhookDeliveryEvidenceLog, WebhookDeliveryIdentity, WebhookDeliveryLifecycleEvent,
+    WebhookDeliveryLifecycleState, WebhookDeliverySnapshot, verify_webhook_delivery_chain,
+    verify_webhook_delivery_events,
+};

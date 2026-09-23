@@ -26,10 +26,12 @@ use shardline_reliability::{
     ProviderLifecycleSnapshot, QuarantineEvidenceLog, QuarantineLifecycleEvent,
     QuarantineLifecycleState, QuarantineObjectIdentity, QuarantineSnapshot,
     ResumableLifecycleState, RetentionEvidenceLog, RetentionHoldLifecycleEvent,
-    RetentionHoldLifecycleState, RetentionHoldSnapshot, RetentionObjectIdentity,
-    StateTransitionEvent, UploadLifecycleState, baseline_resumable_session_events,
-    baseline_upload_lifecycle_events, verify_provider_lifecycle_events,
-    verify_resumable_session_events, verify_upload_lifecycle_events,
+    RetentionHoldLifecycleState, RetentionHoldSnapshot, RetentionObjectIdentity, SnapshotEvidence,
+    StateTransitionEvent, UploadLifecycleState, WebhookDeliveryEvidenceLog,
+    WebhookDeliveryIdentity, WebhookDeliveryLifecycleEvent, WebhookDeliveryLifecycleState,
+    WebhookDeliverySnapshot, baseline_resumable_session_events, baseline_upload_lifecycle_events,
+    verify_provider_lifecycle_events, verify_resumable_session_events,
+    verify_upload_lifecycle_events,
 };
 use shardline_storage::{
     DirectoryPathError, ObjectKey, ObjectKeyError,
@@ -176,6 +178,50 @@ pub(crate) fn load_retention_evidence(
 pub(crate) fn persist_retention_evidence(
     transaction: &Transaction<'_>,
     event: &RetentionHoldLifecycleEvent,
+) -> Result<(), LocalIndexStoreError> {
+    persist_reliability_event(transaction, event)
+}
+
+pub(crate) fn webhook_snapshot(
+    delivery: &WebhookDelivery,
+    state: WebhookDeliveryLifecycleState,
+) -> Result<WebhookDeliverySnapshot, LocalIndexStoreError> {
+    Ok(WebhookDeliverySnapshot::new(
+        WebhookDeliveryIdentity::new(
+            delivery.provider().as_str(),
+            delivery.owner(),
+            delivery.repo(),
+            delivery.delivery_id(),
+        )?,
+        delivery.processed_at_unix_seconds(),
+        state,
+    ))
+}
+
+pub(crate) fn load_webhook_evidence(
+    transaction: &Transaction<'_>,
+    delivery: &WebhookDelivery,
+) -> Result<WebhookDeliveryEvidenceLog, LocalIndexStoreError> {
+    let operation = webhook_snapshot(delivery, WebhookDeliveryLifecycleState::Processed)?
+        .evidence_operation()
+        .map_err(LocalIndexStoreError::from)?;
+    let mut statement = transaction.prepare(
+        "SELECT event_json FROM shardline_reliability_events
+         WHERE operation_kind = 'WebhookDelivery' AND operation_id = ?1 ORDER BY sequence",
+    )?;
+    let rows = statement.query_map(params![operation.operation_id], |row| {
+        let event_json: String = row.get(0)?;
+        from_str::<WebhookDeliveryLifecycleEvent>(&event_json)
+            .map_err(|error| SqliteError::FromSqlConversionFailure(0, Type::Text, Box::new(error)))
+    })?;
+    Ok(WebhookDeliveryEvidenceLog::from_events(
+        rows.collect::<Result<Vec<_>, _>>()?,
+    )?)
+}
+
+pub(crate) fn persist_webhook_evidence(
+    transaction: &Transaction<'_>,
+    event: &WebhookDeliveryLifecycleEvent,
 ) -> Result<(), LocalIndexStoreError> {
     persist_reliability_event(transaction, event)
 }

@@ -5,10 +5,12 @@ use shardline_reliability::{
     EvidenceEventMetadata, LifecycleEvent, ProviderEvidenceLog, ProviderLifecycleEvent,
     QuarantineEvidenceLog, QuarantineLifecycleEvent, QuarantineLifecycleState,
     QuarantineObjectIdentity, QuarantineSnapshot, RetentionEvidenceLog,
-    RetentionHoldLifecycleState, RetentionHoldSnapshot, RetentionObjectIdentity,
-    baseline_upload_lifecycle_events, upload_lifecycle_event, verify_provider_lifecycle_events,
-    verify_quarantine_lifecycle_events, verify_retention_hold_lifecycle_events,
-    verify_upload_lifecycle_events,
+    RetentionHoldLifecycleState, RetentionHoldSnapshot, RetentionObjectIdentity, SnapshotEvidence,
+    WebhookDeliveryEvidenceLog, WebhookDeliveryIdentity, WebhookDeliveryLifecycleState,
+    WebhookDeliverySnapshot, baseline_upload_lifecycle_events, upload_lifecycle_event,
+    verify_provider_lifecycle_events, verify_quarantine_lifecycle_events,
+    verify_retention_hold_lifecycle_events, verify_upload_lifecycle_events,
+    verify_webhook_delivery_events,
 };
 use shardline_storage::ObjectKey;
 use sqlx::{Row, postgres::PgRow, query, query_scalar, types::Json};
@@ -148,6 +150,46 @@ pub(super) fn retention_snapshot(
         hold.release_after_unix_seconds(),
         state,
     )?)
+}
+
+pub(super) fn webhook_snapshot(
+    delivery: &WebhookDelivery,
+    state: WebhookDeliveryLifecycleState,
+) -> Result<WebhookDeliverySnapshot, PostgresMetadataStoreError> {
+    Ok(WebhookDeliverySnapshot::new(
+        WebhookDeliveryIdentity::new(
+            delivery.provider().as_str(),
+            delivery.owner(),
+            delivery.repo(),
+            delivery.delivery_id(),
+        )?,
+        delivery.processed_at_unix_seconds(),
+        state,
+    ))
+}
+
+pub(super) async fn load_postgres_webhook_evidence(
+    executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>,
+    delivery: &WebhookDelivery,
+) -> Result<WebhookDeliveryEvidenceLog, PostgresMetadataStoreError> {
+    let operation = webhook_snapshot(delivery, WebhookDeliveryLifecycleState::Processed)?
+        .evidence_operation()?;
+    let rows = query(
+        "SELECT event_json FROM shardline_reliability_events
+         WHERE operation_kind = 'WebhookDelivery' AND operation_id = $1 ORDER BY sequence",
+    )
+    .bind(operation.operation_id)
+    .fetch_all(executor)
+    .await?;
+    let events = rows
+        .into_iter()
+        .map(|row| {
+            Ok(serde_json::from_value::<
+                shardline_reliability::WebhookDeliveryLifecycleEvent,
+            >(row.try_get("event_json")?)?)
+        })
+        .collect::<Result<Vec<_>, PostgresMetadataStoreError>>()?;
+    Ok(WebhookDeliveryEvidenceLog::from_events(events)?)
 }
 
 impl AsyncIndexStore for super::PostgresIndexStore {
@@ -764,26 +806,12 @@ impl AsyncIndexStore for super::PostgresIndexStore {
         delivery: &'operation WebhookDelivery,
     ) -> IndexStoreFuture<'operation, bool, Self::Error> {
         Box::pin(async move {
-            let result = query(
-                "INSERT INTO shardline_webhook_deliveries (
-                    provider,
-                    owner,
-                    repo,
-                    delivery_id,
-                    processed_at_unix_seconds
-                 )
-                 VALUES ($1, $2, $3, $4, $5)
-                 ON CONFLICT (provider, owner, repo, delivery_id)
-                 DO NOTHING",
-            )
-            .bind(delivery.provider().as_str())
-            .bind(delivery.owner())
-            .bind(delivery.repo())
-            .bind(delivery.delivery_id())
-            .bind(u64_to_i64(delivery.processed_at_unix_seconds())?)
-            .execute(&self.pool)
-            .await?;
-            Ok(result.rows_affected() > 0)
+            let mut transaction = self.pool.begin().await?;
+            let recorded =
+                super::provider_mutation::record_webhook_delivery(&mut transaction, delivery)
+                    .await?;
+            transaction.commit().await?;
+            Ok(recorded)
         })
     }
 
@@ -796,9 +824,22 @@ impl AsyncIndexStore for super::PostgresIndexStore {
             )
             .fetch_all(&self.pool)
             .await?;
-            rows.into_iter()
+            let deliveries = rows
+                .into_iter()
                 .map(|row| webhook_delivery_from_row(&row))
-                .collect::<Result<Vec<_>, _>>()
+                .collect::<Result<Vec<_>, _>>()?;
+            for delivery in &deliveries {
+                let snapshot =
+                    webhook_snapshot(delivery, WebhookDeliveryLifecycleState::Processed)?;
+                let evidence = load_postgres_webhook_evidence(&self.pool, delivery).await?;
+                let evidence = if evidence.events().is_empty() {
+                    WebhookDeliveryEvidenceLog::baseline(snapshot.clone())?
+                } else {
+                    evidence
+                };
+                verify_webhook_delivery_events(evidence.events(), &snapshot)?;
+            }
+            Ok(deliveries)
         })
     }
 
@@ -807,16 +848,54 @@ impl AsyncIndexStore for super::PostgresIndexStore {
         delivery: &'operation WebhookDelivery,
     ) -> IndexStoreFuture<'operation, bool, Self::Error> {
         Box::pin(async move {
-            let result = query(
-                "DELETE FROM shardline_webhook_deliveries
-                 WHERE provider = $1 AND owner = $2 AND repo = $3 AND delivery_id = $4",
+            let mut transaction = self.pool.begin().await?;
+            let row = query(
+                "SELECT provider, owner, repo, delivery_id, processed_at_unix_seconds
+                 FROM shardline_webhook_deliveries
+                 WHERE provider = $1 AND owner = $2 AND repo = $3 AND delivery_id = $4
+                 FOR UPDATE",
             )
             .bind(delivery.provider().as_str())
             .bind(delivery.owner())
             .bind(delivery.repo())
             .bind(delivery.delivery_id())
-            .execute(&self.pool)
+            .fetch_optional(&mut *transaction)
             .await?;
+            let Some(row) = row else {
+                transaction.commit().await?;
+                return Ok(false);
+            };
+            let existing = webhook_delivery_from_row(&row)?;
+            let active = webhook_snapshot(&existing, WebhookDeliveryLifecycleState::Processed)?;
+            let mut evidence = load_postgres_webhook_evidence(&mut *transaction, &existing).await?;
+            let evidence_was_empty = evidence.events().is_empty();
+            if evidence_was_empty {
+                evidence = WebhookDeliveryEvidenceLog::baseline(active)?;
+            } else {
+                verify_webhook_delivery_events(evidence.events(), &active)?;
+            }
+            evidence.record(webhook_snapshot(
+                &existing,
+                WebhookDeliveryLifecycleState::Released,
+            )?)?;
+            let result = query(
+                "DELETE FROM shardline_webhook_deliveries
+                 WHERE provider = $1 AND owner = $2 AND repo = $3 AND delivery_id = $4",
+            )
+            .bind(existing.provider().as_str())
+            .bind(existing.owner())
+            .bind(existing.repo())
+            .bind(existing.delivery_id())
+            .execute(&mut *transaction)
+            .await?;
+            if evidence_was_empty {
+                for event in evidence.events() {
+                    insert_reliability_event(&mut *transaction, event).await?;
+                }
+            } else if let Some(event) = evidence.events().last() {
+                insert_reliability_event(&mut *transaction, event).await?;
+            }
+            transaction.commit().await?;
             Ok(result.rows_affected() > 0)
         })
     }
@@ -826,14 +905,54 @@ impl AsyncIndexStore for super::PostgresIndexStore {
         older_than_unix_seconds: u64,
     ) -> IndexStoreFuture<'operation, u64, Self::Error> {
         Box::pin(async move {
-            let result = query(
-                "DELETE FROM shardline_webhook_deliveries
-                 WHERE processed_at_unix_seconds < $1",
+            let mut transaction = self.pool.begin().await?;
+            let rows = query(
+                "SELECT provider, owner, repo, delivery_id, processed_at_unix_seconds
+                 FROM shardline_webhook_deliveries
+                 WHERE processed_at_unix_seconds < $1
+                 FOR UPDATE",
             )
             .bind(u64_to_i64(older_than_unix_seconds)?)
-            .execute(&self.pool)
+            .fetch_all(&mut *transaction)
             .await?;
-            Ok(result.rows_affected())
+            let deliveries = rows
+                .iter()
+                .map(webhook_delivery_from_row)
+                .collect::<Result<Vec<_>, _>>()?;
+            for delivery in &deliveries {
+                let active = webhook_snapshot(delivery, WebhookDeliveryLifecycleState::Processed)?;
+                let mut evidence =
+                    load_postgres_webhook_evidence(&mut *transaction, delivery).await?;
+                let evidence_was_empty = evidence.events().is_empty();
+                if evidence_was_empty {
+                    evidence = WebhookDeliveryEvidenceLog::baseline(active)?;
+                } else {
+                    verify_webhook_delivery_events(evidence.events(), &active)?;
+                }
+                evidence.record(webhook_snapshot(
+                    delivery,
+                    WebhookDeliveryLifecycleState::Released,
+                )?)?;
+                query(
+                    "DELETE FROM shardline_webhook_deliveries
+                     WHERE provider = $1 AND owner = $2 AND repo = $3 AND delivery_id = $4",
+                )
+                .bind(delivery.provider().as_str())
+                .bind(delivery.owner())
+                .bind(delivery.repo())
+                .bind(delivery.delivery_id())
+                .execute(&mut *transaction)
+                .await?;
+                if evidence_was_empty {
+                    for event in evidence.events() {
+                        insert_reliability_event(&mut *transaction, event).await?;
+                    }
+                } else if let Some(event) = evidence.events().last() {
+                    insert_reliability_event(&mut *transaction, event).await?;
+                }
+            }
+            transaction.commit().await?;
+            Ok(u64::try_from(deliveries.len()).unwrap_or(u64::MAX))
         })
     }
 
@@ -1618,7 +1737,9 @@ pub(super) fn retention_hold_from_row(
     .map_err(PostgresMetadataStoreError::from)
 }
 
-fn webhook_delivery_from_row(row: &PgRow) -> Result<WebhookDelivery, PostgresMetadataStoreError> {
+pub(super) fn webhook_delivery_from_row(
+    row: &PgRow,
+) -> Result<WebhookDelivery, PostgresMetadataStoreError> {
     let provider_name = row.try_get::<String, _>("provider")?;
     let provider = parse_repository_provider(&provider_name, |_| {
         PostgresMetadataStoreError::WebhookDelivery(WebhookDeliveryError::InvalidProvider)

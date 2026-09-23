@@ -2,10 +2,11 @@ use rusqlite::{OptionalExtension, Transaction, params};
 use shardline_protocol::{RepositoryProvider, ShardlineHash, unix_now_seconds_lossy};
 use shardline_reliability::{
     LifecycleEvent, ProviderEvidenceLog, QuarantineLifecycleState, RetentionEvidenceLog,
-    RetentionHoldLifecycleState, baseline_upload_lifecycle_events, upload_lifecycle_event,
-    verify_provider_lifecycle_events, verify_quarantine_lifecycle_events,
-    verify_retention_hold_lifecycle_chain, verify_retention_hold_lifecycle_events,
-    verify_upload_lifecycle_events,
+    RetentionHoldLifecycleState, WebhookDeliveryEvidenceLog, WebhookDeliveryLifecycleState,
+    baseline_upload_lifecycle_events, upload_lifecycle_event, verify_provider_lifecycle_events,
+    verify_quarantine_lifecycle_events, verify_retention_hold_lifecycle_chain,
+    verify_retention_hold_lifecycle_events, verify_upload_lifecycle_events,
+    verify_webhook_delivery_chain, verify_webhook_delivery_events,
 };
 use shardline_storage::ObjectKey;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -16,7 +17,8 @@ use crate::{
     ProviderRepositoryState, QuarantineCandidate, ReconstructionStore, RetentionHold,
     StoredObjectId, WebhookDelivery,
     local_sqlite::helpers::{
-        load_retention_evidence, persist_retention_evidence, retention_snapshot,
+        load_retention_evidence, load_webhook_evidence, persist_retention_evidence,
+        persist_webhook_evidence, retention_snapshot, webhook_snapshot,
     },
     parse_xet_hash_hex,
     provider_evidence::snapshot_from_state,
@@ -548,8 +550,52 @@ impl LifecycleStore for LocalIndexStore {
     }
 
     fn record_webhook_delivery(&self, delivery: &WebhookDelivery) -> Result<bool, Self::Error> {
-        let connection = self.open_connection()?;
-        let changed = connection.execute(
+        let mut connection = self.open_connection()?;
+        let transaction = connection.transaction()?;
+        let existing = transaction
+            .query_row(
+                "SELECT provider, owner, repo, delivery_id, processed_at_unix_seconds
+                 FROM shardline_webhook_deliveries
+                 WHERE provider = ?1 AND owner = ?2 AND repo = ?3 AND delivery_id = ?4",
+                params![
+                    delivery.provider().as_str(),
+                    delivery.owner(),
+                    delivery.repo(),
+                    delivery.delivery_id(),
+                ],
+                super::helpers::webhook_delivery_from_row,
+            )
+            .optional()?;
+        if let Some(existing) = existing {
+            let snapshot = webhook_snapshot(&existing, WebhookDeliveryLifecycleState::Processed)?;
+            let evidence = load_webhook_evidence(&transaction, &existing)?;
+            let evidence = if evidence.events().is_empty() {
+                WebhookDeliveryEvidenceLog::baseline(snapshot.clone())?
+            } else {
+                evidence
+            };
+            verify_webhook_delivery_events(evidence.events(), &snapshot)?;
+            transaction.commit()?;
+            return Ok(false);
+        }
+        let snapshot = webhook_snapshot(delivery, WebhookDeliveryLifecycleState::Processed)?;
+        let mut evidence = load_webhook_evidence(&transaction, delivery)?;
+        if evidence.events().is_empty() {
+            evidence = WebhookDeliveryEvidenceLog::baseline(snapshot)?;
+        } else {
+            verify_webhook_delivery_chain(evidence.events())?;
+            if evidence
+                .events()
+                .last()
+                .is_none_or(|event| event.after.state != WebhookDeliveryLifecycleState::Released)
+            {
+                return Err(LocalIndexStoreError::Reliability(
+                    shardline_reliability::ReliabilityError::StateMismatch,
+                ));
+            }
+            evidence.record(snapshot)?;
+        }
+        transaction.execute(
             "INSERT INTO shardline_webhook_deliveries (
                 provider,
                 owner,
@@ -567,12 +613,17 @@ impl LifecycleStore for LocalIndexStore {
                 u64_to_i64(delivery.processed_at_unix_seconds())?,
             ],
         )?;
-        Ok(changed > 0)
+        for event in evidence.events() {
+            persist_webhook_evidence(&transaction, event)?;
+        }
+        transaction.commit()?;
+        Ok(true)
     }
 
     fn list_webhook_deliveries(&self) -> Result<Vec<WebhookDelivery>, Self::Error> {
-        let connection = self.open_connection()?;
-        let mut statement = connection.prepare(
+        let mut connection = self.open_connection()?;
+        let transaction = connection.transaction()?;
+        let mut statement = transaction.prepare(
             "SELECT provider,
                     owner,
                     repo,
@@ -582,7 +633,20 @@ impl LifecycleStore for LocalIndexStore {
              ORDER BY provider, owner, repo, delivery_id",
         )?;
         let rows = statement.query_map([], super::helpers::webhook_delivery_from_row)?;
-        collect_rows(rows)
+        let deliveries = collect_rows(rows)?;
+        drop(statement);
+        for delivery in &deliveries {
+            let snapshot = webhook_snapshot(delivery, WebhookDeliveryLifecycleState::Processed)?;
+            let evidence = load_webhook_evidence(&transaction, delivery)?;
+            let evidence = if evidence.events().is_empty() {
+                WebhookDeliveryEvidenceLog::baseline(snapshot.clone())?
+            } else {
+                evidence
+            };
+            verify_webhook_delivery_events(evidence.events(), &snapshot)?;
+        }
+        transaction.commit()?;
+        Ok(deliveries)
     }
 
     fn visit_webhook_deliveries<Visitor, VisitorError>(
@@ -600,8 +664,39 @@ impl LifecycleStore for LocalIndexStore {
     }
 
     fn delete_webhook_delivery(&self, delivery: &WebhookDelivery) -> Result<bool, Self::Error> {
-        let connection = self.open_connection()?;
-        let changed = connection.execute(
+        let mut connection = self.open_connection()?;
+        let transaction = connection.transaction()?;
+        let existing = transaction
+            .query_row(
+                "SELECT provider, owner, repo, delivery_id, processed_at_unix_seconds
+                 FROM shardline_webhook_deliveries
+                 WHERE provider = ?1 AND owner = ?2 AND repo = ?3 AND delivery_id = ?4",
+                params![
+                    delivery.provider().as_str(),
+                    delivery.owner(),
+                    delivery.repo(),
+                    delivery.delivery_id(),
+                ],
+                super::helpers::webhook_delivery_from_row,
+            )
+            .optional()?;
+        let Some(existing) = existing else {
+            transaction.commit()?;
+            return Ok(false);
+        };
+        let snapshot = webhook_snapshot(&existing, WebhookDeliveryLifecycleState::Processed)?;
+        let mut evidence = load_webhook_evidence(&transaction, &existing)?;
+        let evidence_was_empty = evidence.events().is_empty();
+        if evidence_was_empty {
+            evidence = WebhookDeliveryEvidenceLog::baseline(snapshot)?;
+        } else {
+            verify_webhook_delivery_events(evidence.events(), &snapshot)?;
+        }
+        evidence.record(webhook_snapshot(
+            &existing,
+            WebhookDeliveryLifecycleState::Released,
+        )?)?;
+        let changed = transaction.execute(
             "DELETE FROM shardline_webhook_deliveries
              WHERE provider = ?1 AND owner = ?2 AND repo = ?3 AND delivery_id = ?4",
             params![
@@ -611,6 +706,14 @@ impl LifecycleStore for LocalIndexStore {
                 delivery.delivery_id(),
             ],
         )?;
+        if evidence_was_empty {
+            for event in evidence.events() {
+                persist_webhook_evidence(&transaction, event)?;
+            }
+        } else if let Some(event) = evidence.events().last() {
+            persist_webhook_evidence(&transaction, event)?;
+        }
+        transaction.commit()?;
         Ok(changed > 0)
     }
 
@@ -618,13 +721,52 @@ impl LifecycleStore for LocalIndexStore {
         &self,
         older_than_unix_seconds: u64,
     ) -> Result<u64, Self::Error> {
-        let connection = self.open_connection()?;
-        let changed = connection.execute(
-            "DELETE FROM shardline_webhook_deliveries
+        let mut connection = self.open_connection()?;
+        let transaction = connection.transaction()?;
+        let mut statement = transaction.prepare(
+            "SELECT provider, owner, repo, delivery_id, processed_at_unix_seconds
+             FROM shardline_webhook_deliveries
              WHERE processed_at_unix_seconds < ?1",
-            params![u64_to_i64(older_than_unix_seconds)?],
         )?;
-        Ok(u64::try_from(changed).unwrap_or(u64::MAX))
+        let rows = statement.query_map(
+            params![u64_to_i64(older_than_unix_seconds)?],
+            super::helpers::webhook_delivery_from_row,
+        )?;
+        let deliveries = collect_rows(rows)?;
+        drop(statement);
+        for delivery in &deliveries {
+            let snapshot = webhook_snapshot(delivery, WebhookDeliveryLifecycleState::Processed)?;
+            let mut evidence = load_webhook_evidence(&transaction, delivery)?;
+            let evidence_was_empty = evidence.events().is_empty();
+            if evidence_was_empty {
+                evidence = WebhookDeliveryEvidenceLog::baseline(snapshot)?;
+            } else {
+                verify_webhook_delivery_events(evidence.events(), &snapshot)?;
+            }
+            evidence.record(webhook_snapshot(
+                delivery,
+                WebhookDeliveryLifecycleState::Released,
+            )?)?;
+            transaction.execute(
+                "DELETE FROM shardline_webhook_deliveries
+                 WHERE provider = ?1 AND owner = ?2 AND repo = ?3 AND delivery_id = ?4",
+                params![
+                    delivery.provider().as_str(),
+                    delivery.owner(),
+                    delivery.repo(),
+                    delivery.delivery_id(),
+                ],
+            )?;
+            if evidence_was_empty {
+                for event in evidence.events() {
+                    persist_webhook_evidence(&transaction, event)?;
+                }
+            } else if let Some(event) = evidence.events().last() {
+                persist_webhook_evidence(&transaction, event)?;
+            }
+        }
+        transaction.commit()?;
+        Ok(u64::try_from(deliveries.len()).unwrap_or(u64::MAX))
     }
 
     fn provider_repository_state(
@@ -1731,6 +1873,32 @@ mod tests {
         let repeated = LifecycleStore::record_webhook_delivery(&store, &delivery)
             .expect("duplicate record should succeed");
         assert!(!repeated, "duplicate record should return false");
+    }
+
+    #[test]
+    fn webhook_delivery_tampered_evidence_is_rejected_on_read() {
+        let store = make_store();
+        let delivery = WebhookDelivery::new(
+            RepositoryProvider::GitHub,
+            "owner".into(),
+            "repo".into(),
+            "delivery-tampered".into(),
+            1000,
+        )
+        .unwrap();
+        LifecycleStore::record_webhook_delivery(&store, &delivery).unwrap();
+
+        let connection = store.open_connection().unwrap();
+        connection
+            .execute(
+                "UPDATE shardline_reliability_events
+                 SET event_json = '{\"sequence\":99}'
+                 WHERE operation_kind = 'WebhookDelivery' AND operation_id = ?1",
+                rusqlite::params![delivery.delivery_id()],
+            )
+            .unwrap();
+
+        assert!(LifecycleStore::list_webhook_deliveries(&store).is_err());
     }
 
     #[test]
