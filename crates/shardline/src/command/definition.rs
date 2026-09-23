@@ -163,6 +163,8 @@ pub(crate) enum DbMigrateSubcommand {
     Verify(DbMigrateVerifyArgs),
     /// Backfill a bounded batch of missing reliability baselines.
     Backfill(DbMigrateBackfillArgs),
+    /// Rebuild one corrupted reliability operation after explicit confirmation.
+    Repair(DbMigrateRepairArgs),
 }
 
 #[derive(Debug, Args)]
@@ -207,6 +209,22 @@ pub(crate) struct DbMigrateBackfillArgs {
     /// Maximum number of rows considered per materialized-state table.
     #[arg(long, default_value = "256", value_parser = parse_positive_usize)]
     pub(crate) batch_size: NonZeroUsize,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct DbMigrateRepairArgs {
+    /// Override the configured Postgres metadata URL.
+    #[arg(long)]
+    pub(crate) database_url: Option<String>,
+    /// Reliability operation kind, such as `S3Object` or `ResumableSession`.
+    #[arg(long)]
+    pub(crate) operation_kind: String,
+    /// Exact persisted operation identity to rebuild.
+    #[arg(long)]
+    pub(crate) operation_id: String,
+    /// Required acknowledgement that existing evidence will be discarded.
+    #[arg(long)]
+    pub(crate) confirm: bool,
 }
 
 // ── Admin ───────────────────────────────────────────────────────────────

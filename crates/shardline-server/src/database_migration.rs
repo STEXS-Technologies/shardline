@@ -125,6 +125,13 @@ pub enum DatabaseMigrationCommand {
         /// Maximum number of rows considered per materialized-state table.
         batch_size: usize,
     },
+    /// Explicitly discard and rebuild one named reliability operation.
+    Repair {
+        /// Persisted reliability operation kind.
+        operation_kind: String,
+        /// Persisted operation identity.
+        operation_id: String,
+    },
 }
 
 /// Database-migration runtime options.
@@ -464,9 +471,9 @@ pub async fn run_database_migration(
         .await?;
     ensure_migration_history_table(&pool).await?;
     let _migration_guard = match options.command() {
-        DatabaseMigrationCommand::Up { .. } | DatabaseMigrationCommand::Down { .. } => {
-            Some(acquire_migration_lock(&pool).await?)
-        }
+        DatabaseMigrationCommand::Up { .. }
+        | DatabaseMigrationCommand::Down { .. }
+        | DatabaseMigrationCommand::Repair { .. } => Some(acquire_migration_lock(&pool).await?),
         DatabaseMigrationCommand::Status => None,
         DatabaseMigrationCommand::Verify => None,
         DatabaseMigrationCommand::Backfill { .. } => Some(acquire_migration_lock(&pool).await?),
@@ -494,7 +501,8 @@ pub async fn run_database_migration(
         }
         DatabaseMigrationCommand::Status
         | DatabaseMigrationCommand::Verify
-        | DatabaseMigrationCommand::Backfill { .. } => (0, 0),
+        | DatabaseMigrationCommand::Backfill { .. }
+        | DatabaseMigrationCommand::Repair { .. } => (0, 0),
     };
 
     if matches!(options.command(), DatabaseMigrationCommand::Verify) {
@@ -502,6 +510,13 @@ pub async fn run_database_migration(
     }
     if let DatabaseMigrationCommand::Backfill { batch_size } = options.command() {
         backfill_reliability_events(&pool, *batch_size).await?;
+    }
+    if let DatabaseMigrationCommand::Repair {
+        operation_kind,
+        operation_id,
+    } = options.command()
+    {
+        repair_reliability_operation(&pool, operation_kind, operation_id).await?;
     }
 
     let migrations = migration_status_entries(&pool).await?;
@@ -548,6 +563,58 @@ async fn backfill_reliability_events(
 
 async fn verify_reliability_events(pool: &PgPool) -> Result<(), DatabaseMigrationError> {
     reconcile_reliability_events(pool, false, usize::MAX).await
+}
+
+async fn repair_reliability_operation(
+    pool: &PgPool,
+    operation_kind: &str,
+    operation_id: &str,
+) -> Result<(), DatabaseMigrationError> {
+    let operation_kind = OperationKind::parse(operation_kind).ok_or_else(|| {
+        DatabaseMigrationError::Backfill(format!(
+            "unknown reliability operation kind for explicit repair: {operation_kind}"
+        ))
+    })?;
+    let mut transaction = pool.begin().await?;
+    query(
+        "DELETE FROM shardline_reliability_events
+         WHERE operation_kind = $1 AND operation_id = $2",
+    )
+    .bind(operation_kind.as_str())
+    .bind(operation_id)
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    backfill_reliability_events(pool, usize::MAX).await?;
+    let repaired: bool = query_scalar(
+        "SELECT EXISTS(
+             SELECT 1 FROM shardline_reliability_events
+             WHERE operation_kind = $1 AND operation_id = $2
+         )",
+    )
+    .bind(operation_kind.as_str())
+    .bind(operation_id)
+    .fetch_one(pool)
+    .await?;
+    if !repaired {
+        return Err(DatabaseMigrationError::Backfill(format!(
+            "cannot repair reliability operation kind={} operation={}: no authoritative materialized state exists",
+            operation_kind.as_str(),
+            operation_id
+        )));
+    }
+    verify_persisted_reliability_operation(pool, operation_kind, operation_id).await
+}
+
+/// Verifies every persisted reliability event for an operator-facing fsck run.
+///
+/// Unlike migration backfill, this never establishes missing baselines or
+/// changes materialized state. A failure is reported by fsck as an evidence
+/// issue so operators can distinguish valid content from invalid provenance.
+pub async fn verify_reliability_events_for_fsck(
+    pool: &PgPool,
+) -> Result<(), DatabaseMigrationError> {
+    verify_reliability_events(pool).await
 }
 
 async fn persist_reliability_event<T: EvidenceEventMetadata>(
@@ -1659,22 +1726,49 @@ async fn verify_persisted_reliability_events(
     .fetch_all(&mut **transaction)
     .await?;
     for row in rows {
-        let operation_kind_text: String = row.try_get("operation_kind")?;
-        let operation_id: String = row.try_get("operation_id")?;
-        let sequence: i64 = row.try_get("sequence")?;
-        let event_json: serde_json::Value = row.try_get("event_json")?;
-        let operation_kind = OperationKind::parse(&operation_kind_text).ok_or_else(|| {
-            DatabaseMigrationError::Backfill(format!(
-                "unknown reliability operation kind {operation_kind_text} for {operation_id} at sequence {sequence}"
-            ))
-        })?;
-        verify_persisted_event(operation_kind, event_json).map_err(|error| {
-            DatabaseMigrationError::Backfill(format!(
-                "invalid persisted reliability event kind={operation_kind_text} operation={operation_id} sequence={sequence}: {error}"
-            ))
-        })?;
+        verify_persisted_reliability_row(&row)?;
     }
     Ok(())
+}
+
+async fn verify_persisted_reliability_operation(
+    pool: &PgPool,
+    operation_kind: OperationKind,
+    operation_id: &str,
+) -> Result<(), DatabaseMigrationError> {
+    let rows = query(
+        "SELECT operation_kind, operation_id, sequence, event_json
+         FROM shardline_reliability_events
+         WHERE operation_kind = $1 AND operation_id = $2
+         ORDER BY sequence",
+    )
+    .bind(operation_kind.as_str())
+    .bind(operation_id)
+    .fetch_all(pool)
+    .await?;
+    for row in rows {
+        verify_persisted_reliability_row(&row)?;
+    }
+    Ok(())
+}
+
+fn verify_persisted_reliability_row(
+    row: &sqlx::postgres::PgRow,
+) -> Result<(), DatabaseMigrationError> {
+    let operation_kind_text: String = row.try_get("operation_kind")?;
+    let operation_id: String = row.try_get("operation_id")?;
+    let sequence: i64 = row.try_get("sequence")?;
+    let event_json: serde_json::Value = row.try_get("event_json")?;
+    let operation_kind = OperationKind::parse(&operation_kind_text).ok_or_else(|| {
+        DatabaseMigrationError::Backfill(format!(
+            "unknown reliability operation kind {operation_kind_text} for {operation_id} at sequence {sequence}"
+        ))
+    })?;
+    verify_persisted_event(operation_kind, event_json).map_err(|error| {
+        DatabaseMigrationError::Backfill(format!(
+            "invalid persisted reliability event kind={operation_kind_text} operation={operation_id} sequence={sequence}: {error}"
+        ))
+    })
 }
 
 fn provider_snapshot_from_row(

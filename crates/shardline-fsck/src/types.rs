@@ -232,6 +232,12 @@ pub enum FsckIssueDetail {
         /// Maximum accepted timestamp.
         max_allowed_unix_seconds: u64,
     },
+    /// Reliability evidence did not verify against its persisted event schema or chain.
+    #[error("reliability evidence is invalid: {reason}")]
+    ReliabilityEvidenceInvalid {
+        /// Stable verifier explanation suitable for operator diagnostics.
+        reason: String,
+    },
 }
 
 /// Reconstruction-plan detail for fsck issues.
@@ -360,6 +366,8 @@ pub enum FsckIssueKind {
     InvalidProviderRepositoryState,
     /// Provider repository lifecycle metadata had a timestamp too far in the future.
     InvalidProviderRepositoryStateTimestamp,
+    /// Materialized state exists but its StateChronicle/Penelope evidence is invalid.
+    InvalidReliabilityEvidence,
 }
 
 impl FsckIssueKind {
@@ -409,6 +417,7 @@ impl FsckIssueKind {
             Self::InvalidProviderRepositoryStateTimestamp => {
                 "invalid_provider_repository_state_timestamp"
             }
+            Self::InvalidReliabilityEvidence => "invalid_reliability_evidence",
         }
     }
 }

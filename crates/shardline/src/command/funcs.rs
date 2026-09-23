@@ -148,6 +148,27 @@ impl TryFrom<CliDefinition> for CliCommand {
                             batch_size: backfill_args.batch_size.get(),
                         },
                     }),
+                    DbMigrateSubcommand::Repair(repair_args) => {
+                        if !repair_args.confirm {
+                            return Err(CliParseError::validation(
+                                ErrorKind::InvalidValue,
+                                "db migrate repair requires --confirm because it discards the selected evidence chain",
+                            ));
+                        }
+                        if repair_args.operation_id.is_empty() {
+                            return Err(CliParseError::validation(
+                                ErrorKind::InvalidValue,
+                                "db migrate repair requires a non-empty --operation-id",
+                            ));
+                        }
+                        Ok(Self::DbMigrate {
+                            database_url: repair_args.database_url.map(RedactedDbUrl),
+                            command: DatabaseMigrationCommand::Repair {
+                                operation_kind: repair_args.operation_kind,
+                                operation_id: repair_args.operation_id,
+                            },
+                        })
+                    }
                 },
             },
             CliDefinitionCommand::Admin(args) => match args.command {

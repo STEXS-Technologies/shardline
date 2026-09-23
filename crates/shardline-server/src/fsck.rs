@@ -1,6 +1,7 @@
-use shardline_fsck::run_fsck_with_stores;
+use shardline_fsck::{FsckIssue, run_fsck_with_stores};
 use shardline_index::{LocalIndexStore, LocalRecordStore, PostgresIndexStore, PostgresRecordStore};
 
+use crate::database_migration::verify_reliability_events_for_fsck;
 use crate::{
     ServerConfig, ServerError,
     error::{IndexError, ObjectStoreError},
@@ -25,8 +26,8 @@ pub async fn run_fsck(config: ServerConfig) -> Result<LocalFsckReport, ServerErr
     if let Some(index_postgres_url) = config.index_postgres_url() {
         let pool = connect_postgres_metadata_pool(index_postgres_url, 4)?;
         let index_store = PostgresIndexStore::new(pool.clone());
-        let record_store = PostgresRecordStore::new(pool);
-        return run_fsck_with_stores(
+        let record_store = PostgresRecordStore::new(pool.clone());
+        let mut report = run_fsck_with_stores(
             &record_store,
             &index_store,
             &object_root,
@@ -34,7 +35,17 @@ pub async fn run_fsck(config: ServerConfig) -> Result<LocalFsckReport, ServerErr
             config.shard_metadata_limits(),
         )
         .await
-        .map_err(ServerError::from);
+        .map_err(ServerError::from)?;
+        if let Err(error) = verify_reliability_events_for_fsck(&pool).await {
+            report.issues.push(FsckIssue {
+                kind: FsckIssueKind::InvalidReliabilityEvidence,
+                location: "postgres reliability journal".to_owned(),
+                detail: FsckIssueDetail::ReliabilityEvidenceInvalid {
+                    reason: error.to_string(),
+                },
+            });
+        }
+        return Ok(report);
     }
 
     let index_store = LocalIndexStore::open(config.root_dir().to_path_buf());
