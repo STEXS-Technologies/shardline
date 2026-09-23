@@ -176,9 +176,15 @@ pub(super) async fn load_postgres_webhook_evidence(
         .evidence_operation()?;
     let rows = query(
         "SELECT event_json FROM shardline_reliability_events
-         WHERE operation_kind = 'WebhookDelivery' AND operation_id = $1 ORDER BY sequence",
+         WHERE operation_kind = 'WebhookDelivery'
+           AND (operation_id = $1 OR (operation_id = $2 AND NOT EXISTS (
+             SELECT 1 FROM shardline_reliability_events
+             WHERE operation_kind = 'WebhookDelivery' AND operation_id = $1
+           )))
+         ORDER BY sequence",
     )
-    .bind(operation.operation_id)
+    .bind(&operation.operation_id)
+    .bind(delivery.delivery_id())
     .fetch_all(executor)
     .await?;
     let events = rows

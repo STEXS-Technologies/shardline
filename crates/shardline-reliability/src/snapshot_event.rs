@@ -13,6 +13,17 @@ use crate::{OperationIdentity, ReliabilityError};
 pub trait SnapshotEvidence: Clone + Eq + Serialize {
     fn evidence_operation(&self) -> Result<OperationIdentity, ReliabilityError>;
 
+    fn validate_evidence_operation(
+        &self,
+        operation: &OperationIdentity,
+    ) -> Result<(), ReliabilityError> {
+        if &self.evidence_operation()? == operation {
+            Ok(())
+        } else {
+            Err(ReliabilityError::OperationMismatch)
+        }
+    }
+
     fn validate_evidence_transition(&self, after: &Self) -> Result<(), ReliabilityError>;
 }
 
@@ -54,9 +65,7 @@ impl<S: SnapshotEvidence> SnapshotEvidenceEvent<S> {
 
     pub fn verify_integrity(&self) -> Result<(), ReliabilityError> {
         self.before.validate_evidence_transition(&self.after)?;
-        if self.operation != self.after.evidence_operation()? {
-            return Err(ReliabilityError::OperationMismatch);
-        }
+        self.after.validate_evidence_operation(&self.operation)?;
         if self.state_digest != state_digest(&self.after, self.digest_encoding)? {
             return Err(ReliabilityError::StateDigestMismatch);
         }

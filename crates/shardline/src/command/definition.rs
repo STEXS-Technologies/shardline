@@ -159,6 +159,8 @@ pub(crate) enum DbMigrateSubcommand {
     Down(DbMigrateDownArgs),
     /// Show applied and pending migrations.
     Status(DbMigrateStatusArgs),
+    /// Verify every durable reliability journal without repairing it.
+    Verify(DbMigrateVerifyArgs),
 }
 
 #[derive(Debug, Args)]
@@ -183,6 +185,13 @@ pub(crate) struct DbMigrateDownArgs {
 
 #[derive(Debug, Args)]
 pub(crate) struct DbMigrateStatusArgs {
+    /// Override the configured Postgres metadata URL.
+    #[arg(long)]
+    pub(crate) database_url: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct DbMigrateVerifyArgs {
     /// Override the configured Postgres metadata URL.
     #[arg(long)]
     pub(crate) database_url: Option<String>,

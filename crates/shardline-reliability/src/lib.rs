@@ -68,6 +68,6 @@ pub use statechronicle::ContentDigest as StateChronicleDigest;
 pub use states::{ResumableLifecycleState, UploadLifecycleState};
 pub use webhook_evidence::{
     WebhookDeliveryEvidenceLog, WebhookDeliveryIdentity, WebhookDeliveryLifecycleEvent,
-    WebhookDeliveryLifecycleState, WebhookDeliverySnapshot, verify_webhook_delivery_chain,
-    verify_webhook_delivery_events,
+    WebhookDeliveryLifecycleState, WebhookDeliveryOperationId, WebhookDeliverySnapshot,
+    verify_webhook_delivery_chain, verify_webhook_delivery_events,
 };

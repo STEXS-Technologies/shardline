@@ -489,6 +489,28 @@ fn parse_db_migrate_status() {
 }
 
 #[test]
+fn parse_db_migrate_verify() {
+    let args = vec![
+        "shardline".to_owned(),
+        "db".to_owned(),
+        "migrate".to_owned(),
+        "verify".to_owned(),
+        "--database-url".to_owned(),
+        "postgres://user:password@localhost:5432/shardline".to_owned(),
+    ];
+
+    assert_eq!(
+        CliCommand::parse(args),
+        Ok(CliCommand::DbMigrate {
+            database_url: Some(RedactedDbUrl(
+                "postgres://user:password@localhost:5432/shardline".to_owned(),
+            )),
+            command: DatabaseMigrationCommand::Verify,
+        })
+    );
+}
+
+#[test]
 fn parse_db_migrate_rejects_zero_steps() {
     let args = vec![
         "shardline".to_owned(),

@@ -138,6 +138,10 @@ impl TryFrom<CliDefinition> for CliCommand {
                         database_url: status_args.database_url.map(RedactedDbUrl),
                         command: DatabaseMigrationCommand::Status,
                     }),
+                    DbMigrateSubcommand::Verify(verify_args) => Ok(Self::DbMigrate {
+                        database_url: verify_args.database_url.map(RedactedDbUrl),
+                        command: DatabaseMigrationCommand::Verify,
+                    }),
                 },
             },
             CliDefinitionCommand::Admin(args) => match args.command {

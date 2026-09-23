@@ -19,6 +19,23 @@ pub enum OperationKind {
 }
 
 impl OperationKind {
+    /// Parses the stable persisted operation discriminator.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "Upload" => Some(Self::Upload),
+            "ResumableSession" => Some(Self::ResumableSession),
+            "MetadataCommit" => Some(Self::MetadataCommit),
+            "Visibility" => Some(Self::Visibility),
+            "ProviderEvent" => Some(Self::ProviderEvent),
+            "Repair" => Some(Self::Repair),
+            "GarbageCollection" => Some(Self::GarbageCollection),
+            "RetentionHold" => Some(Self::RetentionHold),
+            "WebhookDelivery" => Some(Self::WebhookDelivery),
+            _ => None,
+        }
+    }
+
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {

@@ -38,6 +38,32 @@ pub struct WebhookDeliveryIdentity {
     pub delivery_id: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebhookDeliveryOperationId(String);
+
+impl WebhookDeliveryOperationId {
+    fn new(identity: &WebhookDeliveryIdentity) -> Self {
+        let fields = [
+            identity.provider.as_str(),
+            identity.owner.as_str(),
+            identity.repo.as_str(),
+            identity.delivery_id.as_str(),
+        ];
+        Self(
+            fields
+                .into_iter()
+                .map(|field| format!("{}:{field}", field.len()))
+                .collect::<Vec<_>>()
+                .join(""),
+        )
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 impl WebhookDeliveryIdentity {
     pub fn new(
         provider: impl Into<String>,
@@ -91,20 +117,58 @@ impl WebhookDeliverySnapshot {
         }
     }
 
-    fn operation(&self) -> Result<OperationIdentity, ReliabilityError> {
-        Ok(OperationIdentity::new(
-            format!("provider:{}", self.provider),
-            format!("{}/{}", self.owner, self.repo),
+    fn identity(&self) -> Result<WebhookDeliveryIdentity, ReliabilityError> {
+        WebhookDeliveryIdentity::new(
+            self.provider.clone(),
+            self.owner.clone(),
+            self.repo.clone(),
             self.delivery_id.clone(),
+        )
+    }
+
+    fn operation(&self) -> Result<OperationIdentity, ReliabilityError> {
+        let identity = self.identity()?;
+        Ok(OperationIdentity::new(
+            format!("provider:{}", identity.provider),
+            format!("{}/{}", identity.owner, identity.repo),
+            WebhookDeliveryOperationId::new(&identity).0,
             OperationKind::WebhookDelivery,
         )?
-        .with_object_key(format!("{}/{}/{}", self.provider, self.owner, self.repo)))
+        .with_object_key(format!(
+            "{}/{}/{}",
+            identity.provider, identity.owner, identity.repo
+        )))
+    }
+
+    fn legacy_operation(&self) -> Result<OperationIdentity, ReliabilityError> {
+        let identity = self.identity()?;
+        Ok(OperationIdentity::new(
+            format!("provider:{}", identity.provider),
+            format!("{}/{}", identity.owner, identity.repo),
+            identity.delivery_id,
+            OperationKind::WebhookDelivery,
+        )?
+        .with_object_key(format!(
+            "{}/{}/{}",
+            identity.provider, identity.owner, identity.repo
+        )))
     }
 }
 
 impl SnapshotEvidence for WebhookDeliverySnapshot {
     fn evidence_operation(&self) -> Result<OperationIdentity, ReliabilityError> {
         self.operation()
+    }
+
+    fn validate_evidence_operation(
+        &self,
+        operation: &OperationIdentity,
+    ) -> Result<(), ReliabilityError> {
+        if &self.operation()? == operation || &self.legacy_operation()? == operation {
+            Ok(())
+        } else {
+            Err(ReliabilityError::OperationMismatch)
+        }
     }
 
     fn validate_evidence_transition(&self, after: &Self) -> Result<(), ReliabilityError> {
@@ -150,6 +214,7 @@ pub fn verify_webhook_delivery_events(
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::snapshot_event::SnapshotEvidence;
 
     fn snapshot(state: WebhookDeliveryLifecycleState) -> WebhookDeliverySnapshot {
         WebhookDeliverySnapshot::new(
@@ -187,5 +252,24 @@ mod tests {
             event.after.delivery_id = "tampered".to_owned();
         }
         assert!(verify_webhook_delivery_chain(&events).is_err());
+    }
+
+    #[test]
+    fn operation_id_is_scoped_to_repository_identity() {
+        let first = WebhookDeliverySnapshot::new(
+            WebhookDeliveryIdentity::new("github", "team", "assets", "delivery-shared").unwrap(),
+            100,
+            WebhookDeliveryLifecycleState::Processed,
+        );
+        let second = WebhookDeliverySnapshot::new(
+            WebhookDeliveryIdentity::new("github", "team", "other-assets", "delivery-shared")
+                .unwrap(),
+            100,
+            WebhookDeliveryLifecycleState::Processed,
+        );
+        assert_ne!(
+            first.evidence_operation().unwrap().operation_id,
+            second.evidence_operation().unwrap().operation_id
+        );
     }
 }

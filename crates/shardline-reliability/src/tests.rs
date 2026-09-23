@@ -3,6 +3,24 @@
 use super::*;
 
 #[test]
+fn operation_kind_persisted_discriminators_round_trip() {
+    for kind in [
+        OperationKind::Upload,
+        OperationKind::ResumableSession,
+        OperationKind::MetadataCommit,
+        OperationKind::Visibility,
+        OperationKind::ProviderEvent,
+        OperationKind::Repair,
+        OperationKind::GarbageCollection,
+        OperationKind::RetentionHold,
+        OperationKind::WebhookDelivery,
+    ] {
+        assert_eq!(OperationKind::parse(kind.as_str()), Some(kind));
+    }
+    assert_eq!(OperationKind::parse("unknown"), None);
+}
+
+#[test]
 fn lifecycle_preserves_shardline_transitions() {
     assert!(UploadLifecycleState::Created.can_transition_to(UploadLifecycleState::Storing));
     assert!(
