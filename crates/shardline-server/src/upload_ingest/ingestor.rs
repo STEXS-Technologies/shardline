@@ -4,7 +4,7 @@ use std::num::NonZeroUsize;
 
 use bytes::BytesMut;
 use sha2::{Digest, Sha256};
-use shardline_index::{FileChunkRecord, FileRecord};
+use shardline_index::{FileChunkRecord, FileRecord, xet_hash_hex_string};
 use shardline_protocol::{ByteRange, RepositoryScope};
 use shardline_storage::AsyncObjectStore;
 use tokio::task::JoinSet;
@@ -503,17 +503,7 @@ async fn pack_and_store_xorb_from_durable_chunks(
         )
         .await
         .map_err(ServerError::from)?;
-        let raw = lz4_flex::decompress_size_prepended(&compressed).map_err(|error| {
-            ServerError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("stored upload chunk could not be decompressed: {error}"),
-            ))
-        })?;
-        if u64::try_from(raw.len())? != chunk_length {
-            return Err(ServerError::ObjectStore(
-                crate::error::ObjectStoreError::StoredLengthMismatch,
-            ));
-        }
+        let raw = decode_and_verify_durable_chunk(&compressed, &chunk_hash, chunk_length)?;
 
         let next_raw_bytes = batch_raw_bytes
             .checked_add(raw.len())
@@ -536,6 +526,28 @@ async fn pack_and_store_xorb_from_durable_chunks(
         store_xorb_batch(object_store, file_id, &batch, records, batch_record_start).await;
     }
     Ok(())
+}
+
+fn decode_and_verify_durable_chunk(
+    compressed: &[u8],
+    expected_hash: &str,
+    expected_length: u64,
+) -> Result<Vec<u8>, ServerError> {
+    let raw = lz4_flex::decompress_size_prepended(compressed).map_err(|error| {
+        ServerError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("stored upload chunk could not be decompressed: {error}"),
+        ))
+    })?;
+    if u64::try_from(raw.len())? != expected_length {
+        return Err(ServerError::ObjectStore(
+            crate::error::ObjectStoreError::StoredLengthMismatch,
+        ));
+    }
+    if xet_hash_hex_string(crate::local_backend::chunk_hash(&raw)) != expected_hash {
+        return Err(ServerError::ExpectedBodyHashMismatch);
+    }
+    Ok(raw)
 }
 
 async fn pack_and_store_xorb_spool(
@@ -656,8 +668,9 @@ mod tests {
 
     use axum::body::Bytes;
 
-    use super::FileUploadIngestor;
+    use super::{FileUploadIngestor, decode_and_verify_durable_chunk};
     use crate::{ServerError, object_store::ServerObjectStore};
+    use shardline_index::xet_hash_hex_string;
 
     #[test]
     fn ingestor_new_with_parallelism_creates_empty_state() {
@@ -678,6 +691,29 @@ mod tests {
         assert_eq!(ingestor.reused_chunks, 0);
         assert_eq!(ingestor.stored_bytes, 0);
         assert!(ingestor.sha256.is_some());
+    }
+
+    #[test]
+    fn durable_chunk_decode_verifies_length_and_content_identity() {
+        let raw = b"durable chunk bytes";
+        let compressed = lz4_flex::compress_prepend_size(raw);
+        let expected_hash = xet_hash_hex_string(crate::local_backend::chunk_hash(raw));
+        let decoded = decode_and_verify_durable_chunk(
+            &compressed,
+            &expected_hash,
+            u64::try_from(raw.len()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(decoded, raw);
+    }
+
+    #[test]
+    fn durable_chunk_decode_rejects_identity_mismatch() {
+        let raw = b"durable chunk bytes";
+        let compressed = lz4_flex::compress_prepend_size(raw);
+        let wrong_hash = xet_hash_hex_string(crate::local_backend::chunk_hash(b"different bytes"));
+        let result = decode_and_verify_durable_chunk(&compressed, &wrong_hash, raw.len() as u64);
+        assert!(matches!(result, Err(ServerError::ExpectedBodyHashMismatch)));
     }
 
     #[test]
