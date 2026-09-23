@@ -19,12 +19,14 @@ mod quarantine_evidence;
 mod session_evidence;
 mod snapshot_event;
 mod snapshot_log;
+mod state_snapshot;
 mod states;
 
 #[cfg(test)]
 mod tests;
 
 pub use digest::DigestEncoding;
+pub use digest::canonical_state_digest;
 pub use error::ReliabilityError;
 pub use event::{
     LifecycleEvent, StateTransitionEvent, baseline_resumable_session_events,
@@ -53,5 +55,6 @@ pub use quarantine_evidence::{
 pub use session_evidence::SessionEvidenceLog;
 pub use session_evidence::verify_resumable_session_events;
 pub use snapshot_log::SnapshotEvidenceLog;
+pub use state_snapshot::DigestSnapshot;
 pub use statechronicle::ContentDigest as StateChronicleDigest;
 pub use states::{ResumableLifecycleState, UploadLifecycleState};

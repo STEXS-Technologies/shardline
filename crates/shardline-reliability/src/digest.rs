@@ -55,9 +55,7 @@ pub(crate) fn process_digest<T: Serialize, U: Serialize>(
     Ok(PenelopeDigest::sha256(&payload))
 }
 
-pub(crate) fn canonical_state_digest<T: Serialize>(
-    state: &T,
-) -> Result<ContentDigest, ReliabilityError> {
+pub fn canonical_state_digest<T: Serialize>(state: &T) -> Result<ContentDigest, ReliabilityError> {
     state_digest(state, DigestEncoding::CanonicalBcsV1)
 }
 

@@ -4,7 +4,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use shardline_reliability::SessionEvidenceLog;
+use shardline_reliability::{
+    DigestSnapshot, OperationIdentity, OperationKind, SessionEvidenceLog, SnapshotEvidenceLog,
+    canonical_state_digest,
+};
 #[cfg(unix)]
 use shardline_storage::{
     AnchoredPathOptions, ensure_parent_path_matches_anchor, open_anchored_target,
@@ -23,6 +26,25 @@ pub(crate) struct PersistedOciUploadSession {
     pub(crate) session: OciUploadSession,
     #[serde(default)]
     pub(crate) evidence: SessionEvidenceLog,
+    #[serde(default)]
+    pub(crate) snapshot_evidence: SnapshotEvidenceLog<DigestSnapshot>,
+}
+
+fn session_snapshot(
+    session_id: &str,
+    session: &OciUploadSession,
+) -> Result<DigestSnapshot, OciAdapterError> {
+    let operation = OperationIdentity::new(
+        "oci-upload-session",
+        session.scope_namespace.clone(),
+        session_id,
+        OperationKind::ResumableSession,
+    )
+    .map_err(|error| OciAdapterError::Reliability(error.to_string()))?
+    .with_object_key(session.repository.clone());
+    let digest = canonical_state_digest(session)
+        .map_err(|error| OciAdapterError::Reliability(error.to_string()))?;
+    Ok(DigestSnapshot::new(operation, digest))
 }
 
 // ── Path helpers ──────────────────────────────────────────────────────────────
@@ -113,9 +135,12 @@ pub(crate) async fn persist_upload_session(
     evidence
         .verify_for(&session.scope_namespace, session_id, &session.repository)
         .map_err(|error| OciAdapterError::Reliability(error.to_string()))?;
+    let snapshot = session_snapshot(session_id, session)?;
     let bytes = serde_json::to_vec(&PersistedOciUploadSession {
         session: session.clone(),
         evidence,
+        snapshot_evidence: SnapshotEvidenceLog::baseline(snapshot)
+            .map_err(|error| OciAdapterError::Reliability(error.to_string()))?,
     })?;
     write_upload_metadata(root, session_id, bytes).await
 }
@@ -129,13 +154,21 @@ pub(crate) async fn read_persisted_upload_session(
     let bytes = read_upload_file_async(root, &metadata_path)
         .await
         .map_err(map_not_found)?;
-    let (session, stored_evidence) =
+    let (session, stored_evidence, stored_snapshot_evidence) =
         match serde_json::from_slice::<PersistedOciUploadSession>(&bytes) {
-            Ok(persisted) => (persisted.session, persisted.evidence),
+            Ok(persisted) => (
+                persisted.session,
+                persisted.evidence,
+                persisted.snapshot_evidence,
+            ),
             Err(wrapper_error) => {
                 let session = serde_json::from_slice::<OciUploadSession>(&bytes)
                     .map_err(|_legacy_error| OciAdapterError::Json(wrapper_error))?;
-                (session, SessionEvidenceLog::default())
+                (
+                    session,
+                    SessionEvidenceLog::default(),
+                    SnapshotEvidenceLog::default(),
+                )
             }
         };
     let evidence_was_missing = stored_evidence.is_empty();
@@ -151,10 +184,21 @@ pub(crate) async fn read_persisted_upload_session(
             .map(|()| stored_evidence)
     }
     .map_err(|error| OciAdapterError::Reliability(error.to_string()))?;
-    if evidence_was_missing {
+    let snapshot = session_snapshot(session_id, &session)?;
+    let snapshot_evidence_was_missing = stored_snapshot_evidence.events().is_empty();
+    let snapshot_evidence = if snapshot_evidence_was_missing {
+        SnapshotEvidenceLog::baseline(snapshot.clone())
+    } else {
+        stored_snapshot_evidence
+            .verify_for(&snapshot)
+            .map(|()| stored_snapshot_evidence)
+    }
+    .map_err(|error| OciAdapterError::Reliability(error.to_string()))?;
+    if evidence_was_missing || snapshot_evidence_was_missing {
         let repaired_bytes = serde_json::to_vec(&PersistedOciUploadSession {
             session: session.clone(),
             evidence: evidence.clone(),
+            snapshot_evidence: snapshot_evidence.clone(),
         })
         .map_err(|error| OciAdapterError::Reliability(error.to_string()))?;
         write_upload_metadata(root, session_id, repaired_bytes).await?;

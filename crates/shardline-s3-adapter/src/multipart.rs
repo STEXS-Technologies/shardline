@@ -25,7 +25,10 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
-use shardline_reliability::{ResumableLifecycleState, SessionEvidenceLog};
+use shardline_reliability::{
+    DigestSnapshot, OperationIdentity, OperationKind, ResumableLifecycleState, SessionEvidenceLog,
+    SnapshotEvidenceLog, canonical_state_digest,
+};
 use thiserror::Error;
 use tokio::{fs, io::AsyncWriteExt, sync::Mutex, task::spawn_blocking};
 
@@ -169,6 +172,22 @@ struct PersistedMultipartUploadSession {
     session: MultipartUploadSession,
     #[serde(default)]
     evidence: SessionEvidenceLog,
+    #[serde(default)]
+    snapshot_evidence: SnapshotEvidenceLog<DigestSnapshot>,
+}
+
+fn session_snapshot(session: &MultipartUploadSession) -> Result<DigestSnapshot, S3SessionError> {
+    let operation = OperationIdentity::new(
+        "s3-multipart-session",
+        session.scope_namespace.clone(),
+        session.upload_id.clone(),
+        OperationKind::ResumableSession,
+    )
+    .map_err(|error| S3SessionError::Reliability(error.to_string()))?
+    .with_object_key(format!("{}/{}", session.bucket, session.key));
+    let digest = canonical_state_digest(session)
+        .map_err(|error| S3SessionError::Reliability(error.to_string()))?;
+    Ok(DigestSnapshot::new(operation, digest))
 }
 
 /// A held session-store lock (process mutex + advisory file lock).
@@ -762,13 +781,21 @@ async fn load_session(
         }
         Err(error) => return Err(S3SessionError::Io(error)),
     };
-    let (session, stored_evidence) =
+    let (session, stored_evidence, stored_snapshot_evidence) =
         match serde_json::from_slice::<PersistedMultipartUploadSession>(&bytes) {
-            Ok(persisted) => (persisted.session, persisted.evidence),
+            Ok(persisted) => (
+                persisted.session,
+                persisted.evidence,
+                persisted.snapshot_evidence,
+            ),
             Err(wrapper_error) => {
                 let session = serde_json::from_slice::<MultipartUploadSession>(&bytes)
                     .map_err(|_legacy_error| wrapper_error)?;
-                (session, SessionEvidenceLog::default())
+                (
+                    session,
+                    SessionEvidenceLog::default(),
+                    SnapshotEvidenceLog::default(),
+                )
             }
         };
     let evidence_was_missing = stored_evidence.is_empty();
@@ -784,10 +811,21 @@ async fn load_session(
             .map(|()| stored_evidence)
     }
     .map_err(|error| S3SessionError::Reliability(error.to_string()))?;
-    if evidence_was_missing {
+    let snapshot = session_snapshot(&session)?;
+    let snapshot_evidence_was_missing = stored_snapshot_evidence.events().is_empty();
+    let snapshot_evidence = if snapshot_evidence_was_missing {
+        SnapshotEvidenceLog::baseline(snapshot.clone())
+    } else {
+        stored_snapshot_evidence
+            .verify_for(&snapshot)
+            .map(|()| stored_snapshot_evidence)
+    }
+    .map_err(|error| S3SessionError::Reliability(error.to_string()))?;
+    if evidence_was_missing || snapshot_evidence_was_missing {
         let repaired_bytes = serde_json::to_vec(&PersistedMultipartUploadSession {
             session: session.clone(),
             evidence: evidence.clone(),
+            snapshot_evidence: snapshot_evidence.clone(),
         })?;
         write_file_atomically(&dir.join("session.json"), &repaired_bytes).await?;
     }
@@ -818,6 +856,7 @@ async fn persist_session_with_evidence(
     evidence
         .verify_for(&session.scope_namespace, &session.upload_id, &session.key)
         .map_err(|error| S3SessionError::Reliability(error.to_string()))?;
+    let snapshot = session_snapshot(session)?;
     let path = session_metadata_path(root, upload_id)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).await?;
@@ -825,6 +864,8 @@ async fn persist_session_with_evidence(
     let bytes = serde_json::to_vec(&PersistedMultipartUploadSession {
         session: session.clone(),
         evidence: evidence.clone(),
+        snapshot_evidence: SnapshotEvidenceLog::baseline(snapshot)
+            .map_err(|error| S3SessionError::Reliability(error.to_string()))?,
     })?;
     write_file_atomically(&path, &bytes).await
 }
@@ -1320,6 +1361,36 @@ mod tests {
         let mut metadata: serde_json::Value =
             serde_json::from_slice(&fs::read(&metadata_path).await.unwrap()).unwrap();
         metadata["session"]["key"] = serde_json::Value::String("tampered".to_owned());
+        fs::write(&metadata_path, serde_json::to_vec(&metadata).unwrap())
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            delete_session(root.path(), &upload_id).await,
+            Err(S3SessionError::Reliability(_))
+        ));
+        assert!(metadata_path.exists());
+    }
+
+    #[tokio::test]
+    async fn delete_session_rejects_tampered_session_snapshot() {
+        let root = make_root().await;
+        let upload_id = create_session(
+            root.path(),
+            "acme.models",
+            "k",
+            "global",
+            ttl(3600),
+            cap(16),
+            quota(1 << 40),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+        let metadata_path = session_metadata_path(root.path(), &upload_id).unwrap();
+        let mut metadata: serde_json::Value =
+            serde_json::from_slice(&fs::read(&metadata_path).await.unwrap()).unwrap();
+        metadata["session"]["last_touched_unix_seconds"] = serde_json::Value::from(0_u64);
         fs::write(&metadata_path, serde_json::to_vec(&metadata).unwrap())
             .await
             .unwrap();
