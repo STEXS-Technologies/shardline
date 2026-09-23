@@ -2,8 +2,10 @@ use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use shardline_protocol::{ChunkRange, RepositoryProvider, ShardlineHash};
 use shardline_reliability::{
-    LifecycleEvent, ProviderEvidenceLog, ProviderLifecycleEvent, upload_lifecycle_event,
-    verify_provider_lifecycle_events, verify_upload_lifecycle_events,
+    LifecycleEvent, ProviderEvidenceLog, ProviderLifecycleEvent, QuarantineEvidenceLog,
+    QuarantineLifecycleEvent, QuarantineLifecycleState, QuarantineObjectIdentity,
+    QuarantineSnapshot, upload_lifecycle_event, verify_provider_lifecycle_events,
+    verify_quarantine_lifecycle_events, verify_upload_lifecycle_events,
 };
 use shardline_storage::ObjectKey;
 use sqlx::{Row, postgres::PgRow, query, query_scalar, types::Json};
@@ -65,6 +67,41 @@ async fn verify_postgres_provider_evidence(
         verify_provider_lifecycle_events(&events, &snapshot)?;
     }
     Ok(())
+}
+
+async fn load_postgres_quarantine_evidence(
+    executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>,
+    object_key: &str,
+) -> Result<QuarantineEvidenceLog, PostgresMetadataStoreError> {
+    let rows = query(
+        "SELECT event_json FROM shardline_reliability_events
+         WHERE operation_kind = 'GarbageCollection' AND operation_id = $1 ORDER BY sequence",
+    )
+    .bind(object_key)
+    .fetch_all(executor)
+    .await?;
+    let events = rows
+        .into_iter()
+        .map(|row| {
+            Ok(serde_json::from_value::<QuarantineLifecycleEvent>(
+                row.try_get("event_json")?,
+            )?)
+        })
+        .collect::<Result<Vec<_>, PostgresMetadataStoreError>>()?;
+    Ok(QuarantineEvidenceLog::from_events(events)?)
+}
+
+fn quarantine_snapshot(
+    candidate: &QuarantineCandidate,
+    state: QuarantineLifecycleState,
+) -> Result<QuarantineSnapshot, PostgresMetadataStoreError> {
+    Ok(QuarantineSnapshot::new(
+        QuarantineObjectIdentity::new(candidate.object_key().as_str())?,
+        candidate.observed_length(),
+        candidate.first_seen_unreachable_at_unix_seconds(),
+        candidate.delete_after_unix_seconds(),
+        state,
+    )?)
 }
 
 impl AsyncIndexStore for super::PostgresIndexStore {
@@ -290,7 +327,22 @@ impl AsyncIndexStore for super::PostgresIndexStore {
             .fetch_optional(&self.pool)
             .await?;
 
-            row.as_ref().map(quarantine_candidate_from_row).transpose()
+            let candidate = row
+                .as_ref()
+                .map(quarantine_candidate_from_row)
+                .transpose()?;
+            if let Some(candidate) = &candidate {
+                let snapshot = quarantine_snapshot(candidate, QuarantineLifecycleState::Active)?;
+                let evidence =
+                    load_postgres_quarantine_evidence(&self.pool, object_key.as_str()).await?;
+                let evidence = if evidence.events().is_empty() {
+                    QuarantineEvidenceLog::baseline(snapshot.clone())?
+                } else {
+                    evidence
+                };
+                verify_quarantine_lifecycle_events(evidence.events(), &snapshot)?;
+            }
+            Ok(candidate)
         })
     }
 
@@ -309,9 +361,23 @@ impl AsyncIndexStore for super::PostgresIndexStore {
             .fetch_all(&self.pool)
             .await?;
 
-            rows.iter()
+            let candidates = rows
+                .iter()
                 .map(quarantine_candidate_from_row)
-                .collect::<Result<Vec<_>, _>>()
+                .collect::<Result<Vec<_>, _>>()?;
+            for candidate in &candidates {
+                let snapshot = quarantine_snapshot(candidate, QuarantineLifecycleState::Active)?;
+                let evidence =
+                    load_postgres_quarantine_evidence(&self.pool, candidate.object_key().as_str())
+                        .await?;
+                let evidence = if evidence.events().is_empty() {
+                    QuarantineEvidenceLog::baseline(snapshot.clone())?
+                } else {
+                    evidence
+                };
+                verify_quarantine_lifecycle_events(evidence.events(), &snapshot)?;
+            }
+            Ok(candidates)
         })
     }
 
@@ -354,6 +420,7 @@ impl AsyncIndexStore for super::PostgresIndexStore {
         candidate: &'operation QuarantineCandidate,
     ) -> IndexStoreFuture<'operation, (), Self::Error> {
         Box::pin(async move {
+            let mut transaction = self.pool.begin().await?;
             query(
                 "INSERT INTO shardline_quarantine_candidates (
                     object_key,
@@ -375,8 +442,31 @@ impl AsyncIndexStore for super::PostgresIndexStore {
                 candidate.first_seen_unreachable_at_unix_seconds(),
             )?)
             .bind(u64_to_i64(candidate.delete_after_unix_seconds())?)
-            .execute(&self.pool)
+            .execute(&mut *transaction)
             .await?;
+            let snapshot = quarantine_snapshot(candidate, QuarantineLifecycleState::Active)?;
+            let mut evidence = load_postgres_quarantine_evidence(
+                &mut *transaction,
+                candidate.object_key().as_str(),
+            )
+            .await?;
+            evidence.record(snapshot)?;
+            let event = evidence.events().last().ok_or_else(|| {
+                PostgresMetadataStoreError::Reliability(
+                    shardline_reliability::ReliabilityError::EmptyField(
+                        "quarantine evidence event",
+                    ),
+                )
+            })?;
+            insert_reliability_event_json(
+                &mut *transaction,
+                event.operation.kind.as_str(),
+                &event.operation.operation_id,
+                event.sequence,
+                serde_json::to_value(event)?,
+            )
+            .await?;
+            transaction.commit().await?;
             Ok(())
         })
     }
@@ -386,10 +476,45 @@ impl AsyncIndexStore for super::PostgresIndexStore {
         object_key: &'operation ObjectKey,
     ) -> IndexStoreFuture<'operation, bool, Self::Error> {
         Box::pin(async move {
+            let mut transaction = self.pool.begin().await?;
+            let row = query(
+                "SELECT object_key, observed_length, first_seen_unreachable_at_unix_seconds, delete_after_unix_seconds
+                 FROM shardline_quarantine_candidates WHERE object_key = $1",
+            )
+            .bind(object_key.as_str())
+            .fetch_optional(&mut *transaction)
+            .await?;
+            let candidate = row
+                .as_ref()
+                .map(quarantine_candidate_from_row)
+                .transpose()?;
             let result = query("DELETE FROM shardline_quarantine_candidates WHERE object_key = $1")
                 .bind(object_key.as_str())
-                .execute(&self.pool)
+                .execute(&mut *transaction)
                 .await?;
+            if let Some(candidate) = candidate {
+                let snapshot = quarantine_snapshot(&candidate, QuarantineLifecycleState::Released)?;
+                let mut evidence =
+                    load_postgres_quarantine_evidence(&mut *transaction, object_key.as_str())
+                        .await?;
+                evidence.record(snapshot)?;
+                let event = evidence.events().last().ok_or_else(|| {
+                    PostgresMetadataStoreError::Reliability(
+                        shardline_reliability::ReliabilityError::EmptyField(
+                            "quarantine evidence event",
+                        ),
+                    )
+                })?;
+                insert_reliability_event_json(
+                    &mut *transaction,
+                    event.operation.kind.as_str(),
+                    &event.operation.operation_id,
+                    event.sequence,
+                    serde_json::to_value(event)?,
+                )
+                .await?;
+            }
+            transaction.commit().await?;
             Ok(result.rows_affected() > 0)
         })
     }

@@ -7,8 +7,10 @@ use std::{
 use serde_json::{Error as SerdeJsonError, to_vec};
 use shardline_protocol::{RepositoryProvider, RepositoryScope, ShardlineHash};
 use shardline_reliability::{
-    LifecycleEvent, ProviderEvidenceLog, upload_lifecycle_event, verify_lifecycle_chain,
-    verify_provider_lifecycle_events, verify_upload_lifecycle_events,
+    LifecycleEvent, ProviderEvidenceLog, QuarantineEvidenceLog, QuarantineLifecycleState,
+    QuarantineObjectIdentity, QuarantineSnapshot, upload_lifecycle_event, verify_lifecycle_chain,
+    verify_provider_lifecycle_events, verify_quarantine_lifecycle_events,
+    verify_upload_lifecycle_events,
 };
 use shardline_storage::ObjectKey;
 use thiserror::Error;
@@ -144,6 +146,36 @@ impl MemoryIndexStore {
     }
 }
 
+fn quarantine_snapshot(
+    candidate: &QuarantineCandidate,
+    state: QuarantineLifecycleState,
+) -> Result<QuarantineSnapshot, MemoryIndexStoreError> {
+    QuarantineSnapshot::new(
+        QuarantineObjectIdentity::new(candidate.object_key().as_str())
+            .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?,
+        candidate.observed_length(),
+        candidate.first_seen_unreachable_at_unix_seconds(),
+        candidate.delete_after_unix_seconds(),
+        state,
+    )
+    .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))
+}
+
+fn verify_memory_quarantine_evidence(
+    state: &MemoryIndexState,
+    candidate: &QuarantineCandidate,
+) -> Result<(), MemoryIndexStoreError> {
+    let snapshot = quarantine_snapshot(candidate, QuarantineLifecycleState::Active)?;
+    let evidence = state
+        .quarantine_evidence
+        .get(candidate.object_key())
+        .ok_or_else(|| {
+            MemoryIndexStoreError::Reliability("quarantine evidence is missing".into())
+        })?;
+    verify_quarantine_lifecycle_events(evidence.events(), &snapshot)
+        .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))
+}
+
 impl ReconstructionStore for MemoryIndexStore {
     type Error = MemoryIndexStoreError;
 
@@ -227,18 +259,22 @@ impl LifecycleStore for MemoryIndexStore {
         &self,
         object_key: &ObjectKey,
     ) -> Result<Option<QuarantineCandidate>, Self::Error> {
-        Ok(self.lock_state()?.quarantine.get(object_key).cloned())
+        let state = self.lock_state()?;
+        let candidate = state.quarantine.get(object_key).cloned();
+        if let Some(candidate) = &candidate {
+            verify_memory_quarantine_evidence(&state, candidate)?;
+        }
+        Ok(candidate)
     }
 
     fn list_quarantine_candidates(&self) -> Result<Vec<QuarantineCandidate>, Self::Error> {
-        let mut candidates = self
-            .lock_state()?
-            .quarantine
-            .values()
-            .cloned()
-            .collect::<Vec<_>>();
+        let state = self.lock_state()?;
+        let mut candidates = state.quarantine.values().cloned().collect::<Vec<_>>();
         candidates
             .sort_by(|left, right| left.object_key().as_str().cmp(right.object_key().as_str()));
+        for candidate in &candidates {
+            verify_memory_quarantine_evidence(&state, candidate)?;
+        }
         Ok(candidates)
     }
 
@@ -261,14 +297,35 @@ impl LifecycleStore for MemoryIndexStore {
         &self,
         candidate: &QuarantineCandidate,
     ) -> Result<(), Self::Error> {
-        self.lock_state()?
-            .quarantine
-            .insert(candidate.object_key().clone(), candidate.clone());
+        let mut state = self.lock_state()?;
+        let key = candidate.object_key().clone();
+        let snapshot = quarantine_snapshot(candidate, QuarantineLifecycleState::Active)?;
+        let mut evidence = state.quarantine_evidence.remove(&key).unwrap_or_default();
+        evidence
+            .record(snapshot)
+            .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
+        state.quarantine.insert(key.clone(), candidate.clone());
+        state.quarantine_evidence.insert(key, evidence);
         Ok(())
     }
 
     fn delete_quarantine_candidate(&self, object_key: &ObjectKey) -> Result<bool, Self::Error> {
-        Ok(self.lock_state()?.quarantine.remove(object_key).is_some())
+        let mut state = self.lock_state()?;
+        let removed = state.quarantine.remove(object_key);
+        if let Some(candidate) = &removed {
+            let snapshot = quarantine_snapshot(candidate, QuarantineLifecycleState::Released)?;
+            let mut evidence = state
+                .quarantine_evidence
+                .remove(object_key)
+                .unwrap_or_default();
+            evidence
+                .record(snapshot)
+                .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
+            state
+                .quarantine_evidence
+                .insert(object_key.clone(), evidence);
+        }
+        Ok(removed.is_some())
     }
 
     fn retention_hold(&self, object_key: &ObjectKey) -> Result<Option<RetentionHold>, Self::Error> {
@@ -1025,6 +1082,7 @@ struct MemoryIndexState {
     xorbs: HashSet<XorbId>,
     dedupe_shards: HashMap<ShardlineHash, DedupeShardMapping>,
     quarantine: HashMap<ObjectKey, QuarantineCandidate>,
+    quarantine_evidence: HashMap<ObjectKey, QuarantineEvidenceLog>,
     retention_holds: HashMap<ObjectKey, RetentionHold>,
     webhook_deliveries: HashMap<MemoryWebhookDeliveryKey, WebhookDelivery>,
     provider_repository_states: HashMap<MemoryProviderRepositoryStateKey, ProviderRepositoryState>,

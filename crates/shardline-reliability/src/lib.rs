@@ -12,6 +12,7 @@ mod error;
 mod event;
 mod operation;
 mod provider_evidence;
+mod quarantine_evidence;
 mod session_evidence;
 mod states;
 
@@ -30,6 +31,11 @@ pub use provider_evidence::{
     ProviderEvidenceLog, ProviderLifecycleEvent, ProviderLifecycleObservations,
     ProviderLifecycleSnapshot, ProviderRepositoryIdentity, verify_provider_lifecycle_chain,
     verify_provider_lifecycle_events,
+};
+pub use quarantine_evidence::{
+    QuarantineEvidenceLog, QuarantineLifecycleEvent, QuarantineLifecycleState,
+    QuarantineObjectIdentity, QuarantineSnapshot, verify_quarantine_lifecycle_chain,
+    verify_quarantine_lifecycle_events,
 };
 pub use session_evidence::SessionEvidenceLog;
 pub use session_evidence::verify_resumable_session_events;

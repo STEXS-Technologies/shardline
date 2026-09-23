@@ -3,7 +3,8 @@ use shardline_index::{ResumableSessionState, UploadIntentState};
 use shardline_protocol::SecretString;
 use shardline_reliability::{
     LifecycleEvent, ProviderEvidenceLog, ProviderLifecycleEvent, ProviderLifecycleObservations,
-    ProviderLifecycleSnapshot, ProviderRepositoryIdentity, StateTransitionEvent,
+    ProviderLifecycleSnapshot, ProviderRepositoryIdentity, QuarantineEvidenceLog,
+    QuarantineLifecycleState, QuarantineObjectIdentity, QuarantineSnapshot, StateTransitionEvent,
     UploadLifecycleState, baseline_resumable_session_events, baseline_upload_lifecycle_events,
     verify_provider_lifecycle_events, verify_resumable_session_events,
     verify_upload_lifecycle_events,
@@ -484,7 +485,8 @@ async fn backfill_reliability_events(pool: &PgPool) -> Result<(), DatabaseMigrat
         "SELECT to_regclass('public.shardline_reliability_events') IS NOT NULL
              AND to_regclass('public.shardline_upload_intents') IS NOT NULL
              AND to_regclass('public.shardline_resumable_sessions') IS NOT NULL
-             AND to_regclass('public.shardline_provider_repository_states') IS NOT NULL",
+             AND to_regclass('public.shardline_provider_repository_states') IS NOT NULL
+             AND to_regclass('public.shardline_quarantine_candidates') IS NOT NULL",
     )
     .fetch_one(pool)
     .await?;
@@ -616,6 +618,56 @@ async fn backfill_reliability_events(pool: &PgPool) -> Result<(), DatabaseMigrat
     for row in provider_rows {
         let snapshot = provider_snapshot_from_row(&row)?;
         let events = ProviderEvidenceLog::baseline(snapshot)
+            .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?;
+        for event in events.events() {
+            query(
+                "INSERT INTO shardline_reliability_events
+                    (operation_kind, operation_id, sequence, event_json)
+                 VALUES ($1, $2, $3, $4)
+                 ON CONFLICT (operation_kind, operation_id, sequence) DO NOTHING",
+            )
+            .bind(event.operation.kind.as_str())
+            .bind(&event.operation.operation_id)
+            .bind(
+                i64::try_from(event.sequence)
+                    .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?,
+            )
+            .bind(
+                to_value(event)
+                    .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?,
+            )
+            .execute(&mut *transaction)
+            .await?;
+        }
+    }
+
+    let quarantine_rows = query(
+        "SELECT q.object_key, q.observed_length,
+                q.first_seen_unreachable_at_unix_seconds, q.delete_after_unix_seconds
+         FROM shardline_quarantine_candidates AS q
+         WHERE NOT EXISTS (
+             SELECT 1 FROM shardline_reliability_events AS e
+             WHERE e.operation_kind = 'GarbageCollection' AND e.operation_id = q.object_key
+         )
+         FOR UPDATE OF q",
+    )
+    .fetch_all(&mut *transaction)
+    .await?;
+    for row in quarantine_rows {
+        let object_key: String = row.try_get("object_key")?;
+        let snapshot = QuarantineSnapshot::new(
+            QuarantineObjectIdentity::new(object_key.clone())
+                .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?,
+            u64::try_from(row.try_get::<i64, _>("observed_length")?)
+                .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?,
+            u64::try_from(row.try_get::<i64, _>("first_seen_unreachable_at_unix_seconds")?)
+                .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?,
+            u64::try_from(row.try_get::<i64, _>("delete_after_unix_seconds")?)
+                .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?,
+            QuarantineLifecycleState::Active,
+        )
+        .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?;
+        let events = QuarantineEvidenceLog::baseline(snapshot)
             .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?;
         for event in events.events() {
             query(

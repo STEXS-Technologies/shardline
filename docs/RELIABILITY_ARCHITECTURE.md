@@ -34,6 +34,10 @@ The canonical state machines and durable lifecycle snapshots are:
   authorization, and drift timestamps plus the associated revision), recorded
   as complete materialized snapshots so monotonic merges cannot silently drift
   away from their evidence.
+- garbage-collection quarantine candidates (`active`, `released`, and
+  re-quarantined recovery), recorded as complete object-retention snapshots.
+  A release event is journaled before the candidate row is removed, so a
+  crash between index cleanup and object deletion remains replayable.
 
 This same resumable lifecycle evidence is also persisted by the standalone
 file-backed S3 multipart and OCI upload-session adapters. Their legacy session
@@ -69,6 +73,14 @@ in the same mutation boundary, while migration backfills a self-baseline for
 legacy rows. They do not create a second reliability protocol. Where they
 repair or reconcile an upload or session, they consume the canonical journal
 and verify it first.
+
+GC's persisted quarantine candidates are authoritative lifecycle state and use
+the same evidence protocol in memory, SQLite, and Postgres. Retention holds
+remain policy records whose active/released result is derived from their
+timestamps; the last-GC clock anchor is explicitly an optimization-only
+materialization. OCI tombstones remain generation fences for logical deletion,
+not a second lifecycle interpretation, and are protected by their existing
+transactional compare-and-publish rules.
 
 The following are data-plane recovery materializations, not independent
 lifecycle state machines:

@@ -1,7 +1,8 @@
 use rusqlite::{Connection, OptionalExtension, params};
 use shardline_protocol::{RepositoryProvider, ShardlineHash, unix_now_seconds_lossy};
 use shardline_reliability::{
-    LifecycleEvent, ProviderEvidenceLog, upload_lifecycle_event, verify_provider_lifecycle_events,
+    LifecycleEvent, ProviderEvidenceLog, QuarantineLifecycleState, upload_lifecycle_event,
+    verify_provider_lifecycle_events, verify_quarantine_lifecycle_events,
     verify_upload_lifecycle_events,
 };
 use shardline_storage::ObjectKey;
@@ -171,8 +172,9 @@ impl LifecycleStore for LocalIndexStore {
         &self,
         object_key: &ObjectKey,
     ) -> Result<Option<QuarantineCandidate>, Self::Error> {
-        let connection = self.open_connection()?;
-        connection
+        let mut connection = self.open_connection()?;
+        let transaction = connection.transaction()?;
+        let candidate = transaction
             .query_row(
                 "SELECT object_key,
                         observed_length,
@@ -183,13 +185,27 @@ impl LifecycleStore for LocalIndexStore {
                 params![object_key.as_str()],
                 super::helpers::quarantine_candidate_from_row,
             )
-            .optional()
-            .map_err(LocalIndexStoreError::from)
+            .optional()?;
+        if let Some(candidate) = &candidate {
+            let snapshot =
+                super::helpers::quarantine_snapshot(candidate, QuarantineLifecycleState::Active)?;
+            let evidence =
+                super::helpers::load_quarantine_evidence(&transaction, object_key.as_str())?;
+            let evidence = if evidence.events().is_empty() {
+                shardline_reliability::QuarantineEvidenceLog::baseline(snapshot.clone())?
+            } else {
+                evidence
+            };
+            verify_quarantine_lifecycle_events(evidence.events(), &snapshot)?;
+        }
+        transaction.commit()?;
+        Ok(candidate)
     }
 
     fn list_quarantine_candidates(&self) -> Result<Vec<QuarantineCandidate>, Self::Error> {
-        let connection = self.open_connection()?;
-        let mut statement = connection.prepare(
+        let mut connection = self.open_connection()?;
+        let transaction = connection.transaction()?;
+        let mut statement = transaction.prepare(
             "SELECT object_key,
                     observed_length,
                     first_seen_unreachable_at_unix_seconds,
@@ -198,7 +214,24 @@ impl LifecycleStore for LocalIndexStore {
              ORDER BY object_key",
         )?;
         let rows = statement.query_map([], super::helpers::quarantine_candidate_from_row)?;
-        collect_rows(rows)
+        let candidates = collect_rows(rows)?;
+        drop(statement);
+        for candidate in &candidates {
+            let snapshot =
+                super::helpers::quarantine_snapshot(candidate, QuarantineLifecycleState::Active)?;
+            let evidence = super::helpers::load_quarantine_evidence(
+                &transaction,
+                candidate.object_key().as_str(),
+            )?;
+            let evidence = if evidence.events().is_empty() {
+                shardline_reliability::QuarantineEvidenceLog::baseline(snapshot.clone())?
+            } else {
+                evidence
+            };
+            verify_quarantine_lifecycle_events(evidence.events(), &snapshot)?;
+        }
+        transaction.commit()?;
+        Ok(candidates)
     }
 
     fn visit_quarantine_candidates<Visitor, VisitorError>(
@@ -219,8 +252,9 @@ impl LifecycleStore for LocalIndexStore {
         &self,
         candidate: &QuarantineCandidate,
     ) -> Result<(), Self::Error> {
-        let connection = self.open_connection()?;
-        connection.execute(
+        let mut connection = self.open_connection()?;
+        let transaction = connection.transaction()?;
+        transaction.execute(
             "INSERT INTO shardline_quarantine_candidates (
                 object_key,
                 observed_length,
@@ -244,15 +278,56 @@ impl LifecycleStore for LocalIndexStore {
                 u64_to_i64(unix_now_seconds_lossy())?,
             ],
         )?;
+        let snapshot =
+            super::helpers::quarantine_snapshot(candidate, QuarantineLifecycleState::Active)?;
+        let mut evidence = super::helpers::load_quarantine_evidence(
+            &transaction,
+            candidate.object_key().as_str(),
+        )?;
+        evidence.record(snapshot)?;
+        let event = evidence.events().last().ok_or_else(|| {
+            LocalIndexStoreError::Reliability(shardline_reliability::ReliabilityError::EmptyField(
+                "quarantine evidence event",
+            ))
+        })?;
+        super::helpers::persist_quarantine_evidence(&transaction, event)?;
+        transaction.commit()?;
         Ok(())
     }
 
     fn delete_quarantine_candidate(&self, object_key: &ObjectKey) -> Result<bool, Self::Error> {
-        let connection = self.open_connection()?;
-        let changed = connection.execute(
+        let mut connection = self.open_connection()?;
+        let transaction = connection.transaction()?;
+        let candidate = transaction
+            .query_row(
+                "SELECT object_key, observed_length, first_seen_unreachable_at_unix_seconds, delete_after_unix_seconds
+                 FROM shardline_quarantine_candidates WHERE object_key = ?1",
+                params![object_key.as_str()],
+                super::helpers::quarantine_candidate_from_row,
+            )
+            .optional()?;
+        let changed = transaction.execute(
             "DELETE FROM shardline_quarantine_candidates WHERE object_key = ?1",
             params![object_key.as_str()],
         )?;
+        if let Some(candidate) = candidate {
+            let snapshot = super::helpers::quarantine_snapshot(
+                &candidate,
+                QuarantineLifecycleState::Released,
+            )?;
+            let mut evidence =
+                super::helpers::load_quarantine_evidence(&transaction, object_key.as_str())?;
+            evidence.record(snapshot)?;
+            let event = evidence.events().last().ok_or_else(|| {
+                LocalIndexStoreError::Reliability(
+                    shardline_reliability::ReliabilityError::EmptyField(
+                        "quarantine evidence event",
+                    ),
+                )
+            })?;
+            super::helpers::persist_quarantine_evidence(&transaction, event)?;
+        }
+        transaction.commit()?;
         Ok(changed > 0)
     }
 
@@ -2140,5 +2215,29 @@ mod tests {
                 "a concurrent same-intent transition must not fail"
             );
         }
+    }
+
+    #[test]
+    fn quarantine_candidate_tampered_evidence_is_rejected_on_read() {
+        let store = make_store();
+        let candidate = QuarantineCandidate::new(
+            ObjectKey::parse("aa/quarantine-object").unwrap(),
+            42,
+            100,
+            200,
+        )
+        .unwrap();
+        LifecycleStore::upsert_quarantine_candidate(&store, &candidate).unwrap();
+        let connection = store.open_connection().unwrap();
+        connection
+            .execute(
+                "UPDATE shardline_reliability_events
+                 SET event_json = '{\"sequence\": 99}'
+                 WHERE operation_kind = 'GarbageCollection'
+                   AND operation_id = 'aa/quarantine-object'",
+                [],
+            )
+            .unwrap();
+        assert!(LifecycleStore::quarantine_candidate(&store, candidate.object_key()).is_err());
     }
 }

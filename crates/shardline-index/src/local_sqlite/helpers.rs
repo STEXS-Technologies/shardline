@@ -22,8 +22,9 @@ use serde_json::{from_slice, from_str, to_string};
 use shardline_protocol::{RepositoryScope, unix_now_seconds_lossy};
 use shardline_reliability::{
     LifecycleEvent, ProviderEvidenceLog, ProviderLifecycleEvent, ProviderLifecycleSnapshot,
-    ResumableLifecycleState, StateTransitionEvent, UploadLifecycleState,
-    baseline_resumable_session_events, baseline_upload_lifecycle_events,
+    QuarantineEvidenceLog, QuarantineLifecycleEvent, QuarantineLifecycleState,
+    QuarantineObjectIdentity, QuarantineSnapshot, ResumableLifecycleState, StateTransitionEvent,
+    UploadLifecycleState, baseline_resumable_session_events, baseline_upload_lifecycle_events,
     verify_provider_lifecycle_events, verify_resumable_session_events,
     verify_upload_lifecycle_events,
 };
@@ -47,6 +48,64 @@ use crate::{
     record_key::record_key as shared_record_key,
     record_key::repository_scope_key as shared_repository_scope_key, xet_hash_hex_string,
 };
+
+pub(crate) fn quarantine_evidence_operation_id(object_key: &str) -> String {
+    object_key.to_owned()
+}
+
+pub(crate) fn quarantine_snapshot(
+    candidate: &QuarantineCandidate,
+    state: QuarantineLifecycleState,
+) -> Result<QuarantineSnapshot, LocalIndexStoreError> {
+    Ok(QuarantineSnapshot::new(
+        QuarantineObjectIdentity::new(candidate.object_key().as_str())?,
+        candidate.observed_length(),
+        candidate.first_seen_unreachable_at_unix_seconds(),
+        candidate.delete_after_unix_seconds(),
+        state,
+    )?)
+}
+
+pub(crate) fn load_quarantine_evidence(
+    transaction: &Transaction<'_>,
+    object_key: &str,
+) -> Result<QuarantineEvidenceLog, LocalIndexStoreError> {
+    let mut statement = transaction.prepare(
+        "SELECT event_json FROM shardline_reliability_events
+         WHERE operation_kind = 'GarbageCollection' AND operation_id = ?1 ORDER BY sequence",
+    )?;
+    let rows = statement.query_map(
+        params![quarantine_evidence_operation_id(object_key)],
+        |row| {
+            let event_json: String = row.get(0)?;
+            from_str::<QuarantineLifecycleEvent>(&event_json).map_err(|error| {
+                SqliteError::FromSqlConversionFailure(0, Type::Text, Box::new(error))
+            })
+        },
+    )?;
+    Ok(QuarantineEvidenceLog::from_events(
+        rows.collect::<Result<Vec<_>, _>>()?,
+    )?)
+}
+
+pub(crate) fn persist_quarantine_evidence(
+    transaction: &Transaction<'_>,
+    event: &QuarantineLifecycleEvent,
+) -> Result<(), LocalIndexStoreError> {
+    transaction.execute(
+        "INSERT OR IGNORE INTO shardline_reliability_events
+            (operation_kind, operation_id, sequence, event_json, created_at_unix_seconds)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            event.operation.kind.as_str(),
+            event.operation.operation_id,
+            u64_to_i64(event.sequence)?,
+            to_string(event)?,
+            u64_to_i64(unix_now_seconds_lossy())?,
+        ],
+    )?;
+    Ok(())
+}
 
 pub(crate) trait SqliteExecutor {
     fn execute_sql<P>(&self, sql: &str, params: P) -> SqliteResult<usize>
@@ -368,6 +427,57 @@ fn backfill_reliability_events(connection: &mut Connection) -> Result<(), LocalI
         let snapshot = snapshot_from_state(&state)?;
         let events = shardline_reliability::ProviderEvidenceLog::baseline(snapshot)?;
         for event in events.events() {
+            transaction.execute(
+                "INSERT OR IGNORE INTO shardline_reliability_events
+                    (operation_kind, operation_id, sequence, event_json, created_at_unix_seconds)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    event.operation.kind.as_str(),
+                    event.operation.operation_id,
+                    i64::try_from(event.sequence).map_err(|error| {
+                        LocalIndexStoreError::IntegerOutOfRange(error.to_string())
+                    })?,
+                    to_string(event)?,
+                    u64_to_i64(unix_now_seconds_lossy())?,
+                ],
+            )?;
+        }
+    }
+
+    let mut quarantine_rows = Vec::new();
+    {
+        let mut statement = transaction.prepare(
+            "SELECT object_key, observed_length,
+                    first_seen_unreachable_at_unix_seconds, delete_after_unix_seconds
+             FROM shardline_quarantine_candidates AS q
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM shardline_reliability_events AS e
+                 WHERE e.operation_kind = 'GarbageCollection'
+                   AND e.operation_id = q.object_key
+             )",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })?;
+        for row in rows {
+            quarantine_rows.push(row?);
+        }
+    }
+    for (object_key, observed_length, first_seen, delete_after) in quarantine_rows {
+        let candidate = QuarantineCandidate::new(
+            ObjectKey::parse(&object_key)?,
+            i64_to_u64(observed_length)?,
+            i64_to_u64(first_seen)?,
+            i64_to_u64(delete_after)?,
+        )?;
+        let snapshot = quarantine_snapshot(&candidate, QuarantineLifecycleState::Active)?;
+        let evidence = QuarantineEvidenceLog::baseline(snapshot)?;
+        for event in evidence.events() {
             transaction.execute(
                 "INSERT OR IGNORE INTO shardline_reliability_events
                     (operation_kind, operation_id, sequence, event_json, created_at_unix_seconds)
