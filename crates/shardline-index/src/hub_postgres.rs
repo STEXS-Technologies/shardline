@@ -13,7 +13,7 @@ use crate::{
 };
 use shardline_reliability::{
     HubRefEvidenceLog, HubRefLifecycleEvent, HubRefSnapshot, SnapshotEvidence,
-    verify_or_repair_snapshot_evidence,
+    verify_and_append_snapshot_transition, verify_or_repair_snapshot_evidence,
 };
 
 const fn repo_type_to_str(t: HubRepoType) -> &'static str {
@@ -428,13 +428,14 @@ impl HubStore for PostgresIndexStore {
             .execute(&mut *tx)
             .await?;
 
-            let mut evidence =
-                current_hub_ref_evidence(&mut tx, &repo_id, &ref_name, current_ref).await?;
-            evidence.record(HubRefSnapshot::new(
-                &repo_id,
-                &ref_name,
-                Some(new_sha.clone()),
-            )?)?;
+            let before = HubRefSnapshot::new(&repo_id, &ref_name, current_ref.clone())?;
+            let after = HubRefSnapshot::new(&repo_id, &ref_name, Some(new_sha.clone()))?;
+            let evidence = verify_and_append_snapshot_transition(
+                current_hub_ref_evidence(&mut tx, &repo_id, &ref_name, current_ref).await?,
+                before,
+                after,
+            )?
+            .0;
             persist_hub_ref_evidence(&mut tx, &evidence).await?;
 
             let row = sqlx::query(
@@ -525,9 +526,14 @@ impl HubStore for PostgresIndexStore {
             if result.rows_affected() != 1 {
                 return Err(PostgresMetadataStoreError::RecordNotFound);
             }
-            let mut evidence =
-                current_hub_ref_evidence(&mut tx, &repo_id, &ref_name, Some(expected_sha)).await?;
-            evidence.record(HubRefSnapshot::new(&repo_id, &ref_name, None)?)?;
+            let before = HubRefSnapshot::new(&repo_id, &ref_name, Some(expected_sha.clone()))?;
+            let after = HubRefSnapshot::new(&repo_id, &ref_name, None)?;
+            let evidence = verify_and_append_snapshot_transition(
+                current_hub_ref_evidence(&mut tx, &repo_id, &ref_name, Some(expected_sha)).await?,
+                before,
+                after,
+            )?
+            .0;
             persist_hub_ref_evidence(&mut tx, &evidence).await?;
             tx.commit().await?;
             Ok(())

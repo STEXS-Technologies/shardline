@@ -13,7 +13,9 @@ use crate::{
         i64_to_u64, persist_hub_ref_evidence, retry_sqlite_busy, u64_to_i64,
     },
 };
-use shardline_reliability::{HubRefEvidenceLog, SnapshotEvidence};
+use shardline_reliability::{
+    HubRefEvidenceLog, SnapshotEvidence, verify_and_append_snapshot_transition,
+};
 
 fn sqlite_store_error(error: &LocalIndexStoreError) -> rusqlite::Error {
     rusqlite::Error::InvalidParameterName(error.to_string())
@@ -377,12 +379,14 @@ impl HubStore for LocalIndexStore {
              ON CONFLICT(repo_id, ref_name) DO UPDATE SET sha = excluded.sha",
                 params![repo_id, ref_name, new_sha],
             )?;
-            let mut evidence = current_hub_ref_evidence(&tx, &repo_id, &ref_name, current_ref)?;
-            evidence.record(hub_ref_snapshot(
-                &repo_id,
-                &ref_name,
-                Some(new_sha.clone()),
-            )?)?;
+            let before = hub_ref_snapshot(&repo_id, &ref_name, current_ref.clone())?;
+            let after = hub_ref_snapshot(&repo_id, &ref_name, Some(new_sha.clone()))?;
+            let evidence = verify_and_append_snapshot_transition(
+                current_hub_ref_evidence(&tx, &repo_id, &ref_name, current_ref)?,
+                before,
+                after,
+            )?
+            .0;
             for event in evidence.events() {
                 persist_hub_ref_evidence(&tx, event)?;
             }
@@ -464,9 +468,14 @@ impl HubStore for LocalIndexStore {
             if changed != 1 {
                 return Err(rusqlite::Error::QueryReturnedNoRows.into());
             }
-            let mut evidence =
-                current_hub_ref_evidence(&tx, &repo_id, &ref_name, Some(expected_sha.clone()))?;
-            evidence.record(hub_ref_snapshot(&repo_id, &ref_name, None)?)?;
+            let before = hub_ref_snapshot(&repo_id, &ref_name, Some(expected_sha.clone()))?;
+            let after = hub_ref_snapshot(&repo_id, &ref_name, None)?;
+            let evidence = verify_and_append_snapshot_transition(
+                current_hub_ref_evidence(&tx, &repo_id, &ref_name, Some(expected_sha.clone()))?,
+                before,
+                after,
+            )?
+            .0;
             for event in evidence.events() {
                 persist_hub_ref_evidence(&tx, event)?;
             }
