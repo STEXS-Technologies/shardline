@@ -19,7 +19,8 @@ legacy JSON evidence during deserialization; they are verified under their
 original encoding and can be followed by canonical events without changing
 the public state or retry behavior. Replaying an existing Postgres intent
 never replaces valid legacy evidence, while a missing baseline for a newly
-materialized `created` intent is repaired atomically.
+materialized intent at any valid lifecycle state is repaired atomically from
+the canonical baseline when its journal is missing.
 
 Reliability journal rows are namespace-keyed by `(operation_kind,
 operation_id, sequence)`. The operation kind is part of the durable key, not

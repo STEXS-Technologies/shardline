@@ -4,8 +4,9 @@ use shardline_protocol::{ChunkRange, RepositoryProvider, ShardlineHash};
 use shardline_reliability::{
     LifecycleEvent, ProviderEvidenceLog, ProviderLifecycleEvent, QuarantineEvidenceLog,
     QuarantineLifecycleEvent, QuarantineLifecycleState, QuarantineObjectIdentity,
-    QuarantineSnapshot, upload_lifecycle_event, verify_provider_lifecycle_events,
-    verify_quarantine_lifecycle_events, verify_upload_lifecycle_events,
+    QuarantineSnapshot, baseline_upload_lifecycle_events, upload_lifecycle_event,
+    verify_provider_lifecycle_events, verify_quarantine_lifecycle_events,
+    verify_upload_lifecycle_events,
 };
 use shardline_storage::ObjectKey;
 use sqlx::{Row, postgres::PgRow, query, query_scalar, types::Json};
@@ -1011,12 +1012,17 @@ impl UploadIntentStore for super::PostgresIndexStore {
             .fetch_all(&mut *transaction)
             .await?;
             if event_rows.is_empty() {
-                if durable_intent.state() != UploadIntentState::Created {
-                    return Err(PostgresMetadataStoreError::Reliability(
-                        shardline_reliability::ReliabilityError::StateMismatch,
-                    ));
+                let baseline = baseline_upload_lifecycle_events(
+                    "shardline",
+                    "default",
+                    durable_intent.intent_id(),
+                    durable_intent.object_key(),
+                    durable_intent.object_hash(),
+                    durable_intent.state(),
+                )?;
+                for event in &baseline {
+                    insert_reliability_event(transaction.as_mut(), event).await?;
                 }
-                insert_reliability_event(transaction.as_mut(), &created_event).await?;
             } else {
                 let events = event_rows
                     .into_iter()
@@ -1307,7 +1313,7 @@ impl UploadIntentStore for super::PostgresIndexStore {
         operation_id: &str,
     ) -> Result<Vec<LifecycleEvent>, Self::Error> {
         let mut transaction = self.pool.begin().await?;
-        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
             .execute(&mut *transaction)
             .await?;
         let rows = sqlx::query(
@@ -1320,7 +1326,7 @@ impl UploadIntentStore for super::PostgresIndexStore {
         .bind(operation_id)
         .fetch_all(&mut *transaction)
         .await?;
-        let events = rows
+        let mut events = rows
             .into_iter()
             .map(|row| {
                 let sequence: i64 = row.try_get("sequence")?;
@@ -1352,6 +1358,20 @@ impl UploadIntentStore for super::PostgresIndexStore {
                     ),
                 )
             })?;
+            if events.is_empty() {
+                let baseline = baseline_upload_lifecycle_events(
+                    "shardline",
+                    "default",
+                    operation_id,
+                    &object_key,
+                    &object_hash,
+                    state,
+                )?;
+                for event in &baseline {
+                    insert_reliability_event(transaction.as_mut(), event).await?;
+                }
+                events = baseline;
+            }
             verify_upload_lifecycle_events(
                 &events,
                 "shardline",
@@ -2229,6 +2249,84 @@ mod tests {
         let loaded = loaded.unwrap();
         assert_eq!(loaded.intent_id(), "test-intent-1");
         assert_eq!(loaded.state(), UploadIntentState::Created);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pg_upload_intent_read_repairs_missing_evidence_for_current_state() {
+        let Some(pool) = connect_postgres().await else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let intent = UploadIntent::new(
+            format!("repair-upload-evidence-{}", std::process::id()),
+            "objects/repair-upload-evidence".into(),
+            "e".repeat(64),
+            42,
+        );
+        sqlx::query("DELETE FROM shardline_upload_intents WHERE intent_id = $1")
+            .bind(intent.intent_id())
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "DELETE FROM shardline_reliability_events
+             WHERE operation_kind = 'Upload' AND operation_id = $1",
+        )
+        .bind(intent.intent_id())
+        .execute(&pool)
+        .await
+        .unwrap();
+        let store = make_pg_store(pool.clone());
+        store.create_intent(&intent).await.unwrap();
+        assert!(
+            store
+                .transition_intent(intent.intent_id(), UploadIntentState::Storing)
+                .await
+                .unwrap()
+        );
+        assert!(
+            store
+                .transition_intent(intent.intent_id(), UploadIntentState::Stored)
+                .await
+                .unwrap()
+        );
+        sqlx::query(
+            "DELETE FROM shardline_reliability_events
+             WHERE operation_kind = 'Upload' AND operation_id = $1",
+        )
+        .bind(intent.intent_id())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        assert_eq!(
+            store
+                .intent_by_id(intent.intent_id())
+                .await
+                .unwrap()
+                .unwrap()
+                .state(),
+            UploadIntentState::Stored
+        );
+        let events = store.reliability_events(intent.intent_id()).await.unwrap();
+        assert_eq!(events.len(), 3);
+        assert_eq!(
+            events.last().expect("stored baseline").after,
+            UploadIntentState::Stored
+        );
+        sqlx::query("DELETE FROM shardline_upload_intents WHERE intent_id = $1")
+            .bind(intent.intent_id())
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "DELETE FROM shardline_reliability_events
+             WHERE operation_kind = 'Upload' AND operation_id = $1",
+        )
+        .bind(intent.intent_id())
+        .execute(&pool)
+        .await
+        .unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread")]
