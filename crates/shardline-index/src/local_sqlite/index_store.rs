@@ -2,11 +2,11 @@ use rusqlite::{OptionalExtension, Transaction, params};
 use shardline_protocol::{RepositoryProvider, ShardlineHash, unix_now_seconds_lossy};
 use shardline_reliability::{
     LifecycleEvent, ProviderEvidenceLog, QuarantineLifecycleState, RetentionEvidenceLog,
-    RetentionHoldLifecycleState, WebhookDeliveryEvidenceLog, WebhookDeliveryLifecycleState,
-    baseline_upload_lifecycle_events, upload_lifecycle_event, verify_provider_lifecycle_events,
-    verify_quarantine_lifecycle_events, verify_retention_hold_lifecycle_chain,
-    verify_retention_hold_lifecycle_events, verify_upload_lifecycle_events,
-    verify_webhook_delivery_chain, verify_webhook_delivery_events,
+    RetentionHoldLifecycleState, SnapshotEvidence, WebhookDeliveryEvidenceLog,
+    WebhookDeliveryLifecycleState, baseline_upload_lifecycle_events, upload_lifecycle_event,
+    verify_provider_lifecycle_events, verify_quarantine_lifecycle_events,
+    verify_retention_hold_lifecycle_chain, verify_retention_hold_lifecycle_events,
+    verify_upload_lifecycle_events, verify_webhook_delivery_chain, verify_webhook_delivery_events,
 };
 use shardline_storage::ObjectKey;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -1889,12 +1889,17 @@ mod tests {
         LifecycleStore::record_webhook_delivery(&store, &delivery).unwrap();
 
         let connection = store.open_connection().unwrap();
+        let operation_id = webhook_snapshot(&delivery, WebhookDeliveryLifecycleState::Processed)
+            .unwrap()
+            .evidence_operation()
+            .unwrap()
+            .operation_id;
         connection
             .execute(
                 "UPDATE shardline_reliability_events
                  SET event_json = '{\"sequence\":99}'
                  WHERE operation_kind = 'WebhookDelivery' AND operation_id = ?1",
-                rusqlite::params![delivery.delivery_id()],
+                rusqlite::params![operation_id],
             )
             .unwrap();
 
