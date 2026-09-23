@@ -1,6 +1,7 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use super::*;
+use crate::snapshot_event::{SnapshotEvidenceEvent, verify_snapshot_chain};
 
 #[test]
 fn operation_kind_persisted_discriminators_round_trip() {
@@ -151,6 +152,42 @@ fn generic_lifecycle_log_rolls_back_rejected_append() {
     assert!(log.append(invalid).is_err());
     assert_eq!(log.events().len(), original_len);
     log.verify().unwrap();
+}
+
+#[test]
+fn lifecycle_chain_rejects_sequence_gaps() {
+    let operation =
+        upload_operation_identity("tenant", "repo", "op-gap", "object", "hash").unwrap();
+    let baseline = LifecycleEvent::new(
+        operation.clone(),
+        0,
+        UploadLifecycleState::Created,
+        UploadLifecycleState::Created,
+    )
+    .unwrap();
+    let skipped = LifecycleEvent::new(
+        operation,
+        2,
+        UploadLifecycleState::Created,
+        UploadLifecycleState::Storing,
+    )
+    .unwrap();
+    assert!(matches!(
+        verify_lifecycle_chain(&[baseline, skipped]),
+        Err(ReliabilityError::ChainDiscontinuity)
+    ));
+}
+
+#[test]
+fn snapshot_chain_rejects_sequence_gaps() {
+    let before = HubRefSnapshot::new("repo", "main", Some("sha-1".to_owned())).unwrap();
+    let after = HubRefSnapshot::new("repo", "main", Some("sha-2".to_owned())).unwrap();
+    let baseline = SnapshotEvidenceEvent::new(0, before.clone(), before.clone()).unwrap();
+    let skipped = SnapshotEvidenceEvent::new(2, before, after).unwrap();
+    assert!(matches!(
+        verify_snapshot_chain(&[baseline, skipped]),
+        Err(ReliabilityError::ChainDiscontinuity)
+    ));
 }
 
 #[test]

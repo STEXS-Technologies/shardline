@@ -100,8 +100,13 @@ pub fn verify_snapshot_chain<S: SnapshotEvidence>(
         if event.operation != first.operation {
             return Err(ReliabilityError::OperationMismatch);
         }
-        if previous_sequence.is_some_and(|sequence| event.sequence <= sequence) {
-            return Err(ReliabilityError::SequenceRegression);
+        if let Some(sequence) = previous_sequence {
+            if event.sequence <= sequence {
+                return Err(ReliabilityError::SequenceRegression);
+            }
+            if sequence.checked_add(1) != Some(event.sequence) {
+                return Err(ReliabilityError::ChainDiscontinuity);
+            }
         }
         if previous_after.is_some_and(|after| event.before != after) {
             return Err(ReliabilityError::ChainDiscontinuity);
