@@ -6,7 +6,8 @@ use std::{
 
 use shardline_reliability::{
     DigestSnapshot, OperationIdentity, OperationKind, SessionEvidenceLog, SnapshotEvidenceLog,
-    canonical_state_digest,
+    append_or_baseline_snapshot_evidence, canonical_state_digest,
+    verify_or_repair_snapshot_evidence,
 };
 #[cfg(unix)]
 use shardline_storage::{
@@ -138,14 +139,8 @@ pub(crate) async fn persist_upload_session(
         .verify_for(&session.scope_namespace, session_id, &session.repository)
         .map_err(|error| OciAdapterError::Reliability(error.to_string()))?;
     let snapshot = session_snapshot(session_id, session)?;
-    if snapshot_evidence.events().is_empty() {
-        snapshot_evidence = SnapshotEvidenceLog::baseline(snapshot)
-            .map_err(|error| OciAdapterError::Reliability(error.to_string()))?;
-    } else {
-        snapshot_evidence
-            .record(snapshot)
-            .map_err(|error| OciAdapterError::Reliability(error.to_string()))?;
-    }
+    snapshot_evidence = append_or_baseline_snapshot_evidence(snapshot_evidence, snapshot)
+        .map_err(|error| OciAdapterError::Reliability(error.to_string()))?;
     let bytes = serde_json::to_vec(&PersistedOciUploadSession {
         session: session.clone(),
         evidence,
@@ -210,15 +205,9 @@ async fn read_persisted_upload_session_with_snapshot(
     }
     .map_err(|error| OciAdapterError::Reliability(error.to_string()))?;
     let snapshot = session_snapshot(session_id, &session)?;
-    let snapshot_evidence_was_missing = stored_snapshot_evidence.events().is_empty();
-    let snapshot_evidence = if snapshot_evidence_was_missing {
-        SnapshotEvidenceLog::baseline(snapshot.clone())
-    } else {
-        stored_snapshot_evidence
-            .verify_for(&snapshot)
-            .map(|()| stored_snapshot_evidence)
-    }
-    .map_err(|error| OciAdapterError::Reliability(error.to_string()))?;
+    let (snapshot_evidence, snapshot_evidence_was_missing) =
+        verify_or_repair_snapshot_evidence(stored_snapshot_evidence, snapshot)
+            .map_err(|error| OciAdapterError::Reliability(error.to_string()))?;
     if evidence_was_missing || snapshot_evidence_was_missing {
         let repaired_bytes = serde_json::to_vec(&PersistedOciUploadSession {
             session: session.clone(),

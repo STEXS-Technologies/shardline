@@ -77,3 +77,33 @@ impl<S: SnapshotEvidence> SnapshotEvidenceLog<S> {
         &mut self.0
     }
 }
+
+/// Verifies a persisted snapshot log against the materialized state, or
+/// reconstructs its canonical baseline when the log is absent in legacy data.
+///
+/// The boolean reports whether repair was required so adapters can persist the
+/// reconstructed envelope without implementing their own missing-evidence
+/// interpretation.
+pub fn verify_or_repair_snapshot_evidence<S: SnapshotEvidence>(
+    stored: SnapshotEvidenceLog<S>,
+    expected: S,
+) -> Result<(SnapshotEvidenceLog<S>, bool), ReliabilityError> {
+    if stored.events().is_empty() {
+        return Ok((SnapshotEvidenceLog::baseline(expected)?, true));
+    }
+    stored.verify_for(&expected)?;
+    Ok((stored, false))
+}
+
+/// Appends a materialized snapshot to an existing log, or creates its
+/// canonical baseline when the log is absent.
+pub fn append_or_baseline_snapshot_evidence<S: SnapshotEvidence>(
+    mut stored: SnapshotEvidenceLog<S>,
+    snapshot: S,
+) -> Result<SnapshotEvidenceLog<S>, ReliabilityError> {
+    if stored.events().is_empty() {
+        return SnapshotEvidenceLog::baseline(snapshot);
+    }
+    stored.record(snapshot)?;
+    Ok(stored)
+}

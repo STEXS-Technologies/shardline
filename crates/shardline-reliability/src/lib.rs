@@ -79,7 +79,9 @@ pub use s3_object_evidence::{
 pub use session_evidence::SessionEvidenceLog;
 pub use session_evidence::verify_resumable_session_events;
 pub use snapshot_event::SnapshotEvidence;
-pub use snapshot_log::SnapshotEvidenceLog;
+pub use snapshot_log::{
+    SnapshotEvidenceLog, append_or_baseline_snapshot_evidence, verify_or_repair_snapshot_evidence,
+};
 pub use state_snapshot::DigestSnapshot;
 pub use statechronicle::ContentDigest as StateChronicleDigest;
 pub use states::{ResumableLifecycleState, UploadLifecycleState};

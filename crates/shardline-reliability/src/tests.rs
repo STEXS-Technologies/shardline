@@ -123,6 +123,28 @@ fn generic_lifecycle_log_rolls_back_rejected_append() {
 }
 
 #[test]
+fn snapshot_evidence_helpers_share_baseline_repair_and_append_policy() {
+    let initial = HubRefSnapshot::new("org/model", "main", Some("sha-1".to_owned())).unwrap();
+    let (baseline, repaired) =
+        verify_or_repair_snapshot_evidence(SnapshotEvidenceLog::default(), initial.clone())
+            .unwrap();
+    assert!(repaired);
+    assert_eq!(baseline.events().len(), 1);
+    baseline.verify_for(&initial).unwrap();
+
+    let next = HubRefSnapshot::new("org/model", "main", Some("sha-2".to_owned())).unwrap();
+    let appended = append_or_baseline_snapshot_evidence(baseline, next.clone()).unwrap();
+    assert_eq!(appended.events().len(), 2);
+    appended.verify_for(&next).unwrap();
+
+    let wrong = HubRefSnapshot::new("org/model", "main", Some("sha-3".to_owned())).unwrap();
+    assert!(matches!(
+        verify_or_repair_snapshot_evidence(appended, wrong),
+        Err(ReliabilityError::StateMismatch)
+    ));
+}
+
+#[test]
 fn lifecycle_evidence_reads_legacy_json_digests_after_canonical_migration() {
     let operation = OperationIdentity::new("tenant", "repo", "legacy-op", OperationKind::Upload)
         .unwrap()

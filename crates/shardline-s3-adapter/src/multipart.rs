@@ -27,7 +27,8 @@ use std::{
 use serde::{Deserialize, Serialize};
 use shardline_reliability::{
     DigestSnapshot, OperationIdentity, OperationKind, ResumableLifecycleState, SessionEvidenceLog,
-    SnapshotEvidenceLog, canonical_state_digest,
+    SnapshotEvidenceLog, append_or_baseline_snapshot_evidence, canonical_state_digest,
+    verify_or_repair_snapshot_evidence,
 };
 use thiserror::Error;
 use tokio::{fs, io::AsyncWriteExt, sync::Mutex, task::spawn_blocking};
@@ -580,14 +581,8 @@ pub async fn store_part_locked(
         )
         .map_err(|error| S3SessionError::Reliability(error.to_string()))?;
     let snapshot = session_snapshot(&session)?;
-    if snapshot_evidence.events().is_empty() {
-        snapshot_evidence = SnapshotEvidenceLog::baseline(snapshot)
-            .map_err(|error| S3SessionError::Reliability(error.to_string()))?;
-    } else {
-        snapshot_evidence
-            .record(snapshot)
-            .map_err(|error| S3SessionError::Reliability(error.to_string()))?;
-    }
+    snapshot_evidence = append_or_baseline_snapshot_evidence(snapshot_evidence, snapshot)
+        .map_err(|error| S3SessionError::Reliability(error.to_string()))?;
     persist_session_with_evidence(root, upload_id, &session, &evidence, snapshot_evidence).await
 }
 
@@ -859,15 +854,9 @@ async fn load_session_with_snapshot(
     }
     .map_err(|error| S3SessionError::Reliability(error.to_string()))?;
     let snapshot = session_snapshot(&session)?;
-    let snapshot_evidence_was_missing = stored_snapshot_evidence.events().is_empty();
-    let snapshot_evidence = if snapshot_evidence_was_missing {
-        SnapshotEvidenceLog::baseline(snapshot.clone())
-    } else {
-        stored_snapshot_evidence
-            .verify_for(&snapshot)
-            .map(|()| stored_snapshot_evidence)
-    }
-    .map_err(|error| S3SessionError::Reliability(error.to_string()))?;
+    let (snapshot_evidence, snapshot_evidence_was_missing) =
+        verify_or_repair_snapshot_evidence(stored_snapshot_evidence, snapshot)
+            .map_err(|error| S3SessionError::Reliability(error.to_string()))?;
     if evidence_was_missing || snapshot_evidence_was_missing {
         let repaired_bytes = serde_json::to_vec(&PersistedMultipartUploadSession {
             session: session.clone(),
@@ -912,12 +901,8 @@ async fn persist_session_with_evidence(
         .verify_for(&session.scope_namespace, &session.upload_id, &session.key)
         .map_err(|error| S3SessionError::Reliability(error.to_string()))?;
     let snapshot = session_snapshot(session)?;
-    let snapshot_evidence = if snapshot_evidence.events().is_empty() {
-        SnapshotEvidenceLog::baseline(snapshot)
-            .map_err(|error| S3SessionError::Reliability(error.to_string()))?
-    } else {
-        snapshot_evidence
-    };
+    let (snapshot_evidence, _) = verify_or_repair_snapshot_evidence(snapshot_evidence, snapshot)
+        .map_err(|error| S3SessionError::Reliability(error.to_string()))?;
     let path = session_metadata_path(root, upload_id)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).await?;
