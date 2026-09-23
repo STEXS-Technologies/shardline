@@ -5,7 +5,7 @@ use super::{PostgresIndexStore, PostgresMetadataStoreError, u64_to_i64};
 use crate::{OciTagEntry, OciTagStore};
 use shardline_reliability::{
     OciTagEvidenceLog, OciTagLifecycleEvent, OciTagSnapshot, SnapshotEvidence,
-    verify_oci_tag_events,
+    verify_or_repair_snapshot_evidence,
 };
 
 fn entry_from_row(row: &PgRow) -> Result<OciTagEntry, PostgresMetadataStoreError> {
@@ -49,19 +49,16 @@ async fn current_tag_evidence(
 ) -> Result<OciTagEvidenceLog, PostgresMetadataStoreError> {
     let snapshot = OciTagSnapshot::new(scope_namespace, repository, tag, digest_hex)?;
     let loaded = load_tag_evidence(connection, scope_namespace, repository, tag).await?;
-    if loaded.events().is_empty() {
-        let baseline = OciTagEvidenceLog::baseline(snapshot)?;
-        if baseline
+    let (evidence, was_missing) = verify_or_repair_snapshot_evidence(loaded, snapshot)?;
+    if was_missing
+        && evidence
             .events()
             .first()
             .is_some_and(|event| event.after.digest_hex.is_some())
-        {
-            persist_tag_evidence(connection, &baseline).await?;
-        }
-        return Ok(baseline);
+    {
+        persist_tag_evidence(connection, &evidence).await?;
     }
-    verify_oci_tag_events(loaded.events(), &snapshot)?;
-    Ok(loaded)
+    Ok(evidence)
 }
 
 async fn persist_tag_evidence(

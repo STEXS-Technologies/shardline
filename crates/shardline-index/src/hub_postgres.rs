@@ -13,7 +13,7 @@ use crate::{
 };
 use shardline_reliability::{
     HubRefEvidenceLog, HubRefLifecycleEvent, HubRefSnapshot, SnapshotEvidence,
-    verify_hub_ref_events,
+    verify_or_repair_snapshot_evidence,
 };
 
 const fn repo_type_to_str(t: HubRepoType) -> &'static str {
@@ -61,11 +61,7 @@ async fn current_hub_ref_evidence(
 ) -> Result<HubRefEvidenceLog, PostgresMetadataStoreError> {
     let snapshot = HubRefSnapshot::new(repository, ref_name, head_sha)?;
     let evidence = load_hub_ref_evidence(transaction, repository, ref_name).await?;
-    if evidence.events().is_empty() {
-        return Ok(HubRefEvidenceLog::baseline(snapshot)?);
-    }
-    verify_hub_ref_events(evidence.events(), &snapshot)?;
-    Ok(evidence)
+    Ok(verify_or_repair_snapshot_evidence(evidence, snapshot)?.0)
 }
 
 async fn persist_hub_ref_evidence(

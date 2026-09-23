@@ -32,8 +32,8 @@ use shardline_reliability::{
     StateTransitionEvent, UploadLifecycleState, WebhookDeliveryEvidenceLog,
     WebhookDeliveryIdentity, WebhookDeliveryLifecycleEvent, WebhookDeliveryLifecycleState,
     WebhookDeliverySnapshot, baseline_resumable_session_events, baseline_upload_lifecycle_events,
-    verify_hub_ref_events, verify_oci_tag_events, verify_provider_lifecycle_events,
-    verify_resumable_session_events, verify_s3_object_events, verify_upload_lifecycle_events,
+    verify_or_repair_snapshot_evidence, verify_provider_lifecycle_events,
+    verify_resumable_session_events, verify_upload_lifecycle_events,
 };
 use shardline_storage::{
     DirectoryPathError, ObjectKey, ObjectKeyError,
@@ -306,11 +306,7 @@ pub(crate) fn current_hub_ref_evidence(
 ) -> Result<HubRefEvidenceLog, LocalIndexStoreError> {
     let snapshot = hub_ref_snapshot(repository, ref_name, head_sha)?;
     let evidence = load_hub_ref_evidence(transaction, repository, ref_name)?;
-    if evidence.events().is_empty() {
-        return Ok(HubRefEvidenceLog::baseline(snapshot)?);
-    }
-    verify_hub_ref_events(evidence.events(), &snapshot)?;
-    Ok(evidence)
+    Ok(verify_or_repair_snapshot_evidence(evidence, snapshot)?.0)
 }
 
 pub(crate) fn oci_tag_snapshot(
@@ -358,21 +354,18 @@ pub(crate) fn current_oci_tag_evidence(
 ) -> Result<OciTagEvidenceLog, LocalIndexStoreError> {
     let snapshot = oci_tag_snapshot(scope_namespace, repository, tag, digest_hex)?;
     let loaded = load_oci_tag_evidence(transaction, scope_namespace, repository, tag)?;
-    if loaded.events().is_empty() {
-        let baseline = OciTagEvidenceLog::baseline(snapshot)?;
-        if baseline
+    let (evidence, was_missing) = verify_or_repair_snapshot_evidence(loaded, snapshot)?;
+    if was_missing
+        && evidence
             .events()
             .first()
             .is_some_and(|event| event.after.digest_hex.is_some())
-        {
-            for event in baseline.events() {
-                persist_oci_tag_evidence(transaction, event)?;
-            }
+    {
+        for event in evidence.events() {
+            persist_oci_tag_evidence(transaction, event)?;
         }
-        return Ok(baseline);
     }
-    verify_oci_tag_events(loaded.events(), &snapshot)?;
-    Ok(loaded)
+    Ok(evidence)
 }
 
 pub(crate) fn persist_oci_tag_evidence(
@@ -430,21 +423,18 @@ pub(crate) fn current_s3_object_evidence(
 ) -> Result<S3ObjectEvidenceLog, LocalIndexStoreError> {
     let snapshot = s3_object_snapshot(scope_namespace, object_key, entry)?;
     let loaded = load_s3_object_evidence(transaction, scope_namespace, object_key)?;
-    if loaded.events().is_empty() {
-        let baseline = S3ObjectEvidenceLog::baseline(snapshot)?;
-        if baseline
+    let (evidence, was_missing) = verify_or_repair_snapshot_evidence(loaded, snapshot)?;
+    if was_missing
+        && evidence
             .events()
             .first()
             .is_some_and(|event| event.after.entry.is_some())
-        {
-            for event in baseline.events() {
-                persist_s3_object_evidence(transaction, event)?;
-            }
+    {
+        for event in evidence.events() {
+            persist_s3_object_evidence(transaction, event)?;
         }
-        return Ok(baseline);
     }
-    verify_s3_object_events(loaded.events(), &snapshot)?;
-    Ok(loaded)
+    Ok(evidence)
 }
 
 pub(crate) fn persist_s3_object_evidence(

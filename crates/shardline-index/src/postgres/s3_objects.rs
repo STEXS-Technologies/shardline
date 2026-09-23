@@ -5,7 +5,7 @@ use super::{PostgresIndexStore, PostgresMetadataStoreError, i64_to_u64, u64_to_i
 use crate::{S3ObjectEntry, S3ObjectIndexStore};
 use shardline_reliability::{
     OperationKind, S3ObjectEvidenceLog, S3ObjectLifecycleEvent, S3ObjectSnapshot, S3ObjectState,
-    SnapshotEvidence, verify_s3_object_events,
+    SnapshotEvidence, verify_or_repair_snapshot_evidence,
 };
 
 fn s3_object_entry_from_row(row: &PgRow) -> Result<S3ObjectEntry, PostgresMetadataStoreError> {
@@ -82,19 +82,16 @@ async fn current_s3_object_evidence(
 ) -> Result<S3ObjectEvidenceLog, PostgresMetadataStoreError> {
     let snapshot = s3_object_snapshot(scope_namespace, object_key, entry)?;
     let loaded = load_s3_object_evidence(connection, scope_namespace, object_key).await?;
-    if loaded.events().is_empty() {
-        let baseline = S3ObjectEvidenceLog::baseline(snapshot)?;
-        if baseline
+    let (evidence, was_missing) = verify_or_repair_snapshot_evidence(loaded, snapshot)?;
+    if was_missing
+        && evidence
             .events()
             .first()
             .is_some_and(|event| event.after.entry.is_some())
-        {
-            persist_s3_object_evidence(connection, &baseline).await?;
-        }
-        return Ok(baseline);
+    {
+        persist_s3_object_evidence(connection, &evidence).await?;
     }
-    verify_s3_object_events(loaded.events(), &snapshot)?;
-    Ok(loaded)
+    Ok(evidence)
 }
 
 async fn persist_s3_object_evidence(

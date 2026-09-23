@@ -1,7 +1,7 @@
 use rusqlite::{OptionalExtension, params};
 use shardline_reliability::{
     OciObjectEvidenceLog, OciObjectIdentity, OciObjectLifecycleState, OciObjectSnapshot,
-    verify_oci_object_lifecycle_chain,
+    verify_oci_object_lifecycle_chain, verify_or_repair_snapshot_evidence,
 };
 
 use super::{LocalIndexStore, LocalIndexStoreError, i64_to_u64};
@@ -76,15 +76,10 @@ fn record_oci_evidence(
     fallback_deleted_at: Option<u64>,
 ) -> Result<(), LocalIndexStoreError> {
     let after = oci_snapshot(key, state, deleted_at)?;
-    let mut evidence = load_oci_evidence(transaction, key)?;
-    let evidence_was_empty = evidence.events().is_empty();
-    if evidence.events().is_empty() {
-        evidence = OciObjectEvidenceLog::baseline(oci_snapshot(
-            key,
-            fallback_state,
-            fallback_deleted_at,
-        )?)?;
-    }
+    let evidence = load_oci_evidence(transaction, key)?;
+    let fallback = oci_snapshot(key, fallback_state, fallback_deleted_at)?;
+    let (mut evidence, evidence_was_empty) =
+        verify_or_repair_snapshot_evidence(evidence, fallback)?;
     evidence.record(after)?;
     let event = evidence.events().last().ok_or_else(|| {
         LocalIndexStoreError::Reliability(shardline_reliability::ReliabilityError::EmptyField(
@@ -144,14 +139,11 @@ impl LocalIndexStore {
                 OciObjectLifecycleState::Deleted,
                 Some(tombstone.deleted_at_unix_seconds),
             )?;
-            if evidence.events().is_empty() {
-                let baseline = OciObjectEvidenceLog::baseline(expected.clone())?;
-                baseline.verify_for(&expected)?;
-                for event in baseline.events() {
+            let (evidence, was_missing) = verify_or_repair_snapshot_evidence(evidence, expected)?;
+            if was_missing {
+                for event in evidence.events() {
                     persist_oci_evidence(&transaction, event)?;
                 }
-            } else {
-                evidence.verify_for(&expected)?;
             }
         }
         transaction.commit()?;
@@ -339,23 +331,18 @@ impl OciObjectStore for LocalIndexStore {
                 .map(i64_to_u64)
                 .transpose()?;
             let evidence = load_oci_evidence(&transaction, &key)?;
-            if evidence.events().is_empty() {
-                if let Some(deleted_at) = deleted_at {
-                    let expected =
-                        oci_snapshot(&key, OciObjectLifecycleState::Deleted, Some(deleted_at))?;
-                    let baseline = OciObjectEvidenceLog::baseline(expected.clone())?;
-                    baseline.verify_for(&expected)?;
-                    for event in baseline.events() {
+            if let Some(deleted_at) = deleted_at {
+                let expected =
+                    oci_snapshot(&key, OciObjectLifecycleState::Deleted, Some(deleted_at))?;
+                let (evidence, was_missing) =
+                    verify_or_repair_snapshot_evidence(evidence, expected)?;
+                if was_missing {
+                    for event in evidence.events() {
                         persist_oci_evidence(&transaction, event)?;
                     }
                 }
-            } else {
+            } else if !evidence.events().is_empty() {
                 verify_oci_object_lifecycle_chain(evidence.events())?;
-                if let Some(deleted_at) = deleted_at {
-                    let expected =
-                        oci_snapshot(&key, OciObjectLifecycleState::Deleted, Some(deleted_at))?;
-                    evidence.verify_for(&expected)?;
-                }
             }
             transaction.commit()?;
             Ok(deleted_at.is_some())
