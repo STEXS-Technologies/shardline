@@ -93,6 +93,23 @@ async fn persist_hub_ref_evidence(
     Ok(())
 }
 
+async fn verify_hub_repo_heads(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    repos: &[HubRepo],
+) -> Result<(), PostgresMetadataStoreError> {
+    for repo in repos {
+        let evidence = current_hub_ref_evidence(
+            transaction,
+            &repo.repo_id,
+            "main",
+            Some(repo.default_branch.clone()),
+        )
+        .await?;
+        persist_hub_ref_evidence(transaction, &evidence).await?;
+    }
+    Ok(())
+}
+
 /// Runs an async future to completion on the current tokio runtime.
 ///
 /// Uses `block_in_place` to safely transition off the tokio worker thread,
@@ -232,27 +249,31 @@ impl HubStore for PostgresIndexStore {
         let pool = self.pool().clone();
 
         block_on_async(async {
-            let mut rows = sqlx::query(
-                "SELECT repo_id, repo_type, private, default_branch, created_at_unix_seconds, updated_at_unix_seconds
-                 FROM shardline_hub_repos ORDER BY repo_id",
-            )
-            .fetch(&pool);
-
+            let mut tx = pool.begin().await?;
             let mut repos = Vec::new();
-            while let Some(row) = rows.try_next().await? {
-                repos.push(HubRepo {
-                    repo_id: row.try_get("repo_id")?,
-                    repo_type: repo_type_from_str(&row.try_get::<String, _>("repo_type")?)?,
-                    private: row.try_get::<bool, _>("private")?,
-                    default_branch: row.try_get("default_branch")?,
-                    created_at_unix_seconds: i64_to_u64(
-                        row.try_get::<i64, _>("created_at_unix_seconds")?,
-                    )?,
-                    updated_at_unix_seconds: i64_to_u64(
-                        row.try_get::<i64, _>("updated_at_unix_seconds")?,
-                    )?,
-                });
+            {
+                let mut rows = sqlx::query(
+                    "SELECT repo_id, repo_type, private, default_branch, created_at_unix_seconds, updated_at_unix_seconds
+                     FROM shardline_hub_repos ORDER BY repo_id",
+                )
+                .fetch(&mut *tx);
+                while let Some(row) = rows.try_next().await? {
+                    repos.push(HubRepo {
+                        repo_id: row.try_get("repo_id")?,
+                        repo_type: repo_type_from_str(&row.try_get::<String, _>("repo_type")?)?,
+                        private: row.try_get::<bool, _>("private")?,
+                        default_branch: row.try_get("default_branch")?,
+                        created_at_unix_seconds: i64_to_u64(
+                            row.try_get::<i64, _>("created_at_unix_seconds")?,
+                        )?,
+                        updated_at_unix_seconds: i64_to_u64(
+                            row.try_get::<i64, _>("updated_at_unix_seconds")?,
+                        )?,
+                    });
+                }
             }
+            verify_hub_repo_heads(&mut tx, &repos).await?;
+            tx.commit().await?;
             Ok(repos)
         })
     }
@@ -268,19 +289,10 @@ impl HubStore for PostgresIndexStore {
         let limit = limit as i64;
 
         block_on_async(async {
-            let mut rows = repo_type.map_or_else(
-                || {
-                    sqlx::query(
-                        "SELECT repo_id, repo_type, private, default_branch, created_at_unix_seconds, updated_at_unix_seconds
-                         FROM shardline_hub_repos
-                         WHERE repo_id LIKE $1
-                         ORDER BY repo_id LIMIT $2",
-                    )
-                    .bind(&pattern)
-                    .bind(limit)
-                    .fetch(&pool)
-                },
-                |rt| {
+            let mut tx = pool.begin().await?;
+            let mut repos = Vec::new();
+            {
+                let mut rows = if let Some(rt) = repo_type {
                     let rt_str = rt.as_str();
                     sqlx::query(
                         "SELECT repo_id, repo_type, private, default_branch, created_at_unix_seconds, updated_at_unix_seconds
@@ -291,25 +303,35 @@ impl HubStore for PostgresIndexStore {
                     .bind(&pattern)
                     .bind(rt_str)
                     .bind(limit)
-                    .fetch(&pool)
-                },
-            );
-
-            let mut repos = Vec::new();
-            while let Some(row) = rows.try_next().await? {
-                repos.push(HubRepo {
-                    repo_id: row.try_get("repo_id")?,
-                    repo_type: repo_type_from_str(&row.try_get::<String, _>("repo_type")?)?,
-                    private: row.try_get::<bool, _>("private")?,
-                    default_branch: row.try_get("default_branch")?,
-                    created_at_unix_seconds: i64_to_u64(
-                        row.try_get::<i64, _>("created_at_unix_seconds")?,
-                    )?,
-                    updated_at_unix_seconds: i64_to_u64(
-                        row.try_get::<i64, _>("updated_at_unix_seconds")?,
-                    )?,
-                });
+                    .fetch(&mut *tx)
+                } else {
+                    sqlx::query(
+                        "SELECT repo_id, repo_type, private, default_branch, created_at_unix_seconds, updated_at_unix_seconds
+                         FROM shardline_hub_repos
+                         WHERE repo_id LIKE $1
+                         ORDER BY repo_id LIMIT $2",
+                    )
+                    .bind(&pattern)
+                    .bind(limit)
+                    .fetch(&mut *tx)
+                };
+                while let Some(row) = rows.try_next().await? {
+                    repos.push(HubRepo {
+                        repo_id: row.try_get("repo_id")?,
+                        repo_type: repo_type_from_str(&row.try_get::<String, _>("repo_type")?)?,
+                        private: row.try_get::<bool, _>("private")?,
+                        default_branch: row.try_get("default_branch")?,
+                        created_at_unix_seconds: i64_to_u64(
+                            row.try_get::<i64, _>("created_at_unix_seconds")?,
+                        )?,
+                        updated_at_unix_seconds: i64_to_u64(
+                            row.try_get::<i64, _>("updated_at_unix_seconds")?,
+                        )?,
+                    });
+                }
             }
+            verify_hub_repo_heads(&mut tx, &repos).await?;
+            tx.commit().await?;
             Ok(repos)
         })
     }

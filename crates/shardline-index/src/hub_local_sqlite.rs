@@ -44,6 +44,29 @@ fn open_hub_connection_rw(root: &Path) -> Result<Connection, LocalIndexStoreErro
     Ok(connection)
 }
 
+fn verify_hub_repo_heads(root: &Path, repos: &[HubRepo]) -> Result<(), LocalIndexStoreError> {
+    if repos.is_empty() {
+        return Ok(());
+    }
+    retry_sqlite_busy(|| {
+        let mut conn = open_hub_connection_rw(root)?;
+        let tx = conn.transaction()?;
+        for repo in repos {
+            let evidence = current_hub_ref_evidence(
+                &tx,
+                &repo.repo_id,
+                "main",
+                Some(repo.default_branch.clone()),
+            )?;
+            for event in evidence.events() {
+                persist_hub_ref_evidence(&tx, event)?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    })
+}
+
 /// Ensures the hub SQLite tables exist in the given root directory.
 /// Creates the database file and tables if they don't exist.
 ///
@@ -218,6 +241,7 @@ impl HubStore for LocalIndexStore {
         for row in rows {
             repos.push(row?);
         }
+        verify_hub_repo_heads(self.root(), &repos)?;
         Ok(repos)
     }
 
@@ -282,6 +306,7 @@ impl HubStore for LocalIndexStore {
                 repos.push(row?);
             }
         }
+        verify_hub_repo_heads(self.root(), &repos)?;
         Ok(repos)
     }
 
@@ -886,6 +911,8 @@ mod tests {
 
         assert!(store.list_refs("tamper-test").is_err());
         assert!(store.get_repo("tamper-test").is_err());
+        assert!(store.list_repos().is_err());
+        assert!(store.search_repos(None, "tamper-test", 10).is_err());
     }
 
     #[test]
