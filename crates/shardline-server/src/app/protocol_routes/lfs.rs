@@ -877,7 +877,7 @@ fn promote_lfs_patch_session(
             transition
         }
         Err(error) => {
-            drop(lfs_patch_evidence::transition(
+            let abort = lfs_patch_evidence::transition(
                 tmp_dir,
                 oid,
                 scope_namespace,
@@ -885,9 +885,26 @@ fn promote_lfs_patch_session(
                 object_key.as_str(),
                 shardline_reliability::ResumableLifecycleState::Completing,
                 shardline_reliability::ResumableLifecycleState::Aborted,
-            ));
-            consume_lfs_patch_session(tmp_path, ranges_path, tmp_dir, oid);
-            Err(error)
+            );
+            match abort {
+                Ok(()) => {
+                    consume_lfs_patch_session(tmp_path, ranges_path, tmp_dir, oid);
+                    Err(error)
+                }
+                Err(abort_error) => {
+                    // Preserve the completing session and its evidence when
+                    // the abort boundary itself cannot be journaled. The
+                    // next retry can replay promotion (the transition is
+                    // idempotent at `Completing`) or the repair/sweep path
+                    // can inspect the intact canonical evidence.
+                    tracing::warn!(
+                        error = ?abort_error,
+                        oid,
+                        "could not journal failed LFS promotion as aborted; preserving session"
+                    );
+                    Err(error)
+                }
+            }
         }
     }
 }
