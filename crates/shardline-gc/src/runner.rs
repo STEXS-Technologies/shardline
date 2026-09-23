@@ -603,7 +603,7 @@ where
                 );
             }
 
-            quarantined_object_keys.insert(candidate.object_key().as_str().to_owned());
+            quarantined_object_keys.insert(candidate.object_key().clone());
             Ok::<(), GcError>(())
         })
         .await?;
@@ -648,7 +648,7 @@ where
                         .into(),
                     );
                 }
-                if quarantined_object_keys.contains(hold.object_key().as_str()) {
+                if quarantined_object_keys.contains(hold.object_key()) {
                     // A held+quarantined object is a REPAIRABLE state, not a
                     // hard abort. A hold and a quarantine entry on the same key
                     // are contradictory: the hold keeps the data, and the

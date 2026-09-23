@@ -170,7 +170,7 @@ where
             now_unix_seconds,
         ) {
             RetentionHoldRepairAction::Keep => {
-                active_hold_object_keys.insert(hold.object_key().as_str().to_owned());
+                active_hold_object_keys.insert(hold.object_key().clone());
             }
             RetentionHoldRepairAction::DeleteExpired => {
                 let deleted = index_store
@@ -215,7 +215,7 @@ where
             reachability
                 .referenced_object_keys
                 .contains(candidate.object_key().as_str()),
-            active_hold_object_keys.contains(candidate.object_key().as_str()),
+            active_hold_object_keys.contains(candidate.object_key()),
         );
         match action {
             QuarantineRepairAction::Keep => {}
