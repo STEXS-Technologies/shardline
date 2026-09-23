@@ -43,7 +43,7 @@ use shardline_s3_adapter::{
     CompleteMultipartUploadResult, InitiateMultipartUploadResult, S3Error, S3SessionError,
     acquire_session_part_lock, create_session, delete_session_locked, lock_session_parts,
     lock_upload_sessions, new_upload_id, parse_complete_multipart_parts, part_file_path,
-    read_session, store_part_locked, validate_part_quota_locked,
+    read_session_locked, store_part_locked, validate_part_quota_locked,
 };
 use shardline_storage::ObjectKey;
 use tokio::io::AsyncWriteExt;
@@ -239,7 +239,7 @@ pub(super) async fn s3_upload_part(
     let _session_lock = lock_upload_sessions(root).await?;
 
     // The session must exist, be unexpired, and belong to this bucket/key.
-    let session = read_session(root, upload_id, ttl).await?;
+    let session = read_session_locked(root, upload_id, ttl).await?;
     if session.key != context.key || session.scope_namespace != context.scope_namespace {
         return Err(S3Error::no_such_upload());
     }
@@ -564,7 +564,7 @@ pub(super) async fn s3_complete_multipart_upload(
     // completion cannot stall other tenants' session operations (F-10).
     let _session_lock = lock_upload_sessions(root).await?;
 
-    let session = read_session(root, upload_id, ttl).await?;
+    let session = read_session_locked(root, upload_id, ttl).await?;
     if session.key != context.key || session.scope_namespace != context.scope_namespace {
         return Err(S3Error::no_such_upload());
     }
@@ -883,7 +883,7 @@ pub(super) async fn s3_abort_multipart_upload(
     // the sweep takes both locks in the same order.
     let _session_lock = lock_upload_sessions(root).await?;
 
-    let session = read_session(root, upload_id, ttl).await?;
+    let session = read_session_locked(root, upload_id, ttl).await?;
     if session.key != context.key || session.scope_namespace != context.scope_namespace {
         return Err(S3Error::no_such_upload());
     }

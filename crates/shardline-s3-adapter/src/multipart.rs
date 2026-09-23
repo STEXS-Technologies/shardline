@@ -469,6 +469,25 @@ pub async fn read_session(
     upload_id: &str,
     ttl_seconds: NonZeroU64,
 ) -> Result<MultipartUploadSession, S3SessionError> {
+    let _lock = lock_upload_sessions(root).await?;
+    read_session_locked(root, upload_id, ttl_seconds).await
+}
+
+/// Reads a session while the caller owns [`lock_upload_sessions`].
+///
+/// This variant is for bounded operations that already hold the global
+/// session lock. Keeping the lock boundary explicit prevents evidence repair
+/// from racing a metadata mutation without introducing a re-entrant lock.
+///
+/// # Errors
+///
+/// Returns the same session validation, expiry, persistence, and evidence
+/// errors as [`read_session`].
+pub async fn read_session_locked(
+    root: &Path,
+    upload_id: &str,
+    ttl_seconds: NonZeroU64,
+) -> Result<MultipartUploadSession, S3SessionError> {
     validate_upload_id(upload_id)?;
     let now_unix_seconds = unix_now_seconds_checked()?;
     let (session, _evidence) = load_session_at(
