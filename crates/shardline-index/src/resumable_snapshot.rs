@@ -42,6 +42,23 @@ pub fn resumable_state_digest(
     session: &ResumableSession,
     parts: &[ResumableSessionPart],
 ) -> Result<StateChronicleDigest, ReliabilityError> {
+    let mut canonical_parts: Vec<_> = parts
+        .iter()
+        .map(|part| {
+            let range = part.range();
+            ResumablePartStateSnapshot {
+                part_number: part.part_number().get(),
+                generation: part.generation().get(),
+                staging_key: part.staging_key().to_owned(),
+                size_bytes: part.size_bytes(),
+                etag: part.etag().map(str::to_owned),
+                range_start: range.map(|value| value.start()),
+                range_end_exclusive: range.map(|value| value.end_exclusive()),
+            }
+        })
+        .collect();
+    canonical_parts.sort_by_key(|part| (part.part_number, part.generation));
+
     let snapshot = ResumableSessionStateSnapshot {
         session_id: session.session_id().to_owned(),
         protocol: session.protocol().as_str(),
@@ -52,21 +69,7 @@ pub fn resumable_state_digest(
         generation: session.generation().get(),
         fence_epoch: session.fence_epoch().get(),
         expires_at_unix_seconds: session.expires_at().as_secs(),
-        parts: parts
-            .iter()
-            .map(|part| {
-                let range = part.range();
-                ResumablePartStateSnapshot {
-                    part_number: part.part_number().get(),
-                    generation: part.generation().get(),
-                    staging_key: part.staging_key().to_owned(),
-                    size_bytes: part.size_bytes(),
-                    etag: part.etag().map(str::to_owned),
-                    range_start: range.map(|value| value.start()),
-                    range_end_exclusive: range.map(|value| value.end_exclusive()),
-                }
-            })
-            .collect(),
+        parts: canonical_parts,
     };
     canonical_state_digest(&snapshot)
 }
@@ -116,5 +119,29 @@ mod tests {
             resumable_state_digest(&session, &parts).expect("valid snapshot serializes"),
             resumable_state_digest(&session, &parts).expect("valid snapshot serializes")
         );
+    }
+
+    #[test]
+    fn complete_materialized_state_digest_is_independent_of_part_order() {
+        let session = session();
+        let first = ResumableSessionPart::new(
+            NonZeroU64::new(1).expect("non-zero part number"),
+            NonZeroU64::MIN,
+            "staging/one".to_owned(),
+            10,
+            Some("etag-one".to_owned()),
+        );
+        let second = ResumableSessionPart::new(
+            NonZeroU64::new(2).expect("non-zero part number"),
+            NonZeroU64::MIN,
+            "staging/two".to_owned(),
+            20,
+            Some("etag-two".to_owned()),
+        );
+        let ordered = resumable_state_digest(&session, &[first.clone(), second.clone()])
+            .expect("valid snapshot serializes");
+        let reversed =
+            resumable_state_digest(&session, &[second, first]).expect("valid snapshot serializes");
+        assert_eq!(ordered, reversed);
     }
 }
