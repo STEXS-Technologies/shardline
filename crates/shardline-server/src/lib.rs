@@ -84,6 +84,7 @@ mod error;
 mod fsck;
 #[cfg(feature = "fuzzing")]
 mod fuzz;
+pub(crate) mod gc;
 mod gc_runtime;
 mod ingest_bench;
 mod jwks_provider;
@@ -96,6 +97,7 @@ mod maintenance_barrier;
 pub mod metrics;
 mod model;
 mod object_store;
+pub(crate) mod oci_adapter;
 mod oidc_provider;
 mod ops_record_store;
 mod overflow;
@@ -114,6 +116,7 @@ mod server_role;
 mod storage_migration;
 pub mod test_fixtures;
 pub mod test_invariant_error;
+pub(crate) mod xet_adapter;
 
 pub use admission::{ExecutionPools, WeightedAdmission};
 pub use app::ProtocolMetrics;
@@ -133,18 +136,6 @@ pub use object_store::ServerObjectStore;
 pub use oci_adapter::{oci_blob_key, oci_manifest_key, oci_manifest_media_type_key};
 pub use protocol_support::shared_sha256_object_key;
 pub use reconstruction_cache::ReconstructionCacheService;
-pub(crate) mod oci_adapter {
-    pub(crate) use shardline_oci_adapter::{
-        OciReference, abort_s3_multipart_upload_session, append_s3_multipart_upload_bytes,
-        append_upload_bytes, create_upload_session, delete_upload_session,
-        finalize_s3_multipart_upload_session, lock_upload_sessions, new_upload_session_id,
-        oci_blob_location, oci_manifest_location, oci_manifest_prefix, oci_tag_key, oci_tag_prefix,
-        parse_reference, read_upload_session, touch_upload_session, upload_body_integrity,
-        upload_body_path_for_session, upload_length, upload_session_length,
-        upload_session_location, validate_repository,
-    };
-    pub use shardline_oci_adapter::{oci_blob_key, oci_manifest_key, oci_manifest_media_type_key};
-}
 pub use shardline_protocol_adapters::{BazelCacheKind, bazel_cache_object_key, lfs_object_key};
 pub use transfer_limiter::TransferLimiter;
 #[cfg(test)]
@@ -152,33 +143,6 @@ mod gc_tests;
 mod transfer_limiter;
 pub mod upload_ingest;
 mod validation;
-pub(crate) mod xet_adapter {
-    pub use shardline_xet_adapter::{
-        BatchReconstructionResponse, FileReconstructionResponse, FileReconstructionV2Response,
-        XorbUploadResponse, decode_serialized_xorb_chunks, try_for_each_serialized_xorb_chunk,
-        validate_serialized_xorb,
-    };
-    #[cfg(test)]
-    pub(crate) use shardline_xet_adapter::{
-        ReconstructionChunkRange, ReconstructionFetchInfo, ReconstructionTerm,
-        ReconstructionUrlRange, shard_object_key, store_uploaded_xorb,
-    };
-    pub(crate) use shardline_xet_adapter::{
-        ShardUploadResponse, XET_PATH_ROUTE, XET_READ_TOKEN_ROUTE, XET_REVISION_ROUTE,
-        XET_REVISIONS_ROUTE, XET_TREE_ROUTE, XET_WRITE_TOKEN_ROUTE, XORB_TRANSFER_ROUTE,
-        XetAdapterError, XorbParseError, XorbVisitError, build_batch_reconstruction_response,
-        build_reconstruction_response, reconstruction_v2_from_v1, register_uploaded_shard_bytes,
-        register_uploaded_shard_file, resolve_dedupe_shard_object,
-        shard_hash_from_object_key_if_present, store_uploaded_xorb_bytes,
-        store_uploaded_xorb_file_path, validate_hash_path, validate_optional_content_hash,
-        validate_xorb_transfer_namespace, visit_stored_xorb_chunk_hashes,
-        xorb_hash_from_object_key_if_present, xorb_object_key,
-    };
-    #[cfg(feature = "fuzzing")]
-    pub(crate) use shardline_xet_adapter::{
-        build_xorb_transfer_url, normalize_serialized_xorb, retained_shard_chunk_hashes,
-    };
-}
 
 pub use app::{serve, serve_with_listener};
 pub use backup::{BackupManifestReport, write_backup_manifest};
@@ -241,17 +205,6 @@ pub use reconstruction_cache::{
 pub use runtime_check::{ConfigCheckReport, run_config_check};
 pub use server_frontend::{ServerFrontend, ServerFrontendParseError};
 pub use server_role::{ServerRole, ServerRoleParseError};
-pub(crate) mod gc {
-    pub(crate) use shardline_gc::run_gc_with_oci_tombstones;
-    pub use shardline_gc::{
-        DEFAULT_LOCAL_GC_RETENTION_SECONDS, LocalGcDiagnostics, LocalGcOptions, LocalGcReport,
-    };
-    #[cfg(test)]
-    pub(crate) use shardline_gc::{
-        GcOrphanQuarantineState, quarantine_record_path, quarantine_root, run_local_gc,
-        run_local_gc_diagnostics,
-    };
-}
 pub(crate) use shardline_protocol_adapters::{
     LFS_CONTENT_TYPE, LfsBatchRequest, LfsBatchResponse, LfsObjectError, LfsObjectResponse,
     LfsOperation, TransferAdapter, cas_headers,
