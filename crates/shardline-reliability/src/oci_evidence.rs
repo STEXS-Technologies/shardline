@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::snapshot_event::{SnapshotEvidence, SnapshotEvidenceEvent, verify_snapshot_chain};
+use crate::snapshot_log::SnapshotEvidenceLog;
 use crate::{OperationIdentity, OperationKind, ReliabilityError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -160,47 +161,7 @@ pub fn verify_oci_object_lifecycle_events(
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct OciObjectEvidenceLog(Vec<OciObjectLifecycleEvent>);
-
-impl OciObjectEvidenceLog {
-    pub fn from_events(events: Vec<OciObjectLifecycleEvent>) -> Result<Self, ReliabilityError> {
-        verify_oci_object_lifecycle_chain(&events)?;
-        Ok(Self(events))
-    }
-
-    pub fn baseline(snapshot: OciObjectSnapshot) -> Result<Self, ReliabilityError> {
-        Ok(Self(vec![OciObjectLifecycleEvent::new(
-            0,
-            snapshot.clone(),
-            snapshot,
-        )?]))
-    }
-
-    pub fn record(&mut self, snapshot: OciObjectSnapshot) -> Result<(), ReliabilityError> {
-        let before = self
-            .0
-            .last()
-            .map(|event| event.after.clone())
-            .unwrap_or_else(|| snapshot.clone());
-        let sequence = self
-            .0
-            .last()
-            .map_or(0, |event| event.sequence.saturating_add(1));
-        self.0
-            .push(OciObjectLifecycleEvent::new(sequence, before, snapshot)?);
-        verify_oci_object_lifecycle_chain(&self.0)
-    }
-
-    pub fn verify_for(&self, expected: &OciObjectSnapshot) -> Result<(), ReliabilityError> {
-        verify_oci_object_lifecycle_events(&self.0, expected)
-    }
-
-    #[must_use]
-    pub fn events(&self) -> &[OciObjectLifecycleEvent] {
-        &self.0
-    }
-}
+pub type OciObjectEvidenceLog = SnapshotEvidenceLog<OciObjectSnapshot>;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]

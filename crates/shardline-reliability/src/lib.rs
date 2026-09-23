@@ -16,6 +16,7 @@ mod provider_evidence;
 mod quarantine_evidence;
 mod session_evidence;
 mod snapshot_event;
+mod snapshot_log;
 mod states;
 
 #[cfg(test)]
@@ -47,5 +48,6 @@ pub use quarantine_evidence::{
 };
 pub use session_evidence::SessionEvidenceLog;
 pub use session_evidence::verify_resumable_session_events;
+pub use snapshot_log::SnapshotEvidenceLog;
 pub use statechronicle::ContentDigest as StateChronicleDigest;
 pub use states::{ResumableLifecycleState, UploadLifecycleState};

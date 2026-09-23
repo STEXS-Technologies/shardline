@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::snapshot_event::{SnapshotEvidence, SnapshotEvidenceEvent, verify_snapshot_chain};
+use crate::snapshot_log::SnapshotEvidenceLog;
 use crate::{OperationIdentity, OperationKind, ReliabilityError};
 
 /// Canonical materialized snapshot for one provider repository lifecycle.
@@ -157,54 +158,4 @@ pub fn verify_provider_lifecycle_events(
 }
 
 /// Evidence log for one provider repository lifecycle row.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProviderEvidenceLog(Vec<ProviderLifecycleEvent>);
-
-impl ProviderEvidenceLog {
-    /// Wraps persisted events after validating their complete chain.
-    pub fn from_events(events: Vec<ProviderLifecycleEvent>) -> Result<Self, ReliabilityError> {
-        verify_provider_lifecycle_chain(&events)?;
-        Ok(Self(events))
-    }
-
-    /// Creates a legacy-compatible baseline for an existing materialized row.
-    pub fn baseline(snapshot: ProviderLifecycleSnapshot) -> Result<Self, ReliabilityError> {
-        Ok(Self(vec![ProviderLifecycleEvent::new(
-            0,
-            snapshot.clone(),
-            snapshot,
-        )?]))
-    }
-
-    /// Appends a snapshot after validating the complete chain.
-    pub fn record(&mut self, snapshot: ProviderLifecycleSnapshot) -> Result<(), ReliabilityError> {
-        let before = self
-            .0
-            .last()
-            .map(|event| event.after.clone())
-            .unwrap_or_else(|| snapshot.clone());
-        let sequence = self
-            .0
-            .last()
-            .map_or(0, |event| event.sequence.saturating_add(1));
-        self.0
-            .push(ProviderLifecycleEvent::new(sequence, before, snapshot)?);
-        verify_provider_lifecycle_chain(&self.0)
-    }
-
-    /// Verifies all evidence against one materialized row.
-    pub fn verify_for(&self, expected: &ProviderLifecycleSnapshot) -> Result<(), ReliabilityError> {
-        verify_provider_lifecycle_events(&self.0, expected)
-    }
-
-    /// Returns the ordered provider lifecycle events.
-    #[must_use]
-    pub fn events(&self) -> &[ProviderLifecycleEvent] {
-        &self.0
-    }
-
-    #[cfg(test)]
-    pub(crate) const fn events_mut(&mut self) -> &mut Vec<ProviderLifecycleEvent> {
-        &mut self.0
-    }
-}
+pub type ProviderEvidenceLog = SnapshotEvidenceLog<ProviderLifecycleSnapshot>;
