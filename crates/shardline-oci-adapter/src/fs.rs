@@ -7,7 +7,8 @@ use std::{
 use shardline_reliability::{
     DigestSnapshot, OperationIdentity, OperationKind, SessionEvidenceLog, SnapshotEvidenceLog,
     append_or_baseline_snapshot_evidence, canonical_state_digest,
-    verify_or_repair_session_evidence, verify_or_repair_snapshot_evidence,
+    verify_and_append_session_transition, verify_or_repair_session_evidence,
+    verify_or_repair_snapshot_evidence,
 };
 #[cfg(unix)]
 use shardline_storage::{
@@ -116,16 +117,15 @@ pub(crate) async fn persist_upload_session(
     let (evidence, mut snapshot_evidence) =
         match read_persisted_upload_session_with_snapshot(root, session_id).await {
             Ok((_previous, evidence, snapshot_evidence)) => {
-                let mut evidence = evidence;
-                evidence
-                    .record(
-                        &session.scope_namespace,
-                        session_id,
-                        &session.repository,
-                        shardline_reliability::ResumableLifecycleState::Active,
-                        shardline_reliability::ResumableLifecycleState::Active,
-                    )
-                    .map_err(|error| OciAdapterError::Reliability(error.to_string()))?;
+                let (evidence, _) = verify_and_append_session_transition(
+                    evidence,
+                    &session.scope_namespace,
+                    session_id,
+                    &session.repository,
+                    shardline_reliability::ResumableLifecycleState::Active,
+                    shardline_reliability::ResumableLifecycleState::Active,
+                )
+                .map_err(|error| OciAdapterError::Reliability(error.to_string()))?;
                 (evidence, snapshot_evidence)
             }
             Err(OciAdapterError::NotFound) => (

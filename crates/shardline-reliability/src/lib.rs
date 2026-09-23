@@ -77,7 +77,8 @@ pub use s3_object_evidence::{
     S3ObjectState, verify_s3_object_events,
 };
 pub use session_evidence::{
-    SessionEvidenceLog, verify_or_repair_session_evidence, verify_resumable_session_events,
+    SessionEvidenceLog, verify_and_append_session_transition, verify_or_repair_session_evidence,
+    verify_resumable_session_events,
 };
 pub use snapshot_event::SnapshotEvidence;
 pub use snapshot_log::{

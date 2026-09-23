@@ -185,6 +185,37 @@ fn session_evidence_helper_shares_legacy_repair_and_identity_policy() {
 }
 
 #[test]
+fn session_transition_helper_fences_expected_state_and_repairs_baseline() {
+    let (evidence, was_missing) = verify_and_append_session_transition(
+        SessionEvidenceLog::default(),
+        "scope",
+        "session-1",
+        "target",
+        ResumableLifecycleState::Active,
+        ResumableLifecycleState::Completing,
+    )
+    .unwrap();
+    assert!(was_missing);
+    assert_eq!(evidence.events().len(), 2);
+    assert_eq!(
+        evidence.events().last().unwrap().after,
+        ResumableLifecycleState::Completing
+    );
+
+    assert!(matches!(
+        verify_and_append_session_transition(
+            evidence,
+            "scope",
+            "session-1",
+            "target",
+            ResumableLifecycleState::Active,
+            ResumableLifecycleState::Completed,
+        ),
+        Err(ReliabilityError::StateMismatch)
+    ));
+}
+
+#[test]
 fn lifecycle_evidence_reads_legacy_json_digests_after_canonical_migration() {
     let operation = OperationIdentity::new("tenant", "repo", "legacy-op", OperationKind::Upload)
         .unwrap()

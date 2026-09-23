@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use shardline_reliability::{
     DigestSnapshot, OperationIdentity, OperationKind, ResumableLifecycleState, SessionEvidenceLog,
-    SnapshotEvidenceLog, canonical_state_digest,
+    SnapshotEvidenceLog, canonical_state_digest, verify_and_append_session_transition,
 };
 
 use crate::ServerError;
@@ -151,11 +151,12 @@ pub(super) fn record(
     before: ResumableLifecycleState,
     after: ResumableLifecycleState,
 ) -> Result<(), ServerError> {
-    let mut log = load(dir, oid, scope_namespace, session_id, target_key)?;
-    log.record(
-        scope_namespace.to_owned(),
-        session_id.to_owned(),
-        target_key.to_owned(),
+    let log = load(dir, oid, scope_namespace, session_id, target_key)?;
+    let (log, _) = verify_and_append_session_transition(
+        log,
+        scope_namespace,
+        session_id,
+        target_key,
         before,
         after,
     )

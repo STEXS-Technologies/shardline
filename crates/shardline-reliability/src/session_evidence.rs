@@ -169,3 +169,32 @@ pub fn verify_or_repair_session_evidence(
     stored.verify_for(scope_namespace, session_id, target_key)?;
     Ok((stored, false))
 }
+
+/// Verifies a session journal against its identity and expected current state,
+/// repairs a missing legacy baseline, and appends one canonical transition.
+pub fn verify_and_append_session_transition(
+    stored: SessionEvidenceLog,
+    scope_namespace: &str,
+    session_id: &str,
+    target_key: &str,
+    before: ResumableLifecycleState,
+    after: ResumableLifecycleState,
+) -> Result<(SessionEvidenceLog, bool), ReliabilityError> {
+    let (mut evidence, baseline_was_missing) =
+        verify_or_repair_session_evidence(stored, scope_namespace, session_id, target_key)?;
+    let current = evidence
+        .events()
+        .last()
+        .map_or(ResumableLifecycleState::Active, |event| event.after);
+    if current != before {
+        return Err(ReliabilityError::StateMismatch);
+    }
+    evidence.record(
+        scope_namespace.to_owned(),
+        session_id.to_owned(),
+        target_key.to_owned(),
+        before,
+        after,
+    )?;
+    Ok((evidence, baseline_was_missing))
+}

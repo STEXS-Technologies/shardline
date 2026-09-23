@@ -28,7 +28,8 @@ use serde::{Deserialize, Serialize};
 use shardline_reliability::{
     DigestSnapshot, OperationIdentity, OperationKind, ResumableLifecycleState, SessionEvidenceLog,
     SnapshotEvidenceLog, append_or_baseline_snapshot_evidence, canonical_state_digest,
-    verify_or_repair_session_evidence, verify_or_repair_snapshot_evidence,
+    verify_and_append_session_transition, verify_or_repair_session_evidence,
+    verify_or_repair_snapshot_evidence,
 };
 use thiserror::Error;
 use tokio::{fs, io::AsyncWriteExt, sync::Mutex, task::spawn_blocking};
@@ -543,7 +544,7 @@ pub async fn store_part_locked(
     validate_upload_id(upload_id)?;
     validate_part_number(part_number)?;
     let now_unix_seconds = unix_now_seconds_checked()?;
-    let (mut session, mut evidence, mut snapshot_evidence) = load_session_at_with_snapshot(
+    let (mut session, evidence, mut snapshot_evidence) = load_session_at_with_snapshot(
         &session_dir(root, upload_id)?,
         ttl_seconds,
         now_unix_seconds,
@@ -571,15 +572,15 @@ pub async fn store_part_locked(
         },
     );
     session.last_touched_unix_seconds = now_unix_seconds;
-    evidence
-        .record(
-            &session.scope_namespace,
-            &session.upload_id,
-            &session.key,
-            ResumableLifecycleState::Active,
-            ResumableLifecycleState::Active,
-        )
-        .map_err(|error| S3SessionError::Reliability(error.to_string()))?;
+    let (evidence, _) = verify_and_append_session_transition(
+        evidence,
+        &session.scope_namespace,
+        &session.upload_id,
+        &session.key,
+        ResumableLifecycleState::Active,
+        ResumableLifecycleState::Active,
+    )
+    .map_err(|error| S3SessionError::Reliability(error.to_string()))?;
     let snapshot = session_snapshot(&session)?;
     snapshot_evidence = append_or_baseline_snapshot_evidence(snapshot_evidence, snapshot)
         .map_err(|error| S3SessionError::Reliability(error.to_string()))?;
