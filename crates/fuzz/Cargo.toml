@@ -363,6 +363,12 @@ test = false
 doc = false
 
 [[bin]]
+name = "shardline_reliability_lifecycle_log"
+path = "fuzz_targets/shardline/reliability_lifecycle_log.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "shardline_resumable_session_state"
 path = "fuzz_targets/shardline/resumable_session_state.rs"
 test = false
