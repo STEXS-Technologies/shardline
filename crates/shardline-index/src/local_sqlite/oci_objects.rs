@@ -62,19 +62,9 @@ fn persist_oci_evidence(
     transaction: &rusqlite::Transaction<'_>,
     event: &shardline_reliability::OciObjectLifecycleEvent,
 ) -> Result<(), LocalIndexStoreError> {
-    transaction.execute(
-        "INSERT OR IGNORE INTO shardline_reliability_events
-            (operation_kind, operation_id, sequence, event_json, created_at_unix_seconds)
-         VALUES (?1, ?2, ?3, ?4, unixepoch())",
-        params![
-            event.operation.kind.as_str(),
-            event.operation.operation_id,
-            i64::try_from(event.sequence)
-                .map_err(|error| LocalIndexStoreError::IntegerOutOfRange(error.to_string()))?,
-            serde_json::to_string(event)?,
-        ],
-    )?;
-    Ok(())
+    let created_at_unix_seconds =
+        transaction.query_row("SELECT unixepoch()", [], |row| row.get(0))?;
+    super::helpers::persist_reliability_event_at(transaction, event, created_at_unix_seconds)
 }
 
 fn record_oci_evidence(

@@ -21,11 +21,12 @@ use rusqlite::{
 use serde_json::{from_slice, from_str, to_string};
 use shardline_protocol::{RepositoryScope, unix_now_seconds_lossy};
 use shardline_reliability::{
-    LifecycleEvent, OciObjectEvidenceLog, OciObjectIdentity, OciObjectLifecycleState,
-    OciObjectSnapshot, ProviderEvidenceLog, ProviderLifecycleEvent, ProviderLifecycleSnapshot,
-    QuarantineEvidenceLog, QuarantineLifecycleEvent, QuarantineLifecycleState,
-    QuarantineObjectIdentity, QuarantineSnapshot, ResumableLifecycleState, StateTransitionEvent,
-    UploadLifecycleState, baseline_resumable_session_events, baseline_upload_lifecycle_events,
+    EvidenceEventMetadata, LifecycleEvent, OciObjectEvidenceLog, OciObjectIdentity,
+    OciObjectLifecycleState, OciObjectSnapshot, ProviderEvidenceLog, ProviderLifecycleEvent,
+    ProviderLifecycleSnapshot, QuarantineEvidenceLog, QuarantineLifecycleEvent,
+    QuarantineLifecycleState, QuarantineObjectIdentity, QuarantineSnapshot,
+    ResumableLifecycleState, StateTransitionEvent, UploadLifecycleState,
+    baseline_resumable_session_events, baseline_upload_lifecycle_events,
     verify_provider_lifecycle_events, verify_resumable_session_events,
     verify_upload_lifecycle_events,
 };
@@ -52,6 +53,42 @@ use crate::{
 
 pub(crate) fn quarantine_evidence_operation_id(object_key: &str) -> String {
     object_key.to_owned()
+}
+
+/// Persists one authenticated evidence event using its typed operation key.
+///
+/// All local durable state machines share this writer so a caller cannot bind
+/// an event under a separately supplied operation kind or operation id.
+pub(crate) fn persist_reliability_event<T: EvidenceEventMetadata>(
+    transaction: &Transaction<'_>,
+    event: &T,
+) -> Result<(), LocalIndexStoreError> {
+    persist_reliability_event_at(transaction, event, u64_to_i64(unix_now_seconds_lossy())?)
+}
+
+/// Persists one event with an explicitly selected timestamp source.
+///
+/// The timestamp is kept separate from the typed event identity so adapters
+/// can preserve their existing clock contract while sharing the journal
+/// writer and its key derivation.
+pub(crate) fn persist_reliability_event_at<T: EvidenceEventMetadata>(
+    transaction: &Transaction<'_>,
+    event: &T,
+    created_at_unix_seconds: i64,
+) -> Result<(), LocalIndexStoreError> {
+    transaction.execute(
+        "INSERT OR IGNORE INTO shardline_reliability_events
+            (operation_kind, operation_id, sequence, event_json, created_at_unix_seconds)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            event.operation_identity().kind.as_str(),
+            event.operation_identity().operation_id,
+            u64_to_i64(event.sequence_number())?,
+            to_string(event)?,
+            created_at_unix_seconds,
+        ],
+    )?;
+    Ok(())
 }
 
 pub(crate) fn quarantine_snapshot(
@@ -93,19 +130,7 @@ pub(crate) fn persist_quarantine_evidence(
     transaction: &Transaction<'_>,
     event: &QuarantineLifecycleEvent,
 ) -> Result<(), LocalIndexStoreError> {
-    transaction.execute(
-        "INSERT OR IGNORE INTO shardline_reliability_events
-            (operation_kind, operation_id, sequence, event_json, created_at_unix_seconds)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![
-            event.operation.kind.as_str(),
-            event.operation.operation_id,
-            u64_to_i64(event.sequence)?,
-            to_string(event)?,
-            u64_to_i64(unix_now_seconds_lossy())?,
-        ],
-    )?;
-    Ok(())
+    persist_reliability_event(transaction, event)
 }
 
 pub(crate) trait SqliteExecutor {
@@ -142,23 +167,7 @@ pub(crate) fn persist_provider_evidence(
     transaction: &Transaction<'_>,
     event: &ProviderLifecycleEvent,
 ) -> Result<(), LocalIndexStoreError> {
-    let sequence = i64::try_from(event.sequence).map_err(|error| {
-        LocalIndexStoreError::IntegerOutOfRange(format!("provider evidence sequence: {error}"))
-    })?;
-    let event_json = to_string(event)?;
-    transaction.execute(
-        "INSERT OR IGNORE INTO shardline_reliability_events
-            (operation_kind, operation_id, sequence, event_json, created_at_unix_seconds)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![
-            event.operation.kind.as_str(),
-            event.operation.operation_id,
-            sequence,
-            event_json,
-            u64_to_i64(unix_now_seconds_lossy())?,
-        ],
-    )?;
-    Ok(())
+    persist_reliability_event(transaction, event)
 }
 
 impl SqliteExecutor for Connection {
