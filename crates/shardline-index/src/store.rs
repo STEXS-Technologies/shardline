@@ -273,6 +273,23 @@ pub trait ReconstructionStore {
     /// Returns the adapter error when persistence fails.
     fn delete_reconstruction(&self, file_id: &FileId) -> Result<bool, Self::Error>;
 
+    /// Deletes a reconstruction only when its complete materialized value
+    /// still matches the value observed by the caller.
+    ///
+    /// # Errors
+    ///
+    /// Returns the adapter error when the comparison or deletion fails.
+    fn delete_reconstruction_if_matches(
+        &self,
+        file_id: &FileId,
+        expected: &FileReconstruction,
+    ) -> Result<bool, Self::Error> {
+        if self.reconstruction(file_id)?.as_ref() != Some(expected) {
+            return Ok(false);
+        }
+        self.delete_reconstruction(file_id)
+    }
+
     /// Returns whether a stored object is registered.
     ///
     /// # Errors
@@ -324,6 +341,22 @@ pub trait DedupeStore {
     ///
     /// Returns the adapter error when persistence fails.
     fn delete_dedupe_shard_mapping(&self, chunk_hash: &ShardlineHash) -> Result<bool, Self::Error>;
+
+    /// Deletes a retained mapping only when its complete materialized value
+    /// still matches the value observed by the caller.
+    ///
+    /// # Errors
+    ///
+    /// Returns the adapter error when the comparison or deletion fails.
+    fn delete_dedupe_shard_mapping_if_matches(
+        &self,
+        expected: &DedupeShardMapping,
+    ) -> Result<bool, Self::Error> {
+        if self.dedupe_shard_mapping(&expected.chunk_hash())?.as_ref() != Some(expected) {
+            return Ok(false);
+        }
+        self.delete_dedupe_shard_mapping(&expected.chunk_hash())
+    }
 }
 
 /// Lifecycle metadata: quarantine, retention, webhooks, and provider state.
@@ -598,6 +631,27 @@ pub trait AsyncIndexStore {
         file_id: &'operation FileId,
     ) -> IndexStoreFuture<'operation, bool, Self::Error>;
 
+    /// Deletes a reconstruction only if its complete observed value is
+    /// unchanged since the rebuild scan.
+    fn delete_reconstruction_if_matches<'operation>(
+        &'operation self,
+        file_id: &'operation FileId,
+        expected: &'operation FileReconstruction,
+    ) -> IndexStoreFuture<'operation, bool, Self::Error>
+    where
+        Self: Sync,
+    {
+        let file_id = *file_id;
+        let expected = expected.clone();
+        Box::pin(async move {
+            let current = self.reconstruction(&file_id).await?;
+            if current.as_ref() != Some(&expected) {
+                return Ok(false);
+            }
+            self.delete_reconstruction(&file_id).await
+        })
+    }
+
     /// Returns whether a stored object is registered.
     fn contains_object<'operation>(
         &'operation self,
@@ -654,6 +708,26 @@ pub trait AsyncIndexStore {
         &'operation self,
         chunk_hash: &'operation ShardlineHash,
     ) -> IndexStoreFuture<'operation, bool, Self::Error>;
+
+    /// Deletes a retained mapping only if its complete observed value is
+    /// unchanged since the rebuild scan.
+    fn delete_dedupe_shard_mapping_if_matches<'operation>(
+        &'operation self,
+        expected: &'operation DedupeShardMapping,
+    ) -> IndexStoreFuture<'operation, bool, Self::Error>
+    where
+        Self: Sync,
+    {
+        let expected = expected.clone();
+        Box::pin(async move {
+            let current = self.dedupe_shard_mapping(&expected.chunk_hash()).await?;
+            if current.as_ref() != Some(&expected) {
+                return Ok(false);
+            }
+            self.delete_dedupe_shard_mapping(&expected.chunk_hash())
+                .await
+        })
+    }
 
     /// Loads durable quarantine state for one object key.
     fn quarantine_candidate<'operation>(

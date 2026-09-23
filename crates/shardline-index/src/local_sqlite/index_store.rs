@@ -117,6 +117,36 @@ impl ReconstructionStore for LocalIndexStore {
         Ok(changed > 0)
     }
 
+    fn delete_reconstruction_if_matches(
+        &self,
+        file_id: &FileId,
+        expected: &FileReconstruction,
+    ) -> Result<bool, Self::Error> {
+        let mut connection = self.open_connection()?;
+        let transaction = connection.transaction()?;
+        let Some(terms) = transaction
+            .query_row(
+                "SELECT terms FROM shardline_file_reconstructions WHERE file_id = ?1",
+                params![xet_hash_hex_string(file_id.hash())],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+        else {
+            transaction.commit()?;
+            return Ok(false);
+        };
+        if super::helpers::parse_reconstruction_json(&terms)? != *expected {
+            transaction.commit()?;
+            return Ok(false);
+        }
+        let changed = transaction.execute(
+            "DELETE FROM shardline_file_reconstructions WHERE file_id = ?1 AND terms = ?2",
+            params![xet_hash_hex_string(file_id.hash()), terms],
+        )?;
+        transaction.commit()?;
+        Ok(changed > 0)
+    }
+
     fn contains_object(&self, object_id: &StoredObjectId) -> Result<bool, Self::Error> {
         let connection = self.open_connection()?;
         let exists = connection.query_row(
@@ -184,6 +214,40 @@ impl DedupeStore for LocalIndexStore {
             "DELETE FROM shardline_dedupe_shards WHERE chunk_hash = ?1",
             params![xet_hash_hex_string(chunk_hash)],
         )?;
+        Ok(changed > 0)
+    }
+
+    fn delete_dedupe_shard_mapping_if_matches(
+        &self,
+        expected: &DedupeShardMapping,
+    ) -> Result<bool, Self::Error> {
+        let mut connection = self.open_connection()?;
+        let transaction = connection.transaction()?;
+        let Some(current) = transaction
+            .query_row(
+                "SELECT chunk_hash, shard_object_key
+                 FROM shardline_dedupe_shards WHERE chunk_hash = ?1",
+                params![xet_hash_hex_string(expected.chunk_hash())],
+                super::helpers::dedupe_shard_mapping_from_row,
+            )
+            .optional()?
+        else {
+            transaction.commit()?;
+            return Ok(false);
+        };
+        if current != *expected {
+            transaction.commit()?;
+            return Ok(false);
+        }
+        let changed = transaction.execute(
+            "DELETE FROM shardline_dedupe_shards
+             WHERE chunk_hash = ?1 AND shard_object_key = ?2",
+            params![
+                xet_hash_hex_string(expected.chunk_hash()),
+                expected.shard_object_key().as_str(),
+            ],
+        )?;
+        transaction.commit()?;
         Ok(changed > 0)
     }
 }
@@ -1792,6 +1856,29 @@ mod tests {
     }
 
     #[test]
+    fn conditional_reconstruction_delete_preserves_replacement() {
+        let store = make_store();
+        let file_id = FileId::new(ShardlineHash::from_bytes([4; 32]));
+        let original = FileReconstruction::new(vec![]);
+        let replacement = FileReconstruction::new(vec![ReconstructionTerm::new(
+            StoredObjectId::new(ShardlineHash::from_bytes([5; 32])),
+            ChunkRange::new(0, 1).unwrap(),
+            1,
+        )]);
+        store.insert_reconstruction(&file_id, &original).unwrap();
+        store.insert_reconstruction(&file_id, &replacement).unwrap();
+
+        assert!(
+            !ReconstructionStore::delete_reconstruction_if_matches(&store, &file_id, &original)
+                .unwrap()
+        );
+        assert_eq!(
+            ReconstructionStore::reconstruction(&store, &file_id).unwrap(),
+            Some(replacement)
+        );
+    }
+
+    #[test]
     fn list_reconstruction_file_ids_empty_initially() {
         let store = make_store();
         let ids =
@@ -1880,6 +1967,28 @@ mod tests {
         let deleted = DedupeStore::delete_dedupe_shard_mapping(&store, &chunk_hash)
             .expect("delete should succeed");
         assert!(!deleted);
+    }
+
+    #[test]
+    fn conditional_dedupe_delete_preserves_replacement() {
+        let store = make_store();
+        let chunk_hash = ShardlineHash::from_bytes([9; 32]);
+        let original = DedupeShardMapping::new(
+            chunk_hash,
+            ObjectKey::parse("shards/cc/original.shard").unwrap(),
+        );
+        let replacement = DedupeShardMapping::new(
+            chunk_hash,
+            ObjectKey::parse("shards/cc/replacement.shard").unwrap(),
+        );
+        store.upsert_dedupe_shard_mapping(&original).unwrap();
+        store.upsert_dedupe_shard_mapping(&replacement).unwrap();
+
+        assert!(!DedupeStore::delete_dedupe_shard_mapping_if_matches(&store, &original).unwrap());
+        assert_eq!(
+            DedupeStore::dedupe_shard_mapping(&store, &chunk_hash).unwrap(),
+            Some(replacement)
+        );
     }
 
     // ── LifecycleStore: quarantine candidate ───────────────────────────────

@@ -295,6 +295,18 @@ impl ReconstructionStore for MemoryIndexStore {
         Ok(self.lock_state()?.reconstructions.remove(file_id).is_some())
     }
 
+    fn delete_reconstruction_if_matches(
+        &self,
+        file_id: &FileId,
+        expected: &FileReconstruction,
+    ) -> Result<bool, Self::Error> {
+        let mut state = self.lock_state()?;
+        if state.reconstructions.get(file_id) != Some(expected) {
+            return Ok(false);
+        }
+        Ok(state.reconstructions.remove(file_id).is_some())
+    }
+
     fn contains_object(&self, object_id: &StoredObjectId) -> Result<bool, Self::Error> {
         Ok(self.lock_state()?.xorbs.contains(object_id))
     }
@@ -344,6 +356,17 @@ impl DedupeStore for MemoryIndexStore {
             .dedupe_shards
             .remove(chunk_hash)
             .is_some())
+    }
+
+    fn delete_dedupe_shard_mapping_if_matches(
+        &self,
+        expected: &DedupeShardMapping,
+    ) -> Result<bool, Self::Error> {
+        let mut state = self.lock_state()?;
+        if state.dedupe_shards.get(&expected.chunk_hash()) != Some(expected) {
+            return Ok(false);
+        }
+        Ok(state.dedupe_shards.remove(&expected.chunk_hash()).is_some())
     }
 }
 
@@ -1029,6 +1052,16 @@ impl AsyncIndexStore for MemoryIndexStore {
         Box::pin(async move { ReconstructionStore::delete_reconstruction(self, file_id) })
     }
 
+    fn delete_reconstruction_if_matches<'operation>(
+        &'operation self,
+        file_id: &'operation FileId,
+        expected: &'operation FileReconstruction,
+    ) -> IndexStoreFuture<'operation, bool, Self::Error> {
+        Box::pin(async move {
+            ReconstructionStore::delete_reconstruction_if_matches(self, file_id, expected)
+        })
+    }
+
     fn contains_object<'operation>(
         &'operation self,
         object_id: &'operation StoredObjectId,
@@ -1080,6 +1113,13 @@ impl AsyncIndexStore for MemoryIndexStore {
         chunk_hash: &'operation ShardlineHash,
     ) -> IndexStoreFuture<'operation, bool, Self::Error> {
         Box::pin(async move { DedupeStore::delete_dedupe_shard_mapping(self, chunk_hash) })
+    }
+
+    fn delete_dedupe_shard_mapping_if_matches<'operation>(
+        &'operation self,
+        expected: &'operation DedupeShardMapping,
+    ) -> IndexStoreFuture<'operation, bool, Self::Error> {
+        Box::pin(async move { DedupeStore::delete_dedupe_shard_mapping_if_matches(self, expected) })
     }
 
     fn prune_revisions_over_cap<'operation>(

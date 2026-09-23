@@ -310,6 +310,25 @@ impl AsyncIndexStore for super::PostgresIndexStore {
         })
     }
 
+    fn delete_reconstruction_if_matches<'operation>(
+        &'operation self,
+        file_id: &'operation FileId,
+        expected: &'operation FileReconstruction,
+    ) -> IndexStoreFuture<'operation, bool, Self::Error> {
+        Box::pin(async move {
+            let record = PostgresFileReconstructionRecord::from_domain(expected);
+            let result = query(
+                "DELETE FROM shardline_file_reconstructions
+                 WHERE file_id = $1 AND terms = $2",
+            )
+            .bind(xet_hash_hex_string(file_id.hash()))
+            .bind(Json(record))
+            .execute(&self.pool)
+            .await?;
+            Ok(result.rows_affected() > 0)
+        })
+    }
+
     fn contains_object<'operation>(
         &'operation self,
         object_id: &'operation StoredObjectId,
@@ -441,6 +460,23 @@ impl AsyncIndexStore for super::PostgresIndexStore {
                 .bind(xet_hash_hex_string(chunk_hash))
                 .execute(&self.pool)
                 .await?;
+            Ok(result.rows_affected() > 0)
+        })
+    }
+
+    fn delete_dedupe_shard_mapping_if_matches<'operation>(
+        &'operation self,
+        expected: &'operation DedupeShardMapping,
+    ) -> IndexStoreFuture<'operation, bool, Self::Error> {
+        Box::pin(async move {
+            let result = query(
+                "DELETE FROM shardline_dedupe_shards
+                 WHERE chunk_hash = $1 AND shard_object_key = $2",
+            )
+            .bind(xet_hash_hex_string(expected.chunk_hash()))
+            .bind(expected.shard_object_key().as_str())
+            .execute(&self.pool)
+            .await?;
             Ok(result.rows_affected() > 0)
         })
     }

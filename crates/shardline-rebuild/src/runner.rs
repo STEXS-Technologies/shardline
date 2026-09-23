@@ -2,8 +2,8 @@ use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 
 use shardline_index::{
-    AsyncIndexStore, DedupeShardMapping, FileId, RecordMutation, RecordTraversal,
-    parse_xet_hash_hex, xet_hash_hex_string,
+    AsyncIndexStore, DedupeShardMapping, RecordMutation, RecordTraversal, parse_xet_hash_hex,
+    xet_hash_hex_string,
 };
 use shardline_server_core::{
     OpsRecordStore, ServerObjectStore, ShardMetadataLimits, checked_increment,
@@ -170,26 +170,23 @@ where
             continue;
         }
 
-        delete_reconstruction(index_store, &file_id).await?;
-        report.removed_stale_reconstructions =
-            checked_increment(report.removed_stale_reconstructions)?;
+        let Some(reconstruction) = index_store
+            .reconstruction(&file_id)
+            .await
+            .map_err(Into::into)?
+        else {
+            continue;
+        };
+        let deleted = index_store
+            .delete_reconstruction_if_matches(&file_id, &reconstruction)
+            .await
+            .map_err(Into::into)?;
+        if deleted {
+            report.removed_stale_reconstructions =
+                checked_increment(report.removed_stale_reconstructions)?;
+        }
     }
 
-    Ok(())
-}
-
-async fn delete_reconstruction<IndexAdapter>(
-    index_store: &IndexAdapter,
-    file_id: &FileId,
-) -> Result<(), RebuildError>
-where
-    IndexAdapter: AsyncIndexStore + Sync,
-    IndexAdapter::Error: Into<RebuildError>,
-{
-    let _deleted = index_store
-        .delete_reconstruction(file_id)
-        .await
-        .map_err(Into::into)?;
     Ok(())
 }
 
@@ -284,18 +281,19 @@ where
     // and delete could lose its mapping temporarily. The next rebuild pass self-
     // heals. Data loss is prevented because individual chunk objects within the
     // shard are still protected by record references.
-    for (chunk_hash_hex, _mapping) in existing {
+    for (chunk_hash_hex, mapping) in existing {
         if desired.contains_key(&chunk_hash_hex) {
             continue;
         }
 
-        let chunk_hash = parse_xet_hash_hex(&chunk_hash_hex)?;
-        let _deleted = index_store
-            .delete_dedupe_shard_mapping(&chunk_hash)
+        let deleted = index_store
+            .delete_dedupe_shard_mapping_if_matches(&mapping)
             .await
             .map_err(Into::into)?;
-        report.removed_stale_dedupe_shard_mappings =
-            checked_increment(report.removed_stale_dedupe_shard_mappings)?;
+        if deleted {
+            report.removed_stale_dedupe_shard_mappings =
+                checked_increment(report.removed_stale_dedupe_shard_mappings)?;
+        }
     }
 
     Ok(())
