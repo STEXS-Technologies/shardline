@@ -181,6 +181,9 @@ async fn read_persisted_upload_session_with_snapshot(
                 persisted.snapshot_evidence,
             ),
             Err(wrapper_error) => {
+                if reliability_envelope_field_present(&bytes) {
+                    return Err(OciAdapterError::Json(wrapper_error));
+                }
                 let session = serde_json::from_slice::<OciUploadSession>(&bytes)
                     .map_err(|_legacy_error| OciAdapterError::Json(wrapper_error))?;
                 (
@@ -217,6 +220,18 @@ async fn read_persisted_upload_session_with_snapshot(
         stored_snapshot_evidence
     };
     Ok((session, evidence, snapshot_evidence))
+}
+
+fn reliability_envelope_field_present(bytes: &[u8]) -> bool {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return false;
+    };
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    ["evidence", "snapshot_evidence"]
+        .into_iter()
+        .any(|field| object.contains_key(field))
 }
 
 // ── Error mapping ────────────────────────────────────────────────────────────

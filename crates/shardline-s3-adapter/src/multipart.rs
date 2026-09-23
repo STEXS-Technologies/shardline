@@ -918,6 +918,9 @@ async fn load_session_with_snapshot(
                 persisted.journal_head,
             ),
             Err(wrapper_error) => {
+                if reliability_envelope_field_present(&bytes) {
+                    return Err(S3SessionError::Json(wrapper_error));
+                }
                 let session = serde_json::from_slice::<MultipartUploadSession>(&bytes)
                     .map_err(|_legacy_error| wrapper_error)?;
                 (
@@ -980,6 +983,24 @@ async fn load_session_with_snapshot(
     // explicit operator repair operation. This keeps normal reads free of
     // hidden filesystem writes and makes recovery observable.
     Ok((session, evidence, snapshot_evidence))
+}
+
+fn reliability_envelope_field_present(bytes: &[u8]) -> bool {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return false;
+    };
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    [
+        "evidence",
+        "snapshot_evidence",
+        "journal_head",
+        "journal_evidence_sequence",
+        "journal_snapshot_sequence",
+    ]
+    .into_iter()
+    .any(|field| object.contains_key(field))
 }
 
 /// Explicitly establishes missing reliability baselines for one legacy
@@ -1457,6 +1478,33 @@ mod tests {
         let persisted: MultipartUploadSession =
             serde_json::from_slice(&fs::read(path).await.unwrap()).unwrap();
         assert_eq!(persisted, legacy);
+    }
+
+    #[tokio::test]
+    async fn malformed_reliability_envelope_is_not_downgraded_to_legacy() {
+        let root = make_root().await;
+        let upload_id = create_session(
+            root.path(),
+            "acme.models",
+            "corrupt.bin",
+            "global",
+            ttl(3600),
+            cap(16),
+            quota(1 << 40),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+        let path = session_metadata_path(root.path(), &upload_id).unwrap();
+        let mut metadata: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).await.unwrap()).unwrap();
+        metadata["evidence"] = serde_json::json!("corrupt");
+        fs::write(&path, serde_json::to_vec(&metadata).unwrap())
+            .await
+            .unwrap();
+
+        let error = load_session(path.parent().unwrap()).await.unwrap_err();
+        assert!(matches!(error, S3SessionError::Json(_)));
     }
 
     #[tokio::test]

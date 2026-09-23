@@ -346,6 +346,24 @@ async fn read_upload_session_does_not_write_missing_canonical_evidence() {
 }
 
 #[tokio::test]
+async fn malformed_reliability_envelope_is_not_downgraded_to_legacy() {
+    let root = temp_root();
+    let session_id = create_test_session(root.path(), false).await.unwrap();
+    let metadata_path = crate::upload_metadata_path(root.path(), &session_id);
+    let mut metadata: serde_json::Value =
+        serde_json::from_slice(&tokio::fs::read(&metadata_path).await.unwrap()).unwrap();
+    metadata["evidence"] = serde_json::json!("corrupt");
+    tokio::fs::write(&metadata_path, serde_json::to_vec(&metadata).unwrap())
+        .await
+        .unwrap();
+
+    let error = read_upload_session(root.path(), &session_id, ttl())
+        .await
+        .unwrap_err();
+    assert!(matches!(error, OciAdapterError::Json(_)));
+}
+
+#[tokio::test]
 async fn oci_mutations_append_snapshot_evidence_instead_of_resetting_it() {
     let root = temp_root();
     let session_id = create_test_session(root.path(), false).await.unwrap();
