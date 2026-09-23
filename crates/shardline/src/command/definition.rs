@@ -161,6 +161,8 @@ pub(crate) enum DbMigrateSubcommand {
     Status(DbMigrateStatusArgs),
     /// Verify every durable reliability journal without repairing it.
     Verify(DbMigrateVerifyArgs),
+    /// Backfill a bounded batch of missing reliability baselines.
+    Backfill(DbMigrateBackfillArgs),
 }
 
 #[derive(Debug, Args)]
@@ -195,6 +197,16 @@ pub(crate) struct DbMigrateVerifyArgs {
     /// Override the configured Postgres metadata URL.
     #[arg(long)]
     pub(crate) database_url: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct DbMigrateBackfillArgs {
+    /// Override the configured Postgres metadata URL.
+    #[arg(long)]
+    pub(crate) database_url: Option<String>,
+    /// Maximum number of rows considered per materialized-state table.
+    #[arg(long, default_value = "256", value_parser = parse_positive_usize)]
+    pub(crate) batch_size: NonZeroUsize,
 }
 
 // ── Admin ───────────────────────────────────────────────────────────────

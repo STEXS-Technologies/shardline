@@ -3,7 +3,7 @@ use serde_json::Value;
 use crate::{
     HubRefLifecycleEvent, LifecycleEvent, OciObjectLifecycleEvent, OciTagLifecycleEvent,
     OperationKind, ProviderLifecycleEvent, QuarantineLifecycleEvent, ReliabilityError,
-    RetentionHoldLifecycleEvent, S3ObjectLifecycleEvent, StateTransitionEvent,
+    RepairEvidenceEvent, RetentionHoldLifecycleEvent, S3ObjectLifecycleEvent, StateTransitionEvent,
     WebhookDeliveryLifecycleEvent,
 };
 
@@ -12,7 +12,7 @@ use crate::{
 /// Database adapters persist a single envelope table, but the event payload is
 /// intentionally typed by [`OperationKind`]. Keeping the discriminator-to-event
 /// mapping here prevents each adapter or migration from developing its own
-/// interpretation of authenticated evidence.
+/// interpretation of integrity evidence.
 pub fn verify_persisted_event(
     operation_kind: OperationKind,
     event_json: Value,
@@ -38,9 +38,7 @@ pub fn verify_persisted_event(
         OperationKind::WebhookDelivery => {
             verify::<WebhookDeliveryLifecycleEvent>(operation_kind, event_json)
         }
-        OperationKind::Repair => Err(ReliabilityError::UnsupportedOperationKind(
-            operation_kind.as_str(),
-        )),
+        OperationKind::Repair => verify::<RepairEvidenceEvent>(operation_kind, event_json),
     }
 }
 

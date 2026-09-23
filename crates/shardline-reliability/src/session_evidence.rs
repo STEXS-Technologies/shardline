@@ -52,6 +52,11 @@ pub fn verify_resumable_session_events(
 pub struct SessionEvidenceLog(LifecycleEvidenceLog<ResumableLifecycleState>);
 
 impl SessionEvidenceLog {
+    /// Wraps persisted events after validating the complete session chain.
+    pub fn from_events(events: Vec<StateTransitionEvent>) -> Result<Self, ReliabilityError> {
+        Ok(Self(LifecycleEvidenceLog::from_events(events)?))
+    }
+
     /// Creates the initial active evidence for a newly created session.
     pub fn new(
         scope_namespace: impl Into<String>,
@@ -168,6 +173,21 @@ pub fn verify_or_repair_session_evidence(
     }
     stored.verify_for(scope_namespace, session_id, target_key)?;
     Ok((stored, false))
+}
+
+/// Verifies persisted session evidence without creating a legacy baseline.
+/// Normal reads should use this boundary; baseline creation belongs to an
+/// explicit repair or mutation path.
+pub fn verify_session_evidence(
+    stored: &SessionEvidenceLog,
+    scope_namespace: &str,
+    session_id: &str,
+    target_key: &str,
+) -> Result<(), ReliabilityError> {
+    if stored.is_empty() {
+        return Err(ReliabilityError::OperationMismatch);
+    }
+    stored.verify_for(scope_namespace, session_id, target_key)
 }
 
 /// Verifies a session journal against its identity and expected current state,

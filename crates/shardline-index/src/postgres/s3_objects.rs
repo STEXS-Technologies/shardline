@@ -103,7 +103,13 @@ async fn current_s3_object_evidence(
             .first()
             .is_some_and(|event| event.after.entry.is_some())
     {
-        persist_s3_object_evidence(connection, &evidence).await?;
+        persist_s3_object_event(
+            connection,
+            evidence.events().last().ok_or_else(|| {
+                PostgresMetadataStoreError::Unsupported("empty evidence log".into())
+            })?,
+        )
+        .await?;
     }
     Ok(evidence)
 }
@@ -112,22 +118,30 @@ async fn persist_s3_object_evidence(
     connection: &mut PgConnection,
     evidence: &S3ObjectEvidenceLog,
 ) -> Result<(), PostgresMetadataStoreError> {
-    for event in evidence.events() {
-        event.verify_integrity()?;
-        query(
-            "INSERT INTO shardline_reliability_events
-                (operation_kind, operation_id, sequence, event_json, created_at_unix_seconds)
-             VALUES ($1, $2, $3, $4, $5)
-             ON CONFLICT (operation_kind, operation_id, sequence) DO NOTHING",
-        )
-        .bind(event.operation.kind.as_str())
-        .bind(&event.operation.operation_id)
-        .bind(u64_to_i64(event.sequence)?)
-        .bind(to_value(event)?)
-        .bind(shardline_protocol::unix_now_seconds_lossy() as i64)
-        .execute(&mut *connection)
-        .await?;
-    }
+    let Some(event) = evidence.events().last() else {
+        return Ok(());
+    };
+    persist_s3_object_event(connection, event).await
+}
+
+async fn persist_s3_object_event(
+    connection: &mut PgConnection,
+    event: &S3ObjectLifecycleEvent,
+) -> Result<(), PostgresMetadataStoreError> {
+    event.verify_integrity()?;
+    query(
+        "INSERT INTO shardline_reliability_events
+            (operation_kind, operation_id, sequence, event_json, created_at_unix_seconds)
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (operation_kind, operation_id, sequence) DO NOTHING",
+    )
+    .bind(event.operation.kind.as_str())
+    .bind(&event.operation.operation_id)
+    .bind(u64_to_i64(event.sequence)?)
+    .bind(to_value(event)?)
+    .bind(shardline_protocol::unix_now_seconds_lossy() as i64)
+    .execute(&mut *connection)
+    .await?;
     Ok(())
 }
 
@@ -343,15 +357,6 @@ impl S3ObjectIndexStore for PostgresIndexStore {
             .iter()
             .map(s3_object_entry_from_row)
             .collect::<Result<Vec<_>, _>>()?;
-        for value in &values {
-            current_s3_object_evidence(
-                &mut transaction,
-                &value.scope_namespace,
-                &value.object_key,
-                Some(value),
-            )
-            .await?;
-        }
         transaction.commit().await?;
         Ok(values)
     }

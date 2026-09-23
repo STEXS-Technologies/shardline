@@ -1827,7 +1827,7 @@ impl ReconstructionTermManager {
 /// The on-disk chunk cache ([`ChunkCache`], M2b2) is checked before every xorb
 /// fetch and populated on successful ranged fetches; it defaults to the
 /// client-configured cache (see [`crate::XetClientBuilder::with_chunk_cache_dir`])
-/// and can be overridden per reconstructor via [`with_chunk_cache`](Self::with_chunk_cache).
+/// and is inherited by each reconstructor.
 pub(crate) struct FileReconstructor {
     ctx: StreamContext,
     file_id: String,
@@ -1859,19 +1859,6 @@ impl FileReconstructor {
     /// coordinated external cancellation (the stream-group layer, M2b2).
     pub(crate) fn with_cancellation_token(mut self, token: CancellationToken) -> Self {
         self.cancellation_token = token;
-        self
-    }
-
-    /// Overrides the on-disk chunk cache used by this reconstructor (defaults
-    /// to the client-configured cache).
-    ///
-    /// The pipeline reads the cache from the shared [`StreamContext`] by
-    /// default; this override exists for callers that build reconstructors
-    /// directly (the CLI and future milestones).
-    #[must_use]
-    #[allow(dead_code)]
-    pub fn with_chunk_cache(mut self, cache: Arc<ChunkCache>) -> Self {
-        self.chunk_cache = Some(cache);
         self
     }
 

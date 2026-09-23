@@ -34,7 +34,7 @@ use axum::{
     routing::{get, head, post},
     serve as serve_http,
 };
-use shardline_protocol::{RepositoryScope, TokenScope};
+use shardline_protocol::TokenScope;
 use tokio::net::TcpListener;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot};
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
@@ -742,13 +742,6 @@ fn authorize(
         )));
     }
     Ok(None)
-}
-
-/// Kept during the authorization-capability migration; not yet wired to a
-/// caller.
-#[allow(dead_code)]
-const fn scope_from_auth(auth: &VerifiedAuthContext) -> &RepositoryScope {
-    auth.claims().repository()
 }
 
 #[must_use]

@@ -1303,24 +1303,6 @@ mod tests {
         .execute(&pool)
         .await
         .ok()?;
-        let has_operation_kind: bool = sqlx::query_scalar(
-            "SELECT EXISTS (
-                 SELECT 1 FROM information_schema.columns
-                 WHERE table_name = 'shardline_reliability_events'
-                   AND column_name = 'operation_kind'
-             )",
-        )
-        .fetch_one(&pool)
-        .await
-        .ok()?;
-        if !has_operation_kind {
-            sqlx::raw_sql(include_str!(
-                "../../../../migrations/20260923000000_reliability_event_kinds.up.sql"
-            ))
-            .execute(&pool)
-            .await
-            .ok()?;
-        }
         let has_state_digest: bool = sqlx::query_scalar(
             "SELECT EXISTS (
                  SELECT 1 FROM information_schema.columns

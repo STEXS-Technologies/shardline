@@ -1,6 +1,6 @@
 use penelope::ContentDigest as PenelopeDigest;
 use serde::{Deserialize, Serialize};
-use statechronicle::ContentDigest;
+use statechronicle_core::digest::ContentDigest;
 
 use crate::ReliabilityError;
 
@@ -124,13 +124,13 @@ impl OperationIdentity {
 
     pub fn content_digest(&self) -> Result<ContentDigest, ReliabilityError> {
         self.validate()?;
-        statechronicle::core::canonicalize::canonicalize_and_digest(self)
+        statechronicle_core::canonicalize::canonicalize_and_digest(self)
             .map_err(|error| ReliabilityError::Canonicalize(error.to_string()))
     }
 
     pub fn penelope_digest(&self) -> Result<PenelopeDigest, ReliabilityError> {
         self.validate()?;
-        let bytes = statechronicle::core::canonicalize::canonicalize(self)
+        let bytes = statechronicle_core::canonicalize::canonicalize(self)
             .map_err(|error| ReliabilityError::Canonicalize(error.to_string()))?;
         Ok(PenelopeDigest::sha256(&bytes))
     }

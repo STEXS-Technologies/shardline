@@ -128,4 +128,7 @@ Postgres, object-store, and Redis dependencies.
 Older replicas do not participate in newly added resource locks, tombstones, or the GC
 barrier. During a rolling API upgrade, route OCI reads/writes/deletes and provider
 webhook mutations only to new replicas, and suspend destructive GC. Resume unrestricted
-routing only when all replicas run the new version. See [Rolling Upgrade](ROLLING_UPGRADE.md).
+routing only when all replicas run the new version. This rule is per logical resource:
+an N-1 writer must not overwrite an S3 object, OCI tag, Hub ref, or resumable session
+that an N writer has evidence-bound. A different key being safe does not make a
+same-key mixed-version write safe. See [Rolling Upgrade](ROLLING_UPGRADE.md).

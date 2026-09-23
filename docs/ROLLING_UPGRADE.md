@@ -61,6 +61,12 @@ API replicas run the new version; this avoids two software versions using differ
 authoritative tag-pointer stores or bypassing repository-scoped locks during the brief
 mixed-version window.
 
+The same routing constraint applies to every evidence-bound logical resource. Do not
+let N-1 overwrite an S3 object, OCI tag, Hub ref, or resumable session after N has
+written it. N-1 may read it, but same-key writes must be drained or routed to N until
+the rollout is complete; testing a different key is not evidence that same-key
+compatibility exists.
+
 The durable resumable-session migration is also additive, but session formats are not
 shared across versions. Before replacing the API class, stop admitting new Git LFS
 PATCH, OCI blob-upload, and S3 multipart sessions to the old replicas and allow their

@@ -30,7 +30,7 @@ impl From<String> for MetadataCommitOperationId {
     }
 }
 
-/// Authenticated materialized head of one Hub repository reference.
+/// Integrity-checkable materialized head of one Hub repository reference.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HubRefSnapshot {
     pub repository: String,

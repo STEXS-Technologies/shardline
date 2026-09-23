@@ -128,6 +128,11 @@ pub enum DatabaseMigrationCommand {
     Status,
     /// Verify all materialized reliability journals without repairing them.
     Verify,
+    /// Backfill at most one bounded batch of missing reliability baselines.
+    Backfill {
+        /// Maximum number of rows considered per materialized-state table.
+        batch_size: usize,
+    },
 }
 
 /// Database-migration runtime options.
@@ -236,8 +241,13 @@ struct AppliedMigration {
 
 const MIGRATION_HISTORY_TABLE: &str = "shardline_schema_migrations";
 const MIGRATION_ADVISORY_LOCK_KEY: i64 = 0x5348_4152_444d_4701;
+// These pre-release migrations were folded into the first reliability schema
+// migration. Existing development databases may already contain their
+// history rows; they remain accepted as retired compatibility markers and are
+// never re-run or selected for rollback.
+const RETIRED_MIGRATION_VERSIONS: &[&str] = &["20260923000000", "20260925000000"];
 
-const SHARDLINE_MIGRATIONS: [DatabaseMigration; 25] = [
+const SHARDLINE_MIGRATIONS: [DatabaseMigration; 23] = [
     DatabaseMigration {
         version: "20260417000000",
         name: "metadata_store",
@@ -375,24 +385,10 @@ const SHARDLINE_MIGRATIONS: [DatabaseMigration; 25] = [
         down_sql: include_str!("../migrations/20260922000000_reliability_events.down.sql"),
     },
     DatabaseMigration {
-        version: "20260923000000",
-        name: "reliability_event_kinds",
-        up_sql: include_str!("../migrations/20260923000000_reliability_event_kinds.up.sql"),
-        down_sql: include_str!("../migrations/20260923000000_reliability_event_kinds.down.sql"),
-    },
-    DatabaseMigration {
         version: "20260924000000",
         name: "resumable_state_digest",
         up_sql: include_str!("../migrations/20260924000000_resumable_state_digest.up.sql"),
         down_sql: include_str!("../migrations/20260924000000_resumable_state_digest.down.sql"),
-    },
-    DatabaseMigration {
-        version: "20260925000000",
-        name: "reliability_event_timestamps",
-        up_sql: include_str!("../migrations/20260925000000_reliability_event_timestamps.up.sql"),
-        down_sql: include_str!(
-            "../migrations/20260925000000_reliability_event_timestamps.down.sql"
-        ),
     },
 ];
 
@@ -416,8 +412,6 @@ pub async fn apply_database_migrations(pool: &PgPool) -> Result<(), DatabaseMigr
     for migration in pending_migrations(pool).await? {
         apply_one_migration(pool, migration).await?;
     }
-    backfill_reliability_events(pool).await?;
-
     Ok(())
 }
 
@@ -445,6 +439,7 @@ pub async fn run_database_migration(
         }
         DatabaseMigrationCommand::Status => None,
         DatabaseMigrationCommand::Verify => None,
+        DatabaseMigrationCommand::Backfill { .. } => Some(acquire_migration_lock(&pool).await?),
     };
     verify_applied_migrations(&pool).await?;
 
@@ -467,14 +462,16 @@ pub async fn run_database_migration(
             }
             (0, reverted_count)
         }
-        DatabaseMigrationCommand::Status | DatabaseMigrationCommand::Verify => (0, 0),
+        DatabaseMigrationCommand::Status
+        | DatabaseMigrationCommand::Verify
+        | DatabaseMigrationCommand::Backfill { .. } => (0, 0),
     };
 
-    if matches!(options.command(), DatabaseMigrationCommand::Up { .. }) {
-        backfill_reliability_events(&pool).await?;
-    }
     if matches!(options.command(), DatabaseMigrationCommand::Verify) {
         verify_reliability_events(&pool).await?;
+    }
+    if let DatabaseMigrationCommand::Backfill { batch_size } = options.command() {
+        backfill_reliability_events(&pool, *batch_size).await?;
     }
 
     let migrations = migration_status_entries(&pool).await?;
@@ -512,12 +509,15 @@ async fn ensure_migration_history_table(pool: &PgPool) -> Result<(), SqlxError> 
 /// Gives pre-journal durable state a deterministic, verifiable evidence
 /// prefix. This runs under the migration advisory lock and is idempotent: a
 /// row with any evidence already present is left untouched.
-async fn backfill_reliability_events(pool: &PgPool) -> Result<(), DatabaseMigrationError> {
-    reconcile_reliability_events(pool, true).await
+async fn backfill_reliability_events(
+    pool: &PgPool,
+    batch_size: usize,
+) -> Result<(), DatabaseMigrationError> {
+    reconcile_reliability_events(pool, true, batch_size).await
 }
 
 async fn verify_reliability_events(pool: &PgPool) -> Result<(), DatabaseMigrationError> {
-    reconcile_reliability_events(pool, false).await
+    reconcile_reliability_events(pool, false, usize::MAX).await
 }
 
 async fn persist_reliability_event<T: EvidenceEventMetadata>(
@@ -566,6 +566,7 @@ async fn reliability_operation_exists(
 async fn reconcile_reliability_events(
     pool: &PgPool,
     repair_missing: bool,
+    batch_size: usize,
 ) -> Result<(), DatabaseMigrationError> {
     let required_tables_exist: bool = query_scalar(
         "SELECT to_regclass('public.shardline_reliability_events') IS NOT NULL
@@ -585,11 +586,12 @@ async fn reconcile_reliability_events(
     if !required_tables_exist {
         return Ok(());
     }
+    let batch_size = i64::try_from(batch_size.max(1))
+        .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?;
     let mut transaction = pool.begin().await?;
-    if repair_missing {
-        repair_invalid_persisted_events(&mut transaction).await?;
+    if !repair_missing {
+        verify_persisted_reliability_events(&mut transaction).await?;
     }
-    verify_persisted_reliability_events(&mut transaction).await?;
     let upload_rows = query(
         "SELECT i.intent_id, i.object_key, i.object_hash, i.state
          FROM shardline_upload_intents AS i
@@ -597,8 +599,9 @@ async fn reconcile_reliability_events(
              SELECT 1 FROM shardline_reliability_events AS e
              WHERE e.operation_kind = 'Upload' AND e.operation_id = i.intent_id
          )
-         FOR UPDATE OF i",
+         LIMIT $1",
     )
+    .bind(batch_size)
     .fetch_all(&mut *transaction)
     .await?;
     for row in upload_rows {
@@ -636,8 +639,9 @@ async fn reconcile_reliability_events(
              SELECT 1 FROM shardline_reliability_events AS e
              WHERE e.operation_kind = 'ResumableSession' AND e.operation_id = s.session_id
          )
-         FOR UPDATE OF s",
+         LIMIT $1",
     )
+    .bind(batch_size)
     .fetch_all(&mut *transaction)
     .await?;
     for row in session_rows {
@@ -677,8 +681,9 @@ async fn reconcile_reliability_events(
              WHERE e.operation_kind = 'ProviderEvent'
                AND e.operation_id = s.provider || ':' || s.owner || ':' || s.repo
          )
-         FOR UPDATE OF s",
+         LIMIT $1",
     )
+    .bind(batch_size)
     .fetch_all(&mut *transaction)
     .await?;
     for row in provider_rows {
@@ -700,8 +705,9 @@ async fn reconcile_reliability_events(
              SELECT 1 FROM shardline_reliability_events AS e
              WHERE e.operation_kind = 'GarbageCollection' AND e.operation_id = q.object_key
          )
-         FOR UPDATE OF q",
+         LIMIT $1",
     )
+    .bind(batch_size)
     .fetch_all(&mut *transaction)
     .await?;
     for row in quarantine_rows {
@@ -737,8 +743,9 @@ async fn reconcile_reliability_events(
                AND e.operation_id = t.scope_namespace || ':' || t.repository || ':' ||
                    t.object_kind || ':' || t.digest_hex
          )
-         FOR UPDATE OF t",
+         LIMIT $1",
     )
+    .bind(batch_size)
     .fetch_all(&mut *transaction)
     .await?;
     for row in oci_tombstone_rows {
@@ -774,8 +781,9 @@ async fn reconcile_reliability_events(
              SELECT 1 FROM shardline_reliability_events AS e
              WHERE e.operation_kind = 'RetentionHold' AND e.operation_id = h.object_key
          )
-         FOR UPDATE OF h",
+         LIMIT $1",
     )
+    .bind(batch_size)
     .fetch_all(&mut *transaction)
     .await?;
     for row in retention_hold_rows {
@@ -808,8 +816,20 @@ async fn reconcile_reliability_events(
         "SELECT w.provider, w.owner, w.repo, w.delivery_id,
                 w.processed_at_unix_seconds
          FROM shardline_webhook_deliveries AS w
-         FOR UPDATE OF w",
+         WHERE NOT EXISTS (
+             SELECT 1 FROM shardline_reliability_events AS e
+             WHERE e.operation_kind = 'WebhookDelivery'
+               AND (
+                   e.operation_id = octet_length(w.provider)::text || ':' || w.provider
+                       || octet_length(w.owner)::text || ':' || w.owner
+                       || octet_length(w.repo)::text || ':' || w.repo
+                       || octet_length(w.delivery_id)::text || ':' || w.delivery_id
+                   OR e.operation_id = w.delivery_id
+               )
+         )
+         LIMIT $1",
     )
+    .bind(batch_size)
     .fetch_all(&mut *transaction)
     .await?;
     for row in webhook_delivery_rows {
@@ -866,8 +886,15 @@ async fn reconcile_reliability_events(
     let hub_ref_rows = query(
         "SELECT repo_id, ref_name, sha
          FROM shardline_hub_refs
-         FOR UPDATE",
+         WHERE NOT EXISTS (
+             SELECT 1 FROM shardline_reliability_events AS e
+             WHERE e.operation_kind = 'MetadataCommit'
+               AND e.operation_id = octet_length(repo_id)::text || ':' || repo_id
+                   || octet_length(ref_name)::text || ':' || ref_name
+         )
+         LIMIT $1",
     )
+    .bind(batch_size)
     .fetch_all(&mut *transaction)
     .await?;
     for row in hub_ref_rows {
@@ -899,8 +926,16 @@ async fn reconcile_reliability_events(
     let oci_tag_rows = query(
         "SELECT scope_namespace, repository, tag, digest_hex
          FROM shardline_oci_tags
-         FOR UPDATE",
+         WHERE NOT EXISTS (
+             SELECT 1 FROM shardline_reliability_events AS e
+             WHERE e.operation_kind = 'OciTag'
+               AND e.operation_id = octet_length(scope_namespace)::text || ':' || scope_namespace
+                   || octet_length(repository)::text || ':' || repository
+                   || octet_length(tag)::text || ':' || tag
+         )
+         LIMIT $1",
     )
+    .bind(batch_size)
     .fetch_all(&mut *transaction)
     .await?;
     for row in oci_tag_rows {
@@ -938,8 +973,15 @@ async fn reconcile_reliability_events(
         "SELECT scope_namespace, object_key, file_id, size_bytes, content_hash,
                 etag, user_metadata, updated_at_unix_seconds
          FROM shardline_s3_objects
-         FOR UPDATE",
+         WHERE NOT EXISTS (
+             SELECT 1 FROM shardline_reliability_events AS e
+             WHERE e.operation_kind = 'S3Object'
+               AND e.operation_id = octet_length(scope_namespace)::text || ':' || scope_namespace
+                   || octet_length(object_key)::text || ':' || object_key
+         )
+         LIMIT $1",
     )
+    .bind(batch_size)
     .fetch_all(&mut *transaction)
     .await?;
     for row in s3_object_rows {
@@ -982,6 +1024,14 @@ async fn reconcile_reliability_events(
                 persist_reliability_event(&mut transaction, event).await?;
             }
         }
+    }
+
+    // Backfill is deliberately a bounded write-only maintenance pass. Full
+    // journal verification is exposed by the separate verify command; doing
+    // it here would turn a small batch into a table-wide locking operation.
+    if repair_missing {
+        transaction.commit().await?;
+        return Ok(());
     }
 
     // A partially present journal is not a valid migration state. The
@@ -1559,45 +1609,6 @@ async fn reconcile_reliability_events(
     Ok(())
 }
 
-/// Removes malformed authenticated rows before the normal materialized-state
-/// reconciliation recreates canonical baselines. Invalid evidence cannot be
-/// trusted or replayed; deleting only those rows lets the existing per-state
-/// backfills restore the durable current state without changing user-visible
-/// records.
-async fn repair_invalid_persisted_events(
-    transaction: &mut Transaction<'_, Postgres>,
-) -> Result<(), DatabaseMigrationError> {
-    let rows = query(
-        "SELECT operation_kind, operation_id, sequence, event_json
-         FROM shardline_reliability_events
-         ORDER BY operation_kind, operation_id, sequence",
-    )
-    .fetch_all(&mut **transaction)
-    .await?;
-
-    for row in rows {
-        let operation_kind_text: String = row.try_get("operation_kind")?;
-        let operation_id: String = row.try_get("operation_id")?;
-        let sequence: i64 = row.try_get("sequence")?;
-        let event_json: serde_json::Value = row.try_get("event_json")?;
-        let operation_kind = OperationKind::parse(&operation_kind_text);
-        let valid =
-            operation_kind.is_some_and(|kind| verify_persisted_event(kind, event_json).is_ok());
-        if !valid {
-            query(
-                "DELETE FROM shardline_reliability_events
-                 WHERE operation_kind = $1 AND operation_id = $2 AND sequence = $3",
-            )
-            .bind(&operation_kind_text)
-            .bind(&operation_id)
-            .bind(sequence)
-            .execute(&mut **transaction)
-            .await?;
-        }
-    }
-    Ok(())
-}
-
 async fn verify_persisted_reliability_events(
     transaction: &mut Transaction<'_, Postgres>,
 ) -> Result<(), DatabaseMigrationError> {
@@ -1676,6 +1687,9 @@ async fn acquire_migration_lock(
 
 async fn verify_applied_migrations(pool: &PgPool) -> Result<(), DatabaseMigrationError> {
     for applied in load_applied_migrations(pool).await? {
+        if RETIRED_MIGRATION_VERSIONS.contains(&applied.version.as_str()) {
+            continue;
+        }
         let Some(migration) = migration_by_version(&applied.version) else {
             return Err(DatabaseMigrationError::UnknownAppliedMigration(
                 applied.version,
@@ -1715,6 +1729,9 @@ async fn applied_migrations_in_order(
     let applied = load_applied_migrations(pool).await?;
     let mut migrations = Vec::with_capacity(applied.len());
     for entry in applied {
+        if RETIRED_MIGRATION_VERSIONS.contains(&entry.version.as_str()) {
+            continue;
+        }
         let Some(migration) = migration_by_version(&entry.version) else {
             return Err(DatabaseMigrationError::UnknownAppliedMigration(
                 entry.version,

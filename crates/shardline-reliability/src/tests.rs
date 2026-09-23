@@ -291,7 +291,7 @@ fn lifecycle_evidence_reads_legacy_json_digests_after_canonical_migration() {
         .with_content_sha256("a".repeat(64));
     let before = UploadLifecycleState::Created;
     let after = UploadLifecycleState::Storing;
-    let state_digest = statechronicle::core::digest::hash_bytes(after.as_str().as_bytes());
+    let state_digest = statechronicle_core::digest::hash_bytes(after.as_str().as_bytes());
     let process_bytes =
         serde_json::to_vec(&(&operation, 1_u64, before.as_str(), after.as_str())).unwrap();
     let process_digest = penelope::ContentDigest::sha256(&process_bytes);
@@ -325,7 +325,7 @@ fn new_evidence_uses_canonical_bcs_digests() {
 
     assert_eq!(event.digest_encoding, DigestEncoding::CanonicalBcsV1);
     let legacy_state =
-        statechronicle::core::digest::hash_bytes(UploadLifecycleState::Storing.as_str().as_bytes());
+        statechronicle_core::digest::hash_bytes(UploadLifecycleState::Storing.as_str().as_bytes());
     assert_ne!(event.state_digest, legacy_state);
     event.verify_integrity().unwrap();
 }

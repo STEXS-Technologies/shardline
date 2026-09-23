@@ -103,7 +103,6 @@ pub(crate) fn read_full_object(
 ///
 /// The destination is never authoritative. Callers own its cleanup and must
 /// continue to validate the durable session's fenced metadata before publication.
-#[allow(dead_code)]
 pub(crate) async fn materialize_object_to_file(
     object_store: &ServerObjectStore,
     object_key: &ObjectKey,

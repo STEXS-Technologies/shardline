@@ -21,20 +21,15 @@ use rusqlite::{
 use serde_json::{from_slice, from_str, to_string};
 use shardline_protocol::{RepositoryScope, unix_now_seconds_lossy};
 use shardline_reliability::{
-    EvidenceEventMetadata, HubRefEvidenceLog, HubRefLifecycleEvent, HubRefSnapshot, LifecycleEvent,
-    OciObjectEvidenceLog, OciObjectIdentity, OciObjectLifecycleState, OciObjectSnapshot,
+    EvidenceEventMetadata, HubRefEvidenceLog, HubRefLifecycleEvent, HubRefSnapshot,
     OciTagEvidenceLog, OciTagLifecycleEvent, OciTagSnapshot, OperationKind, ProviderEvidenceLog,
     ProviderLifecycleEvent, ProviderLifecycleSnapshot, QuarantineEvidenceLog,
     QuarantineLifecycleEvent, QuarantineLifecycleState, QuarantineObjectIdentity,
-    QuarantineSnapshot, ResumableLifecycleState, RetentionEvidenceLog, RetentionHoldLifecycleEvent,
+    QuarantineSnapshot, RetentionEvidenceLog, RetentionHoldLifecycleEvent,
     RetentionHoldLifecycleState, RetentionHoldSnapshot, RetentionObjectIdentity,
     S3ObjectEvidenceLog, S3ObjectLifecycleEvent, S3ObjectSnapshot, S3ObjectState, SnapshotEvidence,
-    StateTransitionEvent, UploadLifecycleState, WebhookDeliveryEvidenceLog,
-    WebhookDeliveryIdentity, WebhookDeliveryLifecycleEvent, WebhookDeliveryLifecycleState,
-    WebhookDeliverySnapshot, baseline_resumable_session_events, baseline_upload_lifecycle_events,
-    upload_lifecycle_identity, verify_or_repair_snapshot_evidence,
-    verify_provider_lifecycle_events, verify_resumable_session_events,
-    verify_upload_lifecycle_events,
+    WebhookDeliveryEvidenceLog, WebhookDeliveryIdentity, WebhookDeliveryLifecycleEvent,
+    WebhookDeliveryLifecycleState, WebhookDeliverySnapshot, verify_or_repair_snapshot_evidence,
 };
 use shardline_storage::{
     DirectoryPathError, ObjectKey, ObjectKeyError,
@@ -50,12 +45,23 @@ use super::{
     StoredObjectPresenceRecord,
 };
 use crate::{
-    DedupeShardMapping, FileId, FileReconstruction, FileRecord, OciObjectKind,
-    ProviderRepositoryState, QuarantineCandidate, RetentionHold, WebhookDelivery,
-    WebhookDeliveryError, parse_xet_hash_hex, provider::parse_repository_provider,
-    provider_evidence::snapshot_from_state, record_key::record_key as shared_record_key,
+    DedupeShardMapping, FileId, FileReconstruction, FileRecord, ProviderRepositoryState,
+    QuarantineCandidate, RetentionHold, WebhookDelivery, WebhookDeliveryError, parse_xet_hash_hex,
+    provider::parse_repository_provider, record_key::record_key as shared_record_key,
     record_key::repository_scope_key as shared_repository_scope_key, xet_hash_hex_string,
 };
+
+#[cfg(test)]
+use shardline_reliability::{
+    LifecycleEvent, OciObjectEvidenceLog, OciObjectIdentity, OciObjectLifecycleState,
+    OciObjectSnapshot, ResumableLifecycleState, StateTransitionEvent, UploadLifecycleState,
+    baseline_resumable_session_events, baseline_upload_lifecycle_events, upload_lifecycle_identity,
+    verify_provider_lifecycle_events, verify_resumable_session_events,
+    verify_upload_lifecycle_events,
+};
+
+#[cfg(test)]
+use crate::{OciObjectKind, provider_evidence::snapshot_from_state};
 
 pub(crate) fn quarantine_evidence_operation_id(object_key: &str) -> String {
     object_key.to_owned()
@@ -98,6 +104,7 @@ pub(crate) fn persist_reliability_event_at<T: EvidenceEventMetadata>(
     Ok(())
 }
 
+#[cfg(test)]
 fn reliability_operation_exists(
     transaction: &Transaction<'_>,
     operation_kind: OperationKind,
@@ -447,7 +454,7 @@ pub(crate) fn current_s3_object_evidence(
             .first()
             .is_some_and(|event| event.after.entry.is_some())
     {
-        for event in evidence.events() {
+        if let Some(event) = evidence.events().last() {
             persist_s3_object_evidence(transaction, event)?;
         }
     }
@@ -626,13 +633,12 @@ pub(crate) fn apply_pending_local_migrations(
         transaction.commit()?;
     }
 
-    backfill_reliability_events(connection)?;
-
     Ok(())
 }
 
 /// Gives pre-journal local metadata a deterministic evidence prefix. Existing
 /// operation rows are left untouched when any journal evidence is present.
+#[cfg(test)]
 fn backfill_reliability_events(connection: &mut Connection) -> Result<(), LocalIndexStoreError> {
     let transaction = connection.transaction()?;
     let mut upload_rows = Vec::new();

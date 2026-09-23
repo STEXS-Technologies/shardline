@@ -36,11 +36,11 @@ pub struct SnapshotEvidenceEvent<S: SnapshotEvidence> {
     pub sequence: u64,
     pub before: S,
     pub after: S,
-    /// Encoding used for the authenticated digests. Missing on legacy JSON
+    /// Encoding used for the integrity digests. Missing on legacy JSON
     /// rows, which deserialize as [`DigestEncoding::LegacyJson`].
     #[serde(default)]
     pub digest_encoding: DigestEncoding,
-    pub state_digest: statechronicle::ContentDigest,
+    pub state_digest: statechronicle_core::digest::ContentDigest,
     pub process_digest: PenelopeDigest,
 }
 

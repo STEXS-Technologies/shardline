@@ -1,10 +1,10 @@
 use penelope::ContentDigest as PenelopeDigest;
 use serde::{Deserialize, Serialize};
-use statechronicle::ContentDigest;
+use statechronicle_core::digest::ContentDigest;
 
 use crate::{OperationIdentity, ReliabilityError};
 
-/// Encoding used for authenticated evidence payloads.
+/// Encoding used for integrity-checkable evidence payloads.
 ///
 /// `LegacyJson` is retained solely to verify evidence written before the
 /// canonical BCS migration. All newly-created evidence uses BCS.
@@ -18,7 +18,7 @@ pub enum DigestEncoding {
 }
 
 fn canonical_bytes<T: Serialize>(value: &T) -> Result<Vec<u8>, ReliabilityError> {
-    statechronicle::core::canonicalize::canonicalize(value)
+    statechronicle_core::canonicalize::canonicalize(value)
         .map_err(|error| ReliabilityError::Canonicalize(error.to_string()))
 }
 
@@ -34,11 +34,11 @@ pub(crate) fn state_digest<T: Serialize>(
         DigestEncoding::LegacyJson => legacy_bytes(value)?,
         DigestEncoding::CanonicalBcsV1 => canonical_bytes(value)?,
     };
-    Ok(statechronicle::core::digest::hash_bytes(&bytes))
+    Ok(statechronicle_core::digest::hash_bytes(&bytes))
 }
 
 pub(crate) fn legacy_state_label_digest(state: &str) -> ContentDigest {
-    statechronicle::core::digest::hash_bytes(state.as_bytes())
+    statechronicle_core::digest::hash_bytes(state.as_bytes())
 }
 
 pub(crate) fn process_digest<T: Serialize, U: Serialize>(

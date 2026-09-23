@@ -160,7 +160,7 @@ impl RequestBodyReader {
     /// The S3 multipart lane uses the multi-reader variant
     /// ([`Self::from_reader_chain`]); this single-reader convenience is
     /// exercised by the unit tests below.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn from_reader(
         reader: impl AsyncRead + Send + Unpin + 'static,
         chunk_size: usize,

@@ -6,8 +6,9 @@ Shardline has one reliability model for durable server-side state machines:
    protocol behaviour.
 2. Every durable transition is recorded atomically with its metadata mutation
    in the index that owns that state.
-3. `statechronicle` authenticates the resulting state and operation identity.
-4. `penelope` authenticates the complete process boundary: operation,
+3. `statechronicle` provides canonical, integrity-checkable digests for the
+   resulting state and operation identity.
+4. `penelope` provides a canonical process-boundary digest: operation,
    sequence, previous state, and resulting state.
 5. Recovery, repair, and garbage collection read and verify that evidence
    before acting.
@@ -66,7 +67,7 @@ The canonical state machines and durable lifecycle snapshots are:
 - S3 listing-index objects, recorded as complete typed materialized-row
   snapshots. Upsert, create-if-absent and conditional replacement, deletion,
   exact reads, and listings verify or append evidence in the same transaction
-  as the index row; absence is an authenticated state rather than a missing
+  as the index row; absence is an integrity-checkable state rather than a missing
   record that can silently diverge.
 - provider tree entries and revision registries, which are immutable-version
   index records rebuilt from provider metadata rather than lifecycle state;
@@ -118,7 +119,7 @@ GC's persisted quarantine candidates are authoritative lifecycle state and use
 the same evidence protocol in memory, SQLite, and Postgres. Retention holds
 remain policy records whose active/released result is derived from their
 timestamps, but their complete policy snapshots and release/recovery events
-are authenticated by the same evidence protocol; the last-GC clock anchor is
+are bound by the same integrity evidence protocol; the last-GC clock anchor is
 explicitly an optimization-only materialization. Webhook delivery claims use
 the same typed snapshot protocol in memory, SQLite, and Postgres, including the
 provider-mutation transaction, deletion, purge, and recovery re-claim paths.
@@ -152,7 +153,9 @@ materialized progress with that state and the canonical evidence journal.
 
 This separation preserves all existing routes, object keys, hash formats,
 state spellings, and retry semantics while making durable transitions
-tamper-evident and replayable.
+cryptographically integrity-checkable and replayable. These unkeyed digests
+detect corruption and state/evidence disagreement; they do not authenticate a
+privileged database writer or provide immutable provenance.
 
 ## Coherence requirements
 

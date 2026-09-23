@@ -106,7 +106,7 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["e
 zeroize = "1.8"
 proptest = "1"
 penelope = "0.1.0"
-statechronicle = "0.1.0"
+statechronicle-core = "0.1.0"
 
 [profile.release]
 opt-level = 3

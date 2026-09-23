@@ -142,6 +142,12 @@ impl TryFrom<CliDefinition> for CliCommand {
                         database_url: verify_args.database_url.map(RedactedDbUrl),
                         command: DatabaseMigrationCommand::Verify,
                     }),
+                    DbMigrateSubcommand::Backfill(backfill_args) => Ok(Self::DbMigrate {
+                        database_url: backfill_args.database_url.map(RedactedDbUrl),
+                        command: DatabaseMigrationCommand::Backfill {
+                            batch_size: backfill_args.batch_size.get(),
+                        },
+                    }),
                 },
             },
             CliDefinitionCommand::Admin(args) => match args.command {

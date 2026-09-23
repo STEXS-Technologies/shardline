@@ -182,7 +182,7 @@ fn record_s3_object_transition(
         after_snapshot,
     )?
     .0;
-    for event in evidence.events() {
+    if let Some(event) = evidence.events().last() {
         helpers::persist_s3_object_evidence(transaction, event)?;
     }
     Ok(())

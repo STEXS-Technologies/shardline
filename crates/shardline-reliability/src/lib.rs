@@ -19,6 +19,7 @@ mod operation;
 mod persisted;
 mod provider_evidence;
 mod quarantine_evidence;
+mod repair_evidence;
 mod retention_evidence;
 mod s3_object_evidence;
 mod session_evidence;
@@ -72,6 +73,7 @@ pub use quarantine_evidence::{
     QuarantineObjectIdentity, QuarantineSnapshot, verify_quarantine_lifecycle_chain,
     verify_quarantine_lifecycle_events,
 };
+pub use repair_evidence::{RepairEvidenceEvent, RepairSnapshotV1};
 pub use retention_evidence::{
     RetentionEvidenceLog, RetentionHoldLifecycleEvent, RetentionHoldLifecycleState,
     RetentionHoldSnapshot, RetentionObjectIdentity, verify_retention_hold_lifecycle_chain,
@@ -83,15 +85,16 @@ pub use s3_object_evidence::{
 };
 pub use session_evidence::{
     SessionEvidenceLog, verify_and_append_session_transition, verify_or_repair_session_evidence,
-    verify_resumable_session_events,
+    verify_resumable_session_events, verify_session_evidence,
 };
-pub use snapshot_event::SnapshotEvidence;
+pub use snapshot_event::{SnapshotEvidence, SnapshotEvidenceEvent};
 pub use snapshot_log::{
     SnapshotEvidenceLog, append_or_baseline_snapshot_evidence,
     verify_and_append_snapshot_transition, verify_or_repair_snapshot_evidence,
+    verify_snapshot_evidence,
 };
 pub use state_snapshot::DigestSnapshot;
-pub use statechronicle::ContentDigest as StateChronicleDigest;
+pub use statechronicle_core::digest::ContentDigest as StateChronicleDigest;
 pub use states::{ResumableLifecycleState, UploadLifecycleState};
 pub use webhook_evidence::{
     WebhookDeliveryEvidenceLog, WebhookDeliveryIdentity, WebhookDeliveryLifecycleEvent,

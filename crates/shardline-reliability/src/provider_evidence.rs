@@ -162,7 +162,7 @@ impl SnapshotEvidence for ProviderLifecycleSnapshot {
     }
 }
 
-/// Tamper-evident provider lifecycle snapshot transition.
+/// Integrity-checkable provider lifecycle snapshot transition.
 pub type ProviderLifecycleEvent = SnapshotEvidenceEvent<ProviderLifecycleSnapshot>;
 
 /// Verifies one complete provider lifecycle evidence chain.

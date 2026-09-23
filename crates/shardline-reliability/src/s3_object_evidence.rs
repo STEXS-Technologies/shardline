@@ -30,7 +30,7 @@ impl From<String> for S3ObjectOperationId {
     }
 }
 
-/// Authenticated materialized state for one S3 object index row.
+/// Integrity-checkable materialized state for one S3 object index row.
 ///
 /// `None` in `entry` is the durable absent state. Keeping the full row in the
 /// snapshot makes CAS and read verification cover every user-visible field,

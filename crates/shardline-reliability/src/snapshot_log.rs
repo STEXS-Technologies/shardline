@@ -95,6 +95,19 @@ pub fn verify_or_repair_snapshot_evidence<S: SnapshotEvidence>(
     Ok((stored, false))
 }
 
+/// Verifies persisted evidence against materialized state without creating or
+/// persisting a legacy baseline. Normal reads should use this boundary;
+/// baseline creation belongs to an explicit repair or mutation path.
+pub fn verify_snapshot_evidence<S: SnapshotEvidence>(
+    stored: &SnapshotEvidenceLog<S>,
+    expected: &S,
+) -> Result<(), ReliabilityError> {
+    if stored.events().is_empty() {
+        return Err(ReliabilityError::OperationMismatch);
+    }
+    stored.verify_for(expected)
+}
+
 /// Appends a materialized snapshot to an existing log, or creates its
 /// canonical baseline when the log is absent.
 pub fn append_or_baseline_snapshot_evidence<S: SnapshotEvidence>(

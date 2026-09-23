@@ -63,8 +63,9 @@ pub use multipart::{
     S3SessionPartFileLock, S3UploadSessionLock, acquire_session_part_lock, count_active_sessions,
     create_session, delete_session, delete_session_locked, is_expired, lock_session_parts,
     lock_upload_sessions, new_upload_id, part_file_path, read_session, read_session_locked,
-    session_dir, session_metadata_path, store_part, store_part_locked, sweep_expired_sessions,
-    upload_dir, validate_part_number, validate_part_quota_locked, validate_upload_id,
+    repair_session_evidence, session_dir, session_metadata_path, store_part, store_part_locked,
+    sweep_expired_sessions, upload_dir, validate_part_number, validate_part_quota_locked,
+    validate_upload_id,
 };
 pub use protocol_support::{
     ConditionalHeader, CopySource, EntityTagSet, InvalidS3HeaderValue, QueryMap, S3SubResource,
