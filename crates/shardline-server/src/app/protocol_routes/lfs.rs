@@ -43,7 +43,9 @@ use crate::{
     admission::weights,
     cas_headers::{ACCESS_TOKEN, TOKEN_EXPIRATION, URL},
     lfs_object_key, metrics,
-    object_store::{materialize_object_to_file, stage_bytes_content_addressed},
+    object_store::{
+        materialize_object_to_file, s3_lfs_parts_reader, stage_bytes_content_addressed,
+    },
     overflow::checked_add,
     protocol_support::scope_namespace,
     upload_ingest::{RequestBodyReader, read_body_to_bytes},
@@ -1778,59 +1780,68 @@ async fn durable_lfs_patch_object(
     if !lfs_ranges_cover_total(&claimed_parts, total)? {
         return Err(ServerError::LfsPatchRangeNotSatisfiable);
     }
-    let temporary = tempfile::tempdir()?;
-    let assembled_path = temporary.path().join("assembled");
-    let mut assembled = tokio::fs::File::create(&assembled_path).await?;
-    assembled.set_len(total).await?;
-    for part in &claimed_parts {
-        let part_range = part
-            .range()
-            .ok_or(ServerError::LfsPatchRangeNotSatisfiable)?;
-        let key =
-            ObjectKey::parse(part.staging_key()).map_err(|_error| ServerError::InvalidPath)?;
-        let path = temporary.path().join(format!("part-{}", part.generation()));
-        materialize_object_to_file(
-            &state.backend.object_store(),
-            &key,
-            part.size_bytes(),
-            &path,
-        )
-        .await?;
-        assembled.seek(SeekFrom::Start(part_range.start())).await?;
-        let mut input = tokio::fs::File::open(path).await?;
-        tokio::io::copy(&mut input, &mut assembled).await?;
-    }
-    assembled.flush().await?;
-    drop(assembled);
-
-    let mut input = tokio::fs::File::open(&assembled_path).await?;
-    let mut sha256 = Sha256::new();
-    let mut blake3 = blake3::Hasher::new();
-    let mut observed = 0_u64;
-    let mut buffer = vec![0_u8; 1024 * 1024];
-    loop {
-        let read = input.read(&mut buffer).await?;
-        if read == 0 {
-            break;
+    let _stored = if let Some(reader) =
+        s3_lfs_parts_reader(&state.backend.object_store(), &claimed_parts, total).await?
+    {
+        state
+            .backend
+            .put_sha256_addressed_object_stream_if_absent(object_key, oid, reader)
+            .await?
+    } else {
+        let temporary = tempfile::tempdir()?;
+        let assembled_path = temporary.path().join("assembled");
+        let mut assembled = tokio::fs::File::create(&assembled_path).await?;
+        assembled.set_len(total).await?;
+        for part in &claimed_parts {
+            let part_range = part
+                .range()
+                .ok_or(ServerError::LfsPatchRangeNotSatisfiable)?;
+            let key =
+                ObjectKey::parse(part.staging_key()).map_err(|_error| ServerError::InvalidPath)?;
+            let path = temporary.path().join(format!("part-{}", part.generation()));
+            materialize_object_to_file(
+                &state.backend.object_store(),
+                &key,
+                part.size_bytes(),
+                &path,
+            )
+            .await?;
+            assembled.seek(SeekFrom::Start(part_range.start())).await?;
+            let mut input = tokio::fs::File::open(path).await?;
+            tokio::io::copy(&mut input, &mut assembled).await?;
         }
-        let bytes = buffer.get(..read).ok_or(ServerError::Overflow)?;
-        sha256.update(bytes);
-        blake3.update(bytes);
-        observed = observed
-            .checked_add(u64::try_from(read)?)
-            .ok_or(ServerError::Overflow)?;
-    }
-    if observed != total || hex::encode(sha256.finalize()) != oid {
-        return Err(ServerError::ExpectedBodyHashMismatch);
-    }
-    let object_integrity = ObjectIntegrity::new(
-        ShardlineHash::from_bytes(*blake3.finalize().as_bytes()),
-        observed,
-    );
-    let _stored = state
-        .backend
-        .put_sha256_addressed_object_file(object_key, oid, &assembled_path, &object_integrity)
-        .await?;
+        assembled.flush().await?;
+        drop(assembled);
+
+        let mut input = tokio::fs::File::open(&assembled_path).await?;
+        let mut sha256 = Sha256::new();
+        let mut blake3 = blake3::Hasher::new();
+        let mut observed = 0_u64;
+        let mut buffer = vec![0_u8; 1024 * 1024];
+        loop {
+            let read = input.read(&mut buffer).await?;
+            if read == 0 {
+                break;
+            }
+            let bytes = buffer.get(..read).ok_or(ServerError::Overflow)?;
+            sha256.update(bytes);
+            blake3.update(bytes);
+            observed = observed
+                .checked_add(u64::try_from(read)?)
+                .ok_or(ServerError::Overflow)?;
+        }
+        if observed != total || hex::encode(sha256.finalize()) != oid {
+            return Err(ServerError::ExpectedBodyHashMismatch);
+        }
+        let object_integrity = ObjectIntegrity::new(
+            ShardlineHash::from_bytes(*blake3.finalize().as_bytes()),
+            observed,
+        );
+        state
+            .backend
+            .put_sha256_addressed_object_file(object_key, oid, &assembled_path, &object_integrity)
+            .await?
+    };
     if !state
         .backend
         .transition_resumable_session(

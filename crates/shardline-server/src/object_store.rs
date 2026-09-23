@@ -6,8 +6,10 @@ use std::{
     fs::File,
     io::{BufReader, ErrorKind, Read},
     path::Path,
+    pin::Pin,
 };
 
+use bytes::Bytes;
 use futures_util::{StreamExt, TryStreamExt, stream};
 use shardline_index::{
     FileChunkRecord, FileRecord, FileRecordInvariantError, FileRecordStorageLayout,
@@ -165,6 +167,7 @@ pub(crate) async fn s3_resumable_parts_reader(
     let ServerObjectStore::S3(store) = object_store else {
         return Ok(None);
     };
+    let store = store.clone();
     let ranges = parts
         .iter()
         .filter(|part| part.size_bytes() > 0)
@@ -179,7 +182,6 @@ pub(crate) async fn s3_resumable_parts_reader(
             Ok((key, range))
         })
         .collect::<Result<Vec<_>, ServerError>>()?;
-    let store = store.clone();
     let stream = stream::iter(ranges)
         .then(move |(key, range)| {
             let store = store.clone();
@@ -187,6 +189,151 @@ pub(crate) async fn s3_resumable_parts_reader(
         })
         .try_flatten()
         .map_err(ServerError::from);
+    Ok(Some(RequestBodyReader::from_stream(stream)))
+}
+
+/// Streams durable LFS PATCH ranges directly from S3, including zero-filled
+/// gaps between disjoint ranges. Local deployments return `None` and retain
+/// their filesystem-backed sparse assembly path.
+pub(crate) async fn s3_lfs_parts_reader(
+    object_store: &ServerObjectStore,
+    parts: &[ResumableSessionPart],
+    total: u64,
+) -> Result<Option<RequestBodyReader>, ServerError> {
+    let ServerObjectStore::S3(store) = object_store else {
+        return Ok(None);
+    };
+    let store = store.clone();
+    let mut ranges = parts
+        .iter()
+        .map(|part| {
+            let range = part.range().ok_or(ServerError::InvalidPath)?;
+            let key =
+                ObjectKey::parse(part.staging_key()).map_err(|_error| ServerError::InvalidPath)?;
+            if range.end_exclusive().saturating_sub(range.start()) != part.size_bytes()
+                || range.end_exclusive() > total
+            {
+                return Err(ServerError::ObjectStore(
+                    ObjectStoreError::StoredLengthMismatch,
+                ));
+            }
+            Ok((part.generation(), range, key))
+        })
+        .collect::<Result<Vec<_>, ServerError>>()?;
+    ranges.sort_by_key(|(generation, _range, _key)| *generation);
+
+    struct Piece {
+        start: u64,
+        end: u64,
+        key: ObjectKey,
+        object_start: u64,
+    }
+    enum Segment {
+        Zeroes(u64),
+        Object(ObjectKey, ByteRange),
+    }
+    let mut pieces: Vec<Piece> = Vec::new();
+    for (_generation, range, key) in ranges {
+        let start = range.start();
+        let end = range.end_exclusive();
+        let mut retained = Vec::new();
+        for piece in pieces {
+            if piece.end <= start || piece.start >= end {
+                retained.push(piece);
+                continue;
+            }
+            if piece.start < start {
+                retained.push(Piece {
+                    start: piece.start,
+                    end: start,
+                    key: piece.key.clone(),
+                    object_start: piece.object_start,
+                });
+            }
+            if piece.end > end {
+                retained.push(Piece {
+                    start: end,
+                    end: piece.end,
+                    key: piece.key,
+                    object_start: piece
+                        .object_start
+                        .checked_add(end.checked_sub(piece.start).ok_or(ServerError::Overflow)?)
+                        .ok_or(ServerError::Overflow)?,
+                });
+            }
+        }
+        retained.push(Piece {
+            start,
+            end,
+            key,
+            object_start: 0,
+        });
+        pieces = retained;
+    }
+    pieces.sort_by_key(|piece| (piece.start, piece.end));
+    let mut segments = Vec::new();
+    let mut cursor = 0_u64;
+    for piece in pieces {
+        if piece.start > cursor {
+            segments.push(Segment::Zeroes(
+                piece
+                    .start
+                    .checked_sub(cursor)
+                    .ok_or(ServerError::Overflow)?,
+            ));
+        }
+        let size_bytes = piece
+            .end
+            .checked_sub(piece.start)
+            .ok_or(ServerError::Overflow)?;
+        let object_end = piece
+            .object_start
+            .checked_add(size_bytes)
+            .and_then(|end| end.checked_sub(1))
+            .ok_or(ServerError::Overflow)?;
+        segments.push(Segment::Object(
+            piece.key,
+            ByteRange::new(piece.object_start, object_end)
+                .map_err(|_error| ServerError::Overflow)?,
+        ));
+        cursor = cursor.max(piece.end);
+    }
+    if cursor < total {
+        segments.push(Segment::Zeroes(
+            total.checked_sub(cursor).ok_or(ServerError::Overflow)?,
+        ));
+    }
+
+    type BodyStream = Pin<Box<dyn futures_util::Stream<Item = Result<Bytes, ServerError>> + Send>>;
+    let stream = stream::iter(segments)
+        .then(move |segment| {
+            let store = store.clone();
+            async move {
+                let body: BodyStream = match segment {
+                    Segment::Zeroes(remaining) => {
+                        Box::pin(stream::unfold(remaining, |remaining| async move {
+                            if remaining == 0 {
+                                return None;
+                            }
+                            let length = remaining.min(1024 * 1024);
+                            let length_usize = usize::try_from(length).ok()?;
+                            Some((
+                                Ok(Bytes::from(vec![0_u8; length_usize])),
+                                remaining.checked_sub(length)?,
+                            ))
+                        }))
+                    }
+                    Segment::Object(key, range) => Box::pin(
+                        store
+                            .stream_range(&key, range)
+                            .await?
+                            .map(|chunk| chunk.map_err(ServerError::from)),
+                    ),
+                };
+                Ok::<BodyStream, ServerError>(body)
+            }
+        })
+        .try_flatten();
     Ok(Some(RequestBodyReader::from_stream(stream)))
 }
 
