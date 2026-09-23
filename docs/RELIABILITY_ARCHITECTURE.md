@@ -48,6 +48,14 @@ The canonical state machines and durable lifecycle snapshots are:
   re-quarantined recovery), recorded as complete object-retention snapshots.
   A release event is journaled before the candidate row is removed, so a
   crash between index cleanup and object deletion remains replayable.
+- retention holds (`active`, `released`, and re-created recovery), recorded as
+  complete policy snapshots. Timestamp-derived activity remains the public
+  behavior, while the evidence chain authenticates the policy row and its
+  release/recovery boundaries.
+- provider webhook delivery claims (`processed` and released retention),
+  recorded as typed delivery snapshots. The delivery key remains the public
+  idempotency boundary, while the evidence chain makes claims, deletion,
+  purge, and re-processing after recovery verifiable.
 
 This same resumable lifecycle evidence is also persisted by the standalone
 file-backed S3 multipart and OCI upload-session adapters. Their legacy session
@@ -93,9 +101,13 @@ and verify it first.
 GC's persisted quarantine candidates are authoritative lifecycle state and use
 the same evidence protocol in memory, SQLite, and Postgres. Retention holds
 remain policy records whose active/released result is derived from their
-timestamps; the last-GC clock anchor is explicitly an optimization-only
-materialization. OCI tombstones remain generation fences for logical deletion,
-but their published/deleted/reclaimed visibility transitions now use the same
+timestamps, but their complete policy snapshots and release/recovery events
+are authenticated by the same evidence protocol; the last-GC clock anchor is
+explicitly an optimization-only materialization. Webhook delivery claims use
+the same typed snapshot protocol in memory, SQLite, and Postgres, including the
+provider-mutation transaction, deletion, purge, and recovery re-claim paths.
+OCI tombstones remain generation fences for logical deletion, but their
+published/deleted/reclaimed visibility transitions now use the same
 `OciObjectLifecycleEvent` evidence. Existing transactional compare-and-publish
 rules remain authoritative for behavior.
 
@@ -136,9 +148,9 @@ The current durable-state inventory is intentionally explicit:
 | Resumable sessions and local LFS patch sessions | Lifecycle state machine | `StateTransitionEvent` / `SessionEvidenceLog` |
 | Provider repository observations | Monotonic lifecycle snapshot | `ProviderLifecycleEvent` |
 | GC quarantine candidates | Retention lifecycle state machine | `QuarantineLifecycleEvent` |
-| Retention holds | Policy record; active/released is timestamp-derived | Existing transactional row and invariant validation |
+| Retention holds | Policy snapshot with timestamp-derived activity | `RetentionHoldLifecycleEvent` |
 | OCI tombstones | Visibility/generation lifecycle state | `OciObjectLifecycleEvent` plus atomic compare-and-delete/publish fence |
-| Webhook deliveries | Idempotency claim, not a lifecycle machine | Unique delivery key and transactional insert |
+| Webhook deliveries | Idempotency/recovery lifecycle snapshot | `WebhookDeliveryLifecycleEvent` plus unique delivery key and transactional insert |
 | Resource fences | Concurrency epoch, not domain lifecycle state | Existing fenced transaction boundary |
 
 This inventory prevents either omission of an old state machine or accidental
