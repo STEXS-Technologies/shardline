@@ -1140,7 +1140,6 @@ async fn reconcile_reliability_events(
         let repository: String = row.try_get("repository")?;
         let object_kind: String = row.try_get("object_kind")?;
         let digest_hex: String = row.try_get("digest_hex")?;
-        let operation_id = format!("{scope_namespace}:{repository}:{object_kind}:{digest_hex}");
         let snapshot = OciObjectSnapshot::new(
             OciObjectIdentity::new(scope_namespace, repository, object_kind, digest_hex)
                 .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?,
@@ -1151,13 +1150,14 @@ async fn reconcile_reliability_events(
             ),
         )
         .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?;
+        let operation_id = snapshot.operation_id();
         let event_rows = query(
             "SELECT event_json
              FROM shardline_reliability_events
              WHERE operation_kind = 'Visibility' AND operation_id = $1
              ORDER BY sequence",
         )
-        .bind(&operation_id)
+        .bind(operation_id.as_str())
         .fetch_all(&mut *transaction)
         .await?;
         let events = event_rows
@@ -1170,7 +1170,8 @@ async fn reconcile_reliability_events(
             .collect::<Result<Vec<_>, DatabaseMigrationError>>()?;
         verify_oci_object_lifecycle_events(&events, &snapshot).map_err(|error| {
             DatabaseMigrationError::Backfill(format!(
-                "invalid OCI reliability journal for {operation_id}: {error}"
+                "invalid OCI reliability journal for {}: {error}",
+                operation_id.as_str()
             ))
         })?;
     }

@@ -468,7 +468,12 @@ pub(crate) trait SqliteExecutor {
 }
 
 pub(crate) fn provider_evidence_operation_id(snapshot: &ProviderLifecycleSnapshot) -> String {
-    format!("{}:{}:{}", snapshot.provider, snapshot.owner, snapshot.repo)
+    shardline_reliability::ProviderRepositoryOperationId::new(
+        &snapshot.provider,
+        &snapshot.owner,
+        &snapshot.repo,
+    )
+    .into_string()
 }
 
 pub(crate) fn load_provider_evidence(

@@ -49,7 +49,8 @@ pub use metadata_evidence::{
 };
 pub use oci_evidence::{
     OciObjectEvidenceLog, OciObjectIdentity, OciObjectLifecycleEvent, OciObjectLifecycleState,
-    OciObjectSnapshot, verify_oci_object_lifecycle_chain, verify_oci_object_lifecycle_events,
+    OciObjectOperationId, OciObjectSnapshot, verify_oci_object_lifecycle_chain,
+    verify_oci_object_lifecycle_events,
 };
 pub use oci_tag_evidence::{
     OciTagEvidenceLog, OciTagLifecycleEvent, OciTagOperationId, OciTagSnapshot,

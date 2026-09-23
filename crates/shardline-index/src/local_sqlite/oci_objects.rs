@@ -1,7 +1,7 @@
 use rusqlite::{OptionalExtension, params};
 use shardline_reliability::{
-    OciObjectEvidenceLog, OciObjectIdentity, OciObjectLifecycleState, OciObjectSnapshot,
-    verify_and_append_snapshot_transition, verify_oci_object_lifecycle_chain,
+    OciObjectEvidenceLog, OciObjectIdentity, OciObjectLifecycleState, OciObjectOperationId,
+    OciObjectSnapshot, verify_and_append_snapshot_transition, verify_oci_object_lifecycle_chain,
     verify_or_repair_snapshot_evidence,
 };
 
@@ -33,18 +33,12 @@ fn load_oci_evidence(
     transaction: &rusqlite::Transaction<'_>,
     key: &OciObjectKey,
 ) -> Result<OciObjectEvidenceLog, LocalIndexStoreError> {
-    let operation_id = format!(
-        "{}:{}:{}:{}",
-        key.scope_namespace,
-        key.repository,
-        key.kind.as_str(),
-        key.digest_hex
-    );
+    let operation_id = OciObjectOperationId::new(&oci_identity(key)?);
     let mut statement = transaction.prepare(
         "SELECT event_json FROM shardline_reliability_events
          WHERE operation_kind = 'Visibility' AND operation_id = ?1 ORDER BY sequence",
     )?;
-    let rows = statement.query_map(params![operation_id], |row| {
+    let rows = statement.query_map(params![operation_id.as_str()], |row| {
         let json: String = row.get(0)?;
         serde_json::from_str(json.as_str()).map_err(|error| {
             rusqlite::Error::FromSqlConversionFailure(

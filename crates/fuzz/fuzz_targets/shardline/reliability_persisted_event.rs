@@ -3,7 +3,7 @@
 use libfuzzer_sys::fuzz_target;
 use shardline_reliability::{OperationKind, verify_persisted_event};
 
-fn operation_kind(byte: u8) -> OperationKind {
+const fn operation_kind(byte: u8) -> OperationKind {
     match byte % 10 {
         0 => OperationKind::Upload,
         1 => OperationKind::ResumableSession,

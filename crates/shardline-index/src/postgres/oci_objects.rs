@@ -1,7 +1,7 @@
 use shardline_reliability::{
     OciObjectEvidenceLog, OciObjectIdentity, OciObjectLifecycleEvent, OciObjectLifecycleState,
-    OciObjectSnapshot, resumable_session_event, verify_and_append_snapshot_transition,
-    verify_or_repair_snapshot_evidence,
+    OciObjectOperationId, OciObjectSnapshot, resumable_session_event,
+    verify_and_append_snapshot_transition, verify_or_repair_snapshot_evidence,
 };
 use sqlx::{Connection as _, PgConnection, Row as _, query, query_scalar};
 
@@ -31,18 +31,17 @@ async fn load_oci_evidence(
     executor: &mut sqlx::PgConnection,
     key: &OciObjectKey,
 ) -> Result<OciObjectEvidenceLog, PostgresMetadataStoreError> {
-    let operation_id = format!(
-        "{}:{}:{}:{}",
-        key.scope_namespace,
-        key.repository,
+    let operation_id = OciObjectOperationId::new(&OciObjectIdentity::new(
+        key.scope_namespace.clone(),
+        key.repository.clone(),
         key.kind.as_str(),
-        key.digest_hex
-    );
+        key.digest_hex.clone(),
+    )?);
     let rows = query(
         "SELECT event_json FROM shardline_reliability_events
          WHERE operation_kind = 'Visibility' AND operation_id = $1 ORDER BY sequence",
     )
-    .bind(operation_id)
+    .bind(operation_id.as_str())
     .fetch_all(executor)
     .await?;
     let events = rows

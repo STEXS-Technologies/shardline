@@ -46,6 +46,40 @@ pub struct OciObjectIdentity {
     pub digest_hex: String,
 }
 
+/// Typed persisted operation identifier for one OCI object lifecycle.
+///
+/// The textual representation is stable because it is part of the existing
+/// reliability journal key. Keeping construction here prevents storage
+/// backends and repair paths from drifting apart.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OciObjectOperationId(String);
+
+impl OciObjectOperationId {
+    /// Creates the stable OCI visibility operation identifier.
+    #[must_use]
+    pub fn new(identity: &OciObjectIdentity) -> Self {
+        Self(format!(
+            "{}:{}:{}:{}",
+            identity.scope_namespace,
+            identity.repository,
+            identity.object_kind,
+            identity.digest_hex
+        ))
+    }
+
+    /// Returns the persisted operation identifier.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Consumes the typed identifier into its persisted representation.
+    #[must_use]
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
 impl OciObjectIdentity {
     pub fn new(
         scope_namespace: impl Into<String>,
@@ -104,18 +138,15 @@ impl OciObjectSnapshot {
         })
     }
 
+    pub fn operation_id(&self) -> OciObjectOperationId {
+        OciObjectOperationId::new(&self.identity)
+    }
+
     fn operation(&self) -> Result<OperationIdentity, ReliabilityError> {
-        let operation_id = format!(
-            "{}:{}:{}:{}",
-            self.identity.scope_namespace,
-            self.identity.repository,
-            self.identity.object_kind,
-            self.identity.digest_hex
-        );
         Ok(OperationIdentity::new(
             format!("oci:{}", self.identity.scope_namespace),
             self.identity.repository.clone(),
-            operation_id,
+            self.operation_id().into_string(),
             OperationKind::Visibility,
         )?
         .with_object_key(self.identity.digest_hex.clone()))
@@ -205,5 +236,18 @@ mod tests {
             verify_oci_object_lifecycle_chain(&events),
             Err(ReliabilityError::StateDigestMismatch)
         ));
+    }
+
+    #[test]
+    fn operation_id_preserves_the_persisted_identity_format() {
+        let object = snapshot(OciObjectLifecycleState::Published, None);
+        assert_eq!(
+            object.operation_id().as_str(),
+            "global:team/assets:blob:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+        assert_eq!(
+            object.evidence_operation().unwrap().operation_id,
+            object.operation_id().as_str()
+        );
     }
 }
