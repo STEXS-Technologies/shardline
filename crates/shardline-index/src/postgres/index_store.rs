@@ -1479,8 +1479,8 @@ mod tests {
 
     use super::{PostgresFileReconstructionRecord, PostgresReconstructionTermRecord};
     use crate::{
-        AsyncIndexStore, FileReconstruction, ProviderRepositoryState, ReconstructionTerm,
-        StoredObjectId,
+        AsyncIndexStore, FileReconstruction, ProviderRepositoryState, QuarantineCandidate,
+        ReconstructionTerm, StoredObjectId,
     };
 
     struct CommitResponseLossProxy {
@@ -1840,6 +1840,68 @@ mod tests {
             )
             .await
             .expect("clean provider evidence fixture");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pg_quarantine_visitor_rejects_tampered_evidence() {
+        let Some(pool) = connect_postgres().await else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let store = make_pg_store(pool.clone());
+        let object_key = shardline_storage::ObjectKey::parse("gc/visitor-tampered").unwrap();
+        sqlx::query("DELETE FROM shardline_quarantine_candidates WHERE object_key = $1")
+            .bind(object_key.as_str())
+            .execute(&pool)
+            .await
+            .expect("clean quarantine fixture");
+        sqlx::query(
+            "DELETE FROM shardline_reliability_events
+             WHERE operation_kind = 'GarbageCollection' AND operation_id = $1",
+        )
+        .bind(object_key.as_str())
+        .execute(&pool)
+        .await
+        .expect("clean quarantine evidence fixture");
+
+        let candidate = QuarantineCandidate::new(object_key.clone(), 4, 100, 200).unwrap();
+        store
+            .upsert_quarantine_candidate(&candidate)
+            .await
+            .expect("create quarantine fixture");
+        sqlx::query(
+            "UPDATE shardline_reliability_events
+             SET event_json = '{}'::jsonb
+             WHERE operation_kind = 'GarbageCollection' AND operation_id = $1",
+        )
+        .bind(object_key.as_str())
+        .execute(&pool)
+        .await
+        .expect("tamper quarantine evidence fixture");
+
+        let mut visited = false;
+        let result = AsyncIndexStore::visit_quarantine_candidates(&store, |visited_candidate| {
+            visited = true;
+            assert_eq!(visited_candidate.object_key(), &object_key);
+            Ok::<(), super::PostgresMetadataStoreError>(())
+        })
+        .await;
+        assert!(result.is_err());
+        assert!(!visited, "tampered state must not reach GC visitors");
+
+        sqlx::query("DELETE FROM shardline_quarantine_candidates WHERE object_key = $1")
+            .bind(object_key.as_str())
+            .execute(&pool)
+            .await
+            .expect("clean quarantine fixture");
+        sqlx::query(
+            "DELETE FROM shardline_reliability_events
+             WHERE operation_kind = 'GarbageCollection' AND operation_id = $1",
+        )
+        .bind(object_key.as_str())
+        .execute(&pool)
+        .await
+        .expect("clean quarantine evidence fixture");
     }
 
     #[tokio::test(flavor = "multi_thread")]
