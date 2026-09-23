@@ -3,8 +3,9 @@ use serde_json::Value;
 use crate::{
     HubRefLifecycleEvent, LifecycleEvent, OciObjectLifecycleEvent, OciTagLifecycleEvent,
     OperationKind, ProviderLifecycleEvent, QuarantineLifecycleEvent, ReliabilityError,
-    RepairEvidenceEvent, RetentionHoldLifecycleEvent, S3ObjectLifecycleEvent, StateTransitionEvent,
-    WebhookDeliveryLifecycleEvent, reliability_merkle_commit_json,
+    ReliabilityMerkleCommit, RepairEvidenceEvent, RetentionHoldLifecycleEvent,
+    S3ObjectLifecycleEvent, StateTransitionEvent, WebhookDeliveryLifecycleEvent,
+    reliability_merkle_commit_json_with_previous,
 };
 
 /// Verifies one persisted reliability event using the canonical domain decoder.
@@ -48,18 +49,45 @@ pub fn build_persisted_merkle_commit(
     operation_kind: OperationKind,
     event_json: Value,
 ) -> Result<Value, ReliabilityError> {
+    build_persisted_merkle_commit_with_previous(operation_kind, event_json, None)
+}
+
+/// Builds a persisted Merkle commitment linked to a previous commitment for
+/// the same operation, when one exists.
+pub fn build_persisted_merkle_commit_with_previous(
+    operation_kind: OperationKind,
+    event_json: Value,
+    previous_json: Option<Value>,
+) -> Result<Value, ReliabilityError> {
+    let previous = previous_json
+        .map(serde_json::from_value::<ReliabilityMerkleCommit>)
+        .transpose()?;
     match operation_kind {
-        OperationKind::Upload => build::<LifecycleEvent>(event_json),
-        OperationKind::MetadataCommit => build::<HubRefLifecycleEvent>(event_json),
-        OperationKind::ResumableSession => build::<StateTransitionEvent>(event_json),
-        OperationKind::ProviderEvent => build::<ProviderLifecycleEvent>(event_json),
-        OperationKind::GarbageCollection => build::<QuarantineLifecycleEvent>(event_json),
-        OperationKind::Visibility => build::<OciObjectLifecycleEvent>(event_json),
-        OperationKind::OciTag => build::<OciTagLifecycleEvent>(event_json),
-        OperationKind::S3Object => build::<S3ObjectLifecycleEvent>(event_json),
-        OperationKind::RetentionHold => build::<RetentionHoldLifecycleEvent>(event_json),
-        OperationKind::WebhookDelivery => build::<WebhookDeliveryLifecycleEvent>(event_json),
-        OperationKind::Repair => build::<RepairEvidenceEvent>(event_json),
+        OperationKind::Upload => build::<LifecycleEvent>(event_json, previous.as_ref()),
+        OperationKind::MetadataCommit => {
+            build::<HubRefLifecycleEvent>(event_json, previous.as_ref())
+        }
+        OperationKind::ResumableSession => {
+            build::<StateTransitionEvent>(event_json, previous.as_ref())
+        }
+        OperationKind::ProviderEvent => {
+            build::<ProviderLifecycleEvent>(event_json, previous.as_ref())
+        }
+        OperationKind::GarbageCollection => {
+            build::<QuarantineLifecycleEvent>(event_json, previous.as_ref())
+        }
+        OperationKind::Visibility => {
+            build::<OciObjectLifecycleEvent>(event_json, previous.as_ref())
+        }
+        OperationKind::OciTag => build::<OciTagLifecycleEvent>(event_json, previous.as_ref()),
+        OperationKind::S3Object => build::<S3ObjectLifecycleEvent>(event_json, previous.as_ref()),
+        OperationKind::RetentionHold => {
+            build::<RetentionHoldLifecycleEvent>(event_json, previous.as_ref())
+        }
+        OperationKind::WebhookDelivery => {
+            build::<WebhookDeliveryLifecycleEvent>(event_json, previous.as_ref())
+        }
+        OperationKind::Repair => build::<RepairEvidenceEvent>(event_json, previous.as_ref()),
     }
 }
 
@@ -70,13 +98,29 @@ pub fn verify_persisted_merkle_commit(
     event_json: Value,
     merkle_commit_json: Option<Value>,
 ) -> Result<(), ReliabilityError> {
+    verify_persisted_merkle_commit_with_previous(
+        operation_kind,
+        event_json,
+        merkle_commit_json,
+        None,
+    )
+}
+
+/// Verifies a persisted Merkle body and its StateChronicle parent link.
+pub fn verify_persisted_merkle_commit_with_previous(
+    operation_kind: OperationKind,
+    event_json: Value,
+    merkle_commit_json: Option<Value>,
+    previous_json: Option<Value>,
+) -> Result<(), ReliabilityError> {
     let observed = merkle_commit_json.ok_or_else(|| {
         ReliabilityError::Merkle(format!(
             "missing persisted Merkle commitment for {}",
             operation_kind.as_str()
         ))
     })?;
-    let expected = build_persisted_merkle_commit(operation_kind, event_json)?;
+    let expected =
+        build_persisted_merkle_commit_with_previous(operation_kind, event_json, previous_json)?;
     if observed != expected {
         return Err(ReliabilityError::Merkle(format!(
             "persisted Merkle commitment mismatch for {}",
@@ -97,12 +141,15 @@ where
     event.verify_integrity()
 }
 
-fn build<E>(event_json: Value) -> Result<Value, ReliabilityError>
+fn build<E>(
+    event_json: Value,
+    previous: Option<&ReliabilityMerkleCommit>,
+) -> Result<Value, ReliabilityError>
 where
     E: serde::de::DeserializeOwned + crate::event_metadata::EvidenceEventMetadata,
 {
     let event = serde_json::from_value::<E>(event_json)?;
-    reliability_merkle_commit_json(&event)
+    reliability_merkle_commit_json_with_previous(&event, previous)
 }
 
 #[cfg(test)]
@@ -144,5 +191,56 @@ mod tests {
         let commit = build_persisted_merkle_commit(OperationKind::Upload, json).unwrap();
         assert_eq!(commit["body"]["event_count"], 1);
         assert!(build_persisted_merkle_commit(OperationKind::ProviderEvent, commit).is_err());
+    }
+
+    #[test]
+    fn persisted_merkle_verifier_requires_the_previous_commitment() {
+        let first = crate::upload_lifecycle_event(
+            "tenant",
+            "repository",
+            "upload-chain",
+            "object",
+            "d".repeat(64),
+            UploadLifecycleState::Created,
+            UploadLifecycleState::Storing,
+        )
+        .unwrap();
+        let second = crate::upload_lifecycle_event(
+            "tenant",
+            "repository",
+            "upload-chain",
+            "object",
+            "d".repeat(64),
+            UploadLifecycleState::Storing,
+            UploadLifecycleState::Stored,
+        )
+        .unwrap();
+        let first_json = serde_json::to_value(&first).unwrap();
+        let second_json = serde_json::to_value(&second).unwrap();
+        let first_commit =
+            build_persisted_merkle_commit(OperationKind::Upload, first_json).unwrap();
+        let second_commit = build_persisted_merkle_commit_with_previous(
+            OperationKind::Upload,
+            second_json.clone(),
+            Some(first_commit.clone()),
+        )
+        .unwrap();
+
+        let chained_commit = second_commit.clone();
+        verify_persisted_merkle_commit_with_previous(
+            OperationKind::Upload,
+            second_json.clone(),
+            Some(chained_commit.clone()),
+            Some(first_commit),
+        )
+        .unwrap();
+        assert!(
+            verify_persisted_merkle_commit(
+                OperationKind::Upload,
+                second_json,
+                Some(chained_commit)
+            )
+            .is_err()
+        );
     }
 }

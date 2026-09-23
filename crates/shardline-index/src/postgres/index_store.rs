@@ -4,15 +4,16 @@ use shardline_protocol::{ChunkRange, RepositoryProvider, ShardlineHash};
 use shardline_reliability::{
     EvidenceEventMetadata, LifecycleEvent, ProviderLifecycleEvent, QuarantineEvidenceLog,
     QuarantineLifecycleEvent, QuarantineLifecycleState, QuarantineObjectIdentity,
-    QuarantineSnapshot, RetentionEvidenceLog, RetentionHoldLifecycleState, RetentionHoldSnapshot,
-    RetentionObjectIdentity, SnapshotEvidence, WebhookDeliveryEvidenceLog, WebhookDeliveryIdentity,
-    WebhookDeliveryLifecycleState, WebhookDeliverySnapshot, append_or_baseline_snapshot_evidence,
-    baseline_upload_lifecycle_events, reliability_merkle_commit_json, upload_lifecycle_event,
+    QuarantineSnapshot, ReliabilityMerkleCommit, RetentionEvidenceLog, RetentionHoldLifecycleState,
+    RetentionHoldSnapshot, RetentionObjectIdentity, SnapshotEvidence, WebhookDeliveryEvidenceLog,
+    WebhookDeliveryIdentity, WebhookDeliveryLifecycleState, WebhookDeliverySnapshot,
+    append_or_baseline_snapshot_evidence, baseline_upload_lifecycle_events,
+    reliability_merkle_commit_json_with_previous, upload_lifecycle_event,
     upload_lifecycle_identity, verify_and_append_snapshot_transition,
     verify_provider_lifecycle_events, verify_snapshot_evidence, verify_upload_lifecycle_events,
 };
 use shardline_storage::ObjectKey;
-use sqlx::{Row, postgres::PgRow, query, query_scalar, types::Json};
+use sqlx::{PgConnection, Row, postgres::PgRow, query, query_scalar, types::Json};
 
 use super::{PostgresMetadataStoreError, i64_to_u64, u64_to_i64};
 use crate::{
@@ -1834,18 +1835,36 @@ impl UploadIntentStore for super::PostgresIndexStore {
     }
 }
 
-pub(crate) async fn insert_reliability_event<'executor, E, T>(
-    executor: E,
+pub(crate) async fn insert_reliability_event<T>(
+    connection: &mut PgConnection,
     event: &T,
 ) -> Result<(), PostgresMetadataStoreError>
 where
-    E: sqlx::Executor<'executor, Database = sqlx::Postgres>,
     T: EvidenceEventMetadata,
 {
     event.verify_integrity()?;
-    let merkle_commit_json = reliability_merkle_commit_json(event)?;
+    let sequence = i64::try_from(event.sequence_number()).map_err(|_error| {
+        PostgresMetadataStoreError::IntegerOutOfRange("reliability sequence".into())
+    })?;
+    let previous_json: Option<serde_json::Value> = query_scalar(
+        "SELECT merkle_commit_json
+         FROM shardline_reliability_events
+             WHERE operation_kind = $1 AND operation_id = $2 AND sequence < $3
+               AND merkle_commit_json IS NOT NULL
+         ORDER BY sequence DESC LIMIT 1",
+    )
+    .bind(event.operation_identity().kind.as_str())
+    .bind(&event.operation_identity().operation_id)
+    .bind(sequence)
+    .fetch_optional(&mut *connection)
+    .await?;
+    let previous = previous_json
+        .map(serde_json::from_value::<ReliabilityMerkleCommit>)
+        .transpose()?;
+    let merkle_commit_json =
+        reliability_merkle_commit_json_with_previous(event, previous.as_ref())?;
     insert_reliability_event_value(
-        executor,
+        connection,
         event.operation_identity(),
         event.sequence_number(),
         serde_json::to_value(event)?,
@@ -1854,15 +1873,14 @@ where
     .await
 }
 
-async fn insert_reliability_event_value<'executor, E>(
-    executor: E,
+async fn insert_reliability_event_value(
+    connection: &mut PgConnection,
     operation: &shardline_reliability::OperationIdentity,
     event_sequence: u64,
     event_json: serde_json::Value,
     merkle_commit_json: serde_json::Value,
 ) -> Result<(), PostgresMetadataStoreError>
 where
-    E: sqlx::Executor<'executor, Database = sqlx::Postgres>,
 {
     let sequence = i64::try_from(event_sequence).map_err(|_error| {
         PostgresMetadataStoreError::IntegerOutOfRange("reliability sequence".into())
@@ -1887,7 +1905,7 @@ where
     .bind(event_json)
     .bind(shardline_protocol::unix_now_seconds_lossy() as i64)
     .bind(merkle_commit_json)
-    .fetch_optional(executor)
+    .fetch_optional(&mut *connection)
     .await?;
     if row.is_none() {
         return Err(PostgresMetadataStoreError::ReliabilityEventConflict(

@@ -4,9 +4,10 @@ use sqlx::{PgConnection, Row, postgres::PgRow, query, query_scalar};
 use super::{PostgresIndexStore, PostgresMetadataStoreError, u64_to_i64};
 use crate::{OciTagEntry, OciTagStore};
 use shardline_reliability::{
-    OciTagEvidenceLog, OciTagLifecycleEvent, OciTagSnapshot, SnapshotEvidence,
-    reliability_merkle_commit_json, verify_and_append_snapshot_transition,
-    verify_or_repair_snapshot_evidence, verify_snapshot_evidence,
+    OciTagEvidenceLog, OciTagLifecycleEvent, OciTagSnapshot, ReliabilityMerkleCommit,
+    SnapshotEvidence, reliability_merkle_commit_json_with_previous,
+    verify_and_append_snapshot_transition, verify_or_repair_snapshot_evidence,
+    verify_snapshot_evidence,
 };
 
 fn entry_from_row(row: &PgRow) -> Result<OciTagEntry, PostgresMetadataStoreError> {
@@ -88,7 +89,24 @@ async fn persist_tag_evidence(
             continue;
         }
         event.verify_integrity()?;
-        let merkle_commit_json = reliability_merkle_commit_json(event)?;
+        let sequence = u64_to_i64(event.sequence)?;
+        let previous_json: Option<serde_json::Value> = query_scalar(
+            "SELECT merkle_commit_json
+             FROM shardline_reliability_events
+             WHERE operation_kind = $1 AND operation_id = $2 AND sequence < $3
+               AND merkle_commit_json IS NOT NULL
+             ORDER BY sequence DESC LIMIT 1",
+        )
+        .bind(event.operation.kind.as_str())
+        .bind(&event.operation.operation_id)
+        .bind(sequence)
+        .fetch_optional(&mut *connection)
+        .await?;
+        let previous = previous_json
+            .map(serde_json::from_value::<ReliabilityMerkleCommit>)
+            .transpose()?;
+        let merkle_commit_json =
+            reliability_merkle_commit_json_with_previous(event, previous.as_ref())?;
         query(
             "INSERT INTO shardline_reliability_events
                 (operation_kind, operation_id, sequence, event_json, created_at_unix_seconds,
@@ -102,7 +120,7 @@ async fn persist_tag_evidence(
         )
         .bind(event.operation.kind.as_str())
         .bind(&event.operation.operation_id)
-        .bind(u64_to_i64(event.sequence)?)
+        .bind(sequence)
         .bind(to_value(event)?)
         .bind(shardline_protocol::unix_now_seconds_lossy() as i64)
         .bind(merkle_commit_json)

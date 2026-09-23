@@ -4,10 +4,11 @@ use sqlx::{PgConnection, Row, postgres::PgRow, query, query_scalar};
 use super::{PostgresIndexStore, PostgresMetadataStoreError, i64_to_u64, u64_to_i64};
 use crate::{S3ObjectEntry, S3ObjectIndexStore};
 use shardline_reliability::{
-    OperationKind, S3ObjectEvidenceLog, S3ObjectLifecycleEvent, S3ObjectSnapshot, S3ObjectState,
-    SnapshotEvidence, reliability_merkle_commit_json, verify_and_append_snapshot_transition,
-    verify_or_repair_snapshot_evidence, verify_persisted_merkle_commit, verify_snapshot_event,
-    verify_snapshot_evidence,
+    OperationKind, ReliabilityMerkleCommit, S3ObjectEvidenceLog, S3ObjectLifecycleEvent,
+    S3ObjectSnapshot, S3ObjectState, SnapshotEvidence,
+    reliability_merkle_commit_json_with_previous, verify_and_append_snapshot_transition,
+    verify_or_repair_snapshot_evidence, verify_persisted_merkle_commit_with_previous,
+    verify_snapshot_event, verify_snapshot_evidence,
 };
 
 fn s3_object_entry_from_row(row: &PgRow) -> Result<S3ObjectEntry, PostgresMetadataStoreError> {
@@ -143,7 +144,24 @@ async fn persist_s3_object_event(
     event: &S3ObjectLifecycleEvent,
 ) -> Result<(), PostgresMetadataStoreError> {
     event.verify_integrity()?;
-    let merkle_commit_json = reliability_merkle_commit_json(event)?;
+    let sequence = u64_to_i64(event.sequence)?;
+    let previous_json: Option<serde_json::Value> = query_scalar(
+        "SELECT merkle_commit_json
+         FROM shardline_reliability_events
+         WHERE operation_kind = $1 AND operation_id = $2 AND sequence < $3
+           AND merkle_commit_json IS NOT NULL
+         ORDER BY sequence DESC LIMIT 1",
+    )
+    .bind(event.operation.kind.as_str())
+    .bind(&event.operation.operation_id)
+    .bind(sequence)
+    .fetch_optional(&mut *connection)
+    .await?;
+    let previous = previous_json
+        .map(serde_json::from_value::<ReliabilityMerkleCommit>)
+        .transpose()?;
+    let merkle_commit_json =
+        reliability_merkle_commit_json_with_previous(event, previous.as_ref())?;
     query(
         "INSERT INTO shardline_reliability_events
             (operation_kind, operation_id, sequence, event_json, created_at_unix_seconds,
@@ -157,7 +175,7 @@ async fn persist_s3_object_event(
     )
     .bind(event.operation.kind.as_str())
     .bind(&event.operation.operation_id)
-    .bind(u64_to_i64(event.sequence)?)
+    .bind(sequence)
     .bind(to_value(event)?)
     .bind(shardline_protocol::unix_now_seconds_lossy() as i64)
     .bind(merkle_commit_json)
@@ -355,10 +373,12 @@ impl S3ObjectIndexStore for PostgresIndexStore {
                     objects.size_bytes, objects.content_hash, objects.etag,
                     objects.user_metadata, objects.updated_at_unix_seconds,
                     evidence.event_json AS evidence_json,
-                    evidence.merkle_commit_json AS evidence_merkle_json
+                    evidence.sequence AS evidence_sequence,
+                    evidence.merkle_commit_json AS evidence_merkle_json,
+                    previous_evidence.merkle_commit_json AS previous_evidence_merkle_json
              FROM shardline_s3_objects AS objects
              LEFT JOIN LATERAL (
-                 SELECT event_json, merkle_commit_json
+                 SELECT sequence, event_json, merkle_commit_json
                  FROM shardline_reliability_events
                  WHERE operation_kind = 'S3Object'
                    AND operation_id = octet_length(objects.scope_namespace)::text || ':' || objects.scope_namespace
@@ -366,6 +386,17 @@ impl S3ObjectIndexStore for PostgresIndexStore {
                  ORDER BY sequence DESC
                  LIMIT 1
              ) AS evidence ON TRUE
+             LEFT JOIN LATERAL (
+                 SELECT merkle_commit_json
+                 FROM shardline_reliability_events
+                 WHERE operation_kind = 'S3Object'
+                   AND operation_id = octet_length(objects.scope_namespace)::text || ':' || objects.scope_namespace
+                       || octet_length(objects.object_key)::text || ':' || objects.object_key
+                   AND sequence < evidence.sequence
+                   AND merkle_commit_json IS NOT NULL
+                 ORDER BY sequence DESC
+                 LIMIT 1
+             ) AS previous_evidence ON TRUE
              WHERE objects.scope_namespace = $1
                AND substr(objects.object_key, 1, length($2)) = $2",
         );
@@ -398,10 +429,13 @@ impl S3ObjectIndexStore for PostgresIndexStore {
             })?;
             let event: S3ObjectLifecycleEvent = serde_json::from_value(event_json)?;
             let merkle_json: Option<serde_json::Value> = row.try_get("evidence_merkle_json")?;
-            verify_persisted_merkle_commit(
+            let previous_merkle_json: Option<serde_json::Value> =
+                row.try_get("previous_evidence_merkle_json")?;
+            verify_persisted_merkle_commit_with_previous(
                 OperationKind::S3Object,
                 serde_json::to_value(&event)?,
                 merkle_json,
+                previous_merkle_json,
             )?;
             let expected =
                 s3_object_snapshot(&value.scope_namespace, &value.object_key, Some(&value))?;

@@ -9,17 +9,18 @@ use shardline_reliability::{
     ProviderEvidenceLog, ProviderLifecycleEvent, ProviderLifecycleObservations,
     ProviderLifecycleSnapshot, ProviderRepositoryIdentity, QuarantineEvidenceLog,
     QuarantineLifecycleEvent, QuarantineLifecycleState, QuarantineObjectIdentity,
-    QuarantineSnapshot, RetentionEvidenceLog, RetentionHoldLifecycleEvent,
+    QuarantineSnapshot, ReliabilityMerkleCommit, RetentionEvidenceLog, RetentionHoldLifecycleEvent,
     RetentionHoldLifecycleState, RetentionHoldSnapshot, RetentionObjectIdentity,
     S3ObjectEvidenceLog, S3ObjectLifecycleEvent, S3ObjectSnapshot, S3ObjectState, SnapshotEvidence,
     StateTransitionEvent, UploadLifecycleState, WebhookDeliveryEvidenceLog,
     WebhookDeliveryIdentity, WebhookDeliveryLifecycleEvent, WebhookDeliveryLifecycleState,
     WebhookDeliverySnapshot, baseline_resumable_session_events, baseline_upload_lifecycle_events,
-    build_persisted_merkle_commit, reliability_merkle_commit_json, upload_lifecycle_identity,
-    verify_hub_ref_events, verify_oci_object_lifecycle_events, verify_oci_tag_events,
-    verify_persisted_event, verify_provider_lifecycle_events, verify_quarantine_lifecycle_events,
-    verify_resumable_session_events, verify_retention_hold_lifecycle_events,
-    verify_s3_object_events, verify_upload_lifecycle_events, verify_webhook_delivery_events,
+    build_persisted_merkle_commit_with_previous, reliability_merkle_commit_json_with_previous,
+    upload_lifecycle_identity, verify_hub_ref_events, verify_oci_object_lifecycle_events,
+    verify_oci_tag_events, verify_persisted_event, verify_provider_lifecycle_events,
+    verify_quarantine_lifecycle_events, verify_resumable_session_events,
+    verify_retention_hold_lifecycle_events, verify_s3_object_events,
+    verify_upload_lifecycle_events, verify_webhook_delivery_events,
 };
 use sqlx::{
     Error as SqlxError, PgPool, Postgres, Row, Transaction, postgres::PgPoolOptions, query,
@@ -594,6 +595,7 @@ async fn backfill_reliability_merkle_commits(
         "SELECT operation_kind, operation_id, sequence, event_json
              FROM shardline_reliability_events
              WHERE merkle_commit_json IS NULL
+                OR (sequence > 0 AND (merkle_commit_json->'body'->>'parent_commit_id') IS NULL)
              ORDER BY operation_kind, operation_id, sequence
              LIMIT $1
              FOR UPDATE SKIP LOCKED",
@@ -615,8 +617,24 @@ async fn backfill_reliability_merkle_commits(
             ))
         })?;
         let event_json: serde_json::Value = row.try_get("event_json")?;
-        let merkle_commit_json = build_persisted_merkle_commit(operation_kind, event_json)
-                .map_err(|error| {
+        let previous_json: Option<serde_json::Value> = query_scalar(
+            "SELECT merkle_commit_json
+             FROM shardline_reliability_events
+             WHERE operation_kind = $1 AND operation_id = $2 AND sequence < $3
+               AND merkle_commit_json IS NOT NULL
+             ORDER BY sequence DESC LIMIT 1",
+        )
+        .bind(operation_kind.as_str())
+        .bind(&operation_id)
+        .bind(sequence)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let merkle_commit_json = build_persisted_merkle_commit_with_previous(
+            operation_kind,
+            event_json,
+            previous_json,
+        )
+        .map_err(|error| {
                     DatabaseMigrationError::Backfill(format!(
                         "cannot build Merkle commit kind={operation_kind_text} operation={operation_id} sequence={sequence}: {error}"
                     ))
@@ -625,7 +643,7 @@ async fn backfill_reliability_merkle_commits(
             "UPDATE shardline_reliability_events
                  SET merkle_commit_json = $1
                  WHERE operation_kind = $2 AND operation_id = $3 AND sequence = $4
-                   AND merkle_commit_json IS NULL",
+                   AND (merkle_commit_json IS DISTINCT FROM $1 OR merkle_commit_json IS NULL)",
         )
         .bind(merkle_commit_json)
         .bind(operation_kind_text)
@@ -806,8 +824,34 @@ async fn persist_reliability_event<T: EvidenceEventMetadata>(
     event
         .verify_integrity()
         .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?;
-    let merkle_commit_json = reliability_merkle_commit_json(event)
+    let sequence = i64::try_from(event.sequence_number()).map_err(|error| {
+        DatabaseMigrationError::Backfill(format!(
+            "reliability event sequence out of range kind={} operation={} sequence={}: {error}",
+            event.operation_identity().kind.as_str(),
+            event.operation_identity().operation_id,
+            event.sequence_number(),
+        ))
+    })?;
+    let previous_json: Option<serde_json::Value> = query_scalar(
+        "SELECT merkle_commit_json
+         FROM shardline_reliability_events
+         WHERE operation_kind = $1 AND operation_id = $2 AND sequence < $3
+           AND merkle_commit_json IS NOT NULL
+         ORDER BY sequence DESC LIMIT 1",
+    )
+    .bind(event.operation_identity().kind.as_str())
+    .bind(&event.operation_identity().operation_id)
+    .bind(sequence)
+    .fetch_optional(&mut **transaction)
+    .await?;
+    let previous = previous_json
+        .map(serde_json::from_value::<ReliabilityMerkleCommit>)
+        .transpose()
         .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?;
+    let merkle_commit_json = reliability_merkle_commit_json_with_previous(event, previous.as_ref())
+        .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?;
+    let event_json =
+        to_value(event).map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?;
     query(
         "INSERT INTO shardline_reliability_events
             (operation_kind, operation_id, sequence, event_json, created_at_unix_seconds,
@@ -821,15 +865,8 @@ async fn persist_reliability_event<T: EvidenceEventMetadata>(
     )
     .bind(event.operation_identity().kind.as_str())
     .bind(&event.operation_identity().operation_id)
-    .bind(i64::try_from(event.sequence_number()).map_err(|error| {
-        DatabaseMigrationError::Backfill(format!(
-            "reliability event sequence out of range kind={} operation={} sequence={}: {error}",
-            event.operation_identity().kind.as_str(),
-            event.operation_identity().operation_id,
-            event.sequence_number(),
-        ))
-    })?)
-    .bind(to_value(event).map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?)
+    .bind(sequence)
+    .bind(event_json)
     .bind(unix_now_seconds_lossy() as i64)
     .bind(merkle_commit_json)
     .execute(&mut **transaction)
@@ -1915,8 +1952,16 @@ async fn verify_persisted_reliability_events(
     )
     .fetch_all(&mut **transaction)
     .await?;
+    let mut previous_operation: Option<(String, String, serde_json::Value)> = None;
     for row in rows {
-        verify_persisted_reliability_row(&row)?;
+        let operation_kind: String = row.try_get("operation_kind")?;
+        let operation_id: String = row.try_get("operation_id")?;
+        let previous = previous_operation
+            .as_ref()
+            .filter(|(kind, id, _)| kind == &operation_kind && id == &operation_id)
+            .map(|(_, _, commit)| commit.clone());
+        let observed = verify_persisted_reliability_row(&row, previous)?;
+        previous_operation = Some((operation_kind, operation_id, observed));
     }
     Ok(())
 }
@@ -1936,15 +1981,18 @@ async fn verify_persisted_reliability_operation(
     .bind(operation_id)
     .fetch_all(pool)
     .await?;
+    let mut previous: Option<serde_json::Value> = None;
     for row in rows {
-        verify_persisted_reliability_row(&row)?;
+        let observed = verify_persisted_reliability_row(&row, previous)?;
+        previous = Some(observed);
     }
     Ok(())
 }
 
 fn verify_persisted_reliability_row(
     row: &sqlx::postgres::PgRow,
-) -> Result<(), DatabaseMigrationError> {
+    previous: Option<serde_json::Value>,
+) -> Result<serde_json::Value, DatabaseMigrationError> {
     let operation_kind_text: String = row.try_get("operation_kind")?;
     let operation_id: String = row.try_get("operation_id")?;
     let sequence: i64 = row.try_get("sequence")?;
@@ -1965,17 +2013,18 @@ fn verify_persisted_reliability_row(
             "missing persisted Merkle commit kind={operation_kind_text} operation={operation_id} sequence={sequence}"
         ))
     })?;
-    let expected = build_persisted_merkle_commit(operation_kind, event_json).map_err(|error| {
+    shardline_reliability::verify_persisted_merkle_commit_with_previous(
+        operation_kind,
+        event_json,
+        Some(observed.clone()),
+        previous,
+    )
+    .map_err(|error| {
         DatabaseMigrationError::Backfill(format!(
-            "could not rebuild persisted Merkle commit kind={operation_kind_text} operation={operation_id} sequence={sequence}: {error}"
+            "persisted Merkle commit mismatch kind={operation_kind_text} operation={operation_id} sequence={sequence}: {error}"
         ))
     })?;
-    if observed != expected {
-        return Err(DatabaseMigrationError::Backfill(format!(
-            "persisted Merkle commit mismatch kind={operation_kind_text} operation={operation_id} sequence={sequence}"
-        )));
-    }
-    Ok(())
+    Ok(observed)
 }
 
 fn provider_snapshot_from_row(

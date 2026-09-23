@@ -12,7 +12,9 @@ use ed25519_dalek::SigningKey;
 use serde::{Deserialize, Serialize};
 use statechronicle_commit::sign::sign_commit;
 use statechronicle_commit::{
-    batch::CommitBatch, builder::CommitBuilder, roots::compute_state_root,
+    batch::CommitBatch,
+    builder::CommitBuilder,
+    roots::{compute_state_root, state_root_updates},
 };
 use statechronicle_core::{canonicalize::canonicalize_and_digest, digest::ContentDigest};
 use statechronicle_domain::{
@@ -60,6 +62,15 @@ impl ReliabilityMerkleCommit {
 /// Builds a deterministic StateChronicle commit for one typed Shardline event.
 pub fn build_reliability_merkle_commit<T: EvidenceEventMetadata>(
     event: &T,
+) -> Result<ReliabilityMerkleCommit, ReliabilityError> {
+    build_reliability_merkle_commit_with_previous(event, None)
+}
+
+/// Builds a StateChronicle commit linked to the immediately preceding
+/// commitment for the same Shardline operation.
+pub fn build_reliability_merkle_commit_with_previous<T: EvidenceEventMetadata>(
+    event: &T,
+    previous: Option<&ReliabilityMerkleCommit>,
 ) -> Result<ReliabilityMerkleCommit, ReliabilityError> {
     event.verify_integrity()?;
     let operation = event.operation_identity();
@@ -115,7 +126,13 @@ pub fn build_reliability_merkle_commit<T: EvidenceEventMetadata>(
         .map_err(|error| ReliabilityError::Merkle(error.to_string()))?;
     let empty_root =
         compute_state_root(&[]).map_err(|error| ReliabilityError::Merkle(error.to_string()))?;
-    let previous_state_root = ContentDigest::new(*empty_root.as_bytes());
+    let (previous_state_root, prior_updates) = if let Some(previous) = previous {
+        let updates = state_root_updates(std::slice::from_ref(&previous.event))
+            .map_err(|error| ReliabilityError::Merkle(error.to_string()))?;
+        (previous.body.next_state_root.clone(), updates)
+    } else {
+        (ContentDigest::new(*empty_root.as_bytes()), Vec::new())
+    };
     let profile = ProfileId::new(String::from(PROFILE_ID))
         .map_err(|error| ReliabilityError::Merkle(error.to_string()))?;
     let builder = CommitBuilder::builder()
@@ -124,12 +141,20 @@ pub fn build_reliability_merkle_commit<T: EvidenceEventMetadata>(
         .executor(SubjectId(String::from(EXECUTOR_ID)))
         .profile(profile)
         .created_at(event_timestamp(event.sequence_number()));
-    let commit_digest =
-        canonical_state_digest(&(operation, event.sequence_number(), event_digest))?;
+    let parent_commit_id = previous.map(|commit| commit.body.commit_id.clone());
+    let commit_digest = canonical_state_digest(&(
+        operation,
+        event.sequence_number(),
+        event_digest,
+        parent_commit_id.as_ref(),
+    ))?;
     let commit_id = CommitId::new(format!("cmt_{}", digest_suffix(&commit_digest)))
         .map_err(|error| ReliabilityError::Merkle(error.to_string()))?;
     let body = builder
-        .build(&batch, previous_state_root, &[], || Ok(commit_id))
+        .parent(parent_commit_id)
+        .build(&batch, previous_state_root, &prior_updates, || {
+            Ok(commit_id)
+        })
         .map_err(|error| ReliabilityError::Merkle(error.to_string()))?;
     Ok(ReliabilityMerkleCommit {
         body,
@@ -141,9 +166,18 @@ pub fn build_reliability_merkle_commit<T: EvidenceEventMetadata>(
 pub fn reliability_merkle_commit_json<T: EvidenceEventMetadata>(
     event: &T,
 ) -> Result<serde_json::Value, ReliabilityError> {
-    Ok(serde_json::to_value(build_reliability_merkle_commit(
-        event,
-    )?)?)
+    reliability_merkle_commit_json_with_previous(event, None)
+}
+
+/// Serializes a StateChronicle commitment linked to a previous operation
+/// commitment, when one exists.
+pub fn reliability_merkle_commit_json_with_previous<T: EvidenceEventMetadata>(
+    event: &T,
+    previous: Option<&ReliabilityMerkleCommit>,
+) -> Result<serde_json::Value, ReliabilityError> {
+    Ok(serde_json::to_value(
+        build_reliability_merkle_commit_with_previous(event, previous)?,
+    )?)
 }
 
 fn digest_suffix(digest: &ContentDigest) -> &str {
@@ -164,7 +198,10 @@ mod tests {
     use super::*;
     use crate::{OperationKind, UploadLifecycleState, upload_lifecycle_event};
     use ed25519_dalek::VerifyingKey;
-    use statechronicle_commit::{roots::event_root, sign::verify_commit};
+    use statechronicle_commit::{
+        roots::{event_root, state_root_updates},
+        sign::verify_commit,
+    };
 
     #[test]
     fn builds_a_real_statechronicle_merkle_commit() {
@@ -207,5 +244,51 @@ mod tests {
         let signed = commit.sign(&signing_key, key_id).unwrap();
         let verifying_key = VerifyingKey::from(&signing_key);
         verify_commit(&signed, &verifying_key).unwrap();
+    }
+
+    #[test]
+    fn successive_operation_events_form_a_statechronicle_chain() {
+        let first = upload_lifecycle_event(
+            "tenant",
+            "repo",
+            "operation-chain",
+            "object",
+            "c".repeat(64),
+            UploadLifecycleState::Created,
+            UploadLifecycleState::Storing,
+        )
+        .unwrap();
+        let second = upload_lifecycle_event(
+            "tenant",
+            "repo",
+            "operation-chain",
+            "object",
+            "c".repeat(64),
+            UploadLifecycleState::Storing,
+            UploadLifecycleState::Stored,
+        )
+        .unwrap();
+        let first_commit = build_reliability_merkle_commit(&first).unwrap();
+        let second_commit =
+            build_reliability_merkle_commit_with_previous(&second, Some(&first_commit)).unwrap();
+
+        assert_eq!(
+            second_commit.body.previous_state_root,
+            first_commit.body.next_state_root
+        );
+        assert_eq!(
+            second_commit.body.parent_commit_id,
+            Some(first_commit.body.commit_id)
+        );
+        let prior_updates = state_root_updates(std::slice::from_ref(&first_commit.event)).unwrap();
+        let current_updates =
+            state_root_updates(std::slice::from_ref(&second_commit.event)).unwrap();
+        let mut updates = prior_updates;
+        updates.extend(current_updates);
+        updates.sort_by_key(|update| update.key);
+        assert_eq!(
+            second_commit.body.next_state_root,
+            ContentDigest::new(*compute_state_root(&updates).unwrap().as_bytes())
+        );
     }
 }

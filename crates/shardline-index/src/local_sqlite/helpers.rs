@@ -54,11 +54,11 @@ use crate::{
 
 use shardline_reliability::{
     LifecycleEvent, OciObjectEvidenceLog, OciObjectIdentity, OciObjectLifecycleState,
-    OciObjectSnapshot, ResumableLifecycleState, StateTransitionEvent, UploadLifecycleState,
-    baseline_resumable_session_events, baseline_upload_lifecycle_events,
-    build_persisted_merkle_commit, reliability_merkle_commit_json, upload_lifecycle_identity,
-    verify_persisted_event, verify_provider_lifecycle_events, verify_resumable_session_events,
-    verify_upload_lifecycle_events,
+    OciObjectSnapshot, ReliabilityMerkleCommit, ResumableLifecycleState, StateTransitionEvent,
+    UploadLifecycleState, baseline_resumable_session_events, baseline_upload_lifecycle_events,
+    build_persisted_merkle_commit_with_previous, reliability_merkle_commit_json_with_previous,
+    upload_lifecycle_identity, verify_persisted_event, verify_provider_lifecycle_events,
+    verify_resumable_session_events, verify_upload_lifecycle_events,
 };
 
 use crate::{OciObjectKind, provider_evidence::snapshot_from_state};
@@ -89,7 +89,30 @@ pub(crate) fn persist_reliability_event_at<T: EvidenceEventMetadata>(
     created_at_unix_seconds: i64,
 ) -> Result<(), LocalIndexStoreError> {
     event.verify_integrity()?;
-    let merkle_commit_json = reliability_merkle_commit_json(event)?;
+    let sequence = u64_to_i64(event.sequence_number())?;
+    let previous_json: Option<String> = transaction
+        .query_row(
+            "SELECT merkle_commit_json
+             FROM shardline_reliability_events
+             WHERE operation_kind = ?1 AND operation_id = ?2 AND sequence < ?3
+               AND merkle_commit_json IS NOT NULL
+             ORDER BY sequence DESC LIMIT 1",
+            params![
+                event.operation_identity().kind.as_str(),
+                event.operation_identity().operation_id,
+                sequence,
+            ],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let previous = previous_json
+        .map(|json| from_str::<Value>(&json))
+        .transpose()?
+        .map(serde_json::from_value::<ReliabilityMerkleCommit>)
+        .transpose()?;
+    let merkle_commit_json =
+        reliability_merkle_commit_json_with_previous(event, previous.as_ref())?;
+    let event_json = to_string(event)?;
     transaction.execute(
         "INSERT INTO shardline_reliability_events
             (operation_kind, operation_id, sequence, event_json, created_at_unix_seconds,
@@ -103,8 +126,8 @@ pub(crate) fn persist_reliability_event_at<T: EvidenceEventMetadata>(
         params![
             event.operation_identity().kind.as_str(),
             event.operation_identity().operation_id,
-            u64_to_i64(event.sequence_number())?,
-            to_string(event)?,
+            sequence,
+            event_json,
             created_at_unix_seconds,
             merkle_commit_json.to_string(),
         ],
@@ -128,6 +151,7 @@ pub(crate) fn backfill_reliability_merkle_commits(
         "SELECT operation_kind, operation_id, sequence, event_json
          FROM shardline_reliability_events
          WHERE merkle_commit_json IS NULL
+            OR (sequence > 0 AND json_extract(merkle_commit_json, '$.body.parent_commit_id') IS NULL)
          ORDER BY operation_kind, operation_id, sequence
          LIMIT ?1",
     )?;
@@ -149,15 +173,31 @@ pub(crate) fn backfill_reliability_merkle_commits(
             ))
         })?;
         let event_json = from_str(event_json_text)?;
-        let merkle_commit_json = build_persisted_merkle_commit(operation_kind, event_json)
-            .map_err(LocalIndexStoreError::Reliability)?;
+        let previous_json: Option<String> = transaction
+            .query_row(
+                "SELECT merkle_commit_json
+                 FROM shardline_reliability_events
+                 WHERE operation_kind = ?1 AND operation_id = ?2 AND sequence < ?3
+                   AND merkle_commit_json IS NOT NULL
+                 ORDER BY sequence DESC LIMIT 1",
+                params![operation_kind.as_str(), operation_id, sequence],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let previous_json = previous_json
+            .map(|json| from_str::<Value>(&json))
+            .transpose()?;
+        let merkle_commit_json =
+            build_persisted_merkle_commit_with_previous(operation_kind, event_json, previous_json)
+                .map_err(LocalIndexStoreError::Reliability)?;
         transaction.execute(
             "UPDATE shardline_reliability_events
              SET merkle_commit_json = ?1
              WHERE operation_kind = ?2
                AND operation_id = ?3
                AND sequence = ?4
-               AND merkle_commit_json IS NULL
+               AND (merkle_commit_json IS NULL
+                    OR (sequence > 0 AND json_extract(merkle_commit_json, '$.body.parent_commit_id') IS NULL))
                AND event_json = ?5",
             params![
                 merkle_commit_json.to_string(),
@@ -189,6 +229,7 @@ pub(crate) fn verify_reliability_events(
             row.get::<_, Option<String>>(4)?,
         ))
     })?;
+    let mut previous_operation: Option<(String, String, Value)> = None;
     for row in rows {
         let (operation_kind_text, operation_id, sequence, event_json_text, merkle_json_text) = row?;
         let operation_kind = OperationKind::parse(&operation_kind_text).ok_or_else(|| {
@@ -212,20 +253,24 @@ pub(crate) fn verify_reliability_events(
             ))
         })?;
         let observed: Value = from_str(&merkle_json_text)?;
-        let expected = build_persisted_merkle_commit(operation_kind, event_json).map_err(|error| {
+        let previous = previous_operation
+            .as_ref()
+            .filter(|(kind, id, _)| kind == &operation_kind_text && id == &operation_id)
+            .map(|(_, _, commit)| commit.clone());
+        shardline_reliability::verify_persisted_merkle_commit_with_previous(
+            operation_kind,
+            event_json,
+            Some(observed.clone()),
+            previous,
+        )
+        .map_err(|error| {
             LocalIndexStoreError::Reliability(shardline_reliability::ReliabilityError::Merkle(
                 format!(
-                    "could not rebuild persisted Merkle commitment kind={operation_kind_text} operation={operation_id} sequence={sequence}: {error}"
+                    "persisted Merkle commitment mismatch kind={operation_kind_text} operation={operation_id} sequence={sequence}: {error}"
                 ),
             ))
         })?;
-        if observed != expected {
-            return Err(LocalIndexStoreError::Reliability(
-                shardline_reliability::ReliabilityError::Merkle(format!(
-                    "persisted Merkle commitment mismatch kind={operation_kind_text} operation={operation_id} sequence={sequence}"
-                )),
-            ));
-        }
+        previous_operation = Some((operation_kind_text, operation_id, observed));
     }
     Ok(())
 }
