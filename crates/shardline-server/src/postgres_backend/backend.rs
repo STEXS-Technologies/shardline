@@ -4,7 +4,9 @@ use shardline_index::{
     PostgresIndexStore, PostgresRecordStore, RepoKey, RevisionRecord, TreeEntry, TreeKey, TreeStore,
 };
 use shardline_protocol::unix_now_seconds_lossy;
-use shardline_reliability::{upload_lifecycle_event, verify_lifecycle_chain_ends_at};
+use shardline_reliability::{
+    upload_lifecycle_event, upload_lifecycle_identity, verify_lifecycle_chain_ends_at,
+};
 
 use super::connect_postgres_metadata_pool;
 use crate::{
@@ -487,15 +489,7 @@ async fn transition_intent_with_reliability_event(
     }
     let events =
         shardline_index::UploadIntentStore::reliability_events(store, intent.intent_id()).await?;
-    let (tenant, repository) = events
-        .first()
-        .map(|event| {
-            (
-                event.operation.tenant.as_str(),
-                event.operation.repository.as_str(),
-            )
-        })
-        .unwrap_or(("shardline", "default"));
+    let (tenant, repository) = upload_lifecycle_identity(&events);
     let event = upload_lifecycle_event(
         tenant,
         repository,

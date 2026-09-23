@@ -1414,15 +1414,7 @@ impl UploadIntentStore for super::LocalIndexStore {
                 events.push(event.clone());
                 events.sort_by_key(|stored_event| stored_event.sequence);
             }
-            let (tenant, repository) = events
-                .first()
-                .map(|stored_event| {
-                    (
-                        stored_event.operation.tenant.as_str(),
-                        stored_event.operation.repository.as_str(),
-                    )
-                })
-                .unwrap_or(("shardline", "default"));
+            let (tenant, repository) = upload_lifecycle_identity(&events);
             verify_upload_lifecycle_events(
                 &events,
                 tenant,
