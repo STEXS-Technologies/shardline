@@ -74,6 +74,19 @@ pub fn build_reliability_merkle_commit_with_previous<T: EvidenceEventMetadata>(
 ) -> Result<ReliabilityMerkleCommit, ReliabilityError> {
     event.verify_integrity()?;
     let operation = event.operation_identity();
+    if let Some(previous) = previous {
+        let expected_sequence =
+            previous.body.sequence.checked_add(1).ok_or_else(|| {
+                ReliabilityError::Merkle("previous commit sequence overflow".into())
+            })?;
+        if event.sequence_number() != expected_sequence {
+            return Err(ReliabilityError::Merkle(format!(
+                "reliability Merkle sequence gap: expected {}, got {}",
+                expected_sequence,
+                event.sequence_number()
+            )));
+        }
+    }
     let event_digest = canonical_state_digest(event)?;
     let state = ResourceState::UniqueAsset(UniqueAssetState {
         owner: SubjectId(format!("shardline:{}", operation.operation_id)),
@@ -196,7 +209,10 @@ fn event_timestamp(sequence: u64) -> DateTime<Utc> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::{OperationKind, UploadLifecycleState, upload_lifecycle_event};
+    use crate::{
+        OperationKind, UploadLifecycleState, digest::canonical_transition_process_digest,
+        upload_lifecycle_event,
+    };
     use ed25519_dalek::VerifyingKey;
     use statechronicle_commit::{
         roots::{event_root, state_root_updates},
@@ -289,6 +305,42 @@ mod tests {
         assert_eq!(
             second_commit.body.next_state_root,
             ContentDigest::new(*compute_state_root(&updates).unwrap().as_bytes())
+        );
+    }
+
+    #[test]
+    fn merkle_chain_rejects_sequence_gaps() {
+        let first = upload_lifecycle_event(
+            "tenant",
+            "repo",
+            "operation-gap",
+            "object",
+            "e".repeat(64),
+            UploadLifecycleState::Created,
+            UploadLifecycleState::Storing,
+        )
+        .unwrap();
+        let mut second = upload_lifecycle_event(
+            "tenant",
+            "repo",
+            "operation-gap",
+            "object",
+            "e".repeat(64),
+            UploadLifecycleState::Storing,
+            UploadLifecycleState::Stored,
+        )
+        .unwrap();
+        second.sequence = first.sequence.saturating_add(2);
+        second.process_digest = canonical_transition_process_digest(
+            &second.operation,
+            second.sequence,
+            &second.before,
+            &second.after,
+        )
+        .unwrap();
+        let first_commit = build_reliability_merkle_commit(&first).unwrap();
+        assert!(
+            build_reliability_merkle_commit_with_previous(&second, Some(&first_commit)).is_err()
         );
     }
 }

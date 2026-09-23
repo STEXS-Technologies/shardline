@@ -1,7 +1,10 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use shardline_reliability::{OperationKind, build_persisted_merkle_commit};
+use shardline_reliability::{
+    OperationKind, build_persisted_merkle_commit, build_persisted_merkle_commit_with_previous,
+    verify_persisted_merkle_commit_with_previous,
+};
 
 const fn operation_kind(byte: u8) -> OperationKind {
     match byte % 11 {
@@ -26,8 +29,16 @@ fuzz_target!(|input: &[u8]| {
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(payload) else {
         return;
     };
-    drop(build_persisted_merkle_commit(
-        operation_kind(kind_byte),
+    let kind = operation_kind(kind_byte);
+    let Ok(first) = build_persisted_merkle_commit(kind, value.clone()) else {
+        return;
+    };
+    let second =
+        build_persisted_merkle_commit_with_previous(kind, value.clone(), Some(first.clone())).ok();
+    drop(verify_persisted_merkle_commit_with_previous(
+        kind,
         value,
+        second,
+        Some(first),
     ));
 });
