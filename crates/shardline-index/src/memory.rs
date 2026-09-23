@@ -11,10 +11,9 @@ use shardline_reliability::{
     QuarantineObjectIdentity, QuarantineSnapshot, RetentionEvidenceLog,
     RetentionHoldLifecycleState, RetentionHoldSnapshot, RetentionObjectIdentity,
     WebhookDeliveryEvidenceLog, WebhookDeliveryIdentity, WebhookDeliveryLifecycleState,
-    WebhookDeliverySnapshot, upload_lifecycle_event, verify_lifecycle_chain,
-    verify_provider_lifecycle_events, verify_quarantine_lifecycle_events,
-    verify_retention_hold_lifecycle_chain, verify_retention_hold_lifecycle_events,
-    verify_upload_lifecycle_events, verify_webhook_delivery_chain,
+    WebhookDeliverySnapshot, upload_lifecycle_event, verify_and_append_snapshot_transition,
+    verify_lifecycle_chain, verify_provider_lifecycle_events, verify_quarantine_lifecycle_events,
+    verify_retention_hold_lifecycle_events, verify_upload_lifecycle_events,
 };
 use shardline_storage::ObjectKey;
 use thiserror::Error;
@@ -111,30 +110,22 @@ impl MemoryIndexStore {
             return Ok(false);
         }
         let snapshot = webhook_snapshot(delivery, WebhookDeliveryLifecycleState::Processed)?;
-        let mut evidence = state
+        let evidence = state
             .webhook_evidence
             .get(&key)
             .cloned()
             .unwrap_or_default();
-        if evidence.events().is_empty() {
-            evidence = WebhookDeliveryEvidenceLog::baseline(snapshot)
-                .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
+        let (evidence, _) = if evidence.events().is_empty() {
+            (
+                WebhookDeliveryEvidenceLog::baseline(snapshot)
+                    .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?,
+                true,
+            )
         } else {
-            verify_webhook_delivery_chain(evidence.events())
-                .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
-            if evidence
-                .events()
-                .last()
-                .is_none_or(|event| event.after.state != WebhookDeliveryLifecycleState::Released)
-            {
-                return Err(MemoryIndexStoreError::Reliability(
-                    "webhook evidence has no released materialized state".into(),
-                ));
-            }
-            evidence
-                .record(snapshot)
-                .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
-        }
+            let released = webhook_snapshot(delivery, WebhookDeliveryLifecycleState::Released)?;
+            verify_and_append_snapshot_transition(evidence, released, snapshot)
+                .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?
+        };
         state
             .webhook_deliveries
             .insert(key.clone(), delivery.clone());
@@ -394,22 +385,21 @@ impl LifecycleStore for MemoryIndexStore {
         let mut state = self.lock_state()?;
         let key = candidate.object_key().clone();
         let snapshot = quarantine_snapshot(candidate, QuarantineLifecycleState::Active)?;
-        let mut evidence = state
+        let evidence = state
             .quarantine_evidence
             .get(&key)
             .cloned()
             .unwrap_or_default();
-        if evidence.events().is_empty() {
-            evidence = QuarantineEvidenceLog::baseline(snapshot.clone())
-                .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
-        } else if let Some(current) = state.quarantine.get(&key) {
+        let (evidence, _) = if let Some(current) = state.quarantine.get(&key) {
             let current_snapshot = quarantine_snapshot(current, QuarantineLifecycleState::Active)?;
-            verify_quarantine_lifecycle_events(evidence.events(), &current_snapshot)
-                .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
+            verify_and_append_snapshot_transition(evidence, current_snapshot, snapshot)
+        } else if evidence.events().is_empty() {
+            verify_and_append_snapshot_transition(evidence, snapshot.clone(), snapshot)
+        } else {
+            let released = quarantine_snapshot(candidate, QuarantineLifecycleState::Released)?;
+            verify_and_append_snapshot_transition(evidence, released, snapshot)
         }
-        evidence
-            .record(snapshot)
-            .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
+        .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
         state.quarantine.insert(key.clone(), candidate.clone());
         state.quarantine_evidence.insert(key, evidence);
         Ok(())
@@ -424,24 +414,16 @@ impl LifecycleStore for MemoryIndexStore {
         // materialized candidate map. A corrupted journal must leave the
         // candidate recoverable, matching the transactional adapters.
         let active_snapshot = quarantine_snapshot(&candidate, QuarantineLifecycleState::Active)?;
-        let mut evidence = state
+        let evidence = state
             .quarantine_evidence
             .get(object_key)
             .cloned()
             .unwrap_or_default();
-        if evidence.events().is_empty() {
-            evidence = QuarantineEvidenceLog::baseline(active_snapshot)
+        let released_snapshot =
+            quarantine_snapshot(&candidate, QuarantineLifecycleState::Released)?;
+        let (evidence, _) =
+            verify_and_append_snapshot_transition(evidence, active_snapshot, released_snapshot)
                 .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
-        } else {
-            verify_quarantine_lifecycle_events(evidence.events(), &active_snapshot)
-                .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
-        }
-        evidence
-            .record(quarantine_snapshot(
-                &candidate,
-                QuarantineLifecycleState::Released,
-            )?)
-            .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
         state.quarantine.remove(object_key);
         state
             .quarantine_evidence
@@ -487,38 +469,22 @@ impl LifecycleStore for MemoryIndexStore {
         let mut state = self.lock_state()?;
         let snapshot = retention_snapshot(hold, RetentionHoldLifecycleState::Active)?;
         let key = hold.object_key().clone();
-        let mut evidence = state
+        let evidence = state
             .retention_evidence
             .get(&key)
             .cloned()
             .unwrap_or_default();
-        if evidence.events().is_empty() {
-            evidence = RetentionEvidenceLog::baseline(snapshot)
-                .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
+        let (evidence, _) = if let Some(current) = state.retention_holds.get(&key) {
+            let current_snapshot =
+                retention_snapshot(current, RetentionHoldLifecycleState::Active)?;
+            verify_and_append_snapshot_transition(evidence, current_snapshot, snapshot)
+        } else if evidence.events().is_empty() {
+            verify_and_append_snapshot_transition(evidence, snapshot.clone(), snapshot)
         } else {
-            if let Some(current) = state.retention_holds.get(&key) {
-                verify_retention_hold_lifecycle_events(
-                    evidence.events(),
-                    &retention_snapshot(current, RetentionHoldLifecycleState::Active)?,
-                )
-                .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
-            } else {
-                verify_retention_hold_lifecycle_chain(evidence.events())
-                    .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
-                if evidence
-                    .events()
-                    .last()
-                    .is_none_or(|event| event.after.state != RetentionHoldLifecycleState::Released)
-                {
-                    return Err(MemoryIndexStoreError::Reliability(
-                        "retention evidence has no materialized state".into(),
-                    ));
-                }
-            }
-            evidence
-                .record(snapshot)
-                .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
+            let released = retention_snapshot(hold, RetentionHoldLifecycleState::Released)?;
+            verify_and_append_snapshot_transition(evidence, released, snapshot)
         }
+        .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
         state.retention_holds.insert(key.clone(), hold.clone());
         state.retention_evidence.insert(key, evidence);
         Ok(())
@@ -529,30 +495,17 @@ impl LifecycleStore for MemoryIndexStore {
         let Some(hold) = state.retention_holds.get(object_key).cloned() else {
             return Ok(false);
         };
-        let mut evidence = state
+        let evidence = state
             .retention_evidence
             .get(object_key)
             .cloned()
             .unwrap_or_default();
-        if evidence.events().is_empty() {
-            evidence = RetentionEvidenceLog::baseline(retention_snapshot(
-                &hold,
-                RetentionHoldLifecycleState::Active,
-            )?)
-            .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
-        } else {
-            verify_retention_hold_lifecycle_events(
-                evidence.events(),
-                &retention_snapshot(&hold, RetentionHoldLifecycleState::Active)?,
-            )
-            .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
-        }
-        evidence
-            .record(retention_snapshot(
-                &hold,
-                RetentionHoldLifecycleState::Released,
-            )?)
-            .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
+        let (evidence, _) = verify_and_append_snapshot_transition(
+            evidence,
+            retention_snapshot(&hold, RetentionHoldLifecycleState::Active)?,
+            retention_snapshot(&hold, RetentionHoldLifecycleState::Released)?,
+        )
+        .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
         state
             .retention_evidence
             .insert(object_key.clone(), evidence);
@@ -590,16 +543,15 @@ impl LifecycleStore for MemoryIndexStore {
         let Some(current) = state.webhook_deliveries.get(&key).cloned() else {
             return Ok(false);
         };
-        verify_memory_webhook_evidence(&state, &current)?;
-        let mut evidence = state.webhook_evidence.get(&key).cloned().ok_or_else(|| {
+        let evidence = state.webhook_evidence.get(&key).cloned().ok_or_else(|| {
             MemoryIndexStoreError::Reliability("webhook evidence is missing".into())
         })?;
-        evidence
-            .record(webhook_snapshot(
-                &current,
-                WebhookDeliveryLifecycleState::Released,
-            )?)
-            .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
+        let (evidence, _) = verify_and_append_snapshot_transition(
+            evidence,
+            webhook_snapshot(&current, WebhookDeliveryLifecycleState::Processed)?,
+            webhook_snapshot(&current, WebhookDeliveryLifecycleState::Released)?,
+        )
+        .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
         state.webhook_deliveries.remove(&key);
         state.webhook_evidence.insert(key, evidence);
         Ok(true)
