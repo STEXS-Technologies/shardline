@@ -29,4 +29,6 @@ pub enum ReliabilityError {
     StateMismatch,
     #[error("no canonical reliability event verifier is registered for operation kind: {0}")]
     UnsupportedOperationKind(&'static str),
+    #[error("could not form StateChronicle Merkle commit: {0}")]
+    Merkle(String),
 }

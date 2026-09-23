@@ -5,8 +5,8 @@ use super::{PostgresIndexStore, PostgresMetadataStoreError, i64_to_u64, u64_to_i
 use crate::{S3ObjectEntry, S3ObjectIndexStore};
 use shardline_reliability::{
     OperationKind, S3ObjectEvidenceLog, S3ObjectLifecycleEvent, S3ObjectSnapshot, S3ObjectState,
-    SnapshotEvidence, verify_and_append_snapshot_transition, verify_or_repair_snapshot_evidence,
-    verify_snapshot_event, verify_snapshot_evidence,
+    SnapshotEvidence, reliability_merkle_commit_json, verify_and_append_snapshot_transition,
+    verify_or_repair_snapshot_evidence, verify_snapshot_event, verify_snapshot_evidence,
 };
 
 fn s3_object_entry_from_row(row: &PgRow) -> Result<S3ObjectEntry, PostgresMetadataStoreError> {
@@ -142,17 +142,24 @@ async fn persist_s3_object_event(
     event: &S3ObjectLifecycleEvent,
 ) -> Result<(), PostgresMetadataStoreError> {
     event.verify_integrity()?;
+    let merkle_commit_json = reliability_merkle_commit_json(event)?;
     query(
         "INSERT INTO shardline_reliability_events
-            (operation_kind, operation_id, sequence, event_json, created_at_unix_seconds)
-         VALUES ($1, $2, $3, $4, $5)
-         ON CONFLICT (operation_kind, operation_id, sequence) DO NOTHING",
+            (operation_kind, operation_id, sequence, event_json, created_at_unix_seconds,
+             merkle_commit_json)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         ON CONFLICT (operation_kind, operation_id, sequence) DO UPDATE
+         SET merkle_commit_json = COALESCE(
+             shardline_reliability_events.merkle_commit_json,
+             EXCLUDED.merkle_commit_json
+         )",
     )
     .bind(event.operation.kind.as_str())
     .bind(&event.operation.operation_id)
     .bind(u64_to_i64(event.sequence)?)
     .bind(to_value(event)?)
     .bind(shardline_protocol::unix_now_seconds_lossy() as i64)
+    .bind(merkle_commit_json)
     .execute(&mut *connection)
     .await?;
     Ok(())

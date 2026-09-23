@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use shardline_index::LocalIndexStore;
 use shardline_server::{
     LifecycleRepairOptions, LifecycleRepairReport, LocalFsckReport, LocalIndexRebuildReport,
     ServerConfigError, ServerError, run_fsck as run_server_fsck,
@@ -180,6 +181,17 @@ pub async fn run_repair(
     let config = load_server_config(root, None)?;
     let index_rebuild = run_server_index_rebuild(config.clone()).await?;
     let lifecycle_repair = run_server_lifecycle_repair(config.clone(), options).await?;
+    if config.index_postgres_url().is_none() {
+        let local_store = LocalIndexStore::open(config.root_dir().to_path_buf());
+        loop {
+            let updated = local_store
+                .backfill_reliability_merkle_commits(256)
+                .map_err(ServerError::from)?;
+            if updated == 0 {
+                break;
+            }
+        }
+    }
     let fsck = run_server_fsck(config).await?;
 
     Ok(RepairReport {

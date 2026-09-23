@@ -10,6 +10,7 @@ mod error;
 mod event;
 mod event_metadata;
 mod lifecycle_log;
+mod merkle;
 mod metadata_evidence;
 mod oci_evidence;
 mod oci_tag_evidence;
@@ -42,6 +43,9 @@ pub use event::{
 };
 pub use event_metadata::EvidenceEventMetadata;
 pub use lifecycle_log::LifecycleEvidenceLog;
+pub use merkle::{
+    ReliabilityMerkleCommit, build_reliability_merkle_commit, reliability_merkle_commit_json,
+};
 pub use metadata_evidence::{
     HubRefEvidenceLog, HubRefLifecycleEvent, HubRefSnapshot, MetadataCommitOperationId,
     verify_hub_ref_events,
@@ -60,7 +64,7 @@ pub use operation::{
     resumable_session_snapshot_identity,
 };
 pub use penelope::ContentDigest as PenelopeDigest;
-pub use persisted::verify_persisted_event;
+pub use persisted::{build_persisted_merkle_commit, verify_persisted_event};
 pub use provider_evidence::{
     ProviderEvidenceLog, ProviderLifecycleEvent, ProviderLifecycleObservations,
     ProviderLifecycleSnapshot, ProviderRepositoryIdentity, ProviderRepositoryOperationId,

@@ -15,11 +15,11 @@ use shardline_reliability::{
     StateTransitionEvent, UploadLifecycleState, WebhookDeliveryEvidenceLog,
     WebhookDeliveryIdentity, WebhookDeliveryLifecycleEvent, WebhookDeliveryLifecycleState,
     WebhookDeliverySnapshot, baseline_resumable_session_events, baseline_upload_lifecycle_events,
-    upload_lifecycle_identity, verify_hub_ref_events, verify_oci_object_lifecycle_events,
-    verify_oci_tag_events, verify_persisted_event, verify_provider_lifecycle_events,
-    verify_quarantine_lifecycle_events, verify_resumable_session_events,
-    verify_retention_hold_lifecycle_events, verify_s3_object_events,
-    verify_upload_lifecycle_events, verify_webhook_delivery_events,
+    build_persisted_merkle_commit, reliability_merkle_commit_json, upload_lifecycle_identity,
+    verify_hub_ref_events, verify_oci_object_lifecycle_events, verify_oci_tag_events,
+    verify_persisted_event, verify_provider_lifecycle_events, verify_quarantine_lifecycle_events,
+    verify_resumable_session_events, verify_retention_hold_lifecycle_events,
+    verify_s3_object_events, verify_upload_lifecycle_events, verify_webhook_delivery_events,
 };
 use sqlx::{
     Error as SqlxError, PgPool, Postgres, Row, Transaction, postgres::PgPoolOptions, query,
@@ -120,7 +120,8 @@ pub enum DatabaseMigrationCommand {
     Status,
     /// Verify all materialized reliability journals without repairing them.
     Verify,
-    /// Backfill at most one bounded batch of missing reliability baselines.
+    /// Backfill at most one bounded batch of missing reliability baselines and
+    /// their StateChronicle Merkle commitments.
     Backfill {
         /// Maximum number of rows considered per materialized-state table.
         batch_size: usize,
@@ -262,7 +263,7 @@ const LEGACY_MIGRATION_CHECKSUM_ALIASES: &[(&str, &str)] = &[
     ),
 ];
 
-const SHARDLINE_MIGRATIONS: [DatabaseMigration; 27] = [
+const SHARDLINE_MIGRATIONS: [DatabaseMigration; 28] = [
     DatabaseMigration {
         version: "20260417000000",
         name: "metadata_store",
@@ -437,6 +438,12 @@ const SHARDLINE_MIGRATIONS: [DatabaseMigration; 27] = [
             "../migrations/20260929000000_reliability_write_gate_state_match.down.sql"
         ),
     },
+    DatabaseMigration {
+        version: "20260930000000",
+        name: "reliability_merkle_commits",
+        up_sql: include_str!("../migrations/20260930000000_reliability_merkle_commits.up.sql"),
+        down_sql: include_str!("../migrations/20260930000000_reliability_merkle_commits.down.sql"),
+    },
 ];
 
 /// Returns the bundled Shardline migration list in application order.
@@ -520,6 +527,7 @@ pub async fn run_database_migration(
     }
     if let DatabaseMigrationCommand::Backfill { batch_size } = options.command() {
         backfill_reliability_events(&pool, *batch_size).await?;
+        backfill_reliability_merkle_commits(&pool, *batch_size).await?;
     }
     if let DatabaseMigrationCommand::Repair {
         operation_kind,
@@ -569,6 +577,65 @@ async fn backfill_reliability_events(
     batch_size: usize,
 ) -> Result<(), DatabaseMigrationError> {
     reconcile_reliability_events(pool, true, batch_size).await
+}
+
+/// Adds real StateChronicle Merkle commit bodies to legacy evidence rows in
+/// bounded transactions. The existing Shardline event remains authoritative;
+/// this only derives and records its verifiable commitment.
+async fn backfill_reliability_merkle_commits(
+    pool: &PgPool,
+    batch_size: usize,
+) -> Result<(), DatabaseMigrationError> {
+    let batch_size = i64::try_from(batch_size.max(1)).map_err(|error| {
+        DatabaseMigrationError::Backfill(format!("invalid Merkle backfill batch size: {error}"))
+    })?;
+    let mut transaction = pool.begin().await?;
+    let rows = query(
+        "SELECT operation_kind, operation_id, sequence, event_json
+             FROM shardline_reliability_events
+             WHERE merkle_commit_json IS NULL
+             ORDER BY operation_kind, operation_id, sequence
+             LIMIT $1
+             FOR UPDATE SKIP LOCKED",
+    )
+    .bind(batch_size)
+    .fetch_all(&mut *transaction)
+    .await?;
+    if rows.is_empty() {
+        transaction.commit().await?;
+        return Ok(());
+    }
+    for row in rows {
+        let operation_kind_text: String = row.try_get("operation_kind")?;
+        let operation_id: String = row.try_get("operation_id")?;
+        let sequence: i64 = row.try_get("sequence")?;
+        let operation_kind = OperationKind::parse(&operation_kind_text).ok_or_else(|| {
+            DatabaseMigrationError::Backfill(format!(
+                "unknown reliability operation kind {operation_kind_text} for {operation_id}"
+            ))
+        })?;
+        let event_json: serde_json::Value = row.try_get("event_json")?;
+        let merkle_commit_json = build_persisted_merkle_commit(operation_kind, event_json)
+                .map_err(|error| {
+                    DatabaseMigrationError::Backfill(format!(
+                        "cannot build Merkle commit kind={operation_kind_text} operation={operation_id} sequence={sequence}: {error}"
+                    ))
+                })?;
+        query(
+            "UPDATE shardline_reliability_events
+                 SET merkle_commit_json = $1
+                 WHERE operation_kind = $2 AND operation_id = $3 AND sequence = $4
+                   AND merkle_commit_json IS NULL",
+        )
+        .bind(merkle_commit_json)
+        .bind(operation_kind_text)
+        .bind(operation_id)
+        .bind(sequence)
+        .execute(&mut *transaction)
+        .await?;
+    }
+    transaction.commit().await?;
+    Ok(())
 }
 
 async fn verify_reliability_events(pool: &PgPool) -> Result<(), DatabaseMigrationError> {
@@ -739,11 +806,18 @@ async fn persist_reliability_event<T: EvidenceEventMetadata>(
     event
         .verify_integrity()
         .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?;
+    let merkle_commit_json = reliability_merkle_commit_json(event)
+        .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?;
     query(
         "INSERT INTO shardline_reliability_events
-            (operation_kind, operation_id, sequence, event_json, created_at_unix_seconds)
-         VALUES ($1, $2, $3, $4, $5)
-         ON CONFLICT (operation_kind, operation_id, sequence) DO NOTHING",
+            (operation_kind, operation_id, sequence, event_json, created_at_unix_seconds,
+             merkle_commit_json)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         ON CONFLICT (operation_kind, operation_id, sequence) DO UPDATE
+         SET merkle_commit_json = COALESCE(
+             shardline_reliability_events.merkle_commit_json,
+             EXCLUDED.merkle_commit_json
+         )",
     )
     .bind(event.operation_identity().kind.as_str())
     .bind(&event.operation_identity().operation_id)
@@ -757,6 +831,7 @@ async fn persist_reliability_event<T: EvidenceEventMetadata>(
     })?)
     .bind(to_value(event).map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?)
     .bind(unix_now_seconds_lossy() as i64)
+    .bind(merkle_commit_json)
     .execute(&mut **transaction)
     .await?;
     Ok(())
@@ -1834,7 +1909,7 @@ async fn verify_persisted_reliability_events(
     transaction: &mut Transaction<'_, Postgres>,
 ) -> Result<(), DatabaseMigrationError> {
     let rows = query(
-        "SELECT operation_kind, operation_id, sequence, event_json
+        "SELECT operation_kind, operation_id, sequence, event_json, merkle_commit_json
          FROM shardline_reliability_events
          ORDER BY operation_kind, operation_id, sequence",
     )
@@ -1852,7 +1927,7 @@ async fn verify_persisted_reliability_operation(
     operation_id: &str,
 ) -> Result<(), DatabaseMigrationError> {
     let rows = query(
-        "SELECT operation_kind, operation_id, sequence, event_json
+        "SELECT operation_kind, operation_id, sequence, event_json, merkle_commit_json
          FROM shardline_reliability_events
          WHERE operation_kind = $1 AND operation_id = $2
          ORDER BY sequence",
@@ -1874,16 +1949,30 @@ fn verify_persisted_reliability_row(
     let operation_id: String = row.try_get("operation_id")?;
     let sequence: i64 = row.try_get("sequence")?;
     let event_json: serde_json::Value = row.try_get("event_json")?;
+    let merkle_commit_json: Option<serde_json::Value> = row.try_get("merkle_commit_json")?;
     let operation_kind = OperationKind::parse(&operation_kind_text).ok_or_else(|| {
         DatabaseMigrationError::Backfill(format!(
             "unknown reliability operation kind {operation_kind_text} for {operation_id} at sequence {sequence}"
         ))
     })?;
-    verify_persisted_event(operation_kind, event_json).map_err(|error| {
+    verify_persisted_event(operation_kind, event_json.clone()).map_err(|error| {
         DatabaseMigrationError::Backfill(format!(
             "invalid persisted reliability event kind={operation_kind_text} operation={operation_id} sequence={sequence}: {error}"
         ))
-    })
+    })?;
+    if let Some(observed) = merkle_commit_json {
+        let expected = build_persisted_merkle_commit(operation_kind, event_json).map_err(|error| {
+            DatabaseMigrationError::Backfill(format!(
+                "could not rebuild persisted Merkle commit kind={operation_kind_text} operation={operation_id} sequence={sequence}: {error}"
+            ))
+        })?;
+        if observed != expected {
+            return Err(DatabaseMigrationError::Backfill(format!(
+                "persisted Merkle commit mismatch kind={operation_kind_text} operation={operation_id} sequence={sequence}"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn provider_snapshot_from_row(
@@ -2128,7 +2217,7 @@ mod tests {
 
     #[test]
     fn bundled_migrations_have_expected_count() {
-        assert_eq!(bundled_database_migrations().len(), 27);
+        assert_eq!(bundled_database_migrations().len(), 28);
     }
 
     #[test]

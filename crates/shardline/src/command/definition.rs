@@ -161,7 +161,7 @@ pub(crate) enum DbMigrateSubcommand {
     Status(DbMigrateStatusArgs),
     /// Verify every durable reliability journal without repairing it.
     Verify(DbMigrateVerifyArgs),
-    /// Backfill a bounded batch of missing reliability baselines.
+    /// Backfill a bounded batch of missing reliability baselines and Merkle commitments.
     Backfill(DbMigrateBackfillArgs),
     /// Rebuild one corrupted reliability operation after explicit confirmation.
     Repair(DbMigrateRepairArgs),

@@ -4,7 +4,7 @@ use crate::{
     HubRefLifecycleEvent, LifecycleEvent, OciObjectLifecycleEvent, OciTagLifecycleEvent,
     OperationKind, ProviderLifecycleEvent, QuarantineLifecycleEvent, ReliabilityError,
     RepairEvidenceEvent, RetentionHoldLifecycleEvent, S3ObjectLifecycleEvent, StateTransitionEvent,
-    WebhookDeliveryLifecycleEvent,
+    WebhookDeliveryLifecycleEvent, reliability_merkle_commit_json,
 };
 
 /// Verifies one persisted reliability event using the canonical domain decoder.
@@ -42,6 +42,27 @@ pub fn verify_persisted_event(
     }
 }
 
+/// Builds the persisted Merkle commit for a typed envelope selected by its
+/// durable operation discriminator.
+pub fn build_persisted_merkle_commit(
+    operation_kind: OperationKind,
+    event_json: Value,
+) -> Result<Value, ReliabilityError> {
+    match operation_kind {
+        OperationKind::Upload => build::<LifecycleEvent>(event_json),
+        OperationKind::MetadataCommit => build::<HubRefLifecycleEvent>(event_json),
+        OperationKind::ResumableSession => build::<StateTransitionEvent>(event_json),
+        OperationKind::ProviderEvent => build::<ProviderLifecycleEvent>(event_json),
+        OperationKind::GarbageCollection => build::<QuarantineLifecycleEvent>(event_json),
+        OperationKind::Visibility => build::<OciObjectLifecycleEvent>(event_json),
+        OperationKind::OciTag => build::<OciTagLifecycleEvent>(event_json),
+        OperationKind::S3Object => build::<S3ObjectLifecycleEvent>(event_json),
+        OperationKind::RetentionHold => build::<RetentionHoldLifecycleEvent>(event_json),
+        OperationKind::WebhookDelivery => build::<WebhookDeliveryLifecycleEvent>(event_json),
+        OperationKind::Repair => build::<RepairEvidenceEvent>(event_json),
+    }
+}
+
 fn verify<E>(operation_kind: OperationKind, event_json: Value) -> Result<(), ReliabilityError>
 where
     E: serde::de::DeserializeOwned + crate::event_metadata::EvidenceEventMetadata,
@@ -51,6 +72,14 @@ where
         return Err(ReliabilityError::OperationMismatch);
     }
     event.verify_integrity()
+}
+
+fn build<E>(event_json: Value) -> Result<Value, ReliabilityError>
+where
+    E: serde::de::DeserializeOwned + crate::event_metadata::EvidenceEventMetadata,
+{
+    let event = serde_json::from_value::<E>(event_json)?;
+    reliability_merkle_commit_json(&event)
 }
 
 #[cfg(test)]
@@ -74,5 +103,23 @@ mod tests {
         let json = serde_json::to_value(event).unwrap();
         verify_persisted_event(OperationKind::Upload, json.clone()).unwrap();
         assert!(verify_persisted_event(OperationKind::ProviderEvent, json).is_err());
+    }
+
+    #[test]
+    fn persisted_merkle_builder_uses_the_declared_operation_kind() {
+        let operation =
+            OperationIdentity::new("tenant", "repository", "upload-2", OperationKind::Upload)
+                .unwrap();
+        let event = LifecycleEvidenceEvent::new(
+            operation,
+            0,
+            UploadLifecycleState::Created,
+            UploadLifecycleState::Created,
+        )
+        .unwrap();
+        let json = serde_json::to_value(event).unwrap();
+        let commit = build_persisted_merkle_commit(OperationKind::Upload, json).unwrap();
+        assert_eq!(commit["body"]["event_count"], 1);
+        assert!(build_persisted_merkle_commit(OperationKind::ProviderEvent, commit).is_err());
     }
 }

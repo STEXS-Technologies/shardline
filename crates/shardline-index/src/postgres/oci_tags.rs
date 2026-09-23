@@ -5,8 +5,8 @@ use super::{PostgresIndexStore, PostgresMetadataStoreError, u64_to_i64};
 use crate::{OciTagEntry, OciTagStore};
 use shardline_reliability::{
     OciTagEvidenceLog, OciTagLifecycleEvent, OciTagSnapshot, SnapshotEvidence,
-    verify_and_append_snapshot_transition, verify_or_repair_snapshot_evidence,
-    verify_snapshot_evidence,
+    reliability_merkle_commit_json, verify_and_append_snapshot_transition,
+    verify_or_repair_snapshot_evidence, verify_snapshot_evidence,
 };
 
 fn entry_from_row(row: &PgRow) -> Result<OciTagEntry, PostgresMetadataStoreError> {
@@ -88,17 +88,24 @@ async fn persist_tag_evidence(
             continue;
         }
         event.verify_integrity()?;
+        let merkle_commit_json = reliability_merkle_commit_json(event)?;
         query(
             "INSERT INTO shardline_reliability_events
-                (operation_kind, operation_id, sequence, event_json, created_at_unix_seconds)
-             VALUES ($1, $2, $3, $4, $5)
-             ON CONFLICT (operation_kind, operation_id, sequence) DO NOTHING",
+                (operation_kind, operation_id, sequence, event_json, created_at_unix_seconds,
+                 merkle_commit_json)
+             VALUES ($1, $2, $3, $4, $5, $6)
+             ON CONFLICT (operation_kind, operation_id, sequence) DO UPDATE
+             SET merkle_commit_json = COALESCE(
+                 shardline_reliability_events.merkle_commit_json,
+                 EXCLUDED.merkle_commit_json
+             )",
         )
         .bind(event.operation.kind.as_str())
         .bind(&event.operation.operation_id)
         .bind(u64_to_i64(event.sequence)?)
         .bind(to_value(event)?)
         .bind(shardline_protocol::unix_now_seconds_lossy() as i64)
+        .bind(merkle_commit_json)
         .execute(&mut *connection)
         .await?;
     }

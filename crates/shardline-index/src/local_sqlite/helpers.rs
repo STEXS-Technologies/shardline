@@ -55,7 +55,8 @@ use crate::{
 use shardline_reliability::{
     LifecycleEvent, OciObjectEvidenceLog, OciObjectIdentity, OciObjectLifecycleState,
     OciObjectSnapshot, ResumableLifecycleState, StateTransitionEvent, UploadLifecycleState,
-    baseline_resumable_session_events, baseline_upload_lifecycle_events, upload_lifecycle_identity,
+    baseline_resumable_session_events, baseline_upload_lifecycle_events,
+    build_persisted_merkle_commit, reliability_merkle_commit_json, upload_lifecycle_identity,
     verify_provider_lifecycle_events, verify_resumable_session_events,
     verify_upload_lifecycle_events,
 };
@@ -88,19 +89,86 @@ pub(crate) fn persist_reliability_event_at<T: EvidenceEventMetadata>(
     created_at_unix_seconds: i64,
 ) -> Result<(), LocalIndexStoreError> {
     event.verify_integrity()?;
+    let merkle_commit_json = reliability_merkle_commit_json(event)?;
     transaction.execute(
-        "INSERT OR IGNORE INTO shardline_reliability_events
-            (operation_kind, operation_id, sequence, event_json, created_at_unix_seconds)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
+        "INSERT INTO shardline_reliability_events
+            (operation_kind, operation_id, sequence, event_json, created_at_unix_seconds,
+             merkle_commit_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT (operation_kind, operation_id, sequence) DO UPDATE
+         SET merkle_commit_json = COALESCE(
+             shardline_reliability_events.merkle_commit_json,
+             excluded.merkle_commit_json
+         )",
         params![
             event.operation_identity().kind.as_str(),
             event.operation_identity().operation_id,
             u64_to_i64(event.sequence_number())?,
             to_string(event)?,
             created_at_unix_seconds,
+            merkle_commit_json.to_string(),
         ],
     )?;
     Ok(())
+}
+
+/// Adds StateChronicle Merkle commitments to a bounded batch of legacy journal
+/// rows. This is an explicit maintenance operation; normal reads never repair
+/// missing commitments.
+pub(crate) fn backfill_reliability_merkle_commits(
+    transaction: &Transaction<'_>,
+    batch_size: usize,
+) -> Result<usize, LocalIndexStoreError> {
+    let limit = i64::try_from(batch_size.max(1)).map_err(|error| {
+        LocalIndexStoreError::Reliability(shardline_reliability::ReliabilityError::Merkle(format!(
+            "invalid Merkle backfill batch size: {error}"
+        )))
+    })?;
+    let mut statement = transaction.prepare(
+        "SELECT operation_kind, operation_id, sequence, event_json
+         FROM shardline_reliability_events
+         WHERE merkle_commit_json IS NULL
+         ORDER BY operation_kind, operation_id, sequence
+         LIMIT ?1",
+    )?;
+    let rows = statement.query_map(params![limit], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, i64>(2)?,
+            row.get::<_, String>(3)?,
+        ))
+    })?;
+    let rows = rows.collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+
+    for (operation_kind_text, operation_id, sequence, event_json_text) in &rows {
+        let operation_kind = OperationKind::parse(operation_kind_text).ok_or_else(|| {
+            LocalIndexStoreError::Reliability(shardline_reliability::ReliabilityError::Merkle(
+                format!("unknown reliability operation kind {operation_kind_text}"),
+            ))
+        })?;
+        let event_json = from_str(event_json_text)?;
+        let merkle_commit_json = build_persisted_merkle_commit(operation_kind, event_json)
+            .map_err(LocalIndexStoreError::Reliability)?;
+        transaction.execute(
+            "UPDATE shardline_reliability_events
+             SET merkle_commit_json = ?1
+             WHERE operation_kind = ?2
+               AND operation_id = ?3
+               AND sequence = ?4
+               AND merkle_commit_json IS NULL
+               AND event_json = ?5",
+            params![
+                merkle_commit_json.to_string(),
+                operation_kind.as_str(),
+                operation_id,
+                sequence,
+                event_json_text,
+            ],
+        )?;
+    }
+    Ok(rows.len())
 }
 
 fn reliability_operation_exists(

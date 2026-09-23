@@ -73,6 +73,22 @@ impl LocalIndexStore {
         Ok(())
     }
 
+    /// Adds missing StateChronicle Merkle commitments to one bounded batch of
+    /// existing local reliability events.
+    ///
+    /// This is intentionally explicit maintenance. Opening the store and
+    /// serving normal reads never rewrites legacy evidence.
+    pub fn backfill_reliability_merkle_commits(
+        &self,
+        batch_size: usize,
+    ) -> Result<usize, LocalIndexStoreError> {
+        let mut connection = self.open_connection()?;
+        let transaction = connection.transaction()?;
+        let updated = helpers::backfill_reliability_merkle_commits(&transaction, batch_size)?;
+        transaction.commit()?;
+        Ok(updated)
+    }
+
     pub(crate) fn open_connection(&self) -> Result<Connection, LocalIndexStoreError> {
         helpers::initialize_local_metadata_root(&self.root)?;
         let database_path = self.database_path();

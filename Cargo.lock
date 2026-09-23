@@ -4158,12 +4158,16 @@ dependencies = [
 name = "shardline-reliability"
 version = "1.11.0"
 dependencies = [
+ "chrono",
+ "ed25519-dalek",
  "penelope",
  "proptest",
  "serde",
  "serde_json",
  "sha2",
+ "statechronicle-commit",
  "statechronicle-core",
+ "statechronicle-domain",
  "thiserror 2.0.18",
 ]
 
@@ -4685,6 +4689,39 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
+name = "statechronicle-accumulator"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c0ef2d3352544017d041590bcab9eddd686eca00c3d48b00171b92ee6cf5012d"
+dependencies = [
+ "sha2",
+ "statechronicle-core",
+ "statechronicle-domain",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "statechronicle-commit"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "112a90c2730c5509f9668bd0f2e77ed725370efd918864691ff34510c8e0166e"
+dependencies = [
+ "bcs",
+ "chrono",
+ "ed25519-dalek",
+ "serde",
+ "serde_json",
+ "sha2",
+ "statechronicle-accumulator",
+ "statechronicle-core",
+ "statechronicle-domain",
+ "statechronicle-intent",
+ "statechronicle-ports",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
 name = "statechronicle-core"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4698,6 +4735,52 @@ dependencies = [
  "sha2",
  "thiserror 2.0.18",
  "tracing",
+]
+
+[[package]]
+name = "statechronicle-domain"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6066983627cb6aad118e262bd916097a9d984ec713eb0f88ad3b45d1841a8078"
+dependencies = [
+ "base64",
+ "bcs",
+ "chrono",
+ "serde",
+ "serde_json",
+ "statechronicle-core",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
+name = "statechronicle-intent"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f7f4607789a2d9e5c0693876081aab3ce3ac148de435d798f39457765e3f0bef"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "statechronicle-core",
+ "statechronicle-domain",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
+name = "statechronicle-ports"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6202929e6be107dfe5264f5310a9d689cb4f0bf93d51625c625c8952f48f0ca"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "statechronicle-accumulator",
+ "statechronicle-core",
+ "statechronicle-domain",
+ "thiserror 2.0.18",
+ "trait-variant",
 ]
 
 [[package]]
@@ -5205,6 +5288,17 @@ dependencies = [
  "tracing-core",
  "tracing-log",
  "tracing-serde",
+]
+
+[[package]]
+name = "trait-variant"
+version = "0.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b19a4867a870f6edc4c283f2b455804b1879c0baf0e642f26b03ed8ee262d9d3"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]

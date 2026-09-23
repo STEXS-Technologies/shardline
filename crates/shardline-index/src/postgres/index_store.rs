@@ -7,9 +7,9 @@ use shardline_reliability::{
     QuarantineSnapshot, RetentionEvidenceLog, RetentionHoldLifecycleState, RetentionHoldSnapshot,
     RetentionObjectIdentity, SnapshotEvidence, WebhookDeliveryEvidenceLog, WebhookDeliveryIdentity,
     WebhookDeliveryLifecycleState, WebhookDeliverySnapshot, append_or_baseline_snapshot_evidence,
-    baseline_upload_lifecycle_events, upload_lifecycle_event, upload_lifecycle_identity,
-    verify_and_append_snapshot_transition, verify_provider_lifecycle_events,
-    verify_snapshot_evidence, verify_upload_lifecycle_events,
+    baseline_upload_lifecycle_events, reliability_merkle_commit_json, upload_lifecycle_event,
+    upload_lifecycle_identity, verify_and_append_snapshot_transition,
+    verify_provider_lifecycle_events, verify_snapshot_evidence, verify_upload_lifecycle_events,
 };
 use shardline_storage::ObjectKey;
 use sqlx::{Row, postgres::PgRow, query, query_scalar, types::Json};
@@ -1840,14 +1840,16 @@ pub(crate) async fn insert_reliability_event<'executor, E, T>(
 ) -> Result<(), PostgresMetadataStoreError>
 where
     E: sqlx::Executor<'executor, Database = sqlx::Postgres>,
-    T: EvidenceEventMetadata + ?Sized,
+    T: EvidenceEventMetadata,
 {
     event.verify_integrity()?;
+    let merkle_commit_json = reliability_merkle_commit_json(event)?;
     insert_reliability_event_value(
         executor,
         event.operation_identity(),
         event.sequence_number(),
         serde_json::to_value(event)?,
+        merkle_commit_json,
     )
     .await
 }
@@ -1857,6 +1859,7 @@ async fn insert_reliability_event_value<'executor, E>(
     operation: &shardline_reliability::OperationIdentity,
     event_sequence: u64,
     event_json: serde_json::Value,
+    merkle_commit_json: serde_json::Value,
 ) -> Result<(), PostgresMetadataStoreError>
 where
     E: sqlx::Executor<'executor, Database = sqlx::Postgres>,
@@ -1866,10 +1869,15 @@ where
     })?;
     let row = sqlx::query(
         "INSERT INTO shardline_reliability_events
-            (operation_kind, operation_id, sequence, event_json, created_at_unix_seconds)
-         VALUES ($1, $2, $3, $4, $5)
+            (operation_kind, operation_id, sequence, event_json, created_at_unix_seconds,
+             merkle_commit_json)
+         VALUES ($1, $2, $3, $4, $5, $6)
          ON CONFLICT (operation_kind, operation_id, sequence) DO UPDATE
-         SET event_json = shardline_reliability_events.event_json
+         SET event_json = shardline_reliability_events.event_json,
+             merkle_commit_json = COALESCE(
+                 shardline_reliability_events.merkle_commit_json,
+                 EXCLUDED.merkle_commit_json
+             )
          WHERE shardline_reliability_events.event_json = EXCLUDED.event_json
          RETURNING event_json",
     )
@@ -1878,6 +1886,7 @@ where
     .bind(sequence)
     .bind(event_json)
     .bind(shardline_protocol::unix_now_seconds_lossy() as i64)
+    .bind(merkle_commit_json)
     .fetch_optional(executor)
     .await?;
     if row.is_none() {
