@@ -255,7 +255,7 @@ const LEGACY_MIGRATION_CHECKSUM_ALIASES: &[(&str, &str)] = &[
     ),
 ];
 
-const SHARDLINE_MIGRATIONS: [DatabaseMigration; 25] = [
+const SHARDLINE_MIGRATIONS: [DatabaseMigration; 26] = [
     DatabaseMigration {
         version: "20260417000000",
         name: "metadata_store",
@@ -413,6 +413,12 @@ const SHARDLINE_MIGRATIONS: [DatabaseMigration; 25] = [
         down_sql: include_str!(
             "../migrations/20260927000000_reliability_events_schema_compat.down.sql"
         ),
+    },
+    DatabaseMigration {
+        version: "20260928000000",
+        name: "reliability_delete_gates",
+        up_sql: include_str!("../migrations/20260928000000_reliability_delete_gates.up.sql"),
+        down_sql: include_str!("../migrations/20260928000000_reliability_delete_gates.down.sql"),
     },
 ];
 
@@ -1913,7 +1919,7 @@ mod tests {
 
     #[test]
     fn bundled_migrations_have_expected_count() {
-        assert_eq!(bundled_database_migrations().len(), 25);
+        assert_eq!(bundled_database_migrations().len(), 26);
     }
 
     #[test]

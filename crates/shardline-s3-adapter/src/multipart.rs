@@ -171,6 +171,51 @@ pub struct MultipartUploadSession {
     pub last_touched_unix_seconds: u64,
 }
 
+#[derive(Debug, Serialize)]
+struct MultipartPartSnapshotV1 {
+    size_bytes: u64,
+    file_name: String,
+}
+
+#[derive(Debug, Serialize)]
+struct MultipartUploadSessionSnapshotV1 {
+    bucket: String,
+    key: String,
+    scope_namespace: String,
+    upload_id: String,
+    parts: BTreeMap<u32, MultipartPartSnapshotV1>,
+    user_metadata: Vec<(String, String)>,
+    created_at_unix_seconds: u64,
+    last_touched_unix_seconds: u64,
+}
+
+impl MultipartUploadSessionSnapshotV1 {
+    fn from_session(session: &MultipartUploadSession) -> Self {
+        Self {
+            bucket: session.bucket.clone(),
+            key: session.key.clone(),
+            scope_namespace: session.scope_namespace.clone(),
+            upload_id: session.upload_id.clone(),
+            parts: session
+                .parts
+                .iter()
+                .map(|(number, part)| {
+                    (
+                        *number,
+                        MultipartPartSnapshotV1 {
+                            size_bytes: part.size_bytes,
+                            file_name: part.file_name.clone(),
+                        },
+                    )
+                })
+                .collect(),
+            user_metadata: session.user_metadata.clone(),
+            created_at_unix_seconds: session.created_at_unix_seconds,
+            last_touched_unix_seconds: session.last_touched_unix_seconds,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 struct PersistedMultipartUploadSession {
     session: MultipartUploadSession,
@@ -200,7 +245,7 @@ fn session_snapshot(session: &MultipartUploadSession) -> Result<DigestSnapshot, 
         format!("{}/{}", session.bucket, session.key),
     )
     .map_err(|error| S3SessionError::Reliability(error.to_string()))?;
-    let digest = canonical_state_digest(session)
+    let digest = canonical_state_digest(&MultipartUploadSessionSnapshotV1::from_session(session))
         .map_err(|error| S3SessionError::Reliability(error.to_string()))?;
     Ok(DigestSnapshot::new(operation, digest))
 }

@@ -43,7 +43,7 @@ fn session_snapshot(
         session.repository.clone(),
     )
     .map_err(|error| OciAdapterError::Reliability(error.to_string()))?;
-    let digest = canonical_state_digest(session)
+    let digest = canonical_state_digest(&session.reliability_snapshot_v1())
         .map_err(|error| OciAdapterError::Reliability(error.to_string()))?;
     Ok(DigestSnapshot::new(operation, digest))
 }

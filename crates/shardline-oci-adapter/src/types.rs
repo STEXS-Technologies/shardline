@@ -40,6 +40,46 @@ pub struct OciUploadSession {
     pub s3_multipart: Option<OciS3MultipartUploadSession>,
 }
 
+#[derive(Debug, Serialize)]
+pub(crate) struct OciUploadSessionSnapshotV1 {
+    repository: String,
+    scope_namespace: String,
+    created_at_unix_seconds: u64,
+    last_touched_unix_seconds: u64,
+    use_s3_multipart: bool,
+    s3_multipart: Option<OciS3MultipartUploadSessionSnapshotV1>,
+}
+
+#[derive(Debug, Serialize)]
+struct OciS3MultipartUploadSessionSnapshotV1 {
+    temporary_object_key: String,
+    upload_id: String,
+    uploaded_part_ids: Vec<String>,
+    total_length: u64,
+    sha256_state: SerializableSha256State,
+}
+
+impl OciUploadSession {
+    pub(crate) fn reliability_snapshot_v1(&self) -> OciUploadSessionSnapshotV1 {
+        OciUploadSessionSnapshotV1 {
+            repository: self.repository.clone(),
+            scope_namespace: self.scope_namespace.clone(),
+            created_at_unix_seconds: self.created_at_unix_seconds,
+            last_touched_unix_seconds: self.last_touched_unix_seconds,
+            use_s3_multipart: self.use_s3_multipart,
+            s3_multipart: self.s3_multipart.as_ref().map(|multipart| {
+                OciS3MultipartUploadSessionSnapshotV1 {
+                    temporary_object_key: multipart.temporary_object_key.clone(),
+                    upload_id: multipart.upload_id.clone(),
+                    uploaded_part_ids: multipart.uploaded_part_ids.clone(),
+                    total_length: multipart.total_length,
+                    sha256_state: multipart.sha256_state.clone(),
+                }
+            }),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OciS3MultipartUploadSession {
     pub temporary_object_key: String,
