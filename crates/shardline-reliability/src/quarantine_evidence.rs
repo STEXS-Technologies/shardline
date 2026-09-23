@@ -17,6 +17,16 @@ impl QuarantineLifecycleState {
             Self::Released => "Released",
         }
     }
+
+    #[must_use]
+    pub const fn can_transition_to(self, next: Self) -> bool {
+        matches!(
+            (self, next),
+            (Self::Active, Self::Active)
+                | (Self::Active, Self::Released)
+                | (Self::Released, Self::Active)
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -97,6 +107,12 @@ impl QuarantineLifecycleEvent {
     ) -> Result<Self, ReliabilityError> {
         if before.object_key != after.object_key {
             return Err(ReliabilityError::OperationMismatch);
+        }
+        if !before.state.can_transition_to(after.state) {
+            return Err(ReliabilityError::InvalidTransition {
+                before: before.state.as_str(),
+                after: after.state.as_str(),
+            });
         }
         let operation = after.operation()?;
         let state_digest = state_digest(&after)?;
@@ -263,6 +279,17 @@ mod tests {
         assert!(matches!(
             verify_quarantine_lifecycle_chain(&events),
             Err(ReliabilityError::StateDigestMismatch)
+        ));
+    }
+
+    #[test]
+    fn released_candidate_cannot_be_released_twice() {
+        let active = snapshot(QuarantineLifecycleState::Active);
+        let released = snapshot(QuarantineLifecycleState::Released);
+        assert!(QuarantineLifecycleEvent::new(0, active, released.clone()).is_ok());
+        assert!(matches!(
+            QuarantineLifecycleEvent::new(1, released.clone(), released),
+            Err(ReliabilityError::InvalidTransition { .. })
         ));
     }
 }

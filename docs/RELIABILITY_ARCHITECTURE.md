@@ -101,6 +101,23 @@ tamper-evident and replayable.
 
 ## Coherence requirements
 
+The current durable-state inventory is intentionally explicit:
+
+| Durable record | Classification | Evidence boundary |
+| --- | --- | --- |
+| Upload intents | Lifecycle state machine | `LifecycleEvent` |
+| Resumable sessions and local LFS patch sessions | Lifecycle state machine | `StateTransitionEvent` / `SessionEvidenceLog` |
+| Provider repository observations | Monotonic lifecycle snapshot | `ProviderLifecycleEvent` |
+| GC quarantine candidates | Retention lifecycle state machine | `QuarantineLifecycleEvent` |
+| Retention holds | Policy record; active/released is timestamp-derived | Existing transactional row and invariant validation |
+| OCI tombstones | Generation fence for logical deletion | Existing atomic compare-and-delete/publish fence |
+| Webhook deliveries | Idempotency claim, not a lifecycle machine | Unique delivery key and transactional insert |
+| Resource fences | Concurrency epoch, not domain lifecycle state | Existing fenced transaction boundary |
+
+This inventory prevents either omission of an old state machine or accidental
+creation of a second evidence interpretation for records that are deliberately
+materialized or fencing-only.
+
 Any new durable state machine must use the reliability crate's operation
 identity, canonical StateChronicle digest, canonical Penelope process digest,
 atomic journal write, and chain verification. It must not hash an ad-hoc JSON
