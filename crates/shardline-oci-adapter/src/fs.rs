@@ -138,7 +138,8 @@ pub(crate) async fn read_persisted_upload_session(
                 (session, SessionEvidenceLog::default())
             }
         };
-    let evidence = if stored_evidence.is_empty() {
+    let evidence_was_missing = stored_evidence.is_empty();
+    let evidence = if evidence_was_missing {
         SessionEvidenceLog::for_legacy_session(
             &session.scope_namespace,
             session_id,
@@ -150,6 +151,14 @@ pub(crate) async fn read_persisted_upload_session(
             .map(|()| stored_evidence)
     }
     .map_err(|error| OciAdapterError::Reliability(error.to_string()))?;
+    if evidence_was_missing {
+        let repaired_bytes = serde_json::to_vec(&PersistedOciUploadSession {
+            session: session.clone(),
+            evidence: evidence.clone(),
+        })
+        .map_err(|error| OciAdapterError::Reliability(error.to_string()))?;
+        write_upload_metadata(root, session_id, repaired_bytes).await?;
+    }
     Ok((session, evidence))
 }
 

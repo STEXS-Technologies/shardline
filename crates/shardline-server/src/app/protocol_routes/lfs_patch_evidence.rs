@@ -22,16 +22,34 @@ pub(super) fn load(
     target_key: &str,
 ) -> Result<SessionEvidenceLog, ServerError> {
     let path = evidence_path(dir, oid);
-    let log = match fs::read(&path) {
-        Ok(bytes) => serde_json::from_slice(&bytes).map_err(invalid_evidence)?,
-        Err(error) if error.kind() == ErrorKind::NotFound => {
+    let (log, evidence_was_missing) = match fs::read(&path) {
+        Ok(bytes) => (
+            serde_json::from_slice(&bytes).map_err(invalid_evidence)?,
+            false,
+        ),
+        Err(error) if error.kind() == ErrorKind::NotFound => (
             SessionEvidenceLog::for_legacy_session(scope_namespace, session_id, target_key)
-                .map_err(invalid_evidence)?
-        }
+                .map_err(invalid_evidence)?,
+            true,
+        ),
         Err(error) => return Err(error.into()),
     };
     log.verify_for(scope_namespace, session_id, target_key)
         .map_err(invalid_evidence)?;
+    if evidence_was_missing {
+        let bytes = serde_json::to_vec(&log).map_err(invalid_evidence)?;
+        let temporary = path.with_extension("evidence.tmp");
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&temporary)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(temporary, path)?;
+        sync_directory(dir)?;
+    }
     Ok(log)
 }
 
@@ -197,6 +215,7 @@ mod tests {
             log.events().last().expect("baseline event").after,
             ResumableLifecycleState::Active
         );
+        assert!(evidence_path(directory.path(), OID).is_file());
 
         record(
             directory.path(),

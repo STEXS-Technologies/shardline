@@ -1,7 +1,9 @@
 use std::{num::NonZeroU64, time::Duration};
 
 use serde_json::to_value;
-use shardline_reliability::{StateTransitionEvent, resumable_session_event};
+use shardline_reliability::{
+    StateTransitionEvent, baseline_resumable_session_events, resumable_session_event,
+};
 use sqlx::{Postgres, Row, Transaction};
 
 use super::{
@@ -502,7 +504,7 @@ impl PostgresIndexStore {
         session_id: &str,
     ) -> Result<Vec<StateTransitionEvent>, PostgresMetadataStoreError> {
         let mut transaction = self.pool().begin().await?;
-        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
             .execute(&mut *transaction)
             .await?;
         let rows = sqlx::query(
@@ -514,7 +516,7 @@ impl PostgresIndexStore {
         .bind(session_id)
         .fetch_all(&mut *transaction)
         .await?;
-        let events = rows
+        let mut events = rows
             .into_iter()
             .map(|row| {
                 let sequence: i64 = row.try_get("sequence")?;
@@ -545,13 +547,33 @@ impl PostgresIndexStore {
                     ),
                 )
             })?;
-            shardline_reliability::verify_resumable_session_events(
-                &events,
-                &scope_namespace,
-                session_id,
-                &target_key,
-                state,
-            )?;
+            if events.is_empty() {
+                let baseline = baseline_resumable_session_events(
+                    &scope_namespace,
+                    session_id,
+                    &target_key,
+                    state,
+                )?;
+                for event in &baseline {
+                    insert_reliability_event_json(
+                        transaction.as_mut(),
+                        "ResumableSession",
+                        session_id,
+                        event.sequence,
+                        to_value(event)?,
+                    )
+                    .await?;
+                }
+                events = baseline;
+            } else {
+                shardline_reliability::verify_resumable_session_events(
+                    &events,
+                    &scope_namespace,
+                    session_id,
+                    &target_key,
+                    state,
+                )?;
+            }
         } else {
             shardline_reliability::verify_state_transition_chain(&events)?;
         }
@@ -1363,7 +1385,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn postgres_session_reads_reject_missing_reliability_evidence() {
+    async fn postgres_session_reads_repair_missing_reliability_evidence() {
         let Some(store) = store().await else {
             eprintln!("skipping: no reachable DATABASE_URL");
             return;
@@ -1388,8 +1410,15 @@ mod tests {
             store
                 .resumable_session_by_id(session.session_id())
                 .await
-                .is_err()
+                .unwrap()
+                .is_some()
         );
+        let repaired = store
+            .resumable_reliability_events(session.session_id())
+            .await
+            .unwrap();
+        assert_eq!(repaired.len(), 1);
+        assert_eq!(repaired.first().expect("repaired baseline").sequence, 0);
         sqlx::query("DELETE FROM shardline_resumable_sessions WHERE session_id = $1")
             .bind(session.session_id())
             .execute(store.pool())

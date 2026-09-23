@@ -771,7 +771,8 @@ async fn load_session(
                 (session, SessionEvidenceLog::default())
             }
         };
-    let evidence = if stored_evidence.is_empty() {
+    let evidence_was_missing = stored_evidence.is_empty();
+    let evidence = if evidence_was_missing {
         SessionEvidenceLog::for_legacy_session(
             &session.scope_namespace,
             &session.upload_id,
@@ -783,6 +784,13 @@ async fn load_session(
             .map(|()| stored_evidence)
     }
     .map_err(|error| S3SessionError::Reliability(error.to_string()))?;
+    if evidence_was_missing {
+        let repaired_bytes = serde_json::to_vec(&PersistedMultipartUploadSession {
+            session: session.clone(),
+            evidence: evidence.clone(),
+        })?;
+        write_file_atomically(&dir.join("session.json"), &repaired_bytes).await?;
+    }
     Ok((session, evidence))
 }
 
@@ -1085,6 +1093,35 @@ mod tests {
             .unwrap()
             .unwrap();
         waiter.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn legacy_session_read_repairs_canonical_evidence() {
+        let root = make_root().await;
+        let upload_id = create_session(
+            root.path(),
+            "acme.models",
+            "large.bin",
+            "global",
+            ttl(3600),
+            cap(16),
+            quota(1 << 40),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+        let path = session_metadata_path(root.path(), &upload_id).unwrap();
+        let legacy = session_at(root.path(), &upload_id);
+        fs::write(&path, serde_json::to_vec(&legacy).unwrap())
+            .await
+            .unwrap();
+
+        let session_dir = path.parent().unwrap();
+        let (_session, evidence) = load_session(session_dir).await.unwrap();
+        assert_eq!(evidence.events().len(), 1);
+        let repaired: PersistedMultipartUploadSession =
+            serde_json::from_slice(&fs::read(path).await.unwrap()).unwrap();
+        assert_eq!(repaired.evidence.events().len(), 1);
     }
 
     #[test]
