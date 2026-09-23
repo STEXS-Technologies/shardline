@@ -11,10 +11,11 @@ use shardline_reliability::{
     RetentionObjectIdentity, SnapshotEvidence, StateTransitionEvent, UploadLifecycleState,
     WebhookDeliveryEvidenceLog, WebhookDeliveryIdentity, WebhookDeliveryLifecycleEvent,
     WebhookDeliveryLifecycleState, WebhookDeliverySnapshot, baseline_resumable_session_events,
-    baseline_upload_lifecycle_events, verify_oci_object_lifecycle_events, verify_persisted_event,
-    verify_provider_lifecycle_events, verify_quarantine_lifecycle_events,
-    verify_resumable_session_events, verify_retention_hold_lifecycle_events,
-    verify_upload_lifecycle_events, verify_webhook_delivery_events,
+    baseline_upload_lifecycle_events, upload_lifecycle_identity,
+    verify_oci_object_lifecycle_events, verify_persisted_event, verify_provider_lifecycle_events,
+    verify_quarantine_lifecycle_events, verify_resumable_session_events,
+    verify_retention_hold_lifecycle_events, verify_upload_lifecycle_events,
+    verify_webhook_delivery_events,
 };
 use sqlx::{
     Error as SqlxError, PgPool, Postgres, Row, Transaction, postgres::PgPoolOptions, query,
@@ -961,15 +962,7 @@ async fn reconcile_reliability_events(
                     .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))
             })
             .collect::<Result<Vec<_>, DatabaseMigrationError>>()?;
-        let (tenant, repository) = events
-            .first()
-            .map(|event| {
-                (
-                    event.operation.tenant.as_str(),
-                    event.operation.repository.as_str(),
-                )
-            })
-            .unwrap_or(("shardline", "default"));
+        let (tenant, repository) = upload_lifecycle_identity(&events);
         verify_upload_lifecycle_events(
             &events,
             tenant,

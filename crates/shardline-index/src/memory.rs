@@ -12,7 +12,7 @@ use shardline_reliability::{
     RetentionHoldLifecycleState, RetentionHoldSnapshot, RetentionObjectIdentity,
     WebhookDeliveryEvidenceLog, WebhookDeliveryIdentity, WebhookDeliveryLifecycleState,
     WebhookDeliverySnapshot, append_or_baseline_snapshot_evidence, upload_lifecycle_event,
-    verify_and_append_snapshot_transition, verify_lifecycle_chain,
+    upload_lifecycle_identity, verify_and_append_snapshot_transition, verify_lifecycle_chain,
     verify_provider_lifecycle_events, verify_quarantine_lifecycle_events,
     verify_retention_hold_lifecycle_events, verify_upload_lifecycle_events,
 };
@@ -800,15 +800,7 @@ impl UploadIntentStore for MemoryIndexStore {
         }
         events.push(event.clone());
         events.sort_by_key(|stored_event| stored_event.sequence);
-        let (tenant, repository) = events
-            .first()
-            .map(|stored_event| {
-                (
-                    stored_event.operation.tenant.as_str(),
-                    stored_event.operation.repository.as_str(),
-                )
-            })
-            .unwrap_or(("shardline", "default"));
+        let (tenant, repository) = upload_lifecycle_identity(events);
         verify_upload_lifecycle_events(
             events,
             tenant,
@@ -833,15 +825,7 @@ impl UploadIntentStore for MemoryIndexStore {
             .cloned()
             .unwrap_or_default();
         if let Some(intent) = state.upload_intents.get(operation_id) {
-            let (tenant, repository) = events
-                .first()
-                .map(|event| {
-                    (
-                        event.operation.tenant.as_str(),
-                        event.operation.repository.as_str(),
-                    )
-                })
-                .unwrap_or(("shardline", "default"));
+            let (tenant, repository) = upload_lifecycle_identity(&events);
             verify_upload_lifecycle_events(
                 &events,
                 tenant,
@@ -917,15 +901,7 @@ fn verify_memory_intent_evidence(
         .get(intent.intent_id())
         .map(Vec::as_slice)
         .unwrap_or_default();
-    let (tenant, repository) = events
-        .first()
-        .map(|event| {
-            (
-                event.operation.tenant.as_str(),
-                event.operation.repository.as_str(),
-            )
-        })
-        .unwrap_or(("shardline", "default"));
+    let (tenant, repository) = upload_lifecycle_identity(events);
     verify_upload_lifecycle_events(
         events,
         tenant,

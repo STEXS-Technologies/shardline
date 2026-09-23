@@ -250,6 +250,20 @@ pub fn verify_upload_lifecycle_events(
     }
 }
 
+/// Returns the canonical identity used by an upload evidence chain.
+#[must_use]
+pub fn upload_lifecycle_identity(events: &[LifecycleEvent]) -> (&str, &str) {
+    events
+        .first()
+        .map(|event| {
+            (
+                event.operation.tenant.as_str(),
+                event.operation.repository.as_str(),
+            )
+        })
+        .unwrap_or(("shardline", "default"))
+}
+
 const fn lifecycle_sequence(before: UploadLifecycleState, after: UploadLifecycleState) -> u64 {
     match after {
         UploadLifecycleState::Created => 0,

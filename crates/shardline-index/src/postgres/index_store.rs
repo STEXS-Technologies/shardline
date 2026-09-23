@@ -8,7 +8,7 @@ use shardline_reliability::{
     RetentionHoldLifecycleState, RetentionHoldSnapshot, RetentionObjectIdentity, SnapshotEvidence,
     WebhookDeliveryEvidenceLog, WebhookDeliveryIdentity, WebhookDeliveryLifecycleState,
     WebhookDeliverySnapshot, append_or_baseline_snapshot_evidence,
-    baseline_upload_lifecycle_events, upload_lifecycle_event,
+    baseline_upload_lifecycle_events, upload_lifecycle_event, upload_lifecycle_identity,
     verify_and_append_snapshot_transition, verify_or_repair_snapshot_evidence,
     verify_provider_lifecycle_events, verify_quarantine_lifecycle_events,
     verify_retention_hold_lifecycle_events, verify_upload_lifecycle_events,
@@ -35,15 +35,7 @@ async fn verify_postgres_intent_evidence(
         intent.intent_id(),
     )
     .await?;
-    let (tenant, repository) = events
-        .first()
-        .map(|event| {
-            (
-                event.operation.tenant.as_str(),
-                event.operation.repository.as_str(),
-            )
-        })
-        .unwrap_or(("shardline", "default"));
+    let (tenant, repository) = upload_lifecycle_identity(&events);
     verify_upload_lifecycle_events(
         &events,
         tenant,
@@ -1566,15 +1558,7 @@ impl UploadIntentStore for super::PostgresIndexStore {
                 }
                 events = baseline;
             }
-            let (tenant, repository) = events
-                .first()
-                .map(|event| {
-                    (
-                        event.operation.tenant.as_str(),
-                        event.operation.repository.as_str(),
-                    )
-                })
-                .unwrap_or(("shardline", "default"));
+            let (tenant, repository) = upload_lifecycle_identity(&events);
             verify_upload_lifecycle_events(
                 &events,
                 tenant,

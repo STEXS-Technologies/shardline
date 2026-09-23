@@ -3,7 +3,7 @@ use shardline_protocol::{RepositoryProvider, ShardlineHash, unix_now_seconds_los
 use shardline_reliability::{
     LifecycleEvent, ProviderEvidenceLog, QuarantineLifecycleState, RetentionHoldLifecycleState,
     WebhookDeliveryLifecycleState, append_or_baseline_snapshot_evidence,
-    baseline_upload_lifecycle_events, upload_lifecycle_event,
+    baseline_upload_lifecycle_events, upload_lifecycle_event, upload_lifecycle_identity,
     verify_and_append_snapshot_transition, verify_or_repair_snapshot_evidence,
     verify_provider_lifecycle_events, verify_upload_lifecycle_events,
 };
@@ -61,15 +61,7 @@ fn verify_sqlite_intent_evidence(
         }
         events = baseline;
     }
-    let (tenant, repository) = events
-        .first()
-        .map(|event| {
-            (
-                event.operation.tenant.as_str(),
-                event.operation.repository.as_str(),
-            )
-        })
-        .unwrap_or(("shardline", "default"));
+    let (tenant, repository) = upload_lifecycle_identity(&events);
     verify_upload_lifecycle_events(
         &events,
         tenant,
@@ -1533,15 +1525,7 @@ impl UploadIntentStore for super::LocalIndexStore {
                     }
                     events = baseline;
                 }
-                let (tenant, repository) = events
-                    .first()
-                    .map(|event| {
-                        (
-                            event.operation.tenant.as_str(),
-                            event.operation.repository.as_str(),
-                        )
-                    })
-                    .unwrap_or(("shardline", "default"));
+                let (tenant, repository) = upload_lifecycle_identity(&events);
                 shardline_reliability::verify_upload_lifecycle_events(
                     &events,
                     tenant,

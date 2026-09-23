@@ -32,8 +32,9 @@ use shardline_reliability::{
     StateTransitionEvent, UploadLifecycleState, WebhookDeliveryEvidenceLog,
     WebhookDeliveryIdentity, WebhookDeliveryLifecycleEvent, WebhookDeliveryLifecycleState,
     WebhookDeliverySnapshot, baseline_resumable_session_events, baseline_upload_lifecycle_events,
-    verify_or_repair_snapshot_evidence, verify_provider_lifecycle_events,
-    verify_resumable_session_events, verify_upload_lifecycle_events,
+    upload_lifecycle_identity, verify_or_repair_snapshot_evidence,
+    verify_provider_lifecycle_events, verify_resumable_session_events,
+    verify_upload_lifecycle_events,
 };
 use shardline_storage::{
     DirectoryPathError, ObjectKey, ObjectKeyError,
@@ -844,10 +845,11 @@ fn backfill_reliability_events(connection: &mut Connection) -> Result<(), LocalI
             })
         })?;
         let events = rows.collect::<Result<Vec<_>, _>>()?;
+        let (tenant, repository) = upload_lifecycle_identity(&events);
         verify_upload_lifecycle_events(
             &events,
-            "shardline",
-            "default",
+            tenant,
+            repository,
             &intent_id,
             &object_key,
             &object_hash,
