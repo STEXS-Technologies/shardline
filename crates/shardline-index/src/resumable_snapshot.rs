@@ -57,7 +57,16 @@ pub fn resumable_state_digest(
             }
         })
         .collect();
-    canonical_parts.sort_by_key(|part| (part.part_number, part.generation));
+    canonical_parts.sort_by(|left, right| {
+        left.part_number
+            .cmp(&right.part_number)
+            .then_with(|| left.generation.cmp(&right.generation))
+            .then_with(|| left.staging_key.cmp(&right.staging_key))
+            .then_with(|| left.size_bytes.cmp(&right.size_bytes))
+            .then_with(|| left.etag.cmp(&right.etag))
+            .then_with(|| left.range_start.cmp(&right.range_start))
+            .then_with(|| left.range_end_exclusive.cmp(&right.range_end_exclusive))
+    });
 
     let snapshot = ResumableSessionStateSnapshot {
         session_id: session.session_id().to_owned(),
@@ -138,6 +147,18 @@ mod tests {
             20,
             Some("etag-two".to_owned()),
         );
+        let ordered = resumable_state_digest(&session, &[first.clone(), second.clone()])
+            .expect("valid snapshot serializes");
+        let reversed =
+            resumable_state_digest(&session, &[second, first]).expect("valid snapshot serializes");
+        assert_eq!(ordered, reversed);
+    }
+
+    #[test]
+    fn malformed_duplicate_parts_are_still_canonically_ordered() {
+        let session = session();
+        let first = part("staging/one");
+        let second = part("staging/two");
         let ordered = resumable_state_digest(&session, &[first.clone(), second.clone()])
             .expect("valid snapshot serializes");
         let reversed =
