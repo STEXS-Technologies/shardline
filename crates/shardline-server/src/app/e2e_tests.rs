@@ -1503,8 +1503,12 @@ async fn hashing_pool_starvation_rejects_immediately_and_recovers() {
 
     drop(held_hashing_permit);
 
+    // The recovery request must eventually run after the permit is released.
+    // Keep the rejection assertion above tight, but allow extra scheduler
+    // time here because this test runs alongside the full multi-threaded
+    // server suite and does not exercise a production request deadline.
     let recovered = tokio::time::timeout(
-        std::time::Duration::from_secs(1),
+        std::time::Duration::from_secs(5),
         app.oneshot(
             Request::builder()
                 .method("PUT")
