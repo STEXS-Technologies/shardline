@@ -79,7 +79,10 @@ existing transactional domain models and fencing rules. Provider-repository
 lifecycle rows now also use the canonical snapshot evidence protocol: the
 memory, SQLite, and Postgres adapters append and verify the complete snapshot
 in the same mutation boundary, while migration backfills a self-baseline for
-legacy rows. They do not create a second reliability protocol. Where they
+legacy rows. If a Postgres provider row is found without its journal, the
+verified canonical baseline is repaired in the read transaction before the
+state is returned; the same verification is applied before destructive
+provider mutations. They do not create a second reliability protocol. Where they
 repair or reconcile an upload or session, they consume the canonical journal
 and verify it first.
 

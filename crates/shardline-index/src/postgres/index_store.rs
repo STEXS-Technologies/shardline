@@ -47,14 +47,15 @@ async fn verify_postgres_provider_evidence(
 ) -> Result<(), PostgresMetadataStoreError> {
     let snapshot = crate::provider_evidence::snapshot_from_state(state)?;
     let operation_id = format!("{}:{}:{}", snapshot.provider, snapshot.owner, snapshot.repo);
+    let mut transaction = store.pool.begin().await?;
     let rows = query(
         "SELECT event_json
          FROM shardline_reliability_events
          WHERE operation_kind = 'ProviderEvent' AND operation_id = $1
          ORDER BY sequence",
     )
-    .bind(operation_id)
-    .fetch_all(&store.pool)
+    .bind(&operation_id)
+    .fetch_all(&mut *transaction)
     .await?;
     let events = rows
         .into_iter()
@@ -63,9 +64,23 @@ async fn verify_postgres_provider_evidence(
     if events.is_empty() {
         let baseline = ProviderEvidenceLog::baseline(snapshot.clone())?;
         verify_provider_lifecycle_events(baseline.events(), &snapshot)?;
+        let event = baseline.events().last().ok_or_else(|| {
+            PostgresMetadataStoreError::Reliability(
+                shardline_reliability::ReliabilityError::EmptyField("provider evidence"),
+            )
+        })?;
+        insert_reliability_event_json(
+            &mut *transaction,
+            event.operation.kind.as_str(),
+            &event.operation.operation_id,
+            event.sequence,
+            serde_json::to_value(event)?,
+        )
+        .await?;
     } else {
         verify_provider_lifecycle_events(&events, &snapshot)?;
     }
+    transaction.commit().await?;
     Ok(())
 }
 
@@ -1973,6 +1988,78 @@ mod tests {
         .execute(&pool)
         .await
         .expect("clean provider evidence fixture");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pg_provider_repository_state_repairs_missing_evidence_on_read() {
+        let Some(pool) = connect_postgres().await else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let store = make_pg_store(pool.clone());
+        let owner = "evidence-repair-team";
+        let repo = "missing-journal";
+        let operation_id = format!("{}:{owner}:{repo}", RepositoryProvider::GitHub.as_str());
+        sqlx::query(
+            "DELETE FROM shardline_provider_repository_states
+             WHERE provider = 'github' AND owner = $1 AND repo = $2",
+        )
+        .bind(owner)
+        .bind(repo)
+        .execute(&pool)
+        .await
+        .expect("clean provider state fixture");
+        sqlx::query(
+            "DELETE FROM shardline_reliability_events
+             WHERE operation_kind = 'ProviderEvent' AND operation_id = $1",
+        )
+        .bind(&operation_id)
+        .execute(&pool)
+        .await
+        .expect("clean provider evidence fixture");
+        sqlx::query(
+            "INSERT INTO shardline_provider_repository_states
+                (provider, owner, repo, last_access_changed_at_unix_seconds)
+             VALUES ('github', $1, $2, 100)",
+        )
+        .bind(owner)
+        .bind(repo)
+        .execute(&pool)
+        .await
+        .expect("seed provider state without evidence");
+
+        store
+            .provider_repository_state(RepositoryProvider::GitHub, owner, repo)
+            .await
+            .expect("read repairs missing evidence")
+            .expect("seeded provider state");
+        let event_count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM shardline_reliability_events
+             WHERE operation_kind = 'ProviderEvent' AND operation_id = $1",
+        )
+        .bind(&operation_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count repaired evidence");
+        assert_eq!(event_count, 1);
+
+        sqlx::query(
+            "DELETE FROM shardline_provider_repository_states
+             WHERE provider = 'github' AND owner = $1 AND repo = $2",
+        )
+        .bind(owner)
+        .bind(repo)
+        .execute(&pool)
+        .await
+        .expect("clean repaired state fixture");
+        sqlx::query(
+            "DELETE FROM shardline_reliability_events
+             WHERE operation_kind = 'ProviderEvent' AND operation_id = $1",
+        )
+        .bind(&operation_id)
+        .execute(&pool)
+        .await
+        .expect("clean repaired evidence fixture");
     }
 
     #[tokio::test(flavor = "multi_thread")]

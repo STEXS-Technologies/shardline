@@ -501,7 +501,23 @@ pub(super) async fn verify_provider_repository_state_evidence(
 ) -> Result<(), PostgresMetadataStoreError> {
     let snapshot = snapshot_from_state(state)?;
     let evidence = load_provider_evidence(transaction, &snapshot).await?;
-    if !evidence.is_empty() {
+    if evidence.is_empty() {
+        let baseline = ProviderEvidenceLog::baseline(snapshot.clone())?;
+        verify_provider_lifecycle_events(baseline.events(), &snapshot)?;
+        let event = baseline.events().last().ok_or_else(|| {
+            PostgresMetadataStoreError::Reliability(
+                shardline_reliability::ReliabilityError::EmptyField("provider evidence"),
+            )
+        })?;
+        super::insert_reliability_event_json(
+            &mut **transaction,
+            event.operation.kind.as_str(),
+            &event.operation.operation_id,
+            event.sequence,
+            serde_json::to_value(event)?,
+        )
+        .await?;
+    } else {
         verify_provider_lifecycle_events(&evidence, &snapshot)?;
     }
     Ok(())
