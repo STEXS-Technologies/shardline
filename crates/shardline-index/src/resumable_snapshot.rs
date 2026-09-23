@@ -5,10 +5,10 @@ use shardline_reliability::{
 
 use crate::{ResumableSession, ResumableSessionPart};
 
-/// Canonical materialized state used to authenticate a resumable session row
+/// Canonical materialized state used to integrity-check a resumable session row
 /// together with its authoritative part map.
 #[derive(Debug, Serialize)]
-struct ResumableSessionStateSnapshot {
+struct ResumableSessionStateSnapshotV1 {
     session_id: String,
     protocol: &'static str,
     scope_namespace: String,
@@ -18,11 +18,11 @@ struct ResumableSessionStateSnapshot {
     generation: u64,
     fence_epoch: u64,
     expires_at_unix_seconds: u64,
-    parts: Vec<ResumablePartStateSnapshot>,
+    parts: Vec<ResumablePartStateSnapshotV1>,
 }
 
 #[derive(Debug, Serialize)]
-struct ResumablePartStateSnapshot {
+struct ResumablePartStateSnapshotV1 {
     part_number: u64,
     generation: u64,
     staging_key: String,
@@ -46,7 +46,7 @@ pub fn resumable_state_digest(
         .iter()
         .map(|part| {
             let range = part.range();
-            ResumablePartStateSnapshot {
+            ResumablePartStateSnapshotV1 {
                 part_number: part.part_number().get(),
                 generation: part.generation().get(),
                 staging_key: part.staging_key().to_owned(),
@@ -68,7 +68,7 @@ pub fn resumable_state_digest(
             .then_with(|| left.range_end_exclusive.cmp(&right.range_end_exclusive))
     });
 
-    let snapshot = ResumableSessionStateSnapshot {
+    let snapshot = ResumableSessionStateSnapshotV1 {
         session_id: session.session_id().to_owned(),
         protocol: session.protocol().as_str(),
         scope_namespace: session.scope_namespace().to_owned(),

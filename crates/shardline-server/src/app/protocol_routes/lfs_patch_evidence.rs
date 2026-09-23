@@ -17,7 +17,7 @@ const EVIDENCE_SUFFIX: &str = ".evidence";
 const SNAPSHOT_SUFFIX: &str = ".snapshot";
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-struct LfsPatchMaterializedState {
+struct LfsPatchMaterializedStateV1 {
     oid: String,
     scope_namespace: String,
     session_id: String,
@@ -55,7 +55,7 @@ fn materialized_snapshot(input: &LfsPatchSnapshotInput<'_>) -> Result<DigestSnap
         input.target_key.to_owned(),
     )
     .map_err(invalid_evidence)?;
-    let state = LfsPatchMaterializedState {
+    let state = LfsPatchMaterializedStateV1 {
         oid: input.oid.to_owned(),
         scope_namespace: input.scope_namespace.to_owned(),
         session_id: input.session_id.to_owned(),
