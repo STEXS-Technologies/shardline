@@ -420,5 +420,11 @@ path = "fuzz_targets/shardline/reliability_oci_evidence.rs"
 test = false
 doc = false
 
+[[bin]]
+name = "shardline_reliability_persisted_event"
+path = "fuzz_targets/shardline/reliability_persisted_event.rs"
+test = false
+doc = false
+
 [lints]
 workspace = true
