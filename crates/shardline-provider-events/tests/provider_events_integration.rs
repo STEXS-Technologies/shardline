@@ -12,6 +12,7 @@ use shardline_index::{
     PostgresResourceFence, RecordMutation, RecordTraversal,
 };
 use shardline_protocol::{RepositoryProvider, RepositoryScope};
+use shardline_reliability::{WebhookDeliveryIdentity, WebhookDeliveryOperationId};
 use shardline_server_core::ServerObjectStore;
 use shardline_vcs::{
     ProviderKind, RepositoryRef, RepositoryWebhookEvent, RepositoryWebhookEventKind, RevisionRef,
@@ -56,6 +57,17 @@ fn local_object_store() -> Result<ServerObjectStore, Box<dyn Error>> {
     )?)
 }
 
+fn webhook_operation_id(
+    owner: &str,
+    repo: &str,
+    delivery_id: &str,
+) -> Result<String, shardline_reliability::ReliabilityError> {
+    let identity = WebhookDeliveryIdentity::new("github", owner, repo, delivery_id)?;
+    Ok(WebhookDeliveryOperationId::new(&identity)
+        .as_str()
+        .to_owned())
+}
+
 #[allow(clippy::panic_in_result_fn)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn postgres_rename_plan_commits_records_state_and_delivery_together()
@@ -76,6 +88,14 @@ async fn postgres_rename_plan_commits_records_state_and_delivery_together()
          WHERE provider = 'github' AND owner = $1 AND delivery_id = $2",
     )
     .bind(old_owner)
+    .bind(delivery_id)
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "DELETE FROM shardline_reliability_events
+         WHERE operation_kind = 'WebhookDelivery' AND operation_id IN ($1, $2)",
+    )
+    .bind(webhook_operation_id(old_owner, old_repo, delivery_id)?)
     .bind(delivery_id)
     .execute(&pool)
     .await?;
@@ -204,6 +224,14 @@ async fn postgres_delete_plan_commits_holds_records_state_and_delivery_together(
          WHERE provider = 'github' AND owner = $1 AND delivery_id = $2",
     )
     .bind(owner)
+    .bind(delivery_id)
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "DELETE FROM shardline_reliability_events
+         WHERE operation_kind = 'WebhookDelivery' AND operation_id IN ($1, $2)",
+    )
+    .bind(webhook_operation_id(owner, repo, delivery_id)?)
     .bind(delivery_id)
     .execute(&pool)
     .await?;

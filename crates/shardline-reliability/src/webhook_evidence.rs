@@ -42,7 +42,9 @@ pub struct WebhookDeliveryIdentity {
 pub struct WebhookDeliveryOperationId(String);
 
 impl WebhookDeliveryOperationId {
-    fn new(identity: &WebhookDeliveryIdentity) -> Self {
+    /// Derives the canonical, unambiguous operation ID for one delivery.
+    #[must_use]
+    pub fn new(identity: &WebhookDeliveryIdentity) -> Self {
         let fields = [
             identity.provider.as_str(),
             identity.owner.as_str(),

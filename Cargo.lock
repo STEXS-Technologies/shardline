@@ -4121,6 +4121,7 @@ dependencies = [
  "serde_json",
  "shardline-index",
  "shardline-protocol",
+ "shardline-reliability",
  "shardline-server-core",
  "shardline-storage",
  "shardline-vcs",
