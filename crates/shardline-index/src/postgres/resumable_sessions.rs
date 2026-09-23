@@ -171,6 +171,18 @@ impl PostgresIndexStore {
         &self,
         candidates: &[ResumableSession],
     ) -> Result<u64, PostgresMetadataStoreError> {
+        // Re-verify the caller-provided candidates at the deletion boundary.
+        // GC normally obtains them from `resumable_session_gc_inventory`, but
+        // this method is also a public adapter boundary; never let an
+        // unverified or tampered terminal snapshot authorize deletion.
+        for candidate in candidates {
+            self.verify_resumable_session_evidence(candidate).await?;
+            if !candidate.state().is_terminal() {
+                return Err(PostgresMetadataStoreError::Reliability(
+                    shardline_reliability::ReliabilityError::StateMismatch,
+                ));
+            }
+        }
         let mut transaction = self.pool().begin().await?;
         let mut deleted = 0_u64;
         for candidate in candidates {
@@ -1592,6 +1604,32 @@ mod tests {
             .find(|candidate| candidate.session_id() == terminal.session_id())
             .cloned()
             .expect("terminal candidate");
+        let tampered_candidate = ResumableSession::from_parts(
+            terminal_candidate.session_id().to_owned(),
+            terminal_candidate.protocol(),
+            terminal_candidate.scope_namespace().to_owned(),
+            "tampered-target".to_owned(),
+            terminal_candidate.attributes_json().to_owned(),
+            terminal_candidate.state(),
+            terminal_candidate.generation().get(),
+            terminal_candidate.fence_epoch().get(),
+            terminal_candidate.expires_at(),
+        )
+        .expect("tampered candidate remains structurally valid");
+        let tampered_result = store
+            .delete_reclaimable_resumable_sessions(&[tampered_candidate])
+            .await;
+        assert!(matches!(
+            tampered_result,
+            Err(PostgresMetadataStoreError::Reliability(_))
+        ));
+        assert!(
+            store
+                .resumable_session_by_id(terminal.session_id())
+                .await
+                .unwrap()
+                .is_some()
+        );
         assert_eq!(
             store
                 .delete_reclaimable_resumable_sessions(std::slice::from_ref(&terminal_candidate))
