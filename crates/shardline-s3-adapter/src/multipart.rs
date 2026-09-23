@@ -27,7 +27,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 use shardline_reliability::{ResumableLifecycleState, SessionEvidenceLog};
 use thiserror::Error;
-use tokio::{fs, sync::Mutex, task::spawn_blocking};
+use tokio::{fs, io::AsyncWriteExt, sync::Mutex, task::spawn_blocking};
 
 /// The session directory name under the server root directory.
 pub(crate) const S3_UPLOAD_DIR: &str = "s3-uploads";
@@ -825,14 +825,38 @@ async fn persist_session_with_evidence(
 /// `session.json`.
 async fn write_file_atomically(path: &Path, bytes: &[u8]) -> Result<(), S3SessionError> {
     let temporary = path.with_extension("json.tmp");
-    fs::write(&temporary, bytes).await?;
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&temporary)
+        .await?;
+    file.write_all(bytes).await?;
+    file.sync_all().await?;
+    drop(file);
     match fs::rename(&temporary, path).await {
-        Ok(()) => Ok(()),
+        Ok(()) => {
+            sync_parent_directory(path).await?;
+            Ok(())
+        }
         Err(error) => {
             let _ignored = fs::remove_file(&temporary).await;
             Err(S3SessionError::Io(error))
         }
     }
+}
+
+#[cfg(unix)]
+async fn sync_parent_directory(path: &Path) -> Result<(), S3SessionError> {
+    if let Some(parent) = path.parent() {
+        fs::File::open(parent).await?.sync_all().await?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+async fn sync_parent_directory(_path: &Path) -> Result<(), S3SessionError> {
+    Ok(())
 }
 
 async fn delete_session_dir(path: &Path) -> Result<(), S3SessionError> {
