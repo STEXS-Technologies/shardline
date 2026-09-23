@@ -249,7 +249,7 @@ pub async fn plan_postgres_provider_repository_webhook(
 /// a purge hiccup never fails a webhook that has already been applied.
 async fn purge_expired_webhook_deliveries<IndexAdapter>(index_store: &IndexAdapter)
 where
-    IndexAdapter: AsyncIndexStore,
+    IndexAdapter: AsyncIndexStore + Sync,
     IndexAdapter::Error: Into<ProviderEventsError>,
 {
     let now = unix_now_seconds_lossy();
@@ -300,7 +300,7 @@ pub async fn apply_provider_webhook_with_stores<RecordAdapter, IndexAdapter>(
 where
     RecordAdapter: RecordStore + Sync,
     RecordAdapter::Error: Into<ProviderEventsError>,
-    IndexAdapter: AsyncIndexStore,
+    IndexAdapter: AsyncIndexStore + Sync,
     IndexAdapter::Error: Into<ProviderEventsError>,
 {
     let recorded_delivery = WebhookDelivery::new(
@@ -351,7 +351,7 @@ where
         Ok(outcome) => Ok(outcome),
         Err(error) => {
             if let Err(delete_err) = index_store
-                .delete_webhook_delivery(&recorded_delivery)
+                .delete_webhook_delivery_if_matches(&recorded_delivery)
                 .await
                 .map_err(Into::into)
             {
