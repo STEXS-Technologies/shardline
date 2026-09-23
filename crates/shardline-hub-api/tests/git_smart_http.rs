@@ -15,6 +15,7 @@
 //! verifying discovery, upload-pack (clone), receive-pack (push), and
 //! HEAD reference serving.
 
+#[path = "support/common.rs"]
 mod common;
 
 use axum::body::Body;
