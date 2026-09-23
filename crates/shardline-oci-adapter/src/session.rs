@@ -18,11 +18,10 @@ use tokio::task::spawn_blocking;
 use crate::{
     OciAdapterError,
     fs::{
-        PersistedOciUploadSession, acquire_upload_session_file_lock, append_file_anchored,
-        delete_file_anchored, map_not_found, open_anchored_file, persist_upload_session,
-        read_persisted_upload_session, read_upload_file_async, unix_now_seconds_checked,
-        upload_body_path, upload_dir, upload_file_exists_async, upload_file_len_async,
-        upload_metadata_path, upload_session_lock_path, upload_tail_path,
+        acquire_upload_session_file_lock, append_file_anchored, delete_file_anchored,
+        map_not_found, open_anchored_file, persist_upload_session, read_persisted_upload_session,
+        unix_now_seconds_checked, upload_body_path, upload_dir, upload_file_exists_async,
+        upload_file_len_async, upload_metadata_path, upload_session_lock_path, upload_tail_path,
     },
     key::validate_repository,
     protocol_support::{
@@ -338,15 +337,10 @@ async fn expired_metadata_is_cleanup_eligible(
     session_id: &str,
     ttl_seconds: NonZeroU64,
 ) -> bool {
-    let Ok(bytes) = read_upload_file_async(root, &upload_metadata_path(root, session_id)).await
-    else {
-        return false;
-    };
-    let session = serde_json::from_slice::<PersistedOciUploadSession>(&bytes)
-        .map(|persisted| persisted.session)
-        .or_else(|_| serde_json::from_slice::<OciUploadSession>(&bytes))
-        .ok();
-    let Some(session) = session else {
+    // This helper is only reached after the normal read rejected the session.
+    // Do not use an unverified materialized timestamp as a deletion authority:
+    // a tampered-but-expired session must remain available for diagnosis.
+    let Ok((session, _evidence)) = read_persisted_upload_session(root, session_id).await else {
         return false;
     };
     let Ok(now) = unix_now_seconds_checked() else {

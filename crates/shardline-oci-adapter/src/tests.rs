@@ -541,6 +541,28 @@ async fn delete_upload_session_rejects_tampered_session_snapshot() {
 }
 
 #[tokio::test]
+async fn read_upload_session_rejects_expired_tampering_without_deleting_state() {
+    let root = temp_root();
+    let session_id = create_test_session(root.path(), false).await.unwrap();
+    let metadata_path = crate::upload_metadata_path(root.path(), &session_id);
+    let mut metadata: serde_json::Value =
+        serde_json::from_slice(&tokio::fs::read(&metadata_path).await.unwrap()).unwrap();
+    metadata["last_touched_unix_seconds"] = serde_json::Value::from(0_u64);
+    tokio::fs::write(&metadata_path, serde_json::to_vec(&metadata).unwrap())
+        .await
+        .unwrap();
+
+    let result = read_upload_session(root.path(), &session_id, NonZeroU64::new(1).unwrap()).await;
+    assert!(matches!(result, Err(OciAdapterError::Reliability(_))));
+    assert!(tokio::fs::try_exists(&metadata_path).await.unwrap());
+    assert!(
+        tokio::fs::try_exists(crate::upload_body_path(root.path(), &session_id))
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
 async fn read_upload_session_returns_not_found_for_missing() {
     let root = temp_root();
     let result = read_upload_session(root.path(), "00000000000000000000000000000000", ttl()).await;
