@@ -10,10 +10,10 @@ use super::LocalBackend;
 use crate::{
     ServerError,
     download_stream::{ServerByteStream, object_byte_stream, validated_xorb_byte_range_stream},
-    upload_ingest::{RequestBodyReader, stage_body_to_tempfile},
+    upload_ingest::{RequestBodyReader, StagedRequestBody, stage_body_for_object_store},
     xet_adapter::{
-        XorbUploadResponse, resolve_dedupe_shard_object, store_uploaded_xorb_file_path,
-        xorb_object_key,
+        XorbUploadResponse, resolve_dedupe_shard_object, store_uploaded_xorb_bytes,
+        store_uploaded_xorb_file_path, xorb_object_key,
     },
 };
 
@@ -44,7 +44,9 @@ impl LocalBackend {
         expected_hash: &str,
         mut body: RequestBodyReader,
     ) -> Result<XorbUploadResponse, ServerError> {
-        let (temporary, body_length, _body_hash) = stage_body_to_tempfile(&mut body).await?;
+        let object_store = self.object_store();
+        let staged = stage_body_for_object_store(&mut body, &object_store).await?;
+        let body_length = staged.length();
         let intent_id = format!("xorb-{expected_hash}");
         let object_key = xorb_object_key(expected_hash).map_err(ServerError::from)?;
         let intent = UploadIntent::new(
@@ -53,7 +55,6 @@ impl LocalBackend {
             expected_hash.to_owned(),
             body_length,
         );
-        let object_store = self.object_store();
         let coordinator = CasCoordinator::new(
             self.index_store.clone(),
             (),
@@ -62,9 +63,18 @@ impl LocalBackend {
         );
         coordinator
             .with_upload_intent(&intent, move || async move {
-                store_uploaded_xorb_file_path(&object_store, expected_hash, temporary.path())
-                    .await
-                    .map_err(ServerError::from)
+                match staged {
+                    StagedRequestBody::Memory { bytes, .. } => {
+                        store_uploaded_xorb_bytes(&object_store, expected_hash, &bytes)
+                            .await
+                            .map_err(ServerError::from)
+                    }
+                    StagedRequestBody::File { file, .. } => {
+                        store_uploaded_xorb_file_path(&object_store, expected_hash, file.path())
+                            .await
+                            .map_err(ServerError::from)
+                    }
+                }
             })
             .await
     }

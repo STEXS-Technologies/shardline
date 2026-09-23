@@ -10,7 +10,7 @@ use futures_util::stream::{self, Stream, StreamExt};
 use md5::{Digest, Md5};
 use tokio::io::{AsyncRead, AsyncReadExt};
 
-use crate::{ServerError, overflow::checked_add};
+use crate::{ServerError, object_store::ServerObjectStore, overflow::checked_add};
 
 type BodyChunkResult = Result<Bytes, ServerError>;
 type BoxedBodyStream = Pin<Box<dyn Stream<Item = BodyChunkResult> + Send>>;
@@ -60,6 +60,33 @@ pub(crate) struct RequestBodyReader {
     max_bytes: Option<u64>,
     expected_total_bytes: Option<usize>,
     read_bytes: u64,
+}
+
+pub(crate) enum StagedRequestBody {
+    Memory {
+        bytes: Bytes,
+        length: u64,
+        hash: shardline_protocol::ShardlineHash,
+    },
+    File {
+        file: tempfile::NamedTempFile,
+        length: u64,
+        hash: shardline_protocol::ShardlineHash,
+    },
+}
+
+impl StagedRequestBody {
+    pub(crate) const fn length(&self) -> u64 {
+        match self {
+            Self::Memory { length, .. } | Self::File { length, .. } => *length,
+        }
+    }
+
+    pub(crate) const fn hash(&self) -> shardline_protocol::ShardlineHash {
+        match self {
+            Self::Memory { hash, .. } | Self::File { hash, .. } => *hash,
+        }
+    }
 }
 
 impl RequestBodyReader {
@@ -234,6 +261,26 @@ pub(crate) async fn stage_body_to_tempfile(
         length,
         shardline_protocol::ShardlineHash::from_bytes(*hasher.finalize().as_bytes()),
     ))
+}
+
+/// Stages a bounded protocol object in memory for remote object storage and
+/// on the filesystem for local storage. Remote parsing avoids pod-local IO;
+/// the request reader's configured ceiling remains the memory bound.
+pub(crate) async fn stage_body_for_object_store(
+    reader: &mut RequestBodyReader,
+    object_store: &ServerObjectStore,
+) -> Result<StagedRequestBody, ServerError> {
+    if matches!(object_store, ServerObjectStore::S3(_)) {
+        let bytes = read_body_to_bytes(reader).await?;
+        let hash = shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(&bytes).as_bytes());
+        return Ok(StagedRequestBody::Memory {
+            length: u64::try_from(bytes.len())?,
+            bytes: Bytes::from(bytes),
+            hash,
+        });
+    }
+    let (file, length, hash) = stage_body_to_tempfile(reader).await?;
+    Ok(StagedRequestBody::File { file, length, hash })
 }
 
 #[cfg(test)]

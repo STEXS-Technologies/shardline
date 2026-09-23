@@ -9,7 +9,10 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-pub(super) use body_reader::{RequestBodyReader, read_body_to_bytes, stage_body_to_tempfile};
+pub(super) use body_reader::{
+    RequestBodyReader, StagedRequestBody, read_body_to_bytes, stage_body_for_object_store,
+    stage_body_to_tempfile,
+};
 pub(crate) use ingestor::FileUploadIngestor;
 
 static UPLOAD_ATTEMPT_SEQUENCE: AtomicU64 = AtomicU64::new(0);

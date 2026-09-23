@@ -10,12 +10,14 @@ use crate::{
     model::UploadFileResponse,
     protocol_support::reliability_repository_scope,
     upload_ingest::{
-        FileUploadIngestor, RequestBodyReader, stage_body_to_tempfile, upload_attempt_id,
+        FileUploadIngestor, RequestBodyReader, StagedRequestBody, stage_body_for_object_store,
+        upload_attempt_id,
     },
     validation::validate_identifier,
     xet_adapter::{
-        ShardUploadResponse, XorbUploadResponse, register_uploaded_shard_file,
-        store_uploaded_xorb_file_path, xorb_object_key,
+        ShardUploadResponse, XorbUploadResponse, register_uploaded_shard_bytes,
+        register_uploaded_shard_file, store_uploaded_xorb_bytes, store_uploaded_xorb_file_path,
+        xorb_object_key,
     },
 };
 
@@ -184,7 +186,9 @@ impl super::PostgresBackend {
         expected_hash: &str,
         mut body: RequestBodyReader,
     ) -> Result<XorbUploadResponse, ServerError> {
-        let (temporary, body_length, _body_hash) = stage_body_to_tempfile(&mut body).await?;
+        let object_store = self.object_store();
+        let staged = stage_body_for_object_store(&mut body, &object_store).await?;
+        let body_length = staged.length();
         let intent_id = format!("xorb-{expected_hash}");
         let object_key = xorb_object_key(expected_hash).map_err(ServerError::from)?;
         let intent = UploadIntent::new(
@@ -193,7 +197,6 @@ impl super::PostgresBackend {
             expected_hash.to_owned(),
             body_length,
         );
-        let object_store = self.object_store();
         let coordinator = CasCoordinator::new(
             self.index_store.clone(),
             (),
@@ -202,9 +205,18 @@ impl super::PostgresBackend {
         );
         coordinator
             .with_upload_intent(&intent, move || async move {
-                store_uploaded_xorb_file_path(&object_store, expected_hash, temporary.path())
-                    .await
-                    .map_err(ServerError::from)
+                match staged {
+                    StagedRequestBody::Memory { bytes, .. } => {
+                        store_uploaded_xorb_bytes(&object_store, expected_hash, &bytes)
+                            .await
+                            .map_err(ServerError::from)
+                    }
+                    StagedRequestBody::File { file, .. } => {
+                        store_uploaded_xorb_file_path(&object_store, expected_hash, file.path())
+                            .await
+                            .map_err(ServerError::from)
+                    }
+                }
             })
             .await
     }
@@ -221,14 +233,16 @@ impl super::PostgresBackend {
         repository_scope: Option<&RepositoryScope>,
         shard_metadata_limits: ShardMetadataLimits,
     ) -> Result<ShardUploadResponse, ServerError> {
-        let (temporary, body_length, body_hash) = stage_body_to_tempfile(&mut body).await?;
+        let object_store = self.object_store();
+        let staged = stage_body_for_object_store(&mut body, &object_store).await?;
+        let body_length = staged.length();
+        let body_hash = staged.hash();
         let intent_id = format!("shard-{}", hex::encode(body_hash.as_bytes()));
         let body_hash_hex = hex::encode(body_hash.as_bytes());
         let prefix = &body_hash_hex[..2];
         let object_key = format!("shards/{prefix}/{body_hash_hex}.shard");
         let intent = UploadIntent::new(intent_id.clone(), object_key, body_hash_hex, body_length);
         let record_store = self.record_store.clone();
-        let object_store = self.object_store();
         let coordinator = CasCoordinator::new(
             self.index_store.clone(),
             (),
@@ -242,21 +256,40 @@ impl super::PostgresBackend {
                 reliability_repository,
                 &intent,
                 move || async move {
-                    register_uploaded_shard_file(
-                    &object_store,
-                    temporary.path(),
-                    repository_scope,
-                    shard_metadata_limits,
-                    move |records: Vec<shardline_index::FileRecord>,
-                          mappings: Vec<shardline_index::DedupeShardMapping>| async move {
-                        record_store
-                            .commit_native_shard_metadata(&records, &mappings)
-                            .await?;
-                        Ok(())
-                    },
-                )
-                .await
-                .map_err(ServerError::from)
+                    match staged {
+                        StagedRequestBody::Memory { bytes, .. } => {
+                            let record_store = record_store.clone();
+                            register_uploaded_shard_bytes(
+                                &object_store,
+                                &bytes,
+                                repository_scope,
+                                shard_metadata_limits,
+                                move |records: Vec<shardline_index::FileRecord>,
+                                      mappings: Vec<shardline_index::DedupeShardMapping>| async move {
+                                    record_store
+                                        .commit_native_shard_metadata(&records, &mappings)
+                                        .await?;
+                                    Ok(())
+                                },
+                            )
+                            .await
+                        }
+                        StagedRequestBody::File { file, .. } => register_uploaded_shard_file(
+                            &object_store,
+                            file.path(),
+                            repository_scope,
+                            shard_metadata_limits,
+                            move |records: Vec<shardline_index::FileRecord>,
+                                  mappings: Vec<shardline_index::DedupeShardMapping>| async move {
+                                record_store
+                                    .commit_native_shard_metadata(&records, &mappings)
+                                    .await?;
+                                Ok(())
+                            },
+                        )
+                        .await,
+                    }
+                    .map_err(ServerError::from)
                 },
             )
             .await
