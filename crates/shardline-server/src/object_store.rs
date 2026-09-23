@@ -17,7 +17,7 @@ use shardline_protocol::{ByteRange, ShardlineHash};
 pub use shardline_server_core::ServerObjectStore;
 pub use shardline_server_core::ServerObjectStoreError;
 use shardline_storage::{
-    ObjectBody, ObjectIntegrity, ObjectKey, ObjectMetadata, ObjectPrefix, ObjectStore,
+    ObjectBody, ObjectIntegrity, ObjectKey, ObjectMetadata, ObjectPrefix, ObjectStore, PutOutcome,
     S3ObjectStore,
 };
 use tokio::io::AsyncWriteExt;
@@ -240,6 +240,56 @@ pub(crate) async fn stage_reader_content_addressed_s3(
         key,
         ObjectIntegrity::new(ShardlineHash::from_bytes(*digest.as_bytes()), size_bytes),
     ))
+}
+
+/// Streams a request directly into an arbitrary S3 key through remote
+/// multipart staging. Local deployments return `None` so callers can retain
+/// their filesystem-backed fallback.
+pub(crate) async fn put_reader_if_absent_s3(
+    object_store: &ServerObjectStore,
+    key: &ObjectKey,
+    reader: &mut RequestBodyReader,
+) -> Result<Option<(PutOutcome, ObjectIntegrity)>, ServerError> {
+    let ServerObjectStore::S3(store) = object_store else {
+        return Ok(None);
+    };
+    let (mut upload, temporary_key) = store.begin_stream_upload().await?;
+    let mut hasher = blake3::Hasher::new();
+    let mut size_bytes = 0_u64;
+    while let Some(chunk) = match reader.next_bytes().await {
+        Ok(chunk) => chunk,
+        Err(error) => {
+            let _ignored = upload.abort().await;
+            return Err(error);
+        }
+    } {
+        let chunk_len = match u64::try_from(chunk.len()) {
+            Ok(length) => length,
+            Err(error) => {
+                let _ignored = upload.abort().await;
+                return Err(error.into());
+            }
+        };
+        size_bytes = match size_bytes.checked_add(chunk_len) {
+            Some(total) => total,
+            None => {
+                let _ignored = upload.abort().await;
+                return Err(ServerError::Overflow);
+            }
+        };
+        hasher.update(&chunk);
+        upload.write(&chunk);
+        if let Err(error) = upload.wait_for_capacity(2).await {
+            let _ignored = upload.abort().await;
+            return Err(error.into());
+        }
+    }
+    let digest = hasher.finalize();
+    let integrity = ObjectIntegrity::new(ShardlineHash::from_bytes(*digest.as_bytes()), size_bytes);
+    let outcome = store
+        .finish_stream_upload(upload, &temporary_key, key)
+        .await?;
+    Ok(Some((outcome, integrity)))
 }
 
 /// Promotes bounded bytes through a pod-local temporary file into an immutable
