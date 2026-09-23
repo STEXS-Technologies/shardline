@@ -1947,11 +1947,12 @@ async fn drill_deploy_g_live_verifier_clock_skew() {
         TokenScope::Write,
         host_now.saturating_add(60),
     );
+    let boundary_key = format!("g-boundary-{}", std::process::id());
     let boundary_bytes = deterministic_bytes(65_573, 701);
     let rejected = s3_put(
         &fast_node.base_url(),
         &boundary_token,
-        "g-boundary",
+        &boundary_key,
         boundary_bytes.clone(),
     )
     .await;
@@ -1963,7 +1964,7 @@ async fn drill_deploy_g_live_verifier_clock_skew() {
     let absent = s3_get(
         &slow_node.base_url(),
         &mint_token("drill", "drill", TokenScope::Write),
-        "g-boundary",
+        &boundary_key,
     )
     .await;
     assert_eq!(
@@ -1974,7 +1975,7 @@ async fn drill_deploy_g_live_verifier_clock_skew() {
     let accepted = s3_put(
         &slow_node.base_url(),
         &boundary_token,
-        "g-boundary",
+        &boundary_key,
         boundary_bytes.clone(),
     )
     .await;
@@ -1993,7 +1994,7 @@ async fn drill_deploy_g_live_verifier_clock_skew() {
     assert_s3_bytes(
         &fast_node.base_url(),
         &cluster_valid_token,
-        "g-boundary",
+        &boundary_key,
         &boundary_bytes,
         "fast peer after slow-node publication",
     )
@@ -2005,7 +2006,7 @@ async fn drill_deploy_g_live_verifier_clock_skew() {
         host_now.saturating_sub(180),
     );
     for base_url in [fast_node.base_url(), slow_node.base_url()] {
-        let response = s3_get(&base_url, &cluster_expired_token, "g-boundary").await;
+        let response = s3_get(&base_url, &cluster_expired_token, &boundary_key).await;
         assert_eq!(
             response.status().as_u16(),
             403,
