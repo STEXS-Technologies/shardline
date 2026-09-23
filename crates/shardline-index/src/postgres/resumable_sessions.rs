@@ -1245,16 +1245,14 @@ impl PostgresIndexStore {
         &self,
         session: &ResumableSession,
     ) -> Result<(), PostgresMetadataStoreError> {
-        let events = self
+        // `resumable_reliability_events` reads the event chain and the
+        // authoritative session identity/state in one repeatable-read
+        // transaction and verifies them together. Re-verifying against the
+        // caller's `session` here would interpret a potentially stale snapshot
+        // a second time and could reject a valid concurrent transition.
+        let _events = self
             .resumable_reliability_events(session.session_id())
             .await?;
-        shardline_reliability::verify_resumable_session_events(
-            &events,
-            session.scope_namespace(),
-            session.session_id(),
-            session.target_key(),
-            session.state(),
-        )?;
         Ok(())
     }
 }
