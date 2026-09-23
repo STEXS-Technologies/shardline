@@ -11,6 +11,7 @@ use crate::{
     local_sqlite::{
         LocalIndexStore, LocalIndexStoreError, current_hub_ref_evidence, hub_ref_snapshot,
         i64_to_u64, persist_hub_ref_evidence, retry_sqlite_busy, u64_to_i64,
+        verify_hub_ref_evidence,
     },
 };
 use shardline_reliability::{
@@ -161,15 +162,12 @@ impl HubStore for LocalIndexStore {
             )
             .optional()?;
             if let Some(repo) = &result {
-                let evidence = current_hub_ref_evidence(
+                verify_hub_ref_evidence(
                     &tx,
                     &repo.repo_id,
                     "main",
                     Some(repo.default_branch.clone()),
                 )?;
-                for event in evidence.events() {
-                    persist_hub_ref_evidence(&tx, event)?;
-                }
             }
             tx.commit()?;
             Ok(result)
@@ -381,7 +379,7 @@ impl HubStore for LocalIndexStore {
                 rows.collect::<Result<Vec<_>, _>>()?
             };
             for reference in &refs {
-                let evidence = current_hub_ref_evidence(
+                let evidence = verify_hub_ref_evidence(
                     &tx,
                     &reference.repo_id,
                     &reference.ref_name,
@@ -487,11 +485,7 @@ impl HubStore for LocalIndexStore {
                     )
                     .optional()?;
                 if let Some(head) = &head {
-                    let evidence =
-                        current_hub_ref_evidence(&tx, &repo_id, "main", Some(head.clone()))?;
-                    for event in evidence.events() {
-                        persist_hub_ref_evidence(&tx, event)?;
-                    }
+                    verify_hub_ref_evidence(&tx, &repo_id, "main", Some(head.clone()))?;
                 }
                 tx.commit()?;
                 return Ok(head);
@@ -518,11 +512,7 @@ impl HubStore for LocalIndexStore {
                 )
                 .optional()?;
             if let Some(current_sha) = &sha {
-                let evidence =
-                    current_hub_ref_evidence(&tx, &repo_id, ref_name, Some(current_sha.clone()))?;
-                for event in evidence.events() {
-                    persist_hub_ref_evidence(&tx, event)?;
-                }
+                verify_hub_ref_evidence(&tx, &repo_id, ref_name, Some(current_sha.clone()))?;
             }
             tx.commit()?;
             Ok(sha)
@@ -907,7 +897,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_revision_repairs_missing_metadata_commit_baseline() {
+    fn resolve_revision_rejects_missing_metadata_commit_baseline() {
         let (ts, store) = make_store();
         store
             .create_repo(HubRepoType::Model, "resolve-repair-test", false)
@@ -923,11 +913,11 @@ mod tests {
             .expect("remove evidence");
         drop(connection);
 
-        let initial_sha = store
-            .resolve_revision("resolve-repair-test", "main")
-            .expect("resolve main")
-            .expect("main head");
-        assert_eq!(initial_sha, "4b825dc642cb6eb9a060e54bf899d69f8f5ce8e3");
+        assert!(
+            store
+                .resolve_revision("resolve-repair-test", "main")
+                .is_err()
+        );
 
         let repaired = Connection::open(ts.path().join("metadata.sqlite3")).expect("open");
         let count: i64 = repaired
@@ -937,12 +927,12 @@ mod tests {
                 [],
                 |row| row.get(0),
             )
-            .expect("count repaired evidence");
-        assert_eq!(count, 1);
+            .expect("count evidence");
+        assert_eq!(count, 0);
     }
 
     #[test]
-    fn list_refs_repairs_missing_metadata_commit_baseline() {
+    fn list_refs_rejects_missing_metadata_commit_baseline() {
         let (ts, store) = make_store();
         store
             .create_repo(HubRepoType::Model, "list-repair-test", false)
@@ -958,7 +948,7 @@ mod tests {
             .expect("remove evidence");
         drop(connection);
 
-        assert_eq!(store.list_refs("list-repair-test").unwrap().len(), 1);
+        assert!(store.list_refs("list-repair-test").is_err());
 
         let repaired = Connection::open(ts.path().join("metadata.sqlite3")).expect("open");
         let count: i64 = repaired
@@ -968,8 +958,8 @@ mod tests {
                 [],
                 |row| row.get(0),
             )
-            .expect("count repaired evidence");
-        assert_eq!(count, 1);
+            .expect("count evidence");
+        assert_eq!(count, 0);
     }
 
     #[test]

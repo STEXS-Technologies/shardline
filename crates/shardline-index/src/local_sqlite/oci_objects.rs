@@ -2,7 +2,7 @@ use rusqlite::{OptionalExtension, params};
 use shardline_reliability::{
     OciObjectEvidenceLog, OciObjectIdentity, OciObjectLifecycleState, OciObjectOperationId,
     OciObjectSnapshot, verify_and_append_snapshot_transition, verify_oci_object_lifecycle_chain,
-    verify_or_repair_snapshot_evidence,
+    verify_snapshot_evidence,
 };
 
 use super::{LocalIndexStore, LocalIndexStoreError, i64_to_u64};
@@ -133,12 +133,7 @@ impl LocalIndexStore {
                 OciObjectLifecycleState::Deleted,
                 Some(tombstone.deleted_at_unix_seconds),
             )?;
-            let (evidence, was_missing) = verify_or_repair_snapshot_evidence(evidence, expected)?;
-            if was_missing {
-                for event in evidence.events() {
-                    persist_oci_evidence(&transaction, event)?;
-                }
-            }
+            verify_snapshot_evidence(&evidence, &expected)?;
         }
         transaction.commit()?;
         Ok(tombstones)
@@ -328,13 +323,7 @@ impl OciObjectStore for LocalIndexStore {
             if let Some(deleted_at) = deleted_at {
                 let expected =
                     oci_snapshot(&key, OciObjectLifecycleState::Deleted, Some(deleted_at))?;
-                let (evidence, was_missing) =
-                    verify_or_repair_snapshot_evidence(evidence, expected)?;
-                if was_missing {
-                    for event in evidence.events() {
-                        persist_oci_evidence(&transaction, event)?;
-                    }
-                }
+                verify_snapshot_evidence(&evidence, &expected)?;
             } else if !evidence.events().is_empty() {
                 verify_oci_object_lifecycle_chain(evidence.events())?;
             }

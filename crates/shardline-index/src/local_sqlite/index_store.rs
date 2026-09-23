@@ -4,8 +4,8 @@ use shardline_reliability::{
     LifecycleEvent, ProviderEvidenceLog, QuarantineLifecycleState, RetentionHoldLifecycleState,
     WebhookDeliveryLifecycleState, append_or_baseline_snapshot_evidence,
     baseline_upload_lifecycle_events, upload_lifecycle_event, upload_lifecycle_identity,
-    verify_and_append_snapshot_transition, verify_or_repair_snapshot_evidence,
-    verify_provider_lifecycle_events, verify_upload_lifecycle_events,
+    verify_and_append_snapshot_transition, verify_provider_lifecycle_events,
+    verify_snapshot_evidence, verify_upload_lifecycle_events,
 };
 use shardline_storage::ObjectKey;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -278,7 +278,7 @@ impl LifecycleStore for LocalIndexStore {
                 super::helpers::quarantine_snapshot(candidate, QuarantineLifecycleState::Active)?;
             let evidence =
                 super::helpers::load_quarantine_evidence(&transaction, object_key.as_str())?;
-            let (_evidence, _) = verify_or_repair_snapshot_evidence(evidence, snapshot)?;
+            verify_snapshot_evidence(&evidence, &snapshot)?;
         }
         transaction.commit()?;
         Ok(candidate)
@@ -305,7 +305,7 @@ impl LifecycleStore for LocalIndexStore {
                 &transaction,
                 candidate.object_key().as_str(),
             )?;
-            let (_evidence, _) = verify_or_repair_snapshot_evidence(evidence, snapshot)?;
+            verify_snapshot_evidence(&evidence, &snapshot)?;
         }
         transaction.commit()?;
         Ok(candidates)
@@ -524,7 +524,7 @@ impl LifecycleStore for LocalIndexStore {
         if let Some(hold) = hold.as_ref() {
             let snapshot = retention_snapshot(hold, RetentionHoldLifecycleState::Active)?;
             let evidence = load_retention_evidence(&transaction, object_key.as_str())?;
-            let (_evidence, _) = verify_or_repair_snapshot_evidence(evidence, snapshot)?;
+            verify_snapshot_evidence(&evidence, &snapshot)?;
         }
         transaction.commit()?;
         Ok(hold)
@@ -547,7 +547,7 @@ impl LifecycleStore for LocalIndexStore {
         for hold in &holds {
             let snapshot = retention_snapshot(hold, RetentionHoldLifecycleState::Active)?;
             let evidence = load_retention_evidence(&transaction, hold.object_key().as_str())?;
-            let (_evidence, _) = verify_or_repair_snapshot_evidence(evidence, snapshot)?;
+            verify_snapshot_evidence(&evidence, &snapshot)?;
         }
         transaction.commit()?;
         Ok(holds)
@@ -738,7 +738,7 @@ impl LifecycleStore for LocalIndexStore {
         if let Some(existing) = existing {
             let snapshot = webhook_snapshot(&existing, WebhookDeliveryLifecycleState::Processed)?;
             let evidence = load_webhook_evidence(&transaction, &existing)?;
-            let (_evidence, _) = verify_or_repair_snapshot_evidence(evidence, snapshot)?;
+            verify_snapshot_evidence(&evidence, &snapshot)?;
             transaction.commit()?;
             return Ok(false);
         }
@@ -796,7 +796,7 @@ impl LifecycleStore for LocalIndexStore {
         for delivery in &deliveries {
             let snapshot = webhook_snapshot(delivery, WebhookDeliveryLifecycleState::Processed)?;
             let evidence = load_webhook_evidence(&transaction, delivery)?;
-            let (_evidence, _) = verify_or_repair_snapshot_evidence(evidence, snapshot)?;
+            verify_snapshot_evidence(&evidence, &snapshot)?;
         }
         transaction.commit()?;
         Ok(deliveries)

@@ -30,6 +30,7 @@ use shardline_reliability::{
     S3ObjectEvidenceLog, S3ObjectLifecycleEvent, S3ObjectSnapshot, S3ObjectState, SnapshotEvidence,
     WebhookDeliveryEvidenceLog, WebhookDeliveryIdentity, WebhookDeliveryLifecycleEvent,
     WebhookDeliveryLifecycleState, WebhookDeliverySnapshot, verify_or_repair_snapshot_evidence,
+    verify_snapshot_evidence,
 };
 use shardline_storage::{
     DirectoryPathError, ObjectKey, ObjectKeyError,
@@ -51,7 +52,6 @@ use crate::{
     record_key::repository_scope_key as shared_repository_scope_key, xet_hash_hex_string,
 };
 
-#[cfg(test)]
 use shardline_reliability::{
     LifecycleEvent, OciObjectEvidenceLog, OciObjectIdentity, OciObjectLifecycleState,
     OciObjectSnapshot, ResumableLifecycleState, StateTransitionEvent, UploadLifecycleState,
@@ -60,7 +60,6 @@ use shardline_reliability::{
     verify_upload_lifecycle_events,
 };
 
-#[cfg(test)]
 use crate::{OciObjectKind, provider_evidence::snapshot_from_state};
 
 pub(crate) fn quarantine_evidence_operation_id(object_key: &str) -> String {
@@ -104,7 +103,6 @@ pub(crate) fn persist_reliability_event_at<T: EvidenceEventMetadata>(
     Ok(())
 }
 
-#[cfg(test)]
 fn reliability_operation_exists(
     transaction: &Transaction<'_>,
     operation_kind: OperationKind,
@@ -333,6 +331,18 @@ pub(crate) fn current_hub_ref_evidence(
     Ok(verify_or_repair_snapshot_evidence(evidence, snapshot)?.0)
 }
 
+pub(crate) fn verify_hub_ref_evidence(
+    transaction: &Transaction<'_>,
+    repository: &str,
+    ref_name: &str,
+    head_sha: Option<String>,
+) -> Result<HubRefEvidenceLog, LocalIndexStoreError> {
+    let snapshot = hub_ref_snapshot(repository, ref_name, head_sha)?;
+    let evidence = load_hub_ref_evidence(transaction, repository, ref_name)?;
+    verify_snapshot_evidence(&evidence, &snapshot)?;
+    Ok(evidence)
+}
+
 pub(crate) fn oci_tag_snapshot(
     scope_namespace: &str,
     repository: &str,
@@ -392,6 +402,19 @@ pub(crate) fn current_oci_tag_evidence(
     Ok(evidence)
 }
 
+pub(crate) fn verify_oci_tag_evidence(
+    transaction: &Transaction<'_>,
+    scope_namespace: &str,
+    repository: &str,
+    tag: &str,
+    digest_hex: Option<String>,
+) -> Result<OciTagEvidenceLog, LocalIndexStoreError> {
+    let snapshot = oci_tag_snapshot(scope_namespace, repository, tag, digest_hex)?;
+    let evidence = load_oci_tag_evidence(transaction, scope_namespace, repository, tag)?;
+    verify_snapshot_evidence(&evidence, &snapshot)?;
+    Ok(evidence)
+}
+
 pub(crate) fn persist_oci_tag_evidence(
     transaction: &Transaction<'_>,
     event: &OciTagLifecycleEvent,
@@ -448,16 +471,23 @@ pub(crate) fn current_s3_object_evidence(
     let snapshot = s3_object_snapshot(scope_namespace, object_key, entry)?;
     let loaded = load_s3_object_evidence(transaction, scope_namespace, object_key)?;
     let (evidence, was_missing) = verify_or_repair_snapshot_evidence(loaded, snapshot)?;
-    if was_missing
-        && evidence
-            .events()
-            .first()
-            .is_some_and(|event| event.after.entry.is_some())
-    {
-        if let Some(event) = evidence.events().last() {
+    if was_missing {
+        for event in evidence.events() {
             persist_s3_object_evidence(transaction, event)?;
         }
     }
+    Ok(evidence)
+}
+
+pub(crate) fn verify_s3_object_evidence(
+    transaction: &Transaction<'_>,
+    scope_namespace: &str,
+    object_key: &str,
+    entry: Option<&crate::S3ObjectEntry>,
+) -> Result<S3ObjectEvidenceLog, LocalIndexStoreError> {
+    let snapshot = s3_object_snapshot(scope_namespace, object_key, entry)?;
+    let evidence = load_s3_object_evidence(transaction, scope_namespace, object_key)?;
+    verify_snapshot_evidence(&evidence, &snapshot)?;
     Ok(evidence)
 }
 
@@ -638,9 +668,7 @@ pub(crate) fn apply_pending_local_migrations(
 
 /// Gives pre-journal local metadata a deterministic evidence prefix. Existing
 /// operation rows are left untouched when any journal evidence is present.
-#[cfg(test)]
-fn backfill_reliability_events(connection: &mut Connection) -> Result<(), LocalIndexStoreError> {
-    let transaction = connection.transaction()?;
+fn backfill_reliability_events(transaction: &Transaction<'_>) -> Result<(), LocalIndexStoreError> {
     let mut upload_rows = Vec::new();
     {
         let mut statement = transaction.prepare(
@@ -1177,7 +1205,6 @@ fn backfill_reliability_events(connection: &mut Connection) -> Result<(), LocalI
         let evidence = load_provider_evidence(&transaction, &snapshot)?;
         verify_provider_lifecycle_events(evidence.events(), &snapshot)?;
     }
-    transaction.commit()?;
     Ok(())
 }
 
@@ -1226,6 +1253,10 @@ pub(crate) fn ensure_legacy_import_state(
     import_legacy_retention_holds(&transaction, root)?;
     import_legacy_webhook_deliveries(&transaction, root)?;
     import_legacy_provider_repository_states(&transaction, root)?;
+    // The imported materialized rows are authoritative legacy state. Establish
+    // their deterministic reliability baselines before any strict read can
+    // observe them; this is part of the one-time import transaction boundary.
+    backfill_reliability_events(&transaction)?;
     mark_legacy_import_completed(&transaction)?;
     transaction.commit()?;
     Ok(())
@@ -2881,8 +2912,12 @@ mod tests {
             )
             .unwrap();
 
-        backfill_reliability_events(&mut connection).unwrap();
-        backfill_reliability_events(&mut connection).unwrap();
+        let transaction = connection.transaction().unwrap();
+        backfill_reliability_events(&transaction).unwrap();
+        transaction.commit().unwrap();
+        let transaction = connection.transaction().unwrap();
+        backfill_reliability_events(&transaction).unwrap();
+        transaction.commit().unwrap();
 
         for operation_kind in [
             "RetentionHold",

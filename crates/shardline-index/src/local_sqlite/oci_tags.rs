@@ -3,7 +3,10 @@ use rusqlite::{OptionalExtension, Transaction, params};
 use super::{LocalIndexStore, LocalIndexStoreError, collect_rows};
 use crate::{
     OciTagEntry, OciTagStore,
-    local_sqlite::{current_oci_tag_evidence, oci_tag_snapshot, persist_oci_tag_evidence},
+    local_sqlite::{
+        current_oci_tag_evidence, oci_tag_snapshot, persist_oci_tag_evidence,
+        verify_oci_tag_evidence,
+    },
 };
 use shardline_reliability::verify_and_append_snapshot_transition;
 
@@ -164,7 +167,7 @@ impl OciTagStore for LocalIndexStore {
                 let mut connection = store.open_connection()?;
                 let transaction = connection.transaction()?;
                 let value = current_tag(&transaction, &scope_namespace, &repository, &tag)?;
-                current_oci_tag_evidence(
+                verify_oci_tag_evidence(
                     &transaction,
                     &scope_namespace,
                     &repository,
@@ -410,7 +413,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_oci_tag_read_repairs_missing_baseline_evidence() {
+    async fn local_oci_tag_read_rejects_missing_baseline_evidence() {
         let storage = shardline_test_support::TempStorage::new();
         let store = LocalIndexStore::new(storage.path_buf()).unwrap();
         let value = entry("latest", &"a".repeat(64));
@@ -426,12 +429,11 @@ mod tests {
             .unwrap();
         drop(connection);
 
-        assert_eq!(
+        assert!(
             store
                 .oci_tag(&value.scope_namespace, &value.repository, &value.tag)
                 .await
-                .unwrap(),
-            Some(value)
+                .is_err()
         );
         let repaired_connection = store.open_connection().unwrap();
         let count: i64 = repaired_connection
@@ -442,7 +444,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(count, 1);
+        assert_eq!(count, 0);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

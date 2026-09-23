@@ -335,7 +335,7 @@ impl S3ObjectIndexStore for LocalIndexStore {
                     limit,
                 )?;
                 for value in &values {
-                    helpers::current_s3_object_evidence(
+                    helpers::verify_s3_object_evidence(
                         &transaction,
                         &value.scope_namespace,
                         &value.object_key,
@@ -363,12 +363,14 @@ impl S3ObjectIndexStore for LocalIndexStore {
                 let mut connection = store.open_connection()?;
                 let transaction = connection.transaction()?;
                 let value = scan_s3_object_exact_sql(&transaction, &scope_namespace, &object_key)?;
-                helpers::current_s3_object_evidence(
-                    &transaction,
-                    &scope_namespace,
-                    &object_key,
-                    value.as_ref(),
-                )?;
+                if let Some(value) = value.as_ref() {
+                    helpers::verify_s3_object_evidence(
+                        &transaction,
+                        &scope_namespace,
+                        &object_key,
+                        Some(value),
+                    )?;
+                }
                 transaction.commit()?;
                 Ok(value)
             })
@@ -715,7 +717,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn s3_object_read_repairs_missing_baseline_evidence() {
+    async fn s3_object_read_rejects_missing_baseline_evidence_without_writing() {
         let storage = shardline_test_support::TempStorage::new();
         let store = LocalIndexStore::new(storage.path_buf()).unwrap();
         let value = entry("global", "repair.bin", "file-a", 7, 1);
@@ -731,12 +733,11 @@ mod tests {
             .unwrap();
         drop(connection);
 
-        assert_eq!(
+        assert!(
             store
                 .scan_s3_object_exact("global", "repair.bin")
                 .await
-                .unwrap(),
-            Some(value)
+                .is_err()
         );
         let connection = store.open_connection().unwrap();
         let count: i64 = connection
@@ -747,7 +748,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(count, 1);
+        assert_eq!(count, 0);
     }
 
     #[test]
