@@ -1,7 +1,8 @@
 use shardline_protocol::RepositoryProvider;
 use shardline_reliability::{
-    ProviderEvidenceLog, ProviderLifecycleEvent, ProviderLifecycleSnapshot,
-    verify_provider_lifecycle_events,
+    ProviderEvidenceLog, ProviderLifecycleEvent, ProviderLifecycleSnapshot, RetentionEvidenceLog,
+    RetentionHoldLifecycleState, verify_provider_lifecycle_events,
+    verify_retention_hold_lifecycle_chain, verify_retention_hold_lifecycle_events,
 };
 use sqlx::{Acquire, PgConnection, Postgres, Row, Transaction, query, query_scalar};
 
@@ -255,10 +256,49 @@ impl super::PostgresIndexStore {
     }
 }
 
-async fn upsert_retention_hold(
+pub(super) async fn upsert_retention_hold(
     transaction: &mut Transaction<'_, Postgres>,
     hold: &RetentionHold,
 ) -> Result<(), PostgresMetadataStoreError> {
+    let previous_row = query(
+        "SELECT object_key, reason, held_at_unix_seconds, release_after_unix_seconds
+         FROM shardline_retention_holds WHERE object_key = $1 FOR UPDATE",
+    )
+    .bind(hold.object_key().as_str())
+    .fetch_optional(&mut **transaction)
+    .await?;
+    let previous = previous_row
+        .as_ref()
+        .map(super::index_store::retention_hold_from_row)
+        .transpose()?;
+    let snapshot =
+        super::index_store::retention_snapshot(hold, RetentionHoldLifecycleState::Active)?;
+    let mut evidence = super::index_store::load_postgres_retention_evidence(
+        &mut **transaction,
+        hold.object_key().as_str(),
+    )
+    .await?;
+    let evidence_was_empty = evidence.events().is_empty();
+    if evidence_was_empty {
+        evidence = RetentionEvidenceLog::baseline(snapshot)?;
+    } else if let Some(previous) = previous.as_ref() {
+        let previous_snapshot =
+            super::index_store::retention_snapshot(previous, RetentionHoldLifecycleState::Active)?;
+        verify_retention_hold_lifecycle_events(evidence.events(), &previous_snapshot)?;
+        evidence.record(snapshot)?;
+    } else {
+        verify_retention_hold_lifecycle_chain(evidence.events())?;
+        if evidence
+            .events()
+            .last()
+            .is_none_or(|event| event.after.state != RetentionHoldLifecycleState::Released)
+        {
+            return Err(PostgresMetadataStoreError::Reliability(
+                shardline_reliability::ReliabilityError::StateMismatch,
+            ));
+        }
+        evidence.record(snapshot)?;
+    }
     query(
         "INSERT INTO shardline_retention_holds (
             object_key,
@@ -283,6 +323,13 @@ async fn upsert_retention_hold(
     )
     .execute(&mut **transaction)
     .await?;
+    if evidence_was_empty {
+        for event in evidence.events() {
+            super::insert_reliability_event(&mut **transaction, event).await?;
+        }
+    } else if let Some(event) = evidence.events().last() {
+        super::insert_reliability_event(&mut **transaction, event).await?;
+    }
     Ok(())
 }
 

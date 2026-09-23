@@ -1,9 +1,11 @@
 use rusqlite::{OptionalExtension, Transaction, params};
 use shardline_protocol::{RepositoryProvider, ShardlineHash, unix_now_seconds_lossy};
 use shardline_reliability::{
-    LifecycleEvent, ProviderEvidenceLog, QuarantineLifecycleState,
-    baseline_upload_lifecycle_events, upload_lifecycle_event, verify_provider_lifecycle_events,
-    verify_quarantine_lifecycle_events, verify_upload_lifecycle_events,
+    LifecycleEvent, ProviderEvidenceLog, QuarantineLifecycleState, RetentionEvidenceLog,
+    RetentionHoldLifecycleState, baseline_upload_lifecycle_events, upload_lifecycle_event,
+    verify_provider_lifecycle_events, verify_quarantine_lifecycle_events,
+    verify_retention_hold_lifecycle_chain, verify_retention_hold_lifecycle_events,
+    verify_upload_lifecycle_events,
 };
 use shardline_storage::ObjectKey;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -12,7 +14,11 @@ use super::{LocalIndexStore, LocalIndexStoreError, collect_rows, u64_to_i64};
 use crate::{
     DedupeShardMapping, DedupeStore, FileId, FileReconstruction, LifecycleStore,
     ProviderRepositoryState, QuarantineCandidate, ReconstructionStore, RetentionHold,
-    StoredObjectId, WebhookDelivery, parse_xet_hash_hex,
+    StoredObjectId, WebhookDelivery,
+    local_sqlite::helpers::{
+        load_retention_evidence, persist_retention_evidence, retention_snapshot,
+    },
+    parse_xet_hash_hex,
     provider_evidence::snapshot_from_state,
     upload_intent::{UploadIntent, UploadIntentState, UploadIntentStore},
     xet_hash_hex_string,
@@ -361,8 +367,9 @@ impl LifecycleStore for LocalIndexStore {
     }
 
     fn retention_hold(&self, object_key: &ObjectKey) -> Result<Option<RetentionHold>, Self::Error> {
-        let connection = self.open_connection()?;
-        connection
+        let mut connection = self.open_connection()?;
+        let transaction = connection.transaction()?;
+        let hold = transaction
             .query_row(
                 "SELECT object_key,
                         reason,
@@ -373,13 +380,25 @@ impl LifecycleStore for LocalIndexStore {
                 params![object_key.as_str()],
                 super::helpers::retention_hold_from_row,
             )
-            .optional()
-            .map_err(LocalIndexStoreError::from)
+            .optional()?;
+        if let Some(hold) = hold.as_ref() {
+            let snapshot = retention_snapshot(hold, RetentionHoldLifecycleState::Active)?;
+            let evidence = load_retention_evidence(&transaction, object_key.as_str())?;
+            let evidence = if evidence.events().is_empty() {
+                RetentionEvidenceLog::baseline(snapshot.clone())?
+            } else {
+                evidence
+            };
+            verify_retention_hold_lifecycle_events(evidence.events(), &snapshot)?;
+        }
+        transaction.commit()?;
+        Ok(hold)
     }
 
     fn list_retention_holds(&self) -> Result<Vec<RetentionHold>, Self::Error> {
-        let connection = self.open_connection()?;
-        let mut statement = connection.prepare(
+        let mut connection = self.open_connection()?;
+        let transaction = connection.transaction()?;
+        let mut statement = transaction.prepare(
             "SELECT object_key,
                     reason,
                     held_at_unix_seconds,
@@ -388,7 +407,20 @@ impl LifecycleStore for LocalIndexStore {
              ORDER BY object_key",
         )?;
         let rows = statement.query_map([], super::helpers::retention_hold_from_row)?;
-        collect_rows(rows)
+        let holds = collect_rows(rows)?;
+        drop(statement);
+        for hold in &holds {
+            let snapshot = retention_snapshot(hold, RetentionHoldLifecycleState::Active)?;
+            let evidence = load_retention_evidence(&transaction, hold.object_key().as_str())?;
+            let evidence = if evidence.events().is_empty() {
+                RetentionEvidenceLog::baseline(snapshot.clone())?
+            } else {
+                evidence
+            };
+            verify_retention_hold_lifecycle_events(evidence.events(), &snapshot)?;
+        }
+        transaction.commit()?;
+        Ok(holds)
     }
 
     fn visit_retention_holds<Visitor, VisitorError>(
@@ -406,8 +438,40 @@ impl LifecycleStore for LocalIndexStore {
     }
 
     fn upsert_retention_hold(&self, hold: &RetentionHold) -> Result<(), Self::Error> {
-        let connection = self.open_connection()?;
-        connection.execute(
+        let mut connection = self.open_connection()?;
+        let transaction = connection.transaction()?;
+        let previous = transaction
+            .query_row(
+                "SELECT object_key, reason, held_at_unix_seconds, release_after_unix_seconds
+                 FROM shardline_retention_holds WHERE object_key = ?1",
+                params![hold.object_key().as_str()],
+                super::helpers::retention_hold_from_row,
+            )
+            .optional()?;
+        let snapshot = retention_snapshot(hold, RetentionHoldLifecycleState::Active)?;
+        let mut evidence = load_retention_evidence(&transaction, hold.object_key().as_str())?;
+        let evidence_was_empty = evidence.events().is_empty();
+        if evidence_was_empty {
+            evidence = RetentionEvidenceLog::baseline(snapshot)?;
+        } else if let Some(previous) = previous.as_ref() {
+            let previous_snapshot =
+                retention_snapshot(previous, RetentionHoldLifecycleState::Active)?;
+            verify_retention_hold_lifecycle_events(evidence.events(), &previous_snapshot)?;
+            evidence.record(snapshot)?;
+        } else {
+            verify_retention_hold_lifecycle_chain(evidence.events())?;
+            if evidence
+                .events()
+                .last()
+                .is_none_or(|event| event.after.state != RetentionHoldLifecycleState::Released)
+            {
+                return Err(LocalIndexStoreError::Reliability(
+                    shardline_reliability::ReliabilityError::StateMismatch,
+                ));
+            }
+            evidence.record(snapshot)?;
+        }
+        transaction.execute(
             "INSERT INTO shardline_retention_holds (
                 object_key,
                 reason,
@@ -432,15 +496,54 @@ impl LifecycleStore for LocalIndexStore {
                 u64_to_i64(unix_now_seconds_lossy())?,
             ],
         )?;
+        if evidence_was_empty {
+            for event in evidence.events() {
+                persist_retention_evidence(&transaction, event)?;
+            }
+        } else if let Some(event) = evidence.events().last() {
+            persist_retention_evidence(&transaction, event)?;
+        }
+        transaction.commit()?;
         Ok(())
     }
 
     fn delete_retention_hold(&self, object_key: &ObjectKey) -> Result<bool, Self::Error> {
-        let connection = self.open_connection()?;
-        let changed = connection.execute(
+        let mut connection = self.open_connection()?;
+        let transaction = connection.transaction()?;
+        let hold = transaction
+            .query_row(
+                "SELECT object_key, reason, held_at_unix_seconds, release_after_unix_seconds
+                 FROM shardline_retention_holds WHERE object_key = ?1",
+                params![object_key.as_str()],
+                super::helpers::retention_hold_from_row,
+            )
+            .optional()?;
+        let changed = transaction.execute(
             "DELETE FROM shardline_retention_holds WHERE object_key = ?1",
             params![object_key.as_str()],
         )?;
+        if let Some(hold) = hold {
+            let active = retention_snapshot(&hold, RetentionHoldLifecycleState::Active)?;
+            let mut evidence = load_retention_evidence(&transaction, object_key.as_str())?;
+            let evidence_was_empty = evidence.events().is_empty();
+            if evidence_was_empty {
+                evidence = RetentionEvidenceLog::baseline(active)?;
+            } else {
+                verify_retention_hold_lifecycle_events(evidence.events(), &active)?;
+            }
+            evidence.record(retention_snapshot(
+                &hold,
+                RetentionHoldLifecycleState::Released,
+            )?)?;
+            if evidence_was_empty {
+                for event in evidence.events() {
+                    persist_retention_evidence(&transaction, event)?;
+                }
+            } else if let Some(event) = evidence.events().last() {
+                persist_retention_evidence(&transaction, event)?;
+            }
+        }
+        transaction.commit()?;
         Ok(changed > 0)
     }
 
@@ -2401,6 +2504,30 @@ mod tests {
             )
             .unwrap();
         assert!(LifecycleStore::quarantine_candidate(&store, candidate.object_key()).is_err());
+    }
+
+    #[test]
+    fn retention_hold_tampered_evidence_is_rejected_on_read() {
+        let store = make_store();
+        let hold = RetentionHold::new(
+            ObjectKey::parse("aa/retention-object").unwrap(),
+            "legal hold".to_owned(),
+            100,
+            Some(200),
+        )
+        .unwrap();
+        LifecycleStore::upsert_retention_hold(&store, &hold).unwrap();
+        let connection = store.open_connection().unwrap();
+        connection
+            .execute(
+                "UPDATE shardline_reliability_events
+                 SET event_json = '{\"sequence\": 99}'
+                 WHERE operation_kind = 'RetentionHold'
+                   AND operation_id = 'aa/retention-object'",
+                [],
+            )
+            .unwrap();
+        assert!(LifecycleStore::retention_hold(&store, hold.object_key()).is_err());
     }
 
     #[test]

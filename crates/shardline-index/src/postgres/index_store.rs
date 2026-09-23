@@ -4,8 +4,10 @@ use shardline_protocol::{ChunkRange, RepositoryProvider, ShardlineHash};
 use shardline_reliability::{
     EvidenceEventMetadata, LifecycleEvent, ProviderEvidenceLog, ProviderLifecycleEvent,
     QuarantineEvidenceLog, QuarantineLifecycleEvent, QuarantineLifecycleState,
-    QuarantineObjectIdentity, QuarantineSnapshot, baseline_upload_lifecycle_events,
-    upload_lifecycle_event, verify_provider_lifecycle_events, verify_quarantine_lifecycle_events,
+    QuarantineObjectIdentity, QuarantineSnapshot, RetentionEvidenceLog,
+    RetentionHoldLifecycleState, RetentionHoldSnapshot, RetentionObjectIdentity,
+    baseline_upload_lifecycle_events, upload_lifecycle_event, verify_provider_lifecycle_events,
+    verify_quarantine_lifecycle_events, verify_retention_hold_lifecycle_events,
     verify_upload_lifecycle_events,
 };
 use shardline_storage::ObjectKey;
@@ -100,6 +102,28 @@ async fn load_postgres_quarantine_evidence(
     Ok(QuarantineEvidenceLog::from_events(events)?)
 }
 
+pub(super) async fn load_postgres_retention_evidence(
+    executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>,
+    object_key: &str,
+) -> Result<RetentionEvidenceLog, PostgresMetadataStoreError> {
+    let rows = query(
+        "SELECT event_json FROM shardline_reliability_events
+         WHERE operation_kind = 'RetentionHold' AND operation_id = $1 ORDER BY sequence",
+    )
+    .bind(object_key)
+    .fetch_all(executor)
+    .await?;
+    let events = rows
+        .into_iter()
+        .map(|row| {
+            Ok(serde_json::from_value::<
+                shardline_reliability::RetentionHoldLifecycleEvent,
+            >(row.try_get("event_json")?)?)
+        })
+        .collect::<Result<Vec<_>, PostgresMetadataStoreError>>()?;
+    Ok(RetentionEvidenceLog::from_events(events)?)
+}
+
 fn quarantine_snapshot(
     candidate: &QuarantineCandidate,
     state: QuarantineLifecycleState,
@@ -109,6 +133,19 @@ fn quarantine_snapshot(
         candidate.observed_length(),
         candidate.first_seen_unreachable_at_unix_seconds(),
         candidate.delete_after_unix_seconds(),
+        state,
+    )?)
+}
+
+pub(super) fn retention_snapshot(
+    hold: &RetentionHold,
+    state: RetentionHoldLifecycleState,
+) -> Result<RetentionHoldSnapshot, PostgresMetadataStoreError> {
+    Ok(RetentionHoldSnapshot::new(
+        RetentionObjectIdentity::new(hold.object_key().as_str())?,
+        hold.reason(),
+        hold.held_at_unix_seconds(),
+        hold.release_after_unix_seconds(),
         state,
     )?)
 }
@@ -565,7 +602,19 @@ impl AsyncIndexStore for super::PostgresIndexStore {
             .fetch_optional(&self.pool)
             .await?;
 
-            row.as_ref().map(retention_hold_from_row).transpose()
+            let hold = row.as_ref().map(retention_hold_from_row).transpose()?;
+            if let Some(hold) = hold.as_ref() {
+                let snapshot = retention_snapshot(hold, RetentionHoldLifecycleState::Active)?;
+                let evidence =
+                    load_postgres_retention_evidence(&self.pool, object_key.as_str()).await?;
+                let evidence = if evidence.events().is_empty() {
+                    RetentionEvidenceLog::baseline(snapshot.clone())?
+                } else {
+                    evidence
+                };
+                verify_retention_hold_lifecycle_events(evidence.events(), &snapshot)?;
+            }
+            Ok(hold)
         })
     }
 
@@ -582,9 +631,23 @@ impl AsyncIndexStore for super::PostgresIndexStore {
             .fetch_all(&self.pool)
             .await?;
 
-            rows.iter()
+            let holds = rows
+                .iter()
                 .map(retention_hold_from_row)
-                .collect::<Result<Vec<_>, _>>()
+                .collect::<Result<Vec<_>, _>>()?;
+            for hold in &holds {
+                let snapshot = retention_snapshot(hold, RetentionHoldLifecycleState::Active)?;
+                let evidence =
+                    load_postgres_retention_evidence(&self.pool, hold.object_key().as_str())
+                        .await?;
+                let evidence = if evidence.events().is_empty() {
+                    RetentionEvidenceLog::baseline(snapshot.clone())?
+                } else {
+                    evidence
+                };
+                verify_retention_hold_lifecycle_events(evidence.events(), &snapshot)?;
+            }
+            Ok(holds)
         })
     }
 
@@ -615,6 +678,22 @@ impl AsyncIndexStore for super::PostgresIndexStore {
                 .map_err(Into::<VisitorError>::into)?
             {
                 let hold = retention_hold_from_row(&row).map_err(Into::into)?;
+                let snapshot = retention_snapshot(&hold, RetentionHoldLifecycleState::Active)
+                    .map_err(Into::into)?;
+                let evidence =
+                    load_postgres_retention_evidence(&self.pool, hold.object_key().as_str())
+                        .await
+                        .map_err(Into::into)?;
+                let evidence = if evidence.events().is_empty() {
+                    RetentionEvidenceLog::baseline(snapshot.clone())
+                        .map_err(Self::Error::from)
+                        .map_err(Into::<VisitorError>::into)?
+                } else {
+                    evidence
+                };
+                verify_retention_hold_lifecycle_events(evidence.events(), &snapshot)
+                    .map_err(Self::Error::from)
+                    .map_err(Into::<VisitorError>::into)?;
                 visitor(hold)?;
             }
 
@@ -627,30 +706,9 @@ impl AsyncIndexStore for super::PostgresIndexStore {
         hold: &'operation RetentionHold,
     ) -> IndexStoreFuture<'operation, (), Self::Error> {
         Box::pin(async move {
-            query(
-                "INSERT INTO shardline_retention_holds (
-                    object_key,
-                    reason,
-                    held_at_unix_seconds,
-                    release_after_unix_seconds
-                 )
-                 VALUES ($1, $2, $3, $4)
-                 ON CONFLICT (object_key)
-                 DO UPDATE SET
-                    reason = EXCLUDED.reason,
-                    held_at_unix_seconds = EXCLUDED.held_at_unix_seconds,
-                    release_after_unix_seconds = EXCLUDED.release_after_unix_seconds",
-            )
-            .bind(hold.object_key().as_str())
-            .bind(hold.reason())
-            .bind(u64_to_i64(hold.held_at_unix_seconds())?)
-            .bind(
-                hold.release_after_unix_seconds()
-                    .map(u64_to_i64)
-                    .transpose()?,
-            )
-            .execute(&self.pool)
-            .await?;
+            let mut transaction = self.pool.begin().await?;
+            super::provider_mutation::upsert_retention_hold(&mut transaction, hold).await?;
+            transaction.commit().await?;
             Ok(())
         })
     }
@@ -660,10 +718,43 @@ impl AsyncIndexStore for super::PostgresIndexStore {
         object_key: &'operation ObjectKey,
     ) -> IndexStoreFuture<'operation, bool, Self::Error> {
         Box::pin(async move {
+            let mut transaction = self.pool.begin().await?;
+            let row = query(
+                "SELECT object_key, reason, held_at_unix_seconds, release_after_unix_seconds
+                 FROM shardline_retention_holds WHERE object_key = $1",
+            )
+            .bind(object_key.as_str())
+            .fetch_optional(&mut *transaction)
+            .await?;
+            let hold = row.as_ref().map(retention_hold_from_row).transpose()?;
             let result = query("DELETE FROM shardline_retention_holds WHERE object_key = $1")
                 .bind(object_key.as_str())
-                .execute(&self.pool)
+                .execute(&mut *transaction)
                 .await?;
+            if let Some(hold) = hold {
+                let active = retention_snapshot(&hold, RetentionHoldLifecycleState::Active)?;
+                let mut evidence =
+                    load_postgres_retention_evidence(&mut *transaction, object_key.as_str())
+                        .await?;
+                let evidence_was_empty = evidence.events().is_empty();
+                if evidence_was_empty {
+                    evidence = RetentionEvidenceLog::baseline(active)?;
+                } else {
+                    verify_retention_hold_lifecycle_events(evidence.events(), &active)?;
+                }
+                evidence.record(retention_snapshot(
+                    &hold,
+                    RetentionHoldLifecycleState::Released,
+                )?)?;
+                if evidence_was_empty {
+                    for event in evidence.events() {
+                        insert_reliability_event(&mut *transaction, event).await?;
+                    }
+                } else if let Some(event) = evidence.events().last() {
+                    insert_reliability_event(&mut *transaction, event).await?;
+                }
+            }
+            transaction.commit().await?;
             Ok(result.rows_affected() > 0)
         })
     }
@@ -1508,7 +1599,9 @@ fn dedupe_shard_mapping_from_row(
     Ok(DedupeShardMapping::new(chunk_hash, shard_object_key))
 }
 
-fn retention_hold_from_row(row: &PgRow) -> Result<RetentionHold, PostgresMetadataStoreError> {
+pub(super) fn retention_hold_from_row(
+    row: &PgRow,
+) -> Result<RetentionHold, PostgresMetadataStoreError> {
     let object_key = ObjectKey::parse(row.try_get::<String, _>("object_key")?.as_str())?;
     let reason = row.try_get::<String, _>("reason")?;
     let held_at_unix_seconds = i64_to_u64(row.try_get::<i64, _>("held_at_unix_seconds")?)?;

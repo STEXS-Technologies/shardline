@@ -14,6 +14,7 @@ pub enum OperationKind {
     ProviderEvent,
     Repair,
     GarbageCollection,
+    RetentionHold,
 }
 
 impl OperationKind {
@@ -27,6 +28,7 @@ impl OperationKind {
             Self::ProviderEvent => "ProviderEvent",
             Self::Repair => "Repair",
             Self::GarbageCollection => "GarbageCollection",
+            Self::RetentionHold => "RetentionHold",
         }
     }
 }

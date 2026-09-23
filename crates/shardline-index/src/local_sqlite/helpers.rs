@@ -25,10 +25,11 @@ use shardline_reliability::{
     OciObjectLifecycleState, OciObjectSnapshot, ProviderEvidenceLog, ProviderLifecycleEvent,
     ProviderLifecycleSnapshot, QuarantineEvidenceLog, QuarantineLifecycleEvent,
     QuarantineLifecycleState, QuarantineObjectIdentity, QuarantineSnapshot,
-    ResumableLifecycleState, StateTransitionEvent, UploadLifecycleState,
-    baseline_resumable_session_events, baseline_upload_lifecycle_events,
-    verify_provider_lifecycle_events, verify_resumable_session_events,
-    verify_upload_lifecycle_events,
+    ResumableLifecycleState, RetentionEvidenceLog, RetentionHoldLifecycleEvent,
+    RetentionHoldLifecycleState, RetentionHoldSnapshot, RetentionObjectIdentity,
+    StateTransitionEvent, UploadLifecycleState, baseline_resumable_session_events,
+    baseline_upload_lifecycle_events, verify_provider_lifecycle_events,
+    verify_resumable_session_events, verify_upload_lifecycle_events,
 };
 use shardline_storage::{
     DirectoryPathError, ObjectKey, ObjectKeyError,
@@ -129,6 +130,52 @@ pub(crate) fn load_quarantine_evidence(
 pub(crate) fn persist_quarantine_evidence(
     transaction: &Transaction<'_>,
     event: &QuarantineLifecycleEvent,
+) -> Result<(), LocalIndexStoreError> {
+    persist_reliability_event(transaction, event)
+}
+
+pub(crate) fn retention_evidence_operation_id(object_key: &str) -> String {
+    object_key.to_owned()
+}
+
+pub(crate) fn retention_snapshot(
+    hold: &RetentionHold,
+    state: RetentionHoldLifecycleState,
+) -> Result<RetentionHoldSnapshot, LocalIndexStoreError> {
+    Ok(RetentionHoldSnapshot::new(
+        RetentionObjectIdentity::new(hold.object_key().as_str())?,
+        hold.reason(),
+        hold.held_at_unix_seconds(),
+        hold.release_after_unix_seconds(),
+        state,
+    )?)
+}
+
+pub(crate) fn load_retention_evidence(
+    transaction: &Transaction<'_>,
+    object_key: &str,
+) -> Result<RetentionEvidenceLog, LocalIndexStoreError> {
+    let mut statement = transaction.prepare(
+        "SELECT event_json FROM shardline_reliability_events
+         WHERE operation_kind = 'RetentionHold' AND operation_id = ?1 ORDER BY sequence",
+    )?;
+    let rows = statement.query_map(
+        params![retention_evidence_operation_id(object_key)],
+        |row| {
+            let event_json: String = row.get(0)?;
+            from_str::<RetentionHoldLifecycleEvent>(&event_json).map_err(|error| {
+                SqliteError::FromSqlConversionFailure(0, Type::Text, Box::new(error))
+            })
+        },
+    )?;
+    Ok(RetentionEvidenceLog::from_events(
+        rows.collect::<Result<Vec<_>, _>>()?,
+    )?)
+}
+
+pub(crate) fn persist_retention_evidence(
+    transaction: &Transaction<'_>,
+    event: &RetentionHoldLifecycleEvent,
 ) -> Result<(), LocalIndexStoreError> {
     persist_reliability_event(transaction, event)
 }

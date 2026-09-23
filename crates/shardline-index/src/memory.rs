@@ -8,9 +8,11 @@ use serde_json::{Error as SerdeJsonError, to_vec};
 use shardline_protocol::{RepositoryProvider, RepositoryScope, ShardlineHash};
 use shardline_reliability::{
     LifecycleEvent, ProviderEvidenceLog, QuarantineEvidenceLog, QuarantineLifecycleState,
-    QuarantineObjectIdentity, QuarantineSnapshot, upload_lifecycle_event, verify_lifecycle_chain,
-    verify_provider_lifecycle_events, verify_quarantine_lifecycle_events,
-    verify_upload_lifecycle_events,
+    QuarantineObjectIdentity, QuarantineSnapshot, RetentionEvidenceLog,
+    RetentionHoldLifecycleState, RetentionHoldSnapshot, RetentionObjectIdentity,
+    upload_lifecycle_event, verify_lifecycle_chain, verify_provider_lifecycle_events,
+    verify_quarantine_lifecycle_events, verify_retention_hold_lifecycle_chain,
+    verify_retention_hold_lifecycle_events, verify_upload_lifecycle_events,
 };
 use shardline_storage::ObjectKey;
 use thiserror::Error;
@@ -173,6 +175,36 @@ fn verify_memory_quarantine_evidence(
             MemoryIndexStoreError::Reliability("quarantine evidence is missing".into())
         })?;
     verify_quarantine_lifecycle_events(evidence.events(), &snapshot)
+        .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))
+}
+
+fn retention_snapshot(
+    hold: &RetentionHold,
+    state: RetentionHoldLifecycleState,
+) -> Result<RetentionHoldSnapshot, MemoryIndexStoreError> {
+    RetentionHoldSnapshot::new(
+        RetentionObjectIdentity::new(hold.object_key().as_str())
+            .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?,
+        hold.reason(),
+        hold.held_at_unix_seconds(),
+        hold.release_after_unix_seconds(),
+        state,
+    )
+    .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))
+}
+
+fn verify_memory_retention_evidence(
+    state: &MemoryIndexState,
+    hold: &RetentionHold,
+) -> Result<(), MemoryIndexStoreError> {
+    let snapshot = retention_snapshot(hold, RetentionHoldLifecycleState::Active)?;
+    let evidence = state
+        .retention_evidence
+        .get(hold.object_key())
+        .ok_or_else(|| {
+            MemoryIndexStoreError::Reliability("retention evidence is missing".into())
+        })?;
+    verify_retention_hold_lifecycle_events(evidence.events(), &snapshot)
         .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))
 }
 
@@ -356,17 +388,21 @@ impl LifecycleStore for MemoryIndexStore {
     }
 
     fn retention_hold(&self, object_key: &ObjectKey) -> Result<Option<RetentionHold>, Self::Error> {
-        Ok(self.lock_state()?.retention_holds.get(object_key).cloned())
+        let state = self.lock_state()?;
+        let Some(hold) = state.retention_holds.get(object_key).cloned() else {
+            return Ok(None);
+        };
+        verify_memory_retention_evidence(&state, &hold)?;
+        Ok(Some(hold))
     }
 
     fn list_retention_holds(&self) -> Result<Vec<RetentionHold>, Self::Error> {
-        let mut holds = self
-            .lock_state()?
-            .retention_holds
-            .values()
-            .cloned()
-            .collect::<Vec<_>>();
+        let state = self.lock_state()?;
+        let mut holds = state.retention_holds.values().cloned().collect::<Vec<_>>();
         holds.sort_by(|left, right| left.object_key().as_str().cmp(right.object_key().as_str()));
+        for hold in &holds {
+            verify_memory_retention_evidence(&state, hold)?;
+        }
         Ok(holds)
     }
 
@@ -386,18 +422,80 @@ impl LifecycleStore for MemoryIndexStore {
     }
 
     fn upsert_retention_hold(&self, hold: &RetentionHold) -> Result<(), Self::Error> {
-        self.lock_state()?
-            .retention_holds
-            .insert(hold.object_key().clone(), hold.clone());
+        let mut state = self.lock_state()?;
+        let snapshot = retention_snapshot(hold, RetentionHoldLifecycleState::Active)?;
+        let key = hold.object_key().clone();
+        let mut evidence = state
+            .retention_evidence
+            .get(&key)
+            .cloned()
+            .unwrap_or_default();
+        if evidence.events().is_empty() {
+            evidence = RetentionEvidenceLog::baseline(snapshot)
+                .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
+        } else {
+            if let Some(current) = state.retention_holds.get(&key) {
+                verify_retention_hold_lifecycle_events(
+                    evidence.events(),
+                    &retention_snapshot(current, RetentionHoldLifecycleState::Active)?,
+                )
+                .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
+            } else {
+                verify_retention_hold_lifecycle_chain(evidence.events())
+                    .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
+                if evidence
+                    .events()
+                    .last()
+                    .is_none_or(|event| event.after.state != RetentionHoldLifecycleState::Released)
+                {
+                    return Err(MemoryIndexStoreError::Reliability(
+                        "retention evidence has no materialized state".into(),
+                    ));
+                }
+            }
+            evidence
+                .record(snapshot)
+                .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
+        }
+        state.retention_holds.insert(key.clone(), hold.clone());
+        state.retention_evidence.insert(key, evidence);
         Ok(())
     }
 
     fn delete_retention_hold(&self, object_key: &ObjectKey) -> Result<bool, Self::Error> {
-        Ok(self
-            .lock_state()?
-            .retention_holds
-            .remove(object_key)
-            .is_some())
+        let mut state = self.lock_state()?;
+        let Some(hold) = state.retention_holds.get(object_key).cloned() else {
+            return Ok(false);
+        };
+        let mut evidence = state
+            .retention_evidence
+            .get(object_key)
+            .cloned()
+            .unwrap_or_default();
+        if evidence.events().is_empty() {
+            evidence = RetentionEvidenceLog::baseline(retention_snapshot(
+                &hold,
+                RetentionHoldLifecycleState::Active,
+            )?)
+            .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
+        } else {
+            verify_retention_hold_lifecycle_events(
+                evidence.events(),
+                &retention_snapshot(&hold, RetentionHoldLifecycleState::Active)?,
+            )
+            .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
+        }
+        evidence
+            .record(retention_snapshot(
+                &hold,
+                RetentionHoldLifecycleState::Released,
+            )?)
+            .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
+        state
+            .retention_evidence
+            .insert(object_key.clone(), evidence);
+        state.retention_holds.remove(object_key);
+        Ok(true)
     }
 
     fn record_webhook_delivery(&self, delivery: &WebhookDelivery) -> Result<bool, Self::Error> {
@@ -1123,6 +1221,7 @@ struct MemoryIndexState {
     quarantine: HashMap<ObjectKey, QuarantineCandidate>,
     quarantine_evidence: HashMap<ObjectKey, QuarantineEvidenceLog>,
     retention_holds: HashMap<ObjectKey, RetentionHold>,
+    retention_evidence: HashMap<ObjectKey, RetentionEvidenceLog>,
     webhook_deliveries: HashMap<MemoryWebhookDeliveryKey, WebhookDelivery>,
     provider_repository_states: HashMap<MemoryProviderRepositoryStateKey, ProviderRepositoryState>,
     provider_repository_evidence: HashMap<MemoryProviderRepositoryStateKey, ProviderEvidenceLog>,
@@ -2937,6 +3036,39 @@ mod tests {
         assert_eq!(
             store.state.lock().unwrap().quarantine.get(&key),
             Some(&candidate)
+        );
+    }
+
+    #[test]
+    fn memory_retention_hold_read_rejects_tampered_evidence() {
+        let store = MemoryIndexStore::new();
+        let key = ObjectKey::parse("chunks/tampered-retention/key").unwrap();
+        let hold = RetentionHold::new(key.clone(), "retain".to_owned(), 10, Some(20)).unwrap();
+        store.upsert_retention_hold(&hold).unwrap();
+
+        let other_key = ObjectKey::parse("chunks/other-retention/key").unwrap();
+        let wrong_snapshot = shardline_reliability::RetentionHoldSnapshot::new(
+            shardline_reliability::RetentionObjectIdentity::new(other_key.as_str()).unwrap(),
+            "retain",
+            10,
+            Some(20),
+            shardline_reliability::RetentionHoldLifecycleState::Active,
+        )
+        .unwrap();
+        store.state.lock().unwrap().retention_evidence.insert(
+            key.clone(),
+            shardline_reliability::RetentionEvidenceLog::baseline(wrong_snapshot).unwrap(),
+        );
+
+        let result = LifecycleStore::retention_hold(&store, &key);
+        assert!(matches!(result, Err(MemoryIndexStoreError::Reliability(_))));
+        assert!(
+            store
+                .state
+                .lock()
+                .unwrap()
+                .retention_holds
+                .contains_key(&key)
         );
     }
 

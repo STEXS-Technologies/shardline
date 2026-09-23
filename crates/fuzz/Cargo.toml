@@ -407,6 +407,10 @@ name = "shardline_reliability_quarantine_evidence"
 path = "fuzz_targets/shardline/reliability_quarantine_evidence.rs"
 
 [[bin]]
+name = "shardline_reliability_retention_evidence"
+path = "fuzz_targets/shardline/reliability_retention_evidence.rs"
+
+[[bin]]
 name = "shardline_reliability_oci_evidence"
 path = "fuzz_targets/shardline/reliability_oci_evidence.rs"
 test = false
