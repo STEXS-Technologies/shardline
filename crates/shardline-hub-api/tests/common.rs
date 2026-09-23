@@ -25,7 +25,7 @@ pub(crate) const HUB_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS shardline_hub_re
                 message TEXT,
                 created_at_unix_seconds INTEGER NOT NULL CHECK (created_at_unix_seconds >= 0),
                 PRIMARY KEY (repo_id, sha),
-                FOREIGN KEY (repo_id) REFERENCES shardline_hub_repos(repo_id) ON DELETE CASCADE
+                FOREIGN KEY (repo_id) REFERENCES shardline_hub_repos (repo_id) ON DELETE CASCADE
             );
             CREATE INDEX IF NOT EXISTS shardline_hub_revisions_repo_ref_idx
                 ON shardline_hub_revisions (repo_id, ref_name);
@@ -34,7 +34,7 @@ pub(crate) const HUB_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS shardline_hub_re
                 ref_name TEXT NOT NULL,
                 sha TEXT NOT NULL,
                 PRIMARY KEY (repo_id, ref_name),
-                FOREIGN KEY (repo_id) REFERENCES shardline_hub_repos(repo_id) ON DELETE CASCADE
+                FOREIGN KEY (repo_id) REFERENCES shardline_hub_repos (repo_id) ON DELETE CASCADE
             );
             CREATE TABLE IF NOT EXISTS shardline_hub_file_entries (
                 commit_sha TEXT NOT NULL,
@@ -53,7 +53,7 @@ pub(crate) const HUB_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS shardline_hub_re
                 secret TEXT,
                 active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
                 created_at_unix_seconds INTEGER NOT NULL CHECK (created_at_unix_seconds >= 0),
-                FOREIGN KEY (repo_id) REFERENCES shardline_hub_repos(repo_id) ON DELETE CASCADE
+                FOREIGN KEY (repo_id) REFERENCES shardline_hub_repos (repo_id) ON DELETE CASCADE
             );
             CREATE INDEX IF NOT EXISTS shardline_hub_webhooks_repo_idx ON shardline_hub_webhooks (repo_id);";
 
