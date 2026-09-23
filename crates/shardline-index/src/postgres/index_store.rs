@@ -30,22 +30,61 @@ async fn verify_postgres_intent_evidence(
     store: &super::PostgresIndexStore,
     intent: &crate::UploadIntent,
 ) -> Result<(), PostgresMetadataStoreError> {
-    let events = <super::PostgresIndexStore as UploadIntentStore>::reliability_events(
-        store,
-        intent.intent_id(),
-    )
-    .await?;
-    let (tenant, repository) = upload_lifecycle_identity(&events);
-    verify_upload_lifecycle_events(
-        &events,
-        tenant,
-        repository,
-        intent.intent_id(),
-        intent.object_key(),
-        intent.object_hash(),
-        intent.state(),
-    )?;
-    Ok(())
+    // The intent row and its terminal reliability event are committed in one
+    // transition transaction, but these compatibility reads use separate pool
+    // snapshots. A concurrent node can therefore advance both between the two
+    // reads and briefly present a mixed pair to this verifier. Retry the
+    // bounded read/verify operation; persistent corruption still returns after
+    // the final attempt.
+    const MAX_ATTEMPTS: usize = 3;
+    let mut attempt = 0_usize;
+    loop {
+        let events = <super::PostgresIndexStore as UploadIntentStore>::reliability_events(
+            store,
+            intent.intent_id(),
+        )
+        .await?;
+        let (tenant, repository) = upload_lifecycle_identity(&events);
+        match verify_upload_lifecycle_events(
+            &events,
+            tenant,
+            repository,
+            intent.intent_id(),
+            intent.object_key(),
+            intent.object_hash(),
+            intent.state(),
+        ) {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                let current_state = query_scalar::<_, String>(
+                    "SELECT state FROM shardline_upload_intents WHERE intent_id = $1",
+                )
+                .bind(intent.intent_id())
+                .fetch_optional(&store.pool)
+                .await?;
+                if current_state
+                    .as_deref()
+                    .and_then(UploadIntentState::parse)
+                    .is_some_and(|state| state != intent.state())
+                {
+                    // The row advanced after this caller loaded its snapshot.
+                    // Its CAS recovery path will reload the authoritative row;
+                    // do not reject startup for a valid concurrent transition.
+                    return Ok(());
+                }
+                let next_attempt = attempt.saturating_add(1);
+                if next_attempt < MAX_ATTEMPTS {
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        u64::try_from(next_attempt).unwrap_or(1),
+                    ))
+                    .await;
+                    attempt = next_attempt;
+                } else {
+                    return Err(error.into());
+                }
+            }
+        }
+    }
 }
 
 async fn verify_postgres_provider_evidence(

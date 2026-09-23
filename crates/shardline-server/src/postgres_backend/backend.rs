@@ -177,8 +177,22 @@ impl PostgresBackend {
                     .index_store
                     .reliability_events(intent.intent_id())
                     .await?;
-                verify_lifecycle_chain_ends_at(&reliability_events, intent.state())
-                    .map_err(|error| ServerError::Io(std::io::Error::other(error.to_string())))?;
+                if let Err(error) =
+                    verify_lifecycle_chain_ends_at(&reliability_events, intent.state())
+                {
+                    let current = self.index_store.intent_by_id(intent.intent_id()).await?;
+                    if current
+                        .as_ref()
+                        .is_none_or(|current| current.state() != intent.state())
+                    {
+                        // Another node committed a valid transition after this
+                        // recovery scan loaded its row. The next pass must use
+                        // the authoritative state rather than rejecting startup
+                        // for a stale snapshot.
+                        continue;
+                    }
+                    return Err(ServerError::Io(std::io::Error::other(error.to_string())));
+                }
                 let now = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap_or(Duration::ZERO);
