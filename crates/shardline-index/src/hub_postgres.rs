@@ -466,13 +466,14 @@ impl HubStore for PostgresIndexStore {
                 refs
             };
             for reference in &refs {
-                current_hub_ref_evidence(
+                let evidence = current_hub_ref_evidence(
                     &mut tx,
                     &reference.repo_id,
                     &reference.ref_name,
                     Some(reference.sha.clone()),
                 )
                 .await?;
+                persist_hub_ref_evidence(&mut tx, &evidence).await?;
             }
             tx.commit().await?;
             Ok(refs)

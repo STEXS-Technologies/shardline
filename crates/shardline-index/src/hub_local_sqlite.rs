@@ -394,13 +394,18 @@ impl HubStore for LocalIndexStore {
                 rows.collect::<Result<Vec<_>, _>>()?
             };
             for reference in &refs {
-                current_hub_ref_evidence(
+                let evidence = current_hub_ref_evidence(
                     &tx,
                     &reference.repo_id,
                     &reference.ref_name,
                     Some(reference.sha.clone()),
                 )
                 .map_err(|error| rusqlite::Error::InvalidParameterName(error.to_string()))?;
+                for event in evidence.events() {
+                    persist_hub_ref_evidence(&tx, event).map_err(|error| {
+                        rusqlite::Error::InvalidParameterName(error.to_string())
+                    })?;
+                }
             }
             tx.commit()?;
             Ok(refs)
@@ -929,6 +934,37 @@ mod tests {
             .expect("resolve main")
             .expect("main head");
         assert_eq!(initial_sha, "4b825dc642cb6eb9a060e54bf899d69f8f5ce8e3");
+
+        let repaired = Connection::open(ts.path().join("metadata.sqlite3")).expect("open");
+        let count: i64 = repaired
+            .query_row(
+                "SELECT COUNT(*) FROM shardline_reliability_events
+                 WHERE operation_kind = 'MetadataCommit'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count repaired evidence");
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn list_refs_repairs_missing_metadata_commit_baseline() {
+        let (ts, store) = make_store();
+        store
+            .create_repo(HubRepoType::Model, "list-repair-test", false)
+            .expect("create repo");
+
+        let connection = Connection::open(ts.path().join("metadata.sqlite3")).expect("open");
+        connection
+            .execute(
+                "DELETE FROM shardline_reliability_events
+                 WHERE operation_kind = 'MetadataCommit'",
+                [],
+            )
+            .expect("remove evidence");
+        drop(connection);
+
+        assert_eq!(store.list_refs("list-repair-test").unwrap().len(), 1);
 
         let repaired = Connection::open(ts.path().join("metadata.sqlite3")).expect("open");
         let count: i64 = repaired
