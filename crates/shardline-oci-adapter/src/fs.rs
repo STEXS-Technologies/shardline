@@ -112,35 +112,44 @@ pub(crate) async fn persist_upload_session(
     session_id: &str,
     session: &OciUploadSession,
 ) -> Result<(), OciAdapterError> {
-    let evidence = match read_persisted_upload_session(root, session_id).await {
-        Ok((_previous, evidence)) => {
-            let mut evidence = evidence;
-            evidence
-                .record(
-                    &session.scope_namespace,
-                    session_id,
-                    &session.repository,
-                    shardline_reliability::ResumableLifecycleState::Active,
-                    shardline_reliability::ResumableLifecycleState::Active,
-                )
-                .map_err(|error| OciAdapterError::Reliability(error.to_string()))?;
-            evidence
-        }
-        Err(OciAdapterError::NotFound) => {
-            SessionEvidenceLog::new(&session.scope_namespace, session_id, &session.repository)
-                .map_err(|error| OciAdapterError::Reliability(error.to_string()))?
-        }
-        Err(error) => return Err(error),
-    };
+    let (evidence, mut snapshot_evidence) =
+        match read_persisted_upload_session_with_snapshot(root, session_id).await {
+            Ok((_previous, evidence, snapshot_evidence)) => {
+                let mut evidence = evidence;
+                evidence
+                    .record(
+                        &session.scope_namespace,
+                        session_id,
+                        &session.repository,
+                        shardline_reliability::ResumableLifecycleState::Active,
+                        shardline_reliability::ResumableLifecycleState::Active,
+                    )
+                    .map_err(|error| OciAdapterError::Reliability(error.to_string()))?;
+                (evidence, snapshot_evidence)
+            }
+            Err(OciAdapterError::NotFound) => (
+                SessionEvidenceLog::new(&session.scope_namespace, session_id, &session.repository)
+                    .map_err(|error| OciAdapterError::Reliability(error.to_string()))?,
+                SnapshotEvidenceLog::default(),
+            ),
+            Err(error) => return Err(error),
+        };
     evidence
         .verify_for(&session.scope_namespace, session_id, &session.repository)
         .map_err(|error| OciAdapterError::Reliability(error.to_string()))?;
     let snapshot = session_snapshot(session_id, session)?;
+    if snapshot_evidence.events().is_empty() {
+        snapshot_evidence = SnapshotEvidenceLog::baseline(snapshot)
+            .map_err(|error| OciAdapterError::Reliability(error.to_string()))?;
+    } else {
+        snapshot_evidence
+            .record(snapshot)
+            .map_err(|error| OciAdapterError::Reliability(error.to_string()))?;
+    }
     let bytes = serde_json::to_vec(&PersistedOciUploadSession {
         session: session.clone(),
         evidence,
-        snapshot_evidence: SnapshotEvidenceLog::baseline(snapshot)
-            .map_err(|error| OciAdapterError::Reliability(error.to_string()))?,
+        snapshot_evidence,
     })?;
     write_upload_metadata(root, session_id, bytes).await
 }
@@ -149,6 +158,22 @@ pub(crate) async fn read_persisted_upload_session(
     root: &Path,
     session_id: &str,
 ) -> Result<(OciUploadSession, SessionEvidenceLog), OciAdapterError> {
+    let (session, evidence, _) =
+        read_persisted_upload_session_with_snapshot(root, session_id).await?;
+    Ok((session, evidence))
+}
+
+async fn read_persisted_upload_session_with_snapshot(
+    root: &Path,
+    session_id: &str,
+) -> Result<
+    (
+        OciUploadSession,
+        SessionEvidenceLog,
+        SnapshotEvidenceLog<DigestSnapshot>,
+    ),
+    OciAdapterError,
+> {
     protocol_support::validate_upload_session_id(session_id)?;
     let metadata_path = upload_metadata_path(root, session_id);
     let bytes = read_upload_file_async(root, &metadata_path)
@@ -203,7 +228,7 @@ pub(crate) async fn read_persisted_upload_session(
         .map_err(|error| OciAdapterError::Reliability(error.to_string()))?;
         write_upload_metadata(root, session_id, repaired_bytes).await?;
     }
-    Ok((session, evidence))
+    Ok((session, evidence, snapshot_evidence))
 }
 
 // ── Error mapping ────────────────────────────────────────────────────────────

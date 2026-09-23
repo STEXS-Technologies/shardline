@@ -25,8 +25,8 @@ use crate::{
     create_upload_session, delete_upload_session, finalize_s3_multipart_upload_session,
     new_upload_session_id, oci_blob_key, oci_manifest_key, oci_manifest_media_type_key,
     oci_manifest_prefix, oci_tag_key, oci_tag_prefix, parse_reference,
-    purge_expired_upload_sessions, read_upload_session, upload_body_integrity, upload_length,
-    upload_session_expired,
+    purge_expired_upload_sessions, read_upload_session, touch_upload_session,
+    upload_body_integrity, upload_length, upload_session_expired,
 };
 use shardline_protocol::{RepositoryProvider, RepositoryScope};
 use shardline_storage::{DeleteOutcome, ObjectKey, PutOutcome};
@@ -318,6 +318,22 @@ async fn create_upload_session_persists_metadata() {
         .expect("read_upload_session failed");
     assert_eq!(session.repository, "repo");
     assert!(!session.use_s3_multipart);
+}
+
+#[tokio::test]
+async fn oci_mutations_append_snapshot_evidence_instead_of_resetting_it() {
+    let root = temp_root();
+    let session_id = create_test_session(root.path(), false).await.unwrap();
+    let metadata_path = crate::upload_metadata_path(root.path(), &session_id);
+    let session = read_upload_session(root.path(), &session_id, ttl())
+        .await
+        .unwrap();
+    touch_upload_session(root.path(), &session_id, session)
+        .await
+        .unwrap();
+    let persisted: crate::fs::PersistedOciUploadSession =
+        serde_json::from_slice(&tokio::fs::read(&metadata_path).await.unwrap()).unwrap();
+    assert_eq!(persisted.snapshot_evidence.events().len(), 2);
 }
 
 #[tokio::test]
