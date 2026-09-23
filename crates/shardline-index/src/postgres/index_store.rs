@@ -832,6 +832,11 @@ impl AsyncIndexStore for super::PostgresIndexStore {
     ) -> IndexStoreFuture<'operation, bool, Self::Error> {
         Box::pin(async move {
             let mut transaction = self.pool.begin().await?;
+            let operation_id = format!("{}:{}:{}", provider.as_str(), owner, repo);
+            query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+                .bind(&operation_id)
+                .execute(&mut *transaction)
+                .await?;
             let current = query(
                 "SELECT provider,
                         owner,
@@ -913,6 +918,16 @@ impl UploadIntentStore for super::PostgresIndexStore {
             shardline_reliability::UploadLifecycleState::Created,
         )?;
         let mut transaction = self.pool.begin().await?;
+        query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(intent.intent_id())
+            .execute(&mut *transaction)
+            .await?;
+        let existing = query_scalar::<_, i32>(
+            "SELECT 1 FROM shardline_upload_intents WHERE intent_id = $1 FOR UPDATE",
+        )
+        .bind(intent.intent_id())
+        .fetch_optional(&mut *transaction)
+        .await?;
         let result = sqlx::query(
             "INSERT INTO shardline_upload_intents (
                 intent_id, object_key, object_hash, object_length, state, created_at, updated_at
@@ -933,6 +948,19 @@ impl UploadIntentStore for super::PostgresIndexStore {
         if result.rows_affected() == 0 {
             transaction.rollback().await?;
             return Err(crate::UploadIntentConflictError::new(intent.intent_id()).into());
+        }
+        if existing.is_none() {
+            // A previously deleted materialized row may leave legacy evidence
+            // behind. A newly created intent with the same identity starts a
+            // new lifecycle, so discard only that orphaned Upload evidence
+            // before its baseline event.
+            sqlx::query(
+                "DELETE FROM shardline_reliability_events
+                 WHERE operation_kind = 'Upload' AND operation_id = $1",
+            )
+            .bind(intent.intent_id())
+            .execute(&mut *transaction)
+            .await?;
         }
         insert_reliability_event(transaction.as_mut(), &created_event).await?;
         transaction.commit().await?;
@@ -1820,14 +1848,21 @@ mod tests {
             return;
         };
         let store = make_pg_store(pool.clone());
-        store
-            .delete_provider_repository_state(
-                RepositoryProvider::GitHub,
-                "evidence-team",
-                "tampered",
-            )
-            .await
-            .expect("clean provider evidence fixture");
+        sqlx::query(
+            "DELETE FROM shardline_provider_repository_states
+             WHERE provider = 'github' AND owner = 'evidence-team' AND repo = 'tampered'",
+        )
+        .execute(&pool)
+        .await
+        .expect("clean provider state fixture");
+        sqlx::query(
+            "DELETE FROM shardline_reliability_events
+             WHERE operation_kind = 'ProviderEvent'
+               AND operation_id = 'github:evidence-team:tampered'",
+        )
+        .execute(&pool)
+        .await
+        .expect("clean provider evidence fixture");
         let state = ProviderRepositoryState::new(
             RepositoryProvider::GitHub,
             "evidence-team".into(),
@@ -1859,14 +1894,31 @@ mod tests {
                 .await
                 .is_err()
         );
-        store
-            .delete_provider_repository_state(
-                RepositoryProvider::GitHub,
-                "evidence-team",
-                "tampered",
-            )
-            .await
-            .expect("clean provider evidence fixture");
+        assert!(
+            store
+                .delete_provider_repository_state(
+                    RepositoryProvider::GitHub,
+                    "evidence-team",
+                    "tampered",
+                )
+                .await
+                .is_err()
+        );
+        sqlx::query(
+            "DELETE FROM shardline_provider_repository_states
+             WHERE provider = 'github' AND owner = 'evidence-team' AND repo = 'tampered'",
+        )
+        .execute(&pool)
+        .await
+        .expect("clean provider state fixture");
+        sqlx::query(
+            "DELETE FROM shardline_reliability_events
+             WHERE operation_kind = 'ProviderEvent'
+               AND operation_id = 'github:evidence-team:tampered'",
+        )
+        .execute(&pool)
+        .await
+        .expect("clean provider evidence fixture");
     }
 
     #[tokio::test(flavor = "multi_thread")]

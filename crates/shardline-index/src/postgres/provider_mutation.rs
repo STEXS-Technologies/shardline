@@ -199,6 +199,11 @@ impl super::PostgresIndexStore {
             upsert_provider_repository_state(&mut transaction, state).await?;
         }
         for key in &mutation.state_deletes {
+            let operation_id = format!("{}:{}:{}", key.provider.as_str(), key.owner, key.repo);
+            query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+                .bind(&operation_id)
+                .execute(&mut *transaction)
+                .await?;
             let current = query(
                 "SELECT provider,
                         owner,
@@ -285,6 +290,16 @@ pub(super) async fn upsert_provider_repository_state(
     transaction: &mut Transaction<'_, Postgres>,
     state: &ProviderRepositoryState,
 ) -> Result<(), PostgresMetadataStoreError> {
+    let operation_id = format!(
+        "{}:{}:{}",
+        state.provider().as_str(),
+        state.owner(),
+        state.repo()
+    );
+    query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(&operation_id)
+        .execute(&mut **transaction)
+        .await?;
     let current = query(
         "SELECT provider,
                 owner,
@@ -320,12 +335,7 @@ pub(super) async fn upsert_provider_repository_state(
             "DELETE FROM shardline_reliability_events
              WHERE operation_kind = 'ProviderEvent' AND operation_id = $1",
         )
-        .bind(format!(
-            "{}:{}:{}",
-            state.provider().as_str(),
-            state.owner(),
-            state.repo()
-        ))
+        .bind(&operation_id)
         .execute(&mut **transaction)
         .await?;
         ProviderEvidenceLog::default()
@@ -723,6 +733,116 @@ mod tests {
         .fetch_one(&pool)
         .await
         .expect("delivery count");
+        assert_eq!(delivery_count, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pg_provider_mutation_rejects_tampered_delete_and_preserves_state() {
+        let Some(pool) = connect_postgres().await else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let owner = "provider-mutation-tampered-delete";
+        let repo = "repository";
+        let resource = "github:provider-mutation-tampered-delete/repository";
+        query(
+            "DELETE FROM shardline_webhook_deliveries
+             WHERE provider = 'github' AND owner = $1 AND repo = $2",
+        )
+        .bind(owner)
+        .bind(repo)
+        .execute(&pool)
+        .await
+        .expect("clean delivery fixture");
+        query(
+            "DELETE FROM shardline_provider_repository_states
+             WHERE provider = 'github' AND owner = $1 AND repo = $2",
+        )
+        .bind(owner)
+        .bind(repo)
+        .execute(&pool)
+        .await
+        .expect("clean state fixture");
+        query(
+            "DELETE FROM shardline_reliability_events
+             WHERE operation_kind = 'ProviderEvent' AND operation_id = $1",
+        )
+        .bind(format!("github:{owner}:{repo}"))
+        .execute(&pool)
+        .await
+        .expect("clean evidence fixture");
+        set_fence(&pool, resource, 71).await;
+
+        let mut seed =
+            PostgresProviderMutation::new(delivery(owner, repo, "delivery-tampered-seed"));
+        seed.upsert_provider_repository_state(ProviderRepositoryState::new(
+            RepositoryProvider::GitHub,
+            owner.to_owned(),
+            repo.to_owned(),
+            Some(100),
+            None,
+            None,
+        ));
+        let fences = [PostgresResourceFence::new(
+            ResourceLockKey::provider_repository("github", owner, repo),
+            71,
+        )];
+        let mut connection = pool.acquire().await.expect("seed connection");
+        assert_eq!(
+            super::super::PostgresIndexStore::commit_provider_mutation_on_connection(
+                &mut connection,
+                &fences,
+                &seed,
+            )
+            .await
+            .expect("seed mutation"),
+            PostgresProviderMutationOutcome::Applied
+        );
+        query(
+            "UPDATE shardline_reliability_events
+             SET event_json = '{\"sequence\": 99}'
+             WHERE operation_kind = 'ProviderEvent' AND operation_id = $1",
+        )
+        .bind(format!("github:{owner}:{repo}"))
+        .execute(&pool)
+        .await
+        .expect("tamper evidence");
+
+        let mut deletion =
+            PostgresProviderMutation::new(delivery(owner, repo, "delivery-tampered-delete"));
+        deletion.delete_provider_repository_state(ProviderRepositoryKey::new(
+            RepositoryProvider::GitHub,
+            owner.to_owned(),
+            repo.to_owned(),
+        ));
+        let result = super::super::PostgresIndexStore::commit_provider_mutation_on_connection(
+            &mut connection,
+            &fences,
+            &deletion,
+        )
+        .await;
+        assert!(result.is_err());
+
+        let state_count = query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM shardline_provider_repository_states
+             WHERE provider = 'github' AND owner = $1 AND repo = $2",
+        )
+        .bind(owner)
+        .bind(repo)
+        .fetch_one(&pool)
+        .await
+        .expect("state count");
+        let delivery_count = query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM shardline_webhook_deliveries
+             WHERE provider = 'github' AND owner = $1 AND repo = $2
+               AND delivery_id = 'delivery-tampered-delete'",
+        )
+        .bind(owner)
+        .bind(repo)
+        .fetch_one(&pool)
+        .await
+        .expect("delivery count");
+        assert_eq!(state_count, 1);
         assert_eq!(delivery_count, 0);
     }
 }

@@ -864,6 +864,11 @@ impl UploadIntentStore for super::LocalIndexStore {
                 }
             } else {
                 transaction.execute(
+                    "DELETE FROM shardline_reliability_events
+                     WHERE operation_kind = 'Upload' AND operation_id = ?1",
+                    rusqlite::params![intent.intent_id()],
+                )?;
+                transaction.execute(
                     "INSERT INTO shardline_reliability_events (operation_kind, operation_id, sequence, event_json, created_at_unix_seconds) VALUES (?1, ?2, ?3, ?4, ?5)",
                     rusqlite::params![
                         created_event.operation.kind.as_str(),
