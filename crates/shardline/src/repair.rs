@@ -183,6 +183,9 @@ pub async fn run_repair(
     let lifecycle_repair = run_server_lifecycle_repair(config.clone(), options).await?;
     if config.index_postgres_url().is_none() {
         let local_store = LocalIndexStore::open(config.root_dir().to_path_buf());
+        local_store
+            .repair_reliability_merkle_commits()
+            .map_err(ServerError::from)?;
         loop {
             let updated = local_store
                 .backfill_reliability_merkle_commits(256)

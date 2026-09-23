@@ -670,7 +670,23 @@ async fn repair_reliability_operation(
             "unknown reliability operation kind for explicit repair: {operation_kind}"
         ))
     })?;
-    if !authoritative_operation_exists(pool, operation_kind, operation_id).await? {
+    let journal_exists: bool = query_scalar(
+        "SELECT EXISTS(
+             SELECT 1 FROM shardline_reliability_events
+             WHERE operation_kind = $1 AND operation_id = $2
+         )",
+    )
+    .bind(operation_kind.as_str())
+    .bind(operation_id)
+    .fetch_one(pool)
+    .await?;
+    let authoritative_exists =
+        authoritative_operation_exists(pool, operation_kind, operation_id).await?;
+    if journal_exists && !authoritative_exists {
+        repair_persisted_merkle_operation(pool, operation_kind, operation_id).await?;
+        return verify_persisted_reliability_operation(pool, operation_kind, operation_id).await;
+    }
+    if !authoritative_exists {
         return Err(DatabaseMigrationError::Backfill(format!(
             "cannot repair reliability operation kind={} operation={}: no authoritative materialized state exists",
             operation_kind.as_str(),
@@ -705,6 +721,69 @@ async fn repair_reliability_operation(
         }
     }
     verify_persisted_reliability_operation(pool, operation_kind, operation_id).await
+}
+
+/// Rebuilds only the Merkle bodies for a journal whose materialized resource
+/// has legitimately been consumed or deleted. The event JSON remains
+/// authoritative for this explicit operator action; malformed events or
+/// sequence gaps abort the transaction without changing the journal.
+async fn repair_persisted_merkle_operation(
+    pool: &PgPool,
+    operation_kind: OperationKind,
+    operation_id: &str,
+) -> Result<(), DatabaseMigrationError> {
+    let mut transaction = pool.begin().await?;
+    let rows = query(
+        "SELECT sequence, event_json
+         FROM shardline_reliability_events
+         WHERE operation_kind = $1 AND operation_id = $2
+         ORDER BY sequence
+         FOR UPDATE",
+    )
+    .bind(operation_kind.as_str())
+    .bind(operation_id)
+    .fetch_all(&mut *transaction)
+    .await?;
+    let mut previous: Option<serde_json::Value> = None;
+    for row in rows {
+        let sequence: i64 = row.try_get("sequence")?;
+        let event_json: serde_json::Value = row.try_get("event_json")?;
+        verify_persisted_event(operation_kind, event_json.clone()).map_err(|error| {
+            DatabaseMigrationError::Backfill(format!(
+                "invalid persisted reliability event during explicit Merkle repair kind={} operation={} sequence={}: {error}",
+                operation_kind.as_str(),
+                operation_id,
+                sequence,
+            ))
+        })?;
+        let merkle_commit_json = build_persisted_merkle_commit_with_previous(
+            operation_kind,
+            event_json,
+            previous,
+        )
+        .map_err(|error| {
+            DatabaseMigrationError::Backfill(format!(
+                "cannot rebuild Merkle commit during explicit repair kind={} operation={} sequence={}: {error}",
+                operation_kind.as_str(),
+                operation_id,
+                sequence,
+            ))
+        })?;
+        query(
+            "UPDATE shardline_reliability_events
+             SET merkle_commit_json = $1
+             WHERE operation_kind = $2 AND operation_id = $3 AND sequence = $4",
+        )
+        .bind(&merkle_commit_json)
+        .bind(operation_kind.as_str())
+        .bind(operation_id)
+        .bind(sequence)
+        .execute(&mut *transaction)
+        .await?;
+        previous = Some(merkle_commit_json);
+    }
+    transaction.commit().await?;
+    Ok(())
 }
 
 async fn authoritative_operation_exists(

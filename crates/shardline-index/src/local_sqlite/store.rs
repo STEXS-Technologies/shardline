@@ -89,6 +89,16 @@ impl LocalIndexStore {
         Ok(updated)
     }
 
+    /// Rebuilds all local reliability Merkle commitments from persisted event
+    /// JSON in one explicit transactional repair operation.
+    pub fn repair_reliability_merkle_commits(&self) -> Result<usize, LocalIndexStoreError> {
+        let mut connection = self.open_connection()?;
+        let transaction = connection.transaction()?;
+        let repaired = helpers::repair_reliability_merkle_commits(&transaction)?;
+        transaction.commit()?;
+        Ok(repaired)
+    }
+
     /// Verifies all local reliability events and their persisted Merkle
     /// commitments without repairing anything.
     pub fn verify_reliability_events(&self) -> Result<(), LocalIndexStoreError> {

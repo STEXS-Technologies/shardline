@@ -211,6 +211,69 @@ pub(crate) fn backfill_reliability_merkle_commits(
     Ok(rows.len())
 }
 
+/// Rebuilds every persisted Merkle body from the authoritative reliability
+/// event JSON. This is an explicit operator repair path: it never changes the
+/// event journal or materialized state, and the transaction rolls back if any
+/// event is invalid or its linked sequence is broken.
+pub(crate) fn repair_reliability_merkle_commits(
+    transaction: &Transaction<'_>,
+) -> Result<usize, LocalIndexStoreError> {
+    let mut statement = transaction.prepare(
+        "SELECT operation_kind, operation_id, sequence, event_json
+         FROM shardline_reliability_events
+         ORDER BY operation_kind, operation_id, sequence",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, i64>(2)?,
+            row.get::<_, String>(3)?,
+        ))
+    })?;
+    let rows = rows.collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+
+    let mut previous_operation: Option<(String, String, Value)> = None;
+    let mut repaired = 0usize;
+    for (operation_kind_text, operation_id, sequence, event_json_text) in rows {
+        let operation_kind = OperationKind::parse(&operation_kind_text).ok_or_else(|| {
+            LocalIndexStoreError::Reliability(shardline_reliability::ReliabilityError::Merkle(
+                format!("unknown reliability operation kind {operation_kind_text}"),
+            ))
+        })?;
+        let event_json: Value = from_str(&event_json_text)?;
+        verify_persisted_event(operation_kind, event_json.clone()).map_err(|error| {
+            LocalIndexStoreError::Reliability(shardline_reliability::ReliabilityError::Merkle(
+                format!(
+                    "invalid persisted reliability event kind={operation_kind_text} operation={operation_id} sequence={sequence}: {error}"
+                ),
+            ))
+        })?;
+        let previous = previous_operation
+            .as_ref()
+            .filter(|(kind, id, _)| kind == &operation_kind_text && id == &operation_id)
+            .map(|(_, _, commit)| commit.clone());
+        let merkle_commit_json =
+            build_persisted_merkle_commit_with_previous(operation_kind, event_json, previous)
+                .map_err(LocalIndexStoreError::Reliability)?;
+        transaction.execute(
+            "UPDATE shardline_reliability_events
+             SET merkle_commit_json = ?1
+             WHERE operation_kind = ?2 AND operation_id = ?3 AND sequence = ?4",
+            params![
+                merkle_commit_json.to_string(),
+                operation_kind_text,
+                operation_id,
+                sequence,
+            ],
+        )?;
+        previous_operation = Some((operation_kind_text, operation_id, merkle_commit_json));
+        repaired = repaired.saturating_add(1);
+    }
+    Ok(repaired)
+}
+
 /// Verifies every local reliability event and its persisted Merkle body.
 pub(crate) fn verify_reliability_events(
     connection: &Connection,
@@ -3109,5 +3172,21 @@ mod tests {
             assert!(count > 0, "missing backfilled {operation_kind} evidence");
         }
         verify_reliability_events(&connection).expect("backfilled Merkle evidence should verify");
+
+        connection
+            .execute(
+                "UPDATE shardline_reliability_events
+                 SET merkle_commit_json = '{\"tampered\":true}'
+                 WHERE operation_kind = 'S3Object'",
+                [],
+            )
+            .unwrap();
+        assert!(verify_reliability_events(&connection).is_err());
+        let transaction = connection.transaction().unwrap();
+        let repaired = repair_reliability_merkle_commits(&transaction).unwrap();
+        transaction.commit().unwrap();
+        assert!(repaired > 0);
+        verify_reliability_events(&connection)
+            .expect("explicit Merkle repair should restore the chain");
     }
 }
