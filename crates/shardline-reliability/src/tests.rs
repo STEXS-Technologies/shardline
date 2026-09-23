@@ -118,6 +118,7 @@ fn generic_state_transition_chain_is_tamper_evident() {
     assert!(matches!(
         tampered.verify_integrity(),
         Err(ReliabilityError::ProcessDigestMismatch)
+            | Err(ReliabilityError::InvalidTransition { .. })
     ));
 }
 
@@ -325,7 +326,9 @@ fn file_backed_session_evidence_is_replayable_and_tamper_evident() {
         .after = ResumableLifecycleState::Completed;
     assert!(matches!(
         tampered.verify(),
-        Err(ReliabilityError::StateDigestMismatch) | Err(ReliabilityError::ProcessDigestMismatch)
+        Err(ReliabilityError::StateDigestMismatch)
+            | Err(ReliabilityError::ProcessDigestMismatch)
+            | Err(ReliabilityError::InvalidTransition { .. })
     ));
 }
 

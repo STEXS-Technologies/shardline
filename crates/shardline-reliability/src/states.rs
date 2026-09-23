@@ -1,5 +1,13 @@
 use serde::{Deserialize, Serialize};
 
+/// State values accepted by the unified StateChronicle/Penelope transition
+/// evidence protocol.
+pub trait EvidenceState: Copy + Eq + Serialize {
+    fn as_str(self) -> &'static str;
+
+    fn can_transition_to(self, next: Self) -> bool;
+}
+
 /// Existing Shardline lifecycle states, represented without changing their
 /// public or persisted spelling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -58,6 +66,16 @@ impl UploadLifecycleState {
     }
 }
 
+impl EvidenceState for UploadLifecycleState {
+    fn as_str(self) -> &'static str {
+        Self::as_str(self)
+    }
+
+    fn can_transition_to(self, next: Self) -> bool {
+        Self::can_transition_to(self, next)
+    }
+}
+
 /// Durable lifecycle states for LFS, OCI, and S3 resumable sessions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -112,5 +130,15 @@ impl ResumableLifecycleState {
     #[must_use]
     pub const fn is_terminal(self) -> bool {
         matches!(self, Self::Completed | Self::Aborted | Self::Expired)
+    }
+}
+
+impl EvidenceState for ResumableLifecycleState {
+    fn as_str(self) -> &'static str {
+        Self::as_str(self)
+    }
+
+    fn can_transition_to(self, next: Self) -> bool {
+        Self::can_transition_to(self, next)
     }
 }

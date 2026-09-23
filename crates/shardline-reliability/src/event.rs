@@ -5,17 +5,22 @@ use crate::digest::{
     DigestEncoding, canonical_process_digest, canonical_state_digest, legacy_state_label_digest,
     process_digest,
 };
+use crate::states::EvidenceState;
 use crate::{
     OperationIdentity, OperationKind, ReliabilityError, ResumableLifecycleState,
     UploadLifecycleState,
 };
 
+/// One canonical lifecycle evidence event, parameterized only by the owning
+/// domain's typed state. Upload intents and resumable sessions are public type
+/// aliases of this one implementation; they cannot acquire different digest
+/// or chain semantics.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct StateTransitionEvent {
+pub struct LifecycleEvidenceEvent<S: EvidenceState> {
     pub operation: OperationIdentity,
     pub sequence: u64,
-    pub before: ResumableLifecycleState,
-    pub after: ResumableLifecycleState,
+    pub before: S,
+    pub after: S,
     /// Encoding used for the authenticated digests. Missing on legacy JSON
     /// rows, which deserialize as [`DigestEncoding::LegacyJson`].
     #[serde(default)]
@@ -24,154 +29,18 @@ pub struct StateTransitionEvent {
     pub process_digest: PenelopeDigest,
 }
 
-impl StateTransitionEvent {
+/// Evidence for resumable sessions.
+pub type StateTransitionEvent = LifecycleEvidenceEvent<ResumableLifecycleState>;
+
+/// Evidence for upload intents.
+pub type LifecycleEvent = LifecycleEvidenceEvent<UploadLifecycleState>;
+
+impl<S: EvidenceState> LifecycleEvidenceEvent<S> {
     pub fn new(
         operation: OperationIdentity,
         sequence: u64,
-        before: ResumableLifecycleState,
-        after: ResumableLifecycleState,
-    ) -> Result<Self, ReliabilityError> {
-        if !before.can_transition_to(after) {
-            return Err(ReliabilityError::InvalidTransition {
-                before: before.as_str(),
-                after: after.as_str(),
-            });
-        }
-        let digest_encoding = DigestEncoding::CanonicalBcsV1;
-        let state_digest = canonical_state_digest(&after)?;
-        let process_digest = canonical_process_digest(&operation, sequence, &before, &after)?;
-        Ok(Self {
-            operation,
-            sequence,
-            before,
-            after,
-            digest_encoding,
-            state_digest,
-            process_digest,
-        })
-    }
-
-    pub fn verify_integrity(&self) -> Result<(), ReliabilityError> {
-        let expected_state = match self.digest_encoding {
-            DigestEncoding::LegacyJson => legacy_state_label_digest(self.after.as_str()),
-            DigestEncoding::CanonicalBcsV1 => canonical_state_digest(&self.after)?,
-        };
-        if self.state_digest != expected_state {
-            return Err(ReliabilityError::StateDigestMismatch);
-        }
-        let expected_process = match self.digest_encoding {
-            DigestEncoding::LegacyJson => process_digest(
-                &self.operation,
-                self.sequence,
-                &self.before.as_str(),
-                &self.after.as_str(),
-                DigestEncoding::LegacyJson,
-            )?,
-            DigestEncoding::CanonicalBcsV1 => {
-                canonical_process_digest(&self.operation, self.sequence, &self.before, &self.after)?
-            }
-        };
-        if self.process_digest != expected_process {
-            return Err(ReliabilityError::ProcessDigestMismatch);
-        }
-        Ok(())
-    }
-}
-
-pub fn verify_state_transition_chain(
-    events: &[StateTransitionEvent],
-) -> Result<(), ReliabilityError> {
-    let Some(first) = events.first() else {
-        return Ok(());
-    };
-    let operation = &first.operation;
-    let mut previous_after = None;
-    let mut previous_sequence = None;
-    for event in events {
-        event.verify_integrity()?;
-        if event.operation != *operation {
-            return Err(ReliabilityError::OperationMismatch);
-        }
-        if previous_sequence.is_some_and(|sequence| event.sequence <= sequence) {
-            return Err(ReliabilityError::SequenceRegression);
-        }
-        if let Some(previous_after) = previous_after
-            && event.before != previous_after
-        {
-            return Err(ReliabilityError::ChainDiscontinuity);
-        }
-        previous_sequence = Some(event.sequence);
-        previous_after = Some(event.after);
-    }
-    Ok(())
-}
-
-pub fn verify_state_transition_chain_ends_at(
-    events: &[StateTransitionEvent],
-    expected: ResumableLifecycleState,
-) -> Result<(), ReliabilityError> {
-    verify_state_transition_chain(events)?;
-    if events.last().is_some_and(|event| event.after == expected) {
-        Ok(())
-    } else {
-        Err(ReliabilityError::StateMismatch)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LifecycleEvent {
-    pub operation: OperationIdentity,
-    pub sequence: u64,
-    pub before: UploadLifecycleState,
-    pub after: UploadLifecycleState,
-    /// Encoding used for the authenticated digests. Missing on legacy JSON
-    /// rows, which deserialize as [`DigestEncoding::LegacyJson`].
-    #[serde(default)]
-    pub digest_encoding: DigestEncoding,
-    pub state_digest: statechronicle::ContentDigest,
-    pub process_digest: PenelopeDigest,
-}
-
-pub fn upload_lifecycle_event(
-    tenant: impl Into<String>,
-    repository: impl Into<String>,
-    operation_id: impl Into<String>,
-    object_key: impl Into<String>,
-    content_sha256: impl Into<String>,
-    before: UploadLifecycleState,
-    after: UploadLifecycleState,
-) -> Result<LifecycleEvent, ReliabilityError> {
-    let operation =
-        OperationIdentity::new(tenant, repository, operation_id, OperationKind::Upload)?
-            .with_object_key(object_key)
-            .with_content_sha256(content_sha256);
-    LifecycleEvent::new(operation, lifecycle_sequence(before, after), before, after)
-}
-
-pub fn resumable_session_event(
-    scope_namespace: impl Into<String>,
-    session_id: impl Into<String>,
-    target_key: impl Into<String>,
-    sequence: u64,
-    before: ResumableLifecycleState,
-    after: ResumableLifecycleState,
-) -> Result<StateTransitionEvent, ReliabilityError> {
-    let operation = OperationIdentity::new(
-        "resumable-session",
-        scope_namespace,
-        session_id,
-        OperationKind::ResumableSession,
-    )?
-    .with_object_key(target_key);
-    StateTransitionEvent::new(operation, sequence, before, after)
-}
-
-impl LifecycleEvent {
-    pub fn new(
-        operation: OperationIdentity,
-        sequence: u64,
-        before: UploadLifecycleState,
-        after: UploadLifecycleState,
+        before: S,
+        after: S,
     ) -> Result<Self, ReliabilityError> {
         if !before.can_transition_to(after) {
             return Err(ReliabilityError::InvalidTransition {
@@ -224,7 +93,89 @@ impl LifecycleEvent {
         }
         Ok(())
     }
+}
 
+fn verify_evidence_chain<S: EvidenceState>(
+    events: &[LifecycleEvidenceEvent<S>],
+) -> Result<(), ReliabilityError> {
+    let Some(first) = events.first() else {
+        return Ok(());
+    };
+    let operation = &first.operation;
+    let mut previous_after = None;
+    let mut previous_sequence = None;
+    for event in events {
+        event.verify_integrity()?;
+        if event.operation != *operation {
+            return Err(ReliabilityError::OperationMismatch);
+        }
+        if previous_sequence.is_some_and(|sequence| event.sequence <= sequence) {
+            return Err(ReliabilityError::SequenceRegression);
+        }
+        if let Some(previous_after) = previous_after
+            && event.before != previous_after
+        {
+            return Err(ReliabilityError::ChainDiscontinuity);
+        }
+        previous_sequence = Some(event.sequence);
+        previous_after = Some(event.after);
+    }
+    Ok(())
+}
+
+pub fn verify_state_transition_chain(
+    events: &[StateTransitionEvent],
+) -> Result<(), ReliabilityError> {
+    verify_evidence_chain(events)
+}
+
+pub fn verify_state_transition_chain_ends_at(
+    events: &[StateTransitionEvent],
+    expected: ResumableLifecycleState,
+) -> Result<(), ReliabilityError> {
+    verify_evidence_chain(events)?;
+    if events.last().is_some_and(|event| event.after == expected) {
+        Ok(())
+    } else {
+        Err(ReliabilityError::StateMismatch)
+    }
+}
+
+pub fn upload_lifecycle_event(
+    tenant: impl Into<String>,
+    repository: impl Into<String>,
+    operation_id: impl Into<String>,
+    object_key: impl Into<String>,
+    content_sha256: impl Into<String>,
+    before: UploadLifecycleState,
+    after: UploadLifecycleState,
+) -> Result<LifecycleEvent, ReliabilityError> {
+    let operation =
+        OperationIdentity::new(tenant, repository, operation_id, OperationKind::Upload)?
+            .with_object_key(object_key)
+            .with_content_sha256(content_sha256);
+    LifecycleEvent::new(operation, lifecycle_sequence(before, after), before, after)
+}
+
+pub fn resumable_session_event(
+    scope_namespace: impl Into<String>,
+    session_id: impl Into<String>,
+    target_key: impl Into<String>,
+    sequence: u64,
+    before: ResumableLifecycleState,
+    after: ResumableLifecycleState,
+) -> Result<StateTransitionEvent, ReliabilityError> {
+    let operation = OperationIdentity::new(
+        "resumable-session",
+        scope_namespace,
+        session_id,
+        OperationKind::ResumableSession,
+    )?
+    .with_object_key(target_key);
+    StateTransitionEvent::new(operation, sequence, before, after)
+}
+
+impl LifecycleEvidenceEvent<UploadLifecycleState> {
     pub fn validate_for_transition(
         &self,
         operation_id: &str,
@@ -243,27 +194,7 @@ impl LifecycleEvent {
 }
 
 pub fn verify_lifecycle_chain(events: &[LifecycleEvent]) -> Result<(), ReliabilityError> {
-    let Some(first) = events.first() else {
-        return Ok(());
-    };
-    let operation = &first.operation;
-    let mut previous = first.before;
-    let mut previous_sequence = None;
-    for event in events {
-        if &event.operation != operation {
-            return Err(ReliabilityError::OperationMismatch);
-        }
-        if previous_sequence.is_some_and(|sequence| event.sequence <= sequence) {
-            return Err(ReliabilityError::SequenceRegression);
-        }
-        if event.before != previous {
-            return Err(ReliabilityError::ChainDiscontinuity);
-        }
-        event.verify_integrity()?;
-        previous = event.after;
-        previous_sequence = Some(event.sequence);
-    }
-    Ok(())
+    verify_evidence_chain(events)
 }
 
 pub fn verify_lifecycle_chain_ends_at(

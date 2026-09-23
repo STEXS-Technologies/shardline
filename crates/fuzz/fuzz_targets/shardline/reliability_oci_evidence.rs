@@ -16,13 +16,13 @@ fn snapshot(state: OciObjectLifecycleState, deleted_at: Option<u64>) -> Option<O
 }
 
 fuzz_target!(|input: &[u8]| {
-    if let Ok(decoded) = serde_json::from_slice::<OciObjectEvidenceLog>(input) {
-        if let Some(expected) = snapshot(OciObjectLifecycleState::Published, None) {
-            drop(verify_oci_object_lifecycle_events(
-                decoded.events(),
-                &expected,
-            ));
-        }
+    if let Ok(decoded) = serde_json::from_slice::<OciObjectEvidenceLog>(input)
+        && let Some(expected) = snapshot(OciObjectLifecycleState::Published, None)
+    {
+        drop(verify_oci_object_lifecycle_events(
+            decoded.events(),
+            &expected,
+        ));
     }
 
     let Some(published) = snapshot(OciObjectLifecycleState::Published, None) else {

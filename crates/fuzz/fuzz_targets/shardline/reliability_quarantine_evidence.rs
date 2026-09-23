@@ -18,16 +18,16 @@ fn snapshot(state: QuarantineLifecycleState, length: u64) -> Option<QuarantineSn
 }
 
 fuzz_target!(|input: &[u8]| {
-    if let Ok(decoded) = serde_json::from_slice::<QuarantineEvidenceLog>(input) {
-        if let Some(expected) = snapshot(
+    if let Ok(decoded) = serde_json::from_slice::<QuarantineEvidenceLog>(input)
+        && let Some(expected) = snapshot(
             QuarantineLifecycleState::Active,
             u64::from(input.first().copied().unwrap_or_default()),
-        ) {
-            drop(verify_quarantine_lifecycle_events(
-                decoded.events(),
-                &expected,
-            ));
-        }
+        )
+    {
+        drop(verify_quarantine_lifecycle_events(
+            decoded.events(),
+            &expected,
+        ));
     }
 
     let Some(first) = snapshot(
