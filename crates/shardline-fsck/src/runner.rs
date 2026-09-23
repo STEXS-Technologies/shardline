@@ -96,14 +96,29 @@ where
     )
     .await?;
     inspect_reconstruction_index(index_store, &mut report).await?;
-    inspect_lifecycle_metadata(
+    match inspect_lifecycle_metadata(
         index_store,
         object_root,
         object_store,
         &reachability,
         &mut report,
     )
-    .await?;
+    .await
+    {
+        Ok(()) => {}
+        Err(error) => {
+            if let Some(reason) = error.reliability_reason() {
+                push_issue(
+                    &mut report,
+                    FsckIssueKind::InvalidReliabilityEvidence,
+                    "lifecycle/reliability".to_owned(),
+                    FsckIssueDetail::ReliabilityEvidenceInvalid { reason },
+                )?;
+            } else {
+                return Err(error);
+            }
+        }
+    }
 
     let elapsed = start.elapsed();
     shardline_metrics::record_fsck_run(elapsed, report.issue_count() as u64);

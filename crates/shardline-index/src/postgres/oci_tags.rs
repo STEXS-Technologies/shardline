@@ -6,6 +6,7 @@ use crate::{OciTagEntry, OciTagStore};
 use shardline_reliability::{
     OciTagEvidenceLog, OciTagLifecycleEvent, OciTagSnapshot, SnapshotEvidence,
     verify_and_append_snapshot_transition, verify_or_repair_snapshot_evidence,
+    verify_snapshot_evidence,
 };
 
 fn entry_from_row(row: &PgRow) -> Result<OciTagEntry, PostgresMetadataStoreError> {
@@ -50,6 +51,19 @@ async fn current_tag_evidence(
     let snapshot = OciTagSnapshot::new(scope_namespace, repository, tag, digest_hex)?;
     let loaded = load_tag_evidence(connection, scope_namespace, repository, tag).await?;
     Ok(verify_or_repair_snapshot_evidence(loaded, snapshot)?.0)
+}
+
+async fn verify_tag_evidence(
+    connection: &mut PgConnection,
+    scope_namespace: &str,
+    repository: &str,
+    tag: &str,
+    digest_hex: Option<String>,
+) -> Result<(), PostgresMetadataStoreError> {
+    let snapshot = OciTagSnapshot::new(scope_namespace, repository, tag, digest_hex)?;
+    let evidence = load_tag_evidence(connection, scope_namespace, repository, tag).await?;
+    verify_snapshot_evidence(&evidence, &snapshot)?;
+    Ok(())
 }
 
 async fn persist_tag_evidence(
@@ -351,14 +365,16 @@ impl OciTagStore for PostgresIndexStore {
         .as_ref()
         .map(entry_from_row)
         .transpose()?;
-        current_tag_evidence(
-            &mut transaction,
-            scope_namespace,
-            repository,
-            tag,
-            value.as_ref().map(|entry| entry.digest_hex.clone()),
-        )
-        .await?;
+        if let Some(value) = value.as_ref() {
+            verify_tag_evidence(
+                &mut transaction,
+                scope_namespace,
+                repository,
+                tag,
+                Some(value.digest_hex.clone()),
+            )
+            .await?;
+        }
         transaction.commit().await?;
         Ok(value)
     }
@@ -400,7 +416,7 @@ impl OciTagStore for PostgresIndexStore {
         };
         let values: Vec<_> = rows.iter().map(entry_from_row).collect::<Result<_, _>>()?;
         for entry in &values {
-            current_tag_evidence(
+            verify_tag_evidence(
                 &mut transaction,
                 &entry.scope_namespace,
                 &entry.repository,
@@ -433,7 +449,7 @@ impl OciTagStore for PostgresIndexStore {
         .await?;
         let values: Vec<_> = rows.iter().map(entry_from_row).collect::<Result<_, _>>()?;
         for entry in &values {
-            current_tag_evidence(
+            verify_tag_evidence(
                 &mut transaction,
                 &entry.scope_namespace,
                 &entry.repository,
@@ -501,18 +517,54 @@ mod tests {
         }
     }
 
-    async fn cleanup_evidence(pool: &sqlx::PgPool, scope: &str) {
-        let operation_id = OciTagSnapshot::new(scope, "team/assets", "latest", None)
-            .unwrap()
-            .evidence_operation()
-            .unwrap()
-            .operation_id;
+    async fn cleanup_tags(pool: &sqlx::PgPool, scope: &str) {
+        sqlx::query(
+            "WITH fixture_rows AS (
+                 SELECT t.scope_namespace, t.repository, t.tag,
+                        COALESCE(MAX(e.sequence), -1) + 1 AS next_sequence
+                 FROM shardline_oci_tags AS t
+                 LEFT JOIN shardline_reliability_events AS e
+                   ON e.operation_kind = 'OciTag'
+                  AND e.operation_id = octet_length(t.scope_namespace)::text || ':' || t.scope_namespace
+                      || octet_length(t.repository)::text || ':' || t.repository
+                      || octet_length(t.tag)::text || ':' || t.tag
+                 WHERE t.scope_namespace = $1
+                 GROUP BY t.scope_namespace, t.repository, t.tag
+             )
+             INSERT INTO shardline_reliability_events
+                 (operation_kind, operation_id, sequence, event_json, created_at_unix_seconds)
+             SELECT 'OciTag',
+                    octet_length(scope_namespace)::text || ':' || scope_namespace
+                        || octet_length(repository)::text || ':' || repository
+                        || octet_length(tag)::text || ':' || tag,
+                    next_sequence,
+                    jsonb_build_object(
+                        'after', jsonb_build_object(
+                            'scope_namespace', scope_namespace,
+                            'repository', repository,
+                            'tag', tag,
+                            'digest_hex', NULL
+                        )
+                    ),
+                    EXTRACT(EPOCH FROM now())::bigint
+             FROM fixture_rows
+             ON CONFLICT (operation_kind, operation_id, sequence) DO NOTHING",
+        )
+        .bind(scope)
+        .execute(pool)
+        .await
+        .expect("seed OCI tag deletion evidence");
+        query("DELETE FROM shardline_oci_tags WHERE scope_namespace = $1")
+            .bind(scope)
+            .execute(pool)
+            .await
+            .expect("clean OCI tag fixture");
         query(
             "DELETE FROM shardline_reliability_events
-             WHERE operation_kind = $1 AND operation_id = $2",
+             WHERE operation_kind = $1 AND operation_id LIKE $2 || '%'",
         )
         .bind(shardline_reliability::OperationKind::OciTag.as_str())
-        .bind(operation_id)
+        .bind(format!("{}:{scope}", scope.len()))
         .execute(pool)
         .await
         .expect("clean OCI tag evidence fixture");
@@ -524,12 +576,7 @@ mod tests {
             eprintln!("skipping: no DATABASE_URL");
             return;
         };
-        query("DELETE FROM shardline_oci_tags WHERE scope_namespace = $1")
-            .bind("oci-pg-cas")
-            .execute(&pool)
-            .await
-            .expect("clean OCI tag fixture");
-        cleanup_evidence(&pool, "oci-pg-cas").await;
+        cleanup_tags(&pool, "oci-pg-cas").await;
         let deleting_store = PostgresIndexStore::new(pool.clone());
         let retargeting_store = PostgresIndexStore::new(pool);
         let old = entry(&"a".repeat(64));
@@ -563,12 +610,7 @@ mod tests {
             eprintln!("skipping: no DATABASE_URL");
             return;
         };
-        query("DELETE FROM shardline_oci_tags WHERE scope_namespace = $1")
-            .bind("oci-pg-tamper")
-            .execute(&pool)
-            .await
-            .unwrap();
-        cleanup_evidence(&pool, "oci-pg-tamper").await;
+        cleanup_tags(&pool, "oci-pg-tamper").await;
         let store = PostgresIndexStore::new(pool.clone());
         let value = OciTagEntry {
             scope_namespace: "oci-pg-tamper".to_owned(),
@@ -593,30 +635,17 @@ mod tests {
                 .await
                 .is_err()
         );
+        cleanup_tags(&pool, &value.scope_namespace).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn pg_oci_tag_read_repairs_missing_baseline_evidence() {
+    async fn pg_oci_tag_read_rejects_missing_baseline_evidence_without_writing() {
         let Some(pool) = connect_postgres().await else {
             eprintln!("skipping: no DATABASE_URL");
             return;
         };
         let scope = "oci-pg-repair";
-        query("DELETE FROM shardline_oci_tags WHERE scope_namespace = $1")
-            .bind(scope)
-            .execute(&pool)
-            .await
-            .unwrap();
-        query(
-            "DELETE FROM shardline_reliability_events
-             WHERE operation_kind = $1
-               AND event_json->'operation'->>'tenant' = $2",
-        )
-        .bind(shardline_reliability::OperationKind::OciTag.as_str())
-        .bind(scope)
-        .execute(&pool)
-        .await
-        .unwrap();
+        cleanup_tags(&pool, scope).await;
         let store = PostgresIndexStore::new(pool.clone());
         let value = OciTagEntry {
             scope_namespace: scope.to_owned(),
@@ -636,12 +665,11 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(
+        assert!(
             store
                 .oci_tag(&value.scope_namespace, &value.repository, &value.tag)
                 .await
-                .unwrap(),
-            Some(value)
+                .is_err()
         );
         let count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM shardline_reliability_events
@@ -653,21 +681,7 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_eq!(count, 1);
-        query("DELETE FROM shardline_oci_tags WHERE scope_namespace = $1")
-            .bind(scope)
-            .execute(&pool)
-            .await
-            .unwrap();
-        query(
-            "DELETE FROM shardline_reliability_events
-             WHERE operation_kind = $1
-               AND event_json->'operation'->>'tenant' = $2",
-        )
-        .bind(shardline_reliability::OperationKind::OciTag.as_str())
-        .bind(scope)
-        .execute(&pool)
-        .await
-        .unwrap();
+        assert_eq!(count, 0);
+        cleanup_tags(&pool, scope).await;
     }
 }

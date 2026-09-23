@@ -657,9 +657,11 @@ mod tests {
         .expect("clean fixture");
         query(
             "DELETE FROM shardline_reliability_events
-             WHERE operation_kind = 'WebhookDelivery' AND operation_id = $1",
+             WHERE operation_kind = 'WebhookDelivery'
+               AND (operation_id = $1 OR operation_id = $2)",
         )
         .bind(webhook_operation_id(&delivery(owner, repo, delivery_id)))
+        .bind(delivery_id)
         .execute(&pool)
         .await
         .expect("clean delivery evidence fixture");
@@ -758,9 +760,11 @@ mod tests {
         .expect("clean delivery fixture");
         query(
             "DELETE FROM shardline_reliability_events
-             WHERE operation_kind = 'WebhookDelivery' AND operation_id = $1",
+             WHERE operation_kind = 'WebhookDelivery'
+               AND (operation_id = $1 OR operation_id = $2)",
         )
         .bind(webhook_operation_id(&delivery(owner, repo, delivery_id)))
+        .bind(delivery_id)
         .execute(&pool)
         .await
         .expect("clean evidence fixture");
@@ -962,13 +966,15 @@ mod tests {
         .expect("clean evidence fixture");
         query(
             "DELETE FROM shardline_reliability_events
-             WHERE operation_kind = 'WebhookDelivery' AND operation_id = $1",
+             WHERE operation_kind = 'WebhookDelivery'
+               AND (operation_id = $1 OR operation_id = $2)",
         )
         .bind(webhook_operation_id(&delivery(
             owner,
             repo,
             "delivery-tampered-seed",
         )))
+        .bind("delivery-tampered-seed")
         .execute(&pool)
         .await
         .expect("clean seed delivery evidence fixture");

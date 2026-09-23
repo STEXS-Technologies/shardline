@@ -6,6 +6,7 @@ use crate::{S3ObjectEntry, S3ObjectIndexStore};
 use shardline_reliability::{
     OperationKind, S3ObjectEvidenceLog, S3ObjectLifecycleEvent, S3ObjectSnapshot, S3ObjectState,
     SnapshotEvidence, verify_and_append_snapshot_transition, verify_or_repair_snapshot_evidence,
+    verify_snapshot_evidence,
 };
 
 fn s3_object_entry_from_row(row: &PgRow) -> Result<S3ObjectEntry, PostgresMetadataStoreError> {
@@ -97,6 +98,18 @@ async fn current_s3_object_evidence(
     let snapshot = s3_object_snapshot(scope_namespace, object_key, entry)?;
     let loaded = load_s3_object_evidence(connection, scope_namespace, object_key).await?;
     Ok(verify_or_repair_snapshot_evidence(loaded, snapshot)?.0)
+}
+
+async fn verify_s3_object_evidence(
+    connection: &mut PgConnection,
+    scope_namespace: &str,
+    object_key: &str,
+    entry: &S3ObjectEntry,
+) -> Result<(), PostgresMetadataStoreError> {
+    let snapshot = s3_object_snapshot(scope_namespace, object_key, Some(entry))?;
+    let evidence = load_s3_object_evidence(connection, scope_namespace, object_key).await?;
+    verify_snapshot_evidence(&evidence, &snapshot)?;
+    Ok(())
 }
 
 async fn persist_s3_object_evidence(
@@ -383,13 +396,9 @@ impl S3ObjectIndexStore for PostgresIndexStore {
             .map(s3_object_entry_from_row)
             .collect::<Result<Vec<_>, _>>()?
             .pop();
-        current_s3_object_evidence(
-            &mut transaction,
-            scope_namespace,
-            object_key,
-            value.as_ref(),
-        )
-        .await?;
+        if let Some(value) = value.as_ref() {
+            verify_s3_object_evidence(&mut transaction, scope_namespace, object_key, value).await?;
+        }
         transaction.commit().await?;
         Ok(value)
     }
@@ -430,6 +439,43 @@ mod tests {
     }
 
     async fn cleanup(pool: &sqlx::PgPool, scope_namespace: &str) {
+        // The production delete gate intentionally rejects raw row cleanup.
+        // Seed a valid terminal deletion boundary for each fixture row so the
+        // test cleanup exercises the same deferred-trigger contract as a real
+        // adapter mutation, including after evidence-tampering tests.
+        sqlx::query(
+            "WITH fixture_rows AS (
+                 SELECT o.scope_namespace, o.object_key,
+                        COALESCE(MAX(e.sequence), -1) + 1 AS next_sequence
+                 FROM shardline_s3_objects AS o
+                 LEFT JOIN shardline_reliability_events AS e
+                   ON e.operation_kind = 'S3Object'
+                  AND e.operation_id = octet_length(o.scope_namespace)::text || ':' || o.scope_namespace
+                      || octet_length(o.object_key)::text || ':' || o.object_key
+                 WHERE o.scope_namespace = $1
+                 GROUP BY o.scope_namespace, o.object_key
+             )
+             INSERT INTO shardline_reliability_events
+                 (operation_kind, operation_id, sequence, event_json, created_at_unix_seconds)
+             SELECT 'S3Object',
+                    octet_length(scope_namespace)::text || ':' || scope_namespace
+                        || octet_length(object_key)::text || ':' || object_key,
+                    next_sequence,
+                    jsonb_build_object(
+                        'after', jsonb_build_object(
+                            'entry', NULL,
+                            'object_key', object_key,
+                            'scope_namespace', scope_namespace
+                        )
+                    ),
+                    EXTRACT(EPOCH FROM now())::bigint
+             FROM fixture_rows
+             ON CONFLICT (operation_kind, operation_id, sequence) DO NOTHING",
+        )
+        .bind(scope_namespace)
+        .execute(pool)
+        .await
+        .expect("seed deletion evidence");
         sqlx::query("DELETE FROM shardline_s3_objects WHERE scope_namespace = $1")
             .bind(scope_namespace)
             .execute(pool)
@@ -438,10 +484,10 @@ mod tests {
         sqlx::query(
             "DELETE FROM shardline_reliability_events
              WHERE operation_kind = $1
-               AND event_json->'operation'->>'tenant' = $2",
+               AND operation_id LIKE $2 || '%'",
         )
         .bind(OperationKind::S3Object.as_str())
-        .bind(scope_namespace)
+        .bind(format!("{}:{scope_namespace}", scope_namespace.len()))
         .execute(pool)
         .await
         .expect("cleanup s3 object evidence");
@@ -647,7 +693,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn pg_s3_object_read_repairs_missing_baseline_evidence() {
+    async fn pg_s3_object_read_rejects_missing_baseline_evidence_without_writing() {
         let Some(pool) = connect_postgres().await else {
             eprintln!("skipping: no DATABASE_URL");
             return;
@@ -669,12 +715,10 @@ mod tests {
         .await
         .expect("remove evidence");
 
-        assert_eq!(
+        assert!(
             S3ObjectIndexStore::scan_s3_object_exact(&store, &scope, "repair.bin")
                 .await
-                .expect("read")
-                .as_ref(),
-            Some(&value)
+                .is_err()
         );
         let count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM shardline_reliability_events
@@ -685,8 +729,8 @@ mod tests {
         .bind(&scope)
         .fetch_one(&pool)
         .await
-        .expect("count repaired evidence");
-        assert_eq!(count, 1);
+        .expect("count evidence");
+        assert_eq!(count, 0);
         cleanup(&pool, &scope).await;
     }
 

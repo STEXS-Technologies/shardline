@@ -14,6 +14,7 @@ use crate::{
 use shardline_reliability::{
     HubRefEvidenceLog, HubRefLifecycleEvent, HubRefSnapshot, SnapshotEvidence,
     verify_and_append_snapshot_transition, verify_or_repair_snapshot_evidence,
+    verify_snapshot_evidence,
 };
 
 const fn repo_type_to_str(t: HubRepoType) -> &'static str {
@@ -64,6 +65,18 @@ async fn current_hub_ref_evidence(
     Ok(verify_or_repair_snapshot_evidence(evidence, snapshot)?.0)
 }
 
+async fn verify_hub_ref_evidence(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    repository: &str,
+    ref_name: &str,
+    head_sha: Option<String>,
+) -> Result<(), PostgresMetadataStoreError> {
+    let snapshot = HubRefSnapshot::new(repository, ref_name, head_sha)?;
+    let evidence = load_hub_ref_evidence(transaction, repository, ref_name).await?;
+    verify_snapshot_evidence(&evidence, &snapshot)?;
+    Ok(())
+}
+
 async fn persist_hub_ref_evidence(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     evidence: &HubRefEvidenceLog,
@@ -95,14 +108,13 @@ async fn verify_hub_repo_heads(
     repos: &[HubRepo],
 ) -> Result<(), PostgresMetadataStoreError> {
     for repo in repos {
-        let evidence = current_hub_ref_evidence(
+        verify_hub_ref_evidence(
             transaction,
             &repo.repo_id,
             "main",
             Some(repo.default_branch.clone()),
         )
         .await?;
-        persist_hub_ref_evidence(transaction, &evidence).await?;
     }
     Ok(())
 }
@@ -229,14 +241,13 @@ impl HubStore for PostgresIndexStore {
                     row.try_get::<i64, _>("updated_at_unix_seconds")?,
                 )?,
             };
-            let evidence = current_hub_ref_evidence(
+            verify_hub_ref_evidence(
                 &mut tx,
                 &repository.repo_id,
                 "main",
                 Some(repository.default_branch.clone()),
             )
             .await?;
-            persist_hub_ref_evidence(&mut tx, &evidence).await?;
             tx.commit().await?;
             Ok(Some(repository))
         })
@@ -486,14 +497,13 @@ impl HubStore for PostgresIndexStore {
                 refs
             };
             for reference in &refs {
-                let evidence = current_hub_ref_evidence(
+                verify_hub_ref_evidence(
                     &mut tx,
                     &reference.repo_id,
                     &reference.ref_name,
                     Some(reference.sha.clone()),
                 )
                 .await?;
-                persist_hub_ref_evidence(&mut tx, &evidence).await?;
             }
             tx.commit().await?;
             Ok(refs)
@@ -590,10 +600,7 @@ impl HubStore for PostgresIndexStore {
                 .fetch_optional(&mut *tx)
                 .await?;
                 if let Some(head) = &head {
-                    let evidence =
-                        current_hub_ref_evidence(&mut tx, &repo_id, "main", Some(head.clone()))
-                            .await?;
-                    persist_hub_ref_evidence(&mut tx, &evidence).await?;
+                    verify_hub_ref_evidence(&mut tx, &repo_id, "main", Some(head.clone())).await?;
                 }
                 tx.commit().await?;
                 return Ok(head);
@@ -621,14 +628,8 @@ impl HubStore for PostgresIndexStore {
             .fetch_optional(&mut *tx)
             .await?;
             if let Some(current_sha) = &sha {
-                let evidence = current_hub_ref_evidence(
-                    &mut tx,
-                    &repo_id,
-                    ref_name,
-                    Some(current_sha.clone()),
-                )
-                .await?;
-                persist_hub_ref_evidence(&mut tx, &evidence).await?;
+                verify_hub_ref_evidence(&mut tx, &repo_id, ref_name, Some(current_sha.clone()))
+                    .await?;
             }
             tx.commit().await?;
 
@@ -713,15 +714,29 @@ impl HubStore for PostgresIndexStore {
                     .fetch_all(&mut *tx)
                     .await?;
             for ref_name in ref_names {
-                let operation =
-                    HubRefSnapshot::new(&repo_id, &ref_name, None)?.evidence_operation()?;
-                sqlx::query(
-                    "DELETE FROM shardline_reliability_events
-                     WHERE operation_kind = 'MetadataCommit' AND operation_id = $1",
+                let current_sha: String = sqlx::query_scalar(
+                    "SELECT sha FROM shardline_hub_refs
+                     WHERE repo_id = $1 AND ref_name = $2",
                 )
-                .bind(&operation.operation_id)
-                .execute(&mut *tx)
+                .bind(&repo_id)
+                .bind(&ref_name)
+                .fetch_one(&mut *tx)
                 .await?;
+                let before = HubRefSnapshot::new(&repo_id, &ref_name, Some(current_sha.clone()))?;
+                let after = HubRefSnapshot::new(&repo_id, &ref_name, None)?;
+                let evidence = verify_and_append_snapshot_transition(
+                    current_hub_ref_evidence(&mut tx, &repo_id, &ref_name, Some(current_sha))
+                        .await?,
+                    before,
+                    after,
+                )?
+                .0;
+                persist_hub_ref_evidence(&mut tx, &evidence).await?;
+                sqlx::query("DELETE FROM shardline_hub_refs WHERE repo_id = $1 AND ref_name = $2")
+                    .bind(&repo_id)
+                    .bind(&ref_name)
+                    .execute(&mut *tx)
+                    .await?;
             }
 
             // Delete file entries for all revisions in this repo
@@ -1002,48 +1017,90 @@ mod tests {
     }
 
     async fn cleanup_repo(store: &PostgresIndexStore, repo_id: &str) {
+        // Test cleanup must satisfy the same deferred delete gate as a real
+        // mutation.  Seed a terminal evidence event for every existing ref,
+        // delete the materialized rows in that transaction, then remove the
+        // synthetic history after commit.
+        let cleanup_result = async {
+            let mut tx = store.pool().begin().await?;
+            let refs: Vec<(String, String)> = sqlx::query_as(
+                "SELECT ref_name, sha FROM shardline_hub_refs WHERE repo_id = $1",
+            )
+            .bind(repo_id)
+            .fetch_all(&mut *tx)
+            .await?;
+            for (ref_name, _sha) in &refs {
+                let operation_id = format!(
+                    "{}:{}{}:{}",
+                    repo_id.len(),
+                    repo_id,
+                    ref_name.len(),
+                    ref_name
+                );
+                let sequence: i64 = sqlx::query_scalar(
+                    "SELECT COALESCE(MAX(sequence), 0) + 1
+                     FROM shardline_reliability_events
+                     WHERE operation_kind = 'MetadataCommit' AND operation_id = $1",
+                )
+                .bind(&operation_id)
+                .fetch_one(&mut *tx)
+                .await?;
+                let event_json = serde_json::json!({
+                    "after": {
+                        "repository": repo_id,
+                        "ref_name": ref_name,
+                        "head_sha": null
+                    }
+                });
+                sqlx::query(
+                    "INSERT INTO shardline_reliability_events
+                     (operation_kind, operation_id, sequence, event_json, created_at_unix_seconds)
+                     VALUES ('MetadataCommit', $1, $2, $3, $4)",
+                )
+                .bind(&operation_id)
+                .bind(sequence)
+                .bind(event_json)
+                .bind(shardline_protocol::unix_now_seconds_lossy() as i64)
+                .execute(&mut *tx)
+                .await?;
+            }
+            sqlx::query("DELETE FROM shardline_hub_file_entries WHERE commit_sha IN (SELECT sha FROM shardline_hub_revisions WHERE repo_id = $1)")
+                .bind(repo_id)
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("DELETE FROM shardline_hub_refs WHERE repo_id = $1")
+                .bind(repo_id)
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("DELETE FROM shardline_hub_revisions WHERE repo_id = $1")
+                .bind(repo_id)
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("DELETE FROM shardline_hub_repos WHERE repo_id = $1")
+                .bind(repo_id)
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await
+        }
+        .await;
+        if let Err(e) = cleanup_result {
+            eprintln!("cleanup: failed to remove repository {repo_id}: {e}");
+        }
         if let Err(e) = sqlx::query(
             "DELETE FROM shardline_reliability_events
              WHERE operation_kind = 'MetadataCommit'
-               AND event_json->'operation'->>'repository' = $1",
+               AND operation_id LIKE $1 || '%'",
         )
-        .bind(repo_id)
+        .bind(format!("{}:{repo_id}", repo_id.len()))
         .execute(store.pool())
         .await
         {
             eprintln!("cleanup: failed to delete repository evidence for {repo_id}: {e}");
         }
-        if let Err(e) = sqlx::query("DELETE FROM shardline_hub_file_entries WHERE commit_sha IN (SELECT sha FROM shardline_hub_revisions WHERE repo_id = $1)")
-            .bind(repo_id)
-            .execute(store.pool())
-            .await
-        {
-            eprintln!("cleanup: failed to delete file entries for {repo_id}: {e}");
-        }
-        if let Err(e) = sqlx::query("DELETE FROM shardline_hub_refs WHERE repo_id = $1")
-            .bind(repo_id)
-            .execute(store.pool())
-            .await
-        {
-            eprintln!("cleanup: failed to delete refs for {repo_id}: {e}");
-        }
-        if let Err(e) = sqlx::query("DELETE FROM shardline_hub_revisions WHERE repo_id = $1")
-            .bind(repo_id)
-            .execute(store.pool())
-            .await
-        {
-            eprintln!("cleanup: failed to delete revisions for {repo_id}: {e}");
-        }
-        if let Err(e) = sqlx::query("DELETE FROM shardline_hub_repos WHERE repo_id = $1")
-            .bind(repo_id)
-            .execute(store.pool())
-            .await
-        {
-            eprintln!("cleanup: failed to delete repo {repo_id}: {e}");
-        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    #[serial(hub_postgres)]
     async fn pg_create_and_get_repo() {
         let Some(pool) = connect_postgres().await else {
             eprintln!("skipping Postgres test: no DATABASE_URL");
@@ -1068,7 +1125,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    #[serial(hub_postgres_listing)]
+    #[serial(hub_postgres)]
     async fn pg_repo_list_and_search_reject_tampered_head_evidence() {
         let Some(pool) = connect_postgres().await else {
             eprintln!("skipping Postgres test: no DATABASE_URL");
@@ -1111,6 +1168,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    #[serial(hub_postgres)]
     async fn pg_get_repo_returns_none_for_missing() {
         let Some(pool) = connect_postgres().await else {
             eprintln!("skipping Postgres test: no DATABASE_URL");
@@ -1124,6 +1182,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    #[serial(hub_postgres)]
     async fn pg_create_revision_and_resolve() {
         let Some(pool) = connect_postgres().await else {
             eprintln!("skipping Postgres test: no DATABASE_URL");
@@ -1164,6 +1223,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    #[serial(hub_postgres)]
     async fn pg_delete_ref_preserves_commit_history_and_rejects_stale_delete() {
         let Some(pool) = connect_postgres().await else {
             eprintln!("skipping Postgres test: no DATABASE_URL");
@@ -1214,6 +1274,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    #[serial(hub_postgres)]
     async fn pg_store_and_get_files() {
         let Some(pool) = connect_postgres().await else {
             eprintln!("skipping Postgres test: no DATABASE_URL");
@@ -1257,6 +1318,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    #[serial(hub_postgres)]
     async fn pg_optimistic_concurrency_rejects_stale_parent() {
         let Some(pool) = connect_postgres().await else {
             eprintln!("skipping Postgres test: no DATABASE_URL");
@@ -1287,6 +1349,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial(hub_postgres)]
     async fn pg_concurrent_ref_updates_have_exactly_one_winner() {
         let Some(pool) = connect_postgres().await else {
             eprintln!("skipping Postgres test: no DATABASE_URL");
@@ -1330,6 +1393,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial(hub_postgres)]
     async fn pg_delete_and_push_cannot_leave_a_resurrected_ref() {
         let Some(pool) = connect_postgres().await else {
             eprintln!("skipping Postgres test: no DATABASE_URL");
@@ -1381,6 +1445,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     #[serial(hub_postgres_listing)]
+    #[serial(hub_postgres)]
     async fn pg_boxed_hub_store_e2e() {
         let Some(pool) = connect_postgres().await else {
             eprintln!("skipping Postgres test: no DATABASE_URL");

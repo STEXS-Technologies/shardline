@@ -1,7 +1,7 @@
 use shardline_reliability::{
     OciObjectEvidenceLog, OciObjectIdentity, OciObjectLifecycleEvent, OciObjectLifecycleState,
     OciObjectOperationId, OciObjectSnapshot, resumable_session_event,
-    verify_and_append_snapshot_transition, verify_or_repair_snapshot_evidence,
+    verify_and_append_snapshot_transition, verify_snapshot_evidence,
 };
 use sqlx::{Connection as _, PgConnection, Row as _, query, query_scalar};
 
@@ -425,12 +425,7 @@ impl OciObjectStore for PostgresIndexStore {
                 OciObjectLifecycleState::Deleted,
                 Some(super::i64_to_u64(deleted_at)?),
             )?;
-            let (evidence, was_missing) = verify_or_repair_snapshot_evidence(evidence, expected)?;
-            if was_missing {
-                for event in evidence.events() {
-                    insert_reliability_event(transaction.as_mut(), event).await?;
-                }
-            }
+            verify_snapshot_evidence(&evidence, &expected)?;
         } else if !evidence.events().is_empty() {
             shardline_reliability::verify_oci_object_lifecycle_chain(evidence.events())?;
         }
@@ -490,12 +485,7 @@ impl OciObjectStore for PostgresIndexStore {
                 OciObjectLifecycleState::Deleted,
                 Some(tombstone.deleted_at_unix_seconds),
             )?;
-            let (evidence, was_missing) = verify_or_repair_snapshot_evidence(evidence, expected)?;
-            if was_missing {
-                for event in evidence.events() {
-                    insert_reliability_event(transaction.as_mut(), event).await?;
-                }
-            }
+            verify_snapshot_evidence(&evidence, &expected)?;
         }
         transaction.commit().await?;
         Ok(tombstones)

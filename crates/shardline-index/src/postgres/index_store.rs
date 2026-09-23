@@ -2,16 +2,14 @@ use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use shardline_protocol::{ChunkRange, RepositoryProvider, ShardlineHash};
 use shardline_reliability::{
-    EvidenceEventMetadata, LifecycleEvent, ProviderEvidenceLog, ProviderLifecycleEvent,
-    QuarantineEvidenceLog, QuarantineLifecycleEvent, QuarantineLifecycleState,
-    QuarantineObjectIdentity, QuarantineSnapshot, RetentionEvidenceLog,
-    RetentionHoldLifecycleState, RetentionHoldSnapshot, RetentionObjectIdentity, SnapshotEvidence,
-    WebhookDeliveryEvidenceLog, WebhookDeliveryIdentity, WebhookDeliveryLifecycleState,
-    WebhookDeliverySnapshot, append_or_baseline_snapshot_evidence,
+    EvidenceEventMetadata, LifecycleEvent, ProviderLifecycleEvent, QuarantineEvidenceLog,
+    QuarantineLifecycleEvent, QuarantineLifecycleState, QuarantineObjectIdentity,
+    QuarantineSnapshot, RetentionEvidenceLog, RetentionHoldLifecycleState, RetentionHoldSnapshot,
+    RetentionObjectIdentity, SnapshotEvidence, WebhookDeliveryEvidenceLog, WebhookDeliveryIdentity,
+    WebhookDeliveryLifecycleState, WebhookDeliverySnapshot, append_or_baseline_snapshot_evidence,
     baseline_upload_lifecycle_events, upload_lifecycle_event, upload_lifecycle_identity,
-    verify_and_append_snapshot_transition, verify_or_repair_snapshot_evidence,
-    verify_provider_lifecycle_events, verify_quarantine_lifecycle_events,
-    verify_retention_hold_lifecycle_events, verify_upload_lifecycle_events,
+    verify_and_append_snapshot_transition, verify_provider_lifecycle_events,
+    verify_snapshot_evidence, verify_upload_lifecycle_events,
 };
 use shardline_storage::ObjectKey;
 use sqlx::{Row, postgres::PgRow, query, query_scalar, types::Json};
@@ -107,18 +105,7 @@ async fn verify_postgres_provider_evidence(
         .into_iter()
         .map(|row| Ok(serde_json::from_value(row.try_get("event_json")?)?))
         .collect::<Result<Vec<ProviderLifecycleEvent>, PostgresMetadataStoreError>>()?;
-    if events.is_empty() {
-        let baseline = ProviderEvidenceLog::baseline(snapshot.clone())?;
-        verify_provider_lifecycle_events(baseline.events(), &snapshot)?;
-        let event = baseline.events().last().ok_or_else(|| {
-            PostgresMetadataStoreError::Reliability(
-                shardline_reliability::ReliabilityError::EmptyField("provider evidence"),
-            )
-        })?;
-        insert_reliability_event(&mut *transaction, event).await?;
-    } else {
-        verify_provider_lifecycle_events(&events, &snapshot)?;
-    }
+    verify_provider_lifecycle_events(&events, &snapshot)?;
     transaction.commit().await?;
     Ok(())
 }
@@ -506,7 +493,7 @@ impl AsyncIndexStore for super::PostgresIndexStore {
                 let snapshot = quarantine_snapshot(candidate, QuarantineLifecycleState::Active)?;
                 let evidence =
                     load_postgres_quarantine_evidence(&self.pool, object_key.as_str()).await?;
-                let (_evidence, _) = verify_or_repair_snapshot_evidence(evidence, snapshot)?;
+                verify_snapshot_evidence(&evidence, &snapshot)?;
             }
             Ok(candidate)
         })
@@ -536,7 +523,7 @@ impl AsyncIndexStore for super::PostgresIndexStore {
                 let evidence =
                     load_postgres_quarantine_evidence(&self.pool, candidate.object_key().as_str())
                         .await?;
-                let (_evidence, _) = verify_or_repair_snapshot_evidence(evidence, snapshot)?;
+                verify_snapshot_evidence(&evidence, &snapshot)?;
             }
             Ok(candidates)
         })
@@ -582,14 +569,7 @@ impl AsyncIndexStore for super::PostgresIndexStore {
                     load_postgres_quarantine_evidence(&self.pool, candidate.object_key().as_str())
                         .await
                         .map_err(Into::<VisitorError>::into)?;
-                let evidence = if evidence.events().is_empty() {
-                    QuarantineEvidenceLog::baseline(snapshot.clone())
-                        .map_err(Self::Error::from)
-                        .map_err(Into::<VisitorError>::into)?
-                } else {
-                    evidence
-                };
-                verify_quarantine_lifecycle_events(evidence.events(), &snapshot)
+                verify_snapshot_evidence(&evidence, &snapshot)
                     .map_err(Self::Error::from)
                     .map_err(Into::<VisitorError>::into)?;
                 visitor(candidate)?;
@@ -814,7 +794,7 @@ impl AsyncIndexStore for super::PostgresIndexStore {
                 let snapshot = retention_snapshot(hold, RetentionHoldLifecycleState::Active)?;
                 let evidence =
                     load_postgres_retention_evidence(&self.pool, object_key.as_str()).await?;
-                let (_evidence, _) = verify_or_repair_snapshot_evidence(evidence, snapshot)?;
+                verify_snapshot_evidence(&evidence, &snapshot)?;
             }
             Ok(hold)
         })
@@ -842,7 +822,7 @@ impl AsyncIndexStore for super::PostgresIndexStore {
                 let evidence =
                     load_postgres_retention_evidence(&self.pool, hold.object_key().as_str())
                         .await?;
-                let (_evidence, _) = verify_or_repair_snapshot_evidence(evidence, snapshot)?;
+                verify_snapshot_evidence(&evidence, &snapshot)?;
             }
             Ok(holds)
         })
@@ -881,14 +861,7 @@ impl AsyncIndexStore for super::PostgresIndexStore {
                     load_postgres_retention_evidence(&self.pool, hold.object_key().as_str())
                         .await
                         .map_err(Into::into)?;
-                let evidence = if evidence.events().is_empty() {
-                    RetentionEvidenceLog::baseline(snapshot.clone())
-                        .map_err(Self::Error::from)
-                        .map_err(Into::<VisitorError>::into)?
-                } else {
-                    evidence
-                };
-                verify_retention_hold_lifecycle_events(evidence.events(), &snapshot)
+                verify_snapshot_evidence(&evidence, &snapshot)
                     .map_err(Self::Error::from)
                     .map_err(Into::<VisitorError>::into)?;
                 visitor(hold)?;
@@ -1041,7 +1014,7 @@ impl AsyncIndexStore for super::PostgresIndexStore {
                 let snapshot =
                     webhook_snapshot(delivery, WebhookDeliveryLifecycleState::Processed)?;
                 let evidence = load_postgres_webhook_evidence(&self.pool, delivery).await?;
-                let (_evidence, _) = verify_or_repair_snapshot_evidence(evidence, snapshot)?;
+                verify_snapshot_evidence(&evidence, &snapshot)?;
             }
             Ok(deliveries)
         })
@@ -1811,7 +1784,7 @@ impl UploadIntentStore for super::PostgresIndexStore {
         .bind(operation_id)
         .fetch_all(&mut *transaction)
         .await?;
-        let mut events = rows
+        let events = rows
             .into_iter()
             .map(|row| {
                 let sequence: i64 = row.try_get("sequence")?;
@@ -1843,20 +1816,6 @@ impl UploadIntentStore for super::PostgresIndexStore {
                     ),
                 )
             })?;
-            if events.is_empty() {
-                let baseline = baseline_upload_lifecycle_events(
-                    "shardline",
-                    "default",
-                    operation_id,
-                    &object_key,
-                    &object_hash,
-                    state,
-                )?;
-                for event in &baseline {
-                    insert_reliability_event(transaction.as_mut(), event).await?;
-                }
-                events = baseline;
-            }
             let (tenant, repository) = upload_lifecycle_identity(&events);
             verify_upload_lifecycle_events(
                 &events,
@@ -2520,7 +2479,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn pg_provider_repository_state_repairs_missing_evidence_on_read() {
+    async fn pg_provider_repository_state_rejects_missing_evidence_on_read() {
         let Some(pool) = connect_postgres().await else {
             eprintln!("skipping: no DATABASE_URL");
             return;
@@ -2557,11 +2516,12 @@ mod tests {
         .await
         .expect("seed provider state without evidence");
 
-        store
-            .provider_repository_state(RepositoryProvider::GitHub, owner, repo)
-            .await
-            .expect("read repairs missing evidence")
-            .expect("seeded provider state");
+        assert!(
+            store
+                .provider_repository_state(RepositoryProvider::GitHub, owner, repo)
+                .await
+                .is_err()
+        );
         let event_count = sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) FROM shardline_reliability_events
              WHERE operation_kind = 'ProviderEvent' AND operation_id = $1",
@@ -2569,8 +2529,8 @@ mod tests {
         .bind(&operation_id)
         .fetch_one(&pool)
         .await
-        .expect("count repaired evidence");
-        assert_eq!(event_count, 1);
+        .expect("count evidence");
+        assert_eq!(event_count, 0);
 
         sqlx::query(
             "DELETE FROM shardline_provider_repository_states
@@ -2580,7 +2540,7 @@ mod tests {
         .bind(repo)
         .execute(&pool)
         .await
-        .expect("clean repaired state fixture");
+        .expect("clean state fixture");
         sqlx::query(
             "DELETE FROM shardline_reliability_events
              WHERE operation_kind = 'ProviderEvent' AND operation_id = $1",
@@ -2588,7 +2548,7 @@ mod tests {
         .bind(&operation_id)
         .execute(&pool)
         .await
-        .expect("clean repaired evidence fixture");
+        .expect("clean evidence fixture");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -2747,7 +2707,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn pg_upload_intent_read_repairs_missing_evidence_for_current_state() {
+    async fn pg_upload_intent_read_rejects_missing_evidence_without_writing() {
         let Some(pool) = connect_postgres().await else {
             eprintln!("skipping: no DATABASE_URL");
             return;
@@ -2794,21 +2754,8 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(
-            store
-                .intent_by_id(intent.intent_id())
-                .await
-                .unwrap()
-                .unwrap()
-                .state(),
-            UploadIntentState::Stored
-        );
-        let events = store.reliability_events(intent.intent_id()).await.unwrap();
-        assert_eq!(events.len(), 3);
-        assert_eq!(
-            events.last().expect("stored baseline").after,
-            UploadIntentState::Stored
-        );
+        assert!(store.intent_by_id(intent.intent_id()).await.is_err());
+        assert!(store.reliability_events(intent.intent_id()).await.is_err());
         sqlx::query("DELETE FROM shardline_upload_intents WHERE intent_id = $1")
             .bind(intent.intent_id())
             .execute(&pool)

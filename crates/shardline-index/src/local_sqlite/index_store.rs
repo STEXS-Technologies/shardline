@@ -2,10 +2,9 @@ use rusqlite::{OptionalExtension, Transaction, params};
 use shardline_protocol::{RepositoryProvider, ShardlineHash, unix_now_seconds_lossy};
 use shardline_reliability::{
     LifecycleEvent, ProviderEvidenceLog, QuarantineLifecycleState, RetentionHoldLifecycleState,
-    WebhookDeliveryLifecycleState, append_or_baseline_snapshot_evidence,
-    baseline_upload_lifecycle_events, upload_lifecycle_event, upload_lifecycle_identity,
-    verify_and_append_snapshot_transition, verify_provider_lifecycle_events,
-    verify_snapshot_evidence, verify_upload_lifecycle_events,
+    WebhookDeliveryLifecycleState, append_or_baseline_snapshot_evidence, upload_lifecycle_event,
+    upload_lifecycle_identity, verify_and_append_snapshot_transition,
+    verify_provider_lifecycle_events, verify_snapshot_evidence, verify_upload_lifecycle_events,
 };
 use shardline_storage::ObjectKey;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -45,22 +44,7 @@ fn verify_sqlite_intent_evidence(
             )
         })
     })?;
-    let mut events = rows.collect::<Result<Vec<LifecycleEvent>, _>>()?;
-    if events.is_empty() {
-        let baseline = baseline_upload_lifecycle_events(
-            "shardline",
-            "default",
-            intent.intent_id(),
-            intent.object_key(),
-            intent.object_hash(),
-            intent.state(),
-        )?;
-        let now = u64_to_i64(unix_now_seconds_lossy())?;
-        for event in &baseline {
-            super::helpers::persist_reliability_event_at(transaction, event, now)?;
-        }
-        events = baseline;
-    }
+    let events = rows.collect::<Result<Vec<LifecycleEvent>, _>>()?;
     let (tenant, repository) = upload_lifecycle_identity(&events);
     verify_upload_lifecycle_events(
         &events,
@@ -1702,7 +1686,7 @@ impl UploadIntentStore for super::LocalIndexStore {
         tokio::task::spawn_blocking(move || {
             let mut conn = store.open_connection()?;
             let transaction = conn.transaction()?;
-            let mut events = {
+            let events = {
                 let mut statement = transaction.prepare(
                     "SELECT event_json
                      FROM shardline_reliability_events
@@ -1746,21 +1730,6 @@ impl UploadIntentStore for super::LocalIndexStore {
                         ),
                     )
                 })?;
-                if events.is_empty() {
-                    let baseline = baseline_upload_lifecycle_events(
-                        "shardline",
-                        "default",
-                        &operation_id,
-                        &object_key,
-                        &object_hash,
-                        state,
-                    )?;
-                    let now = u64_to_i64(unix_now_seconds_lossy())?;
-                    for event in &baseline {
-                        super::helpers::persist_reliability_event_at(&transaction, event, now)?;
-                    }
-                    events = baseline;
-                }
                 let (tenant, repository) = upload_lifecycle_identity(&events);
                 shardline_reliability::verify_upload_lifecycle_events(
                     &events,
@@ -2771,7 +2740,7 @@ mod tests {
     }
 
     #[test]
-    fn upload_intent_read_repairs_missing_evidence_for_current_state() {
+    fn upload_intent_read_rejects_missing_evidence_without_writing() {
         let store = make_store();
         let intent = UploadIntent::new(
             "repair-upload-evidence".to_owned(),
@@ -2801,21 +2770,15 @@ mod tests {
             .unwrap();
         drop(connection);
 
-        assert_eq!(
+        assert!(
             runtime
                 .block_on(store.intent_by_id(intent.intent_id()))
-                .unwrap()
-                .unwrap()
-                .state(),
-            UploadIntentState::Stored
+                .is_err()
         );
-        let events = runtime
-            .block_on(store.reliability_events(intent.intent_id()))
-            .unwrap();
-        assert_eq!(events.len(), 3);
-        assert_eq!(
-            events.last().expect("stored baseline").after,
-            UploadIntentState::Stored
+        assert!(
+            runtime
+                .block_on(store.reliability_events(intent.intent_id()))
+                .is_err()
         );
     }
 
