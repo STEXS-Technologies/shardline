@@ -2,8 +2,8 @@ use shardline_protocol::RepositoryProvider;
 use shardline_reliability::{
     ProviderEvidenceLog, ProviderLifecycleEvent, ProviderLifecycleSnapshot, RetentionEvidenceLog,
     RetentionHoldLifecycleState, WebhookDeliveryEvidenceLog, WebhookDeliveryLifecycleState,
-    verify_provider_lifecycle_events, verify_retention_hold_lifecycle_chain,
-    verify_retention_hold_lifecycle_events, verify_webhook_delivery_chain,
+    verify_and_append_snapshot_transition, verify_or_repair_snapshot_evidence,
+    verify_provider_lifecycle_events,
 };
 use sqlx::{Acquire, PgConnection, Postgres, Row, Transaction, query, query_scalar};
 
@@ -263,34 +263,22 @@ pub(super) async fn record_webhook_delivery(
         let evidence =
             super::index_store::load_postgres_webhook_evidence(&mut **transaction, &existing)
                 .await?;
-        let evidence = if evidence.events().is_empty() {
-            WebhookDeliveryEvidenceLog::baseline(snapshot.clone())?
-        } else {
-            evidence
-        };
-        shardline_reliability::verify_webhook_delivery_events(evidence.events(), &snapshot)?;
+        let (_evidence, _) = verify_or_repair_snapshot_evidence(evidence, snapshot)?;
         return Ok(false);
     }
     let snapshot =
         super::index_store::webhook_snapshot(delivery, WebhookDeliveryLifecycleState::Processed)?;
-    let mut evidence =
+    let evidence =
         super::index_store::load_postgres_webhook_evidence(&mut **transaction, delivery).await?;
-    let evidence_was_empty = evidence.events().is_empty();
-    if evidence_was_empty {
-        evidence = WebhookDeliveryEvidenceLog::baseline(snapshot)?;
+    let (evidence, _evidence_was_empty) = if evidence.events().is_empty() {
+        (WebhookDeliveryEvidenceLog::baseline(snapshot)?, true)
     } else {
-        verify_webhook_delivery_chain(evidence.events())?;
-        if evidence
-            .events()
-            .last()
-            .is_none_or(|event| event.after.state != WebhookDeliveryLifecycleState::Released)
-        {
-            return Err(PostgresMetadataStoreError::Reliability(
-                shardline_reliability::ReliabilityError::StateMismatch,
-            ));
-        }
-        evidence.record(snapshot)?;
-    }
+        let released = super::index_store::webhook_snapshot(
+            delivery,
+            WebhookDeliveryLifecycleState::Released,
+        )?;
+        verify_and_append_snapshot_transition(evidence, released, snapshot)?
+    };
     query(
         "INSERT INTO shardline_webhook_deliveries (
             provider, owner, repo, delivery_id, processed_at_unix_seconds
@@ -326,32 +314,22 @@ pub(super) async fn upsert_retention_hold(
         .transpose()?;
     let snapshot =
         super::index_store::retention_snapshot(hold, RetentionHoldLifecycleState::Active)?;
-    let mut evidence = super::index_store::load_postgres_retention_evidence(
+    let evidence = super::index_store::load_postgres_retention_evidence(
         &mut **transaction,
         hold.object_key().as_str(),
     )
     .await?;
-    let evidence_was_empty = evidence.events().is_empty();
-    if evidence_was_empty {
-        evidence = RetentionEvidenceLog::baseline(snapshot)?;
+    let (evidence, evidence_was_empty) = if evidence.events().is_empty() {
+        (RetentionEvidenceLog::baseline(snapshot.clone())?, true)
     } else if let Some(previous) = previous.as_ref() {
         let previous_snapshot =
             super::index_store::retention_snapshot(previous, RetentionHoldLifecycleState::Active)?;
-        verify_retention_hold_lifecycle_events(evidence.events(), &previous_snapshot)?;
-        evidence.record(snapshot)?;
+        verify_and_append_snapshot_transition(evidence, previous_snapshot, snapshot.clone())?
     } else {
-        verify_retention_hold_lifecycle_chain(evidence.events())?;
-        if evidence
-            .events()
-            .last()
-            .is_none_or(|event| event.after.state != RetentionHoldLifecycleState::Released)
-        {
-            return Err(PostgresMetadataStoreError::Reliability(
-                shardline_reliability::ReliabilityError::StateMismatch,
-            ));
-        }
-        evidence.record(snapshot)?;
-    }
+        let released =
+            super::index_store::retention_snapshot(hold, RetentionHoldLifecycleState::Released)?;
+        verify_and_append_snapshot_transition(evidence, released, snapshot.clone())?
+    };
     query(
         "INSERT INTO shardline_retention_holds (
             object_key,

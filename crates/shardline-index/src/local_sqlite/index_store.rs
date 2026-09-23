@@ -3,10 +3,11 @@ use shardline_protocol::{RepositoryProvider, ShardlineHash, unix_now_seconds_los
 use shardline_reliability::{
     LifecycleEvent, ProviderEvidenceLog, QuarantineLifecycleState, RetentionEvidenceLog,
     RetentionHoldLifecycleState, WebhookDeliveryEvidenceLog, WebhookDeliveryLifecycleState,
-    baseline_upload_lifecycle_events, upload_lifecycle_event, verify_or_repair_snapshot_evidence,
+    baseline_upload_lifecycle_events, upload_lifecycle_event,
+    verify_and_append_snapshot_transition, verify_or_repair_snapshot_evidence,
     verify_provider_lifecycle_events, verify_retention_hold_lifecycle_chain,
     verify_retention_hold_lifecycle_events, verify_upload_lifecycle_events,
-    verify_webhook_delivery_chain, verify_webhook_delivery_events,
+    verify_webhook_delivery_chain,
 };
 use shardline_storage::ObjectKey;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -324,21 +325,16 @@ impl LifecycleStore for LocalIndexStore {
             params![object_key.as_str()],
         )?;
         if let Some(candidate) = candidate {
-            let snapshot = super::helpers::quarantine_snapshot(
+            let active =
+                super::helpers::quarantine_snapshot(&candidate, QuarantineLifecycleState::Active)?;
+            let released = super::helpers::quarantine_snapshot(
                 &candidate,
                 QuarantineLifecycleState::Released,
             )?;
-            let mut evidence =
+            let evidence =
                 super::helpers::load_quarantine_evidence(&transaction, object_key.as_str())?;
-            let evidence_was_empty = evidence.events().is_empty();
-            if evidence.events().is_empty() {
-                let active = super::helpers::quarantine_snapshot(
-                    &candidate,
-                    QuarantineLifecycleState::Active,
-                )?;
-                evidence = shardline_reliability::QuarantineEvidenceLog::baseline(active)?;
-            }
-            evidence.record(snapshot)?;
+            let (evidence, evidence_was_empty) =
+                verify_and_append_snapshot_transition(evidence, active, released)?;
             let event = evidence.events().last().ok_or_else(|| {
                 LocalIndexStoreError::Reliability(
                     shardline_reliability::ReliabilityError::EmptyField(
@@ -506,17 +502,10 @@ impl LifecycleStore for LocalIndexStore {
         )?;
         if let Some(hold) = hold {
             let active = retention_snapshot(&hold, RetentionHoldLifecycleState::Active)?;
-            let mut evidence = load_retention_evidence(&transaction, object_key.as_str())?;
-            let evidence_was_empty = evidence.events().is_empty();
-            if evidence_was_empty {
-                evidence = RetentionEvidenceLog::baseline(active)?;
-            } else {
-                verify_retention_hold_lifecycle_events(evidence.events(), &active)?;
-            }
-            evidence.record(retention_snapshot(
-                &hold,
-                RetentionHoldLifecycleState::Released,
-            )?)?;
+            let released = retention_snapshot(&hold, RetentionHoldLifecycleState::Released)?;
+            let evidence = load_retention_evidence(&transaction, object_key.as_str())?;
+            let (evidence, evidence_was_empty) =
+                verify_and_append_snapshot_transition(evidence, active, released)?;
             if evidence_was_empty {
                 for event in evidence.events() {
                     persist_retention_evidence(&transaction, event)?;
@@ -655,17 +644,10 @@ impl LifecycleStore for LocalIndexStore {
             return Ok(false);
         };
         let snapshot = webhook_snapshot(&existing, WebhookDeliveryLifecycleState::Processed)?;
-        let mut evidence = load_webhook_evidence(&transaction, &existing)?;
-        let evidence_was_empty = evidence.events().is_empty();
-        if evidence_was_empty {
-            evidence = WebhookDeliveryEvidenceLog::baseline(snapshot)?;
-        } else {
-            verify_webhook_delivery_events(evidence.events(), &snapshot)?;
-        }
-        evidence.record(webhook_snapshot(
-            &existing,
-            WebhookDeliveryLifecycleState::Released,
-        )?)?;
+        let released = webhook_snapshot(&existing, WebhookDeliveryLifecycleState::Released)?;
+        let evidence = load_webhook_evidence(&transaction, &existing)?;
+        let (evidence, evidence_was_empty) =
+            verify_and_append_snapshot_transition(evidence, snapshot, released)?;
         let changed = transaction.execute(
             "DELETE FROM shardline_webhook_deliveries
              WHERE provider = ?1 AND owner = ?2 AND repo = ?3 AND delivery_id = ?4",
@@ -706,17 +688,10 @@ impl LifecycleStore for LocalIndexStore {
         drop(statement);
         for delivery in &deliveries {
             let snapshot = webhook_snapshot(delivery, WebhookDeliveryLifecycleState::Processed)?;
-            let mut evidence = load_webhook_evidence(&transaction, delivery)?;
-            let evidence_was_empty = evidence.events().is_empty();
-            if evidence_was_empty {
-                evidence = WebhookDeliveryEvidenceLog::baseline(snapshot)?;
-            } else {
-                verify_webhook_delivery_events(evidence.events(), &snapshot)?;
-            }
-            evidence.record(webhook_snapshot(
-                delivery,
-                WebhookDeliveryLifecycleState::Released,
-            )?)?;
+            let released = webhook_snapshot(delivery, WebhookDeliveryLifecycleState::Released)?;
+            let evidence = load_webhook_evidence(&transaction, delivery)?;
+            let (evidence, evidence_was_empty) =
+                verify_and_append_snapshot_transition(evidence, snapshot, released)?;
             transaction.execute(
                 "DELETE FROM shardline_webhook_deliveries
                  WHERE provider = ?1 AND owner = ?2 AND repo = ?3 AND delivery_id = ?4",
