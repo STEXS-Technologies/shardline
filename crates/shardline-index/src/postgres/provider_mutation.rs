@@ -667,6 +667,14 @@ mod tests {
         .await
         .expect("clean fixture");
         query(
+            "DELETE FROM shardline_reliability_events
+             WHERE operation_kind = 'WebhookDelivery' AND operation_id = $1",
+        )
+        .bind(delivery_id)
+        .execute(&pool)
+        .await
+        .expect("clean delivery evidence fixture");
+        query(
             "DELETE FROM shardline_provider_repository_states
              WHERE provider = 'github' AND owner = $1 AND repo = $2",
         )
@@ -675,6 +683,14 @@ mod tests {
         .execute(&pool)
         .await
         .expect("clean state fixture");
+        query(
+            "DELETE FROM shardline_reliability_events
+             WHERE operation_kind = 'ProviderEvent' AND operation_id = $1",
+        )
+        .bind(format!("github:{owner}:{repo}"))
+        .execute(&pool)
+        .await
+        .expect("clean provider evidence fixture");
         set_fence(&pool, resource, 41).await;
 
         let mut mutation = PostgresProviderMutation::new(delivery(owner, repo, delivery_id));
@@ -731,6 +747,88 @@ mod tests {
         .await
         .expect("duplicate mutation");
         assert_eq!(duplicate, PostgresProviderMutationOutcome::Duplicate);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pg_webhook_delivery_reclaim_replays_evidence_and_rejects_tampering() {
+        let Some(pool) = connect_postgres().await else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let owner = "provider-webhook-evidence";
+        let repo = "repository";
+        let delivery_id = "delivery-recovery";
+        query(
+            "DELETE FROM shardline_webhook_deliveries
+             WHERE provider = 'github' AND owner = $1 AND repo = $2",
+        )
+        .bind(owner)
+        .bind(repo)
+        .execute(&pool)
+        .await
+        .expect("clean delivery fixture");
+        query(
+            "DELETE FROM shardline_reliability_events
+             WHERE operation_kind = 'WebhookDelivery' AND operation_id = $1",
+        )
+        .bind(delivery_id)
+        .execute(&pool)
+        .await
+        .expect("clean evidence fixture");
+
+        let store = super::super::PostgresIndexStore::new(pool.clone());
+        let delivery = delivery(owner, repo, delivery_id);
+        assert!(
+            crate::AsyncIndexStore::record_webhook_delivery(&store, &delivery)
+                .await
+                .expect("record delivery")
+        );
+        assert!(
+            crate::AsyncIndexStore::delete_webhook_delivery(&store, &delivery)
+                .await
+                .expect("release delivery")
+        );
+        assert!(
+            crate::AsyncIndexStore::record_webhook_delivery(&store, &delivery)
+                .await
+                .expect("reclaim delivery")
+        );
+
+        let deliveries = crate::AsyncIndexStore::list_webhook_deliveries(&store)
+            .await
+            .expect("list recovered delivery");
+        assert_eq!(
+            deliveries
+                .iter()
+                .filter(|candidate| *candidate == &delivery)
+                .count(),
+            1,
+            "the recovered fixture must be present exactly once"
+        );
+        let event_count = query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM shardline_reliability_events
+             WHERE operation_kind = 'WebhookDelivery' AND operation_id = $1",
+        )
+        .bind(delivery_id)
+        .fetch_one(&pool)
+        .await
+        .expect("evidence count");
+        assert_eq!(event_count, 3, "processed -> released -> processed chain");
+
+        query(
+            "UPDATE shardline_reliability_events
+             SET event_json = '{\"sequence\":99}'
+             WHERE operation_kind = 'WebhookDelivery' AND operation_id = $1",
+        )
+        .bind(delivery_id)
+        .execute(&pool)
+        .await
+        .expect("tamper evidence");
+        assert!(
+            crate::AsyncIndexStore::list_webhook_deliveries(&store)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -873,6 +971,14 @@ mod tests {
         .execute(&pool)
         .await
         .expect("clean evidence fixture");
+        query(
+            "DELETE FROM shardline_reliability_events
+             WHERE operation_kind = 'WebhookDelivery' AND operation_id = $1",
+        )
+        .bind("delivery-tampered-seed")
+        .execute(&pool)
+        .await
+        .expect("clean seed delivery evidence fixture");
         set_fence(&pool, resource, 71).await;
 
         let mut seed =
