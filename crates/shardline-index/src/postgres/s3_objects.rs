@@ -74,6 +74,18 @@ async fn load_s3_object_evidence(
     Ok(S3ObjectEvidenceLog::from_events(events)?)
 }
 
+async fn lock_s3_object(
+    connection: &mut PgConnection,
+    scope_namespace: &str,
+    object_key: &str,
+) -> Result<(), PostgresMetadataStoreError> {
+    query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(format!("s3-object:{scope_namespace}:{object_key}"))
+        .execute(&mut *connection)
+        .await?;
+    Ok(())
+}
+
 async fn current_s3_object_evidence(
     connection: &mut PgConnection,
     scope_namespace: &str,
@@ -99,6 +111,7 @@ async fn persist_s3_object_evidence(
     evidence: &S3ObjectEvidenceLog,
 ) -> Result<(), PostgresMetadataStoreError> {
     for event in evidence.events() {
+        event.verify_integrity()?;
         query(
             "INSERT INTO shardline_reliability_events
                 (operation_kind, operation_id, sequence, event_json, created_at_unix_seconds)
@@ -162,6 +175,7 @@ impl S3ObjectIndexStore for PostgresIndexStore {
     async fn upsert_s3_object(&self, entry: &S3ObjectEntry) -> Result<(), Self::Error> {
         let user_metadata_json = user_metadata_to_json(&entry.user_metadata)?;
         let mut transaction = self.pool.begin().await?;
+        lock_s3_object(&mut transaction, &entry.scope_namespace, &entry.object_key).await?;
         let before = current_s3_object_on_connection(
             &mut transaction,
             &entry.scope_namespace,
@@ -205,6 +219,12 @@ impl S3ObjectIndexStore for PostgresIndexStore {
     ) -> Result<bool, Self::Error> {
         let replacement_metadata = user_metadata_to_json(&replacement.user_metadata)?;
         let mut transaction = self.pool.begin().await?;
+        lock_s3_object(
+            &mut transaction,
+            &replacement.scope_namespace,
+            &replacement.object_key,
+        )
+        .await?;
         let result = if let Some(expected) = expected {
             let expected_metadata = user_metadata_to_json(&expected.user_metadata)?;
             query(
@@ -266,6 +286,7 @@ impl S3ObjectIndexStore for PostgresIndexStore {
         object_key: &str,
     ) -> Result<bool, Self::Error> {
         let mut transaction = self.pool.begin().await?;
+        lock_s3_object(&mut transaction, scope_namespace, object_key).await?;
         let before =
             current_s3_object_on_connection(&mut transaction, scope_namespace, object_key).await?;
         let result = query(
@@ -407,6 +428,16 @@ mod tests {
             .execute(pool)
             .await
             .expect("cleanup s3 object rows");
+        sqlx::query(
+            "DELETE FROM shardline_reliability_events
+             WHERE operation_kind = $1
+               AND event_json->'operation'->>'tenant' = $2",
+        )
+        .bind(OperationKind::S3Object.as_str())
+        .bind(scope_namespace)
+        .execute(pool)
+        .await
+        .expect("cleanup s3 object evidence");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -559,10 +590,11 @@ mod tests {
         query(
             "UPDATE shardline_reliability_events
              SET event_json = '{\"tampered\":true}'::jsonb
-             WHERE operation_kind = $1 AND operation_id LIKE $2",
+             WHERE operation_kind = $1
+               AND event_json->'operation'->>'tenant' = $2",
         )
         .bind(OperationKind::S3Object.as_str())
-        .bind(format!("{}:%", scope.len()))
+        .bind(&scope)
         .execute(&pool)
         .await
         .expect("tamper evidence");
@@ -573,14 +605,6 @@ mod tests {
                 .is_err()
         );
         cleanup(&pool, &scope).await;
-        query(
-            "DELETE FROM shardline_reliability_events WHERE operation_kind = $1 AND operation_id LIKE $2",
-        )
-        .bind(OperationKind::S3Object.as_str())
-        .bind(format!("{}:%", scope.len()))
-        .execute(&pool)
-        .await
-        .expect("cleanup s3 object evidence");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -597,10 +621,11 @@ mod tests {
             .expect("upsert");
         query(
             "DELETE FROM shardline_reliability_events
-             WHERE operation_kind = $1 AND operation_id LIKE $2",
+             WHERE operation_kind = $1
+               AND event_json->'operation'->>'tenant' = $2",
         )
         .bind(OperationKind::S3Object.as_str())
-        .bind(format!("{}:%", scope.len()))
+        .bind(&scope)
         .execute(&pool)
         .await
         .expect("remove evidence");
@@ -614,24 +639,16 @@ mod tests {
         );
         let count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM shardline_reliability_events
-             WHERE operation_kind = $1 AND operation_id LIKE $2",
+             WHERE operation_kind = $1
+               AND event_json->'operation'->>'tenant' = $2",
         )
         .bind(OperationKind::S3Object.as_str())
-        .bind(format!("{}:%", scope.len()))
+        .bind(&scope)
         .fetch_one(&pool)
         .await
         .expect("count repaired evidence");
         assert_eq!(count, 1);
         cleanup(&pool, &scope).await;
-        query(
-            "DELETE FROM shardline_reliability_events
-             WHERE operation_kind = $1 AND operation_id LIKE $2",
-        )
-        .bind(OperationKind::S3Object.as_str())
-        .bind(format!("{}:%", scope.len()))
-        .execute(&pool)
-        .await
-        .expect("cleanup s3 object evidence");
     }
 
     #[tokio::test(flavor = "multi_thread")]

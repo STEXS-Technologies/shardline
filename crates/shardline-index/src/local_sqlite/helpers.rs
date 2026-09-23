@@ -82,6 +82,7 @@ pub(crate) fn persist_reliability_event_at<T: EvidenceEventMetadata>(
     event: &T,
     created_at_unix_seconds: i64,
 ) -> Result<(), LocalIndexStoreError> {
+    event.verify_integrity()?;
     transaction.execute(
         "INSERT OR IGNORE INTO shardline_reliability_events
             (operation_kind, operation_id, sequence, event_json, created_at_unix_seconds)

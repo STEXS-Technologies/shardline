@@ -2375,6 +2375,39 @@ mod tests {
     }
 
     #[test]
+    fn sqlite_reliability_writer_rejects_tampered_event_before_insert() {
+        let store = make_store();
+        let mut event = upload_lifecycle_event(
+            "tenant-a",
+            "repo-a",
+            "writer-integrity",
+            "objects/integrity",
+            "a".repeat(64),
+            shardline_reliability::UploadLifecycleState::Created,
+            shardline_reliability::UploadLifecycleState::Created,
+        )
+        .unwrap();
+        event.state_digest = shardline_reliability::canonical_state_digest(&"tampered").unwrap();
+
+        let mut connection = store.open_connection().unwrap();
+        let transaction = connection.transaction().unwrap();
+        let result =
+            crate::local_sqlite::helpers::persist_reliability_event_at(&transaction, &event, 0);
+        assert!(result.is_err());
+        assert_eq!(
+            transaction
+                .query_row(
+                    "SELECT COUNT(*) FROM shardline_reliability_events
+                     WHERE operation_id = ?1",
+                    rusqlite::params!["writer-integrity"],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
     fn transition_intent_to_same_state_is_idempotent() {
         let store = make_store();
         let intent = UploadIntent::new(

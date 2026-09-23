@@ -233,7 +233,7 @@ struct AppliedMigration {
 const MIGRATION_HISTORY_TABLE: &str = "shardline_schema_migrations";
 const MIGRATION_ADVISORY_LOCK_KEY: i64 = 0x5348_4152_444d_4701;
 
-const SHARDLINE_MIGRATIONS: [DatabaseMigration; 24] = [
+const SHARDLINE_MIGRATIONS: [DatabaseMigration; 25] = [
     DatabaseMigration {
         version: "20260417000000",
         name: "metadata_store",
@@ -381,6 +381,14 @@ const SHARDLINE_MIGRATIONS: [DatabaseMigration; 24] = [
         name: "resumable_state_digest",
         up_sql: include_str!("../migrations/20260924000000_resumable_state_digest.up.sql"),
         down_sql: include_str!("../migrations/20260924000000_resumable_state_digest.down.sql"),
+    },
+    DatabaseMigration {
+        version: "20260925000000",
+        name: "reliability_event_timestamps",
+        up_sql: include_str!("../migrations/20260925000000_reliability_event_timestamps.up.sql"),
+        down_sql: include_str!(
+            "../migrations/20260925000000_reliability_event_timestamps.down.sql"
+        ),
     },
 ];
 
@@ -1601,7 +1609,7 @@ mod tests {
 
     #[test]
     fn bundled_migrations_have_expected_count() {
-        assert_eq!(bundled_database_migrations().len(), 24);
+        assert_eq!(bundled_database_migrations().len(), 25);
     }
 
     #[test]
