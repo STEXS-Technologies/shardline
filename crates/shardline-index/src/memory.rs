@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap, HashSet, hash_map::Entry},
+    collections::{BTreeMap, HashMap, HashSet},
     sync::{Arc, Mutex, MutexGuard},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -144,23 +144,32 @@ impl MemoryIndexStore {
     ) -> Result<(), MemoryIndexStoreError> {
         let key = MemoryProviderRepositoryStateKey::from_domain(state);
         let mut store = self.lock_state()?;
-        let merged = store
-            .provider_repository_states
-            .get(&key)
+        let current = store.provider_repository_states.get(&key).cloned();
+        let merged = current
+            .as_ref()
             .map_or_else(|| state.clone(), |current| current.merge_monotonic(state));
         let snapshot = snapshot_from_state(&merged)
             .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
-        let evidence = match store.provider_repository_evidence.entry(key.clone()) {
-            Entry::Occupied(entry) => entry.into_mut(),
-            Entry::Vacant(entry) => entry.insert(
-                ProviderEvidenceLog::baseline(snapshot.clone())
-                    .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?,
-            ),
+        let stored = store
+            .provider_repository_evidence
+            .get(&key)
+            .cloned()
+            .unwrap_or_default();
+        let evidence = if let Some(current) = current {
+            let before = snapshot_from_state(&current)
+                .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
+            verify_and_append_snapshot_transition(stored, before, snapshot)
+                .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?
+                .0
+        } else {
+            // Preserve the in-memory store's existing baseline-plus-first-transition
+            // event shape while routing validation through the shared policy.
+            verify_and_append_snapshot_transition(stored, snapshot.clone(), snapshot)
+                .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?
+                .0
         };
-        evidence
-            .record(snapshot)
-            .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
-        store.provider_repository_states.insert(key, merged);
+        store.provider_repository_states.insert(key.clone(), merged);
+        store.provider_repository_evidence.insert(key, evidence);
         Ok(())
     }
 

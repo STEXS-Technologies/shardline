@@ -2,8 +2,8 @@ use shardline_protocol::RepositoryProvider;
 use shardline_reliability::{
     ProviderEvidenceLog, ProviderLifecycleEvent, ProviderLifecycleSnapshot, RetentionEvidenceLog,
     RetentionHoldLifecycleState, WebhookDeliveryEvidenceLog, WebhookDeliveryLifecycleState,
-    verify_and_append_snapshot_transition, verify_or_repair_snapshot_evidence,
-    verify_provider_lifecycle_events,
+    append_or_baseline_snapshot_evidence, verify_and_append_snapshot_transition,
+    verify_or_repair_snapshot_evidence, verify_provider_lifecycle_events,
 };
 use sqlx::{Acquire, PgConnection, Postgres, Row, Transaction, query, query_scalar};
 
@@ -397,17 +397,14 @@ pub(super) async fn upsert_provider_repository_state(
     .bind(state.repo())
     .fetch_optional(&mut **transaction)
     .await?;
-    let mut evidence = if let Some(row) = current.as_ref() {
-        let current_state = super::index_store::provider_repository_state_from_row(row)?;
-        let current_snapshot = snapshot_from_state(&current_state)?;
-        let events = load_provider_evidence(transaction, &current_snapshot).await?;
-        if events.is_empty() {
-            ProviderEvidenceLog::baseline(current_snapshot)?
-        } else {
-            let log = ProviderEvidenceLog::from_events(events)?;
-            verify_provider_lifecycle_events(log.events(), &current_snapshot)?;
-            log
-        }
+    let current_snapshot = current
+        .as_ref()
+        .map(super::index_store::provider_repository_state_from_row)
+        .transpose()?
+        .map(|current_state| snapshot_from_state(&current_state))
+        .transpose()?;
+    let evidence = if let Some(snapshot) = current_snapshot.as_ref() {
+        ProviderEvidenceLog::from_events(load_provider_evidence(transaction, snapshot).await?)?
     } else {
         query(
             "DELETE FROM shardline_reliability_events
@@ -537,7 +534,12 @@ pub(super) async fn upsert_provider_repository_state(
     .fetch_one(&mut **transaction)
     .await?;
     let merged_state = super::index_store::provider_repository_state_from_row(&row)?;
-    evidence.record(snapshot_from_state(&merged_state)?)?;
+    let snapshot = snapshot_from_state(&merged_state)?;
+    let evidence = if let Some(before) = current_snapshot {
+        verify_and_append_snapshot_transition(evidence, before, snapshot)?.0
+    } else {
+        append_or_baseline_snapshot_evidence(evidence, snapshot)?
+    };
     let event = evidence.events().last().ok_or_else(|| {
         PostgresMetadataStoreError::Reliability(
             shardline_reliability::ReliabilityError::EmptyField("provider evidence"),

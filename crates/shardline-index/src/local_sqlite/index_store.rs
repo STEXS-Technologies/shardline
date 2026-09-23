@@ -3,7 +3,7 @@ use shardline_protocol::{RepositoryProvider, ShardlineHash, unix_now_seconds_los
 use shardline_reliability::{
     LifecycleEvent, ProviderEvidenceLog, QuarantineLifecycleState, RetentionEvidenceLog,
     RetentionHoldLifecycleState, WebhookDeliveryEvidenceLog, WebhookDeliveryLifecycleState,
-    baseline_upload_lifecycle_events, upload_lifecycle_event,
+    append_or_baseline_snapshot_evidence, baseline_upload_lifecycle_events, upload_lifecycle_event,
     verify_and_append_snapshot_transition, verify_or_repair_snapshot_evidence,
     verify_provider_lifecycle_events, verify_retention_hold_lifecycle_chain,
     verify_retention_hold_lifecycle_events, verify_upload_lifecycle_events,
@@ -829,15 +829,9 @@ impl LifecycleStore for LocalIndexStore {
                 super::helpers::provider_repository_state_from_row,
             )
             .optional()?;
-        let mut evidence = if let Some(current) = current.as_ref() {
-            let snapshot = snapshot_from_state(current)?;
-            let stored = super::helpers::load_provider_evidence(&transaction, &snapshot)?;
-            if stored.events().is_empty() {
-                ProviderEvidenceLog::baseline(snapshot)?
-            } else {
-                stored.verify_for(&snapshot)?;
-                stored
-            }
+        let current_snapshot = current.as_ref().map(snapshot_from_state).transpose()?;
+        let evidence = if let Some(snapshot) = current_snapshot.as_ref() {
+            super::helpers::load_provider_evidence(&transaction, snapshot)?
         } else {
             transaction.execute(
                 "DELETE FROM shardline_reliability_events
@@ -962,7 +956,11 @@ impl LifecycleStore for LocalIndexStore {
             super::helpers::provider_repository_state_from_row,
         )?;
         let snapshot = snapshot_from_state(&merged)?;
-        evidence.record(snapshot)?;
+        let evidence = if let Some(before) = current_snapshot {
+            verify_and_append_snapshot_transition(evidence, before, snapshot)?.0
+        } else {
+            append_or_baseline_snapshot_evidence(evidence, snapshot)?
+        };
         let event = evidence.events().last().ok_or_else(|| {
             LocalIndexStoreError::Reliability(shardline_reliability::ReliabilityError::EmptyField(
                 "provider evidence",
