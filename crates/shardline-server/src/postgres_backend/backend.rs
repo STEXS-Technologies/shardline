@@ -485,9 +485,20 @@ async fn transition_intent_with_reliability_event(
     if !before.can_transition_to(after) {
         return Ok(false);
     }
+    let events =
+        shardline_index::UploadIntentStore::reliability_events(store, intent.intent_id()).await?;
+    let (tenant, repository) = events
+        .first()
+        .map(|event| {
+            (
+                event.operation.tenant.as_str(),
+                event.operation.repository.as_str(),
+            )
+        })
+        .unwrap_or(("shardline", "default"));
     let event = upload_lifecycle_event(
-        "shardline",
-        "default",
+        tenant,
+        repository,
         intent.intent_id(),
         intent.object_key(),
         intent.object_hash(),
