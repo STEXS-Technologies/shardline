@@ -203,7 +203,7 @@ impl super::PostgresRecordStore {
             };
             let sequence = next_reliability_sequence(
                 transaction.as_mut(),
-                "ResumableSession",
+                shardline_reliability::OperationKind::ResumableSession,
                 fence.session_id(),
             )
             .await?;
@@ -217,10 +217,9 @@ impl super::PostgresRecordStore {
             )?;
             insert_reliability_event_json(
                 transaction.as_mut(),
-                "ResumableSession",
-                fence.session_id(),
+                &event.operation,
                 sequence,
-                to_value(event)?,
+                to_value(&event)?,
             )
             .await?;
         }

@@ -467,8 +467,7 @@ pub(super) async fn upsert_provider_repository_state(
     })?;
     super::insert_reliability_event_json(
         &mut **transaction,
-        event.operation.kind.as_str(),
-        &event.operation.operation_id,
+        &event.operation,
         event.sequence,
         serde_json::to_value(event)?,
     )
@@ -511,8 +510,7 @@ pub(super) async fn verify_provider_repository_state_evidence(
         })?;
         super::insert_reliability_event_json(
             &mut **transaction,
-            event.operation.kind.as_str(),
-            &event.operation.operation_id,
+            &event.operation,
             event.sequence,
             serde_json::to_value(event)?,
         )

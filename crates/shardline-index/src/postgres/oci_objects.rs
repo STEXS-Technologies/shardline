@@ -84,8 +84,7 @@ async fn record_oci_evidence(
         for stored_event in evidence.events() {
             insert_reliability_event_json(
                 &mut *executor,
-                stored_event.operation.kind.as_str(),
-                &stored_event.operation.operation_id,
+                &stored_event.operation,
                 stored_event.sequence,
                 to_value(stored_event)?,
             )
@@ -93,14 +92,8 @@ async fn record_oci_evidence(
         }
         Ok(())
     } else {
-        insert_reliability_event_json(
-            executor,
-            event.operation.kind.as_str(),
-            &event.operation.operation_id,
-            event.sequence,
-            to_value(event)?,
-        )
-        .await
+        insert_reliability_event_json(executor, &event.operation, event.sequence, to_value(event)?)
+            .await
     }
 }
 use crate::{
@@ -253,9 +246,12 @@ impl PostgresIndexStore {
             transaction.rollback().await?;
             return Ok(false);
         }
-        let sequence =
-            next_reliability_sequence(transaction.as_mut(), "ResumableSession", fence.session_id())
-                .await?;
+        let sequence = next_reliability_sequence(
+            transaction.as_mut(),
+            shardline_reliability::OperationKind::ResumableSession,
+            fence.session_id(),
+        )
+        .await?;
         let event = resumable_session_event(
             scope_namespace,
             fence.session_id(),
@@ -266,10 +262,9 @@ impl PostgresIndexStore {
         )?;
         insert_reliability_event_json(
             transaction.as_mut(),
-            "ResumableSession",
-            fence.session_id(),
+            &event.operation,
             sequence,
-            to_value(event)?,
+            to_value(&event)?,
         )
         .await?;
         transaction.commit().await?;
@@ -395,8 +390,7 @@ impl OciObjectStore for PostgresIndexStore {
                 for event in baseline.events() {
                     insert_reliability_event_json(
                         transaction.as_mut(),
-                        event.operation.kind.as_str(),
-                        &event.operation.operation_id,
+                        &event.operation,
                         event.sequence,
                         to_value(event)?,
                     )
@@ -470,8 +464,7 @@ impl OciObjectStore for PostgresIndexStore {
                 for event in baseline.events() {
                     insert_reliability_event_json(
                         transaction.as_mut(),
-                        event.operation.kind.as_str(),
-                        &event.operation.operation_id,
+                        &event.operation,
                         event.sequence,
                         to_value(event)?,
                     )

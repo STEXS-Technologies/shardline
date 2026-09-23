@@ -72,8 +72,7 @@ async fn verify_postgres_provider_evidence(
         })?;
         insert_reliability_event_json(
             &mut *transaction,
-            event.operation.kind.as_str(),
-            &event.operation.operation_id,
+            &event.operation,
             event.sequence,
             serde_json::to_value(event)?,
         )
@@ -499,8 +498,7 @@ impl AsyncIndexStore for super::PostgresIndexStore {
             })?;
             insert_reliability_event_json(
                 &mut *transaction,
-                event.operation.kind.as_str(),
-                &event.operation.operation_id,
+                &event.operation,
                 event.sequence,
                 serde_json::to_value(event)?,
             )
@@ -553,8 +551,7 @@ impl AsyncIndexStore for super::PostgresIndexStore {
                     for stored_event in evidence.events() {
                         insert_reliability_event_json(
                             &mut *transaction,
-                            stored_event.operation.kind.as_str(),
-                            &stored_event.operation.operation_id,
+                            &stored_event.operation,
                             stored_event.sequence,
                             serde_json::to_value(stored_event)?,
                         )
@@ -563,8 +560,7 @@ impl AsyncIndexStore for super::PostgresIndexStore {
                 } else {
                     insert_reliability_event_json(
                         &mut *transaction,
-                        event.operation.kind.as_str(),
-                        &event.operation.operation_id,
+                        &event.operation,
                         event.sequence,
                         serde_json::to_value(event)?,
                     )
@@ -1399,8 +1395,7 @@ where
     event.verify_integrity()?;
     insert_reliability_event_json(
         executor,
-        event.operation.kind.as_str(),
-        &event.operation.operation_id,
+        &event.operation,
         event.sequence,
         serde_json::to_value(event)?,
     )
@@ -1409,8 +1404,7 @@ where
 
 pub(crate) async fn insert_reliability_event_json<'executor, E>(
     executor: E,
-    operation_kind: &str,
-    operation_id: &str,
+    operation: &shardline_reliability::OperationIdentity,
     event_sequence: u64,
     event_json: serde_json::Value,
 ) -> Result<(), PostgresMetadataStoreError>
@@ -1428,15 +1422,15 @@ where
          WHERE shardline_reliability_events.event_json = EXCLUDED.event_json
          RETURNING event_json",
     )
-    .bind(operation_kind)
-    .bind(operation_id)
+    .bind(operation.kind.as_str())
+    .bind(&operation.operation_id)
     .bind(sequence)
     .bind(event_json)
     .fetch_optional(executor)
     .await?;
     if row.is_none() {
         return Err(PostgresMetadataStoreError::ReliabilityEventConflict(
-            operation_id.to_owned(),
+            operation.operation_id.clone(),
         ));
     }
     Ok(())
@@ -1444,7 +1438,7 @@ where
 
 pub(crate) async fn next_reliability_sequence<'executor, E>(
     executor: E,
-    operation_kind: &str,
+    operation_kind: shardline_reliability::OperationKind,
     operation_id: &str,
 ) -> Result<u64, PostgresMetadataStoreError>
 where
@@ -1455,7 +1449,7 @@ where
          FROM shardline_reliability_events
          WHERE operation_kind = $1 AND operation_id = $2",
     )
-    .bind(operation_kind)
+    .bind(operation_kind.as_str())
     .bind(operation_id)
     .fetch_one(executor)
     .await?;

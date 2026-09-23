@@ -284,7 +284,7 @@ impl PostgresIndexStore {
             .await?;
             let sequence = next_reliability_sequence(
                 transaction.as_mut(),
-                "ResumableSession",
+                shardline_reliability::OperationKind::ResumableSession,
                 session.session_id(),
             )
             .await?;
@@ -298,10 +298,9 @@ impl PostgresIndexStore {
             )?;
             insert_reliability_event_json(
                 transaction.as_mut(),
-                "ResumableSession",
-                session.session_id(),
+                &event.operation,
                 sequence,
-                to_value(event)?,
+                to_value(&event)?,
             )
             .await?;
             transaction.commit().await?;
@@ -358,7 +357,7 @@ impl PostgresIndexStore {
         }
         let sequence = next_reliability_sequence(
             transaction.as_mut(),
-            "ResumableSession",
+            shardline_reliability::OperationKind::ResumableSession,
             session.session_id(),
         )
         .await?;
@@ -372,10 +371,9 @@ impl PostgresIndexStore {
         )?;
         insert_reliability_event_json(
             transaction.as_mut(),
-            "ResumableSession",
-            session.session_id(),
+            &event.operation,
             sequence,
-            to_value(event)?,
+            to_value(&event)?,
         )
         .await?;
         transaction.commit().await?;
@@ -439,7 +437,7 @@ impl PostgresIndexStore {
         if created {
             let sequence = next_reliability_sequence(
                 transaction.as_mut(),
-                "ResumableSession",
+                shardline_reliability::OperationKind::ResumableSession,
                 session.session_id(),
             )
             .await?;
@@ -453,10 +451,9 @@ impl PostgresIndexStore {
             )?;
             insert_reliability_event_json(
                 transaction.as_mut(),
-                "ResumableSession",
-                session.session_id(),
+                &event.operation,
                 sequence,
-                to_value(event)?,
+                to_value(&event)?,
             )
             .await?;
         }
@@ -557,8 +554,7 @@ impl PostgresIndexStore {
                 for event in &baseline {
                     insert_reliability_event_json(
                         transaction.as_mut(),
-                        "ResumableSession",
-                        session_id,
+                        &event.operation,
                         event.sequence,
                         to_value(event)?,
                     )
@@ -672,8 +668,12 @@ impl PostgresIndexStore {
         .bind(session_id)
         .fetch_one(&mut *transaction)
         .await?;
-        let sequence =
-            next_reliability_sequence(transaction.as_mut(), "ResumableSession", session_id).await?;
+        let sequence = next_reliability_sequence(
+            transaction.as_mut(),
+            shardline_reliability::OperationKind::ResumableSession,
+            session_id,
+        )
+        .await?;
         let event = resumable_session_event(
             identity.try_get::<String, _>("scope_namespace")?,
             session_id,
@@ -684,10 +684,9 @@ impl PostgresIndexStore {
         )?;
         insert_reliability_event_json(
             transaction.as_mut(),
-            "ResumableSession",
-            session_id,
+            &event.operation,
             sequence,
-            to_value(event)?,
+            to_value(&event)?,
         )
         .await?;
         transaction.commit().await?;
@@ -830,8 +829,12 @@ impl PostgresIndexStore {
         .bind(session_id)
         .fetch_one(&mut *transaction)
         .await?;
-        let sequence =
-            next_reliability_sequence(transaction.as_mut(), "ResumableSession", session_id).await?;
+        let sequence = next_reliability_sequence(
+            transaction.as_mut(),
+            shardline_reliability::OperationKind::ResumableSession,
+            session_id,
+        )
+        .await?;
         let event = resumable_session_event(
             identity.try_get::<String, _>("scope_namespace")?,
             session_id,
@@ -842,10 +845,9 @@ impl PostgresIndexStore {
         )?;
         insert_reliability_event_json(
             transaction.as_mut(),
-            "ResumableSession",
-            session_id,
+            &event.operation,
             sequence,
-            to_value(event)?,
+            to_value(&event)?,
         )
         .await?;
         transaction.commit().await?;
@@ -906,8 +908,12 @@ impl PostgresIndexStore {
         };
         let session = session_from_row(&row)?;
         let parts = parts_on_transaction(&mut transaction, session_id).await?;
-        let sequence =
-            next_reliability_sequence(transaction.as_mut(), "ResumableSession", session_id).await?;
+        let sequence = next_reliability_sequence(
+            transaction.as_mut(),
+            shardline_reliability::OperationKind::ResumableSession,
+            session_id,
+        )
+        .await?;
         let event = resumable_session_event(
             session.scope_namespace(),
             session.session_id(),
@@ -918,10 +924,9 @@ impl PostgresIndexStore {
         )?;
         insert_reliability_event_json(
             transaction.as_mut(),
-            "ResumableSession",
-            session_id,
+            &event.operation,
             sequence,
-            to_value(event)?,
+            to_value(&event)?,
         )
         .await?;
         transaction.commit().await?;
@@ -969,8 +974,12 @@ impl PostgresIndexStore {
         .await?;
         let scope_namespace: String = row.try_get("scope_namespace")?;
         let target_key: String = row.try_get("target_key")?;
-        let sequence =
-            next_reliability_sequence(transaction.as_mut(), "ResumableSession", session_id).await?;
+        let sequence = next_reliability_sequence(
+            transaction.as_mut(),
+            shardline_reliability::OperationKind::ResumableSession,
+            session_id,
+        )
+        .await?;
         let event = resumable_session_event(
             scope_namespace,
             session_id,
@@ -981,10 +990,9 @@ impl PostgresIndexStore {
         )?;
         insert_reliability_event_json(
             transaction.as_mut(),
-            "ResumableSession",
-            session_id,
+            &event.operation,
             sequence,
-            to_value(event)?,
+            to_value(&event)?,
         )
         .await?;
         transaction.commit().await?;
@@ -1034,9 +1042,12 @@ impl PostgresIndexStore {
             .bind(&session_id)
             .execute(&mut *transaction)
             .await?;
-            let sequence =
-                next_reliability_sequence(transaction.as_mut(), "ResumableSession", &session_id)
-                    .await?;
+            let sequence = next_reliability_sequence(
+                transaction.as_mut(),
+                shardline_reliability::OperationKind::ResumableSession,
+                &session_id,
+            )
+            .await?;
             let event = resumable_session_event(
                 scope_namespace,
                 &session_id,
@@ -1047,10 +1058,9 @@ impl PostgresIndexStore {
             )?;
             insert_reliability_event_json(
                 transaction.as_mut(),
-                "ResumableSession",
-                &session_id,
+                &event.operation,
                 sequence,
-                to_value(event)?,
+                to_value(&event)?,
             )
             .await?;
             expired.push(session_id);
