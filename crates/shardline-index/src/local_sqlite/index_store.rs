@@ -317,6 +317,13 @@ impl LifecycleStore for LocalIndexStore {
             )?;
             let mut evidence =
                 super::helpers::load_quarantine_evidence(&transaction, object_key.as_str())?;
+            if evidence.events().is_empty() {
+                let active = super::helpers::quarantine_snapshot(
+                    &candidate,
+                    QuarantineLifecycleState::Active,
+                )?;
+                evidence = shardline_reliability::QuarantineEvidenceLog::baseline(active)?;
+            }
             evidence.record(snapshot)?;
             let event = evidence.events().last().ok_or_else(|| {
                 LocalIndexStoreError::Reliability(

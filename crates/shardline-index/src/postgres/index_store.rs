@@ -497,6 +497,10 @@ impl AsyncIndexStore for super::PostgresIndexStore {
                 let mut evidence =
                     load_postgres_quarantine_evidence(&mut *transaction, object_key.as_str())
                         .await?;
+                if evidence.events().is_empty() {
+                    let active = quarantine_snapshot(&candidate, QuarantineLifecycleState::Active)?;
+                    evidence = QuarantineEvidenceLog::baseline(active)?;
+                }
                 evidence.record(snapshot)?;
                 let event = evidence.events().last().ok_or_else(|| {
                     PostgresMetadataStoreError::Reliability(
