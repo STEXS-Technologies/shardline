@@ -321,7 +321,7 @@ async fn create_upload_session_persists_metadata() {
 }
 
 #[tokio::test]
-async fn read_upload_session_repairs_missing_canonical_evidence() {
+async fn read_upload_session_does_not_write_missing_canonical_evidence() {
     let root = temp_root();
     let session_id = create_test_session(root.path(), false).await.unwrap();
     let metadata_path = crate::upload_metadata_path(root.path(), &session_id);
@@ -338,11 +338,11 @@ async fn read_upload_session_repairs_missing_canonical_evidence() {
 
     read_upload_session(root.path(), &session_id, ttl())
         .await
-        .expect("legacy session should be repaired");
-    let repaired: crate::fs::PersistedOciUploadSession =
+        .expect("legacy session should remain readable");
+    let unchanged: serde_json::Value =
         serde_json::from_slice(&tokio::fs::read(&metadata_path).await.unwrap()).unwrap();
-    assert_eq!(repaired.evidence.events().len(), 1);
-    assert_eq!(repaired.snapshot_evidence.events().len(), 1);
+    assert!(unchanged.get("evidence").is_none());
+    assert!(unchanged.get("snapshot_evidence").is_none());
 }
 
 #[tokio::test]

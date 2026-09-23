@@ -1,6 +1,6 @@
 use futures_util::TryStreamExt;
 use serde_json::from_value;
-use sqlx::Row;
+use sqlx::{Row, query_scalar};
 
 use shardline_protocol::SecretString;
 
@@ -68,7 +68,23 @@ async fn persist_hub_ref_evidence(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     evidence: &HubRefEvidenceLog,
 ) -> Result<(), PostgresMetadataStoreError> {
+    let Some(first) = evidence.events().first() else {
+        return Ok(());
+    };
+    let persisted_sequence: Option<i64> = query_scalar(
+        "SELECT MAX(sequence)
+         FROM shardline_reliability_events
+         WHERE operation_kind = $1 AND operation_id = $2",
+    )
+    .bind(first.operation.kind.as_str())
+    .bind(&first.operation.operation_id)
+    .fetch_one(&mut **transaction)
+    .await?;
+    let persisted_sequence = persisted_sequence.unwrap_or(-1);
     for event in evidence.events() {
+        if u64_to_i64(event.sequence)? <= persisted_sequence {
+            continue;
+        }
         crate::postgres::insert_reliability_event(&mut **transaction, event).await?;
     }
     Ok(())

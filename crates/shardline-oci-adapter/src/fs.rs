@@ -8,7 +8,7 @@ use shardline_reliability::{
     DigestSnapshot, ResumableSessionSnapshotDomain, SessionEvidenceLog, SnapshotEvidenceLog,
     append_or_baseline_snapshot_evidence, canonical_state_digest,
     resumable_session_snapshot_identity, verify_and_append_session_transition,
-    verify_or_repair_session_evidence, verify_or_repair_snapshot_evidence,
+    verify_session_evidence, verify_snapshot_evidence,
 };
 #[cfg(unix)]
 use shardline_storage::{
@@ -190,26 +190,32 @@ async fn read_persisted_upload_session_with_snapshot(
                 )
             }
         };
-    let (evidence, evidence_was_missing) = verify_or_repair_session_evidence(
-        stored_evidence,
-        &session.scope_namespace,
-        session_id,
-        &session.repository,
-    )
-    .map_err(|error| OciAdapterError::Reliability(error.to_string()))?;
-    let snapshot = session_snapshot(session_id, &session)?;
-    let (snapshot_evidence, snapshot_evidence_was_missing) =
-        verify_or_repair_snapshot_evidence(stored_snapshot_evidence, snapshot)
-            .map_err(|error| OciAdapterError::Reliability(error.to_string()))?;
-    if evidence_was_missing || snapshot_evidence_was_missing {
-        let repaired_bytes = serde_json::to_vec(&PersistedOciUploadSession {
-            session: session.clone(),
-            evidence: evidence.clone(),
-            snapshot_evidence: snapshot_evidence.clone(),
-        })
+    let evidence = if stored_evidence.is_empty() {
+        SessionEvidenceLog::for_legacy_session(
+            &session.scope_namespace,
+            session_id,
+            &session.repository,
+        )
+        .map_err(|error| OciAdapterError::Reliability(error.to_string()))?
+    } else {
+        verify_session_evidence(
+            &stored_evidence,
+            &session.scope_namespace,
+            session_id,
+            &session.repository,
+        )
         .map_err(|error| OciAdapterError::Reliability(error.to_string()))?;
-        write_upload_metadata(root, session_id, repaired_bytes).await?;
-    }
+        stored_evidence
+    };
+    let snapshot = session_snapshot(session_id, &session)?;
+    let snapshot_evidence = if stored_snapshot_evidence.events().is_empty() {
+        SnapshotEvidenceLog::baseline(snapshot.clone())
+            .map_err(|error| OciAdapterError::Reliability(error.to_string()))?
+    } else {
+        verify_snapshot_evidence(&stored_snapshot_evidence, &snapshot)
+            .map_err(|error| OciAdapterError::Reliability(error.to_string()))?;
+        stored_snapshot_evidence
+    };
     Ok((session, evidence, snapshot_evidence))
 }
 

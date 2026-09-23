@@ -44,14 +44,6 @@ pub enum DatabaseMigrationBoundary {
     AfterRevertCommit,
 }
 
-#[cfg(not(test))]
-#[allow(clippy::unnecessary_wraps)]
-const fn database_migration_failpoint(
-    _boundary: DatabaseMigrationBoundary,
-) -> Result<(), DatabaseMigrationError> {
-    Ok(())
-}
-
 #[cfg(test)]
 fn database_migration_failpoint(
     boundary: DatabaseMigrationBoundary,
@@ -246,8 +238,24 @@ const MIGRATION_ADVISORY_LOCK_KEY: i64 = 0x5348_4152_444d_4701;
 // history rows; they remain accepted as retired compatibility markers and are
 // never re-run or selected for rollback.
 const RETIRED_MIGRATION_VERSIONS: &[&str] = &["20260923000000", "20260925000000"];
+// The reliability migration was squashed before release. Keep the checksum
+// written by the pre-squash development database valid so an operator can
+// upgrade that database normally instead of editing migration history.
+const LEGACY_MIGRATION_CHECKSUM_ALIASES: &[(&str, &str)] = &[
+    (
+        "20260922000000",
+        "f47296d3478e4b9b6026eae9006e767a527ce01d5ebff56ed37514eb500ef0a0",
+    ),
+    (
+        // Development databases may have applied the initial gate SQL before
+        // the migration was finalized. Accept that exact historical checksum;
+        // all new installations record the bundled migration checksum.
+        "20260926000000",
+        "08c0ccd56dc6e1d1c687701127c9677e410c7af6f8dd47ce90d887b4e8177efa",
+    ),
+];
 
-const SHARDLINE_MIGRATIONS: [DatabaseMigration; 23] = [
+const SHARDLINE_MIGRATIONS: [DatabaseMigration; 25] = [
     DatabaseMigration {
         version: "20260417000000",
         name: "metadata_store",
@@ -389,6 +397,22 @@ const SHARDLINE_MIGRATIONS: [DatabaseMigration; 23] = [
         name: "resumable_state_digest",
         up_sql: include_str!("../migrations/20260924000000_resumable_state_digest.up.sql"),
         down_sql: include_str!("../migrations/20260924000000_resumable_state_digest.down.sql"),
+    },
+    DatabaseMigration {
+        version: "20260926000000",
+        name: "reliability_write_gates",
+        up_sql: include_str!("../migrations/20260926000000_reliability_write_gates.up.sql"),
+        down_sql: include_str!("../migrations/20260926000000_reliability_write_gates.down.sql"),
+    },
+    DatabaseMigration {
+        version: "20260927000000",
+        name: "reliability_events_schema_compat",
+        up_sql: include_str!(
+            "../migrations/20260927000000_reliability_events_schema_compat.up.sql"
+        ),
+        down_sql: include_str!(
+            "../migrations/20260927000000_reliability_events_schema_compat.down.sql"
+        ),
     },
 ];
 
@@ -535,10 +559,14 @@ async fn persist_reliability_event<T: EvidenceEventMetadata>(
     )
     .bind(event.operation_identity().kind.as_str())
     .bind(&event.operation_identity().operation_id)
-    .bind(
-        i64::try_from(event.sequence_number())
-            .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?,
-    )
+    .bind(i64::try_from(event.sequence_number()).map_err(|error| {
+        DatabaseMigrationError::Backfill(format!(
+            "reliability event sequence out of range kind={} operation={} sequence={}: {error}",
+            event.operation_identity().kind.as_str(),
+            event.operation_identity().operation_id,
+            event.sequence_number(),
+        ))
+    })?)
     .bind(to_value(event).map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?)
     .bind(unix_now_seconds_lossy() as i64)
     .execute(&mut **transaction)
@@ -586,11 +614,16 @@ async fn reconcile_reliability_events(
     if !required_tables_exist {
         return Ok(());
     }
-    let batch_size = i64::try_from(batch_size.max(1))
-        .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?;
+    let batch_size = i64::try_from(batch_size.max(1)).unwrap_or(i64::MAX);
     let mut transaction = pool.begin().await?;
     if !repair_missing {
-        verify_persisted_reliability_events(&mut transaction).await?;
+        verify_persisted_reliability_events(&mut transaction)
+            .await
+            .map_err(|error| {
+                DatabaseMigrationError::Backfill(format!(
+                    "persisted reliability event verification: {error}"
+                ))
+            })?;
     }
     let upload_rows = query(
         "SELECT i.intent_id, i.object_key, i.object_hash, i.state
@@ -1696,7 +1729,13 @@ async fn verify_applied_migrations(pool: &PgPool) -> Result<(), DatabaseMigratio
             ));
         };
         let expected_checksum = migration_checksum(migration);
-        if expected_checksum != applied.checksum {
+        if expected_checksum != applied.checksum
+            && !LEGACY_MIGRATION_CHECKSUM_ALIASES
+                .iter()
+                .any(|(version, checksum)| {
+                    *version == applied.version && *checksum == applied.checksum
+                })
+        {
             return Err(DatabaseMigrationError::ChecksumMismatch {
                 version: migration.version.to_owned(),
                 expected_checksum,
@@ -1759,8 +1798,10 @@ async fn apply_one_migration(
     .bind(migration_checksum(migration))
     .execute(&mut *transaction)
     .await?;
+    #[cfg(test)]
     database_migration_failpoint(DatabaseMigrationBoundary::BeforeApplyCommit)?;
     transaction.commit().await?;
+    #[cfg(test)]
     database_migration_failpoint(DatabaseMigrationBoundary::AfterApplyCommit)?;
     Ok(())
 }
@@ -1779,8 +1820,10 @@ async fn revert_one_migration(
     .bind(migration.version)
     .execute(&mut *transaction)
     .await?;
+    #[cfg(test)]
     database_migration_failpoint(DatabaseMigrationBoundary::BeforeRevertCommit)?;
     transaction.commit().await?;
+    #[cfg(test)]
     database_migration_failpoint(DatabaseMigrationBoundary::AfterRevertCommit)?;
     Ok(())
 }

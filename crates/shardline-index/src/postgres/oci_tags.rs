@@ -1,5 +1,5 @@
 use serde_json::{from_value, to_value};
-use sqlx::{PgConnection, Row, postgres::PgRow, query};
+use sqlx::{PgConnection, Row, postgres::PgRow, query, query_scalar};
 
 use super::{PostgresIndexStore, PostgresMetadataStoreError, u64_to_i64};
 use crate::{OciTagEntry, OciTagStore};
@@ -49,23 +49,30 @@ async fn current_tag_evidence(
 ) -> Result<OciTagEvidenceLog, PostgresMetadataStoreError> {
     let snapshot = OciTagSnapshot::new(scope_namespace, repository, tag, digest_hex)?;
     let loaded = load_tag_evidence(connection, scope_namespace, repository, tag).await?;
-    let (evidence, was_missing) = verify_or_repair_snapshot_evidence(loaded, snapshot)?;
-    if was_missing
-        && evidence
-            .events()
-            .first()
-            .is_some_and(|event| event.after.digest_hex.is_some())
-    {
-        persist_tag_evidence(connection, &evidence).await?;
-    }
-    Ok(evidence)
+    Ok(verify_or_repair_snapshot_evidence(loaded, snapshot)?.0)
 }
 
 async fn persist_tag_evidence(
     connection: &mut PgConnection,
     evidence: &OciTagEvidenceLog,
 ) -> Result<(), PostgresMetadataStoreError> {
+    let Some(first) = evidence.events().first() else {
+        return Ok(());
+    };
+    let persisted_sequence: Option<i64> = query_scalar(
+        "SELECT MAX(sequence)
+         FROM shardline_reliability_events
+         WHERE operation_kind = $1 AND operation_id = $2",
+    )
+    .bind(first.operation.kind.as_str())
+    .bind(&first.operation.operation_id)
+    .fetch_one(&mut *connection)
+    .await?;
+    let persisted_sequence = persisted_sequence.unwrap_or(-1);
     for event in evidence.events() {
+        if u64_to_i64(event.sequence)? <= persisted_sequence {
+            continue;
+        }
         event.verify_integrity()?;
         query(
             "INSERT INTO shardline_reliability_events

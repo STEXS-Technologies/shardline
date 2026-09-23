@@ -1,6 +1,4 @@
 #![deny(unsafe_code)]
-#![allow(clippy::missing_errors_doc)]
-#![allow(clippy::must_use_candidate)]
 
 //! Compatibility-preserving reliability primitives for Shardline.
 //!

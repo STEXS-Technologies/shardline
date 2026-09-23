@@ -1,5 +1,5 @@
 use serde_json::{from_value, to_value};
-use sqlx::{PgConnection, Row, postgres::PgRow, query};
+use sqlx::{PgConnection, Row, postgres::PgRow, query, query_scalar};
 
 use super::{PostgresIndexStore, PostgresMetadataStoreError, i64_to_u64, u64_to_i64};
 use crate::{S3ObjectEntry, S3ObjectIndexStore};
@@ -96,32 +96,32 @@ async fn current_s3_object_evidence(
 ) -> Result<S3ObjectEvidenceLog, PostgresMetadataStoreError> {
     let snapshot = s3_object_snapshot(scope_namespace, object_key, entry)?;
     let loaded = load_s3_object_evidence(connection, scope_namespace, object_key).await?;
-    let (evidence, was_missing) = verify_or_repair_snapshot_evidence(loaded, snapshot)?;
-    if was_missing
-        && evidence
-            .events()
-            .first()
-            .is_some_and(|event| event.after.entry.is_some())
-    {
-        persist_s3_object_event(
-            connection,
-            evidence.events().last().ok_or_else(|| {
-                PostgresMetadataStoreError::Unsupported("empty evidence log".into())
-            })?,
-        )
-        .await?;
-    }
-    Ok(evidence)
+    Ok(verify_or_repair_snapshot_evidence(loaded, snapshot)?.0)
 }
 
 async fn persist_s3_object_evidence(
     connection: &mut PgConnection,
     evidence: &S3ObjectEvidenceLog,
 ) -> Result<(), PostgresMetadataStoreError> {
-    let Some(event) = evidence.events().last() else {
+    let Some(operation) = evidence.events().first() else {
         return Ok(());
     };
-    persist_s3_object_event(connection, event).await
+    let persisted_sequence: Option<i64> = query_scalar(
+        "SELECT MAX(sequence)
+         FROM shardline_reliability_events
+         WHERE operation_kind = $1 AND operation_id = $2",
+    )
+    .bind(operation.operation.kind.as_str())
+    .bind(&operation.operation.operation_id)
+    .fetch_one(&mut *connection)
+    .await?;
+    let persisted_sequence = persisted_sequence.unwrap_or(-1);
+    for event in evidence.events() {
+        if u64_to_i64(event.sequence)? > persisted_sequence {
+            persist_s3_object_event(connection, event).await?;
+        }
+    }
+    Ok(())
 }
 
 async fn persist_s3_object_event(
