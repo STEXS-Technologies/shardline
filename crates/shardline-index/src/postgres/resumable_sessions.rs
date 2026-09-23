@@ -252,10 +252,12 @@ impl PostgresIndexStore {
             self.verify_resumable_session_evidence(session).await?;
         }
         for (session, _) in &reclaimable_sessions {
-            let events = self
-                .resumable_reliability_events(session.session_id())
-                .await?;
-            shardline_reliability::verify_state_transition_chain_ends_at(&events, session.state())?;
+            // Use the same authoritative verifier as live sessions. The
+            // candidate snapshot predates the inventory transaction commit and
+            // may already describe a restarted generation by the time the
+            // evidence is read; the fenced delete below will reject that stale
+            // candidate without treating it as evidence corruption.
+            self.verify_resumable_session_evidence(session).await?;
         }
         Ok(ResumableSessionGcInventory::new(
             protected_staging_keys,
