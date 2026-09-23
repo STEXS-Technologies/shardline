@@ -89,6 +89,86 @@ async fn parts_on_transaction(
         .collect()
 }
 
+pub(crate) async fn refresh_resumable_state_digest(
+    transaction: &mut Transaction<'_, Postgres>,
+    session_id: &str,
+) -> Result<(), PostgresMetadataStoreError> {
+    let row = sqlx::query(
+        "SELECT session_id, protocol, scope_namespace, target_key, attributes_json, state,
+                generation, fence_epoch, expires_at
+         FROM shardline_resumable_sessions WHERE session_id = $1 FOR UPDATE",
+    )
+    .bind(session_id)
+    .fetch_one(&mut **transaction)
+    .await?;
+    let session = session_from_row(&row)?;
+    let parts = parts_on_transaction(transaction, session_id).await?;
+    let digest = crate::resumable_state_digest(&session, &parts)?;
+    sqlx::query("UPDATE shardline_resumable_sessions SET state_digest = $2 WHERE session_id = $1")
+        .bind(session_id)
+        .bind(digest.as_str())
+        .execute(&mut **transaction)
+        .await?;
+    Ok(())
+}
+
+async fn verify_or_repair_resumable_state_digest(
+    transaction: &mut Transaction<'_, Postgres>,
+    session_id: &str,
+    session: &ResumableSession,
+    parts: &[ResumableSessionPart],
+    stored_digest: Option<String>,
+) -> Result<(), PostgresMetadataStoreError> {
+    let expected = crate::resumable_state_digest(session, parts)?;
+    match stored_digest {
+        Some(actual) if actual == expected.as_str() => Ok(()),
+        Some(_) => Err(PostgresMetadataStoreError::Reliability(
+            shardline_reliability::ReliabilityError::StateMismatch,
+        )),
+        None => {
+            sqlx::query(
+                "UPDATE shardline_resumable_sessions SET state_digest = $2 WHERE session_id = $1",
+            )
+            .bind(session_id)
+            .bind(expected.as_str())
+            .execute(&mut **transaction)
+            .await?;
+            Ok(())
+        }
+    }
+}
+
+pub(crate) async fn verify_resumable_state_digest(
+    store: &PostgresIndexStore,
+    session_id: &str,
+) -> Result<(), PostgresMetadataStoreError> {
+    let mut transaction = store.pool().begin().await?;
+    let row = sqlx::query(
+        "SELECT session_id, protocol, scope_namespace, target_key, attributes_json, state,
+                generation, fence_epoch, expires_at, state_digest
+         FROM shardline_resumable_sessions WHERE session_id = $1",
+    )
+    .bind(session_id)
+    .fetch_optional(&mut *transaction)
+    .await?;
+    let Some(row) = row else {
+        transaction.rollback().await?;
+        return Ok(());
+    };
+    let session = session_from_row(&row)?;
+    let parts = parts_on_transaction(&mut transaction, session_id).await?;
+    verify_or_repair_resumable_state_digest(
+        &mut transaction,
+        session_id,
+        &session,
+        &parts,
+        row.try_get("state_digest")?,
+    )
+    .await?;
+    transaction.commit().await?;
+    Ok(())
+}
+
 impl PostgresIndexStore {
     /// Captures every staged key that must remain live plus sessions whose
     /// metadata may be removed after physical staging reclamation succeeds.
@@ -120,7 +200,7 @@ impl PostgresIndexStore {
             .collect::<Result<Vec<String>, PostgresMetadataStoreError>>()?;
         let live_rows = sqlx::query(
             "SELECT session_id, protocol, scope_namespace, target_key, attributes_json, state,
-                    generation, fence_epoch, expires_at
+                    generation, fence_epoch, expires_at, state_digest
              FROM shardline_resumable_sessions
              WHERE state IN ('active', 'completing')
                AND expires_at > clock_timestamp()
@@ -130,11 +210,16 @@ impl PostgresIndexStore {
         .await?;
         let live_sessions = live_rows
             .iter()
-            .map(session_from_row)
+            .map(|row| {
+                Ok::<_, PostgresMetadataStoreError>((
+                    session_from_row(row)?,
+                    row.try_get::<Option<String>, _>("state_digest")?,
+                ))
+            })
             .collect::<Result<Vec<_>, _>>()?;
         let candidate_rows = sqlx::query(
             "SELECT session_id, protocol, scope_namespace, target_key, attributes_json, state,
-                    generation, fence_epoch, expires_at
+                    generation, fence_epoch, expires_at, state_digest
              FROM shardline_resumable_sessions
              WHERE state IN ('completed', 'aborted', 'expired')
                 OR expires_at <= clock_timestamp()
@@ -144,13 +229,29 @@ impl PostgresIndexStore {
         .await?;
         let reclaimable_sessions = candidate_rows
             .iter()
-            .map(session_from_row)
+            .map(|row| {
+                Ok::<_, PostgresMetadataStoreError>((
+                    session_from_row(row)?,
+                    row.try_get::<Option<String>, _>("state_digest")?,
+                ))
+            })
             .collect::<Result<Vec<_>, _>>()?;
+        for (session, stored_digest) in live_sessions.iter().chain(reclaimable_sessions.iter()) {
+            let parts = parts_on_transaction(&mut transaction, session.session_id()).await?;
+            verify_or_repair_resumable_state_digest(
+                &mut transaction,
+                session.session_id(),
+                session,
+                &parts,
+                stored_digest.clone(),
+            )
+            .await?;
+        }
         transaction.commit().await?;
-        for session in &live_sessions {
+        for (session, _) in &live_sessions {
             self.verify_resumable_session_evidence(session).await?;
         }
-        for session in &reclaimable_sessions {
+        for (session, _) in &reclaimable_sessions {
             let events = self
                 .resumable_reliability_events(session.session_id())
                 .await?;
@@ -158,7 +259,10 @@ impl PostgresIndexStore {
         }
         Ok(ResumableSessionGcInventory::new(
             protected_staging_keys,
-            reclaimable_sessions,
+            reclaimable_sessions
+                .into_iter()
+                .map(|(session, _)| session)
+                .collect(),
         ))
     }
 
@@ -281,6 +385,7 @@ impl PostgresIndexStore {
             .bind(expires_at)
             .execute(&mut *transaction)
             .await?;
+            refresh_resumable_state_digest(&mut transaction, session.session_id()).await?;
             let sequence = next_reliability_sequence(
                 transaction.as_mut(),
                 shardline_reliability::OperationKind::ResumableSession,
@@ -325,12 +430,13 @@ impl PostgresIndexStore {
             0,
         )
         .ok_or_else(|| PostgresMetadataStoreError::IntegerOutOfRange("invalid expiry".into()))?;
+        let state_digest = crate::resumable_state_digest(session, &[])?;
         let mut transaction = self.pool().begin().await?;
         let result = sqlx::query(
             "INSERT INTO shardline_resumable_sessions (
                  session_id, protocol, scope_namespace, target_key, attributes_json, state,
-                 generation, fence_epoch, expires_at
-             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                 generation, fence_epoch, expires_at, state_digest
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
              ON CONFLICT (session_id) DO NOTHING",
         )
         .bind(session.session_id())
@@ -342,6 +448,7 @@ impl PostgresIndexStore {
         .bind(u64_to_i64(session.generation().get())?)
         .bind(u64_to_i64(session.fence_epoch().get())?)
         .bind(expires_at)
+        .bind(state_digest.as_str())
         .execute(&mut *transaction)
         .await?;
         if result.rows_affected() != 1 {
@@ -386,6 +493,7 @@ impl PostgresIndexStore {
             0,
         )
         .ok_or_else(|| PostgresMetadataStoreError::IntegerOutOfRange("invalid expiry".into()))?;
+        let state_digest = crate::resumable_state_digest(session, &[])?;
         let mut transaction = self.pool().begin().await?;
         sqlx::query("SELECT pg_advisory_xact_lock($1)")
             .bind(SESSION_ACCOUNTING_LOCK_ID)
@@ -405,8 +513,8 @@ impl PostgresIndexStore {
         let result = sqlx::query(
             "INSERT INTO shardline_resumable_sessions (
                  session_id, protocol, scope_namespace, target_key, attributes_json, state,
-                 generation, fence_epoch, expires_at
-             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                 generation, fence_epoch, expires_at, state_digest
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
              ON CONFLICT (session_id) DO NOTHING",
         )
         .bind(session.session_id())
@@ -418,10 +526,12 @@ impl PostgresIndexStore {
         .bind(u64_to_i64(session.generation().get())?)
         .bind(u64_to_i64(session.fence_epoch().get())?)
         .bind(expires_at)
+        .bind(state_digest.as_str())
         .execute(&mut *transaction)
         .await?;
         let created = result.rows_affected() == 1;
         if created {
+            refresh_resumable_state_digest(&mut transaction, session.session_id()).await?;
             let sequence = next_reliability_sequence(
                 transaction.as_mut(),
                 shardline_reliability::OperationKind::ResumableSession,
@@ -455,18 +565,30 @@ impl PostgresIndexStore {
         &self,
         session_id: &str,
     ) -> Result<Option<ResumableSession>, PostgresMetadataStoreError> {
+        let mut transaction = self.pool().begin().await?;
         let row = sqlx::query(
             "SELECT session_id, protocol, scope_namespace, target_key, attributes_json, state,
-                    generation, fence_epoch, expires_at
+                    generation, fence_epoch, expires_at, state_digest
              FROM shardline_resumable_sessions WHERE session_id = $1",
         )
         .bind(session_id)
-        .fetch_optional(self.pool())
+        .fetch_optional(&mut *transaction)
         .await?;
         let Some(row) = row else {
+            transaction.rollback().await?;
             return Ok(None);
         };
         let session = session_from_row(&row)?;
+        let parts = parts_on_transaction(&mut transaction, session_id).await?;
+        verify_or_repair_resumable_state_digest(
+            &mut transaction,
+            session_id,
+            &session,
+            &parts,
+            row.try_get("state_digest")?,
+        )
+        .await?;
+        transaction.commit().await?;
         self.verify_resumable_session_evidence(&session).await?;
         Ok(Some(session))
     }
@@ -566,7 +688,7 @@ impl PostgresIndexStore {
         let mut transaction = self.pool().begin().await?;
         let row = sqlx::query(
             "SELECT session_id, protocol, scope_namespace, target_key, attributes_json, state,
-                    generation, fence_epoch, expires_at
+                    generation, fence_epoch, expires_at, state_digest
              FROM shardline_resumable_sessions
              WHERE session_id = $1 AND state = 'active' AND expires_at > clock_timestamp()",
         )
@@ -579,6 +701,14 @@ impl PostgresIndexStore {
         };
         let session = session_from_row(&row)?;
         let parts = parts_on_transaction(&mut transaction, session_id).await?;
+        verify_or_repair_resumable_state_digest(
+            &mut transaction,
+            session_id,
+            &session,
+            &parts,
+            row.try_get("state_digest")?,
+        )
+        .await?;
         transaction.commit().await?;
         self.verify_resumable_session_evidence(&session).await?;
         Ok(Some((session, parts)))
@@ -636,6 +766,7 @@ impl PostgresIndexStore {
         .bind(Option::<i64>::None)
         .execute(&mut *transaction)
         .await?;
+        refresh_resumable_state_digest(&mut transaction, session_id).await?;
         let identity = sqlx::query(
             "SELECT scope_namespace, target_key
              FROM shardline_resumable_sessions WHERE session_id = $1",
@@ -791,6 +922,7 @@ impl PostgresIndexStore {
         )
         .execute(&mut *transaction)
         .await?;
+        refresh_resumable_state_digest(&mut transaction, session_id).await?;
         let identity = sqlx::query(
             "SELECT scope_namespace, target_key
              FROM shardline_resumable_sessions WHERE session_id = $1",
@@ -871,6 +1003,7 @@ impl PostgresIndexStore {
         };
         let session = session_from_row(&row)?;
         let parts = parts_on_transaction(&mut transaction, session_id).await?;
+        refresh_resumable_state_digest(&mut transaction, session_id).await?;
         let sequence = next_reliability_sequence(
             transaction.as_mut(),
             shardline_reliability::OperationKind::ResumableSession,
@@ -922,6 +1055,7 @@ impl PostgresIndexStore {
             transaction.rollback().await?;
             return Ok(false);
         }
+        refresh_resumable_state_digest(&mut transaction, session_id).await?;
         let row = sqlx::query(
             "SELECT scope_namespace, target_key FROM shardline_resumable_sessions
              WHERE session_id = $1",
@@ -993,6 +1127,7 @@ impl PostgresIndexStore {
             .bind(&session_id)
             .execute(&mut *transaction)
             .await?;
+            refresh_resumable_state_digest(&mut transaction, &session_id).await?;
             let sequence = next_reliability_sequence(
                 transaction.as_mut(),
                 shardline_reliability::OperationKind::ResumableSession,
@@ -1054,6 +1189,7 @@ impl PostgresIndexStore {
             .map(session_from_row)
             .collect::<Result<Vec<_>, _>>()?;
         for session in &sessions {
+            verify_resumable_state_digest(self, session.session_id()).await?;
             self.verify_resumable_session_evidence(session).await?;
         }
         Ok(sessions)
@@ -1099,6 +1235,7 @@ impl PostgresIndexStore {
             .map(session_from_row)
             .collect::<Result<Vec<_>, _>>()?;
         for session in &sessions {
+            verify_resumable_state_digest(self, session.session_id()).await?;
             self.verify_resumable_session_evidence(session).await?;
         }
         Ok(sessions)
@@ -1170,6 +1307,24 @@ mod tests {
         if !has_operation_kind {
             sqlx::raw_sql(include_str!(
                 "../../../../migrations/20260923000000_reliability_event_kinds.up.sql"
+            ))
+            .execute(&pool)
+            .await
+            .ok()?;
+        }
+        let has_state_digest: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                 SELECT 1 FROM information_schema.columns
+                 WHERE table_name = 'shardline_resumable_sessions'
+                   AND column_name = 'state_digest'
+             )",
+        )
+        .fetch_one(&pool)
+        .await
+        .ok()?;
+        if !has_state_digest {
+            sqlx::raw_sql(include_str!(
+                "../../../../migrations/20260924000000_resumable_state_digest.up.sql"
             ))
             .execute(&pool)
             .await
@@ -1374,6 +1529,48 @@ mod tests {
             .unwrap();
         assert_eq!(repaired.len(), 1);
         assert_eq!(repaired.first().expect("repaired baseline").sequence, 0);
+
+        sqlx::query(
+            "UPDATE shardline_resumable_sessions
+             SET state_digest = NULL
+             WHERE session_id = $1",
+        )
+        .bind(session.session_id())
+        .execute(store.pool())
+        .await
+        .unwrap();
+        assert!(
+            store
+                .resumable_session_by_id(session.session_id())
+                .await
+                .unwrap()
+                .is_some()
+        );
+        let repaired_digest: Option<String> = sqlx::query_scalar(
+            "SELECT state_digest FROM shardline_resumable_sessions WHERE session_id = $1",
+        )
+        .bind(session.session_id())
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        assert!(
+            repaired_digest.is_some(),
+            "legacy digest must be repaired on read"
+        );
+
+        sqlx::query(
+            "UPDATE shardline_resumable_sessions
+             SET target_key = 'tampered-target'
+             WHERE session_id = $1",
+        )
+        .bind(session.session_id())
+        .execute(store.pool())
+        .await
+        .unwrap();
+        assert!(matches!(
+            store.resumable_session_by_id(session.session_id()).await,
+            Err(PostgresMetadataStoreError::Reliability(_))
+        ));
         sqlx::query("DELETE FROM shardline_resumable_sessions WHERE session_id = $1")
             .bind(session.session_id())
             .execute(store.pool())
@@ -1536,6 +1733,7 @@ mod tests {
         let expiry = Duration::from_secs(
             u64::try_from(chrono::Utc::now().timestamp()).unwrap_or_default() + 3600,
         );
+        cleanup_session_prefixes(&store, &["gc-live-", "gc-terminal-"]).await;
         let live = session("gc-live", expiry);
         let terminal = session("gc-terminal", expiry);
         assert!(store.create_resumable_session(&live).await.unwrap());

@@ -197,6 +197,7 @@ impl super::PostgresRecordStore {
                 transaction.rollback().await?;
                 return Ok(false);
             }
+            super::refresh_resumable_state_digest(&mut transaction, fence.session_id()).await?;
             let Some((scope_namespace, target_key)) = completion_identity else {
                 transaction.rollback().await?;
                 return Ok(false);

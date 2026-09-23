@@ -18,10 +18,11 @@ use tokio::task::spawn_blocking;
 use crate::{
     OciAdapterError,
     fs::{
-        acquire_upload_session_file_lock, append_file_anchored, delete_file_anchored,
-        map_not_found, open_anchored_file, persist_upload_session, read_persisted_upload_session,
-        unix_now_seconds_checked, upload_body_path, upload_dir, upload_file_exists_async,
-        upload_file_len_async, upload_metadata_path, upload_session_lock_path, upload_tail_path,
+        PersistedOciUploadSession, acquire_upload_session_file_lock, append_file_anchored,
+        delete_file_anchored, map_not_found, open_anchored_file, persist_upload_session,
+        read_persisted_upload_session, read_upload_file_async, unix_now_seconds_checked,
+        upload_body_path, upload_dir, upload_file_exists_async, upload_file_len_async,
+        upload_metadata_path, upload_session_lock_path, upload_tail_path,
     },
     key::validate_repository,
     protocol_support::{
@@ -115,7 +116,16 @@ pub async fn read_upload_session(
     ttl_seconds: NonZeroU64,
 ) -> Result<OciUploadSession, OciAdapterError> {
     validate_upload_session_id(session_id)?;
-    let (session, _evidence) = read_persisted_upload_session(root, session_id).await?;
+    let (session, _evidence) = match read_persisted_upload_session(root, session_id).await {
+        Ok(session) => session,
+        Err(_error)
+            if expired_metadata_is_cleanup_eligible(root, session_id, ttl_seconds).await =>
+        {
+            delete_upload_session_files(root, session_id).await?;
+            return Err(OciAdapterError::NotFound);
+        }
+        Err(error) => return Err(error),
+    };
     let now_unix_seconds = unix_now_seconds_checked()?;
     if upload_session_expired(&session, ttl_seconds, now_unix_seconds) {
         delete_upload_session(root, session_id).await?;
@@ -298,6 +308,10 @@ pub async fn delete_upload_session(root: &Path, session_id: &str) -> Result<(), 
         Ok(_) | Err(OciAdapterError::NotFound) => {}
         Err(error) => return Err(error),
     }
+    delete_upload_session_files(root, session_id).await
+}
+
+async fn delete_upload_session_files(root: &Path, session_id: &str) -> Result<(), OciAdapterError> {
     let paths = [
         upload_body_path(root, session_id),
         upload_tail_path(root, session_id),
@@ -317,6 +331,30 @@ pub async fn delete_upload_session(root: &Path, session_id: &str) -> Result<(), 
         }
     }
     first_error.map_or_else(|| Ok(()), Err)
+}
+
+async fn expired_metadata_is_cleanup_eligible(
+    root: &Path,
+    session_id: &str,
+    ttl_seconds: NonZeroU64,
+) -> bool {
+    let Ok(bytes) = read_upload_file_async(root, &upload_metadata_path(root, session_id)).await
+    else {
+        return false;
+    };
+    let session = serde_json::from_slice::<PersistedOciUploadSession>(&bytes)
+        .map(|persisted| persisted.session)
+        .or_else(|_| serde_json::from_slice::<OciUploadSession>(&bytes))
+        .ok();
+    let Some(session) = session else {
+        return false;
+    };
+    let Ok(now) = unix_now_seconds_checked() else {
+        return false;
+    };
+    // Cleanup is allowed only for sessions already past their retention TTL;
+    // active tampered sessions remain available for forensic repair.
+    upload_session_expired(&session, ttl_seconds, now)
 }
 
 /// Deletes one file under the OCI upload root using anchored I/O on Unix.

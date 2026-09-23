@@ -381,6 +381,12 @@ test = false
 doc = false
 
 [[bin]]
+name = "shardline_resumable_state_digest"
+path = "fuzz_targets/shardline/resumable_state_digest.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "shardline_reliability_session_evidence"
 path = "fuzz_targets/shardline/reliability_session_evidence.rs"
 test = false

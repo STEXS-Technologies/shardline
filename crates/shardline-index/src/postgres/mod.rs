@@ -13,6 +13,7 @@ pub use provider_mutation::{
     PostgresProviderMutation, PostgresProviderMutationOutcome, PostgresResourceFence,
     ProviderRepositoryKey,
 };
+pub(crate) use resumable_sessions::refresh_resumable_state_digest;
 pub(crate) use types::RecordKind;
 pub use types::{
     PostgresIndexStore, PostgresMetadataStoreError, PostgresRecordLocator, PostgresRecordStore,

@@ -238,6 +238,7 @@ impl PostgresIndexStore {
             transaction.rollback().await?;
             return Ok(false);
         }
+        super::refresh_resumable_state_digest(&mut transaction, fence.session_id()).await?;
         let sequence = next_reliability_sequence(
             transaction.as_mut(),
             shardline_reliability::OperationKind::ResumableSession,
