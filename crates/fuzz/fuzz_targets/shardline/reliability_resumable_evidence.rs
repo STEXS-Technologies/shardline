@@ -32,14 +32,18 @@ fuzz_target!(|input: &[u8]| {
     };
     let mut current = ResumableLifecycleState::Active;
     let mut events = Vec::new();
-    for (sequence, byte) in input.iter().take(128).copied().enumerate() {
+    for byte in input.iter().take(128).copied() {
         let candidate = state(byte);
         if !current.can_transition_to(candidate) {
             continue;
         }
-        let Ok(sequence) = u64::try_from(sequence) else {
-            return;
-        };
+        // Invalid candidates are skipped, so the input index is not the
+        // evidence sequence.  Allocate sequence numbers only for accepted
+        // transitions or the fuzz target would manufacture a false chain-gap
+        // finding for an otherwise valid state trace.
+        let sequence = events.last().map_or(0, |event: &StateTransitionEvent| {
+            event.sequence.saturating_add(1)
+        });
         let Ok(event) = StateTransitionEvent::new(operation.clone(), sequence, current, candidate)
         else {
             return;
