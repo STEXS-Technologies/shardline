@@ -27,8 +27,7 @@ fn sqlite_store_error(error: &LocalIndexStoreError) -> rusqlite::Error {
 /// cannot be cached across threads. SQLite file opens are fast for local files,
 /// so per-call overhead is acceptable.
 fn open_hub_connection(root: &Path) -> Result<Connection, LocalIndexStoreError> {
-    let database_path = root.join("metadata.sqlite3");
-    let connection = Connection::open(&database_path)?;
+    let connection = LocalIndexStore::open(root.to_path_buf()).open_connection()?;
     connection.busy_timeout(std::time::Duration::from_secs(30))?;
     Ok(connection)
 }
@@ -40,8 +39,7 @@ fn open_hub_connection(root: &Path) -> Result<Connection, LocalIndexStoreError> 
 /// the shared transaction retry boundary ensure brief contention retries
 /// gracefully without splitting a ref transition from its evidence.
 fn open_hub_connection_rw(root: &Path) -> Result<Connection, LocalIndexStoreError> {
-    let database_path = root.join("metadata.sqlite3");
-    let connection = Connection::open(&database_path)?;
+    let connection = LocalIndexStore::open(root.to_path_buf()).open_connection()?;
     connection.busy_timeout(std::time::Duration::from_secs(30))?;
     Ok(connection)
 }
@@ -76,47 +74,7 @@ fn verify_hub_repo_heads(root: &Path, repos: &[HubRepo]) -> Result<(), LocalInde
 ///
 /// Returns an error if the database connection or table creation fails.
 pub fn ensure_hub_tables(root: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
-    let db_path = root.join("metadata.sqlite3");
-    let conn = Connection::open(&db_path)?;
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS shardline_hub_repos (
-            repo_id TEXT PRIMARY KEY, repo_type TEXT NOT NULL, private INTEGER NOT NULL DEFAULT 0,
-            default_branch TEXT NOT NULL, created_at_unix_seconds INTEGER NOT NULL,
-            updated_at_unix_seconds INTEGER NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS shardline_hub_revisions (
-            repo_id TEXT NOT NULL, ref_name TEXT NOT NULL, sha TEXT NOT NULL,
-            parent_sha TEXT, message TEXT, created_at_unix_seconds INTEGER NOT NULL,
-            PRIMARY KEY (repo_id, sha)
-        );
-        CREATE INDEX IF NOT EXISTS shardline_hub_revisions_repo_ref_idx
-            ON shardline_hub_revisions (repo_id, ref_name);
-        CREATE TABLE IF NOT EXISTS shardline_hub_refs (
-            repo_id TEXT NOT NULL, ref_name TEXT NOT NULL, sha TEXT NOT NULL,
-            PRIMARY KEY (repo_id, ref_name),
-            FOREIGN KEY (repo_id) REFERENCES shardline_hub_repos(repo_id) ON DELETE CASCADE
-        );
-        CREATE TABLE IF NOT EXISTS shardline_hub_file_entries (
-            commit_sha TEXT NOT NULL, path TEXT NOT NULL, size INTEGER NOT NULL,
-            sha TEXT NOT NULL, is_lfs INTEGER NOT NULL DEFAULT 0,
-            PRIMARY KEY (commit_sha, path)
-        );
-        CREATE TABLE IF NOT EXISTS shardline_hub_webhooks (
-            id TEXT PRIMARY KEY, repo_id TEXT NOT NULL,
-            url TEXT NOT NULL, events TEXT NOT NULL DEFAULT 'push', secret TEXT,
-            active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
-            created_at_unix_seconds INTEGER NOT NULL,
-            FOREIGN KEY (repo_id) REFERENCES shardline_hub_repos(repo_id) ON DELETE CASCADE
-        );
-        CREATE TABLE IF NOT EXISTS shardline_reliability_events (
-            operation_kind TEXT NOT NULL,
-            operation_id TEXT NOT NULL,
-            sequence INTEGER NOT NULL,
-            event_json TEXT NOT NULL,
-            created_at_unix_seconds INTEGER NOT NULL,
-            PRIMARY KEY (operation_kind, operation_id, sequence)
-        );",
-    )?;
+    let _store = LocalIndexStore::new(root.to_path_buf())?;
     Ok(())
 }
 

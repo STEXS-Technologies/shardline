@@ -98,6 +98,21 @@ pub(crate) fn persist_reliability_event_at<T: EvidenceEventMetadata>(
     Ok(())
 }
 
+fn reliability_operation_exists(
+    transaction: &Transaction<'_>,
+    operation_kind: OperationKind,
+    operation_id: &str,
+) -> Result<bool, LocalIndexStoreError> {
+    Ok(transaction.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM shardline_reliability_events
+             WHERE operation_kind = ?1 AND operation_id = ?2
+         )",
+        params![operation_kind.as_str(), operation_id],
+        |row| row.get(0),
+    )?)
+}
+
 /// Retries a complete SQLite pointer transaction when another connection
 /// temporarily owns the writer lock.
 pub(crate) fn retry_sqlite_busy<T, Action>(mut action: Action) -> Result<T, LocalIndexStoreError>
@@ -800,6 +815,229 @@ fn backfill_reliability_events(connection: &mut Connection) -> Result<(), LocalI
             Some(i64_to_u64(deleted_at)?),
         )?;
         let evidence = OciObjectEvidenceLog::baseline(snapshot)?;
+        for event in evidence.events() {
+            persist_reliability_event(&transaction, event)?;
+        }
+    }
+
+    let mut retention_rows = Vec::new();
+    {
+        let mut statement = transaction.prepare(
+            "SELECT object_key, reason, held_at_unix_seconds, release_after_unix_seconds
+             FROM shardline_retention_holds
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM shardline_reliability_events AS e
+                 WHERE e.operation_kind = 'RetentionHold'
+                   AND e.operation_id = shardline_retention_holds.object_key
+             )",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, Option<i64>>(3)?,
+            ))
+        })?;
+        for row in rows {
+            retention_rows.push(row?);
+        }
+    }
+    for (object_key, reason, held_at, release_after) in retention_rows {
+        let hold = RetentionHold::new(
+            ObjectKey::parse(&object_key)?,
+            reason,
+            i64_to_u64(held_at)?,
+            release_after.map(i64_to_u64).transpose()?,
+        )?;
+        let evidence = RetentionEvidenceLog::baseline(retention_snapshot(
+            &hold,
+            RetentionHoldLifecycleState::Active,
+        )?)?;
+        for event in evidence.events() {
+            persist_reliability_event(&transaction, event)?;
+        }
+    }
+
+    let mut webhook_rows = Vec::new();
+    {
+        let mut statement = transaction.prepare(
+            "SELECT provider, owner, repo, delivery_id, processed_at_unix_seconds
+             FROM shardline_webhook_deliveries",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, i64>(4)?,
+            ))
+        })?;
+        for row in rows {
+            webhook_rows.push(row?);
+        }
+    }
+    for (provider_name, owner, repo, delivery_id, processed_at) in webhook_rows {
+        let provider = parse_repository_provider(&provider_name, |_| {
+            LocalIndexStoreError::WebhookDelivery(WebhookDeliveryError::InvalidProvider)
+        })?;
+        let delivery = WebhookDelivery::new(
+            provider,
+            owner,
+            repo,
+            delivery_id,
+            i64_to_u64(processed_at)?,
+        )?;
+        let snapshot = webhook_snapshot(&delivery, WebhookDeliveryLifecycleState::Processed)?;
+        let operation = snapshot.evidence_operation()?;
+        if reliability_operation_exists(
+            &transaction,
+            OperationKind::WebhookDelivery,
+            &operation.operation_id,
+        )? {
+            continue;
+        }
+        let evidence = WebhookDeliveryEvidenceLog::baseline(snapshot)?;
+        for event in evidence.events() {
+            persist_reliability_event(&transaction, event)?;
+        }
+    }
+
+    let mut hub_ref_rows = Vec::new();
+    {
+        let mut statement = transaction.prepare(
+            "SELECT repo_id, ref_name, sha
+             FROM shardline_hub_refs",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        for row in rows {
+            hub_ref_rows.push(row?);
+        }
+    }
+    for (repo_id, ref_name, sha) in hub_ref_rows {
+        let snapshot = hub_ref_snapshot(&repo_id, &ref_name, Some(sha))?;
+        let operation = snapshot.evidence_operation()?;
+        if reliability_operation_exists(
+            &transaction,
+            OperationKind::MetadataCommit,
+            &operation.operation_id,
+        )? {
+            continue;
+        }
+        let evidence = HubRefEvidenceLog::baseline(snapshot)?;
+        for event in evidence.events() {
+            persist_reliability_event(&transaction, event)?;
+        }
+    }
+
+    let mut oci_tag_rows = Vec::new();
+    {
+        let mut statement = transaction.prepare(
+            "SELECT scope_namespace, repository, tag, digest_hex
+             FROM shardline_oci_tags",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?;
+        for row in rows {
+            oci_tag_rows.push(row?);
+        }
+    }
+    for (scope_namespace, repository, tag, digest_hex) in oci_tag_rows {
+        let absent = oci_tag_snapshot(&scope_namespace, &repository, &tag, None)?;
+        let present = oci_tag_snapshot(&scope_namespace, &repository, &tag, Some(digest_hex))?;
+        let operation = present.evidence_operation()?;
+        if reliability_operation_exists(
+            &transaction,
+            OperationKind::OciTag,
+            &operation.operation_id,
+        )? {
+            continue;
+        }
+        let mut evidence = OciTagEvidenceLog::baseline(absent)?;
+        evidence.record(present)?;
+        for event in evidence.events() {
+            persist_reliability_event(&transaction, event)?;
+        }
+    }
+
+    let mut s3_object_rows = Vec::new();
+    {
+        let mut statement = transaction.prepare(
+            "SELECT scope_namespace, object_key, file_id, size_bytes, content_hash,
+                    etag, user_metadata, updated_at_unix_seconds
+             FROM shardline_s3_objects",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, i64>(7)?,
+            ))
+        })?;
+        for row in rows {
+            s3_object_rows.push(row?);
+        }
+    }
+    for (
+        scope_namespace,
+        object_key,
+        file_id,
+        size_bytes,
+        content_hash,
+        etag,
+        user_metadata,
+        updated_at,
+    ) in s3_object_rows
+    {
+        let metadata = if user_metadata.is_empty() {
+            Vec::new()
+        } else {
+            from_str::<Vec<(String, String)>>(&user_metadata)?
+        };
+        let present = S3ObjectSnapshot::new(
+            &scope_namespace,
+            &object_key,
+            Some(S3ObjectState {
+                file_id,
+                size_bytes: i64_to_u64(size_bytes)?,
+                content_hash,
+                etag,
+                user_metadata: metadata,
+                updated_at_unix_seconds: updated_at,
+            }),
+        )?;
+        let operation = present.evidence_operation()?;
+        if reliability_operation_exists(
+            &transaction,
+            OperationKind::S3Object,
+            &operation.operation_id,
+        )? {
+            continue;
+        }
+        let mut evidence = S3ObjectEvidenceLog::baseline(s3_object_snapshot(
+            &scope_namespace,
+            &object_key,
+            None,
+        )?)?;
+        evidence.record(present)?;
         for event in evidence.events() {
             persist_reliability_event(&transaction, event)?;
         }
@@ -2568,5 +2806,89 @@ mod tests {
             )
             .unwrap();
         assert!(count > 0, "should have applied at least one migration");
+    }
+
+    #[test]
+    fn backfill_reliability_events_covers_every_snapshot_table() {
+        let storage = shardline_test_support::TempStorage::new();
+        let root = storage.path();
+        initialize_local_metadata_root(root).unwrap();
+        let db_path = root.join("metadata.sqlite3");
+        let mut connection = Connection::open(&db_path).unwrap();
+        prepare_connection(&mut connection).unwrap();
+        ensure_local_schema_migrations_table(&connection).unwrap();
+        apply_pending_local_migrations(&mut connection).unwrap();
+
+        connection
+            .execute(
+                "INSERT INTO shardline_retention_holds
+                    (object_key, reason, held_at_unix_seconds, release_after_unix_seconds,
+                     updated_at_unix_seconds)
+                 VALUES ('objects/retention', 'migration test', 10, 20, 10)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO shardline_webhook_deliveries
+                    (provider, owner, repo, delivery_id, processed_at_unix_seconds)
+                 VALUES ('github', 'owner', 'repo', 'delivery', 10)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO shardline_hub_repos
+                    (repo_id, repo_type, private, default_branch, created_at_unix_seconds,
+                     updated_at_unix_seconds)
+                 VALUES ('hub/repo', 'model', 0, 'sha-main', 10, 10)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO shardline_hub_refs (repo_id, ref_name, sha)
+                 VALUES ('hub/repo', 'main', 'sha-main')",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO shardline_oci_tags
+                    (scope_namespace, repository, tag, digest_hex)
+                 VALUES ('scope', 'repo', 'latest', ?1)",
+                ["a".repeat(64)],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO shardline_s3_objects
+                    (scope_namespace, object_key, file_id, size_bytes, content_hash,
+                     etag, user_metadata, updated_at_unix_seconds)
+                 VALUES ('scope', 'object', 'file', 4, ?1, 'etag', ?2, 10)",
+                rusqlite::params!["b".repeat(64), "[[\"kind\",\"model\"]]"],
+            )
+            .unwrap();
+
+        backfill_reliability_events(&mut connection).unwrap();
+        backfill_reliability_events(&mut connection).unwrap();
+
+        for operation_kind in [
+            "RetentionHold",
+            "WebhookDelivery",
+            "MetadataCommit",
+            "OciTag",
+            "S3Object",
+        ] {
+            let count: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM shardline_reliability_events
+                     WHERE operation_kind = ?1",
+                    [operation_kind],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(count > 0, "missing backfilled {operation_kind} evidence");
+        }
     }
 }

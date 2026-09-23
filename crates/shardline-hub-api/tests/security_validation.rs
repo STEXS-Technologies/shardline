@@ -295,10 +295,10 @@ fn validate_webhook_accepts_dangerous_urls_at_store_level() {
 /// **[FIXED]**: The hub API router now applies `DefaultBodyLimit::max(64MB)`.
 #[test]
 fn validate_hub_router_has_body_limit() {
-    let lib_source = include_str!("../src/lib.rs");
+    let router_source = include_str!("../src/router.rs");
 
     assert!(
-        lib_source.contains("DefaultBodyLimit::max"),
+        router_source.contains("DefaultBodyLimit::max"),
         "Hub API router now applies DefaultBodyLimit::max"
     );
 }
@@ -311,10 +311,10 @@ fn validate_hub_router_has_body_limit() {
 /// oversized requests before they reach the handler.
 #[test]
 fn validate_commit_handler_body_bounded_by_router() {
-    let lib_source = include_str!("../src/lib.rs");
+    let router_source = include_str!("../src/router.rs");
 
     assert!(
-        lib_source.contains("DefaultBodyLimit::max"),
+        router_source.contains("DefaultBodyLimit::max"),
         "Hub API router enforces body size limit at the layer level"
     );
 }
