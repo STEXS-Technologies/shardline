@@ -1081,7 +1081,9 @@ async fn persist_session_with_evidence(
         fs::create_dir_all(parent).await?;
     }
     let existing = match fs::read(&path).await {
-        Ok(bytes) => serde_json::from_slice::<PersistedMultipartUploadSession>(&bytes).ok(),
+        Ok(bytes) => Some(serde_json::from_slice::<PersistedMultipartUploadSession>(
+            &bytes,
+        )?),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return Err(S3SessionError::Io(error)),
     };
@@ -1760,6 +1762,42 @@ mod tests {
             Err(S3SessionError::Reliability(_))
         ));
         assert!(metadata_path.exists());
+    }
+
+    #[tokio::test]
+    async fn persist_session_rejects_malformed_metadata_without_overwriting_it() {
+        let root = make_root().await;
+        let upload_id = create_session(
+            root.path(),
+            "acme.models",
+            "malformed.bin",
+            "global",
+            ttl(3600),
+            cap(16),
+            quota(1 << 40),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+        let dir = session_dir(root.path(), &upload_id).unwrap();
+        let (session, evidence, snapshot_evidence) =
+            load_session_with_snapshot(&dir).await.unwrap();
+        let metadata_path = session_metadata_path(root.path(), &upload_id).unwrap();
+        let corrupt = b"{malformed metadata";
+        fs::write(&metadata_path, corrupt).await.unwrap();
+
+        assert!(matches!(
+            persist_session_with_evidence(
+                root.path(),
+                &upload_id,
+                &session,
+                &evidence,
+                snapshot_evidence,
+            )
+            .await,
+            Err(S3SessionError::Json(_))
+        ));
+        assert_eq!(fs::read(metadata_path).await.unwrap(), corrupt);
     }
 
     #[tokio::test]
