@@ -12,7 +12,7 @@ use std::{
 };
 
 use rusqlite::{
-    Connection, Error as SqliteError, MappedRows, OpenFlags, OptionalExtension, Params,
+    Connection, Error as SqliteError, ErrorCode, MappedRows, OpenFlags, OptionalExtension, Params,
     Result as SqliteResult, Row, Transaction,
     config::DbConfig,
     params,
@@ -94,6 +94,41 @@ pub(crate) fn persist_reliability_event_at<T: EvidenceEventMetadata>(
         ],
     )?;
     Ok(())
+}
+
+/// Retries a complete SQLite pointer transaction when another connection
+/// temporarily owns the writer lock.
+pub(crate) fn retry_sqlite_busy<T, Action>(mut action: Action) -> Result<T, LocalIndexStoreError>
+where
+    Action: FnMut() -> Result<T, LocalIndexStoreError>,
+{
+    const MAX_RETRIES: usize = 7;
+    let mut retries = 0usize;
+    loop {
+        match action() {
+            Ok(value) => return Ok(value),
+            Err(error) if sqlite_error_is_busy(&error) && retries < MAX_RETRIES => {
+                retries = retries.saturating_add(1);
+                std::thread::sleep(Duration::from_millis(
+                    u64::try_from(retries).unwrap_or(u64::MAX).saturating_mul(5),
+                ));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+const fn sqlite_error_is_busy(error: &LocalIndexStoreError) -> bool {
+    matches!(
+        error,
+        LocalIndexStoreError::Sqlite(SqliteError::SqliteFailure(
+            rusqlite::ffi::Error {
+                code: ErrorCode::DatabaseBusy,
+                ..
+            },
+            _,
+        ))
+    )
 }
 
 pub(crate) fn quarantine_snapshot(

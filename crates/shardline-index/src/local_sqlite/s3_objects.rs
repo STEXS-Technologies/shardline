@@ -1,8 +1,7 @@
 #[cfg(test)]
 use rusqlite::Connection;
-use rusqlite::{Error as SqliteError, ErrorCode, OptionalExtension, Transaction, params_from_iter};
+use rusqlite::{OptionalExtension, Transaction, params_from_iter};
 use std::fmt::Write as _;
-use std::time::Duration;
 
 use super::{LocalIndexStore, LocalIndexStoreError, collect_rows, helpers};
 use crate::{S3ObjectEntry, S3ObjectIndexStore};
@@ -187,39 +186,6 @@ fn record_s3_object_transition(
     Ok(())
 }
 
-fn retry_busy<T, Action>(mut action: Action) -> Result<T, LocalIndexStoreError>
-where
-    Action: FnMut() -> Result<T, LocalIndexStoreError>,
-{
-    const MAX_RETRIES: usize = 7;
-    let mut retries = 0usize;
-    loop {
-        match action() {
-            Ok(value) => return Ok(value),
-            Err(error) if is_busy(&error) && retries < MAX_RETRIES => {
-                retries = retries.saturating_add(1);
-                std::thread::sleep(Duration::from_millis(
-                    u64::try_from(retries).unwrap_or(u64::MAX).saturating_mul(5),
-                ));
-            }
-            Err(error) => return Err(error),
-        }
-    }
-}
-
-const fn is_busy(error: &LocalIndexStoreError) -> bool {
-    matches!(
-        error,
-        LocalIndexStoreError::Sqlite(SqliteError::SqliteFailure(
-            rusqlite::ffi::Error {
-                code: ErrorCode::DatabaseBusy,
-                ..
-            },
-            _,
-        ))
-    )
-}
-
 fn scan_s3_objects_sql(
     connection: &Transaction<'_>,
     scope_namespace: &str,
@@ -285,7 +251,7 @@ impl S3ObjectIndexStore for LocalIndexStore {
         let store = self.clone();
         let entry = entry.clone();
         tokio::task::spawn_blocking(move || {
-            retry_busy(|| {
+            helpers::retry_sqlite_busy(|| {
                 let mut connection = store.open_connection()?;
                 // BEGIN IMMEDIATE prevents two unconditional upserts from both
                 // reading the old evidence chain and then racing while upgrading
@@ -310,7 +276,7 @@ impl S3ObjectIndexStore for LocalIndexStore {
         let expected = expected.cloned();
         let replacement = replacement.clone();
         tokio::task::spawn_blocking(move || {
-            retry_busy(|| {
+            helpers::retry_sqlite_busy(|| {
                 let mut connection = store.open_connection()?;
                 let transaction = connection.transaction()?;
                 let changed =
@@ -332,7 +298,7 @@ impl S3ObjectIndexStore for LocalIndexStore {
         let scope_namespace = scope_namespace.to_owned();
         let object_key = object_key.to_owned();
         tokio::task::spawn_blocking(move || {
-            retry_busy(|| {
+            helpers::retry_sqlite_busy(|| {
                 let mut connection = store.open_connection()?;
                 let transaction = connection.transaction()?;
                 let deleted = delete_s3_object_sql(&transaction, &scope_namespace, &object_key)?;
@@ -356,25 +322,27 @@ impl S3ObjectIndexStore for LocalIndexStore {
         let prefix = prefix.to_owned();
         let cursor = cursor.map(ToOwned::to_owned);
         tokio::task::spawn_blocking(move || {
-            let connection = store.open_connection()?;
-            let transaction = connection.unchecked_transaction()?;
-            let values = scan_s3_objects_sql(
-                &transaction,
-                &scope_namespace,
-                &prefix,
-                cursor.as_deref(),
-                limit,
-            )?;
-            for value in &values {
-                helpers::current_s3_object_evidence(
+            helpers::retry_sqlite_busy(|| {
+                let mut connection = store.open_connection()?;
+                let transaction = connection.transaction()?;
+                let values = scan_s3_objects_sql(
                     &transaction,
-                    &value.scope_namespace,
-                    &value.object_key,
-                    Some(value),
+                    &scope_namespace,
+                    &prefix,
+                    cursor.as_deref(),
+                    limit,
                 )?;
-            }
-            transaction.commit()?;
-            Ok(values)
+                for value in &values {
+                    helpers::current_s3_object_evidence(
+                        &transaction,
+                        &value.scope_namespace,
+                        &value.object_key,
+                        Some(value),
+                    )?;
+                }
+                transaction.commit()?;
+                Ok(values)
+            })
         })
         .await
         .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
@@ -389,17 +357,19 @@ impl S3ObjectIndexStore for LocalIndexStore {
         let scope_namespace = scope_namespace.to_owned();
         let object_key = object_key.to_owned();
         tokio::task::spawn_blocking(move || {
-            let connection = store.open_connection()?;
-            let transaction = connection.unchecked_transaction()?;
-            let value = scan_s3_object_exact_sql(&transaction, &scope_namespace, &object_key)?;
-            helpers::current_s3_object_evidence(
-                &transaction,
-                &scope_namespace,
-                &object_key,
-                value.as_ref(),
-            )?;
-            transaction.commit()?;
-            Ok(value)
+            helpers::retry_sqlite_busy(|| {
+                let mut connection = store.open_connection()?;
+                let transaction = connection.transaction()?;
+                let value = scan_s3_object_exact_sql(&transaction, &scope_namespace, &object_key)?;
+                helpers::current_s3_object_evidence(
+                    &transaction,
+                    &scope_namespace,
+                    &object_key,
+                    value.as_ref(),
+                )?;
+                transaction.commit()?;
+                Ok(value)
+            })
         })
         .await
         .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
