@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::{Error, ErrorKind};
+use std::io::{Error, ErrorKind, Write};
 use std::path::{Path, PathBuf};
 
 use shardline_reliability::{ResumableLifecycleState, SessionEvidenceLog};
@@ -56,8 +56,16 @@ pub(super) fn record(
     let bytes = serde_json::to_vec(&log).map_err(invalid_evidence)?;
     let path = evidence_path(dir, oid);
     let temporary = path.with_extension("evidence.tmp");
-    fs::write(&temporary, bytes)?;
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&temporary)?;
+    file.write_all(&bytes)?;
+    file.sync_all()?;
+    drop(file);
     fs::rename(temporary, path)?;
+    sync_directory(dir)?;
     Ok(())
 }
 
@@ -159,6 +167,17 @@ fn invalid_evidence(error: impl std::fmt::Display) -> ServerError {
         format!("invalid LFS patch evidence: {error}"),
     )
     .into()
+}
+
+#[cfg(unix)]
+fn sync_directory(dir: &Path) -> Result<(), ServerError> {
+    fs::File::open(dir)?.sync_all()?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn sync_directory(_dir: &Path) -> Result<(), ServerError> {
+    Ok(())
 }
 
 #[cfg(test)]
