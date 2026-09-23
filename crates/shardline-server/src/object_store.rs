@@ -15,7 +15,9 @@ use shardline_index::{
 use shardline_protocol::{ByteRange, ShardlineHash};
 pub use shardline_server_core::ServerObjectStore;
 pub use shardline_server_core::ServerObjectStoreError;
-use shardline_storage::{ObjectIntegrity, ObjectKey, ObjectMetadata, ObjectPrefix, ObjectStore};
+use shardline_storage::{
+    ObjectBody, ObjectIntegrity, ObjectKey, ObjectMetadata, ObjectPrefix, ObjectStore,
+};
 use tokio::io::AsyncWriteExt;
 
 use crate::error::{IndexError, ObjectStoreError};
@@ -161,6 +163,19 @@ pub(crate) async fn stage_bytes_content_addressed(
         ShardlineHash::from_bytes(*digest.as_bytes()),
         u64::try_from(bytes.len())?,
     );
+    if matches!(
+        object_store,
+        ServerObjectStore::S3(_) | ServerObjectStore::Blackhole
+    ) {
+        shardline_storage::AsyncObjectStore::put_if_absent(
+            object_store,
+            &key,
+            ObjectBody::from_slice(bytes),
+            &integrity,
+        )
+        .await?;
+        return Ok((key, integrity));
+    }
     let temporary = tempfile::NamedTempFile::new()?;
     tokio::fs::write(temporary.path(), bytes).await?;
     let store = object_store.clone();
