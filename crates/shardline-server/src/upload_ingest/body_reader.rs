@@ -290,7 +290,11 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use tokio::io::AsyncReadExt;
 
-    use super::{ChunkBuffer, RequestBodyReader, read_body_to_bytes, stage_body_to_tempfile};
+    use super::{
+        ChunkBuffer, RequestBodyReader, StagedRequestBody, read_body_to_bytes,
+        stage_body_for_object_store, stage_body_to_tempfile,
+    };
+    use crate::{ObjectStorageAdapter, ServerConfig, object_store::object_store_from_config};
 
     // ------------------------------------------------------------------
     // ChunkBuffer
@@ -326,6 +330,47 @@ mod tests {
         let _first = reader.next_bytes().await.unwrap();
         let second = reader.next_bytes().await.unwrap();
         assert!(second.is_none());
+    }
+
+    #[tokio::test]
+    async fn remote_object_storage_stages_request_body_without_a_filesystem_file() {
+        let root = tempfile::tempdir().unwrap();
+        let s3_config = shardline_storage::S3ObjectStoreConfig::new(
+            "bucket".to_owned(),
+            "us-east-1".to_owned(),
+        );
+        let config = ServerConfig::new(
+            std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 8080),
+            "http://127.0.0.1:8080".to_owned(),
+            root.path().to_path_buf(),
+            std::num::NonZeroUsize::new(1024).unwrap(),
+        )
+        .with_object_storage(ObjectStorageAdapter::S3, Some(s3_config));
+        let object_store = object_store_from_config(&config).unwrap();
+        let mut reader = RequestBodyReader::from_bytes(Bytes::from_static(b"remote"));
+
+        let staged = stage_body_for_object_store(&mut reader, &object_store)
+            .await
+            .unwrap();
+        assert!(matches!(staged, StagedRequestBody::Memory { .. }));
+    }
+
+    #[tokio::test]
+    async fn local_object_storage_retains_filesystem_staging_fallback() {
+        let root = tempfile::tempdir().unwrap();
+        let config = ServerConfig::new(
+            std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 8080),
+            "http://127.0.0.1:8080".to_owned(),
+            root.path().to_path_buf(),
+            std::num::NonZeroUsize::new(1024).unwrap(),
+        );
+        let object_store = object_store_from_config(&config).unwrap();
+        let mut reader = RequestBodyReader::from_bytes(Bytes::from_static(b"local"));
+
+        let staged = stage_body_for_object_store(&mut reader, &object_store)
+            .await
+            .unwrap();
+        assert!(matches!(staged, StagedRequestBody::File { .. }));
     }
 
     #[tokio::test]
