@@ -100,6 +100,11 @@ stores reconstruct and persist both the active baseline and the release event
 in one transaction. This preserves a complete sequence-0/sequence-1 chain
 instead of leaving an unverifiable terminal-only record.
 
+OCI tombstone reclaim, publish, delete, and completion use the same rule: a
+missing visibility journal is rebuilt as a complete chain inside the owning
+transaction before the new visibility boundary is committed. Tombstone reads
+also repair a missing deleted baseline before returning inventory.
+
 The following are data-plane recovery materializations, not independent
 lifecycle state machines:
 

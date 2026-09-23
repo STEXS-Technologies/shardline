@@ -66,6 +66,7 @@ async fn record_oci_evidence(
 ) -> Result<(), PostgresMetadataStoreError> {
     let after = oci_snapshot(key, state, deleted_at)?;
     let mut evidence = load_oci_evidence(executor, key).await?;
+    let evidence_was_empty = evidence.events().is_empty();
     if evidence.events().is_empty() {
         evidence = OciObjectEvidenceLog::baseline(oci_snapshot(
             key,
@@ -79,14 +80,28 @@ async fn record_oci_evidence(
             shardline_reliability::ReliabilityError::EmptyField("OCI object evidence event"),
         )
     })?;
-    insert_reliability_event_json(
-        executor,
-        event.operation.kind.as_str(),
-        &event.operation.operation_id,
-        event.sequence,
-        to_value(event)?,
-    )
-    .await
+    if evidence_was_empty {
+        for stored_event in evidence.events() {
+            insert_reliability_event_json(
+                &mut *executor,
+                stored_event.operation.kind.as_str(),
+                &stored_event.operation.operation_id,
+                stored_event.sequence,
+                to_value(stored_event)?,
+            )
+            .await?;
+        }
+        Ok(())
+    } else {
+        insert_reliability_event_json(
+            executor,
+            event.operation.kind.as_str(),
+            &event.operation.operation_id,
+            event.sequence,
+            to_value(event)?,
+        )
+        .await
+    }
 }
 use crate::{
     OciObjectKey, OciObjectKind, OciObjectStore, OciObjectTombstone, OciTagEntry,
@@ -356,28 +371,44 @@ impl OciObjectStore for PostgresIndexStore {
         .fetch_optional(&self.pool)
         .await?;
         let mut connection = self.pool.acquire().await?;
-        let evidence = load_oci_evidence(&mut connection, key).await?;
-        if !evidence.events().is_empty() {
-            if found.is_some() {
-                let deleted_at: i64 = query_scalar(
-                    "SELECT deleted_at_unix_seconds FROM shardline_oci_object_tombstones
-                     WHERE scope_namespace = $1 AND repository = $2 AND object_kind = $3 AND digest_hex = $4",
-                )
-                .bind(&key.scope_namespace)
-                .bind(&key.repository)
-                .bind(key.kind.as_str())
-                .bind(&key.digest_hex)
-                .fetch_one(&mut *connection)
-                .await?;
-                evidence.verify_for(&oci_snapshot(
-                    key,
-                    OciObjectLifecycleState::Deleted,
-                    Some(super::i64_to_u64(deleted_at)?),
-                )?)?;
+        let mut transaction = connection.begin().await?;
+        let evidence = load_oci_evidence(transaction.as_mut(), key).await?;
+        if found.is_some() {
+            let deleted_at: i64 = query_scalar(
+                "SELECT deleted_at_unix_seconds FROM shardline_oci_object_tombstones
+                 WHERE scope_namespace = $1 AND repository = $2 AND object_kind = $3 AND digest_hex = $4",
+            )
+            .bind(&key.scope_namespace)
+            .bind(&key.repository)
+            .bind(key.kind.as_str())
+            .bind(&key.digest_hex)
+            .fetch_one(transaction.as_mut())
+            .await?;
+            let expected = oci_snapshot(
+                key,
+                OciObjectLifecycleState::Deleted,
+                Some(super::i64_to_u64(deleted_at)?),
+            )?;
+            if evidence.events().is_empty() {
+                let baseline = OciObjectEvidenceLog::baseline(expected.clone())?;
+                baseline.verify_for(&expected)?;
+                for event in baseline.events() {
+                    insert_reliability_event_json(
+                        transaction.as_mut(),
+                        event.operation.kind.as_str(),
+                        &event.operation.operation_id,
+                        event.sequence,
+                        to_value(event)?,
+                    )
+                    .await?;
+                }
             } else {
-                shardline_reliability::verify_oci_object_lifecycle_chain(evidence.events())?;
+                evidence.verify_for(&expected)?;
             }
+        } else if !evidence.events().is_empty() {
+            shardline_reliability::verify_oci_object_lifecycle_chain(evidence.events())?;
         }
+        transaction.commit().await?;
         Ok(found.is_some())
     }
 
@@ -407,6 +438,7 @@ impl OciObjectStore for PostgresIndexStore {
         .fetch_all(&self.pool)
         .await?;
         let mut connection = self.pool.acquire().await?;
+        let mut transaction = connection.begin().await?;
         let tombstones = rows
             .into_iter()
             .map(|row| {
@@ -426,15 +458,30 @@ impl OciObjectStore for PostgresIndexStore {
             })
             .collect::<Result<Vec<_>, Self::Error>>()?;
         for tombstone in &tombstones {
-            let evidence = load_oci_evidence(&mut connection, &tombstone.key).await?;
-            if !evidence.events().is_empty() {
-                evidence.verify_for(&oci_snapshot(
-                    &tombstone.key,
-                    OciObjectLifecycleState::Deleted,
-                    Some(tombstone.deleted_at_unix_seconds),
-                )?)?;
+            let evidence = load_oci_evidence(transaction.as_mut(), &tombstone.key).await?;
+            let expected = oci_snapshot(
+                &tombstone.key,
+                OciObjectLifecycleState::Deleted,
+                Some(tombstone.deleted_at_unix_seconds),
+            )?;
+            if evidence.events().is_empty() {
+                let baseline = OciObjectEvidenceLog::baseline(expected.clone())?;
+                baseline.verify_for(&expected)?;
+                for event in baseline.events() {
+                    insert_reliability_event_json(
+                        transaction.as_mut(),
+                        event.operation.kind.as_str(),
+                        &event.operation.operation_id,
+                        event.sequence,
+                        to_value(event)?,
+                    )
+                    .await?;
+                }
+            } else {
+                evidence.verify_for(&expected)?;
             }
         }
+        transaction.commit().await?;
         Ok(tombstones)
     }
 
@@ -479,6 +526,7 @@ mod tests {
 
     use super::*;
     use crate::{OciTagStore as _, ResumableSession, ResumableSessionProtocol};
+    use sqlx::query_as;
     use std::time::Duration;
 
     async fn connect_postgres() -> Option<sqlx::PgPool> {
@@ -572,6 +620,106 @@ mod tests {
                 .await
                 .unwrap()
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pg_reclaim_repairs_missing_visibility_baseline_chain() {
+        let Some(pool) = connect_postgres().await else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let store = PostgresIndexStore::new(pool.clone());
+        let key = OciObjectKey {
+            scope_namespace: "oci-reclaim-repair".to_owned(),
+            repository: "team/assets".to_owned(),
+            kind: OciObjectKind::Blob,
+            digest_hex: "f".repeat(64),
+        };
+        query(
+            "DELETE FROM shardline_oci_object_tombstones
+             WHERE scope_namespace = $1 AND repository = $2
+               AND object_kind = $3 AND digest_hex = $4",
+        )
+        .bind(&key.scope_namespace)
+        .bind(&key.repository)
+        .bind(key.kind.as_str())
+        .bind(&key.digest_hex)
+        .execute(&pool)
+        .await
+        .unwrap();
+        query(
+            "DELETE FROM shardline_reliability_events
+             WHERE operation_kind = 'Visibility' AND operation_id = $1",
+        )
+        .bind(format!(
+            "{}:{}:{}:{}",
+            key.scope_namespace,
+            key.repository,
+            key.kind.as_str(),
+            key.digest_hex
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+        store.delete_oci_object(&key).await.unwrap();
+        let tombstone = store
+            .list_oci_object_tombstones()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|candidate| candidate.key == key)
+            .unwrap();
+        query(
+            "DELETE FROM shardline_reliability_events
+             WHERE operation_kind = 'Visibility' AND operation_id = $1",
+        )
+        .bind(format!(
+            "{}:{}:{}:{}",
+            key.scope_namespace,
+            key.repository,
+            key.kind.as_str(),
+            key.digest_hex
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        assert!(
+            store
+                .delete_oci_object_tombstone_if_unchanged(&tombstone)
+                .await
+                .unwrap()
+        );
+        let (count, minimum, maximum): (i64, i64, i64) = query_as(
+            "SELECT COUNT(*), MIN(sequence), MAX(sequence)
+             FROM shardline_reliability_events
+             WHERE operation_kind = 'Visibility' AND operation_id = $1",
+        )
+        .bind(format!(
+            "{}:{}:{}:{}",
+            key.scope_namespace,
+            key.repository,
+            key.kind.as_str(),
+            key.digest_hex
+        ))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!((count, minimum, maximum), (2, 0, 1));
+        query(
+            "DELETE FROM shardline_reliability_events
+             WHERE operation_kind = 'Visibility' AND operation_id = $1",
+        )
+        .bind(format!(
+            "{}:{}:{}:{}",
+            key.scope_namespace,
+            key.repository,
+            key.kind.as_str(),
+            key.digest_hex
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread")]

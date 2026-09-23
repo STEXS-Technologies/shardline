@@ -87,6 +87,7 @@ fn record_oci_evidence(
 ) -> Result<(), LocalIndexStoreError> {
     let after = oci_snapshot(key, state, deleted_at)?;
     let mut evidence = load_oci_evidence(transaction, key)?;
+    let evidence_was_empty = evidence.events().is_empty();
     if evidence.events().is_empty() {
         evidence = OciObjectEvidenceLog::baseline(oci_snapshot(
             key,
@@ -100,7 +101,14 @@ fn record_oci_evidence(
             "OCI object evidence event",
         ))
     })?;
-    persist_oci_evidence(transaction, event)
+    if evidence_was_empty {
+        for stored_event in evidence.events() {
+            persist_oci_evidence(transaction, stored_event)?;
+        }
+        Ok(())
+    } else {
+        persist_oci_evidence(transaction, event)
+    }
 }
 
 impl LocalIndexStore {
@@ -141,12 +149,18 @@ impl LocalIndexStore {
         drop(statement);
         for tombstone in &tombstones {
             let evidence = load_oci_evidence(&transaction, &tombstone.key)?;
-            if !evidence.events().is_empty() {
-                let expected = oci_snapshot(
-                    &tombstone.key,
-                    OciObjectLifecycleState::Deleted,
-                    Some(tombstone.deleted_at_unix_seconds),
-                )?;
+            let expected = oci_snapshot(
+                &tombstone.key,
+                OciObjectLifecycleState::Deleted,
+                Some(tombstone.deleted_at_unix_seconds),
+            )?;
+            if evidence.events().is_empty() {
+                let baseline = OciObjectEvidenceLog::baseline(expected.clone())?;
+                baseline.verify_for(&expected)?;
+                for event in baseline.events() {
+                    persist_oci_evidence(&transaction, event)?;
+                }
+            } else {
                 evidence.verify_for(&expected)?;
             }
         }
@@ -291,7 +305,17 @@ impl OciObjectStore for LocalIndexStore {
                 .map(i64_to_u64)
                 .transpose()?;
             let evidence = load_oci_evidence(&transaction, &key)?;
-            if !evidence.events().is_empty() {
+            if evidence.events().is_empty() {
+                if let Some(deleted_at) = deleted_at {
+                    let expected =
+                        oci_snapshot(&key, OciObjectLifecycleState::Deleted, Some(deleted_at))?;
+                    let baseline = OciObjectEvidenceLog::baseline(expected.clone())?;
+                    baseline.verify_for(&expected)?;
+                    for event in baseline.events() {
+                        persist_oci_evidence(&transaction, event)?;
+                    }
+                }
+            } else {
                 verify_oci_object_lifecycle_chain(evidence.events())?;
                 if let Some(deleted_at) = deleted_at {
                     let expected =
@@ -531,5 +555,48 @@ mod tests {
             )
             .unwrap();
         assert!(store.oci_object_is_deleted(&blob).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn reclaim_repairs_missing_visibility_baseline_chain() {
+        let storage = shardline_test_support::TempStorage::new();
+        let store = LocalIndexStore::new(storage.path_buf()).unwrap();
+        let blob = object(OciObjectKind::Blob, 'f');
+        store.delete_oci_object(&blob).await.unwrap();
+        let tombstone = store
+            .list_oci_object_tombstones()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|candidate| candidate.key == blob)
+            .unwrap();
+        {
+            let connection = store.open_connection().unwrap();
+            connection
+                .execute(
+                    "DELETE FROM shardline_reliability_events
+                     WHERE operation_kind = 'Visibility'",
+                    [],
+                )
+                .unwrap();
+        }
+
+        assert!(
+            store
+                .delete_oci_object_tombstone_if_unchanged(&tombstone)
+                .await
+                .unwrap()
+        );
+        let connection = store.open_connection().unwrap();
+        let (count, minimum, maximum): (i64, i64, i64) = connection
+            .query_row(
+                "SELECT COUNT(*), MIN(sequence), MAX(sequence)
+                 FROM shardline_reliability_events
+                 WHERE operation_kind = 'Visibility'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!((count, minimum, maximum), (2, 0, 1));
     }
 }
