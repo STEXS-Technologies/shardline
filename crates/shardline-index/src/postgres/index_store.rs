@@ -8,9 +8,9 @@ use shardline_reliability::{
     RetentionHoldLifecycleState, RetentionHoldSnapshot, RetentionObjectIdentity, SnapshotEvidence,
     WebhookDeliveryEvidenceLog, WebhookDeliveryIdentity, WebhookDeliveryLifecycleState,
     WebhookDeliverySnapshot, baseline_upload_lifecycle_events, upload_lifecycle_event,
-    verify_provider_lifecycle_events, verify_quarantine_lifecycle_events,
-    verify_retention_hold_lifecycle_events, verify_upload_lifecycle_events,
-    verify_webhook_delivery_events,
+    verify_or_repair_snapshot_evidence, verify_provider_lifecycle_events,
+    verify_quarantine_lifecycle_events, verify_retention_hold_lifecycle_events,
+    verify_upload_lifecycle_events, verify_webhook_delivery_events,
 };
 use shardline_storage::ObjectKey;
 use sqlx::{Row, postgres::PgRow, query, query_scalar, types::Json};
@@ -429,12 +429,7 @@ impl AsyncIndexStore for super::PostgresIndexStore {
                 let snapshot = quarantine_snapshot(candidate, QuarantineLifecycleState::Active)?;
                 let evidence =
                     load_postgres_quarantine_evidence(&self.pool, object_key.as_str()).await?;
-                let evidence = if evidence.events().is_empty() {
-                    QuarantineEvidenceLog::baseline(snapshot.clone())?
-                } else {
-                    evidence
-                };
-                verify_quarantine_lifecycle_events(evidence.events(), &snapshot)?;
+                let (_evidence, _) = verify_or_repair_snapshot_evidence(evidence, snapshot)?;
             }
             Ok(candidate)
         })
@@ -464,12 +459,7 @@ impl AsyncIndexStore for super::PostgresIndexStore {
                 let evidence =
                     load_postgres_quarantine_evidence(&self.pool, candidate.object_key().as_str())
                         .await?;
-                let evidence = if evidence.events().is_empty() {
-                    QuarantineEvidenceLog::baseline(snapshot.clone())?
-                } else {
-                    evidence
-                };
-                verify_quarantine_lifecycle_events(evidence.events(), &snapshot)?;
+                let (_evidence, _) = verify_or_repair_snapshot_evidence(evidence, snapshot)?;
             }
             Ok(candidates)
         })
@@ -655,12 +645,7 @@ impl AsyncIndexStore for super::PostgresIndexStore {
                 let snapshot = retention_snapshot(hold, RetentionHoldLifecycleState::Active)?;
                 let evidence =
                     load_postgres_retention_evidence(&self.pool, object_key.as_str()).await?;
-                let evidence = if evidence.events().is_empty() {
-                    RetentionEvidenceLog::baseline(snapshot.clone())?
-                } else {
-                    evidence
-                };
-                verify_retention_hold_lifecycle_events(evidence.events(), &snapshot)?;
+                let (_evidence, _) = verify_or_repair_snapshot_evidence(evidence, snapshot)?;
             }
             Ok(hold)
         })
@@ -688,12 +673,7 @@ impl AsyncIndexStore for super::PostgresIndexStore {
                 let evidence =
                     load_postgres_retention_evidence(&self.pool, hold.object_key().as_str())
                         .await?;
-                let evidence = if evidence.events().is_empty() {
-                    RetentionEvidenceLog::baseline(snapshot.clone())?
-                } else {
-                    evidence
-                };
-                verify_retention_hold_lifecycle_events(evidence.events(), &snapshot)?;
+                let (_evidence, _) = verify_or_repair_snapshot_evidence(evidence, snapshot)?;
             }
             Ok(holds)
         })
@@ -838,12 +818,7 @@ impl AsyncIndexStore for super::PostgresIndexStore {
                 let snapshot =
                     webhook_snapshot(delivery, WebhookDeliveryLifecycleState::Processed)?;
                 let evidence = load_postgres_webhook_evidence(&self.pool, delivery).await?;
-                let evidence = if evidence.events().is_empty() {
-                    WebhookDeliveryEvidenceLog::baseline(snapshot.clone())?
-                } else {
-                    evidence
-                };
-                verify_webhook_delivery_events(evidence.events(), &snapshot)?;
+                let (_evidence, _) = verify_or_repair_snapshot_evidence(evidence, snapshot)?;
             }
             Ok(deliveries)
         })

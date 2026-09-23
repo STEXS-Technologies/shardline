@@ -3,8 +3,8 @@ use shardline_protocol::{RepositoryProvider, ShardlineHash, unix_now_seconds_los
 use shardline_reliability::{
     LifecycleEvent, ProviderEvidenceLog, QuarantineLifecycleState, RetentionEvidenceLog,
     RetentionHoldLifecycleState, WebhookDeliveryEvidenceLog, WebhookDeliveryLifecycleState,
-    baseline_upload_lifecycle_events, upload_lifecycle_event, verify_provider_lifecycle_events,
-    verify_quarantine_lifecycle_events, verify_retention_hold_lifecycle_chain,
+    baseline_upload_lifecycle_events, upload_lifecycle_event, verify_or_repair_snapshot_evidence,
+    verify_provider_lifecycle_events, verify_retention_hold_lifecycle_chain,
     verify_retention_hold_lifecycle_events, verify_upload_lifecycle_events,
     verify_webhook_delivery_chain, verify_webhook_delivery_events,
 };
@@ -214,12 +214,7 @@ impl LifecycleStore for LocalIndexStore {
                 super::helpers::quarantine_snapshot(candidate, QuarantineLifecycleState::Active)?;
             let evidence =
                 super::helpers::load_quarantine_evidence(&transaction, object_key.as_str())?;
-            let evidence = if evidence.events().is_empty() {
-                shardline_reliability::QuarantineEvidenceLog::baseline(snapshot.clone())?
-            } else {
-                evidence
-            };
-            verify_quarantine_lifecycle_events(evidence.events(), &snapshot)?;
+            let (_evidence, _) = verify_or_repair_snapshot_evidence(evidence, snapshot)?;
         }
         transaction.commit()?;
         Ok(candidate)
@@ -246,12 +241,7 @@ impl LifecycleStore for LocalIndexStore {
                 &transaction,
                 candidate.object_key().as_str(),
             )?;
-            let evidence = if evidence.events().is_empty() {
-                shardline_reliability::QuarantineEvidenceLog::baseline(snapshot.clone())?
-            } else {
-                evidence
-            };
-            verify_quarantine_lifecycle_events(evidence.events(), &snapshot)?;
+            let (_evidence, _) = verify_or_repair_snapshot_evidence(evidence, snapshot)?;
         }
         transaction.commit()?;
         Ok(candidates)
@@ -386,12 +376,7 @@ impl LifecycleStore for LocalIndexStore {
         if let Some(hold) = hold.as_ref() {
             let snapshot = retention_snapshot(hold, RetentionHoldLifecycleState::Active)?;
             let evidence = load_retention_evidence(&transaction, object_key.as_str())?;
-            let evidence = if evidence.events().is_empty() {
-                RetentionEvidenceLog::baseline(snapshot.clone())?
-            } else {
-                evidence
-            };
-            verify_retention_hold_lifecycle_events(evidence.events(), &snapshot)?;
+            let (_evidence, _) = verify_or_repair_snapshot_evidence(evidence, snapshot)?;
         }
         transaction.commit()?;
         Ok(hold)
@@ -414,12 +399,7 @@ impl LifecycleStore for LocalIndexStore {
         for hold in &holds {
             let snapshot = retention_snapshot(hold, RetentionHoldLifecycleState::Active)?;
             let evidence = load_retention_evidence(&transaction, hold.object_key().as_str())?;
-            let evidence = if evidence.events().is_empty() {
-                RetentionEvidenceLog::baseline(snapshot.clone())?
-            } else {
-                evidence
-            };
-            verify_retention_hold_lifecycle_events(evidence.events(), &snapshot)?;
+            let (_evidence, _) = verify_or_repair_snapshot_evidence(evidence, snapshot)?;
         }
         transaction.commit()?;
         Ok(holds)
@@ -569,12 +549,7 @@ impl LifecycleStore for LocalIndexStore {
         if let Some(existing) = existing {
             let snapshot = webhook_snapshot(&existing, WebhookDeliveryLifecycleState::Processed)?;
             let evidence = load_webhook_evidence(&transaction, &existing)?;
-            let evidence = if evidence.events().is_empty() {
-                WebhookDeliveryEvidenceLog::baseline(snapshot.clone())?
-            } else {
-                evidence
-            };
-            verify_webhook_delivery_events(evidence.events(), &snapshot)?;
+            let (_evidence, _) = verify_or_repair_snapshot_evidence(evidence, snapshot)?;
             transaction.commit()?;
             return Ok(false);
         }
@@ -638,12 +613,7 @@ impl LifecycleStore for LocalIndexStore {
         for delivery in &deliveries {
             let snapshot = webhook_snapshot(delivery, WebhookDeliveryLifecycleState::Processed)?;
             let evidence = load_webhook_evidence(&transaction, delivery)?;
-            let evidence = if evidence.events().is_empty() {
-                WebhookDeliveryEvidenceLog::baseline(snapshot.clone())?
-            } else {
-                evidence
-            };
-            verify_webhook_delivery_events(evidence.events(), &snapshot)?;
+            let (_evidence, _) = verify_or_repair_snapshot_evidence(evidence, snapshot)?;
         }
         transaction.commit()?;
         Ok(deliveries)
