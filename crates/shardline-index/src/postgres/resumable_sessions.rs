@@ -1722,6 +1722,17 @@ mod tests {
                 .state(),
             ResumableSessionState::Expired
         );
+        let events = store
+            .resumable_reliability_events(session.session_id())
+            .await
+            .unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| (event.before.as_str(), event.after.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("active", "active"), ("active", "expired")]
+        );
     }
 
     #[tokio::test]

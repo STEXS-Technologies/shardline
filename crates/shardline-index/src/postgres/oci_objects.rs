@@ -276,7 +276,7 @@ impl PostgresIndexStore {
         )
         .await?;
         let event = resumable_session_event(
-            scope_namespace,
+            &scope_namespace,
             fence.session_id(),
             target_key,
             sequence,
@@ -551,18 +551,18 @@ mod tests {
         sqlx::PgPool::connect(&url).await.ok()
     }
 
-    fn object() -> OciObjectKey {
+    fn object(scope_namespace: &str) -> OciObjectKey {
         OciObjectKey {
-            scope_namespace: "oci-tombstone-pg".to_owned(),
+            scope_namespace: scope_namespace.to_owned(),
             repository: "team/assets".to_owned(),
             kind: OciObjectKind::Manifest,
             digest_hex: "a".repeat(64),
         }
     }
 
-    fn tag(name: &str, digest: char) -> OciTagEntry {
+    fn tag(scope_namespace: &str, name: &str, digest: char) -> OciTagEntry {
         OciTagEntry {
-            scope_namespace: "oci-tombstone-pg".to_owned(),
+            scope_namespace: scope_namespace.to_owned(),
             repository: "team/assets".to_owned(),
             tag: name.to_owned(),
             digest_hex: digest.to_string().repeat(64),
@@ -575,13 +575,17 @@ mod tests {
             eprintln!("skipping: no DATABASE_URL");
             return;
         };
+        let scope_namespace = format!(
+            "oci-tombstone-pg-{}",
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        );
         query("DELETE FROM shardline_oci_object_tombstones WHERE scope_namespace = $1")
-            .bind("oci-tombstone-pg")
+            .bind(&scope_namespace)
             .execute(&pool)
             .await
             .unwrap();
         query("DELETE FROM shardline_oci_tags WHERE scope_namespace = $1")
-            .bind("oci-tombstone-pg")
+            .bind(&scope_namespace)
             .execute(&pool)
             .await
             .unwrap();
@@ -592,7 +596,7 @@ mod tests {
         )
         .bind(format!(
             "{}:{}:{}:{}",
-            "oci-tombstone-pg",
+            scope_namespace,
             "team/assets",
             OciObjectKind::Manifest.as_str(),
             "a".repeat(64)
@@ -601,9 +605,9 @@ mod tests {
         .await
         .unwrap();
         let store = PostgresIndexStore::new(pool);
-        let manifest = object();
-        let current = tag("latest", 'a');
-        let unrelated = tag("stable", 'b');
+        let manifest = object(&scope_namespace);
+        let current = tag(&scope_namespace, "latest", 'a');
+        let unrelated = tag(&scope_namespace, "stable", 'b');
 
         store
             .publish_oci_object(&manifest, &[current.clone(), unrelated.clone()])
