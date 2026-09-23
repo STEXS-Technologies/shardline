@@ -85,18 +85,7 @@ pub(super) fn record_snapshot(
     };
     log = append_or_baseline_snapshot_evidence(log, snapshot).map_err(invalid_evidence)?;
     let bytes = serde_json::to_vec(&log).map_err(invalid_evidence)?;
-    let temporary = path.with_extension("snapshot.tmp");
-    let mut file = fs::OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .open(&temporary)?;
-    file.write_all(&bytes)?;
-    file.sync_all()?;
-    drop(file);
-    fs::rename(temporary, path)?;
-    sync_directory(dir)?;
-    Ok(())
+    write_sidecar_atomically(dir, &path, &bytes)
 }
 
 /// Verifies the latest persisted materialized snapshot against the state the
@@ -142,17 +131,7 @@ pub(super) fn load(
         .map_err(invalid_evidence)?;
     if evidence_was_missing {
         let bytes = serde_json::to_vec(&log).map_err(invalid_evidence)?;
-        let temporary = path.with_extension("evidence.tmp");
-        let mut file = fs::OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .open(&temporary)?;
-        file.write_all(&bytes)?;
-        file.sync_all()?;
-        drop(file);
-        fs::rename(temporary, path)?;
-        sync_directory(dir)?;
+        write_sidecar_atomically(dir, &path, &bytes)?;
     }
     Ok(log)
 }
@@ -178,18 +157,35 @@ pub(super) fn record(
     .map_err(invalid_evidence)?;
     let bytes = serde_json::to_vec(&log).map_err(invalid_evidence)?;
     let path = evidence_path(dir, oid);
-    let temporary = path.with_extension("evidence.tmp");
-    let mut file = fs::OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .open(&temporary)?;
-    file.write_all(&bytes)?;
-    file.sync_all()?;
-    drop(file);
-    fs::rename(temporary, path)?;
-    sync_directory(dir)?;
-    Ok(())
+    write_sidecar_atomically(dir, &path, &bytes)
+}
+
+/// Commits one evidence sidecar atomically and removes the staging file on
+/// every failed write or rename path. This keeps a failed local repair from
+/// leaving an ambiguous second state artifact beside the verified sidecar.
+fn write_sidecar_atomically(dir: &Path, path: &Path, bytes: &[u8]) -> Result<(), ServerError> {
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("sidecar");
+    let temporary = path.with_extension(format!("{extension}.tmp"));
+    let result = (|| {
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&temporary)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&temporary, path)?;
+        sync_directory(dir)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ignored = fs::remove_file(&temporary);
+    }
+    result
 }
 
 pub(super) fn transition(
@@ -346,6 +342,16 @@ mod tests {
         .expect("record baseline-compatible mutation");
         let stored = load(directory.path(), OID, SCOPE, SESSION, TARGET).expect("stored evidence");
         assert_eq!(stored.events().len(), 2);
+    }
+
+    #[test]
+    fn sidecar_write_failure_removes_temporary_file() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = evidence_path(directory.path(), OID);
+        fs::create_dir(&path).expect("target directory");
+
+        assert!(write_sidecar_atomically(directory.path(), &path, b"evidence").is_err());
+        assert!(!directory.path().join("a.evidence.tmp").exists());
     }
 
     #[test]
