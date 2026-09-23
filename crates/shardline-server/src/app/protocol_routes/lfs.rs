@@ -1468,6 +1468,30 @@ pub(crate) async fn lfs_patch_object(
             evict_lfs_patch_ranges(&ranges_path);
             return Err(ServerError::LfsPatchRangeNotSatisfiable);
         }
+        let pre_snapshot_state = load_lfs_patch_ranges_from_disk(&ranges_path, total)?;
+        let pre_staging_length = match fs::metadata(&tmp_path) {
+            Ok(metadata) => metadata.len(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(error) => return Err(error.into()),
+        };
+        let last_touched_unix_seconds = match read_patch_last_touched(&tmp_dir, &oid_for_closure) {
+            Ok(value) => value,
+            Err(ServerError::Io(ref io)) if io.kind() == std::io::ErrorKind::NotFound => now,
+            Err(error) => return Err(error),
+        };
+        lfs_patch_evidence::verify_snapshot(
+            &tmp_dir,
+            &lfs_patch_evidence::LfsPatchSnapshotInput {
+                oid: &oid_for_closure,
+                scope_namespace: &scope_namespace_for_closure,
+                session_id: &session_id_for_closure,
+                target_key: object_key_for_closure.as_str(),
+                total_bytes: total,
+                ranges: &pre_snapshot_state.ranges,
+                staging_length: pre_staging_length,
+                last_touched_unix_seconds,
+            },
+        )?;
         touch_patch_session(&tmp_dir, &oid_for_closure, now)?;
         drop(store_guard);
         if already_complete {

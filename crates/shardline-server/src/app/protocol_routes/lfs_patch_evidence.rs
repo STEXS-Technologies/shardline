@@ -100,6 +100,25 @@ pub(super) fn record_snapshot(
     Ok(())
 }
 
+/// Verifies the latest persisted materialized snapshot against the state the
+/// caller reconstructed from disk. A missing snapshot is valid for legacy
+/// sessions and will be recreated by the next successful mutation.
+pub(super) fn verify_snapshot(
+    dir: &Path,
+    input: &LfsPatchSnapshotInput<'_>,
+) -> Result<(), ServerError> {
+    let path = snapshot_path(dir, input.oid);
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    let events = serde_json::from_slice(&bytes).map_err(invalid_evidence)?;
+    let log = SnapshotEvidenceLog::from_events(events).map_err(invalid_evidence)?;
+    let expected = materialized_snapshot(input)?;
+    log.verify_for(&expected).map_err(invalid_evidence)
+}
+
 pub(super) fn load(
     dir: &Path,
     oid: &str,
@@ -408,6 +427,28 @@ mod tests {
             error,
             ServerError::Io(ref io_error) if io_error.kind() == ErrorKind::InvalidData
         ));
+    }
+
+    #[test]
+    fn materialized_state_tampering_is_rejected_before_snapshot_append() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let input = LfsPatchSnapshotInput {
+            oid: OID,
+            scope_namespace: SCOPE,
+            session_id: SESSION,
+            target_key: TARGET,
+            total_bytes: 10,
+            ranges: &[(0, 5)],
+            staging_length: 5,
+            last_touched_unix_seconds: 100,
+        };
+        record_snapshot(directory.path(), &input).expect("snapshot baseline");
+        let tampered = LfsPatchSnapshotInput {
+            ranges: &[(0, 4)],
+            ..input
+        };
+        assert!(verify_snapshot(directory.path(), &tampered).is_err());
+        verify_snapshot(directory.path(), &input).expect("canonical snapshot");
     }
 
     #[test]
