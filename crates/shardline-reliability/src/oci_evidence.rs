@@ -1,6 +1,7 @@
 use penelope::ContentDigest as PenelopeDigest;
 use serde::{Deserialize, Serialize};
 
+use crate::digest::{canonical_snapshot_digest, canonical_transition_process_digest};
 use crate::{OperationIdentity, OperationKind, ReliabilityError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -147,8 +148,9 @@ impl OciObjectLifecycleEvent {
             });
         }
         let operation = after.operation()?;
-        let state_digest = state_digest(&after)?;
-        let process_digest = process_digest(&operation, sequence, &before, &after)?;
+        let state_digest = canonical_snapshot_digest(&after)?;
+        let process_digest =
+            canonical_transition_process_digest(&operation, sequence, &before, &after)?;
         Ok(Self {
             operation,
             sequence,
@@ -163,11 +165,16 @@ impl OciObjectLifecycleEvent {
         if self.operation != self.after.operation()? {
             return Err(ReliabilityError::OperationMismatch);
         }
-        if self.state_digest != state_digest(&self.after)? {
+        if self.state_digest != canonical_snapshot_digest(&self.after)? {
             return Err(ReliabilityError::StateDigestMismatch);
         }
         if self.process_digest
-            != process_digest(&self.operation, self.sequence, &self.before, &self.after)?
+            != canonical_transition_process_digest(
+                &self.operation,
+                self.sequence,
+                &self.before,
+                &self.after,
+            )?
         {
             return Err(ReliabilityError::ProcessDigestMismatch);
         }
@@ -252,26 +259,6 @@ impl OciObjectEvidenceLog {
     pub fn events(&self) -> &[OciObjectLifecycleEvent] {
         &self.0
     }
-}
-
-fn state_digest(
-    snapshot: &OciObjectSnapshot,
-) -> Result<statechronicle::ContentDigest, ReliabilityError> {
-    Ok(statechronicle::core::digest::hash_bytes(
-        &serde_json::to_vec(snapshot).map_err(ReliabilityError::Serialize)?,
-    ))
-}
-
-fn process_digest(
-    operation: &OperationIdentity,
-    sequence: u64,
-    before: &OciObjectSnapshot,
-    after: &OciObjectSnapshot,
-) -> Result<PenelopeDigest, ReliabilityError> {
-    Ok(PenelopeDigest::sha256(
-        &serde_json::to_vec(&(operation, sequence, before, after))
-            .map_err(ReliabilityError::Serialize)?,
-    ))
 }
 
 #[cfg(test)]
