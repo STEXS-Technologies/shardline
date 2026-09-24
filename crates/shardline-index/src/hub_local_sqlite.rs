@@ -11,7 +11,7 @@ use crate::{
     local_sqlite::{
         LocalIndexStore, LocalIndexStoreError, current_hub_ref_evidence, hub_ref_snapshot,
         i64_to_u64, persist_hub_ref_evidence, retry_sqlite_busy, u64_to_i64,
-        verify_hub_ref_evidence,
+        verify_hub_ref_evidence, verify_hub_ref_evidence_batch,
     },
 };
 use shardline_reliability::{
@@ -52,14 +52,17 @@ fn verify_hub_repo_heads(root: &Path, repos: &[HubRepo]) -> Result<(), LocalInde
     retry_sqlite_busy(|| {
         let mut conn = open_hub_connection_rw(root)?;
         let tx = conn.transaction()?;
-        for repo in repos {
-            verify_hub_ref_evidence(
-                &tx,
-                &repo.repo_id,
-                "main",
-                Some(repo.default_branch.clone()),
-            )?;
-        }
+        let refs = repos
+            .iter()
+            .map(|repo| {
+                (
+                    repo.repo_id.clone(),
+                    "main".to_owned(),
+                    Some(repo.default_branch.clone()),
+                )
+            })
+            .collect::<Vec<_>>();
+        verify_hub_ref_evidence_batch(&tx, &refs)?;
         tx.commit()?;
         Ok(())
     })

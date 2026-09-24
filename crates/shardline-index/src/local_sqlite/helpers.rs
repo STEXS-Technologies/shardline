@@ -1,6 +1,7 @@
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 use std::{
+    collections::HashMap,
     error::Error as StdError,
     ffi::OsStr,
     fs::{self, OpenOptions},
@@ -15,7 +16,7 @@ use rusqlite::{
     Connection, Error as SqliteError, ErrorCode, MappedRows, OpenFlags, OptionalExtension, Params,
     Result as SqliteResult, Row, Transaction,
     config::DbConfig,
-    params,
+    params, params_from_iter,
     types::{Type, ValueRef},
 };
 use serde_json::{Value, from_slice, from_str, from_value, to_string};
@@ -626,6 +627,87 @@ pub(crate) fn verify_hub_ref_evidence(
     let evidence = load_hub_ref_evidence(transaction, repository, ref_name)?;
     verify_snapshot_evidence(&evidence, &snapshot)?;
     Ok(evidence)
+}
+
+pub(crate) fn verify_hub_ref_evidence_batch(
+    transaction: &Transaction<'_>,
+    refs: &[(String, String, Option<String>)],
+) -> Result<(), LocalIndexStoreError> {
+    if refs.is_empty() {
+        return Ok(());
+    }
+    let mut operation_ids = Vec::with_capacity(refs.len());
+    for (repository, ref_name, _) in refs {
+        operation_ids.push(
+            hub_ref_snapshot(repository, ref_name, None)?
+                .evidence_operation()?
+                .operation_id,
+        );
+    }
+    let placeholders = (0..operation_ids.len())
+        .map(|index| format!("?{}", index + 2))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "SELECT operation_id, sequence, event_json, merkle_commit_json
+         FROM shardline_reliability_events
+         WHERE operation_kind = ?1 AND operation_id IN ({placeholders})
+         ORDER BY operation_id, sequence"
+    );
+    let mut parameters = Vec::with_capacity(operation_ids.len() + 1);
+    parameters.push(OperationKind::MetadataCommit.as_str().to_owned());
+    parameters.extend(operation_ids.iter().cloned());
+    let mut statement = transaction.prepare(&sql)?;
+    let rows = statement.query_map(params_from_iter(parameters.iter()), |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, Option<String>>(3)?,
+        ))
+    })?;
+    let mut histories: HashMap<String, Vec<(i64, String, Option<String>)>> =
+        HashMap::with_capacity(operation_ids.len());
+    for row in rows {
+        let (operation_id, sequence, event_json, merkle_commit_json) = row?;
+        histories
+            .entry(operation_id)
+            .or_insert_with(Vec::new)
+            .push((sequence, event_json, merkle_commit_json));
+    }
+    for ((repository, ref_name, head_sha), operation_id) in refs.iter().zip(operation_ids) {
+        let snapshot = hub_ref_snapshot(repository, ref_name, head_sha.clone())?;
+        let rows = histories.remove(&operation_id).unwrap_or_default();
+        let mut sequences = Vec::with_capacity(rows.len());
+        let mut event_json = Vec::with_capacity(rows.len());
+        let mut merkle_commits = Vec::with_capacity(rows.len());
+        let mut events = Vec::with_capacity(rows.len());
+        for (sequence, value, merkle_commit) in rows {
+            let sequence = u64::try_from(sequence).map_err(|_| {
+                LocalIndexStoreError::Reliability(shardline_reliability::ReliabilityError::Merkle(
+                    "persisted row sequence is out of range".into(),
+                ))
+            })?;
+            let value = from_str::<Value>(&value)?;
+            events.push(from_value::<HubRefLifecycleEvent>(value.clone())?);
+            sequences.push(sequence);
+            event_json.push(value);
+            merkle_commits.push(
+                merkle_commit
+                    .map(|json| from_str::<Value>(&json))
+                    .transpose()?,
+            );
+        }
+        shardline_reliability::verify_persisted_event_merkle_chain_with_sequences(
+            OperationKind::MetadataCommit,
+            &sequences,
+            &event_json,
+            &merkle_commits,
+        )?;
+        let evidence = HubRefEvidenceLog::from_events(events)?;
+        verify_snapshot_evidence(&evidence, &snapshot)?;
+    }
+    Ok(())
 }
 
 pub(crate) fn oci_tag_snapshot(
