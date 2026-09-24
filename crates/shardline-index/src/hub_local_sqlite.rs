@@ -53,15 +53,12 @@ fn verify_hub_repo_heads(root: &Path, repos: &[HubRepo]) -> Result<(), LocalInde
         let mut conn = open_hub_connection_rw(root)?;
         let tx = conn.transaction()?;
         for repo in repos {
-            let evidence = current_hub_ref_evidence(
+            verify_hub_ref_evidence(
                 &tx,
                 &repo.repo_id,
                 "main",
                 Some(repo.default_branch.clone()),
             )?;
-            for event in evidence.events() {
-                persist_hub_ref_evidence(&tx, event)?;
-            }
         }
         tx.commit()?;
         Ok(())
@@ -949,6 +946,8 @@ mod tests {
         drop(connection);
 
         assert!(store.list_refs("list-repair-test").is_err());
+        assert!(store.list_repos().is_err());
+        assert!(store.search_repos(None, "list-repair-test", 10).is_err());
 
         let repaired = Connection::open(ts.path().join("metadata.sqlite3")).expect("open");
         let count: i64 = repaired
