@@ -38,13 +38,15 @@ pub(crate) async fn connect_isolated_postgres() -> Option<PgPool> {
         .connect(&database_url)
         .await
         .ok()?;
+    let stale_schema_prefix = format!("shardline_test_{}_%", std::process::id());
     let _ = CLEANED_STALE_SCHEMAS
         .get_or_init(|| async {
             let schema_names = query_scalar::<_, String>(
                 "SELECT nspname
                  FROM pg_namespace
-                 WHERE nspname LIKE 'shardline_test_%'",
+                 WHERE nspname LIKE $1",
             )
+            .bind(&stale_schema_prefix)
             .fetch_all(&admin_pool)
             .await
             .unwrap_or_default();
