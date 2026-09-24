@@ -14,6 +14,10 @@ use crate::{
 /// intentionally typed by [`OperationKind`]. Keeping the discriminator-to-event
 /// mapping here prevents each adapter or migration from developing its own
 /// interpretation of integrity evidence.
+///
+/// # Errors
+///
+/// Returns an error when validation, integrity verification, or canonicalization fails.
 pub fn verify_persisted_event(
     operation_kind: OperationKind,
     event_json: Value,
@@ -24,6 +28,10 @@ pub fn verify_persisted_event(
 /// Verifies a persisted event and returns the sequence encoded by its typed
 /// payload. Storage adapters use this to bind the database key to the event
 /// itself rather than trusting the row discriminator alone.
+///
+/// # Errors
+///
+/// Returns an error when validation, integrity verification, or canonicalization fails.
 pub fn persisted_event_sequence(
     operation_kind: OperationKind,
     event_json: Value,
@@ -58,6 +66,10 @@ pub fn persisted_event_sequence(
 }
 
 /// Decodes and verifies the operation identity embedded in a persisted event.
+///
+/// # Errors
+///
+/// Returns an error when validation, integrity verification, or canonicalization fails.
 pub fn persisted_event_identity(
     operation_kind: OperationKind,
     event_json: Value,
@@ -93,6 +105,10 @@ pub fn persisted_event_identity(
 
 /// Builds the persisted Merkle commit for a typed envelope selected by its
 /// durable operation discriminator.
+///
+/// # Errors
+///
+/// Returns an error when validation, integrity verification, or canonicalization fails.
 pub fn build_persisted_merkle_commit(
     operation_kind: OperationKind,
     event_json: Value,
@@ -102,6 +118,10 @@ pub fn build_persisted_merkle_commit(
 
 /// Builds a persisted Merkle commitment linked to a previous commitment for
 /// the same operation, when one exists.
+///
+/// # Errors
+///
+/// Returns an error when validation, integrity verification, or canonicalization fails.
 pub fn build_persisted_merkle_commit_with_previous(
     operation_kind: OperationKind,
     event_json: Value,
@@ -149,6 +169,10 @@ pub fn build_persisted_merkle_commit_with_previous(
 
 /// Verifies that a persisted Merkle body is the exact StateChronicle
 /// commitment derived from its typed Shardline event.
+///
+/// # Errors
+///
+/// Returns an error when validation, integrity verification, or canonicalization fails.
 pub fn verify_persisted_merkle_commit(
     operation_kind: OperationKind,
     event_json: Value,
@@ -163,6 +187,10 @@ pub fn verify_persisted_merkle_commit(
 }
 
 /// Verifies a persisted Merkle body and its StateChronicle parent link.
+///
+/// # Errors
+///
+/// Returns an error when validation, integrity verification, or canonicalization fails.
 pub fn verify_persisted_merkle_commit_with_previous(
     operation_kind: OperationKind,
     event_json: Value,
@@ -196,6 +224,10 @@ pub fn verify_persisted_merkle_commit_with_previous(
 /// The event and commitment arrays must represent the same operation in
 /// sequence order. Keeping the previous-commit traversal here makes every
 /// database adapter use one chain interpretation.
+///
+/// # Errors
+///
+/// Returns an error when validation, integrity verification, or canonicalization fails.
 pub fn verify_persisted_event_merkle_chain(
     operation_kind: OperationKind,
     events: &[Value],
@@ -207,6 +239,10 @@ pub fn verify_persisted_event_merkle_chain(
 /// Verifies a persisted Merkle chain and binds each typed event to its storage
 /// row sequence. This catches a database row-key rewrite even when the event
 /// payload and its Merkle commitment are both internally consistent.
+///
+/// # Errors
+///
+/// Returns an error when validation, integrity verification, or canonicalization fails.
 pub fn verify_persisted_event_merkle_chain_with_sequences(
     operation_kind: OperationKind,
     row_sequences: &[u64],
@@ -318,7 +354,12 @@ where
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::redundant_clone,
+    clippy::unwrap_used,
+    clippy::expect_used
+)]
 mod tests {
     use super::*;
     use crate::{OperationIdentity, UploadLifecycleState, event::LifecycleEvidenceEvent};

@@ -36,6 +36,10 @@ pub struct QuarantineObjectIdentity {
 }
 
 impl QuarantineObjectIdentity {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when validation, integrity verification, or canonicalization fails.
     pub fn new(object_key: impl Into<String>) -> Result<Self, ReliabilityError> {
         let identity = Self {
             object_key: object_key.into(),
@@ -57,6 +61,10 @@ pub struct QuarantineSnapshot {
 }
 
 impl QuarantineSnapshot {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when validation, integrity verification, or canonicalization fails.
     pub fn new(
         identity: QuarantineObjectIdentity,
         observed_length: u64,
@@ -111,12 +119,20 @@ impl SnapshotEvidence for QuarantineSnapshot {
 
 pub type QuarantineLifecycleEvent = SnapshotEvidenceEvent<QuarantineSnapshot>;
 
+///
+/// # Errors
+///
+/// Returns an error when validation, integrity verification, or canonicalization fails.
 pub fn verify_quarantine_lifecycle_chain(
     events: &[QuarantineLifecycleEvent],
 ) -> Result<(), ReliabilityError> {
     verify_snapshot_chain(events)
 }
 
+///
+/// # Errors
+///
+/// Returns an error when validation, integrity verification, or canonicalization fails.
 pub fn verify_quarantine_lifecycle_events(
     events: &[QuarantineLifecycleEvent],
     expected: &QuarantineSnapshot,

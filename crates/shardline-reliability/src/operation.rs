@@ -92,6 +92,10 @@ pub struct OperationIdentity {
 }
 
 impl OperationIdentity {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when validation, integrity verification, or canonicalization fails.
     pub fn new(
         tenant: impl Into<String>,
         repository: impl Into<String>,
@@ -122,12 +126,20 @@ impl OperationIdentity {
         self
     }
 
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when validation, integrity verification, or canonicalization fails.
     pub fn content_digest(&self) -> Result<ContentDigest, ReliabilityError> {
         self.validate()?;
         statechronicle_core::canonicalize::canonicalize_and_digest(self)
             .map_err(|error| ReliabilityError::Canonicalize(error.to_string()))
     }
 
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when validation, integrity verification, or canonicalization fails.
     pub fn penelope_digest(&self) -> Result<PenelopeDigest, ReliabilityError> {
         self.validate()?;
         let bytes = statechronicle_core::canonicalize::canonicalize(self)
@@ -159,6 +171,10 @@ impl OperationIdentity {
 
 /// Builds a protocol snapshot identity while preserving its established
 /// persisted namespace and operation shape.
+///
+/// # Errors
+///
+/// Returns an error when validation, integrity verification, or canonicalization fails.
 pub fn resumable_session_snapshot_identity(
     domain: ResumableSessionSnapshotDomain,
     scope_namespace: impl Into<String>,

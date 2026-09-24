@@ -27,6 +27,10 @@ pub struct RepairSnapshotV1 {
 }
 
 impl RepairSnapshotV1 {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when validation, integrity verification, or canonicalization fails.
     pub fn new(
         subject: impl Into<String>,
         action: impl Into<String>,
@@ -66,7 +70,7 @@ pub struct RepairEvidenceEvent {
     pub process_digest: PenelopeDigest,
 }
 
-fn default_repair_digest_encoding() -> DigestEncoding {
+const fn default_repair_digest_encoding() -> DigestEncoding {
     DigestEncoding::CanonicalBcsV1
 }
 
@@ -97,6 +101,10 @@ impl DurableRepairTransitionV1 {
 }
 
 impl RepairEvidenceEvent {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when validation, integrity verification, or canonicalization fails.
     pub fn new(
         operation: OperationIdentity,
         sequence: u64,
@@ -122,6 +130,10 @@ impl RepairEvidenceEvent {
         })
     }
 
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when validation, integrity verification, or canonicalization fails.
     pub fn verify_integrity(&self) -> Result<(), ReliabilityError> {
         if self.operation.kind != OperationKind::Repair {
             return Err(ReliabilityError::OperationMismatch);
@@ -170,6 +182,7 @@ impl EvidenceEventMetadata for RepairEvidenceEvent {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

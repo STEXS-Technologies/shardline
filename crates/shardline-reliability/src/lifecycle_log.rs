@@ -22,12 +22,20 @@ impl<S: EvidenceState> Default for LifecycleEvidenceLog<S> {
 
 impl<S: EvidenceState> LifecycleEvidenceLog<S> {
     /// Wraps persisted events after validating their complete chain.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when validation, integrity verification, or canonicalization fails.
     pub fn from_events(events: Vec<LifecycleEvidenceEvent<S>>) -> Result<Self, ReliabilityError> {
         verify_evidence_chain(&events)?;
         Ok(Self(events))
     }
 
     /// Appends one event and verifies the complete chain.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when validation, integrity verification, or canonicalization fails.
     pub fn append(&mut self, event: LifecycleEvidenceEvent<S>) -> Result<(), ReliabilityError> {
         self.0.push(event);
         let result = verify_evidence_chain(&self.0);
@@ -38,6 +46,10 @@ impl<S: EvidenceState> LifecycleEvidenceLog<S> {
     }
 
     /// Verifies all event digests, identity, ordering, and chain continuity.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when validation, integrity verification, or canonicalization fails.
     pub fn verify(&self) -> Result<(), ReliabilityError> {
         verify_evidence_chain(&self.0)
     }

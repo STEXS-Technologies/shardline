@@ -40,6 +40,10 @@ pub struct OciTagSnapshot {
 }
 
 impl OciTagSnapshot {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when validation, integrity verification, or canonicalization fails.
     pub fn new(
         scope_namespace: impl Into<String>,
         repository: impl Into<String>,
@@ -94,6 +98,10 @@ impl SnapshotEvidence for OciTagSnapshot {
 pub type OciTagLifecycleEvent = SnapshotEvidenceEvent<OciTagSnapshot>;
 pub type OciTagEvidenceLog = SnapshotEvidenceLog<OciTagSnapshot>;
 
+///
+/// # Errors
+///
+/// Returns an error when validation, integrity verification, or canonicalization fails.
 pub fn verify_oci_tag_events(
     events: &[OciTagLifecycleEvent],
     expected: &OciTagSnapshot,

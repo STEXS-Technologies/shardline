@@ -109,6 +109,10 @@ pub struct ProviderLifecycleSnapshot {
 
 impl ProviderLifecycleSnapshot {
     /// Creates a canonical provider lifecycle snapshot from typed components.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when validation, integrity verification, or canonicalization fails.
     pub fn from_parts(
         identity: ProviderRepositoryIdentity,
         observations: ProviderLifecycleObservations,
@@ -166,6 +170,10 @@ impl SnapshotEvidence for ProviderLifecycleSnapshot {
 pub type ProviderLifecycleEvent = SnapshotEvidenceEvent<ProviderLifecycleSnapshot>;
 
 /// Verifies one complete provider lifecycle evidence chain.
+///
+/// # Errors
+///
+/// Returns an error when validation, integrity verification, or canonicalization fails.
 pub fn verify_provider_lifecycle_chain(
     events: &[ProviderLifecycleEvent],
 ) -> Result<(), ReliabilityError> {
@@ -173,6 +181,10 @@ pub fn verify_provider_lifecycle_chain(
 }
 
 /// Verifies provider evidence against the materialized repository identity and state.
+///
+/// # Errors
+///
+/// Returns an error when validation, integrity verification, or canonicalization fails.
 pub fn verify_provider_lifecycle_events(
     events: &[ProviderLifecycleEvent],
     expected: &ProviderLifecycleSnapshot,

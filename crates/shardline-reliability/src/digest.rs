@@ -60,6 +60,10 @@ pub(crate) fn process_digest<O: Serialize, T: Serialize, U: Serialize>(
     Ok(PenelopeDigest::sha256(&payload))
 }
 
+///
+/// # Errors
+///
+/// Returns an error when StateChronicle cannot canonicalize `state`.
 pub fn canonical_state_digest<T: Serialize>(state: &T) -> Result<ContentDigest, ReliabilityError> {
     state_digest(state, DigestEncoding::CanonicalBcsV1)
 }

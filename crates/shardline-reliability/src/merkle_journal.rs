@@ -31,6 +31,10 @@ pub struct PersistedMerkleJournalRecord {
 }
 
 /// Builds a sequence of linked commitments from typed persisted event JSON.
+///
+/// # Errors
+///
+/// Returns an error when validation, integrity verification, or canonicalization fails.
 pub fn build_persisted_merkle_chain(
     operation_kind: OperationKind,
     events: &[Value],
@@ -39,6 +43,10 @@ pub fn build_persisted_merkle_chain(
 }
 
 /// Builds commitments for a newly appended suffix, linked to the prior head.
+///
+/// # Errors
+///
+/// Returns an error when validation, integrity verification, or canonicalization fails.
 pub fn build_persisted_merkle_chain_with_previous(
     operation_kind: OperationKind,
     events: &[Value],
@@ -78,6 +86,10 @@ pub fn build_persisted_merkle_chain_with_previous(
 
 /// Verifies an entire persisted event/commit chain, including exact event
 /// coverage, sequence continuity, and StateChronicle parent links.
+///
+/// # Errors
+///
+/// Returns an error when validation, integrity verification, or canonicalization fails.
 pub fn verify_persisted_merkle_chain(
     operation_kind: OperationKind,
     events: &[Value],
@@ -98,6 +110,10 @@ pub fn verify_persisted_merkle_chain(
 /// Builds a Merkle chain for any typed reliability event, including complete
 /// snapshot events whose operation kind intentionally shares a lifecycle
 /// namespace but has a distinct durable JSON shape.
+///
+/// # Errors
+///
+/// Returns an error when validation, integrity verification, or canonicalization fails.
 pub fn build_typed_merkle_chain<T: DeserializeOwned + EvidenceEventMetadata>(
     events: &[Value],
     previous: Option<&Value>,
@@ -136,6 +152,10 @@ pub fn build_typed_merkle_chain<T: DeserializeOwned + EvidenceEventMetadata>(
 }
 
 /// Verifies a Merkle chain for any typed reliability event.
+///
+/// # Errors
+///
+/// Returns an error when validation, integrity verification, or canonicalization fails.
 pub fn verify_typed_merkle_chain<T: DeserializeOwned + EvidenceEventMetadata>(
     events: &[Value],
     merkle_commits: &[Value],
@@ -148,10 +168,10 @@ pub fn verify_typed_merkle_chain<T: DeserializeOwned + EvidenceEventMetadata>(
     let expected = build_typed_merkle_chain::<T>(events, None)?;
     for (observed, expected_json) in merkle_commits.iter().zip(expected) {
         let observed = serde_json::from_value::<ReliabilityMerkleCommit>(observed.clone())?;
-        let expected = serde_json::from_value::<ReliabilityMerkleCommit>(expected_json)?;
+        let expected_commit = serde_json::from_value::<ReliabilityMerkleCommit>(expected_json)?;
         if observed.schema_version > crate::RELIABILITY_MERKLE_SCHEMA_VERSION
-            || observed.body != expected.body
-            || observed.event != expected.event
+            || observed.body != expected_commit.body
+            || observed.event != expected_commit.event
         {
             return Err(ReliabilityError::Merkle(
                 "persisted Merkle commitment mismatch".into(),
@@ -170,6 +190,7 @@ fn persisted_commit_sequence(commit: &Value) -> Result<u64, ReliabilityError> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::{OperationKind, UploadLifecycleState, upload_lifecycle_event};

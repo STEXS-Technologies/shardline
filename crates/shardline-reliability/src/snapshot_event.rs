@@ -12,8 +12,16 @@ use crate::{OperationIdentity, ReliabilityError};
 /// protocol. Domain modules provide only identity and transition rules; the
 /// StateChronicle/Penelope envelope and chain verifier live here once.
 pub trait SnapshotEvidence: Clone + Eq + Serialize + DurableSnapshotV1Encoding {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when validation, integrity verification, or canonicalization fails.
     fn evidence_operation(&self) -> Result<OperationIdentity, ReliabilityError>;
 
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when validation, integrity verification, or canonicalization fails.
     fn validate_evidence_operation(
         &self,
         operation: &OperationIdentity,
@@ -25,6 +33,10 @@ pub trait SnapshotEvidence: Clone + Eq + Serialize + DurableSnapshotV1Encoding {
         }
     }
 
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when validation, integrity verification, or canonicalization fails.
     fn validate_evidence_transition(&self, after: &Self) -> Result<(), ReliabilityError>;
 }
 
@@ -46,6 +58,10 @@ pub struct SnapshotEvidenceEvent<S: SnapshotEvidence> {
 }
 
 impl<S: SnapshotEvidence> SnapshotEvidenceEvent<S> {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when validation, integrity verification, or canonicalization fails.
     pub fn new(sequence: u64, before: S, after: S) -> Result<Self, ReliabilityError> {
         before.validate_evidence_transition(&after)?;
         let operation = after.evidence_operation()?;
@@ -68,6 +84,10 @@ impl<S: SnapshotEvidence> SnapshotEvidenceEvent<S> {
         })
     }
 
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when validation, integrity verification, or canonicalization fails.
     pub fn verify_integrity(&self) -> Result<(), ReliabilityError> {
         self.before.validate_evidence_transition(&self.after)?;
         self.after.validate_evidence_operation(&self.operation)?;
@@ -145,6 +165,10 @@ pub fn verify_snapshot_chain<S: SnapshotEvidence>(
 /// Verifies one latest materialized-state boundary without loading its full
 /// historical chain. Normal paginated listings use this bounded check;
 /// explicit fsck/recovery paths use [`verify_snapshot_chain`] as well.
+///
+/// # Errors
+///
+/// Returns an error when validation, integrity verification, or canonicalization fails.
 pub fn verify_snapshot_event<S: SnapshotEvidence>(
     event: &SnapshotEvidenceEvent<S>,
     expected: &S,

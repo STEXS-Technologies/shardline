@@ -1,4 +1,4 @@
-#![allow(clippy::expect_used, clippy::unwrap_used)]
+#![allow(clippy::expect_used, clippy::indexing_slicing, clippy::unwrap_used)]
 
 use super::*;
 use crate::snapshot_event::{SnapshotEvidenceEvent, verify_snapshot_chain, verify_snapshot_event};

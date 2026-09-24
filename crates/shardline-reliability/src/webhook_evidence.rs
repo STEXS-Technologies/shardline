@@ -67,6 +67,10 @@ impl WebhookDeliveryOperationId {
 }
 
 impl WebhookDeliveryIdentity {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when validation, integrity verification, or canonicalization fails.
     pub fn new(
         provider: impl Into<String>,
         owner: impl Into<String>,
@@ -104,6 +108,7 @@ pub struct WebhookDeliverySnapshot {
 }
 
 impl WebhookDeliverySnapshot {
+    #[must_use]
     pub fn new(
         identity: WebhookDeliveryIdentity,
         processed_at_unix_seconds: u64,
@@ -194,12 +199,20 @@ impl SnapshotEvidence for WebhookDeliverySnapshot {
 pub type WebhookDeliveryLifecycleEvent = SnapshotEvidenceEvent<WebhookDeliverySnapshot>;
 pub type WebhookDeliveryEvidenceLog = SnapshotEvidenceLog<WebhookDeliverySnapshot>;
 
+///
+/// # Errors
+///
+/// Returns an error when validation, integrity verification, or canonicalization fails.
 pub fn verify_webhook_delivery_chain(
     events: &[WebhookDeliveryLifecycleEvent],
 ) -> Result<(), ReliabilityError> {
     verify_snapshot_chain(events)
 }
 
+///
+/// # Errors
+///
+/// Returns an error when validation, integrity verification, or canonicalization fails.
 pub fn verify_webhook_delivery_events(
     events: &[WebhookDeliveryLifecycleEvent],
     expected: &WebhookDeliverySnapshot,
@@ -217,6 +230,10 @@ pub fn verify_webhook_delivery_events(
 /// delivery identity and its original claim timestamp are durable evidence.
 /// Reuse that timestamp when appending the next `Processed` state so a retry
 /// remains valid even when it crosses a wall-clock second.
+///
+/// # Errors
+///
+/// Returns an error when validation, integrity verification, or canonicalization fails.
 pub fn verify_and_append_webhook_delivery_retry(
     stored: WebhookDeliveryEvidenceLog,
     requested: WebhookDeliverySnapshot,

@@ -37,6 +37,10 @@ pub type StateTransitionEvent = LifecycleEvidenceEvent<ResumableLifecycleState>;
 pub type LifecycleEvent = LifecycleEvidenceEvent<UploadLifecycleState>;
 
 /// Builds the canonical identity for an upload lifecycle operation.
+///
+/// # Errors
+///
+/// Returns an error when validation, integrity verification, or canonicalization fails.
 pub fn upload_operation_identity(
     tenant: impl Into<String>,
     repository: impl Into<String>,
@@ -52,6 +56,12 @@ pub fn upload_operation_identity(
 }
 
 impl<S: EvidenceState> LifecycleEvidenceEvent<S> {
+    /// Creates and integrity-binds one valid lifecycle transition.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the transition is invalid or canonicalization
+    /// fails.
     pub fn new(
         operation: OperationIdentity,
         sequence: u64,
@@ -81,6 +91,12 @@ impl<S: EvidenceState> LifecycleEvidenceEvent<S> {
         })
     }
 
+    /// Verifies the transition and both canonical digests.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the transition, state digest, or process digest
+    /// is invalid.
     pub fn verify_integrity(&self) -> Result<(), ReliabilityError> {
         if !self.before.can_transition_to(self.after) {
             return Err(ReliabilityError::InvalidTransition {
@@ -159,12 +175,20 @@ pub(crate) fn verify_evidence_chain<S: EvidenceState>(
     Ok(())
 }
 
+///
+/// # Errors
+///
+/// Returns an error when validation, integrity verification, or canonicalization fails.
 pub fn verify_state_transition_chain(
     events: &[StateTransitionEvent],
 ) -> Result<(), ReliabilityError> {
     verify_evidence_chain(events)
 }
 
+///
+/// # Errors
+///
+/// Returns an error when validation, integrity verification, or canonicalization fails.
 pub fn verify_state_transition_chain_ends_at(
     events: &[StateTransitionEvent],
     expected: ResumableLifecycleState,
@@ -177,6 +201,10 @@ pub fn verify_state_transition_chain_ends_at(
     }
 }
 
+///
+/// # Errors
+///
+/// Returns an error when validation, integrity verification, or canonicalization fails.
 pub fn upload_lifecycle_event(
     tenant: impl Into<String>,
     repository: impl Into<String>,
@@ -191,6 +219,10 @@ pub fn upload_lifecycle_event(
     LifecycleEvent::new(operation, lifecycle_sequence(before, after), before, after)
 }
 
+///
+/// # Errors
+///
+/// Returns an error when validation, integrity verification, or canonicalization fails.
 pub fn resumable_session_event(
     scope_namespace: impl Into<String>,
     session_id: impl Into<String>,
@@ -210,6 +242,12 @@ pub fn resumable_session_event(
 }
 
 impl LifecycleEvidenceEvent<UploadLifecycleState> {
+    /// Verifies that this event matches one requested upload transition.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation identity, states, or digests do
+    /// not match.
     pub fn validate_for_transition(
         &self,
         operation_id: &str,
@@ -227,10 +265,21 @@ impl LifecycleEvidenceEvent<UploadLifecycleState> {
     }
 }
 
+/// Verifies every event in an upload lifecycle chain.
+///
+/// # Errors
+///
+/// Returns an error when an event is corrupt, out of order, or belongs to a
+/// different operation.
 pub fn verify_lifecycle_chain(events: &[LifecycleEvent]) -> Result<(), ReliabilityError> {
     verify_evidence_chain(events)
 }
 
+/// Verifies an upload lifecycle chain ends at the expected state.
+///
+/// # Errors
+///
+/// Returns an error when the chain is invalid or ends at another state.
 pub fn verify_lifecycle_chain_ends_at(
     events: &[LifecycleEvent],
     expected: UploadLifecycleState,
@@ -245,6 +294,10 @@ pub fn verify_lifecycle_chain_ends_at(
 
 /// Verifies an upload-intent journal against the immutable operation identity
 /// and the state currently stored for that intent.
+///
+/// # Errors
+///
+/// Returns an error when validation, integrity verification, or canonicalization fails.
 pub fn verify_upload_lifecycle_events(
     events: &[LifecycleEvent],
     tenant: &str,
@@ -315,6 +368,10 @@ const fn lifecycle_sequence(before: UploadLifecycleState, after: UploadLifecycle
     }
 }
 
+///
+/// # Errors
+///
+/// Returns an error when validation, integrity verification, or canonicalization fails.
 pub fn baseline_upload_lifecycle_events(
     tenant: impl Into<String>,
     repository: impl Into<String>,
@@ -384,6 +441,10 @@ pub fn baseline_upload_lifecycle_events(
         .collect()
 }
 
+///
+/// # Errors
+///
+/// Returns an error when validation, integrity verification, or canonicalization fails.
 pub fn baseline_resumable_session_events(
     scope_namespace: impl Into<String>,
     session_id: impl Into<String>,

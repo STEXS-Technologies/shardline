@@ -7,6 +7,10 @@ use crate::{
 
 /// Verifies a persisted resumable-session journal against its canonical
 /// identity and current durable state.
+///
+/// # Errors
+///
+/// Returns an error when validation, integrity verification, or canonicalization fails.
 pub fn verify_resumable_session_events(
     events: &[StateTransitionEvent],
     scope_namespace: &str,
@@ -53,11 +57,19 @@ pub struct SessionEvidenceLog(LifecycleEvidenceLog<ResumableLifecycleState>);
 
 impl SessionEvidenceLog {
     /// Wraps persisted events after validating the complete session chain.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when validation, integrity verification, or canonicalization fails.
     pub fn from_events(events: Vec<StateTransitionEvent>) -> Result<Self, ReliabilityError> {
         Ok(Self(LifecycleEvidenceLog::from_events(events)?))
     }
 
     /// Creates the initial active evidence for a newly created session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when validation, integrity verification, or canonicalization fails.
     pub fn new(
         scope_namespace: impl Into<String>,
         session_id: impl Into<String>,
@@ -78,6 +90,10 @@ impl SessionEvidenceLog {
     }
 
     /// Reconstructs the initial active evidence for a pre-evidence session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when validation, integrity verification, or canonicalization fails.
     pub fn for_legacy_session(
         scope_namespace: impl Into<String>,
         session_id: impl Into<String>,
@@ -87,6 +103,10 @@ impl SessionEvidenceLog {
     }
 
     /// Appends one canonical evidence boundary and verifies the complete chain.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when validation, integrity verification, or canonicalization fails.
     pub fn record(
         &mut self,
         scope_namespace: impl Into<String>,
@@ -113,6 +133,10 @@ impl SessionEvidenceLog {
     }
 
     /// Verifies all stored digests, identity, ordering, and chain continuity.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when validation, integrity verification, or canonicalization fails.
     pub fn verify(&self) -> Result<(), ReliabilityError> {
         self.0.verify()
     }
@@ -121,6 +145,10 @@ impl SessionEvidenceLog {
     /// identity. Adapters use this instead of interpreting operation fields
     /// independently, so a valid chain cannot be replayed for another
     /// session, scope, or target.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when validation, integrity verification, or canonicalization fails.
     pub fn verify_for(
         &self,
         scope_namespace: &str,
@@ -161,6 +189,10 @@ impl SessionEvidenceLog {
 ///
 /// The boolean reports whether the returned log was repaired so adapters can
 /// persist the canonical envelope without duplicating legacy-state policy.
+///
+/// # Errors
+///
+/// Returns an error when validation, integrity verification, or canonicalization fails.
 pub fn verify_or_repair_session_evidence(
     stored: SessionEvidenceLog,
     scope_namespace: &str,
@@ -180,6 +212,10 @@ pub fn verify_or_repair_session_evidence(
 /// Verifies persisted session evidence without creating a legacy baseline.
 /// Normal reads should use this boundary; baseline creation belongs to an
 /// explicit repair or mutation path.
+///
+/// # Errors
+///
+/// Returns an error when validation, integrity verification, or canonicalization fails.
 pub fn verify_session_evidence(
     stored: &SessionEvidenceLog,
     scope_namespace: &str,
@@ -194,6 +230,10 @@ pub fn verify_session_evidence(
 
 /// Verifies a session journal against its identity and expected current state,
 /// repairs a missing legacy baseline, and appends one canonical transition.
+///
+/// # Errors
+///
+/// Returns an error when validation, integrity verification, or canonicalization fails.
 pub fn verify_and_append_session_transition(
     stored: SessionEvidenceLog,
     scope_namespace: &str,

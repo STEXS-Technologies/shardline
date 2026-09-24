@@ -59,6 +59,10 @@ const fn default_reliability_merkle_schema_version() -> u8 {
 
 impl ReliabilityMerkleCommit {
     /// Signs this commit with a deployment-provided Ed25519 key.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when validation, integrity verification, or canonicalization fails.
     pub fn sign(
         &self,
         signing_key: &SigningKey,
@@ -70,6 +74,10 @@ impl ReliabilityMerkleCommit {
 }
 
 /// Builds a deterministic StateChronicle commit for one typed Shardline event.
+///
+/// # Errors
+///
+/// Returns an error when validation, integrity verification, or canonicalization fails.
 pub fn build_reliability_merkle_commit<T: EvidenceEventMetadata>(
     event: &T,
 ) -> Result<ReliabilityMerkleCommit, ReliabilityError> {
@@ -78,6 +86,10 @@ pub fn build_reliability_merkle_commit<T: EvidenceEventMetadata>(
 
 /// Builds a StateChronicle commit linked to the immediately preceding
 /// commitment for the same Shardline operation.
+///
+/// # Errors
+///
+/// Returns an error when validation, integrity verification, or canonicalization fails.
 pub fn build_reliability_merkle_commit_with_previous<T: EvidenceEventMetadata>(
     event: &T,
     previous: Option<&ReliabilityMerkleCommit>,
@@ -136,7 +148,7 @@ pub fn build_reliability_merkle_commit_with_previous<T: EvidenceEventMetadata>(
         StateCommitment {
             version: commitment.version,
             state_hash: commitment.state_hash.clone(),
-            state: state.clone(),
+            state,
         },
         commitment,
         None,
@@ -187,6 +199,10 @@ pub fn build_reliability_merkle_commit_with_previous<T: EvidenceEventMetadata>(
 }
 
 /// Serializes a Merkle commit for one durable evidence row.
+///
+/// # Errors
+///
+/// Returns an error when validation, integrity verification, or canonicalization fails.
 pub fn reliability_merkle_commit_json<T: EvidenceEventMetadata>(
     event: &T,
 ) -> Result<serde_json::Value, ReliabilityError> {
@@ -195,6 +211,10 @@ pub fn reliability_merkle_commit_json<T: EvidenceEventMetadata>(
 
 /// Serializes a StateChronicle commitment linked to a previous operation
 /// commitment, when one exists.
+///
+/// # Errors
+///
+/// Returns an error when validation, integrity verification, or canonicalization fails.
 pub fn reliability_merkle_commit_json_with_previous<T: EvidenceEventMetadata>(
     event: &T,
     previous: Option<&ReliabilityMerkleCommit>,

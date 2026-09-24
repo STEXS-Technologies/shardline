@@ -37,6 +37,10 @@ pub struct RetentionObjectIdentity {
 }
 
 impl RetentionObjectIdentity {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when validation, integrity verification, or canonicalization fails.
     pub fn new(object_key: impl Into<String>) -> Result<Self, ReliabilityError> {
         let identity = Self {
             object_key: object_key.into(),
@@ -58,6 +62,10 @@ pub struct RetentionHoldSnapshot {
 }
 
 impl RetentionHoldSnapshot {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when validation, integrity verification, or canonicalization fails.
     pub fn new(
         identity: RetentionObjectIdentity,
         reason: impl Into<String>,
@@ -117,12 +125,20 @@ impl SnapshotEvidence for RetentionHoldSnapshot {
 pub type RetentionHoldLifecycleEvent = SnapshotEvidenceEvent<RetentionHoldSnapshot>;
 pub type RetentionEvidenceLog = SnapshotEvidenceLog<RetentionHoldSnapshot>;
 
+///
+/// # Errors
+///
+/// Returns an error when validation, integrity verification, or canonicalization fails.
 pub fn verify_retention_hold_lifecycle_chain(
     events: &[RetentionHoldLifecycleEvent],
 ) -> Result<(), ReliabilityError> {
     verify_snapshot_chain(events)
 }
 
+///
+/// # Errors
+///
+/// Returns an error when validation, integrity verification, or canonicalization fails.
 pub fn verify_retention_hold_lifecycle_events(
     events: &[RetentionHoldLifecycleEvent],
     expected: &RetentionHoldSnapshot,

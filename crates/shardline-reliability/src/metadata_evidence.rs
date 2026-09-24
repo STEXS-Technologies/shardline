@@ -39,6 +39,10 @@ pub struct HubRefSnapshot {
 }
 
 impl HubRefSnapshot {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when validation, integrity verification, or canonicalization fails.
     pub fn new(
         repository: impl Into<String>,
         ref_name: impl Into<String>,
@@ -85,6 +89,10 @@ impl SnapshotEvidence for HubRefSnapshot {
 pub type HubRefLifecycleEvent = SnapshotEvidenceEvent<HubRefSnapshot>;
 pub type HubRefEvidenceLog = SnapshotEvidenceLog<HubRefSnapshot>;
 
+///
+/// # Errors
+///
+/// Returns an error when validation, integrity verification, or canonicalization fails.
 pub fn verify_hub_ref_events(
     events: &[HubRefLifecycleEvent],
     expected: &HubRefSnapshot,

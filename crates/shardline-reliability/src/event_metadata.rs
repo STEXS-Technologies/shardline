@@ -19,6 +19,10 @@ pub trait EvidenceEventMetadata: Serialize {
     fn sequence_number(&self) -> u64;
 
     /// Verifies the event before a storage adapter commits it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when validation, integrity verification, or canonicalization fails.
     fn verify_integrity(&self) -> Result<(), ReliabilityError>;
 }
 

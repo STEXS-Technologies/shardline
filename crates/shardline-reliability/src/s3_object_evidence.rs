@@ -53,6 +53,10 @@ pub struct S3ObjectState {
 }
 
 impl S3ObjectSnapshot {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when validation, integrity verification, or canonicalization fails.
     pub fn new(
         scope_namespace: impl Into<String>,
         object_key: impl Into<String>,
@@ -101,6 +105,10 @@ impl SnapshotEvidence for S3ObjectSnapshot {
 pub type S3ObjectLifecycleEvent = SnapshotEvidenceEvent<S3ObjectSnapshot>;
 pub type S3ObjectEvidenceLog = SnapshotEvidenceLog<S3ObjectSnapshot>;
 
+///
+/// # Errors
+///
+/// Returns an error when validation, integrity verification, or canonicalization fails.
 pub fn verify_s3_object_events(
     events: &[S3ObjectLifecycleEvent],
     expected: &S3ObjectSnapshot,

@@ -83,6 +83,10 @@ impl OciObjectOperationId {
     /// identity. OCI scope namespaces and repository names are validated by
     /// their producers to exclude `:`, so the four components remain
     /// unambiguous without introducing a second encoding.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when validation, integrity verification, or canonicalization fails.
     pub fn parse(value: &str) -> Result<OciObjectIdentity, ReliabilityError> {
         let mut components = value.splitn(4, ':');
         let scope_namespace = components
@@ -120,6 +124,10 @@ impl OciObjectOperationId {
 }
 
 impl OciObjectIdentity {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when validation, integrity verification, or canonicalization fails.
     pub fn new(
         scope_namespace: impl Into<String>,
         repository: impl Into<String>,
@@ -154,6 +162,10 @@ pub struct OciObjectSnapshot {
 }
 
 impl OciObjectSnapshot {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when validation, integrity verification, or canonicalization fails.
     pub fn new(
         identity: OciObjectIdentity,
         state: OciObjectLifecycleState,
@@ -177,6 +189,7 @@ impl OciObjectSnapshot {
         })
     }
 
+    #[must_use]
     pub fn operation_id(&self) -> OciObjectOperationId {
         OciObjectOperationId::new(&self.identity)
     }
@@ -213,12 +226,20 @@ impl SnapshotEvidence for OciObjectSnapshot {
 
 pub type OciObjectLifecycleEvent = SnapshotEvidenceEvent<OciObjectSnapshot>;
 
+///
+/// # Errors
+///
+/// Returns an error when validation, integrity verification, or canonicalization fails.
 pub fn verify_oci_object_lifecycle_chain(
     events: &[OciObjectLifecycleEvent],
 ) -> Result<(), ReliabilityError> {
     verify_snapshot_chain(events)
 }
 
+///
+/// # Errors
+///
+/// Returns an error when validation, integrity verification, or canonicalization fails.
 pub fn verify_oci_object_lifecycle_events(
     events: &[OciObjectLifecycleEvent],
     expected: &OciObjectSnapshot,
