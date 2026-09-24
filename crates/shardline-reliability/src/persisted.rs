@@ -111,31 +111,39 @@ pub fn build_persisted_merkle_commit_with_previous(
         .map(serde_json::from_value::<ReliabilityMerkleCommit>)
         .transpose()?;
     match operation_kind {
-        OperationKind::Upload => build::<LifecycleEvent>(event_json, previous.as_ref()),
+        OperationKind::Upload => {
+            build::<LifecycleEvent>(operation_kind, event_json, previous.as_ref())
+        }
         OperationKind::MetadataCommit => {
-            build::<HubRefLifecycleEvent>(event_json, previous.as_ref())
+            build::<HubRefLifecycleEvent>(operation_kind, event_json, previous.as_ref())
         }
         OperationKind::ResumableSession => {
-            build::<StateTransitionEvent>(event_json, previous.as_ref())
+            build::<StateTransitionEvent>(operation_kind, event_json, previous.as_ref())
         }
         OperationKind::ProviderEvent => {
-            build::<ProviderLifecycleEvent>(event_json, previous.as_ref())
+            build::<ProviderLifecycleEvent>(operation_kind, event_json, previous.as_ref())
         }
         OperationKind::GarbageCollection => {
-            build::<QuarantineLifecycleEvent>(event_json, previous.as_ref())
+            build::<QuarantineLifecycleEvent>(operation_kind, event_json, previous.as_ref())
         }
         OperationKind::Visibility => {
-            build::<OciObjectLifecycleEvent>(event_json, previous.as_ref())
+            build::<OciObjectLifecycleEvent>(operation_kind, event_json, previous.as_ref())
         }
-        OperationKind::OciTag => build::<OciTagLifecycleEvent>(event_json, previous.as_ref()),
-        OperationKind::S3Object => build::<S3ObjectLifecycleEvent>(event_json, previous.as_ref()),
+        OperationKind::OciTag => {
+            build::<OciTagLifecycleEvent>(operation_kind, event_json, previous.as_ref())
+        }
+        OperationKind::S3Object => {
+            build::<S3ObjectLifecycleEvent>(operation_kind, event_json, previous.as_ref())
+        }
         OperationKind::RetentionHold => {
-            build::<RetentionHoldLifecycleEvent>(event_json, previous.as_ref())
+            build::<RetentionHoldLifecycleEvent>(operation_kind, event_json, previous.as_ref())
         }
         OperationKind::WebhookDelivery => {
-            build::<WebhookDeliveryLifecycleEvent>(event_json, previous.as_ref())
+            build::<WebhookDeliveryLifecycleEvent>(operation_kind, event_json, previous.as_ref())
         }
-        OperationKind::Repair => build::<RepairEvidenceEvent>(event_json, previous.as_ref()),
+        OperationKind::Repair => {
+            build::<RepairEvidenceEvent>(operation_kind, event_json, previous.as_ref())
+        }
     }
 }
 
@@ -295,6 +303,7 @@ where
 }
 
 fn build<E>(
+    operation_kind: OperationKind,
     event_json: Value,
     previous: Option<&ReliabilityMerkleCommit>,
 ) -> Result<Value, ReliabilityError>
@@ -302,6 +311,9 @@ where
     E: serde::de::DeserializeOwned + crate::event_metadata::EvidenceEventMetadata,
 {
     let event = serde_json::from_value::<E>(event_json)?;
+    if event.operation_identity().kind != operation_kind {
+        return Err(ReliabilityError::OperationMismatch);
+    }
     reliability_merkle_commit_json_with_previous(&event, previous)
 }
 
@@ -348,6 +360,28 @@ mod tests {
             crate::RELIABILITY_MERKLE_SCHEMA_VERSION
         );
         assert!(build_persisted_merkle_commit(OperationKind::ProviderEvent, commit).is_err());
+    }
+
+    #[test]
+    fn persisted_merkle_builder_rejects_embedded_kind_mismatch() {
+        let operation =
+            OperationIdentity::new("tenant", "repository", "upload-kind", OperationKind::Upload)
+                .unwrap();
+        let event = LifecycleEvidenceEvent::new(
+            operation,
+            0,
+            UploadLifecycleState::Created,
+            UploadLifecycleState::Created,
+        )
+        .unwrap();
+
+        let error = build::<LifecycleEvent>(
+            OperationKind::ProviderEvent,
+            serde_json::to_value(event).unwrap(),
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(error, ReliabilityError::OperationMismatch));
     }
 
     #[test]
