@@ -844,6 +844,23 @@ mod tests {
                 .await
                 .is_err()
         );
+        query(
+            "DELETE FROM shardline_webhook_deliveries
+             WHERE provider = 'github' AND owner = $1 AND repo = $2",
+        )
+        .bind(owner)
+        .bind(repo)
+        .execute(&pool)
+        .await
+        .expect("clean tampered webhook fixture");
+        query(
+            "DELETE FROM shardline_reliability_events
+             WHERE operation_kind = 'WebhookDelivery' AND operation_id = $1",
+        )
+        .bind(webhook_operation_id(&delivery))
+        .execute(&pool)
+        .await
+        .expect("clean tampered webhook evidence fixture");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1073,5 +1090,24 @@ mod tests {
         .expect("delivery count");
         assert_eq!(state_count, 1);
         assert_eq!(delivery_count, 0);
+
+        drop(connection);
+        query(
+            "DELETE FROM shardline_reliability_events
+             WHERE operation_kind = 'ProviderEvent' AND operation_id = $1",
+        )
+        .bind(format!("github:{owner}:{repo}"))
+        .execute(&pool)
+        .await
+        .expect("clean tampered provider evidence fixture");
+        query(
+            "DELETE FROM shardline_provider_repository_states
+             WHERE provider = 'github' AND owner = $1 AND repo = $2",
+        )
+        .bind(owner)
+        .bind(repo)
+        .execute(&pool)
+        .await
+        .expect("clean tampered provider state fixture");
     }
 }
