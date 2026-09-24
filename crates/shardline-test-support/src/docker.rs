@@ -245,8 +245,8 @@ impl DockerLocalStack {
             .as_mut()
             .ok_or_else(|| IoError::new(ErrorKind::NotFound, "minio is not configured"))?;
         start_container(&service.container_name)?;
-        wait_for_minio(&service.container_name)?;
         service.host_port = docker_published_port(&service.container_name, 9000)?;
+        wait_for_minio(service.host_port)?;
         Ok(())
     }
 
@@ -435,7 +435,7 @@ fn start_minio_service(run_id: &str) -> Result<MinioService, IoError> {
         let host_port = docker_published_port(&container_name, 9000)?;
         let mc_host =
             format!("http://{MINIO_ROOT_USER}:{MINIO_ROOT_PASSWORD}@127.0.0.1:{host_port}");
-        wait_for_minio(&container_name)?;
+        wait_for_minio(host_port)?;
         run_command_checked(
             Command::new("docker")
                 .arg("run")
@@ -624,17 +624,14 @@ fn wait_for_postgres(container_name: &str, host_port: u16) -> Result<(), IoError
     )
 }
 
-fn wait_for_minio(container_name: &str) -> Result<(), IoError> {
+fn wait_for_minio(host_port: u16) -> Result<(), IoError> {
     wait_for(
         || {
             run_command(
-                Command::new("docker")
-                    .arg("exec")
-                    .arg(container_name)
-                    .arg("curl")
+                Command::new("curl")
                     .arg("--fail")
                     .arg("--silent")
-                    .arg("http://127.0.0.1:9000/minio/health/live"),
+                    .arg(format!("http://127.0.0.1:{host_port}/minio/health/live")),
             )
             .is_ok_and(|output| output.status.success())
         },
