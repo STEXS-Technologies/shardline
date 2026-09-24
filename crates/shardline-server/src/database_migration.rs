@@ -680,20 +680,22 @@ async fn repair_reliability_operation(
     .bind(operation_id)
     .fetch_one(pool)
     .await?;
+    let mut transaction = pool.begin().await?;
     let authoritative_exists =
-        authoritative_operation_exists(pool, operation_kind, operation_id).await?;
+        lock_authoritative_operation(&mut transaction, operation_kind, operation_id).await?;
     if journal_exists && !authoritative_exists {
+        transaction.rollback().await?;
         repair_persisted_merkle_operation(pool, operation_kind, operation_id).await?;
         return verify_persisted_reliability_operation(pool, operation_kind, operation_id).await;
     }
     if !authoritative_exists {
+        transaction.rollback().await?;
         return Err(DatabaseMigrationError::Backfill(format!(
             "cannot repair reliability operation kind={} operation={}: no authoritative materialized state exists",
             operation_kind.as_str(),
             operation_id
         )));
     }
-    let mut transaction = pool.begin().await?;
     query(
         "DELETE FROM shardline_reliability_events
          WHERE operation_kind = $1 AND operation_id = $2",
@@ -798,103 +800,104 @@ async fn repair_persisted_merkle_operation(
     Ok(())
 }
 
-async fn authoritative_operation_exists(
-    pool: &PgPool,
+/// Locks the authoritative row for an explicit evidence repair.
+///
+/// Repair must not delete a journal between the caller's state check and the
+/// rebuild. Every normal Postgres mutation locks its materialized row before
+/// changing it, so this makes repair serialize with an in-flight mutation for
+/// the same operation while preserving the consumed-resource Merkle-only path.
+async fn lock_authoritative_operation(
+    transaction: &mut Transaction<'_, Postgres>,
     operation_kind: OperationKind,
     operation_id: &str,
 ) -> Result<bool, DatabaseMigrationError> {
-    let exists = match operation_kind {
-        OperationKind::Upload => query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM shardline_upload_intents WHERE intent_id = $1)",
+    let present = match operation_kind {
+        OperationKind::Upload => query_scalar::<_, i32>(
+            "SELECT 1 FROM shardline_upload_intents
+             WHERE intent_id = $1 LIMIT 1 FOR UPDATE",
         )
         .bind(operation_id)
-        .fetch_one(pool)
+        .fetch_optional(&mut **transaction)
         .await?,
-        OperationKind::ResumableSession => query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM shardline_resumable_sessions WHERE session_id = $1)",
+        OperationKind::ResumableSession => query_scalar::<_, i32>(
+            "SELECT 1 FROM shardline_resumable_sessions
+             WHERE session_id = $1 LIMIT 1 FOR UPDATE",
         )
         .bind(operation_id)
-        .fetch_one(pool)
+        .fetch_optional(&mut **transaction)
         .await?,
-        OperationKind::ProviderEvent => query_scalar(
-            "SELECT EXISTS(
-                 SELECT 1 FROM shardline_provider_repository_states
-                 WHERE provider || ':' || owner || ':' || repo = $1
-             )",
+        OperationKind::ProviderEvent => query_scalar::<_, i32>(
+            "SELECT 1 FROM shardline_provider_repository_states
+             WHERE provider || ':' || owner || ':' || repo = $1 LIMIT 1 FOR UPDATE",
         )
         .bind(operation_id)
-        .fetch_one(pool)
+        .fetch_optional(&mut **transaction)
         .await?,
-        OperationKind::GarbageCollection => query_scalar(
-            "SELECT EXISTS(
-                 SELECT 1 FROM shardline_quarantine_candidates WHERE object_key = $1
-             )",
+        OperationKind::GarbageCollection => query_scalar::<_, i32>(
+            "SELECT 1 FROM shardline_quarantine_candidates
+             WHERE object_key = $1 LIMIT 1 FOR UPDATE",
         )
         .bind(operation_id)
-        .fetch_one(pool)
+        .fetch_optional(&mut **transaction)
         .await?,
-        OperationKind::Visibility => query_scalar(
-            "SELECT EXISTS(
-                 SELECT 1 FROM shardline_oci_object_tombstones
-                 WHERE scope_namespace || ':' || repository || ':' || object_kind || ':' || digest_hex = $1
-             )",
+        OperationKind::Visibility => query_scalar::<_, i32>(
+            "SELECT 1 FROM shardline_oci_object_tombstones
+             WHERE scope_namespace || ':' || repository || ':' || object_kind || ':' || digest_hex = $1
+             LIMIT 1 FOR UPDATE",
         )
         .bind(operation_id)
-        .fetch_one(pool)
+        .fetch_optional(&mut **transaction)
         .await?,
-        OperationKind::RetentionHold => query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM shardline_retention_holds WHERE object_key = $1)",
+        OperationKind::RetentionHold => query_scalar::<_, i32>(
+            "SELECT 1 FROM shardline_retention_holds
+             WHERE object_key = $1 LIMIT 1 FOR UPDATE",
         )
         .bind(operation_id)
-        .fetch_one(pool)
+        .fetch_optional(&mut **transaction)
         .await?,
-        OperationKind::WebhookDelivery => query_scalar(
-            "SELECT EXISTS(
-                 SELECT 1 FROM shardline_webhook_deliveries
-                 WHERE octet_length(provider)::text || ':' || provider
-                       || octet_length(owner)::text || ':' || owner
-                       || octet_length(repo)::text || ':' || repo
-                       || octet_length(delivery_id)::text || ':' || delivery_id = $1
-                    OR delivery_id = $1
-             )",
+        OperationKind::WebhookDelivery => query_scalar::<_, i32>(
+            "SELECT 1 FROM shardline_webhook_deliveries
+             WHERE octet_length(provider)::text || ':' || provider
+                   || octet_length(owner)::text || ':' || owner
+                   || octet_length(repo)::text || ':' || repo
+                   || octet_length(delivery_id)::text || ':' || delivery_id = $1
+                OR delivery_id = $1
+             LIMIT 1 FOR UPDATE",
         )
         .bind(operation_id)
-        .fetch_one(pool)
+        .fetch_optional(&mut **transaction)
         .await?,
-        OperationKind::MetadataCommit => query_scalar(
-            "SELECT EXISTS(
-                 SELECT 1 FROM shardline_hub_refs
-                 WHERE octet_length(repo_id)::text || ':' || repo_id
-                       || octet_length(ref_name)::text || ':' || ref_name = $1
-             )",
+        OperationKind::MetadataCommit => query_scalar::<_, i32>(
+            "SELECT 1 FROM shardline_hub_refs
+             WHERE octet_length(repo_id)::text || ':' || repo_id
+                   || octet_length(ref_name)::text || ':' || ref_name = $1
+             LIMIT 1 FOR UPDATE",
         )
         .bind(operation_id)
-        .fetch_one(pool)
+        .fetch_optional(&mut **transaction)
         .await?,
-        OperationKind::OciTag => query_scalar(
-            "SELECT EXISTS(
-                 SELECT 1 FROM shardline_oci_tags
-                 WHERE octet_length(scope_namespace)::text || ':' || scope_namespace
-                       || octet_length(repository)::text || ':' || repository
-                       || octet_length(tag)::text || ':' || tag = $1
-             )",
+        OperationKind::OciTag => query_scalar::<_, i32>(
+            "SELECT 1 FROM shardline_oci_tags
+             WHERE octet_length(scope_namespace)::text || ':' || scope_namespace
+                   || octet_length(repository)::text || ':' || repository
+                   || octet_length(tag)::text || ':' || tag = $1
+             LIMIT 1 FOR UPDATE",
         )
         .bind(operation_id)
-        .fetch_one(pool)
+        .fetch_optional(&mut **transaction)
         .await?,
-        OperationKind::S3Object => query_scalar(
-            "SELECT EXISTS(
-                 SELECT 1 FROM shardline_s3_objects
-                 WHERE octet_length(scope_namespace)::text || ':' || scope_namespace
-                       || octet_length(object_key)::text || ':' || object_key = $1
-             )",
+        OperationKind::S3Object => query_scalar::<_, i32>(
+            "SELECT 1 FROM shardline_s3_objects
+             WHERE octet_length(scope_namespace)::text || ':' || scope_namespace
+                   || octet_length(object_key)::text || ':' || object_key = $1
+             LIMIT 1 FOR UPDATE",
         )
         .bind(operation_id)
-        .fetch_one(pool)
+        .fetch_optional(&mut **transaction)
         .await?,
-        OperationKind::Repair => false,
+        OperationKind::Repair => None,
     };
-    Ok(exists)
+    Ok(present.is_some())
 }
 
 /// Verifies every persisted reliability event for an operator-facing fsck run.
@@ -2361,8 +2364,8 @@ mod tests {
         DatabaseMigration, DatabaseMigrationBoundary, DatabaseMigrationCommand,
         DatabaseMigrationError, DatabaseMigrationOptions, DatabaseMigrationReport,
         DatabaseMigrationStatusEntry, acquire_migration_lock, bundled_database_migrations,
-        migration_by_version, migration_checksum, migration_fault_injection,
-        run_database_migration,
+        lock_authoritative_operation, migration_by_version, migration_checksum,
+        migration_fault_injection, run_database_migration,
     };
 
     async fn run_test_migration_command(
@@ -2476,6 +2479,40 @@ mod tests {
             .expect("migration lock task should complete")
             .unwrap();
         drop(second);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn repair_authoritative_row_lock_queries_cover_every_operation_kind() {
+        let Some(database_url) = std::env::var("DATABASE_URL").ok() else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&database_url).await.unwrap();
+        let mut transaction = pool.begin().await.unwrap();
+        for operation_kind in [
+            shardline_reliability::OperationKind::Upload,
+            shardline_reliability::OperationKind::ResumableSession,
+            shardline_reliability::OperationKind::ProviderEvent,
+            shardline_reliability::OperationKind::GarbageCollection,
+            shardline_reliability::OperationKind::Visibility,
+            shardline_reliability::OperationKind::RetentionHold,
+            shardline_reliability::OperationKind::WebhookDelivery,
+            shardline_reliability::OperationKind::MetadataCommit,
+            shardline_reliability::OperationKind::OciTag,
+            shardline_reliability::OperationKind::S3Object,
+            shardline_reliability::OperationKind::Repair,
+        ] {
+            assert!(
+                !lock_authoritative_operation(
+                    &mut transaction,
+                    operation_kind,
+                    "repair-lock-query-regression-missing",
+                )
+                .await
+                .unwrap()
+            );
+        }
+        transaction.rollback().await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread")]
