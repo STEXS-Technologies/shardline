@@ -1684,6 +1684,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn postgres_session_same_key_legacy_part_writer_fails_closed_on_read() {
+        let Some(store) = store().await else {
+            eprintln!("skipping: no reachable DATABASE_URL");
+            return;
+        };
+        let expiry = Duration::from_secs(
+            u64::try_from(chrono::Utc::now().timestamp()).unwrap_or_default() + 3600,
+        );
+        let session = session("mixed-version-part", expiry);
+        assert!(store.create_resumable_session(&session).await.unwrap());
+        assert!(
+            store
+                .publish_resumable_part(
+                    session.session_id(),
+                    NonZeroU64::MIN,
+                    "staging/mixed-version-part",
+                    7,
+                    Some("etag-before"),
+                )
+                .await
+                .unwrap()
+                .is_some()
+        );
+
+        sqlx::query(
+            "UPDATE shardline_resumable_session_parts
+             SET etag = $2
+             WHERE session_id = $1 AND part_number = 1",
+        )
+        .bind(session.session_id())
+        .bind("etag-written-by-legacy-node")
+        .execute(store.pool())
+        .await
+        .expect("legacy part mutation is not blocked by the database");
+
+        let error = store
+            .resumable_session_snapshot(session.session_id())
+            .await
+            .expect_err("stale parent digest must fail closed");
+        assert!(
+            matches!(error, PostgresMetadataStoreError::Reliability(_)),
+            "unexpected stale-part error: {error}"
+        );
+        sqlx::query("DELETE FROM shardline_resumable_sessions WHERE session_id = $1")
+            .bind(session.session_id())
+            .execute(store.pool())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn postgres_parts_are_pinned_and_completion_is_fenced() {
         let Some(store) = store().await else {
             eprintln!("skipping: no reachable DATABASE_URL");
