@@ -86,7 +86,9 @@ impl<S: EvidenceState> LifecycleEvidenceEvent<S> {
         }
         let expected_state = match self.digest_encoding {
             DigestEncoding::LegacyJson => legacy_state_label_digest(self.after.as_str()),
-            DigestEncoding::CanonicalBcsV1 => canonical_state_digest(&self.after)?,
+            DigestEncoding::CanonicalBcsV1 | DigestEncoding::CanonicalBcsV2 => {
+                canonical_state_digest(&self.after)?
+            }
         };
         if self.state_digest != expected_state {
             return Err(ReliabilityError::StateDigestMismatch);
@@ -99,7 +101,7 @@ impl<S: EvidenceState> LifecycleEvidenceEvent<S> {
                 &self.after.as_str(),
                 DigestEncoding::LegacyJson,
             )?,
-            DigestEncoding::CanonicalBcsV1 => {
+            DigestEncoding::CanonicalBcsV1 | DigestEncoding::CanonicalBcsV2 => {
                 canonical_process_digest(&self.operation, self.sequence, &self.before, &self.after)?
             }
         };

@@ -279,6 +279,12 @@ fn snapshot_transition_helper_verifies_before_and_appends_after() {
     .unwrap();
     assert!(baseline_was_missing);
     assert_eq!(evidence.events().len(), 2);
+    assert!(
+        evidence
+            .events()
+            .iter()
+            .all(|event| event.digest_encoding == DigestEncoding::CanonicalBcsV2)
+    );
     evidence.verify_for(&after).unwrap();
 
     let wrong_before = HubRefSnapshot::new("repo", "main", Some("sha-x".into())).unwrap();

@@ -2,7 +2,7 @@ use penelope_domain::ContentDigest as PenelopeDigest;
 use serde::{Deserialize, Serialize};
 use statechronicle_core::digest::ContentDigest;
 
-use crate::{OperationIdentity, ReliabilityError};
+use crate::ReliabilityError;
 
 /// Encoding used for integrity-checkable evidence payloads.
 ///
@@ -15,6 +15,9 @@ pub enum DigestEncoding {
     LegacyJson,
     /// StateChronicle/Penelope canonical BCS representation.
     CanonicalBcsV1,
+    /// Frozen DTO representation for durable snapshot evidence. V1 remains
+    /// readable with its original struct-based encoding for compatibility.
+    CanonicalBcsV2,
 }
 
 fn canonical_bytes<T: Serialize>(value: &T) -> Result<Vec<u8>, ReliabilityError> {
@@ -32,7 +35,7 @@ pub(crate) fn state_digest<T: Serialize>(
 ) -> Result<ContentDigest, ReliabilityError> {
     let bytes = match encoding {
         DigestEncoding::LegacyJson => legacy_bytes(value)?,
-        DigestEncoding::CanonicalBcsV1 => canonical_bytes(value)?,
+        DigestEncoding::CanonicalBcsV1 | DigestEncoding::CanonicalBcsV2 => canonical_bytes(value)?,
     };
     Ok(statechronicle_core::digest::hash_bytes(&bytes))
 }
@@ -41,8 +44,8 @@ pub(crate) fn legacy_state_label_digest(state: &str) -> ContentDigest {
     statechronicle_core::digest::hash_bytes(state.as_bytes())
 }
 
-pub(crate) fn process_digest<T: Serialize, U: Serialize>(
-    operation: &OperationIdentity,
+pub(crate) fn process_digest<O: Serialize, T: Serialize, U: Serialize>(
+    operation: &O,
     sequence: u64,
     before: &T,
     after: &U,
@@ -50,7 +53,9 @@ pub(crate) fn process_digest<T: Serialize, U: Serialize>(
 ) -> Result<PenelopeDigest, ReliabilityError> {
     let payload = match encoding {
         DigestEncoding::LegacyJson => legacy_bytes(&(operation, sequence, before, after))?,
-        DigestEncoding::CanonicalBcsV1 => canonical_bytes(&(operation, sequence, before, after))?,
+        DigestEncoding::CanonicalBcsV1 | DigestEncoding::CanonicalBcsV2 => {
+            canonical_bytes(&(operation, sequence, before, after))?
+        }
     };
     Ok(PenelopeDigest::sha256(&payload))
 }
@@ -59,8 +64,8 @@ pub fn canonical_state_digest<T: Serialize>(state: &T) -> Result<ContentDigest, 
     state_digest(state, DigestEncoding::CanonicalBcsV1)
 }
 
-pub(crate) fn canonical_process_digest<T: Serialize, U: Serialize>(
-    operation: &OperationIdentity,
+pub(crate) fn canonical_process_digest<O: Serialize, T: Serialize, U: Serialize>(
+    operation: &O,
     sequence: u64,
     before: &T,
     after: &U,
@@ -80,8 +85,8 @@ pub(crate) fn canonical_snapshot_digest<T: Serialize>(
     canonical_state_digest(snapshot)
 }
 
-pub(crate) fn canonical_transition_process_digest<T: Serialize, U: Serialize>(
-    operation: &OperationIdentity,
+pub(crate) fn canonical_transition_process_digest<O: Serialize, T: Serialize, U: Serialize>(
+    operation: &O,
     sequence: u64,
     before: &T,
     after: &U,

@@ -5,12 +5,13 @@ use crate::digest::{
     DigestEncoding, canonical_snapshot_digest, canonical_transition_process_digest, process_digest,
     state_digest,
 };
+use crate::durable::{DurableSnapshotV1Encoding, durable_operation_v1};
 use crate::{OperationIdentity, ReliabilityError};
 
 /// Snapshot types that participate in the unified lifecycle evidence
 /// protocol. Domain modules provide only identity and transition rules; the
 /// StateChronicle/Penelope envelope and chain verifier live here once.
-pub trait SnapshotEvidence: Clone + Eq + Serialize {
+pub trait SnapshotEvidence: Clone + Eq + Serialize + DurableSnapshotV1Encoding {
     fn evidence_operation(&self) -> Result<OperationIdentity, ReliabilityError>;
 
     fn validate_evidence_operation(
@@ -48,10 +49,14 @@ impl<S: SnapshotEvidence> SnapshotEvidenceEvent<S> {
     pub fn new(sequence: u64, before: S, after: S) -> Result<Self, ReliabilityError> {
         before.validate_evidence_transition(&after)?;
         let operation = after.evidence_operation()?;
-        let digest_encoding = DigestEncoding::CanonicalBcsV1;
-        let state_digest = canonical_snapshot_digest(&after)?;
-        let process_digest =
-            canonical_transition_process_digest(&operation, sequence, &before, &after)?;
+        let digest_encoding = DigestEncoding::CanonicalBcsV2;
+        let state_digest = canonical_snapshot_digest(&after.durable_snapshot_v1())?;
+        let process_digest = canonical_transition_process_digest(
+            &durable_operation_v1(&operation),
+            sequence,
+            &before.durable_snapshot_v1(),
+            &after.durable_snapshot_v1(),
+        )?;
         Ok(Self {
             operation,
             sequence,
@@ -66,18 +71,38 @@ impl<S: SnapshotEvidence> SnapshotEvidenceEvent<S> {
     pub fn verify_integrity(&self) -> Result<(), ReliabilityError> {
         self.before.validate_evidence_transition(&self.after)?;
         self.after.validate_evidence_operation(&self.operation)?;
-        if self.state_digest != state_digest(&self.after, self.digest_encoding)? {
+        let expected_state_digest = match self.digest_encoding {
+            DigestEncoding::LegacyJson => state_digest(&self.after, self.digest_encoding)?,
+            DigestEncoding::CanonicalBcsV1 => state_digest(&self.after, self.digest_encoding)?,
+            DigestEncoding::CanonicalBcsV2 => {
+                canonical_snapshot_digest(&self.after.durable_snapshot_v1())?
+            }
+        };
+        if self.state_digest != expected_state_digest {
             return Err(ReliabilityError::StateDigestMismatch);
         }
-        if self.process_digest
-            != process_digest(
+        let expected_process_digest = match self.digest_encoding {
+            DigestEncoding::LegacyJson => process_digest(
                 &self.operation,
                 self.sequence,
                 &self.before,
                 &self.after,
                 self.digest_encoding,
-            )?
-        {
+            )?,
+            DigestEncoding::CanonicalBcsV1 => canonical_transition_process_digest(
+                &self.operation,
+                self.sequence,
+                &self.before,
+                &self.after,
+            )?,
+            DigestEncoding::CanonicalBcsV2 => canonical_transition_process_digest(
+                &durable_operation_v1(&self.operation),
+                self.sequence,
+                &self.before.durable_snapshot_v1(),
+                &self.after.durable_snapshot_v1(),
+            )?,
+        };
+        if self.process_digest != expected_process_digest {
             return Err(ReliabilityError::ProcessDigestMismatch);
         }
         Ok(())

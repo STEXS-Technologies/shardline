@@ -6,6 +6,7 @@
 //! modules and preserves the public compatibility surface through re-exports.
 
 mod digest;
+mod durable;
 mod error;
 mod event;
 mod event_metadata;
@@ -34,6 +35,7 @@ mod tests;
 
 pub use digest::DigestEncoding;
 pub use digest::canonical_state_digest;
+pub use durable::{DurableOperationIdentityV1, DurableSnapshotV1, DurableSnapshotV1Encoding};
 pub use error::ReliabilityError;
 pub use event::{
     LifecycleEvent, StateTransitionEvent, baseline_resumable_session_events,
