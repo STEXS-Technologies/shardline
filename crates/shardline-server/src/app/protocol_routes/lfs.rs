@@ -209,23 +209,32 @@ fn lfs_validation_response(message: &str) -> Response {
 /// while a guard is held. The guard is only held for the short staging
 /// write + range-record section, so the sweep (which waits on it under the
 /// store lock) can never be starved for long.
-static LFS_PATCH_LOCKS: LazyLock<Mutex<HashMap<String, Weak<Mutex<()>>>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+type LfsPatchLockKey = (PathBuf, String);
+type LfsPatchLockMap = Mutex<HashMap<LfsPatchLockKey, Weak<Mutex<()>>>>;
 
+static LFS_PATCH_LOCKS: LazyLock<LfsPatchLockMap> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+#[cfg(test)]
 pub(super) fn acquire_lfs_patch_lock(oid: &str) -> Arc<Mutex<()>> {
+    acquire_lfs_patch_lock_for_dir(&PathBuf::new(), oid)
+}
+
+#[must_use]
+pub(super) fn acquire_lfs_patch_lock_for_dir(dir: &FsPath, oid: &str) -> Arc<Mutex<()>> {
     // Recover from poisoning: if a previous lock-holder panicked, the map
-    // contents are still valid (simple OID→lock mapping), so continue.
+    // contents are still valid, so continue.
     let mut map = LFS_PATCH_LOCKS.lock().unwrap_or_else(|e| e.into_inner());
+    let key = (dir.to_path_buf(), oid.to_owned());
     // Fast path: a live weak handle exists (a guard is still being held for
     // this OID), so hand out the same strong Arc to preserve serialization.
-    if let Some(live) = map.get(oid).and_then(Weak::upgrade) {
+    if let Some(live) = map.get(&key).and_then(Weak::upgrade) {
         return live;
     }
     // No live handle: drop dead entries so the map cannot grow with finished
     // OIDs (F-22), then install a fresh mutex and return its strong Arc.
     map.retain(|_oid, weak| weak.upgrade().is_some());
     let fresh = Arc::new(Mutex::new(()));
-    map.insert(oid.to_owned(), Arc::downgrade(&fresh));
+    map.insert(key, Arc::downgrade(&fresh));
     fresh
 }
 
@@ -238,27 +247,11 @@ fn live_lfs_patch_lock_count() -> usize {
     map.values().filter(|weak| weak.upgrade().is_some()).count()
 }
 
-/// The process-wide lock serializing LFS patch-store accounting (active
-/// session count + aggregate staging bytes) and the expiry sweep.
-///
-/// Never held across a network body stream: the PATCH body is fully buffered
-/// before any store mutation, so a slow client cannot stall other sessions
-/// (F-10 pattern).
-///
-/// Lock order (F-31): the store lock is acquired FIRST, before the per-OID
-/// lock, exactly like the sweep; it is dropped before the staging write. It is
-/// NEVER re-acquired while a per-OID lock is held — the promotion and error
-/// paths drop the per-OID guard before taking the store lock for the `.meta`
-/// removal. The per-OID lock is therefore always the inner lock, and no code
-/// path acquires store→per-OID and per-OID→store in the same run.
-static LFS_PATCH_STORE_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
-
-/// Held process-local + filesystem advisory lock for patch-store accounting.
+/// Held filesystem advisory lock for patch-store accounting.
 ///
 /// API replicas mount the same staging root in the scaled topology, so the
 /// file guard extends quotas, sweeping, and session creation across pods.
 struct LfsPatchStoreGuard {
-    _process_guard: std::sync::MutexGuard<'static, ()>,
     file: fs::File,
 }
 
@@ -279,9 +272,6 @@ impl Drop for LfsPatchOidFileGuard {
 }
 
 fn lock_lfs_patch_store(dir: &FsPath) -> Result<LfsPatchStoreGuard, ServerError> {
-    let process_guard = LFS_PATCH_STORE_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     fs::create_dir_all(dir)?;
     let file = fs::OpenOptions::new()
         .create(true)
@@ -290,10 +280,7 @@ fn lock_lfs_patch_store(dir: &FsPath) -> Result<LfsPatchStoreGuard, ServerError>
         .write(true)
         .open(dir.join(".sessions.lock"))?;
     file.lock()?;
-    Ok(LfsPatchStoreGuard {
-        _process_guard: process_guard,
-        file,
-    })
+    Ok(LfsPatchStoreGuard { file })
 }
 
 pub(super) fn lock_lfs_patch_oid(
@@ -465,7 +452,7 @@ fn sweep_lfs_patch_sessions_locked(
             Err(_error) => true,
         };
         if stale {
-            let oid_lock = acquire_lfs_patch_lock(oid);
+            let oid_lock = acquire_lfs_patch_lock_for_dir(dir, oid);
             let _guard = oid_lock
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1447,7 +1434,7 @@ pub(crate) async fn lfs_patch_object(
         // the store lock before the disk write: the per-OID lock alone
         // serializes same-OID PATCHes and protects the staging files from the
         // sweep (which holds the store lock and waits on the per-OID lock).
-        let lock_arc = acquire_lfs_patch_lock(&oid_for_closure);
+        let lock_arc = acquire_lfs_patch_lock_for_dir(&tmp_dir, &oid_for_closure);
         // Recover from poisoning: the lock is a simple empty-token Mutex<()>,
         // so its state is trivially consistent even if a previous holder panicked.
         let lock = lock_arc.lock().unwrap_or_else(|e| e.into_inner());
@@ -2051,12 +2038,13 @@ mod tests {
     use shardline_server_core::AuthorizedRepository;
 
     use super::{
-        LFS_PATCH_LOCKS, acquire_lfs_patch_lock, evict_lfs_patch_ranges, inspect_lfs_patch_ranges,
-        lfs_batch, lfs_delete_object, lfs_get_object, lfs_head_object, lfs_patch_dir,
-        lfs_patch_meta_path, lfs_patch_now_seconds, lfs_patch_object, lfs_patch_ranges_compactions,
-        lfs_put_object, lfs_ranges_cover_total, lfs_validation_response, lfs_verify_object,
-        live_lfs_patch_lock_count, lock_lfs_patch_oid, parse_content_range, patch_store_usage,
-        record_lfs_patch_range, sweep_lfs_patch_sessions, touch_patch_session,
+        LFS_PATCH_LOCKS, acquire_lfs_patch_lock, acquire_lfs_patch_lock_for_dir,
+        evict_lfs_patch_ranges, inspect_lfs_patch_ranges, lfs_batch, lfs_delete_object,
+        lfs_get_object, lfs_head_object, lfs_patch_dir, lfs_patch_meta_path, lfs_patch_now_seconds,
+        lfs_patch_object, lfs_patch_ranges_compactions, lfs_put_object, lfs_ranges_cover_total,
+        lfs_validation_response, lfs_verify_object, live_lfs_patch_lock_count, lock_lfs_patch_oid,
+        parse_content_range, patch_store_usage, record_lfs_patch_range, sweep_lfs_patch_sessions,
+        touch_patch_session,
     };
 
     /// Test signing key matching the one used in e2e tests.
@@ -3719,6 +3707,17 @@ mod tests {
     }
 
     #[test]
+    fn acquire_lfs_patch_lock_for_dir_isolated_by_root() {
+        let first_root = TempDir::new().unwrap();
+        let second_root = TempDir::new().unwrap();
+        let first_dir = lfs_patch_dir(first_root.path());
+        let second_dir = lfs_patch_dir(second_root.path());
+        let first = acquire_lfs_patch_lock_for_dir(&first_dir, "same-oid");
+        let second = acquire_lfs_patch_lock_for_dir(&second_dir, "same-oid");
+        assert!(!Arc::ptr_eq(&first, &second));
+    }
+
+    #[test]
     fn lfs_patch_oid_file_lock_excludes_independent_openers() {
         let root = TempDir::new().unwrap();
         let dir = lfs_patch_dir(root.path());
@@ -4907,7 +4906,7 @@ mod tests {
 
         // Mimic a mid-promotion PATCH: hold the target session's per-OID lock
         // so the sweep must wait on it while holding the store lock.
-        let oid_lock = acquire_lfs_patch_lock(&oid);
+        let oid_lock = acquire_lfs_patch_lock_for_dir(&dir, &oid);
         let guard = oid_lock.lock().unwrap();
 
         let root = state.config.root_dir().to_path_buf();

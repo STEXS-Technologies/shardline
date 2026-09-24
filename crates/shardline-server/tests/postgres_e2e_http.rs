@@ -1459,17 +1459,22 @@ async fn test_oci_role_api_serves_manifest_but_not_blob_upload() {
     config.validate_runtime_requirements().unwrap();
     let app = app::router(config).await.unwrap();
 
+    let repo_name = format!("test-{}", std::process::id());
     let token = {
         let provider = LocalHmacProvider::new(TEST_SIGNING_KEY).unwrap();
-        let repo_s =
-            RepositoryScope::new(RepositoryProvider::Generic, "test", "test", Some("main"))
-                .unwrap();
+        let repo_s = RepositoryScope::new(
+            RepositoryProvider::Generic,
+            "test",
+            &repo_name,
+            Some("main"),
+        )
+        .unwrap();
         let claims =
             TokenClaims::new("shardline", "test", TokenScope::Write, repo_s, u64::MAX).unwrap();
         provider.mint_token(&claims).unwrap()
     };
 
-    let repo = "test/test";
+    let repo = format!("test/{repo_name}");
     let content = b"role-api-blob";
     let digest = sha256_hex(content);
 
@@ -1527,17 +1532,22 @@ async fn test_oci_role_transfer_serves_blob_upload_but_not_manifest() {
     config.validate_runtime_requirements().unwrap();
     let app = app::router(config).await.unwrap();
 
+    let repo_name = format!("test-{}", std::process::id());
     let token = {
         let provider = LocalHmacProvider::new(TEST_SIGNING_KEY).unwrap();
-        let repo_s =
-            RepositoryScope::new(RepositoryProvider::Generic, "test", "test", Some("main"))
-                .unwrap();
+        let repo_s = RepositoryScope::new(
+            RepositoryProvider::Generic,
+            "test",
+            &repo_name,
+            Some("main"),
+        )
+        .unwrap();
         let claims =
             TokenClaims::new("shardline", "test", TokenScope::Write, repo_s, u64::MAX).unwrap();
         provider.mint_token(&claims).unwrap()
     };
 
-    let repo = "test/test";
+    let repo = format!("test/{repo_name}");
     let content = b"role-transfer-blob";
     let digest = sha256_hex(content);
 
@@ -2922,11 +2932,16 @@ async fn test_overwrite_prevention_across_lfs_oci_bazel() {
     config.validate_runtime_requirements().unwrap();
     let app = app::router(config).await.unwrap();
 
+    let repo_name = format!("test-{}", std::process::id());
     let token = {
         let provider = LocalHmacProvider::new(TEST_SIGNING_KEY).unwrap();
-        let repo_s =
-            RepositoryScope::new(RepositoryProvider::Generic, "test", "test", Some("main"))
-                .unwrap();
+        let repo_s = RepositoryScope::new(
+            RepositoryProvider::Generic,
+            "test",
+            &repo_name,
+            Some("main"),
+        )
+        .unwrap();
         let claims =
             TokenClaims::new("shardline", "test", TokenScope::Write, repo_s, u64::MAX).unwrap();
         provider.mint_token(&claims).unwrap()
@@ -2936,7 +2951,7 @@ async fn test_overwrite_prevention_across_lfs_oci_bazel() {
     // Same content uploaded via each protocol.
     let content = b"cross-protocol-shadow-test-content";
     let hash = sha256_hex(content);
-    let repo = "test/test";
+    let repo = format!("test/{repo_name}");
 
     // 1. Upload via LFS
     let lfs_put = app
@@ -3031,7 +3046,13 @@ async fn test_overwrite_prevention_across_lfs_oci_bazel() {
         )
         .await
         .unwrap();
-    assert_eq!(oci_get.status(), 200, "OCI GET should succeed");
+    if oci_get.status() != 200 {
+        let status = oci_get.status();
+        let body = axum::body::to_bytes(oci_get.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        panic!("OCI GET should succeed: {status}, body: {:?}", body);
+    }
     let oci_body = axum::body::to_bytes(oci_get.into_body(), usize::MAX)
         .await
         .unwrap();

@@ -423,7 +423,8 @@ impl OciObjectStore for PostgresIndexStore {
             )?;
             verify_snapshot_evidence(&evidence, &expected)?;
         } else if !evidence.events().is_empty() {
-            shardline_reliability::verify_oci_object_lifecycle_chain(evidence.events())?;
+            let expected = oci_snapshot(key, OciObjectLifecycleState::Published, None)?;
+            verify_snapshot_evidence(&evidence, &expected)?;
         }
         transaction.commit().await?;
         Ok(found.is_some())
