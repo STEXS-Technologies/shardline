@@ -913,6 +913,9 @@ fn resolve_faketime_library(drill: &str) -> Option<PathBuf> {
 struct DeploymentServer {
     child: std::process::Child,
     base_url: String,
+    binary: PathBuf,
+    extra_env: Vec<(String, String)>,
+    root: PathBuf,
     _log: NamedTempFile,
 }
 
@@ -927,6 +930,20 @@ impl DeploymentServer {
     }
 
     fn spawn_at(binary: &Path, bind_addr: &str, extra_env: &[(&str, &str)], root: &Path) -> Self {
+        let binary = binary.to_owned();
+        let extra_env = extra_env
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+            .collect::<Vec<_>>();
+        Self::spawn_process(&binary, bind_addr, &extra_env, root.to_owned())
+    }
+
+    fn spawn_process(
+        binary: &Path,
+        bind_addr: &str,
+        extra_env: &[(String, String)],
+        root: PathBuf,
+    ) -> Self {
         let data_dir = root.join("data");
         std::fs::create_dir_all(&data_dir).unwrap_or_else(|e| panic!("create {data_dir:?}: {e}"));
         let log = NamedTempFile::new().expect("temp log file");
@@ -966,6 +983,9 @@ impl DeploymentServer {
         Self {
             child,
             base_url: format!("http://{bind_addr}"),
+            binary: binary.to_owned(),
+            extra_env: extra_env.to_owned(),
+            root,
             _log: log,
         }
     }
@@ -976,35 +996,47 @@ impl DeploymentServer {
 
     async fn wait_ready(&mut self, timeout: Duration) {
         let client = reqwest::Client::new();
-        let deadline = tokio::time::Instant::now()
-            .checked_add(timeout)
-            .expect("deadline overflow");
-        loop {
-            if !self.alive() {
-                panic!(
-                    "deployment server exited during startup; log {:?}:\n{}",
-                    self._log.path(),
-                    self.log_contents()
-                );
+        for attempt in 0..3 {
+            let deadline = tokio::time::Instant::now()
+                .checked_add(timeout)
+                .expect("deadline overflow");
+            loop {
+                if !self.alive() {
+                    let log = self.log_contents();
+                    if log.contains("Address already in use") && attempt < 2 {
+                        let port = free_tcp_port().expect("an available deployment port");
+                        let bind_addr = format!("127.0.0.1:{port}");
+                        let binary = self.binary.clone();
+                        let extra_env = self.extra_env.clone();
+                        let root = self.root.clone();
+                        *self = Self::spawn_process(&binary, &bind_addr, &extra_env, root);
+                        break;
+                    }
+                    panic!(
+                        "deployment server exited during startup; log {:?}:\n{log}",
+                        self._log.path()
+                    );
+                }
+                if matches!(
+                    client
+                        .get(format!("{}/healthz", self.base_url))
+                        .timeout(Duration::from_secs(2))
+                        .send()
+                        .await,
+                    Ok(resp) if resp.status().as_u16() == 200
+                ) {
+                    return;
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    panic!(
+                        "deployment server did not become healthy within {timeout:?}; see log {:?}",
+                        self._log.path()
+                    );
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
             }
-            if matches!(
-                client
-                    .get(format!("{}/healthz", self.base_url))
-                    .timeout(Duration::from_secs(2))
-                    .send()
-                    .await,
-                Ok(resp) if resp.status().as_u16() == 200
-            ) {
-                return;
-            }
-            if tokio::time::Instant::now() >= deadline {
-                panic!(
-                    "deployment server did not become healthy within {timeout:?}; see log {:?}",
-                    self._log.path()
-                );
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
         }
+        unreachable!("startup retry loop always returns or panics")
     }
 
     fn alive(&mut self) -> bool {
