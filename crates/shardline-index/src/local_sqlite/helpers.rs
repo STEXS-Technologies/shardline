@@ -250,6 +250,12 @@ pub(crate) fn load_verified_event_json_batch(
             ))
         })?;
         let event_json = from_str::<Value>(&event_json)?;
+        let identity = persisted_event_identity(operation_kind, event_json.clone())?;
+        if identity.operation_id != operation_id {
+            return Err(LocalIndexStoreError::Reliability(
+                shardline_reliability::ReliabilityError::OperationMismatch,
+            ));
+        }
         let merkle_commit_json = merkle_commit_json
             .map(|json| from_str::<Value>(&json))
             .transpose()?;

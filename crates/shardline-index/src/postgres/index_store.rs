@@ -129,6 +129,12 @@ async fn load_postgres_evidence_histories(
         })?;
         let operation_id: String = row.try_get("operation_id")?;
         let event_json: serde_json::Value = row.try_get("event_json")?;
+        let identity = persisted_event_identity(kind, event_json.clone())?;
+        if identity.operation_id != operation_id {
+            return Err(PostgresMetadataStoreError::Reliability(
+                shardline_reliability::ReliabilityError::OperationMismatch,
+            ));
+        }
         let merkle_commit: Option<serde_json::Value> = row.try_get("merkle_commit_json")?;
         let history = histories
             .entry(operation_id)
