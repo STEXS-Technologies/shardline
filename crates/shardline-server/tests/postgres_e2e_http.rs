@@ -746,7 +746,7 @@ async fn test_all_frontends_health_and_ready() {
 // ===========================================================================
 
 /// Build a temporary OCI app for oneshot tests. Reuses ensure_pg().
-async fn oci_oneshot_app() -> (axum::Router, String) {
+async fn oci_oneshot_app() -> (axum::Router, String, TempDir) {
     let pg_url = ensure_pg().await;
     let tmp = TempDir::new().unwrap();
     let chunk_size = NonZeroUsize::new(65536).unwrap();
@@ -773,10 +773,7 @@ async fn oci_oneshot_app() -> (axum::Router, String) {
     let claims =
         TokenClaims::new("shardline", "test", TokenScope::Write, repo_s, u64::MAX).unwrap();
     let token = provider.mint_token(&claims).unwrap();
-    // Keep tmp alive by returning it — we leak it via a static or just let it
-    // drop (the app already has the PathBuf, so it works for the test duration).
-    let _ = Box::new(tmp);
-    (app, token)
+    (app, token, tmp)
 }
 
 fn oci_digest_hex(data: &[u8]) -> String {
@@ -826,7 +823,7 @@ fn oci_manifest_json(config_digest: &str, layer_digest: &str) -> String {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_oci_manifest_push_and_get_by_tag() {
-    let (app, token) = oci_oneshot_app().await;
+    let (app, token, _tmp) = oci_oneshot_app().await;
     let repo = "test/test";
     let tag = "v0.0.1";
 
@@ -889,7 +886,7 @@ async fn test_oci_manifest_push_and_get_by_tag() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_oci_manifest_get_by_digest() {
-    let (app, token) = oci_oneshot_app().await;
+    let (app, token, _tmp) = oci_oneshot_app().await;
     let repo = "test/test";
     let tag = "digest-ref";
 
@@ -932,7 +929,7 @@ async fn test_oci_manifest_get_by_digest() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_oci_tags_list() {
-    let (app, token) = oci_oneshot_app().await;
+    let (app, token, _tmp) = oci_oneshot_app().await;
     let repo = "test/test";
     let tag = "list-me";
 
@@ -980,7 +977,7 @@ async fn test_oci_tags_list() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_oci_blob_head() {
-    let (app, token) = oci_oneshot_app().await;
+    let (app, token, _tmp) = oci_oneshot_app().await;
     let repo = "test/test";
 
     let content = b"head-blob-content";
@@ -1854,7 +1851,7 @@ async fn test_auth_wrong_repo_scope_returns_403() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_oci_upload_invalid_digest_algorithm() {
-    let (app, token) = oci_oneshot_app().await;
+    let (app, token, _tmp) = oci_oneshot_app().await;
     let repo = "test/test";
     let content = b"some-content";
 
@@ -1880,7 +1877,7 @@ async fn test_oci_upload_invalid_digest_algorithm() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_oci_upload_body_hash_mismatch() {
-    let (app, token) = oci_oneshot_app().await;
+    let (app, token, _tmp) = oci_oneshot_app().await;
     let repo = "test/test";
 
     // Content does not match the digest
@@ -1907,7 +1904,7 @@ async fn test_oci_upload_body_hash_mismatch() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_oci_patch_nonexistent_session() {
-    let (app, token) = oci_oneshot_app().await;
+    let (app, token, _tmp) = oci_oneshot_app().await;
     let repo = "test/test";
 
     let req = axum::http::Request::builder()
@@ -1935,7 +1932,7 @@ async fn test_oci_patch_nonexistent_session() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_oci_put_finalize_without_digest() {
-    let (app, token) = oci_oneshot_app().await;
+    let (app, token, _tmp) = oci_oneshot_app().await;
     let repo = "test/test";
 
     // PUT to blob uploads without ?digest= query parameter
@@ -1958,7 +1955,7 @@ async fn test_oci_put_finalize_without_digest() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_oci_get_nonexistent_blob() {
-    let (app, token) = oci_oneshot_app().await;
+    let (app, token, _tmp) = oci_oneshot_app().await;
     let repo = "test/test";
     let fake_digest = "a".repeat(64);
 
@@ -1979,7 +1976,7 @@ async fn test_oci_get_nonexistent_blob() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_oci_delete_nonexistent_manifest() {
-    let (app, token) = oci_oneshot_app().await;
+    let (app, token, _tmp) = oci_oneshot_app().await;
     let repo = "test/test";
 
     let req = axum::http::Request::builder()
@@ -1999,7 +1996,7 @@ async fn test_oci_delete_nonexistent_manifest() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_oci_push_manifest_with_nonexistent_blob() {
-    let (app, token) = oci_oneshot_app().await;
+    let (app, token, _tmp) = oci_oneshot_app().await;
     let repo = "test/test";
 
     let manifest_body = serde_json::json!({
@@ -2683,7 +2680,7 @@ async fn test_error_invalid_token() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_error_oci_manifest_not_found() {
-    let (app, token) = oci_oneshot_app().await;
+    let (app, token, _tmp) = oci_oneshot_app().await;
 
     let get_uri = "/v2/test/test/manifests/nonexistent-tag";
     let get_req = axum::http::Request::builder()
@@ -2827,7 +2824,7 @@ async fn test_concurrent_lfs_upload_same_oid() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_concurrent_oci_manifest_push_and_pull() {
-    let (app, token) = oci_oneshot_app().await;
+    let (app, token, _tmp) = oci_oneshot_app().await;
     let repo = "test/test";
     let tag = "concurrent-manifest-pg";
 
@@ -3366,7 +3363,7 @@ async fn app_with_body_limit(
     let claims = TokenClaims::new("shardline", "test", TokenScope::Write, repo, u64::MAX).unwrap();
     let token = provider.mint_token(&claims).unwrap();
     // Keep tmp alive
-    let _ = Box::new(tmp);
+    let _keep = Box::new(tmp);
     (app, token)
 }
 
@@ -3663,7 +3660,7 @@ async fn test_concurrent_hub_commit_and_read() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_concurrent_session_upload_and_cancel() {
-    let (app, token) = oci_oneshot_app().await;
+    let (app, token, _tmp) = oci_oneshot_app().await;
     let repo = "test/test";
 
     // Create session
@@ -3950,7 +3947,7 @@ async fn test_oci_tags_list_max_page_size() {
     .with_reconstruction_cache_disabled();
     config.validate_runtime_requirements().unwrap();
     let app = app::router(config).await.unwrap();
-    let _ = Box::new(tmp);
+    let _keep = Box::new(tmp);
 
     let token = {
         let provider = LocalHmacProvider::new(TEST_SIGNING_KEY).unwrap();
@@ -4351,7 +4348,7 @@ fn oci_session_id(resp: &axum::http::Response<axum::body::Body>) -> String {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_oci_session_patch_after_complete() {
-    let (app, token) = oci_oneshot_app().await;
+    let (app, token, _tmp) = oci_oneshot_app().await;
     let repo = "test/test";
 
     // Full session: POST -> PATCH -> PUT
@@ -4407,7 +4404,7 @@ async fn test_oci_session_patch_after_complete() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_oci_session_put_after_complete() {
-    let (app, token) = oci_oneshot_app().await;
+    let (app, token, _tmp) = oci_oneshot_app().await;
     let repo = "test/test";
 
     let post_req = axum::http::Request::builder()
@@ -4461,7 +4458,7 @@ async fn test_oci_session_put_after_complete() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_oci_session_get_after_complete() {
-    let (app, token) = oci_oneshot_app().await;
+    let (app, token, _tmp) = oci_oneshot_app().await;
     let repo = "test/test";
 
     let post_req = axum::http::Request::builder()
@@ -4513,7 +4510,7 @@ async fn test_oci_session_get_after_complete() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_oci_session_patch_after_delete() {
-    let (app, token) = oci_oneshot_app().await;
+    let (app, token, _tmp) = oci_oneshot_app().await;
     let repo = "test/test";
 
     let post_req = axum::http::Request::builder()
@@ -4553,7 +4550,7 @@ async fn test_oci_session_patch_after_delete() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_oci_session_patch_empty_body() {
-    let (app, token) = oci_oneshot_app().await;
+    let (app, token, _tmp) = oci_oneshot_app().await;
     let repo = "test/test";
 
     let post_req = axum::http::Request::builder()
