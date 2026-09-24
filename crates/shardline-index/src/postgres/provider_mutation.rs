@@ -261,7 +261,13 @@ pub(super) async fn record_webhook_delivery(
         let evidence =
             super::index_store::load_postgres_webhook_evidence(&mut **transaction, &existing)
                 .await?;
-        let (_evidence, _) = verify_or_repair_snapshot_evidence(evidence, snapshot)?;
+        let (evidence, evidence_was_missing) =
+            verify_or_repair_snapshot_evidence(evidence, snapshot)?;
+        if evidence_was_missing {
+            for event in evidence.events() {
+                super::insert_reliability_event(&mut **transaction, event).await?;
+            }
+        }
         return Ok(false);
     }
     let snapshot =
@@ -760,6 +766,94 @@ mod tests {
         .await
         .expect("duplicate mutation");
         assert_eq!(duplicate, PostgresProviderMutationOutcome::Duplicate);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pg_duplicate_webhook_rebuilds_missing_baseline_evidence() {
+        let Some(pool) = connect_postgres().await else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let owner = "provider-webhook-baseline";
+        let repo = "repository";
+        let delivery_id = "delivery-baseline";
+        let delivery = delivery(owner, repo, delivery_id);
+        let operation_id = webhook_operation_id(&delivery);
+        query(
+            "DELETE FROM shardline_webhook_deliveries
+             WHERE provider = 'github' AND owner = $1 AND repo = $2",
+        )
+        .bind(owner)
+        .bind(repo)
+        .execute(&pool)
+        .await
+        .expect("clean delivery fixture");
+        query(
+            "DELETE FROM shardline_reliability_events
+             WHERE operation_kind = 'WebhookDelivery' AND operation_id = $1",
+        )
+        .bind(&operation_id)
+        .execute(&pool)
+        .await
+        .expect("clean evidence fixture");
+
+        let store = super::super::PostgresIndexStore::new(pool.clone());
+        assert!(
+            crate::AsyncIndexStore::record_webhook_delivery(&store, &delivery)
+                .await
+                .expect("record delivery")
+        );
+        query(
+            "DELETE FROM shardline_reliability_events
+             WHERE operation_kind = 'WebhookDelivery' AND operation_id = $1",
+        )
+        .bind(&operation_id)
+        .execute(&pool)
+        .await
+        .expect("remove evidence fixture");
+
+        assert!(
+            !crate::AsyncIndexStore::record_webhook_delivery(&store, &delivery)
+                .await
+                .expect("duplicate delivery")
+        );
+        let event_count = query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM shardline_reliability_events
+             WHERE operation_kind = 'WebhookDelivery' AND operation_id = $1",
+        )
+        .bind(&operation_id)
+        .fetch_one(&pool)
+        .await
+        .expect("baseline evidence count");
+        assert_eq!(event_count, 1);
+        let deliveries = crate::AsyncIndexStore::list_webhook_deliveries(&store)
+            .await
+            .expect("list delivery");
+        assert_eq!(
+            deliveries
+                .iter()
+                .filter(|candidate| *candidate == &delivery)
+                .count(),
+            1
+        );
+
+        query(
+            "DELETE FROM shardline_webhook_deliveries
+             WHERE provider = 'github' AND owner = $1 AND repo = $2",
+        )
+        .bind(owner)
+        .bind(repo)
+        .execute(&pool)
+        .await
+        .expect("clean delivery fixture");
+        query(
+            "DELETE FROM shardline_reliability_events
+             WHERE operation_kind = 'WebhookDelivery' AND operation_id = $1",
+        )
+        .bind(&operation_id)
+        .execute(&pool)
+        .await
+        .expect("clean evidence fixture");
     }
 
     #[tokio::test(flavor = "multi_thread")]
