@@ -1,6 +1,8 @@
 use std::{num::NonZeroU64, time::Duration};
 
-use shardline_reliability::{StateTransitionEvent, resumable_session_event};
+use shardline_reliability::{
+    StateTransitionEvent, resumable_session_event, verify_resumable_session_head,
+};
 use sqlx::{Postgres, Row, Transaction};
 
 use super::{
@@ -1316,14 +1318,25 @@ impl PostgresIndexStore {
         &self,
         session: &ResumableSession,
     ) -> Result<(), PostgresMetadataStoreError> {
-        // `resumable_reliability_events` reads the event chain and the
-        // authoritative session identity/state in one repeatable-read
-        // transaction and verifies them together. Re-verifying against the
-        // caller's `session` here would interpret a potentially stale snapshot
-        // a second time and could reject a valid concurrent transition.
-        let _events = self
-            .resumable_reliability_events(session.session_id())
-            .await?;
+        let Some(event) = super::index_store::load_postgres_latest_evidence_event(
+            self.pool(),
+            shardline_reliability::OperationKind::ResumableSession,
+            session.session_id(),
+        )
+        .await?
+        else {
+            return Err(PostgresMetadataStoreError::Reliability(
+                shardline_reliability::ReliabilityError::OperationMismatch,
+            ));
+        };
+        let event = serde_json::from_value::<StateTransitionEvent>(event)?;
+        verify_resumable_session_head(
+            &event,
+            session.scope_namespace(),
+            session.session_id(),
+            session.target_key(),
+            session.state(),
+        )?;
         Ok(())
     }
 }
