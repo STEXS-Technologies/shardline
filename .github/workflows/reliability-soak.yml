@@ -208,9 +208,9 @@ jobs:
         run: |
           set -o pipefail
           mkdir -p reliability-upgrade-results
-          cargo test -p shardline-server --test deployment_chaos \
-            drill_deploy_f_real_mixed_version_rollout_and_rollback \
-            -- --exact --nocapture 2>&1 \
+          cargo nextest run -p shardline-server --test deployment_chaos \
+            -E 'test(drill_deploy_f_real_mixed_version_rollout_and_rollback)' \
+            --no-capture 2>&1 \
             | tee reliability-upgrade-results/mixed-version-upgrade.log
 
       - name: Record mixed-version campaign metadata

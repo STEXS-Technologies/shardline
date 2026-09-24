@@ -13,6 +13,10 @@
 //! Runtime-SKIP convention (fault_drills.rs drill3): when the chaos stack is
 //! not available the test prints a loud banner and returns — never
 //! `#[ignore]`, which is compile-time static.
+//!
+//! Each drill owns an isolated Compose project and dynamically allocated host
+//! ports. Run this suite with nextest so every drill gets its own OS process;
+//! direct in-process `cargo test` execution is not an isolation boundary.
 
 #![allow(
     clippy::indexing_slicing,
@@ -26,7 +30,6 @@
     clippy::arithmetic_side_effects
 )]
 
-use serial_test::serial;
 use sha2::{Digest, Sha256};
 use shardline_protocol::{
     ByteRange, RepositoryProvider, RepositoryScope, SecretString, TokenClaims, TokenScope,
@@ -37,6 +40,7 @@ use shardline_server::{
 use shardline_server_core::{AuthProvider, ServerObjectStoreError, auth::LocalHmacProvider};
 use shardline_storage::{ObjectKey, ObjectPrefix, ObjectStore as _, S3ObjectStoreConfig};
 use std::{
+    net::TcpListener,
     path::{Path, PathBuf},
     process::Stdio,
     time::Duration,
@@ -48,19 +52,16 @@ use tokio::{net::TcpStream, sync::mpsc, task::JoinHandle};
 // Deployment constants (must match docker-compose.chaos.yml / Makefile.toml).
 // ---------------------------------------------------------------------------
 
-/// Host bind address for the deployed server (avoids dev 18080 / default 8080).
+/// Host bind addresses for the deployed server processes.
 const BIN_ADDR: &str = "127.0.0.1:18081";
 const BIN_ADDR_SECONDARY: &str = "127.0.0.1:18082";
-/// Chaos Postgres (compose publishes `15432 -> 5432`).
-const PG_URL: &str = "postgres://shardline:shardline-dev-password@127.0.0.1:15432/shardline";
-/// Design-default MinIO endpoint. Overridden at runtime from the container's
-/// actual published port (see [`ChaosStack::resolve`]).
-const S3_ENDPOINT_DEFAULT: &str = "http://127.0.0.1:29000";
-/// Design-default Redis URL. Overridden at runtime from the container's
-/// actual published port: compose exposes chaos-redis on `16380`, and
-/// `16379` is frequently occupied by unrelated dev stacks.
-const REDIS_URL_DEFAULT: &str = "redis://127.0.0.1:16379/0";
-/// Docker network for the chaos stack (compose `networks.chaos-net.name`).
+const COMPOSE_FILE: &str = "docker-compose.chaos.yml";
+const PG_URL_DEFAULT: &str =
+    "postgres://shardline:shardline-dev-password@127.0.0.1:15432/shardline";
+const S3_ENDPOINT_DEFAULT: &str = "http://127.0.0.1:39000";
+/// Logical Docker resource names. `docker_run` resolves these to the
+/// per-process Compose project's IDs, so independent nextest processes never
+/// address one another's containers or network.
 const NET: &str = "shardline-chaos-net";
 /// The S3 repository bucket (`{owner}.{name}`) the tokens are scoped to.
 const BUCKET: &str = "drill.drill";
@@ -76,6 +77,28 @@ const NETEM_IMAGE: &str = "nicolaka/netshoot:v0.13";
 const TEST_SIGNING_KEY: &[u8] = b"0123456789abcdef0123456789abcdef";
 const ADMIN_READ_TOKEN: &str = "deployment-chaos-admin-read-token";
 const CHUNK_SIZE: usize = 65536;
+
+fn chaos_pg_url() -> String {
+    std::env::var("SHARDLINE_CHAOS_PG_URL").unwrap_or_else(|_| PG_URL_DEFAULT.to_owned())
+}
+
+fn chaos_s3_endpoint() -> String {
+    std::env::var("SHARDLINE_CHAOS_S3_ENDPOINT").unwrap_or_else(|_| S3_ENDPOINT_DEFAULT.to_owned())
+}
+
+fn chaos_bind_addr() -> String {
+    std::env::var("SHARDLINE_CHAOS_BIND_ADDR").unwrap_or_else(|_| BIN_ADDR.to_owned())
+}
+
+fn chaos_secondary_bind_addr() -> String {
+    std::env::var("SHARDLINE_CHAOS_SECONDARY_BIND_ADDR")
+        .unwrap_or_else(|_| BIN_ADDR_SECONDARY.to_owned())
+}
+
+fn free_tcp_port() -> Option<u16> {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).ok()?;
+    Some(listener.local_addr().ok()?.port())
+}
 
 // ---------------------------------------------------------------------------
 // Auth / tokens — same signing key as the deployed server (verbatim from
@@ -163,14 +186,53 @@ async fn tcp_ready(host: &str, port: u16) -> bool {
     require_tcp(host, port).await
 }
 
+async fn chaos_postgres_tcp_ready() -> bool {
+    let Some(port) = container_published_port(CONTAINER_POSTGRES, "5432/tcp")
+        .await
+        .and_then(|port| port.parse::<u16>().ok())
+    else {
+        return false;
+    };
+    tcp_ready("127.0.0.1", port).await
+}
+
 // ---------------------------------------------------------------------------
 // Docker helpers (mc_run pattern from s3_real_client_e2e.rs).
 // ---------------------------------------------------------------------------
 
 /// Runs a `docker` subprocess on the blocking pool and returns its output
 /// (mc_run pattern from s3_real_client_e2e.rs).
+fn resolve_docker_arg(arg: &str) -> String {
+    let replacement = match arg {
+        CONTAINER_POSTGRES => std::env::var("SHARDLINE_CHAOS_POSTGRES_CONTAINER").ok(),
+        CONTAINER_MINIO => std::env::var("SHARDLINE_CHAOS_MINIO_CONTAINER").ok(),
+        CONTAINER_REDIS => std::env::var("SHARDLINE_CHAOS_REDIS_CONTAINER").ok(),
+        NET => std::env::var("SHARDLINE_CHAOS_NETWORK").ok(),
+        _ => None,
+    };
+    if let Some(replacement) = replacement {
+        return replacement;
+    }
+    for (logical, variable) in [
+        (CONTAINER_POSTGRES, "SHARDLINE_CHAOS_POSTGRES_CONTAINER"),
+        (CONTAINER_MINIO, "SHARDLINE_CHAOS_MINIO_CONTAINER"),
+        (CONTAINER_REDIS, "SHARDLINE_CHAOS_REDIS_CONTAINER"),
+        (NET, "SHARDLINE_CHAOS_NETWORK"),
+    ] {
+        if let Ok(replacement) = std::env::var(variable) {
+            if arg.contains(&format!("container:{logical}")) {
+                return arg.replace(
+                    &format!("container:{logical}"),
+                    &format!("container:{replacement}"),
+                );
+            }
+        }
+    }
+    arg.to_owned()
+}
+
 async fn docker_run(args: &[&str]) -> std::process::Output {
-    let args: Vec<String> = args.iter().map(|arg| (*arg).to_owned()).collect();
+    let args: Vec<String> = args.iter().map(|arg| resolve_docker_arg(arg)).collect();
     tokio::task::spawn_blocking(move || {
         std::process::Command::new("docker")
             .args(&args)
@@ -182,6 +244,7 @@ async fn docker_run(args: &[&str]) -> std::process::Output {
 }
 
 async fn docker_run_owned(args: Vec<String>) -> std::process::Output {
+    let args: Vec<String> = args.iter().map(|arg| resolve_docker_arg(arg)).collect();
     tokio::task::spawn_blocking(move || {
         std::process::Command::new("docker")
             .args(args)
@@ -304,13 +367,17 @@ impl ServiceRecoveryGuard {
         // Wait for the service's TCP port to become unreachable so the server's
         // connection pool drops any cached connections before the caller injects
         // the next fault.
-        let port = match name {
-            CONTAINER_POSTGRES => Some(15432u16),
-            CONTAINER_MINIO => Some(39000u16),
-            CONTAINER_REDIS => Some(16380u16),
+        let container_port = match name {
+            CONTAINER_POSTGRES => Some("5432/tcp"),
+            CONTAINER_MINIO => Some("9000/tcp"),
+            CONTAINER_REDIS => Some("6379/tcp"),
             _ => None,
         };
-        if let Some(p) = port {
+        if let Some(container_port) = container_port
+            && let Some(p) = container_published_port(name, container_port)
+                .await
+                .and_then(|port| port.parse::<u16>().ok())
+        {
             wait_for(
                 &format!("{name} TCP unreachable on port {p}"),
                 || async move { !tcp_ready("127.0.0.1", p).await },
@@ -394,9 +461,32 @@ impl Drop for ServiceRecoveryGuard {
 // ---------------------------------------------------------------------------
 
 struct ChaosStack {
+    project: String,
+    compose_file: PathBuf,
     pg_url: String,
     s3_endpoint: String,
     redis_url: String,
+}
+
+impl Drop for ChaosStack {
+    fn drop(&mut self) {
+        cleanup_compose_project(&self.compose_file, &self.project);
+    }
+}
+
+fn cleanup_compose_project(compose_file: &Path, project: &str) {
+    let _ = std::process::Command::new("docker")
+        .args([
+            "compose",
+            "-f",
+            compose_file.to_str().unwrap_or(COMPOSE_FILE),
+            "-p",
+            project,
+            "down",
+            "--volumes",
+            "--remove-orphans",
+        ])
+        .output();
 }
 
 /// Returns the resolved chaos-stack endpoints, or `None` (after printing a
@@ -427,6 +517,10 @@ async fn chaos_stack_available(drill: &str) -> Option<ChaosStack> {
         );
         return None;
     }
+    let Some(postgres_port) = container_published_port(CONTAINER_POSTGRES, "5432/tcp").await else {
+        eprintln!("SKIPPED: {drill} — isolated chaos postgres has no published port");
+        return None;
+    };
     let Some(minio_port) = container_published_port(CONTAINER_MINIO, "9000/tcp").await else {
         eprintln!(
             "SKIPPED: {drill} — shardline-chaos stack not available; run `cargo make chaos-deployment` (chaos-minio has no host-published port; likely a port collision, e.g. 29000/29001 already allocated to another container)"
@@ -434,15 +528,23 @@ async fn chaos_stack_available(drill: &str) -> Option<ChaosStack> {
         return None;
     };
     let s3_endpoint = format!("http://127.0.0.1:{minio_port}");
-    let redis_url = container_published_port(CONTAINER_REDIS, "6379/tcp")
-        .await
-        .map_or_else(
-            || REDIS_URL_DEFAULT.to_owned(),
-            |port| format!("redis://127.0.0.1:{port}/0"),
-        );
+    let Some(redis_port) = container_published_port(CONTAINER_REDIS, "6379/tcp").await else {
+        eprintln!("SKIPPED: {drill} — isolated chaos redis has no published port");
+        return None;
+    };
+    let redis_url = format!("redis://127.0.0.1:{redis_port}/0");
+    let project = std::env::var("SHARDLINE_CHAOS_PROJECT").unwrap_or_default();
+    let compose_file = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .map(|root| root.join(COMPOSE_FILE))?;
+    let pg_url =
+        format!("postgres://shardline:shardline-dev-password@127.0.0.1:{postgres_port}/shardline");
     eprintln!("chaos({drill}): stack resolved s3_endpoint={s3_endpoint} redis_url={redis_url}");
     Some(ChaosStack {
-        pg_url: PG_URL.to_owned(),
+        project,
+        compose_file,
+        pg_url,
         s3_endpoint,
         redis_url,
     })
@@ -506,10 +608,8 @@ async fn ensure_chaos_stack_ready(drill: &str, stack: &ChaosStack) -> bool {
     }
     // Readiness waits (generous: a freshly started postgres can take ~10s to
     // accept connections; minio and redis similar).
-    if !ready_within(|| tcp_ready("127.0.0.1", 15432), Duration::from_secs(90)).await {
-        eprintln!(
-            "SKIPPED: {drill} — shardline-chaos stack not available; run `cargo make chaos-deployment` (postgres 127.0.0.1:15432 did not come up)"
-        );
+    if !ready_within(chaos_postgres_tcp_ready, Duration::from_secs(90)).await {
+        eprintln!("SKIPPED: {drill} — isolated chaos postgres did not become reachable");
         return false;
     }
     let s3 = stack.s3_endpoint.clone();
@@ -540,9 +640,136 @@ async fn ensure_chaos_stack_ready(drill: &str, stack: &ChaosStack) -> bool {
 /// Resolves the chaos stack and self-heals it; `None` (loud SKIP) only when
 /// docker or the chaos containers are genuinely absent.
 async fn boot_chaos_stack(drill: &str) -> Option<ChaosStack> {
-    let stack = chaos_stack_available(drill).await?;
-    if !ensure_chaos_stack_ready(drill, &stack).await {
+    let docker = docker_run(&["version"]).await;
+    if !docker.status.success() {
+        eprintln!(
+            "SKIPPED: {drill} — Docker is unavailable: {}",
+            String::from_utf8_lossy(&docker.stderr).trim()
+        );
         return None;
+    }
+    let project = format!(
+        "shardline-chaos-{}-{}",
+        drill
+            .chars()
+            .map(|character| {
+                if character.is_ascii_alphanumeric() {
+                    character.to_ascii_lowercase()
+                } else {
+                    '-'
+                }
+            })
+            .collect::<String>(),
+        std::process::id()
+    );
+    let compose_file = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .map(|root| root.join(COMPOSE_FILE))?;
+    let compose_file_for_command = compose_file.clone();
+    let project_for_command = project.clone();
+    let pg_port = free_tcp_port()?;
+    let minio_port = free_tcp_port()?;
+    let minio_console_port = free_tcp_port()?;
+    let redis_port = free_tcp_port()?;
+    let bind_port = free_tcp_port()?;
+    let secondary_bind_port = free_tcp_port()?;
+    let started = tokio::task::spawn_blocking(move || {
+        std::process::Command::new("docker")
+            .args([
+                "compose",
+                "-f",
+                compose_file_for_command.to_str().unwrap_or(COMPOSE_FILE),
+                "-p",
+                &project_for_command,
+                "up",
+                "-d",
+                "--quiet-pull",
+            ])
+            .env("SHARDLINE_CHAOS_PG_PORT", pg_port.to_string())
+            .env("SHARDLINE_CHAOS_MINIO_PORT", minio_port.to_string())
+            .env(
+                "SHARDLINE_CHAOS_MINIO_CONSOLE_PORT",
+                minio_console_port.to_string(),
+            )
+            .env("SHARDLINE_CHAOS_REDIS_PORT", redis_port.to_string())
+            .output()
+            .unwrap()
+    })
+    .await
+    .ok()?;
+    if !started.status.success() {
+        cleanup_compose_project(&compose_file, &project);
+        eprintln!(
+            "SKIPPED: {drill} — isolated chaos stack failed to start: {}",
+            String::from_utf8_lossy(&started.stderr).trim()
+        );
+        return None;
+    }
+    let service_container = |service: &'static str| {
+        let compose_file = compose_file.clone();
+        let project = project.clone();
+        async move {
+            let output = docker_run_owned(vec![
+                "compose".to_owned(),
+                "-f".to_owned(),
+                compose_file.to_str().unwrap_or(COMPOSE_FILE).to_owned(),
+                "-p".to_owned(),
+                project,
+                "ps".to_owned(),
+                "-q".to_owned(),
+                service.to_owned(),
+            ])
+            .await;
+            output
+                .status
+                .success()
+                .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+                .filter(|id| !id.is_empty())
+        }
+    };
+    let Some(postgres) = service_container("chaos-postgres").await else {
+        cleanup_compose_project(&compose_file, &project);
+        return None;
+    };
+    let Some(minio) = service_container("chaos-minio").await else {
+        cleanup_compose_project(&compose_file, &project);
+        return None;
+    };
+    let Some(redis) = service_container("chaos-redis").await else {
+        cleanup_compose_project(&compose_file, &project);
+        return None;
+    };
+    // These overrides are process-local: nextest gives each drill its own OS
+    // process. Direct in-process `cargo test` execution is not supported for
+    // this suite because environment variables are process-global.
+    unsafe {
+        std::env::set_var("SHARDLINE_CHAOS_PROJECT", &project);
+        std::env::set_var("SHARDLINE_CHAOS_POSTGRES_CONTAINER", &postgres);
+        std::env::set_var("SHARDLINE_CHAOS_MINIO_CONTAINER", &minio);
+        std::env::set_var("SHARDLINE_CHAOS_REDIS_CONTAINER", &redis);
+        std::env::set_var("SHARDLINE_CHAOS_NETWORK", format!("{project}_chaos-net"));
+        std::env::set_var(
+            "SHARDLINE_CHAOS_BIND_ADDR",
+            format!("127.0.0.1:{bind_port}"),
+        );
+        std::env::set_var(
+            "SHARDLINE_CHAOS_SECONDARY_BIND_ADDR",
+            format!("127.0.0.1:{secondary_bind_port}"),
+        );
+    }
+    let Some(stack) = chaos_stack_available(drill).await else {
+        cleanup_compose_project(&compose_file, &project);
+        return None;
+    };
+    if !ensure_chaos_stack_ready(drill, &stack).await {
+        cleanup_compose_project(&compose_file, &project);
+        return None;
+    }
+    unsafe {
+        std::env::set_var("SHARDLINE_CHAOS_PG_URL", &stack.pg_url);
+        std::env::set_var("SHARDLINE_CHAOS_S3_ENDPOINT", &stack.s3_endpoint);
+        std::env::set_var("SHARDLINE_CHAOS_REDIS_URL", &stack.redis_url);
     }
     Some(stack)
 }
@@ -695,7 +922,8 @@ impl DeploymentServer {
     /// `extra_env` is applied after the base env, so drills can override the
     /// S3 endpoint, frontends, and reconstruction-cache wiring.
     fn spawn(binary: &Path, extra_env: &[(&str, &str)], root: &Path) -> Self {
-        Self::spawn_at(binary, BIN_ADDR, extra_env, root)
+        let bind_addr = chaos_bind_addr();
+        Self::spawn_at(binary, &bind_addr, extra_env, root)
     }
 
     fn spawn_at(binary: &Path, bind_addr: &str, extra_env: &[(&str, &str)], root: &Path) -> Self {
@@ -720,11 +948,11 @@ impl DeploymentServer {
             .env("SHARDLINE_OBJECT_STORAGE_ADAPTER", "s3")
             .env("SHARDLINE_S3_BUCKET", OBJECT_BUCKET)
             .env("SHARDLINE_S3_REGION", "us-east-1")
-            .env("SHARDLINE_S3_ENDPOINT", S3_ENDPOINT_DEFAULT)
+            .env("SHARDLINE_S3_ENDPOINT", chaos_s3_endpoint())
             .env("SHARDLINE_S3_ACCESS_KEY_ID", "shardline")
             .env("SHARDLINE_S3_SECRET_ACCESS_KEY", "shardline-dev-password")
             .env("SHARDLINE_S3_ALLOW_HTTP", "true")
-            .env("SHARDLINE_INDEX_POSTGRES_URL", PG_URL)
+            .env("SHARDLINE_INDEX_POSTGRES_URL", chaos_pg_url())
             .env("SHARDLINE_SERVER_FRONTENDS", "s3")
             .env("SHARDLINE_RECONSTRUCTION_CACHE_ADAPTER", "memory")
             .stdout(Stdio::from(stdout))
@@ -754,8 +982,9 @@ impl DeploymentServer {
         loop {
             if !self.alive() {
                 panic!(
-                    "deployment server exited during startup; see log {:?}",
-                    self._log.path()
+                    "deployment server exited during startup; log {:?}:\n{}",
+                    self._log.path(),
+                    self.log_contents()
                 );
             }
             if matches!(
@@ -1060,7 +1289,6 @@ async fn assert_lfs_object_byte_exact(base: &str, token: &str, oid: &str, expect
 // ===========================================================================
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[serial]
 async fn drill_deploy_a_postgres_kill_mid_upload_no_lost_commits() {
     let drill = "drill_deploy_a_postgres_kill_mid_upload_no_lost_commits";
     let Some(stack) = boot_chaos_stack(drill).await else {
@@ -1157,7 +1385,8 @@ async fn drill_deploy_a_postgres_kill_mid_upload_no_lost_commits() {
         "authoritative inventory must fail instead of returning fabricated data"
     );
     let failed_storage_body = failed_storage.text().await.expect("admin error body");
-    for secret in [ADMIN_READ_TOKEN, "shardline-dev-password", PG_URL] {
+    let pg_url = chaos_pg_url();
+    for secret in [ADMIN_READ_TOKEN, "shardline-dev-password", pg_url.as_str()] {
         assert!(
             !failed_storage_body.contains(secret),
             "admin dependency error must not disclose {secret}"
@@ -1174,7 +1403,7 @@ async fn drill_deploy_a_postgres_kill_mid_upload_no_lost_commits() {
         "tasks listing must fail closed during a metadata outage, not fabricate an empty page"
     );
     let failed_tasks_body = failed_tasks.text().await.expect("admin error body");
-    for secret in [ADMIN_READ_TOKEN, "shardline-dev-password", PG_URL] {
+    for secret in [ADMIN_READ_TOKEN, "shardline-dev-password", pg_url.as_str()] {
         assert!(
             !failed_tasks_body.contains(secret),
             "tasks dependency error must not disclose {secret}"
@@ -1192,7 +1421,7 @@ async fn drill_deploy_a_postgres_kill_mid_upload_no_lost_commits() {
     // Restore Postgres; verify no committed data was lost.
     restart_and_wait(
         CONTAINER_POSTGRES,
-        || tcp_ready("127.0.0.1", 15432),
+        || chaos_postgres_tcp_ready(),
         Duration::from_secs(60),
     )
     .await;
@@ -1264,7 +1493,6 @@ async fn drill_deploy_a_postgres_kill_mid_upload_no_lost_commits() {
 // ===========================================================================
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[serial]
 async fn drill_deploy_b_minio_kill_mid_upload_durability() {
     let drill = "drill_deploy_b_minio_kill_mid_upload_durability";
     let Some(stack) = boot_chaos_stack(drill).await else {
@@ -1345,7 +1573,6 @@ async fn drill_deploy_b_minio_kill_mid_upload_durability() {
 // ===========================================================================
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[serial]
 async fn drill_deploy_c_redis_kill_mid_read_byte_exact_fallback() {
     let drill = "drill_deploy_c_redis_kill_mid_read_byte_exact_fallback";
     let Some(stack) = boot_chaos_stack(drill).await else {
@@ -1495,7 +1722,6 @@ async fn drill_deploy_c_redis_kill_mid_read_byte_exact_fallback() {
 // lines below.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[serial]
 async fn drill_deploy_d_minio_network_partition_recovery() {
     let drill = "drill_deploy_d_minio_network_partition_recovery";
     let Some(stack) = boot_chaos_stack(drill).await else {
@@ -1586,7 +1812,7 @@ async fn drill_deploy_d_minio_network_partition_recovery() {
         guard.disconnect(CONTAINER_POSTGRES).await;
         wait_for(
             "postgres published port severed",
-            || async { !tcp_ready("127.0.0.1", 15432).await },
+            || async { !chaos_postgres_tcp_ready().await },
             Duration::from_secs(15),
         )
         .await;
@@ -1617,7 +1843,7 @@ async fn drill_deploy_d_minio_network_partition_recovery() {
         );
         restart_and_wait(
             CONTAINER_POSTGRES,
-            || tcp_ready("127.0.0.1", 15432),
+            || chaos_postgres_tcp_ready(),
             Duration::from_secs(60),
         )
         .await;
@@ -1660,7 +1886,6 @@ async fn drill_deploy_d_minio_network_partition_recovery() {
 // ===========================================================================
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[serial]
 async fn drill_deploy_e_netem_duplicate_reorder_and_asymmetric_recovery() {
     let drill = "drill_deploy_e_netem_duplicate_reorder_and_asymmetric_recovery";
     let Some(stack) = boot_chaos_stack(drill).await else {
@@ -1786,7 +2011,6 @@ async fn drill_deploy_e_netem_duplicate_reorder_and_asymmetric_recovery() {
 // ===========================================================================
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[serial]
 async fn drill_deploy_f_real_mixed_version_rollout_and_rollback() {
     let drill = "drill_deploy_f_real_mixed_version_rollout_and_rollback";
     let Some(stack) = boot_chaos_stack(drill).await else {
@@ -1807,11 +2031,16 @@ async fn drill_deploy_f_real_mixed_version_rollout_and_rollback() {
     let new_b_root = TempDir::new().unwrap();
     let rollback_root = TempDir::new().unwrap();
     let environment = [("SHARDLINE_S3_ENDPOINT", stack.s3_endpoint.as_str())];
-    let mut node_a =
-        DeploymentServer::spawn_at(&previous_binary, BIN_ADDR, &environment, old_a_root.path());
+    let bind_addr = chaos_bind_addr();
+    let mut node_a = DeploymentServer::spawn_at(
+        &previous_binary,
+        &bind_addr,
+        &environment,
+        old_a_root.path(),
+    );
     let mut node_b = DeploymentServer::spawn_at(
         &previous_binary,
-        BIN_ADDR_SECONDARY,
+        &chaos_secondary_bind_addr(),
         &environment,
         old_b_root.path(),
     );
@@ -1827,8 +2056,9 @@ async fn drill_deploy_f_real_mixed_version_rollout_and_rollback() {
     // First rollout step: an N process and an N-1 process actively share the
     // same Postgres metadata and S3 objects.
     drop(node_a);
+    let bind_addr = chaos_bind_addr();
     let mut node_a =
-        DeploymentServer::spawn_at(&current_binary, BIN_ADDR, &environment, new_a_root.path());
+        DeploymentServer::spawn_at(&current_binary, &bind_addr, &environment, new_a_root.path());
     node_a.wait_ready(Duration::from_secs(20)).await;
     assert_s3_bytes(
         &node_a.base_url(),
@@ -1860,7 +2090,7 @@ async fn drill_deploy_f_real_mixed_version_rollout_and_rollback() {
     drop(node_b);
     let mut node_b = DeploymentServer::spawn_at(
         &current_binary,
-        BIN_ADDR_SECONDARY,
+        &chaos_secondary_bind_addr(),
         &environment,
         new_b_root.path(),
     );
@@ -1877,7 +2107,7 @@ async fn drill_deploy_f_real_mixed_version_rollout_and_rollback() {
     drop(node_a);
     let mut rollback_node = DeploymentServer::spawn_at(
         &previous_binary,
-        BIN_ADDR,
+        &chaos_bind_addr(),
         &environment,
         rollback_root.path(),
     );
@@ -1917,7 +2147,6 @@ async fn drill_deploy_f_real_mixed_version_rollout_and_rollback() {
 // ===========================================================================
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[serial]
 async fn drill_deploy_g_live_verifier_clock_skew() {
     let drill = "drill_deploy_g_live_verifier_clock_skew";
     let Some(stack) = boot_chaos_stack(drill).await else {
@@ -1949,11 +2178,12 @@ async fn drill_deploy_g_live_verifier_clock_skew() {
         ("FAKETIME_DONT_FAKE_MONOTONIC", "1"),
         ("FAKETIME_NO_CACHE", "1"),
     ];
+    let bind_addr = chaos_bind_addr();
     let mut fast_node =
-        DeploymentServer::spawn_at(&binary, BIN_ADDR, &fast_environment, fast_root.path());
+        DeploymentServer::spawn_at(&binary, &bind_addr, &fast_environment, fast_root.path());
     let mut slow_node = DeploymentServer::spawn_at(
         &binary,
-        BIN_ADDR_SECONDARY,
+        &chaos_secondary_bind_addr(),
         &slow_environment,
         slow_root.path(),
     );
@@ -2046,7 +2276,6 @@ async fn drill_deploy_g_live_verifier_clock_skew() {
 // ===========================================================================
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[serial]
 async fn chaos_workload_against_deployment() {
     let drill = "chaos_workload_against_deployment";
     if std::env::var("SHARDLINE_CHAOS_DEPLOYMENT").as_deref() != Ok("1") {
@@ -2109,7 +2338,6 @@ async fn chaos_workload_against_deployment() {
 // ===========================================================================
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[serial]
 async fn drill_deploy_postgres_kill_mid_lfs_patch() {
     let drill = "drill_deploy_postgres_kill_mid_lfs_patch";
     let Some(stack) = boot_chaos_stack(drill).await else {
@@ -2180,7 +2408,7 @@ async fn drill_deploy_postgres_kill_mid_lfs_patch() {
     // object can be completed.
     restart_and_wait(
         CONTAINER_POSTGRES,
-        || tcp_ready("127.0.0.1", 15432),
+        || chaos_postgres_tcp_ready(),
         Duration::from_secs(60),
     )
     .await;
@@ -2212,7 +2440,6 @@ async fn drill_deploy_postgres_kill_mid_lfs_patch() {
 // ===========================================================================
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[serial]
 async fn drill_deploy_minio_kill_mid_lfs_patch_staging() {
     let drill = "drill_deploy_minio_kill_mid_lfs_patch_staging";
     let Some(stack) = boot_chaos_stack(drill).await else {
@@ -2296,7 +2523,6 @@ async fn drill_deploy_minio_kill_mid_lfs_patch_staging() {
 // ===========================================================================
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[serial]
 async fn drill_deploy_partition_during_lfs_patch_repair() {
     let drill = "drill_deploy_partition_during_lfs_patch_repair";
     let Some(stack) = boot_chaos_stack(drill).await else {
@@ -2531,7 +2757,6 @@ async fn s3_complete_multipart_deployment(
 // ===========================================================================
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[serial]
 async fn drill_deploy_postgres_kill_mid_oci_blob_upload() {
     let drill = "drill_deploy_postgres_kill_mid_oci_blob_upload";
     let Some(stack) = boot_chaos_stack(drill).await else {
@@ -2582,7 +2807,7 @@ async fn drill_deploy_postgres_kill_mid_oci_blob_upload() {
 
     restart_and_wait(
         CONTAINER_POSTGRES,
-        || tcp_ready("127.0.0.1", 15432),
+        || chaos_postgres_tcp_ready(),
         Duration::from_secs(60),
     )
     .await;
@@ -2612,7 +2837,6 @@ async fn drill_deploy_postgres_kill_mid_oci_blob_upload() {
 // ===========================================================================
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[serial]
 async fn drill_deploy_postgres_kill_mid_s3_multipart() {
     let drill = "drill_deploy_postgres_kill_mid_s3_multipart";
     let Some(stack) = boot_chaos_stack(drill).await else {
@@ -2659,7 +2883,7 @@ async fn drill_deploy_postgres_kill_mid_s3_multipart() {
 
     restart_and_wait(
         CONTAINER_POSTGRES,
-        || tcp_ready("127.0.0.1", 15432),
+        || chaos_postgres_tcp_ready(),
         Duration::from_secs(60),
     )
     .await;
