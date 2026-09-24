@@ -173,7 +173,7 @@ async fn persist_s3_object_event(
         .transpose()?;
     let merkle_commit_json =
         reliability_merkle_commit_json_with_previous(event, previous.as_ref())?;
-    query(
+    let result = query(
         "INSERT INTO shardline_reliability_events
             (operation_kind, operation_id, sequence, event_json, created_at_unix_seconds,
              merkle_commit_json)
@@ -182,7 +182,8 @@ async fn persist_s3_object_event(
          SET merkle_commit_json = COALESCE(
              shardline_reliability_events.merkle_commit_json,
              EXCLUDED.merkle_commit_json
-         )",
+         )
+         WHERE shardline_reliability_events.event_json = EXCLUDED.event_json",
     )
     .bind(event.operation.kind.as_str())
     .bind(&event.operation.operation_id)
@@ -192,6 +193,11 @@ async fn persist_s3_object_event(
     .bind(merkle_commit_json)
     .execute(&mut *connection)
     .await?;
+    if result.rows_affected() == 0 {
+        return Err(PostgresMetadataStoreError::ReliabilityEventConflict(
+            event.operation.operation_id.clone(),
+        ));
+    }
     Ok(())
 }
 
