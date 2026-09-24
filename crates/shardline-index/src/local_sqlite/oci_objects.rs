@@ -208,7 +208,10 @@ impl LocalIndexStore {
         super::helpers::retry_sqlite_busy(|| self.publish_oci_object_blocking_once(key, tags))
     }
 
-    fn delete_oci_object_blocking(&self, key: &OciObjectKey) -> Result<(), LocalIndexStoreError> {
+    fn delete_oci_object_blocking_once(
+        &self,
+        key: &OciObjectKey,
+    ) -> Result<(), LocalIndexStoreError> {
         let mut connection = self.open_connection()?;
         let transaction = connection.transaction()?;
         let previous_deleted_at = transaction
@@ -292,6 +295,10 @@ impl LocalIndexStore {
         )?;
         transaction.commit()?;
         Ok(())
+    }
+
+    fn delete_oci_object_blocking(&self, key: &OciObjectKey) -> Result<(), LocalIndexStoreError> {
+        super::helpers::retry_sqlite_busy(|| self.delete_oci_object_blocking_once(key))
     }
 }
 
