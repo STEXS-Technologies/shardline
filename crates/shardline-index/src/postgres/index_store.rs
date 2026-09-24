@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use shardline_protocol::{ChunkRange, RepositoryProvider, ShardlineHash};
@@ -91,42 +93,77 @@ async fn verify_postgres_provider_evidence(
     store: &super::PostgresIndexStore,
     state: &ProviderRepositoryState,
 ) -> Result<(), PostgresMetadataStoreError> {
-    let snapshot = crate::provider_evidence::snapshot_from_state(state)?;
-    let operation_id = snapshot.evidence_operation()?.operation_id;
+    verify_postgres_provider_evidence_batch(store, std::slice::from_ref(state)).await
+}
+
+async fn verify_postgres_provider_evidence_batch(
+    store: &super::PostgresIndexStore,
+    states: &[ProviderRepositoryState],
+) -> Result<(), PostgresMetadataStoreError> {
+    if states.is_empty() {
+        return Ok(());
+    }
+    let snapshots = states
+        .iter()
+        .map(crate::provider_evidence::snapshot_from_state)
+        .collect::<Result<Vec<_>, _>>()?;
+    let operation_ids = snapshots
+        .iter()
+        .map(|snapshot| {
+            snapshot
+                .evidence_operation()
+                .map(|operation| operation.operation_id)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let mut transaction = store.pool.begin().await?;
     let rows = query(
-        "SELECT sequence, event_json, merkle_commit_json
+        "SELECT operation_id, sequence, event_json, merkle_commit_json
          FROM shardline_reliability_events
-         WHERE operation_kind = 'ProviderEvent' AND operation_id = $1
-         ORDER BY sequence",
+         WHERE operation_kind = 'ProviderEvent' AND operation_id = ANY($1)
+         ORDER BY operation_id, sequence",
     )
-    .bind(&operation_id)
+    .bind(&operation_ids)
     .fetch_all(&mut *transaction)
     .await?;
-    let mut events = Vec::with_capacity(rows.len());
-    let mut row_sequences = Vec::with_capacity(rows.len());
-    let mut event_json = Vec::with_capacity(rows.len());
-    let mut merkle_commits = Vec::with_capacity(rows.len());
+    let mut grouped = HashMap::<
+        String,
+        (
+            Vec<u64>,
+            Vec<serde_json::Value>,
+            Vec<Option<serde_json::Value>>,
+        ),
+    >::new();
     for row in rows {
-        row_sequences.push(
-            u64::try_from(row.try_get::<i64, _>("sequence")?).map_err(|_| {
-                PostgresMetadataStoreError::IntegerOutOfRange("reliability sequence".into())
-            })?,
-        );
+        let operation_id: String = row.try_get("operation_id")?;
+        let sequence = u64::try_from(row.try_get::<i64, _>("sequence")?).map_err(|_| {
+            PostgresMetadataStoreError::IntegerOutOfRange("reliability sequence".into())
+        })?;
         let value: serde_json::Value = row.try_get("event_json")?;
-        events.push(serde_json::from_value::<ProviderLifecycleEvent>(
-            value.clone(),
-        )?);
-        event_json.push(value);
-        merkle_commits.push(row.try_get("merkle_commit_json")?);
+        let entry = grouped.entry(operation_id).or_default();
+        entry.0.push(sequence);
+        entry.1.push(value);
+        entry.2.push(row.try_get("merkle_commit_json")?);
     }
-    verify_persisted_event_merkle_chain_with_sequences(
-        OperationKind::ProviderEvent,
-        &row_sequences,
-        &event_json,
-        &merkle_commits,
-    )?;
-    verify_provider_lifecycle_events(&events, &snapshot)?;
+    for snapshot in snapshots {
+        let operation_id = snapshot.evidence_operation()?.operation_id;
+        let Some((row_sequences, event_json, merkle_commits)) = grouped.get(&operation_id) else {
+            return Err(PostgresMetadataStoreError::Reliability(
+                shardline_reliability::ReliabilityError::OperationMismatch,
+            ));
+        };
+        verify_persisted_event_merkle_chain_with_sequences(
+            OperationKind::ProviderEvent,
+            row_sequences,
+            event_json,
+            merkle_commits,
+        )?;
+        let events = event_json
+            .iter()
+            .cloned()
+            .map(serde_json::from_value::<ProviderLifecycleEvent>)
+            .collect::<Result<Vec<_>, _>>()?;
+        verify_provider_lifecycle_events(&events, &snapshot)?;
+    }
     transaction.commit().await?;
     Ok(())
 }
@@ -1304,9 +1341,7 @@ impl AsyncIndexStore for super::PostgresIndexStore {
                 .into_iter()
                 .map(|row| provider_repository_state_from_row(&row))
                 .collect::<Result<Vec<_>, _>>()?;
-            for state in &states {
-                verify_postgres_provider_evidence(self, state).await?;
-            }
+            verify_postgres_provider_evidence_batch(self, &states).await?;
             Ok(states)
         })
     }
@@ -2543,6 +2578,86 @@ mod tests {
             Some(180)
         );
         assert_eq!(loaded.last_drift_checked_at_unix_seconds(), Some(190));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pg_provider_repository_state_list_verifies_multiple_histories() {
+        let Some(pool) = connect_postgres().await else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let store = make_pg_store(pool.clone());
+        let owner = "batch-evidence-team";
+        let first = ProviderRepositoryState::new(
+            RepositoryProvider::GitHub,
+            owner.into(),
+            "first".into(),
+            Some(100),
+            None,
+            None,
+        );
+        let second = ProviderRepositoryState::new(
+            RepositoryProvider::GitHub,
+            owner.into(),
+            "second".into(),
+            None,
+            Some(200),
+            Some("refs/heads/main".into()),
+        );
+        for repo in ["first", "second"] {
+            sqlx::query(
+                "DELETE FROM shardline_provider_repository_states
+                 WHERE provider = 'github' AND owner = $1 AND repo = $2",
+            )
+            .bind(owner)
+            .bind(repo)
+            .execute(&pool)
+            .await
+            .expect("clean provider state fixture");
+            sqlx::query(
+                "DELETE FROM shardline_reliability_events
+                 WHERE operation_kind = 'ProviderEvent' AND operation_id = $1",
+            )
+            .bind(format!("github:{owner}:{repo}"))
+            .execute(&pool)
+            .await
+            .expect("clean provider evidence fixture");
+        }
+        store
+            .upsert_provider_repository_state(&first)
+            .await
+            .expect("create first provider evidence fixture");
+        store
+            .upsert_provider_repository_state(&second)
+            .await
+            .expect("create second provider evidence fixture");
+
+        let states = store
+            .list_provider_repository_states()
+            .await
+            .expect("list provider states with batched evidence verification");
+        assert!(states.iter().any(|state| state.repo() == "first"));
+        assert!(states.iter().any(|state| state.repo() == "second"));
+
+        for repo in ["first", "second"] {
+            sqlx::query(
+                "DELETE FROM shardline_provider_repository_states
+                 WHERE provider = 'github' AND owner = $1 AND repo = $2",
+            )
+            .bind(owner)
+            .bind(repo)
+            .execute(&pool)
+            .await
+            .expect("clean provider state fixture");
+            sqlx::query(
+                "DELETE FROM shardline_reliability_events
+                 WHERE operation_kind = 'ProviderEvent' AND operation_id = $1",
+            )
+            .bind(format!("github:{owner}:{repo}"))
+            .execute(&pool)
+            .await
+            .expect("clean provider evidence fixture");
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
