@@ -31,7 +31,9 @@ use sha2::{Digest, Sha256};
 use shardline_protocol::{
     ByteRange, RepositoryProvider, RepositoryScope, SecretString, TokenClaims, TokenScope,
 };
-use shardline_server::ServerObjectStore;
+use shardline_server::{
+    DatabaseMigrationCommand, DatabaseMigrationOptions, ServerObjectStore, run_database_migration,
+};
 use shardline_server_core::{AuthProvider, ServerObjectStoreError, auth::LocalHmacProvider};
 use shardline_storage::{ObjectKey, ObjectPrefix, ObjectStore as _, S3ObjectStoreConfig};
 use std::{
@@ -558,6 +560,12 @@ async fn migrate_chaos_postgres(url: &str) {
                     .await
                     .unwrap();
                 pool.close().await;
+                run_database_migration(&DatabaseMigrationOptions::new(
+                    url.to_owned(),
+                    DatabaseMigrationCommand::Backfill { batch_size: 10_000 },
+                ))
+                .await
+                .unwrap();
                 return;
             }
             Err(e) => {
@@ -732,6 +740,10 @@ impl DeploymentServer {
             base_url: format!("http://{bind_addr}"),
             _log: log,
         }
+    }
+
+    fn log_contents(&self) -> String {
+        std::fs::read_to_string(self._log.path()).unwrap_or_else(|error| error.to_string())
     }
 
     async fn wait_ready(&mut self, timeout: Duration) {
@@ -1081,7 +1093,15 @@ async fn drill_deploy_a_postgres_kill_mid_upload_no_lost_commits() {
     let k1 = "a-k1";
     let v1 = deterministic_bytes(64 * 1024 + 17, 101);
     let put = s3_put(&base, &token, k1, v1.clone()).await;
-    assert_eq!(put.status().as_u16(), 200, "seed {k1}");
+    let put_status = put.status();
+    let put_body = put.text().await.unwrap_or_default();
+    assert_eq!(
+        put_status.as_u16(),
+        200,
+        "seed {k1}: status={} body={put_body} server_log={}",
+        put_status.as_u16(),
+        server.log_contents()
+    );
     let k2a = "a-k2a";
     let v2a = deterministic_bytes(32 * 1024, 102);
     let put = s3_put(&base, &token, k2a, v2a.clone()).await;
