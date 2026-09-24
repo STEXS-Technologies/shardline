@@ -55,7 +55,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 75
     env:
-      SHARDLINE_FUZZ_DURATION_SECONDS: ${{ inputs.duration_seconds || (github.event_name == 'pull_request' && '300') || '3600' }}
+      SHARDLINE_FUZZ_DURATION_SECONDS: ${{ inputs.duration_seconds || '3600' }}
     steps:
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
