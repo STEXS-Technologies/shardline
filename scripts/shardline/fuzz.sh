@@ -189,6 +189,7 @@ run_reliability() {
             printf 'built reliability fuzz binary is missing or not executable: %s\n' "${fuzz_binary}" >&2
             return 1
         fi
+        mkdir -p "${FUZZ_DIR}/corpus/${target}" "${FUZZ_DIR}/artifacts/${target}"
         printf '==> %s (%ss) [isolated process]\n' "${target}" "${duration_seconds}"
         (
             "${fuzz_binary}" \
