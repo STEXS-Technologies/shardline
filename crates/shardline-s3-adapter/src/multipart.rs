@@ -2001,6 +2001,49 @@ mod tests {
         assert_eq!(advanced_evidence.events().len(), 2);
     }
 
+    #[tokio::test]
+    async fn uncommitted_merkle_journal_tail_is_trimmed_after_metadata_crash() {
+        let root = make_root().await;
+        let upload_id = create_session(
+            root.path(),
+            "acme.models",
+            "merkle-crash.bin",
+            "global",
+            ttl(3600),
+            cap(16),
+            quota(1 << 40),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+        let dir = session_dir(root.path(), &upload_id).unwrap();
+        let mut records = read_merkle_journal(&dir).await.unwrap();
+        let record = records.pop().expect("committed Merkle record");
+        append_merkle_journal(&dir, 1, None, &record)
+            .await
+            .expect("append orphaned Merkle record");
+        assert_eq!(read_merkle_journal(&dir).await.unwrap().len(), 2);
+
+        let (_session, evidence) = load_session(&dir).await.unwrap();
+        assert_eq!(evidence.events().len(), 1);
+        store_part(
+            root.path(),
+            &upload_id,
+            1,
+            10,
+            ttl(3600),
+            quota(1 << 20),
+            quota(1 << 40),
+            cap(16),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(read_merkle_journal(&dir).await.unwrap().len(), 2);
+        let (_session, advanced_evidence) = load_session(&dir).await.unwrap();
+        assert_eq!(advanced_evidence.events().len(), 2);
+    }
+
     #[test]
     fn new_upload_id_is_safe_path_component() {
         let id = new_upload_id();
