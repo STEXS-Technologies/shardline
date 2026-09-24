@@ -943,7 +943,7 @@ async fn persist_reliability_event<T: EvidenceEventMetadata>(
         .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?;
     let event_json =
         to_value(event).map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?;
-    query(
+    let result = query(
         "INSERT INTO shardline_reliability_events
             (operation_kind, operation_id, sequence, event_json, created_at_unix_seconds,
              merkle_commit_json)
@@ -952,7 +952,8 @@ async fn persist_reliability_event<T: EvidenceEventMetadata>(
          SET merkle_commit_json = COALESCE(
              shardline_reliability_events.merkle_commit_json,
              EXCLUDED.merkle_commit_json
-         )",
+         )
+         WHERE shardline_reliability_events.event_json = EXCLUDED.event_json",
     )
     .bind(event.operation_identity().kind.as_str())
     .bind(&event.operation_identity().operation_id)
@@ -962,6 +963,14 @@ async fn persist_reliability_event<T: EvidenceEventMetadata>(
     .bind(merkle_commit_json)
     .execute(&mut **transaction)
     .await?;
+    if result.rows_affected() == 0 {
+        return Err(DatabaseMigrationError::Backfill(format!(
+            "conflicting reliability event kind={} operation={} sequence={}",
+            event.operation_identity().kind.as_str(),
+            event.operation_identity().operation_id,
+            event.sequence_number(),
+        )));
+    }
     Ok(())
 }
 
