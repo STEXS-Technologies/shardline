@@ -33,6 +33,8 @@ struct JournalManifest {
     head: u64,
     #[serde(default)]
     bytes: Option<u64>,
+    #[serde(default)]
+    merkle_head: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -99,6 +101,17 @@ fn merkle_journal_path(dir: &Path, oid: &str) -> PathBuf {
 }
 
 fn journal_head(path: &Path, schema: &str) -> Result<Option<u64>, ServerError> {
+    Ok(read_journal_manifest(path, schema)?.map(|manifest| manifest.head))
+}
+
+fn journal_merkle_head(path: &Path, schema: &str) -> Result<Option<u64>, ServerError> {
+    Ok(read_journal_manifest(path, schema)?.and_then(|manifest| manifest.merkle_head))
+}
+
+fn read_journal_manifest(
+    path: &Path,
+    schema: &str,
+) -> Result<Option<JournalManifest>, ServerError> {
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
@@ -111,7 +124,7 @@ fn journal_head(path: &Path, schema: &str) -> Result<Option<u64>, ServerError> {
             manifest.schema
         )));
     }
-    Ok(Some(manifest.head))
+    Ok(Some(manifest))
 }
 
 fn load_merkle_journal(
@@ -137,13 +150,67 @@ fn load_merkle_journal(
     Ok(Some(records))
 }
 
+fn committed_merkle_head(dir: &Path, oid: &str) -> Result<Option<u64>, ServerError> {
+    let evidence_head = journal_merkle_head(&evidence_path(dir, oid), EVIDENCE_JOURNAL_SCHEMA)?;
+    let snapshot_head = journal_merkle_head(&snapshot_path(dir, oid), SNAPSHOT_JOURNAL_SCHEMA)?;
+    Ok(evidence_head.max(snapshot_head))
+}
+
+fn rewrite_merkle_journal_prefix(
+    dir: &Path,
+    oid: &str,
+    records: &[shardline_reliability::PersistedMerkleJournalRecord],
+) -> Result<(), ServerError> {
+    let mut bytes = Vec::new();
+    for record in records {
+        serde_json::to_writer(&mut bytes, record).map_err(invalid_evidence)?;
+        bytes.push(b'\n');
+    }
+    write_sidecar_atomically(dir, &merkle_journal_path(dir, oid), &bytes)?;
+    let manifest = JournalManifest {
+        schema: MERKLE_JOURNAL_SCHEMA.to_owned(),
+        head: u64::try_from(records.len()).map_err(invalid_evidence)?,
+        bytes: Some(u64::try_from(bytes.len()).map_err(invalid_evidence)?),
+        merkle_head: Some(u64::try_from(records.len()).map_err(invalid_evidence)?),
+    };
+    let manifest_bytes = serde_json::to_vec(&manifest).map_err(invalid_evidence)?;
+    write_sidecar_atomically(dir, &merkle_path(dir, oid), &manifest_bytes)
+}
+
+fn load_committed_merkle_journal(
+    dir: &Path,
+    oid: &str,
+    repair_orphaned_tail: bool,
+) -> Result<Option<Vec<shardline_reliability::PersistedMerkleJournalRecord>>, ServerError> {
+    let Some(mut records) = load_merkle_journal(dir, oid)? else {
+        return Ok(None);
+    };
+    let Some(committed_head) = committed_merkle_head(dir, oid)? else {
+        return Ok(Some(records));
+    };
+    let committed_head = usize::try_from(committed_head)
+        .map_err(|_| invalid_evidence("LFS Merkle head overflow"))?;
+    if committed_head > records.len() {
+        return Err(invalid_evidence(
+            "LFS committed Merkle head exceeds its journal",
+        ));
+    }
+    if records.len() > committed_head {
+        records.truncate(committed_head);
+        if repair_orphaned_tail {
+            rewrite_merkle_journal_prefix(dir, oid, &records)?;
+        }
+    }
+    Ok(Some(records))
+}
+
 fn build_lfs_merkle_append(
     dir: &Path,
     oid: &str,
     evidence_events: &[shardline_reliability::StateTransitionEvent],
     snapshot_events: &[shardline_reliability::SnapshotEvidenceEvent<DigestSnapshot>],
 ) -> Result<Option<LfsMerkleAppend>, ServerError> {
-    let records = load_merkle_journal(dir, oid)?.unwrap_or_default();
+    let records = load_committed_merkle_journal(dir, oid, true)?.unwrap_or_default();
     let existing_evidence = records
         .iter()
         .flat_map(|record| record.evidence.iter().cloned())
@@ -256,7 +323,7 @@ fn verify_lfs_merkle_journal(
     evidence: &SessionEvidenceLog,
     snapshots: &SnapshotEvidenceLog<DigestSnapshot>,
 ) -> Result<(), ServerError> {
-    let Some(records) = load_merkle_journal(dir, oid)? else {
+    let Some(records) = load_committed_merkle_journal(dir, oid, false)? else {
         return Ok(());
     };
     let merkle_evidence = records
@@ -471,11 +538,25 @@ fn append_journal<T: Serialize>(
                 u64::try_from(fs::metadata(merkle_journal_path(dir, oid))?.len())
                     .map_err(|_| invalid_evidence("LFS Merkle journal byte length overflow"))?,
             ),
+            merkle_head: Some(
+                merkle
+                    .previous_head
+                    .checked_add(1)
+                    .ok_or_else(|| invalid_evidence("LFS Merkle journal head overflow"))?,
+            ),
         };
         let merkle_manifest_bytes =
             serde_json::to_vec(&merkle_manifest).map_err(invalid_evidence)?;
         write_sidecar_atomically(dir, &merkle_path(dir, oid), &merkle_manifest_bytes)?;
     }
+    let merkle_head = merkle
+        .map(|value| {
+            value
+                .previous_head
+                .checked_add(1)
+                .ok_or_else(|| invalid_evidence("LFS Merkle journal head overflow"))
+        })
+        .transpose()?;
     let manifest = JournalManifest {
         schema: schema.to_owned(),
         head: previous_head
@@ -485,6 +566,7 @@ fn append_journal<T: Serialize>(
             )
             .ok_or_else(|| invalid_evidence("LFS evidence journal head overflow"))?,
         bytes: Some(journal_bytes),
+        merkle_head,
     };
     let manifest_bytes = serde_json::to_vec(&manifest).map_err(invalid_evidence)?;
     write_sidecar_atomically(dir, manifest_path, &manifest_bytes)
@@ -1066,6 +1148,65 @@ mod tests {
         let advanced =
             load(directory.path(), OID, SCOPE, SESSION, TARGET).expect("load advanced evidence");
         assert_eq!(advanced.events().len(), 3);
+    }
+
+    #[test]
+    fn orphaned_merkle_tail_is_trimmed_before_next_mutation() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        record(
+            directory.path(),
+            OID,
+            SCOPE,
+            SESSION,
+            TARGET,
+            ResumableLifecycleState::Active,
+            ResumableLifecycleState::Active,
+        )
+        .expect("write committed evidence");
+
+        let merkle_journal = merkle_journal_path(directory.path(), OID);
+        let committed_record = fs::read_to_string(&merkle_journal).expect("merkle journal");
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .open(&merkle_journal)
+            .expect("open merkle journal");
+        file.write_all(committed_record.as_bytes())
+            .expect("append orphaned Merkle tail");
+        file.sync_all().expect("sync orphaned Merkle tail");
+        let manifest = JournalManifest {
+            schema: MERKLE_JOURNAL_SCHEMA.to_owned(),
+            head: 2,
+            bytes: Some(
+                fs::metadata(&merkle_journal)
+                    .expect("merkle metadata")
+                    .len(),
+            ),
+            merkle_head: Some(2),
+        };
+        fs::write(
+            merkle_path(directory.path(), OID),
+            serde_json::to_vec(&manifest).expect("merkle manifest"),
+        )
+        .expect("publish orphaned Merkle manifest");
+
+        record(
+            directory.path(),
+            OID,
+            SCOPE,
+            SESSION,
+            TARGET,
+            ResumableLifecycleState::Active,
+            ResumableLifecycleState::Active,
+        )
+        .expect("recover orphaned Merkle tail and append");
+
+        let loaded =
+            load(directory.path(), OID, SCOPE, SESSION, TARGET).expect("load recovered evidence");
+        assert_eq!(loaded.events().len(), 3);
+        let records = load_merkle_journal(directory.path(), OID)
+            .expect("load recovered Merkle journal")
+            .expect("Merkle journal");
+        assert_eq!(records.len(), 2);
     }
 
     #[test]
