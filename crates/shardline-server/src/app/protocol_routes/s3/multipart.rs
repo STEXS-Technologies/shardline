@@ -60,7 +60,7 @@ use crate::{
 };
 
 use super::{
-    S3ObjectContext, acquire_object_upload_lock, aws_chunked, object, s3_xml_content_type,
+    S3ObjectContext, acquire_object_upload_lock_for_root, aws_chunked, object, s3_xml_content_type,
 };
 
 /// Maps a local I/O failure to the S3 internal-error envelope.
@@ -629,7 +629,8 @@ pub(super) async fn s3_complete_multipart_upload(
     let parts_reader = RequestBodyReader::from_reader_chain(part_files, chunk_size);
 
     // Serialize concurrent overwrites of the target object key.
-    let object_lock = acquire_object_upload_lock(context.object_key.as_str());
+    let object_lock =
+        acquire_object_upload_lock_for_root(state.config.root_dir(), context.object_key.as_str());
     let _object_guard = object_lock.lock().await;
 
     // Atomic overwrite (same as PutObject): stream the new record FIRST (a
@@ -788,7 +789,8 @@ async fn durable_s3_complete_multipart_upload(
         )
     };
 
-    let object_lock = acquire_object_upload_lock(context.object_key.as_str());
+    let object_lock =
+        acquire_object_upload_lock_for_root(state.config.root_dir(), context.object_key.as_str());
     let _object_guard = object_lock.lock().await;
     let mut resource_guard = state
         .backend

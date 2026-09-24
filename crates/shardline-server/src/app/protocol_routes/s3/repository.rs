@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    path::{Path, PathBuf},
     sync::{Arc, LazyLock, Mutex, Weak},
 };
 
@@ -31,22 +32,29 @@ use crate::{ServerError, app::AppState, protocol_support::scope_namespace};
 /// when a fresh lock is inserted). This bounds the map by the number of keys
 /// with an upload in flight instead of the number of distinct keys ever seen
 /// (F-9: unique-key PUTs must not leak an entry each).
-pub static S3_OBJECT_UPLOAD_LOCKS: LazyLock<Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>> =
+type ObjectUploadLockKey = (PathBuf, String);
+type ObjectUploadLockMap = Mutex<HashMap<ObjectUploadLockKey, Weak<tokio::sync::Mutex<()>>>>;
+
+pub static S3_OBJECT_UPLOAD_LOCKS: LazyLock<ObjectUploadLockMap> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// Returns the per-key upload lock for an object, creating it on first use.
-///
-/// The returned strong [`Arc`] keeps the map entry alive for as long as the
-/// caller holds it (and its guard), so concurrent acquires for the same key
-/// return the SAME mutex. Once the last guard drops, the map's weak handle
-/// goes dead and is cleaned up on the next acquire for that key.
-pub fn acquire_object_upload_lock(object_key: &str) -> Arc<tokio::sync::Mutex<()>> {
+/// Returns the per-key upload lock scoped to one local deployment root.
+#[must_use]
+pub fn acquire_object_upload_lock_for_root(
+    root: &Path,
+    object_key: &str,
+) -> Arc<tokio::sync::Mutex<()>> {
+    acquire_object_upload_lock_key(root.to_path_buf(), object_key)
+}
+
+fn acquire_object_upload_lock_key(root: PathBuf, object_key: &str) -> Arc<tokio::sync::Mutex<()>> {
     let mut map = S3_OBJECT_UPLOAD_LOCKS
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let key = (root, object_key.to_owned());
     // Fast path: a live weak handle exists (a guard is still being held for
     // this key), so hand out the same strong Arc to preserve serialization.
-    if let Some(live) = map.get(object_key).and_then(Weak::upgrade) {
+    if let Some(live) = map.get(&key).and_then(Weak::upgrade) {
         return live;
     }
     // No live handle: the previous entry (if any) has no holders left. Drop
@@ -55,7 +63,7 @@ pub fn acquire_object_upload_lock(object_key: &str) -> Arc<tokio::sync::Mutex<()
     // reference until a caller takes a guard.
     map.retain(|_key, weak| weak.upgrade().is_some());
     let fresh = Arc::new(tokio::sync::Mutex::new(()));
-    map.insert(object_key.to_owned(), Arc::downgrade(&fresh));
+    map.insert(key, Arc::downgrade(&fresh));
     fresh
 }
 
@@ -304,4 +312,22 @@ pub fn has_sub_resource(query: &QueryMap) -> bool {
 #[must_use]
 pub const fn s3_xml_content_type() -> &'static str {
     S3_XML_CONTENT_TYPE
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn object_upload_locks_for_different_roots_run_in_parallel() {
+        let first_root = tempfile::TempDir::new().unwrap();
+        let second_root = tempfile::TempDir::new().unwrap();
+        let first = acquire_object_upload_lock_for_root(first_root.path(), "same-object");
+        let _first_guard = first.lock().await;
+        let second = acquire_object_upload_lock_for_root(second_root.path(), "same-object");
+
+        let _second_guard = tokio::time::timeout(std::time::Duration::from_secs(2), second.lock())
+            .await
+            .expect("different deployment roots must not share an object lock");
+    }
 }
