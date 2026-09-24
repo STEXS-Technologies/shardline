@@ -2080,7 +2080,7 @@ async fn drill_deploy_f_real_mixed_version_rollout_and_rollback() {
         &token,
         "f-old",
         &old_bytes,
-        "N reads N-1 write",
+        "N reads object seeded before mixed window",
     )
     .await;
     let new_bytes = deterministic_bytes(114_711, 602);

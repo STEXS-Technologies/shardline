@@ -49,8 +49,9 @@ Why:
 
 Do not upgrade both classes concurrently. If the new version contains a metadata
 schema change, apply it before the process rollout with `shardline db migrate up`
-(see [Database Migrations](DATABASE_MIGRATIONS.md)); the schema must be compatible
-with the previous version's processes for the duration of the rollout.
+(see [Database Migrations](DATABASE_MIGRATIONS.md)); the schema must remain readable
+by the previous version's processes for the duration of the rollout. Evidence-bound
+writes are intentionally gated until all writers are upgraded.
 
 The OCI tag-index migration is additive and old processes continue to read their
 object-store tag pointers. During the API-class rollout, drain OCI manifest `PUT` and
@@ -209,8 +210,9 @@ separately, starts two N-1 processes against shared Postgres and S3, then perfor
 N-1 + N-1 -> N + N-1 -> N + N -> N-1 + N
 ```
 
-At every mixed-version stage, each binary reads exact bytes written by the other. The
-rollback stage also publishes through N-1 and reconstructs through N. Its transcript
-and exact N/N-1 commit identities are retained as CI artifacts. This evidence applies
-to the tested adjacent release pair; every release reruns the automatically advanced
-pair rather than assuming transitive compatibility.
+At every mixed-version stage, each binary reads exact bytes written by the other.
+Writes during the mixed window are issued only through N; the drill also proves that
+an N-1 write is rejected by the reliability gate and cannot alter the materialized
+state. Its transcript and exact N/N-1 commit identities are retained as CI artifacts.
+This evidence applies to the tested adjacent release pair; every release reruns the
+automatically advanced pair rather than assuming transitive compatibility.
