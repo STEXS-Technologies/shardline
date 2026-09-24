@@ -1,13 +1,11 @@
 #[cfg(test)]
-use std::path::PathBuf;
-#[cfg(test)]
 use std::sync::{LazyLock, Mutex};
 use std::{
     collections::{HashMap, HashSet},
     fmt,
     io::Error as IoError,
     num::NonZeroU64,
-    path::Path,
+    path::{Path, PathBuf},
     str::FromStr,
 };
 
@@ -63,16 +61,15 @@ type ProviderConfigReadHook = Box<dyn FnOnce() + Send>;
 
 #[cfg(test)]
 struct ProviderConfigReadHookRegistration {
-    path: PathBuf,
     hook: ProviderConfigReadHook,
 }
 
 #[cfg(test)]
-type ProviderConfigReadHookSlot = Option<ProviderConfigReadHookRegistration>;
+type ProviderConfigReadHookSlot = HashMap<PathBuf, ProviderConfigReadHookRegistration>;
 
 #[cfg(test)]
 static BEFORE_PROVIDER_CONFIG_READ_HOOK: LazyLock<Mutex<ProviderConfigReadHookSlot>> =
-    LazyLock::new(|| Mutex::new(None));
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Provider token issuance runtime.
 #[derive(Clone)]
@@ -583,10 +580,7 @@ fn take_provider_config_read_hook_for_path(
     slot: &mut ProviderConfigReadHookSlot,
     path: &Path,
 ) -> Option<ProviderConfigReadHook> {
-    if !matches!(slot, Some(registration) if registration.path == path) {
-        return None;
-    }
-    slot.take().map(|registration| registration.hook)
+    slot.remove(path).map(|registration| registration.hook)
 }
 
 #[cfg(not(test))]

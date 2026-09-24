@@ -10,7 +10,6 @@ use std::{
 use axum::http::{HeaderMap, HeaderValue};
 use hmac::Mac;
 use serde_json::json;
-use serial_test::serial;
 use shardline_protocol::{SecretBytes, SecretString, TokenScope};
 use shardline_server_core::at_rest::AtRestCipher;
 use shardline_vcs::{
@@ -574,7 +573,6 @@ fn provider_service_rejects_oversized_configuration_before_json_parsing() {
 }
 
 #[test]
-#[serial(provider_config_hook)]
 fn provider_service_rejects_configuration_growth_after_validation() {
     let config = tempfile::NamedTempFile::new();
     assert!(config.is_ok());
