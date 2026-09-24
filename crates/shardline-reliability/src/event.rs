@@ -2,9 +2,10 @@ use penelope_domain::ContentDigest as PenelopeDigest;
 use serde::{Deserialize, Serialize};
 
 use crate::digest::{
-    DigestEncoding, canonical_process_digest, canonical_state_digest, legacy_state_label_digest,
-    process_digest,
+    DigestEncoding, canonical_payload_process_digest, canonical_process_digest,
+    canonical_state_digest, legacy_state_label_digest, process_digest,
 };
+use crate::durable::{durable_lifecycle_state_v1, durable_lifecycle_transition_v1};
 use crate::states::EvidenceState;
 use crate::{
     OperationIdentity, OperationKind, ReliabilityError, ResumableLifecycleState,
@@ -63,9 +64,12 @@ impl<S: EvidenceState> LifecycleEvidenceEvent<S> {
                 after: after.as_str(),
             });
         }
-        let digest_encoding = DigestEncoding::CanonicalBcsV1;
-        let state_digest = canonical_state_digest(&after)?;
-        let process_digest = canonical_process_digest(&operation, sequence, &before, &after)?;
+        let digest_encoding = DigestEncoding::CanonicalBcsV2;
+        let durable_after = durable_lifecycle_state_v1(after);
+        let durable_transition =
+            durable_lifecycle_transition_v1(&operation, sequence, before, after);
+        let state_digest = canonical_state_digest(&durable_after)?;
+        let process_digest = canonical_payload_process_digest(&durable_transition)?;
         Ok(Self {
             operation,
             sequence,
@@ -86,8 +90,9 @@ impl<S: EvidenceState> LifecycleEvidenceEvent<S> {
         }
         let expected_state = match self.digest_encoding {
             DigestEncoding::LegacyJson => legacy_state_label_digest(self.after.as_str()),
-            DigestEncoding::CanonicalBcsV1 | DigestEncoding::CanonicalBcsV2 => {
-                canonical_state_digest(&self.after)?
+            DigestEncoding::CanonicalBcsV1 => canonical_state_digest(&self.after)?,
+            DigestEncoding::CanonicalBcsV2 => {
+                canonical_state_digest(&durable_lifecycle_state_v1(self.after))?
             }
         };
         if self.state_digest != expected_state {
@@ -101,8 +106,17 @@ impl<S: EvidenceState> LifecycleEvidenceEvent<S> {
                 &self.after.as_str(),
                 DigestEncoding::LegacyJson,
             )?,
-            DigestEncoding::CanonicalBcsV1 | DigestEncoding::CanonicalBcsV2 => {
+            DigestEncoding::CanonicalBcsV1 => {
                 canonical_process_digest(&self.operation, self.sequence, &self.before, &self.after)?
+            }
+            DigestEncoding::CanonicalBcsV2 => {
+                let transition = durable_lifecycle_transition_v1(
+                    &self.operation,
+                    self.sequence,
+                    self.before,
+                    self.after,
+                );
+                canonical_payload_process_digest(&transition)?
             }
         };
         if self.process_digest != expected_process {

@@ -1,3 +1,4 @@
+use crate::states::EvidenceState;
 use crate::{
     DigestSnapshot, HubRefSnapshot, OciObjectLifecycleState, OciObjectSnapshot, OciTagSnapshot,
     OperationIdentity, ProviderLifecycleSnapshot, QuarantineLifecycleState, QuarantineSnapshot,
@@ -27,6 +28,54 @@ impl From<&OperationIdentity> for DurableOperationIdentityV1 {
             object_key: operation.object_key.clone(),
             content_sha256: operation.content_sha256.clone(),
         }
+    }
+}
+
+/// Frozen representation of a generic lifecycle state.
+///
+/// The schema marker prevents a later change to an internal state enum or its
+/// serde representation from changing the meaning of a durable digest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DurableLifecycleStateV1 {
+    pub schema: String,
+    pub state: String,
+}
+
+/// Frozen representation of a generic lifecycle transition.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DurableLifecycleTransitionV1 {
+    pub schema: String,
+    pub operation: DurableOperationIdentityV1,
+    pub sequence: u64,
+    pub before: DurableLifecycleStateV1,
+    pub after: DurableLifecycleStateV1,
+}
+
+/// Encodes an existing Shardline lifecycle state into the durable V1 DTO.
+///
+/// The generic state trait is intentionally used here rather than a new
+/// public bound on `LifecycleEvidenceEvent`; downstream state implementations
+/// therefore retain source compatibility while all built-in states share the
+/// same frozen representation.
+pub fn durable_lifecycle_state_v1<S: EvidenceState>(state: S) -> DurableLifecycleStateV1 {
+    DurableLifecycleStateV1 {
+        schema: "shardline.reliability.lifecycle-state.v1".to_owned(),
+        state: state.as_str().to_owned(),
+    }
+}
+
+pub fn durable_lifecycle_transition_v1<S: EvidenceState>(
+    operation: &OperationIdentity,
+    sequence: u64,
+    before: S,
+    after: S,
+) -> DurableLifecycleTransitionV1 {
+    DurableLifecycleTransitionV1 {
+        schema: "shardline.reliability.lifecycle-transition.v1".to_owned(),
+        operation: operation.into(),
+        sequence,
+        before: durable_lifecycle_state_v1(before),
+        after: durable_lifecycle_state_v1(after),
     }
 }
 

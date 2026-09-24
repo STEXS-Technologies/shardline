@@ -35,7 +35,10 @@ mod tests;
 
 pub use digest::DigestEncoding;
 pub use digest::canonical_state_digest;
-pub use durable::{DurableOperationIdentityV1, DurableSnapshotV1, DurableSnapshotV1Encoding};
+pub use durable::{
+    DurableLifecycleStateV1, DurableLifecycleTransitionV1, DurableOperationIdentityV1,
+    DurableSnapshotV1, DurableSnapshotV1Encoding,
+};
 pub use error::ReliabilityError;
 pub use event::{
     LifecycleEvent, StateTransitionEvent, baseline_resumable_session_events,

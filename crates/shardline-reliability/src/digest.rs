@@ -93,3 +93,10 @@ pub(crate) fn canonical_transition_process_digest<O: Serialize, T: Serialize, U:
 ) -> Result<PenelopeDigest, ReliabilityError> {
     canonical_process_digest(operation, sequence, before, after)
 }
+
+pub(crate) fn canonical_payload_process_digest<T: Serialize>(
+    payload: &T,
+) -> Result<PenelopeDigest, ReliabilityError> {
+    let bytes = canonical_bytes(payload)?;
+    Ok(PenelopeDigest::sha256(&bytes))
+}

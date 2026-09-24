@@ -384,10 +384,27 @@ fn new_evidence_uses_canonical_bcs_digests() {
     )
     .unwrap();
 
-    assert_eq!(event.digest_encoding, DigestEncoding::CanonicalBcsV1);
+    assert_eq!(event.digest_encoding, DigestEncoding::CanonicalBcsV2);
     let legacy_state =
         statechronicle_core::digest::hash_bytes(UploadLifecycleState::Storing.as_str().as_bytes());
     assert_ne!(event.state_digest, legacy_state);
+    event.verify_integrity().unwrap();
+}
+
+#[test]
+fn lifecycle_evidence_keeps_verifying_the_previous_canonical_encoding() {
+    let operation = OperationIdentity::new("tenant", "repo", "v1-op", OperationKind::Upload)
+        .unwrap()
+        .with_object_key("object")
+        .with_content_sha256("a".repeat(64));
+    let before = UploadLifecycleState::Created;
+    let after = UploadLifecycleState::Storing;
+    let mut event = LifecycleEvent::new(operation.clone(), 1, before, after).unwrap();
+    event.digest_encoding = DigestEncoding::CanonicalBcsV1;
+    event.state_digest = canonical_state_digest(&after).unwrap();
+    event.process_digest =
+        crate::digest::canonical_process_digest(&operation, 1, &before, &after).unwrap();
+
     event.verify_integrity().unwrap();
 }
 
