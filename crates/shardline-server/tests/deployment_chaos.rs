@@ -2025,12 +2025,31 @@ async fn drill_deploy_f_real_mixed_version_rollout_and_rollback() {
     };
     migrate_chaos_postgres(&stack.pg_url).await;
 
+    // The write gates intentionally make the post-migration compatibility
+    // policy read-compatible for N-1, but not write-compatible. Seed the
+    // shared object with N before starting the mixed-version window so this
+    // drill exercises the supported rollout contract instead of asking an
+    // N-1 writer to bypass the reliability gate.
+    let seed_root = TempDir::new().unwrap();
+    let environment = [("SHARDLINE_S3_ENDPOINT", stack.s3_endpoint.as_str())];
+    let mut seed_node = DeploymentServer::spawn_at(
+        &current_binary,
+        &chaos_bind_addr(),
+        &environment,
+        seed_root.path(),
+    );
+    seed_node.wait_ready(Duration::from_secs(20)).await;
+    let token = mint_token("drill", "drill", TokenScope::Write);
+    let old_bytes = deterministic_bytes(98_323, 601);
+    let seed_put = s3_put(&seed_node.base_url(), &token, "f-old", old_bytes.clone()).await;
+    assert_eq!(seed_put.status().as_u16(), 200, "N seed write");
+    drop(seed_node);
+
     let old_a_root = TempDir::new().unwrap();
     let old_b_root = TempDir::new().unwrap();
     let new_a_root = TempDir::new().unwrap();
     let new_b_root = TempDir::new().unwrap();
     let rollback_root = TempDir::new().unwrap();
-    let environment = [("SHARDLINE_S3_ENDPOINT", stack.s3_endpoint.as_str())];
     let bind_addr = chaos_bind_addr();
     let mut node_a = DeploymentServer::spawn_at(
         &previous_binary,
@@ -2047,10 +2066,6 @@ async fn drill_deploy_f_real_mixed_version_rollout_and_rollback() {
     node_a.wait_ready(Duration::from_secs(20)).await;
     node_b.wait_ready(Duration::from_secs(20)).await;
 
-    let token = mint_token("drill", "drill", TokenScope::Write);
-    let old_bytes = deterministic_bytes(98_323, 601);
-    let old_put = s3_put(&node_a.base_url(), &token, "f-old", old_bytes.clone()).await;
-    assert_eq!(old_put.status().as_u16(), 200, "N-1 seed write");
     assert_s3_bytes(&node_b.base_url(), &token, "f-old", &old_bytes, "N-1 peer").await;
 
     // First rollout step: an N process and an N-1 process actively share the
@@ -2085,8 +2100,8 @@ async fn drill_deploy_f_real_mixed_version_rollout_and_rollback() {
     .await;
 
     // Finish the rollout, then roll one node back to the real N-1 binary. The
-    // previous binary must read state written by N and publish a fresh object
-    // that the remaining N node reconstructs exactly.
+    // previous binary must read state written by N. Its writes remain gated
+    // until the deployment has completed everywhere.
     drop(node_b);
     let mut node_b = DeploymentServer::spawn_at(
         &current_binary,
@@ -2128,15 +2143,10 @@ async fn drill_deploy_f_real_mixed_version_rollout_and_rollback() {
         rollback_bytes.clone(),
     )
     .await;
-    assert_eq!(rollback_put.status().as_u16(), 200, "N-1 rollback write");
-    assert_s3_bytes(
-        &node_b.base_url(),
-        &token,
-        "f-rollback",
-        &rollback_bytes,
-        "N reads N-1 rollback write",
-    )
-    .await;
+    assert!(
+        !rollback_put.status().is_success(),
+        "N-1 rollback write must be rejected by the reliability gate"
+    );
     eprintln!(
         "chaos({drill}): PASS — real N-1/N rollout and one-node rollback preserved exact bytes"
     );
