@@ -216,34 +216,40 @@ async fn postgres_delete_plan_commits_holds_records_state_and_delivery_together(
     let pool = sqlx::PgPool::connect(&database_url).await?;
     let records = PostgresRecordStore::new(pool.clone());
     let index = PostgresIndexStore::new(pool.clone());
-    let owner = "provider-plan-delete";
+    let owner = format!(
+        "provider-plan-delete-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos()
+    );
     let repo = "repository";
-    let delivery_id = "provider-plan-delete-delivery";
+    let delivery_id = format!("provider-plan-delete-delivery-{}", std::process::id());
     sqlx::query(
         "DELETE FROM shardline_webhook_deliveries
          WHERE provider = 'github' AND owner = $1 AND delivery_id = $2",
     )
-    .bind(owner)
-    .bind(delivery_id)
+    .bind(&owner)
+    .bind(&delivery_id)
     .execute(&pool)
     .await?;
     sqlx::query(
         "DELETE FROM shardline_reliability_events
          WHERE operation_kind = 'WebhookDelivery' AND operation_id IN ($1, $2)",
     )
-    .bind(webhook_operation_id(owner, repo, delivery_id)?)
-    .bind(delivery_id)
+    .bind(webhook_operation_id(&owner, repo, &delivery_id)?)
+    .bind(&delivery_id)
     .execute(&pool)
     .await?;
 
-    let scope = RepositoryScope::new(RepositoryProvider::GitHub, owner, repo, Some("main"))?;
+    let scope = RepositoryScope::new(RepositoryProvider::GitHub, &owner, repo, Some("main"))?;
     let record = test_record(scope);
     RecordMutation::write_version_record(&records, &record).await?;
     RecordMutation::write_latest_record(&records, &record).await?;
     index
         .upsert_provider_repository_state(&shardline_index::ProviderRepositoryState::new(
             RepositoryProvider::GitHub,
-            owner.to_owned(),
+            owner.clone(),
             repo.to_owned(),
             Some(100),
             None,
@@ -252,8 +258,8 @@ async fn postgres_delete_plan_commits_holds_records_state_and_delivery_together(
         .await?;
 
     let event = RepositoryWebhookEvent::new(
-        RepositoryRef::new(ProviderKind::GitHub, owner, repo)?,
-        WebhookDeliveryId::new(delivery_id)?,
+        RepositoryRef::new(ProviderKind::GitHub, &owner, repo)?,
+        WebhookDeliveryId::new(&delivery_id)?,
         RepositoryWebhookEventKind::RepositoryDeleted,
     );
     let object_store = local_object_store()?;
@@ -276,7 +282,7 @@ async fn postgres_delete_plan_commits_holds_records_state_and_delivery_together(
     .execute(&pool)
     .await?;
     let fences = [PostgresResourceFence::new(
-        shardline_index::ResourceLockKey::provider_repository("github", owner, repo),
+        shardline_index::ResourceLockKey::provider_repository("github", &owner, repo),
         88,
     )];
     let mut connection = pool.acquire().await?;
@@ -294,7 +300,7 @@ async fn postgres_delete_plan_commits_holds_records_state_and_delivery_together(
     assert!(!RecordTraversal::record_locator_exists(&records, &latest).await?);
     assert!(
         index
-            .provider_repository_state(RepositoryProvider::GitHub, owner, repo)
+            .provider_repository_state(RepositoryProvider::GitHub, &owner, repo)
             .await?
             .is_none()
     );
@@ -312,9 +318,9 @@ async fn postgres_delete_plan_commits_holds_records_state_and_delivery_together(
         "SELECT COUNT(*) FROM shardline_webhook_deliveries
          WHERE provider = 'github' AND owner = $1 AND repo = $2 AND delivery_id = $3",
     )
-    .bind(owner)
+    .bind(&owner)
     .bind(repo)
-    .bind(delivery_id)
+    .bind(&delivery_id)
     .fetch_one(&pool)
     .await?;
     assert_eq!(delivery_count, 1);

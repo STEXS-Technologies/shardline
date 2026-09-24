@@ -2202,7 +2202,12 @@ where
     T: EvidenceEventMetadata,
 {
     event.verify_integrity()?;
-    verify_existing_reliability_prefix(connection, event.operation_identity()).await?;
+    verify_existing_reliability_boundary(
+        connection,
+        event.operation_identity(),
+        event.sequence_number(),
+    )
+    .await?;
     let sequence = i64::try_from(event.sequence_number()).map_err(|_error| {
         PostgresMetadataStoreError::IntegerOutOfRange("reliability sequence".into())
     })?;
@@ -2237,26 +2242,31 @@ where
     .await
 }
 
-/// Verifies existing commitments before any writer extends an operation.
-/// Legacy rows without commitments remain eligible for ordered backfill, but
-/// every commitment that is present must still match its typed event and
-/// preceding commitment.
-async fn verify_existing_reliability_prefix(
+/// Verifies the persisted Merkle boundary before a writer extends an
+/// operation. Normal appends inspect only the latest event and its immediate
+/// parent, keeping the write path bounded. Full historical-chain verification
+/// remains an explicit fsck/repair operation.
+async fn verify_existing_reliability_boundary(
     connection: &mut PgConnection,
     operation: &shardline_reliability::OperationIdentity,
+    next_sequence: u64,
 ) -> Result<(), PostgresMetadataStoreError> {
     let rows = query(
         "SELECT sequence, event_json, merkle_commit_json
          FROM shardline_reliability_events
          WHERE operation_kind = $1 AND operation_id = $2
-         ORDER BY sequence",
+         ORDER BY sequence DESC
+         LIMIT 2",
     )
     .bind(operation.kind.as_str())
     .bind(&operation.operation_id)
     .fetch_all(&mut *connection)
     .await?;
-    let mut previous_commit = None;
-    for row in rows {
+    let mut rows = rows.into_iter();
+    let Some(latest_row) = rows.next() else {
+        return Ok(());
+    };
+    let validate_row = |row: &sqlx::postgres::PgRow| {
         let row_sequence = u64::try_from(row.try_get::<i64, _>("sequence")?).map_err(|error| {
             PostgresMetadataStoreError::IntegerOutOfRange(format!("reliability sequence: {error}"))
         })?;
@@ -2274,17 +2284,44 @@ async fn verify_existing_reliability_prefix(
                 shardline_reliability::ReliabilityError::OperationMismatch,
             ));
         }
-        let merkle_commit: Option<serde_json::Value> = row.try_get("merkle_commit_json")?;
-        if let Some(merkle_commit_json) = merkle_commit {
-            verify_persisted_merkle_commit_with_previous(
-                operation.kind,
-                event_json,
-                Some(merkle_commit_json.clone()),
-                previous_commit.clone(),
-            )?;
-            previous_commit = Some(merkle_commit_json);
-        } else {
-            previous_commit = None;
+        Ok::<_, PostgresMetadataStoreError>((row_sequence, event_json))
+    };
+    let previous_commit = if let Some(previous_row) = rows.next() {
+        let (_previous_sequence, _previous_event_json) = validate_row(&previous_row)?;
+        let previous_commit: Option<serde_json::Value> =
+            previous_row.try_get("merkle_commit_json")?;
+        Some(previous_commit.ok_or_else(|| {
+            PostgresMetadataStoreError::Reliability(
+                shardline_reliability::ReliabilityError::Merkle(
+                    "latest reliability commitment has a missing parent".into(),
+                ),
+            )
+        })?)
+    } else {
+        None
+    };
+    let (latest_sequence, latest_event_json) = validate_row(&latest_row)?;
+    let latest_commit: Option<serde_json::Value> = latest_row.try_get("merkle_commit_json")?;
+    verify_persisted_merkle_commit_with_previous(
+        operation.kind,
+        latest_event_json,
+        latest_commit.clone(),
+        previous_commit,
+    )?;
+    if next_sequence > latest_sequence {
+        if next_sequence != latest_sequence.saturating_add(1) {
+            return Err(PostgresMetadataStoreError::Reliability(
+                shardline_reliability::ReliabilityError::Merkle(
+                    "reliability sequence gap before append".into(),
+                ),
+            ));
+        }
+        if latest_commit.is_none() {
+            return Err(PostgresMetadataStoreError::Reliability(
+                shardline_reliability::ReliabilityError::Merkle(
+                    "latest reliability event has no Merkle commitment".into(),
+                ),
+            ));
         }
     }
     Ok(())
