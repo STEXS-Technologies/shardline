@@ -46,17 +46,12 @@ pub const MAX_S3_PART_NUMBER: u32 = 10_000;
 /// Maximum upload id length (hex upload ids are 32 chars).
 const MAX_UPLOAD_ID_BYTES: usize = 64;
 
-/// Serializes session-store mutations across the process.
-static S3_UPLOAD_SESSION_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
-
 /// Per-upload-session part-write locks keyed by upload id (weak values).
 ///
-/// The process-wide [`S3_UPLOAD_SESSION_LOCK`] must never be held across a
-/// network body stream (a slow `UploadPart` would stall every other tenant's
-/// session operation), but a part-file write still needs to be exclusive with
-/// the expiry sweep — which can delete the session directory — and with
-/// `CompleteMultipartUpload`, which reads the part files. This per-session
-/// lock provides that exclusivity without serializing unrelated sessions.
+/// A part-file write still needs to be exclusive with the expiry sweep — which
+/// can delete the session directory — and with `CompleteMultipartUpload`,
+/// which reads the part files. This per-session lock provides that
+/// exclusivity without serializing unrelated sessions.
 ///
 /// Entries hold weak references: the strong [`Arc`] returned by
 /// [`acquire_session_part_lock`] keeps a session's entry alive for as long as
@@ -283,23 +278,16 @@ fn session_snapshot(session: &MultipartUploadSession) -> Result<DigestSnapshot, 
     Ok(DigestSnapshot::new(operation, digest))
 }
 
-/// A held session-store lock (process mutex + advisory file lock).
+/// A held session-store advisory file lock.
 pub struct S3UploadSessionLock {
-    _process_guard: MutexGuard<'static, ()>,
     _file_lock: S3FileLock,
 }
-
-type MutexGuard<'lock, T> = tokio::sync::MutexGuard<'lock, T>;
 
 pub(crate) struct S3FileLock {
     file: std::fs::File,
 }
 
 /// Cross-process advisory lock protecting one multipart session's part files.
-///
-/// The process-local per-session mutex remains useful for cheap serialization,
-/// while this guard extends the same exclusion to replicas sharing the upload
-/// root on a filesystem with advisory-lock support.
 pub struct S3SessionPartFileLock {
     _file_lock: S3FileLock,
 }
@@ -403,17 +391,15 @@ pub fn part_file_path(
 
 // ── Locking ──────────────────────────────────────────────────────────────────
 
-/// Acquires the process-wide session lock plus an advisory file lock.
+/// Acquires the upload-root advisory file lock.
 ///
 /// # Errors
 ///
 /// Returns [`S3SessionError::BlockingTask`] or [`S3SessionError::Io`] when the
 /// file lock cannot be acquired.
 pub async fn lock_upload_sessions(root: &Path) -> Result<S3UploadSessionLock, S3SessionError> {
-    let process_guard = S3_UPLOAD_SESSION_LOCK.lock().await;
     let file_lock = acquire_session_file_lock(upload_dir(root).join(".sessions.lock")).await?;
     Ok(S3UploadSessionLock {
-        _process_guard: process_guard,
         _file_lock: file_lock,
     })
 }
@@ -1965,6 +1951,25 @@ mod tests {
             .unwrap()
             .unwrap();
         waiter.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn upload_session_locks_for_different_roots_run_in_parallel() {
+        let first_root = make_root().await;
+        let second_root = make_root().await;
+        let first = lock_upload_sessions(first_root.path()).await.unwrap();
+
+        let second_root_path = second_root.path().to_path_buf();
+        let second = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            lock_upload_sessions(&second_root_path),
+        )
+        .await
+        .expect("different deployment roots must not share a process lock")
+        .unwrap();
+
+        drop(second);
+        drop(first);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
