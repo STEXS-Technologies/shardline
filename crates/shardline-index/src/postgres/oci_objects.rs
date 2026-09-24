@@ -51,8 +51,10 @@ async fn load_oci_evidence(
     let mut merkle_commits = Vec::with_capacity(rows.len());
     for row in rows {
         row_sequences.push(
-            u64::try_from(row.try_get::<i64, _>("sequence")?).map_err(|_| {
-                PostgresMetadataStoreError::IntegerOutOfRange("reliability sequence".into())
+            u64::try_from(row.try_get::<i64, _>("sequence")?).map_err(|error| {
+                PostgresMetadataStoreError::IntegerOutOfRange(format!(
+                    "reliability sequence: {error}"
+                ))
             })?,
         );
         let value: serde_json::Value = row.try_get("event_json")?;
