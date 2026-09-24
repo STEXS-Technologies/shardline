@@ -587,15 +587,6 @@ fn aggregate_value(
 mod tests {
     use super::*;
 
-    static TEST_ADMISSION_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-
-    fn admission_test_lock() -> std::sync::MutexGuard<'static, ()> {
-        TEST_ADMISSION_LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap()
-    }
-
     #[test]
     fn reader_rejects_ranges_past_eof() {
         let reader = RangeReader {
@@ -823,7 +814,6 @@ mod tests {
 
     #[test]
     fn admission_is_bounded() {
-        let _lock = admission_test_lock();
         let guards: Vec<_> = (0..MAX_CONCURRENT_QUERIES)
             .map(|index| admit_query(&format!("tenant-{index}")).unwrap())
             .collect();
@@ -834,7 +824,6 @@ mod tests {
 
     #[test]
     fn admission_limits_each_tenant_before_global_limit() {
-        let _lock = admission_test_lock();
         let guards = [
             admit_query("same-tenant").unwrap(),
             admit_query("same-tenant").unwrap(),
@@ -845,7 +834,6 @@ mod tests {
 
     #[test]
     fn admission_preserves_capacity_for_other_tenants() {
-        let _lock = admission_test_lock();
         let same_tenant = [
             admit_query("busy-tenant").unwrap(),
             admit_query("busy-tenant").unwrap(),

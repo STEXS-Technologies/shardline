@@ -1042,8 +1042,6 @@ fn s3_store_rejects_incomplete_credentials_secret_without_key() {
 // ── MinIO-backed integration tests ───────────────────────────────────
 
 mod minio_tests {
-    use std::sync::atomic::{AtomicBool, Ordering};
-
     use shardline_test_support::DockerLocalStack;
     use shardline_test_support::S3RawConfig;
 
@@ -1057,21 +1055,12 @@ mod minio_tests {
     };
     use shardline_protocol::{ByteRange, SecretString};
 
-    /// Shared MinIO init guard: only starts containers once across all tests.
-    static MINIO_INIT: AtomicBool = AtomicBool::new(false);
-    static INIT_LOCK: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-
     fn ensure_minio() -> Option<DockerLocalStack> {
         if !DockerLocalStack::docker_available() {
             return None;
         }
-        INIT_LOCK.get_or_init(|| {
-            MINIO_INIT.store(true, Ordering::SeqCst);
-        });
-        if !MINIO_INIT.load(Ordering::SeqCst) {
-            return None;
-        }
-        // Start fresh stack per-test-call so we get clean state.
+        // Start a fresh stack per test call so each nextest process owns its
+        // own OS-level infrastructure and has no shared test state.
         DockerLocalStack::builder()
             .with_minio()
             .start()

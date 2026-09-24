@@ -65,8 +65,10 @@ args = ["check", "--workspace", "--all-targets", "--all-features", "${@}"]
 [tasks.test]
 description = "Run workspace lib tests (fast, no external infrastructure needed)"
 workspace = false
+install_crate = "cargo-nextest@0.9.123"
+install_crate_args = ["--locked", "--force"]
 command = "cargo"
-args = ["test", "--workspace", "--lib", "${@}"]
+args = ["nextest", "run", "--workspace", "--lib", "${@}"]
 
 [tasks.test-integration]
 description = "Run integration tests (requires Docker: Postgres, MinIO, Redis)"
@@ -79,8 +81,10 @@ args = ["nextest", "run", "--workspace", "--all-features", "--no-tests=pass", "-
 [tasks.test-postgres]
 description = "Run Postgres-gated tests (requires DATABASE_URL env var)"
 workspace = false
+install_crate = "cargo-nextest@0.9.123"
+install_crate_args = ["--locked", "--force"]
 command = "bash"
-args = ["-c", "cargo test -p shardline-index -- hub_postgres && cargo test -p shardline-server -- postgres_backend::tests database_migration lifecycle_repair::tests && cargo test -p shardline --test db_migrate_e2e"]
+args = ["-c", "cargo nextest run -p shardline-index -E 'test(hub_postgres)' && cargo nextest run -p shardline-server -E 'test(postgres_backend) or test(database_migration) or test(lifecycle_repair)' && cargo nextest run -p shardline --test db_migrate_e2e"]
 
 [tasks.test-e2e]
 description = "Run e2e integration tests from the e2e/ folder"
@@ -394,5 +398,5 @@ install_crate_args = ["--locked", "--force"]
 command = "bash"
 args = [
   "-c",
-  "cargo build -p shardline && docker compose -f docker-compose.chaos.yml -p shardline-chaos up -d && for c in chaos-postgres chaos-minio chaos-redis; do until [ \"$(docker inspect -f '{{.State.Health.Status}}' $c 2>/dev/null)\" = \"healthy\" ]; do sleep 1; done; done && target/debug/shardline db migrate up --database-url postgres://shardline:shardline-dev-password@127.0.0.1:15432/shardline && cargo nextest run -p shardline-server --test deployment_chaos --no-fail-fast && cargo test -p shardline-server --test fault_drills -- drill3 -- --nocapture && cargo test -p shardline-server --test fault_drills_extreme -- drill_extreme_4 -- --nocapture",
+  "cargo build -p shardline && docker compose -f docker-compose.chaos.yml -p shardline-chaos up -d && for c in chaos-postgres chaos-minio chaos-redis; do until [ \"$(docker inspect -f '{{.State.Health.Status}}' $c 2>/dev/null)\" = \"healthy\" ]; do sleep 1; done; done && target/debug/shardline db migrate up --database-url postgres://shardline:shardline-dev-password@127.0.0.1:15432/shardline && cargo nextest run -p shardline-server --test deployment_chaos --no-fail-fast && cargo nextest run -p shardline-server --test fault_drills -E 'test(drill3)' && cargo nextest run -p shardline-server --test fault_drills_extreme -E 'test(drill_extreme_4)'",
 ]

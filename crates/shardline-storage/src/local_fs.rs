@@ -935,11 +935,6 @@ mod tests {
     #[test]
     fn write_bytes_atomically_rename_error_cleans_up() {
         use super::{set_before_local_write_hook, write_bytes_atomically};
-        let _guard = HOOK_TEST_MUTEX
-            .get_or_init(|| std::sync::Mutex::new(()))
-            .lock()
-            .unwrap();
-
         let sandbox = tempfile::tempdir().unwrap();
         let root = sandbox.path().join("root");
         let dest = root.join("sub").join("target.bin");
@@ -961,20 +956,11 @@ mod tests {
 
     // ── hard_link_file_if_absent with race via hook ───────────────────
 
-    /// Serializes hook-based tests that use the global BEFORE_LOCAL_WRITE_HOOK.
-    #[cfg(unix)]
-    static HOOK_TEST_MUTEX: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-
     #[cfg(unix)]
     #[test]
     fn hard_link_file_if_absent_detects_parent_swap_via_hook() {
         use super::{hard_link_file_if_absent, set_before_local_write_hook};
         use std::os::unix::fs::symlink;
-        let _guard = HOOK_TEST_MUTEX
-            .get_or_init(|| std::sync::Mutex::new(()))
-            .lock()
-            .unwrap();
-
         let sandbox = tempfile::tempdir().unwrap();
         let root = sandbox.path().join("root");
         let temporary = sandbox.path().join("src.tmp");
@@ -1007,11 +993,6 @@ mod tests {
         use super::{set_before_local_write_hook, write_bytes_atomically};
         use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, Ordering};
-        let _guard = HOOK_TEST_MUTEX
-            .get_or_init(|| std::sync::Mutex::new(()))
-            .lock()
-            .unwrap();
-
         let called = Arc::new(AtomicBool::new(false));
         let flag = called.clone();
 
@@ -1060,11 +1041,6 @@ mod tests {
     fn write_bytes_atomically_detects_parent_swap() {
         use super::{set_before_local_write_hook, write_bytes_atomically};
         use std::os::unix::fs::symlink;
-        let _guard = HOOK_TEST_MUTEX
-            .get_or_init(|| std::sync::Mutex::new(()))
-            .lock()
-            .unwrap();
-
         let sandbox = tempfile::tempdir().unwrap();
         let root = sandbox.path().join("root");
         let dest = root.join("sub").join("target.bin");
@@ -1131,11 +1107,6 @@ mod tests {
         // the parent a symlink duplicate so anchor check fails.
         use super::{hard_link_file_if_absent, set_before_local_write_hook};
         use std::os::unix::fs::symlink;
-        let _guard = HOOK_TEST_MUTEX
-            .get_or_init(|| std::sync::Mutex::new(()))
-            .lock()
-            .unwrap();
-
         let sandbox = tempfile::tempdir().unwrap();
         let root = sandbox.path().join("root");
         let temporary = sandbox.path().join("src.tmp");
