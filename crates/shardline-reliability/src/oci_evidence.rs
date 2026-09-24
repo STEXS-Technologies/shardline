@@ -78,6 +78,45 @@ impl OciObjectOperationId {
     pub fn into_string(self) -> String {
         self.0
     }
+
+    /// Parses the stable persisted operation identifier into its typed object
+    /// identity. OCI scope namespaces and repository names are validated by
+    /// their producers to exclude `:`, so the four components remain
+    /// unambiguous without introducing a second encoding.
+    pub fn parse(value: &str) -> Result<OciObjectIdentity, ReliabilityError> {
+        let mut components = value.splitn(4, ':');
+        let scope_namespace = components
+            .next()
+            .ok_or(ReliabilityError::OperationMismatch)?;
+        let repository = components
+            .next()
+            .ok_or(ReliabilityError::OperationMismatch)?;
+        let object_kind = components
+            .next()
+            .ok_or(ReliabilityError::OperationMismatch)?;
+        let digest_hex = components
+            .next()
+            .ok_or(ReliabilityError::OperationMismatch)?;
+        if scope_namespace.is_empty()
+            || repository.is_empty()
+            || object_kind.is_empty()
+            || digest_hex.is_empty()
+            || digest_hex.contains(':')
+            || components.next().is_some()
+        {
+            return Err(ReliabilityError::OperationMismatch);
+        }
+        let identity = OciObjectIdentity {
+            scope_namespace: scope_namespace.to_owned(),
+            repository: repository.to_owned(),
+            object_kind: object_kind.to_owned(),
+            digest_hex: digest_hex.to_owned(),
+        };
+        if Self::new(&identity).as_str() != value {
+            return Err(ReliabilityError::OperationMismatch);
+        }
+        Ok(identity)
+    }
 }
 
 impl OciObjectIdentity {
@@ -249,5 +288,18 @@ mod tests {
             object.evidence_operation().unwrap().operation_id,
             object.operation_id().as_str()
         );
+    }
+
+    #[test]
+    fn operation_id_round_trips_through_typed_parser() {
+        let identity =
+            OciObjectIdentity::new("global", "team/assets", "blob", "a".repeat(64)).unwrap();
+        let operation_id = OciObjectOperationId::new(&identity);
+        assert_eq!(
+            OciObjectOperationId::parse(operation_id.as_str()).unwrap(),
+            identity
+        );
+        assert!(OciObjectOperationId::parse("global:team/assets:blob").is_err());
+        assert!(OciObjectOperationId::parse("global:team/assets:blob:digest:extra").is_err());
     }
 }

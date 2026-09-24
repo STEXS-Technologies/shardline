@@ -292,7 +292,6 @@ async fn blob_upload_wrong_digest_can_be_retried_across_postgres_nodes() {
         .status(),
         StatusCode::BAD_REQUEST
     );
-
     // The failed validation fenced the durable completion attempt, but must
     // not make a corrected retry permanently look like a missing session.
     let full_data = [data.as_slice(), final_data.as_slice()].concat();

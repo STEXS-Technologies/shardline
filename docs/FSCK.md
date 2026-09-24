@@ -75,7 +75,21 @@ For each record it verifies:
 Reliability evidence is checked against the authoritative materialized state and
 is never repaired during fsck. An evidence failure is reported separately as
 `invalid_reliability_evidence`, so operators can distinguish valid content from
-invalid state-transition evidence.
+invalid state-transition evidence. For Postgres-backed deployments, repair a
+named operation only after reviewing the fsck result and independently
+validating the materialized object:
+
+```bash
+shardline db migrate repair \
+  --operation-kind Visibility \
+  --operation-id '<scope>:<repository>:<object-kind>:<sha256>' \
+  --confirm
+```
+
+For a published OCI object with no deletion tombstone, this rebuilds a
+StateChronicle Merkle baseline from the authoritative published visibility
+state. Tombstoned objects continue through the tombstone-aware repair path.
+Normal reads never perform this repair implicitly.
 
 For dedupe-shard mappings it also verifies:
 

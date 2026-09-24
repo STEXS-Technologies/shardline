@@ -278,7 +278,7 @@ async fn durable_oci_patch_blob_upload(
     let expected_scope = scope_namespace(repository_scope);
     let (session, parts) = state
         .backend
-        .resumable_session_snapshot(session_id)
+        .resumable_completion_snapshot(session_id)
         .await?
         .filter(|(session, _parts)| {
             session.protocol() == ResumableSessionProtocol::OciBlob

@@ -5,22 +5,23 @@ use shardline_protocol::unix_now_seconds_lossy;
 use shardline_reliability::{
     EvidenceEventMetadata, HubRefEvidenceLog, HubRefLifecycleEvent, HubRefSnapshot, LifecycleEvent,
     OciObjectEvidenceLog, OciObjectIdentity, OciObjectLifecycleEvent, OciObjectLifecycleState,
-    OciObjectSnapshot, OciTagEvidenceLog, OciTagLifecycleEvent, OciTagSnapshot, OperationKind,
-    ProviderEvidenceLog, ProviderLifecycleEvent, ProviderLifecycleObservations,
-    ProviderLifecycleSnapshot, ProviderRepositoryIdentity, QuarantineEvidenceLog,
-    QuarantineLifecycleEvent, QuarantineLifecycleState, QuarantineObjectIdentity,
-    QuarantineSnapshot, ReliabilityMerkleCommit, RetentionEvidenceLog, RetentionHoldLifecycleEvent,
-    RetentionHoldLifecycleState, RetentionHoldSnapshot, RetentionObjectIdentity,
-    S3ObjectEvidenceLog, S3ObjectLifecycleEvent, S3ObjectSnapshot, S3ObjectState, SnapshotEvidence,
-    StateTransitionEvent, UploadLifecycleState, WebhookDeliveryEvidenceLog,
-    WebhookDeliveryIdentity, WebhookDeliveryLifecycleEvent, WebhookDeliveryLifecycleState,
-    WebhookDeliverySnapshot, baseline_resumable_session_events, baseline_upload_lifecycle_events,
-    build_persisted_merkle_commit_with_previous, persisted_event_identity,
-    persisted_event_sequence, reliability_merkle_commit_json_with_previous,
-    upload_lifecycle_identity, verify_hub_ref_events, verify_oci_object_lifecycle_events,
-    verify_oci_tag_events, verify_provider_lifecycle_events, verify_quarantine_lifecycle_events,
-    verify_resumable_session_events, verify_retention_hold_lifecycle_events,
-    verify_s3_object_events, verify_upload_lifecycle_events, verify_webhook_delivery_events,
+    OciObjectOperationId, OciObjectSnapshot, OciTagEvidenceLog, OciTagLifecycleEvent,
+    OciTagSnapshot, OperationKind, ProviderEvidenceLog, ProviderLifecycleEvent,
+    ProviderLifecycleObservations, ProviderLifecycleSnapshot, ProviderRepositoryIdentity,
+    QuarantineEvidenceLog, QuarantineLifecycleEvent, QuarantineLifecycleState,
+    QuarantineObjectIdentity, QuarantineSnapshot, ReliabilityMerkleCommit, RetentionEvidenceLog,
+    RetentionHoldLifecycleEvent, RetentionHoldLifecycleState, RetentionHoldSnapshot,
+    RetentionObjectIdentity, S3ObjectEvidenceLog, S3ObjectLifecycleEvent, S3ObjectSnapshot,
+    S3ObjectState, SnapshotEvidence, StateTransitionEvent, UploadLifecycleState,
+    WebhookDeliveryEvidenceLog, WebhookDeliveryIdentity, WebhookDeliveryLifecycleEvent,
+    WebhookDeliveryLifecycleState, WebhookDeliverySnapshot, baseline_resumable_session_events,
+    baseline_upload_lifecycle_events, build_persisted_merkle_commit_with_previous,
+    persisted_event_identity, persisted_event_sequence,
+    reliability_merkle_commit_json_with_previous, upload_lifecycle_identity, verify_hub_ref_events,
+    verify_oci_object_lifecycle_events, verify_oci_tag_events, verify_provider_lifecycle_events,
+    verify_quarantine_lifecycle_events, verify_resumable_session_events,
+    verify_retention_hold_lifecycle_events, verify_s3_object_events,
+    verify_upload_lifecycle_events, verify_webhook_delivery_events,
 };
 use sqlx::{
     Error as SqlxError, PgPool, Postgres, Row, Transaction, postgres::PgPoolOptions, query,
@@ -680,6 +681,12 @@ async fn repair_reliability_operation(
     .bind(operation_id)
     .fetch_one(pool)
     .await?;
+    if operation_kind == OperationKind::Visibility && journal_exists {
+        if repair_published_oci_visibility_operation(pool, operation_id).await? {
+            return verify_persisted_reliability_operation(pool, operation_kind, operation_id)
+                .await;
+        }
+    }
     let mut transaction = pool.begin().await?;
     let authoritative_exists =
         lock_authoritative_operation(&mut transaction, operation_kind, operation_id).await?;
@@ -723,6 +730,60 @@ async fn repair_reliability_operation(
         }
     }
     verify_persisted_reliability_operation(pool, operation_kind, operation_id).await
+}
+
+/// Rebuilds a published OCI visibility baseline when no tombstone exists.
+///
+/// OCI's durable visibility index stores deletion generations, not a row for
+/// every published immutable object. Therefore absence of a tombstone is the
+/// authoritative materialized published state for an existing visibility
+/// operation. This explicit repair is only entered for `Visibility` and only
+/// after the operator has named the operation; normal reads never call it.
+async fn repair_published_oci_visibility_operation(
+    pool: &PgPool,
+    operation_id: &str,
+) -> Result<bool, DatabaseMigrationError> {
+    let identity = OciObjectOperationId::parse(operation_id)
+        .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?;
+    let mut transaction = pool.begin().await?;
+    query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(format!("oci-visibility:{operation_id}"))
+        .execute(&mut *transaction)
+        .await?;
+    let tombstone_exists: bool = query_scalar(
+        "SELECT EXISTS(
+             SELECT 1 FROM shardline_oci_object_tombstones
+             WHERE scope_namespace = $1 AND repository = $2
+               AND object_kind = $3 AND digest_hex = $4
+         )",
+    )
+    .bind(&identity.scope_namespace)
+    .bind(&identity.repository)
+    .bind(&identity.object_kind)
+    .bind(&identity.digest_hex)
+    .fetch_one(&mut *transaction)
+    .await?;
+    if tombstone_exists {
+        transaction.rollback().await?;
+        return Ok(false);
+    }
+    let snapshot = OciObjectSnapshot::new(identity, OciObjectLifecycleState::Published, None)
+        .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?;
+    let evidence = OciObjectEvidenceLog::baseline(snapshot)
+        .map_err(|error| DatabaseMigrationError::Backfill(error.to_string()))?;
+    query(
+        "DELETE FROM shardline_reliability_events
+         WHERE operation_kind = $1 AND operation_id = $2",
+    )
+    .bind(OperationKind::Visibility.as_str())
+    .bind(operation_id)
+    .execute(&mut *transaction)
+    .await?;
+    for event in evidence.events() {
+        persist_reliability_event(&mut transaction, event).await?;
+    }
+    transaction.commit().await?;
+    Ok(true)
 }
 
 /// Rebuilds only the Merkle bodies for a journal whose materialized resource
@@ -2359,13 +2420,14 @@ mod tests {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use serial_test::serial;
+    use sqlx::{PgPool, Row, query};
 
     use super::{
         DatabaseMigration, DatabaseMigrationBoundary, DatabaseMigrationCommand,
         DatabaseMigrationError, DatabaseMigrationOptions, DatabaseMigrationReport,
         DatabaseMigrationStatusEntry, acquire_migration_lock, bundled_database_migrations,
         lock_authoritative_operation, migration_by_version, migration_checksum,
-        migration_fault_injection, run_database_migration,
+        migration_fault_injection, repair_reliability_operation, run_database_migration,
     };
 
     async fn run_test_migration_command(
@@ -2374,6 +2436,133 @@ mod tests {
     ) -> Result<DatabaseMigrationReport, DatabaseMigrationError> {
         let options = DatabaseMigrationOptions::new(database_url.to_owned(), command);
         run_database_migration(&options).await
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[serial(database_reliability_repair)]
+    async fn explicit_repair_rebuilds_corrupt_published_oci_visibility_evidence() {
+        let Some(database_url) = std::env::var("DATABASE_URL").ok() else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let pool = PgPool::connect(&database_url).await.unwrap();
+        let scope_namespace = format!("repair-visible-{}", std::process::id());
+        let repository = "team/assets";
+        let object_kind = "blob";
+        let digest_hex = "a".repeat(64);
+        let identity = shardline_reliability::OciObjectIdentity::new(
+            &scope_namespace,
+            repository,
+            object_kind,
+            &digest_hex,
+        )
+        .unwrap();
+        let operation_id = shardline_reliability::OciObjectOperationId::new(&identity);
+        let snapshot = shardline_reliability::OciObjectSnapshot::new(
+            identity,
+            shardline_reliability::OciObjectLifecycleState::Published,
+            None,
+        )
+        .unwrap();
+        let evidence = shardline_reliability::OciObjectEvidenceLog::baseline(snapshot).unwrap();
+        let event_json = serde_json::to_value(evidence.events().first().unwrap()).unwrap();
+
+        query(
+            "DELETE FROM shardline_reliability_events
+             WHERE operation_kind = $1 AND operation_id = $2",
+        )
+        .bind(shardline_reliability::OperationKind::Visibility.as_str())
+        .bind(operation_id.as_str())
+        .execute(&pool)
+        .await
+        .unwrap();
+        query(
+            "INSERT INTO shardline_reliability_events
+                 (operation_kind, operation_id, sequence, event_json, created_at_unix_seconds,
+                  merkle_commit_json)
+             VALUES ($1, $2, 0, $3, EXTRACT(EPOCH FROM now())::bigint, NULL)",
+        )
+        .bind(shardline_reliability::OperationKind::Visibility.as_str())
+        .bind(operation_id.as_str())
+        .bind(event_json)
+        .execute(&pool)
+        .await
+        .unwrap();
+        query(
+            "UPDATE shardline_reliability_events
+             SET event_json = jsonb_set(event_json, '{after,state}', to_jsonb($1::text), true),
+                 merkle_commit_json = NULL
+             WHERE operation_kind = $2 AND operation_id = $3 AND sequence = 0",
+        )
+        .bind("Deleted")
+        .bind(shardline_reliability::OperationKind::Visibility.as_str())
+        .bind(operation_id.as_str())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        repair_reliability_operation(
+            &pool,
+            shardline_reliability::OperationKind::Visibility.as_str(),
+            operation_id.as_str(),
+        )
+        .await
+        .unwrap();
+        let row = query(
+            "SELECT event_json, merkle_commit_json
+             FROM shardline_reliability_events
+             WHERE operation_kind = $1 AND operation_id = $2 AND sequence = 0",
+        )
+        .bind(shardline_reliability::OperationKind::Visibility.as_str())
+        .bind(operation_id.as_str())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let repaired: shardline_reliability::OciObjectLifecycleEvent =
+            serde_json::from_value(row.try_get("event_json").unwrap()).unwrap();
+        assert_eq!(
+            repaired.after.state,
+            shardline_reliability::OciObjectLifecycleState::Published
+        );
+        assert!(
+            row.try_get::<Option<serde_json::Value>, _>("merkle_commit_json")
+                .unwrap()
+                .is_some()
+        );
+        shardline_reliability::verify_oci_object_lifecycle_events(
+            &[repaired],
+            &snapshot_for_test(&scope_namespace, repository, object_kind, &digest_hex),
+        )
+        .unwrap();
+        query(
+            "DELETE FROM shardline_reliability_events
+             WHERE operation_kind = $1 AND operation_id = $2",
+        )
+        .bind(shardline_reliability::OperationKind::Visibility.as_str())
+        .bind(operation_id.as_str())
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    fn snapshot_for_test(
+        scope_namespace: &str,
+        repository: &str,
+        object_kind: &str,
+        digest_hex: &str,
+    ) -> shardline_reliability::OciObjectSnapshot {
+        shardline_reliability::OciObjectSnapshot::new(
+            shardline_reliability::OciObjectIdentity::new(
+                scope_namespace,
+                repository,
+                object_kind,
+                digest_hex,
+            )
+            .unwrap(),
+            shardline_reliability::OciObjectLifecycleState::Published,
+            None,
+        )
+        .unwrap()
     }
 
     #[test]
