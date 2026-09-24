@@ -57,6 +57,40 @@ pub fn persisted_event_sequence(
     }
 }
 
+/// Decodes and verifies the operation identity embedded in a persisted event.
+pub fn persisted_event_identity(
+    operation_kind: OperationKind,
+    event_json: Value,
+) -> Result<crate::OperationIdentity, ReliabilityError> {
+    match operation_kind {
+        OperationKind::Upload => identity::<LifecycleEvent>(operation_kind, event_json),
+        OperationKind::MetadataCommit => {
+            identity::<HubRefLifecycleEvent>(operation_kind, event_json)
+        }
+        OperationKind::ResumableSession => {
+            identity::<StateTransitionEvent>(operation_kind, event_json)
+        }
+        OperationKind::ProviderEvent => {
+            identity::<ProviderLifecycleEvent>(operation_kind, event_json)
+        }
+        OperationKind::GarbageCollection => {
+            identity::<QuarantineLifecycleEvent>(operation_kind, event_json)
+        }
+        OperationKind::Visibility => {
+            identity::<OciObjectLifecycleEvent>(operation_kind, event_json)
+        }
+        OperationKind::OciTag => identity::<OciTagLifecycleEvent>(operation_kind, event_json),
+        OperationKind::S3Object => identity::<S3ObjectLifecycleEvent>(operation_kind, event_json),
+        OperationKind::RetentionHold => {
+            identity::<RetentionHoldLifecycleEvent>(operation_kind, event_json)
+        }
+        OperationKind::WebhookDelivery => {
+            identity::<WebhookDeliveryLifecycleEvent>(operation_kind, event_json)
+        }
+        OperationKind::Repair => identity::<RepairEvidenceEvent>(operation_kind, event_json),
+    }
+}
+
 /// Builds the persisted Merkle commit for a typed envelope selected by its
 /// durable operation discriminator.
 pub fn build_persisted_merkle_commit(
@@ -196,6 +230,7 @@ fn verify_persisted_event_merkle_chain_inner(
         ));
     }
     let mut previous = None;
+    let mut operation_identity = None;
     for (index, (event, commit)) in events
         .iter()
         .cloned()
@@ -209,6 +244,14 @@ fn verify_persisted_event_merkle_chain_inner(
                 "persisted row sequence does not match its event".into(),
             ));
         }
+        let event_identity = persisted_event_identity(operation_kind, event.clone())?;
+        if operation_identity
+            .as_ref()
+            .is_some_and(|identity| identity != &event_identity)
+        {
+            return Err(ReliabilityError::OperationMismatch);
+        }
+        operation_identity = Some(event_identity);
         verify_persisted_merkle_commit_with_previous(
             operation_kind,
             event,
@@ -224,12 +267,31 @@ fn sequence<E>(operation_kind: OperationKind, event_json: Value) -> Result<u64, 
 where
     E: serde::de::DeserializeOwned + crate::event_metadata::EvidenceEventMetadata,
 {
+    Ok(decode::<E>(operation_kind, event_json)?.sequence_number())
+}
+
+fn identity<E>(
+    operation_kind: OperationKind,
+    event_json: Value,
+) -> Result<crate::OperationIdentity, ReliabilityError>
+where
+    E: serde::de::DeserializeOwned + crate::event_metadata::EvidenceEventMetadata,
+{
+    Ok(decode::<E>(operation_kind, event_json)?
+        .operation_identity()
+        .clone())
+}
+
+fn decode<E>(operation_kind: OperationKind, event_json: Value) -> Result<E, ReliabilityError>
+where
+    E: serde::de::DeserializeOwned + crate::event_metadata::EvidenceEventMetadata,
+{
     let event = serde_json::from_value::<E>(event_json)?;
     if event.operation_identity().kind != operation_kind {
         return Err(ReliabilityError::OperationMismatch);
     }
     event.verify_integrity()?;
-    Ok(event.sequence_number())
+    Ok(event)
 }
 
 fn build<E>(
@@ -434,5 +496,44 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn persisted_merkle_chain_verifier_rejects_mixed_operation_identities() {
+        let first = crate::upload_lifecycle_event(
+            "tenant",
+            "repository",
+            "first-operation",
+            "object",
+            "d".repeat(64),
+            UploadLifecycleState::Created,
+            UploadLifecycleState::Created,
+        )
+        .unwrap();
+        let second = crate::upload_lifecycle_event(
+            "tenant",
+            "repository",
+            "second-operation",
+            "object",
+            "d".repeat(64),
+            UploadLifecycleState::Created,
+            UploadLifecycleState::Created,
+        )
+        .unwrap();
+        let first_json = serde_json::to_value(&first).unwrap();
+        let second_json = serde_json::to_value(&second).unwrap();
+        let first_commit =
+            build_persisted_merkle_commit(OperationKind::Upload, first_json.clone()).unwrap();
+        let second_commit =
+            build_persisted_merkle_commit(OperationKind::Upload, second_json.clone()).unwrap();
+
+        assert!(matches!(
+            verify_persisted_event_merkle_chain(
+                OperationKind::Upload,
+                &[first_json, second_json],
+                &[Some(first_commit), Some(second_commit)],
+            ),
+            Err(ReliabilityError::OperationMismatch)
+        ));
     }
 }

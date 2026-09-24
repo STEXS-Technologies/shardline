@@ -15,12 +15,12 @@ use shardline_reliability::{
     StateTransitionEvent, UploadLifecycleState, WebhookDeliveryEvidenceLog,
     WebhookDeliveryIdentity, WebhookDeliveryLifecycleEvent, WebhookDeliveryLifecycleState,
     WebhookDeliverySnapshot, baseline_resumable_session_events, baseline_upload_lifecycle_events,
-    build_persisted_merkle_commit_with_previous, persisted_event_sequence,
-    reliability_merkle_commit_json_with_previous, upload_lifecycle_identity, verify_hub_ref_events,
-    verify_oci_object_lifecycle_events, verify_oci_tag_events, verify_provider_lifecycle_events,
-    verify_quarantine_lifecycle_events, verify_resumable_session_events,
-    verify_retention_hold_lifecycle_events, verify_s3_object_events,
-    verify_upload_lifecycle_events, verify_webhook_delivery_events,
+    build_persisted_merkle_commit_with_previous, persisted_event_identity,
+    persisted_event_sequence, reliability_merkle_commit_json_with_previous,
+    upload_lifecycle_identity, verify_hub_ref_events, verify_oci_object_lifecycle_events,
+    verify_oci_tag_events, verify_provider_lifecycle_events, verify_quarantine_lifecycle_events,
+    verify_resumable_session_events, verify_retention_hold_lifecycle_events,
+    verify_s3_object_events, verify_upload_lifecycle_events, verify_webhook_delivery_events,
 };
 use sqlx::{
     Error as SqlxError, PgPool, Postgres, Row, Transaction, postgres::PgPoolOptions, query,
@@ -2096,6 +2096,17 @@ fn verify_persisted_reliability_row(
             "unknown reliability operation kind {operation_kind_text} for {operation_id} at sequence {sequence}"
         ))
     })?;
+    let event_identity = persisted_event_identity(operation_kind, event_json.clone()).map_err(|error| {
+        DatabaseMigrationError::Backfill(format!(
+            "invalid persisted event identity kind={operation_kind_text} operation={operation_id} sequence={sequence}: {error}"
+        ))
+    })?;
+    if event_identity.operation_id != operation_id {
+        return Err(DatabaseMigrationError::Backfill(format!(
+            "persisted event operation does not match row kind={operation_kind_text} row_operation={operation_id} event_operation={} sequence={sequence}",
+            event_identity.operation_id
+        )));
+    }
     let event_sequence = persisted_event_sequence(operation_kind, event_json.clone()).map_err(|error| {
         DatabaseMigrationError::Backfill(format!(
             "invalid persisted reliability event kind={operation_kind_text} operation={operation_id} sequence={sequence}: {error}"
