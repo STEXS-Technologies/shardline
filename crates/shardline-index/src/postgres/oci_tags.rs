@@ -1,13 +1,16 @@
+use std::collections::HashMap;
+
 use serde_json::{from_value, to_value};
 use sqlx::{PgConnection, Row, postgres::PgRow, query, query_scalar};
 
 use super::{PostgresIndexStore, PostgresMetadataStoreError, u64_to_i64};
 use crate::{OciTagEntry, OciTagStore};
 use shardline_reliability::{
-    OciTagEvidenceLog, OciTagLifecycleEvent, OciTagSnapshot, ReliabilityMerkleCommit,
-    SnapshotEvidence, reliability_merkle_commit_json_with_previous,
-    verify_and_append_snapshot_transition, verify_or_repair_snapshot_evidence,
-    verify_persisted_event_merkle_chain_with_sequences, verify_snapshot_evidence,
+    OciTagEvidenceLog, OciTagLifecycleEvent, OciTagSnapshot, OperationKind,
+    ReliabilityMerkleCommit, SnapshotEvidence, persisted_event_sequence,
+    reliability_merkle_commit_json_with_previous, verify_and_append_snapshot_transition,
+    verify_or_repair_snapshot_evidence, verify_persisted_event_merkle_chain_with_sequences,
+    verify_persisted_merkle_commit_with_previous, verify_snapshot_event, verify_snapshot_evidence,
 };
 
 fn entry_from_row(row: &PgRow) -> Result<OciTagEntry, PostgresMetadataStoreError> {
@@ -80,6 +83,102 @@ async fn verify_tag_evidence(
     let snapshot = OciTagSnapshot::new(scope_namespace, repository, tag, digest_hex)?;
     let evidence = load_tag_evidence(connection, scope_namespace, repository, tag).await?;
     verify_snapshot_evidence(&evidence, &snapshot)?;
+    Ok(())
+}
+
+async fn verify_tag_listing_evidence(
+    connection: &mut PgConnection,
+    values: &[OciTagEntry],
+) -> Result<(), PostgresMetadataStoreError> {
+    if values.is_empty() {
+        return Ok(());
+    }
+    let snapshots = values
+        .iter()
+        .map(|entry| {
+            OciTagSnapshot::new(
+                &entry.scope_namespace,
+                &entry.repository,
+                &entry.tag,
+                Some(entry.digest_hex.clone()),
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let operations = snapshots
+        .iter()
+        .map(OciTagSnapshot::evidence_operation)
+        .collect::<Result<Vec<_>, _>>()?;
+    let operation_ids = operations
+        .iter()
+        .map(|operation| operation.operation_id.clone())
+        .collect::<Vec<_>>();
+    let rows = query(
+        "SELECT DISTINCT ON (current.operation_id)
+                current.operation_id, current.sequence, current.event_json,
+                current.merkle_commit_json,
+                (
+                    SELECT previous.merkle_commit_json
+                    FROM shardline_reliability_events AS previous
+                    WHERE previous.operation_kind = $1
+                      AND previous.operation_id = current.operation_id
+                      AND previous.sequence < current.sequence
+                      AND previous.merkle_commit_json IS NOT NULL
+                    ORDER BY previous.sequence DESC
+                    LIMIT 1
+                ) AS previous_merkle_commit_json
+         FROM shardline_reliability_events AS current
+         WHERE current.operation_kind = $1
+           AND current.operation_id = ANY($2)
+         ORDER BY current.operation_id, current.sequence DESC",
+    )
+    .bind(OperationKind::OciTag.as_str())
+    .bind(&operation_ids)
+    .fetch_all(&mut *connection)
+    .await?;
+    let mut latest = HashMap::with_capacity(rows.len());
+    for row in rows {
+        let operation_id: String = row.try_get("operation_id")?;
+        latest.insert(
+            operation_id,
+            (
+                row.try_get::<i64, _>("sequence")?,
+                row.try_get::<serde_json::Value, _>("event_json")?,
+                row.try_get::<Option<serde_json::Value>, _>("merkle_commit_json")?,
+                row.try_get::<Option<serde_json::Value>, _>("previous_merkle_commit_json")?,
+            ),
+        );
+    }
+    for (snapshot, operation) in snapshots.into_iter().zip(operations) {
+        let operation_id = &operation.operation_id;
+        let Some((row_sequence, event_json, merkle_json, previous_merkle_json)) =
+            latest.remove(operation_id)
+        else {
+            return Err(PostgresMetadataStoreError::Reliability(
+                shardline_reliability::ReliabilityError::OperationMismatch,
+            ));
+        };
+        let event_sequence = persisted_event_sequence(OperationKind::OciTag, event_json.clone())?;
+        if row_sequence != u64_to_i64(event_sequence)? {
+            return Err(PostgresMetadataStoreError::Reliability(
+                shardline_reliability::ReliabilityError::Merkle(
+                    "OCI tag listing evidence sequence mismatch".into(),
+                ),
+            ));
+        }
+        verify_persisted_merkle_commit_with_previous(
+            OperationKind::OciTag,
+            event_json.clone(),
+            merkle_json,
+            previous_merkle_json,
+        )?;
+        let event: OciTagLifecycleEvent = from_value(event_json)?;
+        verify_snapshot_event(&event, &snapshot)?;
+        if event.operation != operation {
+            return Err(PostgresMetadataStoreError::Reliability(
+                shardline_reliability::ReliabilityError::OperationMismatch,
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -456,16 +555,7 @@ impl OciTagStore for PostgresIndexStore {
             .await?
         };
         let values: Vec<_> = rows.iter().map(entry_from_row).collect::<Result<_, _>>()?;
-        for entry in &values {
-            verify_tag_evidence(
-                &mut transaction,
-                &entry.scope_namespace,
-                &entry.repository,
-                &entry.tag,
-                Some(entry.digest_hex.clone()),
-            )
-            .await?;
-        }
+        verify_tag_listing_evidence(&mut transaction, &values).await?;
         transaction.commit().await?;
         Ok(values)
     }
@@ -489,16 +579,7 @@ impl OciTagStore for PostgresIndexStore {
         .fetch_all(&mut *transaction)
         .await?;
         let values: Vec<_> = rows.iter().map(entry_from_row).collect::<Result<_, _>>()?;
-        for entry in &values {
-            verify_tag_evidence(
-                &mut transaction,
-                &entry.scope_namespace,
-                &entry.repository,
-                &entry.tag,
-                Some(entry.digest_hex.clone()),
-            )
-            .await?;
-        }
+        verify_tag_listing_evidence(&mut transaction, &values).await?;
         transaction.commit().await?;
         Ok(values)
     }
