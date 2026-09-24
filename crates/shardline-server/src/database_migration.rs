@@ -290,7 +290,7 @@ const LEGACY_MIGRATION_CHECKSUM_ALIASES: &[(&str, &str)] = &[
     ),
 ];
 
-const SHARDLINE_MIGRATIONS: [DatabaseMigration; 28] = [
+const SHARDLINE_MIGRATIONS: [DatabaseMigration; 29] = [
     DatabaseMigration {
         version: "20260417000000",
         name: "metadata_store",
@@ -470,6 +470,16 @@ const SHARDLINE_MIGRATIONS: [DatabaseMigration; 28] = [
         name: "reliability_merkle_commits",
         up_sql: include_str!("../migrations/20260930000000_reliability_merkle_commits.up.sql"),
         down_sql: include_str!("../migrations/20260930000000_reliability_merkle_commits.down.sql"),
+    },
+    DatabaseMigration {
+        version: "20261001000000",
+        name: "resumable_session_reliability_gate",
+        up_sql: include_str!(
+            "../migrations/20261001000000_resumable_session_reliability_gate.up.sql"
+        ),
+        down_sql: include_str!(
+            "../migrations/20261001000000_resumable_session_reliability_gate.down.sql"
+        ),
     },
 ];
 
@@ -2602,7 +2612,7 @@ mod tests {
 
     #[test]
     fn bundled_migrations_have_expected_count() {
-        assert_eq!(bundled_database_migrations().len(), 28);
+        assert_eq!(bundled_database_migrations().len(), 29);
     }
 
     #[test]
@@ -2672,6 +2682,25 @@ mod tests {
         assert_eq!(migration.version, "20260922000000");
         assert!(migration.up_sql.contains("shardline_reliability_events"));
         assert!(migration.down_sql.contains("shardline_reliability_events"));
+    }
+
+    #[test]
+    fn bundled_migrations_include_resumable_session_reliability_gate() {
+        let migration = bundled_database_migrations()
+            .iter()
+            .find(|migration| migration.name == "resumable_session_reliability_gate")
+            .expect("resumable-session reliability gate migration must be registered");
+        assert_eq!(migration.version, "20261001000000");
+        assert!(
+            migration
+                .up_sql
+                .contains("shardline_resumable_session_reliability_gate")
+        );
+        assert!(
+            migration
+                .down_sql
+                .contains("shardline_resumable_session_reliability_gate")
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

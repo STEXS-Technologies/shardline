@@ -23,6 +23,9 @@ BEGIN
 END;
 $$;
 
+DROP TRIGGER IF EXISTS shardline_resumable_session_reliability_gate
+    ON shardline_resumable_sessions;
+
 CREATE CONSTRAINT TRIGGER shardline_resumable_session_reliability_gate
 AFTER UPDATE OF state ON shardline_resumable_sessions
 DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
