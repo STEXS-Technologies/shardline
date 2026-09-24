@@ -1373,6 +1373,12 @@ mod tests {
             .await
             .ok()?;
         }
+        sqlx::raw_sql(include_str!(
+            "../../../../migrations/20261001000000_resumable_session_reliability_gate.up.sql"
+        ))
+        .execute(&pool)
+        .await
+        .ok()?;
         Some(PostgresIndexStore::new(pool))
     }
 
@@ -1640,6 +1646,41 @@ mod tests {
             .execute(store.pool())
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn postgres_session_same_key_legacy_state_writer_is_rejected() {
+        let Some(store) = store().await else {
+            eprintln!("skipping: no reachable DATABASE_URL");
+            return;
+        };
+        let expiry = Duration::from_secs(
+            u64::try_from(chrono::Utc::now().timestamp()).unwrap_or_default() + 3600,
+        );
+        let session = session("mixed-version-state", expiry);
+        assert!(store.create_resumable_session(&session).await.unwrap());
+
+        let error = sqlx::query(
+            "UPDATE shardline_resumable_sessions
+             SET state = 'completing'
+             WHERE session_id = $1",
+        )
+        .bind(session.session_id())
+        .execute(store.pool())
+        .await
+        .expect_err("legacy state update must be rejected by the deferred gate");
+        assert!(
+            error
+                .to_string()
+                .contains("resumable session state mutation"),
+            "unexpected gate error: {error}"
+        );
+        let current = store
+            .resumable_session_by_id(session.session_id())
+            .await
+            .expect("read unchanged session")
+            .expect("session remains present");
+        assert_eq!(current.state(), ResumableSessionState::Active);
     }
 
     #[tokio::test]
