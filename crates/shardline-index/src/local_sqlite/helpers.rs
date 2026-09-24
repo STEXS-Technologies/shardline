@@ -183,7 +183,7 @@ pub(crate) fn load_verified_event_json_batch(
     Ok(verified)
 }
 
-/// Persists one authenticated evidence event using its typed operation key.
+/// Persists one integrity-checked evidence event using its typed operation key.
 ///
 /// All local durable state machines share this writer so a caller cannot bind
 /// an event under a separately supplied operation kind or operation id.

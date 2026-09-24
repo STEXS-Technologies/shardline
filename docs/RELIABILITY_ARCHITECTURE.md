@@ -51,7 +51,7 @@ The canonical state machines and durable lifecycle snapshots are:
   crash between index cleanup and object deletion remains replayable.
 - retention holds (`active`, `released`, and re-created recovery), recorded as
   complete policy snapshots. Timestamp-derived activity remains the public
-  behavior, while the evidence chain authenticates the policy row and its
+  behavior, while the evidence chain integrity-checks the policy row and its
   release/recovery boundaries.
 - provider webhook delivery claims (`processed` and released retention),
   recorded as typed delivery snapshots. The delivery key remains the public
@@ -59,7 +59,7 @@ The canonical state machines and durable lifecycle snapshots are:
   purge, and re-processing after recovery verifiable.
 - Hub repository refs (`main` and named refs), recorded as typed metadata
   snapshots. Ref updates and deletions use the same optimistic-concurrency
-  boundary as before, while the evidence chain authenticates the materialized
+  boundary as before, while the evidence chain integrity-checks the materialized
   ref head and is verified on reads, writes, and repository cleanup.
 - OCI tags, recorded as typed mutable-pointer snapshots. Tag retargets,
   insert-if-absent, digest-guarded deletion, reads, and listing all verify or
