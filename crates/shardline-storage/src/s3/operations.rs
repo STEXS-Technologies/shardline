@@ -623,9 +623,12 @@ impl S3ObjectStore {
                 // target key while we were uploading parts.
                 if ObjectStore::metadata(self, destination)?.is_some() {
                     store.abort_multipart(&dst, &upload_id).await.ok();
-                    // Content is identical for content-addressed keys,
-                    // so returning AlreadyExists is correct.
-                    return Ok(PutOutcome::AlreadyExists);
+                    // The destination may have been written by a different
+                    // operation while this multipart copy was in flight.
+                    // Compare bytes before treating the race as an
+                    // idempotent success; the destination key is not itself
+                    // proof that it contains the source content.
+                    return existing_copy_outcome(self, source, destination, source_len);
                 }
                 match store.complete_multipart(&dst, &upload_id, part_ids).await {
                     Ok(_) => Ok(PutOutcome::Inserted),

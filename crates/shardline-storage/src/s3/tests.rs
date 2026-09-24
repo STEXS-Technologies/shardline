@@ -1373,6 +1373,25 @@ mod minio_tests {
 
         let idempotent = store.copy_object_if_absent(&src, &dst);
         assert!(matches!(idempotent, Ok(PutOutcome::AlreadyExists)));
+
+        let conflicting_dst = ObjectKey::parse("dst/conflicting-copy.xorb").unwrap();
+        let conflicting_body = b"different copy data";
+        let conflicting_integrity = ObjectIntegrity::new(
+            super::super::chunk_hash(conflicting_body),
+            conflicting_body.len() as u64,
+        );
+        store
+            .put_if_absent(
+                &conflicting_dst,
+                ObjectBody::from_slice(conflicting_body),
+                &conflicting_integrity,
+            )
+            .unwrap();
+        let conflict = store.copy_object_if_absent(&src, &conflicting_dst);
+        assert!(matches!(
+            conflict,
+            Err(S3ObjectStoreError::ExistingObjectConflict)
+        ));
     }
 
     /// Seeds an object via the store (through the key prefix).
