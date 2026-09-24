@@ -1181,7 +1181,7 @@ pub(crate) fn prepare_connection(connection: &mut Connection) -> Result<(), Loca
     // Install the busy handler before any PRAGMA that may need a database lock.
     // Concurrent protocol uploads open independent connections, and setting WAL
     // mode can otherwise fail immediately while another connection is writing.
-    connection.busy_timeout(Duration::from_secs(5))?;
+    connection.busy_timeout(Duration::from_secs(30))?;
     let _enabled = connection.set_db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true)?;
     // Reading the mode is connection-local and does not take the schema lock.
     // Re-applying `journal_mode=WAL` for every request connection turns a

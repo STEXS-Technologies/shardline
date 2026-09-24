@@ -723,7 +723,7 @@ async fn drill2_gc_abort_mid_mark_recovery_and_fixed_point() {
     // persist hundreds of quarantine records.  Keep the assertion bounded,
     // but allow enough time for the intentionally large fault-injection
     // fixture to reach a deterministic point before aborting GC.
-    wait_until(Duration::from_secs(60), "all orphans quarantined", || {
+    wait_until(Duration::from_secs(180), "all orphans quarantined", || {
         quarantine_row_count(&root) >= ORPHAN_COUNT
             || quarantine_manifest_files(&root) >= ORPHAN_COUNT
     })
