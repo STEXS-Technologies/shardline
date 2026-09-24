@@ -864,6 +864,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn s3_object_read_rejects_evidence_bound_to_another_operation() {
+        let storage = shardline_test_support::TempStorage::new();
+        let store = LocalIndexStore::new(storage.path_buf()).unwrap();
+        let value = entry("global", "model.bin", "file-a", 7, 1);
+        store.upsert_s3_object(&value).await.unwrap();
+
+        let connection = store.open_connection().unwrap();
+        connection
+            .execute(
+                "UPDATE shardline_reliability_events
+                 SET operation_id = 'rewritten-operation'
+                 WHERE operation_kind = 'S3Object'",
+                [],
+            )
+            .unwrap();
+
+        assert!(
+            store
+                .scan_s3_object_exact("global", "model.bin")
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
     async fn s3_object_read_rejects_missing_predecessor_commitment() {
         let storage = shardline_test_support::TempStorage::new();
         let store = LocalIndexStore::new(storage.path_buf()).unwrap();

@@ -59,10 +59,11 @@ use shardline_reliability::{
     LifecycleEvent, OciObjectEvidenceLog, OciObjectIdentity, OciObjectLifecycleState,
     OciObjectSnapshot, ReliabilityMerkleCommit, ResumableLifecycleState, StateTransitionEvent,
     UploadLifecycleState, baseline_resumable_session_events, baseline_upload_lifecycle_events,
-    build_persisted_merkle_commit_with_previous, persisted_event_sequence,
-    reliability_merkle_commit_json_with_previous, upload_lifecycle_identity,
-    verify_persisted_merkle_commit_with_previous, verify_provider_lifecycle_events,
-    verify_resumable_session_events, verify_upload_lifecycle_events,
+    build_persisted_merkle_commit_with_previous, persisted_event_identity,
+    persisted_event_sequence, reliability_merkle_commit_json_with_previous,
+    upload_lifecycle_identity, verify_persisted_merkle_commit_with_previous,
+    verify_provider_lifecycle_events, verify_resumable_session_events,
+    verify_upload_lifecycle_events,
 };
 
 use crate::{OciObjectKind, provider_evidence::snapshot_from_state};
@@ -106,7 +107,14 @@ pub(crate) fn load_verified_event_json(
                 format!("persisted row sequence is out of range: {error}"),
             ))
         })?);
-        events.push(from_str::<Value>(&event_json)?);
+        let event = from_str::<Value>(&event_json)?;
+        let identity = persisted_event_identity(operation_kind, event.clone())?;
+        if identity.operation_id != operation_id {
+            return Err(LocalIndexStoreError::Reliability(
+                shardline_reliability::ReliabilityError::OperationMismatch,
+            ));
+        }
+        events.push(event);
         merkle_commits.push(
             merkle_commit_json
                 .map(|json| from_str::<Value>(&json))
@@ -181,6 +189,12 @@ pub(crate) fn load_latest_verified_event_json(
             shardline_reliability::ReliabilityError::Merkle(
                 "persisted row sequence does not match its event".into(),
             ),
+        ));
+    }
+    let identity = persisted_event_identity(operation_kind, event_json.clone())?;
+    if identity.operation_id != operation_id {
+        return Err(LocalIndexStoreError::Reliability(
+            shardline_reliability::ReliabilityError::OperationMismatch,
         ));
     }
     verify_persisted_merkle_commit_with_previous(

@@ -112,6 +112,11 @@ async fn load_s3_object_evidence_head(
         ));
     }
     let event: S3ObjectLifecycleEvent = from_value(event_json.clone())?;
+    if event.operation.operation_id != operation.operation_id {
+        return Err(PostgresMetadataStoreError::Reliability(
+            shardline_reliability::ReliabilityError::OperationMismatch,
+        ));
+    }
     verify_persisted_merkle_commit_with_previous(
         OperationKind::S3Object,
         event_json,
@@ -819,6 +824,39 @@ mod tests {
         );
         assert!(
             S3ObjectIndexStore::scan_s3_objects(&store, &scope, "", None, 10)
+                .await
+                .is_err()
+        );
+        cleanup(&pool, &scope).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pg_s3_object_read_rejects_evidence_bound_to_another_operation() {
+        let Some(pool) = connect_postgres().await else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let scope = format!("s3-operation-key-{}", std::process::id());
+        let store = PostgresIndexStore::new(pool.clone());
+        let value = entry(&scope, "model.bin", "file-a");
+        S3ObjectIndexStore::upsert_s3_object(&store, &value)
+            .await
+            .expect("upsert");
+        query(
+            "UPDATE shardline_reliability_events
+             SET operation_id = $1
+             WHERE operation_kind = $2
+               AND event_json->'operation'->>'tenant' = $3",
+        )
+        .bind("rewritten-operation")
+        .bind(OperationKind::S3Object.as_str())
+        .bind(&scope)
+        .execute(&pool)
+        .await
+        .expect("rewrite evidence row key");
+
+        assert!(
+            S3ObjectIndexStore::scan_s3_object_exact(&store, &scope, "model.bin")
                 .await
                 .is_err()
         );

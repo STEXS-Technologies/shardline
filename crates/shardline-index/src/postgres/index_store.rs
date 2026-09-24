@@ -10,7 +10,7 @@ use shardline_reliability::{
     RetentionHoldLifecycleEvent, RetentionHoldLifecycleState, RetentionHoldSnapshot,
     RetentionObjectIdentity, SnapshotEvidence, WebhookDeliveryEvidenceLog, WebhookDeliveryIdentity,
     WebhookDeliveryLifecycleState, WebhookDeliverySnapshot, append_or_baseline_snapshot_evidence,
-    baseline_upload_lifecycle_events, persisted_event_sequence,
+    baseline_upload_lifecycle_events, persisted_event_identity, persisted_event_sequence,
     reliability_merkle_commit_json_with_previous, upload_lifecycle_event,
     upload_lifecycle_identity, verify_and_append_snapshot_transition,
     verify_and_reactivate_quarantine, verify_persisted_event_merkle_chain,
@@ -87,6 +87,12 @@ pub(super) async fn load_postgres_latest_evidence_event(
             shardline_reliability::ReliabilityError::Merkle(
                 "reliability row sequence does not match its event".into(),
             ),
+        ));
+    }
+    let identity = persisted_event_identity(operation_kind, event_json.clone())?;
+    if identity.operation_id != operation_id {
+        return Err(PostgresMetadataStoreError::Reliability(
+            shardline_reliability::ReliabilityError::OperationMismatch,
         ));
     }
     verify_persisted_merkle_commit_with_previous(

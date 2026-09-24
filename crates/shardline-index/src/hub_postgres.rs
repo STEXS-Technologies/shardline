@@ -61,7 +61,13 @@ async fn load_hub_ref_evidence(
             })?,
         );
         let value: serde_json::Value = row.try_get("event_json")?;
-        events.push(from_value::<HubRefLifecycleEvent>(value.clone())?);
+        let event = from_value::<HubRefLifecycleEvent>(value.clone())?;
+        if event.operation.operation_id != operation.operation_id {
+            return Err(PostgresMetadataStoreError::Reliability(
+                shardline_reliability::ReliabilityError::OperationMismatch,
+            ));
+        }
+        events.push(event);
         event_json.push(value);
         merkle_commits.push(row.try_get("merkle_commit_json")?);
     }
