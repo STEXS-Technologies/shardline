@@ -918,10 +918,10 @@ impl AsyncIndexStore for super::PostgresIndexStore {
             })?;
             if evidence_was_empty {
                 for stored_event in evidence.events() {
-                    insert_reliability_event(&mut *transaction, stored_event).await?;
+                    insert_reliability_event(&mut transaction, stored_event).await?;
                 }
             } else {
-                insert_reliability_event(&mut *transaction, event).await?;
+                insert_reliability_event(&mut transaction, event).await?;
             }
             transaction.commit().await?;
             Ok(())
@@ -966,10 +966,10 @@ impl AsyncIndexStore for super::PostgresIndexStore {
                 })?;
                 if evidence_was_empty {
                     for stored_event in evidence.events() {
-                        insert_reliability_event(&mut *transaction, stored_event).await?;
+                        insert_reliability_event(&mut transaction, stored_event).await?;
                     }
                 } else {
-                    insert_reliability_event(&mut *transaction, event).await?;
+                    insert_reliability_event(&mut transaction, event).await?;
                 }
             }
             transaction.commit().await?;
@@ -1035,10 +1035,10 @@ impl AsyncIndexStore for super::PostgresIndexStore {
             })?;
             if evidence_was_empty {
                 for stored_event in evidence.events() {
-                    insert_reliability_event(&mut *transaction, stored_event).await?;
+                    insert_reliability_event(&mut transaction, stored_event).await?;
                 }
             } else {
-                insert_reliability_event(&mut *transaction, event).await?;
+                insert_reliability_event(&mut transaction, event).await?;
             }
             transaction.commit().await?;
             Ok(true)
@@ -1175,10 +1175,10 @@ impl AsyncIndexStore for super::PostgresIndexStore {
                     verify_and_append_snapshot_transition(evidence, active, released)?;
                 if evidence_was_empty {
                     for event in evidence.events() {
-                        insert_reliability_event(&mut *transaction, event).await?;
+                        insert_reliability_event(&mut transaction, event).await?;
                     }
                 } else if let Some(event) = evidence.events().last() {
-                    insert_reliability_event(&mut *transaction, event).await?;
+                    insert_reliability_event(&mut transaction, event).await?;
                 }
             }
             transaction.commit().await?;
@@ -1237,10 +1237,10 @@ impl AsyncIndexStore for super::PostgresIndexStore {
             }
             if evidence_was_empty {
                 for event in evidence.events() {
-                    insert_reliability_event(&mut *transaction, event).await?;
+                    insert_reliability_event(&mut transaction, event).await?;
                 }
             } else if let Some(event) = evidence.events().last() {
-                insert_reliability_event(&mut *transaction, event).await?;
+                insert_reliability_event(&mut transaction, event).await?;
             }
             transaction.commit().await?;
             Ok(true)
@@ -1319,10 +1319,10 @@ impl AsyncIndexStore for super::PostgresIndexStore {
             .await?;
             if evidence_was_empty {
                 for event in evidence.events() {
-                    insert_reliability_event(&mut *transaction, event).await?;
+                    insert_reliability_event(&mut transaction, event).await?;
                 }
             } else if let Some(event) = evidence.events().last() {
-                insert_reliability_event(&mut *transaction, event).await?;
+                insert_reliability_event(&mut transaction, event).await?;
             }
             transaction.commit().await?;
             Ok(result.rows_affected() > 0)
@@ -1379,10 +1379,10 @@ impl AsyncIndexStore for super::PostgresIndexStore {
             }
             if evidence_was_empty {
                 for event in evidence.events() {
-                    insert_reliability_event(&mut *transaction, event).await?;
+                    insert_reliability_event(&mut transaction, event).await?;
                 }
             } else if let Some(event) = evidence.events().last() {
-                insert_reliability_event(&mut *transaction, event).await?;
+                insert_reliability_event(&mut transaction, event).await?;
             }
             transaction.commit().await?;
             Ok(true)
@@ -1426,10 +1426,10 @@ impl AsyncIndexStore for super::PostgresIndexStore {
                 .await?;
                 if evidence_was_empty {
                     for event in evidence.events() {
-                        insert_reliability_event(&mut *transaction, event).await?;
+                        insert_reliability_event(&mut transaction, event).await?;
                     }
                 } else if let Some(event) = evidence.events().last() {
-                    insert_reliability_event(&mut *transaction, event).await?;
+                    insert_reliability_event(&mut transaction, event).await?;
                 }
             }
             transaction.commit().await?;

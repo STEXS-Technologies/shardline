@@ -39,7 +39,7 @@ pub(crate) async fn connect_isolated_postgres() -> Option<PgPool> {
         .await
         .ok()?;
     let stale_schema_prefix = format!("shardline_test_{}_%", std::process::id());
-    let _ = CLEANED_STALE_SCHEMAS
+    CLEANED_STALE_SCHEMAS
         .get_or_init(|| async {
             let schema_names = query_scalar::<_, String>(
                 "SELECT nspname
@@ -51,9 +51,10 @@ pub(crate) async fn connect_isolated_postgres() -> Option<PgPool> {
             .await
             .unwrap_or_default();
             for schema_name in schema_names {
-                let _ = query(&format!("DROP SCHEMA {schema_name} CASCADE"))
+                query(&format!("DROP SCHEMA {schema_name} CASCADE"))
                     .execute(&admin_pool)
-                    .await;
+                    .await
+                    .ok();
             }
         })
         .await;

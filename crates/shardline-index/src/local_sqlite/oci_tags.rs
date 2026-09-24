@@ -88,7 +88,7 @@ fn verify_oci_tag_listing_evidence(
         .map(|operation| operation.operation_id.clone())
         .collect::<Vec<_>>();
     let placeholders = (0..operation_ids.len())
-        .map(|index| format!("?{}", index + 2))
+        .map(|index| format!("?{}", index.saturating_add(2)))
         .collect::<Vec<_>>()
         .join(", ");
     let sql = format!(
@@ -111,7 +111,7 @@ fn verify_oci_tag_listing_evidence(
                  AND latest.operation_id = current.operation_id
            )"
     );
-    let mut parameters = Vec::with_capacity(operation_ids.len() + 1);
+    let mut parameters = Vec::with_capacity(operation_ids.len().saturating_add(1));
     parameters.push(OperationKind::OciTag.as_str().to_owned());
     parameters.extend(operation_ids.iter().cloned());
     let mut statement = transaction.prepare(&sql)?;
@@ -586,8 +586,8 @@ mod tests {
                 .await
                 .is_err()
         );
-        let connection = store.open_connection().unwrap();
-        let count: i64 = connection
+        let other_connection = store.open_connection().unwrap();
+        let count: i64 = other_connection
             .query_row(
                 "SELECT COUNT(*) FROM shardline_reliability_events
                  WHERE operation_kind = 'OciTag'",

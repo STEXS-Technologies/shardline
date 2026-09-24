@@ -250,7 +250,7 @@ fn verify_s3_object_listing_evidence(
         operations.push(snapshot.evidence_operation()?.operation_id);
     }
     let placeholders = (0..operations.len())
-        .map(|index| format!("?{}", index + 2))
+        .map(|index| format!("?{}", index.saturating_add(2)))
         .collect::<Vec<_>>()
         .join(", ");
     let sql = format!(
@@ -272,7 +272,7 @@ fn verify_s3_object_listing_evidence(
                  AND latest.operation_id = current.operation_id
            )"
     );
-    let mut parameters = Vec::with_capacity(operations.len() + 1);
+    let mut parameters = Vec::with_capacity(operations.len().saturating_add(1));
     parameters.push(OperationKind::S3Object.as_str().to_owned());
     parameters.extend(operations.iter().cloned());
     let mut statement = transaction.prepare(&sql)?;

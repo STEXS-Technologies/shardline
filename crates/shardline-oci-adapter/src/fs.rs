@@ -210,7 +210,7 @@ pub(crate) async fn persist_upload_session_with_evidence(
             }
             Err(error) => {
                 serde_json::from_slice::<OciUploadSession>(&bytes)
-                    .map_err(|_| OciAdapterError::Json(error))?;
+                    .map_err(|_legacy_error| OciAdapterError::Json(error))?;
                 None
             }
         },
@@ -240,7 +240,7 @@ pub(crate) async fn persist_upload_session_with_evidence(
 
     if let Some(head) = journal_head {
         let records = read_evidence_journal(root, session_id).await?;
-        let head = usize::try_from(head).map_err(|_| OciAdapterError::Overflow)?;
+        let head = usize::try_from(head)?;
         let committed = records.get(..head).ok_or_else(|| {
             OciAdapterError::Reliability("OCI evidence journal head is invalid".into())
         })?;
@@ -468,7 +468,7 @@ async fn read_persisted_upload_session_with_snapshot(
         };
     if let Some(head) = journal_head {
         let records = read_evidence_journal(root, session_id).await?;
-        let head = usize::try_from(head).map_err(|_| OciAdapterError::Overflow)?;
+        let head = usize::try_from(head).map_err(|_conversion_error| OciAdapterError::Overflow)?;
         let committed = records.get(..head).ok_or_else(|| {
             OciAdapterError::Reliability("OCI evidence journal head is missing".into())
         })?;
@@ -533,7 +533,7 @@ async fn read_persisted_upload_session_with_snapshot(
     };
     let snapshot = session_snapshot(session_id, &session)?;
     let snapshot_evidence = if stored_snapshot_evidence.events().is_empty() {
-        SnapshotEvidenceLog::baseline(snapshot.clone())
+        SnapshotEvidenceLog::baseline(snapshot)
             .map_err(|error| OciAdapterError::Reliability(error.to_string()))?
     } else {
         verify_snapshot_evidence(&stored_snapshot_evidence, &snapshot)
@@ -617,10 +617,10 @@ fn append_journal_file(
     file.sync_all()?;
     ensure_parent_path_matches_anchor(&anchored, "journal parent changed during append")?;
     old_len
-        .checked_add(u64::try_from(bytes.len()).map_err(|_| {
+        .checked_add(u64::try_from(bytes.len()).map_err(|error| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                "journal byte length overflow",
+                format!("journal byte length overflow: {error}"),
             )
         })?)
         .ok_or_else(|| {
@@ -647,10 +647,10 @@ fn append_journal_file(
     file.write_all(bytes)?;
     file.sync_all()?;
     old_len
-        .checked_add(u64::try_from(bytes.len()).map_err(|_| {
+        .checked_add(u64::try_from(bytes.len()).map_err(|error| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                "journal byte length overflow",
+                format!("journal byte length overflow: {error}"),
             )
         })?)
         .ok_or_else(|| {
@@ -734,13 +734,19 @@ fn prepare_journal_append(
     }
     if records > committed_head {
         let mut file = OpenOptions::new().write(true).truncate(true).open(path)?;
-        file.write_all(&bytes[..committed_bytes])?;
+        let committed_prefix = bytes.get(..committed_bytes).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "committed journal byte length exceeds journal",
+            )
+        })?;
+        file.write_all(committed_prefix)?;
         file.sync_all()?;
     }
-    u64::try_from(committed_bytes).map_err(|_| {
+    u64::try_from(committed_bytes).map_err(|error| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            "journal byte length overflow",
+            format!("journal byte length overflow: {error}"),
         )
     })
 }

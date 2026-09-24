@@ -390,6 +390,11 @@ pub async fn touch_upload_session(
 
 /// Explicitly persists canonical lifecycle, snapshot, and Merkle evidence for
 /// a legacy upload session. Normal reads never mutate filesystem state.
+///
+/// # Errors
+///
+/// Returns an error when session metadata or evidence cannot be read, verified,
+/// repaired, or durably persisted.
 pub async fn repair_upload_session_evidence(
     root: &Path,
     session_id: &str,
@@ -404,7 +409,7 @@ pub async fn repair_upload_session_evidence(
     let _guard = persist_lock.lock().await;
     let (evidence, snapshot_evidence) = if let Some(head) = persisted.journal_head {
         let records = read_evidence_journal(root, session_id).await?;
-        let head = usize::try_from(head).map_err(|_| OciAdapterError::Overflow)?;
+        let head = usize::try_from(head)?;
         let committed = records.get(..head).ok_or_else(|| {
             OciAdapterError::Reliability("OCI evidence journal head is missing".into())
         })?;

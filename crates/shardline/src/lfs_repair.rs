@@ -25,6 +25,11 @@ pub enum LfsRepairRuntimeError {
 }
 
 /// Rebuilds one LFS patch evidence envelope from an explicit operator state file.
+///
+/// # Errors
+///
+/// Returns an error when configuration, the operator state file, or the
+/// authoritative LFS materialized state cannot be read or validated.
 pub fn run_lfs_evidence_repair(
     root: Option<&Path>,
     state_file: &Path,

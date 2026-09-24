@@ -29,6 +29,15 @@ struct LfsMerkleAppend {
     record: shardline_reliability::PersistedMerkleJournalRecord,
 }
 
+struct LfsJournalAppend<'events, T> {
+    manifest_path: &'events Path,
+    journal_path: &'events Path,
+    schema: &'events str,
+    previous_head: u64,
+    events: &'events [T],
+    merkle: Option<&'events LfsMerkleAppend>,
+}
+
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
 struct JournalManifest {
     schema: String,
@@ -143,8 +152,8 @@ fn load_merkle_journal(
         .map(serde_json::from_slice)
         .collect::<Result<Vec<shardline_reliability::PersistedMerkleJournalRecord>, _>>()
         .map_err(invalid_evidence)?;
-    let count =
-        usize::try_from(head).map_err(|_| invalid_evidence("LFS Merkle journal head overflow"))?;
+    let count = usize::try_from(head)
+        .map_err(|_error| invalid_evidence("LFS Merkle journal head overflow"))?;
     if count > records.len() {
         return Err(invalid_evidence("LFS Merkle journal head exceeds its log"));
     }
@@ -191,7 +200,7 @@ fn load_committed_merkle_journal(
         return Ok(Some(records));
     };
     let committed_head = usize::try_from(committed_head)
-        .map_err(|_| invalid_evidence("LFS Merkle head overflow"))?;
+        .map_err(|_error| invalid_evidence("LFS Merkle head overflow"))?;
     if committed_head > records.len() {
         return Err(invalid_evidence(
             "LFS committed Merkle head exceeds its journal",
@@ -395,7 +404,8 @@ fn read_journal<T: DeserializeOwned>(
         let mut record: Vec<T> = serde_json::from_slice(line).map_err(invalid_evidence)?;
         events.append(&mut record);
     }
-    let count = usize::try_from(head).map_err(|_| invalid_evidence("LFS journal head overflow"))?;
+    let count =
+        usize::try_from(head).map_err(|_error| invalid_evidence("LFS journal head overflow"))?;
     if count > events.len() {
         return Err(invalid_evidence(
             "LFS evidence journal head exceeds its log",
@@ -429,8 +439,7 @@ fn prepare_journal_append(
         Err(error) => return Err(error.into()),
     };
     if let Some(expected_bytes) = manifest.bytes {
-        let actual_bytes = u64::try_from(bytes.len())
-            .map_err(|_| invalid_evidence("LFS journal byte length overflow"))?;
+        let actual_bytes = bytes.len() as u64;
         if actual_bytes < expected_bytes {
             return Err(invalid_evidence(
                 "LFS journal is shorter than its committed byte length",
@@ -441,10 +450,12 @@ fn prepare_journal_append(
                 .write(true)
                 .truncate(true)
                 .open(journal_path)?;
-            file.write_all(
-                &bytes[..usize::try_from(expected_bytes)
-                    .map_err(|_| invalid_evidence("LFS journal byte length overflow"))?],
-            )?;
+            let expected_bytes = usize::try_from(expected_bytes)
+                .map_err(|_error| invalid_evidence("LFS journal byte length overflow"))?;
+            let committed_prefix = bytes
+                .get(..expected_bytes)
+                .ok_or_else(|| invalid_evidence("LFS journal byte length exceeds its log"))?;
+            file.write_all(committed_prefix)?;
             file.sync_all()?;
         }
         return Ok(());
@@ -462,7 +473,7 @@ fn prepare_journal_append(
                     .as_array()
                     .ok_or_else(|| invalid_evidence("LFS journal record is not an array"))?;
                 u64::try_from(array.len())
-                    .map_err(|_| invalid_evidence("LFS journal event count overflow"))?
+                    .map_err(|_error| invalid_evidence("LFS journal event count overflow"))?
             };
             records = records
                 .checked_add(units)
@@ -471,7 +482,7 @@ fn prepare_journal_append(
                 committed_bytes = committed_bytes
                     .checked_add(line.len())
                     .ok_or_else(|| invalid_evidence("LFS journal byte count overflow"))?;
-            } else if records - units < head {
+            } else if records.saturating_sub(units) < head {
                 return Err(invalid_evidence(
                     "LFS journal head splits a persisted record",
                 ));
@@ -486,7 +497,10 @@ fn prepare_journal_append(
             .write(true)
             .truncate(true)
             .open(journal_path)?;
-        file.write_all(&bytes[..committed_bytes])?;
+        let committed_prefix = bytes
+            .get(..committed_bytes)
+            .ok_or_else(|| invalid_evidence("LFS journal byte length exceeds its log"))?;
+        file.write_all(committed_prefix)?;
         file.sync_all()?;
     }
     Ok(())
@@ -495,28 +509,22 @@ fn prepare_journal_append(
 fn append_journal<T: Serialize>(
     dir: &Path,
     oid: &str,
-    manifest_path: &Path,
-    journal_path: &Path,
-    schema: &str,
-    previous_head: u64,
-    events: &[T],
-    merkle: Option<&LfsMerkleAppend>,
+    append: &LfsJournalAppend<'_, T>,
 ) -> Result<(), ServerError> {
-    if events.is_empty() {
+    if append.events.is_empty() {
         return Ok(());
     }
-    prepare_journal_append(manifest_path, journal_path, schema)?;
-    let mut bytes = serde_json::to_vec(events).map_err(invalid_evidence)?;
+    prepare_journal_append(append.manifest_path, append.journal_path, append.schema)?;
+    let mut bytes = serde_json::to_vec(append.events).map_err(invalid_evidence)?;
     bytes.push(b'\n');
     let mut file = fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(journal_path)?;
+        .open(append.journal_path)?;
     file.write_all(&bytes)?;
     file.sync_all()?;
-    let journal_bytes = u64::try_from(fs::metadata(journal_path)?.len())
-        .map_err(|_| invalid_evidence("LFS journal byte length overflow"))?;
-    if let Some(merkle) = merkle {
+    let journal_bytes = fs::metadata(append.journal_path)?.len();
+    if let Some(merkle) = append.merkle {
         prepare_journal_append(
             &merkle_path(dir, oid),
             &merkle_journal_path(dir, oid),
@@ -536,10 +544,7 @@ fn append_journal<T: Serialize>(
                 .previous_head
                 .checked_add(1)
                 .ok_or_else(|| invalid_evidence("LFS Merkle journal head overflow"))?,
-            bytes: Some(
-                u64::try_from(fs::metadata(merkle_journal_path(dir, oid))?.len())
-                    .map_err(|_| invalid_evidence("LFS Merkle journal byte length overflow"))?,
-            ),
+            bytes: Some(fs::metadata(merkle_journal_path(dir, oid))?.len()),
             merkle_head: Some(
                 merkle
                     .previous_head
@@ -551,7 +556,8 @@ fn append_journal<T: Serialize>(
             serde_json::to_vec(&merkle_manifest).map_err(invalid_evidence)?;
         write_sidecar_atomically(dir, &merkle_path(dir, oid), &merkle_manifest_bytes)?;
     }
-    let merkle_head = merkle
+    let merkle_head = append
+        .merkle
         .map(|value| {
             value
                 .previous_head
@@ -559,19 +565,20 @@ fn append_journal<T: Serialize>(
                 .ok_or_else(|| invalid_evidence("LFS Merkle journal head overflow"))
         })
         .transpose()?;
-    let manifest = JournalManifest {
-        schema: schema.to_owned(),
-        head: previous_head
-            .checked_add(
-                u64::try_from(events.len())
-                    .map_err(|_| invalid_evidence("LFS evidence journal event count overflow"))?,
-            )
-            .ok_or_else(|| invalid_evidence("LFS evidence journal head overflow"))?,
-        bytes: Some(journal_bytes),
-        merkle_head,
-    };
+    let manifest =
+        JournalManifest {
+            schema: append.schema.to_owned(),
+            head: append
+                .previous_head
+                .checked_add(u64::try_from(append.events.len()).map_err(|_error| {
+                    invalid_evidence("LFS evidence journal event count overflow")
+                })?)
+                .ok_or_else(|| invalid_evidence("LFS evidence journal head overflow"))?,
+            bytes: Some(journal_bytes),
+            merkle_head,
+        };
     let manifest_bytes = serde_json::to_vec(&manifest).map_err(invalid_evidence)?;
-    write_sidecar_atomically(dir, manifest_path, &manifest_bytes)
+    write_sidecar_atomically(dir, append.manifest_path, &manifest_bytes)
 }
 
 fn materialized_snapshot(input: &LfsPatchSnapshotInput<'_>) -> Result<DigestSnapshot, ServerError> {
@@ -608,7 +615,9 @@ pub(super) fn record_snapshot(
     let mut log = previous;
     log = append_or_baseline_snapshot_evidence(log, snapshot).map_err(invalid_evidence)?;
     let events = if head.is_some() {
-        &log.events()[previous_len..]
+        log.events()
+            .get(previous_len..)
+            .ok_or_else(|| invalid_evidence("LFS snapshot evidence history regressed"))?
     } else {
         log.events()
     };
@@ -616,12 +625,14 @@ pub(super) fn record_snapshot(
     append_journal(
         dir,
         input.oid,
-        &path,
-        &snapshot_journal_path(dir, input.oid),
-        SNAPSHOT_JOURNAL_SCHEMA,
-        head.unwrap_or(0),
-        events,
-        merkle.as_ref(),
+        &LfsJournalAppend {
+            manifest_path: &path,
+            journal_path: &snapshot_journal_path(dir, input.oid),
+            schema: SNAPSHOT_JOURNAL_SCHEMA,
+            previous_head: head.unwrap_or(0),
+            events,
+            merkle: merkle.as_ref(),
+        },
     )
 }
 
@@ -722,7 +733,9 @@ pub(super) fn record(
     .map_err(invalid_evidence)?;
     let path = evidence_path(dir, oid);
     let events = if head.is_some() {
-        &log.events()[previous_len..]
+        log.events()
+            .get(previous_len..)
+            .ok_or_else(|| invalid_evidence("LFS evidence history regressed"))?
     } else {
         log.events()
     };
@@ -730,18 +743,25 @@ pub(super) fn record(
     append_journal(
         dir,
         oid,
-        &path,
-        &evidence_journal_path(dir, oid),
-        EVIDENCE_JOURNAL_SCHEMA,
-        head.unwrap_or(0),
-        events,
-        merkle.as_ref(),
+        &LfsJournalAppend {
+            manifest_path: &path,
+            journal_path: &evidence_journal_path(dir, oid),
+            schema: EVIDENCE_JOURNAL_SCHEMA,
+            previous_head: head.unwrap_or(0),
+            events,
+            merkle: merkle.as_ref(),
+        },
     )
 }
 
 /// Explicitly rebuilds LFS reliability sidecars from operator-verified
 /// materialized state. This is deliberately not called by any read or repair
 /// sweep: replacing a broken evidence chain is a privileged recovery action.
+///
+/// # Errors
+///
+/// Returns an error when the operator-supplied state does not match the
+/// authoritative LFS files or the repaired evidence cannot be persisted.
 pub fn repair_lfs_patch_evidence(
     dir: &Path,
     input: &LfsPatchEvidenceRepairInput,
@@ -816,24 +836,28 @@ pub fn repair_lfs_patch_evidence(
     append_journal(
         dir,
         &input.oid,
-        &evidence_path(dir, &input.oid),
-        &evidence_journal_path(dir, &input.oid),
-        EVIDENCE_JOURNAL_SCHEMA,
-        0,
-        lifecycle.events(),
-        lifecycle_merkle.as_ref(),
+        &LfsJournalAppend {
+            manifest_path: &evidence_path(dir, &input.oid),
+            journal_path: &evidence_journal_path(dir, &input.oid),
+            schema: EVIDENCE_JOURNAL_SCHEMA,
+            previous_head: 0,
+            events: lifecycle.events(),
+            merkle: lifecycle_merkle.as_ref(),
+        },
     )?;
     let snapshot_log = SnapshotEvidenceLog::baseline(snapshot).map_err(invalid_evidence)?;
     let snapshot_merkle = build_lfs_merkle_append(dir, &input.oid, &[], snapshot_log.events())?;
     append_journal(
         dir,
         &input.oid,
-        &snapshot_path(dir, &input.oid),
-        &snapshot_journal_path(dir, &input.oid),
-        SNAPSHOT_JOURNAL_SCHEMA,
-        0,
-        snapshot_log.events(),
-        snapshot_merkle.as_ref(),
+        &LfsJournalAppend {
+            manifest_path: &snapshot_path(dir, &input.oid),
+            journal_path: &snapshot_journal_path(dir, &input.oid),
+            schema: SNAPSHOT_JOURNAL_SCHEMA,
+            previous_head: 0,
+            events: snapshot_log.events(),
+            merkle: snapshot_merkle.as_ref(),
+        },
     )
 }
 

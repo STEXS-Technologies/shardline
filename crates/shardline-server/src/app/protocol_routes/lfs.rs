@@ -3593,7 +3593,7 @@ mod tests {
                     .uri(&uri)
                     .header(CONTENT_RANGE, format!("bytes 0-{}/{}", total - 1, total))
                     .header(CONTENT_LENGTH, total)
-                    .body(Body::from(damaged.to_vec()))
+                    .body(Body::from(damaged.clone()))
                     .expect("request"),
             )
             .await
@@ -3621,7 +3621,7 @@ mod tests {
                     .uri(&uri)
                     .header(CONTENT_RANGE, format!("bytes 0-{}/{}", total - 1, total))
                     .header(CONTENT_LENGTH, total)
-                    .body(Body::from(expected.to_vec()))
+                    .body(Body::from(expected.clone()))
                     .expect("request"),
             )
             .await

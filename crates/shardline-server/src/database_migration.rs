@@ -706,11 +706,11 @@ async fn repair_reliability_operation(
     .bind(operation_id)
     .fetch_one(pool)
     .await?;
-    if operation_kind == OperationKind::Visibility && journal_exists {
-        if repair_published_oci_visibility_operation(pool, operation_id).await? {
-            return verify_persisted_reliability_operation(pool, operation_kind, operation_id)
-                .await;
-        }
+    if operation_kind == OperationKind::Visibility
+        && journal_exists
+        && repair_published_oci_visibility_operation(pool, operation_id).await?
+    {
+        return verify_persisted_reliability_operation(pool, operation_kind, operation_id).await;
     }
     let mut transaction = pool.begin().await?;
     let authoritative_exists =

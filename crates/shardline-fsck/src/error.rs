@@ -80,7 +80,20 @@ impl FsckError {
             Self::PostgresMetadata(shardline_index::PostgresMetadataStoreError::Reliability(
                 error,
             )) => Some(error.to_string()),
-            _ => None,
+            Self::Io(_)
+            | Self::Json(_)
+            | Self::NumericConversion(_)
+            | Self::Cas(_)
+            | Self::Overflow
+            | Self::LocalObjectStore(_)
+            | Self::S3ObjectStore(_)
+            | Self::ObjectStore(_)
+            | Self::XetAdapter(_)
+            | Self::LocalIndexStore(_)
+            | Self::MemoryIndexStore(_)
+            | Self::MemoryRecordStore(_)
+            | Self::PostgresMetadata(_)
+            | Self::StoredFileMetadataTooLarge { .. } => None,
         }
     }
 }

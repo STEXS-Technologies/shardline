@@ -743,12 +743,10 @@ impl LifecycleStore for LocalIndexStore {
         }
         let snapshot = webhook_snapshot(delivery, WebhookDeliveryLifecycleState::Processed)?;
         let evidence = load_webhook_evidence(&transaction, delivery)?;
-        let processed_at_unix_seconds = evidence
-            .events()
-            .last()
-            .map_or(delivery.processed_at_unix_seconds(), |event| {
-                event.after.processed_at_unix_seconds
-            });
+        let processed_at_unix_seconds = evidence.events().last().map_or_else(
+            || delivery.processed_at_unix_seconds(),
+            |event| event.after.processed_at_unix_seconds,
+        );
         let (evidence, evidence_was_empty) =
             verify_and_append_webhook_delivery_retry(evidence, snapshot)?;
         transaction.execute(

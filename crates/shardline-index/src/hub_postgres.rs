@@ -54,8 +54,10 @@ async fn load_hub_ref_evidence(
     let mut merkle_commits = Vec::with_capacity(rows.len());
     for row in rows {
         row_sequences.push(
-            u64::try_from(row.try_get::<i64, _>("sequence")?).map_err(|_| {
-                PostgresMetadataStoreError::IntegerOutOfRange("reliability sequence".into())
+            u64::try_from(row.try_get::<i64, _>("sequence")?).map_err(|error| {
+                PostgresMetadataStoreError::IntegerOutOfRange(format!(
+                    "reliability sequence: {error}"
+                ))
             })?,
         );
         let value: serde_json::Value = row.try_get("event_json")?;
@@ -116,7 +118,7 @@ async fn persist_hub_ref_evidence(
         if u64_to_i64(event.sequence)? <= persisted_sequence {
             continue;
         }
-        crate::postgres::insert_reliability_event(&mut **transaction, event).await?;
+        crate::postgres::insert_reliability_event(transaction, event).await?;
     }
     Ok(())
 }
@@ -149,17 +151,14 @@ async fn verify_hub_ref_evidence_batch(
         HashMap::with_capacity(operation_ids.len());
     for row in rows {
         let operation_id: String = row.try_get("operation_id")?;
-        let sequence = u64::try_from(row.try_get::<i64, _>("sequence")?).map_err(|_| {
-            PostgresMetadataStoreError::IntegerOutOfRange("reliability sequence".into())
+        let sequence = u64::try_from(row.try_get::<i64, _>("sequence")?).map_err(|error| {
+            PostgresMetadataStoreError::IntegerOutOfRange(format!("reliability sequence: {error}"))
         })?;
-        histories
-            .entry(operation_id)
-            .or_insert_with(Vec::new)
-            .push((
-                sequence,
-                row.try_get("event_json")?,
-                row.try_get("merkle_commit_json")?,
-            ));
+        histories.entry(operation_id).or_default().push((
+            sequence,
+            row.try_get("event_json")?,
+            row.try_get("merkle_commit_json")?,
+        ));
     }
     for (reference, operation_id) in refs.iter().zip(operation_ids) {
         let snapshot = HubRefSnapshot::new(
@@ -167,12 +166,12 @@ async fn verify_hub_ref_evidence_batch(
             &reference.ref_name,
             Some(reference.sha.clone()),
         )?;
-        let rows = histories.remove(&operation_id).unwrap_or_default();
-        let mut sequences = Vec::with_capacity(rows.len());
-        let mut event_json = Vec::with_capacity(rows.len());
-        let mut merkle_commits = Vec::with_capacity(rows.len());
-        let mut events = Vec::with_capacity(rows.len());
-        for (sequence, value, merkle_commit) in rows {
+        let history_rows = histories.remove(&operation_id).unwrap_or_default();
+        let mut sequences = Vec::with_capacity(history_rows.len());
+        let mut event_json = Vec::with_capacity(history_rows.len());
+        let mut merkle_commits = Vec::with_capacity(history_rows.len());
+        let mut events = Vec::with_capacity(history_rows.len());
+        for (sequence, value, merkle_commit) in history_rows {
             sequences.push(sequence);
             events.push(from_value::<HubRefLifecycleEvent>(value.clone())?);
             event_json.push(value);

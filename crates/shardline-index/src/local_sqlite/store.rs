@@ -78,6 +78,11 @@ impl LocalIndexStore {
     ///
     /// This is intentionally explicit maintenance. Opening the store and
     /// serving normal reads never rewrites legacy evidence.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the local database cannot be opened, the bounded
+    /// transaction fails, or a legacy event cannot be canonicalized.
     pub fn backfill_reliability_merkle_commits(
         &self,
         batch_size: usize,
@@ -91,6 +96,11 @@ impl LocalIndexStore {
 
     /// Rebuilds all local reliability Merkle commitments from persisted event
     /// JSON in one explicit transactional repair operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the local database cannot be opened or any
+    /// persisted event is invalid or has a broken sequence.
     pub fn repair_reliability_merkle_commits(&self) -> Result<usize, LocalIndexStoreError> {
         let mut connection = self.open_connection()?;
         let transaction = connection.transaction()?;
@@ -101,6 +111,11 @@ impl LocalIndexStore {
 
     /// Verifies all local reliability events and their persisted Merkle
     /// commitments without repairing anything.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the local database cannot be opened or a
+    /// reliability event or Merkle commitment is invalid.
     pub fn verify_reliability_events(&self) -> Result<(), LocalIndexStoreError> {
         let connection = self.open_connection()?;
         helpers::verify_reliability_events(&connection)

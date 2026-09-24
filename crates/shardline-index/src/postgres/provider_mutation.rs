@@ -265,7 +265,7 @@ pub(super) async fn record_webhook_delivery(
             verify_or_repair_snapshot_evidence(evidence, snapshot)?;
         if evidence_was_missing {
             for event in evidence.events() {
-                super::insert_reliability_event(&mut **transaction, event).await?;
+                super::insert_reliability_event(transaction, event).await?;
             }
         }
         return Ok(false);
@@ -274,12 +274,10 @@ pub(super) async fn record_webhook_delivery(
         super::index_store::webhook_snapshot(delivery, WebhookDeliveryLifecycleState::Processed)?;
     let evidence =
         super::index_store::load_postgres_webhook_evidence(&mut **transaction, delivery).await?;
-    let processed_at_unix_seconds = evidence
-        .events()
-        .last()
-        .map_or(delivery.processed_at_unix_seconds(), |event| {
-            event.after.processed_at_unix_seconds
-        });
+    let processed_at_unix_seconds = evidence.events().last().map_or_else(
+        || delivery.processed_at_unix_seconds(),
+        |event| event.after.processed_at_unix_seconds,
+    );
     let (evidence, _evidence_was_empty) =
         verify_and_append_webhook_delivery_retry(evidence, snapshot)?;
     query(
@@ -295,7 +293,7 @@ pub(super) async fn record_webhook_delivery(
     .execute(&mut **transaction)
     .await?;
     for event in evidence.events() {
-        super::insert_reliability_event(&mut **transaction, event).await?;
+        super::insert_reliability_event(transaction, event).await?;
     }
     Ok(true)
 }
@@ -357,10 +355,10 @@ pub(super) async fn upsert_retention_hold(
     .await?;
     if evidence_was_empty {
         for event in evidence.events() {
-            super::insert_reliability_event(&mut **transaction, event).await?;
+            super::insert_reliability_event(transaction, event).await?;
         }
     } else if let Some(event) = evidence.events().last() {
-        super::insert_reliability_event(&mut **transaction, event).await?;
+        super::insert_reliability_event(transaction, event).await?;
     }
     Ok(())
 }
@@ -546,7 +544,7 @@ pub(super) async fn upsert_provider_repository_state(
             shardline_reliability::ReliabilityError::EmptyField("provider evidence"),
         )
     })?;
-    super::insert_reliability_event(&mut **transaction, event).await?;
+    super::insert_reliability_event(transaction, event).await?;
     Ok(())
 }
 
@@ -606,7 +604,7 @@ pub(super) async fn verify_provider_repository_state_evidence(
                 shardline_reliability::ReliabilityError::EmptyField("provider evidence"),
             )
         })?;
-        super::insert_reliability_event(&mut **transaction, event).await?;
+        super::insert_reliability_event(transaction, event).await?;
     } else {
         verify_provider_lifecycle_events(&evidence, &snapshot)?;
     }

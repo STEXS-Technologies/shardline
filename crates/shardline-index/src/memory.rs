@@ -117,12 +117,10 @@ impl MemoryIndexStore {
             .get(&key)
             .cloned()
             .unwrap_or_default();
-        let processed_at_unix_seconds = evidence
-            .events()
-            .last()
-            .map_or(delivery.processed_at_unix_seconds(), |event| {
-                event.after.processed_at_unix_seconds
-            });
+        let processed_at_unix_seconds = evidence.events().last().map_or_else(
+            || delivery.processed_at_unix_seconds(),
+            |event| event.after.processed_at_unix_seconds,
+        );
         let (evidence, _) = verify_and_append_webhook_delivery_retry(evidence, snapshot)
             .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
         state.webhook_deliveries.insert(

@@ -84,7 +84,7 @@ pub(crate) fn setup() -> HubTestContext {
 }
 
 impl HubTestContext {
-    pub(crate) fn state(&self) -> &HubState {
+    pub(crate) const fn state(&self) -> &HubState {
         &self.state
     }
 

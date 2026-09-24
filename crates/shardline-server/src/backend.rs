@@ -2127,7 +2127,7 @@ fn count_repository_reference_probe_for_tests(hash_hex: &str) {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some(count) = counts.get_mut(hash_hex) {
-        *count += 1;
+        *count = (*count).saturating_add(1);
     }
 }
 

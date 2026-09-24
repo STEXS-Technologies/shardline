@@ -53,6 +53,8 @@ use crate::{
     record_key::repository_scope_key as shared_repository_scope_key, xet_hash_hex_string,
 };
 
+type VerifiedEventHistory = (Vec<u64>, Vec<Value>, Vec<Option<Value>>);
+
 use shardline_reliability::{
     LifecycleEvent, OciObjectEvidenceLog, OciObjectIdentity, OciObjectLifecycleState,
     OciObjectSnapshot, ReliabilityMerkleCommit, ResumableLifecycleState, StateTransitionEvent,
@@ -99,9 +101,9 @@ pub(crate) fn load_verified_event_json(
                 ),
             ));
         }
-        row_sequences.push(u64::try_from(sequence).map_err(|_| {
+        row_sequences.push(u64::try_from(sequence).map_err(|error| {
             LocalIndexStoreError::Reliability(shardline_reliability::ReliabilityError::Merkle(
-                "persisted row sequence is out of range".into(),
+                format!("persisted row sequence is out of range: {error}"),
             ))
         })?);
         events.push(from_str::<Value>(&event_json)?);
@@ -129,7 +131,7 @@ pub(crate) fn load_verified_event_json_batch(
         return Ok(HashMap::new());
     }
     let placeholders = (0..operation_ids.len())
-        .map(|index| format!("?{}", index + 2))
+        .map(|index| format!("?{}", index.saturating_add(2)))
         .collect::<Vec<_>>()
         .join(", ");
     let sql = format!(
@@ -138,7 +140,7 @@ pub(crate) fn load_verified_event_json_batch(
          WHERE operation_kind = ?1 AND operation_id IN ({placeholders})
          ORDER BY operation_id, sequence"
     );
-    let mut parameters = Vec::with_capacity(operation_ids.len() + 1);
+    let mut parameters = Vec::with_capacity(operation_ids.len().saturating_add(1));
     parameters.push(operation_kind.as_str().to_owned());
     parameters.extend(operation_ids.iter().cloned());
     let mut statement = transaction.prepare(&sql)?;
@@ -150,13 +152,13 @@ pub(crate) fn load_verified_event_json_batch(
             row.get::<_, Option<String>>(3)?,
         ))
     })?;
-    let mut histories: HashMap<String, (Vec<u64>, Vec<Value>, Vec<Option<Value>>)> =
+    let mut histories: HashMap<String, VerifiedEventHistory> =
         HashMap::with_capacity(operation_ids.len());
     for row in rows {
         let (operation_id, sequence, event_json, merkle_commit_json) = row?;
-        let sequence = u64::try_from(sequence).map_err(|_| {
+        let sequence = u64::try_from(sequence).map_err(|error| {
             LocalIndexStoreError::Reliability(shardline_reliability::ReliabilityError::Merkle(
-                "persisted row sequence is out of range".into(),
+                format!("persisted row sequence is out of range: {error}"),
             ))
         })?;
         let event_json = from_str::<Value>(&event_json)?;
@@ -788,7 +790,7 @@ pub(crate) fn verify_hub_ref_evidence_batch(
         );
     }
     let placeholders = (0..operation_ids.len())
-        .map(|index| format!("?{}", index + 2))
+        .map(|index| format!("?{}", index.saturating_add(2)))
         .collect::<Vec<_>>()
         .join(", ");
     let sql = format!(
@@ -797,7 +799,7 @@ pub(crate) fn verify_hub_ref_evidence_batch(
          WHERE operation_kind = ?1 AND operation_id IN ({placeholders})
          ORDER BY operation_id, sequence"
     );
-    let mut parameters = Vec::with_capacity(operation_ids.len() + 1);
+    let mut parameters = Vec::with_capacity(operation_ids.len().saturating_add(1));
     parameters.push(OperationKind::MetadataCommit.as_str().to_owned());
     parameters.extend(operation_ids.iter().cloned());
     let mut statement = transaction.prepare(&sql)?;
@@ -815,20 +817,20 @@ pub(crate) fn verify_hub_ref_evidence_batch(
         let (operation_id, sequence, event_json, merkle_commit_json) = row?;
         histories
             .entry(operation_id)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push((sequence, event_json, merkle_commit_json));
     }
     for ((repository, ref_name, head_sha), operation_id) in refs.iter().zip(operation_ids) {
         let snapshot = hub_ref_snapshot(repository, ref_name, head_sha.clone())?;
-        let rows = histories.remove(&operation_id).unwrap_or_default();
-        let mut sequences = Vec::with_capacity(rows.len());
-        let mut event_json = Vec::with_capacity(rows.len());
-        let mut merkle_commits = Vec::with_capacity(rows.len());
-        let mut events = Vec::with_capacity(rows.len());
-        for (sequence, value, merkle_commit) in rows {
-            let sequence = u64::try_from(sequence).map_err(|_| {
+        let history_rows = histories.remove(&operation_id).unwrap_or_default();
+        let mut sequences = Vec::with_capacity(history_rows.len());
+        let mut event_json = Vec::with_capacity(history_rows.len());
+        let mut merkle_commits = Vec::with_capacity(history_rows.len());
+        let mut events = Vec::with_capacity(history_rows.len());
+        for (sequence, value, merkle_commit) in history_rows {
+            let sequence = u64::try_from(sequence).map_err(|error| {
                 LocalIndexStoreError::Reliability(shardline_reliability::ReliabilityError::Merkle(
-                    "persisted row sequence is out of range".into(),
+                    format!("persisted row sequence is out of range: {error}"),
                 ))
             })?;
             let value = from_str::<Value>(&value)?;
@@ -1199,7 +1201,7 @@ fn backfill_reliability_events(transaction: &Transaction<'_>) -> Result<(), Loca
             final_state,
         )?;
         for event in events {
-            persist_reliability_event(&transaction, &event)?;
+            persist_reliability_event(transaction, &event)?;
         }
     }
 
@@ -1234,7 +1236,7 @@ fn backfill_reliability_events(transaction: &Transaction<'_>) -> Result<(), Loca
         let events =
             baseline_resumable_session_events(scope_namespace, session_id, target_key, state)?;
         for event in events {
-            persist_reliability_event(&transaction, &event)?;
+            persist_reliability_event(transaction, &event)?;
         }
     }
 
@@ -1266,7 +1268,7 @@ fn backfill_reliability_events(transaction: &Transaction<'_>) -> Result<(), Loca
         let snapshot = snapshot_from_state(&state)?;
         let events = shardline_reliability::ProviderEvidenceLog::baseline(snapshot)?;
         for event in events.events() {
-            persist_reliability_event(&transaction, event)?;
+            persist_reliability_event(transaction, event)?;
         }
     }
 
@@ -1304,7 +1306,7 @@ fn backfill_reliability_events(transaction: &Transaction<'_>) -> Result<(), Loca
         let snapshot = quarantine_snapshot(&candidate, QuarantineLifecycleState::Active)?;
         let evidence = QuarantineEvidenceLog::baseline(snapshot)?;
         for event in evidence.events() {
-            persist_reliability_event(&transaction, event)?;
+            persist_reliability_event(transaction, event)?;
         }
     }
 
@@ -1343,7 +1345,7 @@ fn backfill_reliability_events(transaction: &Transaction<'_>) -> Result<(), Loca
         )?;
         let evidence = OciObjectEvidenceLog::baseline(snapshot)?;
         for event in evidence.events() {
-            persist_reliability_event(&transaction, event)?;
+            persist_reliability_event(transaction, event)?;
         }
     }
 
@@ -1382,7 +1384,7 @@ fn backfill_reliability_events(transaction: &Transaction<'_>) -> Result<(), Loca
             RetentionHoldLifecycleState::Active,
         )?)?;
         for event in evidence.events() {
-            persist_reliability_event(&transaction, event)?;
+            persist_reliability_event(transaction, event)?;
         }
     }
 
@@ -1419,7 +1421,7 @@ fn backfill_reliability_events(transaction: &Transaction<'_>) -> Result<(), Loca
         let snapshot = webhook_snapshot(&delivery, WebhookDeliveryLifecycleState::Processed)?;
         let operation = snapshot.evidence_operation()?;
         if reliability_operation_exists(
-            &transaction,
+            transaction,
             OperationKind::WebhookDelivery,
             &operation.operation_id,
         )? {
@@ -1427,7 +1429,7 @@ fn backfill_reliability_events(transaction: &Transaction<'_>) -> Result<(), Loca
         }
         let evidence = WebhookDeliveryEvidenceLog::baseline(snapshot)?;
         for event in evidence.events() {
-            persist_reliability_event(&transaction, event)?;
+            persist_reliability_event(transaction, event)?;
         }
     }
 
@@ -1452,7 +1454,7 @@ fn backfill_reliability_events(transaction: &Transaction<'_>) -> Result<(), Loca
         let snapshot = hub_ref_snapshot(&repo_id, &ref_name, Some(sha))?;
         let operation = snapshot.evidence_operation()?;
         if reliability_operation_exists(
-            &transaction,
+            transaction,
             OperationKind::MetadataCommit,
             &operation.operation_id,
         )? {
@@ -1460,7 +1462,7 @@ fn backfill_reliability_events(transaction: &Transaction<'_>) -> Result<(), Loca
         }
         let evidence = HubRefEvidenceLog::baseline(snapshot)?;
         for event in evidence.events() {
-            persist_reliability_event(&transaction, event)?;
+            persist_reliability_event(transaction, event)?;
         }
     }
 
@@ -1487,7 +1489,7 @@ fn backfill_reliability_events(transaction: &Transaction<'_>) -> Result<(), Loca
         let present = oci_tag_snapshot(&scope_namespace, &repository, &tag, Some(digest_hex))?;
         let operation = present.evidence_operation()?;
         if reliability_operation_exists(
-            &transaction,
+            transaction,
             OperationKind::OciTag,
             &operation.operation_id,
         )? {
@@ -1496,7 +1498,7 @@ fn backfill_reliability_events(transaction: &Transaction<'_>) -> Result<(), Loca
         let mut evidence = OciTagEvidenceLog::baseline(absent)?;
         evidence.record(present)?;
         for event in evidence.events() {
-            persist_reliability_event(&transaction, event)?;
+            persist_reliability_event(transaction, event)?;
         }
     }
 
@@ -1553,7 +1555,7 @@ fn backfill_reliability_events(transaction: &Transaction<'_>) -> Result<(), Loca
         )?;
         let operation = present.evidence_operation()?;
         if reliability_operation_exists(
-            &transaction,
+            transaction,
             OperationKind::S3Object,
             &operation.operation_id,
         )? {
@@ -1566,7 +1568,7 @@ fn backfill_reliability_events(transaction: &Transaction<'_>) -> Result<(), Loca
         )?)?;
         evidence.record(present)?;
         for event in evidence.events() {
-            persist_reliability_event(&transaction, event)?;
+            persist_reliability_event(transaction, event)?;
         }
     }
 
@@ -1690,7 +1692,7 @@ fn backfill_reliability_events(transaction: &Transaction<'_>) -> Result<(), Loca
     }
     for state in provider_verification_rows {
         let snapshot = snapshot_from_state(&state)?;
-        let evidence = load_provider_evidence(&transaction, &snapshot)?;
+        let evidence = load_provider_evidence(transaction, &snapshot)?;
         verify_provider_lifecycle_events(evidence.events(), &snapshot)?;
     }
     Ok(())

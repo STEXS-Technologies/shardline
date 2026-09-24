@@ -219,13 +219,13 @@ fn resolve_docker_arg(arg: &str) -> String {
         (CONTAINER_REDIS, "SHARDLINE_CHAOS_REDIS_CONTAINER"),
         (NET, "SHARDLINE_CHAOS_NETWORK"),
     ] {
-        if let Ok(replacement) = std::env::var(variable) {
-            if arg.contains(&format!("container:{logical}")) {
-                return arg.replace(
-                    &format!("container:{logical}"),
-                    &format!("container:{replacement}"),
-                );
-            }
+        if let Ok(replacement) = std::env::var(variable)
+            && arg.contains(&format!("container:{logical}"))
+        {
+            return arg.replace(
+                &format!("container:{logical}"),
+                &format!("container:{replacement}"),
+            );
         }
     }
     arg.to_owned()
@@ -743,6 +743,8 @@ async fn boot_chaos_stack(drill: &str) -> Option<ChaosStack> {
     // These overrides are process-local: nextest gives each drill its own OS
     // process. Direct in-process `cargo test` execution is not supported for
     // this suite because environment variables are process-global.
+    // SAFETY: this test harness runs each drill in its own nextest OS process,
+    // so these process-global variables cannot race another drill.
     unsafe {
         std::env::set_var("SHARDLINE_CHAOS_PROJECT", &project);
         std::env::set_var("SHARDLINE_CHAOS_POSTGRES_CONTAINER", &postgres);
@@ -766,6 +768,8 @@ async fn boot_chaos_stack(drill: &str) -> Option<ChaosStack> {
         cleanup_compose_project(&compose_file, &project);
         return None;
     }
+    // SAFETY: this test harness runs each drill in its own nextest OS process,
+    // so these process-global variables cannot race another drill.
     unsafe {
         std::env::set_var("SHARDLINE_CHAOS_PG_URL", &stack.pg_url);
         std::env::set_var("SHARDLINE_CHAOS_S3_ENDPOINT", &stack.s3_endpoint);
@@ -1036,7 +1040,7 @@ impl DeploymentServer {
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
         }
-        unreachable!("startup retry loop always returns or panics")
+        panic!("startup retry loop always returns or panics")
     }
 
     fn alive(&mut self) -> bool {
@@ -1453,7 +1457,7 @@ async fn drill_deploy_a_postgres_kill_mid_upload_no_lost_commits() {
     // Restore Postgres; verify no committed data was lost.
     restart_and_wait(
         CONTAINER_POSTGRES,
-        || chaos_postgres_tcp_ready(),
+        chaos_postgres_tcp_ready,
         Duration::from_secs(60),
     )
     .await;
@@ -1875,7 +1879,7 @@ async fn drill_deploy_d_minio_network_partition_recovery() {
         );
         restart_and_wait(
             CONTAINER_POSTGRES,
-            || chaos_postgres_tcp_ready(),
+            chaos_postgres_tcp_ready,
             Duration::from_secs(60),
         )
         .await;
@@ -2450,7 +2454,7 @@ async fn drill_deploy_postgres_kill_mid_lfs_patch() {
     // object can be completed.
     restart_and_wait(
         CONTAINER_POSTGRES,
-        || chaos_postgres_tcp_ready(),
+        chaos_postgres_tcp_ready,
         Duration::from_secs(60),
     )
     .await;
@@ -2849,7 +2853,7 @@ async fn drill_deploy_postgres_kill_mid_oci_blob_upload() {
 
     restart_and_wait(
         CONTAINER_POSTGRES,
-        || chaos_postgres_tcp_ready(),
+        chaos_postgres_tcp_ready,
         Duration::from_secs(60),
     )
     .await;
@@ -2925,7 +2929,7 @@ async fn drill_deploy_postgres_kill_mid_s3_multipart() {
 
     restart_and_wait(
         CONTAINER_POSTGRES,
-        || chaos_postgres_tcp_ready(),
+        chaos_postgres_tcp_ready,
         Duration::from_secs(60),
     )
     .await;
