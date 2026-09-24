@@ -17,6 +17,7 @@ async fn exercise_hold_roundtrip() -> Result<(), Box<dyn Error>> {
     let object_key = format!("de/{}", "de".repeat(32));
 
     let set_output = Command::new(&shardline_bin)
+        .env_remove("SHARDLINE_INDEX_POSTGRES_URL")
         .args([
             "hold",
             "set",
@@ -46,6 +47,7 @@ async fn exercise_hold_roundtrip() -> Result<(), Box<dyn Error>> {
     }
 
     let list_output = Command::new(&shardline_bin)
+        .env_remove("SHARDLINE_INDEX_POSTGRES_URL")
         .args([
             "hold",
             "list",
@@ -73,6 +75,7 @@ async fn exercise_hold_roundtrip() -> Result<(), Box<dyn Error>> {
     }
 
     let release_output = Command::new(&shardline_bin)
+        .env_remove("SHARDLINE_INDEX_POSTGRES_URL")
         .args([
             "hold",
             "release",

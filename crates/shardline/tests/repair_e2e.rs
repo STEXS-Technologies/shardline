@@ -171,6 +171,7 @@ async fn exercise_lifecycle_repair() -> Result<(), Box<dyn Error>> {
 
     let shardline_bin = shardline_binary()?;
     let output = Command::new(shardline_bin)
+        .env_remove("SHARDLINE_INDEX_POSTGRES_URL")
         .args([
             "repair",
             "lifecycle",
@@ -285,6 +286,7 @@ async fn exercise_repair_orchestrator() -> Result<(), Box<dyn Error>> {
 
     let shardline_bin = shardline_binary()?;
     let output = Command::new(shardline_bin)
+        .env_remove("SHARDLINE_INDEX_POSTGRES_URL")
         .args([
             "repair",
             "--root",
@@ -350,6 +352,7 @@ async fn exercise_lifecycle_repair_fails_closed_on_corrupt_webhook_delivery_meta
 
     let shardline_bin = shardline_binary()?;
     let output = Command::new(shardline_bin)
+        .env_remove("SHARDLINE_INDEX_POSTGRES_URL")
         .args([
             "repair",
             "lifecycle",
