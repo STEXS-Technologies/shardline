@@ -1,7 +1,7 @@
 #[cfg(test)]
-use std::path::PathBuf;
+use std::cell::RefCell;
 #[cfg(test)]
-use std::sync::{LazyLock, Mutex};
+use std::path::PathBuf;
 use std::{
     env::var,
     fs::{self, File, OpenOptions},
@@ -28,7 +28,7 @@ pub enum AdminTokenAuthProvider {
 }
 
 #[cfg(test)]
-type SigningKeyReadHook = Box<dyn FnOnce() + Send>;
+type SigningKeyReadHook = Box<dyn FnOnce()>;
 
 #[cfg(test)]
 struct SigningKeyReadHookRegistration {
@@ -40,8 +40,9 @@ struct SigningKeyReadHookRegistration {
 type SigningKeyReadHookSlot = Option<SigningKeyReadHookRegistration>;
 
 #[cfg(test)]
-static BEFORE_SIGNING_KEY_READ_HOOK: LazyLock<Mutex<SigningKeyReadHookSlot>> =
-    LazyLock::new(|| Mutex::new(None));
+thread_local! {
+    static BEFORE_SIGNING_KEY_READ_HOOK: RefCell<SigningKeyReadHookSlot> = const { RefCell::new(None) };
+}
 
 /// Runtime failure while minting a local admin token.
 #[derive(Debug, Error)]
@@ -335,10 +336,8 @@ const fn ensure_signing_key_size_within_limit(observed_bytes: u64) -> Result<(),
 
 #[cfg(test)]
 fn run_before_signing_key_read_hook_for_tests(path: &Path) {
-    let hook = match BEFORE_SIGNING_KEY_READ_HOOK.lock() {
-        Ok(mut guard) => take_signing_key_read_hook_for_path(&mut guard, path),
-        Err(poisoned) => take_signing_key_read_hook_for_path(&mut poisoned.into_inner(), path),
-    };
+    let hook = BEFORE_SIGNING_KEY_READ_HOOK
+        .with(|slot| take_signing_key_read_hook_for_path(&mut slot.borrow_mut(), path));
 
     if let Some(hook) = hook {
         hook();
@@ -357,14 +356,12 @@ fn take_signing_key_read_hook_for_path(
 }
 
 #[cfg(test)]
-fn set_before_signing_key_read_hook_for_tests(path: PathBuf, hook: impl FnOnce() + Send + 'static) {
-    let mut slot = match BEFORE_SIGNING_KEY_READ_HOOK.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-    *slot = Some(SigningKeyReadHookRegistration {
-        path,
-        hook: Box::new(hook),
+fn set_before_signing_key_read_hook_for_tests(path: PathBuf, hook: impl FnOnce() + 'static) {
+    BEFORE_SIGNING_KEY_READ_HOOK.with(|slot| {
+        *slot.borrow_mut() = Some(SigningKeyReadHookRegistration {
+            path,
+            hook: Box::new(hook),
+        });
     });
 }
 
@@ -436,7 +433,6 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial]
     fn mint_admin_token_rejects_signing_key_growth_after_validation_without_retaining_appended_bytes()
      {
         let temp = tempfile::NamedTempFile::new().unwrap();
@@ -806,7 +802,6 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial]
     fn mint_admin_token_rejects_shrinking_signing_key_after_validation() {
         let temp = tempfile::NamedTempFile::new().unwrap();
         let initial = b"some signing key that is long enough to be truncated";

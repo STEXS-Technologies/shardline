@@ -744,7 +744,7 @@ impl LifecycleStore for LocalIndexStore {
         }
         let snapshot = webhook_snapshot(delivery, WebhookDeliveryLifecycleState::Processed)?;
         let evidence = load_webhook_evidence(&transaction, delivery)?;
-        let (evidence, _) = if evidence.events().is_empty() {
+        let (evidence, evidence_was_empty) = if evidence.events().is_empty() {
             (
                 append_or_baseline_snapshot_evidence(evidence, snapshot)?,
                 true,
@@ -771,7 +771,11 @@ impl LifecycleStore for LocalIndexStore {
                 u64_to_i64(delivery.processed_at_unix_seconds())?,
             ],
         )?;
-        for event in evidence.events() {
+        if evidence_was_empty {
+            for event in evidence.events() {
+                persist_webhook_evidence(&transaction, event)?;
+            }
+        } else if let Some(event) = evidence.events().last() {
             persist_webhook_evidence(&transaction, event)?;
         }
         transaction.commit()?;
@@ -2141,6 +2145,36 @@ mod tests {
         let repeated = LifecycleStore::record_webhook_delivery(&store, &delivery)
             .expect("duplicate record should succeed");
         assert!(!repeated, "duplicate record should return false");
+    }
+
+    #[test]
+    fn webhook_delivery_recreation_appends_without_rewriting_history() {
+        let store = make_store();
+        let delivery = WebhookDelivery::new(
+            RepositoryProvider::GitHub,
+            "owner".into(),
+            "repo".into(),
+            "delivery-recreate".into(),
+            1000,
+        )
+        .unwrap();
+
+        LifecycleStore::record_webhook_delivery(&store, &delivery).unwrap();
+        assert!(LifecycleStore::delete_webhook_delivery(&store, &delivery).unwrap());
+
+        let connection = store.open_connection().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TRIGGER reject_reliability_history_rewrites
+                 BEFORE UPDATE ON shardline_reliability_events
+                 BEGIN
+                     SELECT RAISE(ABORT, 'reliability history was rewritten');
+                 END;",
+            )
+            .unwrap();
+        drop(connection);
+
+        assert!(LifecycleStore::record_webhook_delivery(&store, &delivery).unwrap());
     }
 
     #[test]
