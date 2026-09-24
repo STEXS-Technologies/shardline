@@ -948,7 +948,8 @@ impl AsyncIndexStore for super::PostgresIndexStore {
             let mut transaction = self.pool.begin().await?;
             let row = query(
                 "SELECT object_key, observed_length, first_seen_unreachable_at_unix_seconds, delete_after_unix_seconds
-                 FROM shardline_quarantine_candidates WHERE object_key = $1",
+                 FROM shardline_quarantine_candidates WHERE object_key = $1
+                 FOR UPDATE",
             )
             .bind(object_key.as_str())
             .fetch_optional(&mut *transaction)
@@ -1167,7 +1168,8 @@ impl AsyncIndexStore for super::PostgresIndexStore {
             let mut transaction = self.pool.begin().await?;
             let row = query(
                 "SELECT object_key, reason, held_at_unix_seconds, release_after_unix_seconds
-                 FROM shardline_retention_holds WHERE object_key = $1",
+                 FROM shardline_retention_holds WHERE object_key = $1
+                 FOR UPDATE",
             )
             .bind(object_key.as_str())
             .fetch_optional(&mut *transaction)
