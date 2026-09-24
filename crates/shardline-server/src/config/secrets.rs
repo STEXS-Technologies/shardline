@@ -1257,7 +1257,6 @@ mod tests {
     // ── parse_env_bool via env var ──────────────────────────────────────────
 
     #[test]
-    #[serial_test::serial]
     fn parse_env_bool_true_value_via_env() {
         // SAFETY: serialized env var test
         set_env_var("SHARDLINE_TEST_PARSE_BOOL_TRUE", "true");
@@ -1268,7 +1267,6 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial]
     fn parse_env_bool_false_value_via_env() {
         // SAFETY: serialized env var test
         set_env_var("SHARDLINE_TEST_PARSE_BOOL_FALSE", "false");
@@ -1279,7 +1277,6 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial]
     fn parse_env_bool_unset_env_returns_ok_none() {
         // SAFETY: serialized env var test
         remove_env_var("SHARDLINE_TEST_PARSE_BOOL_UNSET");
@@ -1288,7 +1285,6 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial]
     fn parse_env_bool_invalid_value_returns_err() {
         // SAFETY: serialized env var test
         set_env_var("SHARDLINE_TEST_PARSE_BOOL_INVALID", "not-a-bool");
@@ -1348,7 +1344,6 @@ mod tests {
     // ── optional_s3_secret_from_sources — credential source conflict via file env ─
 
     #[test]
-    #[serial_test::serial]
     fn optional_s3_secret_env_or_file_conflict() {
         use super::optional_s3_secret_env_or_file;
         // SAFETY: serialized env var test
@@ -1365,7 +1360,6 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial]
     fn optional_s3_secret_env_or_file_direct_value() {
         use super::optional_s3_secret_env_or_file;
         // SAFETY: serialized env var test
@@ -1385,7 +1379,6 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial]
     fn optional_s3_secret_env_or_file_both_unset() {
         use super::optional_s3_secret_env_or_file;
         // SAFETY: serialized env var test
