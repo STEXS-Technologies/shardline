@@ -9,8 +9,8 @@ use shardline_reliability::{
     OciTagEvidenceLog, OciTagLifecycleEvent, OciTagSnapshot, OperationKind,
     ReliabilityMerkleCommit, SnapshotEvidence, persisted_event_sequence,
     reliability_merkle_commit_json_with_previous, verify_and_append_snapshot_transition,
-    verify_or_repair_snapshot_evidence, verify_persisted_event_merkle_chain_with_sequences,
-    verify_persisted_merkle_commit_with_previous, verify_snapshot_event, verify_snapshot_evidence,
+    verify_or_repair_snapshot_evidence, verify_persisted_merkle_commit_with_previous,
+    verify_snapshot_event, verify_snapshot_evidence,
 };
 
 fn entry_from_row(row: &PgRow) -> Result<OciTagEntry, PostgresMetadataStoreError> {
@@ -30,37 +30,16 @@ async fn load_tag_evidence(
 ) -> Result<OciTagEvidenceLog, PostgresMetadataStoreError> {
     let operation =
         OciTagSnapshot::new(scope_namespace, repository, tag, None)?.evidence_operation()?;
-    let rows = query(
-        "SELECT sequence, event_json, merkle_commit_json FROM shardline_reliability_events
-         WHERE operation_kind = 'OciTag' AND operation_id = $1 ORDER BY sequence",
+    let event = super::index_store::load_postgres_latest_evidence_event(
+        &mut *connection,
+        OperationKind::OciTag,
+        &operation.operation_id,
     )
-    .bind(&operation.operation_id)
-    .fetch_all(&mut *connection)
     .await?;
-    let mut events = Vec::with_capacity(rows.len());
-    let mut row_sequences = Vec::with_capacity(rows.len());
-    let mut event_json = Vec::with_capacity(rows.len());
-    let mut merkle_commits = Vec::with_capacity(rows.len());
-    for row in rows {
-        row_sequences.push(
-            u64::try_from(row.try_get::<i64, _>("sequence")?).map_err(|error| {
-                PostgresMetadataStoreError::IntegerOutOfRange(format!(
-                    "reliability sequence: {error}"
-                ))
-            })?,
-        );
-        let value: serde_json::Value = row.try_get("event_json")?;
-        events.push(from_value::<OciTagLifecycleEvent>(value.clone())?);
-        event_json.push(value);
-        merkle_commits.push(row.try_get("merkle_commit_json")?);
-    }
-    verify_persisted_event_merkle_chain_with_sequences(
-        shardline_reliability::OperationKind::OciTag,
-        &row_sequences,
-        &event_json,
-        &merkle_commits,
-    )?;
-    Ok(OciTagEvidenceLog::from_events(events)?)
+    let Some(event) = event else {
+        return Ok(OciTagEvidenceLog::default());
+    };
+    Ok(OciTagEvidenceLog::from_head(from_value(event)?)?)
 }
 
 async fn current_tag_evidence(

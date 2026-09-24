@@ -1,8 +1,7 @@
 use shardline_reliability::{
-    OciObjectEvidenceLog, OciObjectIdentity, OciObjectLifecycleEvent, OciObjectLifecycleState,
-    OciObjectOperationId, OciObjectSnapshot, OperationKind, resumable_session_event,
-    verify_and_append_snapshot_transition, verify_persisted_event_merkle_chain_with_sequences,
-    verify_snapshot_evidence,
+    OciObjectEvidenceLog, OciObjectIdentity, OciObjectLifecycleState, OciObjectOperationId,
+    OciObjectSnapshot, OperationKind, resumable_session_event,
+    verify_and_append_snapshot_transition, verify_snapshot_evidence,
 };
 use sqlx::{Connection as _, PgConnection, Row as _, query, query_scalar};
 
@@ -38,39 +37,18 @@ async fn load_oci_evidence(
         key.kind.as_str(),
         key.digest_hex.clone(),
     )?);
-    let rows = query(
-        "SELECT sequence, event_json, merkle_commit_json FROM shardline_reliability_events
-         WHERE operation_kind = 'Visibility' AND operation_id = $1 ORDER BY sequence",
-    )
-    .bind(operation_id.as_str())
-    .fetch_all(executor)
-    .await?;
-    let mut events = Vec::with_capacity(rows.len());
-    let mut row_sequences = Vec::with_capacity(rows.len());
-    let mut event_json = Vec::with_capacity(rows.len());
-    let mut merkle_commits = Vec::with_capacity(rows.len());
-    for row in rows {
-        row_sequences.push(
-            u64::try_from(row.try_get::<i64, _>("sequence")?).map_err(|error| {
-                PostgresMetadataStoreError::IntegerOutOfRange(format!(
-                    "reliability sequence: {error}"
-                ))
-            })?,
-        );
-        let value: serde_json::Value = row.try_get("event_json")?;
-        events.push(serde_json::from_value::<OciObjectLifecycleEvent>(
-            value.clone(),
-        )?);
-        event_json.push(value);
-        merkle_commits.push(row.try_get("merkle_commit_json")?);
-    }
-    verify_persisted_event_merkle_chain_with_sequences(
+    let event = super::index_store::load_postgres_latest_evidence_event(
+        &mut *executor,
         OperationKind::Visibility,
-        &row_sequences,
-        &event_json,
-        &merkle_commits,
-    )?;
-    Ok(OciObjectEvidenceLog::from_events(events)?)
+        operation_id.as_str(),
+    )
+    .await?;
+    let Some(event) = event else {
+        return Ok(OciObjectEvidenceLog::default());
+    };
+    Ok(OciObjectEvidenceLog::from_head(serde_json::from_value(
+        event,
+    )?)?)
 }
 
 async fn record_oci_evidence(

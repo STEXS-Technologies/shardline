@@ -1,13 +1,13 @@
 use shardline_protocol::RepositoryProvider;
 use shardline_reliability::{
-    OperationKind, ProviderEvidenceLog, ProviderLifecycleEvent, ProviderLifecycleSnapshot,
-    ProviderRepositoryOperationId, RetentionEvidenceLog, RetentionHoldLifecycleState,
-    SnapshotEvidence, WebhookDeliveryLifecycleState, append_or_baseline_snapshot_evidence,
+    OperationKind, ProviderEvidenceLog, ProviderLifecycleSnapshot, ProviderRepositoryOperationId,
+    RetentionEvidenceLog, RetentionHoldLifecycleState, SnapshotEvidence,
+    WebhookDeliveryLifecycleState, append_or_baseline_snapshot_evidence,
     verify_and_append_snapshot_transition, verify_and_append_webhook_delivery_retry,
     verify_and_reactivate_retention_hold, verify_or_repair_snapshot_evidence,
-    verify_persisted_event_merkle_chain_with_sequences, verify_provider_lifecycle_events,
+    verify_provider_lifecycle_events,
 };
-use sqlx::{Acquire, PgConnection, Postgres, Row, Transaction, query, query_scalar};
+use sqlx::{Acquire, PgConnection, Postgres, Transaction, query, query_scalar};
 
 use super::{
     PostgresMetadataStoreError, PostgresRecordLocator, RecordKind,
@@ -259,8 +259,7 @@ pub(super) async fn record_webhook_delivery(
             WebhookDeliveryLifecycleState::Processed,
         )?;
         let evidence =
-            super::index_store::load_postgres_webhook_evidence(&mut **transaction, &existing)
-                .await?;
+            super::index_store::load_postgres_webhook_evidence(transaction, &existing).await?;
         let (evidence, evidence_was_missing) =
             verify_or_repair_snapshot_evidence(evidence, snapshot)?;
         if evidence_was_missing {
@@ -273,7 +272,7 @@ pub(super) async fn record_webhook_delivery(
     let snapshot =
         super::index_store::webhook_snapshot(delivery, WebhookDeliveryLifecycleState::Processed)?;
     let evidence =
-        super::index_store::load_postgres_webhook_evidence(&mut **transaction, delivery).await?;
+        super::index_store::load_postgres_webhook_evidence(transaction, delivery).await?;
     let processed_at_unix_seconds = evidence.events().last().map_or_else(
         || delivery.processed_at_unix_seconds(),
         |event| event.after.processed_at_unix_seconds,
@@ -403,7 +402,7 @@ pub(super) async fn upsert_provider_repository_state(
         .map(|current_state| snapshot_from_state(&current_state))
         .transpose()?;
     let evidence = if let Some(snapshot) = current_snapshot.as_ref() {
-        ProviderEvidenceLog::from_events(load_provider_evidence(transaction, snapshot).await?)?
+        load_provider_evidence(transaction, snapshot).await?
     } else {
         query(
             "DELETE FROM shardline_reliability_events
@@ -551,43 +550,20 @@ pub(super) async fn upsert_provider_repository_state(
 async fn load_provider_evidence(
     transaction: &mut Transaction<'_, Postgres>,
     snapshot: &ProviderLifecycleSnapshot,
-) -> Result<Vec<ProviderLifecycleEvent>, PostgresMetadataStoreError> {
+) -> Result<ProviderEvidenceLog, PostgresMetadataStoreError> {
     let operation_id = snapshot.evidence_operation()?.operation_id;
-    let rows = query(
-        "SELECT sequence, event_json, merkle_commit_json
-         FROM shardline_reliability_events
-         WHERE operation_kind = 'ProviderEvent' AND operation_id = $1
-         ORDER BY sequence",
-    )
-    .bind(operation_id)
-    .fetch_all(&mut **transaction)
-    .await?;
-    let mut events = Vec::with_capacity(rows.len());
-    let mut row_sequences = Vec::with_capacity(rows.len());
-    let mut event_json = Vec::with_capacity(rows.len());
-    let mut merkle_commits = Vec::with_capacity(rows.len());
-    for row in rows {
-        row_sequences.push(
-            u64::try_from(row.try_get::<i64, _>("sequence")?).map_err(|error| {
-                PostgresMetadataStoreError::IntegerOutOfRange(format!(
-                    "reliability sequence: {error}"
-                ))
-            })?,
-        );
-        let value: serde_json::Value = row.try_get("event_json")?;
-        events.push(serde_json::from_value::<ProviderLifecycleEvent>(
-            value.clone(),
-        )?);
-        event_json.push(value);
-        merkle_commits.push(row.try_get("merkle_commit_json")?);
-    }
-    verify_persisted_event_merkle_chain_with_sequences(
+    let event = super::index_store::load_postgres_latest_evidence_event(
+        &mut **transaction,
         OperationKind::ProviderEvent,
-        &row_sequences,
-        &event_json,
-        &merkle_commits,
-    )?;
-    Ok(events)
+        &operation_id,
+    )
+    .await?;
+    let Some(event) = event else {
+        return Ok(ProviderEvidenceLog::default());
+    };
+    Ok(ProviderEvidenceLog::from_head(serde_json::from_value(
+        event,
+    )?)?)
 }
 
 pub(super) async fn verify_provider_repository_state_evidence(
@@ -596,7 +572,7 @@ pub(super) async fn verify_provider_repository_state_evidence(
 ) -> Result<(), PostgresMetadataStoreError> {
     let snapshot = snapshot_from_state(state)?;
     let evidence = load_provider_evidence(transaction, &snapshot).await?;
-    if evidence.is_empty() {
+    if evidence.events().is_empty() {
         let baseline = ProviderEvidenceLog::baseline(snapshot.clone())?;
         verify_provider_lifecycle_events(baseline.events(), &snapshot)?;
         let event = baseline.events().last().ok_or_else(|| {
@@ -606,7 +582,7 @@ pub(super) async fn verify_provider_repository_state_evidence(
         })?;
         super::insert_reliability_event(transaction, event).await?;
     } else {
-        verify_provider_lifecycle_events(&evidence, &snapshot)?;
+        verify_provider_lifecycle_events(evidence.events(), &snapshot)?;
     }
     Ok(())
 }

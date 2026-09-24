@@ -10,10 +10,12 @@ use shardline_reliability::{
     RetentionHoldLifecycleEvent, RetentionHoldLifecycleState, RetentionHoldSnapshot,
     RetentionObjectIdentity, SnapshotEvidence, WebhookDeliveryEvidenceLog, WebhookDeliveryIdentity,
     WebhookDeliveryLifecycleState, WebhookDeliverySnapshot, append_or_baseline_snapshot_evidence,
-    baseline_upload_lifecycle_events, reliability_merkle_commit_json_with_previous,
-    upload_lifecycle_event, upload_lifecycle_identity, verify_and_append_snapshot_transition,
+    baseline_upload_lifecycle_events, persisted_event_sequence,
+    reliability_merkle_commit_json_with_previous, upload_lifecycle_event,
+    upload_lifecycle_identity, verify_and_append_snapshot_transition,
     verify_and_reactivate_quarantine, verify_persisted_event_merkle_chain,
-    verify_persisted_event_merkle_chain_with_sequences, verify_provider_lifecycle_events,
+    verify_persisted_event_merkle_chain_with_sequences,
+    verify_persisted_merkle_commit_with_previous, verify_provider_lifecycle_events,
     verify_snapshot_evidence, verify_upload_lifecycle_events,
 };
 use shardline_storage::ObjectKey;
@@ -33,6 +35,61 @@ struct PersistedEvidenceHistory {
     sequences: Vec<u64>,
     event_json: Vec<serde_json::Value>,
     merkle_commits: Vec<Option<serde_json::Value>>,
+}
+
+/// Loads and verifies one operation's current evidence boundary without
+/// replaying its historical prefix. Full-chain replay remains available to
+/// batch verification and fsck/repair paths.
+pub(super) async fn load_postgres_latest_evidence_event(
+    executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>,
+    operation_kind: OperationKind,
+    operation_id: &str,
+) -> Result<Option<serde_json::Value>, PostgresMetadataStoreError> {
+    let row = query(
+        "SELECT latest.sequence, latest.event_json, latest.merkle_commit_json,
+                (
+                    SELECT previous.merkle_commit_json
+                    FROM shardline_reliability_events AS previous
+                    WHERE previous.operation_kind = $1
+                      AND previous.operation_id = $2
+                      AND previous.sequence < latest.sequence
+                      AND previous.merkle_commit_json IS NOT NULL
+                    ORDER BY previous.sequence DESC
+                    LIMIT 1
+                ) AS previous_merkle_commit_json
+         FROM (
+             SELECT sequence, event_json, merkle_commit_json
+             FROM shardline_reliability_events
+             WHERE operation_kind = $1 AND operation_id = $2
+             ORDER BY sequence DESC
+             LIMIT 1
+         ) AS latest",
+    )
+    .bind(operation_kind.as_str())
+    .bind(operation_id)
+    .fetch_optional(executor)
+    .await?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let sequence = u64::try_from(row.try_get::<i64, _>("sequence")?).map_err(|error| {
+        PostgresMetadataStoreError::IntegerOutOfRange(format!("reliability sequence: {error}"))
+    })?;
+    let event_json: serde_json::Value = row.try_get("event_json")?;
+    if persisted_event_sequence(operation_kind, event_json.clone())? != sequence {
+        return Err(PostgresMetadataStoreError::Reliability(
+            shardline_reliability::ReliabilityError::Merkle(
+                "reliability row sequence does not match its event".into(),
+            ),
+        ));
+    }
+    verify_persisted_merkle_commit_with_previous(
+        operation_kind,
+        event_json.clone(),
+        row.try_get("merkle_commit_json")?,
+        row.try_get("previous_merkle_commit_json")?,
+    )?;
+    Ok(Some(event_json))
 }
 
 async fn load_postgres_evidence_histories(
@@ -349,78 +406,30 @@ async fn load_postgres_quarantine_evidence(
     executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>,
     object_key: &str,
 ) -> Result<QuarantineEvidenceLog, PostgresMetadataStoreError> {
-    let rows = query(
-        "SELECT sequence, event_json, merkle_commit_json FROM shardline_reliability_events
-         WHERE operation_kind = 'GarbageCollection' AND operation_id = $1 ORDER BY sequence",
-    )
-    .bind(object_key)
-    .fetch_all(executor)
-    .await?;
-    let mut events = Vec::with_capacity(rows.len());
-    let mut row_sequences = Vec::with_capacity(rows.len());
-    let mut event_json = Vec::with_capacity(rows.len());
-    let mut merkle_commits = Vec::with_capacity(rows.len());
-    for row in rows {
-        row_sequences.push(
-            u64::try_from(row.try_get::<i64, _>("sequence")?).map_err(|error| {
-                PostgresMetadataStoreError::IntegerOutOfRange(format!(
-                    "reliability sequence: {error}"
-                ))
-            })?,
-        );
-        let value: serde_json::Value = row.try_get("event_json")?;
-        events.push(serde_json::from_value::<QuarantineLifecycleEvent>(
-            value.clone(),
-        )?);
-        event_json.push(value);
-        merkle_commits.push(row.try_get("merkle_commit_json")?);
-    }
-    verify_persisted_event_merkle_chain_with_sequences(
-        OperationKind::GarbageCollection,
-        &row_sequences,
-        &event_json,
-        &merkle_commits,
-    )?;
-    Ok(QuarantineEvidenceLog::from_events(events)?)
+    let event =
+        load_postgres_latest_evidence_event(executor, OperationKind::GarbageCollection, object_key)
+            .await?;
+    let Some(event) = event else {
+        return Ok(QuarantineEvidenceLog::default());
+    };
+    Ok(QuarantineEvidenceLog::from_head(serde_json::from_value(
+        event,
+    )?)?)
 }
 
 pub(super) async fn load_postgres_retention_evidence(
     executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>,
     object_key: &str,
 ) -> Result<RetentionEvidenceLog, PostgresMetadataStoreError> {
-    let rows = query(
-        "SELECT sequence, event_json, merkle_commit_json FROM shardline_reliability_events
-         WHERE operation_kind = 'RetentionHold' AND operation_id = $1 ORDER BY sequence",
-    )
-    .bind(object_key)
-    .fetch_all(executor)
-    .await?;
-    let mut events = Vec::with_capacity(rows.len());
-    let mut row_sequences = Vec::with_capacity(rows.len());
-    let mut event_json = Vec::with_capacity(rows.len());
-    let mut merkle_commits = Vec::with_capacity(rows.len());
-    for row in rows {
-        row_sequences.push(
-            u64::try_from(row.try_get::<i64, _>("sequence")?).map_err(|error| {
-                PostgresMetadataStoreError::IntegerOutOfRange(format!(
-                    "reliability sequence: {error}"
-                ))
-            })?,
-        );
-        let value: serde_json::Value = row.try_get("event_json")?;
-        events.push(serde_json::from_value::<
-            shardline_reliability::RetentionHoldLifecycleEvent,
-        >(value.clone())?);
-        event_json.push(value);
-        merkle_commits.push(row.try_get("merkle_commit_json")?);
-    }
-    verify_persisted_event_merkle_chain_with_sequences(
-        OperationKind::RetentionHold,
-        &row_sequences,
-        &event_json,
-        &merkle_commits,
-    )?;
-    Ok(RetentionEvidenceLog::from_events(events)?)
+    let event =
+        load_postgres_latest_evidence_event(executor, OperationKind::RetentionHold, object_key)
+            .await?;
+    let Some(event) = event else {
+        return Ok(RetentionEvidenceLog::default());
+    };
+    Ok(RetentionEvidenceLog::from_head(serde_json::from_value(
+        event,
+    )?)?)
 }
 
 fn quarantine_snapshot(
@@ -466,50 +475,33 @@ pub(super) fn webhook_snapshot(
 }
 
 pub(super) async fn load_postgres_webhook_evidence(
-    executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>,
+    executor: &mut PgConnection,
     delivery: &WebhookDelivery,
 ) -> Result<WebhookDeliveryEvidenceLog, PostgresMetadataStoreError> {
     let operation = webhook_snapshot(delivery, WebhookDeliveryLifecycleState::Processed)?
         .evidence_operation()?;
-    let rows = query(
-        "SELECT sequence, event_json, merkle_commit_json FROM shardline_reliability_events
-         WHERE operation_kind = 'WebhookDelivery'
-           AND (operation_id = $1 OR (operation_id = $2 AND NOT EXISTS (
-             SELECT 1 FROM shardline_reliability_events
-             WHERE operation_kind = 'WebhookDelivery' AND operation_id = $1
-           )))
-         ORDER BY sequence",
-    )
-    .bind(&operation.operation_id)
-    .bind(delivery.delivery_id())
-    .fetch_all(executor)
-    .await?;
-    let mut events = Vec::with_capacity(rows.len());
-    let mut row_sequences = Vec::with_capacity(rows.len());
-    let mut event_json = Vec::with_capacity(rows.len());
-    let mut merkle_commits = Vec::with_capacity(rows.len());
-    for row in rows {
-        row_sequences.push(
-            u64::try_from(row.try_get::<i64, _>("sequence")?).map_err(|error| {
-                PostgresMetadataStoreError::IntegerOutOfRange(format!(
-                    "reliability sequence: {error}"
-                ))
-            })?,
-        );
-        let value: serde_json::Value = row.try_get("event_json")?;
-        events.push(serde_json::from_value::<
-            shardline_reliability::WebhookDeliveryLifecycleEvent,
-        >(value.clone())?);
-        event_json.push(value);
-        merkle_commits.push(row.try_get("merkle_commit_json")?);
-    }
-    verify_persisted_event_merkle_chain_with_sequences(
+    let event = load_postgres_latest_evidence_event(
+        &mut *executor,
         OperationKind::WebhookDelivery,
-        &row_sequences,
-        &event_json,
-        &merkle_commits,
-    )?;
-    Ok(WebhookDeliveryEvidenceLog::from_events(events)?)
+        &operation.operation_id,
+    )
+    .await?;
+    let event = if event.is_none() {
+        load_postgres_latest_evidence_event(
+            &mut *executor,
+            OperationKind::WebhookDelivery,
+            delivery.delivery_id(),
+        )
+        .await?
+    } else {
+        event
+    };
+    let Some(event) = event else {
+        return Ok(WebhookDeliveryEvidenceLog::default());
+    };
+    Ok(WebhookDeliveryEvidenceLog::from_head(
+        serde_json::from_value(event)?,
+    )?)
 }
 
 impl AsyncIndexStore for super::PostgresIndexStore {
@@ -1303,7 +1295,7 @@ impl AsyncIndexStore for super::PostgresIndexStore {
             };
             let existing = webhook_delivery_from_row(&row)?;
             let active = webhook_snapshot(&existing, WebhookDeliveryLifecycleState::Processed)?;
-            let evidence = load_postgres_webhook_evidence(&mut *transaction, &existing).await?;
+            let evidence = load_postgres_webhook_evidence(&mut transaction, &existing).await?;
             let released = webhook_snapshot(&existing, WebhookDeliveryLifecycleState::Released)?;
             let (evidence, evidence_was_empty) =
                 verify_and_append_snapshot_transition(evidence, active, released)?;
@@ -1358,7 +1350,7 @@ impl AsyncIndexStore for super::PostgresIndexStore {
             }
             let active = webhook_snapshot(&existing, WebhookDeliveryLifecycleState::Processed)?;
             let released = webhook_snapshot(&existing, WebhookDeliveryLifecycleState::Released)?;
-            let evidence = load_postgres_webhook_evidence(&mut *transaction, &existing).await?;
+            let evidence = load_postgres_webhook_evidence(&mut transaction, &existing).await?;
             let (evidence, evidence_was_empty) =
                 verify_and_append_snapshot_transition(evidence, active, released)?;
             let result = query(
@@ -1410,7 +1402,7 @@ impl AsyncIndexStore for super::PostgresIndexStore {
                 .collect::<Result<Vec<_>, _>>()?;
             for delivery in &deliveries {
                 let active = webhook_snapshot(delivery, WebhookDeliveryLifecycleState::Processed)?;
-                let evidence = load_postgres_webhook_evidence(&mut *transaction, delivery).await?;
+                let evidence = load_postgres_webhook_evidence(&mut transaction, delivery).await?;
                 let released = webhook_snapshot(delivery, WebhookDeliveryLifecycleState::Released)?;
                 let (evidence, evidence_was_empty) =
                     verify_and_append_snapshot_transition(evidence, active, released)?;
