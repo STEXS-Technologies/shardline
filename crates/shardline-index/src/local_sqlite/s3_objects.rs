@@ -377,7 +377,8 @@ impl S3ObjectIndexStore for LocalIndexStore {
                 // reading the old evidence chain and then racing while upgrading
                 // to a writer transaction. SQLite otherwise returns SQLITE_BUSY
                 // for the losing deferred-to-write upgrade.
-                let transaction = connection.transaction()?;
+                let transaction = connection
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
                 upsert_s3_object_sql(&transaction, &entry)?;
                 transaction.commit()?;
                 Ok(())
@@ -398,7 +399,8 @@ impl S3ObjectIndexStore for LocalIndexStore {
         tokio::task::spawn_blocking(move || {
             helpers::retry_sqlite_busy(|| {
                 let mut connection = store.open_connection()?;
-                let transaction = connection.transaction()?;
+                let transaction = connection
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
                 let changed =
                     compare_and_swap_s3_object_sql(&transaction, expected.as_ref(), &replacement)?;
                 transaction.commit()?;
@@ -420,7 +422,8 @@ impl S3ObjectIndexStore for LocalIndexStore {
         tokio::task::spawn_blocking(move || {
             helpers::retry_sqlite_busy(|| {
                 let mut connection = store.open_connection()?;
-                let transaction = connection.transaction()?;
+                let transaction = connection
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
                 let deleted = delete_s3_object_sql(&transaction, &scope_namespace, &object_key)?;
                 transaction.commit()?;
                 Ok(deleted)
