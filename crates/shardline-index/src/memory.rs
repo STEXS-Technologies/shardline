@@ -11,9 +11,9 @@ use shardline_reliability::{
     QuarantineObjectIdentity, QuarantineSnapshot, RetentionEvidenceLog,
     RetentionHoldLifecycleState, RetentionHoldSnapshot, RetentionObjectIdentity,
     WebhookDeliveryEvidenceLog, WebhookDeliveryIdentity, WebhookDeliveryLifecycleState,
-    WebhookDeliverySnapshot, append_or_baseline_snapshot_evidence, upload_lifecycle_event,
-    upload_lifecycle_identity, verify_and_append_snapshot_transition, verify_lifecycle_chain,
-    verify_provider_lifecycle_events, verify_quarantine_lifecycle_events,
+    WebhookDeliverySnapshot, upload_lifecycle_event, upload_lifecycle_identity,
+    verify_and_append_snapshot_transition, verify_and_append_webhook_delivery_retry,
+    verify_lifecycle_chain, verify_provider_lifecycle_events, verify_quarantine_lifecycle_events,
     verify_retention_hold_lifecycle_events, verify_upload_lifecycle_events,
 };
 use shardline_storage::ObjectKey;
@@ -116,20 +116,18 @@ impl MemoryIndexStore {
             .get(&key)
             .cloned()
             .unwrap_or_default();
-        let (evidence, _) = if evidence.events().is_empty() {
-            (
-                append_or_baseline_snapshot_evidence(evidence, snapshot)
-                    .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?,
-                true,
-            )
-        } else {
-            let released = webhook_snapshot(delivery, WebhookDeliveryLifecycleState::Released)?;
-            verify_and_append_snapshot_transition(evidence, released, snapshot)
-                .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?
-        };
-        state
-            .webhook_deliveries
-            .insert(key.clone(), delivery.clone());
+        let processed_at_unix_seconds = evidence
+            .events()
+            .last()
+            .map_or(delivery.processed_at_unix_seconds(), |event| {
+                event.after.processed_at_unix_seconds
+            });
+        let (evidence, _) = verify_and_append_webhook_delivery_retry(evidence, snapshot)
+            .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
+        state.webhook_deliveries.insert(
+            key.clone(),
+            delivery.with_processed_at_unix_seconds(processed_at_unix_seconds),
+        );
         state.webhook_evidence.insert(key, evidence);
         Ok(true)
     }

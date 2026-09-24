@@ -119,5 +119,6 @@ pub use states::{ResumableLifecycleState, UploadLifecycleState};
 pub use webhook_evidence::{
     WebhookDeliveryEvidenceLog, WebhookDeliveryIdentity, WebhookDeliveryLifecycleEvent,
     WebhookDeliveryLifecycleState, WebhookDeliveryOperationId, WebhookDeliverySnapshot,
-    verify_webhook_delivery_chain, verify_webhook_delivery_events,
+    verify_and_append_webhook_delivery_retry, verify_webhook_delivery_chain,
+    verify_webhook_delivery_events,
 };

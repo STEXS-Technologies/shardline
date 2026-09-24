@@ -2,8 +2,8 @@ use shardline_protocol::RepositoryProvider;
 use shardline_reliability::{
     OperationKind, ProviderEvidenceLog, ProviderLifecycleEvent, ProviderLifecycleSnapshot,
     ProviderRepositoryOperationId, RetentionEvidenceLog, RetentionHoldLifecycleState,
-    SnapshotEvidence, WebhookDeliveryEvidenceLog, WebhookDeliveryLifecycleState,
-    append_or_baseline_snapshot_evidence, verify_and_append_snapshot_transition,
+    SnapshotEvidence, WebhookDeliveryLifecycleState, append_or_baseline_snapshot_evidence,
+    verify_and_append_snapshot_transition, verify_and_append_webhook_delivery_retry,
     verify_or_repair_snapshot_evidence, verify_persisted_event_merkle_chain_with_sequences,
     verify_provider_lifecycle_events,
 };
@@ -274,15 +274,14 @@ pub(super) async fn record_webhook_delivery(
         super::index_store::webhook_snapshot(delivery, WebhookDeliveryLifecycleState::Processed)?;
     let evidence =
         super::index_store::load_postgres_webhook_evidence(&mut **transaction, delivery).await?;
-    let (evidence, _evidence_was_empty) = if evidence.events().is_empty() {
-        (WebhookDeliveryEvidenceLog::baseline(snapshot)?, true)
-    } else {
-        let released = super::index_store::webhook_snapshot(
-            delivery,
-            WebhookDeliveryLifecycleState::Released,
-        )?;
-        verify_and_append_snapshot_transition(evidence, released, snapshot)?
-    };
+    let processed_at_unix_seconds = evidence
+        .events()
+        .last()
+        .map_or(delivery.processed_at_unix_seconds(), |event| {
+            event.after.processed_at_unix_seconds
+        });
+    let (evidence, _evidence_was_empty) =
+        verify_and_append_webhook_delivery_retry(evidence, snapshot)?;
     query(
         "INSERT INTO shardline_webhook_deliveries (
             provider, owner, repo, delivery_id, processed_at_unix_seconds
@@ -292,7 +291,7 @@ pub(super) async fn record_webhook_delivery(
     .bind(delivery.owner())
     .bind(delivery.repo())
     .bind(delivery.delivery_id())
-    .bind(u64_to_i64(delivery.processed_at_unix_seconds())?)
+    .bind(u64_to_i64(processed_at_unix_seconds)?)
     .execute(&mut **transaction)
     .await?;
     for event in evidence.events() {

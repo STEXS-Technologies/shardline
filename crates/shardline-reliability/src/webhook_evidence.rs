@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::snapshot_event::{SnapshotEvidence, SnapshotEvidenceEvent, verify_snapshot_chain};
-use crate::snapshot_log::SnapshotEvidenceLog;
+use crate::snapshot_log::{SnapshotEvidenceLog, verify_and_append_snapshot_transition};
 use crate::{OperationIdentity, OperationKind, ReliabilityError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -212,6 +212,28 @@ pub fn verify_webhook_delivery_events(
     }
 }
 
+/// Reclaims a delivery whose failed application released its deduplication
+/// claim. Retry requests carry a fresh observation timestamp, but the
+/// delivery identity and its original claim timestamp are durable evidence.
+/// Reuse that timestamp when appending the next `Processed` state so a retry
+/// remains valid even when it crosses a wall-clock second.
+pub fn verify_and_append_webhook_delivery_retry(
+    stored: WebhookDeliveryEvidenceLog,
+    requested: WebhookDeliverySnapshot,
+) -> Result<(WebhookDeliveryEvidenceLog, bool), ReliabilityError> {
+    if stored.events().is_empty() {
+        return Ok((WebhookDeliveryEvidenceLog::baseline(requested)?, true));
+    }
+    let released = stored
+        .events()
+        .last()
+        .map(|event| event.after.clone())
+        .ok_or(ReliabilityError::OperationMismatch)?;
+    let mut processed = requested;
+    processed.processed_at_unix_seconds = released.processed_at_unix_seconds;
+    verify_and_append_snapshot_transition(stored, released, processed)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -241,6 +263,39 @@ mod tests {
             &snapshot(WebhookDeliveryLifecycleState::Processed),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn retry_reuses_original_claim_timestamp() {
+        let mut log = WebhookDeliveryEvidenceLog::baseline(snapshot(
+            WebhookDeliveryLifecycleState::Processed,
+        ))
+        .unwrap();
+        log.record(snapshot(WebhookDeliveryLifecycleState::Released))
+            .unwrap();
+        let requested = WebhookDeliverySnapshot::new(
+            WebhookDeliveryIdentity::new("github", "team", "assets", "delivery-1").unwrap(),
+            200,
+            WebhookDeliveryLifecycleState::Processed,
+        );
+
+        let (retried, baseline_was_missing) =
+            verify_and_append_webhook_delivery_retry(log, requested).unwrap();
+
+        assert!(!baseline_was_missing);
+        assert_eq!(
+            retried
+                .events()
+                .last()
+                .unwrap()
+                .after
+                .processed_at_unix_seconds,
+            100
+        );
+        assert_eq!(
+            retried.events().last().unwrap().after.state,
+            WebhookDeliveryLifecycleState::Processed
+        );
     }
 
     #[test]

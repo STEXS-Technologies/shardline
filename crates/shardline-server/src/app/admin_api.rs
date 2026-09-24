@@ -684,6 +684,8 @@ mod tests {
     };
     use proptest::prelude::*;
     use serde_json::Value;
+    use shardline_index::{PostgresIndexStore, ResumableSession, ResumableSessionProtocol};
+    use std::time::Duration;
     use tempfile::TempDir;
     use tower::ServiceExt;
 
@@ -700,6 +702,23 @@ mod tests {
         "/api/v1/tasks",
         "/api/v1/metrics",
     ];
+
+    async fn seed_active_session(pool: &sqlx::PgPool, session_id: String, expires_at: Duration) {
+        let store = PostgresIndexStore::new(pool.clone());
+        let session = ResumableSession::new(
+            session_id,
+            ResumableSessionProtocol::S3Multipart,
+            "owner/repo".to_owned(),
+            "key.bin".to_owned(),
+            expires_at,
+        );
+        assert!(
+            store
+                .create_resumable_session(&session)
+                .await
+                .expect("create active session")
+        );
+    }
 
     proptest! {
         #[test]
@@ -1421,29 +1440,26 @@ mod tests {
             .expect("cleanup sessions");
 
         // Insert two active sessions and one terminal session.
-        let expiry = chrono::Utc::now() + chrono::Duration::hours(1);
+        let expiry = Duration::from_secs(
+            u64::try_from(chrono::Utc::now().timestamp()).expect("current timestamp") + 3600,
+        );
         let pid = std::process::id();
         let id_active_1 = format!("admin-task-active-1-{pid}");
         let id_active_2 = format!("admin-task-active-2-{pid}");
         let id_terminal = format!("admin-task-terminal-{pid}");
-        for (sid, state) in [
-            (&id_active_1, "active"),
-            (&id_active_2, "active"),
-            (&id_terminal, "completed"),
-        ] {
-            sqlx::query(
-                "INSERT INTO shardline_resumable_sessions \
-                 (session_id, protocol, scope_namespace, target_key, attributes_json, \
-                  state, generation, fence_epoch, expires_at) \
-                 VALUES ($1, 's3_multipart', 'owner/repo', 'key.bin', '{}', $2, 1, 1, $3)",
-            )
-            .bind(sid)
-            .bind(state)
-            .bind(expiry)
-            .execute(&pool)
-            .await
-            .expect("insert session");
-        }
+        seed_active_session(&pool, id_active_1.clone(), expiry).await;
+        seed_active_session(&pool, id_active_2.clone(), expiry).await;
+        sqlx::query(
+            "INSERT INTO shardline_resumable_sessions \
+             (session_id, protocol, scope_namespace, target_key, attributes_json, \
+              state, generation, fence_epoch, expires_at) \
+             VALUES ($1, 's3_multipart', 'owner/repo', 'key.bin', '{}', 'completed', 1, 1, $2)",
+        )
+        .bind(&id_terminal)
+        .bind(chrono::Utc::now() + chrono::Duration::hours(1))
+        .execute(&pool)
+        .await
+        .expect("insert terminal session");
 
         let response = app
             .oneshot(request(Method::GET, "/api/v1/tasks", Some(ADMIN_TOKEN)))
@@ -1508,21 +1524,13 @@ mod tests {
             .await
             .expect("cleanup sessions");
 
-        let expiry = chrono::Utc::now() + chrono::Duration::hours(1);
+        let expiry = Duration::from_secs(
+            u64::try_from(chrono::Utc::now().timestamp()).expect("current timestamp") + 3600,
+        );
         let pid = std::process::id();
         for i in 0..4u32 {
             let sid = format!("admin-paginate-{i}-{pid}");
-            sqlx::query(
-                "INSERT INTO shardline_resumable_sessions \
-                 (session_id, protocol, scope_namespace, target_key, attributes_json, \
-                  state, generation, fence_epoch, expires_at) \
-                 VALUES ($1, 's3_multipart', 'owner/repo', 'key.bin', '{}', 'active', 1, 1, $2)",
-            )
-            .bind(&sid)
-            .bind(expiry)
-            .execute(&pool)
-            .await
-            .expect("insert session");
+            seed_active_session(&pool, sid, expiry).await;
         }
         // Also insert a terminal session with the same prefix to ensure it is filtered.
         let terminal_id = format!("admin-paginate-terminal-{pid}");
@@ -1533,7 +1541,7 @@ mod tests {
              VALUES ($1, 's3_multipart', 'owner/repo', 'key.bin', '{}', 'completed', 1, 1, $2)",
         )
         .bind(&terminal_id)
-        .bind(expiry)
+        .bind(chrono::Utc::now() + chrono::Duration::hours(1))
         .execute(&pool)
         .await
         .expect("insert terminal session");
@@ -1627,7 +1635,9 @@ mod tests {
             .await
             .expect("cleanup sessions");
 
-        let expiry = chrono::Utc::now() + chrono::Duration::hours(1);
+        let expiry = Duration::from_secs(
+            u64::try_from(chrono::Utc::now().timestamp()).expect("current timestamp") + 3600,
+        );
         let pid = std::process::id();
         // Terminal sessions interleave between active sessions in keyset order
         // so a naive in-memory filter over an unfiltered SQL window would
@@ -1641,18 +1651,22 @@ mod tests {
         ];
         for (id, state) in states {
             let sid = format!("{id}-{pid}");
-            sqlx::query(
-                "INSERT INTO shardline_resumable_sessions \
-                 (session_id, protocol, scope_namespace, target_key, attributes_json, \
-                  state, generation, fence_epoch, expires_at) \
-                 VALUES ($1, 's3_multipart', 'owner/repo', 'key.bin', '{}', $2, 1, 1, $3)",
-            )
-            .bind(&sid)
-            .bind(state)
-            .bind(expiry)
-            .execute(&pool)
-            .await
-            .expect("insert session");
+            if state == "active" {
+                seed_active_session(&pool, sid, expiry).await;
+            } else {
+                sqlx::query(
+                    "INSERT INTO shardline_resumable_sessions \
+                     (session_id, protocol, scope_namespace, target_key, attributes_json, \
+                      state, generation, fence_epoch, expires_at) \
+                     VALUES ($1, 's3_multipart', 'owner/repo', 'key.bin', '{}', $2, 1, 1, $3)",
+                )
+                .bind(&sid)
+                .bind(state)
+                .bind(chrono::Utc::now() + chrono::Duration::hours(1))
+                .execute(&pool)
+                .await
+                .expect("insert terminal session");
+            }
         }
 
         // Page through with limit=1, following cursors to the end.

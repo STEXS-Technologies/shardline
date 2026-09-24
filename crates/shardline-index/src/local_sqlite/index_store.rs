@@ -4,7 +4,8 @@ use shardline_reliability::{
     LifecycleEvent, ProviderEvidenceLog, QuarantineLifecycleState, RetentionHoldLifecycleState,
     SnapshotEvidence, WebhookDeliveryLifecycleState, append_or_baseline_snapshot_evidence,
     upload_lifecycle_event, upload_lifecycle_identity, verify_and_append_snapshot_transition,
-    verify_provider_lifecycle_events, verify_snapshot_evidence, verify_upload_lifecycle_events,
+    verify_and_append_webhook_delivery_retry, verify_provider_lifecycle_events,
+    verify_snapshot_evidence, verify_upload_lifecycle_events,
 };
 use shardline_storage::ObjectKey;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -744,15 +745,14 @@ impl LifecycleStore for LocalIndexStore {
         }
         let snapshot = webhook_snapshot(delivery, WebhookDeliveryLifecycleState::Processed)?;
         let evidence = load_webhook_evidence(&transaction, delivery)?;
-        let (evidence, evidence_was_empty) = if evidence.events().is_empty() {
-            (
-                append_or_baseline_snapshot_evidence(evidence, snapshot)?,
-                true,
-            )
-        } else {
-            let released = webhook_snapshot(delivery, WebhookDeliveryLifecycleState::Released)?;
-            verify_and_append_snapshot_transition(evidence, released, snapshot)?
-        };
+        let processed_at_unix_seconds = evidence
+            .events()
+            .last()
+            .map_or(delivery.processed_at_unix_seconds(), |event| {
+                event.after.processed_at_unix_seconds
+            });
+        let (evidence, evidence_was_empty) =
+            verify_and_append_webhook_delivery_retry(evidence, snapshot)?;
         transaction.execute(
             "INSERT INTO shardline_webhook_deliveries (
                 provider,
@@ -768,7 +768,7 @@ impl LifecycleStore for LocalIndexStore {
                 delivery.owner(),
                 delivery.repo(),
                 delivery.delivery_id(),
-                u64_to_i64(delivery.processed_at_unix_seconds())?,
+                u64_to_i64(processed_at_unix_seconds)?,
             ],
         )?;
         if evidence_was_empty {
@@ -2174,7 +2174,19 @@ mod tests {
             .unwrap();
         drop(connection);
 
-        assert!(LifecycleStore::record_webhook_delivery(&store, &delivery).unwrap());
+        let recreated = WebhookDelivery::new(
+            RepositoryProvider::GitHub,
+            "owner".into(),
+            "repo".into(),
+            "delivery-recreate".into(),
+            2000,
+        )
+        .unwrap();
+        assert!(LifecycleStore::record_webhook_delivery(&store, &recreated).unwrap());
+        assert_eq!(
+            LifecycleStore::list_webhook_deliveries(&store).unwrap(),
+            vec![delivery]
+        );
     }
 
     #[test]
