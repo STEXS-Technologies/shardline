@@ -133,7 +133,7 @@ impl LocalIndexStore {
         Ok(tombstones)
     }
 
-    fn publish_oci_object_blocking(
+    fn publish_oci_object_blocking_once(
         &self,
         key: &OciObjectKey,
         tags: &[OciTagEntry],
@@ -198,6 +198,14 @@ impl LocalIndexStore {
         )?;
         transaction.commit()?;
         Ok(())
+    }
+
+    fn publish_oci_object_blocking(
+        &self,
+        key: &OciObjectKey,
+        tags: &[OciTagEntry],
+    ) -> Result<(), LocalIndexStoreError> {
+        super::helpers::retry_sqlite_busy(|| self.publish_oci_object_blocking_once(key, tags))
     }
 
     fn delete_oci_object_blocking(&self, key: &OciObjectKey) -> Result<(), LocalIndexStoreError> {

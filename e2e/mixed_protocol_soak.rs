@@ -259,7 +259,13 @@ async fn exercise_oci(
             .body(content.clone())
             .send()
             .await?;
-        assert_eq!(upload.status(), StatusCode::CREATED);
+        let upload_status = upload.status();
+        let upload_body = upload.text().await.unwrap_or_default();
+        assert_eq!(
+            upload_status,
+            StatusCode::CREATED,
+            "OCI upload failed in round {round}: {upload_body}"
+        );
 
         let download = client
             .get(format!("{base_url}/v2/team/assets/blobs/sha256:{digest}"))
