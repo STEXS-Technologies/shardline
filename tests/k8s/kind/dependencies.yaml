@@ -207,8 +207,8 @@ spec:
             - name: MINIO_ROOT_PASSWORD
               value: kind-smoke-minio-secret
           readinessProbe:
-            exec:
-              command: ["/usr/bin/curl", "--fail", "--silent", "--show-error", "http://127.0.0.1:9000/minio/health/ready"]
+            tcpSocket:
+              port: api
             initialDelaySeconds: 2
             periodSeconds: 2
           resources:
