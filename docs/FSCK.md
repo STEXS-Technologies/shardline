@@ -69,6 +69,13 @@ For each record it verifies:
 - reconstruction rows reference registered xorbs and are not empty
 - provider repository lifecycle state uses valid repository identity and plausible
   timestamps
+- every persisted StateChronicle Merkle commitment matches its typed reliability
+  event, sequence, operation identity, and parent commitment
+
+Reliability evidence is checked against the authoritative materialized state and
+is never repaired during fsck. An evidence failure is reported separately as
+`invalid_reliability_evidence`, so operators can distinguish valid content from
+invalid state-transition evidence.
 
 For dedupe-shard mappings it also verifies:
 
@@ -135,6 +142,7 @@ Issue kinds currently include:
 - `invalid_webhook_delivery_timestamp`
 - `invalid_provider_repository_state`
 - `invalid_provider_repository_state_timestamp`
+- `invalid_reliability_evidence`
 
 ## Scope
 
@@ -148,3 +156,18 @@ provider repository metadata through the configured index-store adapter.
 Provider repository state checks validate the durable lifecycle metadata already stored
 by Shardline; live provider drift is handled by lifecycle reconciliation and repair
 workflows.
+
+For Postgres reliability journals, use `shardline db migrate verify` for a
+journal-only verification pass. To repair one damaged operation, first confirm
+the authoritative materialized row is valid, then explicitly rebuild only that
+operation:
+
+```bash
+shardline db migrate repair \
+  --operation-kind S3Object \
+  --operation-id '<exact-operation-id>' \
+  --confirm
+```
+
+Repair discards and rebuilds the selected evidence chain from the authoritative
+materialized state; it never runs silently as part of a normal read or fsck.
