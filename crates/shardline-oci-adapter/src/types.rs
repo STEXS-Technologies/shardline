@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 use sha2::{compress256, digest::generic_array::GenericArray};
-use std::{fs::File, sync::LazyLock};
-use tokio::sync::{Mutex, MutexGuard};
+use std::fs::File;
 
 use crate::OciAdapterError;
 
@@ -10,10 +9,7 @@ pub(crate) const OCI_S3_MULTIPART_CHUNK_BYTES: usize = 8 * 1024 * 1024;
 const SHA256_INITIAL_STATE: [u32; 8] = [
     0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
 ];
-pub(crate) static OCI_UPLOAD_SESSION_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
-
 pub struct OciUploadSessionLock {
-    pub(crate) _process_guard: MutexGuard<'static, ()>,
     pub(crate) _file_lock: OciFileLock,
 }
 

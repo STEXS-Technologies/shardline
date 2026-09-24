@@ -34,7 +34,7 @@ use crate::{
         scope_namespace, validate_oci_repository_scope, validate_upload_session_id,
     },
     traits::OciBackend,
-    types::{OCI_UPLOAD_SESSION_LOCK, OciUploadSession, OciUploadSessionLock},
+    types::{OciUploadSession, OciUploadSessionLock},
 };
 
 #[must_use]
@@ -62,10 +62,8 @@ pub fn new_upload_session_id() -> String {
 ///
 /// Returns an error when the file lock cannot be acquired.
 pub async fn lock_upload_sessions(root: &Path) -> Result<OciUploadSessionLock, OciAdapterError> {
-    let process_guard = OCI_UPLOAD_SESSION_LOCK.lock().await;
     let file_lock = acquire_upload_session_file_lock(upload_session_lock_path(root)).await?;
     Ok(OciUploadSessionLock {
-        _process_guard: process_guard,
         _file_lock: file_lock,
     })
 }
