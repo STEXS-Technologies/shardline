@@ -55,6 +55,7 @@ run_targets_in_parallel() {
     local target=""
     local fuzz_binary=""
     local corpus_dir=""
+    local artifact_dir=""
 
     for target in "${targets[@]}"; do
         fuzz_binary="${ROOT_DIR}/target/${FUZZ_TARGET}/release/${target}"
@@ -62,11 +63,13 @@ run_targets_in_parallel() {
             printf 'built fuzz binary is missing or not executable: %s\n' "${fuzz_binary}" >&2
             return 1
         fi
+        artifact_dir="${FUZZ_DIR}/artifacts/${target}/"
+        mkdir -p "${artifact_dir}"
         printf '==> %s [isolated process]\n' "${target}"
         case "${FUZZ_MODE}" in
             smoke)
                 (
-                    "${fuzz_binary}" "-runs=${DEFAULT_RUNS}" \
+                    "${fuzz_binary}" "-artifact_prefix=${artifact_dir}" "-runs=${DEFAULT_RUNS}" \
                         > >(sed "s/^/[${target}] /") \
                         2> >(sed "s/^/[${target}] /" >&2)
                 ) &
@@ -75,13 +78,13 @@ run_targets_in_parallel() {
                 corpus_dir="${FUZZ_DIR}/corpus/${target}"
                 if [ -d "${corpus_dir}" ]; then
                     (
-                        "${fuzz_binary}" "${corpus_dir}" "-runs=0" \
+                        "${fuzz_binary}" "-artifact_prefix=${artifact_dir}" "${corpus_dir}" "-runs=0" \
                             > >(sed "s/^/[${target}] /") \
                             2> >(sed "s/^/[${target}] /" >&2)
                     ) &
                 else
                     (
-                        "${fuzz_binary}" "-runs=1" \
+                        "${fuzz_binary}" "-artifact_prefix=${artifact_dir}" "-runs=1" \
                             > >(sed "s/^/[${target}] /") \
                             2> >(sed "s/^/[${target}] /" >&2)
                     ) &
