@@ -11,6 +11,8 @@ use tokio::{sync::Semaphore, task, time::sleep};
 
 struct BenchmarkConfig {
     base_url: String,
+    read_url: String,
+    write_url: Option<String>,
     token: Option<String>,
     concurrency: usize,
     duration: Duration,
@@ -253,6 +255,11 @@ async fn run_download_loop(
 fn parse_config() -> BenchmarkConfig {
     let base_url =
         std::env::var("BENCH_URL").unwrap_or_else(|_| "http://127.0.0.1:18080".to_owned());
+    let read_url =
+        std::env::var("BENCH_READ_URL").unwrap_or_else(|_| format!("{base_url}/healthz"));
+    let write_url = std::env::var("BENCH_WRITE_URL")
+        .ok()
+        .filter(|url| !url.trim().is_empty());
     let token = std::env::var("BENCH_TOKEN").ok();
     let concurrency: usize = std::env::var("BENCH_CONCURRENCY")
         .unwrap_or_else(|_| "10".to_owned())
@@ -273,6 +280,8 @@ fn parse_config() -> BenchmarkConfig {
 
     BenchmarkConfig {
         base_url,
+        read_url,
+        write_url,
         token,
         concurrency,
         duration: Duration::from_secs(duration_secs),
@@ -339,8 +348,7 @@ async fn main() {
         .build()
         .expect("reqwest client should build");
 
-    let upload_url = format!("{}/healthz", config.base_url);
-    let download_url = format!("{}/healthz", config.base_url);
+    let download_url = config.read_url.clone();
 
     eprintln!("=== Shardline Load Benchmark ===");
     eprintln!("  Base URL:     {}", config.base_url);
@@ -379,8 +387,6 @@ async fn main() {
         let metrics = Arc::new(SharedMetrics::new());
         let semaphore = Arc::new(Semaphore::new(config.concurrency));
         let deadline = Instant::now() + config.warmup;
-        let upload_data = vec![0xAB_u8; config.upload_size];
-
         let mut handles = Vec::with_capacity(config.concurrency);
         for _ in 0..config.concurrency {
             let permit = semaphore
@@ -389,12 +395,11 @@ async fn main() {
                 .await
                 .expect("semaphore open");
             let client = client.clone();
-            let url = upload_url.clone();
+            let url = download_url.clone();
             let token = config.token.clone();
-            let data = upload_data.clone();
             let metrics = Arc::clone(&metrics);
             handles.push(task::spawn(async move {
-                run_load_loop(client, url, token, data, metrics, deadline).await;
+                run_download_loop(client, url, token, metrics, deadline).await;
                 drop(permit);
             }));
         }
@@ -404,10 +409,10 @@ async fn main() {
     }
     eprintln!("Warmup complete.\n");
 
-    // --- Upload benchmark ---
-    eprintln!("Running upload benchmark...");
-    let upload_metrics = Arc::new(SharedMetrics::new());
-    {
+    // --- Write benchmark ---
+    if let Some(upload_url) = config.write_url.clone() {
+        eprintln!("Running write benchmark...");
+        let upload_metrics = Arc::new(SharedMetrics::new());
         let semaphore = Arc::new(Semaphore::new(config.concurrency));
         let deadline = Instant::now() + config.duration;
         let upload_data = vec![0xAB_u8; config.upload_size];
@@ -437,10 +442,12 @@ async fn main() {
         let result = upload_metrics.snapshot(elapsed);
 
         if json_output {
-            print_json_result("uploads", &result);
+            print_json_result("writes", &result);
         } else {
-            print_result("Uploads", &result);
+            print_result("Writes", &result);
         }
+    } else {
+        eprintln!("Write benchmark disabled; set BENCH_WRITE_URL to a real write endpoint.");
     }
 
     // --- Download benchmark ---
@@ -481,7 +488,12 @@ async fn main() {
     }
 
     // --- Mixed workload (80% reads, 20% writes) ---
-    eprintln!("Running mixed workload (80/20 read/write)...");
+    let mixed_label = if config.write_url.is_some() {
+        "mixed_80r_20w"
+    } else {
+        "read_only"
+    };
+    eprintln!("Running {} workload...", mixed_label.replace('_', " "));
     let mixed_metrics = Arc::new(SharedMetrics::new());
     {
         let semaphore = Arc::new(Semaphore::new(config.concurrency));
@@ -496,17 +508,25 @@ async fn main() {
                 .await
                 .expect("semaphore open");
             let client = client.clone();
-            let upload_url = upload_url.clone();
             let download_url = download_url.clone();
+            let upload_url = config.write_url.clone();
             let token = config.token.clone();
             let data = upload_data.clone();
             let metrics = Arc::clone(&mixed_metrics);
-            let is_reader = (i % 5) != 0; // 80% readers, 20% writers
+            let is_reader = upload_url.is_none() || (i % 5) != 0; // 80% readers, 20% writers
             handles.push(task::spawn(async move {
                 if is_reader {
                     run_download_loop(client, download_url, token, metrics, deadline).await;
                 } else {
-                    run_load_loop(client, upload_url, token, data, metrics, deadline).await;
+                    run_load_loop(
+                        client,
+                        upload_url.expect("write URL exists for writer"),
+                        token,
+                        data,
+                        metrics,
+                        deadline,
+                    )
+                    .await;
                 }
                 drop(permit);
             }));
@@ -519,7 +539,7 @@ async fn main() {
         let result = mixed_metrics.snapshot(elapsed);
 
         if json_output {
-            print_json_result("mixed_80r_20w", &result);
+            print_json_result(mixed_label, &result);
         } else {
             print_result("Mixed (80% read / 20% write)", &result);
         }
