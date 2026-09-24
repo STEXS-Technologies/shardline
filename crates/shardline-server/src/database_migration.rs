@@ -1126,6 +1126,8 @@ async fn reconcile_reliability_events(
                     "persisted reliability event verification: {error}"
                 ))
             })?;
+        transaction.commit().await?;
+        return Ok(());
     }
     let upload_rows = query(
         "SELECT i.intent_id, i.object_key, i.object_hash, i.state
@@ -1134,7 +1136,8 @@ async fn reconcile_reliability_events(
              SELECT 1 FROM shardline_reliability_events AS e
              WHERE e.operation_kind = 'Upload' AND e.operation_id = i.intent_id
          )
-         LIMIT $1",
+         LIMIT $1
+         FOR UPDATE OF i SKIP LOCKED",
     )
     .bind(batch_size)
     .fetch_all(&mut *transaction)
@@ -1174,7 +1177,8 @@ async fn reconcile_reliability_events(
              SELECT 1 FROM shardline_reliability_events AS e
              WHERE e.operation_kind = 'ResumableSession' AND e.operation_id = s.session_id
          )
-         LIMIT $1",
+         LIMIT $1
+         FOR UPDATE OF s SKIP LOCKED",
     )
     .bind(batch_size)
     .fetch_all(&mut *transaction)
@@ -1216,7 +1220,8 @@ async fn reconcile_reliability_events(
              WHERE e.operation_kind = 'ProviderEvent'
                AND e.operation_id = s.provider || ':' || s.owner || ':' || s.repo
          )
-         LIMIT $1",
+         LIMIT $1
+         FOR UPDATE OF s SKIP LOCKED",
     )
     .bind(batch_size)
     .fetch_all(&mut *transaction)
@@ -1240,7 +1245,8 @@ async fn reconcile_reliability_events(
              SELECT 1 FROM shardline_reliability_events AS e
              WHERE e.operation_kind = 'GarbageCollection' AND e.operation_id = q.object_key
          )
-         LIMIT $1",
+         LIMIT $1
+         FOR UPDATE OF q SKIP LOCKED",
     )
     .bind(batch_size)
     .fetch_all(&mut *transaction)
@@ -1278,7 +1284,8 @@ async fn reconcile_reliability_events(
                AND e.operation_id = t.scope_namespace || ':' || t.repository || ':' ||
                    t.object_kind || ':' || t.digest_hex
          )
-         LIMIT $1",
+         LIMIT $1
+         FOR UPDATE OF t SKIP LOCKED",
     )
     .bind(batch_size)
     .fetch_all(&mut *transaction)
@@ -1316,7 +1323,8 @@ async fn reconcile_reliability_events(
              SELECT 1 FROM shardline_reliability_events AS e
              WHERE e.operation_kind = 'RetentionHold' AND e.operation_id = h.object_key
          )
-         LIMIT $1",
+         LIMIT $1
+         FOR UPDATE OF h SKIP LOCKED",
     )
     .bind(batch_size)
     .fetch_all(&mut *transaction)
@@ -1362,7 +1370,8 @@ async fn reconcile_reliability_events(
                    OR e.operation_id = w.delivery_id
                )
          )
-         LIMIT $1",
+         LIMIT $1
+         FOR UPDATE OF w SKIP LOCKED",
     )
     .bind(batch_size)
     .fetch_all(&mut *transaction)
@@ -1419,15 +1428,16 @@ async fn reconcile_reliability_events(
     }
 
     let hub_ref_rows = query(
-        "SELECT repo_id, ref_name, sha
-         FROM shardline_hub_refs
+        "SELECT h.repo_id, h.ref_name, h.sha
+         FROM shardline_hub_refs AS h
          WHERE NOT EXISTS (
              SELECT 1 FROM shardline_reliability_events AS e
              WHERE e.operation_kind = 'MetadataCommit'
-               AND e.operation_id = octet_length(repo_id)::text || ':' || repo_id
-                   || octet_length(ref_name)::text || ':' || ref_name
+               AND e.operation_id = octet_length(h.repo_id)::text || ':' || h.repo_id
+                   || octet_length(h.ref_name)::text || ':' || h.ref_name
          )
-         LIMIT $1",
+         LIMIT $1
+         FOR UPDATE OF h SKIP LOCKED",
     )
     .bind(batch_size)
     .fetch_all(&mut *transaction)
@@ -1459,16 +1469,17 @@ async fn reconcile_reliability_events(
     }
 
     let oci_tag_rows = query(
-        "SELECT scope_namespace, repository, tag, digest_hex
-         FROM shardline_oci_tags
+        "SELECT t.scope_namespace, t.repository, t.tag, t.digest_hex
+         FROM shardline_oci_tags AS t
          WHERE NOT EXISTS (
              SELECT 1 FROM shardline_reliability_events AS e
              WHERE e.operation_kind = 'OciTag'
-               AND e.operation_id = octet_length(scope_namespace)::text || ':' || scope_namespace
-                   || octet_length(repository)::text || ':' || repository
-                   || octet_length(tag)::text || ':' || tag
+               AND e.operation_id = octet_length(t.scope_namespace)::text || ':' || t.scope_namespace
+                   || octet_length(t.repository)::text || ':' || t.repository
+                   || octet_length(t.tag)::text || ':' || t.tag
          )
-         LIMIT $1",
+         LIMIT $1
+         FOR UPDATE OF t SKIP LOCKED",
     )
     .bind(batch_size)
     .fetch_all(&mut *transaction)
@@ -1505,16 +1516,17 @@ async fn reconcile_reliability_events(
     }
 
     let s3_object_rows = query(
-        "SELECT scope_namespace, object_key, file_id, size_bytes, content_hash,
-                etag, user_metadata, updated_at_unix_seconds
-         FROM shardline_s3_objects
+        "SELECT o.scope_namespace, o.object_key, o.file_id, o.size_bytes, o.content_hash,
+                o.etag, o.user_metadata, o.updated_at_unix_seconds
+         FROM shardline_s3_objects AS o
          WHERE NOT EXISTS (
              SELECT 1 FROM shardline_reliability_events AS e
              WHERE e.operation_kind = 'S3Object'
-               AND e.operation_id = octet_length(scope_namespace)::text || ':' || scope_namespace
-                   || octet_length(object_key)::text || ':' || object_key
+               AND e.operation_id = octet_length(o.scope_namespace)::text || ':' || o.scope_namespace
+                   || octet_length(o.object_key)::text || ':' || o.object_key
          )
-         LIMIT $1",
+         LIMIT $1
+         FOR UPDATE OF o SKIP LOCKED",
     )
     .bind(batch_size)
     .fetch_all(&mut *transaction)
