@@ -107,7 +107,15 @@ run_reliability() {
         exit 2
     elif [ "$#" -eq 1 ]; then
         target="$1"
-        if [[ ! " ${reliability_targets[*]} " == *" ${target} "* ]]; then
+        local target_found=false
+        local candidate=""
+        for candidate in "${reliability_targets[@]}"; do
+            if [ "${candidate}" = "${target}" ]; then
+                target_found=true
+                break
+            fi
+        done
+        if [ "${target_found}" != true ]; then
             printf 'unknown reliability fuzz target: %s\n' "${target}" >&2
             exit 2
         fi
@@ -115,11 +123,39 @@ run_reliability() {
     fi
 
     for target in "${reliability_targets[@]}"; do
-        printf '==> %s (%ss)\n' "${target}" "${duration_seconds}"
-        cargo +nightly fuzz run --fuzz-dir "${FUZZ_DIR}" --target "${FUZZ_TARGET}" \
-            "${target}" -- "-max_total_time=${duration_seconds}" "-timeout=20" \
-            "-rss_limit_mb=${rss_limit_mb}"
+        printf 'building %s\n' "${target}"
+        cargo +nightly fuzz build --fuzz-dir "${FUZZ_DIR}" --target "${FUZZ_TARGET}" "${target}"
     done
+
+    local -a pids=()
+    local -a running_targets=()
+    for target in "${reliability_targets[@]}"; do
+        local fuzz_binary="${ROOT_DIR}/target/${FUZZ_TARGET}/release/${target}"
+        if [ ! -x "${fuzz_binary}" ]; then
+            printf 'built reliability fuzz binary is missing or not executable: %s\n' "${fuzz_binary}" >&2
+            return 1
+        fi
+        printf '==> %s (%ss) [isolated process]\n' "${target}" "${duration_seconds}"
+        (
+            "${fuzz_binary}" \
+                "-artifact_prefix=${FUZZ_DIR}/artifacts/${target}/" \
+                "-max_total_time=${duration_seconds}" "-timeout=20" \
+                "-rss_limit_mb=${rss_limit_mb}" "${FUZZ_DIR}/corpus/${target}"
+        ) > >(sed "s/^/[${target}] /") 2> >(sed "s/^/[${target}] /" >&2) &
+        pids+=("$!")
+        running_targets+=("${target}")
+    done
+
+    local campaign_status=0
+    local index=0
+    for pid in "${pids[@]}"; do
+        if ! wait "${pid}"; then
+            printf 'reliability fuzz target failed: %s\n' "${running_targets[${index}]}" >&2
+            campaign_status=1
+        fi
+        index=$((index + 1))
+    done
+    return "${campaign_status}"
 }
 
 main() {
