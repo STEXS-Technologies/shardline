@@ -5,6 +5,7 @@ ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 FUZZ_DIR="${ROOT_DIR}/crates/fuzz"
 DEFAULT_RUNS="${SHARDLINE_FUZZ_RUNS:-20000}"
 DEFAULT_RELIABILITY_DURATION_SECONDS="${SHARDLINE_FUZZ_DURATION_SECONDS:-3600}"
+DEFAULT_RELIABILITY_RSS_LIMIT_MB="${SHARDLINE_FUZZ_RSS_LIMIT_MB:-2048}"
 
 default_fuzz_target() {
     local host
@@ -84,8 +85,13 @@ run_reliability() {
     fi
 
     local duration_seconds="${SHARDLINE_FUZZ_DURATION_SECONDS:-${DEFAULT_RELIABILITY_DURATION_SECONDS}}"
+    local rss_limit_mb="${SHARDLINE_FUZZ_RSS_LIMIT_MB:-${DEFAULT_RELIABILITY_RSS_LIMIT_MB}}"
     if [[ ! "${duration_seconds}" =~ ^[1-9][0-9]*$ ]]; then
         printf 'SHARDLINE_FUZZ_DURATION_SECONDS must be a positive decimal integer\n' >&2
+        exit 2
+    fi
+    if [[ ! "${rss_limit_mb}" =~ ^[1-9][0-9]*$ ]]; then
+        printf 'SHARDLINE_FUZZ_RSS_LIMIT_MB must be a positive decimal integer\n' >&2
         exit 2
     fi
 
@@ -111,7 +117,8 @@ run_reliability() {
     for target in "${reliability_targets[@]}"; do
         printf '==> %s (%ss)\n' "${target}" "${duration_seconds}"
         cargo +nightly fuzz run --fuzz-dir "${FUZZ_DIR}" --target "${FUZZ_TARGET}" \
-            "${target}" -- "-max_total_time=${duration_seconds}" "-timeout=20"
+            "${target}" -- "-max_total_time=${duration_seconds}" "-timeout=20" \
+            "-rss_limit_mb=${rss_limit_mb}"
     done
 }
 
