@@ -1786,10 +1786,19 @@ async fn durable_lfs_patch_object(
     let _stored = if let Some(reader) =
         s3_lfs_parts_reader(&state.backend.object_store(), &claimed_parts, total).await?
     {
-        state
+        match state
             .backend
             .put_sha256_addressed_object_stream_if_absent(object_key, oid, reader)
-            .await?
+            .await
+        {
+            Ok(stored) => stored,
+            Err(ServerError::ExpectedBodyHashMismatch) => {
+                reopen_lfs_session_after_digest_failure(state, &session_id, claimed.fence_epoch())
+                    .await?;
+                return Err(ServerError::ExpectedBodyHashMismatch);
+            }
+            Err(error) => return Err(error),
+        }
     } else {
         let temporary = tempfile::tempdir()?;
         let assembled_path = temporary.path().join("assembled");
@@ -1834,6 +1843,8 @@ async fn durable_lfs_patch_object(
                 .ok_or(ServerError::Overflow)?;
         }
         if observed != total || hex::encode(sha256.finalize()) != oid {
+            reopen_lfs_session_after_digest_failure(state, &session_id, claimed.fence_epoch())
+                .await?;
             return Err(ServerError::ExpectedBodyHashMismatch);
         }
         let object_integrity = ObjectIntegrity::new(
@@ -1865,6 +1876,22 @@ async fn durable_lfs_patch_object(
     );
     shardline_metrics::metrics().protocol.record_lfs_upload();
     Ok(StatusCode::OK.into_response())
+}
+
+async fn reopen_lfs_session_after_digest_failure(
+    state: &Arc<AppState>,
+    session_id: &str,
+    fence_epoch: NonZeroU64,
+) -> Result<(), ServerError> {
+    if state
+        .backend
+        .reopen_resumable_session_after_failed_completion(session_id, fence_epoch)
+        .await?
+    {
+        Ok(())
+    } else {
+        Err(ServerError::StaleResourceFence)
+    }
 }
 
 fn lfs_ranges_cover_total(
@@ -3532,6 +3559,74 @@ mod tests {
             .await
             .expect("response bytes");
         assert_eq!(observed.as_ref(), content);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn patch_object_hash_mismatch_can_be_repaired_durably() {
+        let Ok(database_url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let tmp = TempDir::new().expect("tempdir");
+        let shared_store = crate::ServerObjectStore::local(tmp.path().join("objects"))
+            .expect("shared object store");
+        let Some(state) =
+            build_postgres_lfs_state(&database_url, tmp.path().join("node"), shared_store).await
+        else {
+            return;
+        };
+        let app = lfs_router(Arc::clone(&state));
+        let expected = format!("expected-lfs-content:{}", tmp.path().display()).into_bytes();
+        let mut damaged = expected.clone();
+        let damaged_byte = damaged
+            .first_mut()
+            .expect("deterministic test content is non-empty");
+        *damaged_byte ^= 0x01;
+        let oid = test_oid(&expected);
+        let total = expected.len();
+        let uri = format!("/v1/lfs/objects/{oid}");
+
+        let first = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(&uri)
+                    .header(CONTENT_RANGE, format!("bytes 0-{}/{}", total - 1, total))
+                    .header(CONTENT_LENGTH, total)
+                    .body(Body::from(damaged.to_vec()))
+                    .expect("request"),
+            )
+            .await
+            .expect("damaged patch");
+        assert_eq!(first.status(), StatusCode::BAD_REQUEST);
+
+        let session_id = super::durable_lfs_session_id("global", &oid);
+        let claimed = state
+            .backend
+            .resumable_session_by_id(&session_id)
+            .await
+            .expect("session lookup")
+            .expect("failed completion leaves session");
+        assert_eq!(
+            claimed.state(),
+            shardline_index::ResumableSessionState::Active
+        );
+
+        // Hash validation failed after the durable completion fence was
+        // claimed. A corrected PATCH must still be able to repair the session.
+        let retry = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(&uri)
+                    .header(CONTENT_RANGE, format!("bytes 0-{}/{}", total - 1, total))
+                    .header(CONTENT_LENGTH, total)
+                    .body(Body::from(expected.to_vec()))
+                    .expect("request"),
+            )
+            .await
+            .expect("corrected patch");
+        assert_eq!(retry.status(), StatusCode::OK);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -1103,6 +1103,58 @@ impl PostgresIndexStore {
         Ok(true)
     }
 
+    /// Reopens a session after completion validation rejected its pinned
+    /// content. The transition is fenced and advances the fence epoch so an
+    /// in-flight completion worker cannot publish or complete the reopened
+    /// session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when Postgres rejects the recovery transition.
+    pub async fn reopen_resumable_session_after_failed_completion(
+        &self,
+        session_id: &str,
+        expected_fence_epoch: NonZeroU64,
+    ) -> Result<bool, PostgresMetadataStoreError> {
+        let mut transaction = self.pool().begin().await?;
+        let row = sqlx::query(
+            "UPDATE shardline_resumable_sessions
+             SET state = 'active', generation = generation + 1,
+                 fence_epoch = fence_epoch + 1, updated_at = now()
+             WHERE session_id = $1 AND state = 'completing' AND fence_epoch = $2
+               AND expires_at > clock_timestamp()
+             RETURNING scope_namespace, target_key",
+        )
+        .bind(session_id)
+        .bind(u64_to_i64(expected_fence_epoch.get())?)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let Some(row) = row else {
+            transaction.rollback().await?;
+            return Ok(false);
+        };
+        let scope_namespace: String = row.try_get("scope_namespace")?;
+        let target_key: String = row.try_get("target_key")?;
+        refresh_resumable_state_digest(&mut transaction, session_id).await?;
+        let sequence = next_reliability_sequence(
+            transaction.as_mut(),
+            shardline_reliability::OperationKind::ResumableSession,
+            session_id,
+        )
+        .await?;
+        let event = resumable_session_event(
+            scope_namespace,
+            session_id,
+            target_key,
+            sequence,
+            ResumableSessionState::Completing,
+            ResumableSessionState::Active,
+        )?;
+        insert_reliability_event(transaction.as_mut(), &event).await?;
+        transaction.commit().await?;
+        Ok(true)
+    }
+
     /// Atomically expires up to `limit` active sessions using the database clock.
     ///
     /// Returned IDs own no authoritative protocol state after this transaction;
@@ -1492,6 +1544,79 @@ mod tests {
                 ("active", "active"),
                 ("active", "expired"),
                 ("expired", "active")
+            ]
+        );
+    }
+
+    #[tokio::test]
+    #[serial(postgres_resumable)]
+    async fn postgres_failed_completion_reopens_and_fences_stale_worker() {
+        let Some(store) = store().await else {
+            eprintln!("skipping: no reachable DATABASE_URL");
+            return;
+        };
+        let expiry = Duration::from_secs(
+            u64::try_from(chrono::Utc::now().timestamp()).unwrap_or_default() + 3600,
+        );
+        let session = session("reopen-failed-completion", expiry);
+        assert!(store.create_resumable_session(&session).await.unwrap());
+
+        let (claimed, _) = store
+            .begin_resumable_completion(session.session_id())
+            .await
+            .unwrap()
+            .expect("active session can be claimed");
+        let old_fence = claimed.fence_epoch();
+        assert!(
+            store
+                .reopen_resumable_session_after_failed_completion(session.session_id(), old_fence,)
+                .await
+                .unwrap()
+        );
+
+        let reopened = store
+            .resumable_session_by_id(session.session_id())
+            .await
+            .unwrap()
+            .expect("reopened session exists");
+        assert_eq!(reopened.state(), ResumableSessionState::Active);
+        assert!(reopened.fence_epoch() > old_fence);
+        assert!(
+            !store
+                .transition_resumable_session(
+                    session.session_id(),
+                    ResumableSessionState::Completing,
+                    old_fence,
+                    ResumableSessionState::Completed,
+                )
+                .await
+                .unwrap()
+        );
+
+        let events = store
+            .resumable_reliability_events(session.session_id())
+            .await
+            .unwrap();
+        shardline_reliability::verify_state_transition_chain_ends_at(
+            &events,
+            ResumableSessionState::Active,
+        )
+        .unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| (event.before, event.after))
+                .collect::<Vec<_>>(),
+            vec![
+                (ResumableSessionState::Active, ResumableSessionState::Active),
+                (
+                    ResumableSessionState::Active,
+                    ResumableSessionState::Completing
+                ),
+                (
+                    ResumableSessionState::Completing,
+                    ResumableSessionState::Active
+                ),
             ]
         );
     }

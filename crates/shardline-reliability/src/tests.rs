@@ -553,9 +553,7 @@ fn resumable_terminal_reuse_is_an_explicit_recovery_transition() {
     assert!(ResumableLifecycleState::Completed.can_transition_to(ResumableLifecycleState::Active));
     assert!(ResumableLifecycleState::Aborted.can_transition_to(ResumableLifecycleState::Active));
     assert!(ResumableLifecycleState::Expired.can_transition_to(ResumableLifecycleState::Active));
-    assert!(
-        !ResumableLifecycleState::Completing.can_transition_to(ResumableLifecycleState::Active)
-    );
+    assert!(ResumableLifecycleState::Completing.can_transition_to(ResumableLifecycleState::Active));
 }
 
 #[test]

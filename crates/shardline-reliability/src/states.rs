@@ -138,7 +138,7 @@ impl ResumableLifecycleState {
                 Self::Active | Self::Completing | Self::Aborted | Self::Expired
             ) | (
                 Self::Completing,
-                Self::Completing | Self::Completed | Self::Aborted | Self::Expired
+                Self::Completing | Self::Completed | Self::Aborted | Self::Expired | Self::Active
             ) | (Self::Completed, Self::Completed | Self::Active)
                 | (Self::Aborted, Self::Aborted | Self::Active)
                 | (Self::Expired, Self::Expired | Self::Active)

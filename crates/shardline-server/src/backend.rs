@@ -632,6 +632,20 @@ impl ServerBackend {
             .await?)
     }
 
+    pub(crate) async fn reopen_resumable_session_after_failed_completion(
+        &self,
+        session_id: &str,
+        expected_fence_epoch: NonZeroU64,
+    ) -> Result<bool, ServerError> {
+        let Self::Postgres(backend) = self else {
+            return Err(ServerError::StaleResourceFence);
+        };
+        Ok(backend
+            .index_store()
+            .reopen_resumable_session_after_failed_completion(session_id, expected_fence_epoch)
+            .await?)
+    }
+
     /// Loads the authoritative file-version record for a protocol object's
     /// deterministic file id.
     ///
