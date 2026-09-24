@@ -78,7 +78,6 @@ proptest.workspace = true
 redis = { workspace = true, features = ["tokio-rustls-comp"] }
 reqwest = { workspace = true, features = ["json", "rustls-tls", "stream"] }
 rusqlite = { workspace = true, features = ["bundled"] }
-serial_test.workspace = true
 shardline-test-support.workspace = true
 wiremock = "0.6"
 xet-client.workspace = true
