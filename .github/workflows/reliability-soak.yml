@@ -305,7 +305,7 @@ jobs:
           mkdir -p reliability-security-results
           for iteration in $(seq 1 100); do
             echo "security-boundary iteration=${iteration}"
-            cargo nextest run -q -p shardline-server --test authorization_matrix \
+            cargo nextest run -p shardline-server --test authorization_matrix \
               -E 'test(expired_revocation_probes_hide_existence_across_all_frontends)' \
               --no-tests=pass
           done 2>&1 | tee reliability-security-results/security-boundary.log
