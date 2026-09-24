@@ -10,8 +10,8 @@ use shardline_reliability::{
     WebhookDeliverySnapshot, append_or_baseline_snapshot_evidence,
     baseline_upload_lifecycle_events, reliability_merkle_commit_json_with_previous,
     upload_lifecycle_event, upload_lifecycle_identity, verify_and_append_snapshot_transition,
-    verify_persisted_event_merkle_chain, verify_provider_lifecycle_events,
-    verify_snapshot_evidence, verify_upload_lifecycle_events,
+    verify_persisted_event_merkle_chain, verify_persisted_event_merkle_chain_with_sequences,
+    verify_provider_lifecycle_events, verify_snapshot_evidence, verify_upload_lifecycle_events,
 };
 use shardline_storage::ObjectKey;
 use sqlx::{PgConnection, Row, postgres::PgRow, query, query_scalar, types::Json};
@@ -95,7 +95,7 @@ async fn verify_postgres_provider_evidence(
     let operation_id = snapshot.evidence_operation()?.operation_id;
     let mut transaction = store.pool.begin().await?;
     let rows = query(
-        "SELECT event_json, merkle_commit_json
+        "SELECT sequence, event_json, merkle_commit_json
          FROM shardline_reliability_events
          WHERE operation_kind = 'ProviderEvent' AND operation_id = $1
          ORDER BY sequence",
@@ -104,9 +104,15 @@ async fn verify_postgres_provider_evidence(
     .fetch_all(&mut *transaction)
     .await?;
     let mut events = Vec::with_capacity(rows.len());
+    let mut row_sequences = Vec::with_capacity(rows.len());
     let mut event_json = Vec::with_capacity(rows.len());
     let mut merkle_commits = Vec::with_capacity(rows.len());
     for row in rows {
+        row_sequences.push(
+            u64::try_from(row.try_get::<i64, _>("sequence")?).map_err(|_| {
+                PostgresMetadataStoreError::IntegerOutOfRange("reliability sequence".into())
+            })?,
+        );
         let value: serde_json::Value = row.try_get("event_json")?;
         events.push(serde_json::from_value::<ProviderLifecycleEvent>(
             value.clone(),
@@ -114,8 +120,9 @@ async fn verify_postgres_provider_evidence(
         event_json.push(value);
         merkle_commits.push(row.try_get("merkle_commit_json")?);
     }
-    verify_persisted_event_merkle_chain(
+    verify_persisted_event_merkle_chain_with_sequences(
         OperationKind::ProviderEvent,
+        &row_sequences,
         &event_json,
         &merkle_commits,
     )?;
@@ -129,16 +136,22 @@ async fn load_postgres_quarantine_evidence(
     object_key: &str,
 ) -> Result<QuarantineEvidenceLog, PostgresMetadataStoreError> {
     let rows = query(
-        "SELECT event_json, merkle_commit_json FROM shardline_reliability_events
+        "SELECT sequence, event_json, merkle_commit_json FROM shardline_reliability_events
          WHERE operation_kind = 'GarbageCollection' AND operation_id = $1 ORDER BY sequence",
     )
     .bind(object_key)
     .fetch_all(executor)
     .await?;
     let mut events = Vec::with_capacity(rows.len());
+    let mut row_sequences = Vec::with_capacity(rows.len());
     let mut event_json = Vec::with_capacity(rows.len());
     let mut merkle_commits = Vec::with_capacity(rows.len());
     for row in rows {
+        row_sequences.push(
+            u64::try_from(row.try_get::<i64, _>("sequence")?).map_err(|_| {
+                PostgresMetadataStoreError::IntegerOutOfRange("reliability sequence".into())
+            })?,
+        );
         let value: serde_json::Value = row.try_get("event_json")?;
         events.push(serde_json::from_value::<QuarantineLifecycleEvent>(
             value.clone(),
@@ -146,8 +159,9 @@ async fn load_postgres_quarantine_evidence(
         event_json.push(value);
         merkle_commits.push(row.try_get("merkle_commit_json")?);
     }
-    verify_persisted_event_merkle_chain(
+    verify_persisted_event_merkle_chain_with_sequences(
         OperationKind::GarbageCollection,
+        &row_sequences,
         &event_json,
         &merkle_commits,
     )?;
@@ -159,16 +173,22 @@ pub(super) async fn load_postgres_retention_evidence(
     object_key: &str,
 ) -> Result<RetentionEvidenceLog, PostgresMetadataStoreError> {
     let rows = query(
-        "SELECT event_json, merkle_commit_json FROM shardline_reliability_events
+        "SELECT sequence, event_json, merkle_commit_json FROM shardline_reliability_events
          WHERE operation_kind = 'RetentionHold' AND operation_id = $1 ORDER BY sequence",
     )
     .bind(object_key)
     .fetch_all(executor)
     .await?;
     let mut events = Vec::with_capacity(rows.len());
+    let mut row_sequences = Vec::with_capacity(rows.len());
     let mut event_json = Vec::with_capacity(rows.len());
     let mut merkle_commits = Vec::with_capacity(rows.len());
     for row in rows {
+        row_sequences.push(
+            u64::try_from(row.try_get::<i64, _>("sequence")?).map_err(|_| {
+                PostgresMetadataStoreError::IntegerOutOfRange("reliability sequence".into())
+            })?,
+        );
         let value: serde_json::Value = row.try_get("event_json")?;
         events.push(serde_json::from_value::<
             shardline_reliability::RetentionHoldLifecycleEvent,
@@ -176,8 +196,9 @@ pub(super) async fn load_postgres_retention_evidence(
         event_json.push(value);
         merkle_commits.push(row.try_get("merkle_commit_json")?);
     }
-    verify_persisted_event_merkle_chain(
+    verify_persisted_event_merkle_chain_with_sequences(
         OperationKind::RetentionHold,
+        &row_sequences,
         &event_json,
         &merkle_commits,
     )?;
@@ -233,7 +254,7 @@ pub(super) async fn load_postgres_webhook_evidence(
     let operation = webhook_snapshot(delivery, WebhookDeliveryLifecycleState::Processed)?
         .evidence_operation()?;
     let rows = query(
-        "SELECT event_json, merkle_commit_json FROM shardline_reliability_events
+        "SELECT sequence, event_json, merkle_commit_json FROM shardline_reliability_events
          WHERE operation_kind = 'WebhookDelivery'
            AND (operation_id = $1 OR (operation_id = $2 AND NOT EXISTS (
              SELECT 1 FROM shardline_reliability_events
@@ -246,9 +267,15 @@ pub(super) async fn load_postgres_webhook_evidence(
     .fetch_all(executor)
     .await?;
     let mut events = Vec::with_capacity(rows.len());
+    let mut row_sequences = Vec::with_capacity(rows.len());
     let mut event_json = Vec::with_capacity(rows.len());
     let mut merkle_commits = Vec::with_capacity(rows.len());
     for row in rows {
+        row_sequences.push(
+            u64::try_from(row.try_get::<i64, _>("sequence")?).map_err(|_| {
+                PostgresMetadataStoreError::IntegerOutOfRange("reliability sequence".into())
+            })?,
+        );
         let value: serde_json::Value = row.try_get("event_json")?;
         events.push(serde_json::from_value::<
             shardline_reliability::WebhookDeliveryLifecycleEvent,
@@ -256,8 +283,9 @@ pub(super) async fn load_postgres_webhook_evidence(
         event_json.push(value);
         merkle_commits.push(row.try_get("merkle_commit_json")?);
     }
-    verify_persisted_event_merkle_chain(
+    verify_persisted_event_merkle_chain_with_sequences(
         OperationKind::WebhookDelivery,
+        &row_sequences,
         &event_json,
         &merkle_commits,
     )?;

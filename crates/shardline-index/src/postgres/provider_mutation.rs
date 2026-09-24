@@ -4,7 +4,7 @@ use shardline_reliability::{
     ProviderRepositoryOperationId, RetentionEvidenceLog, RetentionHoldLifecycleState,
     SnapshotEvidence, WebhookDeliveryEvidenceLog, WebhookDeliveryLifecycleState,
     append_or_baseline_snapshot_evidence, verify_and_append_snapshot_transition,
-    verify_or_repair_snapshot_evidence, verify_persisted_event_merkle_chain,
+    verify_or_repair_snapshot_evidence, verify_persisted_event_merkle_chain_with_sequences,
     verify_provider_lifecycle_events,
 };
 use sqlx::{Acquire, PgConnection, Postgres, Row, Transaction, query, query_scalar};
@@ -553,7 +553,7 @@ async fn load_provider_evidence(
 ) -> Result<Vec<ProviderLifecycleEvent>, PostgresMetadataStoreError> {
     let operation_id = snapshot.evidence_operation()?.operation_id;
     let rows = query(
-        "SELECT event_json, merkle_commit_json
+        "SELECT sequence, event_json, merkle_commit_json
          FROM shardline_reliability_events
          WHERE operation_kind = 'ProviderEvent' AND operation_id = $1
          ORDER BY sequence",
@@ -562,9 +562,15 @@ async fn load_provider_evidence(
     .fetch_all(&mut **transaction)
     .await?;
     let mut events = Vec::with_capacity(rows.len());
+    let mut row_sequences = Vec::with_capacity(rows.len());
     let mut event_json = Vec::with_capacity(rows.len());
     let mut merkle_commits = Vec::with_capacity(rows.len());
     for row in rows {
+        row_sequences.push(
+            u64::try_from(row.try_get::<i64, _>("sequence")?).map_err(|_| {
+                PostgresMetadataStoreError::IntegerOutOfRange("reliability sequence".into())
+            })?,
+        );
         let value: serde_json::Value = row.try_get("event_json")?;
         events.push(serde_json::from_value::<ProviderLifecycleEvent>(
             value.clone(),
@@ -572,8 +578,9 @@ async fn load_provider_evidence(
         event_json.push(value);
         merkle_commits.push(row.try_get("merkle_commit_json")?);
     }
-    verify_persisted_event_merkle_chain(
+    verify_persisted_event_merkle_chain_with_sequences(
         OperationKind::ProviderEvent,
+        &row_sequences,
         &event_json,
         &merkle_commits,
     )?;

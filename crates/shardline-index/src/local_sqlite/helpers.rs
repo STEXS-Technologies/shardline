@@ -76,19 +76,33 @@ pub(crate) fn load_verified_event_json(
     operation_id: &str,
 ) -> Result<Vec<Value>, LocalIndexStoreError> {
     let mut statement = transaction.prepare(
-        "SELECT event_json, merkle_commit_json
+        "SELECT sequence, event_json, merkle_commit_json
          FROM shardline_reliability_events
          WHERE operation_kind = ?1 AND operation_id = ?2 ORDER BY sequence",
     )?;
     let rows = statement.query_map(params![operation_kind.as_str(), operation_id], |row| {
-        let event_json: String = row.get(0)?;
-        let merkle_commit_json: Option<String> = row.get(1)?;
-        Ok((event_json, merkle_commit_json))
+        let sequence: i64 = row.get(0)?;
+        let event_json: String = row.get(1)?;
+        let merkle_commit_json: Option<String> = row.get(2)?;
+        Ok((sequence, event_json, merkle_commit_json))
     })?;
     let rows = rows.collect::<Result<Vec<_>, _>>()?;
+    let mut row_sequences = Vec::with_capacity(rows.len());
     let mut events = Vec::with_capacity(rows.len());
     let mut merkle_commits = Vec::with_capacity(rows.len());
-    for (event_json, merkle_commit_json) in rows {
+    for (sequence, event_json, merkle_commit_json) in rows {
+        if sequence < 0 {
+            return Err(LocalIndexStoreError::Reliability(
+                shardline_reliability::ReliabilityError::Merkle(
+                    "persisted row sequence is negative".into(),
+                ),
+            ));
+        }
+        row_sequences.push(u64::try_from(sequence).map_err(|_| {
+            LocalIndexStoreError::Reliability(shardline_reliability::ReliabilityError::Merkle(
+                "persisted row sequence is out of range".into(),
+            ))
+        })?);
         events.push(from_str::<Value>(&event_json)?);
         merkle_commits.push(
             merkle_commit_json
@@ -96,8 +110,9 @@ pub(crate) fn load_verified_event_json(
                 .transpose()?,
         );
     }
-    shardline_reliability::verify_persisted_event_merkle_chain(
+    shardline_reliability::verify_persisted_event_merkle_chain_with_sequences(
         operation_kind,
+        &row_sequences,
         &events,
         &merkle_commits,
     )?;

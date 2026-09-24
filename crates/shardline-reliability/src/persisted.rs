@@ -159,13 +159,56 @@ pub fn verify_persisted_event_merkle_chain(
     events: &[Value],
     merkle_commits: &[Option<Value>],
 ) -> Result<(), ReliabilityError> {
+    verify_persisted_event_merkle_chain_inner(operation_kind, None, events, merkle_commits)
+}
+
+/// Verifies a persisted Merkle chain and binds each typed event to its storage
+/// row sequence. This catches a database row-key rewrite even when the event
+/// payload and its Merkle commitment are both internally consistent.
+pub fn verify_persisted_event_merkle_chain_with_sequences(
+    operation_kind: OperationKind,
+    row_sequences: &[u64],
+    events: &[Value],
+    merkle_commits: &[Option<Value>],
+) -> Result<(), ReliabilityError> {
+    verify_persisted_event_merkle_chain_inner(
+        operation_kind,
+        Some(row_sequences),
+        events,
+        merkle_commits,
+    )
+}
+
+fn verify_persisted_event_merkle_chain_inner(
+    operation_kind: OperationKind,
+    row_sequences: Option<&[u64]>,
+    events: &[Value],
+    merkle_commits: &[Option<Value>],
+) -> Result<(), ReliabilityError> {
     if events.len() != merkle_commits.len() {
         return Err(ReliabilityError::Merkle(
             "persisted event and Merkle commitment counts differ".into(),
         ));
     }
+    if row_sequences.is_some_and(|sequences| sequences.len() != events.len()) {
+        return Err(ReliabilityError::Merkle(
+            "persisted row and event sequence counts differ".into(),
+        ));
+    }
     let mut previous = None;
-    for (event, commit) in events.iter().cloned().zip(merkle_commits.iter().cloned()) {
+    for (index, (event, commit)) in events
+        .iter()
+        .cloned()
+        .zip(merkle_commits.iter().cloned())
+        .enumerate()
+    {
+        if let Some(row_sequence) = row_sequences.and_then(|sequences| sequences.get(index))
+            && persisted_event_sequence(operation_kind, event.clone())? != *row_sequence
+        {
+            return Err(ReliabilityError::Merkle(
+                "persisted row sequence does not match its event".into(),
+            ));
+        }
         verify_persisted_merkle_commit_with_previous(
             operation_kind,
             event,
@@ -356,6 +399,22 @@ mod tests {
         .unwrap();
         let commitments = vec![Some(first_commit), Some(second_commit.clone())];
         verify_persisted_event_merkle_chain(OperationKind::Upload, &events, &commitments).unwrap();
+        verify_persisted_event_merkle_chain_with_sequences(
+            OperationKind::Upload,
+            &[1, 2],
+            &events,
+            &commitments,
+        )
+        .unwrap();
+        assert!(
+            verify_persisted_event_merkle_chain_with_sequences(
+                OperationKind::Upload,
+                &[4, 5],
+                &events,
+                &commitments,
+            )
+            .is_err()
+        );
 
         let mut tampered = second_commit;
         tampered["body"]["event_merkle_root"] = serde_json::json!("tampered");

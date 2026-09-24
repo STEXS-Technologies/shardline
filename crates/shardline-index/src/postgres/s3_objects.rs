@@ -7,8 +7,8 @@ use shardline_reliability::{
     OperationKind, ReliabilityMerkleCommit, S3ObjectEvidenceLog, S3ObjectLifecycleEvent,
     S3ObjectSnapshot, S3ObjectState, SnapshotEvidence, persisted_event_sequence,
     reliability_merkle_commit_json_with_previous, verify_and_append_snapshot_transition,
-    verify_or_repair_snapshot_evidence, verify_persisted_merkle_commit_with_previous,
-    verify_snapshot_event, verify_snapshot_evidence,
+    verify_or_repair_snapshot_evidence, verify_persisted_event_merkle_chain_with_sequences,
+    verify_persisted_merkle_commit_with_previous, verify_snapshot_event, verify_snapshot_evidence,
 };
 
 fn s3_object_entry_from_row(row: &PgRow) -> Result<S3ObjectEntry, PostgresMetadataStoreError> {
@@ -63,7 +63,7 @@ async fn load_s3_object_evidence(
 ) -> Result<S3ObjectEvidenceLog, PostgresMetadataStoreError> {
     let operation = s3_object_snapshot(scope_namespace, object_key, None)?.evidence_operation()?;
     let rows = query(
-        "SELECT event_json, merkle_commit_json FROM shardline_reliability_events
+        "SELECT sequence, event_json, merkle_commit_json FROM shardline_reliability_events
          WHERE operation_kind = $1 AND operation_id = $2 ORDER BY sequence",
     )
     .bind(OperationKind::S3Object.as_str())
@@ -71,16 +71,19 @@ async fn load_s3_object_evidence(
     .fetch_all(&mut *connection)
     .await?;
     let mut events = Vec::with_capacity(rows.len());
+    let mut row_sequences = Vec::with_capacity(rows.len());
     let mut event_json = Vec::with_capacity(rows.len());
     let mut merkle_commits = Vec::with_capacity(rows.len());
     for row in rows {
+        row_sequences.push(i64_to_u64(row.try_get("sequence")?)?);
         let value: serde_json::Value = row.try_get("event_json")?;
         events.push(from_value::<S3ObjectLifecycleEvent>(value.clone())?);
         event_json.push(value);
         merkle_commits.push(row.try_get("merkle_commit_json")?);
     }
-    shardline_reliability::verify_persisted_event_merkle_chain(
+    verify_persisted_event_merkle_chain_with_sequences(
         OperationKind::S3Object,
+        &row_sequences,
         &event_json,
         &merkle_commits,
     )?;
