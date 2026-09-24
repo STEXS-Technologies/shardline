@@ -395,6 +395,7 @@ pub async fn repair_upload_session_evidence(
     session_id: &str,
 ) -> Result<(), OciAdapterError> {
     validate_upload_session_id(session_id)?;
+    let _session_lock = lock_upload_sessions(root).await?;
     let metadata_path = upload_metadata_path(root, session_id);
     let bytes = read_upload_file_async(root, &metadata_path).await?;
     let persisted = serde_json::from_slice::<PersistedOciUploadSession>(&bytes)
