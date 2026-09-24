@@ -212,7 +212,7 @@ fn lfs_validation_response(message: &str) -> Response {
 static LFS_PATCH_LOCKS: LazyLock<Mutex<HashMap<String, Weak<Mutex<()>>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-fn acquire_lfs_patch_lock(oid: &str) -> Arc<Mutex<()>> {
+pub(super) fn acquire_lfs_patch_lock(oid: &str) -> Arc<Mutex<()>> {
     // Recover from poisoning: if a previous lock-holder panicked, the map
     // contents are still valid (simple OID→lock mapping), so continue.
     let mut map = LFS_PATCH_LOCKS.lock().unwrap_or_else(|e| e.into_inner());
@@ -268,7 +268,7 @@ impl Drop for LfsPatchStoreGuard {
     }
 }
 
-struct LfsPatchOidFileGuard {
+pub(super) struct LfsPatchOidFileGuard {
     file: fs::File,
 }
 
@@ -296,7 +296,10 @@ fn lock_lfs_patch_store(dir: &FsPath) -> Result<LfsPatchStoreGuard, ServerError>
     })
 }
 
-fn lock_lfs_patch_oid(dir: &FsPath, oid: &str) -> Result<LfsPatchOidFileGuard, ServerError> {
+pub(super) fn lock_lfs_patch_oid(
+    dir: &FsPath,
+    oid: &str,
+) -> Result<LfsPatchOidFileGuard, ServerError> {
     // A fixed 256-way stripe set avoids one permanent lock inode per attacker-
     // supplied OID. Hashing also keeps the lock-file component independent of
     // the client value. Collisions only serialize unrelated PATCHes briefly.

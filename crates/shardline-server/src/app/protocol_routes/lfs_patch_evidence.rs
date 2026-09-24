@@ -13,6 +13,8 @@ use shardline_reliability::{
 
 use crate::ServerError;
 
+use super::lfs::{acquire_lfs_patch_lock, lock_lfs_patch_oid};
+
 /// The evidence sidecar is additive: historical LFS patch sessions without it
 /// are reconstructed in memory and persisted by the next successful mutation.
 const EVIDENCE_SUFFIX: &str = ".evidence";
@@ -751,6 +753,9 @@ pub fn repair_lfs_patch_evidence(
     {
         return Err(invalid_evidence("invalid LFS patch object id"));
     }
+    let oid_lock = acquire_lfs_patch_lock(&input.oid);
+    let _process_lock = oid_lock.lock().unwrap_or_else(|error| error.into_inner());
+    let _file_lock = lock_lfs_patch_oid(dir, &input.oid)?;
     let staging_path = dir.join(&input.oid);
     let staging_length = fs::metadata(&staging_path)
         .map_err(|error| {
