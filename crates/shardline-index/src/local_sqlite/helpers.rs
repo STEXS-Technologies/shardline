@@ -748,10 +748,10 @@ pub(crate) fn current_hub_ref_evidence(
     repository: &str,
     ref_name: &str,
     head_sha: Option<String>,
-) -> Result<HubRefEvidenceLog, LocalIndexStoreError> {
+) -> Result<(HubRefEvidenceLog, bool), LocalIndexStoreError> {
     let snapshot = hub_ref_snapshot(repository, ref_name, head_sha)?;
     let evidence = load_hub_ref_evidence(transaction, repository, ref_name)?;
-    Ok(verify_or_repair_snapshot_evidence(evidence, snapshot)?.0)
+    Ok(verify_or_repair_snapshot_evidence(evidence, snapshot)?)
 }
 
 pub(crate) fn verify_hub_ref_evidence(
@@ -884,21 +884,10 @@ pub(crate) fn current_oci_tag_evidence(
     repository: &str,
     tag: &str,
     digest_hex: Option<String>,
-) -> Result<OciTagEvidenceLog, LocalIndexStoreError> {
+) -> Result<(OciTagEvidenceLog, bool), LocalIndexStoreError> {
     let snapshot = oci_tag_snapshot(scope_namespace, repository, tag, digest_hex)?;
     let loaded = load_oci_tag_evidence(transaction, scope_namespace, repository, tag)?;
-    let (evidence, was_missing) = verify_or_repair_snapshot_evidence(loaded, snapshot)?;
-    if was_missing
-        && evidence
-            .events()
-            .first()
-            .is_some_and(|event| event.after.digest_hex.is_some())
-    {
-        for event in evidence.events() {
-            persist_oci_tag_evidence(transaction, event)?;
-        }
-    }
-    Ok(evidence)
+    Ok(verify_or_repair_snapshot_evidence(loaded, snapshot)?)
 }
 
 pub(crate) fn verify_oci_tag_evidence(

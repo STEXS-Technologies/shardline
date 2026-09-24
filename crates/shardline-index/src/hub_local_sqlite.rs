@@ -337,13 +337,14 @@ impl HubStore for LocalIndexStore {
             )?;
             let before = hub_ref_snapshot(&repo_id, &ref_name, current_ref.clone())?;
             let after = hub_ref_snapshot(&repo_id, &ref_name, Some(new_sha.clone()))?;
-            let evidence = verify_and_append_snapshot_transition(
-                current_hub_ref_evidence(&tx, &repo_id, &ref_name, current_ref)?,
-                before,
-                after,
-            )?
-            .0;
-            for event in evidence.events() {
+            let (stored_evidence, evidence_was_missing) =
+                current_hub_ref_evidence(&tx, &repo_id, &ref_name, current_ref)?;
+            let evidence = verify_and_append_snapshot_transition(stored_evidence, before, after)?.0;
+            if evidence_was_missing {
+                for event in evidence.events() {
+                    persist_hub_ref_evidence(&tx, event)?;
+                }
+            } else if let Some(event) = evidence.events().last() {
                 persist_hub_ref_evidence(&tx, event)?;
             }
 
@@ -424,13 +425,14 @@ impl HubStore for LocalIndexStore {
             }
             let before = hub_ref_snapshot(&repo_id, &ref_name, Some(expected_sha.clone()))?;
             let after = hub_ref_snapshot(&repo_id, &ref_name, None)?;
-            let evidence = verify_and_append_snapshot_transition(
-                current_hub_ref_evidence(&tx, &repo_id, &ref_name, Some(expected_sha.clone()))?,
-                before,
-                after,
-            )?
-            .0;
-            for event in evidence.events() {
+            let (stored_evidence, evidence_was_missing) =
+                current_hub_ref_evidence(&tx, &repo_id, &ref_name, Some(expected_sha.clone()))?;
+            let evidence = verify_and_append_snapshot_transition(stored_evidence, before, after)?.0;
+            if evidence_was_missing {
+                for event in evidence.events() {
+                    persist_hub_ref_evidence(&tx, event)?;
+                }
+            } else if let Some(event) = evidence.events().last() {
                 persist_hub_ref_evidence(&tx, event)?;
             }
             tx.commit()?;

@@ -43,13 +43,15 @@ pub(crate) fn record_tag_transition(
 ) -> Result<(), LocalIndexStoreError> {
     let before_snapshot = oci_tag_snapshot(scope_namespace, repository, tag, before.clone())?;
     let after_snapshot = oci_tag_snapshot(scope_namespace, repository, tag, after)?;
-    let evidence = verify_and_append_snapshot_transition(
-        current_oci_tag_evidence(transaction, scope_namespace, repository, tag, before)?,
-        before_snapshot,
-        after_snapshot,
-    )?
-    .0;
-    for event in evidence.events() {
+    let (stored_evidence, evidence_was_missing) =
+        current_oci_tag_evidence(transaction, scope_namespace, repository, tag, before)?;
+    let evidence =
+        verify_and_append_snapshot_transition(stored_evidence, before_snapshot, after_snapshot)?.0;
+    if evidence_was_missing {
+        for event in evidence.events() {
+            persist_oci_tag_evidence(transaction, event)?;
+        }
+    } else if let Some(event) = evidence.events().last() {
         persist_oci_tag_evidence(transaction, event)?;
     }
     Ok(())
