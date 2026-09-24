@@ -1138,8 +1138,8 @@ async fn s3_delete(base: &str, token: &str, key: &str) -> reqwest::Response {
         .expect("s3 DELETE request")
 }
 
-/// Starts a slow PUT (streams one 512KiB chunk, then stalls) and returns the
-/// body sender plus the in-flight request task.
+/// Starts a slow PUT (streams one multipart-sized 8 MiB chunk, then stalls)
+/// and returns the body sender plus the in-flight request task.
 ///
 /// The streamed bytes are derived from `first_chunk_seed` XOR a fresh
 /// nanosecond timestamp, so each invocation writes content the (persistent)
@@ -1173,7 +1173,7 @@ async fn start_slow_put(
             .await
     });
     tx.send(Ok(bytes::Bytes::from(deterministic_bytes(
-        512 * 1024,
+        8 * 1024 * 1024,
         unique_seed,
     ))))
     .await
