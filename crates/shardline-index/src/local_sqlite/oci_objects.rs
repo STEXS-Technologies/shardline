@@ -2,7 +2,7 @@ use rusqlite::{OptionalExtension, params};
 use shardline_reliability::{
     OciObjectEvidenceLog, OciObjectIdentity, OciObjectLifecycleState, OciObjectOperationId,
     OciObjectSnapshot, OperationKind, verify_and_append_snapshot_transition,
-    verify_oci_object_lifecycle_chain, verify_snapshot_evidence,
+    verify_snapshot_evidence,
 };
 
 use super::{LocalIndexStore, LocalIndexStoreError, i64_to_u64};
@@ -34,16 +34,17 @@ fn load_oci_evidence(
     key: &OciObjectKey,
 ) -> Result<OciObjectEvidenceLog, LocalIndexStoreError> {
     let operation_id = OciObjectOperationId::new(&oci_identity(key)?);
-    let rows = super::helpers::load_verified_event_json(
+    let rows = super::helpers::load_latest_verified_event_json(
         transaction,
         OperationKind::Visibility,
         operation_id.as_str(),
     )?;
-    Ok(OciObjectEvidenceLog::from_events(
-        rows.into_iter()
-            .map(serde_json::from_value)
-            .collect::<Result<Vec<_>, _>>()?,
-    )?)
+    let Some(row) = rows else {
+        return Ok(OciObjectEvidenceLog::default());
+    };
+    Ok(OciObjectEvidenceLog::from_head(serde_json::from_value(
+        row,
+    )?)?)
 }
 
 fn persist_oci_evidence(
@@ -318,7 +319,13 @@ impl OciObjectStore for LocalIndexStore {
                     oci_snapshot(&key, OciObjectLifecycleState::Deleted, Some(deleted_at))?;
                 verify_snapshot_evidence(&evidence, &expected)?;
             } else if !evidence.events().is_empty() {
-                verify_oci_object_lifecycle_chain(evidence.events())?;
+                evidence
+                    .events()
+                    .last()
+                    .ok_or(LocalIndexStoreError::Reliability(
+                        shardline_reliability::ReliabilityError::OperationMismatch,
+                    ))?
+                    .verify_integrity()?;
             }
             transaction.commit()?;
             Ok(deleted_at.is_some())

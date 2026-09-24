@@ -166,7 +166,9 @@ pub fn verify_and_reactivate_quarantine(
     if evidence.events().is_empty() {
         return Ok((QuarantineEvidenceLog::baseline(snapshot)?, true));
     }
-    verify_snapshot_chain(evidence.events())?;
+    if !evidence.is_head_only() {
+        verify_snapshot_chain(evidence.events())?;
+    }
     let last = evidence
         .events()
         .last()

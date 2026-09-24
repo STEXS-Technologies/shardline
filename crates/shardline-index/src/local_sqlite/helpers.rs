@@ -611,16 +611,17 @@ pub(crate) fn load_quarantine_evidence(
     transaction: &Transaction<'_>,
     object_key: &str,
 ) -> Result<QuarantineEvidenceLog, LocalIndexStoreError> {
-    let rows = load_verified_event_json(
+    let rows = load_latest_verified_event_json(
         transaction,
         OperationKind::GarbageCollection,
         &quarantine_evidence_operation_id(object_key),
     )?;
-    Ok(QuarantineEvidenceLog::from_events(
-        rows.into_iter()
-            .map(from_value::<QuarantineLifecycleEvent>)
-            .collect::<Result<Vec<_>, _>>()?,
-    )?)
+    let Some(row) = rows else {
+        return Ok(QuarantineEvidenceLog::default());
+    };
+    Ok(QuarantineEvidenceLog::from_head(from_value::<
+        QuarantineLifecycleEvent,
+    >(row)?)?)
 }
 
 pub(crate) fn load_quarantine_evidence_batch(
@@ -669,16 +670,17 @@ pub(crate) fn load_retention_evidence(
     transaction: &Transaction<'_>,
     object_key: &str,
 ) -> Result<RetentionEvidenceLog, LocalIndexStoreError> {
-    let rows = load_verified_event_json(
+    let rows = load_latest_verified_event_json(
         transaction,
         OperationKind::RetentionHold,
         &retention_evidence_operation_id(object_key),
     )?;
-    Ok(RetentionEvidenceLog::from_events(
-        rows.into_iter()
-            .map(from_value::<RetentionHoldLifecycleEvent>)
-            .collect::<Result<Vec<_>, _>>()?,
-    )?)
+    let Some(row) = rows else {
+        return Ok(RetentionEvidenceLog::default());
+    };
+    Ok(RetentionEvidenceLog::from_head(from_value::<
+        RetentionHoldLifecycleEvent,
+    >(row)?)?)
 }
 
 pub(crate) fn load_retention_evidence_batch(
@@ -729,16 +731,17 @@ pub(crate) fn load_webhook_evidence(
     let operation = webhook_snapshot(delivery, WebhookDeliveryLifecycleState::Processed)?
         .evidence_operation()
         .map_err(LocalIndexStoreError::from)?;
-    let rows = load_verified_event_json(
+    let rows = load_latest_verified_event_json(
         transaction,
         OperationKind::WebhookDelivery,
         &operation.operation_id,
     )?;
-    Ok(WebhookDeliveryEvidenceLog::from_events(
-        rows.into_iter()
-            .map(from_value::<WebhookDeliveryLifecycleEvent>)
-            .collect::<Result<Vec<_>, _>>()?,
-    )?)
+    let Some(row) = rows else {
+        return Ok(WebhookDeliveryEvidenceLog::default());
+    };
+    Ok(WebhookDeliveryEvidenceLog::from_head(from_value::<
+        WebhookDeliveryLifecycleEvent,
+    >(row)?)?)
 }
 
 pub(crate) fn load_webhook_evidence_batch(
@@ -800,16 +803,17 @@ pub(crate) fn load_hub_ref_evidence(
     ref_name: &str,
 ) -> Result<HubRefEvidenceLog, LocalIndexStoreError> {
     let operation = hub_ref_snapshot(repository, ref_name, None)?.evidence_operation()?;
-    let rows = load_verified_event_json(
+    let rows = load_latest_verified_event_json(
         transaction,
         OperationKind::MetadataCommit,
         &operation.operation_id,
     )?;
-    Ok(HubRefEvidenceLog::from_events(
-        rows.into_iter()
-            .map(from_value::<HubRefLifecycleEvent>)
-            .collect::<Result<Vec<_>, _>>()?,
-    )?)
+    let Some(row) = rows else {
+        return Ok(HubRefEvidenceLog::default());
+    };
+    Ok(HubRefEvidenceLog::from_head(from_value::<
+        HubRefLifecycleEvent,
+    >(row)?)?)
 }
 
 pub(crate) fn persist_hub_ref_evidence(
@@ -945,13 +949,17 @@ pub(crate) fn load_oci_tag_evidence(
 ) -> Result<OciTagEvidenceLog, LocalIndexStoreError> {
     let operation =
         oci_tag_snapshot(scope_namespace, repository, tag, None)?.evidence_operation()?;
-    let rows =
-        load_verified_event_json(transaction, OperationKind::OciTag, &operation.operation_id)?;
-    Ok(OciTagEvidenceLog::from_events(
-        rows.into_iter()
-            .map(from_value::<OciTagLifecycleEvent>)
-            .collect::<Result<Vec<_>, _>>()?,
-    )?)
+    let rows = load_latest_verified_event_json(
+        transaction,
+        OperationKind::OciTag,
+        &operation.operation_id,
+    )?;
+    let Some(row) = rows else {
+        return Ok(OciTagEvidenceLog::default());
+    };
+    Ok(OciTagEvidenceLog::from_head(from_value::<
+        OciTagLifecycleEvent,
+    >(row)?)?)
 }
 
 pub(crate) fn current_oci_tag_evidence(
@@ -1084,12 +1092,14 @@ pub(crate) fn load_provider_evidence(
     snapshot: &ProviderLifecycleSnapshot,
 ) -> Result<ProviderEvidenceLog, LocalIndexStoreError> {
     let operation_id = provider_evidence_operation_id(snapshot);
-    let events =
-        load_verified_event_json(transaction, OperationKind::ProviderEvent, &operation_id)?
-            .into_iter()
-            .map(from_value::<ProviderLifecycleEvent>)
-            .collect::<Result<Vec<_>, _>>()?;
-    Ok(ProviderEvidenceLog::from_events(events)?)
+    let Some(row) =
+        load_latest_verified_event_json(transaction, OperationKind::ProviderEvent, &operation_id)?
+    else {
+        return Ok(ProviderEvidenceLog::default());
+    };
+    Ok(ProviderEvidenceLog::from_head(from_value::<
+        ProviderLifecycleEvent,
+    >(row)?)?)
 }
 
 pub(crate) fn persist_provider_evidence(

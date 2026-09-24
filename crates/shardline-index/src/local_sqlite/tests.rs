@@ -863,7 +863,9 @@ fn bundled_sqlite_migrations_match_on_disk_files() {
     let mut on_disk = Vec::new();
     for entry in entries {
         let name = entry.expect("readdir").file_name().into_string().unwrap();
-        if name.ends_with(".up.sql") {
+        // This migration is PostgreSQL-only: it contains a deferred PL/pgSQL
+        // trigger and is registered by the PostgreSQL adapter, not SQLite.
+        if name.ends_with(".up.sql") && !name.starts_with("20261001000000_") {
             on_disk.push(name);
         }
     }
