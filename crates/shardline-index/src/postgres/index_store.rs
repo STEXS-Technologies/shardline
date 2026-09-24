@@ -2054,7 +2054,7 @@ impl UploadIntentStore for super::PostgresIndexStore {
             )
         })?;
         let rows = sqlx::query(
-            "SELECT event_json
+            "SELECT sequence, event_json, merkle_commit_json
              FROM shardline_reliability_events
              WHERE operation_kind = $1 AND operation_id = $2
              ORDER BY sequence",
@@ -2063,14 +2063,30 @@ impl UploadIntentStore for super::PostgresIndexStore {
         .bind(&event.operation.operation_id)
         .fetch_all(&mut *transaction)
         .await?;
-        let mut events = rows
-            .into_iter()
-            .map(
-                |row| -> Result<LifecycleEvent, PostgresMetadataStoreError> {
-                    Ok(serde_json::from_value(row.try_get("event_json")?)?)
-                },
-            )
-            .collect::<Result<Vec<LifecycleEvent>, PostgresMetadataStoreError>>()?;
+        let mut sequences = Vec::with_capacity(rows.len());
+        let mut event_json = Vec::with_capacity(rows.len());
+        let mut merkle_commits = Vec::with_capacity(rows.len());
+        for row in rows {
+            let sequence = u64::try_from(row.try_get::<i64, _>("sequence")?).map_err(|error| {
+                PostgresMetadataStoreError::IntegerOutOfRange(format!(
+                    "reliability sequence: {error}"
+                ))
+            })?;
+            event_json.push(row.try_get("event_json")?);
+            merkle_commits.push(row.try_get("merkle_commit_json")?);
+            sequences.push(sequence);
+        }
+        verify_persisted_event_merkle_chain_with_sequences(
+            OperationKind::Upload,
+            &sequences,
+            &event_json,
+            &merkle_commits,
+        )?;
+        let mut events = event_json
+            .iter()
+            .cloned()
+            .map(serde_json::from_value::<LifecycleEvent>)
+            .collect::<Result<Vec<LifecycleEvent>, _>>()?;
         if let Some(existing) = events
             .iter()
             .find(|existing| existing.sequence == event.sequence)
@@ -2457,7 +2473,9 @@ mod tests {
     };
 
     use shardline_protocol::{ChunkRange, HashParseError, RepositoryProvider, ShardlineHash};
-    use shardline_reliability::baseline_upload_lifecycle_events;
+    use shardline_reliability::{
+        UploadLifecycleState, baseline_upload_lifecycle_events, upload_lifecycle_event,
+    };
     use sqlx::{
         Row,
         postgres::{PgConnectOptions, PgPoolOptions, PgSslMode},
@@ -3209,6 +3227,84 @@ mod tests {
 
         assert!(store.intent_by_id(intent.intent_id()).await.is_err());
         assert!(store.reliability_events(intent.intent_id()).await.is_err());
+        sqlx::query("DELETE FROM shardline_upload_intents WHERE intent_id = $1")
+            .bind(intent.intent_id())
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "DELETE FROM shardline_reliability_events
+             WHERE operation_kind = 'Upload' AND operation_id = $1",
+        )
+        .bind(intent.intent_id())
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pg_upload_event_append_rejects_corrupt_merkle_prefix() {
+        let Some(pool) = connect_postgres().await else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let intent = UploadIntent::new(
+            format!("reject-corrupt-merkle-{}", std::process::id()),
+            "objects/reject-corrupt-merkle".into(),
+            "f".repeat(64),
+            7,
+        );
+        sqlx::query("DELETE FROM shardline_upload_intents WHERE intent_id = $1")
+            .bind(intent.intent_id())
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "DELETE FROM shardline_reliability_events
+             WHERE operation_kind = 'Upload' AND operation_id = $1",
+        )
+        .bind(intent.intent_id())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let store = make_pg_store(pool.clone());
+        store.create_intent(&intent).await.unwrap();
+        store
+            .transition_intent(intent.intent_id(), UploadIntentState::Storing)
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE shardline_reliability_events
+             SET merkle_commit_json = '{\"corrupt\":true}'::jsonb
+             WHERE operation_kind = 'Upload' AND operation_id = $1 AND sequence = 1",
+        )
+        .bind(intent.intent_id())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let event = upload_lifecycle_event(
+            "shardline",
+            "default",
+            intent.intent_id(),
+            intent.object_key(),
+            intent.object_hash(),
+            UploadLifecycleState::Storing,
+            UploadLifecycleState::Stored,
+        )
+        .unwrap();
+        assert!(store.record_reliability_event(&event).await.is_err());
+        let appended: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM shardline_reliability_events
+             WHERE operation_kind = 'Upload' AND operation_id = $1 AND sequence = 2",
+        )
+        .bind(intent.intent_id())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(appended, 0);
+
         sqlx::query("DELETE FROM shardline_upload_intents WHERE intent_id = $1")
             .bind(intent.intent_id())
             .execute(&pool)
