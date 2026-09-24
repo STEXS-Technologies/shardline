@@ -1,13 +1,13 @@
-use std::sync::{Mutex, Once, OnceLock};
-
 use shardline_hub_api::routes::HubState;
 use shardline_index::LocalIndexStore;
 use shardline_index::hub::BoxedHubStore;
+use shardline_server_core::ServerObjectStore;
 use tempfile::TempDir;
 
-pub(crate) static INIT: Once = Once::new();
-pub(crate) static TEMP_DIR: OnceLock<Mutex<Option<TempDir>>> = OnceLock::new();
-pub(crate) static STATE: OnceLock<HubState> = OnceLock::new();
+pub(crate) struct HubTestContext {
+    _temp_dir: TempDir,
+    state: HubState,
+}
 
 pub(crate) const HUB_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS shardline_hub_repos (
                 repo_id TEXT PRIMARY KEY,
@@ -57,38 +57,38 @@ pub(crate) const HUB_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS shardline_hub_re
             );
             CREATE INDEX IF NOT EXISTS shardline_hub_webhooks_repo_idx ON shardline_hub_webhooks (repo_id);";
 
-pub(crate) fn setup() {
-    INIT.call_once(|| {
-        let tmp = TempDir::new().expect("tempdir");
-        let root = tmp.path().to_path_buf();
-        let db_path = root.join("metadata.sqlite3");
-        let conn = rusqlite::Connection::open(&db_path).expect("open sqlite");
-        conn.execute_batch(HUB_SCHEMA).expect("execute schema");
-        drop(conn);
+pub(crate) fn setup() -> HubTestContext {
+    let temp_dir = TempDir::new().expect("tempdir");
+    let root = temp_dir.path().to_path_buf();
+    let db_path = root.join("metadata.sqlite3");
+    let conn = rusqlite::Connection::open(&db_path).expect("open sqlite");
+    conn.execute_batch(HUB_SCHEMA).expect("execute schema");
+    drop(conn);
 
-        let store = LocalIndexStore::open(root.clone());
-        let boxed = BoxedHubStore::from_store(store);
-        let object_store = shardline_server_core::ServerObjectStore::local(root.join("lfs"))
-            .expect("local object store");
-        let state = HubState {
-            store: boxed,
-            object_store,
-            auth: None,
-            http_client: None,
-            webhook_secret_cipher: None,
-            public_base_url: "http://127.0.0.1:8080".to_owned(),
-        };
-        let _ = STATE.set(state);
+    let store = LocalIndexStore::open(root.clone());
+    let boxed = BoxedHubStore::from_store(store);
+    let object_store = ServerObjectStore::local(root.join("lfs")).expect("local object store");
+    let state = HubState {
+        store: boxed,
+        object_store,
+        auth: None,
+        http_client: None,
+        webhook_secret_cipher: None,
+        public_base_url: "http://127.0.0.1:8080".to_owned(),
+    };
 
-        let dir_lock = TEMP_DIR.get_or_init(|| Mutex::new(None));
-        *dir_lock.lock().unwrap() = Some(tmp);
-    });
+    HubTestContext {
+        _temp_dir: temp_dir,
+        state,
+    }
 }
 
-pub(crate) fn state() -> &'static HubState {
-    STATE.get().expect("setup() must be called first")
-}
+impl HubTestContext {
+    pub(crate) fn state(&self) -> &HubState {
+        &self.state
+    }
 
-pub(crate) fn app() -> axum::Router {
-    shardline_hub_api::hub_routes(state().clone(), true)
+    pub(crate) fn app(&self) -> axum::Router {
+        shardline_hub_api::hub_routes(self.state.clone(), true)
+    }
 }

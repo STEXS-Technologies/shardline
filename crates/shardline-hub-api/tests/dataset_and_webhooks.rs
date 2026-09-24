@@ -19,7 +19,6 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use parquet::{arrow::ArrowWriter, file::properties::WriterProperties};
-use serial_test::serial;
 use shardline_index::hub::{HubFileEntry, HubRepoType};
 use shardline_protocol::ShardlineHash;
 use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectStore};
@@ -27,15 +26,14 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 use tower::ServiceExt;
 
-use common::{app, setup, state};
+use common::setup;
 
 // ---- Dataset viewer tests ----
 
-#[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dataset_parquet_lists_data_files() {
-    setup();
-    let store = common::state().store.clone();
+    let test = setup();
+    let store = test.state().store.clone();
 
     // Create a dataset repo
     store
@@ -68,7 +66,8 @@ async fn dataset_parquet_lists_data_files() {
         .create_revision("team/dataset", None, "commit1", "main", "init")
         .unwrap();
 
-    let response = app()
+    let response = test
+        .app()
         .oneshot(
             Request::builder()
                 .uri("/api/datasets/team/dataset/parquet")
@@ -88,11 +87,10 @@ async fn dataset_parquet_lists_data_files() {
     assert!(paths.contains(&"default/test/data.csv"));
 }
 
-#[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dataset_first_rows_returns_jsonl_data() {
-    setup();
-    let store = common::state().store.clone();
+    let test = setup();
+    let store = test.state().store.clone();
 
     store
         .create_repo(HubRepoType::Dataset, "team/jsonl-dataset", false)
@@ -117,7 +115,7 @@ async fn dataset_first_rows_returns_jsonl_data() {
         ),
         jsonl_content.len() as u64,
     );
-    state()
+    test.state()
         .object_store
         .put_if_absent(&key, body, &integrity)
         .unwrap();
@@ -125,7 +123,8 @@ async fn dataset_first_rows_returns_jsonl_data() {
         .create_revision("team/jsonl-dataset", None, "commit_jsonl", "main", "init")
         .unwrap();
 
-    let response = app()
+    let response = test
+        .app()
         .oneshot(
             Request::builder()
                 .uri("/api/datasets/team/jsonl-dataset/first-rows?split=train&limit=2")
@@ -145,7 +144,8 @@ async fn dataset_first_rows_returns_jsonl_data() {
     assert_eq!(rows[1]["columns"]["id"], 2);
     assert_eq!(rows[1]["columns"]["name"], "name-2");
 
-    let response = app()
+    let response = test
+        .app()
         .oneshot(
             Request::builder()
                 .uri("/api/datasets/team/jsonl-dataset/viewer/train?offset=19999&length=1")
@@ -161,11 +161,10 @@ async fn dataset_first_rows_returns_jsonl_data() {
     assert_eq!(json["rows"][0]["columns"]["id"], 20_000);
 }
 
-#[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dataset_first_rows_reads_parquet_with_bounded_range_reader() {
-    setup();
-    let store = common::state().store.clone();
+    let test = setup();
+    let store = test.state().store.clone();
     store
         .create_repo(HubRepoType::Dataset, "team/parquet-dataset", false)
         .unwrap();
@@ -206,7 +205,7 @@ async fn dataset_first_rows_reads_parquet_with_bounded_range_reader() {
         .create_revision("team/parquet-dataset", None, revision, "main", "init")
         .unwrap();
     let key = ObjectKey::parse(&format!("protocols/lfs/global/objects/{sha}")).unwrap();
-    common::state()
+    test.state()
         .object_store
         .put_if_absent(
             &key,
@@ -217,7 +216,8 @@ async fn dataset_first_rows_reads_parquet_with_bounded_range_reader() {
             ),
         )
         .unwrap();
-    let response = app()
+    let response = test
+        .app()
         .oneshot(
             Request::builder()
                 .uri("/api/datasets/team/parquet-dataset/first-rows?limit=2")
@@ -238,7 +238,8 @@ async fn dataset_first_rows_reads_parquet_with_bounded_range_reader() {
         "repository": "team/parquet-dataset", "revision": revision, "file_sha": sha,
         "config": "default", "split": "train", "columns": ["does_not_exist"], "limit": 1
     });
-    let response = app()
+    let response = test
+        .app()
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -256,7 +257,8 @@ async fn dataset_first_rows_reads_parquet_with_bounded_range_reader() {
         "config": "default", "split": "train",
         "order_by": [{"column": "does_not_exist", "descending": true}], "limit": 1
     });
-    let response = app()
+    let response = test
+        .app()
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -293,7 +295,8 @@ async fn dataset_first_rows_reads_parquet_with_bounded_range_reader() {
         "columns": ["name"],
         "limit": 1
     });
-    let response = app()
+    let response = test
+        .app()
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -314,7 +317,8 @@ async fn dataset_first_rows_reads_parquet_with_bounded_range_reader() {
         "repository": "team/parquet-dataset", "revision": revision, "file_sha": sha,
         "config": "default", "split": "train", "predicates": [{"column": "id", "op": "gt", "value": 1}], "limit": 10
     });
-    let response = app()
+    let response = test
+        .app()
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -334,7 +338,8 @@ async fn dataset_first_rows_reads_parquet_with_bounded_range_reader() {
         "repository": "team/parquet-dataset", "revision": revision, "file_sha": sha,
         "config": "default", "split": "train", "aggregates": [{"function": "count", "alias": "rows"}], "limit": 10
     });
-    let response = app()
+    let response = test
+        .app()
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -354,7 +359,8 @@ async fn dataset_first_rows_reads_parquet_with_bounded_range_reader() {
         "repository": "team/parquet-dataset", "revision": revision, "file_sha": sha,
         "config": "default", "split": "train", "order_by": [{"column": "id", "descending": true}], "limit": 1
     });
-    let response = app()
+    let response = test
+        .app()
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -375,7 +381,8 @@ async fn dataset_first_rows_reads_parquet_with_bounded_range_reader() {
         "file_sha": "1818181818181818181818181818181818181818181818181818181818181818",
         "config": "default", "split": "train", "limit": 1
     });
-    let response = app()
+    let response = test
+        .app()
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -391,11 +398,10 @@ async fn dataset_first_rows_reads_parquet_with_bounded_range_reader() {
     assert!(!String::from_utf8_lossy(&body).contains("181818"));
 }
 
-#[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dataset_first_rows_preserves_nested_and_null_parquet_values() {
-    setup();
-    let store = common::state().store.clone();
+    let test = setup();
+    let store = test.state().store.clone();
     let repo = "team/nested-null-parquet";
     let revision = "d3333333333333333333333333333333333333";
     let sha = "1718181818181818181818181818181818181818181818181818181818181818";
@@ -448,7 +454,7 @@ async fn dataset_first_rows_preserves_nested_and_null_parquet_values() {
         .create_revision(repo, None, revision, "main", "nested null")
         .unwrap();
     let key = ObjectKey::parse(&format!("protocols/lfs/global/objects/{sha}")).unwrap();
-    common::state()
+    test.state()
         .object_store
         .put_if_absent(
             &key,
@@ -460,7 +466,8 @@ async fn dataset_first_rows_preserves_nested_and_null_parquet_values() {
         )
         .unwrap();
 
-    let response = app()
+    let response = test
+        .app()
         .oneshot(
             Request::builder()
                 .uri(format!("/api/datasets/{repo}/first-rows?limit=2"))
@@ -483,14 +490,13 @@ async fn dataset_first_rows_preserves_nested_and_null_parquet_values() {
 /// deliberately separate from the `oneshot` coverage above: it catches
 /// release-only codec/configuration regressions (for example, a server built
 /// without Snappy support) and validates the production HTTP body path.
-#[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dataset_query_http_e2e_reads_compressed_multiple_row_groups() {
-    setup();
+    let test = setup();
     let repo = format!("team/http-e2e-{}", std::process::id());
     let revision = format!("b{:039}", std::process::id());
     let sha = format!("{:0>64}", "18");
-    let store = common::state().store.clone();
+    let store = test.state().store.clone();
     store
         .create_repo(HubRepoType::Dataset, &repo, false)
         .unwrap();
@@ -522,7 +528,7 @@ async fn dataset_query_http_e2e_reads_compressed_multiple_row_groups() {
         .create_revision(&repo, None, &revision, "main", "http e2e")
         .unwrap();
     let key = ObjectKey::parse(&format!("protocols/lfs/global/objects/{sha}")).unwrap();
-    common::state()
+    test.state()
         .object_store
         .put_if_absent(
             &key,
@@ -538,7 +544,7 @@ async fn dataset_query_http_e2e_reads_compressed_multiple_row_groups() {
     let address = listener.local_addr().unwrap();
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
-        axum::serve(listener, app())
+        axum::serve(listener, test.app())
             .with_graceful_shutdown(async {
                 let _ = shutdown_rx.await;
             })
@@ -569,11 +575,10 @@ async fn dataset_query_http_e2e_reads_compressed_multiple_row_groups() {
     server.await.unwrap();
 }
 
-#[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dataset_query_rejects_body_repository_mismatch() {
-    setup();
-    let store = common::state().store.clone();
+    let test = setup();
+    let store = test.state().store.clone();
     store
         .create_repo(HubRepoType::Dataset, "team/query-boundary", false)
         .unwrap();
@@ -601,7 +606,8 @@ async fn dataset_query_rejects_body_repository_mismatch() {
         "split": "train",
         "limit": 1
     });
-    let response = app()
+    let response = test
+        .app()
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -615,11 +621,10 @@ async fn dataset_query_rejects_body_repository_mismatch() {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
-#[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dataset_query_redacts_malformed_parquet_errors() {
-    setup();
-    let store = common::state().store.clone();
+    let test = setup();
+    let store = test.state().store.clone();
     store
         .create_repo(HubRepoType::Dataset, "team/malformed-query", false)
         .unwrap();
@@ -641,7 +646,7 @@ async fn dataset_query_redacts_malformed_parquet_errors() {
         .create_revision("team/malformed-query", None, revision, "main", "init")
         .unwrap();
     let key = ObjectKey::parse(&format!("protocols/lfs/global/objects/{sha}")).unwrap();
-    common::state()
+    test.state()
         .object_store
         .put_if_absent(
             &key,
@@ -660,7 +665,8 @@ async fn dataset_query_redacts_malformed_parquet_errors() {
         "split": "train",
         "limit": 1
     });
-    let response = app()
+    let response = test
+        .app()
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -678,19 +684,18 @@ async fn dataset_query_redacts_malformed_parquet_errors() {
     assert!(!body.contains(sha));
 }
 
-#[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dataset_query_can_be_disabled_without_disabling_legacy_routes() {
-    setup();
-    common::state()
+    let test = setup();
+    test.state()
         .store
         .create_repo(HubRepoType::Dataset, "team/disabled", false)
         .unwrap();
-    common::state()
+    test.state()
         .store
         .store_files("e444444444444444444444444444444444444444", &[])
         .unwrap();
-    common::state()
+    test.state()
         .store
         .create_revision(
             "team/disabled",
@@ -700,8 +705,7 @@ async fn dataset_query_can_be_disabled_without_disabling_legacy_routes() {
             "init",
         )
         .unwrap();
-    let app =
-        shardline_hub_api::hub_routes_with_dataset_query(common::state().clone(), true, false);
+    let app = shardline_hub_api::hub_routes_with_dataset_query(test.state().clone(), true, false);
     let response = app
         .oneshot(
             Request::builder()
@@ -714,7 +718,7 @@ async fn dataset_query_can_be_disabled_without_disabling_legacy_routes() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
     let response =
-        shardline_hub_api::hub_routes_with_dataset_query(common::state().clone(), true, false)
+        shardline_hub_api::hub_routes_with_dataset_query(test.state().clone(), true, false)
             .oneshot(
                 Request::builder()
                     .uri("/api/datasets/team/disabled/first-rows")
@@ -726,11 +730,10 @@ async fn dataset_query_can_be_disabled_without_disabling_legacy_routes() {
     assert_ne!(response.status(), StatusCode::NOT_FOUND);
 }
 
-#[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dataset_first_rows_returns_csv_data() {
-    setup();
-    let store = common::state().store.clone();
+    let test = setup();
+    let store = test.state().store.clone();
 
     store
         .create_repo(HubRepoType::Dataset, "team/csv-dataset", false)
@@ -753,7 +756,7 @@ async fn dataset_first_rows_returns_csv_data() {
         ),
         csv_content.len() as u64,
     );
-    state()
+    test.state()
         .object_store
         .put_if_absent(&key, body, &integrity)
         .unwrap();
@@ -761,7 +764,8 @@ async fn dataset_first_rows_returns_csv_data() {
         .create_revision("team/csv-dataset", None, "commit_csv", "main", "init")
         .unwrap();
 
-    let response = app()
+    let response = test
+        .app()
         .oneshot(
             Request::builder()
                 .uri("/api/datasets/team/csv-dataset/first-rows")
@@ -781,11 +785,10 @@ async fn dataset_first_rows_returns_csv_data() {
     assert_eq!(rows[0]["columns"]["value"], 100);
 }
 
-#[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dataset_viewer_returns_paginated_rows() {
-    setup();
-    let store = common::state().store.clone();
+    let test = setup();
+    let store = test.state().store.clone();
 
     store
         .create_repo(HubRepoType::Dataset, "team/paginated", false)
@@ -810,7 +813,7 @@ async fn dataset_viewer_returns_paginated_rows() {
         shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(&jsonl_bytes).as_bytes()),
         jsonl_bytes.len() as u64,
     );
-    state()
+    test.state()
         .object_store
         .put_if_absent(&key, body, &integrity)
         .unwrap();
@@ -818,7 +821,8 @@ async fn dataset_viewer_returns_paginated_rows() {
         .create_revision("team/paginated", None, "commit_paginated", "main", "init")
         .unwrap();
 
-    let response = app()
+    let response = test
+        .app()
         .oneshot(
             Request::builder()
                 .uri("/api/datasets/team/paginated/viewer/train?offset=3&length=2")
@@ -837,11 +841,10 @@ async fn dataset_viewer_returns_paginated_rows() {
     assert_eq!(rows[1]["columns"]["index"], 4);
 }
 
-#[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dataset_parquet_rejects_non_dataset_repo() {
-    setup();
-    let store = common::state().store.clone();
+    let test = setup();
+    let store = test.state().store.clone();
 
     store
         .create_repo(HubRepoType::Model, "team/model", false)
@@ -850,7 +853,8 @@ async fn dataset_parquet_rejects_non_dataset_repo() {
         .create_revision("team/model", None, "sha1", "main", "init")
         .unwrap();
 
-    let response = app()
+    let response = test
+        .app()
         .oneshot(
             Request::builder()
                 .uri("/api/datasets/team/model/parquet")
@@ -865,11 +869,10 @@ async fn dataset_parquet_rejects_non_dataset_repo() {
 
 // ---- Webhook tests ----
 
-#[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn webhook_crud_lifecycle() {
-    setup();
-    let store = common::state().store.clone();
+    let test = setup();
+    let store = test.state().store.clone();
 
     store
         .create_repo(HubRepoType::Model, "team/webhook-model", false)
@@ -884,7 +887,8 @@ async fn webhook_crud_lifecycle() {
         "events": ["push", "delete"],
         "secret": "my-secret"
     });
-    let response = app()
+    let response = test
+        .app()
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -903,7 +907,8 @@ async fn webhook_crud_lifecycle() {
     assert_eq!(json["active"], true);
 
     // List webhooks
-    let response = app()
+    let response = test
+        .app()
         .oneshot(
             Request::builder()
                 .uri("/api/models/team/webhook-model/webhooks")
@@ -920,7 +925,8 @@ async fn webhook_crud_lifecycle() {
     assert_eq!(webhooks[0]["id"], webhook_id);
 
     // Delete webhook
-    let response = app()
+    let response = test
+        .app()
         .oneshot(
             Request::builder()
                 .method("DELETE")
@@ -935,7 +941,8 @@ async fn webhook_crud_lifecycle() {
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
 
     // List webhooks (should be empty)
-    let response = app()
+    let response = test
+        .app()
         .oneshot(
             Request::builder()
                 .uri("/api/models/team/webhook-model/webhooks")
@@ -951,16 +958,16 @@ async fn webhook_crud_lifecycle() {
     assert!(webhooks.is_empty());
 }
 
-#[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn webhook_create_rejects_nonexistent_repo() {
-    setup();
+    let test = setup();
 
     let create_body = serde_json::json!({
         "url": "https://example.com/hook",
         "events": ["push"]
     });
-    let response = app()
+    let response = test
+        .app()
         .oneshot(
             Request::builder()
                 .method("POST")

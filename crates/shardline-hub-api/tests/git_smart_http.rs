@@ -30,19 +30,19 @@ use shardline_storage::ObjectStore;
 use std::io::Read;
 use tower::ServiceExt;
 
-use common::{app, setup};
-use serial_test::serial;
+use common::setup;
 
 // ---- Helpers ----
 
 fn create_repo_and_commit(
+    test: &common::HubTestContext,
     repo_type: &str,
     ns: &str,
     repo: &str,
     files: Vec<HubFileEntry>,
     message: &str,
 ) -> String {
-    let state = common::state();
+    let state = test.state();
     let repo_id = format!("{ns}/{repo}");
     let rt = HubRepoType::parse_str(repo_type).unwrap();
     let _ = state.store.create_repo(rt, &repo_id, false);
@@ -144,10 +144,10 @@ async fn collect_body_bytes(response: axum::response::Response) -> Vec<u8> {
 // ---- Tests ----
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[serial]
 async fn health_endpoint() {
-    setup();
-    let response = app()
+    let test = setup();
+    let response = test
+        .app()
         .oneshot(
             Request::builder()
                 .uri("/health")
@@ -163,14 +163,14 @@ async fn health_endpoint() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[serial]
 async fn info_refs_upload_pack_empty_repo() {
-    setup();
+    let test = setup();
     let repo_id = format!("test-{}/empty", std::process::id());
-    let state = common::state();
+    let state = test.state();
     let _ = state.store.create_repo(HubRepoType::Model, &repo_id, false);
 
-    let response = app()
+    let response = test
+        .app()
         .oneshot(
             Request::builder()
                 .uri(format!(
@@ -200,11 +200,11 @@ async fn info_refs_upload_pack_empty_repo() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[serial]
 async fn info_refs_upload_pack_with_refs() {
-    setup();
+    let test = setup();
     let uid = std::process::id();
     let commit_sha = create_repo_and_commit(
+        &test,
         "models",
         &format!("test-{uid}"),
         "with-refs",
@@ -212,7 +212,8 @@ async fn info_refs_upload_pack_with_refs() {
         "Initial commit",
     );
 
-    let response = app()
+    let response = test
+        .app()
         .oneshot(
             Request::builder()
                 .uri(format!(
@@ -234,11 +235,11 @@ async fn info_refs_upload_pack_with_refs() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[serial]
 async fn info_refs_invalid_service() {
-    setup();
+    let test = setup();
     let uid = std::process::id();
     let _ = create_repo_and_commit(
+        &test,
         "models",
         &format!("test-{uid}"),
         "invalid-svc",
@@ -246,7 +247,8 @@ async fn info_refs_invalid_service() {
         "msg",
     );
 
-    let response = app()
+    let response = test
+        .app()
         .oneshot(
             Request::builder()
                 .uri(format!(
@@ -261,10 +263,10 @@ async fn info_refs_invalid_service() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[serial]
 async fn info_refs_nonexistent_repo() {
-    setup();
-    let response = app()
+    let test = setup();
+    let response = test
+        .app()
         .oneshot(
             Request::builder()
                 .uri("/models/nonexistent/nonexistent/info/refs?service=git-upload-pack")
@@ -281,11 +283,11 @@ async fn info_refs_nonexistent_repo() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[serial]
 async fn upload_pack_empty_repo() {
-    setup();
+    let test = setup();
     let uid = std::process::id();
     let _ = create_repo_and_commit(
+        &test,
         "models",
         &format!("test-{uid}"),
         "upload-empty",
@@ -296,7 +298,8 @@ async fn upload_pack_empty_repo() {
     let want_sha = "4b825dc642cb6eb9a060e54bf899d69f8f5ce8e3";
     let req_body = build_upload_pack_request(want_sha);
 
-    let response = app()
+    let response = test
+        .app()
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -327,11 +330,11 @@ async fn upload_pack_empty_repo() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[serial]
 async fn upload_pack_with_files() {
-    setup();
+    let test = setup();
     let uid = std::process::id();
     let commit_sha = create_repo_and_commit(
+        &test,
         "models",
         &format!("test-{uid}"),
         "upload-files",
@@ -354,7 +357,8 @@ async fn upload_pack_with_files() {
 
     let req_body = build_upload_pack_request(&commit_sha);
 
-    let response = app()
+    let response = test
+        .app()
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -386,11 +390,11 @@ async fn upload_pack_with_files() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[serial]
 async fn upload_pack_with_lfs_files() {
-    setup();
+    let test = setup();
     let uid = std::process::id();
     let commit_sha = create_repo_and_commit(
+        &test,
         "models",
         &format!("test-{uid}"),
         "upload-lfs",
@@ -413,7 +417,8 @@ async fn upload_pack_with_lfs_files() {
 
     let req_body = build_upload_pack_request(&commit_sha);
 
-    let response = app()
+    let response = test
+        .app()
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -464,11 +469,11 @@ async fn upload_pack_with_lfs_files() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[serial]
 async fn receive_pack_push() {
-    setup();
+    let test = setup();
     let uid = std::process::id();
     let _ = create_repo_and_commit(
+        &test,
         "models",
         &format!("test-{uid}"),
         "receive-push",
@@ -480,7 +485,8 @@ async fn receive_pack_push() {
     let new_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     let req_body = build_receive_pack_request(old_sha, new_sha, "refs/heads/main");
 
-    let response = app()
+    let response = test
+        .app()
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -511,11 +517,11 @@ async fn receive_pack_push() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[serial]
 async fn receive_pack_empty_update() {
-    setup();
+    let test = setup();
     let uid = std::process::id();
     let _ = create_repo_and_commit(
+        &test,
         "models",
         &format!("test-{uid}"),
         "receive-empty",
@@ -526,7 +532,8 @@ async fn receive_pack_empty_update() {
     // Build request with no updates (just a flush).
     let req_body = b"0000";
 
-    let response = app()
+    let response = test
+        .app()
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -545,11 +552,11 @@ async fn receive_pack_empty_update() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[serial]
 async fn git_head_endpoint() {
-    setup();
+    let test = setup();
     let uid = std::process::id();
     let commit_sha = create_repo_and_commit(
+        &test,
         "models",
         &format!("test-{uid}"),
         "head-test",
@@ -557,7 +564,8 @@ async fn git_head_endpoint() {
         "Initial",
     );
 
-    let response = app()
+    let response = test
+        .app()
         .oneshot(
             Request::builder()
                 .uri(format!("/models/test-{uid}/head-test/HEAD"))
@@ -575,10 +583,10 @@ async fn git_head_endpoint() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[serial]
 async fn git_head_nonexistent_repo() {
-    setup();
-    let response = app()
+    let test = setup();
+    let response = test
+        .app()
         .oneshot(
             Request::builder()
                 .uri("/models/noone/nothing/HEAD")
@@ -595,14 +603,21 @@ async fn git_head_nonexistent_repo() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[serial]
 async fn info_refs_receive_pack_requires_write() {
-    setup();
+    let test = setup();
     let uid = std::process::id();
-    let _ = create_repo_and_commit("models", &format!("test-{uid}"), "rp-auth", vec![], "msg");
+    let _ = create_repo_and_commit(
+        &test,
+        "models",
+        &format!("test-{uid}"),
+        "rp-auth",
+        vec![],
+        "msg",
+    );
 
     // receive-pack discovery should also work (no auth configured, so always allowed).
-    let response = app()
+    let response = test
+        .app()
         .oneshot(
             Request::builder()
                 .uri(format!(
@@ -626,12 +641,12 @@ async fn info_refs_receive_pack_requires_write() {
 // ---- Force push handling ----
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[serial]
 async fn receive_pack_rejects_non_fast_forward_push() {
-    setup();
+    let test = setup();
     let uid = std::process::id();
     let repo_id = format!("test-{}/ff-reject", uid);
     let _ = create_repo_and_commit(
+        &test,
         "models",
         &format!("test-{uid}"),
         "ff-reject",
@@ -647,7 +662,8 @@ async fn receive_pack_rejects_non_fast_forward_push() {
     let body_a =
         build_receive_pack_with_objects(null_sha, "refs/heads/main", &objects_a, &commit_a_sha);
 
-    let response = app()
+    let response = test
+        .app()
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -667,7 +683,7 @@ async fn receive_pack_rejects_non_fast_forward_push() {
     );
 
     // Verify refs/heads/main now points to commit_A via the store.
-    let state = common::state();
+    let state = test.state();
     let current = state
         .store
         .resolve_revision(&repo_id, "refs/heads/main")
@@ -702,7 +718,8 @@ async fn receive_pack_rejects_non_fast_forward_push() {
         &commit_b_sha,
     );
 
-    let response = app()
+    let response = test
+        .app()
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -723,12 +740,12 @@ async fn receive_pack_rejects_non_fast_forward_push() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[serial]
 async fn receive_pack_deletes_branch_without_removing_commit_history() {
-    setup();
+    let test = setup();
     let uid = std::process::id();
     let repo_id = format!("test-{}/delete-branch", uid);
     let _ = create_repo_and_commit(
+        &test,
         "models",
         &format!("test-{uid}"),
         "delete-branch",
@@ -742,7 +759,8 @@ async fn receive_pack_deletes_branch_without_removing_commit_history() {
     let commit_sha_hex = hex::encode(commit_sha);
     let create_body =
         build_receive_pack_with_objects(null_sha, "refs/heads/feature", &objects, &commit_sha);
-    let create_response = app()
+    let create_response = test
+        .app()
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -760,7 +778,8 @@ async fn receive_pack_deletes_branch_without_removing_commit_history() {
     );
 
     let delete_body = build_receive_pack_request(&commit_sha_hex, null_sha, "refs/heads/feature");
-    let delete_response = app()
+    let delete_response = test
+        .app()
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -778,7 +797,7 @@ async fn receive_pack_deletes_branch_without_removing_commit_history() {
         "branch deletion should succeed: {delete_body}"
     );
 
-    let state = common::state();
+    let state = test.state();
     assert_eq!(
         state
             .store
@@ -797,7 +816,8 @@ async fn receive_pack_deletes_branch_without_removing_commit_history() {
         "deleting a ref must retain immutable commit history"
     );
 
-    let refs_response = app()
+    let refs_response = test
+        .app()
         .oneshot(
             Request::builder()
                 .uri(format!(
@@ -816,12 +836,12 @@ async fn receive_pack_deletes_branch_without_removing_commit_history() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[serial]
 async fn receive_pack_rejects_stale_or_default_branch_deletion() {
-    setup();
+    let test = setup();
     let uid = std::process::id();
     let repo_id = format!("test-{}/delete-protection", uid);
     let _ = create_repo_and_commit(
+        &test,
         "models",
         &format!("test-{uid}"),
         "delete-protection",
@@ -835,7 +855,8 @@ async fn receive_pack_rejects_stale_or_default_branch_deletion() {
     let commit_sha_hex = hex::encode(commit_sha);
     let create_body =
         build_receive_pack_with_objects(null_sha, "refs/heads/feature", &objects, &commit_sha);
-    let _ = app()
+    let _ = test
+        .app()
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -853,7 +874,8 @@ async fn receive_pack_rejects_stale_or_default_branch_deletion() {
         null_sha,
         "refs/heads/feature",
     );
-    let stale_response = app()
+    let stale_response = test
+        .app()
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -871,7 +893,7 @@ async fn receive_pack_rejects_stale_or_default_branch_deletion() {
         "stale deletion must be rejected: {stale_body}"
     );
     assert_eq!(
-        common::state()
+        test.state()
             .store
             .resolve_revision(&repo_id, "refs/heads/feature")
             .unwrap(),
@@ -879,13 +901,15 @@ async fn receive_pack_rejects_stale_or_default_branch_deletion() {
         "stale deletion must leave the ref intact"
     );
 
-    let current_main = common::state()
+    let current_main = test
+        .state()
         .store
         .resolve_revision(&repo_id, "main")
         .unwrap()
         .expect("main ref exists");
     let default_delete = build_receive_pack_request(&current_main, null_sha, "refs/heads/main");
-    let default_response = app()
+    let default_response = test
+        .app()
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -907,11 +931,11 @@ async fn receive_pack_rejects_stale_or_default_branch_deletion() {
 // ---- Git tags ----
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[serial]
 async fn receive_pack_pushes_tag() {
-    setup();
+    let test = setup();
     let uid = std::process::id();
     let _ = create_repo_and_commit(
+        &test,
         "models",
         &format!("test-{uid}"),
         "tag-test",
@@ -927,7 +951,8 @@ async fn receive_pack_pushes_tag() {
     let body_a =
         build_receive_pack_with_objects(null_sha, "refs/heads/main", &objects_a, &commit_a_sha);
 
-    let response = app()
+    let response = test
+        .app()
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -967,7 +992,8 @@ async fn receive_pack_pushes_tag() {
     tag_body.extend_from_slice(pktline::FLUSH.as_bytes());
     tag_body.extend_from_slice(&pack_data);
 
-    let response = app()
+    let response = test
+        .app()
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -987,7 +1013,8 @@ async fn receive_pack_pushes_tag() {
     );
 
     // Step 3: Verify info/refs advertises both refs/heads/main and refs/tags/v1.0.
-    let response = app()
+    let response = test
+        .app()
         .oneshot(
             Request::builder()
                 .uri(format!(
@@ -1011,7 +1038,7 @@ async fn receive_pack_pushes_tag() {
     );
 
     // Step 4: Verify the tag revision is stored in the store.
-    let state = common::state();
+    let state = test.state();
     let repo_id = format!("test-{}/tag-test", uid);
     let tag_sha = state
         .store
@@ -1026,11 +1053,11 @@ async fn receive_pack_pushes_tag() {
 // ---- LFS push workflow ----
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[serial]
 async fn receive_pack_stores_lfs_objects() {
-    setup();
+    let test = setup();
     let uid = std::process::id();
     let _ = create_repo_and_commit(
+        &test,
         "models",
         &format!("test-{uid}"),
         "lfs-push",
@@ -1069,7 +1096,8 @@ async fn receive_pack_stores_lfs_objects() {
     let null_sha = "0000000000000000000000000000000000000000";
     let body = build_receive_pack_with_objects(null_sha, "refs/heads/main", &objects, &commit_sha);
 
-    let response = app()
+    let response = test
+        .app()
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -1089,7 +1117,7 @@ async fn receive_pack_stores_lfs_objects() {
     );
 
     // Verify the LFS object was stored via ObjectStore.
-    let state = common::state();
+    let state = test.state();
     // receive_pack now stores LFS objects under the repository namespace
     // (global, since the common test state has no auth configured).
     let key =
