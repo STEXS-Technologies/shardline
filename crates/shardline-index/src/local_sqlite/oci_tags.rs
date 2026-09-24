@@ -136,7 +136,7 @@ impl OciTagStore for LocalIndexStore {
                     &entry.repository,
                     &entry.tag,
                 )? {
-                    current_oci_tag_evidence(
+                    verify_oci_tag_evidence(
                         &transaction,
                         &current.scope_namespace,
                         &current.repository,
@@ -224,7 +224,7 @@ impl OciTagStore for LocalIndexStore {
                         )?)?
                     };
                 for value in &values {
-                    current_oci_tag_evidence(
+                    verify_oci_tag_evidence(
                         &transaction,
                         &value.scope_namespace,
                         &value.repository,
@@ -267,7 +267,7 @@ impl OciTagStore for LocalIndexStore {
                     )?)?
                 };
                 for value in &values {
-                    current_oci_tag_evidence(
+                    verify_oci_tag_evidence(
                         &transaction,
                         &value.scope_namespace,
                         &value.repository,
@@ -437,6 +437,51 @@ mod tests {
         );
         let repaired_connection = store.open_connection().unwrap();
         let count: i64 = repaired_connection
+            .query_row(
+                "SELECT COUNT(*) FROM shardline_reliability_events
+                 WHERE operation_kind = 'OciTag'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn local_oci_tag_list_rejects_missing_baseline_without_writing() {
+        let storage = shardline_test_support::TempStorage::new();
+        let store = LocalIndexStore::new(storage.path_buf()).unwrap();
+        let value = entry("latest", &"a".repeat(64));
+        store.upsert_oci_tag(&value).await.unwrap();
+
+        let connection = store.open_connection().unwrap();
+        connection
+            .execute(
+                "DELETE FROM shardline_reliability_events
+                 WHERE operation_kind = 'OciTag'",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+
+        assert!(
+            store
+                .list_oci_tags(&value.scope_namespace, &value.repository, None, 10)
+                .await
+                .is_err()
+        );
+        assert!(
+            store
+                .list_oci_tags_by_digest(
+                    &value.scope_namespace,
+                    &value.repository,
+                    &value.digest_hex,
+                )
+                .await
+                .is_err()
+        );
+        let connection = store.open_connection().unwrap();
+        let count: i64 = connection
             .query_row(
                 "SELECT COUNT(*) FROM shardline_reliability_events
                  WHERE operation_kind = 'OciTag'",

@@ -376,18 +376,13 @@ impl HubStore for LocalIndexStore {
                 rows.collect::<Result<Vec<_>, _>>()?
             };
             for reference in &refs {
-                let evidence = verify_hub_ref_evidence(
+                verify_hub_ref_evidence(
                     &tx,
                     &reference.repo_id,
                     &reference.ref_name,
                     Some(reference.sha.clone()),
                 )
                 .map_err(|error| rusqlite::Error::InvalidParameterName(error.to_string()))?;
-                for event in evidence.events() {
-                    persist_hub_ref_evidence(&tx, event).map_err(|error| {
-                        rusqlite::Error::InvalidParameterName(error.to_string())
-                    })?;
-                }
             }
             tx.commit()?;
             Ok(refs)
