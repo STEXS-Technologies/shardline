@@ -347,7 +347,7 @@ dependencies = ["ci-full", "test-overflow", "test-miri", "test-asan", "test-loom
 description = "Run Loom concurrency model-checking tests"
 workspace = false
 command = "bash"
-args = ["-c", "RUSTFLAGS='--cfg loom' cargo test -p shardline-loom-tests"]
+args = ["-c", "RUSTFLAGS='--cfg loom' cargo nextest run -p shardline-loom-tests"]
 
 [tasks.test-overflow]
 description = "Run tests with integer overflow detection enabled"
