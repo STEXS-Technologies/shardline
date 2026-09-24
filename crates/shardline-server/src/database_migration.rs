@@ -2446,7 +2446,6 @@ fn migration_checksum(migration: &DatabaseMigration) -> String {
 mod tests {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-    use serial_test::serial;
     use sqlx::{PgPool, Row, query};
 
     use super::{
@@ -2466,14 +2465,17 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    #[serial(database_reliability_repair)]
     async fn explicit_repair_rebuilds_corrupt_published_oci_visibility_evidence() {
         let Some(database_url) = std::env::var("DATABASE_URL").ok() else {
             eprintln!("skipping: no DATABASE_URL");
             return;
         };
         let pool = PgPool::connect(&database_url).await.unwrap();
-        let scope_namespace = format!("repair-visible-{}", std::process::id());
+        let unique_suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let scope_namespace = format!("repair-visible-{}_{}", std::process::id(), unique_suffix);
         let repository = "team/assets";
         let object_kind = "blob";
         let digest_hex = "a".repeat(64);
