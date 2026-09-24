@@ -699,21 +699,36 @@ async fn durable_s3_complete_multipart_upload(
     upload_id: &str,
     body: Body,
 ) -> Result<Response, S3Error> {
-    let (session, parts) = state
+    // Validate the opaque upload identity before claiming completion.  A
+    // caller may know a valid upload ID but present it under another bucket or
+    // key; that request must be observationally rejected and must not advance
+    // the session fence or move it to `completing`.
+    let candidate = state
         .backend
-        .begin_resumable_completion(upload_id)
+        .resumable_session_by_id(upload_id)
         .await?
-        .filter(|(session, _parts)| {
+        .filter(|session| {
             session.protocol() == ResumableSessionProtocol::S3Multipart
+                && matches!(
+                    session.state(),
+                    ResumableSessionState::Active | ResumableSessionState::Completing
+                )
                 && session.scope_namespace() == context.scope_namespace
                 && session.target_key() == context.key
         })
         .ok_or_else(S3Error::no_such_upload)?;
-    let attributes: DurableS3SessionAttributes =
-        serde_json::from_str(session.attributes_json()).map_err(|_error| S3Error::internal())?;
-    if attributes.bucket != context.bucket {
+    let candidate_attributes: DurableS3SessionAttributes =
+        serde_json::from_str(candidate.attributes_json()).map_err(|_error| S3Error::internal())?;
+    if candidate_attributes.bucket != context.bucket {
         return Err(S3Error::no_such_upload());
     }
+
+    let (session, parts) = state
+        .backend
+        .begin_resumable_completion(upload_id)
+        .await?
+        .ok_or_else(S3Error::no_such_upload)?;
+    let attributes = candidate_attributes;
 
     let mut request_reader =
         RequestBodyReader::from_body(body, state.config.max_request_body_bytes())
