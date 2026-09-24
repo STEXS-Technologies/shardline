@@ -15,8 +15,9 @@ use crate::{
     ProviderRepositoryState, QuarantineCandidate, ReconstructionStore, RetentionHold,
     StoredObjectId, WebhookDelivery,
     local_sqlite::helpers::{
-        load_retention_evidence, load_webhook_evidence, persist_retention_evidence,
-        persist_webhook_evidence, retention_snapshot, webhook_snapshot,
+        load_quarantine_evidence_batch, load_retention_evidence, load_retention_evidence_batch,
+        load_webhook_evidence, persist_retention_evidence, persist_webhook_evidence,
+        retention_snapshot, webhook_snapshot,
     },
     parse_xet_hash_hex,
     provider_evidence::snapshot_from_state,
@@ -282,14 +283,20 @@ impl LifecycleStore for LocalIndexStore {
         let rows = statement.query_map([], super::helpers::quarantine_candidate_from_row)?;
         let candidates = collect_rows(rows)?;
         drop(statement);
+        let object_keys = candidates
+            .iter()
+            .map(|candidate| candidate.object_key().as_str().to_owned())
+            .collect::<Vec<_>>();
+        let evidence = load_quarantine_evidence_batch(&transaction, &object_keys)?;
         for candidate in &candidates {
             let snapshot =
                 super::helpers::quarantine_snapshot(candidate, QuarantineLifecycleState::Active)?;
-            let evidence = super::helpers::load_quarantine_evidence(
-                &transaction,
-                candidate.object_key().as_str(),
+            let evidence = evidence.get(candidate.object_key().as_str()).ok_or(
+                LocalIndexStoreError::Reliability(
+                    shardline_reliability::ReliabilityError::OperationMismatch,
+                ),
             )?;
-            verify_snapshot_evidence(&evidence, &snapshot)?;
+            verify_snapshot_evidence(evidence, &snapshot)?;
         }
         transaction.commit()?;
         Ok(candidates)
@@ -528,10 +535,19 @@ impl LifecycleStore for LocalIndexStore {
         let rows = statement.query_map([], super::helpers::retention_hold_from_row)?;
         let holds = collect_rows(rows)?;
         drop(statement);
+        let object_keys = holds
+            .iter()
+            .map(|hold| hold.object_key().as_str().to_owned())
+            .collect::<Vec<_>>();
+        let evidence = load_retention_evidence_batch(&transaction, &object_keys)?;
         for hold in &holds {
             let snapshot = retention_snapshot(hold, RetentionHoldLifecycleState::Active)?;
-            let evidence = load_retention_evidence(&transaction, hold.object_key().as_str())?;
-            verify_snapshot_evidence(&evidence, &snapshot)?;
+            let evidence = evidence.get(hold.object_key().as_str()).ok_or(
+                LocalIndexStoreError::Reliability(
+                    shardline_reliability::ReliabilityError::OperationMismatch,
+                ),
+            )?;
+            verify_snapshot_evidence(evidence, &snapshot)?;
         }
         transaction.commit()?;
         Ok(holds)

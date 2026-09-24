@@ -120,6 +120,69 @@ pub(crate) fn load_verified_event_json(
     Ok(events)
 }
 
+pub(crate) fn load_verified_event_json_batch(
+    transaction: &Transaction<'_>,
+    operation_kind: OperationKind,
+    operation_ids: &[String],
+) -> Result<HashMap<String, Vec<Value>>, LocalIndexStoreError> {
+    if operation_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let placeholders = (0..operation_ids.len())
+        .map(|index| format!("?{}", index + 2))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "SELECT operation_id, sequence, event_json, merkle_commit_json
+         FROM shardline_reliability_events
+         WHERE operation_kind = ?1 AND operation_id IN ({placeholders})
+         ORDER BY operation_id, sequence"
+    );
+    let mut parameters = Vec::with_capacity(operation_ids.len() + 1);
+    parameters.push(operation_kind.as_str().to_owned());
+    parameters.extend(operation_ids.iter().cloned());
+    let mut statement = transaction.prepare(&sql)?;
+    let rows = statement.query_map(params_from_iter(parameters.iter()), |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, Option<String>>(3)?,
+        ))
+    })?;
+    let mut histories: HashMap<String, (Vec<u64>, Vec<Value>, Vec<Option<Value>>)> =
+        HashMap::with_capacity(operation_ids.len());
+    for row in rows {
+        let (operation_id, sequence, event_json, merkle_commit_json) = row?;
+        let sequence = u64::try_from(sequence).map_err(|_| {
+            LocalIndexStoreError::Reliability(shardline_reliability::ReliabilityError::Merkle(
+                "persisted row sequence is out of range".into(),
+            ))
+        })?;
+        let event_json = from_str::<Value>(&event_json)?;
+        let merkle_commit_json = merkle_commit_json
+            .map(|json| from_str::<Value>(&json))
+            .transpose()?;
+        let history = histories
+            .entry(operation_id)
+            .or_insert_with(|| (Vec::new(), Vec::new(), Vec::new()));
+        history.0.push(sequence);
+        history.1.push(event_json);
+        history.2.push(merkle_commit_json);
+    }
+    let mut verified = HashMap::with_capacity(histories.len());
+    for (operation_id, (sequences, event_json, merkle_commits)) in histories {
+        shardline_reliability::verify_persisted_event_merkle_chain_with_sequences(
+            operation_kind,
+            &sequences,
+            &event_json,
+            &merkle_commits,
+        )?;
+        verified.insert(operation_id, event_json);
+    }
+    Ok(verified)
+}
+
 /// Persists one authenticated evidence event using its typed operation key.
 ///
 /// All local durable state machines share this writer so a caller cannot bind
@@ -484,6 +547,24 @@ pub(crate) fn load_quarantine_evidence(
     )?)
 }
 
+pub(crate) fn load_quarantine_evidence_batch(
+    transaction: &Transaction<'_>,
+    object_keys: &[String],
+) -> Result<HashMap<String, QuarantineEvidenceLog>, LocalIndexStoreError> {
+    let histories =
+        load_verified_event_json_batch(transaction, OperationKind::GarbageCollection, object_keys)?;
+    histories
+        .into_iter()
+        .map(|(object_key, events)| {
+            let events = events
+                .into_iter()
+                .map(from_value::<QuarantineLifecycleEvent>)
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok((object_key, QuarantineEvidenceLog::from_events(events)?))
+        })
+        .collect()
+}
+
 pub(crate) fn persist_quarantine_evidence(
     transaction: &Transaction<'_>,
     event: &QuarantineLifecycleEvent,
@@ -522,6 +603,24 @@ pub(crate) fn load_retention_evidence(
             .map(from_value::<RetentionHoldLifecycleEvent>)
             .collect::<Result<Vec<_>, _>>()?,
     )?)
+}
+
+pub(crate) fn load_retention_evidence_batch(
+    transaction: &Transaction<'_>,
+    object_keys: &[String],
+) -> Result<HashMap<String, RetentionEvidenceLog>, LocalIndexStoreError> {
+    let histories =
+        load_verified_event_json_batch(transaction, OperationKind::RetentionHold, object_keys)?;
+    histories
+        .into_iter()
+        .map(|(object_key, events)| {
+            let events = events
+                .into_iter()
+                .map(from_value::<RetentionHoldLifecycleEvent>)
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok((object_key, RetentionEvidenceLog::from_events(events)?))
+        })
+        .collect()
 }
 
 pub(crate) fn persist_retention_evidence(

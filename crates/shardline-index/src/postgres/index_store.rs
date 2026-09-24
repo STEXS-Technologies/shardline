@@ -7,9 +7,9 @@ use shardline_reliability::{
     EvidenceEventMetadata, LifecycleEvent, OperationKind, ProviderLifecycleEvent,
     QuarantineEvidenceLog, QuarantineLifecycleEvent, QuarantineLifecycleState,
     QuarantineObjectIdentity, QuarantineSnapshot, ReliabilityMerkleCommit, RetentionEvidenceLog,
-    RetentionHoldLifecycleState, RetentionHoldSnapshot, RetentionObjectIdentity, SnapshotEvidence,
-    WebhookDeliveryEvidenceLog, WebhookDeliveryIdentity, WebhookDeliveryLifecycleState,
-    WebhookDeliverySnapshot, append_or_baseline_snapshot_evidence,
+    RetentionHoldLifecycleEvent, RetentionHoldLifecycleState, RetentionHoldSnapshot,
+    RetentionObjectIdentity, SnapshotEvidence, WebhookDeliveryEvidenceLog, WebhookDeliveryIdentity,
+    WebhookDeliveryLifecycleState, WebhookDeliverySnapshot, append_or_baseline_snapshot_evidence,
     baseline_upload_lifecycle_events, reliability_merkle_commit_json_with_previous,
     upload_lifecycle_event, upload_lifecycle_identity, verify_and_append_snapshot_transition,
     verify_persisted_event_merkle_chain, verify_persisted_event_merkle_chain_with_sequences,
@@ -27,6 +27,127 @@ use crate::{
     upload_intent::{UploadIntent, UploadIntentState, UploadIntentStore},
     xet_hash_hex_string,
 };
+
+struct PersistedEvidenceHistory {
+    sequences: Vec<u64>,
+    event_json: Vec<serde_json::Value>,
+    merkle_commits: Vec<Option<serde_json::Value>>,
+}
+
+async fn load_postgres_evidence_histories(
+    pool: &sqlx::PgPool,
+    kind: OperationKind,
+    operation_ids: &[String],
+) -> Result<HashMap<String, PersistedEvidenceHistory>, PostgresMetadataStoreError> {
+    if operation_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let rows = query(
+        "SELECT operation_id, sequence, event_json, merkle_commit_json
+         FROM shardline_reliability_events
+         WHERE operation_kind = $1 AND operation_id = ANY($2)
+         ORDER BY operation_id, sequence",
+    )
+    .bind(kind.as_str())
+    .bind(operation_ids)
+    .fetch_all(pool)
+    .await?;
+    let mut histories = HashMap::with_capacity(operation_ids.len());
+    for row in rows {
+        let sequence = u64::try_from(row.try_get::<i64, _>("sequence")?).map_err(|_| {
+            PostgresMetadataStoreError::IntegerOutOfRange("reliability sequence".into())
+        })?;
+        let operation_id: String = row.try_get("operation_id")?;
+        let event_json: serde_json::Value = row.try_get("event_json")?;
+        let merkle_commit: Option<serde_json::Value> = row.try_get("merkle_commit_json")?;
+        let history = histories
+            .entry(operation_id)
+            .or_insert_with(|| PersistedEvidenceHistory {
+                sequences: Vec::new(),
+                event_json: Vec::new(),
+                merkle_commits: Vec::new(),
+            });
+        history.sequences.push(sequence);
+        history.event_json.push(event_json);
+        history.merkle_commits.push(merkle_commit);
+    }
+    Ok(histories)
+}
+
+async fn verify_postgres_quarantine_evidence_batch(
+    store: &super::PostgresIndexStore,
+    candidates: &[QuarantineCandidate],
+) -> Result<(), PostgresMetadataStoreError> {
+    let operation_ids = candidates
+        .iter()
+        .map(|candidate| candidate.object_key().as_str().to_owned())
+        .collect::<Vec<_>>();
+    let histories = load_postgres_evidence_histories(
+        &store.pool,
+        OperationKind::GarbageCollection,
+        &operation_ids,
+    )
+    .await?;
+    for (candidate, operation_id) in candidates.iter().zip(operation_ids) {
+        let history = histories.get(&operation_id).ok_or_else(|| {
+            PostgresMetadataStoreError::Reliability(
+                shardline_reliability::ReliabilityError::OperationMismatch,
+            )
+        })?;
+        verify_persisted_event_merkle_chain_with_sequences(
+            OperationKind::GarbageCollection,
+            &history.sequences,
+            &history.event_json,
+            &history.merkle_commits,
+        )?;
+        let events = history
+            .event_json
+            .iter()
+            .cloned()
+            .map(serde_json::from_value::<QuarantineLifecycleEvent>)
+            .collect::<Result<Vec<_>, _>>()?;
+        let evidence = QuarantineEvidenceLog::from_events(events)?;
+        let snapshot = quarantine_snapshot(candidate, QuarantineLifecycleState::Active)?;
+        verify_snapshot_evidence(&evidence, &snapshot)?;
+    }
+    Ok(())
+}
+
+async fn verify_postgres_retention_evidence_batch(
+    store: &super::PostgresIndexStore,
+    holds: &[RetentionHold],
+) -> Result<(), PostgresMetadataStoreError> {
+    let operation_ids = holds
+        .iter()
+        .map(|hold| hold.object_key().as_str().to_owned())
+        .collect::<Vec<_>>();
+    let histories =
+        load_postgres_evidence_histories(&store.pool, OperationKind::RetentionHold, &operation_ids)
+            .await?;
+    for (hold, operation_id) in holds.iter().zip(operation_ids) {
+        let history = histories.get(&operation_id).ok_or_else(|| {
+            PostgresMetadataStoreError::Reliability(
+                shardline_reliability::ReliabilityError::OperationMismatch,
+            )
+        })?;
+        verify_persisted_event_merkle_chain_with_sequences(
+            OperationKind::RetentionHold,
+            &history.sequences,
+            &history.event_json,
+            &history.merkle_commits,
+        )?;
+        let events = history
+            .event_json
+            .iter()
+            .cloned()
+            .map(serde_json::from_value::<RetentionHoldLifecycleEvent>)
+            .collect::<Result<Vec<_>, _>>()?;
+        let evidence = RetentionEvidenceLog::from_events(events)?;
+        let snapshot = retention_snapshot(hold, RetentionHoldLifecycleState::Active)?;
+        verify_snapshot_evidence(&evidence, &snapshot)?;
+    }
+    Ok(())
+}
 
 async fn verify_postgres_intent_evidence(
     store: &super::PostgresIndexStore,
@@ -621,13 +742,7 @@ impl AsyncIndexStore for super::PostgresIndexStore {
                 .iter()
                 .map(quarantine_candidate_from_row)
                 .collect::<Result<Vec<_>, _>>()?;
-            for candidate in &candidates {
-                let snapshot = quarantine_snapshot(candidate, QuarantineLifecycleState::Active)?;
-                let evidence =
-                    load_postgres_quarantine_evidence(&self.pool, candidate.object_key().as_str())
-                        .await?;
-                verify_snapshot_evidence(&evidence, &snapshot)?;
-            }
+            verify_postgres_quarantine_evidence_batch(self, &candidates).await?;
             Ok(candidates)
         })
     }
@@ -665,16 +780,10 @@ impl AsyncIndexStore for super::PostgresIndexStore {
             // This visitor feeds GC and repair directly. Verify every row at
             // this boundary instead of relying on callers to have used the
             // separately verified list API.
+            verify_postgres_quarantine_evidence_batch(self, &candidates)
+                .await
+                .map_err(Into::<VisitorError>::into)?;
             for candidate in candidates {
-                let snapshot = quarantine_snapshot(&candidate, QuarantineLifecycleState::Active)
-                    .map_err(Into::<VisitorError>::into)?;
-                let evidence =
-                    load_postgres_quarantine_evidence(&self.pool, candidate.object_key().as_str())
-                        .await
-                        .map_err(Into::<VisitorError>::into)?;
-                verify_snapshot_evidence(&evidence, &snapshot)
-                    .map_err(Self::Error::from)
-                    .map_err(Into::<VisitorError>::into)?;
                 visitor(candidate)?;
             }
 
@@ -920,13 +1029,7 @@ impl AsyncIndexStore for super::PostgresIndexStore {
                 .iter()
                 .map(retention_hold_from_row)
                 .collect::<Result<Vec<_>, _>>()?;
-            for hold in &holds {
-                let snapshot = retention_snapshot(hold, RetentionHoldLifecycleState::Active)?;
-                let evidence =
-                    load_postgres_retention_evidence(&self.pool, hold.object_key().as_str())
-                        .await?;
-                verify_snapshot_evidence(&evidence, &snapshot)?;
-            }
+            verify_postgres_retention_evidence_batch(self, &holds).await?;
             Ok(holds)
         })
     }
@@ -951,22 +1054,19 @@ impl AsyncIndexStore for super::PostgresIndexStore {
             )
             .fetch(&self.pool);
 
+            let mut holds = Vec::new();
             while let Some(row) = rows
                 .try_next()
                 .await
                 .map_err(Self::Error::from)
                 .map_err(Into::<VisitorError>::into)?
             {
-                let hold = retention_hold_from_row(&row).map_err(Into::into)?;
-                let snapshot = retention_snapshot(&hold, RetentionHoldLifecycleState::Active)
-                    .map_err(Into::into)?;
-                let evidence =
-                    load_postgres_retention_evidence(&self.pool, hold.object_key().as_str())
-                        .await
-                        .map_err(Into::into)?;
-                verify_snapshot_evidence(&evidence, &snapshot)
-                    .map_err(Self::Error::from)
-                    .map_err(Into::<VisitorError>::into)?;
+                holds.push(retention_hold_from_row(&row).map_err(Into::into)?);
+            }
+            verify_postgres_retention_evidence_batch(self, &holds)
+                .await
+                .map_err(Into::<VisitorError>::into)?;
+            for hold in holds {
                 visitor(hold)?;
             }
 
