@@ -76,7 +76,7 @@ workspace = false
 install_crate = "cargo-nextest@0.9.123"
 install_crate_args = ["--locked", "--force"]
 command = "cargo"
-args = ["nextest", "run", "--workspace", "--all-features", "--no-tests=pass", "-E", "not package(shardline-xet-core)", "-E", "kind(test)", "${@}"]
+args = ["nextest", "run", "--workspace", "--exclude", "shardline-fuzz", "--all-features", "--no-tests=pass", "-E", "not package(shardline-xet-core)", "-E", "kind(test)", "${@}"]
 
 [tasks.test-postgres]
 description = "Run Postgres-gated tests (requires DATABASE_URL env var)"
