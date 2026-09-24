@@ -2650,8 +2650,7 @@ mod tests {
 
     use crate::upload_intent::{UploadIntent, UploadIntentState, UploadIntentStore};
     async fn connect_postgres() -> Option<sqlx::PgPool> {
-        let url = std::env::var("DATABASE_URL").ok()?;
-        sqlx::PgPool::connect(&url).await.ok()
+        super::super::connect_isolated_postgres().await
     }
 
     fn postgres_upstream(database_url: &str) -> Option<String> {
@@ -3214,6 +3213,10 @@ mod tests {
             eprintln!("skipping: cannot connect to DATABASE_URL");
             return;
         };
+        let isolated_schema: String = sqlx::query_scalar("SELECT current_schema()")
+            .fetch_one(&direct_pool)
+            .await
+            .expect("read isolated test schema");
         let intent = UploadIntent::new(
             "test-intent-lost-commit-response".into(),
             "test/lost-commit-response".into(),
@@ -3232,7 +3235,8 @@ mod tests {
             .expect("parse DATABASE_URL")
             .host("127.0.0.1")
             .port(proxy.port())
-            .ssl_mode(PgSslMode::Disable);
+            .ssl_mode(PgSslMode::Disable)
+            .options([("search_path", isolated_schema.as_str())]);
         let proxy_pool = PgPoolOptions::new()
             .max_connections(1)
             .connect_with(connect_options)

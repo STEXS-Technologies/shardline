@@ -625,8 +625,7 @@ mod tests {
     use super::*;
 
     async fn connect_postgres() -> Option<PgPool> {
-        let url = std::env::var("DATABASE_URL").ok()?;
-        PgPool::connect(&url).await.ok()
+        super::super::connect_isolated_postgres().await
     }
 
     fn delivery(owner: &str, repo: &str, id: &str) -> WebhookDelivery {

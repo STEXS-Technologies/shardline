@@ -21,4 +21,9 @@ pub use types::{
 pub(super) use types::{i64_to_u64, u64_to_i64};
 
 #[cfg(test)]
+mod test_support;
+#[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+pub(super) use test_support::connect_isolated_postgres;

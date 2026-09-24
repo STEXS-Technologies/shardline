@@ -1026,8 +1026,7 @@ mod tests {
     )]
     use super::*;
     use crate::hub::{BoxedHubStore, HubRepoType, HubStore};
-    use serial_test::serial;
-    use sqlx::postgres::{PgPool, PgPoolOptions};
+    use sqlx::postgres::PgPool;
 
     // ------------------------------------------------------------------
     // Pure helper function tests (no database needed)
@@ -1079,15 +1078,7 @@ mod tests {
     // test that exercises the HubStore impl (create_repo, get_repo, etc.)
 
     async fn connect_postgres() -> Option<PgPool> {
-        let url = std::env::var("DATABASE_URL")
-            .or_else(|_| std::env::var("SHARDLINE_INDEX_POSTGRES_URL"))
-            .ok()?;
-        let pool = PgPoolOptions::new()
-            .max_connections(2)
-            .connect(&url)
-            .await
-            .ok()?;
-        Some(pool)
+        crate::postgres::connect_isolated_postgres().await
     }
 
     fn make_store(pool: PgPool) -> PostgresIndexStore {
@@ -1178,7 +1169,6 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    #[serial(hub_postgres)]
     async fn pg_create_and_get_repo() {
         let Some(pool) = connect_postgres().await else {
             eprintln!("skipping Postgres test: no DATABASE_URL");
@@ -1203,7 +1193,6 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    #[serial(hub_postgres)]
     async fn pg_hub_same_ref_legacy_writer_is_rejected_by_reliability_gate() {
         let Some(pool) = connect_postgres().await else {
             eprintln!("skipping Postgres test: no DATABASE_URL");
@@ -1237,7 +1226,6 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    #[serial(hub_postgres)]
     async fn pg_repo_list_and_search_reject_tampered_head_evidence() {
         let Some(pool) = connect_postgres().await else {
             eprintln!("skipping Postgres test: no DATABASE_URL");
@@ -1280,7 +1268,6 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    #[serial(hub_postgres)]
     async fn pg_get_repo_returns_none_for_missing() {
         let Some(pool) = connect_postgres().await else {
             eprintln!("skipping Postgres test: no DATABASE_URL");
@@ -1294,7 +1281,6 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    #[serial(hub_postgres)]
     async fn pg_create_revision_and_resolve() {
         let Some(pool) = connect_postgres().await else {
             eprintln!("skipping Postgres test: no DATABASE_URL");
@@ -1335,7 +1321,6 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    #[serial(hub_postgres)]
     async fn pg_delete_ref_preserves_commit_history_and_rejects_stale_delete() {
         let Some(pool) = connect_postgres().await else {
             eprintln!("skipping Postgres test: no DATABASE_URL");
@@ -1386,7 +1371,6 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    #[serial(hub_postgres)]
     async fn pg_store_and_get_files() {
         let Some(pool) = connect_postgres().await else {
             eprintln!("skipping Postgres test: no DATABASE_URL");
@@ -1430,7 +1414,6 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    #[serial(hub_postgres)]
     async fn pg_optimistic_concurrency_rejects_stale_parent() {
         let Some(pool) = connect_postgres().await else {
             eprintln!("skipping Postgres test: no DATABASE_URL");
@@ -1461,7 +1444,6 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    #[serial(hub_postgres)]
     async fn pg_concurrent_ref_updates_have_exactly_one_winner() {
         let Some(pool) = connect_postgres().await else {
             eprintln!("skipping Postgres test: no DATABASE_URL");
@@ -1505,7 +1487,6 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    #[serial(hub_postgres)]
     async fn pg_delete_and_push_cannot_leave_a_resurrected_ref() {
         let Some(pool) = connect_postgres().await else {
             eprintln!("skipping Postgres test: no DATABASE_URL");
@@ -1556,8 +1537,6 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    #[serial(hub_postgres_listing)]
-    #[serial(hub_postgres)]
     async fn pg_boxed_hub_store_e2e() {
         let Some(pool) = connect_postgres().await else {
             eprintln!("skipping Postgres test: no DATABASE_URL");

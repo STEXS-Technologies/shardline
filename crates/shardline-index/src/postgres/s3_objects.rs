@@ -532,8 +532,7 @@ mod tests {
     use super::*;
 
     async fn connect_postgres() -> Option<sqlx::PgPool> {
-        let url = std::env::var("DATABASE_URL").ok()?;
-        sqlx::PgPool::connect(&url).await.ok()
+        super::super::connect_isolated_postgres().await
     }
 
     fn entry(scope_namespace: &str, object_key: &str, file_id: &str) -> S3ObjectEntry {
@@ -1062,7 +1061,8 @@ mod tests {
         sqlx::query_scalar::<_, bool>(
             "SELECT EXISTS(
                 SELECT 1 FROM information_schema.tables
-                WHERE table_schema = 'public' AND table_name = 'shardline_s3_objects'
+                WHERE table_schema = current_schema()
+                  AND table_name = 'shardline_s3_objects'
              )",
         )
         .fetch_one(&mut *connection)

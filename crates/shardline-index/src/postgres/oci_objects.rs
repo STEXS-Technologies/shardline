@@ -552,8 +552,7 @@ mod tests {
     use std::time::Duration;
 
     async fn connect_postgres() -> Option<sqlx::PgPool> {
-        let url = std::env::var("DATABASE_URL").ok()?;
-        sqlx::PgPool::connect(&url).await.ok()
+        super::super::connect_isolated_postgres().await
     }
 
     fn object(scope_namespace: &str) -> OciObjectKey {

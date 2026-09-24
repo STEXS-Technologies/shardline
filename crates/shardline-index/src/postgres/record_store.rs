@@ -1041,10 +1041,9 @@ mod tests {
 
     #[tokio::test]
     async fn s3_publication_rolls_back_records_when_condition_loses() {
-        let Ok(url) = std::env::var("DATABASE_URL") else {
+        let Some(pool) = super::super::connect_isolated_postgres().await else {
             return;
         };
-        let pool = sqlx::PgPool::connect(&url).await.unwrap();
         let store = super::super::PostgresRecordStore::new(pool.clone());
         let suffix = chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default();
         let mut record = sample_record(None);
@@ -1134,10 +1133,9 @@ mod tests {
 
     #[tokio::test]
     async fn stale_multipart_completion_cannot_publish() {
-        let Ok(url) = std::env::var("DATABASE_URL") else {
+        let Some(pool) = super::super::connect_isolated_postgres().await else {
             return;
         };
-        let pool = sqlx::PgPool::connect(&url).await.unwrap();
         let record_store = super::super::PostgresRecordStore::new(pool.clone());
         let index_store = super::super::PostgresIndexStore::new(pool.clone());
         let suffix = chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default();

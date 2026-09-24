@@ -1338,20 +1338,11 @@ mod tests {
         time::Duration,
     };
 
-    use serial_test::serial;
-    use sqlx::postgres::PgPoolOptions;
-
     use super::*;
-
     static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
     async fn store() -> Option<PostgresIndexStore> {
-        let url = std::env::var("DATABASE_URL").ok()?;
-        let pool = PgPoolOptions::new()
-            .max_connections(8)
-            .connect(&url)
-            .await
-            .ok()?;
+        let pool = super::super::connect_isolated_postgres().await?;
         sqlx::raw_sql(include_str!(
             "../../../../migrations/20260823000000_resumable_sessions.up.sql"
         ))
@@ -1425,7 +1416,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial(postgres_resumable)]
     async fn postgres_bounded_creation_and_part_accounting_are_atomic() {
         let Some(store) = store().await else {
             eprintln!("skipping: no reachable DATABASE_URL");
@@ -1493,7 +1483,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial(postgres_resumable)]
     async fn postgres_terminal_session_reuse_is_journaled() {
         let Some(store) = store().await else {
             eprintln!("skipping: no reachable DATABASE_URL");
@@ -1549,7 +1538,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial(postgres_resumable)]
     async fn postgres_failed_completion_reopens_and_fences_stale_worker() {
         let Some(store) = store().await else {
             eprintln!("skipping: no reachable DATABASE_URL");
@@ -1622,7 +1610,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial(postgres_resumable)]
     async fn postgres_session_reads_fail_closed_on_missing_reliability_evidence() {
         let Some(store) = store().await else {
             eprintln!("skipping: no reachable DATABASE_URL");
@@ -1656,7 +1643,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial(postgres_resumable)]
     async fn postgres_parts_are_pinned_and_completion_is_fenced() {
         let Some(store) = store().await else {
             eprintln!("skipping: no reachable DATABASE_URL");
@@ -1769,7 +1755,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial(postgres_resumable)]
     async fn postgres_expiry_uses_database_time_and_blocks_late_parts() {
         let Some(store) = store().await else {
             eprintln!("skipping: no reachable DATABASE_URL");
@@ -1815,7 +1800,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial(postgres_resumable)]
     async fn postgres_resumable_gc_protects_live_parts_and_deletes_terminal_sessions() {
         let Some(store) = store().await else {
             eprintln!("skipping: no reachable DATABASE_URL");
@@ -1930,7 +1914,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial(postgres_resumable)]
     async fn postgres_list_resumable_sessions_bounded_keyset_pagination() {
         let Some(store) = store().await else {
             eprintln!("skipping: no reachable DATABASE_URL");
@@ -1990,7 +1973,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial(postgres_resumable)]
     async fn postgres_list_resumable_sessions_filters_by_state_and_prefix() {
         let Some(store) = store().await else {
             eprintln!("skipping: no reachable DATABASE_URL");
@@ -2063,7 +2045,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial(postgres_resumable)]
     async fn postgres_list_inflight_excludes_terminal_sessions_from_keyset_window() {
         let Some(store) = store().await else {
             eprintln!("skipping: no reachable DATABASE_URL");

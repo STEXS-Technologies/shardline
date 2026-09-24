@@ -652,8 +652,7 @@ mod tests {
     use super::*;
 
     async fn connect_postgres() -> Option<sqlx::PgPool> {
-        let url = std::env::var("DATABASE_URL").ok()?;
-        sqlx::PgPool::connect(&url).await.ok()
+        super::super::connect_isolated_postgres().await
     }
 
     fn entry(digest: &str) -> OciTagEntry {
