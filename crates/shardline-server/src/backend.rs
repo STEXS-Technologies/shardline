@@ -2136,11 +2136,10 @@ mod tests {
     use std::{num::NonZeroUsize, path::PathBuf};
 
     use super::{
-        BenchmarkBackend, REPOSITORY_REFERENCE_PROBE_COUNTS, ServerBackend,
-        compose_benchmark_object_key_prefix, count_repository_reference_probe_for_tests,
-        forget_repository_reference_probe_count, protocol_object_file_id,
-        repository_reference_probe_count, reset_repository_reference_probe_count_for_hash,
-        server_error_to_oci,
+        BenchmarkBackend, ServerBackend, compose_benchmark_object_key_prefix,
+        count_repository_reference_probe_for_tests, forget_repository_reference_probe_count,
+        protocol_object_file_id, repository_reference_probe_count,
+        reset_repository_reference_probe_count_for_hash, server_error_to_oci,
     };
     use crate::ServerConfig;
     use crate::ServerError;
@@ -2224,10 +2223,6 @@ mod tests {
 
     #[test]
     fn repository_reference_probe_count_starts_at_zero() {
-        REPOSITORY_REFERENCE_PROBE_COUNTS
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clear();
         assert_eq!(repository_reference_probe_count("missing"), 0);
     }
 
@@ -2240,7 +2235,33 @@ mod tests {
         assert_eq!(repository_reference_probe_count("aabb"), 1);
         count_repository_reference_probe_for_tests("not-matching");
         assert_eq!(repository_reference_probe_count("aabb"), 1);
-        forget_repository_reference_probe_count("deadbeef");
+        forget_repository_reference_probe_count("aabb");
+    }
+
+    #[test]
+    fn repository_reference_probe_counts_are_independent_under_parallel_updates() {
+        let left = "parallel-left";
+        let right = "parallel-right";
+        reset_repository_reference_probe_count_for_hash(left);
+        reset_repository_reference_probe_count_for_hash(right);
+
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                for _ in 0..128 {
+                    count_repository_reference_probe_for_tests(left);
+                }
+            });
+            scope.spawn(|| {
+                for _ in 0..256 {
+                    count_repository_reference_probe_for_tests(right);
+                }
+            });
+        });
+
+        assert_eq!(repository_reference_probe_count(left), 128);
+        assert_eq!(repository_reference_probe_count(right), 256);
+        forget_repository_reference_probe_count(left);
+        forget_repository_reference_probe_count(right);
     }
 
     // ── server_error_to_oci conversion ─────────────────────────────────────
@@ -2847,12 +2868,11 @@ mod tests {
         count_repository_reference_probe_for_tests("deadbeef");
         assert_eq!(repository_reference_probe_count("deadbeef"), 2);
 
-        forget_repository_reference_probe_count("any-hash");
-        forget_repository_reference_probe_count("another-hash");
+        forget_repository_reference_probe_count("deadbeef");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn count_repository_reference_probe_without_filter_counts_all() {
+    async fn count_repository_reference_probe_tracks_independent_hashes() {
         reset_repository_reference_probe_count_for_hash("any-hash");
         reset_repository_reference_probe_count_for_hash("another-hash");
         assert_eq!(repository_reference_probe_count("any-hash"), 0);
@@ -2864,6 +2884,7 @@ mod tests {
         assert_eq!(repository_reference_probe_count("another-hash"), 1);
 
         forget_repository_reference_probe_count("any-hash");
+        forget_repository_reference_probe_count("another-hash");
     }
 
     // ── server_error_to_oci remaining variants ───────────────────────────
