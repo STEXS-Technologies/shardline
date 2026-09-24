@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     io::{Error, ErrorKind},
     num::{NonZeroU64, NonZeroUsize},
     path::{Path, PathBuf},
@@ -20,11 +21,7 @@ use shardline_storage::{
     ObjectPrefix, PutOutcome,
 };
 
-use std::sync::{
-    Arc, LazyLock, Mutex,
-    atomic::{AtomicUsize, Ordering},
-};
-use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
+use std::sync::{LazyLock, Mutex};
 
 use crate::{
     LocalBackend, ObjectStorageAdapter, ObjectStoreError, PostgresBackend, ServerConfig,
@@ -123,11 +120,8 @@ pub struct BenchmarkBackend {
     backend: ServerBackend,
 }
 
-static REPOSITORY_REFERENCE_PROBE_COUNT: AtomicUsize = AtomicUsize::new(0);
-static REPOSITORY_REFERENCE_PROBE_FILTER: LazyLock<Mutex<Option<String>>> =
-    LazyLock::new(|| Mutex::new(None));
-static REPOSITORY_REFERENCE_PROBE_TEST_LOCK: LazyLock<Arc<AsyncMutex<()>>> =
-    LazyLock::new(|| Arc::new(AsyncMutex::new(())));
+static REPOSITORY_REFERENCE_PROBE_COUNTS: LazyLock<Mutex<HashMap<String, usize>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 impl ServerBackend {
     /// Acquires the shared side of the GC/write barrier for one mutating request.
@@ -2107,83 +2101,47 @@ fn compose_benchmark_object_key_prefix(
 }
 
 pub fn reset_repository_reference_probe_count_for_hash(hash_hex: &str) {
-    REPOSITORY_REFERENCE_PROBE_COUNT.store(0, Ordering::Relaxed);
-    let filter = REPOSITORY_REFERENCE_PROBE_FILTER.lock();
-    match filter {
-        Ok(mut filter) => *filter = Some(hash_hex.to_owned()),
-        Err(poisoned) => *poisoned.into_inner() = Some(hash_hex.to_owned()),
-    }
+    let mut counts = REPOSITORY_REFERENCE_PROBE_COUNTS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    counts.insert(hash_hex.to_owned(), 0);
 }
 
-pub fn repository_reference_probe_count() -> usize {
-    REPOSITORY_REFERENCE_PROBE_COUNT.load(Ordering::Relaxed)
+pub fn repository_reference_probe_count(hash_hex: &str) -> usize {
+    let counts = REPOSITORY_REFERENCE_PROBE_COUNTS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    counts.get(hash_hex).copied().unwrap_or(0)
 }
 
-pub fn clear_repository_reference_probe_filter() {
-    let filter = REPOSITORY_REFERENCE_PROBE_FILTER.lock();
-    match filter {
-        Ok(mut filter) => *filter = None,
-        Err(poisoned) => *poisoned.into_inner() = None,
-    }
-}
-
-pub async fn lock_repository_reference_probe_test() -> OwnedMutexGuard<()> {
-    REPOSITORY_REFERENCE_PROBE_TEST_LOCK
-        .clone()
-        .lock_owned()
-        .await
+pub fn forget_repository_reference_probe_count(hash_hex: &str) {
+    REPOSITORY_REFERENCE_PROBE_COUNTS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(hash_hex);
 }
 
 #[cfg(test)]
 fn count_repository_reference_probe_for_tests(hash_hex: &str) {
-    let filter = REPOSITORY_REFERENCE_PROBE_FILTER.lock();
-    let matches_filter = match filter {
-        Ok(filter) => filter
-            .as_deref()
-            .is_none_or(|expected| expected == hash_hex),
-        Err(poisoned) => poisoned
-            .into_inner()
-            .as_deref()
-            .is_none_or(|expected| expected == hash_hex),
-    };
-
-    if matches_filter {
-        REPOSITORY_REFERENCE_PROBE_COUNT.fetch_add(1, Ordering::Relaxed);
+    let mut counts = REPOSITORY_REFERENCE_PROBE_COUNTS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(count) = counts.get_mut(hash_hex) {
+        *count += 1;
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{num::NonZeroUsize, path::PathBuf, sync::atomic::Ordering};
+    use std::{num::NonZeroUsize, path::PathBuf};
 
     use super::{
-        BenchmarkBackend, REPOSITORY_REFERENCE_PROBE_COUNT, REPOSITORY_REFERENCE_PROBE_FILTER,
-        ServerBackend, clear_repository_reference_probe_filter,
+        BenchmarkBackend, REPOSITORY_REFERENCE_PROBE_COUNTS, ServerBackend,
         compose_benchmark_object_key_prefix, count_repository_reference_probe_for_tests,
-        lock_repository_reference_probe_test, protocol_object_file_id,
+        forget_repository_reference_probe_count, protocol_object_file_id,
         repository_reference_probe_count, reset_repository_reference_probe_count_for_hash,
         server_error_to_oci,
     };
-
-    /// Poison the static probe-filter mutex by panicking in a helper thread
-    /// that is holding the lock.
-    ///
-    /// After this call returns, every subsequent `lock()` on the static will
-    /// produce `Err(PoisonError)`.
-    #[allow(clippy::panic)]
-    fn poison_probe_filter_mutex() {
-        // Handle initial poison if a previous test left the mutex poisoned.
-        REPOSITORY_REFERENCE_PROBE_FILTER.clear_poison();
-        let handle = std::thread::spawn(|| {
-            // Acquire the lock; if already poisoned, recover first.
-            let _guard = match REPOSITORY_REFERENCE_PROBE_FILTER.lock() {
-                Ok(g) => g,
-                Err(poisoned) => poisoned.into_inner(),
-            };
-            panic!("intentional panic to poison the probe filter mutex");
-        });
-        let _ = handle.join();
-    }
     use crate::ServerConfig;
     use crate::ServerError;
     use crate::error::ObjectStoreError;
@@ -2265,79 +2223,24 @@ mod tests {
     // ── Repository reference probe helpers ─────────────────────────────────
 
     #[test]
-    #[serial_test::serial]
     fn repository_reference_probe_count_starts_at_zero() {
-        clear_repository_reference_probe_filter();
-        assert_eq!(repository_reference_probe_count(), 0);
+        REPOSITORY_REFERENCE_PROBE_COUNTS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+        assert_eq!(repository_reference_probe_count("missing"), 0);
     }
 
     #[test]
-    #[serial_test::serial]
-    fn repository_reference_probe_count_increments_when_filter_matches() {
-        clear_repository_reference_probe_filter();
+    fn repository_reference_probe_count_is_scoped_to_hash() {
+        forget_repository_reference_probe_count("aabb");
         reset_repository_reference_probe_count_for_hash("aabb");
-        // count_repository_reference_probe_for_tests is called by
-        // repository_references_xorb, but we can't easily test that async path
-        // without a full backend. Instead verify that reset/clear round-trip.
-        assert_eq!(repository_reference_probe_count(), 0);
-        clear_repository_reference_probe_filter();
-    }
-
-    #[test]
-    #[serial_test::serial]
-    fn poisoned_mutex_reset_repository_reference_probe_count_recovers() {
-        poison_probe_filter_mutex();
-
-        // The recovery path (line 902) should still reset the filter without
-        // propagating the poison error.
-        reset_repository_reference_probe_count_for_hash("recovered");
-
-        // After recovery the mutex is still poisoned; lock() returns Err,
-        // but we can retrieve the value via into_inner.
-        let val = match REPOSITORY_REFERENCE_PROBE_FILTER.lock() {
-            Ok(g) => g.clone(),
-            Err(poisoned) => poisoned.into_inner().clone(),
-        };
-        assert_eq!(val, Some("recovered".to_owned()));
-        REPOSITORY_REFERENCE_PROBE_FILTER.clear_poison();
-        *REPOSITORY_REFERENCE_PROBE_FILTER.lock().unwrap() = None;
-    }
-
-    #[test]
-    #[serial_test::serial]
-    fn poisoned_mutex_clear_repository_reference_probe_filter_recovers() {
-        poison_probe_filter_mutex();
-
-        // The recovery path (line 914) should clear the filter.
-        clear_repository_reference_probe_filter();
-
-        let val = match REPOSITORY_REFERENCE_PROBE_FILTER.lock() {
-            Ok(g) => g.clone(),
-            Err(poisoned) => poisoned.into_inner().clone(),
-        };
-        assert!(val.is_none());
-        REPOSITORY_REFERENCE_PROBE_FILTER.clear_poison();
-    }
-
-    #[test]
-    #[serial_test::serial]
-    fn poisoned_mutex_count_repository_reference_probe_recovers() {
-        // First set a normal value so we can verify the poisoned-path read.
-        REPOSITORY_REFERENCE_PROBE_FILTER.clear_poison();
-        *REPOSITORY_REFERENCE_PROBE_FILTER.lock().unwrap() = Some("target".to_owned());
-        REPOSITORY_REFERENCE_PROBE_COUNT.store(0, Ordering::Relaxed);
-
-        poison_probe_filter_mutex();
-
-        // After poisoning, count_repository_reference_probe_for_tests enters
-        // the Err(poisoned) => poisoned.into_inner() path (lines 931-934).
-        count_repository_reference_probe_for_tests("target");
-        assert_eq!(repository_reference_probe_count(), 1);
-
-        // Clean up.
-        REPOSITORY_REFERENCE_PROBE_FILTER.clear_poison();
-        *REPOSITORY_REFERENCE_PROBE_FILTER.lock().unwrap() = None;
-        REPOSITORY_REFERENCE_PROBE_COUNT.store(0, Ordering::Relaxed);
+        assert_eq!(repository_reference_probe_count("aabb"), 0);
+        count_repository_reference_probe_for_tests("aabb");
+        assert_eq!(repository_reference_probe_count("aabb"), 1);
+        count_repository_reference_probe_for_tests("not-matching");
+        assert_eq!(repository_reference_probe_count("aabb"), 1);
+        forget_repository_reference_probe_count("deadbeef");
     }
 
     // ── server_error_to_oci conversion ─────────────────────────────────────
@@ -2931,55 +2834,36 @@ mod tests {
     // ── Repository reference probe tests ─────────────────────────────────
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[serial_test::serial]
     async fn count_repository_reference_probe_directly() {
-        let _guard = lock_repository_reference_probe_test().await;
-        // Reset count and filter so other tests aren't affected
         reset_repository_reference_probe_count_for_hash("deadbeef");
-        assert_eq!(repository_reference_probe_count(), 0);
+        assert_eq!(repository_reference_probe_count("deadbeef"), 0);
 
-        // Call the count function directly with matching hash
         count_repository_reference_probe_for_tests("deadbeef");
-        assert_eq!(repository_reference_probe_count(), 1);
+        assert_eq!(repository_reference_probe_count("deadbeef"), 1);
 
-        // Call with non-matching hash — should NOT increment
         count_repository_reference_probe_for_tests("not-matching");
-        assert_eq!(repository_reference_probe_count(), 1);
+        assert_eq!(repository_reference_probe_count("deadbeef"), 1);
 
-        // Call with matching hash again
         count_repository_reference_probe_for_tests("deadbeef");
-        assert_eq!(repository_reference_probe_count(), 2);
+        assert_eq!(repository_reference_probe_count("deadbeef"), 2);
 
-        // Clean up: reset count to 0 and clear filter
-        reset_repository_reference_probe_count_for_hash("cleanup");
-        clear_repository_reference_probe_filter();
+        forget_repository_reference_probe_count("any-hash");
+        forget_repository_reference_probe_count("another-hash");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[serial_test::serial]
     async fn count_repository_reference_probe_without_filter_counts_all() {
-        let _guard = lock_repository_reference_probe_test().await;
-        // Reset count and filter so other tests aren't affected
-        reset_repository_reference_probe_count_for_hash("x");
-        clear_repository_reference_probe_filter();
-        assert_eq!(repository_reference_probe_count(), 0);
+        reset_repository_reference_probe_count_for_hash("any-hash");
+        reset_repository_reference_probe_count_for_hash("another-hash");
+        assert_eq!(repository_reference_probe_count("any-hash"), 0);
 
         count_repository_reference_probe_for_tests("any-hash");
-        assert_eq!(repository_reference_probe_count(), 1);
+        assert_eq!(repository_reference_probe_count("any-hash"), 1);
 
         count_repository_reference_probe_for_tests("another-hash");
-        assert_eq!(repository_reference_probe_count(), 2);
+        assert_eq!(repository_reference_probe_count("another-hash"), 1);
 
-        // Clean up: reset count to 0 and clear filter
-        reset_repository_reference_probe_count_for_hash("cleanup");
-        clear_repository_reference_probe_filter();
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[serial_test::serial]
-    async fn lock_repository_reference_probe_test_acquires_lock() {
-        let guard = lock_repository_reference_probe_test().await;
-        drop(guard);
+        forget_repository_reference_probe_count("any-hash");
     }
 
     // ── server_error_to_oci remaining variants ───────────────────────────

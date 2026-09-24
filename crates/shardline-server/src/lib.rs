@@ -126,9 +126,8 @@ pub use app::{
     acquire_chunk_transfer_permit, full_byte_stream_response, repair_lfs_patch_evidence,
 };
 pub use backend::{
-    BenchmarkBackend, ServerBackend, clear_repository_reference_probe_filter,
-    lock_repository_reference_probe_test, repository_reference_probe_count,
-    reset_repository_reference_probe_count_for_hash,
+    BenchmarkBackend, ServerBackend, forget_repository_reference_probe_count,
+    repository_reference_probe_count, reset_repository_reference_probe_count_for_hash,
 };
 pub use download_stream::{STREAM_READ_BUFFER_BYTES, ServerByteStream};
 pub use local_backend::chunk_hash;
