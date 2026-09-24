@@ -1,6 +1,6 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::num::{NonZeroU64, NonZeroUsize};
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 
 use reqwest::Client;
 use sha2::Digest;
@@ -10,9 +10,6 @@ use shardline_server::{
     ServerFrontend, ServerRole, run_database_migration, serve_with_listener,
 };
 use tokio::net::TcpListener;
-
-static POSTGRES_E2E_LOCK: LazyLock<tokio::sync::Mutex<()>> =
-    LazyLock::new(|| tokio::sync::Mutex::new(()));
 
 /// Admin read token wired into every spawned server so tests verify runtime
 /// topology through the authenticated admin API (the unauthenticated /readyz
@@ -8804,7 +8801,6 @@ async fn concurrent_manifest_push_and_pull() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn postgres_backend_lfs_round_trip() {
-    let _postgres_guard = POSTGRES_E2E_LOCK.lock().await;
     let docker = shardline_test_support::DockerLocalStack::builder()
         .with_postgres()
         .start()
@@ -9567,7 +9563,6 @@ async fn s3_backend_dedup_cross_frontend() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn postgres_backend_oci_manifest_push_pull() {
-    let _postgres_guard = POSTGRES_E2E_LOCK.lock().await;
     let docker = shardline_test_support::DockerLocalStack::builder()
         .with_postgres()
         .start()
