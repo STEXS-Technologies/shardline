@@ -1608,25 +1608,14 @@ impl UploadIntentStore for super::LocalIndexStore {
                     ),
                 )
             })?;
-            let mut events = {
-                let mut statement = transaction.prepare(
-                    "SELECT event_json
-                     FROM shardline_reliability_events
-                     WHERE operation_kind = ?1 AND operation_id = ?2
-                     ORDER BY sequence",
-                )?;
-                let rows = statement.query_map(params!["Upload", &operation_id], |row| {
-                    let stored_json: String = row.get(0)?;
-                    serde_json::from_str(&stored_json).map_err(|error| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            0,
-                            rusqlite::types::Type::Text,
-                            Box::new(error),
-                        )
-                    })
-                })?;
-                rows.collect::<Result<Vec<LifecycleEvent>, _>>()?
-            };
+            let mut events = super::helpers::load_verified_event_json(
+                &transaction,
+                shardline_reliability::OperationKind::Upload,
+                &operation_id,
+            )?
+            .into_iter()
+            .map(serde_json::from_value::<LifecycleEvent>)
+            .collect::<Result<Vec<_>, _>>()?;
             if let Some(existing) = events
                 .iter()
                 .find(|existing| existing.sequence == event.sequence)
@@ -1686,27 +1675,14 @@ impl UploadIntentStore for super::LocalIndexStore {
         tokio::task::spawn_blocking(move || {
             let mut conn = store.open_connection()?;
             let transaction = conn.transaction()?;
-            let events = {
-                let mut statement = transaction.prepare(
-                    "SELECT event_json
-                     FROM shardline_reliability_events
-                     WHERE operation_kind = ?1 AND operation_id = ?2
-                     ORDER BY sequence",
-                )?;
-                let rows =
-                    statement.query_map(rusqlite::params!["Upload", &operation_id], |row| {
-                        let event_json: String = row.get(0)?;
-                        serde_json::from_str(&event_json).map_err(|error| {
-                            rusqlite::Error::FromSqlConversionFailure(
-                                0,
-                                rusqlite::types::Type::Text,
-                                Box::new(error),
-                            )
-                        })
-                    })?;
-                rows.collect::<Result<Vec<_>, _>>()
-                    .map_err(LocalIndexStoreError::from)?
-            };
+            let events = super::helpers::load_verified_event_json(
+                &transaction,
+                shardline_reliability::OperationKind::Upload,
+                &operation_id,
+            )?
+            .into_iter()
+            .map(serde_json::from_value::<LifecycleEvent>)
+            .collect::<Result<Vec<_>, _>>()?;
             let intent = transaction
                 .query_row(
                     "SELECT object_key, object_hash, state

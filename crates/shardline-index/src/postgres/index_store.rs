@@ -1460,7 +1460,7 @@ impl UploadIntentStore for super::PostgresIndexStore {
                 ),
             );
             let event_rows = query(
-                "SELECT event_json FROM shardline_reliability_events
+                "SELECT event_json, merkle_commit_json FROM shardline_reliability_events
                  WHERE operation_kind = 'Upload' AND operation_id = $1
                  ORDER BY sequence",
             )
@@ -1480,10 +1480,20 @@ impl UploadIntentStore for super::PostgresIndexStore {
                     insert_reliability_event(transaction.as_mut(), event).await?;
                 }
             } else {
-                let events = event_rows
-                    .into_iter()
-                    .map(|row| Ok(serde_json::from_value(row.try_get("event_json")?)?))
-                    .collect::<Result<Vec<LifecycleEvent>, PostgresMetadataStoreError>>()?;
+                let mut events = Vec::with_capacity(event_rows.len());
+                let mut event_json = Vec::with_capacity(event_rows.len());
+                let mut merkle_commits = Vec::with_capacity(event_rows.len());
+                for row in event_rows {
+                    let value: serde_json::Value = row.try_get("event_json")?;
+                    events.push(serde_json::from_value::<LifecycleEvent>(value.clone())?);
+                    event_json.push(value);
+                    merkle_commits.push(row.try_get("merkle_commit_json")?);
+                }
+                verify_persisted_event_merkle_chain(
+                    OperationKind::Upload,
+                    &event_json,
+                    &merkle_commits,
+                )?;
                 let (stored_tenant, stored_repository) = upload_lifecycle_identity(&events);
                 if stored_tenant != tenant || stored_repository != repository {
                     // Upload evidence predating repository-scoped identities was
