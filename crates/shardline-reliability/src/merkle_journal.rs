@@ -91,8 +91,8 @@ pub fn verify_persisted_merkle_chain(
     for event in events {
         persisted_event_sequence(operation_kind, event.clone())?;
     }
-    verify_typed_merkle_chain::<crate::StateTransitionEvent>(events, merkle_commits)?;
-    Ok(())
+    let commitments = merkle_commits.iter().cloned().map(Some).collect::<Vec<_>>();
+    crate::verify_persisted_event_merkle_chain(operation_kind, events, &commitments)
 }
 
 /// Builds a Merkle chain for any typed reliability event, including complete
@@ -167,4 +167,29 @@ fn persisted_commit_sequence(commit: &Value) -> Result<u64, ReliabilityError> {
         .and_then(|body| body.get("sequence"))
         .and_then(Value::as_u64)
         .ok_or_else(|| ReliabilityError::Merkle("persisted Merkle sequence is missing".into()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{OperationKind, UploadLifecycleState, upload_lifecycle_event};
+
+    #[test]
+    fn persisted_merkle_chain_uses_the_declared_event_kind() {
+        let first = upload_lifecycle_event(
+            "tenant",
+            "repository",
+            "upload-merkle-journal",
+            "object",
+            "f".repeat(64),
+            UploadLifecycleState::Created,
+            UploadLifecycleState::Storing,
+        )
+        .unwrap();
+        let event = serde_json::to_value(&first).unwrap();
+        let commit =
+            crate::build_persisted_merkle_commit(OperationKind::Upload, event.clone()).unwrap();
+
+        verify_persisted_merkle_chain(OperationKind::Upload, &[event], &[commit]).unwrap();
+    }
 }
