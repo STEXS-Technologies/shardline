@@ -695,6 +695,44 @@ impl PostgresIndexStore {
         Ok(Some((session, parts)))
     }
 
+    /// Loads one active or already-claimed session and its ordered parts for a
+    /// completion retry.  A completion attempt can fail after fencing the
+    /// session (for example, when the supplied OCI digest is wrong); allowing
+    /// the same owner to re-read the pinned parts lets a corrected retry make
+    /// progress without reopening ordinary PATCH mutations.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when Postgres fails or durable rows violate the typed contract.
+    pub async fn resumable_completion_snapshot(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<(ResumableSession, Vec<ResumableSessionPart>)>, PostgresMetadataStoreError>
+    {
+        let mut transaction = self.pool().begin().await?;
+        let row = sqlx::query(
+            "SELECT session_id, protocol, scope_namespace, target_key, attributes_json, state,
+                    generation, fence_epoch, expires_at, state_digest
+             FROM shardline_resumable_sessions
+             WHERE session_id = $1 AND state IN ('active', 'completing')
+               AND expires_at > clock_timestamp()
+             FOR SHARE",
+        )
+        .bind(session_id)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let Some(row) = row else {
+            transaction.rollback().await?;
+            return Ok(None);
+        };
+        let session = session_from_row(&row)?;
+        let parts = parts_on_transaction(&mut transaction, session_id).await?;
+        verify_resumable_state_digest_strict(&session, &parts, row.try_get("state_digest")?)?;
+        transaction.commit().await?;
+        self.verify_resumable_session_evidence(&session).await?;
+        Ok(Some((session, parts)))
+    }
+
     /// Atomically selects one immutable staged object as the current part.
     ///
     /// The object must already exist. Publication succeeds only while the

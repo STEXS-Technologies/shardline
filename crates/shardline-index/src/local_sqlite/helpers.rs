@@ -905,6 +905,13 @@ pub(crate) fn verify_oci_tag_evidence(
 ) -> Result<OciTagEvidenceLog, LocalIndexStoreError> {
     let snapshot = oci_tag_snapshot(scope_namespace, repository, tag, digest_hex)?;
     let evidence = load_oci_tag_evidence(transaction, scope_namespace, repository, tag)?;
+    // An absent legacy tag has no materialized state and therefore may not
+    // have a journal baseline yet.  This is the same read contract as the
+    // Postgres adapter: verify an existing tag, but let a genuinely missing
+    // tag resolve to NotFound without manufacturing state during a read.
+    if snapshot.digest_hex.is_none() && evidence.events().is_empty() {
+        return Ok(evidence);
+    }
     verify_snapshot_evidence(&evidence, &snapshot)?;
     Ok(evidence)
 }

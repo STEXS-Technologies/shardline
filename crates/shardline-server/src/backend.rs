@@ -553,6 +553,19 @@ impl ServerBackend {
             .await?)
     }
 
+    pub(crate) async fn resumable_completion_snapshot(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<(ResumableSession, Vec<ResumableSessionPart>)>, ServerError> {
+        let Self::Postgres(backend) = self else {
+            return Err(ServerError::StaleResourceFence);
+        };
+        Ok(backend
+            .index_store()
+            .resumable_completion_snapshot(session_id)
+            .await?)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn publish_resumable_part_bounded(
         &self,

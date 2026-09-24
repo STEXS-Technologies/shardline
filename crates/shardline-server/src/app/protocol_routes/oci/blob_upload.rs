@@ -532,7 +532,7 @@ async fn durable_oci_put_blob_upload(
     let expected_scope = scope_namespace(auth.namespace());
     let (session, parts) = state
         .backend
-        .resumable_session_snapshot(session_id)
+        .resumable_completion_snapshot(session_id)
         .await?
         .filter(|(session, _parts)| {
             session.protocol() == ResumableSessionProtocol::OciBlob
@@ -563,7 +563,11 @@ async fn durable_oci_put_blob_upload(
         }
     }
     ensure_upload_growth_within_limit(state, current_length, final_bytes.len())?;
-    if !final_bytes.is_empty() {
+    // A prior completion attempt may already have appended its final body and
+    // fenced the session before discovering a digest mismatch.  A retry uses
+    // the pinned parts and must not append that body a second time.
+    if session.state() == shardline_index::ResumableSessionState::Active && !final_bytes.is_empty()
+    {
         let number = parts
             .last()
             .map_or(1_u64, |part| part.part_number().get().saturating_add(1));
