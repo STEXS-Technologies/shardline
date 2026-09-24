@@ -26,6 +26,10 @@ const MERKLE_JOURNAL_SCHEMA: &str = "shardline.lfs.merkle-journal.v1";
 
 struct LfsMerkleAppend {
     previous_head: u64,
+    previous_evidence_sequence: Option<u64>,
+    previous_snapshot_sequence: Option<u64>,
+    previous_evidence_commit: Option<serde_json::Value>,
+    previous_snapshot_commit: Option<serde_json::Value>,
     record: shardline_reliability::PersistedMerkleJournalRecord,
 }
 
@@ -46,6 +50,14 @@ struct JournalManifest {
     bytes: Option<u64>,
     #[serde(default)]
     merkle_head: Option<u64>,
+    #[serde(default)]
+    merkle_evidence_sequence: Option<u64>,
+    #[serde(default)]
+    merkle_snapshot_sequence: Option<u64>,
+    #[serde(default)]
+    merkle_evidence_commit: Option<serde_json::Value>,
+    #[serde(default)]
+    merkle_snapshot_commit: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -183,6 +195,10 @@ fn rewrite_merkle_journal_prefix(
         head: u64::try_from(records.len()).map_err(invalid_evidence)?,
         bytes: Some(u64::try_from(bytes.len()).map_err(invalid_evidence)?),
         merkle_head: Some(u64::try_from(records.len()).map_err(invalid_evidence)?),
+        merkle_evidence_sequence: None,
+        merkle_snapshot_sequence: None,
+        merkle_evidence_commit: None,
+        merkle_snapshot_commit: None,
     };
     let manifest_bytes = serde_json::to_vec(&manifest).map_err(invalid_evidence)?;
     write_sidecar_atomically(dir, &merkle_path(dir, oid), &manifest_bytes)
@@ -221,67 +237,100 @@ fn build_lfs_merkle_append(
     evidence_events: &[shardline_reliability::StateTransitionEvent],
     snapshot_events: &[shardline_reliability::SnapshotEvidenceEvent<DigestSnapshot>],
 ) -> Result<Option<LfsMerkleAppend>, ServerError> {
-    let records = load_committed_merkle_journal(dir, oid, true)?.unwrap_or_default();
-    let existing_evidence = records
-        .iter()
-        .flat_map(|record| record.evidence.iter().cloned())
-        .collect::<Vec<_>>();
-    let existing_evidence_commits = records
-        .iter()
-        .flat_map(|record| record.merkle_commits.iter().cloned())
-        .collect::<Vec<_>>();
-    let existing_snapshots = records
-        .iter()
-        .flat_map(|record| record.snapshot_evidence.iter().cloned())
-        .collect::<Vec<_>>();
-    let existing_snapshot_commits = records
-        .iter()
-        .flat_map(|record| record.snapshot_merkle_commits.iter().cloned())
-        .collect::<Vec<_>>();
-    if !existing_evidence.is_empty() || !existing_evidence_commits.is_empty() {
-        verify_persisted_merkle_chain(
-            shardline_reliability::OperationKind::ResumableSession,
-            &existing_evidence,
-            &existing_evidence_commits,
+    let manifest = read_journal_manifest(&merkle_path(dir, oid), MERKLE_JOURNAL_SCHEMA)?;
+    let manifest_has_merkle_head = manifest
+        .as_ref()
+        .and_then(|value| value.merkle_head)
+        .is_some_and(|head| head == 0);
+    let manifest_has_merkle_commits = manifest.as_ref().is_some_and(|value| {
+        value.merkle_evidence_commit.is_some() || value.merkle_snapshot_commit.is_some()
+    });
+    let records = if manifest_has_merkle_head || manifest_has_merkle_commits {
+        Vec::new()
+    } else {
+        load_committed_merkle_journal(dir, oid, true)?.unwrap_or_default()
+    };
+    let (
+        previous_head,
+        previous_evidence_sequence,
+        previous_snapshot_sequence,
+        previous_evidence,
+        previous_snapshot,
+    ) = if manifest_has_merkle_head || manifest_has_merkle_commits {
+        let manifest = manifest
+            .as_ref()
+            .ok_or_else(|| invalid_evidence("LFS Merkle manifest disappeared during append"))?;
+        (
+            manifest.merkle_head.unwrap_or(0),
+            manifest.merkle_evidence_sequence,
+            manifest.merkle_snapshot_sequence,
+            manifest.merkle_evidence_commit.clone(),
+            manifest.merkle_snapshot_commit.clone(),
         )
-        .map_err(invalid_evidence)?;
-    }
-    if !existing_snapshots.is_empty() || !existing_snapshot_commits.is_empty() {
-        verify_typed_merkle_chain::<shardline_reliability::SnapshotEvidenceEvent<DigestSnapshot>>(
-            &existing_snapshots,
-            &existing_snapshot_commits,
-        )
-        .map_err(invalid_evidence)?;
-    }
-    let previous_evidence = existing_evidence_commits.last().cloned();
-    let previous_snapshot = existing_snapshot_commits.last().cloned();
-    let last_evidence_sequence = existing_evidence
-        .last()
-        .map(|event| {
-            persisted_event_sequence(
+    } else {
+        let existing_evidence = records
+            .iter()
+            .flat_map(|record| record.evidence.iter().cloned())
+            .collect::<Vec<_>>();
+        let existing_evidence_commits = records
+            .iter()
+            .flat_map(|record| record.merkle_commits.iter().cloned())
+            .collect::<Vec<_>>();
+        let existing_snapshots = records
+            .iter()
+            .flat_map(|record| record.snapshot_evidence.iter().cloned())
+            .collect::<Vec<_>>();
+        let existing_snapshot_commits = records
+            .iter()
+            .flat_map(|record| record.snapshot_merkle_commits.iter().cloned())
+            .collect::<Vec<_>>();
+        if !existing_evidence.is_empty() || !existing_evidence_commits.is_empty() {
+            verify_persisted_merkle_chain(
                 shardline_reliability::OperationKind::ResumableSession,
-                event.clone(),
+                &existing_evidence,
+                &existing_evidence_commits,
             )
-        })
-        .transpose()
-        .map_err(invalid_evidence)?;
-    let last_snapshot_sequence = existing_snapshots
-        .last()
-        .map(|event| {
-            serde_json::from_value::<shardline_reliability::SnapshotEvidenceEvent<DigestSnapshot>>(
-                event.clone(),
-            )
-            .map(|value| value.sequence)
-        })
-        .transpose()
-        .map_err(invalid_evidence)?;
+            .map_err(invalid_evidence)?;
+        }
+        if !existing_snapshots.is_empty() || !existing_snapshot_commits.is_empty() {
+            verify_typed_merkle_chain::<
+                    shardline_reliability::SnapshotEvidenceEvent<DigestSnapshot>,
+                >(&existing_snapshots, &existing_snapshot_commits)
+                .map_err(invalid_evidence)?;
+        }
+        (
+            u64::try_from(records.len()).map_err(invalid_evidence)?,
+            existing_evidence
+                .last()
+                .map(|event| {
+                    persisted_event_sequence(
+                        shardline_reliability::OperationKind::ResumableSession,
+                        event.clone(),
+                    )
+                })
+                .transpose()
+                .map_err(invalid_evidence)?,
+            existing_snapshots
+                .last()
+                .map(|event| {
+                    serde_json::from_value::<
+                        shardline_reliability::SnapshotEvidenceEvent<DigestSnapshot>,
+                    >(event.clone())
+                    .map(|value| value.sequence)
+                })
+                .transpose()
+                .map_err(invalid_evidence)?,
+            existing_evidence_commits.last().cloned(),
+            existing_snapshot_commits.last().cloned(),
+        )
+    };
     let new_evidence = evidence_events
         .iter()
         .map(serde_json::to_value)
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
         .filter(|event| {
-            last_evidence_sequence.is_none_or(|sequence| {
+            previous_evidence_sequence.is_none_or(|sequence| {
                 persisted_event_sequence(
                     shardline_reliability::OperationKind::ResumableSession,
                     event.clone(),
@@ -296,7 +345,7 @@ fn build_lfs_merkle_append(
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
         .filter(|event| {
-            last_snapshot_sequence.is_none_or(|sequence| {
+            previous_snapshot_sequence.is_none_or(|sequence| {
                 serde_json::from_value::<
                     shardline_reliability::SnapshotEvidenceEvent<DigestSnapshot>,
                 >(event.clone())
@@ -318,7 +367,11 @@ fn build_lfs_merkle_append(
         return Ok(None);
     }
     Ok(Some(LfsMerkleAppend {
-        previous_head: u64::try_from(records.len()).map_err(invalid_evidence)?,
+        previous_head,
+        previous_evidence_sequence,
+        previous_snapshot_sequence,
+        previous_evidence_commit: previous_evidence,
+        previous_snapshot_commit: previous_snapshot,
         record: shardline_reliability::PersistedMerkleJournalRecord {
             evidence: new_evidence,
             merkle_commits,
@@ -525,6 +578,30 @@ fn append_journal<T: Serialize>(
     file.sync_all()?;
     let journal_bytes = fs::metadata(append.journal_path)?.len();
     if let Some(merkle) = append.merkle {
+        let merkle_evidence_commit = merkle
+            .record
+            .merkle_commits
+            .last()
+            .cloned()
+            .or_else(|| merkle.previous_evidence_commit.clone());
+        let merkle_snapshot_commit = merkle
+            .record
+            .snapshot_merkle_commits
+            .last()
+            .cloned()
+            .or_else(|| merkle.previous_snapshot_commit.clone());
+        let merkle_evidence_sequence = merkle
+            .record
+            .merkle_commits
+            .last()
+            .and_then(merkle_commit_sequence)
+            .or(merkle.previous_evidence_sequence);
+        let merkle_snapshot_sequence = merkle
+            .record
+            .snapshot_merkle_commits
+            .last()
+            .and_then(merkle_commit_sequence)
+            .or(merkle.previous_snapshot_sequence);
         prepare_journal_append(
             &merkle_path(dir, oid),
             &merkle_journal_path(dir, oid),
@@ -551,6 +628,10 @@ fn append_journal<T: Serialize>(
                     .checked_add(1)
                     .ok_or_else(|| invalid_evidence("LFS Merkle journal head overflow"))?,
             ),
+            merkle_evidence_sequence,
+            merkle_snapshot_sequence,
+            merkle_evidence_commit,
+            merkle_snapshot_commit,
         };
         let merkle_manifest_bytes =
             serde_json::to_vec(&merkle_manifest).map_err(invalid_evidence)?;
@@ -576,9 +657,20 @@ fn append_journal<T: Serialize>(
                 .ok_or_else(|| invalid_evidence("LFS evidence journal head overflow"))?,
             bytes: Some(journal_bytes),
             merkle_head,
+            merkle_evidence_sequence: None,
+            merkle_snapshot_sequence: None,
+            merkle_evidence_commit: None,
+            merkle_snapshot_commit: None,
         };
     let manifest_bytes = serde_json::to_vec(&manifest).map_err(invalid_evidence)?;
     write_sidecar_atomically(dir, append.manifest_path, &manifest_bytes)
+}
+
+fn merkle_commit_sequence(commit: &serde_json::Value) -> Option<u64> {
+    commit
+        .get("body")
+        .and_then(|body| body.get("sequence"))
+        .and_then(serde_json::Value::as_u64)
 }
 
 fn materialized_snapshot(input: &LfsPatchSnapshotInput<'_>) -> Result<DigestSnapshot, ServerError> {
@@ -1211,6 +1303,10 @@ mod tests {
                     .len(),
             ),
             merkle_head: Some(2),
+            merkle_evidence_sequence: None,
+            merkle_snapshot_sequence: None,
+            merkle_evidence_commit: None,
+            merkle_snapshot_commit: None,
         };
         fs::write(
             merkle_path(directory.path(), OID),
