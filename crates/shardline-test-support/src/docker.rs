@@ -26,8 +26,8 @@ pub struct S3RawConfig {
 }
 
 const POSTGRES_IMAGE: &str = "postgres:16-alpine";
-const MINIO_IMAGE: &str = "quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z";
-const MINIO_MC_IMAGE: &str = "quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z";
+const MINIO_IMAGE: &str = "ghcr.io/golithus/minio:RELEASE.2025-10-15T17-29-55Z@sha256:8793e960474071520bdb91bb9a6d1793eb229fdbc9dcb7ec75ad836b69bbab40";
+const MINIO_MC_IMAGE: &str = "ghcr.io/golithus/mc:RELEASE.2025-08-13T08-35-41Z@sha256:dde55ccc0bc9e65dc582c8e652d652eea1438c6e60d774524f4da15d7b26a900";
 const REDIS_IMAGE: &str = "redis:7-alpine";
 
 const POSTGRES_USER: &str = "shardline";

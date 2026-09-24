@@ -18,6 +18,9 @@ on:
     paths:
       - ".github/workflows/release.yml"
       - ".github/workflows/reliability-soak.yml"
+      - "docker-compose.chaos.yml"
+      - "Makefile.toml"
+      - "scripts/shardline/wait_for_chaos_stack.sh"
   schedule:
     - cron: "31 1 * * 0"
 
@@ -194,11 +197,7 @@ jobs:
       - name: Start shared Postgres, MinIO, and Redis
         run: |
           docker compose -f docker-compose.chaos.yml -p shardline-chaos up -d
-          for container in chaos-postgres chaos-minio chaos-redis; do
-            until [ "$(docker inspect -f '{{.State.Health.Status}}' "$container" 2>/dev/null)" = "healthy" ]; do
-              sleep 1
-            done
-          done
+          bash scripts/shardline/wait_for_chaos_stack.sh
           target/debug/shardline db migrate up \
             --database-url postgres://shardline:shardline-dev-password@127.0.0.1:15432/shardline
 

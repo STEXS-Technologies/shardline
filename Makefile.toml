@@ -398,5 +398,5 @@ install_crate_args = ["--locked", "--force"]
 command = "bash"
 args = [
   "-c",
-  "cargo build -p shardline && docker compose -f docker-compose.chaos.yml -p shardline-chaos up -d && for c in chaos-postgres chaos-minio chaos-redis; do until [ \"$(docker inspect -f '{{.State.Health.Status}}' $c 2>/dev/null)\" = \"healthy\" ]; do sleep 1; done; done && target/debug/shardline db migrate up --database-url postgres://shardline:shardline-dev-password@127.0.0.1:15432/shardline && cargo nextest run -p shardline-server --test deployment_chaos --no-fail-fast && cargo nextest run -p shardline-server --test fault_drills -E 'test(drill3)' && cargo nextest run -p shardline-server --test fault_drills_extreme -E 'test(drill_extreme_4)'",
+  "cargo build -p shardline && docker compose -f docker-compose.chaos.yml -p shardline-chaos up -d && bash scripts/shardline/wait_for_chaos_stack.sh && target/debug/shardline db migrate up --database-url postgres://shardline:shardline-dev-password@127.0.0.1:15432/shardline && cargo nextest run -p shardline-server --test deployment_chaos --no-fail-fast && cargo nextest run -p shardline-server --test fault_drills -E 'test(drill3)' && cargo nextest run -p shardline-server --test fault_drills_extreme -E 'test(drill_extreme_4)'",
 ]
