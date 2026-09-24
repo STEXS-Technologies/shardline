@@ -61,8 +61,8 @@ use shardline_reliability::{
     UploadLifecycleState, baseline_resumable_session_events, baseline_upload_lifecycle_events,
     build_persisted_merkle_commit_with_previous, persisted_event_sequence,
     reliability_merkle_commit_json_with_previous, upload_lifecycle_identity,
-    verify_provider_lifecycle_events, verify_resumable_session_events,
-    verify_upload_lifecycle_events,
+    verify_persisted_merkle_commit_with_previous, verify_provider_lifecycle_events,
+    verify_resumable_session_events, verify_upload_lifecycle_events,
 };
 
 use crate::{OciObjectKind, provider_evidence::snapshot_from_state};
@@ -120,6 +120,74 @@ pub(crate) fn load_verified_event_json(
         &merkle_commits,
     )?;
     Ok(events)
+}
+
+/// Loads and verifies only the latest event for one operation. Full-chain
+/// replay remains available through [`load_verified_event_json`] for fsck and
+/// repair; current-state reads use this bounded boundary.
+pub(crate) fn load_latest_verified_event_json(
+    transaction: &Transaction<'_>,
+    operation_kind: OperationKind,
+    operation_id: &str,
+) -> Result<Option<Value>, LocalIndexStoreError> {
+    let row = transaction
+        .query_row(
+            "SELECT latest.sequence, latest.event_json, latest.merkle_commit_json,
+                    (
+                        SELECT previous.merkle_commit_json
+                        FROM shardline_reliability_events AS previous
+                        WHERE previous.operation_kind = ?1
+                          AND previous.operation_id = ?2
+                          AND previous.sequence < latest.sequence
+                          AND previous.merkle_commit_json IS NOT NULL
+                        ORDER BY previous.sequence DESC
+                        LIMIT 1
+                    )
+             FROM (
+                 SELECT sequence, event_json, merkle_commit_json
+                 FROM shardline_reliability_events
+                 WHERE operation_kind = ?1 AND operation_id = ?2
+                 ORDER BY sequence DESC
+                 LIMIT 1
+             ) AS latest",
+            params![operation_kind.as_str(), operation_id],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((sequence, event_json, merkle_commit_json, previous_merkle_json)) = row else {
+        return Ok(None);
+    };
+    let sequence = u64::try_from(sequence).map_err(|error| {
+        LocalIndexStoreError::Reliability(shardline_reliability::ReliabilityError::Merkle(format!(
+            "persisted row sequence is out of range: {error}"
+        )))
+    })?;
+    let event_json = from_str::<Value>(&event_json)?;
+    if persisted_event_sequence(operation_kind, event_json.clone())? != sequence {
+        return Err(LocalIndexStoreError::Reliability(
+            shardline_reliability::ReliabilityError::Merkle(
+                "persisted row sequence does not match its event".into(),
+            ),
+        ));
+    }
+    verify_persisted_merkle_commit_with_previous(
+        operation_kind,
+        event_json.clone(),
+        merkle_commit_json
+            .map(|json| from_str::<Value>(&json))
+            .transpose()?,
+        previous_merkle_json
+            .map(|json| from_str::<Value>(&json))
+            .transpose()?,
+    )?;
+    Ok(Some(event_json))
 }
 
 pub(crate) fn load_verified_event_json_batch(
@@ -947,16 +1015,17 @@ pub(crate) fn load_s3_object_evidence(
     object_key: &str,
 ) -> Result<S3ObjectEvidenceLog, LocalIndexStoreError> {
     let operation = s3_object_snapshot(scope_namespace, object_key, None)?.evidence_operation()?;
-    let rows = load_verified_event_json(
+    let event = load_latest_verified_event_json(
         transaction,
         OperationKind::S3Object,
         &operation.operation_id,
     )?;
-    Ok(S3ObjectEvidenceLog::from_events(
-        rows.into_iter()
-            .map(from_value::<S3ObjectLifecycleEvent>)
-            .collect::<Result<Vec<_>, _>>()?,
-    )?)
+    let Some(event) = event else {
+        return Ok(S3ObjectEvidenceLog::default());
+    };
+    Ok(S3ObjectEvidenceLog::from_head(from_value::<
+        S3ObjectLifecycleEvent,
+    >(event)?)?)
 }
 
 pub(crate) fn current_s3_object_evidence(

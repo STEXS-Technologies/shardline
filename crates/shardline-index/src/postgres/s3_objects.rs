@@ -7,8 +7,8 @@ use shardline_reliability::{
     OperationKind, ReliabilityMerkleCommit, S3ObjectEvidenceLog, S3ObjectLifecycleEvent,
     S3ObjectSnapshot, S3ObjectState, SnapshotEvidence, persisted_event_sequence,
     reliability_merkle_commit_json_with_previous, verify_and_append_snapshot_transition,
-    verify_or_repair_snapshot_evidence, verify_persisted_event_merkle_chain_with_sequences,
-    verify_persisted_merkle_commit_with_previous, verify_snapshot_event, verify_snapshot_evidence,
+    verify_or_repair_snapshot_evidence, verify_persisted_merkle_commit_with_previous,
+    verify_snapshot_event, verify_snapshot_evidence,
 };
 
 fn s3_object_entry_from_row(row: &PgRow) -> Result<S3ObjectEntry, PostgresMetadataStoreError> {
@@ -56,38 +56,58 @@ fn s3_object_snapshot(
     )?)
 }
 
-async fn load_s3_object_evidence(
+async fn load_s3_object_evidence_head(
     connection: &mut PgConnection,
     scope_namespace: &str,
     object_key: &str,
 ) -> Result<S3ObjectEvidenceLog, PostgresMetadataStoreError> {
     let operation = s3_object_snapshot(scope_namespace, object_key, None)?.evidence_operation()?;
-    let rows = query(
-        "SELECT sequence, event_json, merkle_commit_json FROM shardline_reliability_events
-         WHERE operation_kind = $1 AND operation_id = $2 ORDER BY sequence",
+    let row = query(
+        "SELECT evidence.sequence, evidence.event_json,
+                evidence.merkle_commit_json AS evidence_merkle_json,
+                previous_evidence.merkle_commit_json AS previous_evidence_merkle_json
+         FROM LATERAL (
+             SELECT sequence, event_json, merkle_commit_json
+             FROM shardline_reliability_events
+             WHERE operation_kind = $1 AND operation_id = $2
+             ORDER BY sequence DESC
+             LIMIT 1
+         ) AS evidence
+         LEFT JOIN LATERAL (
+             SELECT merkle_commit_json
+             FROM shardline_reliability_events
+             WHERE operation_kind = $1 AND operation_id = $2
+               AND sequence < evidence.sequence
+               AND merkle_commit_json IS NOT NULL
+             ORDER BY sequence DESC
+             LIMIT 1
+         ) AS previous_evidence ON TRUE",
     )
     .bind(OperationKind::S3Object.as_str())
     .bind(&operation.operation_id)
-    .fetch_all(&mut *connection)
+    .fetch_optional(&mut *connection)
     .await?;
-    let mut events = Vec::with_capacity(rows.len());
-    let mut row_sequences = Vec::with_capacity(rows.len());
-    let mut event_json = Vec::with_capacity(rows.len());
-    let mut merkle_commits = Vec::with_capacity(rows.len());
-    for row in rows {
-        row_sequences.push(i64_to_u64(row.try_get("sequence")?)?);
-        let value: serde_json::Value = row.try_get("event_json")?;
-        events.push(from_value::<S3ObjectLifecycleEvent>(value.clone())?);
-        event_json.push(value);
-        merkle_commits.push(row.try_get("merkle_commit_json")?);
+    let Some(row) = row else {
+        return Ok(S3ObjectEvidenceLog::default());
+    };
+    let sequence = i64_to_u64(row.try_get("sequence")?)?;
+    let event_json: serde_json::Value = row.try_get("event_json")?;
+    let event_sequence = persisted_event_sequence(OperationKind::S3Object, event_json.clone())?;
+    if sequence != event_sequence {
+        return Err(PostgresMetadataStoreError::Reliability(
+            shardline_reliability::ReliabilityError::Merkle(
+                "S3 evidence row sequence does not match its event".into(),
+            ),
+        ));
     }
-    verify_persisted_event_merkle_chain_with_sequences(
+    let event: S3ObjectLifecycleEvent = from_value(event_json.clone())?;
+    verify_persisted_merkle_commit_with_previous(
         OperationKind::S3Object,
-        &row_sequences,
-        &event_json,
-        &merkle_commits,
+        event_json,
+        row.try_get("evidence_merkle_json")?,
+        row.try_get("previous_evidence_merkle_json")?,
     )?;
-    Ok(S3ObjectEvidenceLog::from_events(events)?)
+    Ok(S3ObjectEvidenceLog::from_head(event)?)
 }
 
 async fn lock_s3_object(
@@ -109,7 +129,7 @@ async fn current_s3_object_evidence(
     entry: Option<&S3ObjectEntry>,
 ) -> Result<S3ObjectEvidenceLog, PostgresMetadataStoreError> {
     let snapshot = s3_object_snapshot(scope_namespace, object_key, entry)?;
-    let loaded = load_s3_object_evidence(connection, scope_namespace, object_key).await?;
+    let loaded = load_s3_object_evidence_head(connection, scope_namespace, object_key).await?;
     Ok(verify_or_repair_snapshot_evidence(loaded, snapshot)?.0)
 }
 
@@ -120,7 +140,7 @@ async fn verify_s3_object_evidence(
     entry: &S3ObjectEntry,
 ) -> Result<(), PostgresMetadataStoreError> {
     let snapshot = s3_object_snapshot(scope_namespace, object_key, Some(entry))?;
-    let evidence = load_s3_object_evidence(connection, scope_namespace, object_key).await?;
+    let evidence = load_s3_object_evidence_head(connection, scope_namespace, object_key).await?;
     verify_snapshot_evidence(&evidence, &snapshot)?;
     Ok(())
 }
