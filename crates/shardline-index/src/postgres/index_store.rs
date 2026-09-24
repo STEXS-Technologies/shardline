@@ -149,6 +149,61 @@ async fn verify_postgres_retention_evidence_batch(
     Ok(())
 }
 
+async fn verify_postgres_webhook_evidence_batch(
+    store: &super::PostgresIndexStore,
+    deliveries: &[WebhookDelivery],
+) -> Result<(), PostgresMetadataStoreError> {
+    let mut operation_ids = Vec::with_capacity(deliveries.len() * 2);
+    let mut canonical_ids = Vec::with_capacity(deliveries.len());
+    for delivery in deliveries {
+        let operation_id = webhook_snapshot(delivery, WebhookDeliveryLifecycleState::Processed)?
+            .evidence_operation()?
+            .operation_id;
+        canonical_ids.push(operation_id.clone());
+        operation_ids.push(operation_id);
+        if operation_ids
+            .last()
+            .is_some_and(|id| id != delivery.delivery_id())
+        {
+            operation_ids.push(delivery.delivery_id().to_owned());
+        }
+    }
+    operation_ids.sort_unstable();
+    operation_ids.dedup();
+    let histories = load_postgres_evidence_histories(
+        &store.pool,
+        OperationKind::WebhookDelivery,
+        &operation_ids,
+    )
+    .await?;
+    for (delivery, canonical_id) in deliveries.iter().zip(canonical_ids) {
+        let history = histories
+            .get(&canonical_id)
+            .or_else(|| histories.get(delivery.delivery_id()))
+            .ok_or_else(|| {
+                PostgresMetadataStoreError::Reliability(
+                    shardline_reliability::ReliabilityError::OperationMismatch,
+                )
+            })?;
+        verify_persisted_event_merkle_chain_with_sequences(
+            OperationKind::WebhookDelivery,
+            &history.sequences,
+            &history.event_json,
+            &history.merkle_commits,
+        )?;
+        let events = history
+            .event_json
+            .iter()
+            .cloned()
+            .map(serde_json::from_value::<shardline_reliability::WebhookDeliveryLifecycleEvent>)
+            .collect::<Result<Vec<_>, _>>()?;
+        let evidence = WebhookDeliveryEvidenceLog::from_events(events)?;
+        let snapshot = webhook_snapshot(delivery, WebhookDeliveryLifecycleState::Processed)?;
+        verify_snapshot_evidence(&evidence, &snapshot)?;
+    }
+    Ok(())
+}
+
 async fn verify_postgres_intent_evidence(
     store: &super::PostgresIndexStore,
     intent: &crate::UploadIntent,
@@ -1213,12 +1268,7 @@ impl AsyncIndexStore for super::PostgresIndexStore {
                 .into_iter()
                 .map(|row| webhook_delivery_from_row(&row))
                 .collect::<Result<Vec<_>, _>>()?;
-            for delivery in &deliveries {
-                let snapshot =
-                    webhook_snapshot(delivery, WebhookDeliveryLifecycleState::Processed)?;
-                let evidence = load_postgres_webhook_evidence(&self.pool, delivery).await?;
-                verify_snapshot_evidence(&evidence, &snapshot)?;
-            }
+            verify_postgres_webhook_evidence_batch(self, &deliveries).await?;
             Ok(deliveries)
         })
     }

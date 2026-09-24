@@ -2,8 +2,8 @@ use rusqlite::{OptionalExtension, Transaction, params};
 use shardline_protocol::{RepositoryProvider, ShardlineHash, unix_now_seconds_lossy};
 use shardline_reliability::{
     LifecycleEvent, ProviderEvidenceLog, QuarantineLifecycleState, RetentionHoldLifecycleState,
-    WebhookDeliveryLifecycleState, append_or_baseline_snapshot_evidence, upload_lifecycle_event,
-    upload_lifecycle_identity, verify_and_append_snapshot_transition,
+    SnapshotEvidence, WebhookDeliveryLifecycleState, append_or_baseline_snapshot_evidence,
+    upload_lifecycle_event, upload_lifecycle_identity, verify_and_append_snapshot_transition,
     verify_provider_lifecycle_events, verify_snapshot_evidence, verify_upload_lifecycle_events,
 };
 use shardline_storage::ObjectKey;
@@ -16,8 +16,8 @@ use crate::{
     StoredObjectId, WebhookDelivery,
     local_sqlite::helpers::{
         load_quarantine_evidence_batch, load_retention_evidence, load_retention_evidence_batch,
-        load_webhook_evidence, persist_retention_evidence, persist_webhook_evidence,
-        retention_snapshot, webhook_snapshot,
+        load_webhook_evidence, load_webhook_evidence_batch, persist_retention_evidence,
+        persist_webhook_evidence, retention_snapshot, webhook_snapshot,
     },
     parse_xet_hash_hex,
     provider_evidence::snapshot_from_state,
@@ -793,10 +793,16 @@ impl LifecycleStore for LocalIndexStore {
         let rows = statement.query_map([], super::helpers::webhook_delivery_from_row)?;
         let deliveries = collect_rows(rows)?;
         drop(statement);
+        let evidence = load_webhook_evidence_batch(&transaction, &deliveries)?;
         for delivery in &deliveries {
             let snapshot = webhook_snapshot(delivery, WebhookDeliveryLifecycleState::Processed)?;
-            let evidence = load_webhook_evidence(&transaction, delivery)?;
-            verify_snapshot_evidence(&evidence, &snapshot)?;
+            let operation_id = snapshot.evidence_operation()?.operation_id;
+            let evidence = evidence
+                .get(&operation_id)
+                .ok_or(LocalIndexStoreError::Reliability(
+                    shardline_reliability::ReliabilityError::OperationMismatch,
+                ))?;
+            verify_snapshot_evidence(evidence, &snapshot)?;
         }
         transaction.commit()?;
         Ok(deliveries)

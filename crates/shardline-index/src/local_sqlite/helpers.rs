@@ -665,6 +665,44 @@ pub(crate) fn load_webhook_evidence(
     )?)
 }
 
+pub(crate) fn load_webhook_evidence_batch(
+    transaction: &Transaction<'_>,
+    deliveries: &[WebhookDelivery],
+) -> Result<HashMap<String, WebhookDeliveryEvidenceLog>, LocalIndexStoreError> {
+    let operation_ids = deliveries
+        .iter()
+        .map(|delivery| {
+            webhook_snapshot(delivery, WebhookDeliveryLifecycleState::Processed)
+                .and_then(|snapshot| snapshot.evidence_operation().map_err(Into::into))
+                .map(|operation| operation.operation_id)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let histories = load_verified_event_json_batch(
+        transaction,
+        OperationKind::WebhookDelivery,
+        &operation_ids,
+    )?;
+    operation_ids
+        .into_iter()
+        .map(|operation_id| {
+            let events = histories
+                .get(&operation_id)
+                .ok_or(LocalIndexStoreError::Reliability(
+                    shardline_reliability::ReliabilityError::OperationMismatch,
+                ))?;
+            let events = events
+                .iter()
+                .cloned()
+                .map(from_value::<WebhookDeliveryLifecycleEvent>)
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok((
+                operation_id,
+                WebhookDeliveryEvidenceLog::from_events(events)?,
+            ))
+        })
+        .collect()
+}
+
 pub(crate) fn persist_webhook_evidence(
     transaction: &Transaction<'_>,
     event: &WebhookDeliveryLifecycleEvent,
