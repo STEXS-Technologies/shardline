@@ -40,6 +40,75 @@ run_target() {
     exec cargo +nightly fuzz run --fuzz-dir "${FUZZ_DIR}" --target "${FUZZ_TARGET}" "$@"
 }
 
+build_targets() {
+    local target=""
+    for target in "$@"; do
+        printf 'building %s\n' "${target}"
+        cargo +nightly fuzz build --fuzz-dir "${FUZZ_DIR}" --target "${FUZZ_TARGET}" "${target}"
+    done
+}
+
+run_targets_in_parallel() {
+    local -a targets=("$@")
+    local -a pids=()
+    local -a running_targets=()
+    local target=""
+    local fuzz_binary=""
+    local corpus_dir=""
+
+    for target in "${targets[@]}"; do
+        fuzz_binary="${ROOT_DIR}/target/${FUZZ_TARGET}/release/${target}"
+        if [ ! -x "${fuzz_binary}" ]; then
+            printf 'built fuzz binary is missing or not executable: %s\n' "${fuzz_binary}" >&2
+            return 1
+        fi
+        printf '==> %s [isolated process]\n' "${target}"
+        case "${FUZZ_MODE}" in
+            smoke)
+                (
+                    "${fuzz_binary}" "-runs=${DEFAULT_RUNS}" \
+                        > >(sed "s/^/[${target}] /") \
+                        2> >(sed "s/^/[${target}] /" >&2)
+                ) &
+                ;;
+            regression)
+                corpus_dir="${FUZZ_DIR}/corpus/${target}"
+                if [ -d "${corpus_dir}" ]; then
+                    (
+                        "${fuzz_binary}" "${corpus_dir}" "-runs=0" \
+                            > >(sed "s/^/[${target}] /") \
+                            2> >(sed "s/^/[${target}] /" >&2)
+                    ) &
+                else
+                    (
+                        "${fuzz_binary}" "-runs=1" \
+                            > >(sed "s/^/[${target}] /") \
+                            2> >(sed "s/^/[${target}] /" >&2)
+                    ) &
+                fi
+                ;;
+            *)
+                printf 'unsupported parallel fuzz mode: %s\n' "${FUZZ_MODE}" >&2
+                return 2
+                ;;
+        esac
+        pids+=("$!")
+        running_targets+=("${target}")
+    done
+
+    local campaign_status=0
+    local index=0
+    local pid=""
+    for pid in "${pids[@]}"; do
+        if ! wait "${pid}"; then
+            printf 'parallel fuzz target failed: %s\n' "${running_targets[${index}]}" >&2
+            campaign_status=1
+        fi
+        index=$((index + 1))
+    done
+    return "${campaign_status}"
+}
+
 run_smoke() {
     mapfile -t targets < <(list_targets)
 
@@ -48,10 +117,8 @@ run_smoke() {
         exit 1
     fi
 
-    for target in "${targets[@]}"; do
-        printf '==> %s\n' "${target}"
-        cargo +nightly fuzz run --fuzz-dir "${FUZZ_DIR}" --target "${FUZZ_TARGET}" "${target}" -- "-runs=${DEFAULT_RUNS}"
-    done
+    build_targets "${targets[@]}"
+    FUZZ_MODE=smoke run_targets_in_parallel "${targets[@]}"
 }
 
 run_regression() {
@@ -62,21 +129,8 @@ run_regression() {
         exit 1
     fi
 
-    for target in "${targets[@]}"; do
-        corpus_dir="${FUZZ_DIR}/corpus/${target}"
-        printf '==> %s\n' "${target}"
-        if [ -d "${corpus_dir}" ]; then
-            # `-runs=0` makes libFuzzer replay the supplied corpus without
-            # starting an unbounded mutation campaign.
-            cargo +nightly fuzz run --fuzz-dir "${FUZZ_DIR}" --target "${FUZZ_TARGET}" \
-                "${target}" "${corpus_dir}" -- "-runs=0"
-        else
-            # A target without a seed corpus still receives one bounded input
-            # so a new harness cannot silently stop compiling in CI.
-            cargo +nightly fuzz run --fuzz-dir "${FUZZ_DIR}" --target "${FUZZ_TARGET}" \
-                "${target}" -- "-runs=1"
-        fi
-    done
+    build_targets "${targets[@]}"
+    FUZZ_MODE=regression run_targets_in_parallel "${targets[@]}"
 }
 
 run_reliability() {
@@ -122,10 +176,7 @@ run_reliability() {
         reliability_targets=("${target}")
     fi
 
-    for target in "${reliability_targets[@]}"; do
-        printf 'building %s\n' "${target}"
-        cargo +nightly fuzz build --fuzz-dir "${FUZZ_DIR}" --target "${FUZZ_TARGET}" "${target}"
-    done
+    build_targets "${reliability_targets[@]}"
 
     local -a pids=()
     local -a running_targets=()
