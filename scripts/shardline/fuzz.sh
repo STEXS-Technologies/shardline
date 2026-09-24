@@ -140,7 +140,8 @@ run_reliability() {
             "${fuzz_binary}" \
                 "-artifact_prefix=${FUZZ_DIR}/artifacts/${target}/" \
                 "-max_total_time=${duration_seconds}" "-timeout=20" \
-                "-rss_limit_mb=${rss_limit_mb}" "${FUZZ_DIR}/corpus/${target}"
+                "-rss_limit_mb=${rss_limit_mb}" "-verbosity=0" \
+                "${FUZZ_DIR}/corpus/${target}"
         ) > >(sed "s/^/[${target}] /") 2> >(sed "s/^/[${target}] /" >&2) &
         pids+=("$!")
         running_targets+=("${target}")
