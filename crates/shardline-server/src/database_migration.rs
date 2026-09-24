@@ -49,40 +49,65 @@ pub enum DatabaseMigrationBoundary {
 #[cfg(test)]
 fn database_migration_failpoint(
     boundary: DatabaseMigrationBoundary,
+    database_key: Option<&str>,
 ) -> Result<(), DatabaseMigrationError> {
-    migration_fault_injection::hit(boundary)
+    migration_fault_injection::hit(database_key, boundary)
 }
 
 #[cfg(test)]
 mod migration_fault_injection {
-    use std::sync::{LazyLock, Mutex};
+    use std::{
+        collections::HashMap,
+        sync::{LazyLock, Mutex},
+    };
 
     use super::{DatabaseMigrationBoundary, DatabaseMigrationError};
 
-    static ARMED_BOUNDARY: LazyLock<Mutex<Option<DatabaseMigrationBoundary>>> =
-        LazyLock::new(|| Mutex::new(None));
+    static ARMED_BOUNDARIES: LazyLock<Mutex<HashMap<String, DatabaseMigrationBoundary>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
 
-    pub(super) struct DatabaseMigrationFailpointGuard;
+    pub(super) struct DatabaseMigrationFailpointGuard {
+        database_key: String,
+        boundary: DatabaseMigrationBoundary,
+    }
 
     impl Drop for DatabaseMigrationFailpointGuard {
         fn drop(&mut self) {
-            *ARMED_BOUNDARY
+            let mut armed_boundaries = ARMED_BOUNDARIES
                 .lock()
-                .unwrap_or_else(|error| error.into_inner()) = None;
+                .unwrap_or_else(|error| error.into_inner());
+            if armed_boundaries.get(&self.database_key).copied() == Some(self.boundary) {
+                armed_boundaries.remove(&self.database_key);
+            }
         }
     }
 
-    pub(super) fn arm(boundary: DatabaseMigrationBoundary) -> DatabaseMigrationFailpointGuard {
-        *ARMED_BOUNDARY
-            .lock()
-            .unwrap_or_else(|error| error.into_inner()) = Some(boundary);
-        DatabaseMigrationFailpointGuard
-    }
-
-    pub(super) fn hit(boundary: DatabaseMigrationBoundary) -> Result<(), DatabaseMigrationError> {
-        let interrupted = ARMED_BOUNDARY
+    pub(super) fn arm(
+        database_key: &str,
+        boundary: DatabaseMigrationBoundary,
+    ) -> DatabaseMigrationFailpointGuard {
+        ARMED_BOUNDARIES
             .lock()
             .unwrap_or_else(|error| error.into_inner())
+            .insert(database_key.to_owned(), boundary);
+        DatabaseMigrationFailpointGuard {
+            database_key: database_key.to_owned(),
+            boundary,
+        }
+    }
+
+    pub(super) fn hit(
+        database_key: Option<&str>,
+        boundary: DatabaseMigrationBoundary,
+    ) -> Result<(), DatabaseMigrationError> {
+        let interrupted = database_key
+            .and_then(|database_key| {
+                ARMED_BOUNDARIES
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .get(database_key)
+                    .copied()
+            })
             .is_some_and(|armed| armed == boundary);
         if interrupted {
             Err(DatabaseMigrationError::InjectedInterruption { boundary })
@@ -466,7 +491,7 @@ pub async fn apply_database_migrations(pool: &PgPool) -> Result<(), DatabaseMigr
     verify_applied_migrations(pool).await?;
 
     for migration in pending_migrations(pool).await? {
-        apply_one_migration(pool, migration).await?;
+        apply_one_migration(pool, migration, None).await?;
     }
     Ok(())
 }
@@ -504,7 +529,7 @@ pub async fn run_database_migration(
             let pending = pending_migrations(&pool).await?;
             let mut applied_count = 0_u64;
             for migration in pending.into_iter().take(steps.unwrap_or(usize::MAX)) {
-                apply_one_migration(&pool, migration).await?;
+                apply_one_migration(&pool, migration, Some(options.database_url())).await?;
                 applied_count = applied_count.saturating_add(1);
             }
             (applied_count, 0)
@@ -513,7 +538,7 @@ pub async fn run_database_migration(
             let applied = applied_migrations_in_order(&pool).await?;
             let mut reverted_count = 0_u64;
             for migration in applied.into_iter().rev().take(*steps) {
-                revert_one_migration(&pool, migration).await?;
+                revert_one_migration(&pool, migration, Some(options.database_url())).await?;
                 reverted_count = reverted_count.saturating_add(1);
             }
             (0, reverted_count)
@@ -2317,6 +2342,7 @@ async fn applied_migrations_in_order(
 async fn apply_one_migration(
     pool: &PgPool,
     migration: &'static DatabaseMigration,
+    database_key: Option<&str>,
 ) -> Result<(), DatabaseMigrationError> {
     let mut transaction = pool.begin().await?;
     raw_sql(migration.up_sql).execute(&mut *transaction).await?;
@@ -2331,16 +2357,17 @@ async fn apply_one_migration(
     .execute(&mut *transaction)
     .await?;
     #[cfg(test)]
-    database_migration_failpoint(DatabaseMigrationBoundary::BeforeApplyCommit)?;
+    database_migration_failpoint(DatabaseMigrationBoundary::BeforeApplyCommit, database_key)?;
     transaction.commit().await?;
     #[cfg(test)]
-    database_migration_failpoint(DatabaseMigrationBoundary::AfterApplyCommit)?;
+    database_migration_failpoint(DatabaseMigrationBoundary::AfterApplyCommit, database_key)?;
     Ok(())
 }
 
 async fn revert_one_migration(
     pool: &PgPool,
     migration: &'static DatabaseMigration,
+    database_key: Option<&str>,
 ) -> Result<(), DatabaseMigrationError> {
     let mut transaction = pool.begin().await?;
     raw_sql(migration.down_sql)
@@ -2353,10 +2380,10 @@ async fn revert_one_migration(
     .execute(&mut *transaction)
     .await?;
     #[cfg(test)]
-    database_migration_failpoint(DatabaseMigrationBoundary::BeforeRevertCommit)?;
+    database_migration_failpoint(DatabaseMigrationBoundary::BeforeRevertCommit, database_key)?;
     transaction.commit().await?;
     #[cfg(test)]
-    database_migration_failpoint(DatabaseMigrationBoundary::AfterRevertCommit)?;
+    database_migration_failpoint(DatabaseMigrationBoundary::AfterRevertCommit, database_key)?;
     Ok(())
 }
 
@@ -2705,7 +2732,6 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    #[serial(database_migration_failpoint)]
     async fn interrupted_migration_boundaries_resume_to_complete_schema() {
         let Some(base_database_url) = std::env::var("DATABASE_URL").ok() else {
             eprintln!("skipping: no DATABASE_URL");
@@ -2733,8 +2759,10 @@ mod tests {
         let test_url = test_url.to_string();
 
         {
-            let _fault =
-                migration_fault_injection::arm(DatabaseMigrationBoundary::BeforeApplyCommit);
+            let _fault = migration_fault_injection::arm(
+                &test_url,
+                DatabaseMigrationBoundary::BeforeApplyCommit,
+            );
             assert!(matches!(
                 run_test_migration_command(
                     &test_url,
@@ -2770,8 +2798,10 @@ mod tests {
         );
 
         {
-            let _fault =
-                migration_fault_injection::arm(DatabaseMigrationBoundary::AfterApplyCommit);
+            let _fault = migration_fault_injection::arm(
+                &test_url,
+                DatabaseMigrationBoundary::AfterApplyCommit,
+            );
             assert!(matches!(
                 run_test_migration_command(
                     &test_url,
@@ -2792,8 +2822,10 @@ mod tests {
         );
 
         {
-            let _fault =
-                migration_fault_injection::arm(DatabaseMigrationBoundary::BeforeRevertCommit);
+            let _fault = migration_fault_injection::arm(
+                &test_url,
+                DatabaseMigrationBoundary::BeforeRevertCommit,
+            );
             assert!(matches!(
                 run_test_migration_command(&test_url, DatabaseMigrationCommand::Down { steps: 1 })
                     .await,
@@ -2825,8 +2857,10 @@ mod tests {
         );
 
         {
-            let _fault =
-                migration_fault_injection::arm(DatabaseMigrationBoundary::AfterRevertCommit);
+            let _fault = migration_fault_injection::arm(
+                &test_url,
+                DatabaseMigrationBoundary::AfterRevertCommit,
+            );
             assert!(matches!(
                 run_test_migration_command(&test_url, DatabaseMigrationCommand::Down { steps: 1 })
                     .await,
@@ -2864,6 +2898,67 @@ mod tests {
             .await
             .unwrap();
         admin_pool.close().await;
+    }
+
+    #[test]
+    fn migration_fault_injection_is_scoped_to_database_key() {
+        let first = migration_fault_injection::arm(
+            "migration-test-first",
+            DatabaseMigrationBoundary::BeforeApplyCommit,
+        );
+        let second = migration_fault_injection::arm(
+            "migration-test-second",
+            DatabaseMigrationBoundary::AfterApplyCommit,
+        );
+
+        assert!(matches!(
+            migration_fault_injection::hit(
+                Some("migration-test-first"),
+                DatabaseMigrationBoundary::BeforeApplyCommit,
+            ),
+            Err(DatabaseMigrationError::InjectedInterruption {
+                boundary: DatabaseMigrationBoundary::BeforeApplyCommit
+            })
+        ));
+        assert!(matches!(
+            migration_fault_injection::hit(
+                Some("migration-test-second"),
+                DatabaseMigrationBoundary::AfterApplyCommit,
+            ),
+            Err(DatabaseMigrationError::InjectedInterruption {
+                boundary: DatabaseMigrationBoundary::AfterApplyCommit
+            })
+        ));
+        assert!(
+            migration_fault_injection::hit(
+                Some("migration-test-first"),
+                DatabaseMigrationBoundary::AfterApplyCommit,
+            )
+            .is_ok()
+        );
+
+        drop(second);
+        drop(first);
+
+        let previous = migration_fault_injection::arm(
+            "migration-test-rearmed",
+            DatabaseMigrationBoundary::BeforeApplyCommit,
+        );
+        let current = migration_fault_injection::arm(
+            "migration-test-rearmed",
+            DatabaseMigrationBoundary::AfterApplyCommit,
+        );
+        drop(previous);
+        assert!(matches!(
+            migration_fault_injection::hit(
+                Some("migration-test-rearmed"),
+                DatabaseMigrationBoundary::AfterApplyCommit,
+            ),
+            Err(DatabaseMigrationError::InjectedInterruption {
+                boundary: DatabaseMigrationBoundary::AfterApplyCommit
+            })
+        ));
+        drop(current);
     }
 
     #[test]
