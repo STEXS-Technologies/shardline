@@ -6,7 +6,7 @@ use shardline_reliability::{
     upload_lifecycle_event, upload_lifecycle_identity, verify_and_append_snapshot_transition,
     verify_and_append_webhook_delivery_retry, verify_and_reactivate_quarantine,
     verify_and_reactivate_retention_hold, verify_provider_lifecycle_events,
-    verify_snapshot_evidence, verify_upload_lifecycle_events,
+    verify_snapshot_evidence, verify_upload_lifecycle_events, verify_upload_lifecycle_head,
 };
 use shardline_storage::ObjectKey;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -31,28 +31,21 @@ fn verify_sqlite_intent_evidence(
     transaction: &Transaction<'_>,
     intent: &UploadIntent,
 ) -> Result<(), LocalIndexStoreError> {
-    let mut statement = transaction.prepare(
-        "SELECT event_json
-         FROM shardline_reliability_events
-         WHERE operation_kind = ?1 AND operation_id = ?2
-         ORDER BY sequence",
-    )?;
-    let rows = statement.query_map(params!["Upload", intent.intent_id()], |row| {
-        let event_json: String = row.get(0)?;
-        serde_json::from_str(&event_json).map_err(|error| {
-            rusqlite::Error::FromSqlConversionFailure(
-                0,
-                rusqlite::types::Type::Text,
-                Box::new(error),
-            )
-        })
+    let event = super::helpers::load_latest_verified_event_json(
+        transaction,
+        shardline_reliability::OperationKind::Upload,
+        intent.intent_id(),
+    )?
+    .ok_or(LocalIndexStoreError::Reliability(
+        shardline_reliability::ReliabilityError::OperationMismatch,
+    ))
+    .and_then(|value| {
+        serde_json::from_value::<LifecycleEvent>(value).map_err(LocalIndexStoreError::from)
     })?;
-    let events = rows.collect::<Result<Vec<LifecycleEvent>, _>>()?;
-    let (tenant, repository) = upload_lifecycle_identity(&events);
-    verify_upload_lifecycle_events(
-        &events,
-        tenant,
-        repository,
+    verify_upload_lifecycle_head(
+        &event,
+        event.operation.tenant.as_str(),
+        event.operation.repository.as_str(),
         intent.intent_id(),
         intent.object_key(),
         intent.object_hash(),

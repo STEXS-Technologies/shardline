@@ -337,6 +337,44 @@ pub fn verify_upload_lifecycle_events(
     }
 }
 
+/// Verifies one persisted upload lifecycle head against its authoritative
+/// materialized intent without replaying the historical prefix.
+///
+/// Full-chain verification remains available through
+/// [`verify_upload_lifecycle_events`] for diagnostics and repair. This
+/// boundary is for ordinary current-state reads and transitions.
+///
+/// # Errors
+///
+/// Returns an error when the event is corrupt, belongs to another operation,
+/// or does not describe the current materialized intent.
+pub fn verify_upload_lifecycle_head(
+    event: &LifecycleEvent,
+    tenant: &str,
+    repository: &str,
+    operation_id: &str,
+    object_key: &str,
+    content_sha256: &str,
+    expected_state: UploadLifecycleState,
+) -> Result<(), ReliabilityError> {
+    event.verify_integrity()?;
+    let operation = &event.operation;
+    if operation.kind != OperationKind::Upload
+        || operation.tenant != tenant
+        || operation.repository != repository
+        || operation.operation_id != operation_id
+        || operation.object_key.as_deref() != Some(object_key)
+        || operation.content_sha256.as_deref() != Some(content_sha256)
+    {
+        return Err(ReliabilityError::OperationMismatch);
+    }
+    if event.after == expected_state {
+        Ok(())
+    } else {
+        Err(ReliabilityError::StateMismatch)
+    }
+}
+
 /// Returns the canonical identity used by an upload evidence chain.
 #[must_use]
 pub fn upload_lifecycle_identity(events: &[LifecycleEvent]) -> (&str, &str) {

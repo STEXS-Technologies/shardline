@@ -46,6 +46,7 @@ pub use event::{
     upload_lifecycle_identity, upload_operation_identity, verify_lifecycle_chain,
     verify_lifecycle_chain_ends_at, verify_state_transition_chain,
     verify_state_transition_chain_ends_at, verify_upload_lifecycle_events,
+    verify_upload_lifecycle_head,
 };
 pub use event_metadata::EvidenceEventMetadata;
 pub use lifecycle_log::LifecycleEvidenceLog;

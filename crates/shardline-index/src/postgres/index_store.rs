@@ -16,7 +16,7 @@ use shardline_reliability::{
     verify_and_reactivate_quarantine, verify_persisted_event_merkle_chain,
     verify_persisted_event_merkle_chain_with_sequences,
     verify_persisted_merkle_commit_with_previous, verify_provider_lifecycle_events,
-    verify_snapshot_evidence, verify_upload_lifecycle_events,
+    verify_snapshot_evidence, verify_upload_lifecycle_events, verify_upload_lifecycle_head,
 };
 use shardline_storage::ObjectKey;
 use sqlx::{PgConnection, Row, postgres::PgRow, query, query_scalar, types::Json};
@@ -275,16 +275,20 @@ async fn verify_postgres_intent_evidence(
     const MAX_ATTEMPTS: usize = 3;
     let mut attempt = 0_usize;
     loop {
-        let events = <super::PostgresIndexStore as UploadIntentStore>::reliability_events(
-            store,
+        let event = load_postgres_latest_evidence_event(
+            &store.pool,
+            OperationKind::Upload,
             intent.intent_id(),
         )
-        .await?;
-        let (tenant, repository) = upload_lifecycle_identity(&events);
-        match verify_upload_lifecycle_events(
-            &events,
-            tenant,
-            repository,
+        .await?
+        .ok_or(PostgresMetadataStoreError::Reliability(
+            shardline_reliability::ReliabilityError::OperationMismatch,
+        ))
+        .and_then(|value| serde_json::from_value::<LifecycleEvent>(value).map_err(Into::into))?;
+        match verify_upload_lifecycle_head(
+            &event,
+            event.operation.tenant.as_str(),
+            event.operation.repository.as_str(),
             intent.intent_id(),
             intent.object_key(),
             intent.object_hash(),
