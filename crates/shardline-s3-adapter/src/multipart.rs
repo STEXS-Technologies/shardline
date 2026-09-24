@@ -58,11 +58,17 @@ const MAX_UPLOAD_ID_BYTES: usize = 64;
 /// a guard is held (part write, completion ingest, or sweep delete), and dead
 /// entries are evicted on the next acquire, so the map is bounded by the
 /// number of sessions with work in flight (F-10).
-static S3_UPLOAD_SESSION_PART_LOCKS: LazyLock<std::sync::Mutex<HashMap<String, Weak<Mutex<()>>>>> =
+type SessionPartLockKey = (PathBuf, String);
+type SessionPartLockMap = std::sync::Mutex<HashMap<SessionPartLockKey, Weak<Mutex<()>>>>;
+
+static S3_UPLOAD_SESSION_PART_LOCKS: LazyLock<SessionPartLockMap> =
     LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 
-/// Returns the per-session part-write lock for an upload id, creating it on
-/// first use.
+/// Returns the legacy per-session part-write lock for an upload id, creating
+/// it on first use.
+///
+/// New callers should use [`acquire_session_part_lock_for_root`] so identical
+/// upload ids in separate local deployments do not share a process mutex.
 ///
 /// Concurrent callers for the SAME upload id (concurrent `UploadPart`s, a
 /// `CompleteMultipartUpload` reading part files, and the expiry sweep deleting
@@ -70,21 +76,34 @@ static S3_UPLOAD_SESSION_PART_LOCKS: LazyLock<std::sync::Mutex<HashMap<String, W
 /// guard, so part files are never written, read, and removed concurrently.
 /// Lock-ordering rule: never await [`lock_upload_sessions`] while holding the
 /// guard returned here (the sweep takes both in the opposite order).
+#[must_use]
 pub fn acquire_session_part_lock(upload_id: &str) -> Arc<Mutex<()>> {
+    acquire_session_part_lock_key(PathBuf::new(), upload_id)
+}
+
+/// Returns the per-session part-write lock scoped to one local deployment
+/// root, creating it on first use.
+#[must_use]
+pub fn acquire_session_part_lock_for_root(root: &Path, upload_id: &str) -> Arc<Mutex<()>> {
+    acquire_session_part_lock_key(root.to_path_buf(), upload_id)
+}
+
+fn acquire_session_part_lock_key(root: PathBuf, upload_id: &str) -> Arc<Mutex<()>> {
     let mut map = S3_UPLOAD_SESSION_PART_LOCKS
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     // Fast path: a live weak handle exists (a guard is still held for this
     // session), so return the same strong Arc to keep the write/read/delete
     // serialized.
-    if let Some(live) = map.get(upload_id).and_then(Weak::upgrade) {
+    let key = (root, upload_id.to_owned());
+    if let Some(live) = map.get(&key).and_then(Weak::upgrade) {
         return live;
     }
     // No live handle: drop dead entries so the map cannot grow with finished
     // sessions, then install a fresh mutex and return its strong Arc.
     map.retain(|_id, weak| weak.upgrade().is_some());
     let fresh = Arc::new(Mutex::new(()));
-    map.insert(upload_id.to_owned(), Arc::downgrade(&fresh));
+    map.insert(key, Arc::downgrade(&fresh));
     fresh
 }
 
@@ -1765,7 +1784,7 @@ async fn sweep_expired_sessions_locked(
             // Serialize the delete against an in-flight part write for this
             // session: an UploadPart holds this lock across its body stream
             // (F-10), so we cannot remove the directory mid-write.
-            let part_lock = acquire_session_part_lock(file_name);
+            let part_lock = acquire_session_part_lock_for_root(root, file_name);
             let _part_guard = part_lock.lock().await;
             let _part_file_guard = lock_session_parts(root, file_name).await?;
             if delete_session_dir(&path).await.is_ok() {
@@ -1970,6 +1989,19 @@ mod tests {
 
         drop(second);
         drop(first);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn part_locks_for_different_roots_run_in_parallel() {
+        let first_root = make_root().await;
+        let second_root = make_root().await;
+        let first = acquire_session_part_lock_for_root(first_root.path(), "same-upload-id");
+        let _first_guard = first.lock().await;
+        let second = acquire_session_part_lock_for_root(second_root.path(), "same-upload-id");
+
+        let _second_guard = tokio::time::timeout(std::time::Duration::from_secs(2), second.lock())
+            .await
+            .expect("different deployment roots must not share a part lock");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
