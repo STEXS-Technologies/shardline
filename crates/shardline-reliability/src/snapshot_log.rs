@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::{
     ReliabilityError,
@@ -11,12 +11,50 @@ use crate::{
 /// newtype owns baseline creation, sequence allocation, append validation,
 /// deserialization validation, and current-state verification for provider,
 /// quarantine, and OCI snapshots alike.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SnapshotEvidenceLog<S: SnapshotEvidence>(Vec<SnapshotEvidenceEvent<S>>);
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotEvidenceLog<S: SnapshotEvidence> {
+    events: Vec<SnapshotEvidenceEvent<S>>,
+    head_only: bool,
+}
+
+impl<S> Serialize for SnapshotEvidenceLog<S>
+where
+    S: SnapshotEvidence,
+    SnapshotEvidenceEvent<S>: Serialize,
+{
+    fn serialize<SerializerT>(
+        &self,
+        serializer: SerializerT,
+    ) -> Result<SerializerT::Ok, SerializerT::Error>
+    where
+        SerializerT: Serializer,
+    {
+        self.events.serialize(serializer)
+    }
+}
+
+impl<'de, S> Deserialize<'de> for SnapshotEvidenceLog<S>
+where
+    S: SnapshotEvidence + Deserialize<'de>,
+    SnapshotEvidenceEvent<S>: Deserialize<'de>,
+{
+    fn deserialize<DeserializerT>(deserializer: DeserializerT) -> Result<Self, DeserializerT::Error>
+    where
+        DeserializerT: Deserializer<'de>,
+    {
+        Ok(Self {
+            events: Vec::<SnapshotEvidenceEvent<S>>::deserialize(deserializer)?,
+            head_only: false,
+        })
+    }
+}
 
 impl<S: SnapshotEvidence> Default for SnapshotEvidenceLog<S> {
     fn default() -> Self {
-        Self(Vec::new())
+        Self {
+            events: Vec::new(),
+            head_only: false,
+        }
     }
 }
 
@@ -28,7 +66,24 @@ impl<S: SnapshotEvidence> SnapshotEvidenceLog<S> {
     /// Returns an error when validation, integrity verification, or canonicalization fails.
     pub fn from_events(events: Vec<SnapshotEvidenceEvent<S>>) -> Result<Self, ReliabilityError> {
         verify_snapshot_chain(&events)?;
-        Ok(Self(events))
+        Ok(Self {
+            events,
+            head_only: false,
+        })
+    }
+
+    /// Wraps one already-persisted head event without loading its historical
+    /// prefix. Full-chain verification remains available to fsck and repair.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the head event's integrity digest is invalid.
+    pub fn from_head(event: SnapshotEvidenceEvent<S>) -> Result<Self, ReliabilityError> {
+        event.verify_integrity()?;
+        Ok(Self {
+            events: vec![event],
+            head_only: true,
+        })
     }
 
     /// Creates the sequence-zero self-baseline for a materialized snapshot.
@@ -37,11 +92,10 @@ impl<S: SnapshotEvidence> SnapshotEvidenceLog<S> {
     ///
     /// Returns an error when validation, integrity verification, or canonicalization fails.
     pub fn baseline(snapshot: S) -> Result<Self, ReliabilityError> {
-        Ok(Self(vec![SnapshotEvidenceEvent::new(
-            0,
-            snapshot.clone(),
-            snapshot,
-        )?]))
+        Ok(Self {
+            events: vec![SnapshotEvidenceEvent::new(0, snapshot.clone(), snapshot)?],
+            head_only: false,
+        })
     }
 
     /// Appends one typed snapshot boundary and verifies the complete chain.
@@ -51,21 +105,32 @@ impl<S: SnapshotEvidence> SnapshotEvidenceLog<S> {
     /// Returns an error when validation, integrity verification, or canonicalization fails.
     pub fn record(&mut self, snapshot: S) -> Result<(), ReliabilityError> {
         let before = self
-            .0
+            .events
             .last()
             .map(|event| event.after.clone())
             .unwrap_or_else(|| snapshot.clone());
-        let sequence = self.0.last().map_or(Ok(0), |event| {
+        let sequence = self.events.last().map_or(Ok(0), |event| {
             event
                 .sequence
                 .checked_add(1)
                 .ok_or(ReliabilityError::ChainDiscontinuity)
         })?;
-        self.0
-            .push(SnapshotEvidenceEvent::new(sequence, before, snapshot)?);
-        let result = verify_snapshot_chain(&self.0);
+        let event = SnapshotEvidenceEvent::new(sequence, before, snapshot)?;
+        if self.head_only {
+            if self
+                .events
+                .last()
+                .is_some_and(|previous| previous.operation != event.operation)
+            {
+                return Err(ReliabilityError::OperationMismatch);
+            }
+            self.events = vec![event];
+            return Ok(());
+        }
+        self.events.push(event);
+        let result = verify_snapshot_chain(&self.events);
         if result.is_err() {
-            self.0.pop();
+            self.events.pop();
         }
         result
     }
@@ -76,8 +141,19 @@ impl<S: SnapshotEvidence> SnapshotEvidenceLog<S> {
     ///
     /// Returns an error when validation, integrity verification, or canonicalization fails.
     pub fn verify_for(&self, expected: &S) -> Result<(), ReliabilityError> {
-        verify_snapshot_chain(&self.0)?;
-        if self.0.last().is_some_and(|event| event.after == *expected) {
+        if self.head_only {
+            let event = self
+                .events
+                .last()
+                .ok_or(ReliabilityError::OperationMismatch)?;
+            return super::snapshot_event::verify_snapshot_event(event, expected);
+        }
+        verify_snapshot_chain(&self.events)?;
+        if self
+            .events
+            .last()
+            .is_some_and(|event| event.after == *expected)
+        {
             Ok(())
         } else {
             Err(ReliabilityError::StateMismatch)
@@ -87,12 +163,18 @@ impl<S: SnapshotEvidence> SnapshotEvidenceLog<S> {
     /// Returns the ordered evidence events.
     #[must_use]
     pub fn events(&self) -> &[SnapshotEvidenceEvent<S>] {
-        &self.0
+        &self.events
+    }
+
+    /// Returns whether this log intentionally contains only its durable head.
+    #[must_use]
+    pub const fn is_head_only(&self) -> bool {
+        self.head_only
     }
 
     #[cfg(test)]
     pub(crate) const fn events_mut(&mut self) -> &mut Vec<SnapshotEvidenceEvent<S>> {
-        &mut self.0
+        &mut self.events
     }
 }
 

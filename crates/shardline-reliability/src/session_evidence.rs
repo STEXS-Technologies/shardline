@@ -47,6 +47,38 @@ pub fn verify_resumable_session_events(
     }
 }
 
+/// Verifies one latest session boundary without loading the historical chain.
+/// Explicit fsck and repair paths should use [`verify_resumable_session_events`]
+/// to validate the complete history.
+///
+/// # Errors
+///
+/// Returns an error when the head event does not match the session identity or state.
+pub fn verify_resumable_session_head(
+    event: &StateTransitionEvent,
+    scope_namespace: &str,
+    session_id: &str,
+    target_key: &str,
+    expected_state: ResumableLifecycleState,
+) -> Result<(), ReliabilityError> {
+    event.verify_integrity()?;
+    let operation = &event.operation;
+    if event.sequence == 0
+        || operation.kind != crate::OperationKind::ResumableSession
+        || operation.tenant != "resumable-session"
+        || operation.repository != scope_namespace
+        || operation.operation_id != session_id
+        || operation.object_key.as_deref() != Some(target_key)
+    {
+        return Err(ReliabilityError::OperationMismatch);
+    }
+    if event.after == expected_state {
+        Ok(())
+    } else {
+        Err(ReliabilityError::StateMismatch)
+    }
+}
+
 /// Canonical evidence log for a file-backed resumable session.
 ///
 /// The log is deliberately a newtype so adapters cannot construct or interpret
@@ -63,6 +95,16 @@ impl SessionEvidenceLog {
     /// Returns an error when validation, integrity verification, or canonicalization fails.
     pub fn from_events(events: Vec<StateTransitionEvent>) -> Result<Self, ReliabilityError> {
         Ok(Self(LifecycleEvidenceLog::from_events(events)?))
+    }
+
+    /// Wraps one already-persisted head event without loading its historical
+    /// prefix. Full-chain verification remains available to fsck and repair.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the head event's integrity digest is invalid.
+    pub fn from_head(event: StateTransitionEvent) -> Result<Self, ReliabilityError> {
+        Ok(Self(LifecycleEvidenceLog::from_head(event)?))
     }
 
     /// Creates the initial active evidence for a newly created session.
@@ -155,15 +197,31 @@ impl SessionEvidenceLog {
         session_id: &str,
         target_key: &str,
     ) -> Result<(), ReliabilityError> {
-        verify_resumable_session_events(
-            self.events(),
-            scope_namespace,
-            session_id,
-            target_key,
-            self.events()
+        let expected_state = self
+            .events()
+            .last()
+            .map_or(ResumableLifecycleState::Active, |event| event.after);
+        if self.0.is_head_only() {
+            let event = self
+                .events()
                 .last()
-                .map_or(ResumableLifecycleState::Active, |event| event.after),
-        )
+                .ok_or(ReliabilityError::OperationMismatch)?;
+            verify_resumable_session_head(
+                event,
+                scope_namespace,
+                session_id,
+                target_key,
+                expected_state,
+            )
+        } else {
+            verify_resumable_session_events(
+                self.events(),
+                scope_namespace,
+                session_id,
+                target_key,
+                expected_state,
+            )
+        }
     }
 
     /// Returns the evidence events in sequence order.

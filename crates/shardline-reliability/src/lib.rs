@@ -105,7 +105,7 @@ pub use s3_object_evidence::{
 };
 pub use session_evidence::{
     SessionEvidenceLog, verify_and_append_session_transition, verify_or_repair_session_evidence,
-    verify_resumable_session_events, verify_session_evidence,
+    verify_resumable_session_events, verify_resumable_session_head, verify_session_evidence,
 };
 pub use snapshot_event::{SnapshotEvidence, SnapshotEvidenceEvent, verify_snapshot_event};
 pub use snapshot_log::{
