@@ -1517,11 +1517,14 @@ impl UploadIntentStore for super::PostgresIndexStore {
                     event_json.push(value);
                     merkle_commits.push(row.try_get("merkle_commit_json")?);
                 }
-                verify_persisted_event_merkle_chain(
-                    OperationKind::Upload,
-                    &event_json,
-                    &merkle_commits,
-                )?;
+                let merkle_complete = merkle_commits.iter().all(Option::is_some);
+                if merkle_complete {
+                    verify_persisted_event_merkle_chain(
+                        OperationKind::Upload,
+                        &event_json,
+                        &merkle_commits,
+                    )?;
+                }
                 let (stored_tenant, stored_repository) = upload_lifecycle_identity(&events);
                 if stored_tenant != tenant || stored_repository != repository {
                     // Upload evidence predating repository-scoped identities was
@@ -1567,6 +1570,37 @@ impl UploadIntentStore for super::PostgresIndexStore {
                         durable_intent.object_hash(),
                         durable_intent.state(),
                     )?;
+                    if !merkle_complete {
+                        // Evidence written before the Merkle column existed is
+                        // still authoritative after its typed lifecycle has
+                        // been validated. Reuse the canonical insert boundary
+                        // to fill only missing commitments, then verify the
+                        // complete persisted chain before committing.
+                        for event in &events {
+                            insert_reliability_event(transaction.as_mut(), event).await?;
+                        }
+                        let repaired_rows = query(
+                            "SELECT event_json, merkle_commit_json
+                             FROM shardline_reliability_events
+                             WHERE operation_kind = 'Upload' AND operation_id = $1
+                             ORDER BY sequence",
+                        )
+                        .bind(intent.intent_id())
+                        .fetch_all(&mut *transaction)
+                        .await?;
+                        let mut repaired_events = Vec::with_capacity(repaired_rows.len());
+                        let mut repaired_commits = Vec::with_capacity(repaired_rows.len());
+                        for row in repaired_rows {
+                            let value: serde_json::Value = row.try_get("event_json")?;
+                            repaired_events.push(value.clone());
+                            repaired_commits.push(row.try_get("merkle_commit_json")?);
+                        }
+                        verify_persisted_event_merkle_chain(
+                            OperationKind::Upload,
+                            &repaired_events,
+                            &repaired_commits,
+                        )?;
+                    }
                 }
             }
         } else {
