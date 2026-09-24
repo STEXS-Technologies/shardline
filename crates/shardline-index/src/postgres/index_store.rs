@@ -2202,6 +2202,7 @@ where
     T: EvidenceEventMetadata,
 {
     event.verify_integrity()?;
+    verify_existing_reliability_prefix(connection, event.operation_identity()).await?;
     let sequence = i64::try_from(event.sequence_number()).map_err(|_error| {
         PostgresMetadataStoreError::IntegerOutOfRange("reliability sequence".into())
     })?;
@@ -2234,6 +2235,59 @@ where
         merkle_commit_json,
     )
     .await
+}
+
+/// Verifies existing commitments before any writer extends an operation.
+/// Legacy rows without commitments remain eligible for ordered backfill, but
+/// every commitment that is present must still match its typed event and
+/// preceding commitment.
+async fn verify_existing_reliability_prefix(
+    connection: &mut PgConnection,
+    operation: &shardline_reliability::OperationIdentity,
+) -> Result<(), PostgresMetadataStoreError> {
+    let rows = query(
+        "SELECT sequence, event_json, merkle_commit_json
+         FROM shardline_reliability_events
+         WHERE operation_kind = $1 AND operation_id = $2
+         ORDER BY sequence",
+    )
+    .bind(operation.kind.as_str())
+    .bind(&operation.operation_id)
+    .fetch_all(&mut *connection)
+    .await?;
+    let mut previous_commit = None;
+    for row in rows {
+        let row_sequence = u64::try_from(row.try_get::<i64, _>("sequence")?).map_err(|error| {
+            PostgresMetadataStoreError::IntegerOutOfRange(format!("reliability sequence: {error}"))
+        })?;
+        let event_json: serde_json::Value = row.try_get("event_json")?;
+        if persisted_event_sequence(operation.kind, event_json.clone())? != row_sequence {
+            return Err(PostgresMetadataStoreError::Reliability(
+                shardline_reliability::ReliabilityError::Merkle(
+                    "reliability row sequence does not match its event".into(),
+                ),
+            ));
+        }
+        let identity = persisted_event_identity(operation.kind, event_json.clone())?;
+        if identity.kind != operation.kind || identity.operation_id != operation.operation_id {
+            return Err(PostgresMetadataStoreError::Reliability(
+                shardline_reliability::ReliabilityError::OperationMismatch,
+            ));
+        }
+        let merkle_commit: Option<serde_json::Value> = row.try_get("merkle_commit_json")?;
+        if let Some(merkle_commit_json) = merkle_commit {
+            verify_persisted_merkle_commit_with_previous(
+                operation.kind,
+                event_json,
+                Some(merkle_commit_json.clone()),
+                previous_commit.clone(),
+            )?;
+            previous_commit = Some(merkle_commit_json);
+        } else {
+            previous_commit = None;
+        }
+    }
+    Ok(())
 }
 
 async fn insert_reliability_event_value(
