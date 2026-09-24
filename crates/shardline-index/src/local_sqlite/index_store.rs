@@ -1259,7 +1259,13 @@ impl LifecycleStore for LocalIndexStore {
         if let Some(state) = current {
             let snapshot = snapshot_from_state(&state)?;
             let evidence = super::helpers::load_provider_evidence(&transaction, &snapshot)?;
-            if !evidence.events().is_empty() {
+            if evidence.events().is_empty() {
+                let baseline = ProviderEvidenceLog::baseline(snapshot.clone())?;
+                verify_provider_lifecycle_events(baseline.events(), &snapshot)?;
+                for event in baseline.events() {
+                    super::helpers::persist_provider_evidence(&transaction, event)?;
+                }
+            } else {
                 verify_provider_lifecycle_events(evidence.events(), &snapshot)?;
             }
         }
