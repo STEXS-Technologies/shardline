@@ -121,9 +121,9 @@ pub(crate) mod xet_adapter;
 pub use admission::{ExecutionPools, WeightedAdmission};
 pub use app::ProtocolMetrics;
 pub use app::{
-    AppState, MAX_PROVIDER_NAME_BYTES, MAX_PROVIDER_SUBJECT_BYTES,
+    AppState, LfsPatchEvidenceRepairInput, MAX_PROVIDER_NAME_BYTES, MAX_PROVIDER_SUBJECT_BYTES,
     MAX_PROVIDER_TOKEN_REQUEST_BODY_BYTES, MAX_PROVIDER_WEBHOOK_BODY_BYTES,
-    acquire_chunk_transfer_permit, full_byte_stream_response,
+    acquire_chunk_transfer_permit, full_byte_stream_response, repair_lfs_patch_evidence,
 };
 pub use backend::{
     BenchmarkBackend, ServerBackend, clear_repository_reference_probe_filter,

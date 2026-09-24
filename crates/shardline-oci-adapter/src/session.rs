@@ -437,6 +437,7 @@ pub async fn repair_upload_session_evidence(
         evidence: SessionEvidenceLog::default(),
         snapshot_evidence: SnapshotEvidenceLog::default(),
         journal_head: None,
+        journal_bytes: None,
         journal_evidence_sequence: None,
         journal_snapshot_sequence: None,
         merkle_evidence_sequence: None,

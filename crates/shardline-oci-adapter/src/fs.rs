@@ -37,6 +37,8 @@ pub(crate) struct PersistedOciUploadSession {
     #[serde(default)]
     pub(crate) journal_head: Option<u64>,
     #[serde(default)]
+    pub(crate) journal_bytes: Option<u64>,
+    #[serde(default)]
     pub(crate) journal_evidence_sequence: Option<u64>,
     #[serde(default)]
     pub(crate) journal_snapshot_sequence: Option<u64>,
@@ -216,6 +218,7 @@ pub(crate) async fn persist_upload_session_with_evidence(
         Err(error) => return Err(OciAdapterError::Io(error)),
     };
     let mut journal_head = existing.as_ref().and_then(|value| value.journal_head);
+    let mut journal_bytes = existing.as_ref().and_then(|value| value.journal_bytes);
     let mut last_evidence_sequence = existing
         .as_ref()
         .and_then(|value| value.journal_evidence_sequence);
@@ -357,9 +360,11 @@ pub(crate) async fn persist_upload_session_with_evidence(
         || !merkle_commits.is_empty()
         || !snapshot_merkle_commits.is_empty()
     {
-        append_evidence_journal(
+        let appended_bytes = append_evidence_journal(
             root,
             session_id,
+            journal_head.unwrap_or(0),
+            journal_bytes,
             &PersistedMerkleJournalRecord {
                 evidence: evidence_to_append,
                 merkle_commits: merkle_commits.clone(),
@@ -368,6 +373,7 @@ pub(crate) async fn persist_upload_session_with_evidence(
             },
         )
         .await?;
+        journal_bytes = Some(appended_bytes);
         journal_head = Some(
             journal_head
                 .unwrap_or(0)
@@ -402,6 +408,7 @@ pub(crate) async fn persist_upload_session_with_evidence(
         evidence: SessionEvidenceLog::default(),
         snapshot_evidence: SnapshotEvidenceLog::default(),
         journal_head,
+        journal_bytes,
         journal_evidence_sequence: last_evidence_sequence,
         journal_snapshot_sequence: last_snapshot_sequence,
         merkle_evidence_sequence: last_merkle_evidence_sequence,
@@ -571,43 +578,171 @@ pub(crate) async fn read_evidence_journal(
 async fn append_evidence_journal(
     root: &Path,
     session_id: &str,
+    committed_head: u64,
+    committed_bytes: Option<u64>,
     record: &PersistedMerkleJournalRecord,
-) -> Result<(), OciAdapterError> {
+) -> Result<u64, OciAdapterError> {
     let path = upload_evidence_journal_path(root, session_id);
     let mut bytes = serde_json::to_vec(record)?;
     bytes.push(b'\n');
     let root = root.to_path_buf();
-    spawn_blocking(move || append_journal_file(&root, &path, &bytes))
-        .await
-        .map_err(OciAdapterError::BlockingTask)??;
-    Ok(())
+    spawn_blocking(move || {
+        append_journal_file(&root, &path, committed_head, committed_bytes, &bytes)
+    })
+    .await
+    .map_err(OciAdapterError::BlockingTask)?
+    .map_err(OciAdapterError::Io)
 }
 
 #[cfg(unix)]
-fn append_journal_file(root: &Path, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+fn append_journal_file(
+    root: &Path,
+    path: &Path,
+    committed_head: u64,
+    committed_bytes: Option<u64>,
+    bytes: &[u8],
+) -> std::io::Result<u64> {
     let anchored = open_anchored_target(
         root,
         path,
         AnchoredPathOptions::new(Some(0o750), Some(0o600)),
         || std::io::Error::new(std::io::ErrorKind::InvalidInput, "path escapes root"),
     )?;
+    let old_len = prepare_journal_append(&anchored.final_path(), committed_head, committed_bytes)?;
     let mut file = OpenOptions::new()
         .create(true)
         .append(true)
         .open(anchored.final_path())?;
     file.write_all(bytes)?;
     file.sync_all()?;
-    ensure_parent_path_matches_anchor(&anchored, "journal parent changed during append")
+    ensure_parent_path_matches_anchor(&anchored, "journal parent changed during append")?;
+    old_len
+        .checked_add(u64::try_from(bytes.len()).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "journal byte length overflow",
+            )
+        })?)
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "journal byte length overflow",
+            )
+        })
 }
 
 #[cfg(not(unix))]
-fn append_journal_file(_root: &Path, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+fn append_journal_file(
+    _root: &Path,
+    path: &Path,
+    committed_head: u64,
+    committed_bytes: Option<u64>,
+    bytes: &[u8],
+) -> std::io::Result<u64> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
+    let old_len = prepare_journal_append(path, committed_head, committed_bytes)?;
     let mut file = OpenOptions::new().create(true).append(true).open(path)?;
     file.write_all(bytes)?;
-    file.sync_all()
+    file.sync_all()?;
+    old_len
+        .checked_add(u64::try_from(bytes.len()).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "journal byte length overflow",
+            )
+        })?)
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "journal byte length overflow",
+            )
+        })
+}
+
+fn prepare_journal_append(
+    path: &Path,
+    committed_head: u64,
+    expected_bytes: Option<u64>,
+) -> std::io::Result<u64> {
+    if let Some(expected_bytes) = expected_bytes {
+        let actual_bytes = match std::fs::metadata(path) {
+            Ok(metadata) => metadata.len(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if committed_head == 0 && expected_bytes == 0 {
+                    return Ok(0);
+                }
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "journal is missing its committed log",
+                ));
+            }
+            Err(error) => return Err(error),
+        };
+        if actual_bytes < expected_bytes {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "journal is shorter than its committed byte length",
+            ));
+        }
+        if actual_bytes > expected_bytes {
+            let file = OpenOptions::new().write(true).open(path)?;
+            file.set_len(expected_bytes)?;
+            file.sync_all()?;
+        }
+        return Ok(expected_bytes);
+    }
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if committed_head == 0 {
+                return Ok(0);
+            }
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "journal is missing its committed log",
+            ));
+        }
+        Err(error) => return Err(error),
+    };
+    let mut records = 0_u64;
+    let mut committed_bytes = 0_usize;
+    for line in bytes.split_inclusive(|byte| *byte == b'\n') {
+        if !line.is_empty() && line.iter().any(|byte| !byte.is_ascii_whitespace()) {
+            records = records.checked_add(1).ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "journal record count overflow",
+                )
+            })?;
+            if records <= committed_head {
+                committed_bytes = committed_bytes.checked_add(line.len()).ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "journal byte count overflow",
+                    )
+                })?;
+            }
+        }
+    }
+    if records < committed_head {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "journal head exceeds its log",
+        ));
+    }
+    if records > committed_head {
+        let mut file = OpenOptions::new().write(true).truncate(true).open(path)?;
+        file.write_all(&bytes[..committed_bytes])?;
+        file.sync_all()?;
+    }
+    u64::try_from(committed_bytes).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "journal byte length overflow",
+        )
+    })
 }
 
 // ── Error mapping ────────────────────────────────────────────────────────────

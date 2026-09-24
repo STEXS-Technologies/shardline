@@ -1,12 +1,14 @@
 use std::fs;
 use std::io::{Error, ErrorKind, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use serde::{Serialize, de::DeserializeOwned};
 use shardline_reliability::{
     DigestSnapshot, ResumableLifecycleState, ResumableSessionSnapshotDomain, SessionEvidenceLog,
-    SnapshotEvidenceLog, append_or_baseline_snapshot_evidence, canonical_state_digest,
-    resumable_session_snapshot_identity, verify_and_append_session_transition,
+    SnapshotEvidenceLog, append_or_baseline_snapshot_evidence,
+    build_persisted_merkle_chain_with_previous, build_typed_merkle_chain, canonical_state_digest,
+    persisted_event_sequence, resumable_session_snapshot_identity,
+    verify_and_append_session_transition, verify_persisted_merkle_chain, verify_typed_merkle_chain,
 };
 
 use crate::ServerError;
@@ -17,11 +19,20 @@ const EVIDENCE_SUFFIX: &str = ".evidence";
 const SNAPSHOT_SUFFIX: &str = ".snapshot";
 const EVIDENCE_JOURNAL_SCHEMA: &str = "shardline.lfs.evidence-journal.v1";
 const SNAPSHOT_JOURNAL_SCHEMA: &str = "shardline.lfs.snapshot-journal.v1";
+const MERKLE_SUFFIX: &str = ".merkle";
+const MERKLE_JOURNAL_SCHEMA: &str = "shardline.lfs.merkle-journal.v1";
+
+struct LfsMerkleAppend {
+    previous_head: u64,
+    record: shardline_reliability::PersistedMerkleJournalRecord,
+}
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
 struct JournalManifest {
     schema: String,
     head: u64,
+    #[serde(default)]
+    bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -34,6 +45,22 @@ struct LfsPatchMaterializedStateV1 {
     ranges: Vec<(u64, u64)>,
     staging_length: u64,
     last_touched_unix_seconds: u64,
+}
+
+/// Operator-supplied identity and materialized-state facts used to rebuild a
+/// corrupted LFS patch reliability envelope. The data-plane files remain the
+/// authority; this value only binds the repaired evidence to the operator's
+/// verified identity and reconstruction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct LfsPatchEvidenceRepairInput {
+    pub oid: String,
+    pub scope_namespace: String,
+    pub session_id: String,
+    pub target_key: String,
+    pub total_bytes: u64,
+    pub ranges: Vec<(u64, u64)>,
+    pub staging_length: u64,
+    pub last_touched_unix_seconds: u64,
 }
 
 pub(super) struct LfsPatchSnapshotInput<'input> {
@@ -63,6 +90,14 @@ fn snapshot_journal_path(dir: &Path, oid: &str) -> PathBuf {
     dir.join(format!("{oid}{SNAPSHOT_SUFFIX}.log"))
 }
 
+fn merkle_path(dir: &Path, oid: &str) -> PathBuf {
+    dir.join(format!("{oid}{MERKLE_SUFFIX}"))
+}
+
+fn merkle_journal_path(dir: &Path, oid: &str) -> PathBuf {
+    dir.join(format!("{oid}{MERKLE_SUFFIX}.log"))
+}
+
 fn journal_head(path: &Path, schema: &str) -> Result<Option<u64>, ServerError> {
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
@@ -77,6 +112,195 @@ fn journal_head(path: &Path, schema: &str) -> Result<Option<u64>, ServerError> {
         )));
     }
     Ok(Some(manifest.head))
+}
+
+fn load_merkle_journal(
+    dir: &Path,
+    oid: &str,
+) -> Result<Option<Vec<shardline_reliability::PersistedMerkleJournalRecord>>, ServerError> {
+    let Some(head) = journal_head(&merkle_path(dir, oid), MERKLE_JOURNAL_SCHEMA)? else {
+        return Ok(None);
+    };
+    let bytes = fs::read(merkle_journal_path(dir, oid))?;
+    let mut records = bytes
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(serde_json::from_slice)
+        .collect::<Result<Vec<shardline_reliability::PersistedMerkleJournalRecord>, _>>()
+        .map_err(invalid_evidence)?;
+    let count =
+        usize::try_from(head).map_err(|_| invalid_evidence("LFS Merkle journal head overflow"))?;
+    if count > records.len() {
+        return Err(invalid_evidence("LFS Merkle journal head exceeds its log"));
+    }
+    records.truncate(count);
+    Ok(Some(records))
+}
+
+fn build_lfs_merkle_append(
+    dir: &Path,
+    oid: &str,
+    evidence_events: &[shardline_reliability::StateTransitionEvent],
+    snapshot_events: &[shardline_reliability::SnapshotEvidenceEvent<DigestSnapshot>],
+) -> Result<Option<LfsMerkleAppend>, ServerError> {
+    let records = load_merkle_journal(dir, oid)?.unwrap_or_default();
+    let existing_evidence = records
+        .iter()
+        .flat_map(|record| record.evidence.iter().cloned())
+        .collect::<Vec<_>>();
+    let existing_evidence_commits = records
+        .iter()
+        .flat_map(|record| record.merkle_commits.iter().cloned())
+        .collect::<Vec<_>>();
+    let existing_snapshots = records
+        .iter()
+        .flat_map(|record| record.snapshot_evidence.iter().cloned())
+        .collect::<Vec<_>>();
+    let existing_snapshot_commits = records
+        .iter()
+        .flat_map(|record| record.snapshot_merkle_commits.iter().cloned())
+        .collect::<Vec<_>>();
+    if !existing_evidence.is_empty() || !existing_evidence_commits.is_empty() {
+        verify_persisted_merkle_chain(
+            shardline_reliability::OperationKind::ResumableSession,
+            &existing_evidence,
+            &existing_evidence_commits,
+        )
+        .map_err(invalid_evidence)?;
+    }
+    if !existing_snapshots.is_empty() || !existing_snapshot_commits.is_empty() {
+        verify_typed_merkle_chain::<shardline_reliability::SnapshotEvidenceEvent<DigestSnapshot>>(
+            &existing_snapshots,
+            &existing_snapshot_commits,
+        )
+        .map_err(invalid_evidence)?;
+    }
+    let previous_evidence = existing_evidence_commits.last().cloned();
+    let previous_snapshot = existing_snapshot_commits.last().cloned();
+    let last_evidence_sequence = existing_evidence
+        .last()
+        .map(|event| {
+            persisted_event_sequence(
+                shardline_reliability::OperationKind::ResumableSession,
+                event.clone(),
+            )
+        })
+        .transpose()
+        .map_err(invalid_evidence)?;
+    let last_snapshot_sequence = existing_snapshots
+        .last()
+        .map(|event| {
+            serde_json::from_value::<shardline_reliability::SnapshotEvidenceEvent<DigestSnapshot>>(
+                event.clone(),
+            )
+            .map(|value| value.sequence)
+        })
+        .transpose()
+        .map_err(invalid_evidence)?;
+    let new_evidence = evidence_events
+        .iter()
+        .map(serde_json::to_value)
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .filter(|event| {
+            last_evidence_sequence.is_none_or(|sequence| {
+                persisted_event_sequence(
+                    shardline_reliability::OperationKind::ResumableSession,
+                    event.clone(),
+                )
+                .is_ok_and(|value| value > sequence)
+            })
+        })
+        .collect::<Vec<_>>();
+    let new_snapshots = snapshot_events
+        .iter()
+        .map(serde_json::to_value)
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .filter(|event| {
+            last_snapshot_sequence.is_none_or(|sequence| {
+                serde_json::from_value::<
+                    shardline_reliability::SnapshotEvidenceEvent<DigestSnapshot>,
+                >(event.clone())
+                .is_ok_and(|value| value.sequence > sequence)
+            })
+        })
+        .collect::<Vec<_>>();
+    let merkle_commits = build_persisted_merkle_chain_with_previous(
+        shardline_reliability::OperationKind::ResumableSession,
+        &new_evidence,
+        previous_evidence.as_ref(),
+    )
+    .map_err(invalid_evidence)?;
+    let snapshot_merkle_commits = build_typed_merkle_chain::<
+        shardline_reliability::SnapshotEvidenceEvent<DigestSnapshot>,
+    >(&new_snapshots, previous_snapshot.as_ref())
+    .map_err(invalid_evidence)?;
+    if merkle_commits.is_empty() && snapshot_merkle_commits.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(LfsMerkleAppend {
+        previous_head: u64::try_from(records.len()).map_err(invalid_evidence)?,
+        record: shardline_reliability::PersistedMerkleJournalRecord {
+            evidence: new_evidence,
+            merkle_commits,
+            snapshot_evidence: new_snapshots,
+            snapshot_merkle_commits,
+        },
+    }))
+}
+
+fn verify_lfs_merkle_journal(
+    dir: &Path,
+    oid: &str,
+    evidence: &SessionEvidenceLog,
+    snapshots: &SnapshotEvidenceLog<DigestSnapshot>,
+) -> Result<(), ServerError> {
+    let Some(records) = load_merkle_journal(dir, oid)? else {
+        return Ok(());
+    };
+    let merkle_evidence = records
+        .iter()
+        .flat_map(|record| record.evidence.iter().cloned())
+        .collect::<Vec<_>>();
+    let merkle_commits = records
+        .iter()
+        .flat_map(|record| record.merkle_commits.iter().cloned())
+        .collect::<Vec<_>>();
+    let merkle_snapshots = records
+        .iter()
+        .flat_map(|record| record.snapshot_evidence.iter().cloned())
+        .collect::<Vec<_>>();
+    let merkle_snapshot_commits = records
+        .iter()
+        .flat_map(|record| record.snapshot_merkle_commits.iter().cloned())
+        .collect::<Vec<_>>();
+    let evidence_json = evidence
+        .events()
+        .iter()
+        .map(serde_json::to_value)
+        .collect::<Result<Vec<_>, _>>()?;
+    let snapshot_json = snapshots
+        .events()
+        .iter()
+        .map(serde_json::to_value)
+        .collect::<Result<Vec<_>, _>>()?;
+    if merkle_evidence != evidence_json || merkle_snapshots != snapshot_json {
+        return Err(invalid_evidence(
+            "LFS Merkle journal does not cover evidence journal",
+        ));
+    }
+    verify_persisted_merkle_chain(
+        shardline_reliability::OperationKind::ResumableSession,
+        &merkle_evidence,
+        &merkle_commits,
+    )
+    .map_err(invalid_evidence)?;
+    verify_typed_merkle_chain::<shardline_reliability::SnapshotEvidenceEvent<DigestSnapshot>>(
+        &merkle_snapshots,
+        &merkle_snapshot_commits,
+    )
+    .map_err(invalid_evidence)
 }
 
 fn read_journal<T: DeserializeOwned>(
@@ -112,17 +336,107 @@ fn read_journal<T: DeserializeOwned>(
     Ok(Some(events))
 }
 
+fn prepare_journal_append(
+    manifest_path: &Path,
+    journal_path: &Path,
+    schema: &str,
+) -> Result<(), ServerError> {
+    let Some(head) = journal_head(manifest_path, schema)? else {
+        if journal_path.exists() && fs::metadata(journal_path)?.len() != 0 {
+            return Err(invalid_evidence(
+                "LFS journal is missing its committed head",
+            ));
+        }
+        return Ok(());
+    };
+    let manifest_bytes = fs::read(manifest_path).map_err(ServerError::from)?;
+    let manifest: JournalManifest =
+        serde_json::from_slice(&manifest_bytes).map_err(invalid_evidence)?;
+    let bytes = match fs::read(journal_path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            return Err(invalid_evidence("LFS journal is missing its committed log"));
+        }
+        Err(error) => return Err(error.into()),
+    };
+    if let Some(expected_bytes) = manifest.bytes {
+        let actual_bytes = u64::try_from(bytes.len())
+            .map_err(|_| invalid_evidence("LFS journal byte length overflow"))?;
+        if actual_bytes < expected_bytes {
+            return Err(invalid_evidence(
+                "LFS journal is shorter than its committed byte length",
+            ));
+        }
+        if actual_bytes > expected_bytes {
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .open(journal_path)?;
+            file.write_all(
+                &bytes[..usize::try_from(expected_bytes)
+                    .map_err(|_| invalid_evidence("LFS journal byte length overflow"))?],
+            )?;
+            file.sync_all()?;
+        }
+        return Ok(());
+    }
+    let mut records = 0_u64;
+    let mut committed_bytes = 0_usize;
+    for line in bytes.split_inclusive(|byte| *byte == b'\n') {
+        if !line.is_empty() && line.iter().any(|byte| !byte.is_ascii_whitespace()) {
+            let units = if schema == MERKLE_JOURNAL_SCHEMA {
+                1
+            } else {
+                let value: serde_json::Value =
+                    serde_json::from_slice(line).map_err(invalid_evidence)?;
+                let array = value
+                    .as_array()
+                    .ok_or_else(|| invalid_evidence("LFS journal record is not an array"))?;
+                u64::try_from(array.len())
+                    .map_err(|_| invalid_evidence("LFS journal event count overflow"))?
+            };
+            records = records
+                .checked_add(units)
+                .ok_or_else(|| invalid_evidence("LFS journal record count overflow"))?;
+            if records <= head {
+                committed_bytes = committed_bytes
+                    .checked_add(line.len())
+                    .ok_or_else(|| invalid_evidence("LFS journal byte count overflow"))?;
+            } else if records - units < head {
+                return Err(invalid_evidence(
+                    "LFS journal head splits a persisted record",
+                ));
+            }
+        }
+    }
+    if records < head {
+        return Err(invalid_evidence("LFS journal head exceeds its log"));
+    }
+    if records > head {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(journal_path)?;
+        file.write_all(&bytes[..committed_bytes])?;
+        file.sync_all()?;
+    }
+    Ok(())
+}
+
 fn append_journal<T: Serialize>(
     dir: &Path,
+    oid: &str,
     manifest_path: &Path,
     journal_path: &Path,
     schema: &str,
     previous_head: u64,
     events: &[T],
+    merkle: Option<&LfsMerkleAppend>,
 ) -> Result<(), ServerError> {
     if events.is_empty() {
         return Ok(());
     }
+    prepare_journal_append(manifest_path, journal_path, schema)?;
     let mut bytes = serde_json::to_vec(events).map_err(invalid_evidence)?;
     bytes.push(b'\n');
     let mut file = fs::OpenOptions::new()
@@ -131,6 +445,37 @@ fn append_journal<T: Serialize>(
         .open(journal_path)?;
     file.write_all(&bytes)?;
     file.sync_all()?;
+    let journal_bytes = u64::try_from(fs::metadata(journal_path)?.len())
+        .map_err(|_| invalid_evidence("LFS journal byte length overflow"))?;
+    if let Some(merkle) = merkle {
+        prepare_journal_append(
+            &merkle_path(dir, oid),
+            &merkle_journal_path(dir, oid),
+            MERKLE_JOURNAL_SCHEMA,
+        )?;
+        let mut merkle_bytes = serde_json::to_vec(&merkle.record).map_err(invalid_evidence)?;
+        merkle_bytes.push(b'\n');
+        let mut merkle_file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(merkle_journal_path(dir, oid))?;
+        merkle_file.write_all(&merkle_bytes)?;
+        merkle_file.sync_all()?;
+        let merkle_manifest = JournalManifest {
+            schema: MERKLE_JOURNAL_SCHEMA.to_owned(),
+            head: merkle
+                .previous_head
+                .checked_add(1)
+                .ok_or_else(|| invalid_evidence("LFS Merkle journal head overflow"))?,
+            bytes: Some(
+                u64::try_from(fs::metadata(merkle_journal_path(dir, oid))?.len())
+                    .map_err(|_| invalid_evidence("LFS Merkle journal byte length overflow"))?,
+            ),
+        };
+        let merkle_manifest_bytes =
+            serde_json::to_vec(&merkle_manifest).map_err(invalid_evidence)?;
+        write_sidecar_atomically(dir, &merkle_path(dir, oid), &merkle_manifest_bytes)?;
+    }
     let manifest = JournalManifest {
         schema: schema.to_owned(),
         head: previous_head
@@ -139,6 +484,7 @@ fn append_journal<T: Serialize>(
                     .map_err(|_| invalid_evidence("LFS evidence journal event count overflow"))?,
             )
             .ok_or_else(|| invalid_evidence("LFS evidence journal head overflow"))?,
+        bytes: Some(journal_bytes),
     };
     let manifest_bytes = serde_json::to_vec(&manifest).map_err(invalid_evidence)?;
     write_sidecar_atomically(dir, manifest_path, &manifest_bytes)
@@ -182,13 +528,16 @@ pub(super) fn record_snapshot(
     } else {
         log.events()
     };
+    let merkle = build_lfs_merkle_append(dir, input.oid, &[], log.events())?;
     append_journal(
         dir,
+        input.oid,
         &path,
         &snapshot_journal_path(dir, input.oid),
         SNAPSHOT_JOURNAL_SCHEMA,
         head.unwrap_or(0),
         events,
+        merkle.as_ref(),
     )
 }
 
@@ -257,6 +606,12 @@ pub(super) fn load(
     };
     log.verify_for(scope_namespace, session_id, target_key)
         .map_err(invalid_evidence)?;
+    verify_lfs_merkle_journal(
+        dir,
+        oid,
+        &log,
+        &load_snapshot_log(dir, oid)?.unwrap_or_default(),
+    )?;
     Ok(log)
 }
 
@@ -287,14 +642,160 @@ pub(super) fn record(
     } else {
         log.events()
     };
+    let merkle = build_lfs_merkle_append(dir, oid, log.events(), &[])?;
     append_journal(
         dir,
+        oid,
         &path,
         &evidence_journal_path(dir, oid),
         EVIDENCE_JOURNAL_SCHEMA,
         head.unwrap_or(0),
         events,
+        merkle.as_ref(),
     )
+}
+
+/// Explicitly rebuilds LFS reliability sidecars from operator-verified
+/// materialized state. This is deliberately not called by any read or repair
+/// sweep: replacing a broken evidence chain is a privileged recovery action.
+pub fn repair_lfs_patch_evidence(
+    dir: &Path,
+    input: &LfsPatchEvidenceRepairInput,
+) -> Result<(), ServerError> {
+    let oid_path = Path::new(&input.oid);
+    if input.oid.is_empty()
+        || oid_path.components().count() != 1
+        || !matches!(oid_path.components().next(), Some(Component::Normal(_)))
+    {
+        return Err(invalid_evidence("invalid LFS patch object id"));
+    }
+    let staging_path = dir.join(&input.oid);
+    let staging_length = fs::metadata(&staging_path)
+        .map_err(|error| {
+            if error.kind() == ErrorKind::NotFound {
+                invalid_evidence("LFS patch staging file is missing")
+            } else {
+                ServerError::from(error)
+            }
+        })?
+        .len();
+    if staging_length != input.staging_length {
+        return Err(invalid_evidence(
+            "operator staging length does not match materialized state",
+        ));
+    }
+    let authoritative_ranges = read_repair_ranges(dir, &input.oid, input.total_bytes)?;
+    if authoritative_ranges != input.ranges {
+        return Err(invalid_evidence(
+            "operator LFS patch ranges do not match the materialized range state",
+        ));
+    }
+    let metadata_bytes = fs::read(lfs_meta_path(dir, &input.oid))?;
+    let authoritative_touched = std::str::from_utf8(&metadata_bytes)
+        .map_err(invalid_evidence)?
+        .trim()
+        .parse::<u64>()
+        .map_err(invalid_evidence)?;
+    if authoritative_touched != input.last_touched_unix_seconds {
+        return Err(invalid_evidence(
+            "operator LFS patch timestamp does not match materialized metadata",
+        ));
+    }
+    let mut previous_end = 0_u64;
+    for &(start, end) in &input.ranges {
+        if start >= end || end > input.total_bytes || start < previous_end {
+            return Err(invalid_evidence("operator LFS patch ranges are invalid"));
+        }
+        previous_end = end;
+    }
+    let snapshot = materialized_snapshot(&LfsPatchSnapshotInput {
+        oid: &input.oid,
+        scope_namespace: &input.scope_namespace,
+        session_id: &input.session_id,
+        target_key: &input.target_key,
+        total_bytes: input.total_bytes,
+        ranges: &input.ranges,
+        staging_length: input.staging_length,
+        last_touched_unix_seconds: input.last_touched_unix_seconds,
+    })?;
+    remove(dir, &input.oid);
+    let lifecycle = SessionEvidenceLog::for_legacy_session(
+        &input.scope_namespace,
+        &input.session_id,
+        &input.target_key,
+    )
+    .map_err(invalid_evidence)?;
+    let lifecycle_merkle = build_lfs_merkle_append(dir, &input.oid, lifecycle.events(), &[])?;
+    append_journal(
+        dir,
+        &input.oid,
+        &evidence_path(dir, &input.oid),
+        &evidence_journal_path(dir, &input.oid),
+        EVIDENCE_JOURNAL_SCHEMA,
+        0,
+        lifecycle.events(),
+        lifecycle_merkle.as_ref(),
+    )?;
+    let snapshot_log = SnapshotEvidenceLog::baseline(snapshot).map_err(invalid_evidence)?;
+    let snapshot_merkle = build_lfs_merkle_append(dir, &input.oid, &[], snapshot_log.events())?;
+    append_journal(
+        dir,
+        &input.oid,
+        &snapshot_path(dir, &input.oid),
+        &snapshot_journal_path(dir, &input.oid),
+        SNAPSHOT_JOURNAL_SCHEMA,
+        0,
+        snapshot_log.events(),
+        snapshot_merkle.as_ref(),
+    )
+}
+
+fn lfs_meta_path(dir: &Path, oid: &str) -> PathBuf {
+    dir.join(format!("{oid}.meta"))
+}
+
+fn read_repair_ranges(
+    dir: &Path,
+    oid: &str,
+    total_bytes: u64,
+) -> Result<Vec<(u64, u64)>, ServerError> {
+    let bytes = fs::read_to_string(dir.join(format!("{oid}.ranges")))?;
+    let mut lines = bytes.lines();
+    let stored_total = lines
+        .next()
+        .ok_or_else(|| invalid_evidence("LFS patch range metadata is empty"))?
+        .parse::<u64>()
+        .map_err(invalid_evidence)?;
+    if stored_total != total_bytes {
+        return Err(invalid_evidence(
+            "LFS patch range total does not match repair state",
+        ));
+    }
+    let mut ranges = Vec::new();
+    for line in lines {
+        let line = line.strip_prefix('+').unwrap_or(line);
+        let (start, end) = line
+            .split_once(' ')
+            .ok_or_else(|| invalid_evidence("invalid LFS patch range entry"))?;
+        let start = start.parse::<u64>().map_err(invalid_evidence)?;
+        let end = end.parse::<u64>().map_err(invalid_evidence)?;
+        if start >= end || end > total_bytes {
+            return Err(invalid_evidence("invalid LFS patch range bounds"));
+        }
+        ranges.push((start, end));
+    }
+    ranges.sort_unstable();
+    let mut merged: Vec<(u64, u64)> = Vec::with_capacity(ranges.len());
+    for (start, end) in ranges {
+        if let Some(last) = merged.last_mut()
+            && start <= last.1
+        {
+            last.1 = last.1.max(end);
+        } else {
+            merged.push((start, end));
+        }
+    }
+    Ok(merged)
 }
 
 /// Commits one evidence sidecar atomically and removes the staging file on
@@ -403,23 +904,24 @@ pub(super) fn complete(
 }
 
 pub(super) fn verify_integrity(dir: &Path, oid: &str) -> Result<(), ServerError> {
-    if let Some(events) = read_journal::<shardline_reliability::StateTransitionEvent>(
+    let evidence = if let Some(events) = read_journal::<shardline_reliability::StateTransitionEvent>(
         &evidence_path(dir, oid),
         &evidence_journal_path(dir, oid),
         EVIDENCE_JOURNAL_SCHEMA,
     )? {
-        SessionEvidenceLog::from_events(events).map_err(invalid_evidence)?;
+        SessionEvidenceLog::from_events(events).map_err(invalid_evidence)?
     } else {
         match fs::read(evidence_path(dir, oid)) {
             Ok(bytes) => {
                 let events = serde_json::from_slice(&bytes).map_err(invalid_evidence)?;
-                SessionEvidenceLog::from_events(events).map_err(invalid_evidence)?;
+                SessionEvidenceLog::from_events(events).map_err(invalid_evidence)?
             }
-            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => SessionEvidenceLog::default(),
             Err(error) => return Err(error.into()),
         }
-    }
-    let _ = load_snapshot_log(dir, oid)?;
+    };
+    let snapshots = load_snapshot_log(dir, oid)?.unwrap_or_default();
+    verify_lfs_merkle_journal(dir, oid, &evidence, &snapshots)?;
     Ok(())
 }
 
@@ -428,6 +930,8 @@ pub(super) fn remove(dir: &Path, oid: &str) {
     drop(fs::remove_file(evidence_journal_path(dir, oid)));
     drop(fs::remove_file(snapshot_path(dir, oid)));
     drop(fs::remove_file(snapshot_journal_path(dir, oid)));
+    drop(fs::remove_file(merkle_path(dir, oid)));
+    drop(fs::remove_file(merkle_journal_path(dir, oid)));
 }
 
 fn invalid_evidence(error: impl std::fmt::Display) -> ServerError {
@@ -484,6 +988,49 @@ mod tests {
     }
 
     #[test]
+    fn explicit_repair_rebuilds_corrupt_evidence_from_materialized_state() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        fs::write(directory.path().join(OID), b"state").expect("staging file");
+        fs::write(directory.path().join("a.ranges"), b"5\n0 5\n").expect("ranges");
+        fs::write(directory.path().join("a.meta"), b"100").expect("metadata");
+        record(
+            directory.path(),
+            OID,
+            SCOPE,
+            SESSION,
+            TARGET,
+            ResumableLifecycleState::Active,
+            ResumableLifecycleState::Active,
+        )
+        .expect("initial evidence");
+        fs::write(merkle_path(directory.path(), OID), b"corrupt").expect("tamper merkle");
+        assert!(verify_integrity(directory.path(), OID).is_err());
+
+        repair_lfs_patch_evidence(
+            directory.path(),
+            &LfsPatchEvidenceRepairInput {
+                oid: OID.to_owned(),
+                scope_namespace: SCOPE.to_owned(),
+                session_id: SESSION.to_owned(),
+                target_key: TARGET.to_owned(),
+                total_bytes: 5,
+                ranges: vec![(0, 5)],
+                staging_length: 5,
+                last_touched_unix_seconds: 100,
+            },
+        )
+        .expect("explicit repair");
+        verify_integrity(directory.path(), OID).expect("repaired evidence");
+        assert_eq!(
+            load(directory.path(), OID, SCOPE, SESSION, TARGET)
+                .expect("repaired lifecycle")
+                .events()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
     fn uncommitted_lfs_journal_tail_is_ignored() {
         let directory = tempfile::tempdir().expect("tempdir");
         record(
@@ -506,6 +1053,19 @@ mod tests {
             .expect("append uncommitted tail");
         let loaded = load(directory.path(), OID, SCOPE, SESSION, TARGET).expect("load evidence");
         assert_eq!(loaded.events().len(), 2);
+        record(
+            directory.path(),
+            OID,
+            SCOPE,
+            SESSION,
+            TARGET,
+            ResumableLifecycleState::Active,
+            ResumableLifecycleState::Active,
+        )
+        .expect("append after uncommitted tail");
+        let advanced =
+            load(directory.path(), OID, SCOPE, SESSION, TARGET).expect("load advanced evidence");
+        assert_eq!(advanced.events().len(), 3);
     }
 
     #[test]
@@ -577,6 +1137,28 @@ mod tests {
         value[0]["state_digest"] = serde_json::json!("tampered");
         fs::write(&journal, serde_json::to_vec(&value).expect("tampered json")).expect("rewrite");
         assert!(verify_integrity(directory.path(), OID).is_err());
+    }
+
+    #[test]
+    fn tampered_merkle_commit_is_rejected_before_a_transition() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        record(
+            directory.path(),
+            OID,
+            SCOPE,
+            SESSION,
+            TARGET,
+            ResumableLifecycleState::Active,
+            ResumableLifecycleState::Active,
+        )
+        .expect("write evidence");
+        let path = merkle_journal_path(directory.path(), OID);
+        let tampered = fs::read_to_string(&path)
+            .expect("merkle journal")
+            .replace("event_merkle_root", "tampered_merkle_root");
+        fs::write(&path, tampered).expect("rewrite merkle journal");
+
+        assert!(load(directory.path(), OID, SCOPE, SESSION, TARGET).is_err());
     }
 
     #[test]

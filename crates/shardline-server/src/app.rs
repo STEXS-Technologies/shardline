@@ -7,6 +7,7 @@ mod provider_routes;
 mod reconstruction_helpers;
 mod reconstruction_routes;
 
+pub use protocol_routes::{LfsPatchEvidenceRepairInput, repair_lfs_patch_evidence};
 pub use provider::{
     extract_provider_subject, latest_lifecycle_signal_at, reconciled_provider_repository_state,
     validate_provider_name_path,

@@ -195,6 +195,10 @@ impl TryFrom<CliDefinition> for CliCommand {
                     root: options.root,
                     webhook_retention_seconds: options.webhook_retention_seconds,
                 }),
+                Some(RepairSubcommand::LfsEvidence(options)) => Ok(Self::RepairLfsEvidence {
+                    root: options.root,
+                    state_file: options.state_file,
+                }),
                 None => Ok(Self::Repair {
                     root: args.options.root,
                     webhook_retention_seconds: args.options.webhook_retention_seconds,

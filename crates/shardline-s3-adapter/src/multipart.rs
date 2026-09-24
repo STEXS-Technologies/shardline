@@ -228,6 +228,8 @@ struct PersistedMultipartUploadSession {
     /// only after the append-only record is fsynced.
     #[serde(default)]
     journal_head: Option<u64>,
+    #[serde(default)]
+    journal_bytes: Option<u64>,
     /// Last committed lifecycle sequence, allowing mutations to append
     /// without rereading the growing journal.
     #[serde(default)]
@@ -239,6 +241,8 @@ struct PersistedMultipartUploadSession {
     /// Number of committed Merkle journal records.
     #[serde(default)]
     merkle_head: Option<u64>,
+    #[serde(default)]
+    merkle_bytes: Option<u64>,
     /// Last committed Merkle sequence and body for each evidence stream.
     #[serde(default)]
     merkle_evidence_sequence: Option<u64>,
@@ -1116,9 +1120,11 @@ pub async fn repair_session_evidence(root: &Path, upload_id: &str) -> Result<(),
         evidence: SessionEvidenceLog::default(),
         snapshot_evidence: SnapshotEvidenceLog::default(),
         journal_head: persisted.journal_head,
+        journal_bytes: persisted.journal_bytes,
         journal_evidence_sequence: persisted.journal_evidence_sequence,
         journal_snapshot_sequence: persisted.journal_snapshot_sequence,
         merkle_head: None,
+        merkle_bytes: None,
         merkle_evidence_sequence: None,
         merkle_snapshot_sequence: None,
         merkle_evidence_commit: None,
@@ -1156,9 +1162,12 @@ async fn read_evidence_journal(
 
 async fn append_evidence_journal(
     dir: &Path,
+    committed_head: u64,
+    committed_bytes: Option<u64>,
     record: &SessionEvidenceJournalRecord,
-) -> Result<(), S3SessionError> {
+) -> Result<u64, S3SessionError> {
     let path = dir.join(SESSION_EVIDENCE_JOURNAL);
+    let committed_bytes = prepare_journal_append(&path, committed_head, committed_bytes).await?;
     let mut bytes = serde_json::to_vec(record)?;
     bytes.push(b'\n');
     let mut file = fs::OpenOptions::new()
@@ -1168,7 +1177,9 @@ async fn append_evidence_journal(
         .await?;
     file.write_all(&bytes).await?;
     file.sync_all().await?;
-    Ok(())
+    committed_bytes
+        .checked_add(u64::try_from(bytes.len()).map_err(|_| S3SessionError::Overflow)?)
+        .ok_or(S3SessionError::Overflow)
 }
 
 async fn read_merkle_journal(
@@ -1192,9 +1203,12 @@ async fn read_merkle_journal(
 
 async fn append_merkle_journal(
     dir: &Path,
+    committed_head: u64,
+    committed_bytes: Option<u64>,
     record: &PersistedMerkleJournalRecord,
-) -> Result<(), S3SessionError> {
+) -> Result<u64, S3SessionError> {
     let path = dir.join(SESSION_MERKLE_JOURNAL);
+    let committed_bytes = prepare_journal_append(&path, committed_head, committed_bytes).await?;
     let mut bytes = serde_json::to_vec(record)?;
     bytes.push(b'\n');
     let mut file = fs::OpenOptions::new()
@@ -1204,7 +1218,80 @@ async fn append_merkle_journal(
         .await?;
     file.write_all(&bytes).await?;
     file.sync_all().await?;
-    Ok(())
+    committed_bytes
+        .checked_add(u64::try_from(bytes.len()).map_err(|_| S3SessionError::Overflow)?)
+        .ok_or(S3SessionError::Overflow)
+}
+
+async fn prepare_journal_append(
+    path: &Path,
+    committed_head: u64,
+    expected_bytes: Option<u64>,
+) -> Result<u64, S3SessionError> {
+    if let Some(expected_bytes) = expected_bytes {
+        let actual_bytes = match fs::metadata(path).await {
+            Ok(metadata) => metadata.len(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if committed_head == 0 && expected_bytes == 0 {
+                    return Ok(0);
+                }
+                return Err(S3SessionError::Reliability(
+                    "journal is missing its committed log".into(),
+                ));
+            }
+            Err(error) => return Err(S3SessionError::Io(error)),
+        };
+        if actual_bytes < expected_bytes {
+            return Err(S3SessionError::Reliability(
+                "journal is shorter than its committed byte length".into(),
+            ));
+        }
+        if actual_bytes > expected_bytes {
+            let file = fs::OpenOptions::new().write(true).open(path).await?;
+            file.set_len(expected_bytes).await?;
+            file.sync_all().await?;
+        }
+        return Ok(expected_bytes);
+    }
+    let bytes = match fs::read(path).await {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if committed_head == 0 {
+                return Ok(0);
+            }
+            return Err(S3SessionError::Reliability(
+                "journal is missing its committed log".into(),
+            ));
+        }
+        Err(error) => return Err(S3SessionError::Io(error)),
+    };
+    let mut records = 0_u64;
+    let mut committed_bytes = 0_usize;
+    for line in bytes.split_inclusive(|byte| *byte == b'\n') {
+        if !line.is_empty() && line.iter().any(|byte| !byte.is_ascii_whitespace()) {
+            records = records.checked_add(1).ok_or(S3SessionError::Overflow)?;
+            if records <= committed_head {
+                committed_bytes = committed_bytes
+                    .checked_add(line.len())
+                    .ok_or(S3SessionError::Overflow)?;
+            }
+        }
+    }
+    if records < committed_head {
+        return Err(S3SessionError::Reliability(
+            "journal head exceeds its log".into(),
+        ));
+    }
+    if records > committed_head {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(path)
+            .await?;
+        file.write_all(&bytes[..committed_bytes]).await?;
+        file.sync_all().await?;
+    }
+    Ok(u64::try_from(committed_bytes).map_err(|_| S3SessionError::Overflow)?)
 }
 
 #[cfg(test)]
@@ -1232,9 +1319,11 @@ async fn persist_session(
         evidence,
         snapshot_evidence,
         journal_head: None,
+        journal_bytes: None,
         journal_evidence_sequence: None,
         journal_snapshot_sequence: None,
         merkle_head: None,
+        merkle_bytes: None,
         merkle_evidence_sequence: None,
         merkle_snapshot_sequence: None,
         merkle_evidence_commit: None,
@@ -1282,6 +1371,7 @@ async fn persist_session_with_evidence(
         .as_ref()
         .and_then(|value| value.journal_head)
         .unwrap_or(0);
+    let mut journal_bytes = existing.as_ref().and_then(|value| value.journal_bytes);
     let mut last_evidence_sequence = existing
         .as_ref()
         .and_then(|value| value.journal_evidence_sequence);
@@ -1292,6 +1382,7 @@ async fn persist_session_with_evidence(
         .as_ref()
         .and_then(|value| value.merkle_head)
         .unwrap_or(0);
+    let mut merkle_bytes = existing.as_ref().and_then(|value| value.merkle_bytes);
     let mut last_merkle_evidence_sequence = existing
         .as_ref()
         .and_then(|value| value.merkle_evidence_sequence);
@@ -1422,16 +1513,20 @@ async fn persist_session_with_evidence(
         )
         .map_err(|error| S3SessionError::Reliability(error.to_string()))?;
     if !merkle_commits.is_empty() || !snapshot_merkle_commits.is_empty() {
-        append_merkle_journal(
-            dir,
-            &PersistedMerkleJournalRecord {
-                evidence: merkle_events,
-                merkle_commits: merkle_commits.clone(),
-                snapshot_evidence: snapshot_merkle_events,
-                snapshot_merkle_commits: snapshot_merkle_commits.clone(),
-            },
-        )
-        .await?;
+        merkle_bytes = Some(
+            append_merkle_journal(
+                dir,
+                merkle_head,
+                merkle_bytes,
+                &PersistedMerkleJournalRecord {
+                    evidence: merkle_events,
+                    merkle_commits: merkle_commits.clone(),
+                    snapshot_evidence: snapshot_merkle_events,
+                    snapshot_merkle_commits: snapshot_merkle_commits.clone(),
+                },
+            )
+            .await?,
+        );
         merkle_head = merkle_head.checked_add(1).ok_or(S3SessionError::Overflow)?;
         last_merkle_evidence_sequence = merkle_commits
             .last()
@@ -1455,7 +1550,8 @@ async fn persist_session_with_evidence(
     {
         committed_head
     } else {
-        append_evidence_journal(dir, &new_record).await?;
+        journal_bytes =
+            Some(append_evidence_journal(dir, committed_head, journal_bytes, &new_record).await?);
         committed_head
             .checked_add(1)
             .ok_or(S3SessionError::Overflow)?
@@ -1465,6 +1561,7 @@ async fn persist_session_with_evidence(
         evidence: SessionEvidenceLog::default(),
         snapshot_evidence: SnapshotEvidenceLog::default(),
         journal_head: Some(journal_head),
+        journal_bytes,
         journal_evidence_sequence: new_record
             .evidence
             .last()
@@ -1476,6 +1573,7 @@ async fn persist_session_with_evidence(
             .map(|event| event.sequence)
             .or(last_snapshot_sequence),
         merkle_head: Some(merkle_head),
+        merkle_bytes,
         merkle_evidence_sequence: last_merkle_evidence_sequence,
         merkle_snapshot_sequence: last_merkle_snapshot_sequence,
         merkle_evidence_commit: previous_merkle_evidence,
@@ -1870,6 +1968,8 @@ mod tests {
             load_session_with_snapshot(&dir).await.unwrap();
         append_evidence_journal(
             &dir,
+            1,
+            None,
             &SessionEvidenceJournalRecord {
                 evidence: evidence.events().to_vec(),
                 snapshot_evidence: snapshot_evidence.events().to_vec(),
@@ -1884,6 +1984,21 @@ mod tests {
         assert_eq!(records.len(), 2);
         let (_session, loaded_evidence) = load_session(&dir).await.unwrap();
         assert_eq!(loaded_evidence.events().len(), 1);
+
+        store_part(
+            root.path(),
+            &upload_id,
+            1,
+            10,
+            ttl(3600),
+            quota(1 << 20),
+            quota(1 << 40),
+            cap(16),
+        )
+        .await
+        .unwrap();
+        let (_session, advanced_evidence) = load_session(&dir).await.unwrap();
+        assert_eq!(advanced_evidence.events().len(), 2);
     }
 
     #[test]

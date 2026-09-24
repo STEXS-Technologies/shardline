@@ -263,6 +263,27 @@ fn parse_repair_lifecycle() {
 }
 
 #[test]
+fn parse_repair_lfs_evidence() {
+    let args = vec![
+        "shardline".to_owned(),
+        "repair".to_owned(),
+        "lfs-evidence".to_owned(),
+        "--root".to_owned(),
+        "/var/lib/shardline".to_owned(),
+        "--state-file".to_owned(),
+        "/var/lib/shardline/recovery.json".to_owned(),
+    ];
+
+    assert_eq!(
+        CliCommand::parse(args),
+        Ok(CliCommand::RepairLfsEvidence {
+            root: Some(PathBuf::from("/var/lib/shardline")),
+            state_file: PathBuf::from("/var/lib/shardline/recovery.json"),
+        })
+    );
+}
+
+#[test]
 fn parse_repair_orchestrator_with_defaults() {
     let args = vec!["shardline".to_owned(), "repair".to_owned()];
 

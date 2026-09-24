@@ -77,18 +77,22 @@ The canonical state machines and durable lifecycle snapshots are:
 This same resumable lifecycle evidence is also persisted by the standalone
 file-backed S3 multipart and OCI upload-session adapters. Their legacy session
 files remain readable; new writes use an atomic session envelope containing the
-canonical `SessionEvidenceLog`, and reads/sweeps verify it before using the
-materialized progress. A read that finds a legacy or evidence-free session
-repairs and atomically persists the verified active-to-current baseline before
-returning it; malformed or tampered evidence remains fail-closed.
+canonical `SessionEvidenceLog` plus a persisted StateChronicle Merkle journal,
+and reads/sweeps verify both before using the materialized progress. A read
+that finds a legacy or evidence-free session may reconstruct an in-memory
+baseline, but never silently writes it; the next successful mutation or an
+explicit operator repair persists the baseline. Malformed or tampered
+evidence remains fail-closed.
 
 The local, non-fenced LFS PATCH path uses the same lifecycle evidence through
-an additive `{oid}.evidence` sidecar. Historical sessions without that sidecar
-are reconstructed as an active baseline, while new range writes, promotion,
-completion, abort cleanup, and stale-session sweeps validate or append the
-canonical evidence; the first read persists that baseline atomically. The
-existing `.meta`, `.ranges`, and staging files remain
-the materialized data-plane representation and retain their previous layout.
+an additive `{oid}.evidence` sidecar and a companion persisted StateChronicle
+Merkle journal. Historical sessions without those sidecars are reconstructed
+as an active baseline, while new range writes, promotion, completion, abort
+cleanup, and stale-session sweeps validate or append the canonical evidence.
+Reads do not repair durable state; a successful mutation or explicit operator
+repair establishes the missing baseline and Merkle commitment. The existing
+`.meta`, `.ranges`, and staging files remain the materialized data-plane
+representation and retain their previous layout.
 
 All completion owners—including local LFS, OCI, and S3 Postgres completion
 paths—use the same canonical transition evidence. Where the backend supports

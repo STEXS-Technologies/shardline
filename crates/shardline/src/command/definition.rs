@@ -326,6 +326,18 @@ pub(crate) struct RepairCommandArgs {
 pub(crate) enum RepairSubcommand {
     /// Repair lifecycle state only.
     Lifecycle(RepairOptionsArgs),
+    /// Rebuild one local LFS patch evidence envelope from an operator-verified state file.
+    LfsEvidence(RepairLfsEvidenceArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct RepairLfsEvidenceArgs {
+    /// Optional deployment-root override for the active Shardline config.
+    #[arg(long)]
+    pub(crate) root: Option<PathBuf>,
+    /// JSON file containing the typed operator-verified LFS materialized state.
+    #[arg(long, value_name = "PATH")]
+    pub(crate) state_file: PathBuf,
 }
 
 #[derive(Debug, Clone, Args)]
