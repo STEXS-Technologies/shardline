@@ -12,8 +12,9 @@ use shardline_reliability::{
     WebhookDeliveryLifecycleState, WebhookDeliverySnapshot, append_or_baseline_snapshot_evidence,
     baseline_upload_lifecycle_events, reliability_merkle_commit_json_with_previous,
     upload_lifecycle_event, upload_lifecycle_identity, verify_and_append_snapshot_transition,
-    verify_persisted_event_merkle_chain, verify_persisted_event_merkle_chain_with_sequences,
-    verify_provider_lifecycle_events, verify_snapshot_evidence, verify_upload_lifecycle_events,
+    verify_and_reactivate_quarantine, verify_persisted_event_merkle_chain,
+    verify_persisted_event_merkle_chain_with_sequences, verify_provider_lifecycle_events,
+    verify_snapshot_evidence, verify_upload_lifecycle_events,
 };
 use shardline_storage::ObjectKey;
 use sqlx::{PgConnection, Row, postgres::PgRow, query, query_scalar, types::Json};
@@ -906,8 +907,7 @@ impl AsyncIndexStore for super::PostgresIndexStore {
                     true,
                 )
             } else {
-                let released = quarantine_snapshot(candidate, QuarantineLifecycleState::Released)?;
-                verify_and_append_snapshot_transition(evidence, released, snapshot)?
+                verify_and_reactivate_quarantine(evidence, snapshot)?
             };
             let event = evidence.events().last().ok_or_else(|| {
                 PostgresMetadataStoreError::Reliability(

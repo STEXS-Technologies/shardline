@@ -147,6 +147,37 @@ pub fn verify_quarantine_lifecycle_events(
 
 pub type QuarantineEvidenceLog = SnapshotEvidenceLog<QuarantineSnapshot>;
 
+/// Verifies and records a new active quarantine observation after a prior
+/// candidate was released.
+///
+/// A reactivated object may have a different observed length or retention
+/// window. The released snapshot in the journal is therefore authoritative
+/// for the transition's `before` state; reconstructing it from the new active
+/// candidate would incorrectly reject legitimate reactivation.
+///
+/// # Errors
+///
+/// Returns an error when the evidence chain is invalid, the prior state is
+/// not `Released`, or the new snapshot cannot be appended.
+pub fn verify_and_reactivate_quarantine(
+    mut evidence: QuarantineEvidenceLog,
+    snapshot: QuarantineSnapshot,
+) -> Result<(QuarantineEvidenceLog, bool), ReliabilityError> {
+    if evidence.events().is_empty() {
+        return Ok((QuarantineEvidenceLog::baseline(snapshot)?, true));
+    }
+    verify_snapshot_chain(evidence.events())?;
+    let last = evidence
+        .events()
+        .last()
+        .ok_or(ReliabilityError::OperationMismatch)?;
+    if last.after.state != QuarantineLifecycleState::Released {
+        return Err(ReliabilityError::StateMismatch);
+    }
+    evidence.record(snapshot)?;
+    Ok((evidence, false))
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -198,5 +229,26 @@ mod tests {
             QuarantineLifecycleEvent::new(1, released.clone(), released),
             Err(ReliabilityError::InvalidTransition { .. })
         ));
+    }
+
+    #[test]
+    fn reactivation_uses_the_released_snapshot_as_transition_boundary() {
+        let original = snapshot(QuarantineLifecycleState::Active);
+        let released = snapshot(QuarantineLifecycleState::Released);
+        let mut evidence = QuarantineEvidenceLog::baseline(original).unwrap();
+        evidence.record(released).unwrap();
+        let changed = QuarantineSnapshot::new(
+            QuarantineObjectIdentity::new("aa/object").unwrap(),
+            43,
+            101,
+            202,
+            QuarantineLifecycleState::Active,
+        )
+        .unwrap();
+
+        let (reactivated, was_baseline) =
+            verify_and_reactivate_quarantine(evidence, changed.clone()).unwrap();
+        assert!(!was_baseline);
+        assert_eq!(reactivated.events().last().unwrap().after, changed);
     }
 }

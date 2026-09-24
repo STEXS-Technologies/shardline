@@ -13,8 +13,9 @@ use shardline_reliability::{
     WebhookDeliveryEvidenceLog, WebhookDeliveryIdentity, WebhookDeliveryLifecycleState,
     WebhookDeliverySnapshot, upload_lifecycle_event, upload_lifecycle_identity,
     verify_and_append_snapshot_transition, verify_and_append_webhook_delivery_retry,
-    verify_lifecycle_chain, verify_provider_lifecycle_events, verify_quarantine_lifecycle_events,
-    verify_retention_hold_lifecycle_events, verify_upload_lifecycle_events,
+    verify_and_reactivate_quarantine, verify_lifecycle_chain, verify_provider_lifecycle_events,
+    verify_quarantine_lifecycle_events, verify_retention_hold_lifecycle_events,
+    verify_upload_lifecycle_events,
 };
 use shardline_storage::ObjectKey;
 use thiserror::Error;
@@ -427,8 +428,7 @@ impl LifecycleStore for MemoryIndexStore {
         } else if evidence.events().is_empty() {
             verify_and_append_snapshot_transition(evidence, snapshot.clone(), snapshot)
         } else {
-            let released = quarantine_snapshot(candidate, QuarantineLifecycleState::Released)?;
-            verify_and_append_snapshot_transition(evidence, released, snapshot)
+            verify_and_reactivate_quarantine(evidence, snapshot)
         }
         .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
         state.quarantine.insert(key.clone(), candidate.clone());
@@ -3244,6 +3244,20 @@ mod tests {
             store.state.lock().unwrap().quarantine.get(&key),
             Some(&candidate)
         );
+    }
+
+    #[test]
+    fn memory_quarantine_reactivation_accepts_changed_observed_metadata() {
+        let store = MemoryIndexStore::new();
+        let key = ObjectKey::parse("xorbs/reactivated/key").unwrap();
+        let original = QuarantineCandidate::new(key.clone(), 4, 10, 20).unwrap();
+        let reactivated = QuarantineCandidate::new(key.clone(), 8, 30, 40).unwrap();
+
+        store.upsert_quarantine_candidate(&original).unwrap();
+        assert!(store.delete_quarantine_candidate(&key).unwrap());
+        store.upsert_quarantine_candidate(&reactivated).unwrap();
+
+        assert_eq!(store.quarantine_candidate(&key).unwrap(), Some(reactivated));
     }
 
     #[test]

@@ -4,8 +4,8 @@ use shardline_reliability::{
     LifecycleEvent, ProviderEvidenceLog, QuarantineLifecycleState, RetentionHoldLifecycleState,
     SnapshotEvidence, WebhookDeliveryLifecycleState, append_or_baseline_snapshot_evidence,
     upload_lifecycle_event, upload_lifecycle_identity, verify_and_append_snapshot_transition,
-    verify_and_append_webhook_delivery_retry, verify_provider_lifecycle_events,
-    verify_snapshot_evidence, verify_upload_lifecycle_events,
+    verify_and_append_webhook_delivery_retry, verify_and_reactivate_quarantine,
+    verify_provider_lifecycle_events, verify_snapshot_evidence, verify_upload_lifecycle_events,
 };
 use shardline_storage::ObjectKey;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -371,9 +371,7 @@ impl LifecycleStore for LocalIndexStore {
                 true,
             )
         } else {
-            let released =
-                super::helpers::quarantine_snapshot(candidate, QuarantineLifecycleState::Released)?;
-            verify_and_append_snapshot_transition(evidence, released, snapshot)?
+            verify_and_reactivate_quarantine(evidence, snapshot)?
         };
         let event = evidence.events().last().ok_or_else(|| {
             LocalIndexStoreError::Reliability(shardline_reliability::ReliabilityError::EmptyField(
@@ -2021,6 +2019,23 @@ mod tests {
         assert!(
             !LifecycleStore::delete_quarantine_candidate(&store, &key)
                 .expect("second delete should succeed")
+        );
+    }
+
+    #[test]
+    fn quarantine_candidate_reactivation_accepts_changed_observed_metadata() {
+        let store = make_store();
+        let key = ObjectKey::parse("chunks/dd/reactivated-candidate").unwrap();
+        let original = QuarantineCandidate::new(key.clone(), 300, 3000, 4000).unwrap();
+        let reactivated = QuarantineCandidate::new(key.clone(), 301, 5000, 6000).unwrap();
+
+        LifecycleStore::upsert_quarantine_candidate(&store, &original).unwrap();
+        assert!(LifecycleStore::delete_quarantine_candidate(&store, &key).unwrap());
+        LifecycleStore::upsert_quarantine_candidate(&store, &reactivated).unwrap();
+
+        assert_eq!(
+            LifecycleStore::quarantine_candidate(&store, &key).unwrap(),
+            Some(reactivated)
         );
     }
 

@@ -90,8 +90,8 @@ pub use provider_evidence::{
 };
 pub use quarantine_evidence::{
     QuarantineEvidenceLog, QuarantineLifecycleEvent, QuarantineLifecycleState,
-    QuarantineObjectIdentity, QuarantineSnapshot, verify_quarantine_lifecycle_chain,
-    verify_quarantine_lifecycle_events,
+    QuarantineObjectIdentity, QuarantineSnapshot, verify_and_reactivate_quarantine,
+    verify_quarantine_lifecycle_chain, verify_quarantine_lifecycle_events,
 };
 pub use repair_evidence::{RepairEvidenceEvent, RepairSnapshotV1};
 pub use retention_evidence::{
