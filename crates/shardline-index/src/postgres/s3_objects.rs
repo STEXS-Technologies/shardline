@@ -142,6 +142,18 @@ async fn persist_s3_object_evidence(
     .fetch_one(&mut *connection)
     .await?;
     let persisted_sequence = persisted_sequence.unwrap_or(-1);
+    if let Some(event) = evidence.events().last()
+        && persisted_sequence >= 0
+    {
+        let event_sequence = u64_to_i64(event.sequence)?;
+        if event_sequence <= persisted_sequence {
+            return Ok(());
+        }
+        if event_sequence == persisted_sequence.saturating_add(1) {
+            persist_s3_object_event(connection, event).await?;
+            return Ok(());
+        }
+    }
     for event in evidence.events() {
         if u64_to_i64(event.sequence)? > persisted_sequence {
             persist_s3_object_event(connection, event).await?;
