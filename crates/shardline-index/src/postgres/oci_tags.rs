@@ -97,16 +97,22 @@ async fn verify_tag_listing_evidence(
         "SELECT DISTINCT ON (current.operation_id)
                 current.operation_id, current.sequence, current.event_json,
                 current.merkle_commit_json,
-                (
+                CASE WHEN EXISTS (
+                    SELECT 1
+                    FROM shardline_reliability_events AS missing
+                    WHERE missing.operation_kind = $1
+                      AND missing.operation_id = current.operation_id
+                      AND missing.sequence < current.sequence
+                      AND missing.merkle_commit_json IS NULL
+                ) THEN '{\"missing_previous_merkle_commit\":true}'::jsonb ELSE (
                     SELECT previous.merkle_commit_json
                     FROM shardline_reliability_events AS previous
                     WHERE previous.operation_kind = $1
                       AND previous.operation_id = current.operation_id
                       AND previous.sequence < current.sequence
-                      AND previous.merkle_commit_json IS NOT NULL
                     ORDER BY previous.sequence DESC
                     LIMIT 1
-                ) AS previous_merkle_commit_json
+                ) END AS previous_merkle_commit_json
          FROM shardline_reliability_events AS current
          WHERE current.operation_kind = $1
            AND current.operation_id = ANY($2)
@@ -208,10 +214,14 @@ async fn persist_tag_event(
     event.verify_integrity()?;
     let sequence = u64_to_i64(event.sequence)?;
     let previous_json: Option<serde_json::Value> = query_scalar(
-        "SELECT merkle_commit_json
+        "SELECT CASE WHEN EXISTS (
+             SELECT 1 FROM shardline_reliability_events AS missing
+             WHERE missing.operation_kind = $1 AND missing.operation_id = $2
+               AND missing.sequence < $3
+               AND missing.merkle_commit_json IS NULL
+         ) THEN '{\"missing_previous_merkle_commit\":true}'::jsonb ELSE merkle_commit_json END
          FROM shardline_reliability_events
          WHERE operation_kind = $1 AND operation_id = $2 AND sequence < $3
-           AND merkle_commit_json IS NOT NULL
          ORDER BY sequence DESC LIMIT 1",
     )
     .bind(event.operation.kind.as_str())

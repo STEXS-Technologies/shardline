@@ -94,13 +94,20 @@ fn verify_oci_tag_listing_evidence(
     let sql = format!(
         "SELECT current.operation_id, current.sequence, current.event_json,
                 current.merkle_commit_json,
-                (SELECT previous.merkle_commit_json
-                 FROM shardline_reliability_events AS previous
-                 WHERE previous.operation_kind = ?1
-                   AND previous.operation_id = current.operation_id
-                   AND previous.sequence < current.sequence
-                   AND previous.merkle_commit_json IS NOT NULL
-                 ORDER BY previous.sequence DESC LIMIT 1) AS previous_merkle_json
+                CASE WHEN EXISTS (
+                    SELECT 1 FROM shardline_reliability_events AS missing
+                    WHERE missing.operation_kind = ?1
+                      AND missing.operation_id = current.operation_id
+                      AND missing.sequence < current.sequence
+                      AND missing.merkle_commit_json IS NULL
+                ) THEN '{{\"missing_previous_merkle_commit\":true}}' ELSE (
+                    SELECT previous.merkle_commit_json
+                    FROM shardline_reliability_events AS previous
+                    WHERE previous.operation_kind = ?1
+                      AND previous.operation_id = current.operation_id
+                      AND previous.sequence < current.sequence
+                    ORDER BY previous.sequence DESC LIMIT 1
+                ) END AS previous_merkle_json
          FROM shardline_reliability_events AS current
          WHERE current.operation_kind = ?1
            AND current.operation_id IN ({placeholders})

@@ -654,10 +654,14 @@ async fn backfill_reliability_merkle_commits(
         })?;
         let event_json: serde_json::Value = row.try_get("event_json")?;
         let previous_json: Option<serde_json::Value> = query_scalar(
-            "SELECT merkle_commit_json
+            "SELECT CASE WHEN EXISTS (
+                 SELECT 1 FROM shardline_reliability_events AS missing
+                 WHERE missing.operation_kind = $1 AND missing.operation_id = $2
+                   AND missing.sequence < $3
+                   AND missing.merkle_commit_json IS NULL
+             ) THEN '{\"missing_previous_merkle_commit\":true}'::jsonb ELSE merkle_commit_json END
              FROM shardline_reliability_events
              WHERE operation_kind = $1 AND operation_id = $2 AND sequence < $3
-               AND merkle_commit_json IS NOT NULL
              ORDER BY sequence DESC LIMIT 1",
         )
         .bind(operation_kind.as_str())
@@ -1023,10 +1027,14 @@ async fn persist_reliability_event<T: EvidenceEventMetadata>(
         ))
     })?;
     let previous_json: Option<serde_json::Value> = query_scalar(
-        "SELECT merkle_commit_json
+        "SELECT CASE WHEN EXISTS (
+             SELECT 1 FROM shardline_reliability_events AS missing
+             WHERE missing.operation_kind = $1 AND missing.operation_id = $2
+               AND missing.sequence < $3
+               AND missing.merkle_commit_json IS NULL
+         ) THEN '{\"missing_previous_merkle_commit\":true}'::jsonb ELSE merkle_commit_json END
          FROM shardline_reliability_events
          WHERE operation_kind = $1 AND operation_id = $2 AND sequence < $3
-           AND merkle_commit_json IS NOT NULL
          ORDER BY sequence DESC LIMIT 1",
     )
     .bind(event.operation_identity().kind.as_str())

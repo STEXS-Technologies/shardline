@@ -74,11 +74,22 @@ async fn load_s3_object_evidence_head(
              LIMIT 1
          ) AS evidence
          LEFT JOIN LATERAL (
-             SELECT merkle_commit_json
+             SELECT CASE WHEN EXISTS (
+                 SELECT 1
+                 FROM shardline_reliability_events AS missing
+                 WHERE missing.operation_kind = $1 AND missing.operation_id = $2
+                   AND missing.sequence < evidence.sequence
+                   AND missing.merkle_commit_json IS NULL
+             ) THEN '{\"missing_previous_merkle_commit\":true}'::jsonb ELSE (
+                 SELECT previous.merkle_commit_json
+                 FROM shardline_reliability_events AS previous
+                 WHERE previous.operation_kind = $1 AND previous.operation_id = $2
+                   AND previous.sequence < evidence.sequence
+                 ORDER BY previous.sequence DESC LIMIT 1
+             ) END AS merkle_commit_json
              FROM shardline_reliability_events
              WHERE operation_kind = $1 AND operation_id = $2
                AND sequence < evidence.sequence
-               AND merkle_commit_json IS NOT NULL
              ORDER BY sequence DESC
              LIMIT 1
          ) AS previous_evidence ON TRUE",
@@ -189,10 +200,14 @@ async fn persist_s3_object_event(
     event.verify_integrity()?;
     let sequence = u64_to_i64(event.sequence)?;
     let previous_json: Option<serde_json::Value> = query_scalar(
-        "SELECT merkle_commit_json
+        "SELECT CASE WHEN EXISTS (
+             SELECT 1 FROM shardline_reliability_events AS missing
+             WHERE missing.operation_kind = $1 AND missing.operation_id = $2
+               AND missing.sequence < $3
+               AND missing.merkle_commit_json IS NULL
+         ) THEN '{\"missing_previous_merkle_commit\":true}'::jsonb ELSE merkle_commit_json END
          FROM shardline_reliability_events
          WHERE operation_kind = $1 AND operation_id = $2 AND sequence < $3
-           AND merkle_commit_json IS NOT NULL
          ORDER BY sequence DESC LIMIT 1",
     )
     .bind(event.operation.kind.as_str())
@@ -436,13 +451,28 @@ impl S3ObjectIndexStore for PostgresIndexStore {
                  LIMIT 1
              ) AS evidence ON TRUE
              LEFT JOIN LATERAL (
-                 SELECT merkle_commit_json
+                 SELECT CASE WHEN EXISTS (
+                     SELECT 1
+                     FROM shardline_reliability_events AS missing
+                     WHERE missing.operation_kind = 'S3Object'
+                       AND missing.operation_id = octet_length(objects.scope_namespace)::text || ':' || objects.scope_namespace
+                           || octet_length(objects.object_key)::text || ':' || objects.object_key
+                       AND missing.sequence < evidence.sequence
+                       AND missing.merkle_commit_json IS NULL
+                 ) THEN '{\"missing_previous_merkle_commit\":true}'::jsonb ELSE (
+                     SELECT previous.merkle_commit_json
+                     FROM shardline_reliability_events AS previous
+                     WHERE previous.operation_kind = 'S3Object'
+                       AND previous.operation_id = octet_length(objects.scope_namespace)::text || ':' || objects.scope_namespace
+                           || octet_length(objects.object_key)::text || ':' || objects.object_key
+                       AND previous.sequence < evidence.sequence
+                     ORDER BY previous.sequence DESC LIMIT 1
+                 ) END AS merkle_commit_json
                  FROM shardline_reliability_events
                  WHERE operation_kind = 'S3Object'
                    AND operation_id = octet_length(objects.scope_namespace)::text || ':' || objects.scope_namespace
                        || octet_length(objects.object_key)::text || ':' || objects.object_key
                    AND sequence < evidence.sequence
-                   AND merkle_commit_json IS NOT NULL
                  ORDER BY sequence DESC
                  LIMIT 1
              ) AS previous_evidence ON TRUE
@@ -789,6 +819,44 @@ mod tests {
         );
         assert!(
             S3ObjectIndexStore::scan_s3_objects(&store, &scope, "", None, 10)
+                .await
+                .is_err()
+        );
+        cleanup(&pool, &scope).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pg_s3_object_read_rejects_missing_predecessor_commitment() {
+        let Some(pool) = connect_postgres().await else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let scope = format!("s3-missing-predecessor-{}", std::process::id());
+        let store = PostgresIndexStore::new(pool.clone());
+        S3ObjectIndexStore::upsert_s3_object(&store, &entry(&scope, "model.bin", "file-a"))
+            .await
+            .expect("first upsert");
+        S3ObjectIndexStore::upsert_s3_object(&store, &entry(&scope, "model.bin", "file-b"))
+            .await
+            .expect("second upsert");
+
+        query(
+            "UPDATE shardline_reliability_events
+             SET merkle_commit_json = NULL
+             WHERE operation_kind = $1
+               AND sequence = (
+                   SELECT MIN(sequence)
+                   FROM shardline_reliability_events
+                   WHERE operation_kind = $1
+               )",
+        )
+        .bind(OperationKind::S3Object.as_str())
+        .execute(&pool)
+        .await
+        .expect("remove predecessor commitment");
+
+        assert!(
+            S3ObjectIndexStore::scan_s3_object_exact(&store, &scope, "model.bin")
                 .await
                 .is_err()
         );

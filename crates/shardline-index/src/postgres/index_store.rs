@@ -47,16 +47,22 @@ pub(super) async fn load_postgres_latest_evidence_event(
 ) -> Result<Option<serde_json::Value>, PostgresMetadataStoreError> {
     let row = query(
         "SELECT latest.sequence, latest.event_json, latest.merkle_commit_json,
-                (
+                CASE WHEN EXISTS (
+                    SELECT 1
+                    FROM shardline_reliability_events AS missing
+                    WHERE missing.operation_kind = $1
+                      AND missing.operation_id = $2
+                      AND missing.sequence < latest.sequence
+                      AND missing.merkle_commit_json IS NULL
+                ) THEN '{\"missing_previous_merkle_commit\":true}'::jsonb ELSE (
                     SELECT previous.merkle_commit_json
                     FROM shardline_reliability_events AS previous
                     WHERE previous.operation_kind = $1
                       AND previous.operation_id = $2
                       AND previous.sequence < latest.sequence
-                      AND previous.merkle_commit_json IS NOT NULL
                     ORDER BY previous.sequence DESC
                     LIMIT 1
-                ) AS previous_merkle_commit_json
+                ) END AS previous_merkle_commit_json
          FROM (
              SELECT sequence, event_json, merkle_commit_json
              FROM shardline_reliability_events
@@ -2172,10 +2178,14 @@ where
         PostgresMetadataStoreError::IntegerOutOfRange("reliability sequence".into())
     })?;
     let previous_json: Option<serde_json::Value> = query_scalar(
-        "SELECT merkle_commit_json
+        "SELECT CASE WHEN EXISTS (
+             SELECT 1 FROM shardline_reliability_events AS missing
+             WHERE missing.operation_kind = $1 AND missing.operation_id = $2
+               AND missing.sequence < $3
+               AND missing.merkle_commit_json IS NULL
+         ) THEN '{\"missing_previous_merkle_commit\":true}'::jsonb ELSE merkle_commit_json END
          FROM shardline_reliability_events
-             WHERE operation_kind = $1 AND operation_id = $2 AND sequence < $3
-               AND merkle_commit_json IS NOT NULL
+         WHERE operation_kind = $1 AND operation_id = $2 AND sequence < $3
          ORDER BY sequence DESC LIMIT 1",
     )
     .bind(event.operation_identity().kind.as_str())

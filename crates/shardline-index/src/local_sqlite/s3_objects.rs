@@ -255,13 +255,20 @@ fn verify_s3_object_listing_evidence(
         .join(", ");
     let sql = format!(
         "SELECT operation_id, sequence, event_json, merkle_commit_json,
-                (SELECT previous.merkle_commit_json
-                 FROM shardline_reliability_events AS previous
-                 WHERE previous.operation_kind = ?1
-                   AND previous.operation_id = current.operation_id
-                   AND previous.sequence < current.sequence
-                   AND previous.merkle_commit_json IS NOT NULL
-                 ORDER BY previous.sequence DESC LIMIT 1) AS previous_merkle_json
+                CASE WHEN EXISTS (
+                    SELECT 1 FROM shardline_reliability_events AS missing
+                    WHERE missing.operation_kind = ?1
+                      AND missing.operation_id = current.operation_id
+                      AND missing.sequence < current.sequence
+                      AND missing.merkle_commit_json IS NULL
+                ) THEN '{{\"missing_previous_merkle_commit\":true}}' ELSE (
+                    SELECT previous.merkle_commit_json
+                    FROM shardline_reliability_events AS previous
+                    WHERE previous.operation_kind = ?1
+                      AND previous.operation_id = current.operation_id
+                      AND previous.sequence < current.sequence
+                    ORDER BY previous.sequence DESC LIMIT 1
+                ) END AS previous_merkle_json
          FROM shardline_reliability_events AS current
          WHERE current.operation_kind = ?1
            AND current.operation_id IN ({placeholders})
@@ -844,6 +851,42 @@ mod tests {
                 "UPDATE shardline_reliability_events
                  SET event_json = '{\"tampered\":true}'
                  WHERE operation_kind = 'S3Object'",
+                [],
+            )
+            .unwrap();
+
+        assert!(
+            store
+                .scan_s3_object_exact("global", "model.bin")
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn s3_object_read_rejects_missing_predecessor_commitment() {
+        let storage = shardline_test_support::TempStorage::new();
+        let store = LocalIndexStore::new(storage.path_buf()).unwrap();
+        store
+            .upsert_s3_object(&entry("global", "model.bin", "file-a", 7, 1))
+            .await
+            .unwrap();
+        store
+            .upsert_s3_object(&entry("global", "model.bin", "file-b", 8, 2))
+            .await
+            .unwrap();
+
+        let connection = store.open_connection().unwrap();
+        connection
+            .execute(
+                "UPDATE shardline_reliability_events
+                 SET merkle_commit_json = NULL
+                 WHERE operation_kind = 'S3Object'
+                   AND sequence = (
+                       SELECT MIN(sequence)
+                       FROM shardline_reliability_events
+                       WHERE operation_kind = 'S3Object'
+                   )",
                 [],
             )
             .unwrap();

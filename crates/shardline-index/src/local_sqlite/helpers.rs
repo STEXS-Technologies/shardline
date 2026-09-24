@@ -133,16 +133,22 @@ pub(crate) fn load_latest_verified_event_json(
     let row = transaction
         .query_row(
             "SELECT latest.sequence, latest.event_json, latest.merkle_commit_json,
-                    (
+                    CASE WHEN EXISTS (
+                        SELECT 1
+                        FROM shardline_reliability_events AS missing
+                        WHERE missing.operation_kind = ?1
+                          AND missing.operation_id = ?2
+                          AND missing.sequence < latest.sequence
+                          AND missing.merkle_commit_json IS NULL
+                    ) THEN '{\"missing_previous_merkle_commit\":true}' ELSE (
                         SELECT previous.merkle_commit_json
                         FROM shardline_reliability_events AS previous
                         WHERE previous.operation_kind = ?1
                           AND previous.operation_id = ?2
                           AND previous.sequence < latest.sequence
-                          AND previous.merkle_commit_json IS NOT NULL
                         ORDER BY previous.sequence DESC
                         LIMIT 1
-                    )
+                    ) END
              FROM (
                  SELECT sequence, event_json, merkle_commit_json
                  FROM shardline_reliability_events
@@ -278,10 +284,14 @@ pub(crate) fn persist_reliability_event_at<T: EvidenceEventMetadata>(
     let sequence = u64_to_i64(event.sequence_number())?;
     let previous_json: Option<String> = transaction
         .query_row(
-            "SELECT merkle_commit_json
+            "SELECT CASE WHEN EXISTS (
+                 SELECT 1 FROM shardline_reliability_events AS missing
+                 WHERE missing.operation_kind = ?1 AND missing.operation_id = ?2
+                   AND missing.sequence < ?3
+                   AND missing.merkle_commit_json IS NULL
+             ) THEN '{\"missing_previous_merkle_commit\":true}' ELSE merkle_commit_json END
              FROM shardline_reliability_events
              WHERE operation_kind = ?1 AND operation_id = ?2 AND sequence < ?3
-               AND merkle_commit_json IS NOT NULL
              ORDER BY sequence DESC LIMIT 1",
             params![
                 event.operation_identity().kind.as_str(),
@@ -367,10 +377,14 @@ pub(crate) fn backfill_reliability_merkle_commits(
         let event_json = from_str(event_json_text)?;
         let previous_json: Option<String> = transaction
             .query_row(
-                "SELECT merkle_commit_json
+                "SELECT CASE WHEN EXISTS (
+                     SELECT 1 FROM shardline_reliability_events AS missing
+                     WHERE missing.operation_kind = ?1 AND missing.operation_id = ?2
+                       AND missing.sequence < ?3
+                       AND missing.merkle_commit_json IS NULL
+                 ) THEN '{\"missing_previous_merkle_commit\":true}' ELSE merkle_commit_json END
                  FROM shardline_reliability_events
                  WHERE operation_kind = ?1 AND operation_id = ?2 AND sequence < ?3
-                   AND merkle_commit_json IS NOT NULL
                  ORDER BY sequence DESC LIMIT 1",
                 params![operation_kind.as_str(), operation_id, sequence],
                 |row| row.get(0),
