@@ -171,7 +171,7 @@ async fn exercise_huggingface_cli_flows(runtime: &HubRuntime) -> Result<(), Test
         runtime,
         client_home.path(),
         [
-            "repo",
+            "repos",
             "create",
             created_repo,
             "--private",
@@ -302,7 +302,7 @@ async fn exercise_huggingface_cli_flows(runtime: &HubRuntime) -> Result<(), Test
         runtime,
         client_home.path(),
         [
-            "repo",
+            "repos",
             "create",
             dataset_repo,
             "--repo-type",
@@ -365,7 +365,7 @@ async fn exercise_huggingface_cli_flows(runtime: &HubRuntime) -> Result<(), Test
             runtime,
             client_home.path(),
             [
-                "repo",
+                "repos",
                 "delete",
                 repo,
                 "--repo-type",
