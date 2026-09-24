@@ -28,17 +28,26 @@ async fn load_tag_evidence(
     let operation =
         OciTagSnapshot::new(scope_namespace, repository, tag, None)?.evidence_operation()?;
     let rows = query(
-        "SELECT event_json FROM shardline_reliability_events
+        "SELECT event_json, merkle_commit_json FROM shardline_reliability_events
          WHERE operation_kind = 'OciTag' AND operation_id = $1 ORDER BY sequence",
     )
     .bind(&operation.operation_id)
     .fetch_all(&mut *connection)
     .await?;
     let mut events = Vec::with_capacity(rows.len());
+    let mut event_json = Vec::with_capacity(rows.len());
+    let mut merkle_commits = Vec::with_capacity(rows.len());
     for row in rows {
         let value: serde_json::Value = row.try_get("event_json")?;
-        events.push(from_value::<OciTagLifecycleEvent>(value)?);
+        events.push(from_value::<OciTagLifecycleEvent>(value.clone())?);
+        event_json.push(value);
+        merkle_commits.push(row.try_get("merkle_commit_json")?);
     }
+    shardline_reliability::verify_persisted_event_merkle_chain(
+        shardline_reliability::OperationKind::OciTag,
+        &event_json,
+        &merkle_commits,
+    )?;
     Ok(OciTagEvidenceLog::from_events(events)?)
 }
 

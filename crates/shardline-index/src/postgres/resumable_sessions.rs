@@ -586,7 +586,7 @@ impl PostgresIndexStore {
             .execute(&mut *transaction)
             .await?;
         let rows = sqlx::query(
-            "SELECT sequence, event_json
+            "SELECT sequence, event_json, merkle_commit_json
              FROM shardline_reliability_events
              WHERE operation_kind = $1 AND operation_id = $2 ORDER BY sequence",
         )
@@ -594,18 +594,34 @@ impl PostgresIndexStore {
         .bind(session_id)
         .fetch_all(&mut *transaction)
         .await?;
-        let events = rows
-            .into_iter()
-            .map(|row| {
-                let sequence: i64 = row.try_get("sequence")?;
-                if sequence < 0 {
-                    return Err(PostgresMetadataStoreError::IntegerOutOfRange(
-                        "reliability sequence".into(),
-                    ));
-                }
-                Ok(serde_json::from_value(row.try_get("event_json")?)?)
-            })
-            .collect::<Result<Vec<_>, PostgresMetadataStoreError>>()?;
+        let mut events = Vec::with_capacity(rows.len());
+        let mut event_json = Vec::with_capacity(rows.len());
+        let mut merkle_commits = Vec::with_capacity(rows.len());
+        for row in rows {
+            let sequence: i64 = row.try_get("sequence")?;
+            if sequence < 0 {
+                return Err(PostgresMetadataStoreError::IntegerOutOfRange(
+                    "reliability sequence".into(),
+                ));
+            }
+            let value: serde_json::Value = row.try_get("event_json")?;
+            let event = serde_json::from_value::<StateTransitionEvent>(value.clone())?;
+            if u64_to_i64(event.sequence)? != sequence {
+                return Err(PostgresMetadataStoreError::Reliability(
+                    shardline_reliability::ReliabilityError::Merkle(
+                        "resumable event sequence does not match its row".into(),
+                    ),
+                ));
+            }
+            events.push(event);
+            event_json.push(value);
+            merkle_commits.push(row.try_get("merkle_commit_json")?);
+        }
+        shardline_reliability::verify_persisted_event_merkle_chain(
+            shardline_reliability::OperationKind::ResumableSession,
+            &event_json,
+            &merkle_commits,
+        )?;
         let session = sqlx::query(
             "SELECT scope_namespace, target_key, state
              FROM shardline_resumable_sessions

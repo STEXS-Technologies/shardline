@@ -1,6 +1,6 @@
 use shardline_reliability::{
     OciObjectEvidenceLog, OciObjectIdentity, OciObjectLifecycleEvent, OciObjectLifecycleState,
-    OciObjectOperationId, OciObjectSnapshot, resumable_session_event,
+    OciObjectOperationId, OciObjectSnapshot, OperationKind, resumable_session_event,
     verify_and_append_snapshot_transition, verify_snapshot_evidence,
 };
 use sqlx::{Connection as _, PgConnection, Row as _, query, query_scalar};
@@ -38,20 +38,28 @@ async fn load_oci_evidence(
         key.digest_hex.clone(),
     )?);
     let rows = query(
-        "SELECT event_json FROM shardline_reliability_events
+        "SELECT event_json, merkle_commit_json FROM shardline_reliability_events
          WHERE operation_kind = 'Visibility' AND operation_id = $1 ORDER BY sequence",
     )
     .bind(operation_id.as_str())
     .fetch_all(executor)
     .await?;
-    let events = rows
-        .into_iter()
-        .map(|row| {
-            Ok(serde_json::from_value::<OciObjectLifecycleEvent>(
-                row.try_get("event_json")?,
-            )?)
-        })
-        .collect::<Result<Vec<_>, PostgresMetadataStoreError>>()?;
+    let mut events = Vec::with_capacity(rows.len());
+    let mut event_json = Vec::with_capacity(rows.len());
+    let mut merkle_commits = Vec::with_capacity(rows.len());
+    for row in rows {
+        let value: serde_json::Value = row.try_get("event_json")?;
+        events.push(serde_json::from_value::<OciObjectLifecycleEvent>(
+            value.clone(),
+        )?);
+        event_json.push(value);
+        merkle_commits.push(row.try_get("merkle_commit_json")?);
+    }
+    shardline_reliability::verify_persisted_event_merkle_chain(
+        OperationKind::Visibility,
+        &event_json,
+        &merkle_commits,
+    )?;
     Ok(OciObjectEvidenceLog::from_events(events)?)
 }
 

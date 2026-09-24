@@ -12,9 +12,9 @@ use crate::{
     postgres::{PostgresIndexStore, PostgresMetadataStoreError, i64_to_u64, u64_to_i64},
 };
 use shardline_reliability::{
-    HubRefEvidenceLog, HubRefLifecycleEvent, HubRefSnapshot, SnapshotEvidence,
+    HubRefEvidenceLog, HubRefLifecycleEvent, HubRefSnapshot, OperationKind, SnapshotEvidence,
     verify_and_append_snapshot_transition, verify_or_repair_snapshot_evidence,
-    verify_snapshot_evidence,
+    verify_persisted_event_merkle_chain, verify_snapshot_evidence,
 };
 
 const fn repo_type_to_str(t: HubRepoType) -> &'static str {
@@ -40,17 +40,26 @@ async fn load_hub_ref_evidence(
 ) -> Result<HubRefEvidenceLog, PostgresMetadataStoreError> {
     let operation = HubRefSnapshot::new(repository, ref_name, None)?.evidence_operation()?;
     let rows = sqlx::query(
-        "SELECT event_json FROM shardline_reliability_events
+        "SELECT event_json, merkle_commit_json FROM shardline_reliability_events
          WHERE operation_kind = 'MetadataCommit' AND operation_id = $1 ORDER BY sequence",
     )
     .bind(&operation.operation_id)
     .fetch_all(&mut **transaction)
     .await?;
     let mut events = Vec::with_capacity(rows.len());
+    let mut event_json = Vec::with_capacity(rows.len());
+    let mut merkle_commits = Vec::with_capacity(rows.len());
     for row in rows {
         let value: serde_json::Value = row.try_get("event_json")?;
-        events.push(from_value::<HubRefLifecycleEvent>(value)?);
+        events.push(from_value::<HubRefLifecycleEvent>(value.clone())?);
+        event_json.push(value);
+        merkle_commits.push(row.try_get("merkle_commit_json")?);
     }
+    verify_persisted_event_merkle_chain(
+        OperationKind::MetadataCommit,
+        &event_json,
+        &merkle_commits,
+    )?;
     Ok(HubRefEvidenceLog::from_events(events)?)
 }
 

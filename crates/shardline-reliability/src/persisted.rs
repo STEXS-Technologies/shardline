@@ -149,6 +149,34 @@ pub fn verify_persisted_merkle_commit_with_previous(
     Ok(())
 }
 
+/// Verifies an ordered persisted Merkle chain from a database event stream.
+///
+/// The event and commitment arrays must represent the same operation in
+/// sequence order. Keeping the previous-commit traversal here makes every
+/// database adapter use one chain interpretation.
+pub fn verify_persisted_event_merkle_chain(
+    operation_kind: OperationKind,
+    events: &[Value],
+    merkle_commits: &[Option<Value>],
+) -> Result<(), ReliabilityError> {
+    if events.len() != merkle_commits.len() {
+        return Err(ReliabilityError::Merkle(
+            "persisted event and Merkle commitment counts differ".into(),
+        ));
+    }
+    let mut previous = None;
+    for (event, commit) in events.iter().cloned().zip(merkle_commits.iter().cloned()) {
+        verify_persisted_merkle_commit_with_previous(
+            operation_kind,
+            event,
+            commit.clone(),
+            previous.clone(),
+        )?;
+        previous = commit;
+    }
+    Ok(())
+}
+
 fn sequence<E>(operation_kind: OperationKind, event_json: Value) -> Result<u64, ReliabilityError>
 where
     E: serde::de::DeserializeOwned + crate::event_metadata::EvidenceEventMetadata,
@@ -290,5 +318,62 @@ mod tests {
             Some(first_commit),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn persisted_merkle_chain_verifier_rejects_missing_or_tampered_rows() {
+        let first = crate::upload_lifecycle_event(
+            "tenant",
+            "repository",
+            "upload-chain-helper",
+            "object",
+            "e".repeat(64),
+            UploadLifecycleState::Created,
+            UploadLifecycleState::Storing,
+        )
+        .unwrap();
+        let second = crate::upload_lifecycle_event(
+            "tenant",
+            "repository",
+            "upload-chain-helper",
+            "object",
+            "e".repeat(64),
+            UploadLifecycleState::Storing,
+            UploadLifecycleState::Stored,
+        )
+        .unwrap();
+        let events = vec![
+            serde_json::to_value(&first).unwrap(),
+            serde_json::to_value(&second).unwrap(),
+        ];
+        let first_commit =
+            build_persisted_merkle_commit(OperationKind::Upload, events[0].clone()).unwrap();
+        let second_commit = build_persisted_merkle_commit_with_previous(
+            OperationKind::Upload,
+            events[1].clone(),
+            Some(first_commit.clone()),
+        )
+        .unwrap();
+        let commitments = vec![Some(first_commit), Some(second_commit.clone())];
+        verify_persisted_event_merkle_chain(OperationKind::Upload, &events, &commitments).unwrap();
+
+        let mut tampered = second_commit;
+        tampered["body"]["event_merkle_root"] = serde_json::json!("tampered");
+        assert!(
+            verify_persisted_event_merkle_chain(
+                OperationKind::Upload,
+                &events,
+                &[commitments[0].clone(), Some(tampered)],
+            )
+            .is_err()
+        );
+        assert!(
+            verify_persisted_event_merkle_chain(
+                OperationKind::Upload,
+                &events,
+                &[commitments[0].clone(), None],
+            )
+            .is_err()
+        );
     }
 }

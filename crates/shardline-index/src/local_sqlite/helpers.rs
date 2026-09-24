@@ -18,7 +18,7 @@ use rusqlite::{
     params,
     types::{Type, ValueRef},
 };
-use serde_json::{Value, from_slice, from_str, to_string};
+use serde_json::{Value, from_slice, from_str, from_value, to_string};
 use shardline_protocol::{RepositoryScope, unix_now_seconds_lossy};
 use shardline_reliability::{
     EvidenceEventMetadata, HubRefEvidenceLog, HubRefLifecycleEvent, HubRefSnapshot,
@@ -66,6 +66,42 @@ use crate::{OciObjectKind, provider_evidence::snapshot_from_state};
 
 pub(crate) fn quarantine_evidence_operation_id(object_key: &str) -> String {
     object_key.to_owned()
+}
+
+/// Loads one operation's JSON events and verifies its persisted Merkle chain
+/// before any domain-specific state interpretation occurs.
+pub(crate) fn load_verified_event_json(
+    transaction: &Transaction<'_>,
+    operation_kind: OperationKind,
+    operation_id: &str,
+) -> Result<Vec<Value>, LocalIndexStoreError> {
+    let mut statement = transaction.prepare(
+        "SELECT event_json, merkle_commit_json
+         FROM shardline_reliability_events
+         WHERE operation_kind = ?1 AND operation_id = ?2 ORDER BY sequence",
+    )?;
+    let rows = statement.query_map(params![operation_kind.as_str(), operation_id], |row| {
+        let event_json: String = row.get(0)?;
+        let merkle_commit_json: Option<String> = row.get(1)?;
+        Ok((event_json, merkle_commit_json))
+    })?;
+    let rows = rows.collect::<Result<Vec<_>, _>>()?;
+    let mut events = Vec::with_capacity(rows.len());
+    let mut merkle_commits = Vec::with_capacity(rows.len());
+    for (event_json, merkle_commit_json) in rows {
+        events.push(from_str::<Value>(&event_json)?);
+        merkle_commits.push(
+            merkle_commit_json
+                .map(|json| from_str::<Value>(&json))
+                .transpose()?,
+        );
+    }
+    shardline_reliability::verify_persisted_event_merkle_chain(
+        operation_kind,
+        &events,
+        &merkle_commits,
+    )?;
+    Ok(events)
 }
 
 /// Persists one authenticated evidence event using its typed operation key.
@@ -420,21 +456,15 @@ pub(crate) fn load_quarantine_evidence(
     transaction: &Transaction<'_>,
     object_key: &str,
 ) -> Result<QuarantineEvidenceLog, LocalIndexStoreError> {
-    let mut statement = transaction.prepare(
-        "SELECT event_json FROM shardline_reliability_events
-         WHERE operation_kind = 'GarbageCollection' AND operation_id = ?1 ORDER BY sequence",
-    )?;
-    let rows = statement.query_map(
-        params![quarantine_evidence_operation_id(object_key)],
-        |row| {
-            let event_json: String = row.get(0)?;
-            from_str::<QuarantineLifecycleEvent>(&event_json).map_err(|error| {
-                SqliteError::FromSqlConversionFailure(0, Type::Text, Box::new(error))
-            })
-        },
+    let rows = load_verified_event_json(
+        transaction,
+        OperationKind::GarbageCollection,
+        &quarantine_evidence_operation_id(object_key),
     )?;
     Ok(QuarantineEvidenceLog::from_events(
-        rows.collect::<Result<Vec<_>, _>>()?,
+        rows.into_iter()
+            .map(from_value::<QuarantineLifecycleEvent>)
+            .collect::<Result<Vec<_>, _>>()?,
     )?)
 }
 
@@ -466,21 +496,15 @@ pub(crate) fn load_retention_evidence(
     transaction: &Transaction<'_>,
     object_key: &str,
 ) -> Result<RetentionEvidenceLog, LocalIndexStoreError> {
-    let mut statement = transaction.prepare(
-        "SELECT event_json FROM shardline_reliability_events
-         WHERE operation_kind = 'RetentionHold' AND operation_id = ?1 ORDER BY sequence",
-    )?;
-    let rows = statement.query_map(
-        params![retention_evidence_operation_id(object_key)],
-        |row| {
-            let event_json: String = row.get(0)?;
-            from_str::<RetentionHoldLifecycleEvent>(&event_json).map_err(|error| {
-                SqliteError::FromSqlConversionFailure(0, Type::Text, Box::new(error))
-            })
-        },
+    let rows = load_verified_event_json(
+        transaction,
+        OperationKind::RetentionHold,
+        &retention_evidence_operation_id(object_key),
     )?;
     Ok(RetentionEvidenceLog::from_events(
-        rows.collect::<Result<Vec<_>, _>>()?,
+        rows.into_iter()
+            .map(from_value::<RetentionHoldLifecycleEvent>)
+            .collect::<Result<Vec<_>, _>>()?,
     )?)
 }
 
@@ -514,17 +538,15 @@ pub(crate) fn load_webhook_evidence(
     let operation = webhook_snapshot(delivery, WebhookDeliveryLifecycleState::Processed)?
         .evidence_operation()
         .map_err(LocalIndexStoreError::from)?;
-    let mut statement = transaction.prepare(
-        "SELECT event_json FROM shardline_reliability_events
-         WHERE operation_kind = 'WebhookDelivery' AND operation_id = ?1 ORDER BY sequence",
+    let rows = load_verified_event_json(
+        transaction,
+        OperationKind::WebhookDelivery,
+        &operation.operation_id,
     )?;
-    let rows = statement.query_map(params![operation.operation_id], |row| {
-        let event_json: String = row.get(0)?;
-        from_str::<WebhookDeliveryLifecycleEvent>(&event_json)
-            .map_err(|error| SqliteError::FromSqlConversionFailure(0, Type::Text, Box::new(error)))
-    })?;
     Ok(WebhookDeliveryEvidenceLog::from_events(
-        rows.collect::<Result<Vec<_>, _>>()?,
+        rows.into_iter()
+            .map(from_value::<WebhookDeliveryLifecycleEvent>)
+            .collect::<Result<Vec<_>, _>>()?,
     )?)
 }
 
@@ -549,17 +571,15 @@ pub(crate) fn load_hub_ref_evidence(
     ref_name: &str,
 ) -> Result<HubRefEvidenceLog, LocalIndexStoreError> {
     let operation = hub_ref_snapshot(repository, ref_name, None)?.evidence_operation()?;
-    let mut statement = transaction.prepare(
-        "SELECT event_json FROM shardline_reliability_events
-         WHERE operation_kind = 'MetadataCommit' AND operation_id = ?1 ORDER BY sequence",
+    let rows = load_verified_event_json(
+        transaction,
+        OperationKind::MetadataCommit,
+        &operation.operation_id,
     )?;
-    let rows = statement.query_map(params![operation.operation_id], |row| {
-        let event_json: String = row.get(0)?;
-        from_str::<HubRefLifecycleEvent>(&event_json)
-            .map_err(|error| SqliteError::FromSqlConversionFailure(0, Type::Text, Box::new(error)))
-    })?;
     Ok(HubRefEvidenceLog::from_events(
-        rows.collect::<Result<Vec<_>, _>>()?,
+        rows.into_iter()
+            .map(from_value::<HubRefLifecycleEvent>)
+            .collect::<Result<Vec<_>, _>>()?,
     )?)
 }
 
@@ -615,17 +635,12 @@ pub(crate) fn load_oci_tag_evidence(
 ) -> Result<OciTagEvidenceLog, LocalIndexStoreError> {
     let operation =
         oci_tag_snapshot(scope_namespace, repository, tag, None)?.evidence_operation()?;
-    let mut statement = transaction.prepare(
-        "SELECT event_json FROM shardline_reliability_events
-         WHERE operation_kind = 'OciTag' AND operation_id = ?1 ORDER BY sequence",
-    )?;
-    let rows = statement.query_map(params![operation.operation_id], |row| {
-        let event_json: String = row.get(0)?;
-        from_str::<OciTagLifecycleEvent>(&event_json)
-            .map_err(|error| SqliteError::FromSqlConversionFailure(0, Type::Text, Box::new(error)))
-    })?;
+    let rows =
+        load_verified_event_json(transaction, OperationKind::OciTag, &operation.operation_id)?;
     Ok(OciTagEvidenceLog::from_events(
-        rows.collect::<Result<Vec<_>, _>>()?,
+        rows.into_iter()
+            .map(from_value::<OciTagLifecycleEvent>)
+            .collect::<Result<Vec<_>, _>>()?,
     )?)
 }
 
@@ -694,21 +709,15 @@ pub(crate) fn load_s3_object_evidence(
     object_key: &str,
 ) -> Result<S3ObjectEvidenceLog, LocalIndexStoreError> {
     let operation = s3_object_snapshot(scope_namespace, object_key, None)?.evidence_operation()?;
-    let mut statement = transaction.prepare(
-        "SELECT event_json FROM shardline_reliability_events
-         WHERE operation_kind = ?1 AND operation_id = ?2 ORDER BY sequence",
-    )?;
-    let rows = statement.query_map(
-        params![OperationKind::S3Object.as_str(), operation.operation_id],
-        |row| {
-            let event_json: String = row.get(0)?;
-            from_str::<S3ObjectLifecycleEvent>(&event_json).map_err(|error| {
-                SqliteError::FromSqlConversionFailure(0, Type::Text, Box::new(error))
-            })
-        },
+    let rows = load_verified_event_json(
+        transaction,
+        OperationKind::S3Object,
+        &operation.operation_id,
     )?;
     Ok(S3ObjectEvidenceLog::from_events(
-        rows.collect::<Result<Vec<_>, _>>()?,
+        rows.into_iter()
+            .map(from_value::<S3ObjectLifecycleEvent>)
+            .collect::<Result<Vec<_>, _>>()?,
     )?)
 }
 
@@ -768,18 +777,11 @@ pub(crate) fn load_provider_evidence(
     snapshot: &ProviderLifecycleSnapshot,
 ) -> Result<ProviderEvidenceLog, LocalIndexStoreError> {
     let operation_id = provider_evidence_operation_id(snapshot);
-    let mut statement = transaction.prepare(
-        "SELECT event_json
-         FROM shardline_reliability_events
-         WHERE operation_kind = 'ProviderEvent' AND operation_id = ?1
-         ORDER BY sequence",
-    )?;
-    let rows = statement.query_map(params![operation_id], |row| {
-        let event_json: String = row.get(0)?;
-        from_str::<ProviderLifecycleEvent>(&event_json)
-            .map_err(|error| SqliteError::FromSqlConversionFailure(0, Type::Text, Box::new(error)))
-    })?;
-    let events = rows.collect::<Result<Vec<_>, _>>()?;
+    let events =
+        load_verified_event_json(transaction, OperationKind::ProviderEvent, &operation_id)?
+            .into_iter()
+            .map(from_value::<ProviderLifecycleEvent>)
+            .collect::<Result<Vec<_>, _>>()?;
     Ok(ProviderEvidenceLog::from_events(events)?)
 }
 

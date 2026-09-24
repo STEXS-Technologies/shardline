@@ -63,7 +63,7 @@ async fn load_s3_object_evidence(
 ) -> Result<S3ObjectEvidenceLog, PostgresMetadataStoreError> {
     let operation = s3_object_snapshot(scope_namespace, object_key, None)?.evidence_operation()?;
     let rows = query(
-        "SELECT event_json FROM shardline_reliability_events
+        "SELECT event_json, merkle_commit_json FROM shardline_reliability_events
          WHERE operation_kind = $1 AND operation_id = $2 ORDER BY sequence",
     )
     .bind(OperationKind::S3Object.as_str())
@@ -71,11 +71,19 @@ async fn load_s3_object_evidence(
     .fetch_all(&mut *connection)
     .await?;
     let mut events = Vec::with_capacity(rows.len());
+    let mut event_json = Vec::with_capacity(rows.len());
+    let mut merkle_commits = Vec::with_capacity(rows.len());
     for row in rows {
-        events.push(from_value::<S3ObjectLifecycleEvent>(
-            row.try_get("event_json")?,
-        )?);
+        let value: serde_json::Value = row.try_get("event_json")?;
+        events.push(from_value::<S3ObjectLifecycleEvent>(value.clone())?);
+        event_json.push(value);
+        merkle_commits.push(row.try_get("merkle_commit_json")?);
     }
+    shardline_reliability::verify_persisted_event_merkle_chain(
+        OperationKind::S3Object,
+        &event_json,
+        &merkle_commits,
+    )?;
     Ok(S3ObjectEvidenceLog::from_events(events)?)
 }
 

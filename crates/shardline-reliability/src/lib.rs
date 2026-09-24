@@ -74,8 +74,8 @@ pub use operation::{
 pub use penelope_domain::ContentDigest as PenelopeDigest;
 pub use persisted::{
     build_persisted_merkle_commit, build_persisted_merkle_commit_with_previous,
-    persisted_event_sequence, verify_persisted_event, verify_persisted_merkle_commit,
-    verify_persisted_merkle_commit_with_previous,
+    persisted_event_sequence, verify_persisted_event, verify_persisted_event_merkle_chain,
+    verify_persisted_merkle_commit, verify_persisted_merkle_commit_with_previous,
 };
 pub use provider_evidence::{
     ProviderEvidenceLog, ProviderLifecycleEvent, ProviderLifecycleObservations,
