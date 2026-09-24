@@ -43,6 +43,43 @@ pub struct S3ObjectStore {
     pub(crate) key_prefix: Option<String>,
 }
 
+async fn existing_object_outcome(
+    store: &AmazonS3,
+    location: &ObjectStorePath,
+    integrity: &ObjectIntegrity,
+) -> Result<PutOutcome, S3ObjectStoreError> {
+    let metadata = store
+        .head(location)
+        .await
+        .map_err(S3ObjectStoreError::External)?;
+    if metadata.size != integrity.length() {
+        return Err(S3ObjectStoreError::ExistingObjectConflict);
+    }
+
+    let result = store
+        .get(location)
+        .await
+        .map_err(S3ObjectStoreError::External)?;
+    let mut stream = result.into_stream();
+    let mut hasher = blake3::Hasher::new();
+    let mut length = 0_u64;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(S3ObjectStoreError::External)?;
+        length = length
+            .checked_add(
+                u64::try_from(chunk.len())
+                    .map_err(|_error| S3ObjectStoreError::ExistingObjectConflict)?,
+            )
+            .ok_or(S3ObjectStoreError::ExistingObjectConflict)?;
+        hasher.update(&chunk);
+    }
+    let hash = ShardlineHash::from_bytes(*hasher.finalize().as_bytes());
+    if length != integrity.length() || hash != integrity.hash() {
+        return Err(S3ObjectStoreError::ExistingObjectConflict);
+    }
+    Ok(PutOutcome::AlreadyExists)
+}
+
 impl fmt::Debug for S3ObjectStore {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -758,7 +795,7 @@ impl ObjectStore for S3ObjectStore {
             }))
             | Err(S3ObjectStoreError::External(ExternalObjectStoreError::Precondition {
                 ..
-            })) => Ok(PutOutcome::AlreadyExists),
+            })) => self.block_on_result(existing_object_outcome(&self.inner, &location, integrity)),
             Err(error) => Err(error),
         }
     }
@@ -872,7 +909,9 @@ impl AsyncObjectStore for S3ObjectStore {
         {
             Ok(_result) => Ok(PutOutcome::Inserted),
             Err(ExternalObjectStoreError::AlreadyExists { .. })
-            | Err(ExternalObjectStoreError::Precondition { .. }) => Ok(PutOutcome::AlreadyExists),
+            | Err(ExternalObjectStoreError::Precondition { .. }) => {
+                existing_object_outcome(&self.inner, &location, integrity).await
+            }
             Err(error) => Err(S3ObjectStoreError::External(error)),
         }
     }

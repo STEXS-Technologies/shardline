@@ -1141,6 +1141,61 @@ mod minio_tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn minio_put_if_absent_rejects_conflicting_existing_bytes() {
+        let stack = match ensure_minio() {
+            Some(s) => s,
+            None => return,
+        };
+        let store = build_s3_store(&stack, Some("test-conflict"));
+        let key = ObjectKey::parse("objects/conflict.xorb").unwrap();
+        let original = b"original bytes";
+        let conflicting = b"different data";
+        let original_integrity = ObjectIntegrity::new(super::super::chunk_hash(original), 14);
+        let conflicting_integrity = ObjectIntegrity::new(super::super::chunk_hash(conflicting), 14);
+
+        assert!(matches!(
+            ObjectStoreTrait::put_if_absent(
+                &store,
+                &key,
+                ObjectBody::from_slice(original),
+                &original_integrity,
+            ),
+            Ok(PutOutcome::Inserted)
+        ));
+        assert!(matches!(
+            ObjectStoreTrait::put_if_absent(
+                &store,
+                &key,
+                ObjectBody::from_slice(conflicting),
+                &conflicting_integrity,
+            ),
+            Err(S3ObjectStoreError::ExistingObjectConflict)
+        ));
+
+        let async_key = ObjectKey::parse("objects/async-conflict.xorb").unwrap();
+        assert!(matches!(
+            crate::AsyncObjectStore::put_if_absent(
+                &store,
+                &async_key,
+                ObjectBody::from_slice(original),
+                &original_integrity,
+            )
+            .await,
+            Ok(PutOutcome::Inserted)
+        ));
+        assert!(matches!(
+            crate::AsyncObjectStore::put_if_absent(
+                &store,
+                &async_key,
+                ObjectBody::from_slice(conflicting),
+                &conflicting_integrity,
+            )
+            .await,
+            Err(S3ObjectStoreError::ExistingObjectConflict)
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn minio_list_flat_namespace_page_pagination() {
         let stack = match ensure_minio() {
             Some(s) => s,
