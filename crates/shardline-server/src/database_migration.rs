@@ -268,14 +268,14 @@ struct AppliedMigration {
 
 const MIGRATION_HISTORY_TABLE: &str = "shardline_schema_migrations";
 const MIGRATION_ADVISORY_LOCK_KEY: i64 = 0x5348_4152_444d_4701;
-// These pre-release migrations were folded into the first reliability schema
-// migration. Existing development databases may already contain their
-// history rows; they remain accepted as retired compatibility markers and are
-// never re-run or selected for rollback.
+// These two pre-release migrations were superseded before the reliability
+// schema reached the release sequence. Existing development databases may
+// already contain their history rows; they remain accepted as retired
+// compatibility markers and are never re-run or selected for rollback.
 const RETIRED_MIGRATION_VERSIONS: &[&str] = &["20260923000000", "20260925000000"];
-// The reliability migration was squashed before release. Keep the checksum
-// written by the pre-squash development database valid so an operator can
-// upgrade that database normally instead of editing migration history.
+// Keep historical checksums written by development databases valid so an
+// operator can upgrade those databases normally instead of editing migration
+// history. These aliases do not weaken verification for current migrations.
 const LEGACY_MIGRATION_CHECKSUM_ALIASES: &[(&str, &str)] = &[
     (
         "20260922000000",
