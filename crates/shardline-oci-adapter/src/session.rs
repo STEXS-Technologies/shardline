@@ -403,7 +403,7 @@ pub async fn repair_upload_session_evidence(
     let bytes = read_upload_file_async(root, &metadata_path).await?;
     let persisted = serde_json::from_slice::<PersistedOciUploadSession>(&bytes)
         .map_err(OciAdapterError::Json)?;
-    let persist_lock = super::fs::session_persist_lock(session_id);
+    let persist_lock = super::fs::session_persist_lock(root, session_id);
     let _guard = persist_lock.lock().await;
     let (evidence, snapshot_evidence) = if let Some(head) = persisted.journal_head {
         let records = read_evidence_journal(root, session_id).await?;

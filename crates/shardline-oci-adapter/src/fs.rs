@@ -53,19 +53,23 @@ pub(crate) struct PersistedOciUploadSession {
 }
 
 const SESSION_EVIDENCE_JOURNAL: &str = "evidence.log";
-static OCI_SESSION_PERSIST_LOCKS: LazyLock<std::sync::Mutex<HashMap<String, Weak<Mutex<()>>>>> =
+type SessionPersistLockKey = (PathBuf, String);
+type SessionPersistLockMap = std::sync::Mutex<HashMap<SessionPersistLockKey, Weak<Mutex<()>>>>;
+
+static OCI_SESSION_PERSIST_LOCKS: LazyLock<SessionPersistLockMap> =
     LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 
-pub(crate) fn session_persist_lock(session_id: &str) -> Arc<Mutex<()>> {
+pub(crate) fn session_persist_lock(root: &Path, session_id: &str) -> Arc<Mutex<()>> {
     let mut locks = OCI_SESSION_PERSIST_LOCKS
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if let Some(lock) = locks.get(session_id).and_then(Weak::upgrade) {
+    let key = (root.to_path_buf(), session_id.to_owned());
+    if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) {
         return lock;
     }
     locks.retain(|_, lock| lock.strong_count() > 0);
     let lock = Arc::new(Mutex::new(()));
-    locks.insert(session_id.to_owned(), Arc::downgrade(&lock));
+    locks.insert(key, Arc::downgrade(&lock));
     lock
 }
 
@@ -154,7 +158,7 @@ pub(crate) async fn persist_upload_session(
     session_id: &str,
     session: &OciUploadSession,
 ) -> Result<(), OciAdapterError> {
-    let persist_lock = session_persist_lock(session_id);
+    let persist_lock = session_persist_lock(root, session_id);
     let _guard = persist_lock.lock().await;
     let (evidence, mut snapshot_evidence) =
         match read_persisted_upload_session_with_snapshot(root, session_id).await {

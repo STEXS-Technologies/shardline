@@ -1728,6 +1728,19 @@ async fn lock_upload_sessions_acquires_and_releases_lock() {
         .expect("should acquire lock again");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn persistence_locks_for_different_roots_run_in_parallel() {
+    let first_root = temp_root();
+    let second_root = temp_root();
+    let first = super::fs::session_persist_lock(first_root.path(), "same-session-id");
+    let _first_guard = first.lock().await;
+    let second = super::fs::session_persist_lock(second_root.path(), "same-session-id");
+
+    let _second_guard = tokio::time::timeout(std::time::Duration::from_secs(2), second.lock())
+        .await
+        .expect("different deployment roots must not share a persistence lock");
+}
+
 #[tokio::test]
 async fn new_upload_session_id_format_is_32_char_hex() {
     let id = new_upload_session_id();
