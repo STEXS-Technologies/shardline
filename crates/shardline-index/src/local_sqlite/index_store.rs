@@ -2715,6 +2715,50 @@ mod tests {
     }
 
     #[test]
+    fn sqlite_reliability_writer_rejects_conflicting_sequence_body() {
+        use shardline_reliability::{LifecycleEvent, OperationIdentity, OperationKind};
+
+        let store = make_store();
+        let operation = OperationIdentity::new(
+            "tenant-a",
+            "repo-a",
+            "writer-conflict",
+            OperationKind::Upload,
+        )
+        .unwrap()
+        .with_object_key("objects/first")
+        .with_content_sha256("a".repeat(64));
+        let first = LifecycleEvent::new(
+            operation.clone(),
+            0,
+            shardline_reliability::UploadLifecycleState::Created,
+            shardline_reliability::UploadLifecycleState::Created,
+        )
+        .unwrap();
+        let conflicting = LifecycleEvent::new(
+            operation.with_object_key("objects/second"),
+            0,
+            shardline_reliability::UploadLifecycleState::Created,
+            shardline_reliability::UploadLifecycleState::Created,
+        )
+        .unwrap();
+
+        let mut connection = store.open_connection().unwrap();
+        let transaction = connection.transaction().unwrap();
+        crate::local_sqlite::helpers::persist_reliability_event_at(&transaction, &first, 0)
+            .unwrap();
+        assert!(matches!(
+            crate::local_sqlite::helpers::persist_reliability_event_at(
+                &transaction,
+                &conflicting,
+                0,
+            ),
+            Err(LocalIndexStoreError::ReliabilityEventConflict(operation_id))
+                if operation_id == "writer-conflict"
+        ));
+    }
+
+    #[test]
     fn transition_intent_to_same_state_is_idempotent() {
         let store = make_store();
         let intent = UploadIntent::new(

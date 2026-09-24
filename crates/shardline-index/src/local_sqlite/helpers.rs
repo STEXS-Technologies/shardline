@@ -229,7 +229,7 @@ pub(crate) fn persist_reliability_event_at<T: EvidenceEventMetadata>(
     let merkle_commit_json =
         reliability_merkle_commit_json_with_previous(event, previous.as_ref())?;
     let event_json = to_string(event)?;
-    transaction.execute(
+    let rows = transaction.execute(
         "INSERT INTO shardline_reliability_events
             (operation_kind, operation_id, sequence, event_json, created_at_unix_seconds,
              merkle_commit_json)
@@ -238,7 +238,8 @@ pub(crate) fn persist_reliability_event_at<T: EvidenceEventMetadata>(
          SET merkle_commit_json = COALESCE(
              shardline_reliability_events.merkle_commit_json,
              excluded.merkle_commit_json
-         )",
+         )
+         WHERE shardline_reliability_events.event_json = excluded.event_json",
         params![
             event.operation_identity().kind.as_str(),
             event.operation_identity().operation_id,
@@ -248,6 +249,11 @@ pub(crate) fn persist_reliability_event_at<T: EvidenceEventMetadata>(
             merkle_commit_json.to_string(),
         ],
     )?;
+    if rows == 0 {
+        return Err(LocalIndexStoreError::ReliabilityEventConflict(
+            event.operation_identity().operation_id.clone(),
+        ));
+    }
     Ok(())
 }
 
