@@ -121,17 +121,17 @@ async fn persist_hub_ref_evidence(
     Ok(())
 }
 
-async fn verify_hub_repo_heads(
+async fn verify_hub_ref_evidence_batch(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    repos: &[HubRepo],
+    refs: &[HubRef],
 ) -> Result<(), PostgresMetadataStoreError> {
-    if repos.is_empty() {
+    if refs.is_empty() {
         return Ok(());
     }
-    let mut operation_ids = Vec::with_capacity(repos.len());
-    for repo in repos {
+    let mut operation_ids = Vec::with_capacity(refs.len());
+    for reference in refs {
         operation_ids.push(
-            HubRefSnapshot::new(&repo.repo_id, "main", None)?
+            HubRefSnapshot::new(&reference.repo_id, &reference.ref_name, None)?
                 .evidence_operation()?
                 .operation_id,
         );
@@ -161,10 +161,12 @@ async fn verify_hub_repo_heads(
                 row.try_get("merkle_commit_json")?,
             ));
     }
-    for repo in repos {
-        let snapshot =
-            HubRefSnapshot::new(&repo.repo_id, "main", Some(repo.default_branch.clone()))?;
-        let operation_id = snapshot.evidence_operation()?.operation_id;
+    for (reference, operation_id) in refs.iter().zip(operation_ids) {
+        let snapshot = HubRefSnapshot::new(
+            &reference.repo_id,
+            &reference.ref_name,
+            Some(reference.sha.clone()),
+        )?;
         let rows = histories.remove(&operation_id).unwrap_or_default();
         let mut sequences = Vec::with_capacity(rows.len());
         let mut event_json = Vec::with_capacity(rows.len());
@@ -186,6 +188,21 @@ async fn verify_hub_repo_heads(
         verify_snapshot_evidence(&evidence, &snapshot)?;
     }
     Ok(())
+}
+
+async fn verify_hub_repo_heads(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    repos: &[HubRepo],
+) -> Result<(), PostgresMetadataStoreError> {
+    let refs = repos
+        .iter()
+        .map(|repo| HubRef {
+            repo_id: repo.repo_id.clone(),
+            ref_name: "main".to_owned(),
+            sha: repo.default_branch.clone(),
+        })
+        .collect::<Vec<_>>();
+    verify_hub_ref_evidence_batch(transaction, &refs).await
 }
 
 /// Runs an async future to completion on the current tokio runtime.
@@ -565,15 +582,7 @@ impl HubStore for PostgresIndexStore {
                 }
                 refs
             };
-            for reference in &refs {
-                verify_hub_ref_evidence(
-                    &mut tx,
-                    &reference.repo_id,
-                    &reference.ref_name,
-                    Some(reference.sha.clone()),
-                )
-                .await?;
-            }
+            verify_hub_ref_evidence_batch(&mut tx, &refs).await?;
             tx.commit().await?;
             Ok(refs)
         })
