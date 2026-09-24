@@ -48,8 +48,7 @@ async fn native_huggingface_cli_model_and_dataset_flows_work_against_shardline()
     let runtime = match start_hub_runtime().await {
         Ok(runtime) => runtime,
         Err(error) => {
-            assert!(false, "hub runtime failed to start: {error}");
-            return;
+            panic!("hub runtime failed to start: {error}");
         }
     };
     let result = exercise_huggingface_cli_flows(&runtime).await;
@@ -71,8 +70,7 @@ async fn native_hf_cli_and_s3_clients_coexist_on_one_server() {
     let runtime = match start_runtime(&[ServerFrontend::Hub, ServerFrontend::S3]).await {
         Ok(runtime) => runtime,
         Err(error) => {
-            assert!(false, "hub+s3 runtime failed to start: {error}");
-            return;
+            panic!("hub+s3 runtime failed to start: {error}");
         }
     };
     if let Err(error) = exercise_huggingface_cli_flows(&runtime).await {
@@ -170,7 +168,7 @@ async fn exercise_huggingface_cli_flows(runtime: &HubRuntime) -> Result<(), Test
     let dataset_repo = "team/cli-dataset";
 
     run_hf(
-        &runtime,
+        runtime,
         client_home.path(),
         [
             "repo",
@@ -187,7 +185,7 @@ async fn exercise_huggingface_cli_flows(runtime: &HubRuntime) -> Result<(), Test
     let single_file = working.path().join("single.txt");
     write(&single_file, b"single upload via hf cli\n")?;
     run_hf(
-        &runtime,
+        runtime,
         client_home.path(),
         [
             "upload",
@@ -212,7 +210,7 @@ async fn exercise_huggingface_cli_flows(runtime: &HubRuntime) -> Result<(), Test
     )?;
     write(folder.join("ignored.bin"), b"must not be uploaded")?;
     run_hf(
-        &runtime,
+        runtime,
         client_home.path(),
         [
             "upload",
@@ -232,7 +230,7 @@ async fn exercise_huggingface_cli_flows(runtime: &HubRuntime) -> Result<(), Test
 
     let single_download = working.path().join("single-download");
     run_hf(
-        &runtime,
+        runtime,
         client_home.path(),
         [
             "download",
@@ -254,7 +252,7 @@ async fn exercise_huggingface_cli_flows(runtime: &HubRuntime) -> Result<(), Test
 
     let filtered_download = working.path().join("filtered-download");
     run_hf(
-        &runtime,
+        runtime,
         client_home.path(),
         [
             "download",
@@ -284,7 +282,7 @@ async fn exercise_huggingface_cli_flows(runtime: &HubRuntime) -> Result<(), Test
     );
 
     run_hf(
-        &runtime,
+        runtime,
         client_home.path(),
         [
             "repos",
@@ -301,7 +299,7 @@ async fn exercise_huggingface_cli_flows(runtime: &HubRuntime) -> Result<(), Test
     )?;
 
     run_hf(
-        &runtime,
+        runtime,
         client_home.path(),
         [
             "repo",
@@ -319,7 +317,7 @@ async fn exercise_huggingface_cli_flows(runtime: &HubRuntime) -> Result<(), Test
     let dataset_file = working.path().join("rows.jsonl");
     write(&dataset_file, b"{\"id\":1,\"value\":\"ok\"}\n")?;
     run_hf(
-        &runtime,
+        runtime,
         client_home.path(),
         [
             "upload",
@@ -336,7 +334,7 @@ async fn exercise_huggingface_cli_flows(runtime: &HubRuntime) -> Result<(), Test
     )?;
     let dataset_download = working.path().join("dataset-download");
     run_hf(
-        &runtime,
+        runtime,
         client_home.path(),
         [
             "download",
@@ -364,7 +362,7 @@ async fn exercise_huggingface_cli_flows(runtime: &HubRuntime) -> Result<(), Test
         (dataset_repo, "dataset", runtime.dataset_token.as_str()),
     ] {
         run_hf(
-            &runtime,
+            runtime,
             client_home.path(),
             [
                 "repo",
