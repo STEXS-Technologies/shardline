@@ -318,6 +318,19 @@ async fn create_upload_session_persists_metadata() {
         .expect("read_upload_session failed");
     assert_eq!(session.repository, "repo");
     assert!(!session.use_s3_multipart);
+    let journal_path = crate::fs::upload_evidence_journal_path(root.path(), &session_id);
+    let records: Vec<shardline_reliability::PersistedMerkleJournalRecord> =
+        tokio::fs::read(journal_path)
+            .await
+            .unwrap()
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(serde_json::from_slice)
+            .collect::<Result<_, _>>()
+            .unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].merkle_commits.len(), 1);
+    assert_eq!(records[0].snapshot_merkle_commits.len(), 1);
 }
 
 #[tokio::test]
@@ -364,19 +377,64 @@ async fn malformed_reliability_envelope_is_not_downgraded_to_legacy() {
 }
 
 #[tokio::test]
+async fn tampered_merkle_journal_is_rejected() {
+    let root = temp_root();
+    let session_id = create_test_session(root.path(), false).await.unwrap();
+    let path = crate::fs::upload_evidence_journal_path(root.path(), &session_id);
+    let mut value: serde_json::Value = serde_json::from_slice(
+        tokio::fs::read(&path)
+            .await
+            .unwrap()
+            .split(|byte| *byte == b'\n')
+            .find(|line| !line.is_empty())
+            .unwrap(),
+    )
+    .unwrap();
+    value["snapshot_merkle_commits"][0]["body"]["sequence"] = serde_json::json!(9);
+    tokio::fs::write(&path, serde_json::to_vec(&value).unwrap())
+        .await
+        .unwrap();
+
+    let error = read_upload_session(root.path(), &session_id, ttl())
+        .await
+        .unwrap_err();
+    assert!(matches!(error, OciAdapterError::Reliability(_)));
+
+    crate::repair_upload_session_evidence(root.path(), &session_id)
+        .await
+        .unwrap();
+    read_upload_session(root.path(), &session_id, ttl())
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 async fn oci_mutations_append_snapshot_evidence_instead_of_resetting_it() {
     let root = temp_root();
     let session_id = create_test_session(root.path(), false).await.unwrap();
-    let metadata_path = crate::upload_metadata_path(root.path(), &session_id);
     let session = read_upload_session(root.path(), &session_id, ttl())
         .await
         .unwrap();
     touch_upload_session(root.path(), &session_id, session)
         .await
         .unwrap();
-    let persisted: crate::fs::PersistedOciUploadSession =
-        serde_json::from_slice(&tokio::fs::read(&metadata_path).await.unwrap()).unwrap();
-    assert_eq!(persisted.snapshot_evidence.events().len(), 2);
+    let journal_path = crate::fs::upload_evidence_journal_path(root.path(), &session_id);
+    let records: Vec<shardline_reliability::PersistedMerkleJournalRecord> =
+        tokio::fs::read(journal_path)
+            .await
+            .unwrap()
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(serde_json::from_slice)
+            .collect::<Result<_, _>>()
+            .unwrap();
+    assert_eq!(
+        records
+            .iter()
+            .map(|record| record.snapshot_evidence.len())
+            .sum::<usize>(),
+        2
+    );
 }
 
 #[tokio::test]

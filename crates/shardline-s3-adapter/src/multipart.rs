@@ -26,12 +26,13 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use shardline_reliability::{
-    DigestSnapshot, ResumableLifecycleState, ResumableSessionSnapshotDomain, SessionEvidenceLog,
-    SnapshotEvidenceEvent, SnapshotEvidenceLog, StateTransitionEvent,
-    append_or_baseline_snapshot_evidence, canonical_state_digest,
+    DigestSnapshot, PersistedMerkleJournalRecord, ResumableLifecycleState,
+    ResumableSessionSnapshotDomain, SessionEvidenceLog, SnapshotEvidenceEvent, SnapshotEvidenceLog,
+    StateTransitionEvent, append_or_baseline_snapshot_evidence,
+    build_persisted_merkle_chain_with_previous, build_typed_merkle_chain, canonical_state_digest,
     resumable_session_snapshot_identity, verify_and_append_session_transition,
-    verify_or_repair_session_evidence, verify_or_repair_snapshot_evidence, verify_session_evidence,
-    verify_snapshot_evidence,
+    verify_or_repair_session_evidence, verify_or_repair_snapshot_evidence,
+    verify_persisted_merkle_chain, verify_session_evidence, verify_snapshot_evidence,
 };
 use thiserror::Error;
 use tokio::{fs, io::AsyncWriteExt, sync::Mutex, task::spawn_blocking};
@@ -235,6 +236,18 @@ struct PersistedMultipartUploadSession {
     /// without rereading the growing journal.
     #[serde(default)]
     journal_snapshot_sequence: Option<u64>,
+    /// Number of committed Merkle journal records.
+    #[serde(default)]
+    merkle_head: Option<u64>,
+    /// Last committed Merkle sequence and body for each evidence stream.
+    #[serde(default)]
+    merkle_evidence_sequence: Option<u64>,
+    #[serde(default)]
+    merkle_snapshot_sequence: Option<u64>,
+    #[serde(default)]
+    merkle_evidence_commit: Option<serde_json::Value>,
+    #[serde(default)]
+    merkle_snapshot_commit: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -244,6 +257,7 @@ struct SessionEvidenceJournalRecord {
 }
 
 const SESSION_EVIDENCE_JOURNAL: &str = "evidence.log";
+const SESSION_MERKLE_JOURNAL: &str = "merkle.log";
 
 fn session_snapshot(session: &MultipartUploadSession) -> Result<DigestSnapshot, S3SessionError> {
     let operation = resumable_session_snapshot_identity(
@@ -909,13 +923,14 @@ async fn load_session_with_snapshot(
         }
         Err(error) => return Err(S3SessionError::Io(error)),
     };
-    let (session, mut stored_evidence, mut stored_snapshot_evidence, journal_head) =
+    let (session, mut stored_evidence, mut stored_snapshot_evidence, journal_head, merkle_head) =
         match serde_json::from_slice::<PersistedMultipartUploadSession>(&bytes) {
             Ok(persisted) => (
                 persisted.session,
                 persisted.evidence,
                 persisted.snapshot_evidence,
                 persisted.journal_head,
+                persisted.merkle_head,
             ),
             Err(wrapper_error) => {
                 if reliability_envelope_field_present(&bytes) {
@@ -927,6 +942,7 @@ async fn load_session_with_snapshot(
                     session,
                     SessionEvidenceLog::default(),
                     SnapshotEvidenceLog::default(),
+                    None,
                     None,
                 )
             }
@@ -949,6 +965,55 @@ async fn load_session_with_snapshot(
                 .iter()
                 .flat_map(|record| record.snapshot_evidence.iter().cloned())
                 .collect(),
+        )
+        .map_err(|error| S3SessionError::Reliability(error.to_string()))?;
+    }
+    if let Some(head) = merkle_head {
+        let records = read_merkle_journal(dir).await?;
+        let head = usize::try_from(head).map_err(|_| S3SessionError::Overflow)?;
+        let committed = records.get(..head).ok_or_else(|| {
+            S3SessionError::Reliability("session Merkle journal head is missing".into())
+        })?;
+        let merkle_events = committed
+            .iter()
+            .flat_map(|record| record.evidence.iter().cloned())
+            .collect::<Vec<_>>();
+        let merkle_commits = committed
+            .iter()
+            .flat_map(|record| record.merkle_commits.iter().cloned())
+            .collect::<Vec<_>>();
+        let snapshot_merkle_events = committed
+            .iter()
+            .flat_map(|record| record.snapshot_evidence.iter().cloned())
+            .collect::<Vec<_>>();
+        let snapshot_merkle_commits = committed
+            .iter()
+            .flat_map(|record| record.snapshot_merkle_commits.iter().cloned())
+            .collect::<Vec<_>>();
+        let expected_events = stored_evidence
+            .events()
+            .iter()
+            .map(serde_json::to_value)
+            .collect::<Result<Vec<_>, _>>()?;
+        let expected_snapshot_events = stored_snapshot_evidence
+            .events()
+            .iter()
+            .map(serde_json::to_value)
+            .collect::<Result<Vec<_>, _>>()?;
+        if merkle_events != expected_events || snapshot_merkle_events != expected_snapshot_events {
+            return Err(S3SessionError::Reliability(
+                "session Merkle journal does not cover evidence journal".into(),
+            ));
+        }
+        verify_persisted_merkle_chain(
+            shardline_reliability::OperationKind::ResumableSession,
+            &merkle_events,
+            &merkle_commits,
+        )
+        .map_err(|error| S3SessionError::Reliability(error.to_string()))?;
+        shardline_reliability::verify_typed_merkle_chain::<SnapshotEvidenceEvent<DigestSnapshot>>(
+            &snapshot_merkle_events,
+            &snapshot_merkle_commits,
         )
         .map_err(|error| S3SessionError::Reliability(error.to_string()))?;
     }
@@ -1013,8 +1078,61 @@ pub async fn repair_session_evidence(root: &Path, upload_id: &str) -> Result<(),
     validate_upload_id(upload_id)?;
     let _lock = lock_upload_sessions(root).await?;
     let dir = session_dir(root, upload_id)?;
-    let (session, evidence, snapshot_evidence) = load_session_with_snapshot(&dir).await?;
-    persist_session_with_evidence(root, upload_id, &session, &evidence, snapshot_evidence).await
+    let metadata_path = dir.join("session.json");
+    let bytes = fs::read(&metadata_path).await?;
+    let persisted = serde_json::from_slice::<PersistedMultipartUploadSession>(&bytes)
+        .map_err(S3SessionError::Json)?;
+    let (evidence, snapshot_evidence) = if let Some(head) = persisted.journal_head {
+        let records = read_evidence_journal(&dir).await?;
+        let head = usize::try_from(head).map_err(|_| S3SessionError::Overflow)?;
+        let committed = records.get(..head).ok_or_else(|| {
+            S3SessionError::Reliability("session evidence journal head is missing".into())
+        })?;
+        (
+            SessionEvidenceLog::from_events(
+                committed
+                    .iter()
+                    .flat_map(|record| record.evidence.iter().cloned())
+                    .collect(),
+            )
+            .map_err(|error| S3SessionError::Reliability(error.to_string()))?,
+            SnapshotEvidenceLog::from_events(
+                committed
+                    .iter()
+                    .flat_map(|record| record.snapshot_evidence.iter().cloned())
+                    .collect(),
+            )
+            .map_err(|error| S3SessionError::Reliability(error.to_string()))?,
+        )
+    } else {
+        (
+            persisted.evidence.clone(),
+            persisted.snapshot_evidence.clone(),
+        )
+    };
+    let _ignored = fs::remove_file(dir.join(SESSION_MERKLE_JOURNAL)).await;
+    let reset = serde_json::to_vec(&PersistedMultipartUploadSession {
+        session: persisted.session.clone(),
+        evidence: SessionEvidenceLog::default(),
+        snapshot_evidence: SnapshotEvidenceLog::default(),
+        journal_head: persisted.journal_head,
+        journal_evidence_sequence: persisted.journal_evidence_sequence,
+        journal_snapshot_sequence: persisted.journal_snapshot_sequence,
+        merkle_head: None,
+        merkle_evidence_sequence: None,
+        merkle_snapshot_sequence: None,
+        merkle_evidence_commit: None,
+        merkle_snapshot_commit: None,
+    })?;
+    write_file_atomically(&metadata_path, &reset).await?;
+    persist_session_with_evidence(
+        root,
+        upload_id,
+        &persisted.session,
+        &evidence,
+        snapshot_evidence,
+    )
+    .await
 }
 
 async fn read_evidence_journal(
@@ -1041,6 +1159,42 @@ async fn append_evidence_journal(
     record: &SessionEvidenceJournalRecord,
 ) -> Result<(), S3SessionError> {
     let path = dir.join(SESSION_EVIDENCE_JOURNAL);
+    let mut bytes = serde_json::to_vec(record)?;
+    bytes.push(b'\n');
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .await?;
+    file.write_all(&bytes).await?;
+    file.sync_all().await?;
+    Ok(())
+}
+
+async fn read_merkle_journal(
+    dir: &Path,
+) -> Result<Vec<PersistedMerkleJournalRecord>, S3SessionError> {
+    let path = dir.join(SESSION_MERKLE_JOURNAL);
+    let bytes = match fs::read(path).await {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(S3SessionError::Io(error)),
+    };
+    bytes
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            serde_json::from_slice(line)
+                .map_err(|error| S3SessionError::Reliability(error.to_string()))
+        })
+        .collect()
+}
+
+async fn append_merkle_journal(
+    dir: &Path,
+    record: &PersistedMerkleJournalRecord,
+) -> Result<(), S3SessionError> {
+    let path = dir.join(SESSION_MERKLE_JOURNAL);
     let mut bytes = serde_json::to_vec(record)?;
     bytes.push(b'\n');
     let mut file = fs::OpenOptions::new()
@@ -1080,6 +1234,11 @@ async fn persist_session(
         journal_head: None,
         journal_evidence_sequence: None,
         journal_snapshot_sequence: None,
+        merkle_head: None,
+        merkle_evidence_sequence: None,
+        merkle_snapshot_sequence: None,
+        merkle_evidence_commit: None,
+        merkle_snapshot_commit: None,
     })?;
     write_file_atomically(&path, &bytes).await
 }
@@ -1102,9 +1261,17 @@ async fn persist_session_with_evidence(
         fs::create_dir_all(parent).await?;
     }
     let existing = match fs::read(&path).await {
-        Ok(bytes) => Some(serde_json::from_slice::<PersistedMultipartUploadSession>(
-            &bytes,
-        )?),
+        Ok(bytes) => match serde_json::from_slice::<PersistedMultipartUploadSession>(&bytes) {
+            Ok(persisted) => Some(persisted),
+            Err(error) if reliability_envelope_field_present(&bytes) => {
+                return Err(S3SessionError::Json(error));
+            }
+            Err(error) => {
+                serde_json::from_slice::<MultipartUploadSession>(&bytes)
+                    .map_err(|_| S3SessionError::Json(error))?;
+                None
+            }
+        },
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return Err(S3SessionError::Io(error)),
     };
@@ -1121,6 +1288,22 @@ async fn persist_session_with_evidence(
     let mut last_snapshot_sequence = existing
         .as_ref()
         .and_then(|value| value.journal_snapshot_sequence);
+    let mut merkle_head = existing
+        .as_ref()
+        .and_then(|value| value.merkle_head)
+        .unwrap_or(0);
+    let mut last_merkle_evidence_sequence = existing
+        .as_ref()
+        .and_then(|value| value.merkle_evidence_sequence);
+    let mut last_merkle_snapshot_sequence = existing
+        .as_ref()
+        .and_then(|value| value.merkle_snapshot_sequence);
+    let mut previous_merkle_evidence = existing
+        .as_ref()
+        .and_then(|value| value.merkle_evidence_commit.clone());
+    let mut previous_merkle_snapshot = existing
+        .as_ref()
+        .and_then(|value| value.merkle_snapshot_commit.clone());
     if committed_head > 0 && (last_evidence_sequence.is_none() || last_snapshot_sequence.is_none())
     {
         // Compatibility path for metadata written before sequence sidecars
@@ -1143,6 +1326,42 @@ async fn persist_session_with_evidence(
             .map(|event| event.sequence)
             .max();
     }
+    if merkle_head > 0
+        && (last_merkle_evidence_sequence.is_none()
+            || last_merkle_snapshot_sequence.is_none()
+            || previous_merkle_evidence.is_none()
+            || previous_merkle_snapshot.is_none())
+    {
+        let records = read_merkle_journal(dir).await?;
+        let head = usize::try_from(merkle_head).map_err(|_| S3SessionError::Overflow)?;
+        let committed = records.get(..head).ok_or_else(|| {
+            S3SessionError::Reliability("session Merkle journal head is invalid".into())
+        })?;
+        for record in committed {
+            if let (Some(event), Some(commit)) =
+                (record.evidence.last(), record.merkle_commits.last())
+            {
+                last_merkle_evidence_sequence = Some(
+                    shardline_reliability::persisted_event_sequence(
+                        shardline_reliability::OperationKind::ResumableSession,
+                        event.clone(),
+                    )
+                    .map_err(|error| S3SessionError::Reliability(error.to_string()))?,
+                );
+                previous_merkle_evidence = Some(commit.clone());
+            }
+            if let (Some(event), Some(commit)) = (
+                record.snapshot_evidence.last(),
+                record.snapshot_merkle_commits.last(),
+            ) {
+                last_merkle_snapshot_sequence = Some(
+                    serde_json::from_value::<SnapshotEvidenceEvent<DigestSnapshot>>(event.clone())?
+                        .sequence,
+                );
+                previous_merkle_snapshot = Some(commit.clone());
+            }
+        }
+    }
     let new_record = SessionEvidenceJournalRecord {
         evidence: evidence
             .events()
@@ -1157,6 +1376,81 @@ async fn persist_session_with_evidence(
             .cloned()
             .collect(),
     };
+    let evidence_json = evidence
+        .events()
+        .iter()
+        .map(serde_json::to_value)
+        .collect::<Result<Vec<_>, _>>()?;
+    let snapshot_evidence_json = snapshot_evidence
+        .events()
+        .iter()
+        .map(serde_json::to_value)
+        .collect::<Result<Vec<_>, _>>()?;
+    let merkle_events = evidence_json
+        .iter()
+        .filter(|event| {
+            last_merkle_evidence_sequence.is_none_or(|sequence| {
+                shardline_reliability::persisted_event_sequence(
+                    shardline_reliability::OperationKind::ResumableSession,
+                    (*event).clone(),
+                )
+                .is_ok_and(|value| value > sequence)
+            })
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let snapshot_merkle_events = snapshot_evidence_json
+        .iter()
+        .filter(|event| {
+            last_merkle_snapshot_sequence.is_none_or(|sequence| {
+                serde_json::from_value::<SnapshotEvidenceEvent<DigestSnapshot>>((*event).clone())
+                    .is_ok_and(|value| value.sequence > sequence)
+            })
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let merkle_commits = build_persisted_merkle_chain_with_previous(
+        shardline_reliability::OperationKind::ResumableSession,
+        &merkle_events,
+        previous_merkle_evidence.as_ref(),
+    )
+    .map_err(|error| S3SessionError::Reliability(error.to_string()))?;
+    let snapshot_merkle_commits =
+        build_typed_merkle_chain::<SnapshotEvidenceEvent<DigestSnapshot>>(
+            &snapshot_merkle_events,
+            previous_merkle_snapshot.as_ref(),
+        )
+        .map_err(|error| S3SessionError::Reliability(error.to_string()))?;
+    if !merkle_commits.is_empty() || !snapshot_merkle_commits.is_empty() {
+        append_merkle_journal(
+            dir,
+            &PersistedMerkleJournalRecord {
+                evidence: merkle_events,
+                merkle_commits: merkle_commits.clone(),
+                snapshot_evidence: snapshot_merkle_events,
+                snapshot_merkle_commits: snapshot_merkle_commits.clone(),
+            },
+        )
+        .await?;
+        merkle_head = merkle_head.checked_add(1).ok_or(S3SessionError::Overflow)?;
+        last_merkle_evidence_sequence = merkle_commits
+            .last()
+            .and_then(|commit| commit.get("body"))
+            .and_then(|body| body.get("sequence"))
+            .and_then(serde_json::Value::as_u64)
+            .or(last_merkle_evidence_sequence);
+        last_merkle_snapshot_sequence = snapshot_merkle_commits
+            .last()
+            .and_then(|commit| commit.get("body"))
+            .and_then(|body| body.get("sequence"))
+            .and_then(serde_json::Value::as_u64)
+            .or(last_merkle_snapshot_sequence);
+        previous_merkle_evidence = merkle_commits.last().cloned().or(previous_merkle_evidence);
+        previous_merkle_snapshot = snapshot_merkle_commits
+            .last()
+            .cloned()
+            .or(previous_merkle_snapshot);
+    }
     let journal_head = if new_record.evidence.is_empty() && new_record.snapshot_evidence.is_empty()
     {
         committed_head
@@ -1181,6 +1475,11 @@ async fn persist_session_with_evidence(
             .last()
             .map(|event| event.sequence)
             .or(last_snapshot_sequence),
+        merkle_head: Some(merkle_head),
+        merkle_evidence_sequence: last_merkle_evidence_sequence,
+        merkle_snapshot_sequence: last_merkle_snapshot_sequence,
+        merkle_evidence_commit: previous_merkle_evidence,
+        merkle_snapshot_commit: previous_merkle_snapshot,
     })?;
     write_file_atomically(&path, &bytes).await
 }
@@ -1508,6 +1807,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tampered_merkle_journal_is_rejected() {
+        let root = make_root().await;
+        let upload_id = create_session(
+            root.path(),
+            "acme.models",
+            "merkle-corrupt.bin",
+            "global",
+            ttl(3600),
+            cap(16),
+            quota(1 << 40),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+        let path = session_dir(root.path(), &upload_id)
+            .unwrap()
+            .join(SESSION_MERKLE_JOURNAL);
+        let mut lines: Vec<serde_json::Value> = fs::read(&path)
+            .await
+            .unwrap()
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(serde_json::from_slice)
+            .collect::<Result<_, _>>()
+            .unwrap();
+        lines[0]["snapshot_merkle_commits"][0]["body"]["sequence"] = serde_json::json!(9);
+        let mut bytes = serde_json::to_vec(&lines[0]).unwrap();
+        bytes.push(b'\n');
+        fs::write(&path, bytes).await.unwrap();
+
+        let error = load_session(&session_dir(root.path(), &upload_id).unwrap())
+            .await
+            .unwrap_err();
+        assert!(matches!(error, S3SessionError::Reliability(_)));
+
+        repair_session_evidence(root.path(), &upload_id)
+            .await
+            .unwrap();
+        load_session(&session_dir(root.path(), &upload_id).unwrap())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn uncommitted_evidence_journal_tail_is_ignored_after_metadata_crash() {
         let root = make_root().await;
         let upload_id = create_session(
@@ -1586,6 +1929,13 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(upload_id.len(), 32);
+        let merkle_records =
+            read_merkle_journal(session_dir(root.path(), &upload_id).unwrap().as_path())
+                .await
+                .unwrap();
+        assert_eq!(merkle_records.len(), 1);
+        assert_eq!(merkle_records[0].merkle_commits.len(), 1);
+        assert_eq!(merkle_records[0].snapshot_merkle_commits.len(), 1);
 
         for (part, size) in [(1_u32, 64_u64), (2, 512), (3, 0)] {
             tokio::fs::write(

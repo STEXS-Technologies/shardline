@@ -80,8 +80,8 @@ pub use key::{
 pub use session::{
     append_upload_bytes, create_upload_session, delete_upload_session, lock_upload_sessions,
     new_upload_session_id, purge_expired_upload_sessions, read_upload_session,
-    touch_upload_session, upload_body_integrity, upload_body_path_for_session, upload_length,
-    upload_session_length,
+    repair_upload_session_evidence, touch_upload_session, upload_body_integrity,
+    upload_body_path_for_session, upload_length, upload_session_length,
 };
 
 pub use multipart::{

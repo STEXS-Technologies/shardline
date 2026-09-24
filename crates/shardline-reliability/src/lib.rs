@@ -11,6 +11,7 @@ mod event;
 mod event_metadata;
 mod lifecycle_log;
 mod merkle;
+mod merkle_journal;
 mod metadata_evidence;
 mod oci_evidence;
 mod oci_tag_evidence;
@@ -47,6 +48,11 @@ pub use merkle::{
     RELIABILITY_MERKLE_SCHEMA_VERSION, ReliabilityMerkleCommit, build_reliability_merkle_commit,
     build_reliability_merkle_commit_with_previous, reliability_merkle_commit_json,
     reliability_merkle_commit_json_with_previous,
+};
+pub use merkle_journal::{
+    PersistedMerkleJournalRecord, build_persisted_merkle_chain,
+    build_persisted_merkle_chain_with_previous, build_typed_merkle_chain,
+    verify_persisted_merkle_chain, verify_typed_merkle_chain,
 };
 pub use metadata_evidence::{
     HubRefEvidenceLog, HubRefLifecycleEvent, HubRefSnapshot, MetadataCommitOperationId,

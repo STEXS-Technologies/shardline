@@ -9,6 +9,10 @@ use blake3::Hasher as Blake3Hasher;
 use getrandom::fill as getrandom_fill;
 use sha2::{Digest, Sha256};
 use shardline_protocol::RepositoryScope;
+use shardline_reliability::{
+    DigestSnapshot, SessionEvidenceLog, SnapshotEvidenceEvent, SnapshotEvidenceLog,
+    StateTransitionEvent,
+};
 use shardline_storage::ObjectIntegrity;
 use tokio::fs;
 #[cfg(not(unix))]
@@ -18,10 +22,12 @@ use tokio::task::spawn_blocking;
 use crate::{
     OciAdapterError,
     fs::{
-        acquire_upload_session_file_lock, append_file_anchored, delete_file_anchored,
-        map_not_found, open_anchored_file, persist_upload_session, read_persisted_upload_session,
-        unix_now_seconds_checked, upload_body_path, upload_dir, upload_file_exists_async,
-        upload_file_len_async, upload_metadata_path, upload_session_lock_path, upload_tail_path,
+        PersistedOciUploadSession, acquire_upload_session_file_lock, append_file_anchored,
+        delete_file_anchored, map_not_found, open_anchored_file, persist_upload_session,
+        persist_upload_session_with_evidence, read_evidence_journal, read_persisted_upload_session,
+        read_upload_file_async, unix_now_seconds_checked, upload_body_path, upload_dir,
+        upload_evidence_journal_path, upload_file_exists_async, upload_file_len_async,
+        upload_metadata_path, upload_session_lock_path, upload_tail_path, write_upload_metadata,
     },
     key::validate_repository,
     protocol_support::{
@@ -315,6 +321,7 @@ async fn delete_upload_session_files(root: &Path, session_id: &str) -> Result<()
         upload_body_path(root, session_id),
         upload_tail_path(root, session_id),
         upload_metadata_path(root, session_id),
+        upload_evidence_journal_path(root, session_id),
     ];
     let mut first_error = None;
     for path in &paths {
@@ -379,6 +386,73 @@ pub async fn touch_upload_session(
     validate_upload_session_id(session_id)?;
     session.last_touched_unix_seconds = unix_now_seconds_checked()?;
     persist_upload_session(root, session_id, &session).await
+}
+
+/// Explicitly persists canonical lifecycle, snapshot, and Merkle evidence for
+/// a legacy upload session. Normal reads never mutate filesystem state.
+pub async fn repair_upload_session_evidence(
+    root: &Path,
+    session_id: &str,
+) -> Result<(), OciAdapterError> {
+    validate_upload_session_id(session_id)?;
+    let metadata_path = upload_metadata_path(root, session_id);
+    let bytes = read_upload_file_async(root, &metadata_path).await?;
+    let persisted = serde_json::from_slice::<PersistedOciUploadSession>(&bytes)
+        .map_err(OciAdapterError::Json)?;
+    let persist_lock = super::fs::session_persist_lock(session_id);
+    let _guard = persist_lock.lock().await;
+    let (evidence, snapshot_evidence) = if let Some(head) = persisted.journal_head {
+        let records = read_evidence_journal(root, session_id).await?;
+        let head = usize::try_from(head).map_err(|_| OciAdapterError::Overflow)?;
+        let committed = records.get(..head).ok_or_else(|| {
+            OciAdapterError::Reliability("OCI evidence journal head is missing".into())
+        })?;
+        (
+            SessionEvidenceLog::from_events(
+                committed
+                    .iter()
+                    .flat_map(|record| record.evidence.iter().cloned())
+                    .map(serde_json::from_value::<StateTransitionEvent>)
+                    .collect::<Result<Vec<_>, _>>()?,
+            )
+            .map_err(|error| OciAdapterError::Reliability(error.to_string()))?,
+            SnapshotEvidenceLog::from_events(
+                committed
+                    .iter()
+                    .flat_map(|record| record.snapshot_evidence.iter().cloned())
+                    .map(serde_json::from_value::<SnapshotEvidenceEvent<DigestSnapshot>>)
+                    .collect::<Result<Vec<_>, _>>()?,
+            )
+            .map_err(|error| OciAdapterError::Reliability(error.to_string()))?,
+        )
+    } else {
+        (
+            persisted.evidence.clone(),
+            persisted.snapshot_evidence.clone(),
+        )
+    };
+    let _ignored = delete_file_anchored(root, &upload_evidence_journal_path(root, session_id));
+    let reset = serde_json::to_vec(&PersistedOciUploadSession {
+        session: persisted.session.clone(),
+        evidence: SessionEvidenceLog::default(),
+        snapshot_evidence: SnapshotEvidenceLog::default(),
+        journal_head: None,
+        journal_evidence_sequence: None,
+        journal_snapshot_sequence: None,
+        merkle_evidence_sequence: None,
+        merkle_snapshot_sequence: None,
+        merkle_evidence_commit: None,
+        merkle_snapshot_commit: None,
+    })?;
+    write_upload_metadata(root, session_id, reset).await?;
+    persist_upload_session_with_evidence(
+        root,
+        session_id,
+        &persisted.session,
+        &evidence,
+        snapshot_evidence,
+    )
+    .await
 }
 
 #[must_use]

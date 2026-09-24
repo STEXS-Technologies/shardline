@@ -57,6 +57,12 @@ test = false
 doc = false
 
 [[bin]]
+name = "shardline_reliability_merkle_journal"
+path = "fuzz_targets/shardline/reliability_merkle_journal.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "shardline_protocol_ranges"
 path = "fuzz_targets/shardline/protocol_ranges.rs"
 test = false

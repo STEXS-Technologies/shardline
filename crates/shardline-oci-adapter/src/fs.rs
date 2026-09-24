@@ -1,21 +1,25 @@
 use std::{
+    collections::HashMap,
     fs::{File, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
+    sync::{Arc, LazyLock, Weak},
 };
 
 use shardline_reliability::{
-    DigestSnapshot, ResumableSessionSnapshotDomain, SessionEvidenceLog, SnapshotEvidenceLog,
-    append_or_baseline_snapshot_evidence, canonical_state_digest,
-    resumable_session_snapshot_identity, verify_and_append_session_transition,
-    verify_session_evidence, verify_snapshot_evidence,
+    DigestSnapshot, PersistedMerkleJournalRecord, ResumableSessionSnapshotDomain,
+    SessionEvidenceLog, SnapshotEvidenceEvent, SnapshotEvidenceLog, StateTransitionEvent,
+    append_or_baseline_snapshot_evidence, build_persisted_merkle_chain_with_previous,
+    build_typed_merkle_chain, canonical_state_digest, resumable_session_snapshot_identity,
+    verify_and_append_session_transition, verify_persisted_merkle_chain, verify_session_evidence,
+    verify_snapshot_evidence,
 };
 #[cfg(unix)]
 use shardline_storage::{
     AnchoredPathOptions, ensure_parent_path_matches_anchor, open_anchored_target,
     remove_if_present, sync_parent_directory, write_anchored_temporary_file,
 };
-use tokio::task::spawn_blocking;
+use tokio::{sync::Mutex, task::spawn_blocking};
 
 use crate::{
     OciAdapterError, protocol_support,
@@ -30,6 +34,37 @@ pub(crate) struct PersistedOciUploadSession {
     pub(crate) evidence: SessionEvidenceLog,
     #[serde(default)]
     pub(crate) snapshot_evidence: SnapshotEvidenceLog<DigestSnapshot>,
+    #[serde(default)]
+    pub(crate) journal_head: Option<u64>,
+    #[serde(default)]
+    pub(crate) journal_evidence_sequence: Option<u64>,
+    #[serde(default)]
+    pub(crate) journal_snapshot_sequence: Option<u64>,
+    #[serde(default)]
+    pub(crate) merkle_evidence_sequence: Option<u64>,
+    #[serde(default)]
+    pub(crate) merkle_snapshot_sequence: Option<u64>,
+    #[serde(default)]
+    pub(crate) merkle_evidence_commit: Option<serde_json::Value>,
+    #[serde(default)]
+    pub(crate) merkle_snapshot_commit: Option<serde_json::Value>,
+}
+
+const SESSION_EVIDENCE_JOURNAL: &str = "evidence.log";
+static OCI_SESSION_PERSIST_LOCKS: LazyLock<std::sync::Mutex<HashMap<String, Weak<Mutex<()>>>>> =
+    LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+pub(crate) fn session_persist_lock(session_id: &str) -> Arc<Mutex<()>> {
+    let mut locks = OCI_SESSION_PERSIST_LOCKS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(lock) = locks.get(session_id).and_then(Weak::upgrade) {
+        return lock;
+    }
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    let lock = Arc::new(Mutex::new(()));
+    locks.insert(session_id.to_owned(), Arc::downgrade(&lock));
+    lock
 }
 
 fn session_snapshot(
@@ -68,6 +103,10 @@ pub(crate) fn upload_body_path(root: &Path, session_id: &str) -> PathBuf {
 
 pub(crate) fn upload_tail_path(root: &Path, session_id: &str) -> PathBuf {
     upload_dir(root).join(format!("{session_id}.tail"))
+}
+
+pub(crate) fn upload_evidence_journal_path(root: &Path, session_id: &str) -> PathBuf {
+    upload_dir(root).join(format!("{session_id}.{SESSION_EVIDENCE_JOURNAL}"))
 }
 
 // ── File locking ─────────────────────────────────────────────────────────────
@@ -113,6 +152,8 @@ pub(crate) async fn persist_upload_session(
     session_id: &str,
     session: &OciUploadSession,
 ) -> Result<(), OciAdapterError> {
+    let persist_lock = session_persist_lock(session_id);
+    let _guard = persist_lock.lock().await;
     let (evidence, mut snapshot_evidence) =
         match read_persisted_upload_session_with_snapshot(root, session_id).await {
             Ok((_previous, evidence, snapshot_evidence)) => {
@@ -140,10 +181,233 @@ pub(crate) async fn persist_upload_session(
     let snapshot = session_snapshot(session_id, session)?;
     snapshot_evidence = append_or_baseline_snapshot_evidence(snapshot_evidence, snapshot)
         .map_err(|error| OciAdapterError::Reliability(error.to_string()))?;
+    persist_upload_session_with_evidence(root, session_id, session, &evidence, snapshot_evidence)
+        .await
+}
+
+pub(crate) async fn persist_upload_session_with_evidence(
+    root: &Path,
+    session_id: &str,
+    session: &OciUploadSession,
+    evidence: &SessionEvidenceLog,
+    snapshot_evidence: SnapshotEvidenceLog<DigestSnapshot>,
+) -> Result<(), OciAdapterError> {
+    evidence
+        .verify_for(&session.scope_namespace, session_id, &session.repository)
+        .map_err(|error| OciAdapterError::Reliability(error.to_string()))?;
+    let snapshot = session_snapshot(session_id, session)?;
+    let (snapshot_evidence, _) =
+        shardline_reliability::verify_or_repair_snapshot_evidence(snapshot_evidence, snapshot)
+            .map_err(|error| OciAdapterError::Reliability(error.to_string()))?;
+    let metadata_path = upload_metadata_path(root, session_id);
+    let existing = match read_upload_file_async(root, &metadata_path).await {
+        Ok(bytes) => match serde_json::from_slice::<PersistedOciUploadSession>(&bytes) {
+            Ok(persisted) => Some(persisted),
+            Err(error) if reliability_envelope_field_present(&bytes) => {
+                return Err(OciAdapterError::Json(error));
+            }
+            Err(error) => {
+                serde_json::from_slice::<OciUploadSession>(&bytes)
+                    .map_err(|_| OciAdapterError::Json(error))?;
+                None
+            }
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(OciAdapterError::Io(error)),
+    };
+    let mut journal_head = existing.as_ref().and_then(|value| value.journal_head);
+    let mut last_evidence_sequence = existing
+        .as_ref()
+        .and_then(|value| value.journal_evidence_sequence);
+    let mut last_snapshot_sequence = existing
+        .as_ref()
+        .and_then(|value| value.journal_snapshot_sequence);
+    let mut last_merkle_evidence_sequence = existing
+        .as_ref()
+        .and_then(|value| value.merkle_evidence_sequence);
+    let mut last_merkle_snapshot_sequence = existing
+        .as_ref()
+        .and_then(|value| value.merkle_snapshot_sequence);
+    let mut previous_merkle_evidence = existing
+        .as_ref()
+        .and_then(|value| value.merkle_evidence_commit.clone());
+    let mut previous_merkle_snapshot = existing
+        .as_ref()
+        .and_then(|value| value.merkle_snapshot_commit.clone());
+
+    if let Some(head) = journal_head {
+        let records = read_evidence_journal(root, session_id).await?;
+        let head = usize::try_from(head).map_err(|_| OciAdapterError::Overflow)?;
+        let committed = records.get(..head).ok_or_else(|| {
+            OciAdapterError::Reliability("OCI evidence journal head is invalid".into())
+        })?;
+        if last_evidence_sequence.is_none() || last_snapshot_sequence.is_none() {
+            last_evidence_sequence = committed
+                .iter()
+                .flat_map(|record| record.evidence.iter())
+                .filter_map(|event| event.get("sequence").and_then(serde_json::Value::as_u64))
+                .max();
+            last_snapshot_sequence = committed
+                .iter()
+                .flat_map(|record| record.snapshot_evidence.iter())
+                .filter_map(|event| event.get("sequence").and_then(serde_json::Value::as_u64))
+                .max();
+        }
+        if last_merkle_evidence_sequence.is_none() || last_merkle_snapshot_sequence.is_none() {
+            for record in committed {
+                if let (Some(event), Some(commit)) =
+                    (record.evidence.last(), record.merkle_commits.last())
+                {
+                    last_merkle_evidence_sequence =
+                        event.get("sequence").and_then(serde_json::Value::as_u64);
+                    previous_merkle_evidence = Some(commit.clone());
+                }
+                if let (Some(event), Some(commit)) = (
+                    record.snapshot_evidence.last(),
+                    record.snapshot_merkle_commits.last(),
+                ) {
+                    last_merkle_snapshot_sequence =
+                        event.get("sequence").and_then(serde_json::Value::as_u64);
+                    previous_merkle_snapshot = Some(commit.clone());
+                }
+            }
+        }
+    }
+
+    let evidence_json = evidence
+        .events()
+        .iter()
+        .map(serde_json::to_value)
+        .collect::<Result<Vec<_>, _>>()?;
+    let snapshot_evidence_json = snapshot_evidence
+        .events()
+        .iter()
+        .map(serde_json::to_value)
+        .collect::<Result<Vec<_>, _>>()?;
+    let evidence_to_append = if journal_head.is_some() {
+        evidence_json
+            .iter()
+            .filter(|event| {
+                last_evidence_sequence.is_none_or(|sequence| {
+                    event
+                        .get("sequence")
+                        .and_then(serde_json::Value::as_u64)
+                        .is_some_and(|value| value > sequence)
+                })
+            })
+            .cloned()
+            .collect()
+    } else {
+        evidence_json.clone()
+    };
+    let snapshot_to_append = if journal_head.is_some() {
+        snapshot_evidence_json
+            .iter()
+            .filter(|event| {
+                last_snapshot_sequence.is_none_or(|sequence| {
+                    event
+                        .get("sequence")
+                        .and_then(serde_json::Value::as_u64)
+                        .is_some_and(|value| value > sequence)
+                })
+            })
+            .cloned()
+            .collect()
+    } else {
+        snapshot_evidence_json.clone()
+    };
+    let merkle_events = evidence_json
+        .iter()
+        .filter(|event| {
+            last_merkle_evidence_sequence.is_none_or(|sequence| {
+                event
+                    .get("sequence")
+                    .and_then(serde_json::Value::as_u64)
+                    .is_some_and(|value| value > sequence)
+            })
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let snapshot_merkle_events = snapshot_evidence_json
+        .iter()
+        .filter(|event| {
+            last_merkle_snapshot_sequence.is_none_or(|sequence| {
+                event
+                    .get("sequence")
+                    .and_then(serde_json::Value::as_u64)
+                    .is_some_and(|value| value > sequence)
+            })
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let merkle_commits = build_persisted_merkle_chain_with_previous(
+        shardline_reliability::OperationKind::ResumableSession,
+        &merkle_events,
+        previous_merkle_evidence.as_ref(),
+    )
+    .map_err(|error| OciAdapterError::Reliability(error.to_string()))?;
+    let snapshot_merkle_commits =
+        build_typed_merkle_chain::<SnapshotEvidenceEvent<DigestSnapshot>>(
+            &snapshot_merkle_events,
+            previous_merkle_snapshot.as_ref(),
+        )
+        .map_err(|error| OciAdapterError::Reliability(error.to_string()))?;
+    if !evidence_to_append.is_empty()
+        || !snapshot_to_append.is_empty()
+        || !merkle_commits.is_empty()
+        || !snapshot_merkle_commits.is_empty()
+    {
+        append_evidence_journal(
+            root,
+            session_id,
+            &PersistedMerkleJournalRecord {
+                evidence: evidence_to_append,
+                merkle_commits: merkle_commits.clone(),
+                snapshot_evidence: snapshot_to_append,
+                snapshot_merkle_commits: snapshot_merkle_commits.clone(),
+            },
+        )
+        .await?;
+        journal_head = Some(
+            journal_head
+                .unwrap_or(0)
+                .checked_add(1)
+                .ok_or(OciAdapterError::Overflow)?,
+        );
+        last_evidence_sequence = evidence.events().last().map(|event| event.sequence);
+        last_snapshot_sequence = snapshot_evidence
+            .events()
+            .last()
+            .map(|event| event.sequence);
+        last_merkle_evidence_sequence = merkle_commits
+            .last()
+            .and_then(|commit| commit.get("body"))
+            .and_then(|body| body.get("sequence"))
+            .and_then(serde_json::Value::as_u64)
+            .or(last_merkle_evidence_sequence);
+        last_merkle_snapshot_sequence = snapshot_merkle_commits
+            .last()
+            .and_then(|commit| commit.get("body"))
+            .and_then(|body| body.get("sequence"))
+            .and_then(serde_json::Value::as_u64)
+            .or(last_merkle_snapshot_sequence);
+        previous_merkle_evidence = merkle_commits.last().cloned().or(previous_merkle_evidence);
+        previous_merkle_snapshot = snapshot_merkle_commits
+            .last()
+            .cloned()
+            .or(previous_merkle_snapshot);
+    }
     let bytes = serde_json::to_vec(&PersistedOciUploadSession {
         session: session.clone(),
-        evidence,
-        snapshot_evidence,
+        evidence: SessionEvidenceLog::default(),
+        snapshot_evidence: SnapshotEvidenceLog::default(),
+        journal_head,
+        journal_evidence_sequence: last_evidence_sequence,
+        journal_snapshot_sequence: last_snapshot_sequence,
+        merkle_evidence_sequence: last_merkle_evidence_sequence,
+        merkle_snapshot_sequence: last_merkle_snapshot_sequence,
+        merkle_evidence_commit: previous_merkle_evidence,
+        merkle_snapshot_commit: previous_merkle_snapshot,
     })?;
     write_upload_metadata(root, session_id, bytes).await
 }
@@ -173,12 +437,13 @@ async fn read_persisted_upload_session_with_snapshot(
     let bytes = read_upload_file_async(root, &metadata_path)
         .await
         .map_err(map_not_found)?;
-    let (session, stored_evidence, stored_snapshot_evidence) =
+    let (session, mut stored_evidence, mut stored_snapshot_evidence, journal_head) =
         match serde_json::from_slice::<PersistedOciUploadSession>(&bytes) {
             Ok(persisted) => (
                 persisted.session,
                 persisted.evidence,
                 persisted.snapshot_evidence,
+                persisted.journal_head,
             ),
             Err(wrapper_error) => {
                 if reliability_envelope_field_present(&bytes) {
@@ -190,9 +455,58 @@ async fn read_persisted_upload_session_with_snapshot(
                     session,
                     SessionEvidenceLog::default(),
                     SnapshotEvidenceLog::default(),
+                    None,
                 )
             }
         };
+    if let Some(head) = journal_head {
+        let records = read_evidence_journal(root, session_id).await?;
+        let head = usize::try_from(head).map_err(|_| OciAdapterError::Overflow)?;
+        let committed = records.get(..head).ok_or_else(|| {
+            OciAdapterError::Reliability("OCI evidence journal head is missing".into())
+        })?;
+        let evidence_events = committed
+            .iter()
+            .flat_map(|record| record.evidence.iter().cloned())
+            .map(serde_json::from_value::<StateTransitionEvent>)
+            .collect::<Result<Vec<_>, _>>()?;
+        let snapshot_events = committed
+            .iter()
+            .flat_map(|record| record.snapshot_evidence.iter().cloned())
+            .map(serde_json::from_value::<SnapshotEvidenceEvent<DigestSnapshot>>)
+            .collect::<Result<Vec<_>, _>>()?;
+        stored_evidence = SessionEvidenceLog::from_events(evidence_events)
+            .map_err(|error| OciAdapterError::Reliability(error.to_string()))?;
+        stored_snapshot_evidence = SnapshotEvidenceLog::from_events(snapshot_events)
+            .map_err(|error| OciAdapterError::Reliability(error.to_string()))?;
+        let merkle_events = committed
+            .iter()
+            .flat_map(|record| record.evidence.iter().cloned())
+            .collect::<Vec<_>>();
+        let merkle_commits = committed
+            .iter()
+            .flat_map(|record| record.merkle_commits.iter().cloned())
+            .collect::<Vec<_>>();
+        let snapshot_merkle_events = committed
+            .iter()
+            .flat_map(|record| record.snapshot_evidence.iter().cloned())
+            .collect::<Vec<_>>();
+        let snapshot_merkle_commits = committed
+            .iter()
+            .flat_map(|record| record.snapshot_merkle_commits.iter().cloned())
+            .collect::<Vec<_>>();
+        verify_persisted_merkle_chain(
+            shardline_reliability::OperationKind::ResumableSession,
+            &merkle_events,
+            &merkle_commits,
+        )
+        .map_err(|error| OciAdapterError::Reliability(error.to_string()))?;
+        shardline_reliability::verify_typed_merkle_chain::<SnapshotEvidenceEvent<DigestSnapshot>>(
+            &snapshot_merkle_events,
+            &snapshot_merkle_commits,
+        )
+        .map_err(|error| OciAdapterError::Reliability(error.to_string()))?;
+    }
     let evidence = if stored_evidence.is_empty() {
         SessionEvidenceLog::for_legacy_session(
             &session.scope_namespace,
@@ -232,6 +546,68 @@ fn reliability_envelope_field_present(bytes: &[u8]) -> bool {
     ["evidence", "snapshot_evidence"]
         .into_iter()
         .any(|field| object.contains_key(field))
+}
+
+pub(crate) async fn read_evidence_journal(
+    root: &Path,
+    session_id: &str,
+) -> Result<Vec<PersistedMerkleJournalRecord>, OciAdapterError> {
+    let path = upload_evidence_journal_path(root, session_id);
+    let bytes = match read_upload_file_async(root, &path).await {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(OciAdapterError::Io(error)),
+    };
+    bytes
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            serde_json::from_slice(line)
+                .map_err(|error| OciAdapterError::Reliability(error.to_string()))
+        })
+        .collect()
+}
+
+async fn append_evidence_journal(
+    root: &Path,
+    session_id: &str,
+    record: &PersistedMerkleJournalRecord,
+) -> Result<(), OciAdapterError> {
+    let path = upload_evidence_journal_path(root, session_id);
+    let mut bytes = serde_json::to_vec(record)?;
+    bytes.push(b'\n');
+    let root = root.to_path_buf();
+    spawn_blocking(move || append_journal_file(&root, &path, &bytes))
+        .await
+        .map_err(OciAdapterError::BlockingTask)??;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn append_journal_file(root: &Path, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let anchored = open_anchored_target(
+        root,
+        path,
+        AnchoredPathOptions::new(Some(0o750), Some(0o600)),
+        || std::io::Error::new(std::io::ErrorKind::InvalidInput, "path escapes root"),
+    )?;
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(anchored.final_path())?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    ensure_parent_path_matches_anchor(&anchored, "journal parent changed during append")
+}
+
+#[cfg(not(unix))]
+fn append_journal_file(_root: &Path, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()
 }
 
 // ── Error mapping ────────────────────────────────────────────────────────────
