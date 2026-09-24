@@ -5,9 +5,12 @@ use std::{
     fmt,
     io::Error as IoError,
     num::NonZeroU64,
-    path::{Path, PathBuf},
+    path::Path,
     str::FromStr,
 };
+
+#[cfg(test)]
+use std::path::PathBuf;
 
 mod config_io;
 

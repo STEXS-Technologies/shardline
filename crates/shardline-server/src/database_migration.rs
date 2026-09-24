@@ -2342,7 +2342,7 @@ async fn applied_migrations_in_order(
 async fn apply_one_migration(
     pool: &PgPool,
     migration: &'static DatabaseMigration,
-    database_key: Option<&str>,
+    _database_key: Option<&str>,
 ) -> Result<(), DatabaseMigrationError> {
     let mut transaction = pool.begin().await?;
     raw_sql(migration.up_sql).execute(&mut *transaction).await?;
@@ -2357,17 +2357,17 @@ async fn apply_one_migration(
     .execute(&mut *transaction)
     .await?;
     #[cfg(test)]
-    database_migration_failpoint(DatabaseMigrationBoundary::BeforeApplyCommit, database_key)?;
+    database_migration_failpoint(DatabaseMigrationBoundary::BeforeApplyCommit, _database_key)?;
     transaction.commit().await?;
     #[cfg(test)]
-    database_migration_failpoint(DatabaseMigrationBoundary::AfterApplyCommit, database_key)?;
+    database_migration_failpoint(DatabaseMigrationBoundary::AfterApplyCommit, _database_key)?;
     Ok(())
 }
 
 async fn revert_one_migration(
     pool: &PgPool,
     migration: &'static DatabaseMigration,
-    database_key: Option<&str>,
+    _database_key: Option<&str>,
 ) -> Result<(), DatabaseMigrationError> {
     let mut transaction = pool.begin().await?;
     raw_sql(migration.down_sql)
@@ -2380,10 +2380,10 @@ async fn revert_one_migration(
     .execute(&mut *transaction)
     .await?;
     #[cfg(test)]
-    database_migration_failpoint(DatabaseMigrationBoundary::BeforeRevertCommit, database_key)?;
+    database_migration_failpoint(DatabaseMigrationBoundary::BeforeRevertCommit, _database_key)?;
     transaction.commit().await?;
     #[cfg(test)]
-    database_migration_failpoint(DatabaseMigrationBoundary::AfterRevertCommit, database_key)?;
+    database_migration_failpoint(DatabaseMigrationBoundary::AfterRevertCommit, _database_key)?;
     Ok(())
 }
 
