@@ -320,6 +320,61 @@ mod tests {
     }
 
     #[test]
+    fn successive_operation_events_keep_one_accumulated_state_leaf() {
+        let first = upload_lifecycle_event(
+            "tenant",
+            "repo",
+            "operation-three-events",
+            "object",
+            "d".repeat(64),
+            UploadLifecycleState::Created,
+            UploadLifecycleState::Storing,
+        )
+        .unwrap();
+        let second = upload_lifecycle_event(
+            "tenant",
+            "repo",
+            "operation-three-events",
+            "object",
+            "d".repeat(64),
+            UploadLifecycleState::Storing,
+            UploadLifecycleState::Stored,
+        )
+        .unwrap();
+        let third = upload_lifecycle_event(
+            "tenant",
+            "repo",
+            "operation-three-events",
+            "object",
+            "d".repeat(64),
+            UploadLifecycleState::Stored,
+            UploadLifecycleState::MetadataCommitted,
+        )
+        .unwrap();
+
+        let first_commit = build_reliability_merkle_commit(&first).unwrap();
+        let second_commit =
+            build_reliability_merkle_commit_with_previous(&second, Some(&first_commit)).unwrap();
+        let third_commit =
+            build_reliability_merkle_commit_with_previous(&third, Some(&second_commit)).unwrap();
+
+        assert_eq!(
+            third_commit.body.previous_state_root,
+            second_commit.body.next_state_root
+        );
+        let prior_updates = state_root_updates(std::slice::from_ref(&second_commit.event)).unwrap();
+        let current_updates =
+            state_root_updates(std::slice::from_ref(&third_commit.event)).unwrap();
+        let mut updates = prior_updates;
+        updates.extend(current_updates);
+        updates.sort_by_key(|update| update.key);
+        assert_eq!(
+            third_commit.body.next_state_root,
+            ContentDigest::new(*compute_state_root(&updates).unwrap().as_bytes())
+        );
+    }
+
+    #[test]
     fn merkle_chain_rejects_sequence_gaps() {
         let first = upload_lifecycle_event(
             "tenant",
