@@ -23,6 +23,24 @@ const EVIDENCE_JOURNAL_SCHEMA: &str = "shardline.lfs.evidence-journal.v1";
 const SNAPSHOT_JOURNAL_SCHEMA: &str = "shardline.lfs.snapshot-journal.v1";
 const MERKLE_SUFFIX: &str = ".merkle";
 const MERKLE_JOURNAL_SCHEMA: &str = "shardline.lfs.merkle-journal.v1";
+const REPAIR_SUFFIX: &str = ".repair";
+const REPAIR_STAGE_SUFFIX: &str = ".repair-stage";
+const REPAIR_MANIFEST_SCHEMA: &str = "shardline.lfs.repair-manifest.v1";
+
+const REPAIR_ARTIFACTS: [&str; 6] = [
+    EVIDENCE_SUFFIX,
+    ".evidence.log",
+    SNAPSHOT_SUFFIX,
+    ".snapshot.log",
+    MERKLE_SUFFIX,
+    ".merkle.log",
+];
+
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+struct RepairManifest {
+    schema: String,
+    stage: String,
+}
 
 struct LfsMerkleAppend {
     previous_head: u64,
@@ -121,6 +139,58 @@ fn merkle_path(dir: &Path, oid: &str) -> PathBuf {
 
 fn merkle_journal_path(dir: &Path, oid: &str) -> PathBuf {
     dir.join(format!("{oid}{MERKLE_SUFFIX}.log"))
+}
+
+fn repair_manifest_path(dir: &Path, oid: &str) -> PathBuf {
+    dir.join(format!("{oid}{REPAIR_SUFFIX}"))
+}
+
+fn repair_stage_path(dir: &Path, oid: &str) -> PathBuf {
+    dir.join(format!(".{oid}{REPAIR_STAGE_SUFFIX}"))
+}
+
+fn recover_pending_repair(dir: &Path, oid: &str) -> Result<(), ServerError> {
+    let manifest_path = repair_manifest_path(dir, oid);
+    let bytes = match fs::read(&manifest_path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    let manifest: RepairManifest = serde_json::from_slice(&bytes).map_err(invalid_evidence)?;
+    if manifest.schema != REPAIR_MANIFEST_SCHEMA {
+        return Err(invalid_evidence("unsupported LFS repair manifest schema"));
+    }
+    let stage_name = Path::new(&manifest.stage)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| invalid_evidence("invalid LFS repair stage"))?;
+    if stage_name
+        != repair_stage_path(dir, oid)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default()
+    {
+        return Err(invalid_evidence(
+            "LFS repair stage does not match object id",
+        ));
+    }
+    let stage = dir.join(stage_name);
+    for suffix in REPAIR_ARTIFACTS {
+        let staged = stage.join(format!("{oid}{suffix}"));
+        let destination = dir.join(format!("{oid}{suffix}"));
+        match fs::rename(&staged, &destination) {
+            Ok(()) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound && destination.exists() => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                return Err(invalid_evidence("LFS repair artifact is missing"));
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    sync_directory(dir)?;
+    fs::remove_dir_all(&stage)?;
+    fs::remove_file(&manifest_path)?;
+    sync_directory(dir)
 }
 
 fn journal_head(path: &Path, schema: &str) -> Result<Option<u64>, ServerError> {
@@ -699,6 +769,7 @@ pub(super) fn record_snapshot(
     dir: &Path,
     input: &LfsPatchSnapshotInput<'_>,
 ) -> Result<(), ServerError> {
+    recover_pending_repair(dir, input.oid)?;
     let snapshot = materialized_snapshot(input)?;
     let path = snapshot_path(dir, input.oid);
     let head = journal_head(&path, SNAPSHOT_JOURNAL_SCHEMA)?;
@@ -746,6 +817,7 @@ fn load_snapshot_log(
     dir: &Path,
     oid: &str,
 ) -> Result<Option<SnapshotEvidenceLog<DigestSnapshot>>, ServerError> {
+    recover_pending_repair(dir, oid)?;
     if let Some(events) =
         read_journal::<shardline_reliability::SnapshotEvidenceEvent<DigestSnapshot>>(
             &snapshot_path(dir, oid),
@@ -775,6 +847,7 @@ pub(super) fn load(
     session_id: &str,
     target_key: &str,
 ) -> Result<SessionEvidenceLog, ServerError> {
+    recover_pending_repair(dir, oid)?;
     let log = if let Some(events) = read_journal::<shardline_reliability::StateTransitionEvent>(
         &evidence_path(dir, oid),
         &evidence_journal_path(dir, oid),
@@ -811,6 +884,7 @@ pub(super) fn record(
     before: ResumableLifecycleState,
     after: ResumableLifecycleState,
 ) -> Result<(), ServerError> {
+    recover_pending_repair(dir, oid)?;
     let head = journal_head(&evidence_path(dir, oid), EVIDENCE_JOURNAL_SCHEMA)?;
     let log = load(dir, oid, scope_namespace, session_id, target_key)?;
     let previous_len = log.events().len();
@@ -917,40 +991,64 @@ pub fn repair_lfs_patch_evidence(
         staging_length: input.staging_length,
         last_touched_unix_seconds: input.last_touched_unix_seconds,
     })?;
-    remove(dir, &input.oid);
+    let stage = repair_stage_path(dir, &input.oid);
+    if stage.exists() {
+        return Err(invalid_evidence("unfinished LFS repair stage exists"));
+    }
+    fs::create_dir(&stage)?;
     let lifecycle = SessionEvidenceLog::for_legacy_session(
         &input.scope_namespace,
         &input.session_id,
         &input.target_key,
     )
     .map_err(invalid_evidence)?;
-    let lifecycle_merkle = build_lfs_merkle_append(dir, &input.oid, lifecycle.events(), &[])?;
-    append_journal(
-        dir,
-        &input.oid,
-        &LfsJournalAppend {
-            manifest_path: &evidence_path(dir, &input.oid),
-            journal_path: &evidence_journal_path(dir, &input.oid),
-            schema: EVIDENCE_JOURNAL_SCHEMA,
-            previous_head: 0,
-            events: lifecycle.events(),
-            merkle: lifecycle_merkle.as_ref(),
-        },
-    )?;
-    let snapshot_log = SnapshotEvidenceLog::baseline(snapshot).map_err(invalid_evidence)?;
-    let snapshot_merkle = build_lfs_merkle_append(dir, &input.oid, &[], snapshot_log.events())?;
-    append_journal(
-        dir,
-        &input.oid,
-        &LfsJournalAppend {
-            manifest_path: &snapshot_path(dir, &input.oid),
-            journal_path: &snapshot_journal_path(dir, &input.oid),
-            schema: SNAPSHOT_JOURNAL_SCHEMA,
-            previous_head: 0,
-            events: snapshot_log.events(),
-            merkle: snapshot_merkle.as_ref(),
-        },
-    )
+    let staging_result = (|| {
+        let lifecycle_merkle =
+            build_lfs_merkle_append(&stage, &input.oid, lifecycle.events(), &[])?;
+        append_journal(
+            &stage,
+            &input.oid,
+            &LfsJournalAppend {
+                manifest_path: &evidence_path(&stage, &input.oid),
+                journal_path: &evidence_journal_path(&stage, &input.oid),
+                schema: EVIDENCE_JOURNAL_SCHEMA,
+                previous_head: 0,
+                events: lifecycle.events(),
+                merkle: lifecycle_merkle.as_ref(),
+            },
+        )?;
+        let snapshot_log = SnapshotEvidenceLog::baseline(snapshot).map_err(invalid_evidence)?;
+        let snapshot_merkle =
+            build_lfs_merkle_append(&stage, &input.oid, &[], snapshot_log.events())?;
+        append_journal(
+            &stage,
+            &input.oid,
+            &LfsJournalAppend {
+                manifest_path: &snapshot_path(&stage, &input.oid),
+                journal_path: &snapshot_journal_path(&stage, &input.oid),
+                schema: SNAPSHOT_JOURNAL_SCHEMA,
+                previous_head: 0,
+                events: snapshot_log.events(),
+                merkle: snapshot_merkle.as_ref(),
+            },
+        )?;
+        verify_integrity(&stage, &input.oid)
+    })();
+    if let Err(error) = staging_result {
+        drop(fs::remove_dir_all(&stage));
+        return Err(error);
+    }
+    let stage_name = stage
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| invalid_evidence("invalid LFS repair stage name"))?;
+    let manifest = RepairManifest {
+        schema: REPAIR_MANIFEST_SCHEMA.to_owned(),
+        stage: stage_name.to_owned(),
+    };
+    let manifest_bytes = serde_json::to_vec(&manifest).map_err(invalid_evidence)?;
+    write_sidecar_atomically(dir, &repair_manifest_path(dir, &input.oid), &manifest_bytes)?;
+    recover_pending_repair(dir, &input.oid)
 }
 
 fn lfs_meta_path(dir: &Path, oid: &str) -> PathBuf {
@@ -1107,6 +1205,7 @@ pub(super) fn complete(
 }
 
 pub(super) fn verify_integrity(dir: &Path, oid: &str) -> Result<(), ServerError> {
+    recover_pending_repair(dir, oid)?;
     let evidence = if let Some(events) = read_journal::<shardline_reliability::StateTransitionEvent>(
         &evidence_path(dir, oid),
         &evidence_journal_path(dir, oid),
@@ -1231,6 +1330,64 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn pending_repair_manifest_finishes_a_partially_published_envelope() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        fs::write(directory.path().join(OID), b"state").expect("staging file");
+        fs::write(directory.path().join("a.ranges"), b"5\n0 5\n").expect("ranges");
+        fs::write(directory.path().join("a.meta"), b"100").expect("metadata");
+        repair_lfs_patch_evidence(
+            directory.path(),
+            &LfsPatchEvidenceRepairInput {
+                oid: OID.to_owned(),
+                scope_namespace: SCOPE.to_owned(),
+                session_id: SESSION.to_owned(),
+                target_key: TARGET.to_owned(),
+                total_bytes: 5,
+                ranges: vec![(0, 5)],
+                staging_length: 5,
+                last_touched_unix_seconds: 100,
+            },
+        )
+        .expect("initial repair");
+
+        let stage = repair_stage_path(directory.path(), OID);
+        fs::create_dir(&stage).expect("repair stage");
+        for suffix in REPAIR_ARTIFACTS {
+            fs::rename(
+                directory.path().join(format!("{OID}{suffix}")),
+                stage.join(format!("{OID}{suffix}")),
+            )
+            .expect("move artifact into repair stage");
+        }
+        fs::rename(
+            stage.join(format!("{OID}{EVIDENCE_SUFFIX}")),
+            directory.path().join(format!("{OID}{EVIDENCE_SUFFIX}")),
+        )
+        .expect("partially publish repair");
+        let stage_name = stage
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("stage name");
+        let manifest = RepairManifest {
+            schema: REPAIR_MANIFEST_SCHEMA.to_owned(),
+            stage: stage_name.to_owned(),
+        };
+        write_sidecar_atomically(
+            directory.path(),
+            &repair_manifest_path(directory.path(), OID),
+            &serde_json::to_vec(&manifest).expect("manifest JSON"),
+        )
+        .expect("repair manifest");
+
+        let loaded = load(directory.path(), OID, SCOPE, SESSION, TARGET)
+            .expect("load completes pending repair");
+        assert_eq!(loaded.events().len(), 1);
+        assert!(!repair_manifest_path(directory.path(), OID).exists());
+        assert!(!stage.exists());
+        verify_integrity(directory.path(), OID).expect("recovered envelope verifies");
     }
 
     #[test]
