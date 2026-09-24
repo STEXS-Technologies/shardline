@@ -3754,7 +3754,6 @@ dependencies = [
  "sdx",
  "serde",
  "serde_json",
- "serial_test",
  "shardline-auth",
  "shardline-index",
  "shardline-protocol",
