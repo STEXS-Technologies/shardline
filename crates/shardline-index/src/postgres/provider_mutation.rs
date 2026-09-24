@@ -4,8 +4,8 @@ use shardline_reliability::{
     ProviderRepositoryOperationId, RetentionEvidenceLog, RetentionHoldLifecycleState,
     SnapshotEvidence, WebhookDeliveryLifecycleState, append_or_baseline_snapshot_evidence,
     verify_and_append_snapshot_transition, verify_and_append_webhook_delivery_retry,
-    verify_or_repair_snapshot_evidence, verify_persisted_event_merkle_chain_with_sequences,
-    verify_provider_lifecycle_events,
+    verify_and_reactivate_retention_hold, verify_or_repair_snapshot_evidence,
+    verify_persisted_event_merkle_chain_with_sequences, verify_provider_lifecycle_events,
 };
 use sqlx::{Acquire, PgConnection, Postgres, Row, Transaction, query, query_scalar};
 
@@ -329,9 +329,7 @@ pub(super) async fn upsert_retention_hold(
             super::index_store::retention_snapshot(previous, RetentionHoldLifecycleState::Active)?;
         verify_and_append_snapshot_transition(evidence, previous_snapshot, snapshot.clone())?
     } else {
-        let released =
-            super::index_store::retention_snapshot(hold, RetentionHoldLifecycleState::Released)?;
-        verify_and_append_snapshot_transition(evidence, released, snapshot.clone())?
+        verify_and_reactivate_retention_hold(evidence, snapshot.clone())?
     };
     query(
         "INSERT INTO shardline_retention_holds (

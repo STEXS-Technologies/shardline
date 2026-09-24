@@ -5,7 +5,8 @@ use shardline_reliability::{
     SnapshotEvidence, WebhookDeliveryLifecycleState, append_or_baseline_snapshot_evidence,
     upload_lifecycle_event, upload_lifecycle_identity, verify_and_append_snapshot_transition,
     verify_and_append_webhook_delivery_retry, verify_and_reactivate_quarantine,
-    verify_provider_lifecycle_events, verify_snapshot_evidence, verify_upload_lifecycle_events,
+    verify_and_reactivate_retention_hold, verify_provider_lifecycle_events,
+    verify_snapshot_evidence, verify_upload_lifecycle_events,
 };
 use shardline_storage::ObjectKey;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -589,8 +590,7 @@ impl LifecycleStore for LocalIndexStore {
                 true,
             )
         } else {
-            let released = retention_snapshot(hold, RetentionHoldLifecycleState::Released)?;
-            verify_and_append_snapshot_transition(evidence, released, snapshot)?
+            verify_and_reactivate_retention_hold(evidence, snapshot)?
         };
         transaction.execute(
             "INSERT INTO shardline_retention_holds (
@@ -2035,6 +2035,25 @@ mod tests {
 
         assert_eq!(
             LifecycleStore::quarantine_candidate(&store, &key).unwrap(),
+            Some(reactivated)
+        );
+    }
+
+    #[test]
+    fn retention_hold_reactivation_accepts_changed_metadata() {
+        let store = make_store();
+        let key = ObjectKey::parse("chunks/dd/reactivated-retention").unwrap();
+        let original =
+            RetentionHold::new(key.clone(), "original".to_owned(), 3000, Some(4000)).unwrap();
+        let reactivated =
+            RetentionHold::new(key.clone(), "updated".to_owned(), 5000, Some(6000)).unwrap();
+
+        LifecycleStore::upsert_retention_hold(&store, &original).unwrap();
+        assert!(LifecycleStore::delete_retention_hold(&store, &key).unwrap());
+        LifecycleStore::upsert_retention_hold(&store, &reactivated).unwrap();
+
+        assert_eq!(
+            LifecycleStore::retention_hold(&store, &key).unwrap(),
             Some(reactivated)
         );
     }

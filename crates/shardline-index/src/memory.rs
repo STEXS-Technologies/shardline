@@ -13,9 +13,9 @@ use shardline_reliability::{
     WebhookDeliveryEvidenceLog, WebhookDeliveryIdentity, WebhookDeliveryLifecycleState,
     WebhookDeliverySnapshot, upload_lifecycle_event, upload_lifecycle_identity,
     verify_and_append_snapshot_transition, verify_and_append_webhook_delivery_retry,
-    verify_and_reactivate_quarantine, verify_lifecycle_chain, verify_provider_lifecycle_events,
-    verify_quarantine_lifecycle_events, verify_retention_hold_lifecycle_events,
-    verify_upload_lifecycle_events,
+    verify_and_reactivate_quarantine, verify_and_reactivate_retention_hold, verify_lifecycle_chain,
+    verify_provider_lifecycle_events, verify_quarantine_lifecycle_events,
+    verify_retention_hold_lifecycle_events, verify_upload_lifecycle_events,
 };
 use shardline_storage::ObjectKey;
 use thiserror::Error;
@@ -541,8 +541,7 @@ impl LifecycleStore for MemoryIndexStore {
         } else if evidence.events().is_empty() {
             verify_and_append_snapshot_transition(evidence, snapshot.clone(), snapshot)
         } else {
-            let released = retention_snapshot(hold, RetentionHoldLifecycleState::Released)?;
-            verify_and_append_snapshot_transition(evidence, released, snapshot)
+            verify_and_reactivate_retention_hold(evidence, snapshot)
         }
         .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
         state.retention_holds.insert(key.clone(), hold.clone());
@@ -3258,6 +3257,22 @@ mod tests {
         store.upsert_quarantine_candidate(&reactivated).unwrap();
 
         assert_eq!(store.quarantine_candidate(&key).unwrap(), Some(reactivated));
+    }
+
+    #[test]
+    fn memory_retention_reactivation_accepts_changed_metadata() {
+        let store = MemoryIndexStore::new();
+        let key = ObjectKey::parse("chunks/reactivated-retention/key").unwrap();
+        let original =
+            RetentionHold::new(key.clone(), "original".to_owned(), 10, Some(20)).unwrap();
+        let reactivated =
+            RetentionHold::new(key.clone(), "updated".to_owned(), 30, Some(40)).unwrap();
+
+        store.upsert_retention_hold(&original).unwrap();
+        assert!(store.delete_retention_hold(&key).unwrap());
+        store.upsert_retention_hold(&reactivated).unwrap();
+
+        assert_eq!(store.retention_hold(&key).unwrap(), Some(reactivated));
     }
 
     #[test]

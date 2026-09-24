@@ -96,8 +96,8 @@ pub use quarantine_evidence::{
 pub use repair_evidence::{RepairEvidenceEvent, RepairSnapshotV1};
 pub use retention_evidence::{
     RetentionEvidenceLog, RetentionHoldLifecycleEvent, RetentionHoldLifecycleState,
-    RetentionHoldSnapshot, RetentionObjectIdentity, verify_retention_hold_lifecycle_chain,
-    verify_retention_hold_lifecycle_events,
+    RetentionHoldSnapshot, RetentionObjectIdentity, verify_and_reactivate_retention_hold,
+    verify_retention_hold_lifecycle_chain, verify_retention_hold_lifecycle_events,
 };
 pub use s3_object_evidence::{
     S3ObjectEvidenceLog, S3ObjectLifecycleEvent, S3ObjectOperationId, S3ObjectSnapshot,

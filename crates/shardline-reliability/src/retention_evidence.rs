@@ -125,6 +125,37 @@ impl SnapshotEvidence for RetentionHoldSnapshot {
 pub type RetentionHoldLifecycleEvent = SnapshotEvidenceEvent<RetentionHoldSnapshot>;
 pub type RetentionEvidenceLog = SnapshotEvidenceLog<RetentionHoldSnapshot>;
 
+/// Verifies and records a new active retention hold after a prior hold was
+/// released.
+///
+/// A recreated hold may carry different reason or retention timestamps. The
+/// released snapshot in the journal is therefore authoritative for the
+/// transition boundary; rebuilding it from the new hold would reject a valid
+/// recreation as a state mismatch.
+///
+/// # Errors
+///
+/// Returns an error when the evidence chain is invalid, the prior state is
+/// not `Released`, or the new snapshot cannot be appended.
+pub fn verify_and_reactivate_retention_hold(
+    mut evidence: RetentionEvidenceLog,
+    snapshot: RetentionHoldSnapshot,
+) -> Result<(RetentionEvidenceLog, bool), ReliabilityError> {
+    if evidence.events().is_empty() {
+        return Ok((RetentionEvidenceLog::baseline(snapshot)?, true));
+    }
+    verify_snapshot_chain(evidence.events())?;
+    let last = evidence
+        .events()
+        .last()
+        .ok_or(ReliabilityError::OperationMismatch)?;
+    if last.after.state != RetentionHoldLifecycleState::Released {
+        return Err(ReliabilityError::StateMismatch);
+    }
+    evidence.record(snapshot)?;
+    Ok((evidence, false))
+}
+
 ///
 /// # Errors
 ///
@@ -191,5 +222,28 @@ mod tests {
             event.after.reason = "tampered".to_owned();
         }
         assert!(verify_retention_hold_lifecycle_chain(&events).is_err());
+    }
+
+    #[test]
+    fn reactivation_uses_the_released_snapshot_as_transition_boundary() {
+        let original = snapshot(RetentionHoldLifecycleState::Active);
+        let released = snapshot(RetentionHoldLifecycleState::Released);
+        let mut evidence = RetentionEvidenceLog::baseline(original).unwrap();
+        evidence.record(released).unwrap();
+        let changed = RetentionHoldSnapshot::new(
+            RetentionObjectIdentity::new("aa/object").unwrap(),
+            "updated legal hold",
+            101,
+            Some(202),
+            RetentionHoldLifecycleState::Active,
+        )
+        .unwrap();
+
+        let (evidence, was_baseline) =
+            verify_and_reactivate_retention_hold(evidence, changed.clone()).unwrap();
+
+        assert!(!was_baseline);
+        assert_eq!(evidence.events().last().unwrap().after, changed);
+        verify_retention_hold_lifecycle_events(evidence.events(), &changed).unwrap();
     }
 }
