@@ -94,29 +94,39 @@ async fn verify_tag_listing_evidence(
         .map(|operation| operation.operation_id.clone())
         .collect::<Vec<_>>();
     let rows = query(
-        "SELECT DISTINCT ON (current.operation_id)
-                current.operation_id, current.sequence, current.event_json,
-                current.merkle_commit_json,
+        "WITH requested AS (
+             SELECT operation_id
+             FROM unnest($2::text[]) AS values(operation_id)
+         )
+         SELECT requested.operation_id,
+                latest.sequence,
+                latest.event_json,
+                latest.merkle_commit_json,
                 CASE WHEN EXISTS (
                     SELECT 1
                     FROM shardline_reliability_events AS missing
                     WHERE missing.operation_kind = $1
-                      AND missing.operation_id = current.operation_id
-                      AND missing.sequence < current.sequence
+                      AND missing.operation_id = requested.operation_id
+                      AND missing.sequence < latest.sequence
                       AND missing.merkle_commit_json IS NULL
                 ) THEN '{\"missing_previous_merkle_commit\":true}'::jsonb ELSE (
                     SELECT previous.merkle_commit_json
                     FROM shardline_reliability_events AS previous
                     WHERE previous.operation_kind = $1
-                      AND previous.operation_id = current.operation_id
-                      AND previous.sequence < current.sequence
+                      AND previous.operation_id = requested.operation_id
+                      AND previous.sequence < latest.sequence
                     ORDER BY previous.sequence DESC
                     LIMIT 1
                 ) END AS previous_merkle_commit_json
-         FROM shardline_reliability_events AS current
-         WHERE current.operation_kind = $1
-           AND current.operation_id = ANY($2)
-         ORDER BY current.operation_id, current.sequence DESC",
+         FROM requested
+         LEFT JOIN LATERAL (
+             SELECT sequence, event_json, merkle_commit_json
+             FROM shardline_reliability_events
+             WHERE operation_kind = $1
+               AND operation_id = requested.operation_id
+             ORDER BY sequence DESC
+             LIMIT 1
+         ) AS latest ON TRUE",
     )
     .bind(OperationKind::OciTag.as_str())
     .bind(&operation_ids)
