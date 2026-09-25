@@ -1,5 +1,13 @@
-use rusqlite::{OptionalExtension, params};
+use rusqlite::{OptionalExtension, Transaction, params};
 use shardline_protocol::{RepositoryProvider, ShardlineHash, unix_now_seconds_lossy};
+use shardline_reliability::{
+    LifecycleEvent, ProviderEvidenceLog, QuarantineLifecycleState, RetentionHoldLifecycleState,
+    SnapshotEvidence, WebhookDeliveryLifecycleState, append_or_baseline_snapshot_evidence,
+    upload_lifecycle_event, upload_lifecycle_identity, verify_and_append_snapshot_transition,
+    verify_and_append_webhook_delivery_retry, verify_and_reactivate_quarantine,
+    verify_and_reactivate_retention_hold, verify_provider_lifecycle_events,
+    verify_snapshot_evidence, verify_upload_lifecycle_events, verify_upload_lifecycle_head,
+};
 use shardline_storage::ObjectKey;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -7,10 +15,44 @@ use super::{LocalIndexStore, LocalIndexStoreError, collect_rows, u64_to_i64};
 use crate::{
     DedupeShardMapping, DedupeStore, FileId, FileReconstruction, LifecycleStore,
     ProviderRepositoryState, QuarantineCandidate, ReconstructionStore, RetentionHold,
-    StoredObjectId, WebhookDelivery, parse_xet_hash_hex,
+    StoredObjectId, WebhookDelivery,
+    local_sqlite::helpers::{
+        load_quarantine_evidence_batch, load_retention_evidence, load_retention_evidence_batch,
+        load_webhook_evidence, load_webhook_evidence_batch, persist_retention_evidence,
+        persist_webhook_evidence, retention_snapshot, webhook_snapshot,
+    },
+    parse_xet_hash_hex,
+    provider_evidence::snapshot_from_state,
     upload_intent::{UploadIntent, UploadIntentState, UploadIntentStore},
     xet_hash_hex_string,
 };
+
+fn verify_sqlite_intent_evidence(
+    transaction: &Transaction<'_>,
+    intent: &UploadIntent,
+) -> Result<(), LocalIndexStoreError> {
+    let event = super::helpers::load_latest_verified_event_json(
+        transaction,
+        shardline_reliability::OperationKind::Upload,
+        intent.intent_id(),
+    )?
+    .ok_or(LocalIndexStoreError::Reliability(
+        shardline_reliability::ReliabilityError::OperationMismatch,
+    ))
+    .and_then(|value| {
+        serde_json::from_value::<LifecycleEvent>(value).map_err(LocalIndexStoreError::from)
+    })?;
+    verify_upload_lifecycle_head(
+        &event,
+        event.operation.tenant.as_str(),
+        event.operation.repository.as_str(),
+        intent.intent_id(),
+        intent.object_key(),
+        intent.object_hash(),
+        intent.state(),
+    )
+    .map_err(LocalIndexStoreError::Reliability)
+}
 
 impl ReconstructionStore for LocalIndexStore {
     type Error = LocalIndexStoreError;
@@ -52,6 +94,36 @@ impl ReconstructionStore for LocalIndexStore {
             "DELETE FROM shardline_file_reconstructions WHERE file_id = ?1",
             params![xet_hash_hex_string(file_id.hash())],
         )?;
+        Ok(changed > 0)
+    }
+
+    fn delete_reconstruction_if_matches(
+        &self,
+        file_id: &FileId,
+        expected: &FileReconstruction,
+    ) -> Result<bool, Self::Error> {
+        let mut connection = self.open_connection()?;
+        let transaction = connection.transaction()?;
+        let Some(terms) = transaction
+            .query_row(
+                "SELECT terms FROM shardline_file_reconstructions WHERE file_id = ?1",
+                params![xet_hash_hex_string(file_id.hash())],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+        else {
+            transaction.commit()?;
+            return Ok(false);
+        };
+        if super::helpers::parse_reconstruction_json(&terms)? != *expected {
+            transaction.commit()?;
+            return Ok(false);
+        }
+        let changed = transaction.execute(
+            "DELETE FROM shardline_file_reconstructions WHERE file_id = ?1 AND terms = ?2",
+            params![xet_hash_hex_string(file_id.hash()), terms],
+        )?;
+        transaction.commit()?;
         Ok(changed > 0)
     }
 
@@ -124,6 +196,40 @@ impl DedupeStore for LocalIndexStore {
         )?;
         Ok(changed > 0)
     }
+
+    fn delete_dedupe_shard_mapping_if_matches(
+        &self,
+        expected: &DedupeShardMapping,
+    ) -> Result<bool, Self::Error> {
+        let mut connection = self.open_connection()?;
+        let transaction = connection.transaction()?;
+        let Some(current) = transaction
+            .query_row(
+                "SELECT chunk_hash, shard_object_key
+                 FROM shardline_dedupe_shards WHERE chunk_hash = ?1",
+                params![xet_hash_hex_string(expected.chunk_hash())],
+                super::helpers::dedupe_shard_mapping_from_row,
+            )
+            .optional()?
+        else {
+            transaction.commit()?;
+            return Ok(false);
+        };
+        if current != *expected {
+            transaction.commit()?;
+            return Ok(false);
+        }
+        let changed = transaction.execute(
+            "DELETE FROM shardline_dedupe_shards
+             WHERE chunk_hash = ?1 AND shard_object_key = ?2",
+            params![
+                xet_hash_hex_string(expected.chunk_hash()),
+                expected.shard_object_key().as_str(),
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(changed > 0)
+    }
 }
 
 impl LifecycleStore for LocalIndexStore {
@@ -133,8 +239,9 @@ impl LifecycleStore for LocalIndexStore {
         &self,
         object_key: &ObjectKey,
     ) -> Result<Option<QuarantineCandidate>, Self::Error> {
-        let connection = self.open_connection()?;
-        connection
+        let mut connection = self.open_connection()?;
+        let transaction = connection.transaction()?;
+        let candidate = transaction
             .query_row(
                 "SELECT object_key,
                         observed_length,
@@ -145,13 +252,22 @@ impl LifecycleStore for LocalIndexStore {
                 params![object_key.as_str()],
                 super::helpers::quarantine_candidate_from_row,
             )
-            .optional()
-            .map_err(LocalIndexStoreError::from)
+            .optional()?;
+        if let Some(candidate) = &candidate {
+            let snapshot =
+                super::helpers::quarantine_snapshot(candidate, QuarantineLifecycleState::Active)?;
+            let evidence =
+                super::helpers::load_quarantine_evidence(&transaction, object_key.as_str())?;
+            verify_snapshot_evidence(&evidence, &snapshot)?;
+        }
+        transaction.commit()?;
+        Ok(candidate)
     }
 
     fn list_quarantine_candidates(&self) -> Result<Vec<QuarantineCandidate>, Self::Error> {
-        let connection = self.open_connection()?;
-        let mut statement = connection.prepare(
+        let mut connection = self.open_connection()?;
+        let transaction = connection.transaction()?;
+        let mut statement = transaction.prepare(
             "SELECT object_key,
                     observed_length,
                     first_seen_unreachable_at_unix_seconds,
@@ -160,7 +276,25 @@ impl LifecycleStore for LocalIndexStore {
              ORDER BY object_key",
         )?;
         let rows = statement.query_map([], super::helpers::quarantine_candidate_from_row)?;
-        collect_rows(rows)
+        let candidates = collect_rows(rows)?;
+        drop(statement);
+        let object_keys = candidates
+            .iter()
+            .map(|candidate| candidate.object_key().as_str().to_owned())
+            .collect::<Vec<_>>();
+        let evidence = load_quarantine_evidence_batch(&transaction, &object_keys)?;
+        for candidate in &candidates {
+            let snapshot =
+                super::helpers::quarantine_snapshot(candidate, QuarantineLifecycleState::Active)?;
+            let evidence = evidence.get(candidate.object_key().as_str()).ok_or(
+                LocalIndexStoreError::Reliability(
+                    shardline_reliability::ReliabilityError::OperationMismatch,
+                ),
+            )?;
+            verify_snapshot_evidence(evidence, &snapshot)?;
+        }
+        transaction.commit()?;
+        Ok(candidates)
     }
 
     fn visit_quarantine_candidates<Visitor, VisitorError>(
@@ -181,8 +315,17 @@ impl LifecycleStore for LocalIndexStore {
         &self,
         candidate: &QuarantineCandidate,
     ) -> Result<(), Self::Error> {
-        let connection = self.open_connection()?;
-        connection.execute(
+        let mut connection = self.open_connection()?;
+        let transaction = connection.transaction()?;
+        let previous = transaction
+            .query_row(
+                "SELECT object_key, observed_length, first_seen_unreachable_at_unix_seconds, delete_after_unix_seconds
+                 FROM shardline_quarantine_candidates WHERE object_key = ?1",
+                params![candidate.object_key().as_str()],
+                super::helpers::quarantine_candidate_from_row,
+            )
+            .optional()?;
+        transaction.execute(
             "INSERT INTO shardline_quarantine_candidates (
                 object_key,
                 observed_length,
@@ -206,21 +349,151 @@ impl LifecycleStore for LocalIndexStore {
                 u64_to_i64(unix_now_seconds_lossy())?,
             ],
         )?;
+        let snapshot =
+            super::helpers::quarantine_snapshot(candidate, QuarantineLifecycleState::Active)?;
+        let evidence = super::helpers::load_quarantine_evidence(
+            &transaction,
+            candidate.object_key().as_str(),
+        )?;
+        let (evidence, evidence_was_empty) = if let Some(previous) = previous {
+            let before =
+                super::helpers::quarantine_snapshot(&previous, QuarantineLifecycleState::Active)?;
+            verify_and_append_snapshot_transition(evidence, before, snapshot)?
+        } else if evidence.events().is_empty() {
+            (
+                append_or_baseline_snapshot_evidence(evidence, snapshot)?,
+                true,
+            )
+        } else {
+            verify_and_reactivate_quarantine(evidence, snapshot)?
+        };
+        let event = evidence.events().last().ok_or_else(|| {
+            LocalIndexStoreError::Reliability(shardline_reliability::ReliabilityError::EmptyField(
+                "quarantine evidence event",
+            ))
+        })?;
+        if evidence_was_empty {
+            for stored_event in evidence.events() {
+                super::helpers::persist_quarantine_evidence(&transaction, stored_event)?;
+            }
+        } else {
+            super::helpers::persist_quarantine_evidence(&transaction, event)?;
+        }
+        transaction.commit()?;
         Ok(())
     }
 
     fn delete_quarantine_candidate(&self, object_key: &ObjectKey) -> Result<bool, Self::Error> {
-        let connection = self.open_connection()?;
-        let changed = connection.execute(
+        let mut connection = self.open_connection()?;
+        let transaction = connection.transaction()?;
+        let candidate = transaction
+            .query_row(
+                "SELECT object_key, observed_length, first_seen_unreachable_at_unix_seconds, delete_after_unix_seconds
+                 FROM shardline_quarantine_candidates WHERE object_key = ?1",
+                params![object_key.as_str()],
+                super::helpers::quarantine_candidate_from_row,
+            )
+            .optional()?;
+        let changed = transaction.execute(
             "DELETE FROM shardline_quarantine_candidates WHERE object_key = ?1",
             params![object_key.as_str()],
         )?;
+        if let Some(candidate) = candidate {
+            let active =
+                super::helpers::quarantine_snapshot(&candidate, QuarantineLifecycleState::Active)?;
+            let released = super::helpers::quarantine_snapshot(
+                &candidate,
+                QuarantineLifecycleState::Released,
+            )?;
+            let evidence =
+                super::helpers::load_quarantine_evidence(&transaction, object_key.as_str())?;
+            let (evidence, evidence_was_empty) =
+                verify_and_append_snapshot_transition(evidence, active, released)?;
+            let event = evidence.events().last().ok_or_else(|| {
+                LocalIndexStoreError::Reliability(
+                    shardline_reliability::ReliabilityError::EmptyField(
+                        "quarantine evidence event",
+                    ),
+                )
+            })?;
+            if evidence_was_empty {
+                for stored_event in evidence.events() {
+                    super::helpers::persist_quarantine_evidence(&transaction, stored_event)?;
+                }
+            } else {
+                super::helpers::persist_quarantine_evidence(&transaction, event)?;
+            }
+        }
+        transaction.commit()?;
         Ok(changed > 0)
     }
 
+    fn delete_quarantine_candidate_if_matches(
+        &self,
+        expected: &QuarantineCandidate,
+    ) -> Result<bool, Self::Error> {
+        let mut connection = self.open_connection()?;
+        let transaction = connection.transaction()?;
+        let candidate = transaction
+            .query_row(
+                "SELECT object_key, observed_length, first_seen_unreachable_at_unix_seconds, delete_after_unix_seconds
+                 FROM shardline_quarantine_candidates WHERE object_key = ?1",
+                params![expected.object_key().as_str()],
+                super::helpers::quarantine_candidate_from_row,
+            )
+            .optional()?;
+        let Some(candidate) = candidate else {
+            transaction.commit()?;
+            return Ok(false);
+        };
+        if candidate != *expected {
+            transaction.commit()?;
+            return Ok(false);
+        }
+        let active =
+            super::helpers::quarantine_snapshot(&candidate, QuarantineLifecycleState::Active)?;
+        let released =
+            super::helpers::quarantine_snapshot(&candidate, QuarantineLifecycleState::Released)?;
+        let evidence =
+            super::helpers::load_quarantine_evidence(&transaction, expected.object_key().as_str())?;
+        let (evidence, evidence_was_empty) =
+            verify_and_append_snapshot_transition(evidence, active, released)?;
+        let changed = transaction.execute(
+            "DELETE FROM shardline_quarantine_candidates
+             WHERE object_key = ?1 AND observed_length = ?2
+               AND first_seen_unreachable_at_unix_seconds = ?3
+               AND delete_after_unix_seconds = ?4",
+            params![
+                expected.object_key().as_str(),
+                u64_to_i64(expected.observed_length())?,
+                u64_to_i64(expected.first_seen_unreachable_at_unix_seconds())?,
+                u64_to_i64(expected.delete_after_unix_seconds())?,
+            ],
+        )?;
+        if changed == 0 {
+            transaction.commit()?;
+            return Ok(false);
+        }
+        let event = evidence.events().last().ok_or_else(|| {
+            LocalIndexStoreError::Reliability(shardline_reliability::ReliabilityError::EmptyField(
+                "quarantine evidence event",
+            ))
+        })?;
+        if evidence_was_empty {
+            for stored_event in evidence.events() {
+                super::helpers::persist_quarantine_evidence(&transaction, stored_event)?;
+            }
+        } else {
+            super::helpers::persist_quarantine_evidence(&transaction, event)?;
+        }
+        transaction.commit()?;
+        Ok(true)
+    }
+
     fn retention_hold(&self, object_key: &ObjectKey) -> Result<Option<RetentionHold>, Self::Error> {
-        let connection = self.open_connection()?;
-        connection
+        let mut connection = self.open_connection()?;
+        let transaction = connection.transaction()?;
+        let hold = transaction
             .query_row(
                 "SELECT object_key,
                         reason,
@@ -231,13 +504,20 @@ impl LifecycleStore for LocalIndexStore {
                 params![object_key.as_str()],
                 super::helpers::retention_hold_from_row,
             )
-            .optional()
-            .map_err(LocalIndexStoreError::from)
+            .optional()?;
+        if let Some(hold) = hold.as_ref() {
+            let snapshot = retention_snapshot(hold, RetentionHoldLifecycleState::Active)?;
+            let evidence = load_retention_evidence(&transaction, object_key.as_str())?;
+            verify_snapshot_evidence(&evidence, &snapshot)?;
+        }
+        transaction.commit()?;
+        Ok(hold)
     }
 
     fn list_retention_holds(&self) -> Result<Vec<RetentionHold>, Self::Error> {
-        let connection = self.open_connection()?;
-        let mut statement = connection.prepare(
+        let mut connection = self.open_connection()?;
+        let transaction = connection.transaction()?;
+        let mut statement = transaction.prepare(
             "SELECT object_key,
                     reason,
                     held_at_unix_seconds,
@@ -246,7 +526,24 @@ impl LifecycleStore for LocalIndexStore {
              ORDER BY object_key",
         )?;
         let rows = statement.query_map([], super::helpers::retention_hold_from_row)?;
-        collect_rows(rows)
+        let holds = collect_rows(rows)?;
+        drop(statement);
+        let object_keys = holds
+            .iter()
+            .map(|hold| hold.object_key().as_str().to_owned())
+            .collect::<Vec<_>>();
+        let evidence = load_retention_evidence_batch(&transaction, &object_keys)?;
+        for hold in &holds {
+            let snapshot = retention_snapshot(hold, RetentionHoldLifecycleState::Active)?;
+            let evidence = evidence.get(hold.object_key().as_str()).ok_or(
+                LocalIndexStoreError::Reliability(
+                    shardline_reliability::ReliabilityError::OperationMismatch,
+                ),
+            )?;
+            verify_snapshot_evidence(evidence, &snapshot)?;
+        }
+        transaction.commit()?;
+        Ok(holds)
     }
 
     fn visit_retention_holds<Visitor, VisitorError>(
@@ -264,8 +561,31 @@ impl LifecycleStore for LocalIndexStore {
     }
 
     fn upsert_retention_hold(&self, hold: &RetentionHold) -> Result<(), Self::Error> {
-        let connection = self.open_connection()?;
-        connection.execute(
+        let mut connection = self.open_connection()?;
+        let transaction = connection.transaction()?;
+        let previous = transaction
+            .query_row(
+                "SELECT object_key, reason, held_at_unix_seconds, release_after_unix_seconds
+                 FROM shardline_retention_holds WHERE object_key = ?1",
+                params![hold.object_key().as_str()],
+                super::helpers::retention_hold_from_row,
+            )
+            .optional()?;
+        let snapshot = retention_snapshot(hold, RetentionHoldLifecycleState::Active)?;
+        let evidence = load_retention_evidence(&transaction, hold.object_key().as_str())?;
+        let (evidence, evidence_was_empty) = if let Some(previous) = previous.as_ref() {
+            let previous_snapshot =
+                retention_snapshot(previous, RetentionHoldLifecycleState::Active)?;
+            verify_and_append_snapshot_transition(evidence, previous_snapshot, snapshot)?
+        } else if evidence.events().is_empty() {
+            (
+                append_or_baseline_snapshot_evidence(evidence, snapshot)?,
+                true,
+            )
+        } else {
+            verify_and_reactivate_retention_hold(evidence, snapshot)?
+        };
+        transaction.execute(
             "INSERT INTO shardline_retention_holds (
                 object_key,
                 reason,
@@ -290,21 +610,139 @@ impl LifecycleStore for LocalIndexStore {
                 u64_to_i64(unix_now_seconds_lossy())?,
             ],
         )?;
+        if evidence_was_empty {
+            for event in evidence.events() {
+                persist_retention_evidence(&transaction, event)?;
+            }
+        } else if let Some(event) = evidence.events().last() {
+            persist_retention_evidence(&transaction, event)?;
+        }
+        transaction.commit()?;
         Ok(())
     }
 
     fn delete_retention_hold(&self, object_key: &ObjectKey) -> Result<bool, Self::Error> {
-        let connection = self.open_connection()?;
-        let changed = connection.execute(
+        let mut connection = self.open_connection()?;
+        let transaction = connection.transaction()?;
+        let hold = transaction
+            .query_row(
+                "SELECT object_key, reason, held_at_unix_seconds, release_after_unix_seconds
+                 FROM shardline_retention_holds WHERE object_key = ?1",
+                params![object_key.as_str()],
+                super::helpers::retention_hold_from_row,
+            )
+            .optional()?;
+        let changed = transaction.execute(
             "DELETE FROM shardline_retention_holds WHERE object_key = ?1",
             params![object_key.as_str()],
         )?;
+        if let Some(hold) = hold {
+            let active = retention_snapshot(&hold, RetentionHoldLifecycleState::Active)?;
+            let released = retention_snapshot(&hold, RetentionHoldLifecycleState::Released)?;
+            let evidence = load_retention_evidence(&transaction, object_key.as_str())?;
+            let (evidence, evidence_was_empty) =
+                verify_and_append_snapshot_transition(evidence, active, released)?;
+            if evidence_was_empty {
+                for event in evidence.events() {
+                    persist_retention_evidence(&transaction, event)?;
+                }
+            } else if let Some(event) = evidence.events().last() {
+                persist_retention_evidence(&transaction, event)?;
+            }
+        }
+        transaction.commit()?;
         Ok(changed > 0)
     }
 
+    fn delete_retention_hold_if_matches(
+        &self,
+        expected: &RetentionHold,
+    ) -> Result<bool, Self::Error> {
+        let mut connection = self.open_connection()?;
+        let transaction = connection.transaction()?;
+        let hold = transaction
+            .query_row(
+                "SELECT object_key, reason, held_at_unix_seconds, release_after_unix_seconds
+                 FROM shardline_retention_holds WHERE object_key = ?1",
+                params![expected.object_key().as_str()],
+                super::helpers::retention_hold_from_row,
+            )
+            .optional()?;
+        let Some(hold) = hold else {
+            transaction.commit()?;
+            return Ok(false);
+        };
+        if hold != *expected {
+            transaction.commit()?;
+            return Ok(false);
+        }
+        let active = retention_snapshot(&hold, RetentionHoldLifecycleState::Active)?;
+        let released = retention_snapshot(&hold, RetentionHoldLifecycleState::Released)?;
+        let evidence = load_retention_evidence(&transaction, expected.object_key().as_str())?;
+        let (evidence, evidence_was_empty) =
+            verify_and_append_snapshot_transition(evidence, active, released)?;
+        let changed = transaction.execute(
+            "DELETE FROM shardline_retention_holds
+             WHERE object_key = ?1 AND reason = ?2 AND held_at_unix_seconds = ?3
+               AND (release_after_unix_seconds IS ?4)",
+            params![
+                expected.object_key().as_str(),
+                expected.reason(),
+                u64_to_i64(expected.held_at_unix_seconds())?,
+                expected
+                    .release_after_unix_seconds()
+                    .map(u64_to_i64)
+                    .transpose()?,
+            ],
+        )?;
+        if changed == 0 {
+            transaction.commit()?;
+            return Ok(false);
+        }
+        if evidence_was_empty {
+            for event in evidence.events() {
+                persist_retention_evidence(&transaction, event)?;
+            }
+        } else if let Some(event) = evidence.events().last() {
+            persist_retention_evidence(&transaction, event)?;
+        }
+        transaction.commit()?;
+        Ok(true)
+    }
+
     fn record_webhook_delivery(&self, delivery: &WebhookDelivery) -> Result<bool, Self::Error> {
-        let connection = self.open_connection()?;
-        let changed = connection.execute(
+        let mut connection = self.open_connection()?;
+        let transaction = connection.transaction()?;
+        let existing = transaction
+            .query_row(
+                "SELECT provider, owner, repo, delivery_id, processed_at_unix_seconds
+                 FROM shardline_webhook_deliveries
+                 WHERE provider = ?1 AND owner = ?2 AND repo = ?3 AND delivery_id = ?4",
+                params![
+                    delivery.provider().as_str(),
+                    delivery.owner(),
+                    delivery.repo(),
+                    delivery.delivery_id(),
+                ],
+                super::helpers::webhook_delivery_from_row,
+            )
+            .optional()?;
+        if let Some(existing) = existing {
+            let snapshot = webhook_snapshot(&existing, WebhookDeliveryLifecycleState::Processed)?;
+            let evidence = load_webhook_evidence(&transaction, &existing)?;
+            verify_snapshot_evidence(&evidence, &snapshot)?;
+            transaction.commit()?;
+            return Ok(false);
+        }
+        let snapshot = webhook_snapshot(delivery, WebhookDeliveryLifecycleState::Processed)?;
+        let evidence = load_webhook_evidence(&transaction, delivery)?;
+        let processed_at_unix_seconds = evidence.events().last().map_or_else(
+            || delivery.processed_at_unix_seconds(),
+            |event| event.after.processed_at_unix_seconds,
+        );
+        let (evidence, evidence_was_empty) =
+            verify_and_append_webhook_delivery_retry(evidence, snapshot)?;
+        transaction.execute(
             "INSERT INTO shardline_webhook_deliveries (
                 provider,
                 owner,
@@ -319,15 +757,24 @@ impl LifecycleStore for LocalIndexStore {
                 delivery.owner(),
                 delivery.repo(),
                 delivery.delivery_id(),
-                u64_to_i64(delivery.processed_at_unix_seconds())?,
+                u64_to_i64(processed_at_unix_seconds)?,
             ],
         )?;
-        Ok(changed > 0)
+        if evidence_was_empty {
+            for event in evidence.events() {
+                persist_webhook_evidence(&transaction, event)?;
+            }
+        } else if let Some(event) = evidence.events().last() {
+            persist_webhook_evidence(&transaction, event)?;
+        }
+        transaction.commit()?;
+        Ok(true)
     }
 
     fn list_webhook_deliveries(&self) -> Result<Vec<WebhookDelivery>, Self::Error> {
-        let connection = self.open_connection()?;
-        let mut statement = connection.prepare(
+        let mut connection = self.open_connection()?;
+        let transaction = connection.transaction()?;
+        let mut statement = transaction.prepare(
             "SELECT provider,
                     owner,
                     repo,
@@ -337,7 +784,21 @@ impl LifecycleStore for LocalIndexStore {
              ORDER BY provider, owner, repo, delivery_id",
         )?;
         let rows = statement.query_map([], super::helpers::webhook_delivery_from_row)?;
-        collect_rows(rows)
+        let deliveries = collect_rows(rows)?;
+        drop(statement);
+        let evidence = load_webhook_evidence_batch(&transaction, &deliveries)?;
+        for delivery in &deliveries {
+            let snapshot = webhook_snapshot(delivery, WebhookDeliveryLifecycleState::Processed)?;
+            let operation_id = snapshot.evidence_operation()?.operation_id;
+            let evidence = evidence
+                .get(&operation_id)
+                .ok_or(LocalIndexStoreError::Reliability(
+                    shardline_reliability::ReliabilityError::OperationMismatch,
+                ))?;
+            verify_snapshot_evidence(evidence, &snapshot)?;
+        }
+        transaction.commit()?;
+        Ok(deliveries)
     }
 
     fn visit_webhook_deliveries<Visitor, VisitorError>(
@@ -355,8 +816,32 @@ impl LifecycleStore for LocalIndexStore {
     }
 
     fn delete_webhook_delivery(&self, delivery: &WebhookDelivery) -> Result<bool, Self::Error> {
-        let connection = self.open_connection()?;
-        let changed = connection.execute(
+        let mut connection = self.open_connection()?;
+        let transaction = connection.transaction()?;
+        let existing = transaction
+            .query_row(
+                "SELECT provider, owner, repo, delivery_id, processed_at_unix_seconds
+                 FROM shardline_webhook_deliveries
+                 WHERE provider = ?1 AND owner = ?2 AND repo = ?3 AND delivery_id = ?4",
+                params![
+                    delivery.provider().as_str(),
+                    delivery.owner(),
+                    delivery.repo(),
+                    delivery.delivery_id(),
+                ],
+                super::helpers::webhook_delivery_from_row,
+            )
+            .optional()?;
+        let Some(existing) = existing else {
+            transaction.commit()?;
+            return Ok(false);
+        };
+        let snapshot = webhook_snapshot(&existing, WebhookDeliveryLifecycleState::Processed)?;
+        let released = webhook_snapshot(&existing, WebhookDeliveryLifecycleState::Released)?;
+        let evidence = load_webhook_evidence(&transaction, &existing)?;
+        let (evidence, evidence_was_empty) =
+            verify_and_append_snapshot_transition(evidence, snapshot, released)?;
+        let changed = transaction.execute(
             "DELETE FROM shardline_webhook_deliveries
              WHERE provider = ?1 AND owner = ?2 AND repo = ?3 AND delivery_id = ?4",
             params![
@@ -366,20 +851,120 @@ impl LifecycleStore for LocalIndexStore {
                 delivery.delivery_id(),
             ],
         )?;
+        if evidence_was_empty {
+            for event in evidence.events() {
+                persist_webhook_evidence(&transaction, event)?;
+            }
+        } else if let Some(event) = evidence.events().last() {
+            persist_webhook_evidence(&transaction, event)?;
+        }
+        transaction.commit()?;
         Ok(changed > 0)
+    }
+
+    fn delete_webhook_delivery_if_matches(
+        &self,
+        expected: &WebhookDelivery,
+    ) -> Result<bool, Self::Error> {
+        let mut connection = self.open_connection()?;
+        let transaction = connection.transaction()?;
+        let existing = transaction
+            .query_row(
+                "SELECT provider, owner, repo, delivery_id, processed_at_unix_seconds
+                 FROM shardline_webhook_deliveries
+                 WHERE provider = ?1 AND owner = ?2 AND repo = ?3 AND delivery_id = ?4",
+                params![
+                    expected.provider().as_str(),
+                    expected.owner(),
+                    expected.repo(),
+                    expected.delivery_id(),
+                ],
+                super::helpers::webhook_delivery_from_row,
+            )
+            .optional()?;
+        let Some(existing) = existing else {
+            transaction.commit()?;
+            return Ok(false);
+        };
+        if existing != *expected {
+            transaction.commit()?;
+            return Ok(false);
+        }
+        let active = webhook_snapshot(&existing, WebhookDeliveryLifecycleState::Processed)?;
+        let released = webhook_snapshot(&existing, WebhookDeliveryLifecycleState::Released)?;
+        let evidence = load_webhook_evidence(&transaction, &existing)?;
+        let (evidence, evidence_was_empty) =
+            verify_and_append_snapshot_transition(evidence, active, released)?;
+        let changed = transaction.execute(
+            "DELETE FROM shardline_webhook_deliveries
+             WHERE provider = ?1 AND owner = ?2 AND repo = ?3 AND delivery_id = ?4
+               AND processed_at_unix_seconds = ?5",
+            params![
+                expected.provider().as_str(),
+                expected.owner(),
+                expected.repo(),
+                expected.delivery_id(),
+                u64_to_i64(expected.processed_at_unix_seconds())?,
+            ],
+        )?;
+        if changed == 0 {
+            transaction.commit()?;
+            return Ok(false);
+        }
+        if evidence_was_empty {
+            for event in evidence.events() {
+                persist_webhook_evidence(&transaction, event)?;
+            }
+        } else if let Some(event) = evidence.events().last() {
+            persist_webhook_evidence(&transaction, event)?;
+        }
+        transaction.commit()?;
+        Ok(true)
     }
 
     fn purge_webhook_deliveries_older_than(
         &self,
         older_than_unix_seconds: u64,
     ) -> Result<u64, Self::Error> {
-        let connection = self.open_connection()?;
-        let changed = connection.execute(
-            "DELETE FROM shardline_webhook_deliveries
+        let mut connection = self.open_connection()?;
+        let transaction = connection.transaction()?;
+        let mut statement = transaction.prepare(
+            "SELECT provider, owner, repo, delivery_id, processed_at_unix_seconds
+             FROM shardline_webhook_deliveries
              WHERE processed_at_unix_seconds < ?1",
-            params![u64_to_i64(older_than_unix_seconds)?],
         )?;
-        Ok(u64::try_from(changed).unwrap_or(u64::MAX))
+        let rows = statement.query_map(
+            params![u64_to_i64(older_than_unix_seconds)?],
+            super::helpers::webhook_delivery_from_row,
+        )?;
+        let deliveries = collect_rows(rows)?;
+        drop(statement);
+        for delivery in &deliveries {
+            let snapshot = webhook_snapshot(delivery, WebhookDeliveryLifecycleState::Processed)?;
+            let released = webhook_snapshot(delivery, WebhookDeliveryLifecycleState::Released)?;
+            let evidence = load_webhook_evidence(&transaction, delivery)?;
+            let (evidence, evidence_was_empty) =
+                verify_and_append_snapshot_transition(evidence, snapshot, released)?;
+            transaction.execute(
+                "DELETE FROM shardline_webhook_deliveries
+                 WHERE provider = ?1 AND owner = ?2 AND repo = ?3 AND delivery_id = ?4",
+                params![
+                    delivery.provider().as_str(),
+                    delivery.owner(),
+                    delivery.repo(),
+                    delivery.delivery_id(),
+                ],
+            )?;
+            if evidence_was_empty {
+                for event in evidence.events() {
+                    persist_webhook_evidence(&transaction, event)?;
+                }
+            } else if let Some(event) = evidence.events().last() {
+                persist_webhook_evidence(&transaction, event)?;
+            }
+        }
+        transaction.commit()?;
+        Ok(u64::try_from(deliveries.len()).unwrap_or(u64::MAX))
     }
 
     fn provider_repository_state(
@@ -388,8 +973,9 @@ impl LifecycleStore for LocalIndexStore {
         owner: &str,
         repo: &str,
     ) -> Result<Option<ProviderRepositoryState>, Self::Error> {
-        let connection = self.open_connection()?;
-        connection
+        let mut connection = self.open_connection()?;
+        let transaction = connection.transaction()?;
+        let state = transaction
             .query_row(
                 "SELECT provider,
                         owner,
@@ -405,14 +991,28 @@ impl LifecycleStore for LocalIndexStore {
                 params![provider.as_str(), owner, repo],
                 super::helpers::provider_repository_state_from_row,
             )
-            .optional()
-            .map_err(LocalIndexStoreError::from)
+            .optional()?;
+        if let Some(state) = state.as_ref() {
+            let snapshot = snapshot_from_state(state)?;
+            let stored = super::helpers::load_provider_evidence(&transaction, &snapshot)?;
+            if stored.events().is_empty() {
+                verify_provider_lifecycle_events(
+                    ProviderEvidenceLog::baseline(snapshot.clone())?.events(),
+                    &snapshot,
+                )?;
+            } else {
+                stored.verify_for(&snapshot)?;
+            }
+        }
+        transaction.commit()?;
+        Ok(state)
     }
 
     fn list_provider_repository_states(&self) -> Result<Vec<ProviderRepositoryState>, Self::Error> {
-        let connection = self.open_connection()?;
-        let mut statement = connection.prepare(
-            "SELECT provider,
+        let mut connection = self.open_connection()?;
+        let states = {
+            let mut statement = connection.prepare(
+                "SELECT provider,
                     owner,
                     repo,
                     last_access_changed_at_unix_seconds,
@@ -423,9 +1023,26 @@ impl LifecycleStore for LocalIndexStore {
                     last_drift_checked_at_unix_seconds
              FROM shardline_provider_repository_states
              ORDER BY provider, owner, repo",
-        )?;
-        let rows = statement.query_map([], super::helpers::provider_repository_state_from_row)?;
-        collect_rows(rows)
+            )?;
+            let rows =
+                statement.query_map([], super::helpers::provider_repository_state_from_row)?;
+            collect_rows(rows)?
+        };
+        let transaction = connection.transaction()?;
+        for state in &states {
+            let snapshot = snapshot_from_state(state)?;
+            let stored = super::helpers::load_provider_evidence(&transaction, &snapshot)?;
+            if stored.events().is_empty() {
+                verify_provider_lifecycle_events(
+                    ProviderEvidenceLog::baseline(snapshot.clone())?.events(),
+                    &snapshot,
+                )?;
+            } else {
+                stored.verify_for(&snapshot)?;
+            }
+        }
+        transaction.commit()?;
+        Ok(states)
     }
 
     fn visit_provider_repository_states<Visitor, VisitorError>(
@@ -446,9 +1063,43 @@ impl LifecycleStore for LocalIndexStore {
         &self,
         state: &ProviderRepositoryState,
     ) -> Result<(), Self::Error> {
-        let connection = self.open_connection()?;
+        let mut connection = self.open_connection()?;
+        let transaction = connection.transaction()?;
+        let current = transaction
+            .query_row(
+                "SELECT provider,
+                        owner,
+                        repo,
+                        last_access_changed_at_unix_seconds,
+                        last_revision_pushed_at_unix_seconds,
+                        last_pushed_revision,
+                        last_cache_invalidated_at_unix_seconds,
+                        last_authorization_rechecked_at_unix_seconds,
+                        last_drift_checked_at_unix_seconds
+                 FROM shardline_provider_repository_states
+                 WHERE provider = ?1 AND owner = ?2 AND repo = ?3",
+                params![state.provider().as_str(), state.owner(), state.repo()],
+                super::helpers::provider_repository_state_from_row,
+            )
+            .optional()?;
+        let current_snapshot = current.as_ref().map(snapshot_from_state).transpose()?;
+        let evidence = if let Some(snapshot) = current_snapshot.as_ref() {
+            super::helpers::load_provider_evidence(&transaction, snapshot)?
+        } else {
+            transaction.execute(
+                "DELETE FROM shardline_reliability_events
+                 WHERE operation_kind = 'ProviderEvent' AND operation_id = ?1",
+                params![format!(
+                    "{}:{}:{}",
+                    state.provider().as_str(),
+                    state.owner(),
+                    state.repo()
+                )],
+            )?;
+            ProviderEvidenceLog::default()
+        };
         let now = unix_now_seconds_lossy();
-        connection.execute(
+        transaction.execute(
             "INSERT INTO shardline_provider_repository_states (
                 provider,
                 owner,
@@ -542,6 +1193,34 @@ impl LifecycleStore for LocalIndexStore {
                 u64_to_i64(now)?,
             ],
         )?;
+        let merged = transaction.query_row(
+            "SELECT provider,
+                    owner,
+                    repo,
+                    last_access_changed_at_unix_seconds,
+                    last_revision_pushed_at_unix_seconds,
+                    last_pushed_revision,
+                    last_cache_invalidated_at_unix_seconds,
+                    last_authorization_rechecked_at_unix_seconds,
+                    last_drift_checked_at_unix_seconds
+             FROM shardline_provider_repository_states
+             WHERE provider = ?1 AND owner = ?2 AND repo = ?3",
+            params![state.provider().as_str(), state.owner(), state.repo()],
+            super::helpers::provider_repository_state_from_row,
+        )?;
+        let snapshot = snapshot_from_state(&merged)?;
+        let evidence = if let Some(before) = current_snapshot {
+            verify_and_append_snapshot_transition(evidence, before, snapshot)?.0
+        } else {
+            append_or_baseline_snapshot_evidence(evidence, snapshot)?
+        };
+        let event = evidence.events().last().ok_or_else(|| {
+            LocalIndexStoreError::Reliability(shardline_reliability::ReliabilityError::EmptyField(
+                "provider evidence",
+            ))
+        })?;
+        super::helpers::persist_provider_evidence(&transaction, event)?;
+        transaction.commit()?;
         Ok(())
     }
 
@@ -551,12 +1230,49 @@ impl LifecycleStore for LocalIndexStore {
         owner: &str,
         repo: &str,
     ) -> Result<bool, Self::Error> {
-        let connection = self.open_connection()?;
-        let changed = connection.execute(
+        let mut connection = self.open_connection()?;
+        let transaction = connection.transaction()?;
+        let current = transaction
+            .query_row(
+                "SELECT provider,
+                        owner,
+                        repo,
+                        last_access_changed_at_unix_seconds,
+                        last_revision_pushed_at_unix_seconds,
+                        last_pushed_revision,
+                        last_cache_invalidated_at_unix_seconds,
+                        last_authorization_rechecked_at_unix_seconds,
+                        last_drift_checked_at_unix_seconds
+                 FROM shardline_provider_repository_states
+                 WHERE provider = ?1 AND owner = ?2 AND repo = ?3",
+                params![provider.as_str(), owner, repo],
+                super::helpers::provider_repository_state_from_row,
+            )
+            .optional()?;
+        if let Some(state) = current {
+            let snapshot = snapshot_from_state(&state)?;
+            let evidence = super::helpers::load_provider_evidence(&transaction, &snapshot)?;
+            if evidence.events().is_empty() {
+                let baseline = ProviderEvidenceLog::baseline(snapshot.clone())?;
+                verify_provider_lifecycle_events(baseline.events(), &snapshot)?;
+                for event in baseline.events() {
+                    super::helpers::persist_provider_evidence(&transaction, event)?;
+                }
+            } else {
+                verify_provider_lifecycle_events(evidence.events(), &snapshot)?;
+            }
+        }
+        let changed = transaction.execute(
             "DELETE FROM shardline_provider_repository_states
              WHERE provider = ?1 AND owner = ?2 AND repo = ?3",
             params![provider.as_str(), owner, repo],
         )?;
+        transaction.execute(
+            "DELETE FROM shardline_reliability_events
+             WHERE operation_kind = 'ProviderEvent' AND operation_id = ?1",
+            params![format!("{}:{}:{}", provider.as_str(), owner, repo)],
+        )?;
+        transaction.commit()?;
         Ok(changed > 0)
     }
 }
@@ -566,15 +1282,37 @@ impl UploadIntentStore for super::LocalIndexStore {
     type Error = LocalIndexStoreError;
 
     async fn create_intent(&self, intent: &UploadIntent) -> Result<(), Self::Error> {
+        self.create_intent_scoped(intent, "shardline", "default")
+            .await
+    }
+
+    async fn create_intent_scoped(
+        &self,
+        intent: &UploadIntent,
+        tenant: &str,
+        repository: &str,
+    ) -> Result<(), Self::Error> {
         let store = self.clone();
         let intent = intent.clone();
+        let tenant = tenant.to_owned();
+        let repository = repository.to_owned();
         tokio::task::spawn_blocking(move || {
-            let conn = store.open_connection()?;
+            let mut conn = store.open_connection()?;
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or(Duration::ZERO)
                 .as_secs() as i64;
-            let inserted = conn.execute(
+            let created_event = upload_lifecycle_event(
+                &tenant,
+                &repository,
+                intent.intent_id(),
+                intent.object_key(),
+                intent.object_hash(),
+                shardline_reliability::UploadLifecycleState::Created,
+                shardline_reliability::UploadLifecycleState::Created,
+            )?;
+            let transaction = conn.transaction()?;
+            let inserted = transaction.execute(
                 "INSERT OR IGNORE INTO shardline_upload_intents (intent_id, object_key, object_hash, object_length, state, created_at_unix_seconds, updated_at_unix_seconds) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 rusqlite::params![
                     intent.intent_id(),
@@ -587,7 +1325,7 @@ impl UploadIntentStore for super::LocalIndexStore {
                 ],
             )?;
             if inserted == 0 {
-                let matches_identity = conn.query_row(
+                let matches_identity = transaction.query_row(
                     "SELECT EXISTS(
                         SELECT 1 FROM shardline_upload_intents
                         WHERE intent_id = ?1 AND object_key = ?2 AND object_hash = ?3
@@ -604,7 +1342,15 @@ impl UploadIntentStore for super::LocalIndexStore {
                 if !matches_identity {
                     return Err(crate::UploadIntentConflictError::new(intent.intent_id()).into());
                 }
+            } else {
+                transaction.execute(
+                    "DELETE FROM shardline_reliability_events
+                     WHERE operation_kind = 'Upload' AND operation_id = ?1",
+                    rusqlite::params![intent.intent_id()],
+                )?;
+                super::helpers::persist_reliability_event_at(&transaction, &created_event, now)?;
             }
+            transaction.commit()?;
             Ok(())
         })
         .await
@@ -629,42 +1375,98 @@ impl UploadIntentStore for super::LocalIndexStore {
         if !current.state().can_transition_to(new_state) {
             return Ok(false);
         }
+        let events = self.reliability_events(intent_id).await?;
+        let (tenant, repository) = upload_lifecycle_identity(&events);
+        let event = upload_lifecycle_event(
+            tenant,
+            repository,
+            current.intent_id(),
+            current.object_key(),
+            current.object_hash(),
+            current.state(),
+            new_state,
+        )?;
+        if self
+            .transition_intent_with_event(intent_id, new_state, &event)
+            .await?
+        {
+            return Ok(true);
+        }
+        Ok(self
+            .intent_by_id(intent_id)
+            .await?
+            .is_some_and(|intent| intent.state() == new_state))
+    }
+
+    async fn transition_intent_with_event(
+        &self,
+        intent_id: &str,
+        new_state: UploadIntentState,
+        event: &LifecycleEvent,
+    ) -> Result<bool, Self::Error> {
+        let current = self.intent_by_id(intent_id).await?;
+        let Some(current) = current else {
+            return Ok(false);
+        };
+        if current.state() == new_state {
+            return Ok(true);
+        }
+        if !current.state().can_transition_to(new_state) {
+            return Ok(false);
+        }
+        event.validate_for_transition(intent_id, current.state(), new_state)?;
         let store = self.clone();
         let intent_id = intent_id.to_owned();
-        let read_id = intent_id.clone();
         let current_state = current.state();
+        let event_json = serde_json::to_string(event)?;
+        let event = event.clone();
+        let operation_id = event.operation.operation_id.clone();
         let transitioned = tokio::task::spawn_blocking(move || -> Result<bool, LocalIndexStoreError> {
-            let conn = store.open_connection()?;
+            let mut conn = store.open_connection()?;
+            let transaction = conn.transaction()?;
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or(Duration::ZERO)
                 .as_secs() as i64;
-            let rows = conn.execute(
+            let rows = transaction.execute(
                 "UPDATE shardline_upload_intents SET state = ?1, updated_at_unix_seconds = ?2 WHERE intent_id = ?3 AND state = ?4",
                 rusqlite::params![new_state.as_str(), now, intent_id, current_state.as_str()],
             )?;
-            Ok(rows > 0)
+            if rows == 0 {
+                transaction.rollback()?;
+                return Ok(false);
+            }
+            super::helpers::persist_reliability_event_at(&transaction, &event, now)?;
+            let stored_event: String = transaction.query_row(
+                "SELECT event_json FROM shardline_reliability_events WHERE operation_kind = ?1 AND operation_id = ?2 AND sequence = ?3",
+                rusqlite::params![
+                    event.operation.kind.as_str(),
+                    &event.operation.operation_id,
+                    u64_to_i64(event.sequence)?,
+                ],
+                |row| row.get(0),
+            )?;
+            if stored_event != event_json {
+                transaction.rollback()?;
+                return Err(LocalIndexStoreError::ReliabilityEventConflict(
+                    operation_id,
+                ));
+            }
+            transaction.commit()?;
+            Ok(true)
         })
         .await
         .map_err(|e| LocalIndexStoreError::Io(std::io::Error::other(e)))??;
-        if transitioned {
-            return Ok(true);
-        }
-        // Race: a concurrent caller advanced the state between our read and the
-        // conditional UPDATE, so the UPDATE matched zero rows. If the intent is
-        // now already in the target state, the transition is effectively complete
-        // — report success so the caller does not see a spurious invalid
-        // transition.
-        let now = self.intent_by_id(&read_id).await?;
-        Ok(now.is_some_and(|intent| intent.state() == new_state))
+        Ok(transitioned)
     }
 
     async fn intent_by_id(&self, intent_id: &str) -> Result<Option<UploadIntent>, Self::Error> {
         let store = self.clone();
         let intent_id = intent_id.to_owned();
         tokio::task::spawn_blocking(move || {
-            let conn = store.open_connection()?;
-            let mut stmt = conn.prepare(
+            let mut conn = store.open_connection()?;
+            let transaction = conn.transaction()?;
+            let mut stmt = transaction.prepare(
                 "SELECT intent_id, object_key, object_hash, object_length, state, created_at_unix_seconds, updated_at_unix_seconds FROM shardline_upload_intents WHERE intent_id = ?1"
             )?;
             let result = stmt.query_row(rusqlite::params![intent_id], |row| {
@@ -683,8 +1485,17 @@ impl UploadIntentStore for super::LocalIndexStore {
                 ))
             });
             match result {
-                Ok(intent) => Ok(Some(intent)),
-                Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+                Ok(intent) => {
+                    drop(stmt);
+                    verify_sqlite_intent_evidence(&transaction, &intent)?;
+                    transaction.commit()?;
+                    Ok(Some(intent))
+                }
+                Err(rusqlite::Error::QueryReturnedNoRows) => {
+                    drop(stmt);
+                    transaction.commit()?;
+                    Ok(None)
+                }
                 Err(e) => Err(LocalIndexStoreError::from(e)),
             }
         })
@@ -698,8 +1509,9 @@ impl UploadIntentStore for super::LocalIndexStore {
     ) -> Result<Vec<UploadIntent>, Self::Error> {
         let store = self.clone();
         tokio::task::spawn_blocking(move || {
-            let conn = store.open_connection()?;
-            let mut stmt = conn.prepare(
+            let mut conn = store.open_connection()?;
+            let transaction = conn.transaction()?;
+            let mut stmt = transaction.prepare(
                 "SELECT intent_id, object_key, object_hash, object_length, state, created_at_unix_seconds, updated_at_unix_seconds FROM shardline_upload_intents WHERE state = ?1 ORDER BY created_at_unix_seconds"
             )?;
             let intents = stmt
@@ -721,6 +1533,11 @@ impl UploadIntentStore for super::LocalIndexStore {
                 .map_err(LocalIndexStoreError::from)?
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(LocalIndexStoreError::from)?;
+            drop(stmt);
+            for intent in &intents {
+                verify_sqlite_intent_evidence(&transaction, intent)?;
+            }
+            transaction.commit()?;
             Ok(intents)
         })
         .await
@@ -734,13 +1551,14 @@ impl UploadIntentStore for super::LocalIndexStore {
     ) -> Result<Vec<UploadIntent>, Self::Error> {
         let store = self.clone();
         tokio::task::spawn_blocking(move || {
-            let conn = store.open_connection()?;
+            let mut conn = store.open_connection()?;
+            let transaction = conn.transaction()?;
             let cutoff = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or(Duration::ZERO)
                 .saturating_sub(older_than)
                 .as_secs() as i64;
-            let mut stmt = conn.prepare(
+            let mut stmt = transaction.prepare(
                 "SELECT intent_id, object_key, object_hash, object_length, state, created_at_unix_seconds, updated_at_unix_seconds FROM shardline_upload_intents WHERE state = ?1 AND created_at_unix_seconds < ?2 ORDER BY created_at_unix_seconds"
             )?;
             let intents = stmt
@@ -762,7 +1580,169 @@ impl UploadIntentStore for super::LocalIndexStore {
                 .map_err(LocalIndexStoreError::from)?
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(LocalIndexStoreError::from)?;
+            drop(stmt);
+            for intent in &intents {
+                verify_sqlite_intent_evidence(&transaction, intent)?;
+            }
+            transaction.commit()?;
             Ok(intents)
+        })
+        .await
+        .map_err(|e| LocalIndexStoreError::Io(std::io::Error::other(e)))?
+    }
+
+    async fn record_reliability_event(&self, event: &LifecycleEvent) -> Result<(), Self::Error> {
+        event.verify_integrity()?;
+        let store = self.clone();
+        let event = event.clone();
+        let event_json = serde_json::to_string(&event)?;
+        let operation_id = event.operation.operation_id.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut conn = store.open_connection()?;
+            let transaction = conn.transaction()?;
+            let (object_key, object_hash, state_text) = transaction
+                .query_row(
+                    "SELECT object_key, object_hash, state
+                     FROM shardline_upload_intents
+                     WHERE intent_id = ?1",
+                    params![&operation_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    },
+                )
+                .optional()?
+                .ok_or_else(|| {
+                    LocalIndexStoreError::Reliability(
+                        shardline_reliability::ReliabilityError::EmptyField(
+                            "reliability event has no authoritative upload intent",
+                        ),
+                    )
+                })?;
+            let state = UploadIntentState::parse(&state_text).ok_or_else(|| {
+                LocalIndexStoreError::Reliability(
+                    shardline_reliability::ReliabilityError::EmptyField(
+                        "unknown upload intent state",
+                    ),
+                )
+            })?;
+            let mut events = super::helpers::load_verified_event_json(
+                &transaction,
+                shardline_reliability::OperationKind::Upload,
+                &operation_id,
+            )?
+            .into_iter()
+            .map(serde_json::from_value::<LifecycleEvent>)
+            .collect::<Result<Vec<_>, _>>()?;
+            if let Some(existing) = events
+                .iter()
+                .find(|existing| existing.sequence == event.sequence)
+            {
+                if existing != &event {
+                    return Err(LocalIndexStoreError::ReliabilityEventConflict(
+                        operation_id,
+                    ));
+                }
+            } else {
+                events.push(event.clone());
+                events.sort_by_key(|stored_event| stored_event.sequence);
+            }
+            let (tenant, repository) = upload_lifecycle_identity(&events);
+            verify_upload_lifecycle_events(
+                &events,
+                tenant,
+                repository,
+                &operation_id,
+                &object_key,
+                &object_hash,
+                state,
+            )
+            .map_err(LocalIndexStoreError::Reliability)?;
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or(Duration::ZERO)
+                .as_secs() as i64;
+            super::helpers::persist_reliability_event_at(&transaction, &event, now)?;
+            let stored_event: String = transaction.query_row(
+                "SELECT event_json FROM shardline_reliability_events WHERE operation_kind = ?1 AND operation_id = ?2 AND sequence = ?3",
+                rusqlite::params![
+                    event.operation.kind.as_str(),
+                    &event.operation.operation_id,
+                    u64_to_i64(event.sequence)?,
+                ],
+                |row| row.get(0),
+            )?;
+            if stored_event != event_json {
+                return Err(LocalIndexStoreError::ReliabilityEventConflict(
+                    operation_id,
+                ));
+            }
+            transaction.commit()?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| LocalIndexStoreError::Io(std::io::Error::other(e)))?
+    }
+
+    async fn reliability_events(
+        &self,
+        operation_id: &str,
+    ) -> Result<Vec<LifecycleEvent>, Self::Error> {
+        let store = self.clone();
+        let operation_id = operation_id.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let mut conn = store.open_connection()?;
+            let transaction = conn.transaction()?;
+            let events = super::helpers::load_verified_event_json(
+                &transaction,
+                shardline_reliability::OperationKind::Upload,
+                &operation_id,
+            )?
+            .into_iter()
+            .map(serde_json::from_value::<LifecycleEvent>)
+            .collect::<Result<Vec<_>, _>>()?;
+            let intent = transaction
+                .query_row(
+                    "SELECT object_key, object_hash, state
+                     FROM shardline_upload_intents
+                     WHERE intent_id = ?1",
+                    rusqlite::params![&operation_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            if let Some((object_key, object_hash, state_text)) = intent {
+                let state = UploadIntentState::parse(&state_text).ok_or_else(|| {
+                    LocalIndexStoreError::Reliability(
+                        shardline_reliability::ReliabilityError::EmptyField(
+                            "unknown upload intent state",
+                        ),
+                    )
+                })?;
+                let (tenant, repository) = upload_lifecycle_identity(&events);
+                shardline_reliability::verify_upload_lifecycle_events(
+                    &events,
+                    tenant,
+                    repository,
+                    &operation_id,
+                    &object_key,
+                    &object_hash,
+                    state,
+                )?;
+            } else {
+                shardline_reliability::verify_lifecycle_chain(&events)
+                    .map_err(LocalIndexStoreError::Reliability)?;
+            }
+            transaction.commit()?;
+            Ok(events)
         })
         .await
         .map_err(|e| LocalIndexStoreError::Io(std::io::Error::other(e)))?
@@ -784,6 +1764,7 @@ mod tests {
         clippy::let_underscore_must_use
     )]
     use shardline_protocol::{ChunkRange, RepositoryProvider};
+    use shardline_reliability::SnapshotEvidence;
     use shardline_storage::ObjectKey;
 
     use super::*;
@@ -838,6 +1819,29 @@ mod tests {
         let deleted_again = ReconstructionStore::delete_reconstruction(&store, &file_id)
             .expect("second delete should succeed");
         assert!(!deleted_again);
+    }
+
+    #[test]
+    fn conditional_reconstruction_delete_preserves_replacement() {
+        let store = make_store();
+        let file_id = FileId::new(ShardlineHash::from_bytes([4; 32]));
+        let original = FileReconstruction::new(vec![]);
+        let replacement = FileReconstruction::new(vec![ReconstructionTerm::new(
+            StoredObjectId::new(ShardlineHash::from_bytes([5; 32])),
+            ChunkRange::new(0, 1).unwrap(),
+            1,
+        )]);
+        store.insert_reconstruction(&file_id, &original).unwrap();
+        store.insert_reconstruction(&file_id, &replacement).unwrap();
+
+        assert!(
+            !ReconstructionStore::delete_reconstruction_if_matches(&store, &file_id, &original)
+                .unwrap()
+        );
+        assert_eq!(
+            ReconstructionStore::reconstruction(&store, &file_id).unwrap(),
+            Some(replacement)
+        );
     }
 
     #[test]
@@ -931,6 +1935,28 @@ mod tests {
         assert!(!deleted);
     }
 
+    #[test]
+    fn conditional_dedupe_delete_preserves_replacement() {
+        let store = make_store();
+        let chunk_hash = ShardlineHash::from_bytes([9; 32]);
+        let original = DedupeShardMapping::new(
+            chunk_hash,
+            ObjectKey::parse("shards/cc/original.shard").unwrap(),
+        );
+        let replacement = DedupeShardMapping::new(
+            chunk_hash,
+            ObjectKey::parse("shards/cc/replacement.shard").unwrap(),
+        );
+        store.upsert_dedupe_shard_mapping(&original).unwrap();
+        store.upsert_dedupe_shard_mapping(&replacement).unwrap();
+
+        assert!(!DedupeStore::delete_dedupe_shard_mapping_if_matches(&store, &original).unwrap());
+        assert_eq!(
+            DedupeStore::dedupe_shard_mapping(&store, &chunk_hash).unwrap(),
+            Some(replacement)
+        );
+    }
+
     // ── LifecycleStore: quarantine candidate ───────────────────────────────
 
     #[test]
@@ -987,6 +2013,60 @@ mod tests {
         );
     }
 
+    #[test]
+    fn quarantine_candidate_reactivation_accepts_changed_observed_metadata() {
+        let store = make_store();
+        let key = ObjectKey::parse("chunks/dd/reactivated-candidate").unwrap();
+        let original = QuarantineCandidate::new(key.clone(), 300, 3000, 4000).unwrap();
+        let reactivated = QuarantineCandidate::new(key.clone(), 301, 5000, 6000).unwrap();
+
+        LifecycleStore::upsert_quarantine_candidate(&store, &original).unwrap();
+        assert!(LifecycleStore::delete_quarantine_candidate(&store, &key).unwrap());
+        LifecycleStore::upsert_quarantine_candidate(&store, &reactivated).unwrap();
+
+        assert_eq!(
+            LifecycleStore::quarantine_candidate(&store, &key).unwrap(),
+            Some(reactivated)
+        );
+    }
+
+    #[test]
+    fn retention_hold_reactivation_accepts_changed_metadata() {
+        let store = make_store();
+        let key = ObjectKey::parse("chunks/dd/reactivated-retention").unwrap();
+        let original =
+            RetentionHold::new(key.clone(), "original".to_owned(), 3000, Some(4000)).unwrap();
+        let reactivated =
+            RetentionHold::new(key.clone(), "updated".to_owned(), 5000, Some(6000)).unwrap();
+
+        LifecycleStore::upsert_retention_hold(&store, &original).unwrap();
+        assert!(LifecycleStore::delete_retention_hold(&store, &key).unwrap());
+        LifecycleStore::upsert_retention_hold(&store, &reactivated).unwrap();
+
+        assert_eq!(
+            LifecycleStore::retention_hold(&store, &key).unwrap(),
+            Some(reactivated)
+        );
+    }
+
+    #[test]
+    fn quarantine_candidate_conditional_delete_preserves_replacement() {
+        let store = make_store();
+        let key = ObjectKey::parse("chunks/cc/conditional-candidate").unwrap();
+        let original = QuarantineCandidate::new(key.clone(), 300, 3000, 4000).unwrap();
+        let replacement = QuarantineCandidate::new(key, 301, 3000, 4000).unwrap();
+        LifecycleStore::upsert_quarantine_candidate(&store, &original).unwrap();
+        LifecycleStore::upsert_quarantine_candidate(&store, &replacement).unwrap();
+
+        assert!(
+            !LifecycleStore::delete_quarantine_candidate_if_matches(&store, &original).unwrap()
+        );
+        assert_eq!(
+            LifecycleStore::quarantine_candidate(&store, replacement.object_key()).unwrap(),
+            Some(replacement)
+        );
+    }
+
     // ── LifecycleStore: retention hold ─────────────────────────────────────
 
     #[test]
@@ -1037,6 +2117,24 @@ mod tests {
         );
     }
 
+    #[test]
+    fn retention_hold_conditional_delete_preserves_replacement() {
+        let store = make_store();
+        let key = ObjectKey::parse("chunks/cc/conditional-hold").unwrap();
+        let original =
+            RetentionHold::new(key.clone(), "original".to_owned(), 3000, Some(4000)).unwrap();
+        let replacement =
+            RetentionHold::new(key, "replacement".to_owned(), 3000, Some(4000)).unwrap();
+        LifecycleStore::upsert_retention_hold(&store, &original).unwrap();
+        LifecycleStore::upsert_retention_hold(&store, &replacement).unwrap();
+
+        assert!(!LifecycleStore::delete_retention_hold_if_matches(&store, &original).unwrap());
+        assert_eq!(
+            LifecycleStore::retention_hold(&store, replacement.object_key()).unwrap(),
+            Some(replacement)
+        );
+    }
+
     // ── LifecycleStore: webhook delivery ───────────────────────────────────
 
     #[test]
@@ -1072,6 +2170,79 @@ mod tests {
         let repeated = LifecycleStore::record_webhook_delivery(&store, &delivery)
             .expect("duplicate record should succeed");
         assert!(!repeated, "duplicate record should return false");
+    }
+
+    #[test]
+    fn webhook_delivery_recreation_appends_without_rewriting_history() {
+        let store = make_store();
+        let delivery = WebhookDelivery::new(
+            RepositoryProvider::GitHub,
+            "owner".into(),
+            "repo".into(),
+            "delivery-recreate".into(),
+            1000,
+        )
+        .unwrap();
+
+        LifecycleStore::record_webhook_delivery(&store, &delivery).unwrap();
+        assert!(LifecycleStore::delete_webhook_delivery(&store, &delivery).unwrap());
+
+        let connection = store.open_connection().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TRIGGER reject_reliability_history_rewrites
+                 BEFORE UPDATE ON shardline_reliability_events
+                 BEGIN
+                     SELECT RAISE(ABORT, 'reliability history was rewritten');
+                 END;",
+            )
+            .unwrap();
+        drop(connection);
+
+        let recreated = WebhookDelivery::new(
+            RepositoryProvider::GitHub,
+            "owner".into(),
+            "repo".into(),
+            "delivery-recreate".into(),
+            2000,
+        )
+        .unwrap();
+        assert!(LifecycleStore::record_webhook_delivery(&store, &recreated).unwrap());
+        assert_eq!(
+            LifecycleStore::list_webhook_deliveries(&store).unwrap(),
+            vec![delivery]
+        );
+    }
+
+    #[test]
+    fn webhook_delivery_tampered_evidence_is_rejected_on_read() {
+        let store = make_store();
+        let delivery = WebhookDelivery::new(
+            RepositoryProvider::GitHub,
+            "owner".into(),
+            "repo".into(),
+            "delivery-tampered".into(),
+            1000,
+        )
+        .unwrap();
+        LifecycleStore::record_webhook_delivery(&store, &delivery).unwrap();
+
+        let connection = store.open_connection().unwrap();
+        let operation_id = webhook_snapshot(&delivery, WebhookDeliveryLifecycleState::Processed)
+            .unwrap()
+            .evidence_operation()
+            .unwrap()
+            .operation_id;
+        connection
+            .execute(
+                "UPDATE shardline_reliability_events
+                 SET event_json = '{\"sequence\":99}'
+                 WHERE operation_kind = 'WebhookDelivery' AND operation_id = ?1",
+                rusqlite::params![operation_id],
+            )
+            .unwrap();
+
+        assert!(LifecycleStore::list_webhook_deliveries(&store).is_err());
     }
 
     #[test]
@@ -1113,6 +2284,37 @@ mod tests {
         assert!(
             !LifecycleStore::delete_webhook_delivery(&store, &delivery)
                 .expect("second delete should succeed")
+        );
+    }
+
+    #[test]
+    fn webhook_delivery_conditional_delete_rejects_different_observation() {
+        let store = make_store();
+        let delivery = WebhookDelivery::new(
+            RepositoryProvider::GitHub,
+            "owner".to_owned(),
+            "repo".to_owned(),
+            "conditional-delivery".to_owned(),
+            3000,
+        )
+        .unwrap();
+        let different_observation = WebhookDelivery::new(
+            RepositoryProvider::GitHub,
+            "owner".to_owned(),
+            "repo".to_owned(),
+            "conditional-delivery".to_owned(),
+            3001,
+        )
+        .unwrap();
+        LifecycleStore::record_webhook_delivery(&store, &delivery).unwrap();
+
+        assert!(
+            !LifecycleStore::delete_webhook_delivery_if_matches(&store, &different_observation)
+                .unwrap()
+        );
+        assert_eq!(
+            LifecycleStore::list_webhook_deliveries(&store).unwrap(),
+            vec![delivery]
         );
     }
 
@@ -1221,6 +2423,114 @@ mod tests {
         )
         .expect("lookup should succeed");
         assert_eq!(loaded, Some(state));
+    }
+
+    #[test]
+    fn provider_repository_state_legacy_missing_evidence_remains_readable() {
+        let store = make_store();
+        let state = ProviderRepositoryState::new(
+            RepositoryProvider::GitHub,
+            "team".into(),
+            "legacy-provider".into(),
+            Some(100),
+            None,
+            None,
+        );
+        LifecycleStore::upsert_provider_repository_state(&store, &state).unwrap();
+        let connection = store.open_connection().unwrap();
+        connection
+            .execute(
+                "DELETE FROM shardline_reliability_events
+                 WHERE operation_kind = 'ProviderEvent'
+                   AND operation_id = 'github:team:legacy-provider'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            LifecycleStore::provider_repository_state(
+                &store,
+                RepositoryProvider::GitHub,
+                "team",
+                "legacy-provider",
+            )
+            .unwrap(),
+            Some(state)
+        );
+    }
+
+    #[test]
+    fn provider_repository_state_tampered_evidence_is_rejected_on_read() {
+        let store = make_store();
+        let state = ProviderRepositoryState::new(
+            RepositoryProvider::GitHub,
+            "team".into(),
+            "tampered-provider".into(),
+            Some(100),
+            None,
+            None,
+        );
+        LifecycleStore::upsert_provider_repository_state(&store, &state).unwrap();
+        let connection = store.open_connection().unwrap();
+        connection
+            .execute(
+                "UPDATE shardline_reliability_events
+                 SET event_json = '{\"sequence\": 99}'
+                 WHERE operation_kind = 'ProviderEvent'
+                   AND operation_id = 'github:team:tampered-provider'",
+                [],
+            )
+            .unwrap();
+        assert!(
+            LifecycleStore::provider_repository_state(
+                &store,
+                RepositoryProvider::GitHub,
+                "team",
+                "tampered-provider",
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn provider_repository_state_delete_rejects_tampered_evidence() {
+        let store = make_store();
+        let state = ProviderRepositoryState::new(
+            RepositoryProvider::GitHub,
+            "team".into(),
+            "tampered-delete".into(),
+            Some(100),
+            None,
+            None,
+        );
+        LifecycleStore::upsert_provider_repository_state(&store, &state).unwrap();
+        let connection = store.open_connection().unwrap();
+        connection
+            .execute(
+                "UPDATE shardline_reliability_events
+                 SET event_json = '{\"sequence\": 99}'
+                 WHERE operation_kind = 'ProviderEvent'
+                   AND operation_id = 'github:team:tampered-delete'",
+                [],
+            )
+            .unwrap();
+        assert!(
+            LifecycleStore::delete_provider_repository_state(
+                &store,
+                RepositoryProvider::GitHub,
+                "team",
+                "tampered-delete",
+            )
+            .is_err()
+        );
+        assert!(
+            LifecycleStore::provider_repository_state(
+                &store,
+                RepositoryProvider::GitHub,
+                "team",
+                "tampered-delete",
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -1417,6 +2727,109 @@ mod tests {
     }
 
     #[test]
+    fn scoped_intent_baseline_and_transition_share_repository_identity() {
+        let store = make_store();
+        let intent = UploadIntent::new(
+            "scoped-intent".to_owned(),
+            "objects/scoped".to_owned(),
+            "a".repeat(64),
+            42,
+        );
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime
+            .block_on(store.create_intent_scoped(&intent, "tenant-a", "repo-a"))
+            .unwrap();
+        runtime
+            .block_on(store.transition_intent(intent.intent_id(), UploadIntentState::Storing))
+            .unwrap();
+        let events = runtime
+            .block_on(store.reliability_events(intent.intent_id()))
+            .unwrap();
+        assert_eq!(events.len(), 2);
+        assert!(events.iter().all(|stored_event| {
+            stored_event.operation.tenant == "tenant-a"
+                && stored_event.operation.repository == "repo-a"
+        }));
+    }
+
+    #[test]
+    fn sqlite_reliability_writer_rejects_tampered_event_before_insert() {
+        let store = make_store();
+        let mut event = upload_lifecycle_event(
+            "tenant-a",
+            "repo-a",
+            "writer-integrity",
+            "objects/integrity",
+            "a".repeat(64),
+            shardline_reliability::UploadLifecycleState::Created,
+            shardline_reliability::UploadLifecycleState::Created,
+        )
+        .unwrap();
+        event.state_digest = shardline_reliability::canonical_state_digest(&"tampered").unwrap();
+
+        let mut connection = store.open_connection().unwrap();
+        let transaction = connection.transaction().unwrap();
+        let result =
+            crate::local_sqlite::helpers::persist_reliability_event_at(&transaction, &event, 0);
+        assert!(result.is_err());
+        assert_eq!(
+            transaction
+                .query_row(
+                    "SELECT COUNT(*) FROM shardline_reliability_events
+                     WHERE operation_id = ?1",
+                    rusqlite::params!["writer-integrity"],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn sqlite_reliability_writer_rejects_conflicting_sequence_body() {
+        use shardline_reliability::{LifecycleEvent, OperationIdentity, OperationKind};
+
+        let store = make_store();
+        let operation = OperationIdentity::new(
+            "tenant-a",
+            "repo-a",
+            "writer-conflict",
+            OperationKind::Upload,
+        )
+        .unwrap()
+        .with_object_key("objects/first")
+        .with_content_sha256("a".repeat(64));
+        let first = LifecycleEvent::new(
+            operation.clone(),
+            0,
+            shardline_reliability::UploadLifecycleState::Created,
+            shardline_reliability::UploadLifecycleState::Created,
+        )
+        .unwrap();
+        let conflicting = LifecycleEvent::new(
+            operation.with_object_key("objects/second"),
+            0,
+            shardline_reliability::UploadLifecycleState::Created,
+            shardline_reliability::UploadLifecycleState::Created,
+        )
+        .unwrap();
+
+        let mut connection = store.open_connection().unwrap();
+        let transaction = connection.transaction().unwrap();
+        crate::local_sqlite::helpers::persist_reliability_event_at(&transaction, &first, 0)
+            .unwrap();
+        assert!(matches!(
+            crate::local_sqlite::helpers::persist_reliability_event_at(
+                &transaction,
+                &conflicting,
+                0,
+            ),
+            Err(LocalIndexStoreError::ReliabilityEventConflict(operation_id))
+                if operation_id == "writer-conflict"
+        ));
+    }
+
+    #[test]
     fn transition_intent_to_same_state_is_idempotent() {
         let store = make_store();
         let intent = UploadIntent::new(
@@ -1443,6 +2856,224 @@ mod tests {
             .block_on(store.transition_intent("same-state-intent", UploadIntentState::Storing))
             .unwrap();
         assert!(second, "same-state transition must be idempotent");
+    }
+
+    #[test]
+    fn upload_intent_read_rejects_missing_evidence_without_writing() {
+        let store = make_store();
+        let intent = UploadIntent::new(
+            "repair-upload-evidence".to_owned(),
+            "objects/repair-upload-evidence".to_owned(),
+            "d".repeat(64),
+            42,
+        );
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(store.create_intent(&intent)).unwrap();
+        assert!(
+            runtime
+                .block_on(store.transition_intent(intent.intent_id(), UploadIntentState::Storing))
+                .unwrap()
+        );
+        assert!(
+            runtime
+                .block_on(store.transition_intent(intent.intent_id(), UploadIntentState::Stored))
+                .unwrap()
+        );
+        let connection = store.open_connection().unwrap();
+        connection
+            .execute(
+                "DELETE FROM shardline_reliability_events
+                 WHERE operation_kind = 'Upload' AND operation_id = ?1",
+                params![intent.intent_id()],
+            )
+            .unwrap();
+        drop(connection);
+
+        assert!(
+            runtime
+                .block_on(store.intent_by_id(intent.intent_id()))
+                .is_err()
+        );
+        assert!(
+            runtime
+                .block_on(store.reliability_events(intent.intent_id()))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn transition_with_reliability_event_is_atomic_and_verifiable() {
+        use shardline_reliability::{
+            LifecycleEvent, OperationIdentity, OperationKind, verify_lifecycle_chain,
+        };
+
+        let store = make_store();
+        let intent = UploadIntent::new(
+            "reliability-intent".to_owned(),
+            "objects/reliability".to_owned(),
+            "a".repeat(64),
+            42,
+        );
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(store.create_intent(&intent)).unwrap();
+        let event = LifecycleEvent::new(
+            OperationIdentity::new(
+                "shardline",
+                "default",
+                intent.intent_id(),
+                OperationKind::Upload,
+            )
+            .unwrap()
+            .with_object_key(intent.object_key())
+            .with_content_sha256(intent.object_hash()),
+            1,
+            shardline_reliability::UploadLifecycleState::Created,
+            shardline_reliability::UploadLifecycleState::Storing,
+        )
+        .unwrap();
+
+        assert!(
+            rt.block_on(store.transition_intent_with_event(
+                intent.intent_id(),
+                UploadIntentState::Storing,
+                &event,
+            ))
+            .unwrap()
+        );
+        let events = rt
+            .block_on(store.reliability_events(intent.intent_id()))
+            .unwrap();
+        verify_lifecycle_chain(&events).unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events.last(), Some(&event));
+        assert_eq!(
+            rt.block_on(store.intent_by_id(intent.intent_id()))
+                .unwrap()
+                .unwrap()
+                .state(),
+            UploadIntentState::Storing
+        );
+    }
+
+    #[test]
+    fn conflicting_reliability_evidence_rolls_back_the_state_transition() {
+        use shardline_reliability::{
+            LifecycleEvent, OperationIdentity, OperationKind, UploadLifecycleState,
+        };
+
+        let store = make_store();
+        let intent = UploadIntent::new(
+            "reliability-conflict".to_owned(),
+            "objects/reliability-conflict".to_owned(),
+            "b".repeat(64),
+            42,
+        );
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(store.create_intent(&intent)).unwrap();
+        let operation = OperationIdentity::new(
+            "shardline",
+            "default",
+            intent.intent_id(),
+            OperationKind::Upload,
+        )
+        .unwrap()
+        .with_object_key(intent.object_key())
+        .with_content_sha256(intent.object_hash());
+        let first = LifecycleEvent::new(
+            operation.clone(),
+            1,
+            UploadLifecycleState::Created,
+            UploadLifecycleState::Storing,
+        )
+        .unwrap();
+        assert!(
+            rt.block_on(store.transition_intent_with_event(
+                intent.intent_id(),
+                UploadIntentState::Storing,
+                &first,
+            ))
+            .unwrap()
+        );
+
+        let conflicting = LifecycleEvent::new(
+            operation.with_object_key("objects/different"),
+            1,
+            UploadLifecycleState::Storing,
+            UploadLifecycleState::Stored,
+        )
+        .unwrap();
+        assert!(matches!(
+            rt.block_on(store.transition_intent_with_event(
+                intent.intent_id(),
+                UploadIntentState::Stored,
+                &conflicting,
+            )),
+            Err(LocalIndexStoreError::ReliabilityEventConflict(_))
+        ));
+        assert_eq!(
+            rt.block_on(store.intent_by_id(intent.intent_id()))
+                .unwrap()
+                .unwrap()
+                .state(),
+            UploadIntentState::Storing
+        );
+    }
+
+    #[test]
+    fn tampered_reliability_evidence_is_rejected_on_read() {
+        use shardline_reliability::{
+            LifecycleEvent, OperationIdentity, OperationKind, UploadLifecycleState,
+        };
+
+        let store = make_store();
+        let intent = UploadIntent::new(
+            "reliability-tamper".to_owned(),
+            "objects/reliability-tamper".to_owned(),
+            "c".repeat(64),
+            42,
+        );
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(store.create_intent(&intent)).unwrap();
+        let event = LifecycleEvent::new(
+            OperationIdentity::new(
+                "shardline",
+                "default",
+                intent.intent_id(),
+                OperationKind::Upload,
+            )
+            .unwrap()
+            .with_object_key(intent.object_key())
+            .with_content_sha256(intent.object_hash()),
+            1,
+            UploadLifecycleState::Created,
+            UploadLifecycleState::Storing,
+        )
+        .unwrap();
+        assert!(
+            rt.block_on(store.transition_intent_with_event(
+                intent.intent_id(),
+                UploadIntentState::Storing,
+                &event,
+            ))
+            .unwrap()
+        );
+
+        let connection = store.open_connection().unwrap();
+        let mut tampered: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&event).unwrap()).unwrap();
+        tampered["after"] = serde_json::Value::String("Stored".to_owned());
+        connection
+            .execute(
+                "UPDATE shardline_reliability_events SET event_json = ?1
+                 WHERE operation_kind = 'Upload' AND operation_id = ?2 AND sequence = 1",
+                rusqlite::params![tampered.to_string(), intent.intent_id()],
+            )
+            .unwrap();
+
+        assert!(matches!(
+            rt.block_on(store.reliability_events(intent.intent_id())),
+            Err(LocalIndexStoreError::Reliability(_))
+        ));
     }
 
     #[test]
@@ -1489,5 +3120,93 @@ mod tests {
                 "a concurrent same-intent transition must not fail"
             );
         }
+    }
+
+    #[test]
+    fn quarantine_candidate_tampered_evidence_is_rejected_on_read() {
+        let store = make_store();
+        let candidate = QuarantineCandidate::new(
+            ObjectKey::parse("aa/quarantine-object").unwrap(),
+            42,
+            100,
+            200,
+        )
+        .unwrap();
+        LifecycleStore::upsert_quarantine_candidate(&store, &candidate).unwrap();
+        let connection = store.open_connection().unwrap();
+        connection
+            .execute(
+                "UPDATE shardline_reliability_events
+                 SET event_json = '{\"sequence\": 99}'
+                 WHERE operation_kind = 'GarbageCollection'
+                   AND operation_id = 'aa/quarantine-object'",
+                [],
+            )
+            .unwrap();
+        assert!(LifecycleStore::quarantine_candidate(&store, candidate.object_key()).is_err());
+    }
+
+    #[test]
+    fn retention_hold_tampered_evidence_is_rejected_on_read() {
+        let store = make_store();
+        let hold = RetentionHold::new(
+            ObjectKey::parse("aa/retention-object").unwrap(),
+            "legal hold".to_owned(),
+            100,
+            Some(200),
+        )
+        .unwrap();
+        LifecycleStore::upsert_retention_hold(&store, &hold).unwrap();
+        let connection = store.open_connection().unwrap();
+        connection
+            .execute(
+                "UPDATE shardline_reliability_events
+                 SET event_json = '{\"sequence\": 99}'
+                 WHERE operation_kind = 'RetentionHold'
+                   AND operation_id = 'aa/retention-object'",
+                [],
+            )
+            .unwrap();
+        assert!(LifecycleStore::retention_hold(&store, hold.object_key()).is_err());
+    }
+
+    #[test]
+    fn quarantine_delete_repairs_missing_baseline_chain() {
+        let store = make_store();
+        let candidate = QuarantineCandidate::new(
+            ObjectKey::parse("aa/quarantine-repair").unwrap(),
+            42,
+            100,
+            200,
+        )
+        .unwrap();
+        LifecycleStore::upsert_quarantine_candidate(&store, &candidate).unwrap();
+        {
+            let connection = store.open_connection().unwrap();
+            connection
+                .execute(
+                    "DELETE FROM shardline_reliability_events
+                     WHERE operation_kind = 'GarbageCollection'
+                       AND operation_id = 'aa/quarantine-repair'",
+                    [],
+                )
+                .unwrap();
+        }
+
+        assert!(
+            LifecycleStore::delete_quarantine_candidate(&store, candidate.object_key()).unwrap()
+        );
+        let connection = store.open_connection().unwrap();
+        let (count, minimum, maximum): (i64, i64, i64) = connection
+            .query_row(
+                "SELECT COUNT(*), MIN(sequence), MAX(sequence)
+                 FROM shardline_reliability_events
+                 WHERE operation_kind = 'GarbageCollection'
+                   AND operation_id = 'aa/quarantine-repair'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!((count, minimum, maximum), (2, 0, 1));
     }
 }

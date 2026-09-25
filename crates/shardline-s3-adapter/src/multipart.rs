@@ -25,8 +25,17 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
+use shardline_reliability::{
+    DigestSnapshot, PersistedMerkleJournalRecord, ResumableLifecycleState,
+    ResumableSessionSnapshotDomain, SessionEvidenceLog, SnapshotEvidenceEvent, SnapshotEvidenceLog,
+    StateTransitionEvent, append_or_baseline_snapshot_evidence,
+    build_persisted_merkle_chain_with_previous, build_typed_merkle_chain, canonical_state_digest,
+    resumable_session_snapshot_identity, verify_and_append_session_transition,
+    verify_or_repair_session_evidence, verify_or_repair_snapshot_evidence,
+    verify_persisted_merkle_chain, verify_session_evidence, verify_snapshot_evidence,
+};
 use thiserror::Error;
-use tokio::{fs, sync::Mutex, task::spawn_blocking};
+use tokio::{fs, io::AsyncWriteExt, sync::Mutex, task::spawn_blocking};
 
 /// The session directory name under the server root directory.
 pub(crate) const S3_UPLOAD_DIR: &str = "s3-uploads";
@@ -37,28 +46,29 @@ pub const MAX_S3_PART_NUMBER: u32 = 10_000;
 /// Maximum upload id length (hex upload ids are 32 chars).
 const MAX_UPLOAD_ID_BYTES: usize = 64;
 
-/// Serializes session-store mutations across the process.
-static S3_UPLOAD_SESSION_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
-
 /// Per-upload-session part-write locks keyed by upload id (weak values).
 ///
-/// The process-wide [`S3_UPLOAD_SESSION_LOCK`] must never be held across a
-/// network body stream (a slow `UploadPart` would stall every other tenant's
-/// session operation), but a part-file write still needs to be exclusive with
-/// the expiry sweep — which can delete the session directory — and with
-/// `CompleteMultipartUpload`, which reads the part files. This per-session
-/// lock provides that exclusivity without serializing unrelated sessions.
+/// A part-file write still needs to be exclusive with the expiry sweep — which
+/// can delete the session directory — and with `CompleteMultipartUpload`,
+/// which reads the part files. This per-session lock provides that
+/// exclusivity without serializing unrelated sessions.
 ///
 /// Entries hold weak references: the strong [`Arc`] returned by
 /// [`acquire_session_part_lock`] keeps a session's entry alive for as long as
 /// a guard is held (part write, completion ingest, or sweep delete), and dead
 /// entries are evicted on the next acquire, so the map is bounded by the
 /// number of sessions with work in flight (F-10).
-static S3_UPLOAD_SESSION_PART_LOCKS: LazyLock<std::sync::Mutex<HashMap<String, Weak<Mutex<()>>>>> =
+type SessionPartLockKey = (PathBuf, String);
+type SessionPartLockMap = std::sync::Mutex<HashMap<SessionPartLockKey, Weak<Mutex<()>>>>;
+
+static S3_UPLOAD_SESSION_PART_LOCKS: LazyLock<SessionPartLockMap> =
     LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 
-/// Returns the per-session part-write lock for an upload id, creating it on
-/// first use.
+/// Returns the legacy per-session part-write lock for an upload id, creating
+/// it on first use.
+///
+/// New callers should use [`acquire_session_part_lock_for_root`] so identical
+/// upload ids in separate local deployments do not share a process mutex.
 ///
 /// Concurrent callers for the SAME upload id (concurrent `UploadPart`s, a
 /// `CompleteMultipartUpload` reading part files, and the expiry sweep deleting
@@ -66,21 +76,34 @@ static S3_UPLOAD_SESSION_PART_LOCKS: LazyLock<std::sync::Mutex<HashMap<String, W
 /// guard, so part files are never written, read, and removed concurrently.
 /// Lock-ordering rule: never await [`lock_upload_sessions`] while holding the
 /// guard returned here (the sweep takes both in the opposite order).
+#[must_use]
 pub fn acquire_session_part_lock(upload_id: &str) -> Arc<Mutex<()>> {
+    acquire_session_part_lock_key(PathBuf::new(), upload_id)
+}
+
+/// Returns the per-session part-write lock scoped to one local deployment
+/// root, creating it on first use.
+#[must_use]
+pub fn acquire_session_part_lock_for_root(root: &Path, upload_id: &str) -> Arc<Mutex<()>> {
+    acquire_session_part_lock_key(root.to_path_buf(), upload_id)
+}
+
+fn acquire_session_part_lock_key(root: PathBuf, upload_id: &str) -> Arc<Mutex<()>> {
     let mut map = S3_UPLOAD_SESSION_PART_LOCKS
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     // Fast path: a live weak handle exists (a guard is still held for this
     // session), so return the same strong Arc to keep the write/read/delete
     // serialized.
-    if let Some(live) = map.get(upload_id).and_then(Weak::upgrade) {
+    let key = (root, upload_id.to_owned());
+    if let Some(live) = map.get(&key).and_then(Weak::upgrade) {
         return live;
     }
     // No live handle: drop dead entries so the map cannot grow with finished
     // sessions, then install a fresh mutex and return its strong Arc.
     map.retain(|_id, weak| weak.upgrade().is_some());
     let fresh = Arc::new(Mutex::new(()));
-    map.insert(upload_id.to_owned(), Arc::downgrade(&fresh));
+    map.insert(key, Arc::downgrade(&fresh));
     fresh
 }
 
@@ -93,6 +116,9 @@ pub enum S3SessionError {
     /// Session JSON serialization or deserialization failed.
     #[error("s3 upload session json failed")]
     Json(#[from] serde_json::Error),
+    /// Canonical resumable-session evidence could not be validated.
+    #[error("s3 upload session reliability evidence failed")]
+    Reliability(String),
     /// The referenced upload session does not exist (or has expired).
     #[error("s3 upload session not found")]
     NotFound,
@@ -160,23 +186,127 @@ pub struct MultipartUploadSession {
     pub last_touched_unix_seconds: u64,
 }
 
-/// A held session-store lock (process mutex + advisory file lock).
-pub struct S3UploadSessionLock {
-    _process_guard: MutexGuard<'static, ()>,
-    _file_lock: S3FileLock,
+#[derive(Debug, Serialize)]
+struct MultipartPartSnapshotV1 {
+    size_bytes: u64,
+    file_name: String,
 }
 
-type MutexGuard<'lock, T> = tokio::sync::MutexGuard<'lock, T>;
+#[derive(Debug, Serialize)]
+struct MultipartUploadSessionSnapshotV1 {
+    bucket: String,
+    key: String,
+    scope_namespace: String,
+    upload_id: String,
+    parts: BTreeMap<u32, MultipartPartSnapshotV1>,
+    user_metadata: Vec<(String, String)>,
+    created_at_unix_seconds: u64,
+    last_touched_unix_seconds: u64,
+}
+
+impl MultipartUploadSessionSnapshotV1 {
+    fn from_session(session: &MultipartUploadSession) -> Self {
+        Self {
+            bucket: session.bucket.clone(),
+            key: session.key.clone(),
+            scope_namespace: session.scope_namespace.clone(),
+            upload_id: session.upload_id.clone(),
+            parts: session
+                .parts
+                .iter()
+                .map(|(number, part)| {
+                    (
+                        *number,
+                        MultipartPartSnapshotV1 {
+                            size_bytes: part.size_bytes,
+                            file_name: part.file_name.clone(),
+                        },
+                    )
+                })
+                .collect(),
+            user_metadata: session.user_metadata.clone(),
+            created_at_unix_seconds: session.created_at_unix_seconds,
+            last_touched_unix_seconds: session.last_touched_unix_seconds,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct PersistedMultipartUploadSession {
+    session: MultipartUploadSession,
+    #[serde(default)]
+    evidence: SessionEvidenceLog,
+    #[serde(default)]
+    snapshot_evidence: SnapshotEvidenceLog<DigestSnapshot>,
+    /// Number of committed records in `evidence.log`. The head is written
+    /// only after the append-only record is fsynced.
+    #[serde(default)]
+    journal_head: Option<u64>,
+    #[serde(default)]
+    journal_bytes: Option<u64>,
+    /// Last committed lifecycle sequence, allowing mutations to append
+    /// without rereading the growing journal.
+    #[serde(default)]
+    journal_evidence_sequence: Option<u64>,
+    /// The latest lifecycle event, allowing normal reads and mutations to
+    /// validate the current boundary without replaying the full journal.
+    #[serde(default)]
+    journal_evidence_head: Option<StateTransitionEvent>,
+    /// Last committed snapshot sequence, allowing mutations to append
+    /// without rereading the growing journal.
+    #[serde(default)]
+    journal_snapshot_sequence: Option<u64>,
+    /// The latest snapshot event for the same bounded verification path.
+    #[serde(default)]
+    journal_snapshot_head: Option<SnapshotEvidenceEvent<DigestSnapshot>>,
+    /// Number of committed Merkle journal records.
+    #[serde(default)]
+    merkle_head: Option<u64>,
+    #[serde(default)]
+    merkle_bytes: Option<u64>,
+    /// Last committed Merkle sequence and body for each evidence stream.
+    #[serde(default)]
+    merkle_evidence_sequence: Option<u64>,
+    #[serde(default)]
+    merkle_snapshot_sequence: Option<u64>,
+    #[serde(default)]
+    merkle_evidence_commit: Option<serde_json::Value>,
+    #[serde(default)]
+    merkle_snapshot_commit: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct SessionEvidenceJournalRecord {
+    evidence: Vec<StateTransitionEvent>,
+    snapshot_evidence: Vec<SnapshotEvidenceEvent<DigestSnapshot>>,
+}
+
+const SESSION_EVIDENCE_JOURNAL: &str = "evidence.log";
+const SESSION_MERKLE_JOURNAL: &str = "merkle.log";
+
+fn session_snapshot(session: &MultipartUploadSession) -> Result<DigestSnapshot, S3SessionError> {
+    let operation = resumable_session_snapshot_identity(
+        ResumableSessionSnapshotDomain::S3Multipart,
+        session.scope_namespace.clone(),
+        session.upload_id.clone(),
+        format!("{}/{}", session.bucket, session.key),
+    )
+    .map_err(|error| S3SessionError::Reliability(error.to_string()))?;
+    let digest = canonical_state_digest(&MultipartUploadSessionSnapshotV1::from_session(session))
+        .map_err(|error| S3SessionError::Reliability(error.to_string()))?;
+    Ok(DigestSnapshot::new(operation, digest))
+}
+
+/// A held session-store advisory file lock.
+pub struct S3UploadSessionLock {
+    _file_lock: S3FileLock,
+}
 
 pub(crate) struct S3FileLock {
     file: std::fs::File,
 }
 
 /// Cross-process advisory lock protecting one multipart session's part files.
-///
-/// The process-local per-session mutex remains useful for cheap serialization,
-/// while this guard extends the same exclusion to replicas sharing the upload
-/// root on a filesystem with advisory-lock support.
 pub struct S3SessionPartFileLock {
     _file_lock: S3FileLock,
 }
@@ -280,17 +410,15 @@ pub fn part_file_path(
 
 // ── Locking ──────────────────────────────────────────────────────────────────
 
-/// Acquires the process-wide session lock plus an advisory file lock.
+/// Acquires the upload-root advisory file lock.
 ///
 /// # Errors
 ///
 /// Returns [`S3SessionError::BlockingTask`] or [`S3SessionError::Io`] when the
 /// file lock cannot be acquired.
 pub async fn lock_upload_sessions(root: &Path) -> Result<S3UploadSessionLock, S3SessionError> {
-    let process_guard = S3_UPLOAD_SESSION_LOCK.lock().await;
     let file_lock = acquire_session_file_lock(upload_dir(root).join(".sessions.lock")).await?;
     Ok(S3UploadSessionLock {
-        _process_guard: process_guard,
         _file_lock: file_lock,
     })
 }
@@ -409,7 +537,17 @@ pub async fn create_session(
         created_at_unix_seconds: now_unix_seconds,
         last_touched_unix_seconds: now_unix_seconds,
     };
-    persist_session(root, &upload_id, &session).await?;
+    let evidence =
+        SessionEvidenceLog::new(&session.scope_namespace, &session.upload_id, &session.key)
+            .map_err(|error| S3SessionError::Reliability(error.to_string()))?;
+    persist_session_with_evidence(
+        root,
+        &upload_id,
+        &session,
+        &evidence,
+        SnapshotEvidenceLog::default(),
+    )
+    .await?;
     Ok(upload_id)
 }
 
@@ -427,14 +565,34 @@ pub async fn read_session(
     upload_id: &str,
     ttl_seconds: NonZeroU64,
 ) -> Result<MultipartUploadSession, S3SessionError> {
+    let _lock = lock_upload_sessions(root).await?;
+    read_session_locked(root, upload_id, ttl_seconds).await
+}
+
+/// Reads a session while the caller owns [`lock_upload_sessions`].
+///
+/// This variant is for bounded operations that already hold the global
+/// session lock. Keeping the lock boundary explicit prevents evidence repair
+/// from racing a metadata mutation without introducing a re-entrant lock.
+///
+/// # Errors
+///
+/// Returns the same session validation, expiry, persistence, and evidence
+/// errors as [`read_session`].
+pub async fn read_session_locked(
+    root: &Path,
+    upload_id: &str,
+    ttl_seconds: NonZeroU64,
+) -> Result<MultipartUploadSession, S3SessionError> {
     validate_upload_id(upload_id)?;
     let now_unix_seconds = unix_now_seconds_checked()?;
-    load_session_at(
+    let (session, _evidence) = load_session_at(
         &session_dir(root, upload_id)?,
         ttl_seconds,
         now_unix_seconds,
     )
-    .await
+    .await?;
+    Ok(session)
 }
 
 /// Records a stored part's size in the session metadata.
@@ -501,7 +659,7 @@ pub async fn store_part_locked(
     validate_upload_id(upload_id)?;
     validate_part_number(part_number)?;
     let now_unix_seconds = unix_now_seconds_checked()?;
-    let mut session = load_session_at(
+    let (mut session, evidence, mut snapshot_evidence) = load_session_at_with_snapshot(
         &session_dir(root, upload_id)?,
         ttl_seconds,
         now_unix_seconds,
@@ -529,7 +687,19 @@ pub async fn store_part_locked(
         },
     );
     session.last_touched_unix_seconds = now_unix_seconds;
-    persist_session(root, upload_id, &session).await
+    let (evidence, _) = verify_and_append_session_transition(
+        evidence,
+        &session.scope_namespace,
+        &session.upload_id,
+        &session.key,
+        ResumableLifecycleState::Active,
+        ResumableLifecycleState::Active,
+    )
+    .map_err(|error| S3SessionError::Reliability(error.to_string()))?;
+    let snapshot = session_snapshot(&session)?;
+    snapshot_evidence = append_or_baseline_snapshot_evidence(snapshot_evidence, snapshot)
+        .map_err(|error| S3SessionError::Reliability(error.to_string()))?;
+    persist_session_with_evidence(root, upload_id, &session, &evidence, snapshot_evidence).await
 }
 
 /// Validates a part against the per-session and aggregate byte quotas and the
@@ -564,7 +734,7 @@ pub async fn validate_part_quota_locked(
     validate_upload_id(upload_id)?;
     validate_part_number(part_number)?;
     let now_unix_seconds = unix_now_seconds_checked()?;
-    let session = load_session_at(
+    let (session, _evidence) = load_session_at(
         &session_dir(root, upload_id)?,
         ttl_seconds,
         now_unix_seconds,
@@ -656,7 +826,12 @@ pub async fn delete_session(root: &Path, upload_id: &str) -> Result<(), S3Sessio
 /// See [`delete_session`].
 pub async fn delete_session_locked(root: &Path, upload_id: &str) -> Result<(), S3SessionError> {
     validate_upload_id(upload_id)?;
-    delete_session_dir(&session_dir(root, upload_id)?).await
+    let dir = session_dir(root, upload_id)?;
+    match load_session(&dir).await {
+        Ok((_session, _evidence)) => delete_session_dir(&dir).await,
+        Err(S3SessionError::NotFound) => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 /// Removes every expired (or unreadable) session directory, returning the
@@ -715,7 +890,145 @@ async fn load_session_at(
     dir: &Path,
     ttl_seconds: NonZeroU64,
     now_unix_seconds: u64,
-) -> Result<MultipartUploadSession, S3SessionError> {
+) -> Result<(MultipartUploadSession, SessionEvidenceLog), S3SessionError> {
+    let (session, evidence, _) =
+        load_session_at_with_snapshot(dir, ttl_seconds, now_unix_seconds).await?;
+    Ok((session, evidence))
+}
+
+async fn load_session_at_with_snapshot(
+    dir: &Path,
+    ttl_seconds: NonZeroU64,
+    now_unix_seconds: u64,
+) -> Result<
+    (
+        MultipartUploadSession,
+        SessionEvidenceLog,
+        SnapshotEvidenceLog<DigestSnapshot>,
+    ),
+    S3SessionError,
+> {
+    let (session, evidence, snapshot_evidence) = load_session_head_with_snapshot(dir).await?;
+    if is_expired(&session, ttl_seconds, now_unix_seconds) {
+        return Err(S3SessionError::NotFound);
+    }
+    Ok((session, evidence, snapshot_evidence))
+}
+
+/// Loads the materialized session and only the durable evidence heads for the
+/// normal request path. The complete append-only journals remain the source
+/// for explicit fsck and repair, while current reads avoid replaying history
+/// on every multipart part mutation.
+async fn load_session_head_with_snapshot(
+    dir: &Path,
+) -> Result<
+    (
+        MultipartUploadSession,
+        SessionEvidenceLog,
+        SnapshotEvidenceLog<DigestSnapshot>,
+    ),
+    S3SessionError,
+> {
+    let path = dir.join("session.json");
+    let bytes = match fs::read(&path).await {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(S3SessionError::NotFound);
+        }
+        Err(error) => return Err(S3SessionError::Io(error)),
+    };
+    let Ok(persisted) = serde_json::from_slice::<PersistedMultipartUploadSession>(&bytes) else {
+        return load_session_with_snapshot(dir).await;
+    };
+    let Some(evidence_head) = persisted.journal_evidence_head else {
+        return load_session_with_snapshot(dir).await;
+    };
+    let Some(snapshot_head) = persisted.journal_snapshot_head else {
+        return load_session_with_snapshot(dir).await;
+    };
+    let Some(journal_bytes) = persisted.journal_bytes else {
+        return load_session_with_snapshot(dir).await;
+    };
+    let Some(merkle_head) = persisted.merkle_head else {
+        return load_session_with_snapshot(dir).await;
+    };
+    let Some(merkle_bytes) = persisted.merkle_bytes else {
+        return load_session_with_snapshot(dir).await;
+    };
+    if persisted.merkle_evidence_commit.is_none() || persisted.merkle_snapshot_commit.is_none() {
+        return load_session_with_snapshot(dir).await;
+    }
+    if persisted.journal_evidence_sequence != Some(evidence_head.sequence)
+        || persisted.journal_snapshot_sequence != Some(snapshot_head.sequence)
+        || persisted.merkle_evidence_sequence != Some(evidence_head.sequence)
+        || persisted.merkle_snapshot_sequence != Some(snapshot_head.sequence)
+    {
+        return Err(S3SessionError::Reliability(
+            "session evidence head sequence metadata is inconsistent".into(),
+        ));
+    }
+    validate_committed_journal_file(
+        &dir.join(SESSION_EVIDENCE_JOURNAL),
+        persisted.journal_head.unwrap_or_default(),
+        journal_bytes,
+    )
+    .await?;
+    validate_committed_journal_file(&dir.join(SESSION_MERKLE_JOURNAL), merkle_head, merkle_bytes)
+        .await?;
+    let evidence = SessionEvidenceLog::from_head(evidence_head)
+        .map_err(|error| S3SessionError::Reliability(error.to_string()))?;
+    let snapshot_evidence = SnapshotEvidenceLog::from_head(snapshot_head)
+        .map_err(|error| S3SessionError::Reliability(error.to_string()))?;
+    evidence
+        .verify_for(
+            &persisted.session.scope_namespace,
+            &persisted.session.upload_id,
+            &persisted.session.key,
+        )
+        .map_err(|error| S3SessionError::Reliability(error.to_string()))?;
+    let snapshot = session_snapshot(&persisted.session)?;
+    snapshot_evidence
+        .verify_for(&snapshot)
+        .map_err(|error| S3SessionError::Reliability(error.to_string()))?;
+    Ok((persisted.session, evidence, snapshot_evidence))
+}
+
+async fn validate_committed_journal_file(
+    path: &Path,
+    committed_head: u64,
+    committed_bytes: u64,
+) -> Result<(), S3SessionError> {
+    let metadata = fs::metadata(path).await.map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound && committed_head == 0 {
+            return S3SessionError::Reliability("journal metadata is missing".into());
+        }
+        S3SessionError::Io(error)
+    })?;
+    if metadata.len() < committed_bytes {
+        return Err(S3SessionError::Reliability(
+            "journal is shorter than its committed byte length".into(),
+        ));
+    }
+    Ok(())
+}
+
+async fn load_session(
+    dir: &Path,
+) -> Result<(MultipartUploadSession, SessionEvidenceLog), S3SessionError> {
+    let (session, evidence, _) = load_session_with_snapshot(dir).await?;
+    Ok((session, evidence))
+}
+
+async fn load_session_with_snapshot(
+    dir: &Path,
+) -> Result<
+    (
+        MultipartUploadSession,
+        SessionEvidenceLog,
+        SnapshotEvidenceLog<DigestSnapshot>,
+    ),
+    S3SessionError,
+> {
     let bytes = match fs::read(dir.join("session.json")).await {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -723,38 +1036,712 @@ async fn load_session_at(
         }
         Err(error) => return Err(S3SessionError::Io(error)),
     };
-    let session: MultipartUploadSession = serde_json::from_slice(&bytes)?;
-    if is_expired(&session, ttl_seconds, now_unix_seconds) {
-        return Err(S3SessionError::NotFound);
+    let (session, mut stored_evidence, mut stored_snapshot_evidence, journal_head, merkle_head) =
+        match serde_json::from_slice::<PersistedMultipartUploadSession>(&bytes) {
+            Ok(persisted) => (
+                persisted.session,
+                persisted.evidence,
+                persisted.snapshot_evidence,
+                persisted.journal_head,
+                persisted.merkle_head,
+            ),
+            Err(wrapper_error) => {
+                if reliability_envelope_field_present(&bytes) {
+                    return Err(S3SessionError::Json(wrapper_error));
+                }
+                let session = serde_json::from_slice::<MultipartUploadSession>(&bytes)
+                    .map_err(|_legacy_error| wrapper_error)?;
+                (
+                    session,
+                    SessionEvidenceLog::default(),
+                    SnapshotEvidenceLog::default(),
+                    None,
+                    None,
+                )
+            }
+        };
+    if let Some(head) = journal_head {
+        let records = read_evidence_journal(dir).await?;
+        let head = usize::try_from(head).map_err(|_error| S3SessionError::Overflow)?;
+        let committed = records.get(..head).ok_or_else(|| {
+            S3SessionError::Reliability("session evidence journal head is missing".into())
+        })?;
+        stored_evidence = SessionEvidenceLog::from_events(
+            committed
+                .iter()
+                .flat_map(|record| record.evidence.iter().cloned())
+                .collect(),
+        )
+        .map_err(|error| S3SessionError::Reliability(error.to_string()))?;
+        stored_snapshot_evidence = SnapshotEvidenceLog::from_events(
+            committed
+                .iter()
+                .flat_map(|record| record.snapshot_evidence.iter().cloned())
+                .collect(),
+        )
+        .map_err(|error| S3SessionError::Reliability(error.to_string()))?;
     }
-    Ok(session)
+    if let Some(head) = merkle_head {
+        let records = read_merkle_journal(dir).await?;
+        let head = usize::try_from(head).map_err(|_error| S3SessionError::Overflow)?;
+        let committed = records.get(..head).ok_or_else(|| {
+            S3SessionError::Reliability("session Merkle journal head is missing".into())
+        })?;
+        let merkle_events = committed
+            .iter()
+            .flat_map(|record| record.evidence.iter().cloned())
+            .collect::<Vec<_>>();
+        let merkle_commits = committed
+            .iter()
+            .flat_map(|record| record.merkle_commits.iter().cloned())
+            .collect::<Vec<_>>();
+        let snapshot_merkle_events = committed
+            .iter()
+            .flat_map(|record| record.snapshot_evidence.iter().cloned())
+            .collect::<Vec<_>>();
+        let snapshot_merkle_commits = committed
+            .iter()
+            .flat_map(|record| record.snapshot_merkle_commits.iter().cloned())
+            .collect::<Vec<_>>();
+        let expected_events = stored_evidence
+            .events()
+            .iter()
+            .map(serde_json::to_value)
+            .collect::<Result<Vec<_>, _>>()?;
+        let expected_snapshot_events = stored_snapshot_evidence
+            .events()
+            .iter()
+            .map(serde_json::to_value)
+            .collect::<Result<Vec<_>, _>>()?;
+        if merkle_events != expected_events || snapshot_merkle_events != expected_snapshot_events {
+            return Err(S3SessionError::Reliability(
+                "session Merkle journal does not cover evidence journal".into(),
+            ));
+        }
+        verify_persisted_merkle_chain(
+            shardline_reliability::OperationKind::ResumableSession,
+            &merkle_events,
+            &merkle_commits,
+        )
+        .map_err(|error| S3SessionError::Reliability(error.to_string()))?;
+        shardline_reliability::verify_typed_merkle_chain::<SnapshotEvidenceEvent<DigestSnapshot>>(
+            &snapshot_merkle_events,
+            &snapshot_merkle_commits,
+        )
+        .map_err(|error| S3SessionError::Reliability(error.to_string()))?;
+    }
+    let (evidence, evidence_was_missing) = verify_or_repair_session_evidence(
+        stored_evidence,
+        &session.scope_namespace,
+        &session.upload_id,
+        &session.key,
+    )
+    .map_err(|error| S3SessionError::Reliability(error.to_string()))?;
+    let snapshot = session_snapshot(&session)?;
+    let (snapshot_evidence, snapshot_evidence_was_missing) =
+        verify_or_repair_snapshot_evidence(stored_snapshot_evidence, snapshot)
+            .map_err(|error| S3SessionError::Reliability(error.to_string()))?;
+    if !evidence_was_missing {
+        verify_session_evidence(
+            &evidence,
+            &session.scope_namespace,
+            &session.upload_id,
+            &session.key,
+        )
+        .map_err(|error| S3SessionError::Reliability(error.to_string()))?;
+    }
+    if !snapshot_evidence_was_missing {
+        let expected = session_snapshot(&session)?;
+        verify_snapshot_evidence(&snapshot_evidence, &expected)
+            .map_err(|error| S3SessionError::Reliability(error.to_string()))?;
+    }
+    // Reads never repair durable state. A legacy session may receive an
+    // in-memory baseline so existing callers retain their behavior, but the
+    // baseline is persisted only by the next successful mutation or by an
+    // explicit operator repair operation. This keeps normal reads free of
+    // hidden filesystem writes and makes recovery observable.
+    Ok((session, evidence, snapshot_evidence))
 }
 
+fn reliability_envelope_field_present(bytes: &[u8]) -> bool {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return false;
+    };
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    [
+        "evidence",
+        "snapshot_evidence",
+        "journal_head",
+        "journal_evidence_sequence",
+        "journal_evidence_head",
+        "journal_snapshot_sequence",
+        "journal_snapshot_head",
+    ]
+    .into_iter()
+    .any(|field| object.contains_key(field))
+}
+
+/// Explicitly establishes missing reliability baselines for one legacy
+/// session after operator approval.
+///
+/// Normal reads deliberately do not write. Callers performing an operator
+/// repair must hold the same session-store lock used by mutations, then call
+/// this operation and record the result in their maintenance audit log.
+///
+/// # Errors
+///
+/// Returns an error when the session is missing, malformed, or its evidence
+/// cannot be rebuilt and verified.
+pub async fn repair_session_evidence(root: &Path, upload_id: &str) -> Result<(), S3SessionError> {
+    validate_upload_id(upload_id)?;
+    let _lock = lock_upload_sessions(root).await?;
+    let dir = session_dir(root, upload_id)?;
+    let metadata_path = dir.join("session.json");
+    let bytes = fs::read(&metadata_path).await?;
+    let persisted = serde_json::from_slice::<PersistedMultipartUploadSession>(&bytes)
+        .map_err(S3SessionError::Json)?;
+    let (evidence, snapshot_evidence) = if let Some(head) = persisted.journal_head {
+        let records = read_evidence_journal(&dir).await?;
+        let head = usize::try_from(head).map_err(|_error| S3SessionError::Overflow)?;
+        let committed = records.get(..head).ok_or_else(|| {
+            S3SessionError::Reliability("session evidence journal head is missing".into())
+        })?;
+        (
+            SessionEvidenceLog::from_events(
+                committed
+                    .iter()
+                    .flat_map(|record| record.evidence.iter().cloned())
+                    .collect(),
+            )
+            .map_err(|error| S3SessionError::Reliability(error.to_string()))?,
+            SnapshotEvidenceLog::from_events(
+                committed
+                    .iter()
+                    .flat_map(|record| record.snapshot_evidence.iter().cloned())
+                    .collect(),
+            )
+            .map_err(|error| S3SessionError::Reliability(error.to_string()))?,
+        )
+    } else {
+        (
+            persisted.evidence.clone(),
+            persisted.snapshot_evidence.clone(),
+        )
+    };
+    let _ignored = fs::remove_file(dir.join(SESSION_MERKLE_JOURNAL)).await;
+    let reset = serde_json::to_vec(&PersistedMultipartUploadSession {
+        session: persisted.session.clone(),
+        evidence: SessionEvidenceLog::default(),
+        snapshot_evidence: SnapshotEvidenceLog::default(),
+        journal_head: persisted.journal_head,
+        journal_bytes: persisted.journal_bytes,
+        journal_evidence_sequence: persisted.journal_evidence_sequence,
+        journal_evidence_head: persisted.journal_evidence_head,
+        journal_snapshot_sequence: persisted.journal_snapshot_sequence,
+        journal_snapshot_head: persisted.journal_snapshot_head,
+        merkle_head: None,
+        merkle_bytes: None,
+        merkle_evidence_sequence: None,
+        merkle_snapshot_sequence: None,
+        merkle_evidence_commit: None,
+        merkle_snapshot_commit: None,
+    })?;
+    write_file_atomically(&metadata_path, &reset).await?;
+    persist_session_with_evidence(
+        root,
+        upload_id,
+        &persisted.session,
+        &evidence,
+        snapshot_evidence,
+    )
+    .await
+}
+
+async fn read_evidence_journal(
+    dir: &Path,
+) -> Result<Vec<SessionEvidenceJournalRecord>, S3SessionError> {
+    let path = dir.join(SESSION_EVIDENCE_JOURNAL);
+    let bytes = match fs::read(path).await {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(S3SessionError::Io(error)),
+    };
+    bytes
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            serde_json::from_slice(line)
+                .map_err(|error| S3SessionError::Reliability(error.to_string()))
+        })
+        .collect()
+}
+
+async fn append_evidence_journal(
+    dir: &Path,
+    committed_head: u64,
+    committed_bytes: Option<u64>,
+    record: &SessionEvidenceJournalRecord,
+) -> Result<u64, S3SessionError> {
+    let path = dir.join(SESSION_EVIDENCE_JOURNAL);
+    let committed_bytes = prepare_journal_append(&path, committed_head, committed_bytes).await?;
+    let mut bytes = serde_json::to_vec(record)?;
+    bytes.push(b'\n');
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .await?;
+    file.write_all(&bytes).await?;
+    file.sync_all().await?;
+    committed_bytes
+        .checked_add(u64::try_from(bytes.len()).map_err(|_error| S3SessionError::Overflow)?)
+        .ok_or(S3SessionError::Overflow)
+}
+
+async fn read_merkle_journal(
+    dir: &Path,
+) -> Result<Vec<PersistedMerkleJournalRecord>, S3SessionError> {
+    let path = dir.join(SESSION_MERKLE_JOURNAL);
+    let bytes = match fs::read(path).await {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(S3SessionError::Io(error)),
+    };
+    bytes
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            serde_json::from_slice(line)
+                .map_err(|error| S3SessionError::Reliability(error.to_string()))
+        })
+        .collect()
+}
+
+async fn append_merkle_journal(
+    dir: &Path,
+    committed_head: u64,
+    committed_bytes: Option<u64>,
+    record: &PersistedMerkleJournalRecord,
+) -> Result<u64, S3SessionError> {
+    let path = dir.join(SESSION_MERKLE_JOURNAL);
+    let committed_bytes = prepare_journal_append(&path, committed_head, committed_bytes).await?;
+    let mut bytes = serde_json::to_vec(record)?;
+    bytes.push(b'\n');
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .await?;
+    file.write_all(&bytes).await?;
+    file.sync_all().await?;
+    committed_bytes
+        .checked_add(u64::try_from(bytes.len()).map_err(|_error| S3SessionError::Overflow)?)
+        .ok_or(S3SessionError::Overflow)
+}
+
+async fn prepare_journal_append(
+    path: &Path,
+    committed_head: u64,
+    expected_bytes: Option<u64>,
+) -> Result<u64, S3SessionError> {
+    if let Some(expected_bytes) = expected_bytes {
+        let actual_bytes = match fs::metadata(path).await {
+            Ok(metadata) => metadata.len(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if committed_head == 0 && expected_bytes == 0 {
+                    return Ok(0);
+                }
+                return Err(S3SessionError::Reliability(
+                    "journal is missing its committed log".into(),
+                ));
+            }
+            Err(error) => return Err(S3SessionError::Io(error)),
+        };
+        if actual_bytes < expected_bytes {
+            return Err(S3SessionError::Reliability(
+                "journal is shorter than its committed byte length".into(),
+            ));
+        }
+        if actual_bytes > expected_bytes {
+            let file = fs::OpenOptions::new().write(true).open(path).await?;
+            file.set_len(expected_bytes).await?;
+            file.sync_all().await?;
+        }
+        return Ok(expected_bytes);
+    }
+    let bytes = match fs::read(path).await {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if committed_head == 0 {
+                return Ok(0);
+            }
+            return Err(S3SessionError::Reliability(
+                "journal is missing its committed log".into(),
+            ));
+        }
+        Err(error) => return Err(S3SessionError::Io(error)),
+    };
+    let mut records = 0_u64;
+    let mut committed_bytes = 0_usize;
+    for line in bytes.split_inclusive(|byte| *byte == b'\n') {
+        if !line.is_empty() && line.iter().any(|byte| !byte.is_ascii_whitespace()) {
+            records = records.checked_add(1).ok_or(S3SessionError::Overflow)?;
+            if records <= committed_head {
+                committed_bytes = committed_bytes
+                    .checked_add(line.len())
+                    .ok_or(S3SessionError::Overflow)?;
+            }
+        }
+    }
+    if records < committed_head {
+        return Err(S3SessionError::Reliability(
+            "journal head exceeds its log".into(),
+        ));
+    }
+    if records > committed_head {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(path)
+            .await?;
+        let committed = bytes.get(..committed_bytes).ok_or_else(|| {
+            S3SessionError::Reliability("journal committed byte head is invalid".into())
+        })?;
+        file.write_all(committed).await?;
+        file.sync_all().await?;
+    }
+    u64::try_from(committed_bytes).map_err(|_error| S3SessionError::Overflow)
+}
+
+#[cfg(test)]
 async fn persist_session(
     root: &Path,
     upload_id: &str,
     session: &MultipartUploadSession,
 ) -> Result<(), S3SessionError> {
+    let evidence = SessionEvidenceLog::for_legacy_session(
+        &session.scope_namespace,
+        &session.upload_id,
+        &session.key,
+    )
+    .map_err(|error| S3SessionError::Reliability(error.to_string()))?;
+    let snapshot_evidence = SnapshotEvidenceLog::baseline(session_snapshot(session)?)
+        .map_err(|error| S3SessionError::Reliability(error.to_string()))?;
+    let path = session_metadata_path(root, upload_id)?;
+    let journal = path
+        .parent()
+        .ok_or_else(|| S3SessionError::Reliability("session path has no parent".into()))?
+        .join(SESSION_EVIDENCE_JOURNAL);
+    let _ignored = fs::remove_file(journal).await;
+    let bytes = serde_json::to_vec(&PersistedMultipartUploadSession {
+        session: session.clone(),
+        evidence,
+        snapshot_evidence,
+        journal_head: None,
+        journal_bytes: None,
+        journal_evidence_sequence: None,
+        journal_evidence_head: None,
+        journal_snapshot_sequence: None,
+        journal_snapshot_head: None,
+        merkle_head: None,
+        merkle_bytes: None,
+        merkle_evidence_sequence: None,
+        merkle_snapshot_sequence: None,
+        merkle_evidence_commit: None,
+        merkle_snapshot_commit: None,
+    })?;
+    write_file_atomically(&path, &bytes).await
+}
+
+async fn persist_session_with_evidence(
+    root: &Path,
+    upload_id: &str,
+    session: &MultipartUploadSession,
+    evidence: &SessionEvidenceLog,
+    snapshot_evidence: SnapshotEvidenceLog<DigestSnapshot>,
+) -> Result<(), S3SessionError> {
+    evidence
+        .verify_for(&session.scope_namespace, &session.upload_id, &session.key)
+        .map_err(|error| S3SessionError::Reliability(error.to_string()))?;
+    let snapshot = session_snapshot(session)?;
+    let (snapshot_evidence, _) = verify_or_repair_snapshot_evidence(snapshot_evidence, snapshot)
+        .map_err(|error| S3SessionError::Reliability(error.to_string()))?;
     let path = session_metadata_path(root, upload_id)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).await?;
     }
-    let bytes = serde_json::to_vec(session)?;
+    let existing = match fs::read(&path).await {
+        Ok(bytes) => match serde_json::from_slice::<PersistedMultipartUploadSession>(&bytes) {
+            Ok(persisted) => Some(persisted),
+            Err(error) if reliability_envelope_field_present(&bytes) => {
+                return Err(S3SessionError::Json(error));
+            }
+            Err(error) => {
+                serde_json::from_slice::<MultipartUploadSession>(&bytes)
+                    .map_err(|_error| S3SessionError::Json(error))?;
+                None
+            }
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(S3SessionError::Io(error)),
+    };
+    let dir = path
+        .parent()
+        .ok_or_else(|| S3SessionError::Reliability("session path has no parent".into()))?;
+    let committed_head = existing
+        .as_ref()
+        .and_then(|value| value.journal_head)
+        .unwrap_or(0);
+    let mut journal_bytes = existing.as_ref().and_then(|value| value.journal_bytes);
+    let mut last_evidence_sequence = existing
+        .as_ref()
+        .and_then(|value| value.journal_evidence_sequence);
+    let mut last_snapshot_sequence = existing
+        .as_ref()
+        .and_then(|value| value.journal_snapshot_sequence);
+    let mut merkle_head = existing
+        .as_ref()
+        .and_then(|value| value.merkle_head)
+        .unwrap_or(0);
+    let mut merkle_bytes = existing.as_ref().and_then(|value| value.merkle_bytes);
+    let mut last_merkle_evidence_sequence = existing
+        .as_ref()
+        .and_then(|value| value.merkle_evidence_sequence);
+    let mut last_merkle_snapshot_sequence = existing
+        .as_ref()
+        .and_then(|value| value.merkle_snapshot_sequence);
+    let mut previous_merkle_evidence = existing
+        .as_ref()
+        .and_then(|value| value.merkle_evidence_commit.clone());
+    let mut previous_merkle_snapshot = existing
+        .as_ref()
+        .and_then(|value| value.merkle_snapshot_commit.clone());
+    if committed_head > 0 && (last_evidence_sequence.is_none() || last_snapshot_sequence.is_none())
+    {
+        // Compatibility path for metadata written before sequence sidecars
+        // existed. It runs once per legacy session; subsequent mutations use
+        // the durable sequence fields and do not reread the journal.
+        let records = read_evidence_journal(dir).await?;
+        let committed_head_usize =
+            usize::try_from(committed_head).map_err(|_error| S3SessionError::Overflow)?;
+        let committed = records
+            .get(..committed_head_usize)
+            .ok_or_else(|| S3SessionError::Reliability("session journal head is invalid".into()))?;
+        last_evidence_sequence = committed
+            .iter()
+            .filter_map(|record| record.evidence.last())
+            .map(|event| event.sequence)
+            .max();
+        last_snapshot_sequence = committed
+            .iter()
+            .filter_map(|record| record.snapshot_evidence.last())
+            .map(|event| event.sequence)
+            .max();
+    }
+    if merkle_head > 0
+        && (last_merkle_evidence_sequence.is_none()
+            || last_merkle_snapshot_sequence.is_none()
+            || previous_merkle_evidence.is_none()
+            || previous_merkle_snapshot.is_none())
+    {
+        let records = read_merkle_journal(dir).await?;
+        let head = usize::try_from(merkle_head).map_err(|_error| S3SessionError::Overflow)?;
+        let committed = records.get(..head).ok_or_else(|| {
+            S3SessionError::Reliability("session Merkle journal head is invalid".into())
+        })?;
+        for record in committed {
+            if let (Some(event), Some(commit)) =
+                (record.evidence.last(), record.merkle_commits.last())
+            {
+                last_merkle_evidence_sequence = Some(
+                    shardline_reliability::persisted_event_sequence(
+                        shardline_reliability::OperationKind::ResumableSession,
+                        event.clone(),
+                    )
+                    .map_err(|error| S3SessionError::Reliability(error.to_string()))?,
+                );
+                previous_merkle_evidence = Some(commit.clone());
+            }
+            if let (Some(event), Some(commit)) = (
+                record.snapshot_evidence.last(),
+                record.snapshot_merkle_commits.last(),
+            ) {
+                last_merkle_snapshot_sequence = Some(
+                    serde_json::from_value::<SnapshotEvidenceEvent<DigestSnapshot>>(event.clone())?
+                        .sequence,
+                );
+                previous_merkle_snapshot = Some(commit.clone());
+            }
+        }
+    }
+    let new_evidence = events_after_sequence(evidence.events(), last_evidence_sequence);
+    let new_snapshot_evidence =
+        snapshot_events_after_sequence(snapshot_evidence.events(), last_snapshot_sequence);
+    let new_record = SessionEvidenceJournalRecord {
+        evidence: new_evidence.to_vec(),
+        snapshot_evidence: new_snapshot_evidence.to_vec(),
+    };
+    let evidence_json = events_after_sequence(evidence.events(), last_merkle_evidence_sequence)
+        .iter()
+        .map(serde_json::to_value)
+        .collect::<Result<Vec<_>, _>>()?;
+    let snapshot_evidence_json =
+        snapshot_events_after_sequence(snapshot_evidence.events(), last_merkle_snapshot_sequence)
+            .iter()
+            .map(serde_json::to_value)
+            .collect::<Result<Vec<_>, _>>()?;
+    let merkle_events = evidence_json;
+    let snapshot_merkle_events = snapshot_evidence_json;
+    let merkle_commits = build_persisted_merkle_chain_with_previous(
+        shardline_reliability::OperationKind::ResumableSession,
+        &merkle_events,
+        previous_merkle_evidence.as_ref(),
+    )
+    .map_err(|error| S3SessionError::Reliability(error.to_string()))?;
+    let snapshot_merkle_commits =
+        build_typed_merkle_chain::<SnapshotEvidenceEvent<DigestSnapshot>>(
+            &snapshot_merkle_events,
+            previous_merkle_snapshot.as_ref(),
+        )
+        .map_err(|error| S3SessionError::Reliability(error.to_string()))?;
+    if !merkle_commits.is_empty() || !snapshot_merkle_commits.is_empty() {
+        merkle_bytes = Some(
+            append_merkle_journal(
+                dir,
+                merkle_head,
+                merkle_bytes,
+                &PersistedMerkleJournalRecord {
+                    evidence: merkle_events,
+                    merkle_commits: merkle_commits.clone(),
+                    snapshot_evidence: snapshot_merkle_events,
+                    snapshot_merkle_commits: snapshot_merkle_commits.clone(),
+                },
+            )
+            .await?,
+        );
+        merkle_head = merkle_head.checked_add(1).ok_or(S3SessionError::Overflow)?;
+        last_merkle_evidence_sequence = merkle_commits
+            .last()
+            .and_then(|commit| commit.get("body"))
+            .and_then(|body| body.get("sequence"))
+            .and_then(serde_json::Value::as_u64)
+            .or(last_merkle_evidence_sequence);
+        last_merkle_snapshot_sequence = snapshot_merkle_commits
+            .last()
+            .and_then(|commit| commit.get("body"))
+            .and_then(|body| body.get("sequence"))
+            .and_then(serde_json::Value::as_u64)
+            .or(last_merkle_snapshot_sequence);
+        previous_merkle_evidence = merkle_commits.last().cloned().or(previous_merkle_evidence);
+        previous_merkle_snapshot = snapshot_merkle_commits
+            .last()
+            .cloned()
+            .or(previous_merkle_snapshot);
+    }
+    let journal_head = if new_record.evidence.is_empty() && new_record.snapshot_evidence.is_empty()
+    {
+        committed_head
+    } else {
+        journal_bytes =
+            Some(append_evidence_journal(dir, committed_head, journal_bytes, &new_record).await?);
+        committed_head
+            .checked_add(1)
+            .ok_or(S3SessionError::Overflow)?
+    };
+    let bytes = serde_json::to_vec(&PersistedMultipartUploadSession {
+        session: session.clone(),
+        evidence: SessionEvidenceLog::default(),
+        snapshot_evidence: SnapshotEvidenceLog::default(),
+        journal_head: Some(journal_head),
+        journal_bytes,
+        journal_evidence_sequence: new_record
+            .evidence
+            .last()
+            .map(|event| event.sequence)
+            .or(last_evidence_sequence),
+        journal_evidence_head: new_record.evidence.last().cloned().or_else(|| {
+            existing
+                .as_ref()
+                .and_then(|value| value.journal_evidence_head.clone())
+        }),
+        journal_snapshot_sequence: new_record
+            .snapshot_evidence
+            .last()
+            .map(|event| event.sequence)
+            .or(last_snapshot_sequence),
+        journal_snapshot_head: new_record.snapshot_evidence.last().cloned().or_else(|| {
+            existing
+                .as_ref()
+                .and_then(|value| value.journal_snapshot_head.clone())
+        }),
+        merkle_head: Some(merkle_head),
+        merkle_bytes,
+        merkle_evidence_sequence: last_merkle_evidence_sequence,
+        merkle_snapshot_sequence: last_merkle_snapshot_sequence,
+        merkle_evidence_commit: previous_merkle_evidence,
+        merkle_snapshot_commit: previous_merkle_snapshot,
+    })?;
     write_file_atomically(&path, &bytes).await
+}
+
+fn events_after_sequence(
+    events: &[StateTransitionEvent],
+    sequence: Option<u64>,
+) -> &[StateTransitionEvent] {
+    let start = sequence.map_or(0, |sequence| {
+        events.partition_point(|event| event.sequence <= sequence)
+    });
+    events.get(start..).unwrap_or_default()
+}
+
+fn snapshot_events_after_sequence(
+    events: &[SnapshotEvidenceEvent<DigestSnapshot>],
+    sequence: Option<u64>,
+) -> &[SnapshotEvidenceEvent<DigestSnapshot>] {
+    let start = sequence.map_or(0, |sequence| {
+        events.partition_point(|event| event.sequence <= sequence)
+    });
+    events.get(start..).unwrap_or_default()
 }
 
 /// Writes bytes via a temporary file + rename so a crash never leaves a torn
 /// `session.json`.
 async fn write_file_atomically(path: &Path, bytes: &[u8]) -> Result<(), S3SessionError> {
     let temporary = path.with_extension("json.tmp");
-    fs::write(&temporary, bytes).await?;
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&temporary)
+        .await?;
+    file.write_all(bytes).await?;
+    file.sync_all().await?;
+    drop(file);
     match fs::rename(&temporary, path).await {
-        Ok(()) => Ok(()),
+        Ok(()) => {
+            sync_parent_directory(path).await?;
+            Ok(())
+        }
         Err(error) => {
             let _ignored = fs::remove_file(&temporary).await;
             Err(S3SessionError::Io(error))
         }
     }
+}
+
+#[cfg(unix)]
+async fn sync_parent_directory(path: &Path) -> Result<(), S3SessionError> {
+    if let Some(parent) = path.parent() {
+        fs::File::open(parent).await?.sync_all().await?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+async fn sync_parent_directory(_path: &Path) -> Result<(), S3SessionError> {
+    Ok(())
 }
 
 async fn delete_session_dir(path: &Path) -> Result<(), S3SessionError> {
@@ -789,7 +1776,7 @@ async fn sweep_expired_sessions_locked(
             continue;
         }
         let expired = match load_session_at(&path, ttl_seconds, now_unix_seconds).await {
-            Ok(session) => is_expired(&session, ttl_seconds, now_unix_seconds),
+            Ok((session, _evidence)) => is_expired(&session, ttl_seconds, now_unix_seconds),
             Err(S3SessionError::NotFound) => true,
             Err(_error) => continue,
         };
@@ -797,7 +1784,7 @@ async fn sweep_expired_sessions_locked(
             // Serialize the delete against an in-flight part write for this
             // session: an UploadPart holds this lock across its body stream
             // (F-10), so we cannot remove the directory mid-write.
-            let part_lock = acquire_session_part_lock(file_name);
+            let part_lock = acquire_session_part_lock_for_root(root, file_name);
             let _part_guard = part_lock.lock().await;
             let _part_file_guard = lock_session_parts(root, file_name).await?;
             if delete_session_dir(&path).await.is_ok() {
@@ -888,7 +1875,9 @@ async fn total_active_usage_locked(
         if validate_upload_id(file_name).is_err() {
             continue;
         }
-        if let Ok(session) = load_session_at(&path, ttl_seconds, now_unix_seconds).await {
+        if let Ok((session, _evidence)) =
+            load_session_at(&path, ttl_seconds, now_unix_seconds).await
+        {
             let session_total = session
                 .parts
                 .values()
@@ -939,7 +1928,10 @@ mod tests {
     fn session_at(root: &Path, upload_id: &str) -> MultipartUploadSession {
         // Reads the session json directly for assertions.
         let bytes = std::fs::read(session_metadata_path(root, upload_id).unwrap()).unwrap();
-        serde_json::from_slice(&bytes).unwrap()
+        serde_json::from_slice::<PersistedMultipartUploadSession>(&bytes)
+            .map(|persisted| persisted.session)
+            .or_else(|_| serde_json::from_slice(&bytes))
+            .unwrap()
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -978,6 +1970,303 @@ mod tests {
             .unwrap()
             .unwrap();
         waiter.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn upload_session_locks_for_different_roots_run_in_parallel() {
+        let first_root = make_root().await;
+        let second_root = make_root().await;
+        let first = lock_upload_sessions(first_root.path()).await.unwrap();
+
+        let second_root_path = second_root.path().to_path_buf();
+        let second = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            lock_upload_sessions(&second_root_path),
+        )
+        .await
+        .expect("different deployment roots must not share a process lock")
+        .unwrap();
+
+        drop(second);
+        drop(first);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn part_locks_for_different_roots_run_in_parallel() {
+        let first_root = make_root().await;
+        let second_root = make_root().await;
+        let first = acquire_session_part_lock_for_root(first_root.path(), "same-upload-id");
+        let _first_guard = first.lock().await;
+        let second = acquire_session_part_lock_for_root(second_root.path(), "same-upload-id");
+
+        let _second_guard = tokio::time::timeout(std::time::Duration::from_secs(2), second.lock())
+            .await
+            .expect("different deployment roots must not share a part lock");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn legacy_session_read_does_not_write_canonical_evidence() {
+        let root = make_root().await;
+        let upload_id = create_session(
+            root.path(),
+            "acme.models",
+            "large.bin",
+            "global",
+            ttl(3600),
+            cap(16),
+            quota(1 << 40),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+        let path = session_metadata_path(root.path(), &upload_id).unwrap();
+        let legacy = session_at(root.path(), &upload_id);
+        fs::write(&path, serde_json::to_vec(&legacy).unwrap())
+            .await
+            .unwrap();
+
+        let session_dir = path.parent().unwrap();
+        let (_session, evidence) = load_session(session_dir).await.unwrap();
+        assert_eq!(evidence.events().len(), 1);
+        let persisted: MultipartUploadSession =
+            serde_json::from_slice(&fs::read(path).await.unwrap()).unwrap();
+        assert_eq!(persisted, legacy);
+    }
+
+    #[tokio::test]
+    async fn malformed_reliability_envelope_is_not_downgraded_to_legacy() {
+        let root = make_root().await;
+        let upload_id = create_session(
+            root.path(),
+            "acme.models",
+            "corrupt.bin",
+            "global",
+            ttl(3600),
+            cap(16),
+            quota(1 << 40),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+        let path = session_metadata_path(root.path(), &upload_id).unwrap();
+        let mut metadata: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).await.unwrap()).unwrap();
+        metadata["evidence"] = serde_json::json!("corrupt");
+        fs::write(&path, serde_json::to_vec(&metadata).unwrap())
+            .await
+            .unwrap();
+
+        let error = load_session(path.parent().unwrap()).await.unwrap_err();
+        assert!(matches!(error, S3SessionError::Json(_)));
+    }
+
+    #[tokio::test]
+    async fn tampered_merkle_journal_is_rejected() {
+        let root = make_root().await;
+        let upload_id = create_session(
+            root.path(),
+            "acme.models",
+            "merkle-corrupt.bin",
+            "global",
+            ttl(3600),
+            cap(16),
+            quota(1 << 40),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+        let path = session_dir(root.path(), &upload_id)
+            .unwrap()
+            .join(SESSION_MERKLE_JOURNAL);
+        let mut lines: Vec<serde_json::Value> = fs::read(&path)
+            .await
+            .unwrap()
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(serde_json::from_slice)
+            .collect::<Result<_, _>>()
+            .unwrap();
+        lines[0]["snapshot_merkle_commits"][0]["body"]["sequence"] = serde_json::json!(9);
+        let mut bytes = serde_json::to_vec(&lines[0]).unwrap();
+        bytes.push(b'\n');
+        fs::write(&path, bytes).await.unwrap();
+
+        let error = load_session(&session_dir(root.path(), &upload_id).unwrap())
+            .await
+            .unwrap_err();
+        assert!(matches!(error, S3SessionError::Reliability(_)));
+
+        repair_session_evidence(root.path(), &upload_id)
+            .await
+            .unwrap();
+        load_session(&session_dir(root.path(), &upload_id).unwrap())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn bounded_session_read_rejects_tampered_durable_head() {
+        let root = make_root().await;
+        let upload_id = create_session(
+            root.path(),
+            "acme.models",
+            "head-corrupt.bin",
+            "global",
+            ttl(3600),
+            cap(16),
+            quota(1 << 40),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+        store_part(
+            root.path(),
+            &upload_id,
+            1,
+            10,
+            ttl(3600),
+            quota(1 << 20),
+            quota(1 << 40),
+            cap(16),
+        )
+        .await
+        .unwrap();
+        let path = session_metadata_path(root.path(), &upload_id).unwrap();
+        let mut metadata: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).await.unwrap()).unwrap();
+        metadata["journal_evidence_head"]["after"] = serde_json::json!("Completed");
+        fs::write(&path, serde_json::to_vec(&metadata).unwrap())
+            .await
+            .unwrap();
+
+        assert!(
+            read_session(root.path(), &upload_id, ttl(3600))
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn bounded_session_read_rejects_missing_committed_journal() {
+        let root = make_root().await;
+        let upload_id = create_session(
+            root.path(),
+            "acme.models",
+            "missing-journal.bin",
+            "global",
+            ttl(3600),
+            cap(16),
+            quota(1 << 40),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+        let dir = session_dir(root.path(), &upload_id).unwrap();
+        fs::remove_file(dir.join(SESSION_EVIDENCE_JOURNAL))
+            .await
+            .unwrap();
+
+        assert!(
+            read_session(root.path(), &upload_id, ttl(3600))
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn uncommitted_evidence_journal_tail_is_ignored_after_metadata_crash() {
+        let root = make_root().await;
+        let upload_id = create_session(
+            root.path(),
+            "acme.models",
+            "crash.bin",
+            "global",
+            ttl(3600),
+            cap(16),
+            quota(1 << 40),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+        let dir = session_dir(root.path(), &upload_id).unwrap();
+        let (_session, evidence, snapshot_evidence) =
+            load_session_with_snapshot(&dir).await.unwrap();
+        append_evidence_journal(
+            &dir,
+            1,
+            None,
+            &SessionEvidenceJournalRecord {
+                evidence: evidence.events().to_vec(),
+                snapshot_evidence: snapshot_evidence.events().to_vec(),
+            },
+        )
+        .await
+        .unwrap();
+
+        // The metadata head still points at the first record, so an append
+        // that completed before the metadata rename is not trusted on read.
+        let records = read_evidence_journal(&dir).await.unwrap();
+        assert_eq!(records.len(), 2);
+        let (_session, loaded_evidence) = load_session(&dir).await.unwrap();
+        assert_eq!(loaded_evidence.events().len(), 1);
+
+        store_part(
+            root.path(),
+            &upload_id,
+            1,
+            10,
+            ttl(3600),
+            quota(1 << 20),
+            quota(1 << 40),
+            cap(16),
+        )
+        .await
+        .unwrap();
+        let (_session, advanced_evidence) = load_session(&dir).await.unwrap();
+        assert_eq!(advanced_evidence.events().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn uncommitted_merkle_journal_tail_is_trimmed_after_metadata_crash() {
+        let root = make_root().await;
+        let upload_id = create_session(
+            root.path(),
+            "acme.models",
+            "merkle-crash.bin",
+            "global",
+            ttl(3600),
+            cap(16),
+            quota(1 << 40),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+        let dir = session_dir(root.path(), &upload_id).unwrap();
+        let mut records = read_merkle_journal(&dir).await.unwrap();
+        let record = records.pop().expect("committed Merkle record");
+        append_merkle_journal(&dir, 1, None, &record)
+            .await
+            .expect("append orphaned Merkle record");
+        assert_eq!(read_merkle_journal(&dir).await.unwrap().len(), 2);
+
+        let (_session, evidence) = load_session(&dir).await.unwrap();
+        assert_eq!(evidence.events().len(), 1);
+        store_part(
+            root.path(),
+            &upload_id,
+            1,
+            10,
+            ttl(3600),
+            quota(1 << 20),
+            quota(1 << 40),
+            cap(16),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(read_merkle_journal(&dir).await.unwrap().len(), 2);
+        let (_session, advanced_evidence) = load_session(&dir).await.unwrap();
+        assert_eq!(advanced_evidence.events().len(), 2);
     }
 
     #[test]
@@ -1023,6 +2312,13 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(upload_id.len(), 32);
+        let merkle_records =
+            read_merkle_journal(session_dir(root.path(), &upload_id).unwrap().as_path())
+                .await
+                .unwrap();
+        assert_eq!(merkle_records.len(), 1);
+        assert_eq!(merkle_records[0].merkle_commits.len(), 1);
+        assert_eq!(merkle_records[0].snapshot_merkle_commits.len(), 1);
 
         for (part, size) in [(1_u32, 64_u64), (2, 512), (3, 0)] {
             tokio::fs::write(
@@ -1056,6 +2352,68 @@ mod tests {
         assert_eq!(session.parts[&2].size_bytes, 512);
         assert_eq!(session.parts[&3].size_bytes, 0);
         assert_eq!(session.parts[&1].file_name, "part-1");
+    }
+
+    #[tokio::test]
+    async fn multipart_mutations_append_snapshot_evidence_instead_of_resetting_it() {
+        let root = make_root().await;
+        let upload_id = create_session(
+            root.path(),
+            "acme.models",
+            "history.bin",
+            "global",
+            ttl(3600),
+            cap(16),
+            quota(1 << 40),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+        let part_path = part_file_path(root.path(), &upload_id, 1).unwrap();
+        fs::write(&part_path, vec![0_u8; 4]).await.unwrap();
+        store_part(
+            root.path(),
+            &upload_id,
+            1,
+            4,
+            ttl(3600),
+            quota(1 << 40),
+            quota(1 << 40),
+            cap(200_000),
+        )
+        .await
+        .unwrap();
+        let path = session_metadata_path(root.path(), &upload_id).unwrap();
+        let (_session, _evidence, snapshot_evidence) =
+            load_session_with_snapshot(path.parent().unwrap())
+                .await
+                .unwrap();
+        assert_eq!(snapshot_evidence.events().len(), 2);
+        let persisted: PersistedMultipartUploadSession =
+            serde_json::from_slice(&fs::read(&path).await.unwrap()).unwrap();
+        assert_eq!(persisted.journal_evidence_sequence, Some(2));
+        assert_eq!(persisted.journal_snapshot_sequence, Some(1));
+
+        store_part(
+            root.path(),
+            &upload_id,
+            1,
+            4,
+            ttl(3600),
+            quota(1 << 40),
+            quota(1 << 40),
+            cap(200_000),
+        )
+        .await
+        .unwrap();
+        let (_session, _evidence, snapshot_evidence) =
+            load_session_with_snapshot(path.parent().unwrap())
+                .await
+                .unwrap();
+        assert_eq!(snapshot_evidence.events().len(), 3);
+        snapshot_evidence
+            .verify_for(&session_snapshot(&_session).unwrap())
+            .unwrap();
     }
 
     #[tokio::test]
@@ -1155,6 +2513,102 @@ mod tests {
             read_session(root.path(), &upload_id, ttl(3600)).await,
             Err(S3SessionError::NotFound)
         ));
+    }
+
+    #[tokio::test]
+    async fn delete_session_rejects_tampered_evidence() {
+        let root = make_root().await;
+        let upload_id = create_session(
+            root.path(),
+            "acme.models",
+            "k",
+            "global",
+            ttl(3600),
+            cap(16),
+            quota(1 << 40),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+        let metadata_path = session_metadata_path(root.path(), &upload_id).unwrap();
+        let mut metadata: serde_json::Value =
+            serde_json::from_slice(&fs::read(&metadata_path).await.unwrap()).unwrap();
+        metadata["session"]["key"] = serde_json::Value::String("tampered".to_owned());
+        fs::write(&metadata_path, serde_json::to_vec(&metadata).unwrap())
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            delete_session(root.path(), &upload_id).await,
+            Err(S3SessionError::Reliability(_))
+        ));
+        assert!(metadata_path.exists());
+    }
+
+    #[tokio::test]
+    async fn persist_session_rejects_malformed_metadata_without_overwriting_it() {
+        let root = make_root().await;
+        let upload_id = create_session(
+            root.path(),
+            "acme.models",
+            "malformed.bin",
+            "global",
+            ttl(3600),
+            cap(16),
+            quota(1 << 40),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+        let dir = session_dir(root.path(), &upload_id).unwrap();
+        let (session, evidence, snapshot_evidence) =
+            load_session_with_snapshot(&dir).await.unwrap();
+        let metadata_path = session_metadata_path(root.path(), &upload_id).unwrap();
+        let corrupt = b"{malformed metadata";
+        fs::write(&metadata_path, corrupt).await.unwrap();
+
+        assert!(matches!(
+            persist_session_with_evidence(
+                root.path(),
+                &upload_id,
+                &session,
+                &evidence,
+                snapshot_evidence,
+            )
+            .await,
+            Err(S3SessionError::Json(_))
+        ));
+        assert_eq!(fs::read(metadata_path).await.unwrap(), corrupt);
+    }
+
+    #[tokio::test]
+    async fn delete_session_rejects_tampered_session_snapshot() {
+        let root = make_root().await;
+        let upload_id = create_session(
+            root.path(),
+            "acme.models",
+            "k",
+            "global",
+            ttl(3600),
+            cap(16),
+            quota(1 << 40),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+        let metadata_path = session_metadata_path(root.path(), &upload_id).unwrap();
+        let mut metadata: serde_json::Value =
+            serde_json::from_slice(&fs::read(&metadata_path).await.unwrap()).unwrap();
+        metadata["session"]["last_touched_unix_seconds"] = serde_json::Value::from(0_u64);
+        fs::write(&metadata_path, serde_json::to_vec(&metadata).unwrap())
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            delete_session(root.path(), &upload_id).await,
+            Err(S3SessionError::Reliability(_))
+        ));
+        assert!(metadata_path.exists());
     }
 
     #[tokio::test]

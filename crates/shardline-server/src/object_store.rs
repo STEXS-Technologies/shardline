@@ -6,22 +6,28 @@ use std::{
     fs::File,
     io::{BufReader, ErrorKind, Read},
     path::Path,
+    pin::Pin,
 };
 
-use futures_util::StreamExt;
+use bytes::Bytes;
+use futures_util::{StreamExt, TryStreamExt, stream};
 use shardline_index::{
     FileChunkRecord, FileRecord, FileRecordInvariantError, FileRecordStorageLayout,
+    ResumableSessionPart,
 };
 use shardline_protocol::{ByteRange, ShardlineHash};
 pub use shardline_server_core::ServerObjectStore;
 pub use shardline_server_core::ServerObjectStoreError;
-use shardline_storage::{ObjectIntegrity, ObjectKey, ObjectMetadata, ObjectPrefix, ObjectStore};
+use shardline_storage::{
+    ObjectBody, ObjectIntegrity, ObjectKey, ObjectMetadata, ObjectPrefix, ObjectStore, PutOutcome,
+    S3ObjectStore,
+};
 use tokio::io::AsyncWriteExt;
 
 use crate::error::{IndexError, ObjectStoreError};
 use crate::{
     ObjectStorageAdapter, ServerConfig, ServerError, ServerFrontend, chunk_store::chunk_object_key,
-    server_frontend::append_referenced_term_bytes,
+    server_frontend::append_referenced_term_bytes, upload_ingest::RequestBodyReader,
 };
 
 #[cfg(test)]
@@ -97,7 +103,6 @@ pub(crate) fn read_full_object(
 ///
 /// The destination is never authoritative. Callers own its cleanup and must
 /// continue to validate the durable session's fenced metadata before publication.
-#[allow(dead_code)]
 pub(crate) async fn materialize_object_to_file(
     object_store: &ServerObjectStore,
     object_key: &ObjectKey,
@@ -147,6 +152,292 @@ pub(crate) async fn materialize_object_to_file(
     }
 }
 
+/// Builds a sequential reader over durable S3-resumable parts without a
+/// pod-local assembly file. The database-fenced part descriptors remain the
+/// source of truth; each ranged read is bounded to its recorded length.
+///
+/// Local deployments return `None` so their filesystem-backed staging path is
+/// preserved. The caller must retain its completion/session guards while the
+/// returned reader is consumed.
+pub(crate) async fn s3_resumable_parts_reader(
+    object_store: &ServerObjectStore,
+    parts: &[ResumableSessionPart],
+) -> Result<Option<RequestBodyReader>, ServerError> {
+    let ServerObjectStore::S3(store) = object_store else {
+        return Ok(None);
+    };
+    let store = store.clone();
+    let ranges = parts
+        .iter()
+        .filter(|part| part.size_bytes() > 0)
+        .map(|part| {
+            let key =
+                ObjectKey::parse(part.staging_key()).map_err(|_error| ServerError::InvalidPath)?;
+            let end = part
+                .size_bytes()
+                .checked_sub(1)
+                .ok_or(ServerError::Overflow)?;
+            let range = ByteRange::new(0, end).map_err(|_error| ServerError::Overflow)?;
+            Ok((key, range))
+        })
+        .collect::<Result<Vec<_>, ServerError>>()?;
+    let stream = stream::iter(ranges)
+        .then(move |(key, range)| {
+            let store = store.clone();
+            async move { store.stream_range(&key, range).await }
+        })
+        .try_flatten()
+        .map_err(ServerError::from);
+    Ok(Some(RequestBodyReader::from_stream(stream)))
+}
+
+/// Streams durable LFS PATCH ranges directly from S3, including zero-filled
+/// gaps between disjoint ranges. Local deployments return `None` and retain
+/// their filesystem-backed sparse assembly path.
+pub(crate) async fn s3_lfs_parts_reader(
+    object_store: &ServerObjectStore,
+    parts: &[ResumableSessionPart],
+    total: u64,
+) -> Result<Option<RequestBodyReader>, ServerError> {
+    let ServerObjectStore::S3(store) = object_store else {
+        return Ok(None);
+    };
+    let store = store.clone();
+    let mut ranges = parts
+        .iter()
+        .map(|part| {
+            let range = part.range().ok_or(ServerError::InvalidPath)?;
+            let key =
+                ObjectKey::parse(part.staging_key()).map_err(|_error| ServerError::InvalidPath)?;
+            if range.end_exclusive().saturating_sub(range.start()) != part.size_bytes()
+                || range.end_exclusive() > total
+            {
+                return Err(ServerError::ObjectStore(
+                    ObjectStoreError::StoredLengthMismatch,
+                ));
+            }
+            Ok((part.generation(), range, key))
+        })
+        .collect::<Result<Vec<_>, ServerError>>()?;
+    ranges.sort_by_key(|(generation, _range, _key)| *generation);
+
+    struct Piece {
+        start: u64,
+        end: u64,
+        key: ObjectKey,
+        object_start: u64,
+    }
+    enum Segment {
+        Zeroes(u64),
+        Object(ObjectKey, ByteRange),
+    }
+    let mut pieces: Vec<Piece> = Vec::new();
+    for (_generation, range, key) in ranges {
+        let start = range.start();
+        let end = range.end_exclusive();
+        let mut retained = Vec::new();
+        for piece in pieces {
+            if piece.end <= start || piece.start >= end {
+                retained.push(piece);
+                continue;
+            }
+            if piece.start < start {
+                retained.push(Piece {
+                    start: piece.start,
+                    end: start,
+                    key: piece.key.clone(),
+                    object_start: piece.object_start,
+                });
+            }
+            if piece.end > end {
+                retained.push(Piece {
+                    start: end,
+                    end: piece.end,
+                    key: piece.key,
+                    object_start: piece
+                        .object_start
+                        .checked_add(end.checked_sub(piece.start).ok_or(ServerError::Overflow)?)
+                        .ok_or(ServerError::Overflow)?,
+                });
+            }
+        }
+        retained.push(Piece {
+            start,
+            end,
+            key,
+            object_start: 0,
+        });
+        pieces = retained;
+    }
+    pieces.sort_by_key(|piece| (piece.start, piece.end));
+    let mut segments = Vec::new();
+    let mut cursor = 0_u64;
+    for piece in pieces {
+        if piece.start > cursor {
+            segments.push(Segment::Zeroes(
+                piece
+                    .start
+                    .checked_sub(cursor)
+                    .ok_or(ServerError::Overflow)?,
+            ));
+        }
+        let size_bytes = piece
+            .end
+            .checked_sub(piece.start)
+            .ok_or(ServerError::Overflow)?;
+        let object_end = piece
+            .object_start
+            .checked_add(size_bytes)
+            .and_then(|end| end.checked_sub(1))
+            .ok_or(ServerError::Overflow)?;
+        segments.push(Segment::Object(
+            piece.key,
+            ByteRange::new(piece.object_start, object_end)
+                .map_err(|_error| ServerError::Overflow)?,
+        ));
+        cursor = cursor.max(piece.end);
+    }
+    if cursor < total {
+        segments.push(Segment::Zeroes(
+            total.checked_sub(cursor).ok_or(ServerError::Overflow)?,
+        ));
+    }
+
+    type BodyStream = Pin<Box<dyn futures_util::Stream<Item = Result<Bytes, ServerError>> + Send>>;
+    let stream = stream::iter(segments)
+        .then(move |segment| {
+            let store = store.clone();
+            async move {
+                let body: BodyStream = match segment {
+                    Segment::Zeroes(remaining) => {
+                        Box::pin(stream::unfold(remaining, |remaining| async move {
+                            if remaining == 0 {
+                                return None;
+                            }
+                            let length = remaining.min(1024 * 1024);
+                            let length_usize = usize::try_from(length).ok()?;
+                            Some((
+                                Ok(Bytes::from(vec![0_u8; length_usize])),
+                                remaining.checked_sub(length)?,
+                            ))
+                        }))
+                    }
+                    Segment::Object(key, range) => Box::pin(
+                        store
+                            .stream_range(&key, range)
+                            .await?
+                            .map(|chunk| chunk.map_err(ServerError::from)),
+                    ),
+                };
+                Ok::<BodyStream, ServerError>(body)
+            }
+        })
+        .try_flatten();
+    Ok(Some(RequestBodyReader::from_stream(stream)))
+}
+
+/// Streams a bounded durable upload part directly into S3 remote staging,
+/// hashing it as it crosses the process boundary. The digest-derived staging
+/// key is selected only after the stream is complete, then the remote object
+/// is conditionally promoted without a pod-local staging file.
+pub(crate) async fn stage_reader_content_addressed_s3(
+    store: &S3ObjectStore,
+    prefix: &str,
+    reader: &mut RequestBodyReader,
+) -> Result<(ObjectKey, ObjectIntegrity), ServerError> {
+    let (mut upload, temporary_key) = store.begin_stream_upload().await?;
+    let mut hasher = blake3::Hasher::new();
+    let mut size_bytes = 0_u64;
+    while let Some(chunk) = match reader.next_bytes().await {
+        Ok(chunk) => chunk,
+        Err(error) => {
+            let _ignored = upload.abort().await;
+            return Err(error);
+        }
+    } {
+        let chunk_len = match u64::try_from(chunk.len()) {
+            Ok(length) => length,
+            Err(error) => {
+                let _ignored = upload.abort().await;
+                return Err(error.into());
+            }
+        };
+        size_bytes = match size_bytes.checked_add(chunk_len) {
+            Some(total) => total,
+            None => {
+                let _ignored = upload.abort().await;
+                return Err(ServerError::Overflow);
+            }
+        };
+        hasher.update(&chunk);
+        upload.write(&chunk);
+        if let Err(error) = upload.wait_for_capacity(2).await {
+            let _ignored = upload.abort().await;
+            return Err(error.into());
+        }
+    }
+    let digest = hasher.finalize();
+    let key = ObjectKey::parse(&format!("{prefix}/{}", hex::encode(digest.as_bytes())))
+        .map_err(|_error| ServerError::InvalidPath)?;
+    store
+        .finish_stream_upload(upload, &temporary_key, &key)
+        .await?;
+    Ok((
+        key,
+        ObjectIntegrity::new(ShardlineHash::from_bytes(*digest.as_bytes()), size_bytes),
+    ))
+}
+
+/// Streams a request directly into an arbitrary S3 key through remote
+/// multipart staging. Local deployments return `None` so callers can retain
+/// their filesystem-backed fallback.
+pub(crate) async fn put_reader_if_absent_s3(
+    object_store: &ServerObjectStore,
+    key: &ObjectKey,
+    reader: &mut RequestBodyReader,
+) -> Result<Option<(PutOutcome, ObjectIntegrity)>, ServerError> {
+    let ServerObjectStore::S3(store) = object_store else {
+        return Ok(None);
+    };
+    let (mut upload, temporary_key) = store.begin_stream_upload().await?;
+    let mut hasher = blake3::Hasher::new();
+    let mut size_bytes = 0_u64;
+    while let Some(chunk) = match reader.next_bytes().await {
+        Ok(chunk) => chunk,
+        Err(error) => {
+            let _ignored = upload.abort().await;
+            return Err(error);
+        }
+    } {
+        let chunk_len = match u64::try_from(chunk.len()) {
+            Ok(length) => length,
+            Err(error) => {
+                let _ignored = upload.abort().await;
+                return Err(error.into());
+            }
+        };
+        size_bytes = match size_bytes.checked_add(chunk_len) {
+            Some(total) => total,
+            None => {
+                let _ignored = upload.abort().await;
+                return Err(ServerError::Overflow);
+            }
+        };
+        hasher.update(&chunk);
+        upload.write(&chunk);
+        if let Err(error) = upload.wait_for_capacity(2).await {
+            let _ignored = upload.abort().await;
+            return Err(error.into());
+        }
+    }
+    let digest = hasher.finalize();
+    let integrity = ObjectIntegrity::new(ShardlineHash::from_bytes(*digest.as_bytes()), size_bytes);
+    let outcome = store
+        .finish_stream_upload(upload, &temporary_key, key)
+        .await?;
+    Ok(Some((outcome, integrity)))
+}
+
 /// Promotes bounded bytes through a pod-local temporary file into an immutable
 /// object-store staging key below `prefix`.
 pub(crate) async fn stage_bytes_content_addressed(
@@ -161,6 +452,19 @@ pub(crate) async fn stage_bytes_content_addressed(
         ShardlineHash::from_bytes(*digest.as_bytes()),
         u64::try_from(bytes.len())?,
     );
+    if matches!(
+        object_store,
+        ServerObjectStore::S3(_) | ServerObjectStore::Blackhole
+    ) {
+        shardline_storage::AsyncObjectStore::put_if_absent(
+            object_store,
+            &key,
+            ObjectBody::from_slice(bytes),
+            &integrity,
+        )
+        .await?;
+        return Ok((key, integrity));
+    }
     let temporary = tempfile::NamedTempFile::new()?;
     tokio::fs::write(temporary.path(), bytes).await?;
     let store = object_store.clone();

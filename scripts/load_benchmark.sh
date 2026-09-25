@@ -2,6 +2,8 @@
 set -euo pipefail
 
 BENCH_URL="${BENCH_URL:-http://127.0.0.1:18080}"
+BENCH_READ_URL="${BENCH_READ_URL:-${BENCH_URL}/healthz}"
+BENCH_WRITE_URL="${BENCH_WRITE_URL:-}"
 BENCH_TOKEN="${BENCH_TOKEN:-}"
 BENCH_DURATION="${BENCH_DURATION:-30}"
 BENCH_WARMUP="${BENCH_WARMUP:-5}"
@@ -17,6 +19,8 @@ Runs a concurrent load benchmark against a running Shardline server.
 
 Options:
   --url URL               Server base URL (default: http://127.0.0.1:18080)
+  --read-url URL          Read endpoint (default: $BENCH_URL/healthz)
+  --write-url URL         Optional real write endpoint; enables write/mixed lanes
   --token TOKEN           Bearer auth token (optional, for authenticated endpoints)
   --duration SECS         Test duration per scenario in seconds (default: 30)
   --warmup SECS           Warmup duration in seconds (default: 5)
@@ -26,7 +30,8 @@ Options:
   -h, --help              Show this help message
 
 Environment variables:
-  BENCH_URL, BENCH_TOKEN, BENCH_DURATION, BENCH_WARMUP, BENCH_UPLOAD_SIZE,
+  BENCH_URL, BENCH_READ_URL, BENCH_WRITE_URL, BENCH_TOKEN, BENCH_DURATION,
+  BENCH_WARMUP, BENCH_UPLOAD_SIZE,
   CONCURRENCY_LEVELS, BENCH_JSON
 
 Examples:
@@ -46,6 +51,16 @@ while (($# > 0)); do
         --url)
             [[ $# -ge 2 ]] || { echo "missing value for --url" >&2; exit 2; }
             BENCH_URL="$2"
+            shift 2
+            ;;
+        --read-url)
+            [[ $# -ge 2 ]] || { echo "missing value for --read-url" >&2; exit 2; }
+            BENCH_READ_URL="$2"
+            shift 2
+            ;;
+        --write-url)
+            [[ $# -ge 2 ]] || { echo "missing value for --write-url" >&2; exit 2; }
+            BENCH_WRITE_URL="$2"
             shift 2
             ;;
         --token)
@@ -91,6 +106,12 @@ done
 
 echo "=== Shardline Load Benchmark ==="
 echo "  URL:         ${BENCH_URL}"
+echo "  Read URL:    ${BENCH_READ_URL}"
+if [[ -n "${BENCH_WRITE_URL}" ]]; then
+    echo "  Write URL:   ${BENCH_WRITE_URL}"
+else
+    echo "  Write URL:   disabled (set --write-url for a real write endpoint)"
+fi
 echo "  Duration:    ${BENCH_DURATION}s per level"
 echo "  Warmup:      ${BENCH_WARMUP}s"
 echo "  Upload size: ${BENCH_UPLOAD_SIZE} bytes"
@@ -113,6 +134,8 @@ if [[ ! -x "${BINARY}" ]]; then
 fi
 
 export BENCH_URL
+export BENCH_READ_URL
+export BENCH_WRITE_URL
 export BENCH_TOKEN
 export BENCH_DURATION
 export BENCH_WARMUP

@@ -65,6 +65,39 @@ pub enum FsckError {
     },
 }
 
+impl FsckError {
+    /// Returns the stable reliability-verifier reason when an index adapter
+    /// rejected persisted evidence. Fsck reports this as an actionable issue
+    /// so operators can distinguish evidence damage from storage I/O failure.
+    pub(crate) fn reliability_reason(&self) -> Option<String> {
+        match self {
+            Self::LocalIndexStore(shardline_index::LocalIndexStoreError::Reliability(error)) => {
+                Some(error.to_string())
+            }
+            Self::MemoryIndexStore(shardline_index::MemoryIndexStoreError::Reliability(error)) => {
+                Some(error.clone())
+            }
+            Self::PostgresMetadata(shardline_index::PostgresMetadataStoreError::Reliability(
+                error,
+            )) => Some(error.to_string()),
+            Self::Io(_)
+            | Self::Json(_)
+            | Self::NumericConversion(_)
+            | Self::Cas(_)
+            | Self::Overflow
+            | Self::LocalObjectStore(_)
+            | Self::S3ObjectStore(_)
+            | Self::ObjectStore(_)
+            | Self::XetAdapter(_)
+            | Self::LocalIndexStore(_)
+            | Self::MemoryIndexStore(_)
+            | Self::MemoryRecordStore(_)
+            | Self::PostgresMetadata(_)
+            | Self::StoredFileMetadataTooLarge { .. } => None,
+        }
+    }
+}
+
 impl From<ParseStoredFileRecordError> for FsckError {
     fn from(value: ParseStoredFileRecordError) -> Self {
         match value {

@@ -164,6 +164,19 @@ shardline repair lifecycle
 shardline repair lifecycle --webhook-retention-seconds 604800
 ```
 
+Rebuild one corrupted local LFS patch evidence envelope only after verifying its
+materialized state and identity out of band:
+
+```bash
+shardline repair lfs-evidence --root /var/lib/shardline \
+  --state-file ./lfs-patch-recovery.json
+```
+
+The state file is a JSON encoding of `LfsPatchEvidenceRepairInput` and must include
+the OID, scope/session/target identity, total length, canonical ranges, staging length,
+and `.meta` timestamp. This command replaces reliability sidecars and Merkle journals
+only; ordinary reads and sweeps never perform this repair.
+
 Export an adapter-neutral recovery manifest:
 
 ```bash

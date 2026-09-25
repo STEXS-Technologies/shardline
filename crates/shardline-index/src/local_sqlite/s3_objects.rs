@@ -1,10 +1,21 @@
-use rusqlite::{Connection, params_from_iter};
-use std::fmt::Write as _;
+#[cfg(test)]
+use rusqlite::Connection;
+use rusqlite::{OptionalExtension, Transaction, params_from_iter};
+use std::{collections::HashMap, fmt::Write as _};
 
 use super::{LocalIndexStore, LocalIndexStoreError, collect_rows, helpers};
 use crate::{S3ObjectEntry, S3ObjectIndexStore};
+use shardline_reliability::{
+    OperationKind, S3ObjectLifecycleEvent, SnapshotEvidence, persisted_event_sequence,
+    verify_and_append_snapshot_transition, verify_persisted_merkle_commit_with_previous,
+    verify_snapshot_event,
+};
 
 fn s3_object_entry_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<S3ObjectEntry> {
+    let user_metadata_json: String = row.get("user_metadata")?;
+    let user_metadata = serde_json::from_str(&user_metadata_json).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(6, rusqlite::types::Type::Text, Box::new(error))
+    })?;
     Ok(S3ObjectEntry {
         scope_namespace: row.get("scope_namespace")?,
         object_key: row.get("object_key")?,
@@ -18,8 +29,7 @@ fn s3_object_entry_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<S3Objec
         })?,
         content_hash: row.get("content_hash")?,
         etag: row.get("etag")?,
-        user_metadata: serde_json::from_str(&row.get::<_, String>("user_metadata")?)
-            .unwrap_or_default(),
+        user_metadata,
         updated_at_unix_seconds: row.get("updated_at_unix_seconds")?,
     })
 }
@@ -33,10 +43,11 @@ fn user_metadata_to_json(
 }
 
 fn upsert_s3_object_sql(
-    connection: &Connection,
+    transaction: &Transaction<'_>,
     entry: &S3ObjectEntry,
 ) -> Result<(), LocalIndexStoreError> {
-    connection.execute(
+    let before = current_s3_object_sql(transaction, &entry.scope_namespace, &entry.object_key)?;
+    transaction.execute(
         "INSERT INTO shardline_s3_objects (
             scope_namespace, object_key, file_id, size_bytes, content_hash, etag,
             user_metadata, updated_at_unix_seconds
@@ -61,17 +72,18 @@ fn upsert_s3_object_sql(
             entry.updated_at_unix_seconds,
         ],
     )?;
+    record_s3_object_transition(transaction, before.as_ref(), Some(entry))?;
     Ok(())
 }
 
 fn compare_and_swap_s3_object_sql(
-    connection: &Connection,
+    transaction: &Transaction<'_>,
     expected: Option<&S3ObjectEntry>,
     replacement: &S3ObjectEntry,
 ) -> Result<bool, LocalIndexStoreError> {
     let replacement_metadata = user_metadata_to_json(&replacement.user_metadata)?;
     let changed = if let Some(expected) = expected {
-        connection.execute(
+        transaction.execute(
             "UPDATE shardline_s3_objects
              SET file_id = ?3, size_bytes = ?4, content_hash = ?5, etag = ?6,
                  user_metadata = ?7, updated_at_unix_seconds = ?8
@@ -97,7 +109,7 @@ fn compare_and_swap_s3_object_sql(
             ],
         )?
     } else {
-        connection.execute(
+        transaction.execute(
             "INSERT INTO shardline_s3_objects (
                 scope_namespace, object_key, file_id, size_bytes, content_hash, etag,
                 user_metadata, updated_at_unix_seconds
@@ -116,23 +128,75 @@ fn compare_and_swap_s3_object_sql(
             ],
         )?
     };
+    if changed == 1 {
+        let before = expected;
+        record_s3_object_transition(transaction, before, Some(replacement))?;
+    }
     Ok(changed == 1)
 }
 
 fn delete_s3_object_sql(
-    connection: &Connection,
+    transaction: &Transaction<'_>,
     scope_namespace: &str,
     object_key: &str,
 ) -> Result<bool, LocalIndexStoreError> {
-    let changed = connection.execute(
+    let before = current_s3_object_sql(transaction, scope_namespace, object_key)?;
+    let changed = transaction.execute(
         "DELETE FROM shardline_s3_objects WHERE scope_namespace = ?1 AND object_key = ?2",
         rusqlite::params![scope_namespace, object_key],
     )?;
+    if changed > 0 {
+        record_s3_object_transition(transaction, before.as_ref(), None)?;
+    }
     Ok(changed > 0)
 }
 
+fn current_s3_object_sql(
+    connection: &Transaction<'_>,
+    scope_namespace: &str,
+    object_key: &str,
+) -> Result<Option<S3ObjectEntry>, LocalIndexStoreError> {
+    let mut statement = connection.prepare(
+        "SELECT scope_namespace, object_key, file_id, size_bytes, content_hash, etag,
+                user_metadata, updated_at_unix_seconds
+         FROM shardline_s3_objects
+         WHERE scope_namespace = ?1 AND object_key = ?2 LIMIT 1",
+    )?;
+    Ok(statement
+        .query_row(
+            rusqlite::params![scope_namespace, object_key],
+            s3_object_entry_from_row,
+        )
+        .optional()?)
+}
+
+fn record_s3_object_transition(
+    transaction: &Transaction<'_>,
+    before: Option<&S3ObjectEntry>,
+    after: Option<&S3ObjectEntry>,
+) -> Result<(), LocalIndexStoreError> {
+    let (scope_namespace, object_key) = after
+        .or(before)
+        .map(|entry| (entry.scope_namespace.as_str(), entry.object_key.as_str()))
+        .ok_or_else(|| {
+            LocalIndexStoreError::Io(std::io::Error::other("missing S3 object identity"))
+        })?;
+    let before_snapshot = helpers::s3_object_snapshot(scope_namespace, object_key, before)?;
+    let after_snapshot = helpers::s3_object_snapshot(scope_namespace, object_key, after)?;
+    let evidence = verify_and_append_snapshot_transition(
+        helpers::current_s3_object_evidence(transaction, scope_namespace, object_key, before)?,
+        before_snapshot,
+        after_snapshot,
+    )?
+    .0;
+    if let Some(event) = evidence.events().last() {
+        helpers::persist_s3_object_evidence(transaction, event)?;
+    }
+    Ok(())
+}
+
 fn scan_s3_objects_sql(
-    connection: &Connection,
+    connection: &Transaction<'_>,
     scope_namespace: &str,
     prefix: &str,
     cursor: Option<&str>,
@@ -169,8 +233,119 @@ fn scan_s3_objects_sql(
     collect_rows(rows)
 }
 
+/// Verifies only the latest committed boundary for a paginated listing.
+/// Historical-chain verification remains the fsck/recovery responsibility;
+/// this keeps normal listings bounded to one query and one event per object.
+fn verify_s3_object_listing_evidence(
+    transaction: &Transaction<'_>,
+    values: &[S3ObjectEntry],
+) -> Result<(), LocalIndexStoreError> {
+    if values.is_empty() {
+        return Ok(());
+    }
+    let mut operations = Vec::with_capacity(values.len());
+    for value in values {
+        let snapshot =
+            helpers::s3_object_snapshot(&value.scope_namespace, &value.object_key, Some(value))?;
+        operations.push(snapshot.evidence_operation()?.operation_id);
+    }
+    let placeholders = (0..operations.len())
+        .map(|index| format!("?{}", index.saturating_add(2)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "SELECT operation_id, sequence, event_json, merkle_commit_json,
+                CASE WHEN EXISTS (
+                    SELECT 1 FROM shardline_reliability_events AS missing
+                    WHERE missing.operation_kind = ?1
+                      AND missing.operation_id = current.operation_id
+                      AND missing.sequence < current.sequence
+                      AND missing.merkle_commit_json IS NULL
+                ) THEN '{{\"missing_previous_merkle_commit\":true}}' ELSE (
+                    SELECT previous.merkle_commit_json
+                    FROM shardline_reliability_events AS previous
+                    WHERE previous.operation_kind = ?1
+                      AND previous.operation_id = current.operation_id
+                      AND previous.sequence < current.sequence
+                    ORDER BY previous.sequence DESC LIMIT 1
+                ) END AS previous_merkle_json
+         FROM shardline_reliability_events AS current
+         WHERE current.operation_kind = ?1
+           AND current.operation_id IN ({placeholders})
+           AND current.sequence = (
+               SELECT MAX(latest.sequence)
+               FROM shardline_reliability_events AS latest
+               WHERE latest.operation_kind = ?1
+                 AND latest.operation_id = current.operation_id
+           )"
+    );
+    let mut parameters = Vec::with_capacity(operations.len().saturating_add(1));
+    parameters.push(OperationKind::S3Object.as_str().to_owned());
+    parameters.extend(operations.iter().cloned());
+    let mut statement = transaction.prepare(&sql)?;
+    let rows = statement.query_map(params_from_iter(parameters.iter()), |row| {
+        let operation_id: String = row.get(0)?;
+        let sequence: i64 = row.get(1)?;
+        let event_json: String = row.get(2)?;
+        let merkle_json: Option<String> = row.get(3)?;
+        let previous_json: Option<String> = row.get(4)?;
+        Ok((
+            operation_id,
+            sequence,
+            event_json,
+            merkle_json,
+            previous_json,
+        ))
+    })?;
+    let mut latest = HashMap::with_capacity(values.len());
+    for row in rows {
+        let (operation_id, sequence, event_json, merkle_json, previous_json) = row?;
+        latest.insert(
+            operation_id,
+            (
+                sequence,
+                serde_json::from_str::<serde_json::Value>(&event_json)?,
+                merkle_json
+                    .map(|json| serde_json::from_str::<serde_json::Value>(&json))
+                    .transpose()?,
+                previous_json
+                    .map(|json| serde_json::from_str::<serde_json::Value>(&json))
+                    .transpose()?,
+            ),
+        );
+    }
+    for (value, operation_id) in values.iter().zip(operations) {
+        let Some((row_sequence, event_json, merkle_json, previous_json)) =
+            latest.remove(&operation_id)
+        else {
+            return Err(LocalIndexStoreError::Reliability(
+                shardline_reliability::ReliabilityError::OperationMismatch,
+            ));
+        };
+        let event_sequence = persisted_event_sequence(OperationKind::S3Object, event_json.clone())?;
+        if u64::try_from(row_sequence).ok() != Some(event_sequence) {
+            return Err(LocalIndexStoreError::Reliability(
+                shardline_reliability::ReliabilityError::Merkle(
+                    "S3 listing evidence sequence mismatch".into(),
+                ),
+            ));
+        }
+        verify_persisted_merkle_commit_with_previous(
+            OperationKind::S3Object,
+            event_json.clone(),
+            merkle_json,
+            previous_json,
+        )?;
+        let event: S3ObjectLifecycleEvent = serde_json::from_value(event_json)?;
+        let expected =
+            helpers::s3_object_snapshot(&value.scope_namespace, &value.object_key, Some(value))?;
+        verify_snapshot_event(&event, &expected)?;
+    }
+    Ok(())
+}
+
 fn scan_s3_object_exact_sql(
-    connection: &Connection,
+    connection: &Transaction<'_>,
     scope_namespace: &str,
     object_key: &str,
 ) -> Result<Option<S3ObjectEntry>, LocalIndexStoreError> {
@@ -196,8 +371,18 @@ impl S3ObjectIndexStore for LocalIndexStore {
         let store = self.clone();
         let entry = entry.clone();
         tokio::task::spawn_blocking(move || {
-            let connection = store.open_connection()?;
-            upsert_s3_object_sql(&connection, &entry)
+            helpers::retry_sqlite_busy(|| {
+                let mut connection = store.open_connection()?;
+                // BEGIN IMMEDIATE prevents two unconditional upserts from both
+                // reading the old evidence chain and then racing while upgrading
+                // to a writer transaction. SQLite otherwise returns SQLITE_BUSY
+                // for the losing deferred-to-write upgrade.
+                let transaction = connection
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+                upsert_s3_object_sql(&transaction, &entry)?;
+                transaction.commit()?;
+                Ok(())
+            })
         })
         .await
         .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
@@ -212,12 +397,15 @@ impl S3ObjectIndexStore for LocalIndexStore {
         let expected = expected.cloned();
         let replacement = replacement.clone();
         tokio::task::spawn_blocking(move || {
-            let mut connection = store.open_connection()?;
-            let transaction = connection.transaction()?;
-            let changed =
-                compare_and_swap_s3_object_sql(&transaction, expected.as_ref(), &replacement)?;
-            transaction.commit()?;
-            Ok(changed)
+            helpers::retry_sqlite_busy(|| {
+                let mut connection = store.open_connection()?;
+                let transaction = connection
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+                let changed =
+                    compare_and_swap_s3_object_sql(&transaction, expected.as_ref(), &replacement)?;
+                transaction.commit()?;
+                Ok(changed)
+            })
         })
         .await
         .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
@@ -232,8 +420,14 @@ impl S3ObjectIndexStore for LocalIndexStore {
         let scope_namespace = scope_namespace.to_owned();
         let object_key = object_key.to_owned();
         tokio::task::spawn_blocking(move || {
-            let connection = store.open_connection()?;
-            delete_s3_object_sql(&connection, &scope_namespace, &object_key)
+            helpers::retry_sqlite_busy(|| {
+                let mut connection = store.open_connection()?;
+                let transaction = connection
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+                let deleted = delete_s3_object_sql(&transaction, &scope_namespace, &object_key)?;
+                transaction.commit()?;
+                Ok(deleted)
+            })
         })
         .await
         .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
@@ -251,14 +445,20 @@ impl S3ObjectIndexStore for LocalIndexStore {
         let prefix = prefix.to_owned();
         let cursor = cursor.map(ToOwned::to_owned);
         tokio::task::spawn_blocking(move || {
-            let connection = store.open_connection()?;
-            scan_s3_objects_sql(
-                &connection,
-                &scope_namespace,
-                &prefix,
-                cursor.as_deref(),
-                limit,
-            )
+            helpers::retry_sqlite_busy(|| {
+                let mut connection = store.open_connection()?;
+                let transaction = connection.transaction()?;
+                let values = scan_s3_objects_sql(
+                    &transaction,
+                    &scope_namespace,
+                    &prefix,
+                    cursor.as_deref(),
+                    limit,
+                )?;
+                verify_s3_object_listing_evidence(&transaction, &values)?;
+                transaction.commit()?;
+                Ok(values)
+            })
         })
         .await
         .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
@@ -273,8 +473,21 @@ impl S3ObjectIndexStore for LocalIndexStore {
         let scope_namespace = scope_namespace.to_owned();
         let object_key = object_key.to_owned();
         tokio::task::spawn_blocking(move || {
-            let connection = store.open_connection()?;
-            scan_s3_object_exact_sql(&connection, &scope_namespace, &object_key)
+            helpers::retry_sqlite_busy(|| {
+                let mut connection = store.open_connection()?;
+                let transaction = connection.transaction()?;
+                let value = scan_s3_object_exact_sql(&transaction, &scope_namespace, &object_key)?;
+                if let Some(value) = value.as_ref() {
+                    helpers::verify_s3_object_evidence(
+                        &transaction,
+                        &scope_namespace,
+                        &object_key,
+                        Some(value),
+                    )?;
+                }
+                transaction.commit()?;
+                Ok(value)
+            })
         })
         .await
         .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
@@ -346,6 +559,26 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(stored, if first_won { first } else { second });
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_unconditional_upserts_keep_a_verifiable_chain() {
+        let store = make_store();
+        let first = entry("concurrent-upsert", "model.bin", &file_id(1), 10, 1);
+        let second = entry("concurrent-upsert", "model.bin", &file_id(2), 20, 2);
+
+        let (first_result, second_result) = tokio::join!(
+            store.upsert_s3_object(&first),
+            store.upsert_s3_object(&second),
+        );
+        first_result.unwrap();
+        second_result.unwrap();
+        let stored = store
+            .scan_s3_object_exact("concurrent-upsert", "model.bin")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(stored == first || stored == second);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -508,6 +741,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn scan_s3_objects_rejects_missing_evidence_without_writing() {
+        let store = make_store();
+        S3ObjectIndexStore::upsert_s3_object(
+            &store,
+            &entry("global", "missing-evidence", "file", 1, 1),
+        )
+        .await
+        .unwrap();
+        let connection = store.open_connection().unwrap();
+        connection
+            .execute(
+                "DELETE FROM shardline_reliability_events
+                 WHERE operation_kind = 'S3Object'",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+
+        assert!(
+            S3ObjectIndexStore::scan_s3_objects(&store, "global", "", None, 10)
+                .await
+                .is_err()
+        );
+        let connection = store.open_connection().unwrap();
+        let count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM shardline_reliability_events
+                 WHERE operation_kind = 'S3Object'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
     async fn scan_s3_objects_prefix_matches_literal_string() {
         // A prefix containing LIKE metacharacters must match literally (string
         // prefix semantics, not SQL LIKE pattern semantics).
@@ -570,6 +839,153 @@ mod tests {
             scan(&store, "global", "a", None, 100).await,
             vec!["a/b", "a/b/c"]
         );
+    }
+
+    #[tokio::test]
+    async fn s3_object_read_rejects_tampered_evidence() {
+        let storage = shardline_test_support::TempStorage::new();
+        let store = LocalIndexStore::new(storage.path_buf()).unwrap();
+        let value = entry("global", "model.bin", "file-a", 7, 1);
+        store.upsert_s3_object(&value).await.unwrap();
+
+        let connection = store.open_connection().unwrap();
+        connection
+            .execute(
+                "UPDATE shardline_reliability_events
+                 SET event_json = '{\"tampered\":true}'
+                 WHERE operation_kind = 'S3Object'",
+                [],
+            )
+            .unwrap();
+
+        assert!(
+            store
+                .scan_s3_object_exact("global", "model.bin")
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn s3_object_read_rejects_evidence_bound_to_another_operation() {
+        let storage = shardline_test_support::TempStorage::new();
+        let store = LocalIndexStore::new(storage.path_buf()).unwrap();
+        let value = entry("global", "model.bin", "file-a", 7, 1);
+        store.upsert_s3_object(&value).await.unwrap();
+
+        let connection = store.open_connection().unwrap();
+        connection
+            .execute(
+                "UPDATE shardline_reliability_events
+                 SET operation_id = 'rewritten-operation'
+                 WHERE operation_kind = 'S3Object'",
+                [],
+            )
+            .unwrap();
+
+        assert!(
+            store
+                .scan_s3_object_exact("global", "model.bin")
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn s3_object_read_rejects_missing_predecessor_commitment() {
+        let storage = shardline_test_support::TempStorage::new();
+        let store = LocalIndexStore::new(storage.path_buf()).unwrap();
+        store
+            .upsert_s3_object(&entry("global", "model.bin", "file-a", 7, 1))
+            .await
+            .unwrap();
+        store
+            .upsert_s3_object(&entry("global", "model.bin", "file-b", 8, 2))
+            .await
+            .unwrap();
+
+        let connection = store.open_connection().unwrap();
+        connection
+            .execute(
+                "UPDATE shardline_reliability_events
+                 SET merkle_commit_json = NULL
+                 WHERE operation_kind = 'S3Object'
+                   AND sequence = (
+                       SELECT MIN(sequence)
+                       FROM shardline_reliability_events
+                       WHERE operation_kind = 'S3Object'
+                   )",
+                [],
+            )
+            .unwrap();
+
+        assert!(
+            store
+                .scan_s3_object_exact("global", "model.bin")
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn s3_object_read_rejects_malformed_user_metadata() {
+        let storage = shardline_test_support::TempStorage::new();
+        let store = LocalIndexStore::new(storage.path_buf()).unwrap();
+        let mut value = entry("global", "metadata.bin", "file-a", 7, 1);
+        value.user_metadata = vec![("mode".to_owned(), "fast".to_owned())];
+        store.upsert_s3_object(&value).await.unwrap();
+
+        let connection = store.open_connection().unwrap();
+        connection
+            .execute(
+                "UPDATE shardline_s3_objects
+                 SET user_metadata = '{malformed:true}'
+                 WHERE scope_namespace = 'global' AND object_key = 'metadata.bin'",
+                [],
+            )
+            .unwrap();
+
+        assert!(matches!(
+            store.scan_s3_object_exact("global", "metadata.bin").await,
+            Err(LocalIndexStoreError::Sqlite(
+                rusqlite::Error::FromSqlConversionFailure(..)
+            ))
+        ));
+    }
+
+    #[tokio::test]
+    async fn s3_object_read_rejects_missing_baseline_evidence_without_writing() {
+        let storage = shardline_test_support::TempStorage::new();
+        let store = LocalIndexStore::new(storage.path_buf()).unwrap();
+        let value = entry("global", "repair.bin", "file-a", 7, 1);
+        store.upsert_s3_object(&value).await.unwrap();
+
+        let connection = store.open_connection().unwrap();
+        connection
+            .execute(
+                "DELETE FROM shardline_reliability_events
+                 WHERE operation_kind = 'S3Object'",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+
+        assert!(
+            store
+                .scan_s3_object_exact("global", "repair.bin")
+                .await
+                .is_err()
+        );
+        let connection = store.open_connection().unwrap();
+        let count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM shardline_reliability_events
+                 WHERE operation_kind = 'S3Object'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0);
     }
 
     #[test]

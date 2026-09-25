@@ -407,11 +407,8 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
     use super::*;
-    use serial_test::serial;
-
     async fn connect_postgres() -> Option<sqlx::PgPool> {
-        let url = std::env::var("DATABASE_URL").ok()?;
-        sqlx::PgPool::connect(&url).await.ok()
+        super::super::connect_isolated_postgres().await
     }
 
     /// Removes every tree-entry and revision row for the shared repos used by
@@ -467,7 +464,6 @@ mod tests {
     /// `shardline -- db migrate up`, which the `postgres` CI job runs first).
     /// Exercises tree upsert / scan with cursor / delete round-trip.
     #[tokio::test(flavor = "multi_thread")]
-    #[serial]
     async fn pg_tree_store_upsert_scan_delete_roundtrip() {
         let Some(pool) = connect_postgres().await else {
             eprintln!("skipping: no DATABASE_URL");
@@ -528,7 +524,6 @@ mod tests {
 
     /// Exercises the revision registry (upsert / read / list / delete cascade).
     #[tokio::test(flavor = "multi_thread")]
-    #[serial]
     async fn pg_revision_registry_lifecycle() {
         let Some(pool) = connect_postgres().await else {
             eprintln!("skipping: no DATABASE_URL");
@@ -585,7 +580,6 @@ mod tests {
     /// are evicted (created-at ordering, not name ordering), tree rows
     /// cascade, and other repos are untouched.
     #[tokio::test(flavor = "multi_thread")]
-    #[serial]
     async fn pg_prune_revisions_over_cap_removes_oldest_down_to_cap() {
         let Some(pool) = connect_postgres().await else {
             eprintln!("skipping: no DATABASE_URL");
@@ -630,7 +624,6 @@ mod tests {
 
     /// The prune is a no-op at/below the cap and does not touch other repos.
     #[tokio::test(flavor = "multi_thread")]
-    #[serial]
     async fn pg_prune_revisions_over_cap_at_cap_and_other_repo_untouched() {
         let Some(pool) = connect_postgres().await else {
             eprintln!("skipping: no DATABASE_URL");
@@ -688,7 +681,6 @@ mod tests {
 
     /// Lists the distinct repos present in the revision registry.
     #[tokio::test(flavor = "multi_thread")]
-    #[serial]
     async fn pg_list_revision_repo_keys_returns_distinct_repos() {
         let Some(pool) = connect_postgres().await else {
             eprintln!("skipping: no DATABASE_URL");
@@ -741,7 +733,6 @@ mod tests {
 
     /// Counts tree-entry rows per repo (F-103 cap gate) across revisions.
     #[tokio::test(flavor = "multi_thread")]
-    #[serial]
     async fn pg_count_tree_entries_counts_only_the_matching_repo() {
         let Some(pool) = connect_postgres().await else {
             eprintln!("skipping: no DATABASE_URL");

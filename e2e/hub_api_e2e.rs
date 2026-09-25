@@ -273,6 +273,7 @@ async fn create_model_repo(base_url: &str, token: &str) {
 }
 
 /// Commits an inline file to the given repo and returns the new commit SHA.
+#[allow(clippy::too_many_arguments)]
 async fn commit_inline_file(
     base_url: &str,
     token: &str,
@@ -613,7 +614,7 @@ async fn repo_info_returns_model_info() {
     let srv = start_hub_server().await;
     let base_url = srv.base_url();
     let token = srv.token();
-    create_model_repo(&base_url, &token).await;
+    create_model_repo(base_url, token).await;
     let client = Client::new();
 
     let resp = client
@@ -677,7 +678,7 @@ async fn modelcard_empty_repo_returns_404() {
     let srv = start_hub_server().await;
     let base_url = srv.base_url();
     let token = srv.token();
-    create_model_repo(&base_url, &token).await;
+    create_model_repo(base_url, token).await;
     let client = Client::new();
     let resp = client
         .get(format!(
@@ -699,12 +700,12 @@ async fn modelcard_with_readme_returns_200() {
     let srv = start_hub_server().await;
     let base_url = srv.base_url();
     let token = srv.token();
-    create_model_repo(&base_url, &token).await;
+    create_model_repo(base_url, token).await;
 
     // Commit a README.md
     commit_inline_file(
-        &base_url,
-        &token,
+        base_url,
+        token,
         "models",
         "test-owner",
         "test-model",
@@ -745,7 +746,7 @@ async fn revisions_empty_repo_returns_empty() {
     let srv = start_hub_server().await;
     let base_url = srv.base_url();
     let token = srv.token();
-    create_model_repo(&base_url, &token).await;
+    create_model_repo(base_url, token).await;
     let client = Client::new();
 
     let resp = client
@@ -773,10 +774,10 @@ async fn revisions_after_commit_contains_main() {
     let srv = start_hub_server().await;
     let base_url = srv.base_url();
     let token = srv.token();
-    create_model_repo(&base_url, &token).await;
+    create_model_repo(base_url, token).await;
     commit_inline_file(
-        &base_url,
-        &token,
+        base_url,
+        token,
         "models",
         "test-owner",
         "test-model",
@@ -844,10 +845,10 @@ async fn preupload_returns_file_existence_flags() {
     let srv = start_hub_server().await;
     let base_url = srv.base_url();
     let token = srv.token();
-    create_model_repo(&base_url, &token).await;
+    create_model_repo(base_url, token).await;
     commit_inline_file(
-        &base_url,
-        &token,
+        base_url,
+        token,
         "models",
         "test-owner",
         "test-model",
@@ -894,7 +895,7 @@ async fn preupload_nonexistent_revision_returns_404() {
     let srv = start_hub_server().await;
     let base_url = srv.base_url();
     let token = srv.token();
-    create_model_repo(&base_url, &token).await;
+    create_model_repo(base_url, token).await;
     let client = Client::new();
     let resp = client
         .post(format!(
@@ -917,7 +918,7 @@ async fn commit_single_file_returns_200() {
     let srv = start_hub_server().await;
     let base_url = srv.base_url();
     let token = srv.token();
-    create_model_repo(&base_url, &token).await;
+    create_model_repo(base_url, token).await;
 
     let client = Client::new();
     let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b"hello world");
@@ -948,7 +949,7 @@ async fn commit_multiple_files() {
     let srv = start_hub_server().await;
     let base_url = srv.base_url();
     let token = srv.token();
-    create_model_repo(&base_url, &token).await;
+    create_model_repo(base_url, token).await;
 
     let client = Client::new();
     let b64_a = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b"file a");
@@ -981,7 +982,7 @@ async fn commit_missing_header_returns_error() {
     let srv = start_hub_server().await;
     let base_url = srv.base_url();
     let token = srv.token();
-    create_model_repo(&base_url, &token).await;
+    create_model_repo(base_url, token).await;
 
     let client = Client::new();
     // Commit body without a header line — should be rejected.
@@ -1009,11 +1010,11 @@ async fn commit_delete_file() {
     let srv = start_hub_server().await;
     let base_url = srv.base_url();
     let token = srv.token();
-    create_model_repo(&base_url, &token).await;
+    create_model_repo(base_url, token).await;
     // First commit creates a file
     commit_inline_file(
-        &base_url,
-        &token,
+        base_url,
+        token,
         "models",
         "test-owner",
         "test-model",
@@ -1053,10 +1054,10 @@ async fn tree_root_after_commit_lists_files() {
     let srv = start_hub_server().await;
     let base_url = srv.base_url();
     let token = srv.token();
-    create_model_repo(&base_url, &token).await;
+    create_model_repo(base_url, token).await;
     commit_inline_file(
-        &base_url,
-        &token,
+        base_url,
+        token,
         "models",
         "test-owner",
         "test-model",
@@ -1089,10 +1090,10 @@ async fn tree_subdirectory() {
     let srv = start_hub_server().await;
     let base_url = srv.base_url();
     let token = srv.token();
-    create_model_repo(&base_url, &token).await;
+    create_model_repo(base_url, token).await;
     commit_inline_file(
-        &base_url,
-        &token,
+        base_url,
+        token,
         "models",
         "test-owner",
         "test-model",
@@ -1102,8 +1103,8 @@ async fn tree_subdirectory() {
     )
     .await;
     commit_inline_file(
-        &base_url,
-        &token,
+        base_url,
+        token,
         "models",
         "test-owner",
         "test-model",
@@ -1134,7 +1135,7 @@ async fn tree_nonexistent_revision_returns_404() {
     let srv = start_hub_server().await;
     let base_url = srv.base_url();
     let token = srv.token();
-    create_model_repo(&base_url, &token).await;
+    create_model_repo(base_url, token).await;
     let client = Client::new();
     let resp = client
         .get(format!(
@@ -1457,7 +1458,7 @@ async fn git_push_clone_roundtrip_via_smart_http() {
     let client = Client::new();
 
     // 1. Create a model repo.
-    create_model_repo(&base_url, &token).await;
+    create_model_repo(base_url, token).await;
 
     // 2. Verify the repo has initial refs via info/refs (repo creation seeds an initial revision).
     let resp = client
@@ -1582,7 +1583,7 @@ async fn git_smart_http_ref_deletion_removes_branch_and_keeps_commit_available()
     let base_url = srv.base_url();
     let token = srv.token();
     let client = Client::new();
-    create_model_repo(&base_url, &token).await;
+    create_model_repo(base_url, token).await;
 
     let null_sha = "0000000000000000000000000000000000000000";
     let (push_body, commit_sha) = build_receive_pack_request_for_ref(
@@ -1682,7 +1683,7 @@ async fn git_receive_pack_rejects_unauthorized() {
 
     // Create a model repo first.
     let token = srv.token();
-    create_model_repo(&base_url, &token).await;
+    create_model_repo(base_url, token).await;
 
     // Try push without auth — should fail.
     let resp = client
@@ -1705,7 +1706,7 @@ async fn git_receive_pack_rejects_read_only_token() {
 
     // Create a model repo with write token.
     let write_token = srv.token();
-    create_model_repo(&base_url, &write_token).await;
+    create_model_repo(base_url, write_token).await;
 
     // Try push with a read-only token — should fail.
     let read_token = mint_token(shardline_protocol::TokenScope::Read).unwrap();
@@ -1735,7 +1736,7 @@ async fn repo_delete_removes_repo() {
     let srv = start_hub_server().await;
     let base_url = srv.base_url();
     let token = srv.token();
-    create_model_repo(&base_url, &token).await;
+    create_model_repo(base_url, token).await;
     let client = Client::new();
 
     // DELETE the repo.
@@ -1825,7 +1826,7 @@ async fn repo_delete_requires_write_scope() {
 
     // Create the repo with a write token.
     let write_token = srv.token();
-    create_model_repo(&base_url, &write_token).await;
+    create_model_repo(base_url, write_token).await;
 
     // Try to delete with a read-only token — should fail.
     let read_token = mint_token(shardline_protocol::TokenScope::Read).unwrap();
@@ -1850,7 +1851,7 @@ async fn git_info_refs_discover_refs_for_clone() {
     let client = Client::new();
 
     // Create a model repo and push a commit.
-    create_model_repo(&base_url, &token).await;
+    create_model_repo(base_url, token).await;
     let null_sha = "0000000000000000000000000000000000000000";
     let (push_body, _commit_sha) = build_receive_pack_request(
         null_sha,
@@ -1946,7 +1947,7 @@ async fn git_receive_pack_rejects_dotdot_refname() {
     let srv = start_hub_server().await;
     let base_url = srv.base_url();
     let token = srv.token();
-    create_model_repo(&base_url, &token).await;
+    create_model_repo(base_url, token).await;
 
     let client = Client::new();
     let null_sha = "0000000000000000000000000000000000000000";
@@ -2000,7 +2001,7 @@ async fn git_receive_pack_rejects_space_in_refname() {
     let srv = start_hub_server().await;
     let base_url = srv.base_url();
     let token = srv.token();
-    create_model_repo(&base_url, &token).await;
+    create_model_repo(base_url, token).await;
 
     let client = Client::new();
     let null_sha = "0000000000000000000000000000000000000000";
@@ -2058,7 +2059,7 @@ async fn git_receive_pack_rejects_malformed_pack() {
     let srv = start_hub_server().await;
     let base_url = srv.base_url();
     let token = srv.token();
-    create_model_repo(&base_url, &token).await;
+    create_model_repo(base_url, token).await;
 
     let client = Client::new();
     use shardline_hub_api::git::pktline;
@@ -2110,7 +2111,7 @@ async fn hub_commit_rejects_oversized_inline_file() {
     let srv = start_hub_server().await;
     let base_url = srv.base_url();
     let token = srv.token();
-    create_model_repo(&base_url, &token).await;
+    create_model_repo(base_url, token).await;
 
     // Build base64 for 10 MiB + 1 byte (MAX_INLINE_FILE_BYTES is 10 MiB).
     // This is expensive but necessary for correctness.
@@ -2156,7 +2157,7 @@ async fn git_clone_after_push_returns_correct_content() {
     let srv = start_hub_server().await;
     let base_url = srv.base_url();
     let token = srv.token();
-    create_model_repo(&base_url, &token).await;
+    create_model_repo(base_url, token).await;
 
     let client = Client::new();
 
@@ -2242,7 +2243,7 @@ async fn hub_commit_multi_file_single_request() {
     let srv = start_hub_server().await;
     let base_url = srv.base_url();
     let token = srv.token();
-    create_model_repo(&base_url, &token).await;
+    create_model_repo(base_url, token).await;
 
     // Build NDJSON with 5 files in a subdirectory.
     let mut ndjson = String::from("{\"header\":{\"summary\":\"five files\"}}\n");
@@ -2306,12 +2307,12 @@ async fn hub_commit_delete_removes_from_tree() {
     let srv = start_hub_server().await;
     let base_url = srv.base_url();
     let token = srv.token();
-    create_model_repo(&base_url, &token).await;
+    create_model_repo(base_url, token).await;
 
     // Commit a file in a subdirectory.
     commit_inline_file(
-        &base_url,
-        &token,
+        base_url,
+        token,
         "models",
         "test-owner",
         "test-model",
@@ -2384,7 +2385,7 @@ async fn hub_force_push_rejected_on_existing_branch() {
     let srv = start_hub_server().await;
     let base_url = srv.base_url();
     let token = srv.token();
-    create_model_repo(&base_url, &token).await;
+    create_model_repo(base_url, token).await;
 
     use shardline_hub_api::git::pack::{
         create_blob_object, create_commit_object, create_tree_object, generate_pack,
@@ -2472,7 +2473,7 @@ async fn hub_tag_push_appears_in_revisions() {
     let srv = start_hub_server().await;
     let base_url = srv.base_url();
     let token = srv.token();
-    create_model_repo(&base_url, &token).await;
+    create_model_repo(base_url, token).await;
 
     let client = Client::new();
     let null_sha = "0000000000000000000000000000000000000000";
@@ -2558,7 +2559,7 @@ async fn git_upload_pack_empty_repo() {
     let srv = start_hub_server().await;
     let base_url = srv.base_url();
     let token = srv.token();
-    create_model_repo(&base_url, &token).await;
+    create_model_repo(base_url, token).await;
 
     let client = Client::new();
     let upload_resp = client
@@ -2602,7 +2603,7 @@ async fn git_receive_pack_multiple_refs() {
     let srv = start_hub_server().await;
     let base_url = srv.base_url();
     let token = srv.token();
-    create_model_repo(&base_url, &token).await;
+    create_model_repo(base_url, token).await;
 
     use shardline_hub_api::git::pack::{
         create_blob_object, create_commit_object, create_tree_object, generate_pack,
@@ -2788,13 +2789,13 @@ async fn hub_modelcard_after_readme_commit() {
     let srv = start_hub_server().await;
     let base_url = srv.base_url();
     let token = srv.token();
-    create_model_repo(&base_url, &token).await;
+    create_model_repo(base_url, token).await;
 
     // Commit a README.md with modelcard-like content.
     let readme_content = b"# My Great Model\n\nThis is a comprehensive model card.\n\n## Capabilities\n- Vision\n- Language\n";
     commit_inline_file(
-        &base_url,
-        &token,
+        base_url,
+        token,
         "models",
         "test-owner",
         "test-model",
@@ -2843,7 +2844,7 @@ async fn hub_repo_info_includes_hf_fields() {
     let srv = start_hub_server().await;
     let base_url = srv.base_url();
     let token = srv.token();
-    create_model_repo(&base_url, &token).await;
+    create_model_repo(base_url, token).await;
 
     let client = Client::new();
     let resp = client
@@ -2946,12 +2947,12 @@ async fn hub_tree_supports_recursive() {
     let srv = start_hub_server().await;
     let base_url = srv.base_url();
     let token = srv.token();
-    create_model_repo(&base_url, &token).await;
+    create_model_repo(base_url, token).await;
 
     // Commit files in nested directories
     commit_inline_file(
-        &base_url,
-        &token,
+        base_url,
+        token,
         "models",
         "test-owner",
         "test-model",
@@ -2961,8 +2962,8 @@ async fn hub_tree_supports_recursive() {
     )
     .await;
     commit_inline_file(
-        &base_url,
-        &token,
+        base_url,
+        token,
         "models",
         "test-owner",
         "test-model",
@@ -3037,7 +3038,7 @@ async fn hub_search_accepts_hf_query_params() {
     let token = srv.token();
 
     // Create a repo
-    create_model_repo(&base_url, &token).await;
+    create_model_repo(base_url, token).await;
 
     let client = Client::new();
 
@@ -3083,13 +3084,13 @@ async fn hub_tree_supports_limit() {
     let srv = start_hub_server().await;
     let base_url = srv.base_url();
     let token = srv.token();
-    create_model_repo(&base_url, &token).await;
+    create_model_repo(base_url, token).await;
 
     // Commit 3 files
     for i in 0..3 {
         commit_inline_file(
-            &base_url,
-            &token,
+            base_url,
+            token,
             "models",
             "test-owner",
             "test-model",
@@ -3451,7 +3452,7 @@ async fn git_smart_http_works_with_valid_token() {
     let client = Client::new();
 
     // 1. Create a model repo.
-    create_model_repo(&base_url, &token).await;
+    create_model_repo(base_url, token).await;
 
     // 2. Push a commit via git-receive-pack with a valid write token.
     let file_content = b"token-gated content\nThis verifies auth-gated push works.\n";
@@ -3549,7 +3550,7 @@ async fn git_receive_pack_rejects_non_fast_forward() {
     let client = Client::new();
 
     // 1. Create a model repo.
-    create_model_repo(&base_url, &token).await;
+    create_model_repo(base_url, token).await;
 
     // 2. Push commit A to main.
     let null_sha = "0000000000000000000000000000000000000000";

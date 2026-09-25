@@ -54,7 +54,7 @@ Status meanings:
 | Resource pressure | Covered | Request/body/list bounds, admission and concurrency stress exist; isolated `RLIMIT_NOFILE` and Linux `RLIMIT_AS` regressions exhaust descriptors/address space, preserve committed state, release pressure and verify exact-byte recovery; deterministic execution-pool saturation rejects without queueing; a disposable Tokio runtime blocks every worker, proves queued storage work remains invisible, then releases the workers and requires exact publication | Extend the pressure matrix when a new process-wide resource becomes correctness-relevant |
 | Time | Covered | GC injects forward clock jumps and fails closed without stamping or deleting; Postgres-backed lifecycle repair takes shared retention time from PostgreSQL rather than replica clocks and verifies epoch results across extreme session timezones; two real Shardline processes sharing Postgres/S3 run with independent `-120s` and `+120s` wall clocks while monotonic time remains real, exercise the same near-expiry token, reject beyond each verifier's clock without side effects, and agree on tokens outside the tested skew window; fencing is epoch/lock based and clock-independent | Extend the skew magnitude/provider matrix and keep production clock monitoring within the documented operational bound |
 | Data corruption | Covered | Corrupt chunks, hashes, ranges, metadata, cache entries and protocol inputs are rejected or repaired; Xet range transfers validate the complete addressed xorb before exposing bytes; fsck is an independent oracle | Add sampled corruption campaigns over restored production-scale inventories |
-| Upgrade | Covered | Same-binary role replacement, migration up/down checks and typed pre/post-commit migration interruptions; the reliability workflow automatically selects the preceding SemVer release tag, builds it and the current commit as separate binaries, runs them concurrently against shared Postgres/S3, rolls both nodes forward one at a time, rolls one back, and requires bidirectional exact-byte reads and writes throughout | Extend compatibility assertions whenever a release adds a durable state transition |
+| Upgrade | Covered | Same-binary role replacement, migration up/down checks and typed pre/post-commit migration interruptions; the reliability workflow automatically selects the preceding SemVer release tag, builds it and the current commit as separate binaries, runs them concurrently against shared Postgres/S3, rolls both nodes forward one at a time, rolls one back, requires exact-byte cross-version reads, and proves N-1 writes are rejected without state change during the gated window | Extend compatibility assertions whenever a release adds a durable state transition |
 | Operator actions | Covered | Repeated restart, destructive restore rehearsal, repair/fsck/rebuild dry runs and malformed configuration tests; interrupted apply/revert migrations resume to a complete schema; lifecycle repair is interrupted after retention-hold, quarantine-candidate and webhook-delivery mutations, then required to resume and converge; the full rebuild → lifecycle repair → fsck operator sequence is rerun against the same durable root and required to converge identically | Extend typed interruption coverage whenever an operator workflow gains a new durable mutation |
 | Security | Covered | Cross-tenant route matrices and sealed capability binding require authorization before repository operations; denied-write cells prove no side effects for S3, LFS, Bazel, OCI, Hub and Xet; provider access-change/visibility and webhook replay tests cover lifecycle revocation signals; a concurrent six-frontend expired-token campaign seeds real existing and missing resources, alternates probe order, requires identical status/content-type/body-length surfaces, and bounds existing-versus-missing median latency, repeated 100 times in the scheduled workflow | Extend live external-IdP revocation and latency campaigns as provider test credentials become available |
 | Long soak | Covered | A weekly two-hour deterministic chaos campaign archives every seed transcript, elapsed time, peak RSS, sampled process-tree FD/task counts and invariant result; separate scheduled jobs archive the real Postgres/MinIO/Redis kill-and-partition campaign and 100 consecutive FD, address-space, and Tokio-worker starvation recovery cycles | Extend duration and fault combinations as hosted-runner budgets permit |
@@ -95,13 +95,13 @@ Run the fast deterministic schedule:
 
 ```bash
 SHARDLINE_CHAOS_SCALE=1 SHARDLINE_CHAOS_SEED=2436552524 \
-  cargo test -p shardline-server --test chaos_runner -- --nocapture
+  cargo nextest run -p shardline-server --test chaos_runner --no-tests=pass
 ```
 
 Run Loom models:
 
 ```bash
-cargo test -p shardline-loom-tests
+cargo nextest run -p shardline-loom-tests
 ```
 
 Run the bounded fuzz campaign configured by the repository:
@@ -113,14 +113,15 @@ scripts/shardline/fuzz.sh
 Deployment drills require the Docker fault stack described by the test and CI workflow:
 
 ```bash
-cargo test -p shardline-server --test deployment_chaos -- --nocapture
+cargo nextest run -p shardline-server --test deployment_chaos --no-tests=pass
 ```
 
 Run the real PostgreSQL streaming-replica promotion drill:
 
 ```bash
 docker compose -f docker-compose.postgres-failover.yml up -d --wait
-cargo test -p shardline-server --test postgres_failover -- --exact --nocapture
+cargo nextest run -p shardline-server --test postgres_failover \
+  -E 'test(running_server_recovers_after_real_primary_promotion)' --no-tests=pass
 docker compose -f docker-compose.postgres-failover.yml down
 ```
 

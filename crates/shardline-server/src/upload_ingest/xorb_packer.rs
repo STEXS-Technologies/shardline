@@ -14,7 +14,6 @@ use crate::{ServerError, object_store::ServerObjectStore};
 
 /// Metadata for one chunk packed inside a xorb.
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // fields read in tests
 pub struct XorbChunkEntry {
     /// Index of this chunk within the xorb (0-based).
     pub chunk_index: u32,

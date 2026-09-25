@@ -263,6 +263,27 @@ fn parse_repair_lifecycle() {
 }
 
 #[test]
+fn parse_repair_lfs_evidence() {
+    let args = vec![
+        "shardline".to_owned(),
+        "repair".to_owned(),
+        "lfs-evidence".to_owned(),
+        "--root".to_owned(),
+        "/var/lib/shardline".to_owned(),
+        "--state-file".to_owned(),
+        "/var/lib/shardline/recovery.json".to_owned(),
+    ];
+
+    assert_eq!(
+        CliCommand::parse(args),
+        Ok(CliCommand::RepairLfsEvidence {
+            root: Some(PathBuf::from("/var/lib/shardline")),
+            state_file: PathBuf::from("/var/lib/shardline/recovery.json"),
+        })
+    );
+}
+
+#[test]
 fn parse_repair_orchestrator_with_defaults() {
     let args = vec!["shardline".to_owned(), "repair".to_owned()];
 
@@ -486,6 +507,78 @@ fn parse_db_migrate_status() {
             command: DatabaseMigrationCommand::Status,
         })
     );
+}
+
+#[test]
+fn parse_db_migrate_verify() {
+    let args = vec![
+        "shardline".to_owned(),
+        "db".to_owned(),
+        "migrate".to_owned(),
+        "verify".to_owned(),
+        "--database-url".to_owned(),
+        "postgres://user:password@localhost:5432/shardline".to_owned(),
+    ];
+
+    assert_eq!(
+        CliCommand::parse(args),
+        Ok(CliCommand::DbMigrate {
+            database_url: Some(RedactedDbUrl(
+                "postgres://user:password@localhost:5432/shardline".to_owned(),
+            )),
+            command: DatabaseMigrationCommand::Verify,
+        })
+    );
+}
+
+#[test]
+fn parse_db_migrate_repair_requires_confirmation_and_preserves_identity() {
+    let args = vec![
+        "shardline".to_owned(),
+        "db".to_owned(),
+        "migrate".to_owned(),
+        "repair".to_owned(),
+        "--database-url".to_owned(),
+        "postgres://user:password@localhost:5432/shardline".to_owned(),
+        "--operation-kind".to_owned(),
+        "S3Object".to_owned(),
+        "--operation-id".to_owned(),
+        "bucket/object".to_owned(),
+        "--confirm".to_owned(),
+    ];
+
+    assert_eq!(
+        CliCommand::parse(args),
+        Ok(CliCommand::DbMigrate {
+            database_url: Some(RedactedDbUrl(
+                "postgres://user:password@localhost:5432/shardline".to_owned(),
+            )),
+            command: DatabaseMigrationCommand::Repair {
+                operation_kind: "S3Object".to_owned(),
+                operation_id: "bucket/object".to_owned(),
+            },
+        })
+    );
+}
+
+#[test]
+fn parse_db_migrate_repair_requires_confirmation() {
+    let parsed = CliCommand::parse(vec![
+        "shardline".to_owned(),
+        "db".to_owned(),
+        "migrate".to_owned(),
+        "repair".to_owned(),
+        "--operation-kind".to_owned(),
+        "S3Object".to_owned(),
+        "--operation-id".to_owned(),
+        "bucket/object".to_owned(),
+    ]);
+
+    let Err(error) = parsed else {
+        panic!("repair without confirmation must fail");
+    };
+    assert_eq!(error.kind(), ErrorKind::InvalidValue);
+    assert!(error.to_string().contains("--confirm"));
 }
 
 #[test]

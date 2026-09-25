@@ -1,4 +1,8 @@
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+    sync::{Mutex, OnceLock},
+};
 
 use rusqlite::{Connection, OptionalExtension, params};
 use shardline_protocol::unix_now_seconds_lossy;
@@ -10,7 +14,11 @@ use crate::{
     xet_hash_hex_string,
 };
 
-use super::{LOCAL_METADATA_DATABASE_FILE_NAME, LocalIndexStoreError, helpers};
+use super::{
+    LOCAL_METADATA_DATABASE_FILE_NAME, LOCAL_SCHEMA_MIGRATIONS_TABLE, LocalIndexStoreError, helpers,
+};
+
+static INITIALIZED_LOCAL_DATABASES: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
 
 /// Local SQLite implementation of [`IndexStore`](crate::IndexStore).
 #[derive(Debug, Clone)]
@@ -65,16 +73,105 @@ impl LocalIndexStore {
         Ok(())
     }
 
+    /// Adds missing StateChronicle Merkle commitments to one bounded batch of
+    /// existing local reliability events.
+    ///
+    /// This is intentionally explicit maintenance. Opening the store and
+    /// serving normal reads never rewrites legacy evidence.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the local database cannot be opened, the bounded
+    /// transaction fails, or a legacy event cannot be canonicalized.
+    pub fn backfill_reliability_merkle_commits(
+        &self,
+        batch_size: usize,
+    ) -> Result<usize, LocalIndexStoreError> {
+        let mut connection = self.open_connection()?;
+        let transaction = connection.transaction()?;
+        let updated = helpers::backfill_reliability_merkle_commits(&transaction, batch_size)?;
+        transaction.commit()?;
+        Ok(updated)
+    }
+
+    /// Rebuilds all local reliability Merkle commitments from persisted event
+    /// JSON in one explicit transactional repair operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the local database cannot be opened or any
+    /// persisted event is invalid or has a broken sequence.
+    pub fn repair_reliability_merkle_commits(&self) -> Result<usize, LocalIndexStoreError> {
+        let mut connection = self.open_connection()?;
+        let transaction = connection.transaction()?;
+        let repaired = helpers::repair_reliability_merkle_commits(&transaction)?;
+        transaction.commit()?;
+        Ok(repaired)
+    }
+
+    /// Verifies all local reliability events and their persisted Merkle
+    /// commitments without repairing anything.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the local database cannot be opened or a
+    /// reliability event or Merkle commitment is invalid.
+    pub fn verify_reliability_events(&self) -> Result<(), LocalIndexStoreError> {
+        let connection = self.open_connection()?;
+        helpers::verify_reliability_events(&connection)
+    }
+
     pub(crate) fn open_connection(&self) -> Result<Connection, LocalIndexStoreError> {
         helpers::initialize_local_metadata_root(&self.root)?;
         let database_path = self.database_path();
         helpers::ensure_sqlite_database_path_is_safe(&database_path)?;
+        let database_preexisted = database_path.exists();
         let mut connection =
-            Connection::open_with_flags(database_path, helpers::sqlite_open_flags())?;
+            Connection::open_with_flags(&database_path, helpers::sqlite_open_flags())?;
         helpers::prepare_connection(&mut connection)?;
-        helpers::ensure_local_schema_migrations_table(&connection)?;
-        helpers::apply_pending_local_migrations(&mut connection)?;
-        helpers::ensure_legacy_import_state(&mut connection, &self.root)?;
+        let mut initialized = INITIALIZED_LOCAL_DATABASES
+            .get_or_init(|| Mutex::new(HashSet::new()))
+            .lock()
+            .map_err(|error| {
+                LocalIndexStoreError::Io(std::io::Error::other(format!(
+                    "local metadata initialization lock poisoned: {error}"
+                )))
+            })?;
+        if !database_preexisted {
+            // A caller may remove and recreate a temporary/test root while a
+            // server task still owns the store. Treat the recreated file as a
+            // new database even if this process initialized the old inode.
+            initialized.remove(&database_path);
+        }
+        if initialized.contains(&database_path) {
+            let schema_table_exists = connection
+                .query_row(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                    [LOCAL_SCHEMA_MIGRATIONS_TABLE],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some();
+            if !schema_table_exists {
+                initialized.remove(&database_path);
+            }
+        }
+        if !initialized.contains(&database_path) {
+            helpers::ensure_local_schema_migrations_table(&connection)?;
+            helpers::apply_pending_local_migrations(&mut connection)?;
+            helpers::ensure_legacy_import_state(&mut connection, &self.root)?;
+            initialized.insert(database_path);
+        }
+        let import_state = connection
+            .query_row(
+                "SELECT value FROM shardline_local_metadata_meta WHERE key = ?1",
+                [super::LEGACY_IMPORT_COMPLETED_KEY],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        if import_state.as_deref().is_some_and(|state| state != "1") {
+            return Err(LocalIndexStoreError::InvalidLegacyImportState);
+        }
         Ok(connection)
     }
 
@@ -218,15 +315,17 @@ impl LocalRecordStore {
         let store = self.clone();
         let record = record.clone();
         tokio::task::spawn_blocking(move || {
-            let connection = store.open_connection()?;
-            let transaction = connection.unchecked_transaction()?;
-            let now = unix_now_seconds_lossy();
-            let version_locator = store.version_record_locator(&record);
-            helpers::upsert_file_record_row(&transaction, &version_locator, &record, now)?;
-            let latest_locator = store.latest_record_locator(&record);
-            helpers::upsert_file_record_row(&transaction, &latest_locator, &record, now)?;
-            transaction.commit()?;
-            Ok::<_, LocalIndexStoreError>(())
+            helpers::retry_sqlite_busy(|| {
+                let mut connection = store.open_connection()?;
+                let transaction = connection.transaction()?;
+                let now = unix_now_seconds_lossy();
+                let version_locator = store.version_record_locator(&record);
+                helpers::upsert_file_record_row(&transaction, &version_locator, &record, now)?;
+                let latest_locator = store.latest_record_locator(&record);
+                helpers::upsert_file_record_row(&transaction, &latest_locator, &record, now)?;
+                transaction.commit()?;
+                Ok::<_, LocalIndexStoreError>(())
+            })
         })
         .await
         .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
@@ -244,16 +343,18 @@ impl LocalRecordStore {
         let store = self.clone();
         let record = record.clone();
         tokio::task::spawn_blocking(move || {
-            let connection = store.open_connection()?;
-            let transaction = connection.unchecked_transaction()?;
-            let latest = store.latest_record_locator(&record);
-            let version = store.version_record_locator(&record);
-            transaction.execute(
-                "DELETE FROM shardline_file_records WHERE record_key IN (?1, ?2)",
-                params![latest.record_key(), version.record_key()],
-            )?;
-            transaction.commit()?;
-            Ok::<_, LocalIndexStoreError>(())
+            helpers::retry_sqlite_busy(|| {
+                let mut connection = store.open_connection()?;
+                let transaction = connection.transaction()?;
+                let latest = store.latest_record_locator(&record);
+                let version = store.version_record_locator(&record);
+                transaction.execute(
+                    "DELETE FROM shardline_file_records WHERE record_key IN (?1, ?2)",
+                    params![latest.record_key(), version.record_key()],
+                )?;
+                transaction.commit()?;
+                Ok::<_, LocalIndexStoreError>(())
+            })
         })
         .await
         .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
@@ -273,22 +374,24 @@ impl LocalRecordStore {
         let records = records.to_vec();
         let dedupe_mappings = dedupe_mappings.to_vec();
         tokio::task::spawn_blocking(move || {
-            let connection = store.open_connection()?;
-            let transaction = connection.unchecked_transaction()?;
-            let now = unix_now_seconds_lossy();
-            for record in &records {
-                let version_locator = store.version_record_locator(record);
-                helpers::upsert_file_record_row(&transaction, &version_locator, record, now)?;
-            }
-            for mapping in &dedupe_mappings {
-                helpers::upsert_dedupe_mapping_row(&transaction, mapping, now)?;
-            }
-            for record in &records {
-                let latest_locator = store.latest_record_locator(record);
-                helpers::upsert_file_record_row(&transaction, &latest_locator, record, now)?;
-            }
-            transaction.commit()?;
-            Ok::<_, LocalIndexStoreError>(())
+            helpers::retry_sqlite_busy(|| {
+                let mut connection = store.open_connection()?;
+                let transaction = connection.transaction()?;
+                let now = unix_now_seconds_lossy();
+                for record in &records {
+                    let version_locator = store.version_record_locator(record);
+                    helpers::upsert_file_record_row(&transaction, &version_locator, record, now)?;
+                }
+                for mapping in &dedupe_mappings {
+                    helpers::upsert_dedupe_mapping_row(&transaction, mapping, now)?;
+                }
+                for record in &records {
+                    let latest_locator = store.latest_record_locator(record);
+                    helpers::upsert_file_record_row(&transaction, &latest_locator, record, now)?;
+                }
+                transaction.commit()?;
+                Ok::<_, LocalIndexStoreError>(())
+            })
         })
         .await
         .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?

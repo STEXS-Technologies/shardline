@@ -1,7 +1,6 @@
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::{
-    env::var,
     fs::{self, File, OpenOptions},
     io::{self, Error as IoError, ErrorKind, Read},
     num::NonZeroU64,
@@ -13,6 +12,7 @@ use shardline_cache::RedisTlsConfig;
 use shardline_protocol::{SecretBytes, SecretString, parse_bool};
 use shardline_storage::S3ObjectStoreConfig;
 
+use super::environment::var;
 use super::{
     MAX_PROVIDER_API_KEY_BYTES, MAX_REDIS_TLS_MATERIAL_BYTES, MAX_S3_CREDENTIAL_BYTES,
     ServerConfig, ServerConfigError, run_before_secret_file_read_hook_for_tests,
@@ -406,7 +406,6 @@ fn parse_env_bool(name: &str) -> Result<Option<bool>, ()> {
 }
 
 #[cfg(test)]
-#[allow(unsafe_code)]
 mod tests {
     use super::{
         ensure_secret_size_within_limit, load_redis_tls_config_from_env, open_secret_file,
@@ -419,13 +418,10 @@ mod tests {
     use super::super::ServerConfigError;
 
     fn set_env_var(key: &str, value: &str) {
-        // SAFETY: Must only be called from `#[serial_test::serial]` tests to
-        // prevent data races on the global environment.
-        unsafe { std::env::set_var(key, value) };
+        super::super::environment::set_test_var(key, value);
     }
     fn remove_env_var(key: &str) {
-        // SAFETY: Same threading constraints as `set_env_var`.
-        unsafe { std::env::remove_var(key) };
+        super::super::environment::remove_test_var(key);
     }
 
     // -----------------------------------------------------------------------
@@ -707,7 +703,6 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    #[serial_test::serial]
     fn redis_tls_secret_files_load_a_complete_mutual_tls_identity() {
         let mut ca = tempfile::NamedTempFile::new().unwrap();
         let mut client_cert = tempfile::NamedTempFile::new().unwrap();
@@ -747,7 +742,6 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial]
     fn redis_tls_rejects_a_partial_mutual_tls_identity() {
         let mut client_cert = tempfile::NamedTempFile::new().unwrap();
         client_cert.write_all(b"test-client-certificate").unwrap();
@@ -1257,7 +1251,6 @@ mod tests {
     // ── parse_env_bool via env var ──────────────────────────────────────────
 
     #[test]
-    #[serial_test::serial]
     fn parse_env_bool_true_value_via_env() {
         // SAFETY: serialized env var test
         set_env_var("SHARDLINE_TEST_PARSE_BOOL_TRUE", "true");
@@ -1268,7 +1261,6 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial]
     fn parse_env_bool_false_value_via_env() {
         // SAFETY: serialized env var test
         set_env_var("SHARDLINE_TEST_PARSE_BOOL_FALSE", "false");
@@ -1279,7 +1271,6 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial]
     fn parse_env_bool_unset_env_returns_ok_none() {
         // SAFETY: serialized env var test
         remove_env_var("SHARDLINE_TEST_PARSE_BOOL_UNSET");
@@ -1288,7 +1279,6 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial]
     fn parse_env_bool_invalid_value_returns_err() {
         // SAFETY: serialized env var test
         set_env_var("SHARDLINE_TEST_PARSE_BOOL_INVALID", "not-a-bool");
@@ -1301,7 +1291,6 @@ mod tests {
     // ── load_s3_object_store_config_from_env (env-based) ───────────────────
 
     #[test]
-    #[serial_test::serial]
     fn load_s3_object_store_config_missing_bucket() {
         // Ensure SHARDLINE_S3_BUCKET is unset
         // SAFETY: serialized env var test
@@ -1314,7 +1303,6 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial]
     fn load_s3_object_store_config_invalid_allow_http() {
         // SAFETY: serialized env var test
         set_env_var("SHARDLINE_S3_BUCKET", "test-bucket");
@@ -1330,7 +1318,6 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial]
     fn load_s3_object_store_config_invalid_virtual_hosted_style() {
         // SAFETY: serialized env var test
         set_env_var("SHARDLINE_S3_BUCKET", "test-bucket");
@@ -1348,7 +1335,6 @@ mod tests {
     // ── optional_s3_secret_from_sources — credential source conflict via file env ─
 
     #[test]
-    #[serial_test::serial]
     fn optional_s3_secret_env_or_file_conflict() {
         use super::optional_s3_secret_env_or_file;
         // SAFETY: serialized env var test
@@ -1365,7 +1351,6 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial]
     fn optional_s3_secret_env_or_file_direct_value() {
         use super::optional_s3_secret_env_or_file;
         // SAFETY: serialized env var test
@@ -1385,7 +1370,6 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial]
     fn optional_s3_secret_env_or_file_both_unset() {
         use super::optional_s3_secret_env_or_file;
         // SAFETY: serialized env var test
@@ -1463,7 +1447,6 @@ mod tests {
     // ── load_s3_object_store_config_from_env — key prefix ────────────────
 
     #[test]
-    #[serial_test::serial]
     fn load_s3_object_store_config_with_key_prefix() {
         set_env_var("SHARDLINE_S3_BUCKET", "test-bucket");
         set_env_var("SHARDLINE_S3_KEY_PREFIX", "shardline/");
@@ -1485,7 +1468,6 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial]
     fn load_s3_object_store_config_empty_region() {
         // SAFETY: serialized env var test
         set_env_var("SHARDLINE_S3_BUCKET", "test-bucket");

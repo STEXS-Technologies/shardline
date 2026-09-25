@@ -6,7 +6,7 @@ pub(crate) struct LocalSqliteMigration {
     pub(crate) down_sql: &'static str,
 }
 
-pub(crate) const LOCAL_SQLITE_MIGRATIONS: [LocalSqliteMigration; 21] = [
+pub(crate) const LOCAL_SQLITE_MIGRATIONS: [LocalSqliteMigration; 28] = [
     LocalSqliteMigration {
         version: "20260417000000",
         name: "metadata_store",
@@ -138,5 +138,57 @@ pub(crate) const LOCAL_SQLITE_MIGRATIONS: [LocalSqliteMigration; 21] = [
         name: "resumable_sessions",
         up_sql: include_str!("../../migrations/20260823000000_resumable_sessions.up.sql"),
         down_sql: include_str!("../../migrations/20260823000000_resumable_sessions.down.sql"),
+    },
+    LocalSqliteMigration {
+        version: "20260922000000",
+        name: "reliability_events",
+        up_sql: include_str!("../../migrations/20260922000000_reliability_events.up.sql"),
+        down_sql: include_str!("../../migrations/20260922000000_reliability_events.down.sql"),
+    },
+    LocalSqliteMigration {
+        version: "20260924000000",
+        name: "resumable_state_digest",
+        up_sql: include_str!("../../migrations/20260924000000_resumable_state_digest.up.sql"),
+        down_sql: include_str!("../../migrations/20260924000000_resumable_state_digest.down.sql"),
+    },
+    LocalSqliteMigration {
+        version: "20260926000000",
+        name: "reliability_write_gates",
+        up_sql: include_str!("../../migrations/20260926000000_reliability_write_gates.up.sql"),
+        down_sql: include_str!("../../migrations/20260926000000_reliability_write_gates.down.sql"),
+    },
+    LocalSqliteMigration {
+        version: "20260927000000",
+        name: "reliability_events_schema_compat",
+        up_sql: include_str!(
+            "../../migrations/20260927000000_reliability_events_schema_compat.up.sql"
+        ),
+        down_sql: include_str!(
+            "../../migrations/20260927000000_reliability_events_schema_compat.down.sql"
+        ),
+    },
+    LocalSqliteMigration {
+        version: "20260928000000",
+        name: "reliability_delete_gates",
+        up_sql: include_str!("../../migrations/20260928000000_reliability_delete_gates.up.sql"),
+        down_sql: include_str!("../../migrations/20260928000000_reliability_delete_gates.down.sql"),
+    },
+    LocalSqliteMigration {
+        version: "20260929000000",
+        name: "reliability_write_gate_state_match",
+        up_sql: include_str!(
+            "../../migrations/20260929000000_reliability_write_gate_state_match.up.sql"
+        ),
+        down_sql: include_str!(
+            "../../migrations/20260929000000_reliability_write_gate_state_match.down.sql"
+        ),
+    },
+    LocalSqliteMigration {
+        version: "20260930000000",
+        name: "reliability_merkle_commits",
+        up_sql: include_str!("../../migrations/20260930000000_reliability_merkle_commits.up.sql"),
+        down_sql: include_str!(
+            "../../migrations/20260930000000_reliability_merkle_commits.down.sql"
+        ),
     },
 ];

@@ -9,17 +9,18 @@
 //! `put_s3_object_stream`), producing a single `FileRecord` whose BLAKE3 root
 //! content hash equals a single `PutObject` of the same bytes.
 //!
-//! Locking: the adapter's process-global session lock ([`lock_upload_sessions`])
-//! is held only for session validation and metadata/quota mutations — never
+//! Locking: the adapter's per-root session lock ([`lock_upload_sessions`]) is
+//! held only for session validation and metadata/quota mutations — never
 //! across a network body stream, so a slow `UploadPart` or `Complete` cannot
 //! stall other tenants' session operations (F-10). Part-file writes and reads
 //! are instead serialized with the expiry sweep (which deletes session
-//! directories) and with each other by a per-session lock keyed by the upload
-//! id ([`acquire_session_part_lock`]): concurrent `UploadPart`s for the same
-//! session serialize there, `CompleteMultipartUpload` reads the part files
-//! under it, and the adapter's sweep takes it before removing a session
-//! directory. The adapter's `store_part_locked` / `delete_session_locked`
-//! variants are used to avoid re-acquiring the global lock for metadata
+//! directories) and with each other by a per-session lock scoped to the
+//! deployment root ([`acquire_session_part_lock_for_root`]): concurrent
+//! `UploadPart`s for the same session serialize there,
+//! `CompleteMultipartUpload` reads the part files under it, and the adapter's
+//! sweep takes it before removing a session directory. The adapter's
+//! `store_part_locked` / `delete_session_locked` variants are used to avoid
+//! re-acquiring the per-root lock for metadata
 //! mutations.
 
 use std::{
@@ -39,26 +40,27 @@ use shardline_index::{
     CreateResumableSessionOutcome, PublishResumablePartOutcome, ResourceLockKey, ResumableSession,
     ResumableSessionProtocol, ResumableSessionState, S3ObjectEntry, S3PublishCondition,
 };
-use shardline_protocol::ShardlineHash;
 use shardline_s3_adapter::{
     CompleteMultipartUploadResult, InitiateMultipartUploadResult, S3Error, S3SessionError,
-    acquire_session_part_lock, create_session, delete_session_locked, lock_session_parts,
+    acquire_session_part_lock_for_root, create_session, delete_session_locked, lock_session_parts,
     lock_upload_sessions, new_upload_id, parse_complete_multipart_parts, part_file_path,
-    read_session, store_part_locked, validate_part_quota_locked,
+    read_session_locked, store_part_locked, validate_part_quota_locked,
 };
-use shardline_storage::{ObjectIntegrity, ObjectKey};
+use shardline_storage::ObjectKey;
 use tokio::io::AsyncWriteExt;
 
 use crate::{
     ServerError,
     app::AppState,
     metrics,
-    object_store::materialize_object_to_file,
+    object_store::{
+        materialize_object_to_file, s3_resumable_parts_reader, stage_reader_content_addressed_s3,
+    },
     upload_ingest::{RequestBodyReader, read_body_to_bytes},
 };
 
 use super::{
-    S3ObjectContext, acquire_object_upload_lock, aws_chunked, object, s3_xml_content_type,
+    S3ObjectContext, acquire_object_upload_lock_for_root, aws_chunked, object, s3_xml_content_type,
 };
 
 /// Maps a local I/O failure to the S3 internal-error envelope.
@@ -98,6 +100,7 @@ fn store_error_to_s3(error: S3SessionError) -> S3Error {
         | other @ S3SessionError::SessionQuotaExceeded
         | other @ S3SessionError::AggregateQuotaExceeded
         | other @ S3SessionError::Overflow
+        | other @ S3SessionError::Reliability(_)
         | other @ S3SessionError::BlockingTask(_) => S3Error::from(other),
     }
 }
@@ -237,7 +240,7 @@ pub(super) async fn s3_upload_part(
     let _session_lock = lock_upload_sessions(root).await?;
 
     // The session must exist, be unexpired, and belong to this bucket/key.
-    let session = read_session(root, upload_id, ttl).await?;
+    let session = read_session_locked(root, upload_id, ttl).await?;
     if session.key != context.key || session.scope_namespace != context.scope_namespace {
         return Err(S3Error::no_such_upload());
     }
@@ -327,7 +330,7 @@ pub(super) async fn s3_upload_part(
     // streaming: the part-file write below is protected from the sweep and
     // from a concurrent Complete by the per-session lock alone, so other
     // tenants' session operations are never blocked on this body (F-10).
-    let part_lock = acquire_session_part_lock(upload_id);
+    let part_lock = acquire_session_part_lock_for_root(root, upload_id);
     let _part_guard = part_lock.lock().await;
     let part_file_guard = lock_session_parts(root, upload_id).await?;
     drop(_session_lock);
@@ -444,36 +447,53 @@ async fn durable_s3_upload_part(
         reader = RequestBodyReader::from_stream(aws_chunked::decode_aws_chunked(reader, ceiling));
     }
 
-    let temporary = tempfile::NamedTempFile::new().map_err(io_to_s3)?;
-    let mut file = tokio::fs::File::from_std(temporary.reopen().map_err(io_to_s3)?);
-    let mut hasher = blake3::Hasher::new();
-    let mut size_bytes = 0_u64;
-    while let Some(chunk) = reader.next_bytes().await.map_err(S3Error::from)? {
-        size_bytes = size_bytes
-            .checked_add(u64::try_from(chunk.len()).map_err(|_error| S3Error::internal())?)
-            .ok_or_else(S3Error::internal)?;
-        hasher.update(&chunk);
-        file.write_all(&chunk).await.map_err(io_to_s3)?;
-    }
-    file.flush().await.map_err(io_to_s3)?;
-    drop(file);
-
-    let digest = hasher.finalize();
-    let staging_key = ObjectKey::parse(&format!(
-        "staging/resumable/s3/{upload_id}/{part_number}/{}",
-        hex::encode(digest.as_bytes())
-    ))
-    .map_err(|_error| S3Error::internal())?;
-    let integrity = ObjectIntegrity::new(ShardlineHash::from_bytes(*digest.as_bytes()), size_bytes);
     let store = state.backend.object_store();
-    let path = temporary.path().to_path_buf();
-    let durable_key = staging_key.clone();
-    tokio::task::spawn_blocking(move || {
-        store.put_content_addressed_file(&durable_key, &path, &integrity)
-    })
-    .await
-    .map_err(|error| io_to_s3(std::io::Error::other(error)))?
-    .map_err(ServerError::from)?;
+    let (staging_key, size_bytes) = match &store {
+        shardline_server_core::ServerObjectStore::S3(s3_store) => {
+            let prefix = format!("staging/resumable/s3/{upload_id}/{part_number}");
+            let (key, integrity) =
+                stage_reader_content_addressed_s3(s3_store, &prefix, &mut reader)
+                    .await
+                    .map_err(S3Error::from)?;
+            (key, integrity.length())
+        }
+        shardline_server_core::ServerObjectStore::Local(_)
+        | shardline_server_core::ServerObjectStore::Blackhole => {
+            let temporary = tempfile::NamedTempFile::new().map_err(io_to_s3)?;
+            let mut file = tokio::fs::File::from_std(temporary.reopen().map_err(io_to_s3)?);
+            let mut hasher = blake3::Hasher::new();
+            let mut size_bytes = 0_u64;
+            while let Some(chunk) = reader.next_bytes().await.map_err(S3Error::from)? {
+                size_bytes = size_bytes
+                    .checked_add(u64::try_from(chunk.len()).map_err(|_error| S3Error::internal())?)
+                    .ok_or_else(S3Error::internal)?;
+                hasher.update(&chunk);
+                file.write_all(&chunk).await.map_err(io_to_s3)?;
+            }
+            file.flush().await.map_err(io_to_s3)?;
+            drop(file);
+
+            let digest = hasher.finalize();
+            let staging_key = ObjectKey::parse(&format!(
+                "staging/resumable/s3/{upload_id}/{part_number}/{}",
+                hex::encode(digest.as_bytes())
+            ))
+            .map_err(|_error| S3Error::internal())?;
+            let integrity = shardline_storage::ObjectIntegrity::new(
+                shardline_protocol::ShardlineHash::from_bytes(*digest.as_bytes()),
+                size_bytes,
+            );
+            let path = temporary.path().to_path_buf();
+            let durable_key = staging_key.clone();
+            tokio::task::spawn_blocking(move || {
+                store.put_content_addressed_file(&durable_key, &path, &integrity)
+            })
+            .await
+            .map_err(|error| io_to_s3(std::io::Error::other(error)))?
+            .map_err(ServerError::from)?;
+            (staging_key, size_bytes)
+        }
+    };
 
     let part_number = NonZeroU64::new(u64::from(part_number)).ok_or_else(S3Error::invalid_part)?;
     let etag = format!("\"{upload_id}-{}\"", part_number.get());
@@ -545,7 +565,7 @@ pub(super) async fn s3_complete_multipart_upload(
     // completion cannot stall other tenants' session operations (F-10).
     let _session_lock = lock_upload_sessions(root).await?;
 
-    let session = read_session(root, upload_id, ttl).await?;
+    let session = read_session_locked(root, upload_id, ttl).await?;
     if session.key != context.key || session.scope_namespace != context.scope_namespace {
         return Err(S3Error::no_such_upload());
     }
@@ -590,7 +610,7 @@ pub(super) async fn s3_complete_multipart_upload(
     // concurrent UploadPart for this session (and the expiry sweep) serialize
     // on the per-session lock while we open and ingest the part files, so the
     // ingest below cannot race a part write or a directory delete (F-10).
-    let part_lock = acquire_session_part_lock(upload_id);
+    let part_lock = acquire_session_part_lock_for_root(root, upload_id);
     let _part_guard = part_lock.lock().await;
     let part_file_guard = lock_session_parts(root, upload_id).await?;
     drop(_session_lock);
@@ -609,7 +629,8 @@ pub(super) async fn s3_complete_multipart_upload(
     let parts_reader = RequestBodyReader::from_reader_chain(part_files, chunk_size);
 
     // Serialize concurrent overwrites of the target object key.
-    let object_lock = acquire_object_upload_lock(context.object_key.as_str());
+    let object_lock =
+        acquire_object_upload_lock_for_root(state.config.root_dir(), context.object_key.as_str());
     let _object_guard = object_lock.lock().await;
 
     // Atomic overwrite (same as PutObject): stream the new record FIRST (a
@@ -680,21 +701,36 @@ async fn durable_s3_complete_multipart_upload(
     upload_id: &str,
     body: Body,
 ) -> Result<Response, S3Error> {
-    let (session, parts) = state
+    // Validate the opaque upload identity before claiming completion.  A
+    // caller may know a valid upload ID but present it under another bucket or
+    // key; that request must be observationally rejected and must not advance
+    // the session fence or move it to `completing`.
+    let candidate = state
         .backend
-        .begin_resumable_completion(upload_id)
+        .resumable_session_by_id(upload_id)
         .await?
-        .filter(|(session, _parts)| {
+        .filter(|session| {
             session.protocol() == ResumableSessionProtocol::S3Multipart
+                && matches!(
+                    session.state(),
+                    ResumableSessionState::Active | ResumableSessionState::Completing
+                )
                 && session.scope_namespace() == context.scope_namespace
                 && session.target_key() == context.key
         })
         .ok_or_else(S3Error::no_such_upload)?;
-    let attributes: DurableS3SessionAttributes =
-        serde_json::from_str(session.attributes_json()).map_err(|_error| S3Error::internal())?;
-    if attributes.bucket != context.bucket {
+    let candidate_attributes: DurableS3SessionAttributes =
+        serde_json::from_str(candidate.attributes_json()).map_err(|_error| S3Error::internal())?;
+    if candidate_attributes.bucket != context.bucket {
         return Err(S3Error::no_such_upload());
     }
+
+    let (session, parts) = state
+        .backend
+        .begin_resumable_completion(upload_id)
+        .await?
+        .ok_or_else(S3Error::no_such_upload)?;
+    let attributes = candidate_attributes;
 
     let mut request_reader =
         RequestBodyReader::from_body(body, state.config.max_request_body_bytes())
@@ -724,28 +760,37 @@ async fn durable_s3_complete_multipart_upload(
         }
     }
 
-    let temporary = tempfile::tempdir().map_err(io_to_s3)?;
-    let mut files = Vec::with_capacity(parts.len());
-    for part in &parts {
-        let key = ObjectKey::parse(part.staging_key()).map_err(|_error| S3Error::internal())?;
-        let destination = temporary
-            .path()
-            .join(format!("part-{}", part.part_number()));
-        materialize_object_to_file(
-            &state.backend.object_store(),
-            &key,
-            part.size_bytes(),
-            &destination,
-        )
-        .await?;
-        files.push(tokio::fs::File::open(destination).await.map_err(io_to_s3)?);
-    }
-    let chunk_size = state.config.chunk_size().get();
     let hasher = Arc::new(Mutex::new(Md5::new()));
-    let reader =
-        RequestBodyReader::from_reader_chain(files, chunk_size).with_md5_tee(hasher.clone());
+    let (reader, _temporary) = if let Some(reader) =
+        s3_resumable_parts_reader(&state.backend.object_store(), &parts).await?
+    {
+        (reader.with_md5_tee(hasher.clone()), None)
+    } else {
+        let temporary = tempfile::tempdir().map_err(io_to_s3)?;
+        let mut files = Vec::with_capacity(parts.len());
+        for part in &parts {
+            let key = ObjectKey::parse(part.staging_key()).map_err(|_error| S3Error::internal())?;
+            let destination = temporary
+                .path()
+                .join(format!("part-{}", part.part_number()));
+            materialize_object_to_file(
+                &state.backend.object_store(),
+                &key,
+                part.size_bytes(),
+                &destination,
+            )
+            .await?;
+            files.push(tokio::fs::File::open(destination).await.map_err(io_to_s3)?);
+        }
+        let chunk_size = state.config.chunk_size().get();
+        (
+            RequestBodyReader::from_reader_chain(files, chunk_size).with_md5_tee(hasher.clone()),
+            Some(temporary),
+        )
+    };
 
-    let object_lock = acquire_object_upload_lock(context.object_key.as_str());
+    let object_lock =
+        acquire_object_upload_lock_for_root(state.config.root_dir(), context.object_key.as_str());
     let _object_guard = object_lock.lock().await;
     let mut resource_guard = state
         .backend
@@ -856,11 +901,11 @@ pub(super) async fn s3_abort_multipart_upload(
     // the sweep takes both locks in the same order.
     let _session_lock = lock_upload_sessions(root).await?;
 
-    let session = read_session(root, upload_id, ttl).await?;
+    let session = read_session_locked(root, upload_id, ttl).await?;
     if session.key != context.key || session.scope_namespace != context.scope_namespace {
         return Err(S3Error::no_such_upload());
     }
-    let part_lock = acquire_session_part_lock(upload_id);
+    let part_lock = acquire_session_part_lock_for_root(root, upload_id);
     let _part_guard = part_lock.lock().await;
     let _part_file_guard = lock_session_parts(root, upload_id).await?;
     delete_session_locked(root, upload_id).await?;

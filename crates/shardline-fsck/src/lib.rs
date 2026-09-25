@@ -54,6 +54,7 @@
 //! index, and object-store adapters, or [`run_local_fsck`] for the
 //! local-filesystem layout.
 
+mod compat;
 mod error;
 mod report;
 mod runner;
@@ -67,6 +68,9 @@ mod record_checks;
 
 // ── Public API re-exports ────────────────────────────────────────────
 
+pub use compat::{
+    LocalFsckIssue, LocalFsckIssueKind, LocalFsckReport, WEBHOOK_DELIVERY_FUTURE_SKEW_SECONDS,
+};
 pub use error::FsckError;
 pub use report::FsckReport;
 pub use runner::{run_fsck_with_stores, run_local_fsck};
@@ -74,21 +78,6 @@ pub use types::{
     FsckIssue, FsckIssueDetail, FsckIssueKind, FsckReconstructionPlanDetail,
     ProviderRepositoryStateTimestampField,
 };
-
-// ── Backward-compatible local aliases ─────────────────────────────────
-
-/// Backward-compatible local fsck report alias.
-pub type LocalFsckReport = FsckReport;
-
-/// Backward-compatible local fsck issue alias.
-pub type LocalFsckIssue = FsckIssue;
-
-/// Backward-compatible local fsck issue-kind alias.
-pub type LocalFsckIssueKind = FsckIssueKind;
-
-// ── Constants ────────────────────────────────────────────────────────
-
-pub const WEBHOOK_DELIVERY_FUTURE_SKEW_SECONDS: u64 = 300;
 
 // ── Crate-internal re-exports (for sibling modules & tests) ──────────
 

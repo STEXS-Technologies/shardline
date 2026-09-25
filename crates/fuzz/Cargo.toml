@@ -21,6 +21,7 @@ hex.workspace = true
 libfuzzer-sys.workspace = true
 object_store = { workspace = true, default-features = true }
 sdx.workspace = true
+serde_json.workspace = true
 shardline.workspace = true
 shardline-auth.workspace = true
 shardline-cas.workspace = true
@@ -31,6 +32,7 @@ shardline-index.workspace = true
 shardline-oci-adapter.workspace = true
 shardline-protocol.workspace = true
 shardline-protocol-adapters.workspace = true
+shardline-reliability.workspace = true
 shardline-rebuild.workspace = true
 shardline-s3-adapter.workspace = true
 shardline-server = { workspace = true, features = ["fuzzing"] }
@@ -45,6 +47,18 @@ shardline-xet-core.workspace = true
 [[bin]]
 name = "shardline_protocol_hash"
 path = "fuzz_targets/shardline/protocol_hash.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "shardline_reliability_merkle"
+path = "fuzz_targets/shardline/reliability_merkle.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "shardline_reliability_merkle_journal"
+path = "fuzz_targets/shardline/reliability_merkle_journal.rs"
 test = false
 doc = false
 
@@ -351,6 +365,94 @@ doc = false
 [[bin]]
 name = "shardline_admin_api_v1_cursor"
 path = "fuzz_targets/shardline/admin_api_v1_cursor.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "shardline_reliability_lifecycle"
+path = "fuzz_targets/shardline/reliability_lifecycle.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "shardline_reliability_lifecycle_log"
+path = "fuzz_targets/shardline/reliability_lifecycle_log.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "shardline_resumable_session_state"
+path = "fuzz_targets/shardline/resumable_session_state.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "shardline_reliability_resumable_evidence"
+path = "fuzz_targets/shardline/reliability_resumable_evidence.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "shardline_resumable_state_digest"
+path = "fuzz_targets/shardline/resumable_state_digest.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "shardline_reliability_session_evidence"
+path = "fuzz_targets/shardline/reliability_session_evidence.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "shardline_reliability_upload_evidence"
+path = "fuzz_targets/shardline/reliability_upload_evidence.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "shardline_reliability_provider_evidence"
+path = "fuzz_targets/shardline/reliability_provider_evidence.rs"
+
+[[bin]]
+name = "shardline_reliability_quarantine_evidence"
+path = "fuzz_targets/shardline/reliability_quarantine_evidence.rs"
+
+[[bin]]
+name = "shardline_reliability_retention_evidence"
+path = "fuzz_targets/shardline/reliability_retention_evidence.rs"
+
+[[bin]]
+name = "shardline_reliability_webhook_evidence"
+path = "fuzz_targets/shardline/reliability_webhook_evidence.rs"
+
+[[bin]]
+name = "shardline_reliability_oci_evidence"
+path = "fuzz_targets/shardline/reliability_oci_evidence.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "shardline_reliability_persisted_event"
+path = "fuzz_targets/shardline/reliability_persisted_event.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "shardline_reliability_metadata_evidence"
+path = "fuzz_targets/shardline/reliability_metadata_evidence.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "shardline_reliability_oci_tag_evidence"
+path = "fuzz_targets/shardline/reliability_oci_tag_evidence.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "shardline_reliability_s3_object_evidence"
+path = "fuzz_targets/shardline/reliability_s3_object_evidence.rs"
 test = false
 doc = false
 

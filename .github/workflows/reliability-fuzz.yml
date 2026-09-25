@@ -1,0 +1,62 @@
+name: Reliability fuzz
+
+on:
+  workflow_dispatch:
+    inputs:
+      duration_seconds:
+        description: Minimum libFuzzer wall-clock duration per target
+        required: false
+        default: "3600"
+  schedule:
+    - cron: "17 3 * * 6"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: reliability-fuzz-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  reliability_targets:
+    runs-on: ubuntu-latest
+    outputs:
+      targets: ${{ steps.targets.outputs.targets }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Setup Rust CI toolchain and tools
+        uses: ./.github/actions/rust-ci-setup
+        with:
+          cargo-tools: cargo-make,cargo-nextest,cargo-fuzz
+
+      - name: Discover registered reliability fuzz targets
+        id: targets
+        shell: bash
+        run: |
+          targets="$(bash scripts/shardline/fuzz.sh reliability-list | jq -R -s -c 'split("\n") | map(select(length > 0) )')"
+          test "${targets}" != "[]"
+          echo "targets=${targets}" >> "${GITHUB_OUTPUT}"
+
+  reliability-fuzz:
+    needs: reliability_targets
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.reliability_targets.outputs.targets) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    env:
+      SHARDLINE_FUZZ_DURATION_SECONDS: ${{ inputs.duration_seconds || '3600' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Setup Rust CI toolchain and tools
+        uses: ./.github/actions/rust-ci-setup
+        with:
+          cargo-tools: cargo-make,cargo-nextest,cargo-fuzz
+
+      - name: Run reliability fuzz campaign
+        run: bash scripts/shardline/fuzz.sh reliability ${{ matrix.target }}

@@ -1,6 +1,6 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::{env::var, fs, num::NonZeroUsize, process::Command};
+use std::{env::var, fs, num::NonZeroUsize, path::Path, process::Command};
 
 use shardline_server::LocalBackend;
 
@@ -86,6 +86,22 @@ fn missing_or_invalid_env_file_fails_during_cli_parsing() {
 }
 
 fn shardline_binary() -> String {
-    #[allow(clippy::expect_used)]
-    var("CARGO_BIN_EXE_shardline").expect("Cargo should provide the shardline binary path")
+    if let Ok(path) = var("CARGO_BIN_EXE_shardline") {
+        return path;
+    }
+
+    // Cargo sets CARGO_BIN_EXE_* for `cargo test`, but nextest intentionally
+    // does not. Derive the sibling binary from the integration-test path so
+    // the CLI tests remain valid in both runners.
+    let test_executable = std::env::current_exe().expect("test executable path");
+    let binary = test_executable
+        .parent()
+        .and_then(Path::parent)
+        .map(|target| target.join("shardline"))
+        .expect("test executable should be under target/debug/deps");
+    assert!(
+        binary.is_file(),
+        "shardline binary does not exist: {binary:?}"
+    );
+    binary.to_string_lossy().into_owned()
 }

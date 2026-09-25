@@ -144,21 +144,21 @@ pub(super) fn set_before_provider_config_read_hook(
     path: PathBuf,
     hook: impl FnOnce() + Send + 'static,
 ) {
-    let mut slot = match super::BEFORE_PROVIDER_CONFIG_READ_HOOK.lock() {
+    let mut hooks = match super::BEFORE_PROVIDER_CONFIG_READ_HOOK.lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
     };
-    *slot = Some(ProviderConfigReadHookRegistration {
+    hooks.insert(
         path,
-        hook: Box::new(hook),
-    });
+        ProviderConfigReadHookRegistration {
+            hook: Box::new(hook),
+        },
+    );
 }
 
 #[cfg(test)]
 mod tests {
     use std::io::Write;
-
-    use serial_test::serial;
 
     use super::*;
     use crate::provider::ProviderConfigDocument;
@@ -335,7 +335,6 @@ mod tests {
     // ── set_before_provider_config_read_hook test ─────────────────────────
 
     #[test]
-    #[serial(provider_config_hook)]
     fn set_before_provider_config_read_hook_stores_registration() {
         use super::super::BEFORE_PROVIDER_CONFIG_READ_HOOK;
 
@@ -346,15 +345,13 @@ mod tests {
             hook_called.store(true, std::sync::atomic::Ordering::SeqCst);
         });
 
-        // Verify the hook was stored. The mutex may have been poisoned by an
-        // earlier test, so recover the guard instead of unwrapping. The guard
-        // is scoped so it is released before the hook is run below.
+        // Verify the hook was stored under its independent config path.
         let stored_path = {
-            let slot = match BEFORE_PROVIDER_CONFIG_READ_HOOK.lock() {
+            let hooks = match BEFORE_PROVIDER_CONFIG_READ_HOOK.lock() {
                 Ok(guard) => guard,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            slot.as_ref().map(|registration| registration.path.clone())
+            hooks.get(&path).map(|_| path.clone())
         };
         assert_eq!(stored_path.as_deref(), Some(path.as_path()));
 
@@ -362,6 +359,33 @@ mod tests {
         // registration so it cannot affect later tests).
         run_before_provider_config_read_hook(&path);
         assert!(called.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn config_read_hooks_are_independent_by_path() {
+        use std::sync::{Arc, atomic::AtomicUsize};
+
+        let first_path = std::path::PathBuf::from("/tmp/first-hook-config");
+        let second_path = std::path::PathBuf::from("/tmp/second-hook-config");
+        let first_called = Arc::new(AtomicUsize::new(0));
+        let second_called = Arc::new(AtomicUsize::new(0));
+        let first_counter = Arc::clone(&first_called);
+        let second_counter = Arc::clone(&second_called);
+
+        set_before_provider_config_read_hook(first_path.clone(), move || {
+            first_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        });
+        set_before_provider_config_read_hook(second_path.clone(), move || {
+            second_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        });
+
+        std::thread::scope(|scope| {
+            scope.spawn(|| run_before_provider_config_read_hook(&first_path));
+            scope.spawn(|| run_before_provider_config_read_hook(&second_path));
+        });
+
+        assert_eq!(first_called.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(second_called.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     // ── read_bounded_provider_config — UnexpectedEof during initial read ──

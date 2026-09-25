@@ -84,6 +84,8 @@ mod error;
 mod fsck;
 #[cfg(feature = "fuzzing")]
 mod fuzz;
+pub(crate) mod gc;
+mod gc_runtime;
 mod ingest_bench;
 mod jwks_provider;
 mod jwt_algorithm;
@@ -95,6 +97,7 @@ mod maintenance_barrier;
 pub mod metrics;
 mod model;
 mod object_store;
+pub(crate) mod oci_adapter;
 mod oidc_provider;
 mod ops_record_store;
 mod overflow;
@@ -113,18 +116,18 @@ mod server_role;
 mod storage_migration;
 pub mod test_fixtures;
 pub mod test_invariant_error;
+pub(crate) mod xet_adapter;
 
 pub use admission::{ExecutionPools, WeightedAdmission};
 pub use app::ProtocolMetrics;
 pub use app::{
-    AppState, MAX_PROVIDER_NAME_BYTES, MAX_PROVIDER_SUBJECT_BYTES,
+    AppState, LfsPatchEvidenceRepairInput, MAX_PROVIDER_NAME_BYTES, MAX_PROVIDER_SUBJECT_BYTES,
     MAX_PROVIDER_TOKEN_REQUEST_BODY_BYTES, MAX_PROVIDER_WEBHOOK_BODY_BYTES,
-    acquire_chunk_transfer_permit, full_byte_stream_response,
+    acquire_chunk_transfer_permit, full_byte_stream_response, repair_lfs_patch_evidence,
 };
 pub use backend::{
-    BenchmarkBackend, ServerBackend, clear_repository_reference_probe_filter,
-    lock_repository_reference_probe_test, repository_reference_probe_count,
-    reset_repository_reference_probe_count_for_hash,
+    BenchmarkBackend, ServerBackend, forget_repository_reference_probe_count,
+    repository_reference_probe_count, reset_repository_reference_probe_count_for_hash,
 };
 pub use download_stream::{STREAM_READ_BUFFER_BYTES, ServerByteStream};
 pub use local_backend::chunk_hash;
@@ -132,18 +135,6 @@ pub use object_store::ServerObjectStore;
 pub use oci_adapter::{oci_blob_key, oci_manifest_key, oci_manifest_media_type_key};
 pub use protocol_support::shared_sha256_object_key;
 pub use reconstruction_cache::ReconstructionCacheService;
-pub(crate) mod oci_adapter {
-    pub(crate) use shardline_oci_adapter::{
-        OciReference, abort_s3_multipart_upload_session, append_s3_multipart_upload_bytes,
-        append_upload_bytes, create_upload_session, delete_upload_session,
-        finalize_s3_multipart_upload_session, lock_upload_sessions, new_upload_session_id,
-        oci_blob_location, oci_manifest_location, oci_manifest_prefix, oci_tag_key, oci_tag_prefix,
-        parse_reference, read_upload_session, touch_upload_session, upload_body_integrity,
-        upload_body_path_for_session, upload_length, upload_session_length,
-        upload_session_location, validate_repository,
-    };
-    pub use shardline_oci_adapter::{oci_blob_key, oci_manifest_key, oci_manifest_media_type_key};
-}
 pub use shardline_protocol_adapters::{BazelCacheKind, bazel_cache_object_key, lfs_object_key};
 pub use transfer_limiter::TransferLimiter;
 #[cfg(test)]
@@ -151,32 +142,6 @@ mod gc_tests;
 mod transfer_limiter;
 pub mod upload_ingest;
 mod validation;
-pub(crate) mod xet_adapter {
-    pub use shardline_xet_adapter::{
-        BatchReconstructionResponse, FileReconstructionResponse, FileReconstructionV2Response,
-        XorbUploadResponse, decode_serialized_xorb_chunks, try_for_each_serialized_xorb_chunk,
-        validate_serialized_xorb,
-    };
-    #[cfg(test)]
-    pub(crate) use shardline_xet_adapter::{
-        ReconstructionChunkRange, ReconstructionFetchInfo, ReconstructionTerm,
-        ReconstructionUrlRange, shard_object_key, store_uploaded_xorb,
-    };
-    pub(crate) use shardline_xet_adapter::{
-        ShardUploadResponse, XET_PATH_ROUTE, XET_READ_TOKEN_ROUTE, XET_REVISION_ROUTE,
-        XET_REVISIONS_ROUTE, XET_TREE_ROUTE, XET_WRITE_TOKEN_ROUTE, XORB_TRANSFER_ROUTE,
-        XetAdapterError, XorbParseError, XorbVisitError, build_batch_reconstruction_response,
-        build_reconstruction_response, reconstruction_v2_from_v1, register_uploaded_shard_file,
-        resolve_dedupe_shard_object, shard_hash_from_object_key_if_present,
-        store_uploaded_xorb_file_path, validate_hash_path, validate_optional_content_hash,
-        validate_xorb_transfer_namespace, visit_stored_xorb_chunk_hashes,
-        xorb_hash_from_object_key_if_present, xorb_object_key,
-    };
-    #[cfg(feature = "fuzzing")]
-    pub(crate) use shardline_xet_adapter::{
-        build_xorb_transfer_url, normalize_serialized_xorb, retained_shard_chunk_hashes,
-    };
-}
 
 pub use app::{serve, serve_with_listener};
 pub use backup::{BackupManifestReport, write_backup_manifest};
@@ -215,6 +180,7 @@ pub use fuzz::{
 pub use gc::{
     DEFAULT_LOCAL_GC_RETENTION_SECONDS, LocalGcDiagnostics, LocalGcOptions, LocalGcReport,
 };
+pub use gc_runtime::{run_gc, run_gc_diagnostics};
 pub use ingest_bench::ingest_without_storage_with_parallelism;
 pub use lifecycle_repair::{
     DEFAULT_WEBHOOK_DELIVERY_RETENTION_SECONDS, LifecycleRepairBoundary, LifecycleRepairOptions,
@@ -238,17 +204,6 @@ pub use reconstruction_cache::{
 pub use runtime_check::{ConfigCheckReport, run_config_check};
 pub use server_frontend::{ServerFrontend, ServerFrontendParseError};
 pub use server_role::{ServerRole, ServerRoleParseError};
-pub(crate) mod gc {
-    pub(crate) use shardline_gc::run_gc_with_oci_tombstones;
-    pub use shardline_gc::{
-        DEFAULT_LOCAL_GC_RETENTION_SECONDS, LocalGcDiagnostics, LocalGcOptions, LocalGcReport,
-    };
-    #[cfg(test)]
-    pub(crate) use shardline_gc::{
-        GcOrphanQuarantineState, quarantine_record_path, quarantine_root, run_local_gc,
-        run_local_gc_diagnostics,
-    };
-}
 pub(crate) use shardline_protocol_adapters::{
     LFS_CONTENT_TYPE, LfsBatchRequest, LfsBatchResponse, LfsObjectError, LfsObjectResponse,
     LfsOperation, TransferAdapter, cas_headers,
@@ -263,250 +218,3 @@ pub use xet_adapter::{
     XorbUploadResponse, decode_serialized_xorb_chunks, try_for_each_serialized_xorb_chunk,
     validate_serialized_xorb,
 };
-
-use object_store::object_store_from_config;
-use postgres_backend::connect_postgres_metadata_pool;
-use shardline_index::{LocalIndexStore, LocalRecordStore, PostgresIndexStore, PostgresRecordStore};
-use shardline_storage::{AsyncObjectStore as _, ObjectPrefix};
-
-async fn reclaim_postgres_resumable_staging(
-    index_store: &PostgresIndexStore,
-    object_store: &ServerObjectStore,
-    sweep: bool,
-) -> Result<ResumableStagingGcReport, error::ServerError> {
-    const EXPIRY_BATCH: usize = 10_000;
-    if sweep {
-        loop {
-            let expired = index_store.expire_resumable_sessions(EXPIRY_BATCH).await?;
-            if expired.len() < EXPIRY_BATCH {
-                break;
-            }
-        }
-    }
-    let inventory = index_store.resumable_session_gc_inventory().await?;
-    let protected = inventory
-        .protected_staging_keys()
-        .iter()
-        .cloned()
-        .collect::<std::collections::HashSet<_>>();
-    let mut report =
-        reclaim_unprotected_resumable_staging_objects(object_store, &protected, sweep).await?;
-    if sweep {
-        report.reclaimed_sessions = index_store
-            .delete_reclaimable_resumable_sessions(inventory.reclaimable_sessions())
-            .await?;
-    }
-    Ok(report)
-}
-
-async fn reclaim_unprotected_resumable_staging_objects(
-    object_store: &ServerObjectStore,
-    protected: &std::collections::HashSet<String>,
-    sweep: bool,
-) -> Result<ResumableStagingGcReport, error::ServerError> {
-    let prefix = ObjectPrefix::parse("staging/resumable/")
-        .map_err(|_error| error::ServerError::InvalidPath)?;
-    let objects = object_store.list_prefix(&prefix).await?;
-    let mut report = ResumableStagingGcReport {
-        scanned_objects: u64::try_from(objects.len())?,
-        protected_objects: u64::try_from(
-            objects
-                .iter()
-                .filter(|metadata| protected.contains(metadata.key().as_str()))
-                .count(),
-        )?,
-        ..ResumableStagingGcReport::default()
-    };
-    if !sweep {
-        return Ok(report);
-    }
-    for metadata in objects {
-        if protected.contains(metadata.key().as_str()) {
-            continue;
-        }
-        object_store.delete_if_present(metadata.key()).await?;
-        report.reclaimed_objects = report
-            .reclaimed_objects
-            .checked_add(1)
-            .ok_or(error::ServerError::Overflow)?;
-        report.reclaimed_bytes = report
-            .reclaimed_bytes
-            .checked_add(metadata.length())
-            .ok_or(error::ServerError::Overflow)?;
-    }
-    Ok(report)
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct ResumableStagingGcReport {
-    scanned_objects: u64,
-    protected_objects: u64,
-    reclaimed_objects: u64,
-    reclaimed_bytes: u64,
-    reclaimed_sessions: u64,
-}
-
-/// Runs garbage collection against the configured metadata backend and local chunk storage.
-///
-/// # Examples
-///
-/// ```no_run
-/// use shardline_server::{LocalGcOptions, ServerConfig, run_gc};
-///
-/// #[tokio::main]
-/// async fn main() -> Result<(), Box<dyn std::error::Error>> {
-///     let config = ServerConfig::from_env()?;
-///     // Start with a dry run, then move to `mark_and_sweep(retention_seconds)`.
-///     let report = run_gc(config, LocalGcOptions::dry_run()).await?;
-///     assert_eq!(report.deleted_chunks, 0);
-///     Ok(())
-/// }
-/// ```
-///
-/// See [`LocalGcOptions`] for the supported modes: `dry_run`, `mark_only`,
-/// `sweep_only`, and `mark_and_sweep`.
-///
-/// # Errors
-///
-/// Returns [`ServerError`] when metadata cannot be read, quarantine state cannot be
-/// updated, or deletion fails.
-pub async fn run_gc(
-    config: ServerConfig,
-    options: gc::LocalGcOptions,
-) -> Result<gc::LocalGcReport, error::ServerError> {
-    Ok(run_gc_diagnostics(config, options).await?.report)
-}
-
-/// Runs garbage collection and returns operator diagnostics.
-///
-/// # Errors
-///
-/// Returns [`ServerError`] when metadata cannot be read, quarantine state cannot be
-/// updated, or deletion fails.
-pub async fn run_gc_diagnostics(
-    config: ServerConfig,
-    options: gc::LocalGcOptions,
-) -> Result<gc::LocalGcDiagnostics, error::ServerError> {
-    let object_store = object_store_from_config(&config)?;
-    if let Some(index_postgres_url) = config.index_postgres_url() {
-        let pool = connect_postgres_metadata_pool(index_postgres_url, 4)?;
-        let _gc_barrier = if options.mark || options.sweep {
-            Some(maintenance_barrier::acquire_postgres_exclusive(&pool).await?)
-        } else {
-            None
-        };
-        let index_store = PostgresIndexStore::new(pool.clone());
-        let record_store = PostgresRecordStore::new(pool);
-        let staging_report =
-            reclaim_postgres_resumable_staging(&index_store, &object_store, options.sweep).await?;
-        let mut diagnostics = gc::run_gc_with_oci_tombstones(
-            &record_store,
-            &index_store,
-            &object_store,
-            config.server_frontends(),
-            options,
-        )
-        .await
-        .map_err(error::ServerError::from)?;
-        diagnostics.report.scanned_resumable_staging_objects = staging_report.scanned_objects;
-        diagnostics.report.protected_resumable_staging_objects = staging_report.protected_objects;
-        diagnostics.report.reclaimed_resumable_staging_objects = staging_report.reclaimed_objects;
-        diagnostics.report.reclaimed_resumable_staging_bytes = staging_report.reclaimed_bytes;
-        diagnostics.report.reclaimed_resumable_sessions = staging_report.reclaimed_sessions;
-        return Ok(diagnostics);
-    }
-
-    let _gc_barrier = if options.mark || options.sweep {
-        Some(maintenance_barrier::acquire_local_exclusive(config.root_dir()).await?)
-    } else {
-        None
-    };
-    let index_store = LocalIndexStore::open(config.root_dir().to_path_buf());
-    let record_store = LocalRecordStore::open(config.root_dir().to_path_buf());
-    gc::run_gc_with_oci_tombstones(
-        &record_store,
-        &index_store,
-        &object_store,
-        config.server_frontends(),
-        options,
-    )
-    .await
-    .map_err(Into::into)
-}
-
-#[cfg(test)]
-mod lib_tests {
-    use std::collections::HashSet;
-
-    use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey};
-
-    use super::*;
-
-    fn put_test_staging_object(object_store: &ServerObjectStore, key: &ObjectKey, bytes: &[u8]) {
-        let integrity = ObjectIntegrity::new(
-            shardline_server_core::chunk_hash(bytes),
-            u64::try_from(bytes.len()).unwrap(),
-        );
-        shardline_storage::ObjectStore::put_if_absent(
-            object_store,
-            key,
-            ObjectBody::Borrowed(bytes),
-            &integrity,
-        )
-        .unwrap();
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn run_gc_succeeds_on_valid_local_path() {
-        let tmp = tempfile::tempdir().unwrap();
-        let config = crate::config::ServerConfig::new(
-            std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 8080),
-            "http://localhost:8080".to_owned(),
-            tmp.path().to_path_buf(),
-            std::num::NonZeroUsize::new(4096).unwrap(),
-        );
-        let options = super::gc::LocalGcOptions::default();
-        let result = run_gc(config, options).await;
-        // On a valid temp directory with default options (mark=false, sweep=false),
-        // GC should succeed as a no-op
-        assert!(result.is_ok());
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn run_gc_diagnostics_succeeds_on_valid_local_path() {
-        let tmp = tempfile::tempdir().unwrap();
-        let config = crate::config::ServerConfig::new(
-            std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 8080),
-            "http://localhost:8080".to_owned(),
-            tmp.path().to_path_buf(),
-            std::num::NonZeroUsize::new(4096).unwrap(),
-        );
-        let options = super::gc::LocalGcOptions::default();
-        let result = run_gc_diagnostics(config, options).await;
-        assert!(result.is_ok());
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn resumable_staging_gc_preserves_live_keys_and_reclaims_every_other_attempt() {
-        let tmp = tempfile::tempdir().unwrap();
-        let object_store = ServerObjectStore::local(tmp.path().join("objects")).unwrap();
-        let protected_key = ObjectKey::parse("staging/resumable/lfs/live/1/hash").unwrap();
-        let replaced_key = ObjectKey::parse("staging/resumable/lfs/live/1/old-hash").unwrap();
-        let terminal_key = ObjectKey::parse("staging/resumable/s3/terminal/1/hash").unwrap();
-        put_test_staging_object(&object_store, &protected_key, b"live");
-        put_test_staging_object(&object_store, &replaced_key, b"old");
-        put_test_staging_object(&object_store, &terminal_key, b"terminal");
-        let protected = HashSet::from([protected_key.as_str().to_owned()]);
-
-        let report = reclaim_unprotected_resumable_staging_objects(&object_store, &protected, true)
-            .await
-            .unwrap();
-        assert_eq!(report.scanned_objects, 3);
-        assert_eq!(report.protected_objects, 1);
-        assert_eq!(report.reclaimed_objects, 2);
-        assert_eq!(report.reclaimed_bytes, 11);
-        assert!(shardline_storage::ObjectStore::contains(&object_store, &protected_key).unwrap());
-        assert!(!shardline_storage::ObjectStore::contains(&object_store, &replaced_key).unwrap());
-        assert!(!shardline_storage::ObjectStore::contains(&object_store, &terminal_key).unwrap());
-    }
-}

@@ -374,6 +374,15 @@ impl WebhookDelivery {
     pub const fn processed_at_unix_seconds(&self) -> u64 {
         self.processed_at_unix_seconds
     }
+
+    /// Reconstructs this delivery with its original durable claim timestamp.
+    #[must_use]
+    pub fn with_processed_at_unix_seconds(&self, processed_at_unix_seconds: u64) -> Self {
+        Self {
+            processed_at_unix_seconds,
+            ..self.clone()
+        }
+    }
 }
 
 const MAX_WEBHOOK_DELIVERY_COMPONENT_BYTES: usize = 512;

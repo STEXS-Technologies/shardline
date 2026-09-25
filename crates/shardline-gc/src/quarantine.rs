@@ -167,21 +167,21 @@ where
     IndexAdapter::Error: Into<GcError>,
 {
     let mut hold_object_keys = HashSet::new();
-    let mut expired_object_keys = Vec::new();
+    let mut expired_holds = Vec::new();
     index_store
         .visit_retention_holds(|hold| {
             if hold.is_active_at(now_unix_seconds) {
                 hold_object_keys.insert(hold.object_key().as_str().to_owned());
             } else if prune_expired && hold.release_after_unix_seconds().is_some() {
-                expired_object_keys.push(hold.object_key().clone());
+                expired_holds.push(hold);
             }
 
             Ok::<(), GcError>(())
         })
         .await?;
-    for object_key in expired_object_keys {
+    for hold in expired_holds {
         let _deleted = index_store
-            .delete_retention_hold(&object_key)
+            .delete_retention_hold_if_matches(&hold)
             .await
             .map_err(Into::into)?;
     }
@@ -198,7 +198,7 @@ pub(super) async fn reconcile_quarantine_entries<IndexAdapter>(
     report: &mut LocalGcReport,
 ) -> Result<(), GcError>
 where
-    IndexAdapter: AsyncIndexStore,
+    IndexAdapter: AsyncIndexStore + Sync,
     IndexAdapter::Error: Into<GcError>,
 {
     let stale_object_keys = quarantine_entries
@@ -211,10 +211,20 @@ where
         let Some(candidate) = quarantine_entries.remove(&object_key) else {
             continue;
         };
-        index_store
-            .delete_quarantine_candidate(candidate.object_key())
+        let deleted = index_store
+            .delete_quarantine_candidate_if_matches(&candidate)
             .await
             .map_err(Into::into)?;
+        if !deleted {
+            if let Some(current) = index_store
+                .quarantine_candidate(candidate.object_key())
+                .await
+                .map_err(Into::into)?
+            {
+                quarantine_entries.insert(object_key, current);
+            }
+            continue;
+        }
         report.released_quarantine_candidates =
             checked_increment(report.released_quarantine_candidates)?;
     }
@@ -327,10 +337,20 @@ where
             let Some(candidate) = quarantine_entries.remove(&object_key) else {
                 continue;
             };
-            index_store
-                .delete_quarantine_candidate(candidate.object_key())
+            let deleted = index_store
+                .delete_quarantine_candidate_if_matches(&candidate)
                 .await
                 .map_err(Into::into)?;
+            if !deleted {
+                if let Some(current) = index_store
+                    .quarantine_candidate(candidate.object_key())
+                    .await
+                    .map_err(Into::into)?
+                {
+                    quarantine_entries.insert(object_key, current);
+                }
+                continue;
+            }
             report.released_quarantine_candidates =
                 checked_increment(report.released_quarantine_candidates)?;
             continue;
@@ -362,10 +382,20 @@ where
         let Some(removed_candidate) = quarantine_entries.remove(&object_key) else {
             continue;
         };
-        index_store
-            .delete_quarantine_candidate(removed_candidate.object_key())
+        let deleted = index_store
+            .delete_quarantine_candidate_if_matches(&removed_candidate)
             .await
             .map_err(Into::into)?;
+        if !deleted {
+            if let Some(current) = index_store
+                .quarantine_candidate(removed_candidate.object_key())
+                .await
+                .map_err(Into::into)?
+            {
+                quarantine_entries.insert(object_key, current);
+            }
+            continue;
+        }
 
         // Re-verify reachability at delete time against the single
         // referenced-set collected once above (O(1) membership check, no

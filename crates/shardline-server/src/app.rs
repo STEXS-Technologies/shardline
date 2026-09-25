@@ -7,6 +7,7 @@ mod provider_routes;
 mod reconstruction_helpers;
 mod reconstruction_routes;
 
+pub use protocol_routes::{LfsPatchEvidenceRepairInput, repair_lfs_patch_evidence};
 pub use provider::{
     extract_provider_subject, latest_lifecycle_signal_at, reconciled_provider_repository_state,
     validate_provider_name_path,
@@ -34,7 +35,7 @@ use axum::{
     routing::{get, head, post},
     serve as serve_http,
 };
-use shardline_protocol::{RepositoryScope, TokenScope};
+use shardline_protocol::TokenScope;
 use tokio::net::TcpListener;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot};
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
@@ -284,13 +285,15 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
         protocol_metrics: ProtocolMetrics::default(),
     });
 
-    // Sweep expired S3 multipart upload sessions at startup (crash recovery);
-    // in-flight sweeps also run on every session creation.
+    // Sweep legacy filesystem-backed S3 multipart sessions at startup (crash
+    // recovery). Postgres-backed fenced sessions have their own durable GC
+    // and must not touch the local filesystem on startup.
     if state
         .config
         .server_frontends()
         .iter()
         .any(|frontend| matches!(frontend, ServerFrontend::S3))
+        && !state.backend.supports_fenced_s3_publication()
     {
         match shardline_s3_adapter::sweep_expired_sessions(
             state.config.root_dir(),
@@ -740,13 +743,6 @@ fn authorize(
         )));
     }
     Ok(None)
-}
-
-/// Kept during the authorization-capability migration; not yet wired to a
-/// caller.
-#[allow(dead_code)]
-const fn scope_from_auth(auth: &VerifiedAuthContext) -> &RepositoryScope {
-    auth.claims().repository()
 }
 
 #[must_use]

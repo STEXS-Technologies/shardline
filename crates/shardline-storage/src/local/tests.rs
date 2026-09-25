@@ -2,8 +2,6 @@ use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::symlink;
 #[cfg(unix)]
-use std::sync::{LazyLock, Mutex};
-#[cfg(unix)]
 use std::{io::ErrorKind as IoErrorKind, path::PathBuf};
 
 use shardline_protocol::ByteRange;
@@ -14,10 +12,6 @@ use crate::local_fs::set_before_local_write_hook;
 use crate::{
     DeleteOutcome, ObjectBody, ObjectIntegrity, ObjectKey, ObjectPrefix, ObjectStore, PutOutcome,
 };
-
-/// Serializes hook-based race tests so they don't clobber each other's global hook state.
-#[cfg(unix)]
-static HOOK_TEST_MUTEX: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 #[test]
 fn local_object_store_roundtrips_metadata_ranges_inventory_and_delete() {
@@ -526,7 +520,6 @@ fn local_object_store_rejects_symlinked_parent_directory_writes() {
 #[cfg(unix)]
 #[test]
 fn local_object_store_put_overwrite_rejects_parent_swap_race() {
-    let _guard = HOOK_TEST_MUTEX.lock().unwrap();
     let storage = shardline_test_support::TempStorage::new();
     let outside = tempfile::tempdir();
     assert!(outside.is_ok());
@@ -569,7 +562,6 @@ fn local_object_store_put_overwrite_rejects_parent_swap_race() {
 #[cfg(unix)]
 #[test]
 fn local_object_store_rejects_parent_swap_race() {
-    let _guard = HOOK_TEST_MUTEX.lock().unwrap();
     let storage = shardline_test_support::TempStorage::new();
     let outside = tempfile::tempdir();
     assert!(outside.is_ok());

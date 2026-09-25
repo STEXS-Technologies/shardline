@@ -1,6 +1,6 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::num::{NonZeroU64, NonZeroUsize};
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 
 use reqwest::Client;
 use sha2::Digest;
@@ -10,9 +10,6 @@ use shardline_server::{
     ServerFrontend, ServerRole, run_database_migration, serve_with_listener,
 };
 use tokio::net::TcpListener;
-
-static POSTGRES_E2E_LOCK: LazyLock<tokio::sync::Mutex<()>> =
-    LazyLock::new(|| tokio::sync::Mutex::new(()));
 
 /// Admin read token wired into every spawned server so tests verify runtime
 /// topology through the authenticated admin API (the unauthenticated /readyz
@@ -34,7 +31,7 @@ async fn start_server() -> Result<
             ServerFrontend::Oci,
             ServerFrontend::BazelHttp,
         ],
-        |c| Ok(c),
+        Ok,
     )
     .await
 }
@@ -105,10 +102,10 @@ async fn try_start_server(
     let server = tokio::spawn(async move { serve_with_listener(config, listener).await });
     let client = Client::new();
     for _attempt in 0..50 {
-        if let Ok(resp) = client.get(format!("{base_url}/healthz")).send().await {
-            if resp.status().is_success() {
-                return Ok((base_url, server));
-            }
+        if let Ok(resp) = client.get(format!("{base_url}/healthz")).send().await
+            && resp.status().is_success()
+        {
+            return Ok((base_url, server));
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
@@ -263,7 +260,7 @@ async fn xet_write_token_issuance_succeeds() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn xet_routes_disabled_when_role_api_only() {
     let (base_url, server) =
-        start_server_with(Some(ServerRole::Api), &[ServerFrontend::Xet], |c| Ok(c))
+        start_server_with(Some(ServerRole::Api), &[ServerFrontend::Xet], Ok)
             .await
             .unwrap();
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
@@ -349,7 +346,7 @@ async fn xet_routes_disabled_without_xet_frontend() {
             ServerFrontend::Oci,
             ServerFrontend::BazelHttp,
         ],
-        |c| Ok(c),
+        Ok,
     )
     .await
     .unwrap();
@@ -398,7 +395,7 @@ async fn lfs_routes_disabled_without_lfs_frontend() {
             ServerFrontend::Oci,
             ServerFrontend::BazelHttp,
         ],
-        |c| Ok(c),
+        Ok,
     )
     .await
     .unwrap();
@@ -1563,22 +1560,22 @@ async fn upload_thousand_small_files() {
                 .send()
                 .await
                 .expect("upload request failed");
-            assert!(
-                upload.status().is_success(),
-                "upload {i} failed: {}",
-                upload.status()
-            );
+            if !upload.status().is_success() {
+                let status = upload.status();
+                let body = upload.text().await.unwrap_or_default();
+                panic!("upload {i} failed: {status}: {body}");
+            }
             let download = client
                 .get(&url)
                 .header("Authorization", &auth)
                 .send()
                 .await
                 .expect("download request failed");
-            assert!(
-                download.status().is_success(),
-                "download {i} failed: {}",
-                download.status()
-            );
+            if !download.status().is_success() {
+                let status = download.status();
+                let body = download.text().await.unwrap_or_default();
+                panic!("download {i} failed: {status}: {body}");
+            }
             let body = download.bytes().await.expect("download body failed");
             assert_eq!(
                 body.as_ref(),
@@ -4820,9 +4817,9 @@ async fn dedup_ten_files_sharing_chunks_delete_nine() {
     }
 
     // Delete files 0-8 (9 files), keep file 9
-    for i in 0..9 {
+    for (i, oid) in oids.iter().take(9).enumerate() {
         let del = client
-            .delete(format!("{base_url}/v1/lfs/objects/{}", oids[i]))
+            .delete(format!("{base_url}/v1/lfs/objects/{oid}"))
             .header("Authorization", format!("Bearer {token}"))
             .send()
             .await
@@ -5709,10 +5706,10 @@ async fn lfs_objects_survive_gc_when_referenced() {
 
 async fn wait_for_health(base_url: &str, client: &Client) {
     for _attempt in 0..50 {
-        if let Ok(resp) = client.get(format!("{base_url}/healthz")).send().await {
-            if resp.status().is_success() {
-                return;
-            }
+        if let Ok(resp) = client.get(format!("{base_url}/healthz")).send().await
+            && resp.status().is_success()
+        {
+            return;
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
@@ -6202,7 +6199,7 @@ async fn readyz_metadata_backend_info() {
     assert!(
         body["server_frontends"]
             .as_array()
-            .map_or(false, |a| a.len() >= 4),
+            .is_some_and(|a| a.len() >= 4),
         "all frontends"
     );
     server.abort();
@@ -6309,7 +6306,7 @@ async fn verify_token_insufficient_scope() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn frontend_only_xet() {
-    let (base_url, server) = start_server_with(None, &[ServerFrontend::Xet], |c| Ok(c))
+    let (base_url, server) = start_server_with(None, &[ServerFrontend::Xet], Ok)
         .await
         .unwrap();
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
@@ -6348,7 +6345,7 @@ async fn frontend_only_xet() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn frontend_only_lfs() {
-    let (base_url, server) = start_server_with(None, &[ServerFrontend::Lfs], |c| Ok(c))
+    let (base_url, server) = start_server_with(None, &[ServerFrontend::Lfs], Ok)
         .await
         .unwrap();
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
@@ -6375,7 +6372,7 @@ async fn frontend_only_lfs() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn frontend_only_oci() {
-    let (base_url, server) = start_server_with(None, &[ServerFrontend::Oci], |c| Ok(c))
+    let (base_url, server) = start_server_with(None, &[ServerFrontend::Oci], Ok)
         .await
         .unwrap();
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
@@ -6400,7 +6397,7 @@ async fn frontend_only_oci() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn frontend_only_bazel() {
-    let (base_url, server) = start_server_with(None, &[ServerFrontend::BazelHttp], |c| Ok(c))
+    let (base_url, server) = start_server_with(None, &[ServerFrontend::BazelHttp], Ok)
         .await
         .unwrap();
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
@@ -7520,7 +7517,7 @@ async fn verify_wrong_signing_key_rejected() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn oci_role_api_rejects_blob_upload() {
     let (base_url, server) =
-        start_server_with(Some(ServerRole::Api), &[ServerFrontend::Oci], |c| Ok(c))
+        start_server_with(Some(ServerRole::Api), &[ServerFrontend::Oci], Ok)
             .await
             .unwrap();
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
@@ -7722,7 +7719,7 @@ async fn frontends_all_serves_everything() {
             ServerFrontend::Oci,
             ServerFrontend::BazelHttp,
         ],
-        |c| Ok(c),
+        Ok,
     )
     .await
     .unwrap();
@@ -7770,7 +7767,7 @@ async fn frontends_all_serves_everything() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn frontends_xet_lfs_pair() {
     let (base_url, server) =
-        start_server_with(None, &[ServerFrontend::Xet, ServerFrontend::Lfs], |c| Ok(c))
+        start_server_with(None, &[ServerFrontend::Xet, ServerFrontend::Lfs], Ok)
             .await
             .unwrap();
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
@@ -7798,7 +7795,7 @@ async fn frontends_xet_lfs_pair() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn frontends_xet_oci_pair() {
     let (base_url, server) =
-        start_server_with(None, &[ServerFrontend::Xet, ServerFrontend::Oci], |c| Ok(c))
+        start_server_with(None, &[ServerFrontend::Xet, ServerFrontend::Oci], Ok)
             .await
             .unwrap();
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
@@ -7826,7 +7823,7 @@ async fn frontends_xet_oci_pair() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn frontends_lfs_oci_pair() {
     let (base_url, server) =
-        start_server_with(None, &[ServerFrontend::Lfs, ServerFrontend::Oci], |c| Ok(c))
+        start_server_with(None, &[ServerFrontend::Lfs, ServerFrontend::Oci], Ok)
             .await
             .unwrap();
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
@@ -7862,7 +7859,7 @@ async fn frontends_xet_lfs_oci_triple() {
             ServerFrontend::Lfs,
             ServerFrontend::Oci,
         ],
-        |c| Ok(c),
+        Ok,
     )
     .await
     .unwrap();
@@ -8804,7 +8801,6 @@ async fn concurrent_manifest_push_and_pull() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn postgres_backend_lfs_round_trip() {
-    let _postgres_guard = POSTGRES_E2E_LOCK.lock().await;
     let docker = shardline_test_support::DockerLocalStack::builder()
         .with_postgres()
         .start()
@@ -8892,7 +8888,7 @@ async fn xet_full_pipeline_upload_xorb_shard_reconstruct() {
         serde_json::from_str(&write_text).expect("write token JSON");
     let xet_token = write_body["accessToken"]
         .as_str()
-        .expect(&format!("accessToken in response: {write_text}"))
+        .unwrap_or_else(|| panic!("accessToken in response: {write_text}"))
         .to_owned();
 
     let content = b"xet full pipeline test content for verification";
@@ -8966,11 +8962,11 @@ async fn config_validation_chunk_size_too_large() {
     let client = Client::new();
     let mut healthy = false;
     for _ in 0..50 {
-        if let Ok(resp) = client.get(format!("{base_url}/healthz")).send().await {
-            if resp.status().is_success() {
-                healthy = true;
-                break;
-            }
+        if let Ok(resp) = client.get(format!("{base_url}/healthz")).send().await
+            && resp.status().is_success()
+        {
+            healthy = true;
+            break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
@@ -9567,7 +9563,6 @@ async fn s3_backend_dedup_cross_frontend() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn postgres_backend_oci_manifest_push_pull() {
-    let _postgres_guard = POSTGRES_E2E_LOCK.lock().await;
     let docker = shardline_test_support::DockerLocalStack::builder()
         .with_postgres()
         .start()
@@ -10052,7 +10047,7 @@ async fn xet_large_reconstruction_chain_ten_xorbs() {
     assert_eq!(recon.status(), 200, "large reconstruction chain");
     let body: serde_json::Value = recon.json().await.unwrap();
     let terms = body["terms"].as_array().unwrap();
-    assert!(terms.len() >= 1, "reconstruction has terms");
+    assert!(!terms.is_empty(), "reconstruction has terms");
 
     server.abort();
 }
@@ -12574,7 +12569,7 @@ async fn s3_backend_oci_session_abort() {
     // PATCH a chunk
     let chunk = b"abortable-chunk-data";
     let patch = client
-        .patch(&format!("{base_url}{location}"))
+        .patch(format!("{base_url}{location}"))
         .header("Authorization", format!("Bearer {token}"))
         .header("Content-Type", "application/octet-stream")
         .header("Content-Range", format!("0-{}", chunk.len() - 1))
@@ -12593,7 +12588,7 @@ async fn s3_backend_oci_session_abort() {
 
     // Cancel (DELETE) the upload session
     let cancel = client
-        .delete(&format!("{base_url}{location2}"))
+        .delete(format!("{base_url}{location2}"))
         .header("Authorization", format!("Bearer {token}"))
         .send()
         .await
@@ -12602,7 +12597,7 @@ async fn s3_backend_oci_session_abort() {
 
     // Verify session is gone
     let get = client
-        .get(&format!("{base_url}{location2}"))
+        .get(format!("{base_url}{location2}"))
         .header("Authorization", format!("Bearer {token}"))
         .send()
         .await

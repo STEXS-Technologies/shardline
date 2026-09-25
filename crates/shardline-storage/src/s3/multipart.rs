@@ -11,6 +11,62 @@ use super::{
 use crate::{ObjectKey, ObjectStore, PutOutcome};
 
 impl S3ObjectStore {
+    /// Begins a stream upload to a unique reserved remote temporary object.
+    ///
+    /// The caller must finish it with [`Self::finish_stream_upload`]. This is
+    /// used when the canonical content-addressed key is not known until the
+    /// request stream has been hashed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`S3ObjectStoreError`] when the remote multipart upload cannot
+    /// be initialized.
+    pub async fn begin_stream_upload(
+        &self,
+    ) -> Result<(S3MultipartUploadWriter, ObjectKey), S3ObjectStoreError> {
+        let seed = ObjectKey::parse("staging/resumable/stream")
+            .map_err(|_error| S3ObjectStoreError::InvalidListedKey)?;
+        let temp_key = temp_key_for(&seed)?;
+        let location = self.location_for_key(&temp_key)?;
+        let upload = self
+            .inner
+            .put_multipart(&location)
+            .await
+            .map_err(S3ObjectStoreError::External)?;
+        Ok((
+            S3MultipartUploadWriter {
+                writer: WriteMultipart::new_with_chunk_size(upload, STREAM_UPLOAD_CHUNK_BYTES),
+            },
+            temp_key,
+        ))
+    }
+
+    /// Finishes a remote stream upload and conditionally promotes it to the
+    /// canonical key. The remote temporary object is cleaned up best-effort.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`S3ObjectStoreError`] when multipart finalization or the
+    /// conditional promotion fails.
+    pub async fn finish_stream_upload(
+        &self,
+        upload: S3MultipartUploadWriter,
+        temp_key: &ObjectKey,
+        canonical_key: &ObjectKey,
+    ) -> Result<PutOutcome, S3ObjectStoreError> {
+        upload.finish().await?;
+        match self.copy_object_if_absent(temp_key, canonical_key) {
+            Ok(outcome) => {
+                self.delete_if_present(temp_key).ok();
+                Ok(outcome)
+            }
+            Err(error) => {
+                self.delete_if_present(temp_key).ok();
+                Err(error)
+            }
+        }
+    }
+
     /// Begins a direct multipart upload to a content-addressed destination key.
     ///
     /// This path is intended for immutable digest-addressed objects, where callers

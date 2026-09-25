@@ -3,6 +3,7 @@ use std::io::Error as IoError;
 use rusqlite::Error as SqliteError;
 use serde_json::Error as JsonError;
 use shardline_protocol::{HashParseError, RangeError};
+use shardline_reliability::ReliabilityError;
 use shardline_storage::ObjectKeyError;
 use thiserror::Error;
 
@@ -67,6 +68,12 @@ pub enum LocalIndexStoreError {
     /// A stored integer exceeded the supported range.
     #[error("stored integer exceeded the supported range: {0}")]
     IntegerOutOfRange(String),
+    /// A reliability sequence was already bound to different evidence.
+    #[error("reliability event conflict: {0}")]
+    ReliabilityEventConflict(String),
+    /// Reliability evidence could not be validated.
+    #[error("reliability evidence operation failed")]
+    Reliability(#[from] ReliabilityError),
     /// A stored record kind was invalid.
     #[error("stored local record kind was invalid")]
     InvalidRecordKind,

@@ -65,6 +65,7 @@ async fn exercise_gc_mark_and_sweep() -> Result<(), Box<dyn Error>> {
     // Mark phase — retention 0 is clamped to the minimum internally, so the
     // chunk is quarantined but NOT deleted immediately.
     let output = Command::new(shardline_bin)
+        .env_remove("SHARDLINE_INDEX_POSTGRES_URL")
         .args([
             "gc",
             "--root",
@@ -120,6 +121,7 @@ async fn exercise_gc_exports() -> Result<(), Box<dyn Error>> {
     let shardline_bin = shardline_binary()?;
 
     let output = Command::new(shardline_bin)
+        .env_remove("SHARDLINE_INDEX_POSTGRES_URL")
         .args([
             "gc",
             "--root",
@@ -210,6 +212,7 @@ async fn exercise_gc_mark_and_sweep_for_native_xet_objects() -> Result<(), Box<d
     let shardline_bin = shardline_binary()?;
 
     let output = Command::new(shardline_bin)
+        .env_remove("SHARDLINE_INDEX_POSTGRES_URL")
         .args([
             "gc",
             "--root",
@@ -273,6 +276,7 @@ async fn exercise_gc_rejects_symlinked_export_artifact_path() -> Result<(), Box<
     let shardline_bin = shardline_binary()?;
 
     let output = Command::new(shardline_bin)
+        .env_remove("SHARDLINE_INDEX_POSTGRES_URL")
         .args([
             "gc",
             "--root",
@@ -329,6 +333,7 @@ async fn exercise_gc_fails_closed_on_corrupt_webhook_delivery_metadata()
 
     let shardline_bin = shardline_binary()?;
     let output = Command::new(shardline_bin)
+        .env_remove("SHARDLINE_INDEX_POSTGRES_URL")
         .args([
             "gc",
             "--root",

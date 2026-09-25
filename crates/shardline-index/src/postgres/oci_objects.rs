@@ -1,6 +1,83 @@
+use shardline_reliability::{
+    OciObjectEvidenceLog, OciObjectIdentity, OciObjectLifecycleState, OciObjectOperationId,
+    OciObjectSnapshot, OperationKind, resumable_session_event,
+    verify_and_append_snapshot_transition, verify_snapshot_evidence,
+};
 use sqlx::{Connection as _, PgConnection, Row as _, query, query_scalar};
 
-use super::{PostgresIndexStore, PostgresMetadataStoreError};
+use super::{
+    PostgresIndexStore, PostgresMetadataStoreError, insert_reliability_event,
+    next_reliability_sequence,
+};
+
+fn oci_snapshot(
+    key: &OciObjectKey,
+    state: OciObjectLifecycleState,
+    deleted_at: Option<u64>,
+) -> Result<OciObjectSnapshot, PostgresMetadataStoreError> {
+    Ok(OciObjectSnapshot::new(
+        OciObjectIdentity::new(
+            key.scope_namespace.clone(),
+            key.repository.clone(),
+            key.kind.as_str(),
+            key.digest_hex.clone(),
+        )?,
+        state,
+        deleted_at,
+    )?)
+}
+
+async fn load_oci_evidence(
+    executor: &mut sqlx::PgConnection,
+    key: &OciObjectKey,
+) -> Result<OciObjectEvidenceLog, PostgresMetadataStoreError> {
+    let operation_id = OciObjectOperationId::new(&OciObjectIdentity::new(
+        key.scope_namespace.clone(),
+        key.repository.clone(),
+        key.kind.as_str(),
+        key.digest_hex.clone(),
+    )?);
+    let event = super::index_store::load_postgres_latest_evidence_event(
+        &mut *executor,
+        OperationKind::Visibility,
+        operation_id.as_str(),
+    )
+    .await?;
+    let Some(event) = event else {
+        return Ok(OciObjectEvidenceLog::default());
+    };
+    Ok(OciObjectEvidenceLog::from_head(serde_json::from_value(
+        event,
+    )?)?)
+}
+
+async fn record_oci_evidence(
+    executor: &mut sqlx::PgConnection,
+    key: &OciObjectKey,
+    state: OciObjectLifecycleState,
+    deleted_at: Option<u64>,
+    fallback_state: OciObjectLifecycleState,
+    fallback_deleted_at: Option<u64>,
+) -> Result<(), PostgresMetadataStoreError> {
+    let after = oci_snapshot(key, state, deleted_at)?;
+    let evidence = load_oci_evidence(executor, key).await?;
+    let fallback = oci_snapshot(key, fallback_state, fallback_deleted_at)?;
+    let (evidence, evidence_was_empty) =
+        verify_and_append_snapshot_transition(evidence, fallback, after)?;
+    let event = evidence.events().last().ok_or_else(|| {
+        PostgresMetadataStoreError::Reliability(
+            shardline_reliability::ReliabilityError::EmptyField("OCI object evidence event"),
+        )
+    })?;
+    if evidence_was_empty {
+        for stored_event in evidence.events() {
+            insert_reliability_event(&mut *executor, stored_event).await?;
+        }
+        Ok(())
+    } else {
+        insert_reliability_event(executor, event).await
+    }
+}
 use crate::{
     OciObjectKey, OciObjectKind, OciObjectStore, OciObjectTombstone, OciTagEntry,
     ResumableCompletionFence,
@@ -19,6 +96,20 @@ impl PostgresIndexStore {
         tags: &[OciTagEntry],
     ) -> Result<(), PostgresMetadataStoreError> {
         let mut transaction = connection.begin().await?;
+        let previous_deleted_at = query(
+            "SELECT deleted_at_unix_seconds FROM shardline_oci_object_tombstones
+             WHERE scope_namespace = $1 AND repository = $2 AND object_kind = $3 AND digest_hex = $4",
+        )
+        .bind(&key.scope_namespace)
+        .bind(&key.repository)
+        .bind(key.kind.as_str())
+        .bind(&key.digest_hex)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .map(|row| row.try_get::<i64, _>("deleted_at_unix_seconds"))
+        .transpose()?
+        .map(super::i64_to_u64)
+        .transpose()?;
         query(
             "DELETE FROM shardline_oci_object_tombstones
              WHERE scope_namespace = $1 AND repository = $2
@@ -31,6 +122,13 @@ impl PostgresIndexStore {
         .execute(&mut *transaction)
         .await?;
         for tag in tags {
+            let before = super::oci_tags::current_tag(
+                transaction.as_mut(),
+                &tag.scope_namespace,
+                &tag.repository,
+                &tag.tag,
+            )
+            .await?;
             query(
                 "INSERT INTO shardline_oci_tags (scope_namespace, repository, tag, digest_hex)
                  VALUES ($1, $2, $3, $4)
@@ -43,7 +141,29 @@ impl PostgresIndexStore {
             .bind(&tag.digest_hex)
             .execute(&mut *transaction)
             .await?;
+            super::oci_tags::record_tag_transition(
+                transaction.as_mut(),
+                &tag.scope_namespace,
+                &tag.repository,
+                &tag.tag,
+                before.map(|value| value.digest_hex),
+                Some(tag.digest_hex.clone()),
+            )
+            .await?;
         }
+        record_oci_evidence(
+            transaction.as_mut(),
+            key,
+            OciObjectLifecycleState::Published,
+            None,
+            if previous_deleted_at.is_some() {
+                OciObjectLifecycleState::Deleted
+            } else {
+                OciObjectLifecycleState::Published
+            },
+            previous_deleted_at,
+        )
+        .await?;
         transaction.commit().await?;
         Ok(())
     }
@@ -62,21 +182,25 @@ impl PostgresIndexStore {
         fence: &ResumableCompletionFence,
     ) -> Result<bool, PostgresMetadataStoreError> {
         let mut transaction = connection.begin().await?;
-        let owns_completion = query_scalar::<_, i32>(
-            "SELECT 1 FROM shardline_resumable_sessions
+        let owns_completion = query(
+            "SELECT scope_namespace, target_key FROM shardline_resumable_sessions
              WHERE session_id = $1 AND state = 'completing' AND fence_epoch = $2
-               AND expires_at > clock_timestamp()
+             AND expires_at > clock_timestamp()
              FOR UPDATE",
         )
         .bind(fence.session_id())
         .bind(super::u64_to_i64(fence.epoch().get())?)
         .fetch_optional(&mut *transaction)
-        .await?
-        .is_some();
-        if !owns_completion {
+        .await?;
+        let Some(owns_completion) = owns_completion else {
             transaction.rollback().await?;
             return Ok(false);
-        }
+        };
+        // Tag rows and their integrity-checked pointer histories share this
+        // completion transaction, so a published manifest cannot expose an
+        // unjournaled retarget.
+        let scope_namespace: String = owns_completion.try_get("scope_namespace")?;
+        let target_key: String = owns_completion.try_get("target_key")?;
         query(
             "DELETE FROM shardline_oci_object_tombstones
              WHERE scope_namespace = $1 AND repository = $2
@@ -89,6 +213,13 @@ impl PostgresIndexStore {
         .execute(&mut *transaction)
         .await?;
         for tag in tags {
+            let before = super::oci_tags::current_tag(
+                transaction.as_mut(),
+                &tag.scope_namespace,
+                &tag.repository,
+                &tag.tag,
+            )
+            .await?;
             query(
                 "INSERT INTO shardline_oci_tags (scope_namespace, repository, tag, digest_hex)
                  VALUES ($1, $2, $3, $4)
@@ -101,7 +232,25 @@ impl PostgresIndexStore {
             .bind(&tag.digest_hex)
             .execute(&mut *transaction)
             .await?;
+            super::oci_tags::record_tag_transition(
+                transaction.as_mut(),
+                &tag.scope_namespace,
+                &tag.repository,
+                &tag.tag,
+                before.map(|value| value.digest_hex),
+                Some(tag.digest_hex.clone()),
+            )
+            .await?;
         }
+        record_oci_evidence(
+            transaction.as_mut(),
+            key,
+            OciObjectLifecycleState::Published,
+            None,
+            OciObjectLifecycleState::Published,
+            None,
+        )
+        .await?;
         let completed = query(
             "UPDATE shardline_resumable_sessions SET state = 'completed', updated_at = now()
              WHERE session_id = $1 AND state = 'completing' AND fence_epoch = $2",
@@ -114,6 +263,22 @@ impl PostgresIndexStore {
             transaction.rollback().await?;
             return Ok(false);
         }
+        super::refresh_resumable_state_digest(&mut transaction, fence.session_id()).await?;
+        let sequence = next_reliability_sequence(
+            transaction.as_mut(),
+            shardline_reliability::OperationKind::ResumableSession,
+            fence.session_id(),
+        )
+        .await?;
+        let event = resumable_session_event(
+            &scope_namespace,
+            fence.session_id(),
+            target_key,
+            sequence,
+            crate::ResumableSessionState::Completing,
+            crate::ResumableSessionState::Completed,
+        )?;
+        insert_reliability_event(transaction.as_mut(), &event).await?;
         transaction.commit().await?;
         Ok(true)
     }
@@ -129,6 +294,20 @@ impl PostgresIndexStore {
         key: &OciObjectKey,
     ) -> Result<(), PostgresMetadataStoreError> {
         let mut transaction = connection.begin().await?;
+        let previous_deleted_at = query(
+            "SELECT deleted_at_unix_seconds FROM shardline_oci_object_tombstones
+             WHERE scope_namespace = $1 AND repository = $2 AND object_kind = $3 AND digest_hex = $4",
+        )
+        .bind(&key.scope_namespace)
+        .bind(&key.repository)
+        .bind(key.kind.as_str())
+        .bind(&key.digest_hex)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .map(|row| row.try_get::<i64, _>("deleted_at_unix_seconds"))
+        .transpose()?
+        .map(super::i64_to_u64)
+        .transpose()?;
         query(
             "INSERT INTO shardline_oci_object_tombstones
                 (scope_namespace, repository, object_kind, digest_hex, deleted_at_unix_seconds)
@@ -143,6 +322,16 @@ impl PostgresIndexStore {
         .execute(&mut *transaction)
         .await?;
         if key.kind == OciObjectKind::Manifest {
+            let tags = query(
+                "SELECT scope_namespace, repository, tag, digest_hex
+                 FROM shardline_oci_tags
+                 WHERE scope_namespace = $1 AND repository = $2 AND digest_hex = $3",
+            )
+            .bind(&key.scope_namespace)
+            .bind(&key.repository)
+            .bind(&key.digest_hex)
+            .fetch_all(&mut *transaction)
+            .await?;
             query(
                 "DELETE FROM shardline_oci_tags
                  WHERE scope_namespace = $1 AND repository = $2 AND digest_hex = $3",
@@ -152,7 +341,46 @@ impl PostgresIndexStore {
             .bind(&key.digest_hex)
             .execute(&mut *transaction)
             .await?;
+            for row in tags {
+                let scope_namespace: String = row.try_get("scope_namespace")?;
+                let repository: String = row.try_get("repository")?;
+                let tag: String = row.try_get("tag")?;
+                let digest_hex: String = row.try_get("digest_hex")?;
+                super::oci_tags::record_tag_transition(
+                    transaction.as_mut(),
+                    &scope_namespace,
+                    &repository,
+                    &tag,
+                    Some(digest_hex),
+                    None,
+                )
+                .await?;
+            }
         }
+        let deleted_at: i64 = query_scalar(
+            "SELECT deleted_at_unix_seconds FROM shardline_oci_object_tombstones
+             WHERE scope_namespace = $1 AND repository = $2 AND object_kind = $3 AND digest_hex = $4",
+        )
+        .bind(&key.scope_namespace)
+        .bind(&key.repository)
+        .bind(key.kind.as_str())
+        .bind(&key.digest_hex)
+        .fetch_one(&mut *transaction)
+        .await?;
+        let deleted_at = super::i64_to_u64(deleted_at)?;
+        record_oci_evidence(
+            transaction.as_mut(),
+            key,
+            OciObjectLifecycleState::Deleted,
+            Some(deleted_at),
+            if previous_deleted_at.is_some() {
+                OciObjectLifecycleState::Deleted
+            } else {
+                OciObjectLifecycleState::Published
+            },
+            previous_deleted_at,
+        )
+        .await?;
         transaction.commit().await?;
         Ok(())
     }
@@ -163,7 +391,7 @@ impl OciObjectStore for PostgresIndexStore {
     type Error = PostgresMetadataStoreError;
 
     async fn oci_object_is_deleted(&self, key: &OciObjectKey) -> Result<bool, Self::Error> {
-        Ok(query_scalar::<_, i32>(
+        let found = query_scalar::<_, i32>(
             "SELECT 1 FROM shardline_oci_object_tombstones
              WHERE scope_namespace = $1 AND repository = $2
                AND object_kind = $3 AND digest_hex = $4",
@@ -173,8 +401,33 @@ impl OciObjectStore for PostgresIndexStore {
         .bind(key.kind.as_str())
         .bind(&key.digest_hex)
         .fetch_optional(&self.pool)
-        .await?
-        .is_some())
+        .await?;
+        let mut connection = self.pool.acquire().await?;
+        let mut transaction = connection.begin().await?;
+        let evidence = load_oci_evidence(transaction.as_mut(), key).await?;
+        if found.is_some() {
+            let deleted_at: i64 = query_scalar(
+                "SELECT deleted_at_unix_seconds FROM shardline_oci_object_tombstones
+                 WHERE scope_namespace = $1 AND repository = $2 AND object_kind = $3 AND digest_hex = $4",
+            )
+            .bind(&key.scope_namespace)
+            .bind(&key.repository)
+            .bind(key.kind.as_str())
+            .bind(&key.digest_hex)
+            .fetch_one(transaction.as_mut())
+            .await?;
+            let expected = oci_snapshot(
+                key,
+                OciObjectLifecycleState::Deleted,
+                Some(super::i64_to_u64(deleted_at)?),
+            )?;
+            verify_snapshot_evidence(&evidence, &expected)?;
+        } else if !evidence.events().is_empty() {
+            let expected = oci_snapshot(key, OciObjectLifecycleState::Published, None)?;
+            verify_snapshot_evidence(&evidence, &expected)?;
+        }
+        transaction.commit().await?;
+        Ok(found.is_some())
     }
 
     async fn publish_oci_object(
@@ -202,7 +455,10 @@ impl OciObjectStore for PostgresIndexStore {
         )
         .fetch_all(&self.pool)
         .await?;
-        rows.into_iter()
+        let mut connection = self.pool.acquire().await?;
+        let mut transaction = connection.begin().await?;
+        let tombstones = rows
+            .into_iter()
             .map(|row| {
                 let object_kind: String = row.try_get("object_kind")?;
                 let kind = object_kind.parse()?;
@@ -218,13 +474,26 @@ impl OciObjectStore for PostgresIndexStore {
                     )?,
                 })
             })
-            .collect()
+            .collect::<Result<Vec<_>, Self::Error>>()?;
+        for tombstone in &tombstones {
+            let evidence = load_oci_evidence(transaction.as_mut(), &tombstone.key).await?;
+            let expected = oci_snapshot(
+                &tombstone.key,
+                OciObjectLifecycleState::Deleted,
+                Some(tombstone.deleted_at_unix_seconds),
+            )?;
+            verify_snapshot_evidence(&evidence, &expected)?;
+        }
+        transaction.commit().await?;
+        Ok(tombstones)
     }
 
     async fn delete_oci_object_tombstone_if_unchanged(
         &self,
         tombstone: &OciObjectTombstone,
     ) -> Result<bool, Self::Error> {
+        let mut connection = self.pool.acquire().await?;
+        let mut transaction = connection.begin().await?;
         let result = query(
             "DELETE FROM shardline_oci_object_tombstones
              WHERE scope_namespace = $1 AND repository = $2
@@ -236,8 +505,20 @@ impl OciObjectStore for PostgresIndexStore {
         .bind(tombstone.key.kind.as_str())
         .bind(&tombstone.key.digest_hex)
         .bind(super::u64_to_i64(tombstone.deleted_at_unix_seconds)?)
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await?;
+        if result.rows_affected() != 0 {
+            record_oci_evidence(
+                transaction.as_mut(),
+                &tombstone.key,
+                OciObjectLifecycleState::Reclaimed,
+                Some(tombstone.deleted_at_unix_seconds),
+                OciObjectLifecycleState::Deleted,
+                Some(tombstone.deleted_at_unix_seconds),
+            )
+            .await?;
+        }
+        transaction.commit().await?;
         Ok(result.rows_affected() != 0)
     }
 }
@@ -247,25 +528,26 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
-    use crate::OciTagStore as _;
+    use crate::{OciTagStore as _, ResumableSession, ResumableSessionProtocol};
+    use sqlx::query_as;
+    use std::time::Duration;
 
     async fn connect_postgres() -> Option<sqlx::PgPool> {
-        let url = std::env::var("DATABASE_URL").ok()?;
-        sqlx::PgPool::connect(&url).await.ok()
+        super::super::connect_isolated_postgres().await
     }
 
-    fn object() -> OciObjectKey {
+    fn object(scope_namespace: &str) -> OciObjectKey {
         OciObjectKey {
-            scope_namespace: "oci-tombstone-pg".to_owned(),
+            scope_namespace: scope_namespace.to_owned(),
             repository: "team/assets".to_owned(),
             kind: OciObjectKind::Manifest,
             digest_hex: "a".repeat(64),
         }
     }
 
-    fn tag(name: &str, digest: char) -> OciTagEntry {
+    fn tag(scope_namespace: &str, name: &str, digest: char) -> OciTagEntry {
         OciTagEntry {
-            scope_namespace: "oci-tombstone-pg".to_owned(),
+            scope_namespace: scope_namespace.to_owned(),
             repository: "team/assets".to_owned(),
             tag: name.to_owned(),
             digest_hex: digest.to_string().repeat(64),
@@ -278,20 +560,39 @@ mod tests {
             eprintln!("skipping: no DATABASE_URL");
             return;
         };
+        let scope_namespace = format!(
+            "oci-tombstone-pg-{}",
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        );
         query("DELETE FROM shardline_oci_object_tombstones WHERE scope_namespace = $1")
-            .bind("oci-tombstone-pg")
+            .bind(&scope_namespace)
             .execute(&pool)
             .await
             .unwrap();
         query("DELETE FROM shardline_oci_tags WHERE scope_namespace = $1")
-            .bind("oci-tombstone-pg")
+            .bind(&scope_namespace)
             .execute(&pool)
             .await
             .unwrap();
+        query(
+            "DELETE FROM shardline_reliability_events
+             WHERE operation_kind = 'Visibility'
+               AND operation_id = $1",
+        )
+        .bind(format!(
+            "{}:{}:{}:{}",
+            scope_namespace,
+            "team/assets",
+            OciObjectKind::Manifest.as_str(),
+            "a".repeat(64)
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
         let store = PostgresIndexStore::new(pool);
-        let manifest = object();
-        let current = tag("latest", 'a');
-        let unrelated = tag("stable", 'b');
+        let manifest = object(&scope_namespace);
+        let current = tag(&scope_namespace, "latest", 'a');
+        let unrelated = tag(&scope_namespace, "stable", 'b');
 
         store
             .publish_oci_object(&manifest, &[current.clone(), unrelated.clone()])
@@ -339,6 +640,157 @@ mod tests {
                 .delete_oci_object_tombstone_if_unchanged(&tombstone)
                 .await
                 .unwrap()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pg_reclaim_repairs_missing_visibility_baseline_chain() {
+        let Some(pool) = connect_postgres().await else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let store = PostgresIndexStore::new(pool.clone());
+        let key = OciObjectKey {
+            scope_namespace: "oci-reclaim-repair".to_owned(),
+            repository: "team/assets".to_owned(),
+            kind: OciObjectKind::Blob,
+            digest_hex: "f".repeat(64),
+        };
+        query(
+            "DELETE FROM shardline_oci_object_tombstones
+             WHERE scope_namespace = $1 AND repository = $2
+               AND object_kind = $3 AND digest_hex = $4",
+        )
+        .bind(&key.scope_namespace)
+        .bind(&key.repository)
+        .bind(key.kind.as_str())
+        .bind(&key.digest_hex)
+        .execute(&pool)
+        .await
+        .unwrap();
+        query(
+            "DELETE FROM shardline_reliability_events
+             WHERE operation_kind = 'Visibility' AND operation_id = $1",
+        )
+        .bind(format!(
+            "{}:{}:{}:{}",
+            key.scope_namespace,
+            key.repository,
+            key.kind.as_str(),
+            key.digest_hex
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+        store.delete_oci_object(&key).await.unwrap();
+        let tombstone = store
+            .list_oci_object_tombstones()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|candidate| candidate.key == key)
+            .unwrap();
+        query(
+            "DELETE FROM shardline_reliability_events
+             WHERE operation_kind = 'Visibility' AND operation_id = $1",
+        )
+        .bind(format!(
+            "{}:{}:{}:{}",
+            key.scope_namespace,
+            key.repository,
+            key.kind.as_str(),
+            key.digest_hex
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        assert!(
+            store
+                .delete_oci_object_tombstone_if_unchanged(&tombstone)
+                .await
+                .unwrap()
+        );
+        let (count, minimum, maximum): (i64, i64, i64) = query_as(
+            "SELECT COUNT(*), MIN(sequence), MAX(sequence)
+             FROM shardline_reliability_events
+             WHERE operation_kind = 'Visibility' AND operation_id = $1",
+        )
+        .bind(format!(
+            "{}:{}:{}:{}",
+            key.scope_namespace,
+            key.repository,
+            key.kind.as_str(),
+            key.digest_hex
+        ))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!((count, minimum, maximum), (2, 0, 1));
+        query(
+            "DELETE FROM shardline_reliability_events
+             WHERE operation_kind = 'Visibility' AND operation_id = $1",
+        )
+        .bind(format!(
+            "{}:{}:{}:{}",
+            key.scope_namespace,
+            key.repository,
+            key.kind.as_str(),
+            key.digest_hex
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pg_oci_completion_records_the_resumable_transition_atomically() {
+        let Some(pool) = connect_postgres().await else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let suffix = chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default();
+        let session = ResumableSession::new(
+            format!("oci-completion-{suffix}"),
+            ResumableSessionProtocol::OciBlob,
+            format!("oci-completion-scope-{suffix}"),
+            "team/assets".to_owned(),
+            Duration::from_secs(u64::try_from(chrono::Utc::now().timestamp()).unwrap() + 3_600),
+        );
+        let store = PostgresIndexStore::new(pool);
+        assert!(store.create_resumable_session(&session).await.unwrap());
+        let claimed = store
+            .begin_resumable_completion(session.session_id())
+            .await
+            .unwrap()
+            .unwrap()
+            .0;
+        let key = OciObjectKey {
+            scope_namespace: session.scope_namespace().to_owned(),
+            repository: session.target_key().to_owned(),
+            kind: OciObjectKind::Manifest,
+            digest_hex: "b".repeat(64),
+        };
+        let mut connection = store.pool().acquire().await.unwrap();
+        assert!(
+            store
+                .publish_oci_object_completion_on_connection(
+                    &mut connection,
+                    &key,
+                    &[],
+                    &claimed.completion_fence(),
+                )
+                .await
+                .unwrap()
+        );
+        let events = store
+            .resumable_reliability_events(session.session_id())
+            .await
+            .unwrap();
+        shardline_reliability::verify_state_transition_chain(&events).unwrap();
+        assert_eq!(
+            events.last().unwrap().after,
+            crate::ResumableSessionState::Completed
         );
     }
 }

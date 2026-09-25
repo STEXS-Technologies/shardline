@@ -1,0 +1,320 @@
+use serde::{Deserialize, Serialize};
+
+use crate::{
+    LifecycleEvidenceLog, ReliabilityError, ResumableLifecycleState, StateTransitionEvent,
+    resumable_session_event, verify_state_transition_chain,
+};
+
+/// Verifies a persisted resumable-session journal against its canonical
+/// identity and current durable state.
+///
+/// # Errors
+///
+/// Returns an error when validation, integrity verification, or canonicalization fails.
+pub fn verify_resumable_session_events(
+    events: &[StateTransitionEvent],
+    scope_namespace: &str,
+    session_id: &str,
+    target_key: &str,
+    expected_state: ResumableLifecycleState,
+) -> Result<(), ReliabilityError> {
+    verify_state_transition_chain(events)?;
+    let Some(first) = events.first() else {
+        return Err(ReliabilityError::OperationMismatch);
+    };
+    if !matches!(first.sequence, 0 | 1)
+        || first.before != ResumableLifecycleState::Active
+        || first.after != ResumableLifecycleState::Active
+    {
+        return Err(ReliabilityError::ChainDiscontinuity);
+    }
+    let operation = &first.operation;
+    if operation.kind != crate::OperationKind::ResumableSession
+        || operation.tenant != "resumable-session"
+        || operation.repository != scope_namespace
+        || operation.operation_id != session_id
+        || operation.object_key.as_deref() != Some(target_key)
+    {
+        return Err(ReliabilityError::OperationMismatch);
+    }
+    if events
+        .last()
+        .is_some_and(|event| event.after == expected_state)
+    {
+        Ok(())
+    } else {
+        Err(ReliabilityError::StateMismatch)
+    }
+}
+
+/// Verifies one latest session boundary without loading the historical chain.
+/// Explicit fsck and repair paths should use [`verify_resumable_session_events`]
+/// to validate the complete history.
+///
+/// # Errors
+///
+/// Returns an error when the head event does not match the session identity or state.
+pub fn verify_resumable_session_head(
+    event: &StateTransitionEvent,
+    scope_namespace: &str,
+    session_id: &str,
+    target_key: &str,
+    expected_state: ResumableLifecycleState,
+) -> Result<(), ReliabilityError> {
+    event.verify_integrity()?;
+    let operation = &event.operation;
+    if event.sequence == 0
+        || operation.kind != crate::OperationKind::ResumableSession
+        || operation.tenant != "resumable-session"
+        || operation.repository != scope_namespace
+        || operation.operation_id != session_id
+        || operation.object_key.as_deref() != Some(target_key)
+    {
+        return Err(ReliabilityError::OperationMismatch);
+    }
+    if event.after == expected_state {
+        Ok(())
+    } else {
+        Err(ReliabilityError::StateMismatch)
+    }
+}
+
+/// Canonical evidence log for a file-backed resumable session.
+///
+/// The log is deliberately a newtype so adapters cannot construct or interpret
+/// a parallel digest format. Legacy session files may start empty; callers must
+/// use [`Self::for_legacy_session`] before accepting or mutating such state.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionEvidenceLog(LifecycleEvidenceLog<ResumableLifecycleState>);
+
+impl SessionEvidenceLog {
+    /// Wraps persisted events after validating the complete session chain.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when validation, integrity verification, or canonicalization fails.
+    pub fn from_events(events: Vec<StateTransitionEvent>) -> Result<Self, ReliabilityError> {
+        Ok(Self(LifecycleEvidenceLog::from_events(events)?))
+    }
+
+    /// Wraps one already-persisted head event without loading its historical
+    /// prefix. Full-chain verification remains available to fsck and repair.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the head event's integrity digest is invalid.
+    pub fn from_head(event: StateTransitionEvent) -> Result<Self, ReliabilityError> {
+        Ok(Self(LifecycleEvidenceLog::from_head(event)?))
+    }
+
+    /// Creates the initial active evidence for a newly created session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when validation, integrity verification, or canonicalization fails.
+    pub fn new(
+        scope_namespace: impl Into<String>,
+        session_id: impl Into<String>,
+        target_key: impl Into<String>,
+    ) -> Result<Self, ReliabilityError> {
+        let scope_namespace = scope_namespace.into();
+        let session_id = session_id.into();
+        let target_key = target_key.into();
+        let event = resumable_session_event(
+            scope_namespace,
+            session_id,
+            target_key,
+            1,
+            ResumableLifecycleState::Active,
+            ResumableLifecycleState::Active,
+        )?;
+        Ok(Self(LifecycleEvidenceLog::from_events(vec![event])?))
+    }
+
+    /// Reconstructs the initial active evidence for a pre-evidence session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when validation, integrity verification, or canonicalization fails.
+    pub fn for_legacy_session(
+        scope_namespace: impl Into<String>,
+        session_id: impl Into<String>,
+        target_key: impl Into<String>,
+    ) -> Result<Self, ReliabilityError> {
+        Self::new(scope_namespace, session_id, target_key)
+    }
+
+    /// Appends one canonical evidence boundary and verifies the complete chain.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when validation, integrity verification, or canonicalization fails.
+    pub fn record(
+        &mut self,
+        scope_namespace: impl Into<String>,
+        session_id: impl Into<String>,
+        target_key: impl Into<String>,
+        before: ResumableLifecycleState,
+        after: ResumableLifecycleState,
+    ) -> Result<(), ReliabilityError> {
+        let sequence = self.events().last().map_or(Ok(1), |event| {
+            event
+                .sequence
+                .checked_add(1)
+                .ok_or(ReliabilityError::ChainDiscontinuity)
+        })?;
+        let event = resumable_session_event(
+            scope_namespace,
+            session_id,
+            target_key,
+            sequence,
+            before,
+            after,
+        )?;
+        self.0.append(event)
+    }
+
+    /// Verifies all stored digests, identity, ordering, and chain continuity.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when validation, integrity verification, or canonicalization fails.
+    pub fn verify(&self) -> Result<(), ReliabilityError> {
+        self.0.verify()
+    }
+
+    /// Verifies integrity and binds the chain to one canonical session
+    /// identity. Adapters use this instead of interpreting operation fields
+    /// independently, so a valid chain cannot be replayed for another
+    /// session, scope, or target.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when validation, integrity verification, or canonicalization fails.
+    pub fn verify_for(
+        &self,
+        scope_namespace: &str,
+        session_id: &str,
+        target_key: &str,
+    ) -> Result<(), ReliabilityError> {
+        let expected_state = self
+            .events()
+            .last()
+            .map_or(ResumableLifecycleState::Active, |event| event.after);
+        if self.0.is_head_only() {
+            let event = self
+                .events()
+                .last()
+                .ok_or(ReliabilityError::OperationMismatch)?;
+            verify_resumable_session_head(
+                event,
+                scope_namespace,
+                session_id,
+                target_key,
+                expected_state,
+            )
+        } else {
+            verify_resumable_session_events(
+                self.events(),
+                scope_namespace,
+                session_id,
+                target_key,
+                expected_state,
+            )
+        }
+    }
+
+    /// Returns the evidence events in sequence order.
+    #[must_use]
+    pub fn events(&self) -> &[StateTransitionEvent] {
+        self.0.events()
+    }
+
+    /// Returns whether no evidence has been recorded.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.events().is_empty()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn events_mut(&mut self) -> &mut [StateTransitionEvent] {
+        self.0.events_mut()
+    }
+}
+
+/// Verifies persisted session evidence against its canonical identity, or
+/// reconstructs the active baseline for legacy data that predates evidence.
+///
+/// The boolean reports whether the returned log was repaired so adapters can
+/// persist the canonical envelope without duplicating legacy-state policy.
+///
+/// # Errors
+///
+/// Returns an error when validation, integrity verification, or canonicalization fails.
+pub fn verify_or_repair_session_evidence(
+    stored: SessionEvidenceLog,
+    scope_namespace: &str,
+    session_id: &str,
+    target_key: &str,
+) -> Result<(SessionEvidenceLog, bool), ReliabilityError> {
+    if stored.is_empty() {
+        return Ok((
+            SessionEvidenceLog::for_legacy_session(scope_namespace, session_id, target_key)?,
+            true,
+        ));
+    }
+    stored.verify_for(scope_namespace, session_id, target_key)?;
+    Ok((stored, false))
+}
+
+/// Verifies persisted session evidence without creating a legacy baseline.
+/// Normal reads should use this boundary; baseline creation belongs to an
+/// explicit repair or mutation path.
+///
+/// # Errors
+///
+/// Returns an error when validation, integrity verification, or canonicalization fails.
+pub fn verify_session_evidence(
+    stored: &SessionEvidenceLog,
+    scope_namespace: &str,
+    session_id: &str,
+    target_key: &str,
+) -> Result<(), ReliabilityError> {
+    if stored.is_empty() {
+        return Err(ReliabilityError::OperationMismatch);
+    }
+    stored.verify_for(scope_namespace, session_id, target_key)
+}
+
+/// Verifies a session journal against its identity and expected current state,
+/// repairs a missing legacy baseline, and appends one canonical transition.
+///
+/// # Errors
+///
+/// Returns an error when validation, integrity verification, or canonicalization fails.
+pub fn verify_and_append_session_transition(
+    stored: SessionEvidenceLog,
+    scope_namespace: &str,
+    session_id: &str,
+    target_key: &str,
+    before: ResumableLifecycleState,
+    after: ResumableLifecycleState,
+) -> Result<(SessionEvidenceLog, bool), ReliabilityError> {
+    let (mut evidence, baseline_was_missing) =
+        verify_or_repair_session_evidence(stored, scope_namespace, session_id, target_key)?;
+    let current = evidence
+        .events()
+        .last()
+        .map_or(ResumableLifecycleState::Active, |event| event.after);
+    if current != before {
+        return Err(ReliabilityError::StateMismatch);
+    }
+    evidence.record(
+        scope_namespace.to_owned(),
+        session_id.to_owned(),
+        target_key.to_owned(),
+        before,
+        after,
+    )?;
+    Ok((evidence, baseline_was_missing))
+}

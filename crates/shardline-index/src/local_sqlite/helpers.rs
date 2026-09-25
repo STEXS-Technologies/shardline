@@ -1,6 +1,7 @@
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 use std::{
+    collections::HashMap,
     error::Error as StdError,
     ffi::OsStr,
     fs::{self, OpenOptions},
@@ -12,14 +13,26 @@ use std::{
 };
 
 use rusqlite::{
-    Connection, Error as SqliteError, MappedRows, OpenFlags, OptionalExtension, Params,
+    Connection, Error as SqliteError, ErrorCode, MappedRows, OpenFlags, OptionalExtension, Params,
     Result as SqliteResult, Row, Transaction,
     config::DbConfig,
-    params,
+    params, params_from_iter,
     types::{Type, ValueRef},
 };
-use serde_json::{from_slice, from_str, to_string};
+use serde_json::{Value, from_slice, from_str, from_value, to_string};
 use shardline_protocol::{RepositoryScope, unix_now_seconds_lossy};
+use shardline_reliability::{
+    EvidenceEventMetadata, HubRefEvidenceLog, HubRefLifecycleEvent, HubRefSnapshot,
+    OciTagEvidenceLog, OciTagLifecycleEvent, OciTagSnapshot, OperationKind, ProviderEvidenceLog,
+    ProviderLifecycleEvent, ProviderLifecycleSnapshot, QuarantineEvidenceLog,
+    QuarantineLifecycleEvent, QuarantineLifecycleState, QuarantineObjectIdentity,
+    QuarantineSnapshot, RetentionEvidenceLog, RetentionHoldLifecycleEvent,
+    RetentionHoldLifecycleState, RetentionHoldSnapshot, RetentionObjectIdentity,
+    S3ObjectEvidenceLog, S3ObjectLifecycleEvent, S3ObjectSnapshot, S3ObjectState, SnapshotEvidence,
+    WebhookDeliveryEvidenceLog, WebhookDeliveryIdentity, WebhookDeliveryLifecycleEvent,
+    WebhookDeliveryLifecycleState, WebhookDeliverySnapshot, verify_or_repair_snapshot_evidence,
+    verify_snapshot_evidence,
+};
 use shardline_storage::{
     DirectoryPathError, ObjectKey, ObjectKeyError,
     ensure_directory_path_components_are_not_symlinked as ensure_directory_path_components_are_not_symlinked_shared,
@@ -40,10 +53,1094 @@ use crate::{
     record_key::repository_scope_key as shared_repository_scope_key, xet_hash_hex_string,
 };
 
+type VerifiedEventHistory = (Vec<u64>, Vec<Value>, Vec<Option<Value>>);
+
+use shardline_reliability::{
+    LifecycleEvent, OciObjectEvidenceLog, OciObjectIdentity, OciObjectLifecycleState,
+    OciObjectSnapshot, ReliabilityMerkleCommit, ResumableLifecycleState, StateTransitionEvent,
+    UploadLifecycleState, baseline_resumable_session_events, baseline_upload_lifecycle_events,
+    build_persisted_merkle_commit_with_previous, persisted_event_identity,
+    persisted_event_sequence, reliability_merkle_commit_json_with_previous,
+    upload_lifecycle_identity, verify_persisted_merkle_commit_with_previous,
+    verify_provider_lifecycle_events, verify_resumable_session_events,
+    verify_upload_lifecycle_events,
+};
+
+use crate::{OciObjectKind, provider_evidence::snapshot_from_state};
+
+pub(crate) fn quarantine_evidence_operation_id(object_key: &str) -> String {
+    object_key.to_owned()
+}
+
+/// Loads one operation's JSON events and verifies its persisted Merkle chain
+/// before any domain-specific state interpretation occurs.
+pub(crate) fn load_verified_event_json(
+    transaction: &Transaction<'_>,
+    operation_kind: OperationKind,
+    operation_id: &str,
+) -> Result<Vec<Value>, LocalIndexStoreError> {
+    let mut statement = transaction.prepare(
+        "SELECT sequence, event_json, merkle_commit_json
+         FROM shardline_reliability_events
+         WHERE operation_kind = ?1 AND operation_id = ?2 ORDER BY sequence",
+    )?;
+    let rows = statement.query_map(params![operation_kind.as_str(), operation_id], |row| {
+        let sequence: i64 = row.get(0)?;
+        let event_json: String = row.get(1)?;
+        let merkle_commit_json: Option<String> = row.get(2)?;
+        Ok((sequence, event_json, merkle_commit_json))
+    })?;
+    let rows = rows.collect::<Result<Vec<_>, _>>()?;
+    let mut row_sequences = Vec::with_capacity(rows.len());
+    let mut events = Vec::with_capacity(rows.len());
+    let mut merkle_commits = Vec::with_capacity(rows.len());
+    for (sequence, event_json, merkle_commit_json) in rows {
+        if sequence < 0 {
+            return Err(LocalIndexStoreError::Reliability(
+                shardline_reliability::ReliabilityError::Merkle(
+                    "persisted row sequence is negative".into(),
+                ),
+            ));
+        }
+        row_sequences.push(u64::try_from(sequence).map_err(|error| {
+            LocalIndexStoreError::Reliability(shardline_reliability::ReliabilityError::Merkle(
+                format!("persisted row sequence is out of range: {error}"),
+            ))
+        })?);
+        let event = from_str::<Value>(&event_json)?;
+        let identity = persisted_event_identity(operation_kind, event.clone())?;
+        if identity.operation_id != operation_id {
+            return Err(LocalIndexStoreError::Reliability(
+                shardline_reliability::ReliabilityError::OperationMismatch,
+            ));
+        }
+        events.push(event);
+        merkle_commits.push(
+            merkle_commit_json
+                .map(|json| from_str::<Value>(&json))
+                .transpose()?,
+        );
+    }
+    shardline_reliability::verify_persisted_event_merkle_chain_with_sequences(
+        operation_kind,
+        &row_sequences,
+        &events,
+        &merkle_commits,
+    )?;
+    Ok(events)
+}
+
+/// Loads and verifies only the latest event for one operation. Full-chain
+/// replay remains available through [`load_verified_event_json`] for fsck and
+/// repair; current-state reads use this bounded boundary.
+pub(crate) fn load_latest_verified_event_json(
+    transaction: &Transaction<'_>,
+    operation_kind: OperationKind,
+    operation_id: &str,
+) -> Result<Option<Value>, LocalIndexStoreError> {
+    let row = transaction
+        .query_row(
+            "SELECT latest.sequence, latest.event_json, latest.merkle_commit_json,
+                    CASE WHEN EXISTS (
+                        SELECT 1
+                        FROM shardline_reliability_events AS missing
+                        WHERE missing.operation_kind = ?1
+                          AND missing.operation_id = ?2
+                          AND missing.sequence < latest.sequence
+                          AND missing.merkle_commit_json IS NULL
+                    ) THEN '{\"missing_previous_merkle_commit\":true}' ELSE (
+                        SELECT previous.merkle_commit_json
+                        FROM shardline_reliability_events AS previous
+                        WHERE previous.operation_kind = ?1
+                          AND previous.operation_id = ?2
+                          AND previous.sequence < latest.sequence
+                        ORDER BY previous.sequence DESC
+                        LIMIT 1
+                    ) END
+             FROM (
+                 SELECT sequence, event_json, merkle_commit_json
+                 FROM shardline_reliability_events
+                 WHERE operation_kind = ?1 AND operation_id = ?2
+                 ORDER BY sequence DESC
+                 LIMIT 1
+             ) AS latest",
+            params![operation_kind.as_str(), operation_id],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((sequence, event_json, merkle_commit_json, previous_merkle_json)) = row else {
+        return Ok(None);
+    };
+    let sequence = u64::try_from(sequence).map_err(|error| {
+        LocalIndexStoreError::Reliability(shardline_reliability::ReliabilityError::Merkle(format!(
+            "persisted row sequence is out of range: {error}"
+        )))
+    })?;
+    let event_json = from_str::<Value>(&event_json)?;
+    if persisted_event_sequence(operation_kind, event_json.clone())? != sequence {
+        return Err(LocalIndexStoreError::Reliability(
+            shardline_reliability::ReliabilityError::Merkle(
+                "persisted row sequence does not match its event".into(),
+            ),
+        ));
+    }
+    let identity = persisted_event_identity(operation_kind, event_json.clone())?;
+    if identity.operation_id != operation_id {
+        return Err(LocalIndexStoreError::Reliability(
+            shardline_reliability::ReliabilityError::OperationMismatch,
+        ));
+    }
+    verify_persisted_merkle_commit_with_previous(
+        operation_kind,
+        event_json.clone(),
+        merkle_commit_json
+            .map(|json| from_str::<Value>(&json))
+            .transpose()?,
+        previous_merkle_json
+            .map(|json| from_str::<Value>(&json))
+            .transpose()?,
+    )?;
+    Ok(Some(event_json))
+}
+
+pub(crate) fn load_verified_event_json_batch(
+    transaction: &Transaction<'_>,
+    operation_kind: OperationKind,
+    operation_ids: &[String],
+) -> Result<HashMap<String, Vec<Value>>, LocalIndexStoreError> {
+    if operation_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let placeholders = (0..operation_ids.len())
+        .map(|index| format!("?{}", index.saturating_add(2)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "SELECT operation_id, sequence, event_json, merkle_commit_json
+         FROM shardline_reliability_events
+         WHERE operation_kind = ?1 AND operation_id IN ({placeholders})
+         ORDER BY operation_id, sequence"
+    );
+    let mut parameters = Vec::with_capacity(operation_ids.len().saturating_add(1));
+    parameters.push(operation_kind.as_str().to_owned());
+    parameters.extend(operation_ids.iter().cloned());
+    let mut statement = transaction.prepare(&sql)?;
+    let rows = statement.query_map(params_from_iter(parameters.iter()), |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, Option<String>>(3)?,
+        ))
+    })?;
+    let mut histories: HashMap<String, VerifiedEventHistory> =
+        HashMap::with_capacity(operation_ids.len());
+    for row in rows {
+        let (operation_id, sequence, event_json, merkle_commit_json) = row?;
+        let sequence = u64::try_from(sequence).map_err(|error| {
+            LocalIndexStoreError::Reliability(shardline_reliability::ReliabilityError::Merkle(
+                format!("persisted row sequence is out of range: {error}"),
+            ))
+        })?;
+        let event_json = from_str::<Value>(&event_json)?;
+        let identity = persisted_event_identity(operation_kind, event_json.clone())?;
+        if identity.operation_id != operation_id {
+            return Err(LocalIndexStoreError::Reliability(
+                shardline_reliability::ReliabilityError::OperationMismatch,
+            ));
+        }
+        let merkle_commit_json = merkle_commit_json
+            .map(|json| from_str::<Value>(&json))
+            .transpose()?;
+        let history = histories
+            .entry(operation_id)
+            .or_insert_with(|| (Vec::new(), Vec::new(), Vec::new()));
+        history.0.push(sequence);
+        history.1.push(event_json);
+        history.2.push(merkle_commit_json);
+    }
+    let mut verified = HashMap::with_capacity(histories.len());
+    for (operation_id, (sequences, event_json, merkle_commits)) in histories {
+        shardline_reliability::verify_persisted_event_merkle_chain_with_sequences(
+            operation_kind,
+            &sequences,
+            &event_json,
+            &merkle_commits,
+        )?;
+        verified.insert(operation_id, event_json);
+    }
+    Ok(verified)
+}
+
+/// Persists one integrity-checked evidence event using its typed operation key.
+///
+/// All local durable state machines share this writer so a caller cannot bind
+/// an event under a separately supplied operation kind or operation id.
+pub(crate) fn persist_reliability_event<T: EvidenceEventMetadata>(
+    transaction: &Transaction<'_>,
+    event: &T,
+) -> Result<(), LocalIndexStoreError> {
+    persist_reliability_event_at(transaction, event, u64_to_i64(unix_now_seconds_lossy())?)
+}
+
+/// Persists one event with an explicitly selected timestamp source.
+///
+/// The timestamp is kept separate from the typed event identity so adapters
+/// can preserve their existing clock contract while sharing the journal
+/// writer and its key derivation.
+pub(crate) fn persist_reliability_event_at<T: EvidenceEventMetadata>(
+    transaction: &Transaction<'_>,
+    event: &T,
+    created_at_unix_seconds: i64,
+) -> Result<(), LocalIndexStoreError> {
+    event.verify_integrity()?;
+    let sequence = u64_to_i64(event.sequence_number())?;
+    let previous_json: Option<String> = transaction
+        .query_row(
+            "SELECT CASE WHEN EXISTS (
+                 SELECT 1 FROM shardline_reliability_events AS missing
+                 WHERE missing.operation_kind = ?1 AND missing.operation_id = ?2
+                   AND missing.sequence < ?3
+                   AND missing.merkle_commit_json IS NULL
+             ) THEN '{\"missing_previous_merkle_commit\":true}' ELSE merkle_commit_json END
+             FROM shardline_reliability_events
+             WHERE operation_kind = ?1 AND operation_id = ?2 AND sequence < ?3
+             ORDER BY sequence DESC LIMIT 1",
+            params![
+                event.operation_identity().kind.as_str(),
+                event.operation_identity().operation_id,
+                sequence,
+            ],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let previous = previous_json
+        .map(|json| from_str::<Value>(&json))
+        .transpose()?
+        .map(serde_json::from_value::<ReliabilityMerkleCommit>)
+        .transpose()?;
+    let merkle_commit_json =
+        reliability_merkle_commit_json_with_previous(event, previous.as_ref())?;
+    let event_json = to_string(event)?;
+    let rows = transaction.execute(
+        "INSERT INTO shardline_reliability_events
+            (operation_kind, operation_id, sequence, event_json, created_at_unix_seconds,
+             merkle_commit_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT (operation_kind, operation_id, sequence) DO UPDATE
+         SET merkle_commit_json = COALESCE(
+             shardline_reliability_events.merkle_commit_json,
+             excluded.merkle_commit_json
+         )
+         WHERE shardline_reliability_events.event_json = excluded.event_json",
+        params![
+            event.operation_identity().kind.as_str(),
+            event.operation_identity().operation_id,
+            sequence,
+            event_json,
+            created_at_unix_seconds,
+            merkle_commit_json.to_string(),
+        ],
+    )?;
+    if rows == 0 {
+        return Err(LocalIndexStoreError::ReliabilityEventConflict(
+            event.operation_identity().operation_id.clone(),
+        ));
+    }
+    Ok(())
+}
+
+/// Adds StateChronicle Merkle commitments to a bounded batch of legacy journal
+/// rows. This is an explicit maintenance operation; normal reads never repair
+/// missing commitments.
+pub(crate) fn backfill_reliability_merkle_commits(
+    transaction: &Transaction<'_>,
+    batch_size: usize,
+) -> Result<usize, LocalIndexStoreError> {
+    let limit = i64::try_from(batch_size.max(1)).map_err(|error| {
+        LocalIndexStoreError::Reliability(shardline_reliability::ReliabilityError::Merkle(format!(
+            "invalid Merkle backfill batch size: {error}"
+        )))
+    })?;
+    let mut statement = transaction.prepare(
+        "SELECT operation_kind, operation_id, sequence, event_json
+         FROM shardline_reliability_events
+         WHERE merkle_commit_json IS NULL
+            OR (sequence > 0 AND json_extract(merkle_commit_json, '$.body.parent_commit_id') IS NULL)
+         ORDER BY operation_kind, operation_id, sequence
+         LIMIT ?1",
+    )?;
+    let rows = statement.query_map(params![limit], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, i64>(2)?,
+            row.get::<_, String>(3)?,
+        ))
+    })?;
+    let rows = rows.collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+
+    for (operation_kind_text, operation_id, sequence, event_json_text) in &rows {
+        let operation_kind = OperationKind::parse(operation_kind_text).ok_or_else(|| {
+            LocalIndexStoreError::Reliability(shardline_reliability::ReliabilityError::Merkle(
+                format!("unknown reliability operation kind {operation_kind_text}"),
+            ))
+        })?;
+        let event_json = from_str(event_json_text)?;
+        let previous_json: Option<String> = transaction
+            .query_row(
+                "SELECT CASE WHEN EXISTS (
+                     SELECT 1 FROM shardline_reliability_events AS missing
+                     WHERE missing.operation_kind = ?1 AND missing.operation_id = ?2
+                       AND missing.sequence < ?3
+                       AND missing.merkle_commit_json IS NULL
+                 ) THEN '{\"missing_previous_merkle_commit\":true}' ELSE merkle_commit_json END
+                 FROM shardline_reliability_events
+                 WHERE operation_kind = ?1 AND operation_id = ?2 AND sequence < ?3
+                 ORDER BY sequence DESC LIMIT 1",
+                params![operation_kind.as_str(), operation_id, sequence],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let previous_json = previous_json
+            .map(|json| from_str::<Value>(&json))
+            .transpose()?;
+        let merkle_commit_json =
+            build_persisted_merkle_commit_with_previous(operation_kind, event_json, previous_json)
+                .map_err(LocalIndexStoreError::Reliability)?;
+        transaction.execute(
+            "UPDATE shardline_reliability_events
+             SET merkle_commit_json = ?1
+             WHERE operation_kind = ?2
+               AND operation_id = ?3
+               AND sequence = ?4
+               AND (merkle_commit_json IS NULL
+                    OR (sequence > 0 AND json_extract(merkle_commit_json, '$.body.parent_commit_id') IS NULL))
+               AND event_json = ?5",
+            params![
+                merkle_commit_json.to_string(),
+                operation_kind.as_str(),
+                operation_id,
+                sequence,
+                event_json_text,
+            ],
+        )?;
+    }
+    Ok(rows.len())
+}
+
+/// Rebuilds every persisted Merkle body from the authoritative reliability
+/// event JSON. This is an explicit operator repair path: it never changes the
+/// event journal or materialized state, and the transaction rolls back if any
+/// event is invalid or its linked sequence is broken.
+pub(crate) fn repair_reliability_merkle_commits(
+    transaction: &Transaction<'_>,
+) -> Result<usize, LocalIndexStoreError> {
+    let mut statement = transaction.prepare(
+        "SELECT operation_kind, operation_id, sequence, event_json
+         FROM shardline_reliability_events
+         ORDER BY operation_kind, operation_id, sequence",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, i64>(2)?,
+            row.get::<_, String>(3)?,
+        ))
+    })?;
+    let rows = rows.collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+
+    let mut previous_operation: Option<(String, String, Value)> = None;
+    let mut repaired = 0usize;
+    for (operation_kind_text, operation_id, sequence, event_json_text) in rows {
+        let operation_kind = OperationKind::parse(&operation_kind_text).ok_or_else(|| {
+            LocalIndexStoreError::Reliability(shardline_reliability::ReliabilityError::Merkle(
+                format!("unknown reliability operation kind {operation_kind_text}"),
+            ))
+        })?;
+        let event_json: Value = from_str(&event_json_text)?;
+        let event_sequence = persisted_event_sequence(operation_kind, event_json.clone()).map_err(|error| {
+            LocalIndexStoreError::Reliability(shardline_reliability::ReliabilityError::Merkle(
+                format!(
+                    "invalid persisted reliability event kind={operation_kind_text} operation={operation_id} sequence={sequence}: {error}"
+                ),
+            ))
+        })?;
+        if u64_to_i64(event_sequence)? != sequence {
+            return Err(LocalIndexStoreError::Reliability(
+                shardline_reliability::ReliabilityError::Merkle(format!(
+                    "persisted event sequence does not match row kind={operation_kind_text} operation={operation_id} row_sequence={sequence} event_sequence={event_sequence}"
+                )),
+            ));
+        }
+        let previous = previous_operation
+            .as_ref()
+            .filter(|(kind, id, _)| kind == &operation_kind_text && id == &operation_id)
+            .map(|(_, _, commit)| commit.clone());
+        let merkle_commit_json =
+            build_persisted_merkle_commit_with_previous(operation_kind, event_json, previous)
+                .map_err(LocalIndexStoreError::Reliability)?;
+        transaction.execute(
+            "UPDATE shardline_reliability_events
+             SET merkle_commit_json = ?1
+             WHERE operation_kind = ?2 AND operation_id = ?3 AND sequence = ?4",
+            params![
+                merkle_commit_json.to_string(),
+                operation_kind_text,
+                operation_id,
+                sequence,
+            ],
+        )?;
+        previous_operation = Some((operation_kind_text, operation_id, merkle_commit_json));
+        repaired = repaired.saturating_add(1);
+    }
+    Ok(repaired)
+}
+
+/// Verifies every local reliability event and its persisted Merkle body.
+pub(crate) fn verify_reliability_events(
+    connection: &Connection,
+) -> Result<(), LocalIndexStoreError> {
+    let mut statement = connection.prepare(
+        "SELECT operation_kind, operation_id, sequence, event_json, merkle_commit_json
+         FROM shardline_reliability_events
+         ORDER BY operation_kind, operation_id, sequence",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, i64>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, Option<String>>(4)?,
+        ))
+    })?;
+    let mut previous_operation: Option<(String, String, Value)> = None;
+    for row in rows {
+        let (operation_kind_text, operation_id, sequence, event_json_text, merkle_json_text) = row?;
+        let operation_kind = OperationKind::parse(&operation_kind_text).ok_or_else(|| {
+            LocalIndexStoreError::Reliability(shardline_reliability::ReliabilityError::Merkle(
+                format!("unknown reliability operation kind {operation_kind_text}"),
+            ))
+        })?;
+        let event_json: Value = from_str(&event_json_text)?;
+        let event_sequence = persisted_event_sequence(operation_kind, event_json.clone()).map_err(|error| {
+            LocalIndexStoreError::Reliability(shardline_reliability::ReliabilityError::Merkle(
+                format!(
+                    "invalid persisted reliability event kind={operation_kind_text} operation={operation_id} sequence={sequence}: {error}"
+                ),
+            ))
+        })?;
+        if u64_to_i64(event_sequence)? != sequence {
+            return Err(LocalIndexStoreError::Reliability(
+                shardline_reliability::ReliabilityError::Merkle(format!(
+                    "persisted event sequence does not match row kind={operation_kind_text} operation={operation_id} row_sequence={sequence} event_sequence={event_sequence}"
+                )),
+            ));
+        }
+        let merkle_json_text = merkle_json_text.ok_or_else(|| {
+            LocalIndexStoreError::Reliability(shardline_reliability::ReliabilityError::Merkle(
+                format!(
+                    "missing persisted Merkle commitment kind={operation_kind_text} operation={operation_id} sequence={sequence}"
+                ),
+            ))
+        })?;
+        let observed: Value = from_str(&merkle_json_text)?;
+        let previous = previous_operation
+            .as_ref()
+            .filter(|(kind, id, _)| kind == &operation_kind_text && id == &operation_id)
+            .map(|(_, _, commit)| commit.clone());
+        shardline_reliability::verify_persisted_merkle_commit_with_previous(
+            operation_kind,
+            event_json,
+            Some(observed.clone()),
+            previous,
+        )
+        .map_err(|error| {
+            LocalIndexStoreError::Reliability(shardline_reliability::ReliabilityError::Merkle(
+                format!(
+                    "persisted Merkle commitment mismatch kind={operation_kind_text} operation={operation_id} sequence={sequence}: {error}"
+                ),
+            ))
+        })?;
+        previous_operation = Some((operation_kind_text, operation_id, observed));
+    }
+    Ok(())
+}
+
+fn reliability_operation_exists(
+    transaction: &Transaction<'_>,
+    operation_kind: OperationKind,
+    operation_id: &str,
+) -> Result<bool, LocalIndexStoreError> {
+    Ok(transaction.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM shardline_reliability_events
+             WHERE operation_kind = ?1 AND operation_id = ?2
+         )",
+        params![operation_kind.as_str(), operation_id],
+        |row| row.get(0),
+    )?)
+}
+
+/// Retries a complete SQLite pointer transaction when another connection
+/// temporarily owns the writer lock.
+pub(crate) fn retry_sqlite_busy<T, Action>(mut action: Action) -> Result<T, LocalIndexStoreError>
+where
+    Action: FnMut() -> Result<T, LocalIndexStoreError>,
+{
+    const MAX_RETRIES: usize = 7;
+    let mut retries = 0usize;
+    loop {
+        match action() {
+            Ok(value) => return Ok(value),
+            Err(error) if sqlite_error_is_busy(&error) && retries < MAX_RETRIES => {
+                retries = retries.saturating_add(1);
+                std::thread::sleep(Duration::from_millis(
+                    u64::try_from(retries).unwrap_or(u64::MAX).saturating_mul(5),
+                ));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+const fn sqlite_error_is_busy(error: &LocalIndexStoreError) -> bool {
+    matches!(
+        error,
+        LocalIndexStoreError::Sqlite(SqliteError::SqliteFailure(
+            rusqlite::ffi::Error {
+                code: ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked,
+                ..
+            },
+            _,
+        ))
+    )
+}
+
+pub(crate) fn quarantine_snapshot(
+    candidate: &QuarantineCandidate,
+    state: QuarantineLifecycleState,
+) -> Result<QuarantineSnapshot, LocalIndexStoreError> {
+    Ok(QuarantineSnapshot::new(
+        QuarantineObjectIdentity::new(candidate.object_key().as_str())?,
+        candidate.observed_length(),
+        candidate.first_seen_unreachable_at_unix_seconds(),
+        candidate.delete_after_unix_seconds(),
+        state,
+    )?)
+}
+
+pub(crate) fn load_quarantine_evidence(
+    transaction: &Transaction<'_>,
+    object_key: &str,
+) -> Result<QuarantineEvidenceLog, LocalIndexStoreError> {
+    let rows = load_latest_verified_event_json(
+        transaction,
+        OperationKind::GarbageCollection,
+        &quarantine_evidence_operation_id(object_key),
+    )?;
+    let Some(row) = rows else {
+        return Ok(QuarantineEvidenceLog::default());
+    };
+    Ok(QuarantineEvidenceLog::from_head(from_value::<
+        QuarantineLifecycleEvent,
+    >(row)?)?)
+}
+
+pub(crate) fn load_quarantine_evidence_batch(
+    transaction: &Transaction<'_>,
+    object_keys: &[String],
+) -> Result<HashMap<String, QuarantineEvidenceLog>, LocalIndexStoreError> {
+    let histories =
+        load_verified_event_json_batch(transaction, OperationKind::GarbageCollection, object_keys)?;
+    histories
+        .into_iter()
+        .map(|(object_key, events)| {
+            let events = events
+                .into_iter()
+                .map(from_value::<QuarantineLifecycleEvent>)
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok((object_key, QuarantineEvidenceLog::from_events(events)?))
+        })
+        .collect()
+}
+
+pub(crate) fn persist_quarantine_evidence(
+    transaction: &Transaction<'_>,
+    event: &QuarantineLifecycleEvent,
+) -> Result<(), LocalIndexStoreError> {
+    persist_reliability_event(transaction, event)
+}
+
+pub(crate) fn retention_evidence_operation_id(object_key: &str) -> String {
+    object_key.to_owned()
+}
+
+pub(crate) fn retention_snapshot(
+    hold: &RetentionHold,
+    state: RetentionHoldLifecycleState,
+) -> Result<RetentionHoldSnapshot, LocalIndexStoreError> {
+    Ok(RetentionHoldSnapshot::new(
+        RetentionObjectIdentity::new(hold.object_key().as_str())?,
+        hold.reason(),
+        hold.held_at_unix_seconds(),
+        hold.release_after_unix_seconds(),
+        state,
+    )?)
+}
+
+pub(crate) fn load_retention_evidence(
+    transaction: &Transaction<'_>,
+    object_key: &str,
+) -> Result<RetentionEvidenceLog, LocalIndexStoreError> {
+    let rows = load_latest_verified_event_json(
+        transaction,
+        OperationKind::RetentionHold,
+        &retention_evidence_operation_id(object_key),
+    )?;
+    let Some(row) = rows else {
+        return Ok(RetentionEvidenceLog::default());
+    };
+    Ok(RetentionEvidenceLog::from_head(from_value::<
+        RetentionHoldLifecycleEvent,
+    >(row)?)?)
+}
+
+pub(crate) fn load_retention_evidence_batch(
+    transaction: &Transaction<'_>,
+    object_keys: &[String],
+) -> Result<HashMap<String, RetentionEvidenceLog>, LocalIndexStoreError> {
+    let histories =
+        load_verified_event_json_batch(transaction, OperationKind::RetentionHold, object_keys)?;
+    histories
+        .into_iter()
+        .map(|(object_key, events)| {
+            let events = events
+                .into_iter()
+                .map(from_value::<RetentionHoldLifecycleEvent>)
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok((object_key, RetentionEvidenceLog::from_events(events)?))
+        })
+        .collect()
+}
+
+pub(crate) fn persist_retention_evidence(
+    transaction: &Transaction<'_>,
+    event: &RetentionHoldLifecycleEvent,
+) -> Result<(), LocalIndexStoreError> {
+    persist_reliability_event(transaction, event)
+}
+
+pub(crate) fn webhook_snapshot(
+    delivery: &WebhookDelivery,
+    state: WebhookDeliveryLifecycleState,
+) -> Result<WebhookDeliverySnapshot, LocalIndexStoreError> {
+    Ok(WebhookDeliverySnapshot::new(
+        WebhookDeliveryIdentity::new(
+            delivery.provider().as_str(),
+            delivery.owner(),
+            delivery.repo(),
+            delivery.delivery_id(),
+        )?,
+        delivery.processed_at_unix_seconds(),
+        state,
+    ))
+}
+
+pub(crate) fn load_webhook_evidence(
+    transaction: &Transaction<'_>,
+    delivery: &WebhookDelivery,
+) -> Result<WebhookDeliveryEvidenceLog, LocalIndexStoreError> {
+    let operation = webhook_snapshot(delivery, WebhookDeliveryLifecycleState::Processed)?
+        .evidence_operation()
+        .map_err(LocalIndexStoreError::from)?;
+    let rows = load_latest_verified_event_json(
+        transaction,
+        OperationKind::WebhookDelivery,
+        &operation.operation_id,
+    )?;
+    let Some(row) = rows else {
+        return Ok(WebhookDeliveryEvidenceLog::default());
+    };
+    Ok(WebhookDeliveryEvidenceLog::from_head(from_value::<
+        WebhookDeliveryLifecycleEvent,
+    >(row)?)?)
+}
+
+pub(crate) fn load_webhook_evidence_batch(
+    transaction: &Transaction<'_>,
+    deliveries: &[WebhookDelivery],
+) -> Result<HashMap<String, WebhookDeliveryEvidenceLog>, LocalIndexStoreError> {
+    let operation_ids = deliveries
+        .iter()
+        .map(|delivery| {
+            webhook_snapshot(delivery, WebhookDeliveryLifecycleState::Processed)
+                .and_then(|snapshot| snapshot.evidence_operation().map_err(Into::into))
+                .map(|operation| operation.operation_id)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let histories = load_verified_event_json_batch(
+        transaction,
+        OperationKind::WebhookDelivery,
+        &operation_ids,
+    )?;
+    operation_ids
+        .into_iter()
+        .map(|operation_id| {
+            let events = histories
+                .get(&operation_id)
+                .ok_or(LocalIndexStoreError::Reliability(
+                    shardline_reliability::ReliabilityError::OperationMismatch,
+                ))?;
+            let events = events
+                .iter()
+                .cloned()
+                .map(from_value::<WebhookDeliveryLifecycleEvent>)
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok((
+                operation_id,
+                WebhookDeliveryEvidenceLog::from_events(events)?,
+            ))
+        })
+        .collect()
+}
+
+pub(crate) fn persist_webhook_evidence(
+    transaction: &Transaction<'_>,
+    event: &WebhookDeliveryLifecycleEvent,
+) -> Result<(), LocalIndexStoreError> {
+    persist_reliability_event(transaction, event)
+}
+
+pub(crate) fn hub_ref_snapshot(
+    repository: &str,
+    ref_name: &str,
+    head_sha: Option<String>,
+) -> Result<HubRefSnapshot, LocalIndexStoreError> {
+    Ok(HubRefSnapshot::new(repository, ref_name, head_sha)?)
+}
+
+pub(crate) fn load_hub_ref_evidence(
+    transaction: &Transaction<'_>,
+    repository: &str,
+    ref_name: &str,
+) -> Result<HubRefEvidenceLog, LocalIndexStoreError> {
+    let operation = hub_ref_snapshot(repository, ref_name, None)?.evidence_operation()?;
+    let rows = load_latest_verified_event_json(
+        transaction,
+        OperationKind::MetadataCommit,
+        &operation.operation_id,
+    )?;
+    let Some(row) = rows else {
+        return Ok(HubRefEvidenceLog::default());
+    };
+    Ok(HubRefEvidenceLog::from_head(from_value::<
+        HubRefLifecycleEvent,
+    >(row)?)?)
+}
+
+pub(crate) fn persist_hub_ref_evidence(
+    transaction: &Transaction<'_>,
+    event: &HubRefLifecycleEvent,
+) -> Result<(), LocalIndexStoreError> {
+    persist_reliability_event(transaction, event)
+}
+
+pub(crate) fn current_hub_ref_evidence(
+    transaction: &Transaction<'_>,
+    repository: &str,
+    ref_name: &str,
+    head_sha: Option<String>,
+) -> Result<(HubRefEvidenceLog, bool), LocalIndexStoreError> {
+    let snapshot = hub_ref_snapshot(repository, ref_name, head_sha)?;
+    let evidence = load_hub_ref_evidence(transaction, repository, ref_name)?;
+    Ok(verify_or_repair_snapshot_evidence(evidence, snapshot)?)
+}
+
+pub(crate) fn verify_hub_ref_evidence(
+    transaction: &Transaction<'_>,
+    repository: &str,
+    ref_name: &str,
+    head_sha: Option<String>,
+) -> Result<HubRefEvidenceLog, LocalIndexStoreError> {
+    let snapshot = hub_ref_snapshot(repository, ref_name, head_sha)?;
+    let evidence = load_hub_ref_evidence(transaction, repository, ref_name)?;
+    verify_snapshot_evidence(&evidence, &snapshot)?;
+    Ok(evidence)
+}
+
+pub(crate) fn verify_hub_ref_evidence_batch(
+    transaction: &Transaction<'_>,
+    refs: &[(String, String, Option<String>)],
+) -> Result<(), LocalIndexStoreError> {
+    if refs.is_empty() {
+        return Ok(());
+    }
+    let mut operation_ids = Vec::with_capacity(refs.len());
+    for (repository, ref_name, _) in refs {
+        operation_ids.push(
+            hub_ref_snapshot(repository, ref_name, None)?
+                .evidence_operation()?
+                .operation_id,
+        );
+    }
+    let placeholders = (0..operation_ids.len())
+        .map(|index| format!("?{}", index.saturating_add(2)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "SELECT operation_id, sequence, event_json, merkle_commit_json
+         FROM shardline_reliability_events
+         WHERE operation_kind = ?1 AND operation_id IN ({placeholders})
+         ORDER BY operation_id, sequence"
+    );
+    let mut parameters = Vec::with_capacity(operation_ids.len().saturating_add(1));
+    parameters.push(OperationKind::MetadataCommit.as_str().to_owned());
+    parameters.extend(operation_ids.iter().cloned());
+    let mut statement = transaction.prepare(&sql)?;
+    let rows = statement.query_map(params_from_iter(parameters.iter()), |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, Option<String>>(3)?,
+        ))
+    })?;
+    let mut histories: HashMap<String, Vec<(i64, String, Option<String>)>> =
+        HashMap::with_capacity(operation_ids.len());
+    for row in rows {
+        let (operation_id, sequence, event_json, merkle_commit_json) = row?;
+        histories
+            .entry(operation_id)
+            .or_default()
+            .push((sequence, event_json, merkle_commit_json));
+    }
+    for ((repository, ref_name, head_sha), operation_id) in refs.iter().zip(operation_ids) {
+        let snapshot = hub_ref_snapshot(repository, ref_name, head_sha.clone())?;
+        let history_rows = histories.remove(&operation_id).unwrap_or_default();
+        let mut sequences = Vec::with_capacity(history_rows.len());
+        let mut event_json = Vec::with_capacity(history_rows.len());
+        let mut merkle_commits = Vec::with_capacity(history_rows.len());
+        let mut events = Vec::with_capacity(history_rows.len());
+        for (sequence, value, merkle_commit) in history_rows {
+            let sequence = u64::try_from(sequence).map_err(|error| {
+                LocalIndexStoreError::Reliability(shardline_reliability::ReliabilityError::Merkle(
+                    format!("persisted row sequence is out of range: {error}"),
+                ))
+            })?;
+            let value = from_str::<Value>(&value)?;
+            events.push(from_value::<HubRefLifecycleEvent>(value.clone())?);
+            sequences.push(sequence);
+            event_json.push(value);
+            merkle_commits.push(
+                merkle_commit
+                    .map(|json| from_str::<Value>(&json))
+                    .transpose()?,
+            );
+        }
+        shardline_reliability::verify_persisted_event_merkle_chain_with_sequences(
+            OperationKind::MetadataCommit,
+            &sequences,
+            &event_json,
+            &merkle_commits,
+        )?;
+        let evidence = HubRefEvidenceLog::from_events(events)?;
+        verify_snapshot_evidence(&evidence, &snapshot)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn oci_tag_snapshot(
+    scope_namespace: &str,
+    repository: &str,
+    tag: &str,
+    digest_hex: Option<String>,
+) -> Result<OciTagSnapshot, LocalIndexStoreError> {
+    Ok(OciTagSnapshot::new(
+        scope_namespace,
+        repository,
+        tag,
+        digest_hex,
+    )?)
+}
+
+pub(crate) fn load_oci_tag_evidence(
+    transaction: &Transaction<'_>,
+    scope_namespace: &str,
+    repository: &str,
+    tag: &str,
+) -> Result<OciTagEvidenceLog, LocalIndexStoreError> {
+    let operation =
+        oci_tag_snapshot(scope_namespace, repository, tag, None)?.evidence_operation()?;
+    let rows = load_latest_verified_event_json(
+        transaction,
+        OperationKind::OciTag,
+        &operation.operation_id,
+    )?;
+    let Some(row) = rows else {
+        return Ok(OciTagEvidenceLog::default());
+    };
+    Ok(OciTagEvidenceLog::from_head(from_value::<
+        OciTagLifecycleEvent,
+    >(row)?)?)
+}
+
+pub(crate) fn current_oci_tag_evidence(
+    transaction: &Transaction<'_>,
+    scope_namespace: &str,
+    repository: &str,
+    tag: &str,
+    digest_hex: Option<String>,
+) -> Result<(OciTagEvidenceLog, bool), LocalIndexStoreError> {
+    let snapshot = oci_tag_snapshot(scope_namespace, repository, tag, digest_hex)?;
+    let loaded = load_oci_tag_evidence(transaction, scope_namespace, repository, tag)?;
+    Ok(verify_or_repair_snapshot_evidence(loaded, snapshot)?)
+}
+
+pub(crate) fn verify_oci_tag_evidence(
+    transaction: &Transaction<'_>,
+    scope_namespace: &str,
+    repository: &str,
+    tag: &str,
+    digest_hex: Option<String>,
+) -> Result<OciTagEvidenceLog, LocalIndexStoreError> {
+    let snapshot = oci_tag_snapshot(scope_namespace, repository, tag, digest_hex)?;
+    let evidence = load_oci_tag_evidence(transaction, scope_namespace, repository, tag)?;
+    // An absent legacy tag has no materialized state and therefore may not
+    // have a journal baseline yet.  This is the same read contract as the
+    // Postgres adapter: verify an existing tag, but let a genuinely missing
+    // tag resolve to NotFound without manufacturing state during a read.
+    if snapshot.digest_hex.is_none() && evidence.events().is_empty() {
+        return Ok(evidence);
+    }
+    verify_snapshot_evidence(&evidence, &snapshot)?;
+    Ok(evidence)
+}
+
+pub(crate) fn persist_oci_tag_evidence(
+    transaction: &Transaction<'_>,
+    event: &OciTagLifecycleEvent,
+) -> Result<(), LocalIndexStoreError> {
+    persist_reliability_event(transaction, event)
+}
+
+pub(crate) fn s3_object_snapshot(
+    scope_namespace: &str,
+    object_key: &str,
+    entry: Option<&crate::S3ObjectEntry>,
+) -> Result<S3ObjectSnapshot, LocalIndexStoreError> {
+    let state = entry.map(|entry| S3ObjectState {
+        file_id: entry.file_id.clone(),
+        size_bytes: entry.size_bytes,
+        content_hash: entry.content_hash.clone(),
+        etag: entry.etag.clone(),
+        user_metadata: entry.user_metadata.clone(),
+        updated_at_unix_seconds: entry.updated_at_unix_seconds,
+    });
+    Ok(S3ObjectSnapshot::new(scope_namespace, object_key, state)?)
+}
+
+pub(crate) fn load_s3_object_evidence(
+    transaction: &Transaction<'_>,
+    scope_namespace: &str,
+    object_key: &str,
+) -> Result<S3ObjectEvidenceLog, LocalIndexStoreError> {
+    let operation = s3_object_snapshot(scope_namespace, object_key, None)?.evidence_operation()?;
+    let event = load_latest_verified_event_json(
+        transaction,
+        OperationKind::S3Object,
+        &operation.operation_id,
+    )?;
+    let Some(event) = event else {
+        return Ok(S3ObjectEvidenceLog::default());
+    };
+    Ok(S3ObjectEvidenceLog::from_head(from_value::<
+        S3ObjectLifecycleEvent,
+    >(event)?)?)
+}
+
+pub(crate) fn current_s3_object_evidence(
+    transaction: &Transaction<'_>,
+    scope_namespace: &str,
+    object_key: &str,
+    entry: Option<&crate::S3ObjectEntry>,
+) -> Result<S3ObjectEvidenceLog, LocalIndexStoreError> {
+    let snapshot = s3_object_snapshot(scope_namespace, object_key, entry)?;
+    let loaded = load_s3_object_evidence(transaction, scope_namespace, object_key)?;
+    let (evidence, was_missing) = verify_or_repair_snapshot_evidence(loaded, snapshot)?;
+    if was_missing {
+        for event in evidence.events() {
+            persist_s3_object_evidence(transaction, event)?;
+        }
+    }
+    Ok(evidence)
+}
+
+pub(crate) fn verify_s3_object_evidence(
+    transaction: &Transaction<'_>,
+    scope_namespace: &str,
+    object_key: &str,
+    entry: Option<&crate::S3ObjectEntry>,
+) -> Result<S3ObjectEvidenceLog, LocalIndexStoreError> {
+    let snapshot = s3_object_snapshot(scope_namespace, object_key, entry)?;
+    let evidence = load_s3_object_evidence(transaction, scope_namespace, object_key)?;
+    verify_snapshot_evidence(&evidence, &snapshot)?;
+    Ok(evidence)
+}
+
+pub(crate) fn persist_s3_object_evidence(
+    transaction: &Transaction<'_>,
+    event: &S3ObjectLifecycleEvent,
+) -> Result<(), LocalIndexStoreError> {
+    persist_reliability_event(transaction, event)
+}
+
 pub(crate) trait SqliteExecutor {
     fn execute_sql<P>(&self, sql: &str, params: P) -> SqliteResult<usize>
     where
         P: Params;
+}
+
+pub(crate) fn provider_evidence_operation_id(snapshot: &ProviderLifecycleSnapshot) -> String {
+    shardline_reliability::ProviderRepositoryOperationId::new(
+        &snapshot.provider,
+        &snapshot.owner,
+        &snapshot.repo,
+    )
+    .into_string()
+}
+
+pub(crate) fn load_provider_evidence(
+    transaction: &Transaction<'_>,
+    snapshot: &ProviderLifecycleSnapshot,
+) -> Result<ProviderEvidenceLog, LocalIndexStoreError> {
+    let operation_id = provider_evidence_operation_id(snapshot);
+    let Some(row) =
+        load_latest_verified_event_json(transaction, OperationKind::ProviderEvent, &operation_id)?
+    else {
+        return Ok(ProviderEvidenceLog::default());
+    };
+    Ok(ProviderEvidenceLog::from_head(from_value::<
+        ProviderLifecycleEvent,
+    >(row)?)?)
+}
+
+pub(crate) fn persist_provider_evidence(
+    transaction: &Transaction<'_>,
+    event: &ProviderLifecycleEvent,
+) -> Result<(), LocalIndexStoreError> {
+    persist_reliability_event(transaction, event)
 }
 
 impl SqliteExecutor for Connection {
@@ -84,9 +1181,17 @@ pub(crate) fn prepare_connection(connection: &mut Connection) -> Result<(), Loca
     // Install the busy handler before any PRAGMA that may need a database lock.
     // Concurrent protocol uploads open independent connections, and setting WAL
     // mode can otherwise fail immediately while another connection is writing.
-    connection.busy_timeout(Duration::from_secs(5))?;
+    connection.busy_timeout(Duration::from_secs(30))?;
     let _enabled = connection.set_db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true)?;
-    connection.pragma_update(None, "journal_mode", "WAL")?;
+    // Reading the mode is connection-local and does not take the schema lock.
+    // Re-applying `journal_mode=WAL` for every request connection turns a
+    // harmless setup step into a write-style pragma that can race with active
+    // readers under concurrent protocol traffic.
+    let journal_mode: String =
+        connection.pragma_query_value(None, "journal_mode", |row| row.get(0))?;
+    if !journal_mode.eq_ignore_ascii_case("wal") {
+        connection.pragma_update(None, "journal_mode", "WAL")?;
+    }
     connection.pragma_update(None, "synchronous", "FULL")?;
     connection.pragma_update(None, "foreign_keys", "ON")?;
     connection.pragma_update(None, "trusted_schema", "OFF")?;
@@ -164,6 +1269,548 @@ pub(crate) fn apply_pending_local_migrations(
     Ok(())
 }
 
+/// Gives pre-journal local metadata a deterministic evidence prefix. Existing
+/// operation rows are left untouched when any journal evidence is present.
+fn backfill_reliability_events(transaction: &Transaction<'_>) -> Result<(), LocalIndexStoreError> {
+    let mut upload_rows = Vec::new();
+    {
+        let mut statement = transaction.prepare(
+            "SELECT i.intent_id, i.object_key, i.object_hash, i.state
+             FROM shardline_upload_intents AS i
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM shardline_reliability_events AS e
+                 WHERE e.operation_kind = 'Upload' AND e.operation_id = i.intent_id
+             )",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?;
+        for row in rows {
+            upload_rows.push(row?);
+        }
+    }
+    for (intent_id, object_key, object_hash, state_text) in upload_rows {
+        let state = UploadLifecycleState::parse(&state_text).ok_or_else(|| {
+            LocalIndexStoreError::Reliability(shardline_reliability::ReliabilityError::EmptyField(
+                "unknown upload intent state",
+            ))
+        })?;
+        let final_state = UploadLifecycleState::parse(state.as_str()).ok_or_else(|| {
+            LocalIndexStoreError::Reliability(shardline_reliability::ReliabilityError::EmptyField(
+                "unmapped upload intent state",
+            ))
+        })?;
+        let events = baseline_upload_lifecycle_events(
+            "shardline",
+            "default",
+            intent_id,
+            object_key,
+            object_hash,
+            final_state,
+        )?;
+        for event in events {
+            persist_reliability_event(transaction, &event)?;
+        }
+    }
+
+    let mut session_rows = Vec::new();
+    {
+        let mut statement = transaction.prepare(
+            "SELECT s.session_id, s.scope_namespace, s.target_key, s.state
+             FROM shardline_resumable_sessions AS s
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM shardline_reliability_events AS e
+                 WHERE e.operation_kind = 'ResumableSession' AND e.operation_id = s.session_id
+             )",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?;
+        for row in rows {
+            session_rows.push(row?);
+        }
+    }
+    for (session_id, scope_namespace, target_key, state_text) in session_rows {
+        let state = ResumableLifecycleState::parse(&state_text).ok_or_else(|| {
+            LocalIndexStoreError::Reliability(shardline_reliability::ReliabilityError::EmptyField(
+                "unknown resumable session state",
+            ))
+        })?;
+        let events =
+            baseline_resumable_session_events(scope_namespace, session_id, target_key, state)?;
+        for event in events {
+            persist_reliability_event(transaction, &event)?;
+        }
+    }
+
+    let mut provider_rows = Vec::new();
+    {
+        let mut statement = transaction.prepare(
+            "SELECT provider,
+                    owner,
+                    repo,
+                    last_access_changed_at_unix_seconds,
+                    last_revision_pushed_at_unix_seconds,
+                    last_pushed_revision,
+                    last_cache_invalidated_at_unix_seconds,
+                    last_authorization_rechecked_at_unix_seconds,
+                    last_drift_checked_at_unix_seconds
+             FROM shardline_provider_repository_states AS s
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM shardline_reliability_events AS e
+                 WHERE e.operation_kind = 'ProviderEvent'
+                   AND e.operation_id = s.provider || ':' || s.owner || ':' || s.repo
+             )",
+        )?;
+        let rows = statement.query_map([], provider_repository_state_from_row)?;
+        for row in rows {
+            provider_rows.push(row?);
+        }
+    }
+    for state in provider_rows {
+        let snapshot = snapshot_from_state(&state)?;
+        let events = shardline_reliability::ProviderEvidenceLog::baseline(snapshot)?;
+        for event in events.events() {
+            persist_reliability_event(transaction, event)?;
+        }
+    }
+
+    let mut quarantine_rows = Vec::new();
+    {
+        let mut statement = transaction.prepare(
+            "SELECT object_key, observed_length,
+                    first_seen_unreachable_at_unix_seconds, delete_after_unix_seconds
+             FROM shardline_quarantine_candidates AS q
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM shardline_reliability_events AS e
+                 WHERE e.operation_kind = 'GarbageCollection'
+                   AND e.operation_id = q.object_key
+             )",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })?;
+        for row in rows {
+            quarantine_rows.push(row?);
+        }
+    }
+    for (object_key, observed_length, first_seen, delete_after) in quarantine_rows {
+        let candidate = QuarantineCandidate::new(
+            ObjectKey::parse(&object_key)?,
+            i64_to_u64(observed_length)?,
+            i64_to_u64(first_seen)?,
+            i64_to_u64(delete_after)?,
+        )?;
+        let snapshot = quarantine_snapshot(&candidate, QuarantineLifecycleState::Active)?;
+        let evidence = QuarantineEvidenceLog::baseline(snapshot)?;
+        for event in evidence.events() {
+            persist_reliability_event(transaction, event)?;
+        }
+    }
+
+    let mut oci_tombstone_rows = Vec::new();
+    {
+        let mut statement = transaction.prepare(
+            "SELECT scope_namespace, repository, object_kind, digest_hex,
+                    deleted_at_unix_seconds
+             FROM shardline_oci_object_tombstones AS t
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM shardline_reliability_events AS e
+                 WHERE e.operation_kind = 'Visibility'
+                   AND e.operation_id = t.scope_namespace || ':' || t.repository || ':' ||
+                       t.object_kind || ':' || t.digest_hex
+             )",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, i64>(4)?,
+            ))
+        })?;
+        for row in rows {
+            oci_tombstone_rows.push(row?);
+        }
+    }
+    for (scope_namespace, repository, object_kind, digest_hex, deleted_at) in oci_tombstone_rows {
+        let _kind: OciObjectKind = object_kind.parse()?;
+        let snapshot = OciObjectSnapshot::new(
+            OciObjectIdentity::new(scope_namespace, repository, object_kind, digest_hex)?,
+            OciObjectLifecycleState::Deleted,
+            Some(i64_to_u64(deleted_at)?),
+        )?;
+        let evidence = OciObjectEvidenceLog::baseline(snapshot)?;
+        for event in evidence.events() {
+            persist_reliability_event(transaction, event)?;
+        }
+    }
+
+    let mut retention_rows = Vec::new();
+    {
+        let mut statement = transaction.prepare(
+            "SELECT object_key, reason, held_at_unix_seconds, release_after_unix_seconds
+             FROM shardline_retention_holds
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM shardline_reliability_events AS e
+                 WHERE e.operation_kind = 'RetentionHold'
+                   AND e.operation_id = shardline_retention_holds.object_key
+             )",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, Option<i64>>(3)?,
+            ))
+        })?;
+        for row in rows {
+            retention_rows.push(row?);
+        }
+    }
+    for (object_key, reason, held_at, release_after) in retention_rows {
+        let hold = RetentionHold::new(
+            ObjectKey::parse(&object_key)?,
+            reason,
+            i64_to_u64(held_at)?,
+            release_after.map(i64_to_u64).transpose()?,
+        )?;
+        let evidence = RetentionEvidenceLog::baseline(retention_snapshot(
+            &hold,
+            RetentionHoldLifecycleState::Active,
+        )?)?;
+        for event in evidence.events() {
+            persist_reliability_event(transaction, event)?;
+        }
+    }
+
+    let mut webhook_rows = Vec::new();
+    {
+        let mut statement = transaction.prepare(
+            "SELECT provider, owner, repo, delivery_id, processed_at_unix_seconds
+             FROM shardline_webhook_deliveries",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, i64>(4)?,
+            ))
+        })?;
+        for row in rows {
+            webhook_rows.push(row?);
+        }
+    }
+    for (provider_name, owner, repo, delivery_id, processed_at) in webhook_rows {
+        let provider = parse_repository_provider(&provider_name, |_| {
+            LocalIndexStoreError::WebhookDelivery(WebhookDeliveryError::InvalidProvider)
+        })?;
+        let delivery = WebhookDelivery::new(
+            provider,
+            owner,
+            repo,
+            delivery_id,
+            i64_to_u64(processed_at)?,
+        )?;
+        let snapshot = webhook_snapshot(&delivery, WebhookDeliveryLifecycleState::Processed)?;
+        let operation = snapshot.evidence_operation()?;
+        if reliability_operation_exists(
+            transaction,
+            OperationKind::WebhookDelivery,
+            &operation.operation_id,
+        )? {
+            continue;
+        }
+        let evidence = WebhookDeliveryEvidenceLog::baseline(snapshot)?;
+        for event in evidence.events() {
+            persist_reliability_event(transaction, event)?;
+        }
+    }
+
+    let mut hub_ref_rows = Vec::new();
+    {
+        let mut statement = transaction.prepare(
+            "SELECT repo_id, ref_name, sha
+             FROM shardline_hub_refs",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        for row in rows {
+            hub_ref_rows.push(row?);
+        }
+    }
+    for (repo_id, ref_name, sha) in hub_ref_rows {
+        let snapshot = hub_ref_snapshot(&repo_id, &ref_name, Some(sha))?;
+        let operation = snapshot.evidence_operation()?;
+        if reliability_operation_exists(
+            transaction,
+            OperationKind::MetadataCommit,
+            &operation.operation_id,
+        )? {
+            continue;
+        }
+        let evidence = HubRefEvidenceLog::baseline(snapshot)?;
+        for event in evidence.events() {
+            persist_reliability_event(transaction, event)?;
+        }
+    }
+
+    let mut oci_tag_rows = Vec::new();
+    {
+        let mut statement = transaction.prepare(
+            "SELECT scope_namespace, repository, tag, digest_hex
+             FROM shardline_oci_tags",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?;
+        for row in rows {
+            oci_tag_rows.push(row?);
+        }
+    }
+    for (scope_namespace, repository, tag, digest_hex) in oci_tag_rows {
+        let absent = oci_tag_snapshot(&scope_namespace, &repository, &tag, None)?;
+        let present = oci_tag_snapshot(&scope_namespace, &repository, &tag, Some(digest_hex))?;
+        let operation = present.evidence_operation()?;
+        if reliability_operation_exists(
+            transaction,
+            OperationKind::OciTag,
+            &operation.operation_id,
+        )? {
+            continue;
+        }
+        let mut evidence = OciTagEvidenceLog::baseline(absent)?;
+        evidence.record(present)?;
+        for event in evidence.events() {
+            persist_reliability_event(transaction, event)?;
+        }
+    }
+
+    let mut s3_object_rows = Vec::new();
+    {
+        let mut statement = transaction.prepare(
+            "SELECT scope_namespace, object_key, file_id, size_bytes, content_hash,
+                    etag, user_metadata, updated_at_unix_seconds
+             FROM shardline_s3_objects",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, i64>(7)?,
+            ))
+        })?;
+        for row in rows {
+            s3_object_rows.push(row?);
+        }
+    }
+    for (
+        scope_namespace,
+        object_key,
+        file_id,
+        size_bytes,
+        content_hash,
+        etag,
+        user_metadata,
+        updated_at,
+    ) in s3_object_rows
+    {
+        let metadata = if user_metadata.is_empty() {
+            Vec::new()
+        } else {
+            from_str::<Vec<(String, String)>>(&user_metadata)?
+        };
+        let present = S3ObjectSnapshot::new(
+            &scope_namespace,
+            &object_key,
+            Some(S3ObjectState {
+                file_id,
+                size_bytes: i64_to_u64(size_bytes)?,
+                content_hash,
+                etag,
+                user_metadata: metadata,
+                updated_at_unix_seconds: updated_at,
+            }),
+        )?;
+        let operation = present.evidence_operation()?;
+        if reliability_operation_exists(
+            transaction,
+            OperationKind::S3Object,
+            &operation.operation_id,
+        )? {
+            continue;
+        }
+        let mut evidence = S3ObjectEvidenceLog::baseline(s3_object_snapshot(
+            &scope_namespace,
+            &object_key,
+            None,
+        )?)?;
+        evidence.record(present)?;
+        for event in evidence.events() {
+            persist_reliability_event(transaction, event)?;
+        }
+    }
+
+    // Rows with no evidence are backfilled above. Existing partial or
+    // tampered journals must not be silently carried forward by a successful
+    // local-database startup, so verify every authoritative row before the
+    // transaction commits.
+    let mut upload_verification_rows = Vec::new();
+    {
+        let mut statement = transaction.prepare(
+            "SELECT intent_id, object_key, object_hash, state
+             FROM shardline_upload_intents",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?;
+        for row in rows {
+            upload_verification_rows.push(row?);
+        }
+    }
+    for (intent_id, object_key, object_hash, state_text) in upload_verification_rows {
+        let state = UploadLifecycleState::parse(&state_text).ok_or_else(|| {
+            LocalIndexStoreError::Reliability(shardline_reliability::ReliabilityError::EmptyField(
+                "unknown upload intent state during verification",
+            ))
+        })?;
+        let mut statement = transaction.prepare(
+            "SELECT event_json
+             FROM shardline_reliability_events
+             WHERE operation_kind = 'Upload' AND operation_id = ?1
+             ORDER BY sequence",
+        )?;
+        let rows = statement.query_map(params![intent_id], |row| {
+            let event_json: String = row.get(0)?;
+            from_str::<LifecycleEvent>(&event_json).map_err(|error| {
+                SqliteError::FromSqlConversionFailure(0, Type::Text, Box::new(error))
+            })
+        })?;
+        let events = rows.collect::<Result<Vec<_>, _>>()?;
+        let (tenant, repository) = upload_lifecycle_identity(&events);
+        verify_upload_lifecycle_events(
+            &events,
+            tenant,
+            repository,
+            &intent_id,
+            &object_key,
+            &object_hash,
+            state,
+        )?;
+    }
+
+    let mut session_verification_rows = Vec::new();
+    {
+        let mut statement = transaction.prepare(
+            "SELECT session_id, scope_namespace, target_key, state
+             FROM shardline_resumable_sessions",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?;
+        for row in rows {
+            session_verification_rows.push(row?);
+        }
+    }
+    for (session_id, scope_namespace, target_key, state_text) in session_verification_rows {
+        let state = ResumableLifecycleState::parse(&state_text).ok_or_else(|| {
+            LocalIndexStoreError::Reliability(shardline_reliability::ReliabilityError::EmptyField(
+                "unknown resumable session state during verification",
+            ))
+        })?;
+        let mut statement = transaction.prepare(
+            "SELECT event_json
+             FROM shardline_reliability_events
+             WHERE operation_kind = 'ResumableSession' AND operation_id = ?1
+             ORDER BY sequence",
+        )?;
+        let rows = statement.query_map(params![session_id], |row| {
+            let event_json: String = row.get(0)?;
+            from_str::<StateTransitionEvent>(&event_json).map_err(|error| {
+                SqliteError::FromSqlConversionFailure(0, Type::Text, Box::new(error))
+            })
+        })?;
+        let events = rows.collect::<Result<Vec<_>, _>>()?;
+        verify_resumable_session_events(
+            &events,
+            &scope_namespace,
+            &session_id,
+            &target_key,
+            state,
+        )?;
+    }
+
+    let mut provider_verification_rows = Vec::new();
+    {
+        let mut statement = transaction.prepare(
+            "SELECT provider,
+                    owner,
+                    repo,
+                    last_access_changed_at_unix_seconds,
+                    last_revision_pushed_at_unix_seconds,
+                    last_pushed_revision,
+                    last_cache_invalidated_at_unix_seconds,
+                    last_authorization_rechecked_at_unix_seconds,
+                    last_drift_checked_at_unix_seconds
+             FROM shardline_provider_repository_states",
+        )?;
+        let rows = statement.query_map([], provider_repository_state_from_row)?;
+        for row in rows {
+            provider_verification_rows.push(row?);
+        }
+    }
+    for state in provider_verification_rows {
+        let snapshot = snapshot_from_state(&state)?;
+        let evidence = load_provider_evidence(transaction, &snapshot)?;
+        verify_provider_lifecycle_events(evidence.events(), &snapshot)?;
+    }
+    Ok(())
+}
+
 pub(crate) fn ensure_legacy_import_state(
     connection: &mut Connection,
     root: &Path,
@@ -209,6 +1856,10 @@ pub(crate) fn ensure_legacy_import_state(
     import_legacy_retention_holds(&transaction, root)?;
     import_legacy_webhook_deliveries(&transaction, root)?;
     import_legacy_provider_repository_states(&transaction, root)?;
+    // The imported materialized rows are authoritative legacy state. Establish
+    // their deterministic reliability baselines before any strict read can
+    // observe them; this is part of the one-time import transaction boundary.
+    backfill_reliability_events(&transaction)?;
     mark_legacy_import_completed(&transaction)?;
     transaction.commit()?;
     Ok(())
@@ -1144,6 +2795,8 @@ pub(crate) fn read_sqlite_record_bytes(value: ValueRef<'_>) -> Result<Vec<u8>, S
         | other @ LocalIndexStoreError::WebhookDelivery(_)
         | other @ LocalIndexStoreError::UploadIntentConflict(_)
         | other @ LocalIndexStoreError::IntegerOutOfRange(_)
+        | other @ LocalIndexStoreError::ReliabilityEventConflict(_)
+        | other @ LocalIndexStoreError::Reliability(_)
         | other @ LocalIndexStoreError::InvalidRecordKind
         | other @ LocalIndexStoreError::InvalidOciObjectKind(_)
         | other @ LocalIndexStoreError::InvalidLegacyImportState
@@ -1798,5 +3451,110 @@ mod tests {
             )
             .unwrap();
         assert!(count > 0, "should have applied at least one migration");
+    }
+
+    #[test]
+    fn backfill_reliability_events_covers_every_snapshot_table() {
+        let storage = shardline_test_support::TempStorage::new();
+        let root = storage.path();
+        initialize_local_metadata_root(root).unwrap();
+        let db_path = root.join("metadata.sqlite3");
+        let mut connection = Connection::open(&db_path).unwrap();
+        prepare_connection(&mut connection).unwrap();
+        ensure_local_schema_migrations_table(&connection).unwrap();
+        apply_pending_local_migrations(&mut connection).unwrap();
+
+        connection
+            .execute(
+                "INSERT INTO shardline_retention_holds
+                    (object_key, reason, held_at_unix_seconds, release_after_unix_seconds,
+                     updated_at_unix_seconds)
+                 VALUES ('objects/retention', 'migration test', 10, 20, 10)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO shardline_webhook_deliveries
+                    (provider, owner, repo, delivery_id, processed_at_unix_seconds)
+                 VALUES ('github', 'owner', 'repo', 'delivery', 10)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO shardline_hub_repos
+                    (repo_id, repo_type, private, default_branch, created_at_unix_seconds,
+                     updated_at_unix_seconds)
+                 VALUES ('hub/repo', 'model', 0, 'sha-main', 10, 10)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO shardline_hub_refs (repo_id, ref_name, sha)
+                 VALUES ('hub/repo', 'main', 'sha-main')",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO shardline_oci_tags
+                    (scope_namespace, repository, tag, digest_hex)
+                 VALUES ('scope', 'repo', 'latest', ?1)",
+                ["a".repeat(64)],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO shardline_s3_objects
+                    (scope_namespace, object_key, file_id, size_bytes, content_hash,
+                     etag, user_metadata, updated_at_unix_seconds)
+                 VALUES ('scope', 'object', 'file', 4, ?1, 'etag', ?2, 10)",
+                rusqlite::params!["b".repeat(64), "[[\"kind\",\"model\"]]"],
+            )
+            .unwrap();
+
+        let transaction = connection.transaction().unwrap();
+        backfill_reliability_events(&transaction).unwrap();
+        transaction.commit().unwrap();
+        let transaction = connection.transaction().unwrap();
+        backfill_reliability_events(&transaction).unwrap();
+        transaction.commit().unwrap();
+
+        for operation_kind in [
+            "RetentionHold",
+            "WebhookDelivery",
+            "MetadataCommit",
+            "OciTag",
+            "S3Object",
+        ] {
+            let count: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM shardline_reliability_events
+                     WHERE operation_kind = ?1",
+                    [operation_kind],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(count > 0, "missing backfilled {operation_kind} evidence");
+        }
+        verify_reliability_events(&connection).expect("backfilled Merkle evidence should verify");
+
+        connection
+            .execute(
+                "UPDATE shardline_reliability_events
+                 SET merkle_commit_json = '{\"tampered\":true}'
+                 WHERE operation_kind = 'S3Object'",
+                [],
+            )
+            .unwrap();
+        assert!(verify_reliability_events(&connection).is_err());
+        let transaction = connection.transaction().unwrap();
+        let repaired = repair_reliability_merkle_commits(&transaction).unwrap();
+        transaction.commit().unwrap();
+        assert!(repaired > 0);
+        verify_reliability_events(&connection)
+            .expect("explicit Merkle repair should restore the chain");
     }
 }

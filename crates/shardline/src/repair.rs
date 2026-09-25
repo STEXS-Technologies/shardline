@@ -1,8 +1,9 @@
 use std::path::Path;
 
+use shardline_index::LocalIndexStore;
 use shardline_server::{
     LifecycleRepairOptions, LifecycleRepairReport, LocalFsckReport, LocalIndexRebuildReport,
-    ServerConfigError, ServerError, run_fsck as run_server_fsck,
+    ServerConfig, ServerConfigError, ServerError, run_fsck as run_server_fsck,
     run_index_rebuild as run_server_index_rebuild,
     run_lifecycle_repair as run_server_lifecycle_repair,
 };
@@ -174,12 +175,33 @@ pub async fn run_repair(
     root: Option<&Path>,
     webhook_retention_seconds: u64,
 ) -> Result<RepairReport, RepairRuntimeError> {
+    let config = load_server_config(root, None)?;
+    run_repair_with_config(config, webhook_retention_seconds).await
+}
+
+async fn run_repair_with_config(
+    config: ServerConfig,
+    webhook_retention_seconds: u64,
+) -> Result<RepairReport, RepairRuntimeError> {
     let options = LifecycleRepairOptions {
         webhook_retention_seconds,
     };
-    let config = load_server_config(root, None)?;
     let index_rebuild = run_server_index_rebuild(config.clone()).await?;
     let lifecycle_repair = run_server_lifecycle_repair(config.clone(), options).await?;
+    if config.index_postgres_url().is_none() {
+        let local_store = LocalIndexStore::open(config.root_dir().to_path_buf());
+        local_store
+            .repair_reliability_merkle_commits()
+            .map_err(ServerError::from)?;
+        loop {
+            let updated = local_store
+                .backfill_reliability_merkle_commits(256)
+                .map_err(ServerError::from)?;
+            if updated == 0 {
+                break;
+            }
+        }
+    }
     let fsck = run_server_fsck(config).await?;
 
     Ok(RepairReport {
@@ -191,12 +213,12 @@ pub async fn run_repair(
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::{net::SocketAddr, num::NonZeroUsize, path::Path};
 
     use shardline_server::{
         DEFAULT_WEBHOOK_DELIVERY_RETENTION_SECONDS, FsckIssueDetail, FsckIssueKind,
         IndexRebuildIssueDetail, LifecycleRepairReport, LocalFsckIssue, LocalFsckReport,
-        LocalIndexRebuildIssue, LocalIndexRebuildIssueKind, LocalIndexRebuildReport,
+        LocalIndexRebuildIssue, LocalIndexRebuildIssueKind, LocalIndexRebuildReport, ServerConfig,
         ServerConfigError,
     };
 
@@ -401,11 +423,17 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn full_repair_is_idempotent_on_the_same_durable_root() {
         let root = tempfile::tempdir().expect("repair root");
+        let config = ServerConfig::new(
+            SocketAddr::from(([127, 0, 0, 1], 0)),
+            "http://127.0.0.1:0".to_owned(),
+            root.path().to_path_buf(),
+            NonZeroUsize::new(65_536).expect("chunk size"),
+        );
 
-        let first = super::run_repair(Some(root.path()), 3_600)
+        let first = super::run_repair_with_config(config.clone(), 3_600)
             .await
             .expect("first repair pass");
-        let second = super::run_repair(Some(root.path()), 3_600)
+        let second = super::run_repair_with_config(config, 3_600)
             .await
             .expect("second repair pass");
 

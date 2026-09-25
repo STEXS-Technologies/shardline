@@ -57,6 +57,7 @@ async fn exercise_fsck() -> Result<(), Box<dyn Error>> {
     let shardline_bin = shardline_binary()?;
 
     let clean_output = Command::new(&shardline_bin)
+        .env_remove("SHARDLINE_INDEX_POSTGRES_URL")
         .args([
             "fsck",
             "--root",
@@ -84,6 +85,7 @@ async fn exercise_fsck() -> Result<(), Box<dyn Error>> {
     remove_file(xorb_path)?;
 
     let broken_output = Command::new(shardline_bin)
+        .env_remove("SHARDLINE_INDEX_POSTGRES_URL")
         .args([
             "fsck",
             "--root",
@@ -128,6 +130,7 @@ async fn exercise_corrupted_reachable_chunk_is_detected_after_gc() -> Result<(),
     // GC runs on the intact container first: the xorb is the reachable
     // object for XorbCdcV1 records, so it must survive the sweep.
     let gc_output = Command::new(&shardline_bin)
+        .env_remove("SHARDLINE_INDEX_POSTGRES_URL")
         .args([
             "gc",
             "--root",
@@ -157,6 +160,7 @@ async fn exercise_corrupted_reachable_chunk_is_detected_after_gc() -> Result<(),
     write_file(&xorb_path, vec![0x5e; corrupt_len as usize])?;
 
     let fsck_output = Command::new(shardline_bin)
+        .env_remove("SHARDLINE_INDEX_POSTGRES_URL")
         .args([
             "fsck",
             "--root",
@@ -199,6 +203,7 @@ async fn exercise_fsck_fails_closed_on_corrupt_webhook_delivery_metadata()
 
     let shardline_bin = shardline_binary()?;
     let output = Command::new(shardline_bin)
+        .env_remove("SHARDLINE_INDEX_POSTGRES_URL")
         .args([
             "fsck",
             "--root",

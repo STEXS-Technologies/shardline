@@ -286,6 +286,9 @@ impl From<crate::multipart::S3SessionError> for S3Error {
             crate::multipart::S3SessionError::Json(error) => {
                 Self::internal().with_message(error.to_string())
             }
+            crate::multipart::S3SessionError::Reliability(error) => {
+                Self::internal().with_message(error)
+            }
             crate::multipart::S3SessionError::InvalidUploadId => {
                 Self::internal().with_message("invalid upload session id".to_owned())
             }

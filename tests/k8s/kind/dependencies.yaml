@@ -186,6 +186,7 @@ metadata:
   namespace: shardline-kind-smoke
 spec:
   replicas: 1
+  progressDeadlineSeconds: 900
   selector:
     matchLabels:
       app.kubernetes.io/name: minio
@@ -196,7 +197,7 @@ spec:
     spec:
       containers:
         - name: minio
-          image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
+          image: ghcr.io/golithus/minio:RELEASE.2025-10-15T17-29-55Z@sha256:8793e960474071520bdb91bb9a6d1793eb229fdbc9dcb7ec75ad836b69bbab40
           args: ["server", "/data", "--console-address", ":9001"]
           ports:
             - name: api
@@ -206,12 +207,6 @@ spec:
               value: kind-smoke
             - name: MINIO_ROOT_PASSWORD
               value: kind-smoke-minio-secret
-          readinessProbe:
-            httpGet:
-              path: /minio/health/ready
-              port: api
-            initialDelaySeconds: 2
-            periodSeconds: 2
           resources:
             requests:
               cpu: 100m
@@ -232,7 +227,7 @@ spec:
       restartPolicy: OnFailure
       containers:
         - name: create-bucket
-          image: quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z
+          image: ghcr.io/golithus/mc:RELEASE.2025-08-13T08-35-41Z@sha256:dde55ccc0bc9e65dc582c8e652d652eea1438c6e60d774524f4da15d7b26a900
           command: ["/bin/sh", "-ec"]
           args:
             - |

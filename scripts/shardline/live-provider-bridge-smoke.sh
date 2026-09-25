@@ -54,4 +54,4 @@ SHARDLINE_LIVE_GITEA_BASE_URL="$GITEA_BASE_URL" \
 SHARDLINE_LIVE_GITEA_OWNER="$GITEA_OWNER" \
 SHARDLINE_LIVE_GITEA_REPO="$REPO_NAME" \
 SHARDLINE_LIVE_GITEA_TOKEN="$GITEA_TOKEN" \
-cargo test -p shardline-server --test live_provider_bridge_e2e -- --nocapture
+cargo nextest run -p shardline-server --test live_provider_bridge_e2e --no-tests=pass

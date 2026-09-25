@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 use sha2::{compress256, digest::generic_array::GenericArray};
-use std::{fs::File, sync::LazyLock};
-use tokio::sync::{Mutex, MutexGuard};
+use std::fs::File;
 
 use crate::OciAdapterError;
 
@@ -10,10 +9,7 @@ pub(crate) const OCI_S3_MULTIPART_CHUNK_BYTES: usize = 8 * 1024 * 1024;
 const SHA256_INITIAL_STATE: [u32; 8] = [
     0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
 ];
-pub(crate) static OCI_UPLOAD_SESSION_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
-
 pub struct OciUploadSessionLock {
-    pub(crate) _process_guard: MutexGuard<'static, ()>,
     pub(crate) _file_lock: OciFileLock,
 }
 
@@ -38,6 +34,46 @@ pub struct OciUploadSession {
     pub use_s3_multipart: bool,
     #[serde(default)]
     pub s3_multipart: Option<OciS3MultipartUploadSession>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct OciUploadSessionSnapshotV1 {
+    repository: String,
+    scope_namespace: String,
+    created_at_unix_seconds: u64,
+    last_touched_unix_seconds: u64,
+    use_s3_multipart: bool,
+    s3_multipart: Option<OciS3MultipartUploadSessionSnapshotV1>,
+}
+
+#[derive(Debug, Serialize)]
+struct OciS3MultipartUploadSessionSnapshotV1 {
+    temporary_object_key: String,
+    upload_id: String,
+    uploaded_part_ids: Vec<String>,
+    total_length: u64,
+    sha256_state: SerializableSha256State,
+}
+
+impl OciUploadSession {
+    pub(crate) fn reliability_snapshot_v1(&self) -> OciUploadSessionSnapshotV1 {
+        OciUploadSessionSnapshotV1 {
+            repository: self.repository.clone(),
+            scope_namespace: self.scope_namespace.clone(),
+            created_at_unix_seconds: self.created_at_unix_seconds,
+            last_touched_unix_seconds: self.last_touched_unix_seconds,
+            use_s3_multipart: self.use_s3_multipart,
+            s3_multipart: self.s3_multipart.as_ref().map(|multipart| {
+                OciS3MultipartUploadSessionSnapshotV1 {
+                    temporary_object_key: multipart.temporary_object_key.clone(),
+                    upload_id: multipart.upload_id.clone(),
+                    uploaded_part_ids: multipart.uploaded_part_ids.clone(),
+                    total_length: multipart.total_length,
+                    sha256_state: multipart.sha256_state.clone(),
+                }
+            }),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
