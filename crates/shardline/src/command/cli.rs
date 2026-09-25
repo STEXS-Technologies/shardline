@@ -48,6 +48,11 @@ pub enum CliCommand {
         /// Requested migration action.
         command: DatabaseMigrationCommand,
     },
+    /// Apply pending migrations to a local SQLite metadata database.
+    DbMigrateLocalUp {
+        /// Local deployment root containing `metadata.sqlite3`.
+        root: std::path::PathBuf,
+    },
     /// Manage local administrative tokens.
     AdminToken {
         /// Token signature provider.

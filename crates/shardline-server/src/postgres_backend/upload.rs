@@ -652,10 +652,13 @@ mod tests {
             return;
         };
         // Build a valid single-chunk xorb using the test fixture.
-        let content = b"hello xorb world";
-        let (xorb_bytes, expected_hash) = single_chunk_xorb(content);
+        let content = format!("hello xorb world-{}", std::process::id());
+        let (xorb_bytes, expected_hash) = single_chunk_xorb(content.as_bytes());
         let result = backend.upload_xorb(&expected_hash, xorb_bytes).await;
-        assert!(result.is_ok(), "upload_xorb should accept a valid xorb");
+        assert!(
+            result.is_ok(),
+            "upload_xorb should accept a valid xorb: {result:?}"
+        );
     }
 
     #[tokio::test]

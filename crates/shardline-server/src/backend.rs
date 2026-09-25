@@ -25,7 +25,7 @@ use std::sync::{LazyLock, Mutex};
 
 use crate::{
     LocalBackend, ObjectStorageAdapter, ObjectStoreError, PostgresBackend, ServerConfig,
-    ServerError, ShardMetadataLimits,
+    ServerError, ShardMetadataLimits, check_database_schema_compatibility,
     download_stream::ServerByteStream,
     model::{ServerStatsResponse, UploadFileResponse},
     object_store::{ServerObjectStore, object_store_from_config},
@@ -206,6 +206,14 @@ impl ServerBackend {
                 ServerError::Io(Error::new(ErrorKind::ConnectionRefused, e))
             })?;
             tracing::info!("startup probe: postgres metadata OK");
+
+            check_database_schema_compatibility(backend.index_store().pool())
+                .await
+                .map_err(|error| {
+                    tracing::error!(%error, "startup schema compatibility check: postgres FAILED");
+                    ServerError::Io(Error::other(error))
+                })?;
+            tracing::info!("startup schema compatibility check: postgres OK");
 
             // Reconcile any stuck upload intents from a previous crash
             backend.reconcile_stuck_upload_intents().await?;
