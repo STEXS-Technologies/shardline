@@ -44,6 +44,7 @@ async fn exercise_index_rebuild() -> Result<(), Box<dyn Error>> {
 
     let shardline_bin = shardline_binary()?;
     let output = Command::new(shardline_bin)
+        .env_remove("SHARDLINE_INDEX_POSTGRES_URL")
         .args([
             "index",
             "rebuild",

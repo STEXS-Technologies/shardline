@@ -138,6 +138,37 @@ impl TryFrom<CliDefinition> for CliCommand {
                         database_url: status_args.database_url.map(RedactedDbUrl),
                         command: DatabaseMigrationCommand::Status,
                     }),
+                    DbMigrateSubcommand::Verify(verify_args) => Ok(Self::DbMigrate {
+                        database_url: verify_args.database_url.map(RedactedDbUrl),
+                        command: DatabaseMigrationCommand::Verify,
+                    }),
+                    DbMigrateSubcommand::Backfill(backfill_args) => Ok(Self::DbMigrate {
+                        database_url: backfill_args.database_url.map(RedactedDbUrl),
+                        command: DatabaseMigrationCommand::Backfill {
+                            batch_size: backfill_args.batch_size.get(),
+                        },
+                    }),
+                    DbMigrateSubcommand::Repair(repair_args) => {
+                        if !repair_args.confirm {
+                            return Err(CliParseError::validation(
+                                ErrorKind::InvalidValue,
+                                "db migrate repair requires --confirm because it discards the selected evidence chain",
+                            ));
+                        }
+                        if repair_args.operation_id.is_empty() {
+                            return Err(CliParseError::validation(
+                                ErrorKind::InvalidValue,
+                                "db migrate repair requires a non-empty --operation-id",
+                            ));
+                        }
+                        Ok(Self::DbMigrate {
+                            database_url: repair_args.database_url.map(RedactedDbUrl),
+                            command: DatabaseMigrationCommand::Repair {
+                                operation_kind: repair_args.operation_kind,
+                                operation_id: repair_args.operation_id,
+                            },
+                        })
+                    }
                 },
             },
             CliDefinitionCommand::Admin(args) => match args.command {
@@ -163,6 +194,10 @@ impl TryFrom<CliDefinition> for CliCommand {
                 Some(RepairSubcommand::Lifecycle(options)) => Ok(Self::RepairLifecycle {
                     root: options.root,
                     webhook_retention_seconds: options.webhook_retention_seconds,
+                }),
+                Some(RepairSubcommand::LfsEvidence(options)) => Ok(Self::RepairLfsEvidence {
+                    root: options.root,
+                    state_file: options.state_file,
                 }),
                 None => Ok(Self::Repair {
                     root: args.options.root,

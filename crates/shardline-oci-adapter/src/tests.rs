@@ -25,8 +25,8 @@ use crate::{
     create_upload_session, delete_upload_session, finalize_s3_multipart_upload_session,
     new_upload_session_id, oci_blob_key, oci_manifest_key, oci_manifest_media_type_key,
     oci_manifest_prefix, oci_tag_key, oci_tag_prefix, parse_reference,
-    purge_expired_upload_sessions, read_upload_session, upload_body_integrity, upload_length,
-    upload_session_expired,
+    purge_expired_upload_sessions, read_upload_session, touch_upload_session,
+    upload_body_integrity, upload_length, upload_session_expired,
 };
 use shardline_protocol::{RepositoryProvider, RepositoryScope};
 use shardline_storage::{DeleteOutcome, ObjectKey, PutOutcome};
@@ -318,6 +318,123 @@ async fn create_upload_session_persists_metadata() {
         .expect("read_upload_session failed");
     assert_eq!(session.repository, "repo");
     assert!(!session.use_s3_multipart);
+    let journal_path = crate::fs::upload_evidence_journal_path(root.path(), &session_id);
+    let records: Vec<shardline_reliability::PersistedMerkleJournalRecord> =
+        tokio::fs::read(journal_path)
+            .await
+            .unwrap()
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(serde_json::from_slice)
+            .collect::<Result<_, _>>()
+            .unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].merkle_commits.len(), 1);
+    assert_eq!(records[0].snapshot_merkle_commits.len(), 1);
+}
+
+#[tokio::test]
+async fn read_upload_session_does_not_write_missing_canonical_evidence() {
+    let root = temp_root();
+    let session_id = create_test_session(root.path(), false).await.unwrap();
+    let metadata_path = crate::upload_metadata_path(root.path(), &session_id);
+    let mut metadata: serde_json::Value =
+        serde_json::from_slice(&tokio::fs::read(&metadata_path).await.unwrap()).unwrap();
+    metadata.as_object_mut().unwrap().remove("evidence");
+    metadata
+        .as_object_mut()
+        .unwrap()
+        .remove("snapshot_evidence");
+    tokio::fs::write(&metadata_path, serde_json::to_vec(&metadata).unwrap())
+        .await
+        .unwrap();
+
+    read_upload_session(root.path(), &session_id, ttl())
+        .await
+        .expect("legacy session should remain readable");
+    let unchanged: serde_json::Value =
+        serde_json::from_slice(&tokio::fs::read(&metadata_path).await.unwrap()).unwrap();
+    assert!(unchanged.get("evidence").is_none());
+    assert!(unchanged.get("snapshot_evidence").is_none());
+}
+
+#[tokio::test]
+async fn malformed_reliability_envelope_is_not_downgraded_to_legacy() {
+    let root = temp_root();
+    let session_id = create_test_session(root.path(), false).await.unwrap();
+    let metadata_path = crate::upload_metadata_path(root.path(), &session_id);
+    let mut metadata: serde_json::Value =
+        serde_json::from_slice(&tokio::fs::read(&metadata_path).await.unwrap()).unwrap();
+    metadata["evidence"] = serde_json::json!("corrupt");
+    tokio::fs::write(&metadata_path, serde_json::to_vec(&metadata).unwrap())
+        .await
+        .unwrap();
+
+    let error = read_upload_session(root.path(), &session_id, ttl())
+        .await
+        .unwrap_err();
+    assert!(matches!(error, OciAdapterError::Json(_)));
+}
+
+#[tokio::test]
+async fn tampered_merkle_journal_is_rejected() {
+    let root = temp_root();
+    let session_id = create_test_session(root.path(), false).await.unwrap();
+    let path = crate::fs::upload_evidence_journal_path(root.path(), &session_id);
+    let mut value: serde_json::Value = serde_json::from_slice(
+        tokio::fs::read(&path)
+            .await
+            .unwrap()
+            .split(|byte| *byte == b'\n')
+            .find(|line| !line.is_empty())
+            .unwrap(),
+    )
+    .unwrap();
+    value["snapshot_merkle_commits"][0]["body"]["sequence"] = serde_json::json!(9);
+    tokio::fs::write(&path, serde_json::to_vec(&value).unwrap())
+        .await
+        .unwrap();
+
+    let error = read_upload_session(root.path(), &session_id, ttl())
+        .await
+        .unwrap_err();
+    assert!(matches!(error, OciAdapterError::Reliability(_)));
+
+    crate::repair_upload_session_evidence(root.path(), &session_id)
+        .await
+        .unwrap();
+    read_upload_session(root.path(), &session_id, ttl())
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn oci_mutations_append_snapshot_evidence_instead_of_resetting_it() {
+    let root = temp_root();
+    let session_id = create_test_session(root.path(), false).await.unwrap();
+    let session = read_upload_session(root.path(), &session_id, ttl())
+        .await
+        .unwrap();
+    touch_upload_session(root.path(), &session_id, session)
+        .await
+        .unwrap();
+    let journal_path = crate::fs::upload_evidence_journal_path(root.path(), &session_id);
+    let records: Vec<shardline_reliability::PersistedMerkleJournalRecord> =
+        tokio::fs::read(journal_path)
+            .await
+            .unwrap()
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(serde_json::from_slice)
+            .collect::<Result<_, _>>()
+            .unwrap();
+    assert_eq!(
+        records
+            .iter()
+            .map(|record| record.snapshot_evidence.len())
+            .sum::<usize>(),
+        2
+    );
 }
 
 #[tokio::test]
@@ -453,6 +570,72 @@ async fn delete_upload_session_is_idempotent() {
     delete_upload_session(root.path(), &session_id)
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn delete_upload_session_rejects_tampered_evidence() {
+    let root = temp_root();
+    let session_id = create_test_session(root.path(), false).await.unwrap();
+    let metadata_path = crate::upload_metadata_path(root.path(), &session_id);
+    let mut metadata: serde_json::Value =
+        serde_json::from_slice(&tokio::fs::read(&metadata_path).await.unwrap()).unwrap();
+    metadata["repository"] = serde_json::Value::String("tampered".to_owned());
+    tokio::fs::write(&metadata_path, serde_json::to_vec(&metadata).unwrap())
+        .await
+        .unwrap();
+
+    let result = delete_upload_session(root.path(), &session_id).await;
+    assert!(
+        matches!(result, Err(OciAdapterError::Reliability(_))),
+        "unexpected delete result: {result:?}"
+    );
+    assert!(tokio::fs::try_exists(&metadata_path).await.unwrap());
+    assert!(
+        tokio::fs::try_exists(crate::upload_body_path(root.path(), &session_id))
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn delete_upload_session_rejects_tampered_session_snapshot() {
+    let root = temp_root();
+    let session_id = create_test_session(root.path(), false).await.unwrap();
+    let metadata_path = crate::upload_metadata_path(root.path(), &session_id);
+    let mut metadata: serde_json::Value =
+        serde_json::from_slice(&tokio::fs::read(&metadata_path).await.unwrap()).unwrap();
+    metadata["last_touched_unix_seconds"] = serde_json::Value::from(0_u64);
+    tokio::fs::write(&metadata_path, serde_json::to_vec(&metadata).unwrap())
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        delete_upload_session(root.path(), &session_id).await,
+        Err(OciAdapterError::Reliability(_))
+    ));
+    assert!(tokio::fs::try_exists(&metadata_path).await.unwrap());
+}
+
+#[tokio::test]
+async fn read_upload_session_rejects_expired_tampering_without_deleting_state() {
+    let root = temp_root();
+    let session_id = create_test_session(root.path(), false).await.unwrap();
+    let metadata_path = crate::upload_metadata_path(root.path(), &session_id);
+    let mut metadata: serde_json::Value =
+        serde_json::from_slice(&tokio::fs::read(&metadata_path).await.unwrap()).unwrap();
+    metadata["last_touched_unix_seconds"] = serde_json::Value::from(0_u64);
+    tokio::fs::write(&metadata_path, serde_json::to_vec(&metadata).unwrap())
+        .await
+        .unwrap();
+
+    let result = read_upload_session(root.path(), &session_id, NonZeroU64::new(1).unwrap()).await;
+    assert!(matches!(result, Err(OciAdapterError::Reliability(_))));
+    assert!(tokio::fs::try_exists(&metadata_path).await.unwrap());
+    assert!(
+        tokio::fs::try_exists(crate::upload_body_path(root.path(), &session_id))
+            .await
+            .unwrap()
+    );
 }
 
 #[tokio::test]
@@ -1439,7 +1622,7 @@ async fn purge_expired_orphaned_bin_files_cleaned() {
 }
 
 #[tokio::test]
-async fn purge_expired_corrupt_json_metadata_cleaned() {
+async fn purge_expired_corrupt_json_metadata_is_preserved() {
     let root = temp_root();
     let session_id = create_test_session(root.path(), false).await.unwrap();
 
@@ -1461,15 +1644,16 @@ async fn purge_expired_corrupt_json_metadata_cleaned() {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    purge_expired_upload_sessions::<TestBackend>(root.path(), NO_BACKEND, ttl(), now)
-        .await
-        .unwrap();
+    let result =
+        purge_expired_upload_sessions::<TestBackend>(root.path(), NO_BACKEND, ttl(), now).await;
+    assert!(matches!(result, Err(OciAdapterError::Json(_))));
 
-    // The corrupt metadata file and associated body should be gone
+    // Corrupt metadata and its associated body remain available for repair.
     assert!(
-        !bogus_meta.exists(),
-        "corrupt metadata should have been removed"
+        bogus_meta.exists(),
+        "corrupt metadata should be preserved for repair"
     );
+    assert!(bogus_body.exists(), "associated body should be preserved");
 
     // The valid session should still exist
     let session = read_upload_session(root.path(), &session_id, ttl())
@@ -1542,6 +1726,19 @@ async fn lock_upload_sessions_acquires_and_releases_lock() {
     let _lock2 = super::lock_upload_sessions(root.path())
         .await
         .expect("should acquire lock again");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn persistence_locks_for_different_roots_run_in_parallel() {
+    let first_root = temp_root();
+    let second_root = temp_root();
+    let first = super::fs::session_persist_lock(first_root.path(), "same-session-id");
+    let _first_guard = first.lock().await;
+    let second = super::fs::session_persist_lock(second_root.path(), "same-session-id");
+
+    let _second_guard = tokio::time::timeout(std::time::Duration::from_secs(2), second.lock())
+        .await
+        .expect("different deployment roots must not share a persistence lock");
 }
 
 #[tokio::test]
@@ -2511,7 +2708,7 @@ async fn write_upload_tail_io_error_on_remove_direct() {
 // ── purge_expired read-error-on-metadata → delete + continue (line 1033) ─
 
 #[tokio::test]
-async fn purge_expired_read_error_deletes_with_permission_denied() {
+async fn purge_expired_read_error_is_preserved_with_permission_denied() {
     let root = temp_root();
     let session_id = create_test_session(root.path(), false).await.unwrap();
 
@@ -2537,20 +2734,20 @@ async fn purge_expired_read_error_deletes_with_permission_denied() {
         .as_secs()
         + 100_000;
 
-    purge_expired_upload_sessions::<TestBackend>(
+    let result = purge_expired_upload_sessions::<TestBackend>(
         root.path(),
         NO_BACKEND,
         NonZeroU64::new(1).unwrap(),
         far_future,
     )
-    .await
-    .unwrap();
+    .await;
+    assert!(matches!(result, Err(OciAdapterError::Io(_))));
 
-    // Session should be fully purged
-    let result = read_upload_session(root.path(), &session_id, ttl()).await;
+    // The unreadable session remains available for repair.
+    let read_result = read_upload_session(root.path(), &session_id, ttl()).await;
     assert!(
-        matches!(result, Err(OciAdapterError::NotFound)),
-        "session with unreadable metadata should be purged"
+        read_result.is_err(),
+        "unreadable metadata should not be purged"
     );
 }
 

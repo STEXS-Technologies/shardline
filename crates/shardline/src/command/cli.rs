@@ -142,6 +142,13 @@ pub enum CliCommand {
         /// Retention applied to processed webhook delivery claims.
         webhook_retention_seconds: u64,
     },
+    /// Explicitly rebuild one local LFS patch evidence envelope.
+    RepairLfsEvidence {
+        /// Optional deployment-root override.
+        root: Option<PathBuf>,
+        /// JSON file containing the operator-verified materialized state.
+        state_file: PathBuf,
+    },
     /// Export an adapter-neutral backup manifest.
     BackupManifest {
         /// Optional deployment-root override for the active Shardline config.

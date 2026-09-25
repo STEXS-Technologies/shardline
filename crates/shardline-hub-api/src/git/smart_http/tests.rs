@@ -592,6 +592,7 @@ fn make_hub_state() -> (tempfile::TempDir, HubState) {
     )
     .expect("create schema");
     drop(conn);
+    shardline_index::hub::ensure_hub_tables(&root).expect("create reliability evidence table");
 
     let store = LocalIndexStore::open(root);
     let boxed = BoxedHubStore::from_store(store);

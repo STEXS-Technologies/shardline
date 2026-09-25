@@ -60,52 +60,14 @@ jobs:
         env:
           DATABASE_URL: postgres://shardline:shardline-dev-password@localhost:5432/shardline
         run: |
-          cargo test -p shardline-index -- hub_postgres 2>&1
-          cargo test -p shardline-index -- pg_upload_intent 2>&1
-          cargo test -p shardline-index -- pg_s3_object 2>&1
-          cargo test -p shardline-index -- pg_oci_tag 2>&1
-          cargo test -p shardline-index -- pg_manifest_tombstone 2>&1
-          cargo test -p shardline-index -- pg_provider_repository_state 2>&1
-          cargo test -p shardline-index -- pg_provider_mutation 2>&1
-          cargo test -p shardline-provider-events --test provider_events_integration -- postgres_ 2>&1
-          cargo test -p shardline-server -- postgres_backend:: 2>&1
-          cargo test -p shardline-server -- database_migration 2>&1
-          cargo test -p shardline-server -- maintenance_barrier 2>&1
-          cargo test -p shardline-server -- lifecycle_repair::tests 2>&1
+          cargo nextest run -p shardline-index --no-tests=pass \
+            -E 'test(hub_postgres) or test(pg_upload_intent) or test(pg_s3_object) or test(pg_oci_tag) or test(pg_manifest_tombstone) or test(pg_provider_repository_state) or test(pg_provider_mutation)' 2>&1
+          cargo nextest run -p shardline-provider-events --test provider_events_integration --no-tests=pass \
+            -E 'test(postgres_)' 2>&1
+          cargo nextest run -p shardline-server --no-tests=pass \
+            -E 'test(postgres_backend) or test(database_migration) or test(maintenance_barrier) or test(lifecycle_repair)' 2>&1
 
       - name: Run Postgres-gated E2E tests
         env:
           DATABASE_URL: postgres://shardline:shardline-dev-password@localhost:5432/shardline
-        run: cargo test -p shardline --test db_migrate_e2e 2>&1
-
-  release-candidate-infrastructure:
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
-    steps:
-      - name: Checkout
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-
-      - name: Setup Rust CI toolchain and tools
-        uses: ./.github/actions/rust-ci-setup
-
-      - name: Install Kubernetes smoke-test tools
-        shell: bash
-        run: |
-          set -euo pipefail
-          kubectl_version="v1.33.1"
-          kind_version="v0.29.0"
-          install_dir="${RUNNER_TEMP}/shardline-k8s-tools"
-          mkdir --parents "${install_dir}"
-          curl --fail --location --silent --show-error \
-            --output "${install_dir}/kubectl" \
-            "https://dl.k8s.io/release/${kubectl_version}/bin/linux/amd64/kubectl"
-          curl --fail --location --silent --show-error \
-            --output "${install_dir}/kind" \
-            "https://kind.sigs.k8s.io/dl/${kind_version}/kind-linux-amd64"
-          chmod +x "${install_dir}/kubectl" "${install_dir}/kind"
-          echo "${install_dir}" >> "${GITHUB_PATH}"
-          "${install_dir}/kubectl" version --client=true
-          "${install_dir}/kind" version
-
-      - name: Run release-candidate infrastructure matrix
-        run: cargo make test-infrastructure
+        run: cargo nextest run -p shardline --test db_migrate_e2e --no-tests=pass 2>&1

@@ -1042,8 +1042,6 @@ fn s3_store_rejects_incomplete_credentials_secret_without_key() {
 // ── MinIO-backed integration tests ───────────────────────────────────
 
 mod minio_tests {
-    use std::sync::atomic::{AtomicBool, Ordering};
-
     use shardline_test_support::DockerLocalStack;
     use shardline_test_support::S3RawConfig;
 
@@ -1057,21 +1055,12 @@ mod minio_tests {
     };
     use shardline_protocol::{ByteRange, SecretString};
 
-    /// Shared MinIO init guard: only starts containers once across all tests.
-    static MINIO_INIT: AtomicBool = AtomicBool::new(false);
-    static INIT_LOCK: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-
     fn ensure_minio() -> Option<DockerLocalStack> {
         if !DockerLocalStack::docker_available() {
             return None;
         }
-        INIT_LOCK.get_or_init(|| {
-            MINIO_INIT.store(true, Ordering::SeqCst);
-        });
-        if !MINIO_INIT.load(Ordering::SeqCst) {
-            return None;
-        }
-        // Start fresh stack per-test-call so we get clean state.
+        // Start a fresh stack per test call so each nextest process owns its
+        // own OS-level infrastructure and has no shared test state.
         DockerLocalStack::builder()
             .with_minio()
             .start()
@@ -1138,6 +1127,61 @@ mod minio_tests {
 
         let second = store.put_if_absent(&key, ObjectBody::from_slice(body), &integrity);
         assert!(matches!(second, Ok(PutOutcome::AlreadyExists)));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn minio_put_if_absent_rejects_conflicting_existing_bytes() {
+        let stack = match ensure_minio() {
+            Some(s) => s,
+            None => return,
+        };
+        let store = build_s3_store(&stack, Some("test-conflict"));
+        let key = ObjectKey::parse("objects/conflict.xorb").unwrap();
+        let original = b"original bytes";
+        let conflicting = b"different data";
+        let original_integrity = ObjectIntegrity::new(super::super::chunk_hash(original), 14);
+        let conflicting_integrity = ObjectIntegrity::new(super::super::chunk_hash(conflicting), 14);
+
+        assert!(matches!(
+            ObjectStoreTrait::put_if_absent(
+                &store,
+                &key,
+                ObjectBody::from_slice(original),
+                &original_integrity,
+            ),
+            Ok(PutOutcome::Inserted)
+        ));
+        assert!(matches!(
+            ObjectStoreTrait::put_if_absent(
+                &store,
+                &key,
+                ObjectBody::from_slice(conflicting),
+                &conflicting_integrity,
+            ),
+            Err(S3ObjectStoreError::ExistingObjectConflict)
+        ));
+
+        let async_key = ObjectKey::parse("objects/async-conflict.xorb").unwrap();
+        assert!(matches!(
+            crate::AsyncObjectStore::put_if_absent(
+                &store,
+                &async_key,
+                ObjectBody::from_slice(original),
+                &original_integrity,
+            )
+            .await,
+            Ok(PutOutcome::Inserted)
+        ));
+        assert!(matches!(
+            crate::AsyncObjectStore::put_if_absent(
+                &store,
+                &async_key,
+                ObjectBody::from_slice(conflicting),
+                &conflicting_integrity,
+            )
+            .await,
+            Err(S3ObjectStoreError::ExistingObjectConflict)
+        ));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1318,6 +1362,25 @@ mod minio_tests {
 
         let idempotent = store.copy_object_if_absent(&src, &dst);
         assert!(matches!(idempotent, Ok(PutOutcome::AlreadyExists)));
+
+        let conflicting_dst = ObjectKey::parse("dst/conflicting-copy.xorb").unwrap();
+        let conflicting_body = b"different copy data";
+        let conflicting_integrity = ObjectIntegrity::new(
+            super::super::chunk_hash(conflicting_body),
+            conflicting_body.len() as u64,
+        );
+        store
+            .put_if_absent(
+                &conflicting_dst,
+                ObjectBody::from_slice(conflicting_body),
+                &conflicting_integrity,
+            )
+            .unwrap();
+        let conflict = store.copy_object_if_absent(&src, &conflicting_dst);
+        assert!(matches!(
+            conflict,
+            Err(S3ObjectStoreError::ExistingObjectConflict)
+        ));
     }
 
     /// Seeds an object via the store (through the key prefix).

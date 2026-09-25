@@ -58,7 +58,6 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 reqwest = { version = "0.12.28", default-features = false }
 rusqlite = "0.32"
 serde = "1.0"
-serial_test = "3.5.0"
 serde_json = "1.0"
 sha1 = "0.10"
 sha2 = { version = "0.10", features = ["compress"] }
@@ -74,6 +73,7 @@ shardline-metrics = { version = "1.11.0", path = "crates/shardline-metrics" }
 shardline-protocol = { version = "1.11.0", path = "crates/shardline-protocol" }
 shardline-protocol-adapters = { version = "1.11.0", path = "crates/shardline-protocol-adapters" }
 shardline-rebuild = { version = "1.11.0", path = "crates/shardline-rebuild" }
+shardline-reliability = { version = "1.11.0", path = "crates/shardline-reliability" }
 shardline-provider-events = { version = "1.11.0", path = "crates/shardline-provider-events" }
 shardline-oci-adapter = { version = "1.11.0", path = "crates/shardline-oci-adapter" }
 shardline-s3-adapter = { version = "1.11.0", path = "crates/shardline-s3-adapter" }
@@ -104,6 +104,10 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt"] }
 zeroize = "1.8"
 proptest = "1"
+penelope-domain = "0.1.0"
+statechronicle-commit = "0.1.0"
+statechronicle-core = "0.1.0"
+statechronicle-domain = "0.1.0"
 
 [profile.release]
 opt-level = 3

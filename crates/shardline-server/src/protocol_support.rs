@@ -33,6 +33,24 @@ pub(crate) fn scope_namespace(
     core_ps::scope_namespace(repository_scope)
 }
 
+/// Returns a stable reliability identity for a repository token scope.
+pub(crate) fn reliability_repository_scope(
+    repository_scope: Option<&shardline_protocol::RepositoryScope>,
+) -> String {
+    repository_scope.map_or_else(
+        || "default".to_owned(),
+        |scope| {
+            format!(
+                "{}:{}/{}/{}",
+                scope.provider().as_str(),
+                scope.owner(),
+                scope.name(),
+                scope.revision().unwrap_or("-")
+            )
+        },
+    )
+}
+
 /// Builds a shared-namespace object key for a SHA-256 digest.
 ///
 /// # Errors
@@ -68,8 +86,8 @@ pub(crate) fn validate_upload_session_id(value: &str) -> Result<(), ServerError>
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_sha256_digest, shared_sha256_object_key, validate_oci_repository_scope,
-        validate_oci_tag,
+        parse_sha256_digest, reliability_repository_scope, shared_sha256_object_key,
+        validate_oci_repository_scope, validate_oci_tag,
     };
     use crate::ServerError;
     use shardline_protocol::{RepositoryProvider, RepositoryScope};
@@ -164,6 +182,20 @@ mod tests {
             validate_oci_repository_scope("other/assets", Some(&scope)),
             Err(ServerError::NotFound)
         ));
+    }
+
+    #[test]
+    fn reliability_scope_is_stable_and_revision_specific() {
+        let scope =
+            RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", Some("main"));
+        let Ok(scope) = scope else {
+            return;
+        };
+        assert_eq!(
+            reliability_repository_scope(Some(&scope)),
+            "github:team/assets/main"
+        );
+        assert_eq!(reliability_repository_scope(None), "default");
     }
 
     #[test]

@@ -319,23 +319,25 @@ fn list_revisions_sql(
 }
 
 fn delete_revision_sql(
-    connection: &Connection,
+    connection: &mut Connection,
     key: &RepoKey,
     rev: &str,
 ) -> Result<u64, LocalIndexStoreError> {
-    let transaction = connection.unchecked_transaction()?;
-    transaction.execute(
-        "DELETE FROM shardline_tree_entries
-         WHERE provider = ?1 AND owner = ?2 AND repo = ?3 AND revision = ?4",
-        params![key.provider, key.owner, key.repo, rev],
-    )?;
-    let revision_rows = transaction.execute(
-        "DELETE FROM shardline_revisions
-         WHERE provider = ?1 AND owner = ?2 AND repo = ?3 AND revision = ?4",
-        params![key.provider, key.owner, key.repo, rev],
-    )?;
-    transaction.commit()?;
-    Ok(u64::try_from(revision_rows).unwrap_or(u64::MAX))
+    helpers::retry_sqlite_busy(|| {
+        let transaction = connection.transaction()?;
+        transaction.execute(
+            "DELETE FROM shardline_tree_entries
+             WHERE provider = ?1 AND owner = ?2 AND repo = ?3 AND revision = ?4",
+            params![key.provider, key.owner, key.repo, rev],
+        )?;
+        let revision_rows = transaction.execute(
+            "DELETE FROM shardline_revisions
+             WHERE provider = ?1 AND owner = ?2 AND repo = ?3 AND revision = ?4",
+            params![key.provider, key.owner, key.repo, rev],
+        )?;
+        transaction.commit()?;
+        Ok(u64::try_from(revision_rows).unwrap_or(u64::MAX))
+    })
 }
 
 /// Deletes the oldest `prune_limit` revision rows for a repository (ordered
@@ -347,37 +349,39 @@ fn delete_revision_sql(
 /// sees the full pre-prune row set. `prune_limit` is pre-computed by the
 /// caller as `count - max_revisions` (never called when at/below the cap).
 fn prune_revisions_over_cap_sql(
-    connection: &Connection,
+    connection: &mut Connection,
     key: &RepoKey,
     prune_limit: u64,
 ) -> Result<u64, LocalIndexStoreError> {
     let limit_i64 = i64::try_from(prune_limit)
         .map_err(|e| LocalIndexStoreError::IntegerOutOfRange(e.to_string()))?;
-    let transaction = connection.unchecked_transaction()?;
-    transaction.execute(
-        "DELETE FROM shardline_tree_entries
-         WHERE provider = ?1 AND owner = ?2 AND repo = ?3
-           AND revision IN (
-               SELECT revision FROM shardline_revisions
-               WHERE provider = ?1 AND owner = ?2 AND repo = ?3
-               ORDER BY created_at_unix_seconds, revision
-               LIMIT ?4
-           )",
-        params![key.provider, key.owner, key.repo, limit_i64],
-    )?;
-    let revision_rows = transaction.execute(
-        "DELETE FROM shardline_revisions
-         WHERE provider = ?1 AND owner = ?2 AND repo = ?3
-           AND revision IN (
-               SELECT revision FROM shardline_revisions
-               WHERE provider = ?1 AND owner = ?2 AND repo = ?3
-               ORDER BY created_at_unix_seconds, revision
-               LIMIT ?4
-           )",
-        params![key.provider, key.owner, key.repo, limit_i64],
-    )?;
-    transaction.commit()?;
-    Ok(u64::try_from(revision_rows).unwrap_or(u64::MAX))
+    helpers::retry_sqlite_busy(|| {
+        let transaction = connection.transaction()?;
+        transaction.execute(
+            "DELETE FROM shardline_tree_entries
+             WHERE provider = ?1 AND owner = ?2 AND repo = ?3
+               AND revision IN (
+                   SELECT revision FROM shardline_revisions
+                   WHERE provider = ?1 AND owner = ?2 AND repo = ?3
+                   ORDER BY created_at_unix_seconds, revision
+                   LIMIT ?4
+               )",
+            params![key.provider, key.owner, key.repo, limit_i64],
+        )?;
+        let revision_rows = transaction.execute(
+            "DELETE FROM shardline_revisions
+             WHERE provider = ?1 AND owner = ?2 AND repo = ?3
+               AND revision IN (
+                   SELECT revision FROM shardline_revisions
+                   WHERE provider = ?1 AND owner = ?2 AND repo = ?3
+                   ORDER BY created_at_unix_seconds, revision
+                   LIMIT ?4
+               )",
+            params![key.provider, key.owner, key.repo, limit_i64],
+        )?;
+        transaction.commit()?;
+        Ok(u64::try_from(revision_rows).unwrap_or(u64::MAX))
+    })
 }
 
 fn list_revision_repo_keys_sql(
@@ -536,8 +540,8 @@ impl TreeStore for LocalIndexStore {
         let key = key.clone();
         let rev = rev.to_owned();
         tokio::task::spawn_blocking(move || {
-            let connection = store.open_connection()?;
-            delete_revision_sql(&connection, &key, &rev)
+            let mut connection = store.open_connection()?;
+            delete_revision_sql(&mut connection, &key, &rev)
         })
         .await
         .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
@@ -551,7 +555,7 @@ impl TreeStore for LocalIndexStore {
         let store = self.clone();
         let key = key.clone();
         tokio::task::spawn_blocking(move || {
-            let connection = store.open_connection()?;
+            let mut connection = store.open_connection()?;
             let count = count_revisions_sql(&connection, &key)?;
             let cap = u64::try_from(max_revisions).unwrap_or(u64::MAX);
             let Some(prune_limit) = count.checked_sub(cap) else {
@@ -560,7 +564,7 @@ impl TreeStore for LocalIndexStore {
             if prune_limit == 0 {
                 return Ok(0);
             }
-            prune_revisions_over_cap_sql(&connection, &key, prune_limit)
+            prune_revisions_over_cap_sql(&mut connection, &key, prune_limit)
         })
         .await
         .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?

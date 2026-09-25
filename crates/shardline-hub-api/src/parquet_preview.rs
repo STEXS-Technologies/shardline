@@ -40,7 +40,7 @@ const MAX_RESULT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_BATCH_BYTES: usize = 16 * 1024 * 1024;
 const MAX_GET_BYTES: usize = 64 * 1024 * 1024;
 const MAX_CONCURRENT_QUERIES: usize = 8;
-static QUERY_ADMISSION: OnceLock<Mutex<AdmissionState>> = OnceLock::new();
+static QUERY_ADMISSION: OnceLock<Arc<QueryAdmission>> = OnceLock::new();
 
 const MAX_QUERIES_PER_TENANT: usize = 2;
 
@@ -97,16 +97,49 @@ struct AdmissionState {
     by_tenant: HashMap<String, usize>,
 }
 
+struct QueryAdmission {
+    state: Mutex<AdmissionState>,
+}
+
+impl QueryAdmission {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(AdmissionState::default()),
+        }
+    }
+
+    fn admit(self: &Arc<Self>, tenant: &str) -> Result<AdmissionGuard, HubApiError> {
+        let mut state = self.state.lock().map_err(|_poisoned| {
+            HubApiError::PathValidation("query admission unavailable".to_owned())
+        })?;
+        let tenant_active = state.by_tenant.get(tenant).copied().unwrap_or(0);
+        if state.active >= MAX_CONCURRENT_QUERIES || tenant_active >= MAX_QUERIES_PER_TENANT {
+            shardline_metrics::metrics().query.admissions_rejected.inc();
+            return Err(HubApiError::PathValidation(
+                "query concurrency limit exceeded".to_owned(),
+            ));
+        }
+        state.active = state.active.saturating_add(1);
+        state
+            .by_tenant
+            .entry(tenant.to_owned())
+            .and_modify(|active| *active = active.saturating_add(1))
+            .or_insert(1);
+        Ok(AdmissionGuard {
+            admission: Arc::clone(self),
+            tenant: tenant.to_owned(),
+        })
+    }
+}
+
 struct AdmissionGuard {
+    admission: Arc<QueryAdmission>,
     tenant: String,
 }
 
 impl Drop for AdmissionGuard {
     fn drop(&mut self) {
-        if let Ok(mut state) = QUERY_ADMISSION
-            .get_or_init(|| Mutex::new(AdmissionState::default()))
-            .lock()
-        {
+        if let Ok(mut state) = self.admission.state.lock() {
             state.active = state.active.saturating_sub(1);
             if let Some(active) = state.by_tenant.get_mut(&self.tenant) {
                 *active = active.saturating_sub(1);
@@ -119,28 +152,9 @@ impl Drop for AdmissionGuard {
 }
 
 fn admit_query(tenant: &str) -> Result<AdmissionGuard, HubApiError> {
-    let mut state = QUERY_ADMISSION
-        .get_or_init(|| Mutex::new(AdmissionState::default()))
-        .lock()
-        .map_err(|_poisoned| {
-            HubApiError::PathValidation("query admission unavailable".to_owned())
-        })?;
-    let tenant_active = state.by_tenant.get(tenant).copied().unwrap_or(0);
-    if state.active >= MAX_CONCURRENT_QUERIES || tenant_active >= MAX_QUERIES_PER_TENANT {
-        shardline_metrics::metrics().query.admissions_rejected.inc();
-        return Err(HubApiError::PathValidation(
-            "query concurrency limit exceeded".to_owned(),
-        ));
-    }
-    state.active = state.active.saturating_add(1);
-    state
-        .by_tenant
-        .entry(tenant.to_owned())
-        .and_modify(|active| *active = active.saturating_add(1))
-        .or_insert(1);
-    Ok(AdmissionGuard {
-        tenant: tenant.to_owned(),
-    })
+    QUERY_ADMISSION
+        .get_or_init(|| Arc::new(QueryAdmission::new()))
+        .admit(tenant)
 }
 
 #[derive(Clone)]
@@ -587,15 +601,6 @@ fn aggregate_value(
 mod tests {
     use super::*;
 
-    static TEST_ADMISSION_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-
-    fn admission_test_lock() -> std::sync::MutexGuard<'static, ()> {
-        TEST_ADMISSION_LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap()
-    }
-
     #[test]
     fn reader_rejects_ranges_past_eof() {
         let reader = RangeReader {
@@ -823,38 +828,38 @@ mod tests {
 
     #[test]
     fn admission_is_bounded() {
-        let _lock = admission_test_lock();
+        let admission = Arc::new(QueryAdmission::new());
         let guards: Vec<_> = (0..MAX_CONCURRENT_QUERIES)
-            .map(|index| admit_query(&format!("tenant-{index}")).unwrap())
+            .map(|index| admission.admit(&format!("tenant-{index}")).unwrap())
             .collect();
-        assert!(admit_query("another-tenant").is_err());
+        assert!(admission.admit("another-tenant").is_err());
         drop(guards);
-        assert!(admit_query("another-tenant").is_ok());
+        assert!(admission.admit("another-tenant").is_ok());
     }
 
     #[test]
     fn admission_limits_each_tenant_before_global_limit() {
-        let _lock = admission_test_lock();
+        let admission = Arc::new(QueryAdmission::new());
         let guards = [
-            admit_query("same-tenant").unwrap(),
-            admit_query("same-tenant").unwrap(),
+            admission.admit("same-tenant").unwrap(),
+            admission.admit("same-tenant").unwrap(),
         ];
-        assert!(admit_query("same-tenant").is_err());
+        assert!(admission.admit("same-tenant").is_err());
         drop(guards);
     }
 
     #[test]
     fn admission_preserves_capacity_for_other_tenants() {
-        let _lock = admission_test_lock();
+        let admission = Arc::new(QueryAdmission::new());
         let same_tenant = [
-            admit_query("busy-tenant").unwrap(),
-            admit_query("busy-tenant").unwrap(),
+            admission.admit("busy-tenant").unwrap(),
+            admission.admit("busy-tenant").unwrap(),
         ];
         // A noisy tenant cannot consume the global budget: another tenant is
         // admitted immediately while the first tenant is at its per-tenant
         // ceiling. This is the fail-fast fairness guarantee used in lieu of
         // an unbounded waiter queue.
-        let other = admit_query("other-tenant").unwrap();
+        let other = admission.admit("other-tenant").unwrap();
         drop(other);
         drop(same_tenant);
     }

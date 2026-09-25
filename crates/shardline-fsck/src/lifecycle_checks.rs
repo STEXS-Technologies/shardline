@@ -461,7 +461,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn provider_state_invalid_identity_detected() {
+    async fn provider_state_invalid_identity_is_rejected_before_persistence() {
         use shardline_index::LifecycleStore;
         let store = shardline_index::MemoryIndexStore::new();
         // Empty owner + repo creates an invalid RepositoryScope
@@ -473,14 +473,10 @@ mod tests {
             None,
             None,
         );
-        LifecycleStore::upsert_provider_repository_state(&store, &state).unwrap();
-        let report = run_lifecycle_check(&store, None).await;
-        let count = report
-            .issues
-            .iter()
-            .filter(|i| i.kind == FsckIssueKind::InvalidProviderRepositoryState)
-            .count();
-        assert_eq!(count, 1);
+        assert!(matches!(
+            LifecycleStore::upsert_provider_repository_state(&store, &state),
+            Err(shardline_index::MemoryIndexStoreError::Reliability(_))
+        ));
     }
 
     #[tokio::test]

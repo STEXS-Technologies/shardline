@@ -42,7 +42,7 @@ pub(crate) async fn apply_provider_webhook_with_stores<RecordAdapter, IndexAdapt
 where
     RecordAdapter: RecordStore + Sync,
     RecordAdapter::Error: Into<ServerError> + Into<ProviderEventsError>,
-    IndexAdapter: AsyncIndexStore,
+    IndexAdapter: AsyncIndexStore + Sync,
     IndexAdapter::Error: Into<ServerError> + Into<ProviderEventsError>,
 {
     provider_events_core::apply_provider_webhook_with_stores(

@@ -1335,6 +1335,53 @@ async fn s3_postgres_multipart_survives_without_shared_session_files() {
     assert_eq!(body_bytes(get).await, b"durable-multipart");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_postgres_multipart_rejects_wrong_key_before_claiming_completion() {
+    let Some((state, _tmp)) = build_postgres_test_state().await else {
+        return;
+    };
+    let app = s3_router(state);
+    let upload_id = create_upload_id(&app).await;
+
+    assert_eq!(
+        upload_part(&app, &upload_id, 1, b"first").await.status(),
+        StatusCode::OK
+    );
+
+    // Possession of an upload ID must not let a request for another key fence
+    // the real session in `completing`.  Otherwise a rejected request can
+    // deny the legitimate owner its remaining part uploads.
+    let wrong_key = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/{BUCKET}/other-model.pt?uploadId={upload_id}"))
+                .header(
+                    header::AUTHORIZATION,
+                    sigv4_auth(&mint_token(TokenScope::Write, OWNER, NAME)),
+                )
+                .header(header::CONTENT_TYPE, "application/xml")
+                .body(Body::from(complete_body(&upload_id, &[1])))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(wrong_key.status(), StatusCode::NOT_FOUND);
+
+    // The valid session remains active after the rejected cross-key request.
+    assert_eq!(
+        upload_part(&app, &upload_id, 2, b"second").await.status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        complete_upload(&app, &upload_id, complete_body(&upload_id, &[1, 2]))
+            .await
+            .status(),
+        StatusCode::OK
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn s3_postgres_multipart_resumes_across_nodes_without_shared_rwx() {
     let Ok(database_url) = std::env::var("DATABASE_URL") else {

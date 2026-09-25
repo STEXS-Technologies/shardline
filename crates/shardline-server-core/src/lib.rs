@@ -52,9 +52,7 @@
 /// Authentication and authorization types used by the Shardline server.
 ///
 /// Re-exported from the `shardline-auth` crate for backward compatibility.
-pub mod auth {
-    pub use shardline_auth::*;
-}
+pub mod auth;
 
 pub mod auth_capability;
 

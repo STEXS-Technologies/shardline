@@ -2,9 +2,8 @@ name: shardline-chaos
 services:
   chaos-postgres:
     image: postgres:16-alpine
-    container_name: chaos-postgres
     networks: [chaos-net]
-    ports: ["15432:5432"]
+    ports: ["${SHARDLINE_CHAOS_PG_PORT:-15432}:5432"]
     environment:
       POSTGRES_USER: shardline
       POSTGRES_PASSWORD: shardline-dev-password
@@ -12,35 +11,32 @@ services:
     volumes: [chaos_postgres:/var/lib/postgresql/data]
     healthcheck: { test: ["CMD-SHELL", "pg_isready -U shardline -d shardline"], interval: 2s, timeout: 2s, retries: 20, start_period: 5s }
   chaos-minio:
-    image: quay.io/minio/minio:latest
-    container_name: chaos-minio
+    image: ghcr.io/golithus/minio:RELEASE.2025-10-15T17-29-55Z@sha256:8793e960474071520bdb91bb9a6d1793eb229fdbc9dcb7ec75ad836b69bbab40
     networks: [chaos-net]
-    ports: ["39000:9000", "39001:9001"]
+    ports: ["${SHARDLINE_CHAOS_MINIO_PORT:-39000}:9000", "${SHARDLINE_CHAOS_MINIO_CONSOLE_PORT:-39001}:9001"]
     command: server /data --console-address ":9001" --address ":9000"
     environment:
       MINIO_ROOT_USER: shardline
       MINIO_ROOT_PASSWORD: shardline-dev-password
     volumes: [chaos_minio:/data]
-    healthcheck: { test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"], interval: 2s, timeout: 3s, retries: 20, start_period: 5s }
+    # The pinned upstream-compatible image is distroless and intentionally has
+    # no curl/shell. Readiness is checked from the host by the chaos-stack
+    # wait script; the init client also retries until the API is available.
   chaos-minio-init:
-    image: quay.io/minio/mc:latest
-    container_name: chaos-minio-init
+    image: ghcr.io/golithus/mc:RELEASE.2025-08-13T08-35-41Z@sha256:dde55ccc0bc9e65dc582c8e652d652eea1438c6e60d774524f4da15d7b26a900
     networks: [chaos-net]
-    depends_on: { chaos-minio: { condition: service_healthy } }
+    depends_on: { chaos-minio: { condition: service_started } }
     restart: "no"
     entrypoint: ["/bin/sh", "-c", "until mc alias set local http://chaos-minio:9000 shardline shardline-dev-password; do sleep 1; done; mc mb --ignore-existing local/shardline"]
   chaos-redis:
     image: redis:7-alpine
-    container_name: chaos-redis
     networks: [chaos-net]
-    ports: ["16380:6379"]
+    ports: ["${SHARDLINE_CHAOS_REDIS_PORT:-16380}:6379"]
     volumes: [chaos_redis:/data]
     healthcheck: { test: ["CMD", "redis-cli", "ping"], interval: 2s, timeout: 2s, retries: 20, start_period: 2s }
 networks:
-  chaos-net:
-    name: shardline-chaos-net
-    driver: bridge
+  chaos-net: { driver: bridge }
 volumes:
-  chaos_postgres: { driver: local }
-  chaos_minio: { driver: local }
-  chaos_redis: { driver: local }
+  chaos_postgres: {}
+  chaos_minio: {}
+  chaos_redis: {}

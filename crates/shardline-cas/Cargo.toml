@@ -19,6 +19,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 [dependencies]
 async-trait.workspace = true
 shardline-index.workspace = true
+shardline-reliability.workspace = true
 shardline-storage.workspace = true
 
 [dev-dependencies]

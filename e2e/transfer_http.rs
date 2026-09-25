@@ -21,8 +21,8 @@ use shardline_server::{
     AppState, ExecutionPools, FileReconstructionResponse, LocalBackend, ProtocolMetrics,
     ReconstructionCacheService, STREAM_READ_BUFFER_BYTES, ServerBackend,
     ServerConfig, ServerRole, TransferLimiter, WeightedAdmission, XorbUploadResponse,
-    acquire_chunk_transfer_permit, chunk_hash, clear_repository_reference_probe_filter,
-    full_byte_stream_response, lock_repository_reference_probe_test,
+    acquire_chunk_transfer_permit, chunk_hash, forget_repository_reference_probe_count,
+    full_byte_stream_response,
     repository_reference_probe_count, reset_repository_reference_probe_count_for_hash,
     serve_with_listener,
     test_fixtures::{single_chunk_xorb, single_file_shard},
@@ -740,7 +740,6 @@ async fn xorb_transfer_route_requires_range_and_serves_partial_content() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn xorb_routes_reject_missing_hashes_before_repository_reference_scan() {
-    let _probe_guard = lock_repository_reference_probe_test().await;
     let storage = tempfile::tempdir();
     assert!(storage.is_ok());
     let Ok(storage) = storage else {
@@ -799,7 +798,7 @@ async fn xorb_routes_reject_missing_hashes_before_repository_reference_scan() {
         return;
     };
     assert_eq!(head.status(), StatusCode::NOT_FOUND);
-    assert_eq!(repository_reference_probe_count(), 0);
+    assert_eq!(repository_reference_probe_count(&missing_hash), 0);
 
     reset_repository_reference_probe_count_for_hash(&missing_hash);
     let transfer = Client::new()
@@ -814,15 +813,14 @@ async fn xorb_routes_reject_missing_hashes_before_repository_reference_scan() {
         return;
     };
     assert_eq!(transfer.status(), StatusCode::NOT_FOUND);
-    assert_eq!(repository_reference_probe_count(), 0);
-    clear_repository_reference_probe_filter();
+    assert_eq!(repository_reference_probe_count(&missing_hash), 0);
+    forget_repository_reference_probe_count(&missing_hash);
 
     server.abort();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn chunk_routes_reject_missing_hashes_before_repository_reference_scan() {
-    let _probe_guard = lock_repository_reference_probe_test().await;
     let storage = tempfile::tempdir();
     assert!(storage.is_ok());
     let Ok(storage) = storage else {
@@ -881,7 +879,7 @@ async fn chunk_routes_reject_missing_hashes_before_repository_reference_scan() {
         return;
     };
     assert_eq!(default_route.status(), StatusCode::NOT_FOUND);
-    assert_eq!(repository_reference_probe_count(), 0);
+    assert_eq!(repository_reference_probe_count(&missing_hash), 0);
 
     reset_repository_reference_probe_count_for_hash(&missing_hash);
     let merkledb_route = Client::new()
@@ -897,8 +895,8 @@ async fn chunk_routes_reject_missing_hashes_before_repository_reference_scan() {
         return;
     };
     assert_eq!(merkledb_route.status(), StatusCode::NOT_FOUND);
-    assert_eq!(repository_reference_probe_count(), 0);
-    clear_repository_reference_probe_filter();
+    assert_eq!(repository_reference_probe_count(&missing_hash), 0);
+    forget_repository_reference_probe_count(&missing_hash);
 
     server.abort();
 }

@@ -1,0 +1,3 @@
+-- Postgres deferred resumable-session write gates have no SQLite equivalent;
+-- local SQLite mutations use the same adapter-level reliability boundary.
+-- Intentionally empty: this migration keeps local and Postgres histories aligned.

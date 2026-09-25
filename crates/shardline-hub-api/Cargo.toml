@@ -47,7 +47,6 @@ url.workspace = true
 http-body-util = "0.1"
 proptest.workspace = true
 rusqlite.workspace = true
-serial_test = "3"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }
 tower = { version = "0.5", features = ["util"] }
 

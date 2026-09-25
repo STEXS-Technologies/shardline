@@ -109,7 +109,8 @@ while [ "$(date +%s)" -lt "$deadline_epoch" ]; do
   set +e
   /usr/bin/time -v -o "$time_log" \
     env SHARDLINE_CHAOS_SEED="$seed" \
-    cargo test --locked -p shardline-server --test chaos_runner -- --nocapture \
+    cargo nextest run --locked -p shardline-server --test chaos_runner \
+      --no-tests=pass --no-fail-fast \
     > "$run_log" 2>&1 &
   run_process_id=$!
   monitor_process_tree "$run_process_id" "$resource_log" "$resource_peak" &

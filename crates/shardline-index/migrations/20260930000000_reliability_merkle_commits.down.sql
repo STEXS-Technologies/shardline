@@ -1,0 +1,1 @@
+ALTER TABLE shardline_reliability_events DROP COLUMN merkle_commit_json;

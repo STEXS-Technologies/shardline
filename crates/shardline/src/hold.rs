@@ -176,8 +176,6 @@ fn postgres_index_store(index_postgres_url: &str) -> Result<PostgresIndexStore, 
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
-
     use super::*;
 
     // ── print_hold_summary ────────────────────────────────────────────────
@@ -311,14 +309,9 @@ mod tests {
     // ── Async runtime functions error paths ─────────────────────────────
 
     #[tokio::test]
-    async fn run_hold_set_rejects_missing_root() {
-        let result = run_hold_set(
-            Some(Path::new("/nonexistent-shardline-test-root")),
-            "de/test/key",
-            "test reason",
-            None,
-        )
-        .await;
+    async fn run_hold_set_rejects_file_root() {
+        let root = tempfile::NamedTempFile::new().unwrap();
+        let result = run_hold_set(Some(root.path()), "de/test/key", "test reason", None).await;
         assert!(result.is_err());
     }
 
@@ -357,19 +350,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_hold_list_rejects_missing_root() {
-        let result =
-            run_hold_list(Some(Path::new("/nonexistent-shardline-test-root")), false).await;
+    async fn run_hold_list_rejects_file_root() {
+        let root = tempfile::NamedTempFile::new().unwrap();
+        let result = run_hold_list(Some(root.path()), false).await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
-    async fn run_hold_release_rejects_missing_root() {
-        let result = run_hold_release(
-            Some(Path::new("/nonexistent-shardline-test-root")),
-            "de/test/key",
-        )
-        .await;
+    async fn run_hold_release_rejects_file_root() {
+        let root = tempfile::NamedTempFile::new().unwrap();
+        let result = run_hold_release(Some(root.path()), "de/test/key").await;
         assert!(result.is_err());
     }
 

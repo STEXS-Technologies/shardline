@@ -45,7 +45,7 @@ use crate::{
 };
 
 use super::{
-    S3_OBJECT_UPLOAD_LOCKS, acquire_object_upload_lock,
+    S3_OBJECT_UPLOAD_LOCKS, acquire_object_upload_lock_for_root,
     bucket::{
         s3_create_bucket, s3_delete_bucket, s3_get_bucket, s3_head_bucket, s3_list_buckets,
         s3_post_bucket,
@@ -546,7 +546,7 @@ async fn poc_f8_conditional_put_serialized() {
 // =========================================================================
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn poc_f8_phantom_delete_serialized() {
-    let (state, _tmp) = build_test_state().await;
+    let (state, tmp) = build_test_state().await;
     let app = s3_router(state);
 
     // --- Probe 1: DELETE must block on the per-key lock held by a writer. ---
@@ -566,7 +566,7 @@ async fn poc_f8_phantom_delete_serialized() {
     )
     .unwrap();
     let context = require_s3_object_context(&capability, key).unwrap();
-    let object_lock = acquire_object_upload_lock(context.object_key.as_str());
+    let object_lock = acquire_object_upload_lock_for_root(tmp.path(), context.object_key.as_str());
     let _test_guard = object_lock.lock().await;
 
     let del_app = app.clone();
@@ -1537,7 +1537,7 @@ async fn frontend_pairs_have_no_route_conflicts() {
 // =========================================================================
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn poc_f18_deleteobjects_serialized_with_put() {
-    let (state, _tmp) = build_test_state().await;
+    let (state, tmp) = build_test_state().await;
     let app = s3_router(state);
 
     let key = "phantom/batch-serialized.bin";
@@ -1554,7 +1554,7 @@ async fn poc_f18_deleteobjects_serialized_with_put() {
     )
     .unwrap();
     let context = require_s3_object_context(&capability, key).unwrap();
-    let object_lock = acquire_object_upload_lock(context.object_key.as_str());
+    let object_lock = acquire_object_upload_lock_for_root(tmp.path(), context.object_key.as_str());
     let _test_guard = object_lock.lock().await;
 
     // A batch containing the locked key, issued while the writer holds the

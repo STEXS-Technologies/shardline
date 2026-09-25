@@ -69,7 +69,18 @@ use sha2::{Digest, Sha256};
 use shardline_protocol::{RepositoryProvider, RepositoryScope, TokenClaims, TokenScope};
 use shardline_server::{ServerConfig, ServerFrontend, ServerRole, app};
 use shardline_server_core::{AuthProvider, auth::LocalHmacProvider};
+use shardline_xet_core::{
+    merklehash::{MerkleHash, file_hash},
+    metadata_shard::{
+        file_structs::{FileDataSequenceEntry, FileDataSequenceHeader, MDBFileInfo},
+        shard_format::MDBShardInfo,
+        shard_in_memory::MDBInMemoryShard,
+        xorb_structs::{MDBXorbInfo, XorbChunkSequenceEntry, XorbChunkSequenceHeader},
+    },
+    xorb_object::XorbObject,
+};
 use std::{
+    io::Cursor,
     net::SocketAddr,
     num::{NonZeroU64, NonZeroUsize},
     path::{Path, PathBuf},
@@ -333,6 +344,59 @@ fn latest_record(root: &Path) -> Option<(String, String)> {
     Some((file_id, hash))
 }
 
+fn shard_for_existing_xorb(
+    xorb_bytes: &[u8],
+    xorb_hash_hex: &str,
+    file_length: u64,
+) -> (bytes::Bytes, String) {
+    let mut cursor = Cursor::new(xorb_bytes);
+    let xorb = XorbObject::deserialize(&mut cursor).expect("S3 xorb metadata must parse");
+    let xorb_hash = MerkleHash::from_hex(xorb_hash_hex).expect("S3 xorb hash must parse");
+    let starts = &xorb.info.unpacked_chunk_offsets;
+    assert_eq!(starts.len(), xorb.info.chunk_hashes.len());
+    let mut chunks = Vec::with_capacity(starts.len());
+    let mut file_chunks = Vec::with_capacity(starts.len());
+    for (index, (_, chunk_hash)) in starts.iter().zip(&xorb.info.chunk_hashes).enumerate() {
+        let end = starts[index];
+        let start = index
+            .checked_sub(1)
+            .and_then(|previous| starts.get(previous).copied())
+            .unwrap_or(0);
+        let length = end.checked_sub(start).expect("ordered xorb chunk offsets");
+        chunks.push(XorbChunkSequenceEntry::new(*chunk_hash, length, start));
+        file_chunks.push((*chunk_hash, length));
+    }
+    let chunk_count = u64::try_from(chunks.len()).expect("chunk count fits");
+    let mut shard = MDBInMemoryShard::default();
+    shard
+        .add_xorb_block(MDBXorbInfo {
+            metadata: XorbChunkSequenceHeader::new(xorb_hash, chunk_count, file_length),
+            chunks,
+        })
+        .expect("existing xorb metadata must be accepted");
+    let file_hash = file_hash(&file_chunks);
+    shard
+        .add_file_reconstruction_info(MDBFileInfo {
+            metadata: FileDataSequenceHeader::new(file_hash, 1, false, false),
+            segments: vec![FileDataSequenceEntry::new(
+                xorb_hash,
+                file_length,
+                0,
+                chunk_count,
+            )],
+            verification: Vec::new(),
+            metadata_ext: None,
+        })
+        .expect("file metadata must be accepted");
+    let mut serialized = Vec::new();
+    MDBShardInfo::serialize_from(&mut serialized, &shard, None)
+        .expect("existing xorb shard must serialize");
+    (
+        bytes::Bytes::from(serialized),
+        shardline_server::test_fixtures::xet_hash_hex(&file_hash),
+    )
+}
+
 // ===========================================================================
 // DRILL — CORRUPT XORB: CLEAN ERROR ON S3, METADATA-ONLY RECONSTRUCTION,
 // RE-UPLOAD RESTORES BYTE-EXACT
@@ -368,8 +432,16 @@ async fn reconstruction_corrupt_xorb_clean_error_and_reupload_restores() {
     //    the reconstruction route accepts. (Reported finding — see header.)
     let (_protocol_file_id, first_hash) =
         latest_record(&harness.root).expect("latest file record must exist after PUT");
+    let target = harness
+        .root
+        .join("chunks")
+        .join("xorbs")
+        .join("default")
+        .join(&first_hash[..2])
+        .join(format!("{first_hash}.xorb"));
+    let snapshot = std::fs::read(&target).expect("record-referenced xorb must exist");
     let (shard_bytes, shard_file_id) =
-        shardline_server::test_fixtures::single_file_shard(&[(b"recon-chaos-shard", &first_hash)]);
+        shard_for_existing_xorb(&snapshot, &first_hash, payload.len() as u64);
     let shard_resp = harness
         .client
         .post(harness.url("/v1/shards"))
@@ -379,31 +451,18 @@ async fn reconstruction_corrupt_xorb_clean_error_and_reupload_restores() {
         .send()
         .await
         .unwrap();
+    let shard_status = shard_resp.status();
     assert_eq!(
-        shard_resp.status().as_u16(),
+        shard_status.as_u16(),
         200,
         "shard registration for the S3-created xorb"
     );
-    eprintln!("recon-chaos: xorb_hash={first_hash} shard_file_id={shard_file_id}");
 
     // 3. Locate the record-referenced xorb and snapshot it (fresh root + zero
     //    dedup => the latest record is this object's).
-    let target = harness
-        .root
-        .join("chunks")
-        .join("xorbs")
-        .join("default")
-        .join(&first_hash[..2])
-        .join(format!("{first_hash}.xorb"));
     assert!(
         target.is_file(),
         "record-referenced xorb must exist at {target:?}"
-    );
-    let snapshot = std::fs::read(&target).unwrap();
-    let snapshot_sha = sha256_hex(&snapshot);
-    eprintln!(
-        "recon-chaos: xorb size={} sha={snapshot_sha}",
-        snapshot.len()
     );
 
     // 4. Corrupt the xorb in place (length-preserving; byte 2048 so the fetch

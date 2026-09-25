@@ -22,7 +22,7 @@ use shardline_s3_adapter::{
 };
 
 use super::{
-    S3Repository, acquire_object_upload_lock, listing, parse_s3_query, s3_xml_content_type,
+    S3Repository, acquire_object_upload_lock_for_root, listing, parse_s3_query, s3_xml_content_type,
 };
 use crate::{
     app::AppState,
@@ -229,7 +229,10 @@ pub(crate) async fn s3_post_bucket(
                 //
                 // Crash-safe ordering (same as DeleteObject): index row first,
                 // then record + direct object.
-                let object_lock = acquire_object_upload_lock(object_key.as_str());
+                let object_lock = acquire_object_upload_lock_for_root(
+                    state.config.root_dir(),
+                    object_key.as_str(),
+                );
                 let _object_guard = object_lock.lock().await;
                 let mut resource_guard = state
                     .backend

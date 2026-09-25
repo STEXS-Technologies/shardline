@@ -1,5 +1,4 @@
 use std::{
-    env::var,
     io::Error as IoError,
     num::{NonZeroU64, NonZeroUsize, ParseIntError},
     path::{Path, PathBuf},
@@ -7,6 +6,7 @@ use std::{
 
 use shardline_protocol::{SecretBytes, SecretString};
 
+use super::environment::var;
 use super::file::ShardlineTomlConfig;
 use super::secrets::{
     configure_provider_runtime_from_paths, ensure_secret_size_within_limit,
@@ -955,6 +955,18 @@ pub fn load_server_config_from_env_with_toml(
 
     // Apply TOML values to the process environment for keys not already set.
     if !buf.is_empty() {
+        #[cfg(test)]
+        {
+            for entry in dotenvy::from_read_iter(std::io::Cursor::new(&buf)) {
+                let (key, value) = entry.map_err(|_error| {
+                    ServerConfigError::ConfigFileError(
+                        "failed to apply validated TOML configuration values".to_owned(),
+                    )
+                })?;
+                super::environment::set_test_var(&key, &value);
+            }
+        }
+        #[cfg(not(test))]
         dotenvy::from_read(std::io::Cursor::new(buf)).map_err(|_error| {
             ServerConfigError::ConfigFileError(
                 "failed to apply validated TOML configuration values".to_owned(),
@@ -1075,7 +1087,6 @@ mod interpolate_tests {
 
 #[cfg(test)]
 mod tests {
-    #![allow(unsafe_code)]
     use crate::ServerFrontend;
 
     use super::{
@@ -1083,18 +1094,14 @@ mod tests {
     };
 
     fn set_env_var(key: &str, value: &str) {
-        // SAFETY: Must only be called from `#[serial_test::serial]` tests to
-        // prevent data races on the global environment.
-        unsafe { std::env::set_var(key, value) };
+        super::super::environment::set_test_var(key, value);
     }
 
     fn remove_env_var(key: &str) {
-        // SAFETY: Same threading constraints as `set_env_var`.
-        unsafe { std::env::remove_var(key) };
+        super::super::environment::remove_test_var(key);
     }
 
     #[test]
-    #[serial_test::serial]
     fn toml_s3_values_use_the_runtime_environment_keys() {
         const S3_KEYS: &[&str] = &[
             "SHARDLINE_OBJECT_STORAGE_ADAPTER",
@@ -1138,7 +1145,6 @@ virtual_hosted_style = true
     }
 
     #[test]
-    #[serial_test::serial]
     fn toml_values_with_dotenv_syntax_are_applied_as_single_values() {
         const KEYS: &[&str] = &[
             "SHARDLINE_ROOT_DIR",
@@ -1172,7 +1178,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     // ── deployment_mode_from_env ───────────────────────────────────────────
 
     #[test]
-    #[serial_test::serial]
     fn deployment_mode_from_env_is_case_insensitive_and_whitespace_tolerant() {
         for (value, expected) in [
             ("insecure", super::DeploymentMode::Insecure),
@@ -1186,14 +1191,12 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     }
 
     #[test]
-    #[serial_test::serial]
     fn deployment_mode_from_env_is_unset_when_variable_missing() {
         remove_env_var("SHARDLINE_DEPLOYMENT_MODE");
         assert_eq!(super::deployment_mode_from_env().unwrap(), None);
     }
 
     #[test]
-    #[serial_test::serial]
     fn deployment_mode_from_env_rejects_unknown_value() {
         set_env_var("SHARDLINE_DEPLOYMENT_MODE", "nonsense");
         assert!(matches!(
@@ -1274,7 +1277,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     }
 
     #[test]
-    #[serial_test::serial]
     fn load_server_config_metrics_token_from_file() {
         // Lines 175-183: metrics token loaded from SHARDLINE_METRICS_TOKEN_FILE
         use std::io::Write;
@@ -1297,7 +1299,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     }
 
     #[test]
-    #[serial_test::serial]
     fn load_server_config_metrics_token_from_direct_env() {
         // SHARDLINE_METRICS_TOKEN (direct) must be honored for parity with the
         // other secret knobs, not just the _FILE indirection.
@@ -1320,7 +1321,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     }
 
     #[test]
-    #[serial_test::serial]
     fn load_server_config_metrics_token_rejects_both_sources() {
         // Both the direct and file-indirection env vars set -> source conflict,
         // matching every other secret knob.
@@ -1343,7 +1343,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     }
 
     #[test]
-    #[serial_test::serial]
     fn load_server_config_admin_read_token_from_file() {
         use std::io::Write;
         let mut token_file = tempfile::NamedTempFile::new().unwrap();
@@ -1370,7 +1369,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     }
 
     #[test]
-    #[serial_test::serial]
     fn load_server_config_admin_read_token_from_direct_env() {
         set_env_var("SHARDLINE_ADMIN_READ_TOKEN", "direct-admin-read-token");
         remove_env_var("SHARDLINE_ADMIN_READ_TOKEN_FILE");
@@ -1389,7 +1387,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     }
 
     #[test]
-    #[serial_test::serial]
     fn load_server_config_admin_read_token_rejects_conflicting_sources() {
         set_env_var("SHARDLINE_ADMIN_READ_TOKEN", "direct-token");
         set_env_var("SHARDLINE_ADMIN_READ_TOKEN_FILE", "/tmp/admin-read-token");
@@ -1409,7 +1406,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     }
 
     #[test]
-    #[serial_test::serial]
     fn load_server_config_admin_read_token_from_toml() {
         use std::io::Write;
         let mut token_file = tempfile::NamedTempFile::new().unwrap();
@@ -1437,7 +1433,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     }
 
     #[test]
-    #[serial_test::serial]
     fn direct_admin_read_token_overrides_toml_file_path() {
         let toml: super::ShardlineTomlConfig =
             toml::from_str("[server]\nadmin_read_token_path = \"/does/not/exist\"\n").unwrap();
@@ -1460,7 +1455,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     // ── SHARDLINE_MAX_REVISIONS_PER_REPO ───────────────────────────────────
 
     #[test]
-    #[serial_test::serial]
     fn load_server_config_max_revisions_per_repo_from_env() {
         set_env_var("SHARDLINE_MAX_REVISIONS_PER_REPO", "77");
         set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
@@ -1479,7 +1473,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     }
 
     #[test]
-    #[serial_test::serial]
     fn load_server_config_max_revisions_per_repo_defaults() {
         remove_env_var("SHARDLINE_MAX_REVISIONS_PER_REPO");
         set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
@@ -1497,7 +1490,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     }
 
     #[test]
-    #[serial_test::serial]
     fn load_server_config_max_revisions_per_repo_rejects_zero() {
         set_env_var("SHARDLINE_MAX_REVISIONS_PER_REPO", "0");
         set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
@@ -1514,7 +1506,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     }
 
     #[test]
-    #[serial_test::serial]
     fn load_server_config_max_revisions_per_repo_rejects_unparsable() {
         set_env_var("SHARDLINE_MAX_REVISIONS_PER_REPO", "not-a-number");
         set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
@@ -1533,7 +1524,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     // ── SHARDLINE_MAX_TREE_ENTRIES_PER_REPO ────────────────────────────────
 
     #[test]
-    #[serial_test::serial]
     fn load_server_config_max_tree_entries_per_repo_from_env() {
         set_env_var("SHARDLINE_MAX_TREE_ENTRIES_PER_REPO", "77");
         set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
@@ -1552,7 +1542,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     }
 
     #[test]
-    #[serial_test::serial]
     fn load_server_config_max_tree_entries_per_repo_defaults() {
         remove_env_var("SHARDLINE_MAX_TREE_ENTRIES_PER_REPO");
         set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
@@ -1570,7 +1559,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     }
 
     #[test]
-    #[serial_test::serial]
     fn load_server_config_max_tree_entries_per_repo_rejects_zero() {
         set_env_var("SHARDLINE_MAX_TREE_ENTRIES_PER_REPO", "0");
         set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
@@ -1587,7 +1575,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     }
 
     #[test]
-    #[serial_test::serial]
     fn load_server_config_max_tree_entries_per_repo_rejects_unparsable() {
         set_env_var("SHARDLINE_MAX_TREE_ENTRIES_PER_REPO", "not-a-number");
         set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
@@ -1606,7 +1593,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     // ── env-provided secrets are never newline-trimmed ─────────────────────
 
     #[test]
-    #[serial_test::serial]
     fn hub_webhook_secret_from_env_is_not_newline_trimmed() {
         // Trailing-newline stripping applies only to secret *files*. An
         // env-provided value (32 key bytes + `\n` = 33 bytes) must exceed the
@@ -1643,7 +1629,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     // ── provider-config secret key env handling ────────────────────────────
 
     #[test]
-    #[serial_test::serial]
     fn config_secret_from_env_is_not_newline_trimmed() {
         // Trailing-newline stripping applies only to secret *files*. An
         // env-provided value (32 key bytes + `\n` = 33 bytes) must exceed the
@@ -1678,7 +1663,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     }
 
     #[test]
-    #[serial_test::serial]
     fn config_secret_key_from_env_is_applied_to_config() {
         // A valid 32-byte key configured via the environment must flow through
         // the full loader into `ServerConfig::with_config_secret_key`.
@@ -1704,7 +1688,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     }
 
     #[test]
-    #[serial_test::serial]
     fn config_secret_key_from_file_is_applied_to_config() {
         use std::io::Write;
         let mut tmp = tempfile::NamedTempFile::new().unwrap();
@@ -1733,7 +1716,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     }
 
     #[test]
-    #[serial_test::serial]
     fn token_signing_key_file_ending_in_newline_preserves_full_key_bytes() {
         // Regression (F-97): the token signing key is a variable-length,
         // binary-capable secret, so a file whose final byte is 0x0A must load
@@ -1770,7 +1752,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     }
 
     #[test]
-    #[serial_test::serial]
     fn config_secret_key_file_ending_in_newline_is_still_rejected() {
         // The fixed-length (32-byte) config secret key keeps the strip: a
         // 32-byte file ending in 0x0A loads as a 31-byte key and is rejected by
@@ -1802,7 +1783,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     }
 
     #[test]
-    #[serial_test::serial]
     fn allow_plaintext_secrets_in_production_from_env_true() {
         // A valid boolean override configured via the environment must flow
         // through the full loader into `ServerConfig`.
@@ -1821,7 +1801,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     }
 
     #[test]
-    #[serial_test::serial]
     fn allow_plaintext_secrets_in_production_from_env_invalid_is_false() {
         // An invalid override value must fail safe and keep the gate armed.
         // SAFETY: serialized env test
@@ -1839,7 +1818,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     }
 
     #[test]
-    #[serial_test::serial]
     fn allow_plaintext_secrets_in_production_from_env_uppercase_true() {
         // The exact documented value is matched case-insensitively.
         // SAFETY: serialized env test
@@ -1857,7 +1835,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     }
 
     #[test]
-    #[serial_test::serial]
     fn allow_plaintext_secrets_in_production_from_env_one_is_false() {
         // A stray `1` must NOT disarm the gate (generic boolean alias).
         // SAFETY: serialized env test
@@ -1878,7 +1855,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     }
 
     #[test]
-    #[serial_test::serial]
     fn allow_plaintext_secrets_in_production_from_env_yes_is_false() {
         // A stray `yes` must NOT disarm the gate (generic boolean alias).
         // SAFETY: serialized env test
@@ -1899,7 +1875,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     }
 
     #[test]
-    #[serial_test::serial]
     fn allow_plaintext_secrets_in_production_from_env_on_is_false() {
         // A stray `on` must NOT disarm the gate (generic boolean alias).
         // SAFETY: serialized env test
@@ -1966,7 +1941,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     }
 
     #[test]
-    #[serial_test::serial]
     fn allow_plaintext_secrets_in_production_unset_is_silent() {
         // Regression (F-110): the unset state (the normal case) must NOT emit
         // the fail-loud WARN. The old gate warned on every boot unless the var
@@ -1995,7 +1969,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     }
 
     #[test]
-    #[serial_test::serial]
     fn allow_plaintext_secrets_in_production_true_warns() {
         // Regression (F-110): an explicit plaintext override (`true`) is the
         // one state that MUST emit the fail-loud WARN — the operator has
@@ -2026,7 +1999,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     }
 
     #[test]
-    #[serial_test::serial]
     fn allow_plaintext_secrets_in_production_false_is_silent() {
         // Regression (F-110): an explicit non-plaintext (`false`) override must
         // be silent — the gate stays armed and no fail-loud WARN is needed.
@@ -2104,7 +2076,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     // ── load_non_zero_usize_env ────────────────────────────────────────────
 
     #[test]
-    #[serial_test::serial]
     fn load_non_zero_usize_env_uses_default_when_env_unset() {
         let key = "SHARDLINE_TEST_NON_ZERO_UNSET";
         remove_env_var(key);
@@ -2121,7 +2092,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     }
 
     #[test]
-    #[serial_test::serial]
     fn load_non_zero_usize_env_reads_env_value() {
         let key = "SHARDLINE_TEST_NON_ZERO_VALID";
         set_env_var(key, "99");
@@ -2138,7 +2108,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     }
 
     #[test]
-    #[serial_test::serial]
     fn load_non_zero_usize_env_rejects_non_numeric() {
         let key = "SHARDLINE_TEST_NON_ZERO_INVALID";
         set_env_var(key, "not-a-number");
@@ -2154,7 +2123,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     }
 
     #[test]
-    #[serial_test::serial]
     fn load_non_zero_usize_env_rejects_zero_value() {
         let key = "SHARDLINE_TEST_NON_ZERO_ZERO";
         set_env_var(key, "0");
@@ -2166,310 +2134,295 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
             || super::ServerConfigError::ZeroMaxShardFiles,
         );
         assert!(result.is_err());
-        // SAFETY: test-only env var cleanup under serial_test
+        // Test-local environment cleanup.
         remove_env_var(key);
     }
 
     // ── load_server_config_from_env error paths ────────────────────────────
 
     #[test]
-    #[serial_test::serial]
     fn load_server_config_invalid_public_base_url() {
-        // SAFETY: test-only env var manipulation under serial_test
+        // Test-local environment override.
         set_env_var("SHARDLINE_PUBLIC_BASE_URL", "not-a-valid-url");
-        // SAFETY: test-only env var manipulation under serial_test
+        // Test-local environment override.
         set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
         let result = super::load_server_config_from_env();
         assert!(matches!(
             result,
             Err(super::ServerConfigError::InvalidPublicBaseUrl(_))
         ));
-        // SAFETY: test-only env var cleanup under serial_test
+        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
-        // SAFETY: test-only env var cleanup under serial_test
+        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_ROOT_DIR");
     }
 
     #[test]
-    #[serial_test::serial]
     fn load_server_config_zero_max_request_body_bytes() {
-        // SAFETY: test-only env var manipulation under serial_test
+        // Test-local environment override.
         set_env_var("SHARDLINE_MAX_REQUEST_BODY_BYTES", "0");
-        // SAFETY: test-only env var manipulation under serial_test
+        // Test-local environment override.
         set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
-        // SAFETY: test-only env var manipulation under serial_test
+        // Test-local environment override.
         set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
         let result = super::load_server_config_from_env();
         assert!(matches!(
             result,
             Err(super::ServerConfigError::ZeroMaxRequestBodyBytes)
         ));
-        // SAFETY: test-only env var cleanup under serial_test
+        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_MAX_REQUEST_BODY_BYTES");
-        // SAFETY: test-only env var cleanup under serial_test
+        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_ROOT_DIR");
-        // SAFETY: test-only env var cleanup under serial_test
+        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
     }
 
     #[test]
-    #[serial_test::serial]
     fn load_server_config_invalid_max_request_body_bytes() {
-        // SAFETY: test-only env var manipulation under serial_test
+        // Test-local environment override.
         set_env_var("SHARDLINE_MAX_REQUEST_BODY_BYTES", "not-a-number");
-        // SAFETY: test-only env var manipulation under serial_test
+        // Test-local environment override.
         set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
-        // SAFETY: test-only env var manipulation under serial_test
+        // Test-local environment override.
         set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
         let result = super::load_server_config_from_env();
         assert!(result.is_err());
-        // SAFETY: test-only env var cleanup under serial_test
+        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_MAX_REQUEST_BODY_BYTES");
-        // SAFETY: test-only env var cleanup under serial_test
+        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_ROOT_DIR");
-        // SAFETY: test-only env var cleanup under serial_test
+        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
     }
 
     #[test]
-    #[serial_test::serial]
     fn load_server_config_zero_chunk_size() {
-        // SAFETY: test-only env var manipulation under serial_test
+        // Test-local environment override.
         set_env_var("SHARDLINE_CHUNK_SIZE_BYTES", "0");
-        // SAFETY: test-only env var manipulation under serial_test
+        // Test-local environment override.
         set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
-        // SAFETY: test-only env var manipulation under serial_test
+        // Test-local environment override.
         set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
         let result = super::load_server_config_from_env();
         assert!(matches!(
             result,
             Err(super::ServerConfigError::ZeroChunkSize)
         ));
-        // SAFETY: test-only env var cleanup under serial_test
+        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_CHUNK_SIZE_BYTES");
-        // SAFETY: test-only env var cleanup under serial_test
+        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_ROOT_DIR");
-        // SAFETY: test-only env var cleanup under serial_test
+        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
     }
 
     #[test]
-    #[serial_test::serial]
     fn load_server_config_chunk_size_too_large() {
         // 2 GB exceeds MAX_CHUNK_SIZE (1 GB)
-        // SAFETY: test-only env var manipulation under serial_test
+        // Test-local environment override.
         set_env_var("SHARDLINE_CHUNK_SIZE_BYTES", "2147483648");
-        // SAFETY: test-only env var manipulation under serial_test
+        // Test-local environment override.
         set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
-        // SAFETY: test-only env var manipulation under serial_test
+        // Test-local environment override.
         set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
         let result = super::load_server_config_from_env();
         assert!(matches!(
             result,
             Err(super::ServerConfigError::ChunkSizeTooLarge)
         ));
-        // SAFETY: test-only env var cleanup under serial_test
+        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_CHUNK_SIZE_BYTES");
-        // SAFETY: test-only env var cleanup under serial_test
+        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_ROOT_DIR");
-        // SAFETY: test-only env var cleanup under serial_test
+        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
     }
 
     #[test]
-    #[serial_test::serial]
     fn load_server_config_invalid_chunk_size() {
-        // SAFETY: test-only env var manipulation under serial_test
+        // Test-local environment override.
         set_env_var("SHARDLINE_CHUNK_SIZE_BYTES", "not-a-size");
-        // SAFETY: test-only env var manipulation under serial_test
+        // Test-local environment override.
         set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
-        // SAFETY: test-only env var manipulation under serial_test
+        // Test-local environment override.
         set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
         let result = super::load_server_config_from_env();
         assert!(result.is_err());
-        // SAFETY: test-only env var cleanup under serial_test
+        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_CHUNK_SIZE_BYTES");
-        // SAFETY: test-only env var cleanup under serial_test
+        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_ROOT_DIR");
-        // SAFETY: test-only env var cleanup under serial_test
+        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
     }
 
     #[test]
-    #[serial_test::serial]
     fn load_server_config_invalid_server_role() {
-        // SAFETY: test-only env var manipulation under serial_test
+        // Test-local environment override.
         set_env_var("SHARDLINE_SERVER_ROLE", "invalid-role");
-        // SAFETY: test-only env var manipulation under serial_test
+        // Test-local environment override.
         set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
-        // SAFETY: test-only env var manipulation under serial_test
+        // Test-local environment override.
         set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
         let result = super::load_server_config_from_env();
         assert!(matches!(
             result,
             Err(super::ServerConfigError::InvalidServerRole)
         ));
-        // SAFETY: test-only env var cleanup under serial_test
+        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_SERVER_ROLE");
-        // SAFETY: test-only env var cleanup under serial_test
+        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_ROOT_DIR");
-        // SAFETY: test-only env var cleanup under serial_test
+        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
     }
 
     #[test]
-    #[serial_test::serial]
     fn load_server_config_bind_addr_parse_error() {
-        // SAFETY: test-only env var manipulation under serial_test
+        // Test-local environment override.
         set_env_var("SHARDLINE_BIND_ADDR", "not-a-valid-addr");
-        // SAFETY: test-only env var manipulation under serial_test
+        // Test-local environment override.
         set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
-        // SAFETY: test-only env var manipulation under serial_test
+        // Test-local environment override.
         set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
         let result = super::load_server_config_from_env();
         assert!(result.is_err());
-        // SAFETY: test-only env var cleanup under serial_test
+        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_BIND_ADDR");
-        // SAFETY: test-only env var cleanup under serial_test
+        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_ROOT_DIR");
-        // SAFETY: test-only env var cleanup under serial_test
+        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
     }
 
     #[test]
-    #[serial_test::serial]
     fn load_server_config_upload_max_in_flight_zero() {
-        // SAFETY: test-only env var manipulation under serial_test
+        // Test-local environment override.
         set_env_var("SHARDLINE_UPLOAD_MAX_IN_FLIGHT_CHUNKS", "0");
-        // SAFETY: test-only env var manipulation under serial_test
+        // Test-local environment override.
         set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
-        // SAFETY: test-only env var manipulation under serial_test
+        // Test-local environment override.
         set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
         let result = super::load_server_config_from_env();
         assert!(matches!(
             result,
             Err(super::ServerConfigError::ZeroUploadMaxInFlightChunks)
         ));
-        // SAFETY: test-only env var cleanup under serial_test
+        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_UPLOAD_MAX_IN_FLIGHT_CHUNKS");
-        // SAFETY: test-only env var cleanup under serial_test
+        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_ROOT_DIR");
-        // SAFETY: test-only env var cleanup under serial_test
+        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
     }
 
     #[test]
-    #[serial_test::serial]
     fn load_server_config_transfer_max_in_flight_zero() {
-        // SAFETY: test-only env var manipulation under serial_test
+        // Test-local environment override.
         set_env_var("SHARDLINE_TRANSFER_MAX_IN_FLIGHT_CHUNKS", "0");
-        // SAFETY: test-only env var manipulation under serial_test
+        // Test-local environment override.
         set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
-        // SAFETY: test-only env var manipulation under serial_test
+        // Test-local environment override.
         set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
         let result = super::load_server_config_from_env();
         assert!(matches!(
             result,
             Err(super::ServerConfigError::ZeroTransferMaxInFlightChunks)
         ));
-        // SAFETY: test-only env var cleanup under serial_test
+        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_TRANSFER_MAX_IN_FLIGHT_CHUNKS");
-        // SAFETY: test-only env var cleanup under serial_test
+        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_ROOT_DIR");
-        // SAFETY: test-only env var cleanup under serial_test
+        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
     }
 
     #[test]
-    #[serial_test::serial]
     fn load_server_config_missing_server_frontends() {
-        // SAFETY: test-only env var manipulation under serial_test
+        // Test-local environment override.
         set_env_var("SHARDLINE_SERVER_FRONTENDS", "");
-        // SAFETY: test-only env var manipulation under serial_test
+        // Test-local environment override.
         set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
-        // SAFETY: test-only env var manipulation under serial_test
+        // Test-local environment override.
         set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
         let result = super::load_server_config_from_env();
         assert!(matches!(
             result,
             Err(super::ServerConfigError::MissingServerFrontends)
         ));
-        // SAFETY: test-only env var cleanup under serial_test
+        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_SERVER_FRONTENDS");
-        // SAFETY: test-only env var cleanup under serial_test
+        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_ROOT_DIR");
-        // SAFETY: test-only env var cleanup under serial_test
+        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
     }
 
     #[test]
-    #[serial_test::serial]
     fn load_server_config_invalid_server_frontends() {
-        // SAFETY: test-only env var manipulation under serial_test
+        // Test-local environment override.
         set_env_var("SHARDLINE_SERVER_FRONTENDS", "invalid-frontend");
-        // SAFETY: test-only env var manipulation under serial_test
+        // Test-local environment override.
         set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
-        // SAFETY: test-only env var manipulation under serial_test
+        // Test-local environment override.
         set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
         let result = super::load_server_config_from_env();
         assert!(matches!(
             result,
             Err(super::ServerConfigError::InvalidServerFrontend)
         ));
-        // SAFETY: test-only env var cleanup under serial_test
+        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_SERVER_FRONTENDS");
-        // SAFETY: test-only env var cleanup under serial_test
+        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_ROOT_DIR");
-        // SAFETY: test-only env var cleanup under serial_test
+        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
     }
 
     #[test]
-    #[serial_test::serial]
     fn load_server_config_zero_reconstruction_cache_ttl() {
-        // SAFETY: test-only env var manipulation under serial_test
+        // Test-local environment override.
         set_env_var("SHARDLINE_RECONSTRUCTION_CACHE_TTL_SECONDS", "0");
-        // SAFETY: test-only env var manipulation under serial_test
+        // Test-local environment override.
         set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
-        // SAFETY: test-only env var manipulation under serial_test
+        // Test-local environment override.
         set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
         let result = super::load_server_config_from_env();
         assert!(matches!(
             result,
             Err(super::ServerConfigError::ZeroReconstructionCacheTtlSeconds)
         ));
-        // SAFETY: test-only env var cleanup under serial_test
+        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_RECONSTRUCTION_CACHE_TTL_SECONDS");
-        // SAFETY: test-only env var cleanup under serial_test
+        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_ROOT_DIR");
-        // SAFETY: test-only env var cleanup under serial_test
+        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
     }
 
     #[test]
-    #[serial_test::serial]
     fn load_server_config_zero_oci_upload_session_ttl() {
-        // SAFETY: test-only env var manipulation under serial_test
+        // Test-local environment override.
         set_env_var("SHARDLINE_OCI_UPLOAD_SESSION_TTL_SECONDS", "0");
-        // SAFETY: test-only env var manipulation under serial_test
+        // Test-local environment override.
         set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
-        // SAFETY: test-only env var manipulation under serial_test
+        // Test-local environment override.
         set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
         let result = super::load_server_config_from_env();
         assert!(matches!(
             result,
             Err(super::ServerConfigError::ZeroOciUploadSessionTtlSeconds)
         ));
-        // SAFETY: test-only env var cleanup under serial_test
+        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_OCI_UPLOAD_SESSION_TTL_SECONDS");
-        // SAFETY: test-only env var cleanup under serial_test
+        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_ROOT_DIR");
-        // SAFETY: test-only env var cleanup under serial_test
+        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
     }
 
     #[test]
-    #[serial_test::serial]
     fn load_server_config_zero_provider_token_ttl() {
         set_env_var("SHARDLINE_PROVIDER_TOKEN_TTL_SECONDS", "0");
         set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
@@ -2502,7 +2455,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     }
 
     #[test]
-    #[serial_test::serial]
     fn load_server_config_invalid_provider_token_ttl() {
         set_env_var("SHARDLINE_PROVIDER_TOKEN_TTL_SECONDS", "not-a-ttl");
         set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
@@ -2533,35 +2485,33 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     }
 
     #[test]
-    #[serial_test::serial]
     fn load_server_config_missing_reconstruction_cache_redis_url() {
-        // SAFETY: test-only env var manipulation under serial_test
+        // Test-local environment override.
         set_env_var("SHARDLINE_RECONSTRUCTION_CACHE_ADAPTER", "redis");
-        // SAFETY: test-only env var manipulation under serial_test
+        // Test-local environment override.
         set_env_var("SHARDLINE_RECONSTRUCTION_CACHE_REDIS_URL", "");
-        // SAFETY: test-only env var manipulation under serial_test
+        // Test-local environment override.
         set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
-        // SAFETY: test-only env var manipulation under serial_test
+        // Test-local environment override.
         set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
         let result = super::load_server_config_from_env();
         assert!(matches!(
             result,
             Err(super::ServerConfigError::MissingReconstructionCacheRedisUrl)
         ));
-        // SAFETY: test-only env var cleanup under serial_test
+        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_RECONSTRUCTION_CACHE_ADAPTER");
-        // SAFETY: test-only env var cleanup under serial_test
+        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_RECONSTRUCTION_CACHE_REDIS_URL");
-        // SAFETY: test-only env var cleanup under serial_test
+        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_ROOT_DIR");
-        // SAFETY: test-only env var cleanup under serial_test
+        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
     }
 
     // ── load_server_config_from_env: OCI zero-value edge cases ───────────
 
     #[test]
-    #[serial_test::serial]
     fn load_server_config_zero_oci_registry_token_ttl() {
         set_env_var("SHARDLINE_OCI_REGISTRY_TOKEN_TTL_SECONDS", "0");
         set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
@@ -2577,7 +2527,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     }
 
     #[test]
-    #[serial_test::serial]
     fn load_server_config_zero_oci_upload_max_active_sessions() {
         set_env_var("SHARDLINE_OCI_UPLOAD_MAX_ACTIVE_SESSIONS", "0");
         set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
@@ -2593,7 +2542,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     }
 
     #[test]
-    #[serial_test::serial]
     fn load_server_config_zero_oci_registry_token_max_in_flight() {
         set_env_var("SHARDLINE_OCI_REGISTRY_TOKEN_MAX_IN_FLIGHT_REQUESTS", "0");
         set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
@@ -2611,7 +2559,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     // ── load_server_config_from_env: auth provider branches ─────────────
 
     #[test]
-    #[serial_test::serial]
     fn load_server_config_oidc_requires_issuer() {
         set_env_var("SHARDLINE_AUTH_PROVIDER", "oidc");
         set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
@@ -2627,7 +2574,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     }
 
     #[test]
-    #[serial_test::serial]
     fn load_server_config_oidc_audience_from_env() {
         set_env_var("SHARDLINE_AUTH_PROVIDER", "oidc");
         set_env_var("SHARDLINE_AUTH_OIDC_ISSUER", "https://accounts.example.com");
@@ -2650,7 +2596,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     }
 
     #[test]
-    #[serial_test::serial]
     fn load_server_config_oidc_audience_unset_by_default() {
         set_env_var("SHARDLINE_AUTH_PROVIDER", "oidc");
         set_env_var("SHARDLINE_AUTH_OIDC_ISSUER", "https://accounts.example.com");
@@ -2672,7 +2617,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     }
 
     #[test]
-    #[serial_test::serial]
     fn load_server_config_oidc_audience_empty_behaves_as_unset() {
         // Regression (F-55): SHARDLINE_AUTH_OIDC_AUDIENCE="" must behave
         // exactly like the variable being unset. An empty string used to flow
@@ -2702,7 +2646,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     }
 
     #[test]
-    #[serial_test::serial]
     fn load_server_config_oidc_audience_whitespace_only_behaves_as_unset() {
         set_env_var("SHARDLINE_AUTH_PROVIDER", "oidc");
         set_env_var("SHARDLINE_AUTH_OIDC_ISSUER", "https://accounts.example.com");
@@ -2725,7 +2668,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     }
 
     #[test]
-    #[serial_test::serial]
     fn load_server_config_oidc_audience_whitespace_is_trimmed() {
         set_env_var("SHARDLINE_AUTH_PROVIDER", "oidc");
         set_env_var("SHARDLINE_AUTH_OIDC_ISSUER", "https://accounts.example.com");
@@ -2748,7 +2690,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     }
 
     #[test]
-    #[serial_test::serial]
     fn load_server_config_oidc_jwks_host_allowlist_from_env() {
         set_env_var("SHARDLINE_AUTH_PROVIDER", "oidc");
         set_env_var("SHARDLINE_AUTH_OIDC_ISSUER", "https://accounts.example.com");
@@ -2779,7 +2720,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     }
 
     #[test]
-    #[serial_test::serial]
     fn load_server_config_oidc_jwks_host_allowlist_unset_by_default() {
         set_env_var("SHARDLINE_AUTH_PROVIDER", "oidc");
         set_env_var("SHARDLINE_AUTH_OIDC_ISSUER", "https://accounts.example.com");
@@ -2801,7 +2741,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     }
 
     #[test]
-    #[serial_test::serial]
     fn load_server_config_oidc_jwks_host_allowlist_trims_and_skips_empty() {
         set_env_var("SHARDLINE_AUTH_PROVIDER", "oidc");
         set_env_var("SHARDLINE_AUTH_OIDC_ISSUER", "https://accounts.example.com");
@@ -2827,7 +2766,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     }
 
     #[test]
-    #[serial_test::serial]
     fn load_server_config_oidc_rejects_http_issuer() {
         // Regression (F-64): OIDC issuers must be https (RFC 8414 §2). A
         // plain-http issuer is a startup error rather than a silent downgrade.
@@ -2847,7 +2785,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     }
 
     #[test]
-    #[serial_test::serial]
     fn load_server_config_oidc_accepts_https_issuer() {
         set_env_var("SHARDLINE_AUTH_PROVIDER", "oidc");
         set_env_var("SHARDLINE_AUTH_OIDC_ISSUER", "https://accounts.example.com");
@@ -2868,7 +2805,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     }
 
     #[test]
-    #[serial_test::serial]
     fn load_server_config_jwks_requires_url() {
         set_env_var("SHARDLINE_AUTH_PROVIDER", "jwks");
         set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
@@ -2884,7 +2820,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     }
 
     #[test]
-    #[serial_test::serial]
     fn load_server_config_jwks_rejects_http_url() {
         // Regression (F-95): JWKS key transport must be https (RFC 8414 §2).
         // A plain-http non-loopback SHARDLINE_AUTH_JWKS_URL is a startup error
@@ -2908,7 +2843,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     }
 
     #[test]
-    #[serial_test::serial]
     fn load_server_config_jwks_accepts_https_url() {
         set_env_var("SHARDLINE_AUTH_PROVIDER", "jwks");
         set_env_var(
@@ -2932,7 +2866,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     }
 
     #[test]
-    #[serial_test::serial]
     fn load_server_config_jwks_accepts_loopback_http_url() {
         // Loopback http is tolerated so local development and test tooling
         // (which cannot serve TLS) keep working.
@@ -2952,7 +2885,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     }
 
     #[test]
-    #[serial_test::serial]
     fn load_server_config_lower_max_request_body_bytes_parse_error() {
         set_env_var("SHARDLINE_MAX_REQUEST_BODY_BYTES", "0");
         set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
@@ -2968,7 +2900,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     }
 
     #[test]
-    #[serial_test::serial]
     fn load_server_config_zero_shard_metadata_limits() {
         set_env_var("SHARDLINE_MAX_SHARD_FILES", "0");
         set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
@@ -2984,7 +2915,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     }
 
     #[test]
-    #[serial_test::serial]
     fn load_server_config_zero_shard_xorbs() {
         set_env_var("SHARDLINE_MAX_SHARD_XORBS", "0");
         set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
@@ -3000,7 +2930,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     }
 
     #[test]
-    #[serial_test::serial]
     fn load_server_config_zero_shard_reconstruction_terms() {
         set_env_var("SHARDLINE_MAX_SHARD_RECONSTRUCTION_TERMS", "0");
         set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
@@ -3016,7 +2945,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     }
 
     #[test]
-    #[serial_test::serial]
     fn load_server_config_zero_shard_xorb_chunks() {
         set_env_var("SHARDLINE_MAX_SHARD_XORB_CHUNKS", "0");
         set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
@@ -3032,7 +2960,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     }
 
     #[test]
-    #[serial_test::serial]
     fn load_server_config_zero_reconstruction_cache_memory_max_entries() {
         set_env_var("SHARDLINE_RECONSTRUCTION_CACHE_MEMORY_MAX_ENTRIES", "0");
         set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
@@ -3048,7 +2975,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     }
 
     #[test]
-    #[serial_test::serial]
     fn load_server_config_hub_requires_auth() {
         set_env_var("SHARDLINE_SERVER_FRONTENDS", "hub");
         set_env_var("SHARDLINE_AUTH_PROVIDER", "local");
@@ -3067,7 +2993,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     }
 
     #[test]
-    #[serial_test::serial]
     fn load_server_config_invalid_auth_provider() {
         set_env_var("SHARDLINE_AUTH_PROVIDER", "invalid");
         set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
@@ -3085,9 +3010,8 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     // ── load_server_config_from_env: empty index postgres url ─────────────
 
     #[test]
-    #[serial_test::serial]
     fn load_server_config_empty_index_postgres_url() {
-        // SAFETY: test-only env var manipulation under serial_test
+        // Test-local environment override.
         set_env_var("SHARDLINE_INDEX_POSTGRES_URL", "");
         set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
         set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
@@ -3096,7 +3020,7 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
             matches!(result, Err(super::ServerConfigError::EmptyIndexPostgresUrl)),
             "expected EmptyIndexPostgresUrl, got {result:?}"
         );
-        // SAFETY: test-only env var cleanup under serial_test
+        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_INDEX_POSTGRES_URL");
         remove_env_var("SHARDLINE_ROOT_DIR");
         remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
@@ -3105,9 +3029,8 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     // ── load_server_config_from_env: whitespace reconstruction cache redis url ─
 
     #[test]
-    #[serial_test::serial]
     fn load_server_config_whitespace_reconstruction_cache_redis_url() {
-        // SAFETY: test-only env var manipulation under serial_test
+        // Test-local environment override.
         set_env_var("SHARDLINE_RECONSTRUCTION_CACHE_ADAPTER", "redis");
         set_env_var("SHARDLINE_RECONSTRUCTION_CACHE_REDIS_URL", "   ");
         set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
@@ -3120,7 +3043,7 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
             ),
             "expected MissingReconstructionCacheRedisUrl, got {result:?}"
         );
-        // SAFETY: test-only env var cleanup under serial_test
+        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_RECONSTRUCTION_CACHE_ADAPTER");
         remove_env_var("SHARDLINE_RECONSTRUCTION_CACHE_REDIS_URL");
         remove_env_var("SHARDLINE_ROOT_DIR");
@@ -3130,9 +3053,8 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     // ── load_server_config_from_env: empty provider token issuer ──────────
 
     #[test]
-    #[serial_test::serial]
     fn load_server_config_empty_provider_token_issuer() {
-        // SAFETY: test-only env var and tempfile under serial_test
+        // Test-local environment and temporary-file setup.
         use std::io::Write;
 
         // Provider config file and api key file must exist for the
@@ -3168,7 +3090,7 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
             ),
             "expected EmptyProviderTokenIssuer, got {result:?}"
         );
-        // SAFETY: test-only env var cleanup under serial_test
+        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_PROVIDER_TOKEN_ISSUER");
         remove_env_var("SHARDLINE_PROVIDER_CONFIG_FILE");
         remove_env_var("SHARDLINE_PROVIDER_API_KEY_FILE");
@@ -3181,7 +3103,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     // ── load_server_config_from_env: Ed25519 auth provider ───────────────
 
     #[test]
-    #[serial_test::serial]
     fn env_ed25519_private_key_from_direct_env() {
         remove_env_var("SHARDLINE_ED25519_PRIVATE_KEY_FILE");
         remove_env_var("SHARDLINE_ED25519_PUBLIC_KEY");
@@ -3203,7 +3124,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     }
 
     #[test]
-    #[serial_test::serial]
     fn env_ed25519_private_key_from_file_env() {
         remove_env_var("SHARDLINE_ED25519_PRIVATE_KEY");
         remove_env_var("SHARDLINE_ED25519_PUBLIC_KEY");
@@ -3230,7 +3150,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     }
 
     #[test]
-    #[serial_test::serial]
     fn env_ed25519_public_key_from_direct_env() {
         remove_env_var("SHARDLINE_ED25519_PRIVATE_KEY");
         remove_env_var("SHARDLINE_ED25519_PRIVATE_KEY_FILE");
@@ -3253,7 +3172,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     }
 
     #[test]
-    #[serial_test::serial]
     fn env_ed25519_missing_both_keys_errors() {
         remove_env_var("SHARDLINE_ED25519_PRIVATE_KEY");
         remove_env_var("SHARDLINE_ED25519_PRIVATE_KEY_FILE");
@@ -3276,7 +3194,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     }
 
     #[test]
-    #[serial_test::serial]
     fn env_ed25519_private_and_public_key_enable_rotation_overlap() {
         remove_env_var("SHARDLINE_ED25519_PRIVATE_KEY_FILE");
         remove_env_var("SHARDLINE_ED25519_PUBLIC_KEY_FILE");
@@ -3296,9 +3213,8 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     // ── load_server_config_from_env: end-to-end integration ───────────────
 
     #[test]
-    #[serial_test::serial]
     fn load_server_config_integration_end_to_end() {
-        // SAFETY: test-only env var manipulation under serial_test
+        // Test-local environment override.
         set_env_var("SHARDLINE_BIND_ADDR", "127.0.0.1:9090");
         set_env_var("SHARDLINE_PUBLIC_BASE_URL", "https://example.com:9090");
         set_env_var("SHARDLINE_SERVER_ROLE", "all");
@@ -3366,7 +3282,7 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
         );
         assert!(config.token_signing_key().is_some());
 
-        // SAFETY: test-only env var cleanup under serial_test
+        // Test-local environment cleanup.
         remove_env_var("SHARDLINE_BIND_ADDR");
         remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
         remove_env_var("SHARDLINE_SERVER_ROLE");
@@ -3394,7 +3310,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
     }
 
     #[test]
-    #[serial_test::serial]
     fn toml_ed25519_section_maps_to_env_vars() {
         use std::io::Write;
 
@@ -3437,10 +3352,10 @@ private_key_path = "{priv_path}"
 
         // The TOML values should be set as env vars for downstream loading
         assert_eq!(
-            std::env::var("SHARDLINE_ED25519_PRIVATE_KEY_FILE").as_deref(),
+            super::super::environment::var("SHARDLINE_ED25519_PRIVATE_KEY_FILE").as_deref(),
             Ok(priv_path.as_str())
         );
-        assert!(std::env::var("SHARDLINE_ED25519_PUBLIC_KEY_FILE").is_err());
+        assert!(super::super::environment::var("SHARDLINE_ED25519_PUBLIC_KEY_FILE").is_err());
 
         // Clean up
         remove_env_var("SHARDLINE_ED25519_PRIVATE_KEY_FILE");

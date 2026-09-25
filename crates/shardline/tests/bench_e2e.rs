@@ -38,6 +38,7 @@ async fn exercise_bench() -> Result<(), Box<dyn Error>> {
     let shardline_bin = shardline_binary()?;
 
     let output = Command::new(shardline_bin)
+        .env_remove("SHARDLINE_INDEX_POSTGRES_URL")
         .args([
             "bench",
             "--storage-dir",
@@ -162,6 +163,7 @@ async fn exercise_configured_bench() -> Result<(), Box<dyn Error>> {
     let shardline_bin = shardline_binary()?;
 
     let output = Command::new(shardline_bin)
+        .env_remove("SHARDLINE_INDEX_POSTGRES_URL")
         .args([
             "bench",
             "--deployment-target",
@@ -216,6 +218,7 @@ async fn exercise_cached_bench() -> Result<(), Box<dyn Error>> {
     let shardline_bin = shardline_binary()?;
 
     let output = Command::new(shardline_bin)
+        .env_remove("SHARDLINE_INDEX_POSTGRES_URL")
         .args([
             "bench",
             "--storage-dir",
@@ -271,6 +274,7 @@ async fn exercise_focused_bench() -> Result<(), Box<dyn Error>> {
     let shardline_bin = shardline_binary()?;
 
     let output = Command::new(shardline_bin)
+        .env_remove("SHARDLINE_INDEX_POSTGRES_URL")
         .args([
             "bench",
             "--storage-dir",

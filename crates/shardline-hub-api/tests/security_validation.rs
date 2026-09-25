@@ -266,6 +266,7 @@ fn validate_webhook_accepts_dangerous_urls_at_store_level() {
         );",
     )
     .unwrap();
+    shardline_index::hub::ensure_hub_tables(&root).unwrap();
 
     let store = LocalIndexStore::open(root);
     let boxed = BoxedHubStore::from_store(store);
@@ -294,10 +295,10 @@ fn validate_webhook_accepts_dangerous_urls_at_store_level() {
 /// **[FIXED]**: The hub API router now applies `DefaultBodyLimit::max(64MB)`.
 #[test]
 fn validate_hub_router_has_body_limit() {
-    let lib_source = include_str!("../src/lib.rs");
+    let router_source = include_str!("../src/router.rs");
 
     assert!(
-        lib_source.contains("DefaultBodyLimit::max"),
+        router_source.contains("DefaultBodyLimit::max"),
         "Hub API router now applies DefaultBodyLimit::max"
     );
 }
@@ -310,10 +311,10 @@ fn validate_hub_router_has_body_limit() {
 /// oversized requests before they reach the handler.
 #[test]
 fn validate_commit_handler_body_bounded_by_router() {
-    let lib_source = include_str!("../src/lib.rs");
+    let router_source = include_str!("../src/router.rs");
 
     assert!(
-        lib_source.contains("DefaultBodyLimit::max"),
+        router_source.contains("DefaultBodyLimit::max"),
         "Hub API router enforces body size limit at the layer level"
     );
 }
@@ -567,6 +568,7 @@ async fn validate_commit_body_bounded_by_router() {
     )
     .unwrap();
     drop(conn);
+    shardline_index::hub::ensure_hub_tables(&root).unwrap();
 
     let store = LocalIndexStore::open(root.clone());
     let boxed = BoxedHubStore::from_store(store);

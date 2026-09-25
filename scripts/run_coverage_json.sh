@@ -50,28 +50,28 @@ coverage_database_url="postgres://shardline:shardline-dev-password@127.0.0.1:${c
 cargo run -p shardline -- db migrate up --database-url "${coverage_database_url}"
 
 # Reuse the workspace coverage profile and profraw directory for the
-# database-gated suites. Running these filters sequentially keeps migration
-# and shared-schema tests from interfering with the normal parallel suite.
+# database-gated suites. Each selected test still runs in its own nextest
+# process, so process-global test hooks cannot interfere with one another.
 coverage_target_dir="$(pwd)/target/llvm-cov-target"
 eval "$(CARGO_TARGET_DIR="${coverage_target_dir}" cargo llvm-cov show-env --sh)"
 export CARGO_TARGET_DIR="${coverage_target_dir}"
 
 DATABASE_URL="${coverage_database_url}" \
-    cargo test -p shardline-index --lib -- hub_postgres
+    cargo llvm-cov nextest -p shardline-index --lib -E 'test(hub_postgres)'
 DATABASE_URL="${coverage_database_url}" \
-    cargo test -p shardline-index --lib -- pg_upload_intent
+    cargo llvm-cov nextest -p shardline-index --lib -E 'test(pg_upload_intent)'
 DATABASE_URL="${coverage_database_url}" \
-    cargo test -p shardline-index --lib -- pg_provider_
+    cargo llvm-cov nextest -p shardline-index --lib -E 'test(pg_provider_)'
 DATABASE_URL="${coverage_database_url}" \
-    cargo test -p shardline-index --lib -- pg_manifest_tombstone
+    cargo llvm-cov nextest -p shardline-index --lib -E 'test(pg_manifest_tombstone)'
 DATABASE_URL="${coverage_database_url}" \
-    cargo test -p shardline-index --lib -- pg_oci_tag
+    cargo llvm-cov nextest -p shardline-index --lib -E 'test(pg_oci_tag)'
 DATABASE_URL="${coverage_database_url}" \
-    cargo test -p shardline-index --lib -- pg_s3_object
+    cargo llvm-cov nextest -p shardline-index --lib -E 'test(pg_s3_object)'
 DATABASE_URL="${coverage_database_url}" \
-    cargo test -p shardline-index --lib -- resumable_sessions::tests
+    cargo llvm-cov nextest -p shardline-index --lib -E 'test(resumable_sessions)'
 DATABASE_URL="${coverage_database_url}" \
-    cargo test -p shardline-server --lib -- postgres
+    cargo llvm-cov nextest -p shardline-server --lib -E 'test(postgres)'
 
 cargo llvm-cov report \
     --json \

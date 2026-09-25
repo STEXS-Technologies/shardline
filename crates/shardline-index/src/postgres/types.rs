@@ -1,5 +1,6 @@
 use serde_json::Error as JsonError;
 use shardline_protocol::{HashParseError, RangeError};
+use shardline_reliability::ReliabilityError;
 use shardline_storage::ObjectKeyError;
 use sqlx::{Error as SqlxError, PgPool};
 use thiserror::Error;
@@ -108,6 +109,9 @@ pub enum PostgresMetadataStoreError {
     /// JSON serialization or deserialization failed.
     #[error("postgres metadata json operation failed")]
     Json(#[from] JsonError),
+    /// Reliability evidence could not be constructed or verified.
+    #[error("reliability evidence operation failed")]
+    Reliability(#[from] ReliabilityError),
     /// A stored hash value was invalid.
     #[error("stored hash value was invalid")]
     HashParse(#[from] HashParseError),
@@ -129,6 +133,9 @@ pub enum PostgresMetadataStoreError {
     /// A stored integer exceeded the supported range.
     #[error("stored integer exceeded the supported range: {0}")]
     IntegerOutOfRange(String),
+    /// A reliability sequence was already bound to different evidence.
+    #[error("reliability event conflict: {0}")]
+    ReliabilityEventConflict(String),
     /// The requested record locator does not exist.
     #[error("postgres record locator was not found")]
     RecordNotFound,

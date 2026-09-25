@@ -10,7 +10,7 @@ use futures_util::stream::{self, Stream, StreamExt};
 use md5::{Digest, Md5};
 use tokio::io::{AsyncRead, AsyncReadExt};
 
-use crate::{ServerError, overflow::checked_add};
+use crate::{ServerError, object_store::ServerObjectStore, overflow::checked_add};
 
 type BodyChunkResult = Result<Bytes, ServerError>;
 type BoxedBodyStream = Pin<Box<dyn Stream<Item = BodyChunkResult> + Send>>;
@@ -60,6 +60,33 @@ pub(crate) struct RequestBodyReader {
     max_bytes: Option<u64>,
     expected_total_bytes: Option<usize>,
     read_bytes: u64,
+}
+
+pub(crate) enum StagedRequestBody {
+    Memory {
+        bytes: Bytes,
+        length: u64,
+        hash: shardline_protocol::ShardlineHash,
+    },
+    File {
+        file: tempfile::NamedTempFile,
+        length: u64,
+        hash: shardline_protocol::ShardlineHash,
+    },
+}
+
+impl StagedRequestBody {
+    pub(crate) const fn length(&self) -> u64 {
+        match self {
+            Self::Memory { length, .. } | Self::File { length, .. } => *length,
+        }
+    }
+
+    pub(crate) const fn hash(&self) -> shardline_protocol::ShardlineHash {
+        match self {
+            Self::Memory { hash, .. } | Self::File { hash, .. } => *hash,
+        }
+    }
 }
 
 impl RequestBodyReader {
@@ -133,7 +160,7 @@ impl RequestBodyReader {
     /// The S3 multipart lane uses the multi-reader variant
     /// ([`Self::from_reader_chain`]); this single-reader convenience is
     /// exercised by the unit tests below.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn from_reader(
         reader: impl AsyncRead + Send + Unpin + 'static,
         chunk_size: usize,
@@ -236,6 +263,26 @@ pub(crate) async fn stage_body_to_tempfile(
     ))
 }
 
+/// Stages a bounded protocol object in memory for remote object storage and
+/// on the filesystem for local storage. Remote parsing avoids pod-local IO;
+/// the request reader's configured ceiling remains the memory bound.
+pub(crate) async fn stage_body_for_object_store(
+    reader: &mut RequestBodyReader,
+    object_store: &ServerObjectStore,
+) -> Result<StagedRequestBody, ServerError> {
+    if matches!(object_store, ServerObjectStore::S3(_)) {
+        let bytes = read_body_to_bytes(reader).await?;
+        let hash = shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(&bytes).as_bytes());
+        return Ok(StagedRequestBody::Memory {
+            length: u64::try_from(bytes.len())?,
+            bytes: Bytes::from(bytes),
+            hash,
+        });
+    }
+    let (file, length, hash) = stage_body_to_tempfile(reader).await?;
+    Ok(StagedRequestBody::File { file, length, hash })
+}
+
 #[cfg(test)]
 mod tests {
     use axum::body::Bytes;
@@ -243,7 +290,11 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use tokio::io::AsyncReadExt;
 
-    use super::{ChunkBuffer, RequestBodyReader, read_body_to_bytes, stage_body_to_tempfile};
+    use super::{
+        ChunkBuffer, RequestBodyReader, StagedRequestBody, read_body_to_bytes,
+        stage_body_for_object_store, stage_body_to_tempfile,
+    };
+    use crate::{ObjectStorageAdapter, ServerConfig, object_store::object_store_from_config};
 
     // ------------------------------------------------------------------
     // ChunkBuffer
@@ -279,6 +330,47 @@ mod tests {
         let _first = reader.next_bytes().await.unwrap();
         let second = reader.next_bytes().await.unwrap();
         assert!(second.is_none());
+    }
+
+    #[tokio::test]
+    async fn remote_object_storage_stages_request_body_without_a_filesystem_file() {
+        let root = tempfile::tempdir().unwrap();
+        let s3_config = shardline_storage::S3ObjectStoreConfig::new(
+            "bucket".to_owned(),
+            "us-east-1".to_owned(),
+        );
+        let config = ServerConfig::new(
+            std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 8080),
+            "http://127.0.0.1:8080".to_owned(),
+            root.path().to_path_buf(),
+            std::num::NonZeroUsize::new(1024).unwrap(),
+        )
+        .with_object_storage(ObjectStorageAdapter::S3, Some(s3_config));
+        let object_store = object_store_from_config(&config).unwrap();
+        let mut reader = RequestBodyReader::from_bytes(Bytes::from_static(b"remote"));
+
+        let staged = stage_body_for_object_store(&mut reader, &object_store)
+            .await
+            .unwrap();
+        assert!(matches!(staged, StagedRequestBody::Memory { .. }));
+    }
+
+    #[tokio::test]
+    async fn local_object_storage_retains_filesystem_staging_fallback() {
+        let root = tempfile::tempdir().unwrap();
+        let config = ServerConfig::new(
+            std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 8080),
+            "http://127.0.0.1:8080".to_owned(),
+            root.path().to_path_buf(),
+            std::num::NonZeroUsize::new(1024).unwrap(),
+        );
+        let object_store = object_store_from_config(&config).unwrap();
+        let mut reader = RequestBodyReader::from_bytes(Bytes::from_static(b"local"));
+
+        let staged = stage_body_for_object_store(&mut reader, &object_store)
+            .await
+            .unwrap();
+        assert!(matches!(staged, StagedRequestBody::File { .. }));
     }
 
     #[tokio::test]

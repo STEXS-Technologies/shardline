@@ -1,0 +1,182 @@
+use penelope_domain::ContentDigest as PenelopeDigest;
+use serde::{Deserialize, Serialize};
+
+use crate::digest::{
+    DigestEncoding, canonical_snapshot_digest, canonical_transition_process_digest, process_digest,
+    state_digest,
+};
+use crate::durable::{DurableSnapshotV1Encoding, durable_operation_v1};
+use crate::{OperationIdentity, ReliabilityError};
+
+/// Snapshot types that participate in the unified lifecycle evidence
+/// protocol. Domain modules provide only identity and transition rules; the
+/// StateChronicle/Penelope envelope and chain verifier live here once.
+pub trait SnapshotEvidence: Clone + Eq + Serialize + DurableSnapshotV1Encoding {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when validation, integrity verification, or canonicalization fails.
+    fn evidence_operation(&self) -> Result<OperationIdentity, ReliabilityError>;
+
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when validation, integrity verification, or canonicalization fails.
+    fn validate_evidence_operation(
+        &self,
+        operation: &OperationIdentity,
+    ) -> Result<(), ReliabilityError> {
+        if &self.evidence_operation()? == operation {
+            Ok(())
+        } else {
+            Err(ReliabilityError::OperationMismatch)
+        }
+    }
+
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when validation, integrity verification, or canonicalization fails.
+    fn validate_evidence_transition(&self, after: &Self) -> Result<(), ReliabilityError>;
+}
+
+/// Canonical evidence for a transition between two complete durable
+/// snapshots. Provider, quarantine, and OCI records are aliases of this one
+/// implementation, preserving their existing JSON field layout.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SnapshotEvidenceEvent<S: SnapshotEvidence> {
+    pub operation: OperationIdentity,
+    pub sequence: u64,
+    pub before: S,
+    pub after: S,
+    /// Encoding used for the integrity digests. Missing on legacy JSON
+    /// rows, which deserialize as [`DigestEncoding::LegacyJson`].
+    #[serde(default)]
+    pub digest_encoding: DigestEncoding,
+    pub state_digest: statechronicle_core::digest::ContentDigest,
+    pub process_digest: PenelopeDigest,
+}
+
+impl<S: SnapshotEvidence> SnapshotEvidenceEvent<S> {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when validation, integrity verification, or canonicalization fails.
+    pub fn new(sequence: u64, before: S, after: S) -> Result<Self, ReliabilityError> {
+        before.validate_evidence_transition(&after)?;
+        let operation = after.evidence_operation()?;
+        let digest_encoding = DigestEncoding::CanonicalBcsV2;
+        let state_digest = canonical_snapshot_digest(&after.durable_snapshot_v1())?;
+        let process_digest = canonical_transition_process_digest(
+            &durable_operation_v1(&operation),
+            sequence,
+            &before.durable_snapshot_v1(),
+            &after.durable_snapshot_v1(),
+        )?;
+        Ok(Self {
+            operation,
+            sequence,
+            before,
+            after,
+            digest_encoding,
+            state_digest,
+            process_digest,
+        })
+    }
+
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when validation, integrity verification, or canonicalization fails.
+    pub fn verify_integrity(&self) -> Result<(), ReliabilityError> {
+        self.before.validate_evidence_transition(&self.after)?;
+        self.after.validate_evidence_operation(&self.operation)?;
+        let expected_state_digest = match self.digest_encoding {
+            DigestEncoding::LegacyJson => state_digest(&self.after, self.digest_encoding)?,
+            DigestEncoding::CanonicalBcsV1 => state_digest(&self.after, self.digest_encoding)?,
+            DigestEncoding::CanonicalBcsV2 => {
+                canonical_snapshot_digest(&self.after.durable_snapshot_v1())?
+            }
+        };
+        if self.state_digest != expected_state_digest {
+            return Err(ReliabilityError::StateDigestMismatch);
+        }
+        let expected_process_digest = match self.digest_encoding {
+            DigestEncoding::LegacyJson => process_digest(
+                &self.operation,
+                self.sequence,
+                &self.before,
+                &self.after,
+                self.digest_encoding,
+            )?,
+            DigestEncoding::CanonicalBcsV1 => canonical_transition_process_digest(
+                &self.operation,
+                self.sequence,
+                &self.before,
+                &self.after,
+            )?,
+            DigestEncoding::CanonicalBcsV2 => canonical_transition_process_digest(
+                &durable_operation_v1(&self.operation),
+                self.sequence,
+                &self.before.durable_snapshot_v1(),
+                &self.after.durable_snapshot_v1(),
+            )?,
+        };
+        if self.process_digest != expected_process_digest {
+            return Err(ReliabilityError::ProcessDigestMismatch);
+        }
+        Ok(())
+    }
+}
+
+pub fn verify_snapshot_chain<S: SnapshotEvidence>(
+    events: &[SnapshotEvidenceEvent<S>],
+) -> Result<(), ReliabilityError> {
+    let Some(first) = events.first() else {
+        return Ok(());
+    };
+    if first.sequence != 0 || first.before != first.after {
+        return Err(ReliabilityError::ChainDiscontinuity);
+    }
+    let mut previous_after = None;
+    let mut previous_sequence = None;
+    for event in events {
+        event.verify_integrity()?;
+        if event.operation != first.operation {
+            return Err(ReliabilityError::OperationMismatch);
+        }
+        if let Some(sequence) = previous_sequence {
+            if event.sequence <= sequence {
+                return Err(ReliabilityError::SequenceRegression);
+            }
+            if sequence.checked_add(1) != Some(event.sequence) {
+                return Err(ReliabilityError::ChainDiscontinuity);
+            }
+        }
+        if previous_after.is_some_and(|after| event.before != after) {
+            return Err(ReliabilityError::ChainDiscontinuity);
+        }
+        previous_sequence = Some(event.sequence);
+        previous_after = Some(event.after.clone());
+    }
+    Ok(())
+}
+
+/// Verifies one latest materialized-state boundary without loading its full
+/// historical chain. Normal paginated listings use this bounded check;
+/// explicit fsck/recovery paths use [`verify_snapshot_chain`] as well.
+///
+/// # Errors
+///
+/// Returns an error when validation, integrity verification, or canonicalization fails.
+pub fn verify_snapshot_event<S: SnapshotEvidence>(
+    event: &SnapshotEvidenceEvent<S>,
+    expected: &S,
+) -> Result<(), ReliabilityError> {
+    event.verify_integrity()?;
+    if event.after == *expected {
+        Ok(())
+    } else {
+        Err(ReliabilityError::StateMismatch)
+    }
+}

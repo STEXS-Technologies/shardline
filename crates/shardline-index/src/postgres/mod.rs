@@ -8,10 +8,12 @@ mod s3_objects;
 mod tree_store;
 mod types;
 
+pub(super) use index_store::{insert_reliability_event, next_reliability_sequence};
 pub use provider_mutation::{
     PostgresProviderMutation, PostgresProviderMutationOutcome, PostgresResourceFence,
     ProviderRepositoryKey,
 };
+pub(crate) use resumable_sessions::refresh_resumable_state_digest;
 pub(crate) use types::RecordKind;
 pub use types::{
     PostgresIndexStore, PostgresMetadataStoreError, PostgresRecordLocator, PostgresRecordStore,
@@ -19,4 +21,9 @@ pub use types::{
 pub(super) use types::{i64_to_u64, u64_to_i64};
 
 #[cfg(test)]
+mod test_support;
+#[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+pub(super) use test_support::connect_isolated_postgres;
