@@ -4,6 +4,48 @@ All notable changes to Shardline are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.11.1] - 2026-09-25
+
+This patch release hardens durable state and recovery without changing the
+successful protocol surface. Existing deployments must apply database changes
+explicitly; server startup reports stale schemas instead of upgrading them.
+
+### Added
+
+- Added the unified `shardline-reliability` layer for durable lifecycle evidence
+  across uploads, resumable sessions, provider state, quarantine, retention,
+  webhooks, Hub refs, OCI tags, and S3 objects.
+- Added StateChronicle-backed canonical state digests and real Merkle commitments
+  for persisted reliability events, with bounded backfill, verification, fsck,
+  and explicit operator repair paths.
+- Added explicit Postgres schema preflight and local SQLite compatibility checks,
+  plus `db migrate local-up`, bounded `db migrate backfill`, `verify`, and
+  `repair` workflows.
+- Added reliability fuzz targets, concurrency tests, fault drills, chaos tests,
+  and migration-upgrade coverage.
+
+### Improved
+
+- Improved atomicity and recovery for provider mutations, uploads, resumable
+  sessions, OCI publication, S3 object updates, and Hub reference changes.
+- Improved concurrency behavior with resource fences, stale-worker rejection,
+  compare-and-swap protection, idempotent replay, and bounded database work.
+- Improved corruption detection: missing, tampered, mismatched, reordered, or
+  incomplete evidence now fails closed before inconsistent state is exposed.
+- Improved local and Postgres migration operations with version and checksum
+  validation and explicit operator-visible status.
+
+### Fixed
+
+- Fixed partial provider deletion and rename outcomes where delivery claims,
+  retention holds, records, or provider state could diverge after failure.
+- Fixed resumable completion and upload recovery races, including lost commit
+  responses, stale completions, invalid transitions, and duplicate retries.
+- Fixed concurrent S3 overwrites, OCI tag retarget/deletion races, and missing
+  lifecycle baselines that could otherwise leave unverifiable metadata.
+- Fixed Postgres integration-test identity collisions so reliability tests remain
+  isolated and safe to run in parallel.
+
 ## [1.11.0] - 2026-09-18
 
 This release makes bounded, streaming dataset analytics production-ready while
