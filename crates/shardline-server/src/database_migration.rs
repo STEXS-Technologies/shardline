@@ -526,6 +526,11 @@ pub async fn apply_database_migrations(pool: &PgPool) -> Result<(), DatabaseMigr
 /// Operators must run the explicit `shardline db migrate up` command;
 /// startup never creates the history table, applies SQL, or acquires the
 /// migration lock.
+///
+/// # Errors
+///
+/// Returns [`DatabaseMigrationError`] when the history table is missing, the
+/// applied history is invalid, or migrations remain pending.
 pub async fn check_database_schema_compatibility(
     pool: &PgPool,
 ) -> Result<(), DatabaseMigrationError> {
