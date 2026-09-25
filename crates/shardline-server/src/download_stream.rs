@@ -97,7 +97,7 @@ pub(crate) fn validated_xorb_byte_range_stream(
     })))
 }
 
-/// Returns whether a serialized xorb object is stored under `hash_hex`.
+/// Returns the serialized xorb length when an object is stored under `hash_hex`.
 ///
 /// Used by the single-chunk routing decision in [`file_record_byte_stream`]: a
 /// xorb-backed single-chunk record stores its `hash` as the xorb hash, an
@@ -105,11 +105,14 @@ pub(crate) fn validated_xorb_byte_range_stream(
 /// checking storage. A metadata miss (or an error) means the record is treated
 /// as individual-chunk-backed; the subsequent read then surfaces any real
 /// storage failure.
-fn xorb_object_exists(object_store: &ServerObjectStore, hash_hex: &str) -> bool {
+fn xorb_object_length(object_store: &ServerObjectStore, hash_hex: &str) -> Option<u64> {
     let Ok(object_key) = crate::xet_adapter::xorb_object_key(hash_hex) else {
-        return false;
+        return None;
     };
-    matches!(object_store.metadata(&object_key), Ok(Some(metadata)) if metadata.length() != 0)
+    match object_store.metadata(&object_key) {
+        Ok(Some(metadata)) if metadata.length() != 0 => Some(metadata.length()),
+        Ok(_) | Err(_) => None,
+    }
 }
 
 /// Reads a xorb-backed file record by fetching the single xorb object, parsing
@@ -120,17 +123,21 @@ fn xorb_object_exists(object_store: &ServerObjectStore, hash_hex: &str) -> bool 
 /// once and extracts decompressed chunk data without per-chunk storage round-trips.
 async fn read_xorb_backed_chunks(
     object_store: ServerObjectStore,
-    record: &FileRecord,
+    record: FileRecord,
     range: Option<ByteRange>,
+    known_xorb_length: Option<u64>,
 ) -> Result<ServerByteStream, ServerError> {
     // 1. Read the entire xorb from storage.
     let chunk_zero = record.chunks.first().ok_or(ServerError::Overflow)?;
     let xorb_hash_hex = &chunk_zero.hash;
     let xorb_key = crate::xet_adapter::xorb_object_key(xorb_hash_hex)?;
-    let metadata = object_store
-        .metadata(&xorb_key)?
-        .ok_or(ServerError::NotFound)?;
-    let xorb_length = metadata.length();
+    let xorb_length = match known_xorb_length {
+        Some(length) => length,
+        None => object_store
+            .metadata(&xorb_key)?
+            .ok_or(ServerError::NotFound)?
+            .length(),
+    };
     let mut xorb_data = object_store.materialize_object_to_tempfile(&xorb_key, xorb_length)?;
 
     // 2. Parse and validate the xorb (verifies xorb hash against expected hash).
@@ -155,17 +162,32 @@ async fn read_xorb_backed_chunks(
     )?;
 
     let (sender, receiver) = mpsc::channel::<Result<Bytes, ServerError>>(2);
-    let chunks = record.chunks.clone();
+    let chunks = record.chunks;
     tokio::task::spawn_blocking(move || {
         let mut cursor = xorb_data.as_file_mut();
-        let result = crate::xet_adapter::try_for_each_serialized_xorb_chunk(
+        let mut next_chunk_index = 0_usize;
+        let result = crate::xet_adapter::try_for_each_serialized_xorb_chunk_trusted(
             &mut cursor,
             &validated,
             |decoded| {
                 let chunk_index = decoded.descriptor().unpacked_start();
-                let Some(chunk) = chunks.iter().find(|chunk| chunk.offset == chunk_index) else {
+                while chunks
+                    .get(next_chunk_index)
+                    .is_some_and(|chunk| chunk.offset < chunk_index)
+                {
+                    next_chunk_index = next_chunk_index
+                        .checked_add(1)
+                        .ok_or(ServerError::Overflow)?;
+                }
+                let Some(chunk) = chunks.get(next_chunk_index) else {
                     return Err(ServerError::Overflow);
                 };
+                if chunk.offset != chunk_index {
+                    return Err(ServerError::Overflow);
+                }
+                next_chunk_index = next_chunk_index
+                    .checked_add(1)
+                    .ok_or(ServerError::Overflow)?;
                 let chunk_end = chunk
                     .offset
                     .checked_add(chunk.length)
@@ -249,14 +271,24 @@ pub(crate) async fn file_record_byte_stream(
     // which lets us skip the probe for legacy records that predate packing.
     let first_hash = record.chunks.first().map(|c| &c.hash);
     let all_same_hash = first_hash.is_some_and(|h| record.chunks.iter().all(|c| c.hash == *h));
+    let known_xorb_length = if record.chunks.len() == 1
+        && all_same_hash
+        && record
+            .chunks
+            .first()
+            .is_some_and(|chunk| chunk.packed_end > 0)
+    {
+        record
+            .chunks
+            .first()
+            .and_then(|chunk| xorb_object_length(&object_store, &chunk.hash))
+    } else {
+        None
+    };
     let is_xorb_backed = if record.chunks.len() > 1 {
         all_same_hash
     } else {
-        all_same_hash
-            && record
-                .chunks
-                .first()
-                .is_some_and(|c| c.packed_end > 0 && xorb_object_exists(&object_store, &c.hash))
+        known_xorb_length.is_some()
     };
 
     if is_xorb_backed {
@@ -268,7 +300,7 @@ pub(crate) async fn file_record_byte_stream(
             xorb_hash = %xorb_hash,
             "reading xorb-backed file"
         );
-        return read_xorb_backed_chunks(object_store, &record, range).await;
+        return read_xorb_backed_chunks(object_store, record, range, known_xorb_length).await;
     }
 
     debug!(
@@ -293,7 +325,7 @@ pub(crate) async fn file_record_byte_stream(
         return Err(ServerError::RangeNotSatisfiable);
     }
 
-    let mut terms = Vec::new();
+    let mut terms = Vec::with_capacity(record.chunks.len());
     for chunk in record.chunks {
         let chunk_end = chunk
             .offset
@@ -325,7 +357,7 @@ pub(crate) async fn file_record_byte_stream(
             record.storage_repr,
             shardline_index::StorageRepresentation::XorbCdcV1
         );
-        let hash_hex = chunk.hash.clone();
+        let hash_hex = chunk.hash;
         let chunk_range = ByteRange::new(relative_start, relative_end)
             .map_err(|_error| ServerError::RangeNotSatisfiable)?;
         terms.push((

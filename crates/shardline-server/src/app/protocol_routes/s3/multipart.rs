@@ -41,10 +41,10 @@ use shardline_index::{
     ResumableSessionProtocol, ResumableSessionState, S3ObjectEntry, S3PublishCondition,
 };
 use shardline_s3_adapter::{
-    CompleteMultipartUploadResult, InitiateMultipartUploadResult, S3Error, S3SessionError,
-    acquire_session_part_lock_for_root, create_session, delete_session_locked, lock_session_parts,
-    lock_upload_sessions, new_upload_id, parse_complete_multipart_parts, part_file_path,
-    read_session_locked, store_part_locked, validate_part_quota_locked,
+    CompleteMultipartUploadResult, InitiateMultipartUploadResult, PartQuotaLimits, S3Error,
+    S3SessionError, acquire_session_part_lock_for_root, create_session, delete_session_locked,
+    lock_session_parts, lock_upload_sessions, new_upload_id, parse_complete_multipart_parts,
+    part_file_path, read_session_locked, store_part_locked, validate_part_quota_for_session_locked,
 };
 use shardline_storage::ObjectKey;
 use tokio::io::AsyncWriteExt;
@@ -277,15 +277,17 @@ pub(super) async fn s3_upload_part(
     // accounting; the quotas are re-checked against the streamed size after
     // the write. A cap rejection is surfaced as a clean 429.
     if let Some(length) = expected_len {
-        validate_part_quota_locked(
+        validate_part_quota_for_session_locked(
             root,
-            upload_id,
+            &session,
             part_number,
             length,
             ttl,
-            session_quota,
-            total_quota,
-            part_file_cap,
+            PartQuotaLimits {
+                session_max_bytes: session_quota,
+                total_max_bytes: total_quota,
+                max_active_part_files: part_file_cap,
+            },
         )
         .await
         .map_err(store_error_to_s3)?;

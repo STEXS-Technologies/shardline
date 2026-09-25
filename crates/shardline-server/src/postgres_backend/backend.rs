@@ -4,9 +4,7 @@ use shardline_index::{
     PostgresIndexStore, PostgresRecordStore, RepoKey, RevisionRecord, TreeEntry, TreeKey, TreeStore,
 };
 use shardline_protocol::unix_now_seconds_lossy;
-use shardline_reliability::{
-    upload_lifecycle_event, upload_lifecycle_identity, verify_lifecycle_chain_ends_at,
-};
+use shardline_reliability::verify_lifecycle_chain_ends_at;
 
 use super::connect_postgres_metadata_pool;
 use crate::{
@@ -227,9 +225,9 @@ impl PostgresBackend {
                         UploadIntentState::MetadataCommitted,
                         UploadIntentState::Visible,
                     ] {
-                        let transitioned = transition_intent_with_reliability_event(
+                        let transitioned = transition_intent_for_recovery(
                             &self.index_store,
-                            intent,
+                            intent.intent_id(),
                             recovery_from,
                             recovery_state,
                         )
@@ -277,9 +275,9 @@ impl PostgresBackend {
                 let Some(target_state) = target_state else {
                     continue;
                 };
-                match transition_intent_with_reliability_event(
+                match transition_intent_for_recovery(
                     &self.index_store,
-                    intent,
+                    intent.intent_id(),
                     intent.state(),
                     target_state,
                 )
@@ -492,37 +490,16 @@ impl PostgresBackend {
     }
 }
 
-async fn transition_intent_with_reliability_event(
+async fn transition_intent_for_recovery(
     store: &shardline_index::PostgresIndexStore,
-    intent: &shardline_index::UploadIntent,
+    intent_id: &str,
     before: shardline_index::UploadIntentState,
     after: shardline_index::UploadIntentState,
 ) -> Result<bool, ServerError> {
     if !before.can_transition_to(after) {
         return Ok(false);
     }
-    let events =
-        shardline_index::UploadIntentStore::reliability_events(store, intent.intent_id()).await?;
-    let (tenant, repository) = upload_lifecycle_identity(&events);
-    let event = upload_lifecycle_event(
-        tenant,
-        repository,
-        intent.intent_id(),
-        intent.object_key(),
-        intent.object_hash(),
-        before,
-        after,
-    )
-    .map_err(|error| ServerError::Io(std::io::Error::other(error.to_string())))?;
-    Ok(
-        shardline_index::UploadIntentStore::transition_intent_with_event(
-            store,
-            intent.intent_id(),
-            after,
-            &event,
-        )
-        .await?,
-    )
+    Ok(shardline_index::UploadIntentStore::transition_intent(store, intent_id, after).await?)
 }
 
 #[cfg(test)]

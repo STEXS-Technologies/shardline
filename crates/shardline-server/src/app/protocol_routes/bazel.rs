@@ -17,7 +17,7 @@ use crate::{
     upload_ingest::{RequestBodyReader, stage_body_to_tempfile},
 };
 
-use super::{AppState, authorize, direct_object_response};
+use super::{AppState, authorize, direct_object_response, direct_object_response_from_snapshot};
 
 /// Runs the shared authorize chain and mints a typed [`AuthorizedRepository`]
 /// capability for Bazel requests.
@@ -279,15 +279,16 @@ pub(crate) async fn bazel_get(
 ) -> Result<Response, ServerError> {
     // Try AC first, then CAS.
     if let Ok(ac_key) = bazel_cache_object_key(BazelCacheKind::Ac, &hash, repo.capability())
-        && state.backend.object_length(&ac_key).await.is_ok()
+        && let Ok(snapshot) = state.backend.object_read_snapshot(&ac_key).await
     {
-        return direct_object_response(
+        return direct_object_response_from_snapshot(
             &state,
             &headers,
             &ac_key,
             "application/octet-stream",
             None,
             "bazel",
+            snapshot,
         )
         .await;
     }

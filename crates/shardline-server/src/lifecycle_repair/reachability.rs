@@ -16,7 +16,7 @@ use crate::{
         visit_protocol_object_member_chunks,
     },
     xet_adapter::{
-        XorbVisitError, try_for_each_serialized_xorb_chunk, validate_serialized_xorb,
+        XorbVisitError, try_for_each_serialized_xorb_chunk_trusted, validate_serialized_xorb,
         xorb_hash_from_object_key_if_present,
     },
 };
@@ -168,7 +168,7 @@ fn collect_xorb_member_chunk_references(
     let expected_hash = parse_xet_hash_hex(xorb_hash_hex)?;
     let mut reader = xorb_file.as_file_mut();
     let validated = validate_serialized_xorb(&mut reader, expected_hash)?;
-    match try_for_each_serialized_xorb_chunk(&mut reader, &validated, |decoded| {
+    match try_for_each_serialized_xorb_chunk_trusted(&mut reader, &validated, |decoded| {
         let member_hash_hex = xet_hash_hex_string(chunk_hash(decoded.data()));
         let member_key = chunk_object_key(&member_hash_hex)?;
         reachability

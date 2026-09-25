@@ -15,7 +15,7 @@ use super::cdc::CdcChunker;
 use super::chunk_store::{
     SequencedStoredChunkOutcome, SequencedStoredChunkTaskOutcome, put_if_absent_pooled_chunk_buffer,
 };
-use super::xorb_packer::{pack_chunks_into_xorb, store_xorb};
+use super::xorb_packer::{pack_owned_chunks_into_xorb, store_xorb};
 
 #[cfg(test)]
 use crate::config::default_upload_max_in_flight_chunks;
@@ -55,6 +55,7 @@ pub(crate) struct FileUploadIngestor {
     /// store path. S3 deployments leave this unset and read already durable
     /// chunks back in bounded batches during finalization.
     pub(super) raw_chunk_spool: Option<tempfile::NamedTempFile>,
+    pub(super) raw_spool_bytes: u64,
     pub(super) raw_chunk_offsets: Vec<(u64, u64)>,
 }
 
@@ -93,6 +94,7 @@ impl FileUploadIngestor {
             sha256: compute_sha256.then(Sha256::new),
             cdc_chunker: Box::new(CdcChunker::new(chunk_size)),
             raw_chunk_spool: None,
+            raw_spool_bytes: 0,
             raw_chunk_offsets: Vec::new(),
         }
     }
@@ -385,15 +387,17 @@ impl FileUploadIngestor {
         if self.raw_chunk_spool.is_none() {
             self.raw_chunk_spool = Some(tempfile::NamedTempFile::new()?);
         }
+        let offset = self.raw_spool_bytes;
+        let chunk_length = u64::try_from(chunk.len())?;
+        let next_offset = checked_add(offset, chunk_length)?;
         let spool = self
             .raw_chunk_spool
             .as_mut()
             .ok_or(ServerError::Overflow)?
             .as_file_mut();
-        let offset = spool.seek(SeekFrom::End(0))?;
         spool.write_all(chunk)?;
-        self.raw_chunk_offsets
-            .push((offset, u64::try_from(chunk.len())?));
+        self.raw_spool_bytes = next_offset;
+        self.raw_chunk_offsets.push((offset, chunk_length));
         Ok(())
     }
 
@@ -511,8 +515,15 @@ async fn pack_and_store_xorb_from_durable_chunks(
         if !batch.is_empty()
             && (batch.len() >= MAX_XORB_CHUNKS || next_raw_bytes > MAX_SERVER_XORB_RAW_BYTES)
         {
-            store_xorb_batch(object_store, file_id, &batch, records, batch_record_start).await;
-            batch.clear();
+            let batch_to_store = take_xorb_batch(&mut batch);
+            store_xorb_batch(
+                object_store,
+                file_id,
+                batch_to_store,
+                records,
+                batch_record_start,
+            )
+            .await;
             batch_raw_bytes = 0;
             batch_record_start = record_index;
         }
@@ -523,7 +534,15 @@ async fn pack_and_store_xorb_from_durable_chunks(
     }
 
     if !batch.is_empty() {
-        store_xorb_batch(object_store, file_id, &batch, records, batch_record_start).await;
+        let batch_to_store = take_xorb_batch(&mut batch);
+        store_xorb_batch(
+            object_store,
+            file_id,
+            batch_to_store,
+            records,
+            batch_record_start,
+        )
+        .await;
     }
     Ok(())
 }
@@ -566,19 +585,33 @@ async fn pack_and_store_xorb_spool(
     let mut batch_record_start = 0usize;
 
     let file = spool.as_file_mut();
+    let mut cursor = 0_u64;
+    if !offsets.is_empty() {
+        file.seek(SeekFrom::Start(0))?;
+    }
     for (record_index, &(offset, length)) in offsets.iter().enumerate() {
-        file.seek(SeekFrom::Start(offset))?;
+        if offset != cursor {
+            file.seek(SeekFrom::Start(offset))?;
+        }
         let length = usize::try_from(length)?;
         let mut raw_chunk = vec![0_u8; length];
         file.read_exact(&mut raw_chunk)?;
+        cursor = checked_add(offset, u64::try_from(length)?)?;
         let next_raw_bytes = batch_raw_bytes
             .checked_add(raw_chunk.len())
             .ok_or(ServerError::Overflow)?;
         if !batch.is_empty()
             && (batch.len() >= MAX_XORB_CHUNKS || next_raw_bytes > MAX_SERVER_XORB_RAW_BYTES)
         {
-            store_xorb_batch(object_store, file_id, &batch, records, batch_record_start).await;
-            batch.clear();
+            let batch_to_store = take_xorb_batch(&mut batch);
+            store_xorb_batch(
+                object_store,
+                file_id,
+                batch_to_store,
+                records,
+                batch_record_start,
+            )
+            .await;
             batch_raw_bytes = 0;
             batch_record_start = record_index;
         }
@@ -591,7 +624,15 @@ async fn pack_and_store_xorb_spool(
     }
 
     if !batch.is_empty() {
-        store_xorb_batch(object_store, file_id, &batch, records, batch_record_start).await;
+        let batch_to_store = take_xorb_batch(&mut batch);
+        store_xorb_batch(
+            object_store,
+            file_id,
+            batch_to_store,
+            records,
+            batch_record_start,
+        )
+        .await;
     }
     Ok(())
 }
@@ -599,17 +640,18 @@ async fn pack_and_store_xorb_spool(
 async fn store_xorb_batch(
     object_store: &ServerObjectStore,
     file_id: &str,
-    chunks: &[(Vec<u8>, u64)],
+    chunks: Vec<(Vec<u8>, u64)>,
     records: &mut [FileChunkRecord],
     record_start: usize,
 ) {
-    let packed = match pack_chunks_into_xorb(chunks) {
+    let num_chunks = chunks.len();
+    let packed = match pack_owned_chunks_into_xorb(chunks) {
         Ok(packed) => packed,
         Err(error) => {
             warn!(
                 file_id,
                 record_start,
-                num_chunks = chunks.len(),
+                num_chunks,
                 error = %error,
                 "failed to pack xorb batch, continuing with individual chunks"
             );
@@ -660,6 +702,11 @@ async fn store_xorb_batch(
         packed_len = packed.serialized.len(),
         "stored bounded xorb batch for file upload"
     );
+}
+
+fn take_xorb_batch(batch: &mut Vec<(Vec<u8>, u64)>) -> Vec<(Vec<u8>, u64)> {
+    let capacity = batch.capacity();
+    std::mem::replace(batch, Vec::with_capacity(capacity))
 }
 
 #[cfg(test)]

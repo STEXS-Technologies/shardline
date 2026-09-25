@@ -10,7 +10,8 @@ pub(crate) use bazel::{
     bazel_put_ac, bazel_put_cas,
 };
 pub(crate) use helpers::{
-    direct_object_response, ensure_upload_growth_within_limit, parse_query_map, parse_query_values,
+    direct_object_response, direct_object_response_from_snapshot,
+    ensure_upload_growth_within_limit, parse_query_map, parse_query_values,
     parse_upload_content_range,
 };
 pub(crate) use lfs::{
