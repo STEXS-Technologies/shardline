@@ -67,9 +67,19 @@ jobs:
         env:
           USE_BAZEL_VERSION: "8.7.0"
         run: |
-          cargo nextest run --manifest-path e2e/Cargo.toml \
-            --test native_protocol_frontends_e2e \
-            -E 'test(native_bazel)' --run-ignored all --no-tests=pass
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            if cargo nextest run --manifest-path e2e/Cargo.toml \
+              --test native_protocol_frontends_e2e \
+              -E 'test(native_bazel)' --run-ignored all --no-tests=pass; then
+              exit 0
+            fi
+            if [ "${attempt}" -lt 3 ]; then
+              echo "Native Bazel E2E attempt ${attempt} failed; retrying for transient client dependency failures."
+              sleep 10
+            fi
+          done
+          exit 1
 
       - name: Run adjacent client compatibility
         run: |
