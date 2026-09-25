@@ -784,7 +784,7 @@ async fn boot_chaos_stack(drill: &str) -> Option<ChaosStack> {
 
 async fn migrate_chaos_postgres(url: &str) {
     let mut last_err = None;
-    for _ in 0..5 {
+    for attempt in 0..60 {
         match sqlx::PgPool::connect(url).await {
             Ok(pool) => {
                 shardline_server::apply_database_migrations(&pool)
@@ -801,11 +801,12 @@ async fn migrate_chaos_postgres(url: &str) {
             }
             Err(e) => {
                 last_err = Some(e);
-                tokio::time::sleep(Duration::from_millis(500)).await;
+                let delay = 250_u64.saturating_add((attempt as u64).saturating_mul(250));
+                tokio::time::sleep(Duration::from_millis(delay.min(2_000))).await;
             }
         }
     }
-    panic!("migrate_chaos_postgres: cannot connect to {url} after 5 retries: {last_err:?}");
+    panic!("migrate_chaos_postgres: cannot connect to {url} after 60 retries: {last_err:?}");
 }
 
 // ---------------------------------------------------------------------------
