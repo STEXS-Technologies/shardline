@@ -136,11 +136,14 @@ shardline db migrate up --steps 2
 shardline db migrate up --database-url postgres://user:password@db.example.com:5432/shardline
 shardline db migrate down --steps 1
 shardline db migrate status
+shardline db migrate local-up --root /var/lib/shardline
 ```
 
 `up` applies pending migrations, `down` reverts applied migrations (optionally limited
 by `--steps`), and `status` reports the applied and pending sets. `--database-url`
-overrides the configured Postgres metadata URL.
+overrides the configured Postgres metadata URL. `local-up` explicitly applies local
+SQLite migrations to the selected deployment root; server startup does not upgrade
+stale schemas automatically.
 
 Verify object-store and metadata integrity:
 
