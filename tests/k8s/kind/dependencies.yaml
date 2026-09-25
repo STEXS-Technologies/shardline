@@ -206,11 +206,6 @@ spec:
               value: kind-smoke
             - name: MINIO_ROOT_PASSWORD
               value: kind-smoke-minio-secret
-          readinessProbe:
-            tcpSocket:
-              port: api
-            initialDelaySeconds: 2
-            periodSeconds: 2
           resources:
             requests:
               cpu: 100m
