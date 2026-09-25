@@ -48,6 +48,25 @@ impl RawXorbData {
         }
     }
 
+    /// Builds raw xorb data by taking ownership of the chunk payloads.
+    ///
+    /// Upload paths commonly own the raw chunk buffers until packing completes.
+    /// Consuming those chunks avoids cloning every payload before compression.
+    pub fn from_owned_data(data: Vec<Cow<'static, [u8]>>, file_boundaries: Vec<usize>) -> Self {
+        let mut chunk_boundaries = Vec::with_capacity(data.len());
+        let mut unpacked_bytes = 0_u32;
+        for chunk in &data {
+            unpacked_bytes += chunk.len() as u32;
+            chunk_boundaries.push(unpacked_bytes);
+        }
+        let xorb_info = XorbInfo { chunk_boundaries };
+        Self {
+            data,
+            xorb_info,
+            file_boundaries,
+        }
+    }
+
     pub fn hash(&self) -> MerkleHash {
         let chunks_and_sizes: Vec<(MerkleHash, u64)> = self
             .data
@@ -55,6 +74,18 @@ impl RawXorbData {
             .map(|d| (compute_data_hash(d), d.len() as u64))
             .collect();
         xorb_hash(&chunks_and_sizes)
+    }
+
+    /// Computes the xorb hash and the per-chunk hashes in one pass.
+    pub fn hash_with_chunk_hashes(&self) -> (MerkleHash, Vec<MerkleHash>) {
+        let mut chunks_and_sizes = Vec::with_capacity(self.data.len());
+        let mut chunk_hashes = Vec::with_capacity(self.data.len());
+        for data in &self.data {
+            let chunk_hash = compute_data_hash(data);
+            chunks_and_sizes.push((chunk_hash, data.len() as u64));
+            chunk_hashes.push(chunk_hash);
+        }
+        (xorb_hash(&chunks_and_sizes), chunk_hashes)
     }
 
     pub fn num_bytes(&self) -> usize {
@@ -160,6 +191,29 @@ mod tests {
     }
 
     #[test]
+    fn raw_xorb_data_hash_with_chunk_hashes_matches_individual_hashes() {
+        let chunks = vec![
+            Chunk {
+                hash: MerkleHash::default(),
+                data: b"first".to_vec().into(),
+            },
+            Chunk {
+                hash: MerkleHash::default(),
+                data: b"second".to_vec().into(),
+            },
+        ];
+        let raw = RawXorbData::from_chunks(&chunks, vec![]);
+
+        let (xorb_hash, chunk_hashes) = raw.hash_with_chunk_hashes();
+
+        assert_eq!(xorb_hash, raw.hash());
+        assert_eq!(
+            chunk_hashes,
+            vec![compute_data_hash(b"first"), compute_data_hash(b"second")]
+        );
+    }
+
+    #[test]
     fn raw_xorb_data_num_bytes_multi_chunk() {
         let chunks = vec![
             Chunk {
@@ -193,6 +247,31 @@ mod tests {
         ];
         let raw = RawXorbData::from_chunks(&chunks, vec![0, 1]);
         assert_eq!(raw.file_boundaries, vec![0, 1]);
+    }
+
+    #[test]
+    fn raw_xorb_data_from_owned_data_preserves_payloads_and_hash() {
+        let owned_data = vec![
+            Cow::Owned(b"first".to_vec()),
+            Cow::Owned(b"second".to_vec()),
+        ];
+        let raw = RawXorbData::from_owned_data(owned_data, vec![0, 5]);
+        let reference_chunks = vec![
+            Chunk {
+                hash: MerkleHash::default(),
+                data: Cow::Borrowed(b"first"),
+            },
+            Chunk {
+                hash: MerkleHash::default(),
+                data: Cow::Borrowed(b"second"),
+            },
+        ];
+        let reference = RawXorbData::from_chunks(&reference_chunks, vec![0, 5]);
+
+        assert_eq!(raw.data, reference.data);
+        assert_eq!(raw.xorb_info.chunk_boundaries, vec![5, 11]);
+        assert_eq!(raw.file_boundaries, reference.file_boundaries);
+        assert_eq!(raw.hash(), reference.hash());
     }
 
     #[test]
