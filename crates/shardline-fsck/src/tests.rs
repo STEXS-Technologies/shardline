@@ -349,10 +349,29 @@ fn fsck_issue_kind_as_str_all_variants() {
             FsckIssueKind::InvalidProviderRepositoryStateTimestamp,
             "invalid_provider_repository_state_timestamp",
         ),
+        (
+            FsckIssueKind::InvalidReliabilityEvidence,
+            "invalid_reliability_evidence",
+        ),
     ];
     for &(kind, expected) in cases {
         assert_eq!(kind.as_str(), expected, "variant {kind:?}");
     }
+}
+
+#[test]
+fn fsck_reliability_evidence_issue_is_operator_actionable() {
+    let detail = FsckIssueDetail::ReliabilityEvidenceInvalid {
+        reason: "state digest mismatch".to_owned(),
+    };
+    assert_eq!(
+        detail.to_string(),
+        "reliability evidence is invalid: state digest mismatch"
+    );
+    assert_eq!(
+        FsckIssueKind::InvalidReliabilityEvidence.as_str(),
+        "invalid_reliability_evidence"
+    );
 }
 
 // ── ProviderRepositoryStateTimestampField::as_str ────────────────────

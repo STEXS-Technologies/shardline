@@ -71,12 +71,14 @@ mod oci_objects;
 mod oci_tags;
 mod postgres;
 mod provider;
+mod provider_evidence;
 mod reconstruction;
 mod record;
 mod record_key;
 mod record_kind;
 mod resource_fence;
 mod resumable_session;
+mod resumable_snapshot;
 mod s3_objects;
 #[cfg(test)]
 mod test_invariant_error;
@@ -119,6 +121,7 @@ pub use resumable_session::{
     ResumableSessionGcInventory, ResumableSessionPart, ResumableSessionProtocol,
     ResumableSessionState,
 };
+pub use resumable_snapshot::resumable_state_digest;
 pub use s3_objects::{S3ObjectEntry, S3ObjectIndexStore, S3PublishCondition};
 pub use store::{
     AsyncIndexStore, DedupeStore, IndexStore, IndexStoreFuture, LifecycleStore,

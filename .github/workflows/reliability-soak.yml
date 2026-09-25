@@ -14,10 +14,6 @@ on:
         description: Deterministic chaos campaign duration
         required: false
         default: "7200"
-  pull_request:
-    paths:
-      - ".github/workflows/release.yml"
-      - ".github/workflows/reliability-soak.yml"
   schedule:
     - cron: "31 1 * * 0"
 
@@ -121,8 +117,8 @@ jobs:
           mkdir -p reliability-resource-results
           for iteration in $(seq 1 100); do
             echo "resource-pressure iteration=${iteration}"
-            cargo test -p shardline-storage --test resource_pressure \
-              -- --test-threads=1 --nocapture
+            cargo nextest run -p shardline-storage --test resource_pressure \
+              --no-tests=pass
           done 2>&1 | tee reliability-resource-results/resource-pressure.log
 
       - name: Record resource campaign metadata
@@ -194,11 +190,7 @@ jobs:
       - name: Start shared Postgres, MinIO, and Redis
         run: |
           docker compose -f docker-compose.chaos.yml -p shardline-chaos up -d
-          for container in chaos-postgres chaos-minio chaos-redis; do
-            until [ "$(docker inspect -f '{{.State.Health.Status}}' "$container" 2>/dev/null)" = "healthy" ]; do
-              sleep 1
-            done
-          done
+          bash scripts/shardline/wait_for_chaos_stack.sh
           target/debug/shardline db migrate up \
             --database-url postgres://shardline:shardline-dev-password@127.0.0.1:15432/shardline
 
@@ -208,9 +200,9 @@ jobs:
         run: |
           set -o pipefail
           mkdir -p reliability-upgrade-results
-          cargo test -p shardline-server --test deployment_chaos \
-            drill_deploy_f_real_mixed_version_rollout_and_rollback \
-            -- --exact --nocapture 2>&1 \
+          cargo nextest run -p shardline-server --test deployment_chaos \
+            -E 'test(drill_deploy_f_real_mixed_version_rollout_and_rollback)' \
+            --no-capture 2>&1 \
             | tee reliability-upgrade-results/mixed-version-upgrade.log
 
       - name: Record mixed-version campaign metadata
@@ -259,8 +251,9 @@ jobs:
         run: |
           set -o pipefail
           mkdir -p reliability-postgres-results
-          cargo test -p shardline-server --test postgres_failover \
-            -- --exact --nocapture 2>&1 \
+          cargo nextest run -p shardline-server --test postgres_failover \
+            -E 'test(running_server_recovers_after_real_primary_promotion)' \
+            --no-tests=pass 2>&1 \
             | tee reliability-postgres-results/postgres-promotion.log
 
       - name: Record PostgreSQL promotion metadata
@@ -304,9 +297,9 @@ jobs:
           mkdir -p reliability-security-results
           for iteration in $(seq 1 100); do
             echo "security-boundary iteration=${iteration}"
-            cargo test -q -p shardline-server --test authorization_matrix \
-              expired_revocation_probes_hide_existence_across_all_frontends \
-              -- --exact
+            cargo nextest run -p shardline-server --test authorization_matrix \
+              -E 'test(expired_revocation_probes_hide_existence_across_all_frontends)' \
+              --no-tests=pass
           done 2>&1 | tee reliability-security-results/security-boundary.log
 
       - name: Record security campaign metadata

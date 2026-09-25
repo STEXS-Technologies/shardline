@@ -244,8 +244,8 @@ tests are documented in [Contributing](CONTRIBUTING.md).
 Useful focused commands include:
 
 ```bash
-cargo test -p shardline-hub-api
-cargo test -p shardline-server --test fault_drills
+cargo nextest run -p shardline-hub-api
+cargo nextest run -p shardline-server --test fault_drills
 cargo make shardline-bench-duckdb
 ```
 

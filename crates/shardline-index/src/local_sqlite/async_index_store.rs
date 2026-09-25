@@ -69,6 +69,23 @@ impl AsyncIndexStore for LocalIndexStore {
         })
     }
 
+    fn delete_reconstruction_if_matches<'operation>(
+        &'operation self,
+        file_id: &'operation FileId,
+        expected: &'operation FileReconstruction,
+    ) -> IndexStoreFuture<'operation, bool, Self::Error> {
+        let store = self.clone();
+        let file_id = *file_id;
+        let expected = expected.clone();
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || {
+                ReconstructionStore::delete_reconstruction_if_matches(&store, &file_id, &expected)
+            })
+            .await
+            .map_err(|e| LocalIndexStoreError::Io(std::io::Error::other(e)))?
+        })
+    }
+
     fn contains_object<'operation>(
         &'operation self,
         object_id: &'operation StoredObjectId,
@@ -169,6 +186,21 @@ impl AsyncIndexStore for LocalIndexStore {
         Box::pin(async move {
             tokio::task::spawn_blocking(move || {
                 DedupeStore::delete_dedupe_shard_mapping(&store, &chunk_hash)
+            })
+            .await
+            .map_err(|e| LocalIndexStoreError::Io(std::io::Error::other(e)))?
+        })
+    }
+
+    fn delete_dedupe_shard_mapping_if_matches<'operation>(
+        &'operation self,
+        expected: &'operation DedupeShardMapping,
+    ) -> IndexStoreFuture<'operation, bool, Self::Error> {
+        let store = self.clone();
+        let expected = expected.clone();
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || {
+                DedupeStore::delete_dedupe_shard_mapping_if_matches(&store, &expected)
             })
             .await
             .map_err(|e| LocalIndexStoreError::Io(std::io::Error::other(e)))?

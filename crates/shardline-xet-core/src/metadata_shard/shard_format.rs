@@ -375,27 +375,6 @@ mod tests {
         }
     }
 
-    #[cfg(test)]
-    #[allow(dead_code)]
-    fn serialize_to_buf(info: &MDBShardInfo) -> Vec<u8> {
-        let mut buf = Vec::new();
-        info.header.serialize(&mut buf).unwrap();
-        for f in &info.file_infos {
-            f.serialize(&mut buf).unwrap();
-        }
-        FileDataSequenceHeader::bookend()
-            .serialize(&mut buf)
-            .unwrap();
-        for x in &info.xorb_infos {
-            x.serialize(&mut buf).unwrap();
-        }
-        XorbChunkSequenceHeader::bookend()
-            .serialize(&mut buf)
-            .unwrap();
-        info.footer.serialize(&mut buf).unwrap();
-        buf
-    }
-
     // ======= MDBShardFileHeader =======
 
     #[test]

@@ -155,7 +155,7 @@ async fn matching_delivery_ids_in_different_repositories_are_not_replay_collisio
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn failed_webhook_application_can_retry_same_delivery() {
     let result = exercise_failed_webhook_application_can_retry_same_delivery().await;
-    let error = result.as_ref().err().map(ToString::to_string);
+    let error = result.as_ref().err().map(|error| format!("{error:?}"));
     assert!(
         result.is_ok(),
         "failed webhook retry flow failed: {error:?}"

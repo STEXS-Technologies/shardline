@@ -41,8 +41,9 @@ use crate::{
 };
 
 use super::{
-    S3ObjectContext, S3Repository, acquire_object_upload_lock, aws_chunked, format_http_date,
-    has_sub_resource, multipart, parse_s3_query, require_s3_object_context, s3_xml_content_type,
+    S3ObjectContext, S3Repository, acquire_object_upload_lock_for_root, aws_chunked,
+    format_http_date, has_sub_resource, multipart, parse_s3_query, require_s3_object_context,
+    s3_xml_content_type,
 };
 
 /// The `x-amz-copy-source` request header (not in axum's header constants).
@@ -509,7 +510,8 @@ async fn s3_upload_object_body(
 ) -> Result<(crate::model::UploadFileResponse, String), S3Error> {
     // Serialize concurrent overwrites of the same key; the swap below (index
     // upsert + stale-direct drop) is atomic with respect to other overwrites.
-    let object_lock = acquire_object_upload_lock(context.object_key.as_str());
+    let object_lock =
+        acquire_object_upload_lock_for_root(state.config.root_dir(), context.object_key.as_str());
     let _object_guard = object_lock.lock().await;
     let mut resource_guard = if state.backend.supports_fenced_s3_publication() {
         Some(
@@ -898,7 +900,8 @@ pub(crate) async fn s3_delete_object(
     // just-committed PUT points at — a phantom delete where the PUT returns 200
     // but the object is gone. Holding the same lock the writers use makes the
     // check-and-delete atomic with respect to any swap.
-    let object_lock = acquire_object_upload_lock(context.object_key.as_str());
+    let object_lock =
+        acquire_object_upload_lock_for_root(state.config.root_dir(), context.object_key.as_str());
     let _object_guard = object_lock.lock().await;
     let mut resource_guard = state
         .backend

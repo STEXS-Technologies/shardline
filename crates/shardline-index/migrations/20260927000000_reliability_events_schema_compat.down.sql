@@ -1,0 +1,1 @@
+-- Reverting this Postgres-only migration has no local SQLite schema action.

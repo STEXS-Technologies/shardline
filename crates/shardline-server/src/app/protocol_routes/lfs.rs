@@ -34,6 +34,7 @@ use futures_util::StreamExt;
 use shardline_storage::{DeleteOutcome, ObjectIntegrity, ObjectKey};
 use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _, AsyncWriteExt as _};
 
+use super::lfs_patch_evidence;
 use super::{MAX_LFS_BATCH_OBJECTS, direct_object_response};
 use crate::app::{AppState, MAX_LFS_PATCH_CHUNK_BYTES, authorize};
 use crate::{
@@ -42,7 +43,9 @@ use crate::{
     admission::weights,
     cas_headers::{ACCESS_TOKEN, TOKEN_EXPIRATION, URL},
     lfs_object_key, metrics,
-    object_store::{materialize_object_to_file, stage_bytes_content_addressed},
+    object_store::{
+        materialize_object_to_file, s3_lfs_parts_reader, stage_bytes_content_addressed,
+    },
     overflow::checked_add,
     protocol_support::scope_namespace,
     upload_ingest::{RequestBodyReader, read_body_to_bytes},
@@ -206,23 +209,32 @@ fn lfs_validation_response(message: &str) -> Response {
 /// while a guard is held. The guard is only held for the short staging
 /// write + range-record section, so the sweep (which waits on it under the
 /// store lock) can never be starved for long.
-static LFS_PATCH_LOCKS: LazyLock<Mutex<HashMap<String, Weak<Mutex<()>>>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+type LfsPatchLockKey = (PathBuf, String);
+type LfsPatchLockMap = Mutex<HashMap<LfsPatchLockKey, Weak<Mutex<()>>>>;
 
-fn acquire_lfs_patch_lock(oid: &str) -> Arc<Mutex<()>> {
+static LFS_PATCH_LOCKS: LazyLock<LfsPatchLockMap> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+#[cfg(test)]
+pub(super) fn acquire_lfs_patch_lock(oid: &str) -> Arc<Mutex<()>> {
+    acquire_lfs_patch_lock_for_dir(&PathBuf::new(), oid)
+}
+
+#[must_use]
+pub(super) fn acquire_lfs_patch_lock_for_dir(dir: &FsPath, oid: &str) -> Arc<Mutex<()>> {
     // Recover from poisoning: if a previous lock-holder panicked, the map
-    // contents are still valid (simple OID→lock mapping), so continue.
+    // contents are still valid, so continue.
     let mut map = LFS_PATCH_LOCKS.lock().unwrap_or_else(|e| e.into_inner());
+    let key = (dir.to_path_buf(), oid.to_owned());
     // Fast path: a live weak handle exists (a guard is still being held for
     // this OID), so hand out the same strong Arc to preserve serialization.
-    if let Some(live) = map.get(oid).and_then(Weak::upgrade) {
+    if let Some(live) = map.get(&key).and_then(Weak::upgrade) {
         return live;
     }
     // No live handle: drop dead entries so the map cannot grow with finished
     // OIDs (F-22), then install a fresh mutex and return its strong Arc.
     map.retain(|_oid, weak| weak.upgrade().is_some());
     let fresh = Arc::new(Mutex::new(()));
-    map.insert(oid.to_owned(), Arc::downgrade(&fresh));
+    map.insert(key, Arc::downgrade(&fresh));
     fresh
 }
 
@@ -235,27 +247,11 @@ fn live_lfs_patch_lock_count() -> usize {
     map.values().filter(|weak| weak.upgrade().is_some()).count()
 }
 
-/// The process-wide lock serializing LFS patch-store accounting (active
-/// session count + aggregate staging bytes) and the expiry sweep.
-///
-/// Never held across a network body stream: the PATCH body is fully buffered
-/// before any store mutation, so a slow client cannot stall other sessions
-/// (F-10 pattern).
-///
-/// Lock order (F-31): the store lock is acquired FIRST, before the per-OID
-/// lock, exactly like the sweep; it is dropped before the staging write. It is
-/// NEVER re-acquired while a per-OID lock is held — the promotion and error
-/// paths drop the per-OID guard before taking the store lock for the `.meta`
-/// removal. The per-OID lock is therefore always the inner lock, and no code
-/// path acquires store→per-OID and per-OID→store in the same run.
-static LFS_PATCH_STORE_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
-
-/// Held process-local + filesystem advisory lock for patch-store accounting.
+/// Held filesystem advisory lock for patch-store accounting.
 ///
 /// API replicas mount the same staging root in the scaled topology, so the
 /// file guard extends quotas, sweeping, and session creation across pods.
 struct LfsPatchStoreGuard {
-    _process_guard: std::sync::MutexGuard<'static, ()>,
     file: fs::File,
 }
 
@@ -265,7 +261,7 @@ impl Drop for LfsPatchStoreGuard {
     }
 }
 
-struct LfsPatchOidFileGuard {
+pub(super) struct LfsPatchOidFileGuard {
     file: fs::File,
 }
 
@@ -276,9 +272,6 @@ impl Drop for LfsPatchOidFileGuard {
 }
 
 fn lock_lfs_patch_store(dir: &FsPath) -> Result<LfsPatchStoreGuard, ServerError> {
-    let process_guard = LFS_PATCH_STORE_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     fs::create_dir_all(dir)?;
     let file = fs::OpenOptions::new()
         .create(true)
@@ -287,13 +280,13 @@ fn lock_lfs_patch_store(dir: &FsPath) -> Result<LfsPatchStoreGuard, ServerError>
         .write(true)
         .open(dir.join(".sessions.lock"))?;
     file.lock()?;
-    Ok(LfsPatchStoreGuard {
-        _process_guard: process_guard,
-        file,
-    })
+    Ok(LfsPatchStoreGuard { file })
 }
 
-fn lock_lfs_patch_oid(dir: &FsPath, oid: &str) -> Result<LfsPatchOidFileGuard, ServerError> {
+pub(super) fn lock_lfs_patch_oid(
+    dir: &FsPath,
+    oid: &str,
+) -> Result<LfsPatchOidFileGuard, ServerError> {
     // A fixed 256-way stripe set avoids one permanent lock inode per attacker-
     // supplied OID. Hashing also keeps the lock-file component independent of
     // the client value. Collisions only serialize unrelated PATCHes briefly.
@@ -452,13 +445,14 @@ fn sweep_lfs_patch_sessions_locked(
         let Some(oid) = name.strip_suffix(".meta") else {
             continue;
         };
+        lfs_patch_evidence::verify_integrity(dir, oid)?;
         let stale = match read_patch_last_touched(dir, oid) {
             Ok(touched) => touched.saturating_add(ttl_seconds.get()) <= now_unix_seconds,
             // An unreadable sidecar is crash debris; treat it as stale.
             Err(_error) => true,
         };
         if stale {
-            let oid_lock = acquire_lfs_patch_lock(oid);
+            let oid_lock = acquire_lfs_patch_lock_for_dir(dir, oid);
             let _guard = oid_lock
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -467,6 +461,7 @@ fn sweep_lfs_patch_sessions_locked(
             let ranges_path = dir.join(format!("{oid}.ranges"));
             let removed_ranges = fs::remove_file(&ranges_path);
             let removed_meta = fs::remove_file(lfs_patch_meta_path(dir, oid));
+            lfs_patch_evidence::remove(dir, oid);
             // Drop the session's in-memory range bookkeeping so a later PATCH
             // for the same OID re-derives it from the (now absent) file.
             evict_lfs_patch_ranges(&ranges_path);
@@ -807,6 +802,7 @@ fn consume_lfs_patch_session(tmp_path: &FsPath, ranges_path: &FsPath, tmp_dir: &
     drop(fs::remove_file(ranges_path));
     if let Ok(_store_guard) = lock_lfs_patch_store(tmp_dir) {
         drop(fs::remove_file(lfs_patch_meta_path(tmp_dir, oid)));
+        lfs_patch_evidence::remove(tmp_dir, oid);
     }
     evict_lfs_patch_ranges(ranges_path);
 }
@@ -826,6 +822,7 @@ fn consume_lfs_patch_session(tmp_path: &FsPath, ranges_path: &FsPath, tmp_dir: &
 /// never committed (F-59). The store lock is only taken inside
 /// [`consume_lfs_patch_session`], with NO per-OID guard held (F-31); the
 /// caller must have dropped the per-OID lock first.
+#[allow(clippy::too_many_arguments)]
 fn promote_lfs_patch_session(
     tmp_path: &FsPath,
     ranges_path: &FsPath,
@@ -834,7 +831,18 @@ fn promote_lfs_patch_session(
     backend: &crate::ServerBackend,
     object_key: &shardline_storage::ObjectKey,
     stream_chunk_size: usize,
+    scope_namespace: &str,
+    session_id: &str,
 ) -> Result<(), ServerError> {
+    lfs_patch_evidence::transition(
+        tmp_dir,
+        oid,
+        scope_namespace,
+        session_id,
+        object_key.as_str(),
+        shardline_reliability::ResumableLifecycleState::Active,
+        shardline_reliability::ResumableLifecycleState::Completing,
+    )?;
     let promotion = (|| {
         let promotion_body = bounded_file_stream(tmp_path, stream_chunk_size, MAX_LFS_OBJECT_SIZE)?;
         tokio::runtime::Handle::current().block_on(
@@ -846,8 +854,51 @@ fn promote_lfs_patch_session(
             ),
         )
     })();
-    consume_lfs_patch_session(tmp_path, ranges_path, tmp_dir, oid);
-    promotion.map(|_outcome| ())
+    match promotion {
+        Ok(_outcome) => {
+            let transition = lfs_patch_evidence::transition(
+                tmp_dir,
+                oid,
+                scope_namespace,
+                session_id,
+                object_key.as_str(),
+                shardline_reliability::ResumableLifecycleState::Completing,
+                shardline_reliability::ResumableLifecycleState::Completed,
+            );
+            consume_lfs_patch_session(tmp_path, ranges_path, tmp_dir, oid);
+            transition
+        }
+        Err(error) => {
+            let abort = lfs_patch_evidence::transition(
+                tmp_dir,
+                oid,
+                scope_namespace,
+                session_id,
+                object_key.as_str(),
+                shardline_reliability::ResumableLifecycleState::Completing,
+                shardline_reliability::ResumableLifecycleState::Aborted,
+            );
+            match abort {
+                Ok(()) => {
+                    consume_lfs_patch_session(tmp_path, ranges_path, tmp_dir, oid);
+                    Err(error)
+                }
+                Err(abort_error) => {
+                    // Preserve the completing session and its evidence when
+                    // the abort boundary itself cannot be journaled. The
+                    // next retry can replay promotion (the transition is
+                    // idempotent at `Completing`) or the repair/sweep path
+                    // can inspect the intact canonical evidence.
+                    tracing::warn!(
+                        error = ?abort_error,
+                        oid,
+                        "could not journal failed LFS promotion as aborted; preserving session"
+                    );
+                    Err(error)
+                }
+            }
+        }
+    }
 }
 
 #[tracing::instrument(skip(state, headers, request))]
@@ -1327,6 +1378,8 @@ pub(crate) async fn lfs_patch_object(
     let backend = state.backend.clone();
     let oid_for_closure = oid.clone();
     let object_key_for_closure = object_key.clone();
+    let scope_namespace_for_closure = scope_namespace(repo.capability().namespace());
+    let session_id_for_closure = durable_lfs_session_id(&scope_namespace_for_closure, &oid);
 
     let max_active_sessions = state.config.lfs_patch_max_active_sessions();
     let total_max_bytes = state.config.lfs_patch_total_max_bytes();
@@ -1381,7 +1434,7 @@ pub(crate) async fn lfs_patch_object(
         // the store lock before the disk write: the per-OID lock alone
         // serializes same-OID PATCHes and protects the staging files from the
         // sweep (which holds the store lock and waits on the per-OID lock).
-        let lock_arc = acquire_lfs_patch_lock(&oid_for_closure);
+        let lock_arc = acquire_lfs_patch_lock_for_dir(&tmp_dir, &oid_for_closure);
         // Recover from poisoning: the lock is a simple empty-token Mutex<()>,
         // so its state is trivially consistent even if a previous holder panicked.
         let lock = lock_arc.lock().unwrap_or_else(|e| e.into_inner());
@@ -1407,6 +1460,30 @@ pub(crate) async fn lfs_patch_object(
             evict_lfs_patch_ranges(&ranges_path);
             return Err(ServerError::LfsPatchRangeNotSatisfiable);
         }
+        let pre_snapshot_state = load_lfs_patch_ranges_from_disk(&ranges_path, total)?;
+        let pre_staging_length = match fs::metadata(&tmp_path) {
+            Ok(metadata) => metadata.len(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(error) => return Err(error.into()),
+        };
+        let last_touched_unix_seconds = match read_patch_last_touched(&tmp_dir, &oid_for_closure) {
+            Ok(value) => value,
+            Err(ServerError::Io(ref io)) if io.kind() == std::io::ErrorKind::NotFound => now,
+            Err(error) => return Err(error),
+        };
+        lfs_patch_evidence::verify_snapshot(
+            &tmp_dir,
+            &lfs_patch_evidence::LfsPatchSnapshotInput {
+                oid: &oid_for_closure,
+                scope_namespace: &scope_namespace_for_closure,
+                session_id: &session_id_for_closure,
+                target_key: object_key_for_closure.as_str(),
+                total_bytes: total,
+                ranges: &pre_snapshot_state.ranges,
+                staging_length: pre_staging_length,
+                last_touched_unix_seconds,
+            },
+        )?;
         touch_patch_session(&tmp_dir, &oid_for_closure, now)?;
         drop(store_guard);
         if already_complete {
@@ -1433,6 +1510,13 @@ pub(crate) async fn lfs_patch_object(
             if object_present {
                 // The object made it into the store; only the staging cleanup
                 // was lost (or a concurrent promotion owns the commit).
+                lfs_patch_evidence::complete(
+                    &tmp_dir,
+                    &oid_for_closure,
+                    &scope_namespace_for_closure,
+                    &session_id_for_closure,
+                    object_key_for_closure.as_str(),
+                )?;
                 consume_lfs_patch_session(&tmp_path, &ranges_path, &tmp_dir, &oid_for_closure);
             } else {
                 promote_lfs_patch_session(
@@ -1443,6 +1527,8 @@ pub(crate) async fn lfs_patch_object(
                     &backend,
                     &object_key_for_closure,
                     stream_chunk_size,
+                    &scope_namespace_for_closure,
+                    &session_id_for_closure,
                 )?;
             }
             return Ok(());
@@ -1466,7 +1552,32 @@ pub(crate) async fn lfs_patch_object(
                 file.seek(SeekFrom::Start(offset))?;
                 file.write_all(&chunk_bytes)?;
             }
-            record_lfs_patch_range(&ranges_path, offset, end_exclusive, total)
+            let promote = record_lfs_patch_range(&ranges_path, offset, end_exclusive, total)?;
+            lfs_patch_evidence::record(
+                &tmp_dir,
+                &oid_for_closure,
+                &scope_namespace_for_closure,
+                &session_id_for_closure,
+                object_key_for_closure.as_str(),
+                shardline_reliability::ResumableLifecycleState::Active,
+                shardline_reliability::ResumableLifecycleState::Active,
+            )?;
+            let snapshot_state = load_lfs_patch_ranges_from_disk(&ranges_path, total)?;
+            let staging_length = fs::metadata(&tmp_path)?.len();
+            lfs_patch_evidence::record_snapshot(
+                &tmp_dir,
+                &lfs_patch_evidence::LfsPatchSnapshotInput {
+                    oid: &oid_for_closure,
+                    scope_namespace: &scope_namespace_for_closure,
+                    session_id: &session_id_for_closure,
+                    target_key: object_key_for_closure.as_str(),
+                    total_bytes: total,
+                    ranges: &snapshot_state.ranges,
+                    staging_length,
+                    last_touched_unix_seconds: now,
+                },
+            )?;
+            Ok(promote)
         })();
         drop(lock);
         drop(file_lock);
@@ -1483,6 +1594,7 @@ pub(crate) async fn lfs_patch_object(
                         &tmp_dir,
                         &oid_for_closure,
                     )));
+                    lfs_patch_evidence::remove(&tmp_dir, &oid_for_closure);
                 }
                 evict_lfs_patch_ranges(&ranges_path);
                 return Err(error);
@@ -1506,6 +1618,8 @@ pub(crate) async fn lfs_patch_object(
                 &backend,
                 &object_key_for_closure,
                 stream_chunk_size,
+                &scope_namespace_for_closure,
+                &session_id_for_closure,
             )?;
         }
 
@@ -1656,59 +1770,79 @@ async fn durable_lfs_patch_object(
     if !lfs_ranges_cover_total(&claimed_parts, total)? {
         return Err(ServerError::LfsPatchRangeNotSatisfiable);
     }
-    let temporary = tempfile::tempdir()?;
-    let assembled_path = temporary.path().join("assembled");
-    let mut assembled = tokio::fs::File::create(&assembled_path).await?;
-    assembled.set_len(total).await?;
-    for part in &claimed_parts {
-        let part_range = part
-            .range()
-            .ok_or(ServerError::LfsPatchRangeNotSatisfiable)?;
-        let key =
-            ObjectKey::parse(part.staging_key()).map_err(|_error| ServerError::InvalidPath)?;
-        let path = temporary.path().join(format!("part-{}", part.generation()));
-        materialize_object_to_file(
-            &state.backend.object_store(),
-            &key,
-            part.size_bytes(),
-            &path,
-        )
-        .await?;
-        assembled.seek(SeekFrom::Start(part_range.start())).await?;
-        let mut input = tokio::fs::File::open(path).await?;
-        tokio::io::copy(&mut input, &mut assembled).await?;
-    }
-    assembled.flush().await?;
-    drop(assembled);
-
-    let mut input = tokio::fs::File::open(&assembled_path).await?;
-    let mut sha256 = Sha256::new();
-    let mut blake3 = blake3::Hasher::new();
-    let mut observed = 0_u64;
-    let mut buffer = vec![0_u8; 1024 * 1024];
-    loop {
-        let read = input.read(&mut buffer).await?;
-        if read == 0 {
-            break;
+    let _stored = if let Some(reader) =
+        s3_lfs_parts_reader(&state.backend.object_store(), &claimed_parts, total).await?
+    {
+        match state
+            .backend
+            .put_sha256_addressed_object_stream_if_absent(object_key, oid, reader)
+            .await
+        {
+            Ok(stored) => stored,
+            Err(ServerError::ExpectedBodyHashMismatch) => {
+                reopen_lfs_session_after_digest_failure(state, &session_id, claimed.fence_epoch())
+                    .await?;
+                return Err(ServerError::ExpectedBodyHashMismatch);
+            }
+            Err(error) => return Err(error),
         }
-        let bytes = buffer.get(..read).ok_or(ServerError::Overflow)?;
-        sha256.update(bytes);
-        blake3.update(bytes);
-        observed = observed
-            .checked_add(u64::try_from(read)?)
-            .ok_or(ServerError::Overflow)?;
-    }
-    if observed != total || hex::encode(sha256.finalize()) != oid {
-        return Err(ServerError::ExpectedBodyHashMismatch);
-    }
-    let object_integrity = ObjectIntegrity::new(
-        ShardlineHash::from_bytes(*blake3.finalize().as_bytes()),
-        observed,
-    );
-    let _stored = state
-        .backend
-        .put_sha256_addressed_object_file(object_key, oid, &assembled_path, &object_integrity)
-        .await?;
+    } else {
+        let temporary = tempfile::tempdir()?;
+        let assembled_path = temporary.path().join("assembled");
+        let mut assembled = tokio::fs::File::create(&assembled_path).await?;
+        assembled.set_len(total).await?;
+        for part in &claimed_parts {
+            let part_range = part
+                .range()
+                .ok_or(ServerError::LfsPatchRangeNotSatisfiable)?;
+            let key =
+                ObjectKey::parse(part.staging_key()).map_err(|_error| ServerError::InvalidPath)?;
+            let path = temporary.path().join(format!("part-{}", part.generation()));
+            materialize_object_to_file(
+                &state.backend.object_store(),
+                &key,
+                part.size_bytes(),
+                &path,
+            )
+            .await?;
+            assembled.seek(SeekFrom::Start(part_range.start())).await?;
+            let mut input = tokio::fs::File::open(path).await?;
+            tokio::io::copy(&mut input, &mut assembled).await?;
+        }
+        assembled.flush().await?;
+        drop(assembled);
+
+        let mut input = tokio::fs::File::open(&assembled_path).await?;
+        let mut sha256 = Sha256::new();
+        let mut blake3 = blake3::Hasher::new();
+        let mut observed = 0_u64;
+        let mut buffer = vec![0_u8; 1024 * 1024];
+        loop {
+            let read = input.read(&mut buffer).await?;
+            if read == 0 {
+                break;
+            }
+            let bytes = buffer.get(..read).ok_or(ServerError::Overflow)?;
+            sha256.update(bytes);
+            blake3.update(bytes);
+            observed = observed
+                .checked_add(u64::try_from(read)?)
+                .ok_or(ServerError::Overflow)?;
+        }
+        if observed != total || hex::encode(sha256.finalize()) != oid {
+            reopen_lfs_session_after_digest_failure(state, &session_id, claimed.fence_epoch())
+                .await?;
+            return Err(ServerError::ExpectedBodyHashMismatch);
+        }
+        let object_integrity = ObjectIntegrity::new(
+            ShardlineHash::from_bytes(*blake3.finalize().as_bytes()),
+            observed,
+        );
+        state
+            .backend
+            .put_sha256_addressed_object_file(object_key, oid, &assembled_path, &object_integrity)
+            .await?
+    };
     if !state
         .backend
         .transition_resumable_session(
@@ -1729,6 +1863,22 @@ async fn durable_lfs_patch_object(
     );
     shardline_metrics::metrics().protocol.record_lfs_upload();
     Ok(StatusCode::OK.into_response())
+}
+
+async fn reopen_lfs_session_after_digest_failure(
+    state: &Arc<AppState>,
+    session_id: &str,
+    fence_epoch: NonZeroU64,
+) -> Result<(), ServerError> {
+    if state
+        .backend
+        .reopen_resumable_session_after_failed_completion(session_id, fence_epoch)
+        .await?
+    {
+        Ok(())
+    } else {
+        Err(ServerError::StaleResourceFence)
+    }
 }
 
 fn lfs_ranges_cover_total(
@@ -1888,12 +2038,13 @@ mod tests {
     use shardline_server_core::AuthorizedRepository;
 
     use super::{
-        LFS_PATCH_LOCKS, acquire_lfs_patch_lock, evict_lfs_patch_ranges, inspect_lfs_patch_ranges,
-        lfs_batch, lfs_delete_object, lfs_get_object, lfs_head_object, lfs_patch_dir,
-        lfs_patch_meta_path, lfs_patch_now_seconds, lfs_patch_object, lfs_patch_ranges_compactions,
-        lfs_put_object, lfs_ranges_cover_total, lfs_validation_response, lfs_verify_object,
-        live_lfs_patch_lock_count, lock_lfs_patch_oid, parse_content_range, patch_store_usage,
-        record_lfs_patch_range, sweep_lfs_patch_sessions, touch_patch_session,
+        LFS_PATCH_LOCKS, acquire_lfs_patch_lock, acquire_lfs_patch_lock_for_dir,
+        evict_lfs_patch_ranges, inspect_lfs_patch_ranges, lfs_batch, lfs_delete_object,
+        lfs_get_object, lfs_head_object, lfs_patch_dir, lfs_patch_meta_path, lfs_patch_now_seconds,
+        lfs_patch_object, lfs_patch_ranges_compactions, lfs_put_object, lfs_ranges_cover_total,
+        lfs_validation_response, lfs_verify_object, live_lfs_patch_lock_count, lock_lfs_patch_oid,
+        parse_content_range, patch_store_usage, record_lfs_patch_range, sweep_lfs_patch_sessions,
+        touch_patch_session,
     };
 
     /// Test signing key matching the one used in e2e tests.
@@ -3398,6 +3549,74 @@ mod tests {
         assert_eq!(observed.as_ref(), content);
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn patch_object_hash_mismatch_can_be_repaired_durably() {
+        let Ok(database_url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let tmp = TempDir::new().expect("tempdir");
+        let shared_store = crate::ServerObjectStore::local(tmp.path().join("objects"))
+            .expect("shared object store");
+        let Some(state) =
+            build_postgres_lfs_state(&database_url, tmp.path().join("node"), shared_store).await
+        else {
+            return;
+        };
+        let app = lfs_router(Arc::clone(&state));
+        let expected = format!("expected-lfs-content:{}", tmp.path().display()).into_bytes();
+        let mut damaged = expected.clone();
+        let damaged_byte = damaged
+            .first_mut()
+            .expect("deterministic test content is non-empty");
+        *damaged_byte ^= 0x01;
+        let oid = test_oid(&expected);
+        let total = expected.len();
+        let uri = format!("/v1/lfs/objects/{oid}");
+
+        let first = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(&uri)
+                    .header(CONTENT_RANGE, format!("bytes 0-{}/{}", total - 1, total))
+                    .header(CONTENT_LENGTH, total)
+                    .body(Body::from(damaged.clone()))
+                    .expect("request"),
+            )
+            .await
+            .expect("damaged patch");
+        assert_eq!(first.status(), StatusCode::BAD_REQUEST);
+
+        let session_id = super::durable_lfs_session_id("global", &oid);
+        let claimed = state
+            .backend
+            .resumable_session_by_id(&session_id)
+            .await
+            .expect("session lookup")
+            .expect("failed completion leaves session");
+        assert_eq!(
+            claimed.state(),
+            shardline_index::ResumableSessionState::Active
+        );
+
+        // Hash validation failed after the durable completion fence was
+        // claimed. A corrected PATCH must still be able to repair the session.
+        let retry = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(&uri)
+                    .header(CONTENT_RANGE, format!("bytes 0-{}/{}", total - 1, total))
+                    .header(CONTENT_LENGTH, total)
+                    .body(Body::from(expected.clone()))
+                    .expect("request"),
+            )
+            .await
+            .expect("corrected patch");
+        assert_eq!(retry.status(), StatusCode::OK);
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn patch_object_missing_content_range_returns_416() {
         let (state, _tmp) = build_test_state().await;
@@ -3485,6 +3704,17 @@ mod tests {
         let lock1 = acquire_lfs_patch_lock("abc123");
         let lock2 = acquire_lfs_patch_lock("def456");
         assert!(!Arc::ptr_eq(&lock1, &lock2));
+    }
+
+    #[test]
+    fn acquire_lfs_patch_lock_for_dir_isolated_by_root() {
+        let first_root = TempDir::new().unwrap();
+        let second_root = TempDir::new().unwrap();
+        let first_dir = lfs_patch_dir(first_root.path());
+        let second_dir = lfs_patch_dir(second_root.path());
+        let first = acquire_lfs_patch_lock_for_dir(&first_dir, "same-oid");
+        let second = acquire_lfs_patch_lock_for_dir(&second_dir, "same-oid");
+        assert!(!Arc::ptr_eq(&first, &second));
     }
 
     #[test]
@@ -4676,7 +4906,7 @@ mod tests {
 
         // Mimic a mid-promotion PATCH: hold the target session's per-OID lock
         // so the sweep must wait on it while holding the store lock.
-        let oid_lock = acquire_lfs_patch_lock(&oid);
+        let oid_lock = acquire_lfs_patch_lock_for_dir(&dir, &oid);
         let guard = oid_lock.lock().unwrap();
 
         let root = state.config.root_dir().to_path_buf();

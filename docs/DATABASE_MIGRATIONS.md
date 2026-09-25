@@ -47,6 +47,35 @@ shardline db migrate status \
   --database-url 'postgres://shardline:replace-me@postgres:5432/shardline'
 ```
 
+Verify every persisted reliability journal without modifying it:
+
+```bash
+shardline db migrate verify
+```
+
+Backfill one bounded batch of missing reliability baselines and StateChronicle
+Merkle commitments. Repeat this command until the deployment's maintenance
+monitor reports no remaining work:
+
+```bash
+shardline db migrate backfill --batch-size 256
+```
+
+Repair one known-corrupt reliability operation only after validating its
+authoritative materialized row. The confirmation flag is required because the
+selected evidence chain is discarded and rebuilt:
+
+```bash
+shardline db migrate repair \
+  --operation-kind S3Object \
+  --operation-id '<exact-operation-id>' \
+  --confirm
+```
+
+`verify` and `fsck` fail closed on malformed, mismatched, or tampered evidence.
+Neither command silently establishes a new baseline. `repair` is the explicit
+operator recovery action and is serialized with other database maintenance.
+
 ## Behavior
 
 Shardline records migration history inside the metadata database and verifies that

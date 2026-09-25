@@ -109,10 +109,11 @@ kind load docker-image "$image" --name "$cluster_name"
 context="kind-${cluster_name}"
 echo "Deploying in-cluster dependencies"
 kubectl --context "$context" apply -f tests/k8s/kind/dependencies.yaml
-for deployment in postgres redis minio; do
+for deployment in postgres redis; do
     kubectl --context "$context" -n "$namespace" rollout status "deployment/${deployment}" --timeout=180s
 done
-kubectl --context "$context" -n "$namespace" wait --for=condition=complete job/minio-create-bucket --timeout=180s
+kubectl --context "$context" -n "$namespace" rollout status deployment/minio --timeout=600s
+kubectl --context "$context" -n "$namespace" wait --for=condition=complete job/minio-create-bucket --timeout=600s
 kubectl --context "$context" apply -f tests/k8s/kind/migration-job.yaml
 kubectl --context "$context" -n "$namespace" wait --for=condition=complete job/shardline-db-migrate --timeout=180s
 

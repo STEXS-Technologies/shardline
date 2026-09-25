@@ -566,7 +566,7 @@ where
     IndexAdapter::Error: Into<GcError>,
 {
     let mut quarantined_object_keys = HashSet::new();
-    let mut missing_object_keys = Vec::new();
+    let mut missing_candidates = Vec::new();
 
     index_store
         .visit_quarantine_candidates(|candidate| {
@@ -589,7 +589,7 @@ where
                     "quarantine candidate {} references a missing object — will auto-release",
                     candidate.object_key().as_str(),
                 );
-                missing_object_keys.push(candidate.object_key().clone());
+                missing_candidates.push(candidate);
                 return Ok(());
             };
             if _metadata.length() != candidate.observed_length() {
@@ -603,7 +603,7 @@ where
                 );
             }
 
-            quarantined_object_keys.insert(candidate.object_key().as_str().to_owned());
+            quarantined_object_keys.insert(candidate.object_key().clone());
             Ok::<(), GcError>(())
         })
         .await?;
@@ -617,8 +617,10 @@ where
     // auto-release (F-111). The detection above stays read-only either way, so
     // dry runs still surface the warnings as diagnostics.
     if auto_release_missing_quarantine_objects {
-        for key in &missing_object_keys {
-            let _result = index_store.delete_quarantine_candidate(key).await;
+        for candidate in &missing_candidates {
+            let _result = index_store
+                .delete_quarantine_candidate_if_matches(candidate)
+                .await;
         }
     }
 
@@ -646,7 +648,7 @@ where
                         .into(),
                     );
                 }
-                if quarantined_object_keys.contains(hold.object_key().as_str()) {
+                if quarantined_object_keys.contains(hold.object_key()) {
                     // A held+quarantined object is a REPAIRABLE state, not a
                     // hard abort. A hold and a quarantine entry on the same key
                     // are contradictory: the hold keeps the data, and the

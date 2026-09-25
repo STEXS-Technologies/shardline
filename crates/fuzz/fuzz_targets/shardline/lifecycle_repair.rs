@@ -150,7 +150,11 @@ fn expected_summary(
             .is_some_and(|release_after| release_after <= now_unix_seconds);
         if is_expired {
             summary.retention_delete_expired = checked_increment(summary.retention_delete_expired)?;
-        } else if object_exists {
+        } else if object_exists || release_after_unix_seconds.is_none() {
+            // Permanent holds are operator protection and remain durable even
+            // when their object is temporarily absent. This mirrors the
+            // production classifier and prevents a transient metadata/storage
+            // inconsistency from silently removing the hold.
             summary.retention_keep = checked_increment(summary.retention_keep)?;
         } else {
             summary.retention_delete_missing = checked_increment(summary.retention_delete_missing)?;

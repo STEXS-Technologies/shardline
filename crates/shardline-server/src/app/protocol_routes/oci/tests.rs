@@ -244,6 +244,67 @@ async fn blob_upload_session_resumes_across_postgres_nodes_without_rwx() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn blob_upload_wrong_digest_can_be_retried_across_postgres_nodes() {
+    let Some(cluster) = build_oci_postgres_test_cluster().await else {
+        return;
+    };
+    let app_a = oci_test_router(&cluster.node_a);
+    let app_b = oci_test_router(&cluster.node_b);
+    let uri = format!("/v2/{REPO}/blobs/uploads/");
+    let response = send(&app_a, Method::POST, &uri, Body::empty()).await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let session_id = response
+        .headers()
+        .get(header::LOCATION)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .rsplit('/')
+        .next()
+        .unwrap()
+        .to_owned();
+    let upload_uri = format!("/v2/{REPO}/blobs/uploads/{session_id}");
+    let data = b"durable-oci-retry";
+    assert_eq!(
+        send(
+            &app_a,
+            Method::PATCH,
+            &upload_uri,
+            Body::from(data.to_vec())
+        )
+        .await
+        .status(),
+        StatusCode::ACCEPTED
+    );
+
+    let wrong_digest = "0".repeat(64);
+    let wrong_completion = format!("{upload_uri}?digest=sha256:{wrong_digest}");
+    let final_data = b"-final";
+    assert_eq!(
+        send(
+            &app_b,
+            Method::PUT,
+            &wrong_completion,
+            Body::from(final_data.to_vec()),
+        )
+        .await
+        .status(),
+        StatusCode::BAD_REQUEST
+    );
+    // The failed validation fenced the durable completion attempt, but must
+    // not make a corrected retry permanently look like a missing session.
+    let full_data = [data.as_slice(), final_data.as_slice()].concat();
+    let digest = sha256_hex(&full_data);
+    let correct_completion = format!("{upload_uri}?digest=sha256:{digest}");
+    assert_eq!(
+        send(&app_a, Method::PUT, &correct_completion, Body::empty())
+            .await
+            .status(),
+        StatusCode::CREATED
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn blob_upload_session_delete_cancels() {
     let ctx = build_oci_test_state().await;

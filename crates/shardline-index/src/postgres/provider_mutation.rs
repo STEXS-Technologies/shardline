@@ -1,4 +1,12 @@
 use shardline_protocol::RepositoryProvider;
+use shardline_reliability::{
+    OperationKind, ProviderEvidenceLog, ProviderLifecycleSnapshot, ProviderRepositoryOperationId,
+    RetentionEvidenceLog, RetentionHoldLifecycleState, SnapshotEvidence,
+    WebhookDeliveryLifecycleState, append_or_baseline_snapshot_evidence,
+    verify_and_append_snapshot_transition, verify_and_append_webhook_delivery_retry,
+    verify_and_reactivate_retention_hold, verify_or_repair_snapshot_evidence,
+    verify_provider_lifecycle_events,
+};
 use sqlx::{Acquire, PgConnection, Postgres, Transaction, query, query_scalar};
 
 use super::{
@@ -6,7 +14,10 @@ use super::{
     record_store::{record_locator, upsert_record_in_transaction},
     u64_to_i64,
 };
-use crate::{FileRecord, ProviderRepositoryState, ResourceLockKey, RetentionHold, WebhookDelivery};
+use crate::{
+    FileRecord, ProviderRepositoryState, ResourceLockKey, RetentionHold, WebhookDelivery,
+    provider_evidence::snapshot_from_state,
+};
 
 /// One durable fencing identity that must still match when a provider mutation commits.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -144,27 +155,8 @@ impl super::PostgresIndexStore {
             }
         }
 
-        let delivery = &mutation.delivery;
-        let inserted = query(
-            "INSERT INTO shardline_webhook_deliveries (
-                provider,
-                owner,
-                repo,
-                delivery_id,
-                processed_at_unix_seconds
-             )
-             VALUES ($1, $2, $3, $4, $5)
-             ON CONFLICT (provider, owner, repo, delivery_id)
-             DO NOTHING",
-        )
-        .bind(delivery.provider().as_str())
-        .bind(delivery.owner())
-        .bind(delivery.repo())
-        .bind(delivery.delivery_id())
-        .bind(u64_to_i64(delivery.processed_at_unix_seconds())?)
-        .execute(&mut *transaction)
-        .await?;
-        if inserted.rows_affected() == 0 {
+        let inserted = record_webhook_delivery(&mut transaction, &mutation.delivery).await?;
+        if !inserted {
             transaction.rollback().await?;
             return Ok(PostgresProviderMutationOutcome::Duplicate);
         }
@@ -192,6 +184,35 @@ impl super::PostgresIndexStore {
             upsert_provider_repository_state(&mut transaction, state).await?;
         }
         for key in &mutation.state_deletes {
+            let operation_id =
+                ProviderRepositoryOperationId::new(key.provider.as_str(), &key.owner, &key.repo);
+            query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+                .bind(operation_id.as_str())
+                .execute(&mut *transaction)
+                .await?;
+            let current = query(
+                "SELECT provider,
+                        owner,
+                        repo,
+                        last_access_changed_at_unix_seconds,
+                        last_revision_pushed_at_unix_seconds,
+                        last_pushed_revision,
+                        last_cache_invalidated_at_unix_seconds,
+                        last_authorization_rechecked_at_unix_seconds,
+                        last_drift_checked_at_unix_seconds
+                 FROM shardline_provider_repository_states
+                 WHERE provider = $1 AND owner = $2 AND repo = $3
+                 FOR UPDATE",
+            )
+            .bind(key.provider.as_str())
+            .bind(&key.owner)
+            .bind(&key.repo)
+            .fetch_optional(&mut *transaction)
+            .await?;
+            if let Some(row) = current {
+                let state = super::index_store::provider_repository_state_from_row(&row)?;
+                verify_provider_repository_state_evidence(&mut transaction, &state).await?;
+            }
             query(
                 "DELETE FROM shardline_provider_repository_states
                  WHERE provider = $1 AND owner = $2 AND repo = $3",
@@ -201,6 +222,13 @@ impl super::PostgresIndexStore {
             .bind(&key.repo)
             .execute(&mut *transaction)
             .await?;
+            query(
+                "DELETE FROM shardline_reliability_events
+                 WHERE operation_kind = 'ProviderEvent' AND operation_id = $1",
+            )
+            .bind(operation_id.as_str())
+            .execute(&mut *transaction)
+            .await?;
         }
 
         transaction.commit().await?;
@@ -208,10 +236,98 @@ impl super::PostgresIndexStore {
     }
 }
 
-async fn upsert_retention_hold(
+pub(super) async fn record_webhook_delivery(
+    transaction: &mut Transaction<'_, Postgres>,
+    delivery: &WebhookDelivery,
+) -> Result<bool, PostgresMetadataStoreError> {
+    let existing_row = query(
+        "SELECT provider, owner, repo, delivery_id, processed_at_unix_seconds
+         FROM shardline_webhook_deliveries
+         WHERE provider = $1 AND owner = $2 AND repo = $3 AND delivery_id = $4
+         FOR UPDATE",
+    )
+    .bind(delivery.provider().as_str())
+    .bind(delivery.owner())
+    .bind(delivery.repo())
+    .bind(delivery.delivery_id())
+    .fetch_optional(&mut **transaction)
+    .await?;
+    if let Some(row) = existing_row {
+        let existing = super::index_store::webhook_delivery_from_row(&row)?;
+        let snapshot = super::index_store::webhook_snapshot(
+            &existing,
+            WebhookDeliveryLifecycleState::Processed,
+        )?;
+        let evidence =
+            super::index_store::load_postgres_webhook_evidence(transaction, &existing).await?;
+        let (evidence, evidence_was_missing) =
+            verify_or_repair_snapshot_evidence(evidence, snapshot)?;
+        if evidence_was_missing {
+            for event in evidence.events() {
+                super::insert_reliability_event(transaction, event).await?;
+            }
+        }
+        return Ok(false);
+    }
+    let snapshot =
+        super::index_store::webhook_snapshot(delivery, WebhookDeliveryLifecycleState::Processed)?;
+    let evidence =
+        super::index_store::load_postgres_webhook_evidence(transaction, delivery).await?;
+    let processed_at_unix_seconds = evidence.events().last().map_or_else(
+        || delivery.processed_at_unix_seconds(),
+        |event| event.after.processed_at_unix_seconds,
+    );
+    let (evidence, _evidence_was_empty) =
+        verify_and_append_webhook_delivery_retry(evidence, snapshot)?;
+    query(
+        "INSERT INTO shardline_webhook_deliveries (
+            provider, owner, repo, delivery_id, processed_at_unix_seconds
+         ) VALUES ($1, $2, $3, $4, $5)",
+    )
+    .bind(delivery.provider().as_str())
+    .bind(delivery.owner())
+    .bind(delivery.repo())
+    .bind(delivery.delivery_id())
+    .bind(u64_to_i64(processed_at_unix_seconds)?)
+    .execute(&mut **transaction)
+    .await?;
+    for event in evidence.events() {
+        super::insert_reliability_event(transaction, event).await?;
+    }
+    Ok(true)
+}
+
+pub(super) async fn upsert_retention_hold(
     transaction: &mut Transaction<'_, Postgres>,
     hold: &RetentionHold,
 ) -> Result<(), PostgresMetadataStoreError> {
+    let previous_row = query(
+        "SELECT object_key, reason, held_at_unix_seconds, release_after_unix_seconds
+         FROM shardline_retention_holds WHERE object_key = $1 FOR UPDATE",
+    )
+    .bind(hold.object_key().as_str())
+    .fetch_optional(&mut **transaction)
+    .await?;
+    let previous = previous_row
+        .as_ref()
+        .map(super::index_store::retention_hold_from_row)
+        .transpose()?;
+    let snapshot =
+        super::index_store::retention_snapshot(hold, RetentionHoldLifecycleState::Active)?;
+    let evidence = super::index_store::load_postgres_retention_evidence(
+        &mut **transaction,
+        hold.object_key().as_str(),
+    )
+    .await?;
+    let (evidence, evidence_was_empty) = if evidence.events().is_empty() {
+        (RetentionEvidenceLog::baseline(snapshot.clone())?, true)
+    } else if let Some(previous) = previous.as_ref() {
+        let previous_snapshot =
+            super::index_store::retention_snapshot(previous, RetentionHoldLifecycleState::Active)?;
+        verify_and_append_snapshot_transition(evidence, previous_snapshot, snapshot.clone())?
+    } else {
+        verify_and_reactivate_retention_hold(evidence, snapshot.clone())?
+    };
     query(
         "INSERT INTO shardline_retention_holds (
             object_key,
@@ -236,13 +352,67 @@ async fn upsert_retention_hold(
     )
     .execute(&mut **transaction)
     .await?;
+    if evidence_was_empty {
+        for event in evidence.events() {
+            super::insert_reliability_event(transaction, event).await?;
+        }
+    } else if let Some(event) = evidence.events().last() {
+        super::insert_reliability_event(transaction, event).await?;
+    }
     Ok(())
 }
 
-async fn upsert_provider_repository_state(
+pub(super) async fn upsert_provider_repository_state(
     transaction: &mut Transaction<'_, Postgres>,
     state: &ProviderRepositoryState,
 ) -> Result<(), PostgresMetadataStoreError> {
+    let operation_id = format!(
+        "{}:{}:{}",
+        state.provider().as_str(),
+        state.owner(),
+        state.repo()
+    );
+    query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(&operation_id)
+        .execute(&mut **transaction)
+        .await?;
+    let current = query(
+        "SELECT provider,
+                owner,
+                repo,
+                last_access_changed_at_unix_seconds,
+                last_revision_pushed_at_unix_seconds,
+                last_pushed_revision,
+                last_cache_invalidated_at_unix_seconds,
+                last_authorization_rechecked_at_unix_seconds,
+                last_drift_checked_at_unix_seconds
+         FROM shardline_provider_repository_states
+         WHERE provider = $1 AND owner = $2 AND repo = $3
+         FOR UPDATE",
+    )
+    .bind(state.provider().as_str())
+    .bind(state.owner())
+    .bind(state.repo())
+    .fetch_optional(&mut **transaction)
+    .await?;
+    let current_snapshot = current
+        .as_ref()
+        .map(super::index_store::provider_repository_state_from_row)
+        .transpose()?
+        .map(|current_state| snapshot_from_state(&current_state))
+        .transpose()?;
+    let evidence = if let Some(snapshot) = current_snapshot.as_ref() {
+        load_provider_evidence(transaction, snapshot).await?
+    } else {
+        query(
+            "DELETE FROM shardline_reliability_events
+             WHERE operation_kind = 'ProviderEvent' AND operation_id = $1",
+        )
+        .bind(&operation_id)
+        .execute(&mut **transaction)
+        .await?;
+        ProviderEvidenceLog::default()
+    };
     query(
         "INSERT INTO shardline_provider_repository_states (
             provider,
@@ -343,6 +513,77 @@ async fn upsert_provider_repository_state(
     )
     .execute(&mut **transaction)
     .await?;
+    let row = query(
+        "SELECT provider,
+                owner,
+                repo,
+                last_access_changed_at_unix_seconds,
+                last_revision_pushed_at_unix_seconds,
+                last_pushed_revision,
+                last_cache_invalidated_at_unix_seconds,
+                last_authorization_rechecked_at_unix_seconds,
+                last_drift_checked_at_unix_seconds
+         FROM shardline_provider_repository_states
+         WHERE provider = $1 AND owner = $2 AND repo = $3",
+    )
+    .bind(state.provider().as_str())
+    .bind(state.owner())
+    .bind(state.repo())
+    .fetch_one(&mut **transaction)
+    .await?;
+    let merged_state = super::index_store::provider_repository_state_from_row(&row)?;
+    let snapshot = snapshot_from_state(&merged_state)?;
+    let evidence = if let Some(before) = current_snapshot {
+        verify_and_append_snapshot_transition(evidence, before, snapshot)?.0
+    } else {
+        append_or_baseline_snapshot_evidence(evidence, snapshot)?
+    };
+    let event = evidence.events().last().ok_or_else(|| {
+        PostgresMetadataStoreError::Reliability(
+            shardline_reliability::ReliabilityError::EmptyField("provider evidence"),
+        )
+    })?;
+    super::insert_reliability_event(transaction, event).await?;
+    Ok(())
+}
+
+async fn load_provider_evidence(
+    transaction: &mut Transaction<'_, Postgres>,
+    snapshot: &ProviderLifecycleSnapshot,
+) -> Result<ProviderEvidenceLog, PostgresMetadataStoreError> {
+    let operation_id = snapshot.evidence_operation()?.operation_id;
+    let event = super::index_store::load_postgres_latest_evidence_event(
+        &mut **transaction,
+        OperationKind::ProviderEvent,
+        &operation_id,
+    )
+    .await?;
+    let Some(event) = event else {
+        return Ok(ProviderEvidenceLog::default());
+    };
+    Ok(ProviderEvidenceLog::from_head(serde_json::from_value(
+        event,
+    )?)?)
+}
+
+pub(super) async fn verify_provider_repository_state_evidence(
+    transaction: &mut Transaction<'_, Postgres>,
+    state: &ProviderRepositoryState,
+) -> Result<(), PostgresMetadataStoreError> {
+    let snapshot = snapshot_from_state(state)?;
+    let evidence = load_provider_evidence(transaction, &snapshot).await?;
+    if evidence.events().is_empty() {
+        let baseline = ProviderEvidenceLog::baseline(snapshot.clone())?;
+        verify_provider_lifecycle_events(baseline.events(), &snapshot)?;
+        let event = baseline.events().last().ok_or_else(|| {
+            PostgresMetadataStoreError::Reliability(
+                shardline_reliability::ReliabilityError::EmptyField("provider evidence"),
+            )
+        })?;
+        super::insert_reliability_event(transaction, event).await?;
+    } else {
+        verify_provider_lifecycle_events(evidence.events(), &snapshot)?;
+    }
     Ok(())
 }
 
@@ -351,13 +592,13 @@ mod tests {
     #![allow(clippy::expect_used)]
 
     use shardline_protocol::RepositoryProvider;
+    use shardline_reliability::SnapshotEvidence;
     use sqlx::{PgPool, query, query_scalar};
 
     use super::*;
 
     async fn connect_postgres() -> Option<PgPool> {
-        let url = std::env::var("DATABASE_URL").ok()?;
-        PgPool::connect(&url).await.ok()
+        super::super::connect_isolated_postgres().await
     }
 
     fn delivery(owner: &str, repo: &str, id: &str) -> WebhookDelivery {
@@ -369,6 +610,17 @@ mod tests {
             1_800_000_000,
         )
         .expect("valid delivery")
+    }
+
+    fn webhook_operation_id(delivery: &WebhookDelivery) -> String {
+        super::super::index_store::webhook_snapshot(
+            delivery,
+            WebhookDeliveryLifecycleState::Processed,
+        )
+        .expect("valid webhook snapshot")
+        .evidence_operation()
+        .expect("valid webhook operation")
+        .operation_id
     }
 
     async fn set_fence(pool: &PgPool, resource: &str, epoch: i64) {
@@ -404,6 +656,16 @@ mod tests {
         .await
         .expect("clean fixture");
         query(
+            "DELETE FROM shardline_reliability_events
+             WHERE operation_kind = 'WebhookDelivery'
+               AND (operation_id = $1 OR operation_id = $2)",
+        )
+        .bind(webhook_operation_id(&delivery(owner, repo, delivery_id)))
+        .bind(delivery_id)
+        .execute(&pool)
+        .await
+        .expect("clean delivery evidence fixture");
+        query(
             "DELETE FROM shardline_provider_repository_states
              WHERE provider = 'github' AND owner = $1 AND repo = $2",
         )
@@ -412,6 +674,14 @@ mod tests {
         .execute(&pool)
         .await
         .expect("clean state fixture");
+        query(
+            "DELETE FROM shardline_reliability_events
+             WHERE operation_kind = 'ProviderEvent' AND operation_id = $1",
+        )
+        .bind(format!("github:{owner}:{repo}"))
+        .execute(&pool)
+        .await
+        .expect("clean provider evidence fixture");
         set_fence(&pool, resource, 41).await;
 
         let mut mutation = PostgresProviderMutation::new(delivery(owner, repo, delivery_id));
@@ -468,6 +738,195 @@ mod tests {
         .await
         .expect("duplicate mutation");
         assert_eq!(duplicate, PostgresProviderMutationOutcome::Duplicate);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pg_duplicate_webhook_rebuilds_missing_baseline_evidence() {
+        let Some(pool) = connect_postgres().await else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let owner = "provider-webhook-baseline";
+        let repo = "repository";
+        let delivery_id = "delivery-baseline";
+        let delivery = delivery(owner, repo, delivery_id);
+        let operation_id = webhook_operation_id(&delivery);
+        query(
+            "DELETE FROM shardline_webhook_deliveries
+             WHERE provider = 'github' AND owner = $1 AND repo = $2",
+        )
+        .bind(owner)
+        .bind(repo)
+        .execute(&pool)
+        .await
+        .expect("clean delivery fixture");
+        query(
+            "DELETE FROM shardline_reliability_events
+             WHERE operation_kind = 'WebhookDelivery' AND operation_id = $1",
+        )
+        .bind(&operation_id)
+        .execute(&pool)
+        .await
+        .expect("clean evidence fixture");
+
+        let store = super::super::PostgresIndexStore::new(pool.clone());
+        assert!(
+            crate::AsyncIndexStore::record_webhook_delivery(&store, &delivery)
+                .await
+                .expect("record delivery")
+        );
+        query(
+            "DELETE FROM shardline_reliability_events
+             WHERE operation_kind = 'WebhookDelivery' AND operation_id = $1",
+        )
+        .bind(&operation_id)
+        .execute(&pool)
+        .await
+        .expect("remove evidence fixture");
+
+        assert!(
+            !crate::AsyncIndexStore::record_webhook_delivery(&store, &delivery)
+                .await
+                .expect("duplicate delivery")
+        );
+        let event_count = query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM shardline_reliability_events
+             WHERE operation_kind = 'WebhookDelivery' AND operation_id = $1",
+        )
+        .bind(&operation_id)
+        .fetch_one(&pool)
+        .await
+        .expect("baseline evidence count");
+        assert_eq!(event_count, 1);
+        let deliveries = crate::AsyncIndexStore::list_webhook_deliveries(&store)
+            .await
+            .expect("list delivery");
+        assert_eq!(
+            deliveries
+                .iter()
+                .filter(|candidate| *candidate == &delivery)
+                .count(),
+            1
+        );
+
+        query(
+            "DELETE FROM shardline_webhook_deliveries
+             WHERE provider = 'github' AND owner = $1 AND repo = $2",
+        )
+        .bind(owner)
+        .bind(repo)
+        .execute(&pool)
+        .await
+        .expect("clean delivery fixture");
+        query(
+            "DELETE FROM shardline_reliability_events
+             WHERE operation_kind = 'WebhookDelivery' AND operation_id = $1",
+        )
+        .bind(&operation_id)
+        .execute(&pool)
+        .await
+        .expect("clean evidence fixture");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pg_webhook_delivery_reclaim_replays_evidence_and_rejects_tampering() {
+        let Some(pool) = connect_postgres().await else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let owner = "provider-webhook-evidence";
+        let repo = "repository";
+        let delivery_id = "delivery-recovery";
+        query(
+            "DELETE FROM shardline_webhook_deliveries
+             WHERE provider = 'github' AND owner = $1 AND repo = $2",
+        )
+        .bind(owner)
+        .bind(repo)
+        .execute(&pool)
+        .await
+        .expect("clean delivery fixture");
+        query(
+            "DELETE FROM shardline_reliability_events
+             WHERE operation_kind = 'WebhookDelivery'
+               AND (operation_id = $1 OR operation_id = $2)",
+        )
+        .bind(webhook_operation_id(&delivery(owner, repo, delivery_id)))
+        .bind(delivery_id)
+        .execute(&pool)
+        .await
+        .expect("clean evidence fixture");
+
+        let store = super::super::PostgresIndexStore::new(pool.clone());
+        let delivery = delivery(owner, repo, delivery_id);
+        assert!(
+            crate::AsyncIndexStore::record_webhook_delivery(&store, &delivery)
+                .await
+                .expect("record delivery")
+        );
+        assert!(
+            crate::AsyncIndexStore::delete_webhook_delivery(&store, &delivery)
+                .await
+                .expect("release delivery")
+        );
+        assert!(
+            crate::AsyncIndexStore::record_webhook_delivery(&store, &delivery)
+                .await
+                .expect("reclaim delivery")
+        );
+
+        let deliveries = crate::AsyncIndexStore::list_webhook_deliveries(&store)
+            .await
+            .expect("list recovered delivery");
+        assert_eq!(
+            deliveries
+                .iter()
+                .filter(|candidate| *candidate == &delivery)
+                .count(),
+            1,
+            "the recovered fixture must be present exactly once"
+        );
+        let event_count = query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM shardline_reliability_events
+             WHERE operation_kind = 'WebhookDelivery' AND operation_id = $1",
+        )
+        .bind(webhook_operation_id(&delivery))
+        .fetch_one(&pool)
+        .await
+        .expect("evidence count");
+        assert_eq!(event_count, 3, "processed -> released -> processed chain");
+
+        query(
+            "UPDATE shardline_reliability_events
+             SET event_json = '{\"sequence\":99}'
+             WHERE operation_kind = 'WebhookDelivery' AND operation_id = $1",
+        )
+        .bind(webhook_operation_id(&delivery))
+        .execute(&pool)
+        .await
+        .expect("tamper evidence");
+        assert!(
+            crate::AsyncIndexStore::list_webhook_deliveries(&store)
+                .await
+                .is_err()
+        );
+        query(
+            "DELETE FROM shardline_webhook_deliveries
+             WHERE provider = 'github' AND owner = $1 AND repo = $2",
+        )
+        .bind(owner)
+        .bind(repo)
+        .execute(&pool)
+        .await
+        .expect("clean tampered webhook fixture");
+        query(
+            "DELETE FROM shardline_reliability_events
+             WHERE operation_kind = 'WebhookDelivery' AND operation_id = $1",
+        )
+        .bind(webhook_operation_id(&delivery))
+        .execute(&pool)
+        .await
+        .expect("clean tampered webhook evidence fixture");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -573,5 +1032,148 @@ mod tests {
         .await
         .expect("delivery count");
         assert_eq!(delivery_count, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pg_provider_mutation_rejects_tampered_delete_and_preserves_state() {
+        let Some(pool) = connect_postgres().await else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let owner = "provider-mutation-tampered-delete";
+        let repo = "repository";
+        let resource = "github:provider-mutation-tampered-delete/repository";
+        query(
+            "DELETE FROM shardline_webhook_deliveries
+             WHERE provider = 'github' AND owner = $1 AND repo = $2",
+        )
+        .bind(owner)
+        .bind(repo)
+        .execute(&pool)
+        .await
+        .expect("clean delivery fixture");
+        query(
+            "DELETE FROM shardline_provider_repository_states
+             WHERE provider = 'github' AND owner = $1 AND repo = $2",
+        )
+        .bind(owner)
+        .bind(repo)
+        .execute(&pool)
+        .await
+        .expect("clean state fixture");
+        query(
+            "DELETE FROM shardline_reliability_events
+             WHERE operation_kind = 'ProviderEvent' AND operation_id = $1",
+        )
+        .bind(format!("github:{owner}:{repo}"))
+        .execute(&pool)
+        .await
+        .expect("clean evidence fixture");
+        query(
+            "DELETE FROM shardline_reliability_events
+             WHERE operation_kind = 'WebhookDelivery'
+               AND (operation_id = $1 OR operation_id = $2)",
+        )
+        .bind(webhook_operation_id(&delivery(
+            owner,
+            repo,
+            "delivery-tampered-seed",
+        )))
+        .bind("delivery-tampered-seed")
+        .execute(&pool)
+        .await
+        .expect("clean seed delivery evidence fixture");
+        set_fence(&pool, resource, 71).await;
+
+        let mut seed =
+            PostgresProviderMutation::new(delivery(owner, repo, "delivery-tampered-seed"));
+        seed.upsert_provider_repository_state(ProviderRepositoryState::new(
+            RepositoryProvider::GitHub,
+            owner.to_owned(),
+            repo.to_owned(),
+            Some(100),
+            None,
+            None,
+        ));
+        let fences = [PostgresResourceFence::new(
+            ResourceLockKey::provider_repository("github", owner, repo),
+            71,
+        )];
+        let mut connection = pool.acquire().await.expect("seed connection");
+        assert_eq!(
+            super::super::PostgresIndexStore::commit_provider_mutation_on_connection(
+                &mut connection,
+                &fences,
+                &seed,
+            )
+            .await
+            .expect("seed mutation"),
+            PostgresProviderMutationOutcome::Applied
+        );
+        query(
+            "UPDATE shardline_reliability_events
+             SET event_json = '{\"sequence\": 99}'
+             WHERE operation_kind = 'ProviderEvent' AND operation_id = $1",
+        )
+        .bind(format!("github:{owner}:{repo}"))
+        .execute(&pool)
+        .await
+        .expect("tamper evidence");
+
+        let mut deletion =
+            PostgresProviderMutation::new(delivery(owner, repo, "delivery-tampered-delete"));
+        deletion.delete_provider_repository_state(ProviderRepositoryKey::new(
+            RepositoryProvider::GitHub,
+            owner.to_owned(),
+            repo.to_owned(),
+        ));
+        let result = super::super::PostgresIndexStore::commit_provider_mutation_on_connection(
+            &mut connection,
+            &fences,
+            &deletion,
+        )
+        .await;
+        assert!(result.is_err());
+
+        let state_count = query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM shardline_provider_repository_states
+             WHERE provider = 'github' AND owner = $1 AND repo = $2",
+        )
+        .bind(owner)
+        .bind(repo)
+        .fetch_one(&pool)
+        .await
+        .expect("state count");
+        let delivery_count = query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM shardline_webhook_deliveries
+             WHERE provider = 'github' AND owner = $1 AND repo = $2
+               AND delivery_id = 'delivery-tampered-delete'",
+        )
+        .bind(owner)
+        .bind(repo)
+        .fetch_one(&pool)
+        .await
+        .expect("delivery count");
+        assert_eq!(state_count, 1);
+        assert_eq!(delivery_count, 0);
+
+        drop(connection);
+        query(
+            "DELETE FROM shardline_reliability_events
+             WHERE operation_kind = 'ProviderEvent' AND operation_id = $1",
+        )
+        .bind(format!("github:{owner}:{repo}"))
+        .execute(&pool)
+        .await
+        .expect("clean tampered provider evidence fixture");
+        query(
+            "DELETE FROM shardline_provider_repository_states
+             WHERE provider = 'github' AND owner = $1 AND repo = $2",
+        )
+        .bind(owner)
+        .bind(repo)
+        .execute(&pool)
+        .await
+        .expect("clean tampered provider state fixture");
     }
 }

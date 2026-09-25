@@ -884,6 +884,32 @@ async fn minio_content_addressed_upload_roundtrip() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn minio_remote_stream_upload_promotes_and_cleans_temp_object() {
+    let Some(stack) = DockerLocalStack::builder().with_minio().start().unwrap() else {
+        eprintln!("skipping: docker not available");
+        return;
+    };
+    let Some(config) = s3_config(&stack, Some("test-remote-stream-upload")) else {
+        return;
+    };
+    let store = S3ObjectStore::new(config).unwrap();
+    let canonical_key = ObjectKey::parse("stream/final-key").unwrap();
+    let body = b"remote stream upload avoids pod-local staging";
+    let (mut writer, temp_key) = store.begin_stream_upload().await.unwrap();
+    writer.write(body);
+    writer.wait_for_capacity(1).await.unwrap();
+    let outcome = store
+        .finish_stream_upload(writer, &temp_key, &canonical_key)
+        .await
+        .unwrap();
+    assert!(matches!(outcome, PutOutcome::Inserted));
+    assert!(!store.contains(&temp_key).unwrap());
+    let end = (body.len() as u64).checked_sub(1).unwrap();
+    let range = shardline_protocol::ByteRange::new(0, end).unwrap();
+    assert_eq!(store.read_range(&canonical_key, range).unwrap(), body);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn minio_content_addressed_upload_already_exists_idempotent() {
     let Some(stack) = DockerLocalStack::builder().with_minio().start().unwrap() else {
         eprintln!("skipping: docker not available");

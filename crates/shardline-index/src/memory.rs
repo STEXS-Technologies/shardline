@@ -6,6 +6,17 @@ use std::{
 
 use serde_json::{Error as SerdeJsonError, to_vec};
 use shardline_protocol::{RepositoryProvider, RepositoryScope, ShardlineHash};
+use shardline_reliability::{
+    LifecycleEvent, ProviderEvidenceLog, QuarantineEvidenceLog, QuarantineLifecycleState,
+    QuarantineObjectIdentity, QuarantineSnapshot, RetentionEvidenceLog,
+    RetentionHoldLifecycleState, RetentionHoldSnapshot, RetentionObjectIdentity,
+    WebhookDeliveryEvidenceLog, WebhookDeliveryIdentity, WebhookDeliveryLifecycleState,
+    WebhookDeliverySnapshot, upload_lifecycle_event, upload_lifecycle_identity,
+    verify_and_append_snapshot_transition, verify_and_append_webhook_delivery_retry,
+    verify_and_reactivate_quarantine, verify_and_reactivate_retention_hold, verify_lifecycle_chain,
+    verify_provider_lifecycle_events, verify_quarantine_lifecycle_events,
+    verify_retention_hold_lifecycle_events, verify_upload_lifecycle_events,
+};
 use shardline_storage::ObjectKey;
 use thiserror::Error;
 
@@ -15,6 +26,7 @@ use crate::{
     ReconstructionStore, RecordMutation, RecordStoreFuture, RecordTraversal, RepoKey,
     RepositoryRecordScope, RetentionHold, RevisionRecord, StoredObjectId, StoredRecord, TreeEntry,
     TreeEntryOutcome, TreeKey, TreeStore, WebhookDelivery, XorbId,
+    provider_evidence::snapshot_from_state,
     upload_intent::{
         UploadIntent, UploadIntentConflictError, UploadIntentState, UploadIntentStore,
     },
@@ -94,11 +106,29 @@ impl MemoryIndexStore {
         delivery: &WebhookDelivery,
     ) -> Result<bool, MemoryIndexStoreError> {
         let key = MemoryWebhookDeliveryKey::from_domain(delivery);
-        Ok(self
-            .lock_state()?
-            .webhook_deliveries
-            .insert(key, delivery.clone())
-            .is_none())
+        let mut state = self.lock_state()?;
+        if let Some(current) = state.webhook_deliveries.get(&key) {
+            verify_memory_webhook_evidence(&state, current)?;
+            return Ok(false);
+        }
+        let snapshot = webhook_snapshot(delivery, WebhookDeliveryLifecycleState::Processed)?;
+        let evidence = state
+            .webhook_evidence
+            .get(&key)
+            .cloned()
+            .unwrap_or_default();
+        let processed_at_unix_seconds = evidence.events().last().map_or_else(
+            || delivery.processed_at_unix_seconds(),
+            |event| event.after.processed_at_unix_seconds,
+        );
+        let (evidence, _) = verify_and_append_webhook_delivery_retry(evidence, snapshot)
+            .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
+        state.webhook_deliveries.insert(
+            key.clone(),
+            delivery.with_processed_at_unix_seconds(processed_at_unix_seconds),
+        );
+        state.webhook_evidence.insert(key, evidence);
+        Ok(true)
     }
 
     /// Persists provider-derived repository lifecycle state in memory.
@@ -111,11 +141,33 @@ impl MemoryIndexStore {
         state: &ProviderRepositoryState,
     ) -> Result<(), MemoryIndexStoreError> {
         let key = MemoryProviderRepositoryStateKey::from_domain(state);
-        self.lock_state()?
-            .provider_repository_states
-            .entry(key)
-            .and_modify(|current| *current = current.merge_monotonic(state))
-            .or_insert_with(|| state.clone());
+        let mut store = self.lock_state()?;
+        let current = store.provider_repository_states.get(&key).cloned();
+        let merged = current
+            .as_ref()
+            .map_or_else(|| state.clone(), |current| current.merge_monotonic(state));
+        let snapshot = snapshot_from_state(&merged)
+            .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
+        let stored = store
+            .provider_repository_evidence
+            .get(&key)
+            .cloned()
+            .unwrap_or_default();
+        let evidence = if let Some(current) = current {
+            let before = snapshot_from_state(&current)
+                .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
+            verify_and_append_snapshot_transition(stored, before, snapshot)
+                .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?
+                .0
+        } else {
+            // Preserve the in-memory store's existing baseline-plus-first-transition
+            // event shape while routing validation through the shared policy.
+            verify_and_append_snapshot_transition(stored, snapshot.clone(), snapshot)
+                .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?
+                .0
+        };
+        store.provider_repository_states.insert(key.clone(), merged);
+        store.provider_repository_evidence.insert(key, evidence);
         Ok(())
     }
 
@@ -124,6 +176,96 @@ impl MemoryIndexStore {
             .lock()
             .map_err(|e| MemoryIndexStoreError::LockPoisoned(e.to_string()))
     }
+}
+
+fn quarantine_snapshot(
+    candidate: &QuarantineCandidate,
+    state: QuarantineLifecycleState,
+) -> Result<QuarantineSnapshot, MemoryIndexStoreError> {
+    QuarantineSnapshot::new(
+        QuarantineObjectIdentity::new(candidate.object_key().as_str())
+            .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?,
+        candidate.observed_length(),
+        candidate.first_seen_unreachable_at_unix_seconds(),
+        candidate.delete_after_unix_seconds(),
+        state,
+    )
+    .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))
+}
+
+fn verify_memory_quarantine_evidence(
+    state: &MemoryIndexState,
+    candidate: &QuarantineCandidate,
+) -> Result<(), MemoryIndexStoreError> {
+    let snapshot = quarantine_snapshot(candidate, QuarantineLifecycleState::Active)?;
+    let evidence = state
+        .quarantine_evidence
+        .get(candidate.object_key())
+        .ok_or_else(|| {
+            MemoryIndexStoreError::Reliability("quarantine evidence is missing".into())
+        })?;
+    verify_quarantine_lifecycle_events(evidence.events(), &snapshot)
+        .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))
+}
+
+fn retention_snapshot(
+    hold: &RetentionHold,
+    state: RetentionHoldLifecycleState,
+) -> Result<RetentionHoldSnapshot, MemoryIndexStoreError> {
+    RetentionHoldSnapshot::new(
+        RetentionObjectIdentity::new(hold.object_key().as_str())
+            .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?,
+        hold.reason(),
+        hold.held_at_unix_seconds(),
+        hold.release_after_unix_seconds(),
+        state,
+    )
+    .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))
+}
+
+fn verify_memory_retention_evidence(
+    state: &MemoryIndexState,
+    hold: &RetentionHold,
+) -> Result<(), MemoryIndexStoreError> {
+    let snapshot = retention_snapshot(hold, RetentionHoldLifecycleState::Active)?;
+    let evidence = state
+        .retention_evidence
+        .get(hold.object_key())
+        .ok_or_else(|| {
+            MemoryIndexStoreError::Reliability("retention evidence is missing".into())
+        })?;
+    verify_retention_hold_lifecycle_events(evidence.events(), &snapshot)
+        .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))
+}
+
+fn webhook_snapshot(
+    delivery: &WebhookDelivery,
+    state: WebhookDeliveryLifecycleState,
+) -> Result<WebhookDeliverySnapshot, MemoryIndexStoreError> {
+    Ok(WebhookDeliverySnapshot::new(
+        WebhookDeliveryIdentity::new(
+            delivery.provider().as_str(),
+            delivery.owner(),
+            delivery.repo(),
+            delivery.delivery_id(),
+        )
+        .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?,
+        delivery.processed_at_unix_seconds(),
+        state,
+    ))
+}
+
+fn verify_memory_webhook_evidence(
+    state: &MemoryIndexState,
+    delivery: &WebhookDelivery,
+) -> Result<(), MemoryIndexStoreError> {
+    let snapshot = webhook_snapshot(delivery, WebhookDeliveryLifecycleState::Processed)?;
+    let evidence = state
+        .webhook_evidence
+        .get(&MemoryWebhookDeliveryKey::from_domain(delivery))
+        .ok_or_else(|| MemoryIndexStoreError::Reliability("webhook evidence is missing".into()))?;
+    shardline_reliability::verify_webhook_delivery_events(evidence.events(), &snapshot)
+        .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))
 }
 
 impl ReconstructionStore for MemoryIndexStore {
@@ -148,6 +290,18 @@ impl ReconstructionStore for MemoryIndexStore {
 
     fn delete_reconstruction(&self, file_id: &FileId) -> Result<bool, Self::Error> {
         Ok(self.lock_state()?.reconstructions.remove(file_id).is_some())
+    }
+
+    fn delete_reconstruction_if_matches(
+        &self,
+        file_id: &FileId,
+        expected: &FileReconstruction,
+    ) -> Result<bool, Self::Error> {
+        let mut state = self.lock_state()?;
+        if state.reconstructions.get(file_id) != Some(expected) {
+            return Ok(false);
+        }
+        Ok(state.reconstructions.remove(file_id).is_some())
     }
 
     fn contains_object(&self, object_id: &StoredObjectId) -> Result<bool, Self::Error> {
@@ -200,6 +354,17 @@ impl DedupeStore for MemoryIndexStore {
             .remove(chunk_hash)
             .is_some())
     }
+
+    fn delete_dedupe_shard_mapping_if_matches(
+        &self,
+        expected: &DedupeShardMapping,
+    ) -> Result<bool, Self::Error> {
+        let mut state = self.lock_state()?;
+        if state.dedupe_shards.get(&expected.chunk_hash()) != Some(expected) {
+            return Ok(false);
+        }
+        Ok(state.dedupe_shards.remove(&expected.chunk_hash()).is_some())
+    }
 }
 
 impl LifecycleStore for MemoryIndexStore {
@@ -209,18 +374,22 @@ impl LifecycleStore for MemoryIndexStore {
         &self,
         object_key: &ObjectKey,
     ) -> Result<Option<QuarantineCandidate>, Self::Error> {
-        Ok(self.lock_state()?.quarantine.get(object_key).cloned())
+        let state = self.lock_state()?;
+        let candidate = state.quarantine.get(object_key).cloned();
+        if let Some(candidate) = &candidate {
+            verify_memory_quarantine_evidence(&state, candidate)?;
+        }
+        Ok(candidate)
     }
 
     fn list_quarantine_candidates(&self) -> Result<Vec<QuarantineCandidate>, Self::Error> {
-        let mut candidates = self
-            .lock_state()?
-            .quarantine
-            .values()
-            .cloned()
-            .collect::<Vec<_>>();
+        let state = self.lock_state()?;
+        let mut candidates = state.quarantine.values().cloned().collect::<Vec<_>>();
         candidates
             .sort_by(|left, right| left.object_key().as_str().cmp(right.object_key().as_str()));
+        for candidate in &candidates {
+            verify_memory_quarantine_evidence(&state, candidate)?;
+        }
         Ok(candidates)
     }
 
@@ -243,28 +412,99 @@ impl LifecycleStore for MemoryIndexStore {
         &self,
         candidate: &QuarantineCandidate,
     ) -> Result<(), Self::Error> {
-        self.lock_state()?
-            .quarantine
-            .insert(candidate.object_key().clone(), candidate.clone());
+        let mut state = self.lock_state()?;
+        let key = candidate.object_key().clone();
+        let snapshot = quarantine_snapshot(candidate, QuarantineLifecycleState::Active)?;
+        let evidence = state
+            .quarantine_evidence
+            .get(&key)
+            .cloned()
+            .unwrap_or_default();
+        let (evidence, _) = if let Some(current) = state.quarantine.get(&key) {
+            let current_snapshot = quarantine_snapshot(current, QuarantineLifecycleState::Active)?;
+            verify_and_append_snapshot_transition(evidence, current_snapshot, snapshot)
+        } else if evidence.events().is_empty() {
+            verify_and_append_snapshot_transition(evidence, snapshot.clone(), snapshot)
+        } else {
+            verify_and_reactivate_quarantine(evidence, snapshot)
+        }
+        .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
+        state.quarantine.insert(key.clone(), candidate.clone());
+        state.quarantine_evidence.insert(key, evidence);
         Ok(())
     }
 
     fn delete_quarantine_candidate(&self, object_key: &ObjectKey) -> Result<bool, Self::Error> {
-        Ok(self.lock_state()?.quarantine.remove(object_key).is_some())
+        let mut state = self.lock_state()?;
+        let Some(candidate) = state.quarantine.get(object_key).cloned() else {
+            return Ok(false);
+        };
+        // Build and validate the complete release evidence before mutating the
+        // materialized candidate map. A corrupted journal must leave the
+        // candidate recoverable, matching the transactional adapters.
+        let active_snapshot = quarantine_snapshot(&candidate, QuarantineLifecycleState::Active)?;
+        let evidence = state
+            .quarantine_evidence
+            .get(object_key)
+            .cloned()
+            .unwrap_or_default();
+        let released_snapshot =
+            quarantine_snapshot(&candidate, QuarantineLifecycleState::Released)?;
+        let (evidence, _) =
+            verify_and_append_snapshot_transition(evidence, active_snapshot, released_snapshot)
+                .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
+        state.quarantine.remove(object_key);
+        state
+            .quarantine_evidence
+            .insert(object_key.clone(), evidence);
+        Ok(true)
+    }
+
+    fn delete_quarantine_candidate_if_matches(
+        &self,
+        expected: &QuarantineCandidate,
+    ) -> Result<bool, Self::Error> {
+        let mut state = self.lock_state()?;
+        let Some(candidate) = state.quarantine.get(expected.object_key()).cloned() else {
+            return Ok(false);
+        };
+        if candidate != *expected {
+            return Ok(false);
+        }
+        let active_snapshot = quarantine_snapshot(&candidate, QuarantineLifecycleState::Active)?;
+        let evidence = state
+            .quarantine_evidence
+            .get(expected.object_key())
+            .cloned()
+            .unwrap_or_default();
+        let released_snapshot =
+            quarantine_snapshot(&candidate, QuarantineLifecycleState::Released)?;
+        let (evidence, _) =
+            verify_and_append_snapshot_transition(evidence, active_snapshot, released_snapshot)
+                .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
+        state.quarantine.remove(expected.object_key());
+        state
+            .quarantine_evidence
+            .insert(expected.object_key().clone(), evidence);
+        Ok(true)
     }
 
     fn retention_hold(&self, object_key: &ObjectKey) -> Result<Option<RetentionHold>, Self::Error> {
-        Ok(self.lock_state()?.retention_holds.get(object_key).cloned())
+        let state = self.lock_state()?;
+        let Some(hold) = state.retention_holds.get(object_key).cloned() else {
+            return Ok(None);
+        };
+        verify_memory_retention_evidence(&state, &hold)?;
+        Ok(Some(hold))
     }
 
     fn list_retention_holds(&self) -> Result<Vec<RetentionHold>, Self::Error> {
-        let mut holds = self
-            .lock_state()?
-            .retention_holds
-            .values()
-            .cloned()
-            .collect::<Vec<_>>();
+        let state = self.lock_state()?;
+        let mut holds = state.retention_holds.values().cloned().collect::<Vec<_>>();
         holds.sort_by(|left, right| left.object_key().as_str().cmp(right.object_key().as_str()));
+        for hold in &holds {
+            verify_memory_retention_evidence(&state, hold)?;
+        }
         Ok(holds)
     }
 
@@ -284,18 +524,79 @@ impl LifecycleStore for MemoryIndexStore {
     }
 
     fn upsert_retention_hold(&self, hold: &RetentionHold) -> Result<(), Self::Error> {
-        self.lock_state()?
-            .retention_holds
-            .insert(hold.object_key().clone(), hold.clone());
+        let mut state = self.lock_state()?;
+        let snapshot = retention_snapshot(hold, RetentionHoldLifecycleState::Active)?;
+        let key = hold.object_key().clone();
+        let evidence = state
+            .retention_evidence
+            .get(&key)
+            .cloned()
+            .unwrap_or_default();
+        let (evidence, _) = if let Some(current) = state.retention_holds.get(&key) {
+            let current_snapshot =
+                retention_snapshot(current, RetentionHoldLifecycleState::Active)?;
+            verify_and_append_snapshot_transition(evidence, current_snapshot, snapshot)
+        } else if evidence.events().is_empty() {
+            verify_and_append_snapshot_transition(evidence, snapshot.clone(), snapshot)
+        } else {
+            verify_and_reactivate_retention_hold(evidence, snapshot)
+        }
+        .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
+        state.retention_holds.insert(key.clone(), hold.clone());
+        state.retention_evidence.insert(key, evidence);
         Ok(())
     }
 
     fn delete_retention_hold(&self, object_key: &ObjectKey) -> Result<bool, Self::Error> {
-        Ok(self
-            .lock_state()?
-            .retention_holds
-            .remove(object_key)
-            .is_some())
+        let mut state = self.lock_state()?;
+        let Some(hold) = state.retention_holds.get(object_key).cloned() else {
+            return Ok(false);
+        };
+        let evidence = state
+            .retention_evidence
+            .get(object_key)
+            .cloned()
+            .unwrap_or_default();
+        let (evidence, _) = verify_and_append_snapshot_transition(
+            evidence,
+            retention_snapshot(&hold, RetentionHoldLifecycleState::Active)?,
+            retention_snapshot(&hold, RetentionHoldLifecycleState::Released)?,
+        )
+        .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
+        state
+            .retention_evidence
+            .insert(object_key.clone(), evidence);
+        state.retention_holds.remove(object_key);
+        Ok(true)
+    }
+
+    fn delete_retention_hold_if_matches(
+        &self,
+        expected: &RetentionHold,
+    ) -> Result<bool, Self::Error> {
+        let mut state = self.lock_state()?;
+        let Some(hold) = state.retention_holds.get(expected.object_key()).cloned() else {
+            return Ok(false);
+        };
+        if hold != *expected {
+            return Ok(false);
+        }
+        let evidence = state
+            .retention_evidence
+            .get(expected.object_key())
+            .cloned()
+            .unwrap_or_default();
+        let (evidence, _) = verify_and_append_snapshot_transition(
+            evidence,
+            retention_snapshot(&hold, RetentionHoldLifecycleState::Active)?,
+            retention_snapshot(&hold, RetentionHoldLifecycleState::Released)?,
+        )
+        .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
+        state
+            .retention_evidence
+            .insert(expected.object_key().clone(), evidence);
+        state.retention_holds.remove(expected.object_key());
+        Ok(true)
     }
 
     fn record_webhook_delivery(&self, delivery: &WebhookDelivery) -> Result<bool, Self::Error> {
@@ -303,8 +604,8 @@ impl LifecycleStore for MemoryIndexStore {
     }
 
     fn list_webhook_deliveries(&self) -> Result<Vec<WebhookDelivery>, Self::Error> {
-        let mut deliveries = self
-            .lock_state()?
+        let state = self.lock_state()?;
+        let mut deliveries = state
             .webhook_deliveries
             .values()
             .cloned()
@@ -316,12 +617,56 @@ impl LifecycleStore for MemoryIndexStore {
                 .then_with(|| left.repo().cmp(right.repo()))
                 .then_with(|| left.delivery_id().cmp(right.delivery_id()))
         });
+        for delivery in &deliveries {
+            verify_memory_webhook_evidence(&state, delivery)?;
+        }
         Ok(deliveries)
     }
 
     fn delete_webhook_delivery(&self, delivery: &WebhookDelivery) -> Result<bool, Self::Error> {
         let key = MemoryWebhookDeliveryKey::from_domain(delivery);
-        Ok(self.lock_state()?.webhook_deliveries.remove(&key).is_some())
+        let mut state = self.lock_state()?;
+        let Some(current) = state.webhook_deliveries.get(&key).cloned() else {
+            return Ok(false);
+        };
+        let evidence = state.webhook_evidence.get(&key).cloned().ok_or_else(|| {
+            MemoryIndexStoreError::Reliability("webhook evidence is missing".into())
+        })?;
+        let (evidence, _) = verify_and_append_snapshot_transition(
+            evidence,
+            webhook_snapshot(&current, WebhookDeliveryLifecycleState::Processed)?,
+            webhook_snapshot(&current, WebhookDeliveryLifecycleState::Released)?,
+        )
+        .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
+        state.webhook_deliveries.remove(&key);
+        state.webhook_evidence.insert(key, evidence);
+        Ok(true)
+    }
+
+    fn delete_webhook_delivery_if_matches(
+        &self,
+        expected: &WebhookDelivery,
+    ) -> Result<bool, Self::Error> {
+        let key = MemoryWebhookDeliveryKey::from_domain(expected);
+        let mut state = self.lock_state()?;
+        let Some(current) = state.webhook_deliveries.get(&key).cloned() else {
+            return Ok(false);
+        };
+        if current != *expected {
+            return Ok(false);
+        }
+        let evidence = state.webhook_evidence.get(&key).cloned().ok_or_else(|| {
+            MemoryIndexStoreError::Reliability("webhook evidence is missing".into())
+        })?;
+        let (evidence, _) = verify_and_append_snapshot_transition(
+            evidence,
+            webhook_snapshot(&current, WebhookDeliveryLifecycleState::Processed)?,
+            webhook_snapshot(&current, WebhookDeliveryLifecycleState::Released)?,
+        )
+        .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
+        state.webhook_deliveries.remove(&key);
+        state.webhook_evidence.insert(key, evidence);
+        Ok(true)
     }
 
     fn provider_repository_state(
@@ -331,16 +676,26 @@ impl LifecycleStore for MemoryIndexStore {
         repo: &str,
     ) -> Result<Option<ProviderRepositoryState>, Self::Error> {
         let key = MemoryProviderRepositoryStateKey::new(provider, owner, repo);
-        Ok(self
-            .lock_state()?
-            .provider_repository_states
+        let store = self.lock_state()?;
+        let Some(state) = store.provider_repository_states.get(&key).cloned() else {
+            return Ok(None);
+        };
+        let snapshot = snapshot_from_state(&state)
+            .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
+        let evidence = store
+            .provider_repository_evidence
             .get(&key)
-            .cloned())
+            .ok_or_else(|| {
+                MemoryIndexStoreError::Reliability("provider state evidence is missing".into())
+            })?;
+        verify_provider_lifecycle_events(evidence.events(), &snapshot)
+            .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
+        Ok(Some(state))
     }
 
     fn list_provider_repository_states(&self) -> Result<Vec<ProviderRepositoryState>, Self::Error> {
-        let mut states = self
-            .lock_state()?
+        let store = self.lock_state()?;
+        let mut states = store
             .provider_repository_states
             .values()
             .cloned()
@@ -351,6 +706,19 @@ impl LifecycleStore for MemoryIndexStore {
                 .then_with(|| left.owner().cmp(right.owner()))
                 .then_with(|| left.repo().cmp(right.repo()))
         });
+        for state in &states {
+            let key = MemoryProviderRepositoryStateKey::from_domain(state);
+            let snapshot = snapshot_from_state(state)
+                .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
+            let evidence = store
+                .provider_repository_evidence
+                .get(&key)
+                .ok_or_else(|| {
+                    MemoryIndexStoreError::Reliability("provider state evidence is missing".into())
+                })?;
+            verify_provider_lifecycle_events(evidence.events(), &snapshot)
+                .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
+        }
         Ok(states)
     }
 
@@ -368,11 +736,21 @@ impl LifecycleStore for MemoryIndexStore {
         repo: &str,
     ) -> Result<bool, Self::Error> {
         let key = MemoryProviderRepositoryStateKey::new(provider, owner, repo);
-        Ok(self
-            .lock_state()?
-            .provider_repository_states
-            .remove(&key)
-            .is_some())
+        let mut store = self.lock_state()?;
+        if let Some(state) = store.provider_repository_states.get(&key) {
+            let snapshot = snapshot_from_state(state)
+                .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
+            let evidence = store
+                .provider_repository_evidence
+                .get(&key)
+                .ok_or_else(|| {
+                    MemoryIndexStoreError::Reliability("provider state evidence is missing".into())
+                })?;
+            verify_provider_lifecycle_events(evidence.events(), &snapshot)
+                .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
+        }
+        store.provider_repository_evidence.remove(&key);
+        Ok(store.provider_repository_states.remove(&key).is_some())
     }
 }
 
@@ -381,6 +759,16 @@ impl UploadIntentStore for MemoryIndexStore {
     type Error = MemoryIndexStoreError;
 
     async fn create_intent(&self, intent: &UploadIntent) -> Result<(), Self::Error> {
+        self.create_intent_scoped(intent, "shardline", "default")
+            .await
+    }
+
+    async fn create_intent_scoped(
+        &self,
+        intent: &UploadIntent,
+        tenant: &str,
+        repository: &str,
+    ) -> Result<(), Self::Error> {
         // Idempotent, matching the SQL stores (INSERT OR IGNORE / ON CONFLICT
         // DO NOTHING): never overwrite an existing intent. Overwriting a fresh
         // `Created` intent over a concurrent caller's already-advanced intent
@@ -393,7 +781,20 @@ impl UploadIntentStore for MemoryIndexStore {
                 }
             }
             std::collections::hash_map::Entry::Vacant(entry) => {
+                let created_event = upload_lifecycle_event(
+                    tenant,
+                    repository,
+                    intent.intent_id(),
+                    intent.object_key(),
+                    intent.object_hash(),
+                    shardline_reliability::UploadLifecycleState::Created,
+                    shardline_reliability::UploadLifecycleState::Created,
+                )
+                .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
                 entry.insert(intent.clone());
+                state
+                    .reliability_events
+                    .insert(intent.intent_id().to_owned(), vec![created_event]);
             }
         }
         Ok(())
@@ -404,41 +805,172 @@ impl UploadIntentStore for MemoryIndexStore {
         intent_id: &str,
         new_state: UploadIntentState,
     ) -> Result<bool, Self::Error> {
+        let Some(intent) = self.intent_by_id(intent_id).await? else {
+            return Ok(false);
+        };
+        if intent.state() == new_state {
+            return Ok(true);
+        }
+        if !intent.state().can_transition_to(new_state) {
+            return Ok(false);
+        }
+        let events = self.reliability_events(intent_id).await?;
+        let (tenant, repository) = upload_lifecycle_identity(&events);
+        let event = upload_lifecycle_event(
+            tenant,
+            repository,
+            intent.intent_id(),
+            intent.object_key(),
+            intent.object_hash(),
+            intent.state(),
+            new_state,
+        )
+        .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
+        self.transition_intent_with_event(intent_id, new_state, &event)
+            .await
+    }
+
+    async fn transition_intent_with_event(
+        &self,
+        intent_id: &str,
+        new_state: UploadIntentState,
+        event: &LifecycleEvent,
+    ) -> Result<bool, Self::Error> {
         let mut state = self.lock_state()?;
-        let intent = state.upload_intents.get(intent_id).cloned();
-        intent.map_or(Ok(false), |intent| {
-            if !intent.state().can_transition_to(new_state) {
-                return Ok(false);
+        let Some(intent) = state.upload_intents.get(intent_id).cloned() else {
+            return Ok(false);
+        };
+        if intent.state() == new_state {
+            return Ok(true);
+        }
+        if !intent.state().can_transition_to(new_state) {
+            return Ok(false);
+        }
+        event
+            .validate_for_transition(intent_id, intent.state(), new_state)
+            .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
+        let mut candidate = state
+            .reliability_events
+            .get(intent_id)
+            .cloned()
+            .unwrap_or_default();
+        candidate.push(event.clone());
+        verify_lifecycle_chain(&candidate)
+            .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
+        let updated = UploadIntent::from_parts(
+            intent.intent_id().to_owned(),
+            intent.object_key().to_owned(),
+            intent.object_hash().to_owned(),
+            intent.object_length(),
+            new_state,
+            intent.created_at(),
+            Duration::ZERO,
+        );
+        state.upload_intents.insert(intent_id.to_owned(), updated);
+        state
+            .reliability_events
+            .insert(intent_id.to_owned(), candidate);
+        Ok(true)
+    }
+
+    async fn record_reliability_event(&self, event: &LifecycleEvent) -> Result<(), Self::Error> {
+        event
+            .verify_integrity()
+            .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
+        let mut state = self.lock_state()?;
+        let Some(intent) = state
+            .upload_intents
+            .get(&event.operation.operation_id)
+            .cloned()
+        else {
+            return Err(MemoryIndexStoreError::Reliability(
+                "reliability event has no authoritative upload intent".into(),
+            ));
+        };
+        let events = state
+            .reliability_events
+            .entry(event.operation.operation_id.clone())
+            .or_default();
+        if let Some(existing) = events
+            .iter()
+            .find(|existing| existing.sequence == event.sequence)
+        {
+            if existing != event {
+                return Err(MemoryIndexStoreError::ReliabilityEventConflict(
+                    event.operation.operation_id.clone(),
+                ));
             }
-            let updated = UploadIntent::from_parts(
-                intent.intent_id().to_owned(),
-                intent.object_key().to_owned(),
-                intent.object_hash().to_owned(),
-                intent.object_length(),
-                new_state,
-                intent.created_at(),
-                Duration::ZERO,
-            );
-            state.upload_intents.insert(intent_id.to_owned(), updated);
-            Ok(true)
-        })
+            return Ok(());
+        }
+        events.push(event.clone());
+        events.sort_by_key(|stored_event| stored_event.sequence);
+        let (tenant, repository) = upload_lifecycle_identity(events);
+        verify_upload_lifecycle_events(
+            events,
+            tenant,
+            repository,
+            intent.intent_id(),
+            intent.object_key(),
+            intent.object_hash(),
+            intent.state(),
+        )
+        .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
+        Ok(())
+    }
+
+    async fn reliability_events(
+        &self,
+        operation_id: &str,
+    ) -> Result<Vec<LifecycleEvent>, Self::Error> {
+        let state = self.lock_state()?;
+        let events = state
+            .reliability_events
+            .get(operation_id)
+            .cloned()
+            .unwrap_or_default();
+        if let Some(intent) = state.upload_intents.get(operation_id) {
+            let (tenant, repository) = upload_lifecycle_identity(&events);
+            verify_upload_lifecycle_events(
+                &events,
+                tenant,
+                repository,
+                operation_id,
+                intent.object_key(),
+                intent.object_hash(),
+                intent.state(),
+            )
+            .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
+        } else {
+            verify_lifecycle_chain(&events)
+                .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))?;
+        }
+        Ok(events)
     }
 
     async fn intent_by_id(&self, intent_id: &str) -> Result<Option<UploadIntent>, Self::Error> {
-        Ok(self.lock_state()?.upload_intents.get(intent_id).cloned())
+        let state = self.lock_state()?;
+        let Some(intent) = state.upload_intents.get(intent_id).cloned() else {
+            return Ok(None);
+        };
+        verify_memory_intent_evidence(&state, &intent)?;
+        Ok(Some(intent))
     }
 
     async fn intents_by_state(
         &self,
         state: UploadIntentState,
     ) -> Result<Vec<UploadIntent>, Self::Error> {
-        Ok(self
-            .lock_state()?
+        let state_data = self.lock_state()?;
+        let intents = state_data
             .upload_intents
             .values()
             .filter(|i| i.state() == state)
             .cloned()
-            .collect())
+            .collect::<Vec<_>>();
+        for intent in &intents {
+            verify_memory_intent_evidence(&state_data, intent)?;
+        }
+        Ok(intents)
     }
 
     async fn stale_intents(
@@ -450,14 +982,40 @@ impl UploadIntentStore for MemoryIndexStore {
             .duration_since(UNIX_EPOCH)
             .unwrap_or(Duration::ZERO);
         let cutoff = now.saturating_sub(older_than);
-        Ok(self
-            .lock_state()?
+        let state_data = self.lock_state()?;
+        let intents = state_data
             .upload_intents
             .values()
             .filter(|i| i.state() == state && i.created_at() < cutoff)
             .cloned()
-            .collect())
+            .collect::<Vec<_>>();
+        for intent in &intents {
+            verify_memory_intent_evidence(&state_data, intent)?;
+        }
+        Ok(intents)
     }
+}
+
+fn verify_memory_intent_evidence(
+    state: &MemoryIndexState,
+    intent: &UploadIntent,
+) -> Result<(), MemoryIndexStoreError> {
+    let events = state
+        .reliability_events
+        .get(intent.intent_id())
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let (tenant, repository) = upload_lifecycle_identity(events);
+    verify_upload_lifecycle_events(
+        events,
+        tenant,
+        repository,
+        intent.intent_id(),
+        intent.object_key(),
+        intent.object_hash(),
+        intent.state(),
+    )
+    .map_err(|error| MemoryIndexStoreError::Reliability(error.to_string()))
 }
 
 impl AsyncIndexStore for MemoryIndexStore {
@@ -487,6 +1045,16 @@ impl AsyncIndexStore for MemoryIndexStore {
         file_id: &'operation FileId,
     ) -> IndexStoreFuture<'operation, bool, Self::Error> {
         Box::pin(async move { ReconstructionStore::delete_reconstruction(self, file_id) })
+    }
+
+    fn delete_reconstruction_if_matches<'operation>(
+        &'operation self,
+        file_id: &'operation FileId,
+        expected: &'operation FileReconstruction,
+    ) -> IndexStoreFuture<'operation, bool, Self::Error> {
+        Box::pin(async move {
+            ReconstructionStore::delete_reconstruction_if_matches(self, file_id, expected)
+        })
     }
 
     fn contains_object<'operation>(
@@ -540,6 +1108,13 @@ impl AsyncIndexStore for MemoryIndexStore {
         chunk_hash: &'operation ShardlineHash,
     ) -> IndexStoreFuture<'operation, bool, Self::Error> {
         Box::pin(async move { DedupeStore::delete_dedupe_shard_mapping(self, chunk_hash) })
+    }
+
+    fn delete_dedupe_shard_mapping_if_matches<'operation>(
+        &'operation self,
+        expected: &'operation DedupeShardMapping,
+    ) -> IndexStoreFuture<'operation, bool, Self::Error> {
+        Box::pin(async move { DedupeStore::delete_dedupe_shard_mapping_if_matches(self, expected) })
     }
 
     fn prune_revisions_over_cap<'operation>(
@@ -807,6 +1382,12 @@ pub enum MemoryIndexStoreError {
         #[source]
         UploadIntentConflictError,
     ),
+    /// Reliability evidence was malformed or could not be replayed.
+    #[error("memory reliability evidence failed: {0}")]
+    Reliability(String),
+    /// A reliability sequence was already bound to different evidence.
+    #[error("reliability event conflict: {0}")]
+    ReliabilityEventConflict(String),
 }
 
 #[derive(Debug, Default)]
@@ -815,10 +1396,15 @@ struct MemoryIndexState {
     xorbs: HashSet<XorbId>,
     dedupe_shards: HashMap<ShardlineHash, DedupeShardMapping>,
     quarantine: HashMap<ObjectKey, QuarantineCandidate>,
+    quarantine_evidence: HashMap<ObjectKey, QuarantineEvidenceLog>,
     retention_holds: HashMap<ObjectKey, RetentionHold>,
+    retention_evidence: HashMap<ObjectKey, RetentionEvidenceLog>,
     webhook_deliveries: HashMap<MemoryWebhookDeliveryKey, WebhookDelivery>,
+    webhook_evidence: HashMap<MemoryWebhookDeliveryKey, WebhookDeliveryEvidenceLog>,
     provider_repository_states: HashMap<MemoryProviderRepositoryStateKey, ProviderRepositoryState>,
+    provider_repository_evidence: HashMap<MemoryProviderRepositoryStateKey, ProviderEvidenceLog>,
     upload_intents: HashMap<String, UploadIntent>,
+    reliability_events: HashMap<String, Vec<LifecycleEvent>>,
     tree_entries: BTreeMap<MemoryTreeKey, TreeEntry>,
     revisions: BTreeMap<MemoryRevisionKey, RevisionRecord>,
 }
@@ -1445,6 +2031,7 @@ mod tests {
 
     use serde_json::from_slice;
     use shardline_protocol::{ChunkRange, RepositoryProvider, RepositoryScope, ShardlineHash};
+    use shardline_reliability::ProviderEvidenceLog;
     use shardline_storage::ObjectKey;
 
     use super::{MemoryIndexStore, MemoryRecordStore};
@@ -1453,8 +2040,35 @@ mod tests {
         LifecycleStore, LocalIndexStore, MemoryIndexStoreError, MemoryRecordStoreError,
         ProviderRepositoryState, QuarantineCandidate, ReconstructionStore, ReconstructionTerm,
         RecordMutation, RecordTraversal, RepositoryRecordScope, RetentionHold, StoredObjectId,
-        WebhookDelivery, XorbId,
+        UploadIntent, UploadIntentState, UploadIntentStore, WebhookDelivery, XorbId,
     };
+    use crate::{memory::MemoryProviderRepositoryStateKey, provider_evidence::snapshot_from_state};
+
+    #[tokio::test]
+    async fn scoped_intent_legacy_transition_preserves_evidence_identity() {
+        let store = MemoryIndexStore::new();
+        let intent = UploadIntent::new(
+            "memory-scoped-transition".to_owned(),
+            "objects/memory-scoped".to_owned(),
+            "a".repeat(64),
+            7,
+        );
+        store
+            .create_intent_scoped(&intent, "tenant-memory", "repo-memory")
+            .await
+            .unwrap();
+
+        assert!(
+            store
+                .transition_intent(intent.intent_id(), UploadIntentState::Storing)
+                .await
+                .unwrap()
+        );
+        let events = store.reliability_events(intent.intent_id()).await.unwrap();
+        assert!(events.iter().all(|event| {
+            event.operation.tenant == "tenant-memory" && event.operation.repository == "repo-memory"
+        }));
+    }
 
     #[test]
     fn memory_index_store_satisfies_index_store_lifecycle_contract() {
@@ -2562,6 +3176,137 @@ mod tests {
     }
 
     #[test]
+    fn memory_delete_quarantine_candidate_preserves_tampered_state() {
+        let store = MemoryIndexStore::new();
+        let key = ObjectKey::parse("xorbs/tampered/key").unwrap();
+        let candidate = QuarantineCandidate::new(key.clone(), 4, 10, 20).unwrap();
+        store.upsert_quarantine_candidate(&candidate).unwrap();
+
+        let other_key = ObjectKey::parse("xorbs/other/key").unwrap();
+        let other_identity =
+            shardline_reliability::QuarantineObjectIdentity::new(other_key.as_str()).unwrap();
+        let other_snapshot = shardline_reliability::QuarantineSnapshot::new(
+            other_identity,
+            4,
+            10,
+            20,
+            shardline_reliability::QuarantineLifecycleState::Active,
+        )
+        .unwrap();
+        let tampered_evidence =
+            shardline_reliability::QuarantineEvidenceLog::baseline(other_snapshot).unwrap();
+        store
+            .state
+            .lock()
+            .unwrap()
+            .quarantine_evidence
+            .insert(key.clone(), tampered_evidence);
+
+        let result = store.delete_quarantine_candidate(&key);
+        assert!(matches!(result, Err(MemoryIndexStoreError::Reliability(_))));
+        assert!(store.state.lock().unwrap().quarantine.contains_key(&key));
+    }
+
+    #[test]
+    fn memory_upsert_quarantine_candidate_preserves_tampered_evidence() {
+        let store = MemoryIndexStore::new();
+        let key = ObjectKey::parse("xorbs/tampered-upsert/key").unwrap();
+        let candidate = QuarantineCandidate::new(key.clone(), 4, 10, 20).unwrap();
+        store.upsert_quarantine_candidate(&candidate).unwrap();
+
+        let other_key = ObjectKey::parse("xorbs/other-upsert/key").unwrap();
+        let other_identity =
+            shardline_reliability::QuarantineObjectIdentity::new(other_key.as_str()).unwrap();
+        let other_snapshot = shardline_reliability::QuarantineSnapshot::new(
+            other_identity,
+            4,
+            10,
+            20,
+            shardline_reliability::QuarantineLifecycleState::Active,
+        )
+        .unwrap();
+        let tampered_evidence =
+            shardline_reliability::QuarantineEvidenceLog::baseline(other_snapshot).unwrap();
+        store
+            .state
+            .lock()
+            .unwrap()
+            .quarantine_evidence
+            .insert(key.clone(), tampered_evidence);
+
+        let replacement = QuarantineCandidate::new(key.clone(), 8, 10, 30).unwrap();
+        let result = store.upsert_quarantine_candidate(&replacement);
+        assert!(matches!(result, Err(MemoryIndexStoreError::Reliability(_))));
+        assert_eq!(
+            store.state.lock().unwrap().quarantine.get(&key),
+            Some(&candidate)
+        );
+    }
+
+    #[test]
+    fn memory_quarantine_reactivation_accepts_changed_observed_metadata() {
+        let store = MemoryIndexStore::new();
+        let key = ObjectKey::parse("xorbs/reactivated/key").unwrap();
+        let original = QuarantineCandidate::new(key.clone(), 4, 10, 20).unwrap();
+        let reactivated = QuarantineCandidate::new(key.clone(), 8, 30, 40).unwrap();
+
+        store.upsert_quarantine_candidate(&original).unwrap();
+        assert!(store.delete_quarantine_candidate(&key).unwrap());
+        store.upsert_quarantine_candidate(&reactivated).unwrap();
+
+        assert_eq!(store.quarantine_candidate(&key).unwrap(), Some(reactivated));
+    }
+
+    #[test]
+    fn memory_retention_reactivation_accepts_changed_metadata() {
+        let store = MemoryIndexStore::new();
+        let key = ObjectKey::parse("chunks/reactivated-retention/key").unwrap();
+        let original =
+            RetentionHold::new(key.clone(), "original".to_owned(), 10, Some(20)).unwrap();
+        let reactivated =
+            RetentionHold::new(key.clone(), "updated".to_owned(), 30, Some(40)).unwrap();
+
+        store.upsert_retention_hold(&original).unwrap();
+        assert!(store.delete_retention_hold(&key).unwrap());
+        store.upsert_retention_hold(&reactivated).unwrap();
+
+        assert_eq!(store.retention_hold(&key).unwrap(), Some(reactivated));
+    }
+
+    #[test]
+    fn memory_retention_hold_read_rejects_tampered_evidence() {
+        let store = MemoryIndexStore::new();
+        let key = ObjectKey::parse("chunks/tampered-retention/key").unwrap();
+        let hold = RetentionHold::new(key.clone(), "retain".to_owned(), 10, Some(20)).unwrap();
+        store.upsert_retention_hold(&hold).unwrap();
+
+        let other_key = ObjectKey::parse("chunks/other-retention/key").unwrap();
+        let wrong_snapshot = shardline_reliability::RetentionHoldSnapshot::new(
+            shardline_reliability::RetentionObjectIdentity::new(other_key.as_str()).unwrap(),
+            "retain",
+            10,
+            Some(20),
+            shardline_reliability::RetentionHoldLifecycleState::Active,
+        )
+        .unwrap();
+        store.state.lock().unwrap().retention_evidence.insert(
+            key.clone(),
+            shardline_reliability::RetentionEvidenceLog::baseline(wrong_snapshot).unwrap(),
+        );
+
+        let result = LifecycleStore::retention_hold(&store, &key);
+        assert!(matches!(result, Err(MemoryIndexStoreError::Reliability(_))));
+        assert!(
+            store
+                .state
+                .lock()
+                .unwrap()
+                .retention_holds
+                .contains_key(&key)
+        );
+    }
+
+    #[test]
     fn memory_index_store_delete_retention_hold_not_found() {
         let store = MemoryIndexStore::new();
         let key = ObjectKey::parse("xorbs/absent/hold").unwrap();
@@ -2575,6 +3320,57 @@ mod tests {
             !store
                 .delete_provider_repository_state(RepositoryProvider::GitHub, "nonexistent", "repo")
                 .unwrap()
+        );
+    }
+
+    #[test]
+    fn memory_provider_repository_delete_rejects_tampered_evidence() {
+        let store = MemoryIndexStore::new();
+        let state = ProviderRepositoryState::new(
+            RepositoryProvider::GitHub,
+            "team".into(),
+            "tampered-delete".into(),
+            Some(100),
+            None,
+            None,
+        );
+        store.upsert_provider_repository_state(&state).unwrap();
+        let key = MemoryProviderRepositoryStateKey::from_domain(&state);
+        let other = ProviderRepositoryState::new(
+            RepositoryProvider::GitHub,
+            "team".into(),
+            "other".into(),
+            Some(999),
+            None,
+            None,
+        );
+        let wrong_snapshot = snapshot_from_state(&other).unwrap();
+        store
+            .state
+            .lock()
+            .unwrap()
+            .provider_repository_evidence
+            .insert(key, ProviderEvidenceLog::baseline(wrong_snapshot).unwrap());
+
+        assert!(matches!(
+            store.delete_provider_repository_state(
+                RepositoryProvider::GitHub,
+                "team",
+                "tampered-delete",
+            ),
+            Err(MemoryIndexStoreError::Reliability(_))
+        ));
+        assert!(
+            store
+                .state
+                .lock()
+                .unwrap()
+                .provider_repository_states
+                .contains_key(&MemoryProviderRepositoryStateKey::new(
+                    RepositoryProvider::GitHub,
+                    "team",
+                    "tampered-delete",
+                ))
         );
     }
 

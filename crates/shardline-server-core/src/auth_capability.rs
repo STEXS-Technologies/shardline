@@ -3,8 +3,9 @@
 //! An [`AuthorizedRepository`] is the only handle through which repository-scoped
 //! storage operations will be permitted. It is deliberately **sealed**: its fields
 //! are private and, apart from the `#[doc(hidden)]` seams reserved for the
-//! auth-layer extractors, it has no public constructor, so a forged [`AuthContext`]
-//! (whose [`AuthContext::new`] is `pub const` and accepts bare [`TokenClaims`])
+//! auth-layer extractors, it has no public constructor, so a forged
+//! [`shardline_auth::AuthContext`] (whose [`shardline_auth::AuthContext::new`]
+//! is `pub const` and accepts bare [`TokenClaims`])
 //! cannot mint one. The sole **public** mint path is
 //! [`AuthorizedRepository::verify_and_authorize`], which re-verifies the bearer
 //! token against an [`AuthProvider`] and enforces the required scope before a
@@ -17,16 +18,12 @@
 //! that **only** the auth layer can mint. Its constructor is `pub(crate)`
 //! inside `shardline-auth`, and the sole production path to one is
 //! [`AuthProvider::verify_verified`], which wraps claims a provider just
-//! verified. A forged [`AuthContext`] (bare `TokenClaims` through
-//! [`AuthContext::new`]) cannot be converted to a [`VerifiedAuthContext`], so
+//! verified. A forged [`shardline_auth::AuthContext`] (bare `TokenClaims` through
+//! [`shardline_auth::AuthContext::new`]) cannot be converted to a [`VerifiedAuthContext`], so
 //! the seam is unreachable with unverified claims: no crate outside the auth
 //! layer can mint a capability from a hand-constructed context.
 
-// `AuthContext` is referenced only by intra-doc links below (it is the
-// forgeable value type the seal protects against); rustc does not count
-// doc-link usage for the unused-imports lint, so keep it explicitly.
-#[allow(unused_imports)]
-use shardline_auth::{AuthContext, AuthError, AuthProvider, VerifiedAuthContext};
+use shardline_auth::{AuthError, AuthProvider, VerifiedAuthContext};
 use shardline_protocol::{RepositoryScope, TokenClaims, TokenScope};
 
 /// A verified, scope-checked capability authorizing access to a single repository.
@@ -43,8 +40,8 @@ use shardline_protocol::{RepositoryScope, TokenClaims, TokenScope};
 /// non-hidden constructor is [`Self::verify_and_authorize`]. The
 /// [`Self::from_verified_context`] seam takes a [`VerifiedAuthContext`], which
 /// **only the auth layer can mint** (see the module docs), so
-/// `AuthContext::new` (which is `pub const` and takes bare claims) cannot be
-/// used to mint a capability — there is no `From<AuthContext>` or
+/// [`shardline_auth::AuthContext::new`] (which is `pub const` and takes bare claims) cannot be
+/// used to mint a capability — there is no `From<shardline_auth::AuthContext>` or
 /// `From<TokenClaims>` conversion into a `VerifiedAuthContext`, so any attempt
 /// is rejected at compile time:
 ///
@@ -65,7 +62,7 @@ use shardline_protocol::{RepositoryScope, TokenClaims, TokenScope};
 /// This compile-fail guarantee is the **type-enforced** replacement for the
 /// old convention-only seal: the `#[doc(hidden)]` seam
 /// [`Self::from_verified_context`] now consumes a [`VerifiedAuthContext`], so a
-/// hand-constructed [`AuthContext`] — or any other code path that skips a
+/// hand-constructed [`shardline_auth::AuthContext`] — or any other code path that skips a
 /// provider verification — cannot produce a capability (see the module docs on
 /// the seal seam).
 ///

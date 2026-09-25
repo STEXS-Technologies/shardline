@@ -78,6 +78,7 @@ async fn exercise_backup_manifest() -> Result<(), Box<dyn Error>> {
     let output_path = storage.path().join("backup-manifest.json");
     let shardline_bin = shardline_binary()?;
     let output = Command::new(shardline_bin)
+        .env_remove("SHARDLINE_INDEX_POSTGRES_URL")
         .args([
             "backup",
             "manifest",
@@ -165,6 +166,7 @@ async fn exercise_backup_manifest_from_current_directory() -> Result<(), Box<dyn
     let output = Command::new(shardline_bin)
         .current_dir(storage.path())
         .env_remove("SHARDLINE_ROOT_DIR")
+        .env_remove("SHARDLINE_INDEX_POSTGRES_URL")
         .args([
             "backup",
             "manifest",
@@ -217,6 +219,7 @@ async fn exercise_backup_manifest_from_project_directory() -> Result<(), Box<dyn
     let output = Command::new(shardline_bin)
         .current_dir(project.path())
         .env_remove("SHARDLINE_ROOT_DIR")
+        .env_remove("SHARDLINE_INDEX_POSTGRES_URL")
         .args([
             "backup",
             "manifest",
@@ -272,6 +275,7 @@ async fn exercise_backup_manifest_rejects_symlinked_output_path() -> Result<(), 
 
     let shardline_bin = shardline_binary()?;
     let output = Command::new(shardline_bin)
+        .env_remove("SHARDLINE_INDEX_POSTGRES_URL")
         .args([
             "backup",
             "manifest",
@@ -321,6 +325,7 @@ async fn exercise_backup_manifest_rejects_symlinked_root_override() -> Result<()
     let output_path = storage.path().join("backup-manifest.json");
     let shardline_bin = shardline_binary()?;
     let output = Command::new(shardline_bin)
+        .env_remove("SHARDLINE_INDEX_POSTGRES_URL")
         .args([
             "backup",
             "manifest",

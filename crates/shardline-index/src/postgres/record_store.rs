@@ -3,12 +3,16 @@ use std::time::Duration;
 
 use futures_util::TryStreamExt;
 use serde_json::to_vec;
+use shardline_reliability::resumable_session_event;
 use sqlx::{
     Connection as _, PgConnection, Postgres, Row, Transaction, postgres::PgRow, query,
     query_scalar, types::Json,
 };
 
-use super::{PostgresMetadataStoreError, PostgresRecordLocator, RecordKind, i64_to_u64};
+use super::{
+    PostgresMetadataStoreError, PostgresRecordLocator, RecordKind, i64_to_u64,
+    insert_reliability_event, next_reliability_sequence,
+};
 use crate::{
     DedupeShardMapping, FileRecord, RecordMutation, RecordStoreFuture, RecordTraversal,
     RepositoryRecordScope, ResumableCompletionFence, S3ObjectEntry, S3PublishCondition,
@@ -78,23 +82,33 @@ impl super::PostgresRecordStore {
         }
         let metadata = serde_json::to_string(&entry.user_metadata)?;
         let mut transaction = connection.begin().await?;
-        if let Some(fence) = completion_fence {
-            let owns_completion = query_scalar::<_, i32>(
-                "SELECT 1 FROM shardline_resumable_sessions
+        let previous_s3_entry = super::s3_objects::current_s3_object_on_connection(
+            &mut transaction,
+            &entry.scope_namespace,
+            &entry.object_key,
+        )
+        .await?;
+        let completion_identity = if let Some(fence) = completion_fence {
+            let owns_completion = query(
+                "SELECT scope_namespace, target_key FROM shardline_resumable_sessions
                  WHERE session_id = $1 AND state = 'completing' AND fence_epoch = $2
-                   AND expires_at > clock_timestamp()
+                 AND expires_at > clock_timestamp()
                  FOR UPDATE",
             )
             .bind(fence.session_id())
             .bind(super::u64_to_i64(fence.epoch().get())?)
             .fetch_optional(&mut *transaction)
-            .await?
-            .is_some();
-            if !owns_completion {
+            .await?;
+            let Some(owns_completion) = owns_completion else {
                 transaction.rollback().await?;
                 return Ok(false);
-            }
-        }
+            };
+            let scope_namespace: String = owns_completion.try_get("scope_namespace")?;
+            let target_key: String = owns_completion.try_get("target_key")?;
+            Some((scope_namespace, target_key))
+        } else {
+            None
+        };
         let version = self.version_record_locator(record);
         upsert_record_in_transaction(&mut transaction, &version, record).await?;
         let latest = self.latest_record_locator(record);
@@ -175,6 +189,12 @@ impl super::PostgresRecordStore {
             transaction.rollback().await?;
             return Ok(false);
         }
+        super::s3_objects::record_s3_object_transition(
+            &mut transaction,
+            previous_s3_entry.as_ref(),
+            Some(entry),
+        )
+        .await?;
         if let Some(fence) = completion_fence {
             let completed = query(
                 "UPDATE shardline_resumable_sessions
@@ -189,6 +209,26 @@ impl super::PostgresRecordStore {
                 transaction.rollback().await?;
                 return Ok(false);
             }
+            super::refresh_resumable_state_digest(&mut transaction, fence.session_id()).await?;
+            let Some((scope_namespace, target_key)) = completion_identity else {
+                transaction.rollback().await?;
+                return Ok(false);
+            };
+            let sequence = next_reliability_sequence(
+                transaction.as_mut(),
+                shardline_reliability::OperationKind::ResumableSession,
+                fence.session_id(),
+            )
+            .await?;
+            let event = resumable_session_event(
+                scope_namespace,
+                fence.session_id(),
+                target_key,
+                sequence,
+                crate::ResumableSessionState::Completing,
+                crate::ResumableSessionState::Completed,
+            )?;
+            insert_reliability_event(transaction.as_mut(), &event).await?;
         }
         transaction.commit().await?;
         Ok(true)
@@ -212,6 +252,12 @@ impl super::PostgresRecordStore {
         fallback_file_id: &str,
     ) -> Result<bool, PostgresMetadataStoreError> {
         let mut transaction = connection.begin().await?;
+        let previous_s3_entry = super::s3_objects::current_s3_object_on_connection(
+            &mut transaction,
+            scope_namespace,
+            object_key,
+        )
+        .await?;
         let deleted_entry = query(
             "DELETE FROM shardline_s3_objects
              WHERE scope_namespace = $1 AND object_key = $2
@@ -255,6 +301,14 @@ impl super::PostgresRecordStore {
         } else {
             0
         };
+        if deleted_entry.is_some() {
+            super::s3_objects::record_s3_object_transition(
+                &mut transaction,
+                previous_s3_entry.as_ref(),
+                None,
+            )
+            .await?;
+        }
         transaction.commit().await?;
         Ok(deleted_entry.is_some() || deleted_records > 0)
     }
@@ -987,10 +1041,9 @@ mod tests {
 
     #[tokio::test]
     async fn s3_publication_rolls_back_records_when_condition_loses() {
-        let Ok(url) = std::env::var("DATABASE_URL") else {
+        let Some(pool) = super::super::connect_isolated_postgres().await else {
             return;
         };
-        let pool = sqlx::PgPool::connect(&url).await.unwrap();
         let store = super::super::PostgresRecordStore::new(pool.clone());
         let suffix = chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default();
         let mut record = sample_record(None);
@@ -1080,10 +1133,9 @@ mod tests {
 
     #[tokio::test]
     async fn stale_multipart_completion_cannot_publish() {
-        let Ok(url) = std::env::var("DATABASE_URL") else {
+        let Some(pool) = super::super::connect_isolated_postgres().await else {
             return;
         };
-        let pool = sqlx::PgPool::connect(&url).await.unwrap();
         let record_store = super::super::PostgresRecordStore::new(pool.clone());
         let index_store = super::super::PostgresIndexStore::new(pool.clone());
         let suffix = chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default();
@@ -1161,6 +1213,23 @@ mod tests {
                 .unwrap()
                 .state(),
             crate::ResumableSessionState::Completed
+        );
+        let events = index_store
+            .resumable_reliability_events(session.session_id())
+            .await
+            .unwrap();
+        shardline_reliability::verify_state_transition_chain(&events).unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| (event.before.as_str(), event.after.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("active", "active"),
+                ("active", "completing"),
+                ("completing", "completing"),
+                ("completing", "completed"),
+            ]
         );
     }
 }

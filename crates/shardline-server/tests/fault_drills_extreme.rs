@@ -283,7 +283,9 @@ impl DrillHarness {
 
     async fn gc(&self, options: LocalGcOptions) -> LocalGcReport {
         let config = self.build_config("127.0.0.1:0".parse().unwrap());
-        shardline_server::run_gc(config, options).await.unwrap()
+        shardline_server::run_gc(config, options)
+            .await
+            .unwrap_or_else(|error| panic!("GC failed for root {:?}: {error:?}", self.root))
     }
 
     fn url(&self, path: &str) -> String {

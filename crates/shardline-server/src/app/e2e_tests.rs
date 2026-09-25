@@ -1503,8 +1503,12 @@ async fn hashing_pool_starvation_rejects_immediately_and_recovers() {
 
     drop(held_hashing_permit);
 
+    // The recovery request must eventually run after the permit is released.
+    // Keep the rejection assertion above tight, but allow extra scheduler
+    // time here because this test runs alongside the full multi-threaded
+    // server suite and does not exercise a production request deadline.
     let recovered = tokio::time::timeout(
-        std::time::Duration::from_secs(1),
+        std::time::Duration::from_secs(5),
         app.oneshot(
             Request::builder()
                 .method("PUT")
@@ -8800,11 +8804,11 @@ async fn oci_manifest_delete_not_found() {
 }
 
 // ---------------------------------------------------------------------------
-// OCI: Upload session expiration and auto-cleanup
+// OCI: Tampered upload sessions fail closed and remain available for repair
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn oci_blob_upload_session_expires_cleaned_up() {
+async fn oci_blob_upload_session_tampering_fails_closed_without_cleanup() {
     let (app, tmp) = test_app(&[ServerFrontend::Oci]).await;
 
     // Step 1: Create an upload session
@@ -8844,8 +8848,8 @@ async fn oci_blob_upload_session_expires_cleaned_up() {
     session["last_touched_unix_seconds"] = serde_json::json!(0u64);
     std::fs::write(&metadata_path, serde_json::to_vec(&session).unwrap()).unwrap();
 
-    // Step 3: PATCH the session — the handler should detect expiry, clean up,
-    // and return 404.
+    // Step 3: PATCH the session — the handler must reject the tampered
+    // evidence without treating the unverified expiry as deletion authority.
     let patch = app
         .oneshot(
             Request::builder()
@@ -8859,17 +8863,12 @@ async fn oci_blob_upload_session_expires_cleaned_up() {
         .await
         .unwrap();
 
-    assert_eq!(
-        patch.status(),
-        StatusCode::NOT_FOUND,
-        "expired session should be auto-cleaned: {}",
-        String::from_utf8_lossy(&body_bytes(patch).await)
-    );
+    assert_eq!(patch.status(), StatusCode::INTERNAL_SERVER_ERROR);
 
-    // Step 4: Confirm the metadata file has been deleted
+    // Step 4: Confirm the metadata file remains available for repair.
     assert!(
-        !metadata_path.exists(),
-        "session metadata should be deleted after expiry"
+        metadata_path.exists(),
+        "tampered session metadata must be preserved for repair"
     );
 }
 

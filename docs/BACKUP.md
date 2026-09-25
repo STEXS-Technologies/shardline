@@ -104,6 +104,6 @@ metadata loss, object-store loss, crash mid-upload, and cross-node moves — see
 Run it directly with:
 
 ```bash
-cargo test -p shardline-server --test fault_drills \
-  drill9_backup_destroy_restore_fsck_and_download
+cargo nextest run -p shardline-server --test fault_drills \
+  -E 'test(drill9_backup_destroy_restore_fsck_and_download)'
 ```

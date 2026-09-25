@@ -26,8 +26,8 @@ pub struct S3RawConfig {
 }
 
 const POSTGRES_IMAGE: &str = "postgres:16-alpine";
-const MINIO_IMAGE: &str = "quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z";
-const MINIO_MC_IMAGE: &str = "quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z";
+const MINIO_IMAGE: &str = "ghcr.io/golithus/minio:RELEASE.2025-10-15T17-29-55Z@sha256:8793e960474071520bdb91bb9a6d1793eb229fdbc9dcb7ec75ad836b69bbab40";
+const MINIO_MC_IMAGE: &str = "ghcr.io/golithus/mc:RELEASE.2025-08-13T08-35-41Z@sha256:dde55ccc0bc9e65dc582c8e652d652eea1438c6e60d774524f4da15d7b26a900";
 const REDIS_IMAGE: &str = "redis:7-alpine";
 
 const POSTGRES_USER: &str = "shardline";
@@ -245,8 +245,8 @@ impl DockerLocalStack {
             .as_mut()
             .ok_or_else(|| IoError::new(ErrorKind::NotFound, "minio is not configured"))?;
         start_container(&service.container_name)?;
-        wait_for_minio(&service.container_name)?;
         service.host_port = docker_published_port(&service.container_name, 9000)?;
+        wait_for_minio(service.host_port)?;
         Ok(())
     }
 
@@ -435,7 +435,7 @@ fn start_minio_service(run_id: &str) -> Result<MinioService, IoError> {
         let host_port = docker_published_port(&container_name, 9000)?;
         let mc_host =
             format!("http://{MINIO_ROOT_USER}:{MINIO_ROOT_PASSWORD}@127.0.0.1:{host_port}");
-        wait_for_minio(&container_name)?;
+        wait_for_minio(host_port)?;
         run_command_checked(
             Command::new("docker")
                 .arg("run")
@@ -624,17 +624,14 @@ fn wait_for_postgres(container_name: &str, host_port: u16) -> Result<(), IoError
     )
 }
 
-fn wait_for_minio(container_name: &str) -> Result<(), IoError> {
+fn wait_for_minio(host_port: u16) -> Result<(), IoError> {
     wait_for(
         || {
             run_command(
-                Command::new("docker")
-                    .arg("exec")
-                    .arg(container_name)
-                    .arg("curl")
+                Command::new("curl")
                     .arg("--fail")
                     .arg("--silent")
-                    .arg("http://127.0.0.1:9000/minio/health/live"),
+                    .arg(format!("http://127.0.0.1:{host_port}/minio/health/live")),
             )
             .is_ok_and(|output| output.status.success())
         },
