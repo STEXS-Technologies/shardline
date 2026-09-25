@@ -15,16 +15,16 @@ use crate::{
     ServerError,
     admission::weights,
     xet_adapter::{
-        BatchReconstructionResponse, build_batch_reconstruction_response, validate_hash_path,
-        validate_optional_content_hash,
+        BatchReconstructionResponse, build_batch_reconstruction_response,
+        reconstruction_v2_from_v1, validate_hash_path, validate_optional_content_hash,
     },
 };
 
 use super::{
     AppState, authorize,
     reconstruction_helpers::{
-        load_reconstruction_response, load_reconstruction_v2_response,
-        parse_batch_reconstruction_file_ids, parse_reconstruction_request_range,
+        load_reconstruction_range_response, load_reconstruction_response,
+        load_reconstruction_v2_response, parse_batch_reconstruction_file_ids,
     },
 };
 
@@ -150,23 +150,28 @@ pub(super) async fn reconstruction(
         .ok_or(ServerError::WorkQueueSaturated)?;
     validate_hash_path(&file_id)?;
     validate_optional_content_hash(query.content_hash.as_deref())?;
-    let requested_range = parse_reconstruction_request_range(
+    let start = Instant::now();
+    let result = match load_reconstruction_range_response(
         &state,
         &headers,
         &file_id,
         query.content_hash.as_deref(),
         repo.capability(),
     )
-    .await?;
-    let start = Instant::now();
-    let result = load_reconstruction_response(
-        &state,
-        &file_id,
-        query.content_hash.as_deref(),
-        requested_range,
-        repo.capability(),
-    )
-    .await;
+    .await?
+    {
+        Some(response) => Ok(response),
+        None => {
+            load_reconstruction_response(
+                &state,
+                &file_id,
+                query.content_hash.as_deref(),
+                None,
+                repo.capability(),
+            )
+            .await
+        }
+    };
     let elapsed = start.elapsed();
     match &result {
         Ok(response) => {
@@ -200,23 +205,28 @@ pub(super) async fn reconstruction_v2(
         .ok_or(ServerError::WorkQueueSaturated)?;
     validate_hash_path(&file_id)?;
     validate_optional_content_hash(query.content_hash.as_deref())?;
-    let requested_range = parse_reconstruction_request_range(
+    let start = Instant::now();
+    let result = match load_reconstruction_range_response(
         &state,
         &headers,
         &file_id,
         query.content_hash.as_deref(),
         repo.capability(),
     )
-    .await?;
-    let start = Instant::now();
-    let result = load_reconstruction_v2_response(
-        &state,
-        &file_id,
-        query.content_hash.as_deref(),
-        requested_range,
-        repo.capability(),
-    )
-    .await;
+    .await?
+    {
+        Some(response) => Ok(reconstruction_v2_from_v1(response)),
+        None => {
+            load_reconstruction_v2_response(
+                &state,
+                &file_id,
+                query.content_hash.as_deref(),
+                None,
+                repo.capability(),
+            )
+            .await
+        }
+    };
     let elapsed = start.elapsed();
     match &result {
         Ok(response) => {

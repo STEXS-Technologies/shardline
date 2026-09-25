@@ -3,6 +3,7 @@ use std::path::PathBuf;
 #[cfg(test)]
 use std::sync::{LazyLock, Mutex};
 use std::{
+    collections::BTreeMap,
     fs::File,
     io::{BufReader, ErrorKind, Read},
     path::Path,
@@ -231,48 +232,65 @@ pub(crate) async fn s3_lfs_parts_reader(
         Zeroes(u64),
         Object(ObjectKey, ByteRange),
     }
-    let mut pieces: Vec<Piece> = Vec::new();
+    let mut pieces: BTreeMap<u64, Piece> = BTreeMap::new();
     for (_generation, range, key) in ranges {
         let start = range.start();
         let end = range.end_exclusive();
-        let mut retained = Vec::new();
-        for piece in pieces {
-            if piece.end <= start || piece.start >= end {
-                retained.push(piece);
-                continue;
-            }
+        let mut overlapping_starts = Vec::with_capacity(2);
+        if let Some((&piece_start, piece)) = pieces.range(..=start).next_back()
+            && piece.end > start
+        {
+            overlapping_starts.push(piece_start);
+        }
+        overlapping_starts.extend(
+            pieces
+                .range(start..end)
+                .map(|(&piece_start, _)| piece_start),
+        );
+        overlapping_starts.sort_unstable();
+        overlapping_starts.dedup();
+
+        for piece_start in overlapping_starts {
+            let piece = pieces.remove(&piece_start).ok_or(ServerError::Overflow)?;
             if piece.start < start {
-                retained.push(Piece {
-                    start: piece.start,
-                    end: start,
-                    key: piece.key.clone(),
-                    object_start: piece.object_start,
-                });
+                pieces.insert(
+                    piece.start,
+                    Piece {
+                        start: piece.start,
+                        end: start,
+                        key: piece.key.clone(),
+                        object_start: piece.object_start,
+                    },
+                );
             }
             if piece.end > end {
-                retained.push(Piece {
-                    start: end,
-                    end: piece.end,
-                    key: piece.key,
-                    object_start: piece
-                        .object_start
-                        .checked_add(end.checked_sub(piece.start).ok_or(ServerError::Overflow)?)
-                        .ok_or(ServerError::Overflow)?,
-                });
+                pieces.insert(
+                    end,
+                    Piece {
+                        start: end,
+                        end: piece.end,
+                        key: piece.key,
+                        object_start: piece
+                            .object_start
+                            .checked_add(end.checked_sub(piece.start).ok_or(ServerError::Overflow)?)
+                            .ok_or(ServerError::Overflow)?,
+                    },
+                );
             }
         }
-        retained.push(Piece {
+        pieces.insert(
             start,
-            end,
-            key,
-            object_start: 0,
-        });
-        pieces = retained;
+            Piece {
+                start,
+                end,
+                key,
+                object_start: 0,
+            },
+        );
     }
-    pieces.sort_by_key(|piece| (piece.start, piece.end));
-    let mut segments = Vec::new();
+    let mut segments = Vec::with_capacity(pieces.len().saturating_mul(2).saturating_add(1));
     let mut cursor = 0_u64;
-    for piece in pieces {
+    for piece in pieces.into_values() {
         if piece.start > cursor {
             segments.push(Segment::Zeroes(
                 piece
@@ -310,17 +328,23 @@ pub(crate) async fn s3_lfs_parts_reader(
             async move {
                 let body: BodyStream = match segment {
                     Segment::Zeroes(remaining) => {
-                        Box::pin(stream::unfold(remaining, |remaining| async move {
-                            if remaining == 0 {
-                                return None;
-                            }
-                            let length = remaining.min(1024 * 1024);
-                            let length_usize = usize::try_from(length).ok()?;
-                            Some((
-                                Ok(Bytes::from(vec![0_u8; length_usize])),
-                                remaining.checked_sub(length)?,
-                            ))
-                        }))
+                        let zero_chunk_len = usize::try_from(remaining.min(1024 * 1024))
+                            .map_err(|_error| ServerError::Overflow)?;
+                        let zeroes = Bytes::from(vec![0_u8; zero_chunk_len]);
+                        Box::pin(stream::unfold(
+                            (remaining, zeroes),
+                            |(remaining, zeroes)| async move {
+                                if remaining == 0 {
+                                    return None;
+                                }
+                                let length = remaining.min(1024 * 1024);
+                                let length_usize = usize::try_from(length).ok()?;
+                                Some((
+                                    Ok(zeroes.slice(..length_usize)),
+                                    (remaining.checked_sub(length)?, zeroes),
+                                ))
+                            },
+                        ))
                     }
                     Segment::Object(key, range) => Box::pin(
                         store

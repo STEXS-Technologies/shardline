@@ -1,11 +1,11 @@
-use std::io::{Cursor, Read};
+use std::io::Cursor;
 
 use shardline_index::xet_hash_hex_string;
 use shardline_protocol::ShardlineHash;
 use shardline_xet_core::{
     merklehash::MerkleHash,
     xorb_object::{
-        Chunk, CompressionScheme, RawXorbData, SerializedXorbObject,
+        CompressionScheme, RawXorbData, SerializedXorbObject,
         xorb_chunk_format::{XORB_CHUNK_HEADER_LENGTH, XorbChunkHeader, deserialize_chunk_header},
     },
 };
@@ -13,7 +13,7 @@ use shardline_xet_core::{
 use crate::{ServerError, object_store::ServerObjectStore};
 
 /// Metadata for one chunk packed inside a xorb.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct XorbChunkEntry {
     /// Index of this chunk within the xorb (0-based).
     pub chunk_index: u32,
@@ -56,18 +56,32 @@ pub fn pack_chunks_into_xorb(
         return Err(ServerError::Overflow);
     }
 
-    // Build Chunk objects with content hashes.
-    let xorb_chunks: Vec<Chunk> = chunks
+    let owned_chunks = chunks
         .iter()
-        .map(|(data, _)| Chunk {
-            hash: shardline_xet_core::merklehash::compute_data_hash(data),
-            data: std::borrow::Cow::Owned(data.clone()),
-        })
+        .map(|(data, offset)| (data.clone(), *offset))
         .collect();
+    pack_owned_chunks_into_xorb(owned_chunks)
+}
+
+/// Packs owned CDC chunks without cloning their raw payloads.
+pub(crate) fn pack_owned_chunks_into_xorb(
+    chunks: Vec<(Vec<u8>, u64)>,
+) -> Result<PackedXorb, ServerError> {
+    if chunks.is_empty() {
+        return Err(ServerError::Overflow);
+    }
 
     let file_boundaries: Vec<usize> = chunks.iter().map(|(_, offset)| *offset as usize).collect();
+    let chunk_metadata: Vec<(usize, u64)> = chunks
+        .iter()
+        .map(|(data, offset)| (data.len(), *offset))
+        .collect();
+    let xorb_data = chunks
+        .into_iter()
+        .map(|(data, _)| std::borrow::Cow::Owned(data))
+        .collect();
 
-    let raw = RawXorbData::from_chunks(&xorb_chunks, file_boundaries);
+    let raw = RawXorbData::from_owned_data(xorb_data, file_boundaries);
 
     // Serialize with BG4+LZ4 compression and footer.
     let serialized = SerializedXorbObject::from_xorb_with_compression(
@@ -89,11 +103,11 @@ pub fn pack_chunks_into_xorb(
     let xorb_hash_hex = xet_hash_hex_string(shardline_hash);
 
     // Walk the serialized xorb to record per-chunk byte offsets.
-    let mut chunk_entries = Vec::with_capacity(chunks.len());
+    let mut chunk_entries = Vec::with_capacity(chunk_metadata.len());
     let mut cursor = Cursor::new(serialized.serialized_data.as_slice());
     let mut packed_offset: u32 = 0;
 
-    for (i, (raw_data, raw_offset)) in chunks.iter().enumerate() {
+    for (i, (raw_length, raw_offset)) in chunk_metadata.iter().enumerate() {
         let header: XorbChunkHeader = deserialize_chunk_header(&mut cursor).map_err(|e| {
             ServerError::Io(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -110,19 +124,24 @@ pub fn pack_chunks_into_xorb(
         )
         .map_err(ServerError::NumericConversion)?;
 
-        // Skip the compressed payload bytes.
-        let mut skip_buf = vec![0u8; compressed_len];
-        cursor.read_exact(&mut skip_buf).map_err(|e| {
-            ServerError::Io(std::io::Error::new(
+        // Skip the compressed payload without allocating a temporary buffer,
+        // while retaining the old truncated-payload rejection semantics.
+        let payload_end = cursor
+            .position()
+            .checked_add(u64::try_from(compressed_len)?)
+            .ok_or(ServerError::Overflow)?;
+        if payload_end > u64::try_from(serialized.serialized_data.len())? {
+            return Err(ServerError::Io(std::io::Error::new(
                 std::io::ErrorKind::UnexpectedEof,
-                format!("truncated xorb chunk payload at index {i}: {e}"),
-            ))
-        })?;
+                format!("truncated xorb chunk payload at index {i}"),
+            )));
+        }
+        cursor.set_position(payload_end);
 
         chunk_entries.push(XorbChunkEntry {
             chunk_index: i as u32,
             raw_offset: *raw_offset,
-            raw_length: raw_data.len() as u64,
+            raw_length: u64::try_from(*raw_length)?,
             packed_offset,
             packed_length: chunk_total_len,
         });
@@ -161,11 +180,8 @@ pub(crate) async fn store_xorb(
         crate::local_backend::chunk_hash(xorb_bytes),
         u64::try_from(xorb_bytes.len())?,
     );
-    let outcome = object_store.put_if_absent(
-        &object_key,
-        ObjectBody::from_bytes(axum::body::Bytes::copy_from_slice(xorb_bytes)),
-        &integrity,
-    )?;
+    let outcome =
+        object_store.put_if_absent(&object_key, ObjectBody::from_slice(xorb_bytes), &integrity)?;
     Ok(matches!(outcome, PutOutcome::Inserted))
 }
 
@@ -286,6 +302,20 @@ mod tests {
     }
 
     #[test]
+    fn owned_packing_matches_borrowed_packing() {
+        let chunks = vec![
+            (b"first chunk".to_vec(), 0u64),
+            (b"second chunk".to_vec(), 11u64),
+        ];
+        let borrowed = pack_chunks_into_xorb(&chunks).unwrap();
+        let owned = pack_owned_chunks_into_xorb(chunks).unwrap();
+
+        assert_eq!(owned.serialized, borrowed.serialized);
+        assert_eq!(owned.xorb_hash_hex, borrowed.xorb_hash_hex);
+        assert_eq!(owned.chunk_entries, borrowed.chunk_entries);
+    }
+
+    #[test]
     fn pack_chunk_offsets_are_monotonic() {
         let chunks = vec![
             (b"chunk a".to_vec(), 0u64),
@@ -388,8 +418,16 @@ mod tests {
             .expect("xorb validation should succeed");
 
         std::io::Seek::seek(&mut cursor, std::io::SeekFrom::Start(0)).unwrap();
-        let decoded = crate::xet_adapter::decode_serialized_xorb_chunks(&mut cursor, &validated)
-            .expect("xorb decode should succeed");
+        let mut decoded = Vec::with_capacity(validated.chunks().len());
+        crate::xet_adapter::try_for_each_serialized_xorb_chunk_trusted(
+            &mut cursor,
+            &validated,
+            |chunk| {
+                decoded.push(chunk);
+                Ok::<(), crate::error::ServerError>(())
+            },
+        )
+        .expect("xorb decode should succeed");
 
         assert_eq!(decoded.len(), chunks.len());
         for (i, (expected_data, _offset)) in chunks.iter().enumerate() {
