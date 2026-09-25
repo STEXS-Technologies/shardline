@@ -543,6 +543,19 @@ impl XorbObject {
             return Ok(None);
         };
 
+        Self::validate_xorb_object_with_info(reader, xorb, hash)
+    }
+
+    /// Validates xorb content using metadata that has already been parsed.
+    ///
+    /// This preserves the checks performed by [`Self::validate_xorb_object`]
+    /// while allowing callers that already inspected the footer to avoid
+    /// parsing the same metadata twice.
+    pub fn validate_xorb_object_with_info<R: Read + Seek>(
+        reader: &mut R,
+        xorb: XorbObject,
+        hash: &MerkleHash,
+    ) -> Result<Option<XorbObject>, CoreError> {
         let mut hash_chunks = Vec::with_capacity(xorb.info.num_chunks as usize);
         let mut cumulative_compressed_length: u64 = 0;
         let mut unpacked_chunk_offset: u64 = 0;
@@ -672,7 +685,7 @@ impl SerializedXorbObject {
     ) -> Result<Self, CoreError> {
         let mut xorb_object_info = XorbObjectInfoV1::default();
 
-        let hash = xorb.hash();
+        let (hash, chunk_hashes) = xorb.hash_with_chunk_hashes();
         xorb_object_info.xorb_hash = hash;
         let raw_num_bytes = xorb.num_bytes() as u64;
         let num_chunks = xorb.data.len();
@@ -680,11 +693,7 @@ impl SerializedXorbObject {
         xorb_object_info.num_chunks = xorb.data.len() as u64;
         xorb_object_info.chunk_boundary_offsets =
             Vec::with_capacity(xorb_object_info.num_chunks as usize);
-        xorb_object_info.chunk_hashes = xorb
-            .data
-            .iter()
-            .map(|chunk_data| compute_data_hash(chunk_data))
-            .collect();
+        xorb_object_info.chunk_hashes = chunk_hashes;
         xorb_object_info.unpacked_chunk_offsets = xorb
             .xorb_info
             .chunk_boundaries
@@ -1242,6 +1251,12 @@ mod tests {
         let hash = obj.info.xorb_hash;
         let result = XorbObject::validate_xorb_object(&mut Cursor::new(&buf), &hash).unwrap();
         assert!(result.is_some());
+
+        let parsed = XorbObject::deserialize(&mut Cursor::new(&buf)).unwrap();
+        let reused =
+            XorbObject::validate_xorb_object_with_info(&mut Cursor::new(&buf), parsed, &hash)
+                .unwrap();
+        assert_eq!(result, reused);
     }
 
     #[test]
