@@ -8,7 +8,10 @@ mod s3_objects;
 mod tree_store;
 mod types;
 
-pub(super) use index_store::{insert_reliability_event, next_reliability_sequence};
+pub(crate) use index_store::{
+    insert_reliability_event, load_postgres_latest_evidence_event,
+    load_postgres_latest_evidence_heads, next_reliability_sequence,
+};
 pub use provider_mutation::{
     PostgresProviderMutation, PostgresProviderMutationOutcome, PostgresResourceFence,
     ProviderRepositoryKey,
