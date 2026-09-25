@@ -264,7 +264,7 @@ fn copy_limited<R: Read, W: Write>(
 }
 
 pub fn lz4_compress_from_slice(data: &[u8]) -> Result<Vec<u8>, CoreError> {
-    let mut enc = FrameEncoder::new(Vec::new());
+    let mut enc = FrameEncoder::new(Vec::with_capacity(data.len()));
     enc.write_all(data)?;
     Ok(enc.finish()?)
 }
@@ -295,7 +295,7 @@ fn lz4_decompress_from_reader_limited<R: Read, W: Write>(
 
 fn bg4_lz4_compress_from_slice(data: &[u8]) -> Result<Vec<u8>, CoreError> {
     let grouped = bg4_split(data);
-    let mut enc = FrameEncoder::new(Vec::new());
+    let mut enc = FrameEncoder::new(Vec::with_capacity(grouped.len()));
     enc.write_all(&grouped)?;
     Ok(enc.finish()?)
 }

@@ -33,8 +33,8 @@ use crate::{
 };
 
 use super::{
-    ValidatedXorb, map_xorb_visit_error, try_for_each_serialized_xorb_chunk,
-    try_for_each_serialized_xorb_chunk_async, validate_serialized_xorb,
+    ValidatedXorb, map_xorb_visit_error, try_for_each_serialized_xorb_chunk_async_trusted,
+    try_for_each_serialized_xorb_chunk_trusted, validate_serialized_xorb,
 };
 
 /// Legacy git-xet clients can send footerless xorbs that require a
@@ -145,7 +145,7 @@ where
 
     // Collect chunk hashes, call the visitor, and write the cache sidecar.
     let mut chunk_hashes = Vec::new();
-    try_for_each_serialized_xorb_chunk(&mut cursor, &validated, |decoded_chunk| {
+    try_for_each_serialized_xorb_chunk_trusted(&mut cursor, &validated, |decoded_chunk| {
         let hash_hex = xet_hash_hex_string(decoded_chunk.descriptor().hash());
         visitor(hash_hex.clone())?;
         chunk_hashes.push(hash_hex);
@@ -235,7 +235,7 @@ pub async fn store_uploaded_xorb(
     let unpacked_length = Arc::new(AtomicU64::new(0));
     let stored_bytes = Arc::new(AtomicU64::new(0));
 
-    try_for_each_serialized_xorb_chunk_async(&mut cursor, &validated, {
+    try_for_each_serialized_xorb_chunk_async_trusted(&mut cursor, &validated, {
         let unpacked_length = Arc::clone(&unpacked_length);
         let stored_bytes = Arc::clone(&stored_bytes);
         move |decoded_chunk| {
@@ -338,7 +338,7 @@ pub async fn store_uploaded_xorb_file(
     };
     let unpacked_length = Arc::new(AtomicU64::new(0));
     let stored_bytes = Arc::new(AtomicU64::new(0));
-    try_for_each_serialized_xorb_chunk_async(&mut file, &validated, {
+    try_for_each_serialized_xorb_chunk_async_trusted(&mut file, &validated, {
         let unpacked_length = Arc::clone(&unpacked_length);
         let stored_bytes = Arc::clone(&stored_bytes);
         move |decoded_chunk| {

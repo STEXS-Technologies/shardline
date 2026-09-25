@@ -16,7 +16,10 @@ use std::io::Cursor;
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use shardline_protocol::ShardlineHash;
-use shardline_xet_adapter::{decode_serialized_xorb_chunks, validate_serialized_xorb};
+use shardline_xet_adapter::{
+    decode_serialized_xorb_chunks, try_for_each_serialized_xorb_chunk_trusted,
+    validate_serialized_xorb,
+};
 use shardline_xet_core::{
     merklehash::{compute_data_hash, xorb_hash},
     xorb_object::{
@@ -114,9 +117,80 @@ fn bench_decode_serialized_xorb_chunks(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_decode_serialized_xorb_chunks_trusted(c: &mut Criterion) {
+    let mut group = c.benchmark_group("decode_serialized_xorb_chunks_trusted");
+
+    for chunk_count in [1, 4, 16, 64] {
+        let chunk_size = 4096;
+        let (data, hash) = build_xorb(chunk_count, chunk_size);
+        let mut pre_reader = Cursor::new(data.as_slice());
+        let validated = validate_serialized_xorb(&mut pre_reader, hash).expect("valid xorb");
+
+        group.bench_with_input(
+            BenchmarkId::from_parameter(chunk_count),
+            &(data, validated),
+            |b, (data, validated)| {
+                b.iter(|| {
+                    let mut reader = Cursor::new(black_box(data.as_slice()));
+                    let mut decoded = 0_usize;
+                    try_for_each_serialized_xorb_chunk_trusted(&mut reader, validated, |_chunk| {
+                        decoded = decoded.saturating_add(1);
+                        Ok::<(), shardline_xet_adapter::XetAdapterError>(())
+                    })
+                    .expect("trusted decode ok");
+                    black_box(decoded);
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+fn bench_decode_serialized_xorb_chunks_async_trusted(c: &mut Criterion) {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("benchmark runtime should build");
+    let mut group = c.benchmark_group("decode_serialized_xorb_chunks_async_trusted");
+
+    for chunk_count in [1, 4, 16, 64] {
+        let chunk_size = 4096;
+        let (data, hash) = build_xorb(chunk_count, chunk_size);
+        let mut pre_reader = Cursor::new(data.as_slice());
+        let validated = validate_serialized_xorb(&mut pre_reader, hash).expect("valid xorb");
+
+        group.bench_with_input(
+            BenchmarkId::from_parameter(chunk_count),
+            &(data, validated),
+            |b, (data, validated)| {
+                b.to_async(&runtime).iter(|| async {
+                    let mut reader = Cursor::new(black_box(data.as_slice()));
+                    let mut decoded = 0_usize;
+                    shardline_xet_adapter::try_for_each_serialized_xorb_chunk_async_trusted(
+                        &mut reader,
+                        validated,
+                        |_chunk| {
+                            decoded = decoded.saturating_add(1);
+                            async { Ok::<(), shardline_xet_adapter::XetAdapterError>(()) }
+                        },
+                    )
+                    .await
+                    .expect("trusted async decode ok");
+                    black_box(decoded);
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_validate_serialized_xorb,
-    bench_decode_serialized_xorb_chunks
+    bench_decode_serialized_xorb_chunks,
+    bench_decode_serialized_xorb_chunks_trusted,
+    bench_decode_serialized_xorb_chunks_async_trusted
 );
 criterion_main!(benches);
