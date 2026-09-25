@@ -471,6 +471,25 @@ fn parse_db_migrate_up() {
 }
 
 #[test]
+fn parse_db_migrate_local_up() {
+    let args = vec![
+        "shardline".to_owned(),
+        "db".to_owned(),
+        "migrate".to_owned(),
+        "local-up".to_owned(),
+        "--root".to_owned(),
+        "/var/lib/shardline".to_owned(),
+    ];
+
+    assert_eq!(
+        CliCommand::parse(args),
+        Ok(CliCommand::DbMigrateLocalUp {
+            root: PathBuf::from("/var/lib/shardline"),
+        })
+    );
+}
+
+#[test]
 fn cli_command_debug_redacts_database_url_credentials() {
     let parsed = CliCommand::parse(vec![
         "shardline".to_owned(),

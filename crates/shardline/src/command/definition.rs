@@ -131,8 +131,8 @@ pub(crate) enum ConfigSubcommand {
 
 #[derive(Debug, Args)]
 #[command(
-    about = "Manage the Postgres metadata schema.",
-    long_about = "Apply, revert, or inspect the Shardline metadata schema used by Postgres-backed index state."
+    about = "Manage the metadata schema.",
+    long_about = "Apply, revert, or inspect the Shardline metadata schema used by Postgres-backed index state. Local SQLite migrations are applied explicitly with `db migrate local-up`."
 )]
 pub(crate) struct DbCommandArgs {
     #[command(subcommand)]
@@ -165,6 +165,15 @@ pub(crate) enum DbMigrateSubcommand {
     Backfill(DbMigrateBackfillArgs),
     /// Rebuild one corrupted reliability operation after explicit confirmation.
     Repair(DbMigrateRepairArgs),
+    /// Apply pending migrations to a local SQLite metadata database.
+    LocalUp(DbMigrateLocalUpArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct DbMigrateLocalUpArgs {
+    /// Local deployment root containing `metadata.sqlite3`.
+    #[arg(long)]
+    pub(crate) root: PathBuf,
 }
 
 #[derive(Debug, Args)]

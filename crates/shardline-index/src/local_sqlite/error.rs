@@ -83,6 +83,24 @@ pub enum LocalIndexStoreError {
     /// The local metadata database had inconsistent import state.
     #[error("local metadata database had inconsistent legacy import state")]
     InvalidLegacyImportState,
+    /// An existing local metadata database has no migration history table.
+    #[error(
+        "local metadata schema history is missing; run the explicit local database migration before starting the server"
+    )]
+    SchemaMigrationsTableMissing,
+    /// An existing local metadata database contains an unknown migration.
+    #[error("local metadata database contains an unknown migration version: {0}")]
+    UnknownSchemaMigration(String),
+    /// An existing local metadata database is behind the running binary.
+    #[error(
+        "local metadata schema is stale: {pending_count} migration(s) pending, first pending version {first_pending_version}"
+    )]
+    PendingSchemaMigrations {
+        /// First migration that must be applied.
+        first_pending_version: String,
+        /// Number of bundled migrations not yet applied.
+        pending_count: usize,
+    },
     /// An invalid repository type string was encountered.
     #[error("invalid repository type: {0}")]
     InvalidRepoType(String),

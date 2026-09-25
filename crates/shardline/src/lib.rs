@@ -77,7 +77,7 @@ pub use command::{BenchMode, CliCommand, CliParseError, CompletionShell, Redacte
 pub use config::{
     ConfigRuntimeError, effective_root, load_server_config, run_config_check_from_env,
 };
-pub use db::{DbRuntimeError, run_db_migration};
+pub use db::{DbRuntimeError, run_db_migration, run_local_db_migration};
 pub use fsck::{FsckRuntimeError, run_fsck};
 pub use gc::{GcRuntimeError, MINIMUM_GC_RETENTION_SECONDS, run_gc, run_gc_diagnostics};
 pub use gc_schedule::{

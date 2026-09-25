@@ -119,6 +119,8 @@ impl LocalBackend {
         server_frontends: &[ServerFrontend],
     ) -> Result<Self, ServerError> {
         ensure_directory_path_components_are_not_symlinked(&root)?;
+        let index_store = LocalIndexStore::open(root.clone());
+        index_store.check_schema_compatibility()?;
         let backend = Self {
             // Initialize and migrate SQLite before the server begins accepting
             // concurrent protocol requests. Lazy first-use initialization lets

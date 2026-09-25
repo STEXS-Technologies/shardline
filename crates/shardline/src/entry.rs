@@ -15,8 +15,8 @@ use crate::{
     print_hold_summary, render_completion, render_manpage, report_output, run_backup_manifest,
     run_bench, run_config_check_from_env, run_db_migration, run_fsck, run_gc, run_health_check,
     run_hold_list, run_hold_release, run_hold_set, run_index_rebuild, run_ingest_bench,
-    run_lfs_evidence_repair, run_lifecycle_repair, run_providerless_setup, run_repair,
-    run_storage_migration, uninstall_gc_schedule, write_output_bytes,
+    run_lfs_evidence_repair, run_lifecycle_repair, run_local_db_migration, run_providerless_setup,
+    run_repair, run_storage_migration, uninstall_gc_schedule, write_output_bytes,
 };
 
 pub async fn run(args: impl Iterator<Item = OsString>) -> ExitCode {
@@ -90,6 +90,16 @@ pub async fn run(args: impl Iterator<Item = OsString>) -> ExitCode {
         }) => match run_db_migration(database_url.as_ref().map(|r| r.as_str()), command).await {
             Ok(report) => {
                 report_output::print_database_migration_summary(&report);
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                print_error_chain(&error);
+                ExitCode::from(2)
+            }
+        },
+        Ok(CliCommand::DbMigrateLocalUp { root }) => match run_local_db_migration(&root) {
+            Ok(()) => {
+                println!("local SQLite migrations applied: {}", root.display());
                 ExitCode::SUCCESS
             }
             Err(error) => {
