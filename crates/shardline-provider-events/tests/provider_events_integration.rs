@@ -4,7 +4,11 @@
 //! through in-memory record and index stores so that no filesystem scaffolding
 //! is required beyond a temporary object-store root.
 
-use std::error::Error;
+use std::{
+    collections::hash_map::DefaultHasher,
+    error::Error,
+    hash::{Hash, Hasher},
+};
 
 use shardline_index::{
     AsyncIndexStore, FileChunkRecord, FileRecord, MemoryIndexStore, MemoryRecordStore,
@@ -48,6 +52,36 @@ fn test_record(scope: RepositoryScope) -> FileRecord {
             packed_end: 4,
         }],
     }
+}
+
+fn test_record_with_seed(scope: RepositoryScope, seed: &str) -> FileRecord {
+    let content_hash = test_hash("content", seed);
+    let chunk_hash = test_hash("chunk", seed);
+    FileRecord {
+        file_id: format!("asset-{seed}.bin"),
+        content_hash,
+        total_bytes: 8,
+        chunk_size: 4,
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
+        repository_scope: Some(scope),
+        chunks: vec![FileChunkRecord {
+            hash: chunk_hash,
+            offset: 0,
+            length: 4,
+            range_start: 0,
+            range_end: 1,
+            packed_start: 0,
+            packed_end: 4,
+        }],
+    }
+}
+
+fn test_hash(prefix: &str, seed: &str) -> String {
+    let mut hasher = DefaultHasher::new();
+    prefix.hash(&mut hasher);
+    seed.hash(&mut hasher);
+    let value = hasher.finish();
+    format!("{value:016x}{value:016x}{value:016x}{value:016x}")
 }
 
 /// Short-hand for creating a temporary local object store.
@@ -243,7 +277,7 @@ async fn postgres_delete_plan_commits_holds_records_state_and_delivery_together(
     .await?;
 
     let scope = RepositoryScope::new(RepositoryProvider::GitHub, &owner, repo, Some("main"))?;
-    let record = test_record(scope);
+    let record = test_record_with_seed(scope, &owner);
     RecordMutation::write_version_record(&records, &record).await?;
     RecordMutation::write_latest_record(&records, &record).await?;
     index
