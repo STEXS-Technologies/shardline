@@ -17,9 +17,9 @@ use crate::{
     ProviderRepositoryState, QuarantineCandidate, ReconstructionStore, RetentionHold,
     StoredObjectId, WebhookDelivery,
     local_sqlite::helpers::{
-        load_quarantine_evidence_batch, load_retention_evidence, load_retention_evidence_batch,
-        load_webhook_evidence, load_webhook_evidence_batch, persist_retention_evidence,
-        persist_webhook_evidence, retention_snapshot, webhook_snapshot,
+        load_provider_evidence_batch, load_quarantine_evidence_batch, load_retention_evidence,
+        load_retention_evidence_batch, load_webhook_evidence, load_webhook_evidence_batch,
+        persist_retention_evidence, persist_webhook_evidence, retention_snapshot, webhook_snapshot,
     },
     parse_xet_hash_hex,
     provider_evidence::snapshot_from_state,
@@ -939,10 +939,33 @@ impl LifecycleStore for LocalIndexStore {
         )?;
         let deliveries = collect_rows(rows)?;
         drop(statement);
-        for delivery in &deliveries {
+        let operation_ids = deliveries
+            .iter()
+            .map(|delivery| {
+                Ok::<_, LocalIndexStoreError>(
+                    webhook_snapshot(delivery, WebhookDeliveryLifecycleState::Processed)?
+                        .evidence_operation()?
+                        .operation_id,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let heads = super::helpers::load_latest_verified_event_json_batch(
+            &transaction,
+            shardline_reliability::OperationKind::WebhookDelivery,
+            &operation_ids,
+        )?;
+        for (delivery, operation_id) in deliveries.iter().zip(operation_ids) {
             let snapshot = webhook_snapshot(delivery, WebhookDeliveryLifecycleState::Processed)?;
             let released = webhook_snapshot(delivery, WebhookDeliveryLifecycleState::Released)?;
-            let evidence = load_webhook_evidence(&transaction, delivery)?;
+            let evidence = heads
+                .get(&operation_id)
+                .map(|event| {
+                    shardline_reliability::WebhookDeliveryEvidenceLog::from_head(
+                        serde_json::from_value(event.clone())?,
+                    )
+                })
+                .transpose()?
+                .unwrap_or_default();
             let (evidence, evidence_was_empty) =
                 verify_and_append_snapshot_transition(evidence, snapshot, released)?;
             transaction.execute(
@@ -1029,9 +1052,18 @@ impl LifecycleStore for LocalIndexStore {
             collect_rows(rows)?
         };
         let transaction = connection.transaction()?;
-        for state in &states {
-            let snapshot = snapshot_from_state(state)?;
-            let stored = super::helpers::load_provider_evidence(&transaction, &snapshot)?;
+        let snapshots = states
+            .iter()
+            .map(snapshot_from_state)
+            .collect::<Result<Vec<_>, _>>()?;
+        let evidence = load_provider_evidence_batch(&transaction, &snapshots)?;
+        for (_state, snapshot) in states.iter().zip(snapshots) {
+            let operation_id = super::helpers::provider_evidence_operation_id(&snapshot);
+            let stored = evidence
+                .get(&operation_id)
+                .ok_or(LocalIndexStoreError::Reliability(
+                    shardline_reliability::ReliabilityError::OperationMismatch,
+                ))?;
             if stored.events().is_empty() {
                 verify_provider_lifecycle_events(
                     ProviderEvidenceLog::baseline(snapshot.clone())?.events(),
@@ -1375,8 +1407,28 @@ impl UploadIntentStore for super::LocalIndexStore {
         if !current.state().can_transition_to(new_state) {
             return Ok(false);
         }
-        let events = self.reliability_events(intent_id).await?;
-        let (tenant, repository) = upload_lifecycle_identity(&events);
+        let latest_event = {
+            let store = self.clone();
+            let operation_id = intent_id.to_owned();
+            tokio::task::spawn_blocking(move || {
+                let connection = store.open_connection()?;
+                let transaction = connection.unchecked_transaction()?;
+                let event = super::helpers::load_latest_verified_event_json(
+                    &transaction,
+                    shardline_reliability::OperationKind::Upload,
+                    &operation_id,
+                )?
+                .ok_or(LocalIndexStoreError::Reliability(
+                    shardline_reliability::ReliabilityError::OperationMismatch,
+                ))?;
+                transaction.commit()?;
+                Ok::<LifecycleEvent, LocalIndexStoreError>(serde_json::from_value(event)?)
+            })
+            .await
+            .map_err(|error| LocalIndexStoreError::Io(std::io::Error::other(error)))??
+        };
+        let tenant = latest_event.operation.tenant.clone();
+        let repository = latest_event.operation.repository.clone();
         let event = upload_lifecycle_event(
             tenant,
             repository,
@@ -1534,8 +1586,31 @@ impl UploadIntentStore for super::LocalIndexStore {
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(LocalIndexStoreError::from)?;
             drop(stmt);
+            let operation_ids = intents
+                .iter()
+                .map(|intent| intent.intent_id().to_owned())
+                .collect::<Vec<_>>();
+            let heads = super::helpers::load_latest_verified_event_json_batch(
+                &transaction,
+                shardline_reliability::OperationKind::Upload,
+                &operation_ids,
+            )?;
             for intent in &intents {
-                verify_sqlite_intent_evidence(&transaction, intent)?;
+                let event_json = heads.get(intent.intent_id()).ok_or(
+                    LocalIndexStoreError::Reliability(
+                        shardline_reliability::ReliabilityError::OperationMismatch,
+                    ),
+                )?;
+                let event = serde_json::from_value::<LifecycleEvent>(event_json.clone())?;
+                verify_upload_lifecycle_head(
+                    &event,
+                    event.operation.tenant.as_str(),
+                    event.operation.repository.as_str(),
+                    intent.intent_id(),
+                    intent.object_key(),
+                    intent.object_hash(),
+                    intent.state(),
+                )?;
             }
             transaction.commit()?;
             Ok(intents)
@@ -1581,8 +1656,31 @@ impl UploadIntentStore for super::LocalIndexStore {
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(LocalIndexStoreError::from)?;
             drop(stmt);
+            let operation_ids = intents
+                .iter()
+                .map(|intent| intent.intent_id().to_owned())
+                .collect::<Vec<_>>();
+            let heads = super::helpers::load_latest_verified_event_json_batch(
+                &transaction,
+                shardline_reliability::OperationKind::Upload,
+                &operation_ids,
+            )?;
             for intent in &intents {
-                verify_sqlite_intent_evidence(&transaction, intent)?;
+                let event_json = heads.get(intent.intent_id()).ok_or(
+                    LocalIndexStoreError::Reliability(
+                        shardline_reliability::ReliabilityError::OperationMismatch,
+                    ),
+                )?;
+                let event = serde_json::from_value::<LifecycleEvent>(event_json.clone())?;
+                verify_upload_lifecycle_head(
+                    &event,
+                    event.operation.tenant.as_str(),
+                    event.operation.repository.as_str(),
+                    intent.intent_id(),
+                    intent.object_key(),
+                    intent.object_hash(),
+                    intent.state(),
+                )?;
             }
             transaction.commit()?;
             Ok(intents)

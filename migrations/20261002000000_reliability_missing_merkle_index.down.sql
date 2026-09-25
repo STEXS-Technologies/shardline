@@ -1,0 +1,1 @@
+DROP INDEX IF EXISTS shardline_reliability_events_missing_merkle_idx;

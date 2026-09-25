@@ -7,7 +7,7 @@ use sqlx::{Connection as _, PgConnection, Row as _, query, query_scalar};
 
 use super::{
     PostgresIndexStore, PostgresMetadataStoreError, insert_reliability_event,
-    next_reliability_sequence,
+    load_postgres_latest_evidence_heads, next_reliability_sequence,
 };
 
 fn oci_snapshot(
@@ -475,8 +475,31 @@ impl OciObjectStore for PostgresIndexStore {
                 })
             })
             .collect::<Result<Vec<_>, Self::Error>>()?;
-        for tombstone in &tombstones {
-            let evidence = load_oci_evidence(transaction.as_mut(), &tombstone.key).await?;
+        let operation_ids = tombstones
+            .iter()
+            .map(|tombstone| -> Result<String, PostgresMetadataStoreError> {
+                let identity = OciObjectIdentity::new(
+                    tombstone.key.scope_namespace.clone(),
+                    tombstone.key.repository.clone(),
+                    tombstone.key.kind.as_str(),
+                    tombstone.key.digest_hex.clone(),
+                )?;
+                Ok(OciObjectOperationId::new(&identity).into_string())
+            })
+            .collect::<Result<Vec<_>, PostgresMetadataStoreError>>()?;
+        let heads = load_postgres_latest_evidence_heads(
+            transaction.as_mut(),
+            OperationKind::Visibility,
+            &operation_ids,
+        )
+        .await?;
+        for (tombstone, operation_id) in tombstones.iter().zip(operation_ids) {
+            let event = heads.get(&operation_id).ok_or_else(|| {
+                PostgresMetadataStoreError::Reliability(
+                    shardline_reliability::ReliabilityError::OperationMismatch,
+                )
+            })?;
+            let evidence = OciObjectEvidenceLog::from_head(serde_json::from_value(event.clone())?)?;
             let expected = oci_snapshot(
                 &tombstone.key,
                 OciObjectLifecycleState::Deleted,
