@@ -154,7 +154,8 @@ pub use config::{
 pub use database_migration::{
     DatabaseMigration, DatabaseMigrationBoundary, DatabaseMigrationCommand, DatabaseMigrationError,
     DatabaseMigrationOptions, DatabaseMigrationReport, DatabaseMigrationStatusEntry,
-    apply_database_migrations, bundled_database_migrations, run_database_migration,
+    apply_database_migrations, bundled_database_migrations, check_database_schema_compatibility,
+    run_database_migration,
 };
 #[cfg(feature = "fuzzing")]
 pub(crate) use error::InvalidReconstructionResponseError;

@@ -15,7 +15,8 @@ use crate::{
 };
 
 use super::{
-    LOCAL_METADATA_DATABASE_FILE_NAME, LOCAL_SCHEMA_MIGRATIONS_TABLE, LocalIndexStoreError, helpers,
+    LOCAL_METADATA_DATABASE_FILE_NAME, LOCAL_SCHEMA_MIGRATIONS_TABLE, LOCAL_SQLITE_MIGRATIONS,
+    LocalIndexStoreError, helpers,
 };
 
 static INITIALIZED_LOCAL_DATABASES: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
@@ -70,6 +71,69 @@ impl LocalIndexStore {
         connection
             .execute_batch("SELECT 1")
             .map_err(|e| format!("sqlite metadata probe query failed: {e}"))?;
+        Ok(())
+    }
+
+    /// Checks an existing SQLite schema without creating files or applying SQL.
+    ///
+    /// A missing database file is treated as a fresh local deployment and is
+    /// left for the explicit bootstrap path. Once a database file exists,
+    /// startup rejects missing, unknown, or pending migrations.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when an existing database is not compatible with the
+    /// bundled migration set.
+    pub fn check_schema_compatibility(&self) -> Result<(), LocalIndexStoreError> {
+        let database_path = self.database_path();
+        helpers::ensure_sqlite_database_path_is_safe(&database_path)?;
+        if !database_path.exists() {
+            return Ok(());
+        }
+        let connection =
+            Connection::open_with_flags(&database_path, helpers::sqlite_read_only_flags())?;
+        let table_exists = connection
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                [LOCAL_SCHEMA_MIGRATIONS_TABLE],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if !table_exists {
+            return Err(LocalIndexStoreError::SchemaMigrationsTableMissing);
+        }
+
+        let mut applied_versions = Vec::new();
+        let mut statement = connection.prepare(&format!(
+            "SELECT version FROM {LOCAL_SCHEMA_MIGRATIONS_TABLE} ORDER BY version"
+        ))?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        for row in rows {
+            let version = row?;
+            if !LOCAL_SQLITE_MIGRATIONS
+                .iter()
+                .any(|migration| migration.version == version)
+            {
+                return Err(LocalIndexStoreError::UnknownSchemaMigration(version));
+            }
+            applied_versions.push(version);
+        }
+
+        let pending = LOCAL_SQLITE_MIGRATIONS
+            .iter()
+            .filter(|migration| {
+                !applied_versions
+                    .iter()
+                    .any(|version| version == migration.version)
+            })
+            .collect::<Vec<_>>();
+        if let Some(first_pending) = pending.first() {
+            return Err(LocalIndexStoreError::PendingSchemaMigrations {
+                first_pending_version: first_pending.version.to_owned(),
+                pending_count: pending.len(),
+            });
+        }
         Ok(())
     }
 

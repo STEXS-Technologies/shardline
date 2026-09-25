@@ -1,10 +1,10 @@
 # Database Migrations
 
-Shardline ships its Postgres metadata schema with the binary.
+Shardline ships its Postgres and local SQLite metadata schemas with the binary.
 
-Use `shardline db migrate` to apply, inspect, or revert the bundled schema migrations.
-That keeps the operational path consistent across local, Docker, and Kubernetes
-deployments and avoids hand-running SQL files in the wrong order.
+Use `shardline db migrate` to apply, inspect, or revert the bundled Postgres schema
+migrations. Local SQLite migrations are applied explicitly with `local-up`.
+Server startup only checks compatibility and never upgrades a stale database.
 
 ## Commands
 
@@ -14,6 +14,12 @@ Apply all pending migrations:
 export SHARDLINE_INDEX_POSTGRES_URL='postgres://shardline:replace-me@postgres:5432/shardline'
 
 shardline db migrate up
+```
+
+Apply local SQLite migrations for an explicitly selected deployment root:
+
+```bash
+shardline db migrate local-up --root /var/lib/shardline
 ```
 
 Apply only the next migration steps:
@@ -87,6 +93,12 @@ If the database contains:
 - a checksum for a known migration that no longer matches the bundled SQL
 
 the command fails closed instead of guessing.
+
+Before starting, a Postgres-backed server performs the same read-only check. A
+stale schema produces an explicit error instructing the operator to run
+`shardline db migrate up`. A local SQLite deployment uses the same policy for an
+existing database; run `shardline db migrate local-up --root <root>` to apply its
+pending migrations.
 
 Each migration step runs inside its own transaction.
 A failed step does not mark itself applied.

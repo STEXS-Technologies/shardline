@@ -322,6 +322,48 @@ fn exercise_local_sqlite_rejects_invalid_legacy_import_state() -> Result<(), Box
     Ok(())
 }
 
+#[test]
+fn local_schema_compatibility_accepts_fresh_root_without_creating_database() {
+    let storage = shardline_test_support::TempStorage::new();
+    let database_path = storage.path().join(LOCAL_METADATA_DATABASE_FILE_NAME);
+    let store = LocalIndexStore::open(storage.path_buf());
+
+    store
+        .check_schema_compatibility()
+        .expect("fresh local root should be bootstrap-compatible");
+    assert!(
+        !database_path.exists(),
+        "compatibility checks must not create a local database"
+    );
+}
+
+#[test]
+fn local_schema_compatibility_rejects_pending_migrations_without_mutating() {
+    let storage = shardline_test_support::TempStorage::new();
+    let store = LocalIndexStore::new(storage.path_buf()).expect("initialize local database");
+    let connection = open_sqlite_connection(storage.path()).expect("open local database");
+    let latest_version = LOCAL_SQLITE_MIGRATIONS
+        .last()
+        .expect("bundled migrations are non-empty")
+        .version;
+    connection
+        .execute(
+            &format!("DELETE FROM {LOCAL_SCHEMA_MIGRATIONS_TABLE} WHERE version = ?1"),
+            params![latest_version],
+        )
+        .expect("remove one migration history row");
+    drop(connection);
+
+    let result = store.check_schema_compatibility();
+    assert!(matches!(
+        result,
+        Err(LocalIndexStoreError::PendingSchemaMigrations {
+            pending_count: 1,
+            ..
+        })
+    ));
+}
+
 async fn exercise_local_record_store_reads_corrupt_sqlite_bytes_verbatim()
 -> Result<(), Box<dyn Error>> {
     let storage = shardline_test_support::TempStorage::new();

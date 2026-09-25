@@ -1208,6 +1208,14 @@ pub(crate) const fn sqlite_open_flags() -> OpenFlags {
         .union(OpenFlags::SQLITE_OPEN_EXRESCODE)
 }
 
+pub(crate) const fn sqlite_read_only_flags() -> OpenFlags {
+    OpenFlags::SQLITE_OPEN_READ_ONLY
+        .union(OpenFlags::SQLITE_OPEN_NO_MUTEX)
+        .union(OpenFlags::SQLITE_OPEN_URI)
+        .union(OpenFlags::SQLITE_OPEN_NOFOLLOW)
+        .union(OpenFlags::SQLITE_OPEN_EXRESCODE)
+}
+
 pub(crate) fn ensure_local_schema_migrations_table(
     connection: &Connection,
 ) -> Result<(), LocalIndexStoreError> {
@@ -2800,6 +2808,9 @@ pub(crate) fn read_sqlite_record_bytes(value: ValueRef<'_>) -> Result<Vec<u8>, S
         | other @ LocalIndexStoreError::InvalidRecordKind
         | other @ LocalIndexStoreError::InvalidOciObjectKind(_)
         | other @ LocalIndexStoreError::InvalidLegacyImportState
+        | other @ LocalIndexStoreError::SchemaMigrationsTableMissing
+        | other @ LocalIndexStoreError::UnknownSchemaMigration(_)
+        | other @ LocalIndexStoreError::PendingSchemaMigrations { .. }
         | other @ LocalIndexStoreError::InvalidRepoType(_)
         | other @ LocalIndexStoreError::BlockingTask(_)
         | other @ LocalIndexStoreError::InvalidTableName => {

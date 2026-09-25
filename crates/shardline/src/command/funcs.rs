@@ -169,6 +169,9 @@ impl TryFrom<CliDefinition> for CliCommand {
                             },
                         })
                     }
+                    DbMigrateSubcommand::LocalUp(local_args) => Ok(Self::DbMigrateLocalUp {
+                        root: local_args.root,
+                    }),
                 },
             },
             CliDefinitionCommand::Admin(args) => match args.command {
