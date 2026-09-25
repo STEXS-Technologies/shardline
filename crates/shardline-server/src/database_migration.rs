@@ -236,6 +236,21 @@ pub enum DatabaseMigrationError {
     /// Migration history contains a version unknown to the running binary.
     #[error("database contains an unknown shardline migration version: {0}")]
     UnknownAppliedMigration(String),
+    /// The database has no migration history table.
+    #[error(
+        "shardline database schema history is missing; run `shardline db migrate up` before starting the server"
+    )]
+    MigrationHistoryTableMissing,
+    /// The database is behind the running binary.
+    #[error(
+        "shardline database schema is stale: {pending_count} migration(s) pending, first pending version {first_pending_version}; run `shardline db migrate up`"
+    )]
+    PendingMigrations {
+        /// First migration that must be applied.
+        first_pending_version: String,
+        /// Number of bundled migrations not yet applied.
+        pending_count: usize,
+    },
     /// A previously applied migration no longer matches the bundled SQL.
     #[error(
         "bundled migration checksum mismatch for version {version}: expected {expected_checksum}, observed {observed_checksum}"
@@ -502,6 +517,33 @@ pub async fn apply_database_migrations(pool: &PgPool) -> Result<(), DatabaseMigr
 
     for migration in pending_migrations(pool).await? {
         apply_one_migration(pool, migration, None).await?;
+    }
+    Ok(())
+}
+
+/// Checks the Postgres schema without changing it.
+///
+/// Operators must run the explicit `shardline db migrate up` command;
+/// startup never creates the history table, applies SQL, or acquires the
+/// migration lock.
+pub async fn check_database_schema_compatibility(
+    pool: &PgPool,
+) -> Result<(), DatabaseMigrationError> {
+    let history_table = query_scalar::<_, Option<String>>("SELECT to_regclass($1)::text")
+        .bind(MIGRATION_HISTORY_TABLE)
+        .fetch_one(pool)
+        .await?;
+    if history_table.is_none() {
+        return Err(DatabaseMigrationError::MigrationHistoryTableMissing);
+    }
+
+    verify_applied_migrations(pool).await?;
+    let pending = pending_migrations(pool).await?;
+    if let Some(first_pending) = pending.first() {
+        return Err(DatabaseMigrationError::PendingMigrations {
+            first_pending_version: first_pending.version.to_owned(),
+            pending_count: pending.len(),
+        });
     }
     Ok(())
 }

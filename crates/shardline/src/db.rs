@@ -1,5 +1,6 @@
-use std::env::var;
+use std::{env::var, path::Path};
 
+use shardline_index::LocalIndexStore;
 use shardline_server::{
     DatabaseMigrationCommand, DatabaseMigrationError, DatabaseMigrationOptions,
     DatabaseMigrationReport, run_database_migration,
@@ -39,6 +40,16 @@ pub async fn run_db_migration(
 
     let options = DatabaseMigrationOptions::new(database_url, command);
     Ok(run_database_migration(&options).await?)
+}
+
+/// Applies pending migrations to an explicitly selected local SQLite root.
+///
+/// # Errors
+///
+/// Returns the local metadata error when the root cannot be initialized or a
+/// migration cannot be applied.
+pub fn run_local_db_migration(root: &Path) -> Result<(), shardline_index::LocalIndexStoreError> {
+    LocalIndexStore::new(root.to_path_buf()).map(|_| ())
 }
 
 #[cfg(test)]
