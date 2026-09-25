@@ -7,15 +7,6 @@ on:
         description: Minimum libFuzzer wall-clock duration per target
         required: false
         default: "3600"
-  pull_request:
-    paths:
-      - ".github/workflows/reliability-fuzz.yml"
-      - "Cargo.lock"
-      - "Cargo.toml"
-      - "crates/fuzz/**"
-      - "crates/shardline-reliability/**"
-      - "scripts/shardline/fuzz.sh"
-      - "Makefile.toml"
   schedule:
     - cron: "17 3 * * 6"
 

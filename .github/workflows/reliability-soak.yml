@@ -14,13 +14,6 @@ on:
         description: Deterministic chaos campaign duration
         required: false
         default: "7200"
-  pull_request:
-    paths:
-      - ".github/workflows/release.yml"
-      - ".github/workflows/reliability-soak.yml"
-      - "docker-compose.chaos.yml"
-      - "Makefile.toml"
-      - "scripts/shardline/wait_for_chaos_stack.sh"
   schedule:
     - cron: "31 1 * * 0"
 
