@@ -5,18 +5,18 @@ use serde::{Deserialize, Serialize};
 use shardline_protocol::{ChunkRange, RepositoryProvider, ShardlineHash};
 use shardline_reliability::{
     EvidenceEventMetadata, LifecycleEvent, OperationKind, ProviderLifecycleEvent,
-    QuarantineEvidenceLog, QuarantineLifecycleEvent, QuarantineLifecycleState,
-    QuarantineObjectIdentity, QuarantineSnapshot, ReliabilityMerkleCommit, RetentionEvidenceLog,
-    RetentionHoldLifecycleEvent, RetentionHoldLifecycleState, RetentionHoldSnapshot,
-    RetentionObjectIdentity, SnapshotEvidence, WebhookDeliveryEvidenceLog, WebhookDeliveryIdentity,
-    WebhookDeliveryLifecycleState, WebhookDeliverySnapshot, append_or_baseline_snapshot_evidence,
-    baseline_upload_lifecycle_events, persisted_event_identity, persisted_event_sequence,
+    QuarantineEvidenceLog, QuarantineLifecycleState, QuarantineObjectIdentity, QuarantineSnapshot,
+    ReliabilityMerkleCommit, RetentionEvidenceLog, RetentionHoldLifecycleState,
+    RetentionHoldSnapshot, RetentionObjectIdentity, SnapshotEvidence, WebhookDeliveryEvidenceLog,
+    WebhookDeliveryIdentity, WebhookDeliveryLifecycleState, WebhookDeliverySnapshot,
+    append_or_baseline_snapshot_evidence, baseline_upload_lifecycle_events,
+    persisted_event_identity, persisted_event_sequence,
     reliability_merkle_commit_json_with_previous, upload_lifecycle_event,
     upload_lifecycle_identity, verify_and_append_snapshot_transition,
     verify_and_reactivate_quarantine, verify_persisted_event_merkle_chain,
     verify_persisted_event_merkle_chain_with_sequences,
-    verify_persisted_merkle_commit_with_previous, verify_provider_lifecycle_events,
-    verify_snapshot_evidence, verify_upload_lifecycle_events, verify_upload_lifecycle_head,
+    verify_persisted_merkle_commit_with_previous, verify_snapshot_evidence,
+    verify_upload_lifecycle_events, verify_upload_lifecycle_head,
 };
 use shardline_storage::ObjectKey;
 use sqlx::{PgConnection, Row, postgres::PgRow, query, query_scalar, types::Json};
@@ -31,16 +31,10 @@ use crate::{
     xet_hash_hex_string,
 };
 
-struct PersistedEvidenceHistory {
-    sequences: Vec<u64>,
-    event_json: Vec<serde_json::Value>,
-    merkle_commits: Vec<Option<serde_json::Value>>,
-}
-
 /// Loads and verifies one operation's current evidence boundary without
 /// replaying its historical prefix. Full-chain replay remains available to
 /// batch verification and fsck/repair paths.
-pub(super) async fn load_postgres_latest_evidence_event(
+pub(crate) async fn load_postgres_latest_evidence_event(
     executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>,
     operation_kind: OperationKind,
     operation_id: &str,
@@ -104,50 +98,90 @@ pub(super) async fn load_postgres_latest_evidence_event(
     Ok(Some(event_json))
 }
 
-async fn load_postgres_evidence_histories(
-    pool: &sqlx::PgPool,
-    kind: OperationKind,
+/// Loads and verifies the current evidence boundary for many operations in a
+/// single query. Normal list and visitor paths use this bounded representation;
+/// complete histories remain reserved for explicit audit and repair paths.
+pub(crate) async fn load_postgres_latest_evidence_heads(
+    executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>,
+    operation_kind: OperationKind,
     operation_ids: &[String],
-) -> Result<HashMap<String, PersistedEvidenceHistory>, PostgresMetadataStoreError> {
+) -> Result<HashMap<String, serde_json::Value>, PostgresMetadataStoreError> {
     if operation_ids.is_empty() {
         return Ok(HashMap::new());
     }
     let rows = query(
-        "SELECT operation_id, sequence, event_json, merkle_commit_json
-         FROM shardline_reliability_events
-         WHERE operation_kind = $1 AND operation_id = ANY($2)
-         ORDER BY operation_id, sequence",
+        "WITH requested AS (
+             SELECT operation_id
+             FROM unnest($2::text[]) AS values(operation_id)
+         )
+         SELECT requested.operation_id,
+                latest.sequence,
+                latest.event_json,
+                latest.merkle_commit_json,
+                CASE WHEN EXISTS (
+                    SELECT 1
+                    FROM shardline_reliability_events AS missing
+                    WHERE missing.operation_kind = $1
+                      AND missing.operation_id = requested.operation_id
+                      AND missing.sequence < latest.sequence
+                      AND missing.merkle_commit_json IS NULL
+                ) THEN '{\"missing_previous_merkle_commit\":true}'::jsonb ELSE previous.merkle_commit_json END
+                    AS previous_merkle_commit_json
+         FROM requested
+         LEFT JOIN LATERAL (
+             SELECT sequence, event_json, merkle_commit_json
+             FROM shardline_reliability_events
+             WHERE operation_kind = $1
+               AND operation_id = requested.operation_id
+             ORDER BY sequence DESC
+             LIMIT 1
+         ) AS latest ON TRUE
+         LEFT JOIN LATERAL (
+             SELECT merkle_commit_json
+             FROM shardline_reliability_events
+             WHERE operation_kind = $1
+               AND operation_id = requested.operation_id
+               AND sequence < latest.sequence
+             ORDER BY sequence DESC
+             LIMIT 1
+         ) AS previous ON TRUE",
     )
-    .bind(kind.as_str())
+    .bind(operation_kind.as_str())
     .bind(operation_ids)
-    .fetch_all(pool)
+    .fetch_all(executor)
     .await?;
-    let mut histories = HashMap::with_capacity(operation_ids.len());
+    let mut heads = HashMap::with_capacity(operation_ids.len());
     for row in rows {
-        let sequence = u64::try_from(row.try_get::<i64, _>("sequence")?).map_err(|error| {
+        let Some(sequence) = row.try_get::<Option<i64>, _>("sequence")? else {
+            continue;
+        };
+        let sequence = u64::try_from(sequence).map_err(|error| {
             PostgresMetadataStoreError::IntegerOutOfRange(format!("reliability sequence: {error}"))
         })?;
         let operation_id: String = row.try_get("operation_id")?;
         let event_json: serde_json::Value = row.try_get("event_json")?;
-        let identity = persisted_event_identity(kind, event_json.clone())?;
+        if persisted_event_sequence(operation_kind, event_json.clone())? != sequence {
+            return Err(PostgresMetadataStoreError::Reliability(
+                shardline_reliability::ReliabilityError::Merkle(
+                    "reliability row sequence does not match its event".into(),
+                ),
+            ));
+        }
+        let identity = persisted_event_identity(operation_kind, event_json.clone())?;
         if identity.operation_id != operation_id {
             return Err(PostgresMetadataStoreError::Reliability(
                 shardline_reliability::ReliabilityError::OperationMismatch,
             ));
         }
-        let merkle_commit: Option<serde_json::Value> = row.try_get("merkle_commit_json")?;
-        let history = histories
-            .entry(operation_id)
-            .or_insert_with(|| PersistedEvidenceHistory {
-                sequences: Vec::new(),
-                event_json: Vec::new(),
-                merkle_commits: Vec::new(),
-            });
-        history.sequences.push(sequence);
-        history.event_json.push(event_json);
-        history.merkle_commits.push(merkle_commit);
+        verify_persisted_merkle_commit_with_previous(
+            operation_kind,
+            event_json.clone(),
+            row.try_get("merkle_commit_json")?,
+            row.try_get("previous_merkle_commit_json")?,
+        )?;
+        heads.insert(operation_id, event_json);
     }
-    Ok(histories)
+    Ok(heads)
 }
 
 async fn verify_postgres_quarantine_evidence_batch(
@@ -158,31 +192,19 @@ async fn verify_postgres_quarantine_evidence_batch(
         .iter()
         .map(|candidate| candidate.object_key().as_str().to_owned())
         .collect::<Vec<_>>();
-    let histories = load_postgres_evidence_histories(
+    let heads = load_postgres_latest_evidence_heads(
         &store.pool,
         OperationKind::GarbageCollection,
         &operation_ids,
     )
     .await?;
     for (candidate, operation_id) in candidates.iter().zip(operation_ids) {
-        let history = histories.get(&operation_id).ok_or_else(|| {
+        let head = heads.get(&operation_id).ok_or_else(|| {
             PostgresMetadataStoreError::Reliability(
                 shardline_reliability::ReliabilityError::OperationMismatch,
             )
         })?;
-        verify_persisted_event_merkle_chain_with_sequences(
-            OperationKind::GarbageCollection,
-            &history.sequences,
-            &history.event_json,
-            &history.merkle_commits,
-        )?;
-        let events = history
-            .event_json
-            .iter()
-            .cloned()
-            .map(serde_json::from_value::<QuarantineLifecycleEvent>)
-            .collect::<Result<Vec<_>, _>>()?;
-        let evidence = QuarantineEvidenceLog::from_events(events)?;
+        let evidence = QuarantineEvidenceLog::from_head(serde_json::from_value(head.clone())?)?;
         let snapshot = quarantine_snapshot(candidate, QuarantineLifecycleState::Active)?;
         verify_snapshot_evidence(&evidence, &snapshot)?;
     }
@@ -197,28 +219,19 @@ async fn verify_postgres_retention_evidence_batch(
         .iter()
         .map(|hold| hold.object_key().as_str().to_owned())
         .collect::<Vec<_>>();
-    let histories =
-        load_postgres_evidence_histories(&store.pool, OperationKind::RetentionHold, &operation_ids)
-            .await?;
+    let heads = load_postgres_latest_evidence_heads(
+        &store.pool,
+        OperationKind::RetentionHold,
+        &operation_ids,
+    )
+    .await?;
     for (hold, operation_id) in holds.iter().zip(operation_ids) {
-        let history = histories.get(&operation_id).ok_or_else(|| {
+        let head = heads.get(&operation_id).ok_or_else(|| {
             PostgresMetadataStoreError::Reliability(
                 shardline_reliability::ReliabilityError::OperationMismatch,
             )
         })?;
-        verify_persisted_event_merkle_chain_with_sequences(
-            OperationKind::RetentionHold,
-            &history.sequences,
-            &history.event_json,
-            &history.merkle_commits,
-        )?;
-        let events = history
-            .event_json
-            .iter()
-            .cloned()
-            .map(serde_json::from_value::<RetentionHoldLifecycleEvent>)
-            .collect::<Result<Vec<_>, _>>()?;
-        let evidence = RetentionEvidenceLog::from_events(events)?;
+        let evidence = RetentionEvidenceLog::from_head(serde_json::from_value(head.clone())?)?;
         let snapshot = retention_snapshot(hold, RetentionHoldLifecycleState::Active)?;
         verify_snapshot_evidence(&evidence, &snapshot)?;
     }
@@ -246,34 +259,23 @@ async fn verify_postgres_webhook_evidence_batch(
     }
     operation_ids.sort_unstable();
     operation_ids.dedup();
-    let histories = load_postgres_evidence_histories(
+    let heads = load_postgres_latest_evidence_heads(
         &store.pool,
         OperationKind::WebhookDelivery,
         &operation_ids,
     )
     .await?;
     for (delivery, canonical_id) in deliveries.iter().zip(canonical_ids) {
-        let history = histories
+        let head = heads
             .get(&canonical_id)
-            .or_else(|| histories.get(delivery.delivery_id()))
+            .or_else(|| heads.get(delivery.delivery_id()))
             .ok_or_else(|| {
                 PostgresMetadataStoreError::Reliability(
                     shardline_reliability::ReliabilityError::OperationMismatch,
                 )
             })?;
-        verify_persisted_event_merkle_chain_with_sequences(
-            OperationKind::WebhookDelivery,
-            &history.sequences,
-            &history.event_json,
-            &history.merkle_commits,
-        )?;
-        let events = history
-            .event_json
-            .iter()
-            .cloned()
-            .map(serde_json::from_value::<shardline_reliability::WebhookDeliveryLifecycleEvent>)
-            .collect::<Result<Vec<_>, _>>()?;
-        let evidence = WebhookDeliveryEvidenceLog::from_events(events)?;
+        let evidence =
+            WebhookDeliveryEvidenceLog::from_head(serde_json::from_value(head.clone())?)?;
         let snapshot = webhook_snapshot(delivery, WebhookDeliveryLifecycleState::Processed)?;
         verify_snapshot_evidence(&evidence, &snapshot)?;
     }
@@ -387,56 +389,24 @@ async fn verify_postgres_provider_evidence_batch(
                 .map(|operation| operation.operation_id)
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let mut transaction = store.pool.begin().await?;
-    let rows = query(
-        "SELECT operation_id, sequence, event_json, merkle_commit_json
-         FROM shardline_reliability_events
-         WHERE operation_kind = 'ProviderEvent' AND operation_id = ANY($1)
-         ORDER BY operation_id, sequence",
+    let heads = load_postgres_latest_evidence_heads(
+        &store.pool,
+        OperationKind::ProviderEvent,
+        &operation_ids,
     )
-    .bind(&operation_ids)
-    .fetch_all(&mut *transaction)
     .await?;
-    let mut grouped = HashMap::<
-        String,
-        (
-            Vec<u64>,
-            Vec<serde_json::Value>,
-            Vec<Option<serde_json::Value>>,
-        ),
-    >::new();
-    for row in rows {
-        let operation_id: String = row.try_get("operation_id")?;
-        let sequence = u64::try_from(row.try_get::<i64, _>("sequence")?).map_err(|error| {
-            PostgresMetadataStoreError::IntegerOutOfRange(format!("reliability sequence: {error}"))
-        })?;
-        let value: serde_json::Value = row.try_get("event_json")?;
-        let entry = grouped.entry(operation_id).or_default();
-        entry.0.push(sequence);
-        entry.1.push(value);
-        entry.2.push(row.try_get("merkle_commit_json")?);
-    }
     for snapshot in snapshots {
         let operation_id = snapshot.evidence_operation()?.operation_id;
-        let Some((row_sequences, event_json, merkle_commits)) = grouped.get(&operation_id) else {
+        let Some(head) = heads.get(&operation_id) else {
             return Err(PostgresMetadataStoreError::Reliability(
                 shardline_reliability::ReliabilityError::OperationMismatch,
             ));
         };
-        verify_persisted_event_merkle_chain_with_sequences(
-            OperationKind::ProviderEvent,
-            row_sequences,
-            event_json,
-            merkle_commits,
+        let evidence = shardline_reliability::ProviderEvidenceLog::from_head(
+            serde_json::from_value(head.clone())?,
         )?;
-        let events = event_json
-            .iter()
-            .cloned()
-            .map(serde_json::from_value::<ProviderLifecycleEvent>)
-            .collect::<Result<Vec<_>, _>>()?;
-        verify_provider_lifecycle_events(&events, &snapshot)?;
+        verify_snapshot_evidence(&evidence, &snapshot)?;
     }
-    transaction.commit().await?;
     Ok(())
 }
 
@@ -1440,9 +1410,36 @@ impl AsyncIndexStore for super::PostgresIndexStore {
                 .iter()
                 .map(webhook_delivery_from_row)
                 .collect::<Result<Vec<_>, _>>()?;
+            let mut operation_ids = Vec::with_capacity(deliveries.len().saturating_mul(2));
+            for delivery in &deliveries {
+                let operation_id =
+                    webhook_snapshot(delivery, WebhookDeliveryLifecycleState::Processed)?
+                        .evidence_operation()?
+                        .operation_id;
+                operation_ids.push(operation_id);
+                operation_ids.push(delivery.delivery_id().to_owned());
+            }
+            operation_ids.sort_unstable();
+            operation_ids.dedup();
+            let heads = load_postgres_latest_evidence_heads(
+                &mut *transaction,
+                OperationKind::WebhookDelivery,
+                &operation_ids,
+            )
+            .await?;
             for delivery in &deliveries {
                 let active = webhook_snapshot(delivery, WebhookDeliveryLifecycleState::Processed)?;
-                let evidence = load_postgres_webhook_evidence(&mut transaction, delivery).await?;
+                let canonical_id = active.evidence_operation()?.operation_id;
+                let evidence = heads
+                    .get(&canonical_id)
+                    .or_else(|| heads.get(delivery.delivery_id()))
+                    .map(|event| {
+                        WebhookDeliveryEvidenceLog::from_head(serde_json::from_value(
+                            event.clone(),
+                        )?)
+                    })
+                    .transpose()?
+                    .unwrap_or_default();
                 let released = webhook_snapshot(delivery, WebhookDeliveryLifecycleState::Released)?;
                 let (evidence, evidence_was_empty) =
                     verify_and_append_snapshot_transition(evidence, active, released)?;
@@ -1861,8 +1858,16 @@ impl UploadIntentStore for super::PostgresIndexStore {
         if !current.state().can_transition_to(new_state) {
             return Ok(false);
         }
-        let events = self.reliability_events(intent_id).await?;
-        let (tenant, repository) = upload_lifecycle_identity(&events);
+        let (tenant, repository) =
+            match load_postgres_latest_evidence_event(&self.pool, OperationKind::Upload, intent_id)
+                .await?
+            {
+                Some(value) => {
+                    let event = serde_json::from_value::<LifecycleEvent>(value)?;
+                    (event.operation.tenant, event.operation.repository)
+                }
+                None => ("shardline".to_owned(), "default".to_owned()),
+            };
         let event = upload_lifecycle_event(
             tenant,
             repository,
@@ -1954,11 +1959,15 @@ impl UploadIntentStore for super::PostgresIndexStore {
         &self,
         state: UploadIntentState,
     ) -> Result<Vec<UploadIntent>, Self::Error> {
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            .execute(&mut *transaction)
+            .await?;
         let rows = sqlx::query_as::<_, (String, String, String, i64, String, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>(
             "SELECT intent_id, object_key, object_hash, object_length, state, created_at, updated_at FROM shardline_upload_intents WHERE state = $1 ORDER BY created_at"
         )
         .bind(state.as_str())
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *transaction)
         .await?;
         let intents = rows
             .into_iter()
@@ -1977,9 +1986,34 @@ impl UploadIntentStore for super::PostgresIndexStore {
                 ))
             })
             .collect::<Result<Vec<_>, PostgresMetadataStoreError>>()?;
+        let operation_ids = intents
+            .iter()
+            .map(|intent| intent.intent_id().to_owned())
+            .collect::<Vec<_>>();
+        let heads = load_postgres_latest_evidence_heads(
+            &mut *transaction,
+            OperationKind::Upload,
+            &operation_ids,
+        )
+        .await?;
         for intent in &intents {
-            verify_postgres_intent_evidence(self, intent).await?;
+            let event_json = heads.get(intent.intent_id()).ok_or_else(|| {
+                PostgresMetadataStoreError::Reliability(
+                    shardline_reliability::ReliabilityError::OperationMismatch,
+                )
+            })?;
+            let event = serde_json::from_value::<LifecycleEvent>(event_json.clone())?;
+            verify_upload_lifecycle_head(
+                &event,
+                event.operation.tenant.as_str(),
+                event.operation.repository.as_str(),
+                intent.intent_id(),
+                intent.object_key(),
+                intent.object_hash(),
+                intent.state(),
+            )?;
         }
+        transaction.commit().await?;
         Ok(intents)
     }
 
@@ -1996,12 +2030,16 @@ impl UploadIntentStore for super::PostgresIndexStore {
             .ok_or_else(|| {
                 PostgresMetadataStoreError::InvalidUploadIntentState("invalid duration".into())
             })?;
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            .execute(&mut *transaction)
+            .await?;
         let rows = sqlx::query_as::<_, (String, String, String, i64, String, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>(
             "SELECT intent_id, object_key, object_hash, object_length, state, created_at, updated_at FROM shardline_upload_intents WHERE state = $1 AND created_at < $2 ORDER BY created_at"
         )
         .bind(state.as_str())
         .bind(cutoff)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *transaction)
         .await?;
         let intents = rows
             .into_iter()
@@ -2020,9 +2058,34 @@ impl UploadIntentStore for super::PostgresIndexStore {
                 ))
             })
             .collect::<Result<Vec<_>, PostgresMetadataStoreError>>()?;
+        let operation_ids = intents
+            .iter()
+            .map(|intent| intent.intent_id().to_owned())
+            .collect::<Vec<_>>();
+        let heads = load_postgres_latest_evidence_heads(
+            &mut *transaction,
+            OperationKind::Upload,
+            &operation_ids,
+        )
+        .await?;
         for intent in &intents {
-            verify_postgres_intent_evidence(self, intent).await?;
+            let event_json = heads.get(intent.intent_id()).ok_or_else(|| {
+                PostgresMetadataStoreError::Reliability(
+                    shardline_reliability::ReliabilityError::OperationMismatch,
+                )
+            })?;
+            let event = serde_json::from_value::<LifecycleEvent>(event_json.clone())?;
+            verify_upload_lifecycle_head(
+                &event,
+                event.operation.tenant.as_str(),
+                event.operation.repository.as_str(),
+                intent.intent_id(),
+                intent.object_key(),
+                intent.object_hash(),
+                intent.state(),
+            )?;
         }
+        transaction.commit().await?;
         Ok(intents)
     }
 

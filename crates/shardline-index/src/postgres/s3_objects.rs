@@ -1,7 +1,10 @@
 use serde_json::{from_value, to_value};
 use sqlx::{PgConnection, Row, postgres::PgRow, query, query_scalar};
 
-use super::{PostgresIndexStore, PostgresMetadataStoreError, i64_to_u64, u64_to_i64};
+use super::{
+    PostgresIndexStore, PostgresMetadataStoreError, i64_to_u64,
+    load_postgres_latest_evidence_heads, u64_to_i64,
+};
 use crate::{S3ObjectEntry, S3ObjectIndexStore};
 use shardline_reliability::{
     OperationKind, ReliabilityMerkleCommit, S3ObjectEvidenceLog, S3ObjectLifecycleEvent,
@@ -438,51 +441,11 @@ impl S3ObjectIndexStore for PostgresIndexStore {
         use std::fmt::Write as _;
 
         let mut sql = String::from(
-            "SELECT objects.scope_namespace, objects.object_key, objects.file_id,
-                    objects.size_bytes, objects.content_hash, objects.etag,
-                    objects.user_metadata, objects.updated_at_unix_seconds,
-                    evidence.event_json AS evidence_json,
-                    evidence.sequence AS evidence_sequence,
-                    evidence.merkle_commit_json AS evidence_merkle_json,
-                    previous_evidence.merkle_commit_json AS previous_evidence_merkle_json
-             FROM shardline_s3_objects AS objects
-             LEFT JOIN LATERAL (
-                 SELECT sequence, event_json, merkle_commit_json
-                 FROM shardline_reliability_events
-                 WHERE operation_kind = 'S3Object'
-                   AND operation_id = octet_length(objects.scope_namespace)::text || ':' || objects.scope_namespace
-                       || octet_length(objects.object_key)::text || ':' || objects.object_key
-                 ORDER BY sequence DESC
-                 LIMIT 1
-             ) AS evidence ON TRUE
-             LEFT JOIN LATERAL (
-                 SELECT CASE WHEN EXISTS (
-                     SELECT 1
-                     FROM shardline_reliability_events AS missing
-                     WHERE missing.operation_kind = 'S3Object'
-                       AND missing.operation_id = octet_length(objects.scope_namespace)::text || ':' || objects.scope_namespace
-                           || octet_length(objects.object_key)::text || ':' || objects.object_key
-                       AND missing.sequence < evidence.sequence
-                       AND missing.merkle_commit_json IS NULL
-                 ) THEN '{\"missing_previous_merkle_commit\":true}'::jsonb ELSE (
-                     SELECT previous.merkle_commit_json
-                     FROM shardline_reliability_events AS previous
-                     WHERE previous.operation_kind = 'S3Object'
-                       AND previous.operation_id = octet_length(objects.scope_namespace)::text || ':' || objects.scope_namespace
-                           || octet_length(objects.object_key)::text || ':' || objects.object_key
-                       AND previous.sequence < evidence.sequence
-                     ORDER BY previous.sequence DESC LIMIT 1
-                 ) END AS merkle_commit_json
-                 FROM shardline_reliability_events
-                 WHERE operation_kind = 'S3Object'
-                   AND operation_id = octet_length(objects.scope_namespace)::text || ':' || objects.scope_namespace
-                       || octet_length(objects.object_key)::text || ':' || objects.object_key
-                   AND sequence < evidence.sequence
-                 ORDER BY sequence DESC
-                 LIMIT 1
-             ) AS previous_evidence ON TRUE
-             WHERE objects.scope_namespace = $1
-               AND substr(objects.object_key, 1, length($2)) = $2",
+            "SELECT scope_namespace, object_key, file_id, size_bytes, content_hash, etag,
+                    user_metadata, updated_at_unix_seconds
+             FROM shardline_s3_objects
+             WHERE scope_namespace = $1
+               AND substr(object_key, 1, length($2)) = $2",
         );
         let mut index = 3usize;
         if cursor.is_some() {
@@ -502,39 +465,36 @@ impl S3ObjectIndexStore for PostgresIndexStore {
         q = q.bind(limit_i64);
         let mut transaction = self.pool.begin().await?;
         let rows = q.fetch_all(&mut *transaction).await?;
-        let mut values = Vec::with_capacity(rows.len());
-        for row in &rows {
-            let value = s3_object_entry_from_row(row)?;
-            let event_json: Option<serde_json::Value> = row.try_get("evidence_json")?;
-            let event_json = event_json.ok_or_else(|| {
+        let values = rows
+            .iter()
+            .map(s3_object_entry_from_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        let snapshots = values
+            .iter()
+            .map(|value| s3_object_snapshot(&value.scope_namespace, &value.object_key, Some(value)))
+            .collect::<Result<Vec<_>, _>>()?;
+        let operation_ids = snapshots
+            .iter()
+            .map(|snapshot| {
+                snapshot
+                    .evidence_operation()
+                    .map(|operation| operation.operation_id)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut evidence_heads = load_postgres_latest_evidence_heads(
+            &mut *transaction,
+            OperationKind::S3Object,
+            &operation_ids,
+        )
+        .await?;
+        for (operation_id, expected) in operation_ids.iter().zip(&snapshots) {
+            let event_json = evidence_heads.remove(operation_id).ok_or_else(|| {
                 PostgresMetadataStoreError::Reliability(
                     shardline_reliability::ReliabilityError::OperationMismatch,
                 )
             })?;
-            let evidence_sequence: Option<i64> = row.try_get("evidence_sequence")?;
-            let event_sequence =
-                persisted_event_sequence(OperationKind::S3Object, event_json.clone())?;
-            if evidence_sequence != Some(u64_to_i64(event_sequence)?) {
-                return Err(PostgresMetadataStoreError::Reliability(
-                    shardline_reliability::ReliabilityError::Merkle(
-                        "S3 evidence row sequence does not match its event".into(),
-                    ),
-                ));
-            }
-            let event: S3ObjectLifecycleEvent = serde_json::from_value(event_json)?;
-            let merkle_json: Option<serde_json::Value> = row.try_get("evidence_merkle_json")?;
-            let previous_merkle_json: Option<serde_json::Value> =
-                row.try_get("previous_evidence_merkle_json")?;
-            verify_persisted_merkle_commit_with_previous(
-                OperationKind::S3Object,
-                serde_json::to_value(&event)?,
-                merkle_json,
-                previous_merkle_json,
-            )?;
-            let expected =
-                s3_object_snapshot(&value.scope_namespace, &value.object_key, Some(&value))?;
-            verify_snapshot_event(&event, &expected)?;
-            values.push(value);
+            let event: S3ObjectLifecycleEvent = from_value(event_json)?;
+            verify_snapshot_event(&event, expected)?;
         }
         transaction.commit().await?;
         Ok(values)
@@ -546,7 +506,7 @@ impl S3ObjectIndexStore for PostgresIndexStore {
         object_key: &str,
     ) -> Result<Option<S3ObjectEntry>, Self::Error> {
         let mut transaction = self.pool.begin().await?;
-        let rows = query(
+        let row = query(
             "SELECT scope_namespace, object_key, file_id, size_bytes, content_hash, etag,
                     user_metadata, updated_at_unix_seconds
              FROM shardline_s3_objects
@@ -555,13 +515,9 @@ impl S3ObjectIndexStore for PostgresIndexStore {
         )
         .bind(scope_namespace)
         .bind(object_key)
-        .fetch_all(&mut *transaction)
+        .fetch_optional(&mut *transaction)
         .await?;
-        let value = rows
-            .iter()
-            .map(s3_object_entry_from_row)
-            .collect::<Result<Vec<_>, _>>()?
-            .pop();
+        let value = row.as_ref().map(s3_object_entry_from_row).transpose()?;
         if let Some(value) = value.as_ref() {
             verify_s3_object_evidence(&mut transaction, scope_namespace, object_key, value).await?;
         }

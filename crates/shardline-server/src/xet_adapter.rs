@@ -1,6 +1,7 @@
 pub use shardline_xet_adapter::{
     BatchReconstructionResponse, FileReconstructionResponse, FileReconstructionV2Response,
     XorbUploadResponse, decode_serialized_xorb_chunks, try_for_each_serialized_xorb_chunk,
+    try_for_each_serialized_xorb_chunk_async_trusted, try_for_each_serialized_xorb_chunk_trusted,
     validate_serialized_xorb,
 };
 

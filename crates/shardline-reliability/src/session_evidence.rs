@@ -230,6 +230,12 @@ impl SessionEvidenceLog {
         self.0.events()
     }
 
+    /// Returns whether this log intentionally contains only its durable head.
+    #[must_use]
+    pub const fn is_head_only(&self) -> bool {
+        self.0.is_head_only()
+    }
+
     /// Returns whether no evidence has been recorded.
     #[must_use]
     pub fn is_empty(&self) -> bool {

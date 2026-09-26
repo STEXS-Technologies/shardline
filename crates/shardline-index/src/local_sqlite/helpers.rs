@@ -53,8 +53,6 @@ use crate::{
     record_key::repository_scope_key as shared_repository_scope_key, xet_hash_hex_string,
 };
 
-type VerifiedEventHistory = (Vec<u64>, Vec<Value>, Vec<Option<Value>>);
-
 use shardline_reliability::{
     LifecycleEvent, OciObjectEvidenceLog, OciObjectIdentity, OciObjectLifecycleState,
     OciObjectSnapshot, ReliabilityMerkleCommit, ResumableLifecycleState, StateTransitionEvent,
@@ -210,11 +208,11 @@ pub(crate) fn load_latest_verified_event_json(
     Ok(Some(event_json))
 }
 
-pub(crate) fn load_verified_event_json_batch(
+pub(crate) fn load_latest_verified_event_json_batch(
     transaction: &Transaction<'_>,
     operation_kind: OperationKind,
     operation_ids: &[String],
-) -> Result<HashMap<String, Vec<Value>>, LocalIndexStoreError> {
+) -> Result<HashMap<String, Value>, LocalIndexStoreError> {
     if operation_ids.is_empty() {
         return Ok(HashMap::new());
     }
@@ -223,10 +221,33 @@ pub(crate) fn load_verified_event_json_batch(
         .collect::<Vec<_>>()
         .join(", ");
     let sql = format!(
-        "SELECT operation_id, sequence, event_json, merkle_commit_json
-         FROM shardline_reliability_events
-         WHERE operation_kind = ?1 AND operation_id IN ({placeholders})
-         ORDER BY operation_id, sequence"
+        "SELECT latest.operation_id, latest.sequence, latest.event_json,
+                latest.merkle_commit_json,
+                CASE WHEN EXISTS (
+                    SELECT 1
+                    FROM shardline_reliability_events AS missing
+                    WHERE missing.operation_kind = ?1
+                      AND missing.operation_id = latest.operation_id
+                      AND missing.sequence < latest.sequence
+                      AND missing.merkle_commit_json IS NULL
+                ) THEN '{{\"missing_previous_merkle_commit\":true}}' ELSE (
+                    SELECT previous.merkle_commit_json
+                    FROM shardline_reliability_events AS previous
+                    WHERE previous.operation_kind = ?1
+                      AND previous.operation_id = latest.operation_id
+                      AND previous.sequence < latest.sequence
+                    ORDER BY previous.sequence DESC
+                    LIMIT 1
+                ) END
+         FROM shardline_reliability_events AS latest
+         WHERE latest.operation_kind = ?1
+           AND latest.operation_id IN ({placeholders})
+           AND latest.sequence = (
+               SELECT MAX(current.sequence)
+               FROM shardline_reliability_events AS current
+               WHERE current.operation_kind = ?1
+                 AND current.operation_id = latest.operation_id
+           )"
     );
     let mut parameters = Vec::with_capacity(operation_ids.len().saturating_add(1));
     parameters.push(operation_kind.as_str().to_owned());
@@ -238,45 +259,44 @@ pub(crate) fn load_verified_event_json_batch(
             row.get::<_, i64>(1)?,
             row.get::<_, String>(2)?,
             row.get::<_, Option<String>>(3)?,
+            row.get::<_, Option<String>>(4)?,
         ))
     })?;
-    let mut histories: HashMap<String, VerifiedEventHistory> =
-        HashMap::with_capacity(operation_ids.len());
+    let mut heads = HashMap::with_capacity(operation_ids.len());
     for row in rows {
-        let (operation_id, sequence, event_json, merkle_commit_json) = row?;
+        let (operation_id, sequence, event_json, merkle_commit_json, previous_merkle_json) = row?;
         let sequence = u64::try_from(sequence).map_err(|error| {
             LocalIndexStoreError::Reliability(shardline_reliability::ReliabilityError::Merkle(
                 format!("persisted row sequence is out of range: {error}"),
             ))
         })?;
         let event_json = from_str::<Value>(&event_json)?;
+        if persisted_event_sequence(operation_kind, event_json.clone())? != sequence {
+            return Err(LocalIndexStoreError::Reliability(
+                shardline_reliability::ReliabilityError::Merkle(
+                    "persisted row sequence does not match its event".into(),
+                ),
+            ));
+        }
         let identity = persisted_event_identity(operation_kind, event_json.clone())?;
         if identity.operation_id != operation_id {
             return Err(LocalIndexStoreError::Reliability(
                 shardline_reliability::ReliabilityError::OperationMismatch,
             ));
         }
-        let merkle_commit_json = merkle_commit_json
-            .map(|json| from_str::<Value>(&json))
-            .transpose()?;
-        let history = histories
-            .entry(operation_id)
-            .or_insert_with(|| (Vec::new(), Vec::new(), Vec::new()));
-        history.0.push(sequence);
-        history.1.push(event_json);
-        history.2.push(merkle_commit_json);
-    }
-    let mut verified = HashMap::with_capacity(histories.len());
-    for (operation_id, (sequences, event_json, merkle_commits)) in histories {
-        shardline_reliability::verify_persisted_event_merkle_chain_with_sequences(
+        verify_persisted_merkle_commit_with_previous(
             operation_kind,
-            &sequences,
-            &event_json,
-            &merkle_commits,
+            event_json.clone(),
+            merkle_commit_json
+                .map(|json| from_str::<Value>(&json))
+                .transpose()?,
+            previous_merkle_json
+                .map(|json| from_str::<Value>(&json))
+                .transpose()?,
         )?;
-        verified.insert(operation_id, event_json);
+        heads.insert(operation_id, event_json);
     }
-    Ok(verified)
+    Ok(heads)
 }
 
 /// Persists one integrity-checked evidence event using its typed operation key.
@@ -662,16 +682,18 @@ pub(crate) fn load_quarantine_evidence_batch(
     transaction: &Transaction<'_>,
     object_keys: &[String],
 ) -> Result<HashMap<String, QuarantineEvidenceLog>, LocalIndexStoreError> {
-    let histories =
-        load_verified_event_json_batch(transaction, OperationKind::GarbageCollection, object_keys)?;
-    histories
+    let heads = load_latest_verified_event_json_batch(
+        transaction,
+        OperationKind::GarbageCollection,
+        object_keys,
+    )?;
+    heads
         .into_iter()
-        .map(|(object_key, events)| {
-            let events = events
-                .into_iter()
-                .map(from_value::<QuarantineLifecycleEvent>)
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok((object_key, QuarantineEvidenceLog::from_events(events)?))
+        .map(|(object_key, event)| {
+            Ok((
+                object_key,
+                QuarantineEvidenceLog::from_head(from_value::<QuarantineLifecycleEvent>(event)?)?,
+            ))
         })
         .collect()
 }
@@ -721,16 +743,18 @@ pub(crate) fn load_retention_evidence_batch(
     transaction: &Transaction<'_>,
     object_keys: &[String],
 ) -> Result<HashMap<String, RetentionEvidenceLog>, LocalIndexStoreError> {
-    let histories =
-        load_verified_event_json_batch(transaction, OperationKind::RetentionHold, object_keys)?;
-    histories
+    let heads = load_latest_verified_event_json_batch(
+        transaction,
+        OperationKind::RetentionHold,
+        object_keys,
+    )?;
+    heads
         .into_iter()
-        .map(|(object_key, events)| {
-            let events = events
-                .into_iter()
-                .map(from_value::<RetentionHoldLifecycleEvent>)
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok((object_key, RetentionEvidenceLog::from_events(events)?))
+        .map(|(object_key, event)| {
+            Ok((
+                object_key,
+                RetentionEvidenceLog::from_head(from_value::<RetentionHoldLifecycleEvent>(event)?)?,
+            ))
         })
         .collect()
 }
@@ -790,7 +814,7 @@ pub(crate) fn load_webhook_evidence_batch(
                 .map(|operation| operation.operation_id)
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let histories = load_verified_event_json_batch(
+    let heads = load_latest_verified_event_json_batch(
         transaction,
         OperationKind::WebhookDelivery,
         &operation_ids,
@@ -798,19 +822,16 @@ pub(crate) fn load_webhook_evidence_batch(
     operation_ids
         .into_iter()
         .map(|operation_id| {
-            let events = histories
+            let event = heads
                 .get(&operation_id)
                 .ok_or(LocalIndexStoreError::Reliability(
                     shardline_reliability::ReliabilityError::OperationMismatch,
                 ))?;
-            let events = events
-                .iter()
-                .cloned()
-                .map(from_value::<WebhookDeliveryLifecycleEvent>)
-                .collect::<Result<Vec<_>, _>>()?;
             Ok((
                 operation_id,
-                WebhookDeliveryEvidenceLog::from_events(events)?,
+                WebhookDeliveryEvidenceLog::from_head(
+                    from_value::<WebhookDeliveryLifecycleEvent>(event.clone())?,
+                )?,
             ))
         })
         .collect()
@@ -895,67 +916,20 @@ pub(crate) fn verify_hub_ref_evidence_batch(
                 .operation_id,
         );
     }
-    let placeholders = (0..operation_ids.len())
-        .map(|index| format!("?{}", index.saturating_add(2)))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let sql = format!(
-        "SELECT operation_id, sequence, event_json, merkle_commit_json
-         FROM shardline_reliability_events
-         WHERE operation_kind = ?1 AND operation_id IN ({placeholders})
-         ORDER BY operation_id, sequence"
-    );
-    let mut parameters = Vec::with_capacity(operation_ids.len().saturating_add(1));
-    parameters.push(OperationKind::MetadataCommit.as_str().to_owned());
-    parameters.extend(operation_ids.iter().cloned());
-    let mut statement = transaction.prepare(&sql)?;
-    let rows = statement.query_map(params_from_iter(parameters.iter()), |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, i64>(1)?,
-            row.get::<_, String>(2)?,
-            row.get::<_, Option<String>>(3)?,
-        ))
-    })?;
-    let mut histories: HashMap<String, Vec<(i64, String, Option<String>)>> =
-        HashMap::with_capacity(operation_ids.len());
-    for row in rows {
-        let (operation_id, sequence, event_json, merkle_commit_json) = row?;
-        histories
-            .entry(operation_id)
-            .or_default()
-            .push((sequence, event_json, merkle_commit_json));
-    }
+    let heads = load_latest_verified_event_json_batch(
+        transaction,
+        OperationKind::MetadataCommit,
+        &operation_ids,
+    )?;
     for ((repository, ref_name, head_sha), operation_id) in refs.iter().zip(operation_ids) {
         let snapshot = hub_ref_snapshot(repository, ref_name, head_sha.clone())?;
-        let history_rows = histories.remove(&operation_id).unwrap_or_default();
-        let mut sequences = Vec::with_capacity(history_rows.len());
-        let mut event_json = Vec::with_capacity(history_rows.len());
-        let mut merkle_commits = Vec::with_capacity(history_rows.len());
-        let mut events = Vec::with_capacity(history_rows.len());
-        for (sequence, value, merkle_commit) in history_rows {
-            let sequence = u64::try_from(sequence).map_err(|error| {
-                LocalIndexStoreError::Reliability(shardline_reliability::ReliabilityError::Merkle(
-                    format!("persisted row sequence is out of range: {error}"),
-                ))
-            })?;
-            let value = from_str::<Value>(&value)?;
-            events.push(from_value::<HubRefLifecycleEvent>(value.clone())?);
-            sequences.push(sequence);
-            event_json.push(value);
-            merkle_commits.push(
-                merkle_commit
-                    .map(|json| from_str::<Value>(&json))
-                    .transpose()?,
-            );
-        }
-        shardline_reliability::verify_persisted_event_merkle_chain_with_sequences(
-            OperationKind::MetadataCommit,
-            &sequences,
-            &event_json,
-            &merkle_commits,
-        )?;
-        let evidence = HubRefEvidenceLog::from_events(events)?;
+        let head = heads
+            .get(&operation_id)
+            .ok_or(LocalIndexStoreError::Reliability(
+                shardline_reliability::ReliabilityError::OperationMismatch,
+            ))?;
+        let evidence =
+            HubRefEvidenceLog::from_head(from_value::<HubRefLifecycleEvent>(head.clone())?)?;
         verify_snapshot_evidence(&evidence, &snapshot)?;
     }
     Ok(())
@@ -1134,6 +1108,36 @@ pub(crate) fn load_provider_evidence(
     Ok(ProviderEvidenceLog::from_head(from_value::<
         ProviderLifecycleEvent,
     >(row)?)?)
+}
+
+pub(crate) fn load_provider_evidence_batch(
+    transaction: &Transaction<'_>,
+    snapshots: &[ProviderLifecycleSnapshot],
+) -> Result<HashMap<String, ProviderEvidenceLog>, LocalIndexStoreError> {
+    let operation_ids = snapshots
+        .iter()
+        .map(provider_evidence_operation_id)
+        .collect::<Vec<_>>();
+    let heads = load_latest_verified_event_json_batch(
+        transaction,
+        OperationKind::ProviderEvent,
+        &operation_ids,
+    )?;
+    operation_ids
+        .into_iter()
+        .map(|operation_id| {
+            let evidence = heads
+                .get(&operation_id)
+                .map(|event| {
+                    ProviderEvidenceLog::from_head(from_value::<ProviderLifecycleEvent>(
+                        event.clone(),
+                    )?)
+                })
+                .transpose()?
+                .unwrap_or_default();
+            Ok((operation_id, evidence))
+        })
+        .collect()
 }
 
 pub(crate) fn persist_provider_evidence(
