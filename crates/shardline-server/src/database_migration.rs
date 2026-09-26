@@ -305,7 +305,7 @@ const LEGACY_MIGRATION_CHECKSUM_ALIASES: &[(&str, &str)] = &[
     ),
 ];
 
-const SHARDLINE_MIGRATIONS: [DatabaseMigration; 29] = [
+const SHARDLINE_MIGRATIONS: [DatabaseMigration; 30] = [
     DatabaseMigration {
         version: "20260417000000",
         name: "metadata_store",
@@ -494,6 +494,16 @@ const SHARDLINE_MIGRATIONS: [DatabaseMigration; 29] = [
         ),
         down_sql: include_str!(
             "../migrations/20261001000000_resumable_session_reliability_gate.down.sql"
+        ),
+    },
+    DatabaseMigration {
+        version: "20261002000000",
+        name: "reliability_missing_merkle_index",
+        up_sql: include_str!(
+            "../migrations/20261002000000_reliability_missing_merkle_index.up.sql"
+        ),
+        down_sql: include_str!(
+            "../migrations/20261002000000_reliability_missing_merkle_index.down.sql"
         ),
     },
 ];
@@ -2679,7 +2689,7 @@ mod tests {
 
     #[test]
     fn bundled_migrations_have_expected_count() {
-        assert_eq!(bundled_database_migrations().len(), 29);
+        assert_eq!(bundled_database_migrations().len(), 30);
     }
 
     #[test]
@@ -2767,6 +2777,25 @@ mod tests {
             migration
                 .down_sql
                 .contains("shardline_resumable_session_reliability_gate")
+        );
+    }
+
+    #[test]
+    fn bundled_migrations_include_missing_merkle_index() {
+        let migration = bundled_database_migrations()
+            .iter()
+            .find(|migration| migration.name == "reliability_missing_merkle_index")
+            .expect("reliability missing-Merkle index migration must be registered");
+        assert_eq!(migration.version, "20261002000000");
+        assert!(
+            migration
+                .up_sql
+                .contains("shardline_reliability_events_missing_merkle_idx")
+        );
+        assert!(
+            migration
+                .down_sql
+                .contains("shardline_reliability_events_missing_merkle_idx")
         );
     }
 

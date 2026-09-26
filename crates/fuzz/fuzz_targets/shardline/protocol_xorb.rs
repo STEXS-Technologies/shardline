@@ -5,7 +5,10 @@ use std::io::Cursor;
 use libfuzzer_sys::fuzz_target;
 use shardline_protocol::ShardlineHash;
 use shardline_server::fuzz_normalize_and_validate_xorb;
-use shardline_server::{decode_serialized_xorb_chunks, validate_serialized_xorb};
+use shardline_server::{
+    decode_serialized_xorb_chunks, try_for_each_serialized_xorb_chunk_trusted,
+    validate_serialized_xorb,
+};
 
 fuzz_target!(|data: (Vec<u8>, [u8; 32])| {
     let (serialized, expected_hash_bytes) = data;
@@ -58,6 +61,19 @@ fuzz_target!(|data: (Vec<u8>, [u8; 32])| {
     let Ok(decoded) = first_decode else {
         return;
     };
+
+    let mut trusted_decode_reader = Cursor::new(serialized.as_slice());
+    let mut trusted_decoded = Vec::with_capacity(decoded.len());
+    let trusted_decode = try_for_each_serialized_xorb_chunk_trusted(
+        &mut trusted_decode_reader,
+        &validated,
+        |chunk| {
+            trusted_decoded.push(chunk);
+            Ok::<(), ()>(())
+        },
+    );
+    assert!(trusted_decode.is_ok());
+    assert_eq!(trusted_decoded, decoded);
 
     assert_eq!(decoded.len(), validated.chunks().len());
 

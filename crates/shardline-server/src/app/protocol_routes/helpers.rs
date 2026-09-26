@@ -18,11 +18,33 @@ pub(crate) async fn direct_object_response(
     content_digest: Option<String>,
     protocol: &str,
 ) -> Result<Response, ServerError> {
-    let total_length = state.backend.object_length(object_key).await?;
+    let snapshot = state.backend.object_read_snapshot(object_key).await?;
+    direct_object_response_from_snapshot(
+        state,
+        headers,
+        object_key,
+        content_type,
+        content_digest,
+        protocol,
+        snapshot,
+    )
+    .await
+}
+
+pub(crate) async fn direct_object_response_from_snapshot(
+    state: &Arc<AppState>,
+    headers: &HeaderMap,
+    object_key: &shardline_storage::ObjectKey,
+    content_type: &str,
+    content_digest: Option<String>,
+    protocol: &str,
+    snapshot: crate::backend::ObjectReadSnapshot,
+) -> Result<Response, ServerError> {
+    let total_length = snapshot.total_length;
     let range = parse_optional_range(headers, total_length)?;
     let byte_stream = state
         .backend
-        .read_object_stream(object_key, total_length, range)
+        .read_object_stream_from_snapshot(object_key, snapshot, range)
         .await?;
     let mut response = if let Some(range) = range {
         metrics::record_range_request();

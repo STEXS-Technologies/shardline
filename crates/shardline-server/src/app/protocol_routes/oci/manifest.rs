@@ -19,7 +19,7 @@ use crate::{
     upload_ingest::{RequestBodyReader, read_body_to_bytes},
 };
 
-use super::super::{AppState, direct_object_response, parse_query_values};
+use super::super::{AppState, direct_object_response_from_snapshot, parse_query_values};
 use super::helpers::{
     OciRepository, oci_blob_index_key, oci_blob_key, oci_manifest_index_key, oci_manifest_key,
     oci_manifest_media_type_key,
@@ -51,7 +51,8 @@ pub(crate) async fn oci_get_manifest(
     .await?;
     let manifest_key = oci_manifest_key(repository, &digest_hex, auth)?;
     let media_type_key = oci_manifest_media_type_key(repository, &digest_hex, auth)?;
-    let total_length = state.backend.object_length(&manifest_key).await?;
+    let snapshot = state.backend.object_read_snapshot(&manifest_key).await?;
+    let total_length = snapshot.total_length;
     let media_type =
         String::from_utf8(state.backend.read_object(&media_type_key).await?).map_err(|e| {
             tracing::warn!(error = %e, "invalid media type utf-8");
@@ -71,13 +72,14 @@ pub(crate) async fn oci_get_manifest(
             });
     }
 
-    direct_object_response(
+    direct_object_response_from_snapshot(
         state,
         headers,
         &manifest_key,
         &media_type,
         Some(format!("sha256:{digest_hex}")),
         "oci",
+        snapshot,
     )
     .await
 }

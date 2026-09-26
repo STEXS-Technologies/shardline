@@ -448,6 +448,11 @@ pub async fn repair_upload_session_evidence(
         merkle_snapshot_sequence: None,
         merkle_evidence_commit: None,
         merkle_snapshot_commit: None,
+        merkle_evidence_previous_commit: None,
+        merkle_snapshot_previous_commit: None,
+        journal_evidence_head: None,
+        journal_snapshot_head: None,
+        reliability_head_metadata: false,
     })?;
     write_upload_metadata(root, session_id, reset).await?;
     persist_upload_session_with_evidence(

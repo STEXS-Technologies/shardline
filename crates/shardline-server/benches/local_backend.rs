@@ -14,6 +14,7 @@ use tokio::{
 const CHUNK_SIZE_BYTES: usize = 65_536;
 const BASE_BYTES: usize = 1_048_576;
 const MUTATED_BYTES: usize = 4_096;
+const SINGLE_CHUNK_BYTES: usize = 32_768;
 
 fn local_backend_benchmarks(criterion: &mut Criterion) {
     let runtime = must(Runtime::new(), "benchmark runtime should initialize");
@@ -29,11 +30,17 @@ fn local_backend_benchmarks(criterion: &mut Criterion) {
         build_sparse_update(&base, MUTATED_BYTES),
         "benchmark sparse update fixture should build",
     );
+    let single_chunk = must(
+        build_base_asset(SINGLE_CHUNK_BYTES),
+        "single-chunk benchmark fixture should build",
+    );
     let base_for_initial = base.as_slice();
     let base_for_sparse_setup = base.as_slice();
     let updated_for_sparse_upload = updated.as_slice();
     let updated_for_reconstruction = updated.as_slice();
     let updated_for_download = updated.as_slice();
+    let single_chunk_for_reconstruction = single_chunk.as_slice();
+    let single_chunk_for_download = single_chunk.as_slice();
 
     let mut group = criterion.benchmark_group("shardline_server_local_backend");
     group.bench_function("upload_initial", |bench| {
@@ -114,6 +121,41 @@ fn local_backend_benchmarks(criterion: &mut Criterion) {
                 let _storage = storage;
                 let response = backend.download_file("asset.bin", None, None).await;
                 black_box(must(response, "download benchmark failed"));
+            },
+            BatchSize::SmallInput,
+        );
+    });
+    group.bench_function("reconstruction_single_chunk_xorb", |bench| {
+        bench.to_async(&runtime).iter_batched(
+            || {
+                must(
+                    setup_backend_with_updated(chunk_size, single_chunk_for_reconstruction),
+                    "single-chunk reconstruction backend should initialize",
+                )
+            },
+            |(storage, backend)| async move {
+                let _storage = storage;
+                let response = backend.reconstruction("asset.bin", None, None, None).await;
+                black_box(must(
+                    response,
+                    "single-chunk reconstruction benchmark failed",
+                ));
+            },
+            BatchSize::SmallInput,
+        );
+    });
+    group.bench_function("download_single_chunk_xorb", |bench| {
+        bench.to_async(&runtime).iter_batched(
+            || {
+                must(
+                    setup_backend_with_updated(chunk_size, single_chunk_for_download),
+                    "single-chunk download backend should initialize",
+                )
+            },
+            |(storage, backend)| async move {
+                let _storage = storage;
+                let response = backend.download_file("asset.bin", None, None).await;
+                black_box(must(response, "single-chunk download benchmark failed"));
             },
             BatchSize::SmallInput,
         );
