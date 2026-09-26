@@ -4,6 +4,38 @@ All notable changes to Shardline are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.11.2] - 2026-09-26
+
+This patch release improves the performance of the existing reliability-hardened
+paths from 1.11.1 without changing the protocol or storage behavior.
+
+### Added
+
+- Added a targeted index for locating persisted reliability events that are
+  missing Merkle commitments, keeping commitment repair and verification work
+  bounded as the event table grows.
+- Added local-backend and Xorb validation benchmarks covering the optimized
+  storage and reconstruction paths.
+
+### Improved
+
+- Reduced reliability evidence persistence work across Postgres and SQLite by
+  avoiding repeated historical writes and using more direct latest-state
+  lookups.
+- Improved upload, resumable-session, S3 multipart, OCI, reconstruction-cache,
+  download, and local-storage paths to reduce redundant allocation, copying,
+  staging, and validation overhead.
+- Reduced Xorb hashing and validation overhead by reusing validated raw data,
+  avoiding duplicate digest work, and tightening compression and allocation
+  paths while preserving content verification.
+- Preserved the 1.11.1 reliability model, including evidence verification,
+  Merkle commitments, recovery behavior, and existing protocol surfaces.
+
+### Fixed
+
+- Fixed the missing-Merkle-event query path so incomplete persisted commitments
+  can be found efficiently during repair and verification.
+
 ## [1.11.1] - 2026-09-25
 
 This patch release hardens durable state and recovery without changing the
@@ -1109,6 +1141,8 @@ There are no intentional breaking API or configuration changes from `1.0.0`.
 - Documented async storage TOCTOU races with 1.2M-run fuzz validation (`40ef000`)
 - Updated all architecture, deployment, and Hub API docs for 20-crate structure (`1203d8e`)
 
+[1.11.2]: https://github.com/STEXS-Technologies/shardline/compare/v1.11.1...v1.11.2
+[1.11.1]: https://github.com/STEXS-Technologies/shardline/compare/v1.11.0...v1.11.1
 [1.11.0]: https://github.com/STEXS-Technologies/shardline/compare/v1.10.0...v1.11.0
 [1.10.0]: https://github.com/STEXS-Technologies/shardline/compare/v1.9.0...v1.10.0
 [1.9.0]: https://github.com/STEXS-Technologies/shardline/compare/v1.8.0...v1.9.0
