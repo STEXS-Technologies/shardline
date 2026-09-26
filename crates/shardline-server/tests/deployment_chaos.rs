@@ -42,7 +42,7 @@ use shardline_storage::{ObjectKey, ObjectPrefix, ObjectStore as _, S3ObjectStore
 use std::{
     net::TcpListener,
     path::{Path, PathBuf},
-    process::Stdio,
+    process::{Command, Stdio},
     time::Duration,
 };
 use tempfile::{NamedTempFile, TempDir};
@@ -809,6 +809,30 @@ async fn migrate_chaos_postgres(url: &str) {
     panic!("migrate_chaos_postgres: cannot connect to {url} after 60 retries: {last_err:?}");
 }
 
+async fn migrate_chaos_postgres_with_binary(binary: &Path, url: &str) {
+    let mut last_output = String::new();
+    for attempt in 0..60 {
+        match Command::new(binary)
+            .args(["db", "migrate", "up", "--database-url", url])
+            .output()
+        {
+            Ok(output) if output.status.success() => return,
+            Ok(output) => {
+                last_output = format!(
+                    "status={} stdout={} stderr={}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            Err(error) => last_output = error.to_string(),
+        }
+        let delay = 250_u64.saturating_add((attempt as u64).saturating_mul(250));
+        tokio::time::sleep(Duration::from_millis(delay.min(2_000))).await;
+    }
+    panic!("migrate_chaos_postgres_with_binary: {binary:?} could not migrate {url}: {last_output}");
+}
+
 // ---------------------------------------------------------------------------
 // Object-store client for chunk-evidence polling (S3 store, same creds as the
 // deployed server).
@@ -1042,6 +1066,29 @@ impl DeploymentServer {
             }
         }
         panic!("startup retry loop always returns or panics")
+    }
+
+    async fn wait_startup_rejected(&mut self, expected_log: &str, timeout: Duration) {
+        let deadline = tokio::time::Instant::now()
+            .checked_add(timeout)
+            .expect("deadline overflow");
+        loop {
+            if !self.alive() {
+                let log = self.log_contents();
+                assert!(
+                    log.contains(expected_log),
+                    "rejected startup log did not contain {expected_log:?}: {log}"
+                );
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "deployment server remained alive instead of rejecting startup; log {:?}:\n{}",
+                self._log.path(),
+                self.log_contents()
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
     }
 
     fn alive(&mut self) -> bool {
@@ -2060,17 +2107,19 @@ async fn drill_deploy_f_real_mixed_version_rollout_and_rollback() {
     let Some(previous_binary) = resolve_n_minus_one_binary(drill) else {
         return;
     };
-    migrate_chaos_postgres(&stack.pg_url).await;
+    // N-1 owns the database while the old deployment is serving. The new
+    // migration must not be applied until the old nodes are drained: the
+    // explicit schema compatibility check correctly rejects an N-1 binary
+    // that encounters an unknown N migration.
+    migrate_chaos_postgres_with_binary(&previous_binary, &stack.pg_url).await;
 
-    // The write gates intentionally make the post-migration compatibility
-    // policy read-compatible for N-1, but not write-compatible. Seed the
-    // shared object with N before starting the mixed-version window so this
-    // drill exercises the supported rollout contract instead of asking an
-    // N-1 writer to bypass the reliability gate.
+    // Seed the shared object with N-1 before starting the rollout. This
+    // proves that the new binary can read state created by the preceding
+    // release after the explicit migration boundary.
     let seed_root = TempDir::new().unwrap();
     let environment = [("SHARDLINE_S3_ENDPOINT", stack.s3_endpoint.as_str())];
     let mut seed_node = DeploymentServer::spawn_at(
-        &current_binary,
+        &previous_binary,
         &chaos_bind_addr(),
         &environment,
         seed_root.path(),
@@ -2079,7 +2128,7 @@ async fn drill_deploy_f_real_mixed_version_rollout_and_rollback() {
     let token = mint_token("drill", "drill", TokenScope::Write);
     let old_bytes = deterministic_bytes(98_323, 601);
     let seed_put = s3_put(&seed_node.base_url(), &token, "f-old", old_bytes.clone()).await;
-    assert_eq!(seed_put.status().as_u16(), 200, "N seed write");
+    assert_eq!(seed_put.status().as_u16(), 200, "N-1 seed write");
     drop(seed_node);
 
     let old_a_root = TempDir::new().unwrap();
@@ -2105,13 +2154,25 @@ async fn drill_deploy_f_real_mixed_version_rollout_and_rollback() {
 
     assert_s3_bytes(&node_b.base_url(), &token, "f-old", &old_bytes, "N-1 peer").await;
 
-    // First rollout step: an N process and an N-1 process actively share the
-    // same Postgres metadata and S3 objects.
+    // Drain all N-1 nodes before changing the shared schema. The upgrade is
+    // explicit and leaves no unsafe N-1/N overlap across the migration.
     drop(node_a);
+    drop(node_b);
+    migrate_chaos_postgres(&stack.pg_url).await;
+
+    // First post-migration rollout step: N reads state written by N-1 and
+    // publishes new state.
     let bind_addr = chaos_bind_addr();
     let mut node_a =
         DeploymentServer::spawn_at(&current_binary, &bind_addr, &environment, new_a_root.path());
     node_a.wait_ready(Duration::from_secs(20)).await;
+    let mut node_b = DeploymentServer::spawn_at(
+        &current_binary,
+        &chaos_secondary_bind_addr(),
+        &environment,
+        new_b_root.path(),
+    );
+    node_b.wait_ready(Duration::from_secs(20)).await;
     assert_s3_bytes(
         &node_a.base_url(),
         &token,
@@ -2125,37 +2186,21 @@ async fn drill_deploy_f_real_mixed_version_rollout_and_rollback() {
     assert_eq!(
         new_put.status().as_u16(),
         200,
-        "N write during mixed window"
+        "N write after explicit migration"
     );
     assert_s3_bytes(
         &node_b.base_url(),
         &token,
         "f-new",
         &new_bytes,
-        "N-1 reads N write",
+        "N peer reads N write",
     )
     .await;
 
-    // Finish the rollout, then roll one node back to the real N-1 binary. The
-    // previous binary must read state written by N. Its writes remain gated
-    // until the deployment has completed everywhere.
+    // Finish the rollout, then attempt to roll one node back to the real N-1
+    // binary. The previous binary must fail closed on the unknown N migration;
+    // operators must migrate explicitly before starting an older release.
     drop(node_b);
-    let mut node_b = DeploymentServer::spawn_at(
-        &current_binary,
-        &chaos_secondary_bind_addr(),
-        &environment,
-        new_b_root.path(),
-    );
-    node_b.wait_ready(Duration::from_secs(20)).await;
-    assert_s3_bytes(
-        &node_b.base_url(),
-        &token,
-        "f-new",
-        &new_bytes,
-        "N peer after rollout",
-    )
-    .await;
-
     drop(node_a);
     let mut rollback_node = DeploymentServer::spawn_at(
         &previous_binary,
@@ -2163,29 +2208,14 @@ async fn drill_deploy_f_real_mixed_version_rollout_and_rollback() {
         &environment,
         rollback_root.path(),
     );
-    rollback_node.wait_ready(Duration::from_secs(20)).await;
-    assert_s3_bytes(
-        &rollback_node.base_url(),
-        &token,
-        "f-new",
-        &new_bytes,
-        "N-1 rollback reads N write",
-    )
-    .await;
-    let rollback_bytes = deterministic_bytes(81_949, 603);
-    let rollback_put = s3_put(
-        &rollback_node.base_url(),
-        &token,
-        "f-rollback",
-        rollback_bytes.clone(),
-    )
-    .await;
-    assert!(
-        !rollback_put.status().is_success(),
-        "N-1 rollback write must be rejected by the reliability gate"
-    );
+    rollback_node
+        .wait_startup_rejected(
+            "unknown shardline migration version",
+            Duration::from_secs(20),
+        )
+        .await;
     eprintln!(
-        "chaos({drill}): PASS — real N-1/N rollout and one-node rollback preserved exact bytes"
+        "chaos({drill}): PASS — explicit migration boundary preserved exact bytes and rejected unsafe N-1 rollback"
     );
 }
 
