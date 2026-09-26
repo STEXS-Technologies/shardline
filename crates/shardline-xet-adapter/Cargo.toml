@@ -23,7 +23,7 @@ tokio = { workspace = true, features = ["rt"] }
 shardline-xet-core.workspace = true
 
 [dev-dependencies]
-criterion = { workspace = true, features = ["cargo_bench_support"] }
+criterion = { workspace = true, features = ["async_tokio", "cargo_bench_support"] }
 tempfile.workspace = true
 
 [[bench]]

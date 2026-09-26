@@ -1931,13 +1931,14 @@ pub(crate) async fn lfs_verify_object(
     };
 
     // Check object existence and size before reading.
-    let total_length = match state.backend.object_length(&object_key).await {
-        Ok(len) => len,
+    let snapshot = match state.backend.object_read_snapshot(&object_key).await {
+        Ok(snapshot) => snapshot,
         Err(ServerError::NotFound) => {
             return Ok(StatusCode::NOT_FOUND.into_response());
         }
         Err(e) => return Err(e),
     };
+    let total_length = snapshot.total_length;
 
     if total_length > MAX_LFS_VERIFY_BYTES {
         return Ok((
@@ -1953,7 +1954,7 @@ pub(crate) async fn lfs_verify_object(
     let mut hasher = Sha256::new();
     let mut byte_stream = match state
         .backend
-        .read_object_stream(&object_key, total_length, None)
+        .read_object_stream_from_snapshot(&object_key, snapshot, None)
         .await
     {
         Ok(stream) => stream,

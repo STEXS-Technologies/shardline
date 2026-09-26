@@ -243,12 +243,20 @@ fn verify_s3_object_listing_evidence(
     if values.is_empty() {
         return Ok(());
     }
-    let mut operations = Vec::with_capacity(values.len());
-    for value in values {
-        let snapshot =
-            helpers::s3_object_snapshot(&value.scope_namespace, &value.object_key, Some(value))?;
-        operations.push(snapshot.evidence_operation()?.operation_id);
-    }
+    let snapshots = values
+        .iter()
+        .map(|value| {
+            helpers::s3_object_snapshot(&value.scope_namespace, &value.object_key, Some(value))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let operations = snapshots
+        .iter()
+        .map(|snapshot| {
+            snapshot
+                .evidence_operation()
+                .map(|operation| operation.operation_id)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let placeholders = (0..operations.len())
         .map(|index| format!("?{}", index.saturating_add(2)))
         .collect::<Vec<_>>()
@@ -314,9 +322,9 @@ fn verify_s3_object_listing_evidence(
             ),
         );
     }
-    for (value, operation_id) in values.iter().zip(operations) {
+    for (operation_id, expected) in operations.iter().zip(&snapshots) {
         let Some((row_sequence, event_json, merkle_json, previous_json)) =
-            latest.remove(&operation_id)
+            latest.remove(operation_id)
         else {
             return Err(LocalIndexStoreError::Reliability(
                 shardline_reliability::ReliabilityError::OperationMismatch,
@@ -337,9 +345,7 @@ fn verify_s3_object_listing_evidence(
             previous_json,
         )?;
         let event: S3ObjectLifecycleEvent = serde_json::from_value(event_json)?;
-        let expected =
-            helpers::s3_object_snapshot(&value.scope_namespace, &value.object_key, Some(value))?;
-        verify_snapshot_event(&event, &expected)?;
+        verify_snapshot_event(&event, expected)?;
     }
     Ok(())
 }

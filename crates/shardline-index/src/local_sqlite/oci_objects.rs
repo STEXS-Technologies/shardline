@@ -120,8 +120,26 @@ impl LocalIndexStore {
             });
         }
         drop(statement);
-        for tombstone in &tombstones {
-            let evidence = load_oci_evidence(&transaction, &tombstone.key)?;
+        let operation_ids = tombstones
+            .iter()
+            .map(|tombstone| {
+                Ok::<_, LocalIndexStoreError>(
+                    OciObjectOperationId::new(&oci_identity(&tombstone.key)?).into_string(),
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let heads = super::helpers::load_latest_verified_event_json_batch(
+            &transaction,
+            OperationKind::Visibility,
+            &operation_ids,
+        )?;
+        for (tombstone, operation_id) in tombstones.iter().zip(operation_ids) {
+            let event = heads
+                .get(&operation_id)
+                .ok_or(LocalIndexStoreError::Reliability(
+                    shardline_reliability::ReliabilityError::OperationMismatch,
+                ))?;
+            let evidence = OciObjectEvidenceLog::from_head(serde_json::from_value(event.clone())?)?;
             let expected = oci_snapshot(
                 &tombstone.key,
                 OciObjectLifecycleState::Deleted,

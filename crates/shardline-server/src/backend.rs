@@ -98,6 +98,18 @@ pub(crate) struct S3ObjectReadSnapshot {
     pub user_metadata: Vec<(String, String)>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ObjectReadRepresentation {
+    Direct,
+    FileRecord,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ObjectReadSnapshot {
+    pub total_length: u64,
+    pub representation: ObjectReadRepresentation,
+}
+
 /// Immutable CAS preparation awaiting an atomic S3 metadata publication.
 pub(crate) struct PreparedS3Object {
     pub record: FileRecord,
@@ -945,6 +957,37 @@ impl ServerBackend {
         }
     }
 
+    pub(crate) async fn reconstruction_http_range(
+        &self,
+        file_id: &str,
+        content_hash: Option<&str>,
+        range_header: &str,
+        repository_scope: Option<&RepositoryScope>,
+    ) -> Result<FileReconstructionResponse, ServerError> {
+        match self {
+            Self::Local(backend) => {
+                backend
+                    .reconstruction_http_range(
+                        file_id,
+                        content_hash,
+                        range_header,
+                        repository_scope,
+                    )
+                    .await
+            }
+            Self::Postgres(backend) => {
+                backend
+                    .reconstruction_http_range(
+                        file_id,
+                        content_hash,
+                        range_header,
+                        repository_scope,
+                    )
+                    .await
+            }
+        }
+    }
+
     pub(crate) async fn file_total_bytes(
         &self,
         file_id: &str,
@@ -1244,16 +1287,28 @@ impl ServerBackend {
     }
 
     pub(crate) async fn object_length(&self, object_key: &ObjectKey) -> Result<u64, ServerError> {
+        Ok(self.object_read_snapshot(object_key).await?.total_length)
+    }
+
+    pub(crate) async fn object_read_snapshot(
+        &self,
+        object_key: &ObjectKey,
+    ) -> Result<ObjectReadSnapshot, ServerError> {
         let direct = match self {
             Self::Local(backend) => backend.object_length(object_key).await,
             Self::Postgres(backend) => backend.object_length(object_key).await,
         };
         match direct {
-            Ok(length) => Ok(length),
-            Err(ServerError::NotFound) => {
-                self.file_total_bytes(&protocol_object_file_id(object_key), None, None)
-                    .await
-            }
+            Ok(total_length) => Ok(ObjectReadSnapshot {
+                total_length,
+                representation: ObjectReadRepresentation::Direct,
+            }),
+            Err(ServerError::NotFound) => Ok(ObjectReadSnapshot {
+                total_length: self
+                    .file_total_bytes(&protocol_object_file_id(object_key), None, None)
+                    .await?,
+                representation: ObjectReadRepresentation::FileRecord,
+            }),
             Err(error) => Err(error),
         }
     }
@@ -1287,39 +1342,50 @@ impl ServerBackend {
         total_length: u64,
         range: Option<ByteRange>,
     ) -> Result<ServerByteStream, ServerError> {
-        let direct_length = match self {
-            Self::Local(backend) => backend.object_length(object_key).await,
-            Self::Postgres(backend) => backend.object_length(object_key).await,
-        };
-        if direct_length.is_ok() {
-            crate::metrics::record_object_read_by_repr("direct_object", total_length);
+        let snapshot = self.object_read_snapshot(object_key).await?;
+        self.read_object_stream_from_snapshot(
+            object_key,
+            ObjectReadSnapshot {
+                total_length,
+                representation: snapshot.representation,
+            },
+            range,
+        )
+        .await
+    }
+
+    pub(crate) async fn read_object_stream_from_snapshot(
+        &self,
+        object_key: &ObjectKey,
+        snapshot: ObjectReadSnapshot,
+        range: Option<ByteRange>,
+    ) -> Result<ServerByteStream, ServerError> {
+        if snapshot.representation == ObjectReadRepresentation::Direct {
+            crate::metrics::record_object_read_by_repr("direct_object", snapshot.total_length);
             return match self {
                 Self::Local(backend) => {
                     backend
-                        .read_object_stream(object_key, total_length, range)
+                        .read_object_stream(object_key, snapshot.total_length, range)
                         .await
                 }
                 Self::Postgres(backend) => {
                     backend
-                        .read_object_stream(object_key, total_length, range)
+                        .read_object_stream(object_key, snapshot.total_length, range)
                         .await
                 }
             };
-        }
-        if !matches!(direct_length, Err(ServerError::NotFound)) {
-            return Err(direct_length.err().unwrap_or(ServerError::NotFound));
         }
         let file_id = protocol_object_file_id(object_key);
         let (stream, record_length) = match self {
             Self::Local(backend) => backend.read_file_stream(&file_id, None, range).await?,
             Self::Postgres(backend) => backend.read_file_stream(&file_id, None, range).await?,
         };
-        if record_length != total_length {
+        if record_length != snapshot.total_length {
             return Err(ServerError::ObjectStore(
                 ObjectStoreError::StoredLengthMismatch,
             ));
         }
-        crate::metrics::record_object_read_by_repr("file_read", total_length);
+        crate::metrics::record_object_read_by_repr("file_read", snapshot.total_length);
         Ok(stream)
     }
 

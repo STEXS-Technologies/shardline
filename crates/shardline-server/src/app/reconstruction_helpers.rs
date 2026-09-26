@@ -169,6 +169,26 @@ pub(super) async fn load_reconstruction_response(
         .await
 }
 
+pub(super) async fn load_reconstruction_range_response(
+    state: &AppState,
+    headers: &HeaderMap,
+    file_id: &str,
+    content_hash: Option<&str>,
+    auth: &AuthorizedRepository,
+) -> Result<Option<FileReconstructionResponse>, ServerError> {
+    let Some(header_value) = headers.get(RANGE) else {
+        return Ok(None);
+    };
+    let header_value = header_value
+        .to_str()
+        .map_err(|_error| ServerError::InvalidRangeHeader)?;
+    let response = state
+        .backend
+        .reconstruction_http_range(file_id, content_hash, header_value, auth.namespace())
+        .await?;
+    Ok(Some(response))
+}
+
 pub(super) async fn load_reconstruction_v2_response(
     state: &AppState,
     file_id: &str,
@@ -179,27 +199,6 @@ pub(super) async fn load_reconstruction_v2_response(
     let response =
         load_reconstruction_response(state, file_id, content_hash, requested_range, auth).await?;
     Ok(reconstruction_v2_from_v1(response))
-}
-
-pub(super) async fn parse_reconstruction_request_range(
-    state: &AppState,
-    headers: &HeaderMap,
-    file_id: &str,
-    content_hash: Option<&str>,
-    auth: &AuthorizedRepository,
-) -> Result<Option<ByteRange>, ServerError> {
-    let Some(header_value) = headers.get(RANGE) else {
-        return Ok(None);
-    };
-    let header_value = header_value
-        .to_str()
-        .map_err(|_error| ServerError::InvalidRangeHeader)?;
-    let total_bytes = state
-        .backend
-        .file_total_bytes(file_id, content_hash, auth.namespace())
-        .await?;
-    let range = parse_http_byte_range(header_value, total_bytes).map_err(ServerError::from)?;
-    Ok(Some(range))
 }
 
 pub(super) fn parse_required_xorb_transfer_range(

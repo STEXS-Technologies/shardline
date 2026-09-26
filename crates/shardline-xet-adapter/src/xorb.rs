@@ -272,8 +272,9 @@ pub fn validate_serialized_xorb<R: Read + Seek>(
     reader
         .seek(SeekFrom::Start(0))
         .map_err(XorbParseError::from)?;
-    let validated = XorbObject::validate_xorb_object(reader, &expected_merkle_hash)
-        .map_err(|error| map_core_error(&error))?;
+    let validated =
+        XorbObject::validate_xorb_object_with_info(reader, parsed, &expected_merkle_hash)
+            .map_err(|error| map_core_error(&error))?;
     let Some(validated) = validated else {
         return Err(XorbInvalidFormatError::StructuralValidationFailed.into());
     };
@@ -355,7 +356,44 @@ pub fn decode_serialized_xorb_chunks<R: Read + Seek>(
 pub fn try_for_each_serialized_xorb_chunk<R, F, VisitorError>(
     reader: &mut R,
     validated: &ValidatedXorb,
+    visitor: F,
+) -> Result<(), XorbVisitError<VisitorError>>
+where
+    R: Read + Seek,
+    F: FnMut(DecodedXorbChunk) -> Result<(), VisitorError>,
+{
+    try_for_each_serialized_xorb_chunk_inner(reader, validated, visitor, true)
+}
+
+/// Decodes a serialized xorb after the exact immutable bytes have already been
+/// fully validated by [`validate_serialized_xorb`].
+///
+/// This retains structural and length checks while avoiding a second content
+/// hash for every decoded chunk. Callers must only use it with the same byte
+/// snapshot that produced `validated`; serving code satisfies that requirement
+/// by validating a pod-local materialized object before spawning the decoder.
+///
+/// # Errors
+///
+/// Returns [`XorbVisitError`] when the reader cannot decode the validated
+/// structure or when the visitor rejects a decoded chunk.
+pub fn try_for_each_serialized_xorb_chunk_trusted<R, F, VisitorError>(
+    reader: &mut R,
+    validated: &ValidatedXorb,
+    visitor: F,
+) -> Result<(), XorbVisitError<VisitorError>>
+where
+    R: Read + Seek,
+    F: FnMut(DecodedXorbChunk) -> Result<(), VisitorError>,
+{
+    try_for_each_serialized_xorb_chunk_inner(reader, validated, visitor, false)
+}
+
+fn try_for_each_serialized_xorb_chunk_inner<R, F, VisitorError>(
+    reader: &mut R,
+    validated: &ValidatedXorb,
     mut visitor: F,
+    verify_chunk_hash: bool,
 ) -> Result<(), XorbVisitError<VisitorError>>
 where
     R: Read + Seek,
@@ -382,11 +420,13 @@ where
                 XorbParseError::from(XorbInvalidFormatError::ChunkPayloadMetadataMismatch).into(),
             );
         }
-        let actual_hash = merkle_hash_to_shardline_hash(compute_data_hash(&data));
-        if descriptor.hash() != actual_hash {
-            return Err(
-                XorbParseError::from(XorbInvalidFormatError::ChunkPayloadHashMismatch).into(),
-            );
+        if verify_chunk_hash {
+            let actual_hash = merkle_hash_to_shardline_hash(compute_data_hash(&data));
+            if descriptor.hash() != actual_hash {
+                return Err(
+                    XorbParseError::from(XorbInvalidFormatError::ChunkPayloadHashMismatch).into(),
+                );
+            }
         }
         visitor(DecodedXorbChunk::new(descriptor.clone(), data))
             .map_err(XorbVisitError::Visitor)?;
@@ -412,7 +452,43 @@ where
 pub async fn try_for_each_serialized_xorb_chunk_async<R, F, Fut, VisitorError>(
     reader: &mut R,
     validated: &ValidatedXorb,
+    visitor: F,
+) -> Result<(), XorbVisitError<VisitorError>>
+where
+    R: Read + Seek,
+    F: FnMut(DecodedXorbChunk) -> Fut,
+    Fut: Future<Output = Result<(), VisitorError>>,
+{
+    try_for_each_serialized_xorb_chunk_async_inner(reader, validated, visitor, true).await
+}
+
+/// Async counterpart to [`try_for_each_serialized_xorb_chunk_trusted`].
+///
+/// The caller must have fully validated the same immutable byte snapshot with
+/// [`validate_serialized_xorb`] before invoking this function.
+///
+/// # Errors
+///
+/// Returns [`XorbVisitError`] when the reader cannot decode the validated
+/// structure or when the visitor rejects a decoded chunk.
+pub async fn try_for_each_serialized_xorb_chunk_async_trusted<R, F, Fut, VisitorError>(
+    reader: &mut R,
+    validated: &ValidatedXorb,
+    visitor: F,
+) -> Result<(), XorbVisitError<VisitorError>>
+where
+    R: Read + Seek,
+    F: FnMut(DecodedXorbChunk) -> Fut,
+    Fut: Future<Output = Result<(), VisitorError>>,
+{
+    try_for_each_serialized_xorb_chunk_async_inner(reader, validated, visitor, false).await
+}
+
+async fn try_for_each_serialized_xorb_chunk_async_inner<R, F, Fut, VisitorError>(
+    reader: &mut R,
+    validated: &ValidatedXorb,
     mut visitor: F,
+    verify_chunk_hash: bool,
 ) -> Result<(), XorbVisitError<VisitorError>>
 where
     R: Read + Seek,
@@ -440,11 +516,13 @@ where
                 XorbParseError::from(XorbInvalidFormatError::ChunkPayloadMetadataMismatch).into(),
             );
         }
-        let actual_hash = merkle_hash_to_shardline_hash(compute_data_hash(&data));
-        if descriptor.hash() != actual_hash {
-            return Err(
-                XorbParseError::from(XorbInvalidFormatError::ChunkPayloadHashMismatch).into(),
-            );
+        if verify_chunk_hash {
+            let actual_hash = merkle_hash_to_shardline_hash(compute_data_hash(&data));
+            if descriptor.hash() != actual_hash {
+                return Err(
+                    XorbParseError::from(XorbInvalidFormatError::ChunkPayloadHashMismatch).into(),
+                );
+            }
         }
         visitor(DecodedXorbChunk::new(descriptor.clone(), data))
             .await
@@ -577,7 +655,7 @@ mod tests {
         DecodedXorbChunk, MAX_XORB_UNPACKED_BYTES, ValidatedXorb, ValidatedXorbChunk,
         XorbInvalidFormatError, XorbParseError, XorbVisitError, decode_serialized_xorb_chunks,
         merkle_hash_to_shardline_hash, try_for_each_serialized_xorb_chunk,
-        validate_serialized_xorb,
+        try_for_each_serialized_xorb_chunk_trusted, validate_serialized_xorb,
     };
     use crate::XetAdapterError;
     use shardline_protocol::ShardlineHash;
@@ -1102,6 +1180,15 @@ mod tests {
         });
         assert!(result.is_ok());
         assert_eq!(count, 2);
+
+        let mut trusted_count = 0_usize;
+        let trusted =
+            try_for_each_serialized_xorb_chunk_trusted(&mut reader, &validated, |_chunk| {
+                trusted_count += 1;
+                Ok::<(), XetAdapterError>(())
+            });
+        assert!(trusted.is_ok());
+        assert_eq!(trusted_count, 2);
     }
 
     #[test]

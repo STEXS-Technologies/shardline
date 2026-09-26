@@ -21,6 +21,7 @@ use std::{
     collections::{BTreeMap, HashMap},
     num::{NonZeroU64, NonZeroUsize},
     path::{Path, PathBuf},
+    sync::atomic::{AtomicUsize, Ordering},
     sync::{Arc, LazyLock, Weak},
 };
 
@@ -56,13 +57,15 @@ const MAX_UPLOAD_ID_BYTES: usize = 64;
 /// Entries hold weak references: the strong [`Arc`] returned by
 /// [`acquire_session_part_lock`] keeps a session's entry alive for as long as
 /// a guard is held (part write, completion ingest, or sweep delete), and dead
-/// entries are evicted on the next acquire, so the map is bounded by the
-/// number of sessions with work in flight (F-10).
+/// entries are evicted during periodic maintenance, so stale entries are
+/// bounded while ordinary lock acquisition remains O(1) (F-10).
 type SessionPartLockKey = (PathBuf, String);
 type SessionPartLockMap = std::sync::Mutex<HashMap<SessionPartLockKey, Weak<Mutex<()>>>>;
 
 static S3_UPLOAD_SESSION_PART_LOCKS: LazyLock<SessionPartLockMap> =
     LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+const SESSION_PART_LOCK_CLEANUP_INTERVAL: usize = 256;
+static SESSION_PART_LOCK_ACQUISITIONS: AtomicUsize = AtomicUsize::new(0);
 
 /// Returns the legacy per-session part-write lock for an upload id, creating
 /// it on first use.
@@ -89,6 +92,10 @@ pub fn acquire_session_part_lock_for_root(root: &Path, upload_id: &str) -> Arc<M
 }
 
 fn acquire_session_part_lock_key(root: PathBuf, upload_id: &str) -> Arc<Mutex<()>> {
+    let acquisition = SESSION_PART_LOCK_ACQUISITIONS
+        .fetch_add(1, Ordering::Relaxed)
+        .wrapping_add(1);
+    let should_cleanup = acquisition.is_multiple_of(SESSION_PART_LOCK_CLEANUP_INTERVAL);
     let mut map = S3_UPLOAD_SESSION_PART_LOCKS
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -99,9 +106,12 @@ fn acquire_session_part_lock_key(root: PathBuf, upload_id: &str) -> Arc<Mutex<()
     if let Some(live) = map.get(&key).and_then(Weak::upgrade) {
         return live;
     }
-    // No live handle: drop dead entries so the map cannot grow with finished
-    // sessions, then install a fresh mutex and return its strong Arc.
-    map.retain(|_id, weak| weak.upgrade().is_some());
+    // Periodic maintenance drops dead entries without putting an O(n) scan on
+    // every new session. A dead entry for this exact key is harmless: the
+    // upgrade above fails and it is replaced below.
+    if should_cleanup {
+        map.retain(|_id, weak| weak.upgrade().is_some());
+    }
     let fresh = Arc::new(Mutex::new(()));
     map.insert(key, Arc::downgrade(&fresh));
     fresh
@@ -515,13 +525,12 @@ pub async fn create_session(
 ) -> Result<String, S3SessionError> {
     let _lock = lock_upload_sessions(root).await?;
     let now_unix_seconds = unix_now_seconds_checked()?;
-    sweep_expired_sessions_locked(root, ttl_seconds, now_unix_seconds).await?;
-    let active_sessions = count_active_sessions_locked(root, ttl_seconds, now_unix_seconds).await?;
-    if active_sessions >= max_active_sessions.get() {
+    let (_removed, usage) =
+        sweep_expired_sessions_with_usage_locked(root, ttl_seconds, now_unix_seconds).await?;
+    if usage.active_sessions >= max_active_sessions.get() {
         return Err(S3SessionError::TooManySessions);
     }
-    let total_bytes = total_active_bytes_locked(root, ttl_seconds, now_unix_seconds).await?;
-    if total_bytes >= total_max_bytes.get() {
+    if usage.total_bytes >= total_max_bytes.get() {
         return Err(S3SessionError::AggregateQuotaExceeded);
     }
     let upload_id = new_upload_id();
@@ -667,7 +676,7 @@ pub async fn store_part_locked(
     .await?;
 
     let (total_active_bytes, total_active_part_files) =
-        total_active_usage_locked(root, ttl_seconds, now_unix_seconds).await?;
+        total_active_usage_locked(root, ttl_seconds, now_unix_seconds, None).await?;
     enforce_part_quotas(
         &session,
         part_number,
@@ -740,15 +749,68 @@ pub async fn validate_part_quota_locked(
         now_unix_seconds,
     )
     .await?;
-    let (total_active_bytes, total_active_part_files) =
-        total_active_usage_locked(root, ttl_seconds, now_unix_seconds).await?;
-    enforce_part_quotas(
-        &session,
-        part_number,
-        size_bytes,
+    let limits = PartQuotaLimits {
         session_max_bytes,
         total_max_bytes,
         max_active_part_files,
+    };
+    validate_part_quota_for_session_locked(
+        root,
+        &session,
+        part_number,
+        size_bytes,
+        ttl_seconds,
+        limits,
+    )
+    .await
+}
+
+/// Aggregate and per-session limits for one staged part validation.
+#[derive(Debug, Clone, Copy)]
+pub struct PartQuotaLimits {
+    /// Maximum bytes stored by this upload session.
+    pub session_max_bytes: NonZeroU64,
+    /// Maximum bytes stored by all active upload sessions.
+    pub total_max_bytes: NonZeroU64,
+    /// Maximum active part files across all sessions.
+    pub max_active_part_files: NonZeroUsize,
+}
+
+/// Validates quotas using a session already loaded under the caller's session
+/// lock. This avoids re-reading the same session metadata on request paths that
+/// already needed it for ownership and body-size validation.
+///
+/// The caller must have loaded `session` from `root` while holding the session
+/// lock. The expiry check is repeated here because a request can cross the TTL
+/// boundary between its initial session read and this validation.
+///
+/// # Errors
+///
+/// Returns the same quota, expiry, validation, and I/O errors as
+/// [`validate_part_quota_locked`].
+pub async fn validate_part_quota_for_session_locked(
+    root: &Path,
+    session: &MultipartUploadSession,
+    part_number: u32,
+    size_bytes: u64,
+    ttl_seconds: NonZeroU64,
+    limits: PartQuotaLimits,
+) -> Result<(), S3SessionError> {
+    validate_upload_id(&session.upload_id)?;
+    validate_part_number(part_number)?;
+    let now_unix_seconds = unix_now_seconds_checked()?;
+    if is_expired(session, ttl_seconds, now_unix_seconds) {
+        return Err(S3SessionError::NotFound);
+    }
+    let (total_active_bytes, total_active_part_files) =
+        total_active_usage_locked(root, ttl_seconds, now_unix_seconds, Some(session)).await?;
+    enforce_part_quotas(
+        session,
+        part_number,
+        size_bytes,
+        limits.session_max_bytes,
+        limits.total_max_bytes,
+        limits.max_active_part_files,
         total_active_bytes,
         total_active_part_files,
     )
@@ -846,7 +908,11 @@ pub async fn sweep_expired_sessions(
 ) -> Result<usize, S3SessionError> {
     let _lock = lock_upload_sessions(root).await?;
     let now_unix_seconds = unix_now_seconds_checked()?;
-    sweep_expired_sessions_locked(root, ttl_seconds, now_unix_seconds).await
+    Ok(
+        sweep_expired_sessions_with_usage_locked(root, ttl_seconds, now_unix_seconds)
+            .await?
+            .0,
+    )
 }
 
 /// Counts the currently active (unexpired) sessions.
@@ -1752,18 +1818,27 @@ async fn delete_session_dir(path: &Path) -> Result<(), S3SessionError> {
     }
 }
 
-async fn sweep_expired_sessions_locked(
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct ActiveSessionUsage {
+    active_sessions: usize,
+    total_bytes: u64,
+}
+
+async fn sweep_expired_sessions_with_usage_locked(
     root: &Path,
     ttl_seconds: NonZeroU64,
     now_unix_seconds: u64,
-) -> Result<usize, S3SessionError> {
+) -> Result<(usize, ActiveSessionUsage), S3SessionError> {
     let dir = upload_dir(root);
     let mut entries = match fs::read_dir(&dir).await {
         Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((0, ActiveSessionUsage::default()));
+        }
         Err(error) => return Err(S3SessionError::Io(error)),
     };
     let mut removed = 0_usize;
+    let mut usage = ActiveSessionUsage::default();
     while let Some(entry) = entries.next_entry().await? {
         let path = entry.path();
         if !path.is_dir() {
@@ -1776,7 +1851,16 @@ async fn sweep_expired_sessions_locked(
             continue;
         }
         let expired = match load_session_at(&path, ttl_seconds, now_unix_seconds).await {
-            Ok((session, _evidence)) => is_expired(&session, ttl_seconds, now_unix_seconds),
+            Ok((session, _evidence)) => {
+                usage.active_sessions = usage.active_sessions.saturating_add(1);
+                usage.total_bytes = usage.total_bytes.saturating_add(
+                    session
+                        .parts
+                        .values()
+                        .fold(0_u64, |sum, part| sum.saturating_add(part.size_bytes)),
+                );
+                false
+            }
             Err(S3SessionError::NotFound) => true,
             Err(_error) => continue,
         };
@@ -1792,7 +1876,7 @@ async fn sweep_expired_sessions_locked(
             }
         }
     }
-    Ok(removed)
+    Ok((removed, usage))
 }
 
 async fn count_active_sessions_locked(
@@ -1828,21 +1912,6 @@ async fn count_active_sessions_locked(
     Ok(active)
 }
 
-/// Sums the stored part bytes across all active sessions (caller must hold
-/// the session lock). Used to enforce the aggregate byte quota at session
-/// creation; part writes use [`total_active_usage_locked`].
-async fn total_active_bytes_locked(
-    root: &Path,
-    ttl_seconds: NonZeroU64,
-    now_unix_seconds: u64,
-) -> Result<u64, S3SessionError> {
-    Ok(
-        total_active_usage_locked(root, ttl_seconds, now_unix_seconds)
-            .await?
-            .0,
-    )
-}
-
 /// Computes the aggregate stored-part bytes AND the total part-file count
 /// across all active sessions (caller must hold the session lock). Used to
 /// enforce the aggregate byte quota and the global active-part-file cap in a
@@ -1855,6 +1924,7 @@ async fn total_active_usage_locked(
     root: &Path,
     ttl_seconds: NonZeroU64,
     now_unix_seconds: u64,
+    known_session: Option<&MultipartUploadSession>,
 ) -> Result<(u64, u64), S3SessionError> {
     let dir = upload_dir(root);
     let mut entries = match fs::read_dir(&dir).await {
@@ -1875,19 +1945,33 @@ async fn total_active_usage_locked(
         if validate_upload_id(file_name).is_err() {
             continue;
         }
+        if let Some(known_session) = known_session
+            && file_name == known_session.upload_id
+        {
+            add_session_usage(known_session, &mut total_bytes, &mut total_part_files);
+            continue;
+        }
         if let Ok((session, _evidence)) =
             load_session_at(&path, ttl_seconds, now_unix_seconds).await
         {
-            let session_total = session
-                .parts
-                .values()
-                .fold(0_u64, |sum, part| sum.saturating_add(part.size_bytes));
-            total_bytes = total_bytes.saturating_add(session_total);
-            total_part_files = total_part_files
-                .saturating_add(u64::try_from(session.parts.len()).unwrap_or(u64::MAX));
+            add_session_usage(&session, &mut total_bytes, &mut total_part_files);
         }
     }
     Ok((total_bytes, total_part_files))
+}
+
+fn add_session_usage(
+    session: &MultipartUploadSession,
+    total_bytes: &mut u64,
+    total_part_files: &mut u64,
+) {
+    let session_total = session
+        .parts
+        .values()
+        .fold(0_u64, |sum, part| sum.saturating_add(part.size_bytes));
+    *total_bytes = total_bytes.saturating_add(session_total);
+    *total_part_files =
+        total_part_files.saturating_add(u64::try_from(session.parts.len()).unwrap_or(u64::MAX));
 }
 
 #[cfg(test)]
@@ -2002,6 +2086,20 @@ mod tests {
         let _second_guard = tokio::time::timeout(std::time::Duration::from_secs(2), second.lock())
             .await
             .expect("different deployment roots must not share a part lock");
+    }
+
+    #[test]
+    fn periodic_part_lock_cleanup_preserves_live_lock_identity() {
+        let root = PathBuf::from("periodic-part-lock-cleanup-root");
+        let live = acquire_session_part_lock_for_root(&root, "live-upload");
+
+        for index in 0..(SESSION_PART_LOCK_CLEANUP_INTERVAL * 2) {
+            let upload_id = format!("upload-{index}");
+            let _other = acquire_session_part_lock_for_root(&root, &upload_id);
+        }
+
+        let reacquired = acquire_session_part_lock_for_root(&root, "live-upload");
+        assert!(Arc::ptr_eq(&live, &reacquired));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
