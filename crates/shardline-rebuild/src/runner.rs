@@ -73,6 +73,16 @@ where
             continue;
         }
 
+        // An unreadable version may be newer than the candidate selected from
+        // the readable subset. Preserve an existing head rather than silently
+        // rolling it back. Corrupt records have opaque locators on some store
+        // adapters, so we cannot reliably narrow this protection to one file.
+        // A missing head must also wait: recreating it from this subset could
+        // expose a stale version as latest. A clean rescan enables repairs.
+        if !report.is_clean() {
+            continue;
+        }
+
         RecordMutation::write_latest_record(record_store, &candidate.record)
             .await
             .map_err(Into::into)?;

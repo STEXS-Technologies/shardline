@@ -148,7 +148,6 @@ pub(crate) async fn apply_commit(
         HubApiError::CasError(e.to_string())
     })?;
     let mut files: Vec<HubFileEntry> = existing_files;
-    let mut file_hashes = Vec::new();
 
     for instruction in &parsed.instructions {
         match instruction {
@@ -182,7 +181,6 @@ pub(crate) async fn apply_commit(
                     sha: sha.clone(),
                     is_lfs: false,
                 });
-                file_hashes.push(sha);
             }
             CommitInstruction::LfsPointer { path, oid, size } => {
                 commit::validate_lfs_oid(oid).map_err(|e| {
@@ -196,7 +194,6 @@ pub(crate) async fn apply_commit(
                     sha: oid.clone(),
                     is_lfs: true,
                 });
-                file_hashes.push(oid.clone());
             }
             CommitInstruction::Delete { path } => {
                 files.retain(|f| f.path != *path);
@@ -204,19 +201,24 @@ pub(crate) async fn apply_commit(
         }
     }
 
-    let files_hash = {
-        let mut h = blake3::Hasher::new();
-        for fh in &file_hashes {
-            h.update(fh.as_bytes());
-        }
-        hex::encode(h.finalize().as_bytes())
-    };
-    let commit_sha =
-        shardline_index::hub::HubRepo::compute_commit_sha(parent_sha, &parsed.message, &files_hash)
-            .map_err(|e| {
-                tracing::error!(error = %e, "compute_commit_sha failed");
-                HubApiError::CasError(e.to_string())
-            })?;
+    // File metadata is indexed globally by commit SHA. Bind that identity to
+    // the repository and the complete resulting tree, including paths and
+    // deletions, rather than just the contents supplied by this request.
+    // Canonical ordering and JSON field boundaries make equivalent trees
+    // stable without allowing concatenation or instruction-order collisions.
+    files.sort_unstable_by(|a, b| a.path.cmp(&b.path));
+    let tree: Vec<_> = files
+        .iter()
+        .map(|file| (&file.path, file.size, &file.sha, file.is_lfs))
+        .collect();
+    let identity = serde_json::to_vec(&(
+        "shardline-hub-ndjson-commit-v2",
+        repo_id,
+        parent_sha,
+        &parsed.message,
+        tree,
+    ))?;
+    let commit_sha = blake3::hash(&identity).to_hex().to_string();
 
     // HUB-008: Orphan cleanup trade-off.
     //

@@ -48,7 +48,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use bytes::Bytes;
-use tokio::sync::{Mutex, Semaphore, mpsc};
+use tokio::sync::{Mutex, RwLock, Semaphore, mpsc};
 use tokio::task::JoinSet;
 use xet_core_structures::merklehash::{MerkleHash, file_hash};
 
@@ -117,6 +117,7 @@ pub struct UploadStreamHandle {
 }
 
 struct UploadStreamHandleInner {
+    session: UploadSession,
     pipeline: Mutex<Option<FileUploadPipeline>>,
     result: Arc<OnceLock<UploadFileInfo>>,
     task_id: u64,
@@ -124,6 +125,21 @@ struct UploadStreamHandleInner {
     finished: AtomicBool,
     aborted: AtomicBool,
     error: Mutex<Option<String>>,
+}
+
+/// Once an operation consumes pipeline state, cancellation is terminal.
+struct UploadOperationGuard<'operation> {
+    inner: &'operation UploadStreamHandleInner,
+    completed: bool,
+}
+
+impl Drop for UploadOperationGuard<'_> {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.inner.aborted.store(true, Ordering::Relaxed);
+            self.inner.finished.store(true, Ordering::Relaxed);
+        }
+    }
 }
 
 impl UploadStreamHandle {
@@ -134,21 +150,42 @@ impl UploadStreamHandle {
     }
 
     /// Feeds `data` into the ingest pipeline (chunk → dedup → pending xorb).
+    /// A processing error or cancellation after processing begins permanently
+    /// closes this handle; create a new handle to retry the file from the beginning.
     ///
     /// # Errors
     ///
     /// Returns [`SdxError`] when the pipeline is already finished/aborted, the
     /// session is finalized, or a dedup/upload step fails.
     pub async fn write(&self, data: impl Into<Bytes>) -> Result<(), SdxError> {
+        let _operation = self.inner.session.inner.lifecycle.read().await;
+        self.inner.session.check_not_finalized().await?;
         let data = data.into();
         let mut guard = self.inner.pipeline.lock().await;
-        let Some(pipeline) = guard.as_mut() else {
+        let Some(mut pipeline) = guard.take() else {
             return Err(SdxError::UploadSession(
                 "stream already finished or aborted".to_owned(),
             ));
         };
+        let mut cancellation = UploadOperationGuard {
+            inner: &self.inner,
+            completed: false,
+        };
         self.inner.started.store(true, Ordering::Relaxed);
-        pipeline.add_data(data).await
+        let result = pipeline.add_data(data).await;
+        if let Err(error) = &result {
+            // Chunking consumes the entire block before asynchronous chunk
+            // processing. After a failure, the unprocessed chunks cannot be
+            // replayed, so this pipeline must never publish a partial file.
+            *self.inner.error.lock().await = Some(error.to_string());
+            self.inner.finished.store(true, Ordering::Relaxed);
+        } else {
+            // Restore only after the whole block has been processed. Dropping
+            // a cancelled write also drops its partially advanced pipeline.
+            *guard = Some(pipeline);
+        }
+        cancellation.completed = true;
+        result
     }
 
     /// Blocking version of [`write`](Self::write), bridged onto the
@@ -174,6 +211,8 @@ impl UploadStreamHandle {
     /// Returns [`SdxError`] when the pipeline is already finished, a xorb cut
     /// fails, or the file info cannot be registered.
     pub async fn finish(&self) -> Result<UploadFileInfo, SdxError> {
+        let _operation = self.inner.session.inner.lifecycle.read().await;
+        self.inner.session.check_not_finalized().await?;
         let pipeline = self.inner.pipeline.lock().await.take();
         let Some(pipeline) = pipeline else {
             return Err(SdxError::UploadSession(
@@ -183,6 +222,10 @@ impl UploadStreamHandle {
         if self.inner.aborted.load(Ordering::Relaxed) {
             return Err(SdxError::UploadSession("stream aborted".to_owned()));
         }
+        let mut cancellation = UploadOperationGuard {
+            inner: &self.inner,
+            completed: false,
+        };
         let result = pipeline.finish().await;
         match &result {
             Ok(info) => {
@@ -193,6 +236,7 @@ impl UploadStreamHandle {
             }
         }
         self.inner.finished.store(true, Ordering::Relaxed);
+        cancellation.completed = true;
         result
     }
 
@@ -231,6 +275,8 @@ pub(crate) struct UploadStatusFlags {
 
 /// Shared state of one [`UploadSession`].
 struct UploadSessionInner {
+    /// File operations finish before finalize snapshots upload tasks and files.
+    lifecycle: RwLock<()>,
     transfer: TransferClient,
     tokens: TokenService,
     api_base: String,
@@ -747,6 +793,7 @@ impl UploadSession {
             .map_err(TransferError::from)?;
         Ok(Self {
             inner: Arc::new(UploadSessionInner {
+                lifecycle: RwLock::new(()),
                 transfer: inner.transfer.clone(),
                 tokens: inner.tokens.clone(),
                 api_base: inner.api_base.clone(),
@@ -818,6 +865,7 @@ impl UploadSession {
     where
         R: Read + Send + 'static,
     {
+        let _operation = self.inner.lifecycle.read().await;
         self.check_not_finalized().await?;
         let mut pipeline = FileUploadPipeline::new(self.clone());
         let (tx, mut rx) = mpsc::channel::<Result<ChunkBatch, SdxError>>(2);
@@ -862,6 +910,7 @@ impl UploadSession {
     pub(crate) fn upload_stream_handle_with_id(&self, id: u64) -> UploadStreamHandle {
         UploadStreamHandle {
             inner: Arc::new(UploadStreamHandleInner {
+                session: self.clone(),
                 pipeline: Mutex::new(Some(FileUploadPipeline::new(self.clone()))),
                 result: Arc::new(OnceLock::new()),
                 task_id: id,
@@ -881,6 +930,7 @@ impl UploadSession {
     /// Returns [`SdxError`] when a xorb upload failed, the shard cannot be
     /// built, or the shard POST fails. Calling twice fails.
     pub async fn finalize(&self) -> Result<UploadReport, SdxError> {
+        let _finalize = self.inner.lifecycle.write().await;
         let mut tasks = {
             let mut state = self.inner.state.lock().await;
             if state.finalized {
@@ -1295,6 +1345,129 @@ mod tests {
         let report = session.finalize().await.unwrap();
         assert_eq!(report.files.len(), 1);
         assert_eq!(report.shard_posts, 1);
+    }
+
+    #[tokio::test]
+    async fn finalize_waits_for_in_progress_stream_upload() {
+        let (server, client) = mock_client().await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"/v1/chunks/default-merkledb/.*"))
+            .respond_with(
+                ResponseTemplate::new(404).set_delay(std::time::Duration::from_millis(100)),
+            )
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        let session = client.upload_session().unwrap();
+        let upload_session = session.clone();
+        let upload = tokio::spawn(async move {
+            upload_session
+                .upload_bytes("remote/race", vec![0x5a; 4096])
+                .await
+        });
+        loop {
+            if server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .any(|request| {
+                    request
+                        .url
+                        .path()
+                        .starts_with("/v1/chunks/default-merkledb/")
+                })
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        let report = session.finalize().await.unwrap();
+        let uploaded = upload.await.unwrap().unwrap();
+        assert_eq!(report.files, vec![uploaded]);
+        assert_eq!(report.shard_posts, 1);
+    }
+
+    #[tokio::test]
+    async fn push_upload_cannot_write_or_finish_after_session_finalize() {
+        let (_server, client) = mock_client().await;
+        let session = client.upload_session().unwrap();
+        let handle = session.upload_stream_handle();
+        handle.write(Bytes::from_static(b"tail")).await.unwrap();
+        session.finalize().await.unwrap();
+        assert!(handle.write(Bytes::from_static(b"late")).await.is_err());
+        assert!(handle.finish().await.is_err());
+        let late = session.upload_stream_handle();
+        assert!(late.write(Bytes::from_static(b"late")).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn cancelled_push_write_cannot_publish_partial_file() {
+        let (server, client) = mock_client().await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"/v1/chunks/default-merkledb/.*"))
+            .respond_with(ResponseTemplate::new(404).set_delay(std::time::Duration::from_secs(1)))
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        let session = client.upload_session().unwrap();
+        let handle = session.upload_stream_handle();
+        let source = Bytes::from(vec![0x5a; 4096]);
+        {
+            let write = handle.write(source);
+            tokio::pin!(write);
+            tokio::select! {
+                result = &mut write => panic!("write unexpectedly completed: {result:?}"),
+                () = async {
+                    loop {
+                        if server.received_requests().await.unwrap().iter().any(|request| {
+                            request.url.path().starts_with("/v1/chunks/default-merkledb/")
+                        }) {
+                            break;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                } => {}
+            }
+        }
+        assert!(handle.finish().await.is_err());
+        assert!(handle.write(Bytes::from_static(b"retry")).await.is_err());
+        assert!(handle.try_finish().is_none());
+        assert!(
+            handle
+                .inner
+                .aborted
+                .load(std::sync::atomic::Ordering::Relaxed)
+        );
+        let report = session.finalize().await.unwrap();
+        assert!(report.files.is_empty());
+        assert_eq!(report.shard_posts, 0);
+    }
+
+    #[tokio::test]
+    async fn failed_push_write_cannot_publish_partial_file() {
+        let (server, client) = mock_client().await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"/v1/chunks/default-merkledb/.*"))
+            .respond_with(ResponseTemplate::new(429))
+            .with_priority(1)
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        let session = client.upload_session().unwrap();
+        let handle = session.upload_stream_handle();
+        let source = Bytes::from(vec![0x5a; 4096]);
+        let mut chunker = crate::chunker::Chunker::new(128);
+        assert!(chunker.next_block_bytes(&source, false).len() > 1);
+
+        assert!(handle.write(source).await.is_err());
+        assert!(handle.finish().await.is_err());
+        assert!(handle.write(Bytes::from_static(b"retry")).await.is_err());
+        assert!(handle.try_finish().is_none());
+        assert!(handle.inner.error.lock().await.is_some());
+        let report = session.finalize().await.unwrap();
+        assert!(report.files.is_empty());
+        assert_eq!(report.shard_posts, 0);
     }
 
     #[tokio::test]

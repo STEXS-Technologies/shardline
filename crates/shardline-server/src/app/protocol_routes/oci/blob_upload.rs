@@ -14,7 +14,7 @@ use shardline_index::{
     ResumableSessionProtocol,
 };
 use shardline_metrics::metrics;
-use shardline_protocol::ShardlineHash;
+use shardline_protocol::{ByteRange, ShardlineHash};
 use shardline_storage::ObjectIntegrity;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
@@ -32,7 +32,7 @@ use crate::{
         upload_session_length, upload_session_location, validate_repository,
     },
     protocol_support::{parse_sha256_digest, scope_namespace},
-    upload_ingest::RequestBodyReader,
+    upload_ingest::{RequestBodyReader, StagedRequestBody, stage_body_for_object_store},
 };
 
 const fn durable_oci_sessions_enabled(state: &AppState) -> bool {
@@ -45,6 +45,35 @@ use super::super::{
 use super::helpers::{OciRepository, oci_blob_index_key, oci_blob_key};
 use super::manifest::ensure_oci_object_visible;
 use super::tags::oci_created_response;
+
+/// Validate a ranged request before appending any bytes to its upload session.
+/// The staging policy keeps local bodies on disk and remote bodies within the
+/// reader's existing memory ceiling. Keep the returned file alive during replay.
+/// Remote ranged requests buffer the full bounded body before replay, trading
+/// chunk-at-a-time memory use for validation before session publication.
+async fn stage_oci_ranged_body(
+    state: &Arc<AppState>,
+    body: &mut RequestBodyReader,
+    range: Option<ByteRange>,
+) -> Result<Option<StagedRequestBody>, ServerError> {
+    let Some(range) = range else {
+        return Ok(None);
+    };
+    let expected_length = range.len().ok_or(ServerError::Overflow)?;
+    ensure_upload_growth_within_limit(state, range.start(), usize::try_from(expected_length)?)?;
+    let staged = stage_body_for_object_store(body, &state.backend.object_store()).await?;
+    if expected_length != staged.length() {
+        return Err(ServerError::RangeNotSatisfiable);
+    }
+    *body = match &staged {
+        StagedRequestBody::Memory { bytes, .. } => RequestBodyReader::from_bytes(bytes.clone()),
+        StagedRequestBody::File { file, .. } => RequestBodyReader::from_reader_chain(
+            vec![tokio::fs::File::open(file.path()).await?],
+            state.config.chunk_size().get(),
+        ),
+    };
+    Ok(Some(staged))
+}
 
 #[tracing::instrument(skip(state, _headers, uri, body, repo), fields(repository = %repo.repository()))]
 pub(crate) async fn oci_post_blob_upload(
@@ -223,6 +252,7 @@ pub(crate) async fn oci_patch_blob_upload(
     } else {
         None
     };
+    let _staged_body = stage_oci_ranged_body(state, &mut body, expected_range).await?;
     let mut new_length = current_length;
     while let Some(bytes) = body.next_bytes().await? {
         ensure_upload_growth_within_limit(state, new_length, bytes.len())?;
@@ -291,7 +321,7 @@ async fn durable_oci_patch_blob_upload(
             .checked_add(part.size_bytes())
             .ok_or(ServerError::Overflow)
     })?;
-    if let Some(content_range) = headers.get(CONTENT_RANGE) {
+    let expected_range = if let Some(content_range) = headers.get(CONTENT_RANGE) {
         let expected_range = parse_upload_content_range(
             content_range
                 .to_str()
@@ -300,7 +330,11 @@ async fn durable_oci_patch_blob_upload(
         if expected_range.start() != current_length {
             return Err(ServerError::RangeNotSatisfiable);
         }
-    }
+        Some(expected_range)
+    } else {
+        None
+    };
+    let _staged_body = stage_oci_ranged_body(state, body, expected_range).await?;
     let mut new_length = current_length;
     let mut next_part_number = parts
         .last()
@@ -426,6 +460,7 @@ pub(crate) async fn oci_put_blob_upload(
         {
             return Err(ServerError::RangeNotSatisfiable);
         }
+        let _staged_body = stage_oci_ranged_body(state, &mut body, expected_range).await?;
         let mut s3_session = session;
         let mut new_length = current_length;
         while let Some(bytes) = body.next_bytes().await? {
@@ -484,6 +519,7 @@ pub(crate) async fn oci_put_blob_upload(
     } else {
         None
     };
+    let _staged_body = stage_oci_ranged_body(state, &mut body, expected_range).await?;
     let mut new_length = current_length;
     while let Some(bytes) = body.next_bytes().await? {
         ensure_upload_growth_within_limit(state, new_length, bytes.len())?;
@@ -853,7 +889,9 @@ mod tests {
     use sha2::{Digest, Sha256};
     use tower::ServiceExt;
 
-    use super::super::test_helpers::{build_oci_test_state, oci_test_router};
+    use super::super::test_helpers::{
+        build_oci_postgres_test_cluster, build_oci_test_state, oci_test_router,
+    };
 
     const REPO: &str = "team/assets";
 
@@ -1447,6 +1485,93 @@ mod tests {
             .unwrap();
         let put_response = app.clone().oneshot(request).await.unwrap();
         assert_eq!(put_response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rejected_upload_range_does_not_advance_local_session() {
+        let ctx = build_oci_test_state().await;
+        assert_rejected_range_preserves_session(&oci_test_router(&ctx.state)).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rejected_upload_range_does_not_advance_postgres_session() {
+        let Some(cluster) = build_oci_postgres_test_cluster().await else {
+            return;
+        };
+        assert_rejected_range_preserves_session(&oci_test_router(&cluster.node_a)).await;
+    }
+
+    async fn assert_rejected_range_preserves_session(app: &axum::Router) {
+        for request_method in [Method::PATCH, Method::PUT] {
+            for (declared, pieces) in [
+                ("bytes 4-10/11", vec![b"sho".to_vec(), b"rt".to_vec()]),
+                ("bytes 4-6/7", vec![b"sho".to_vec(), b"rt".to_vec()]),
+            ] {
+                let init = send(
+                    app,
+                    Method::POST,
+                    &format!("/v2/{REPO}/blobs/uploads/"),
+                    Body::empty(),
+                )
+                .await;
+                let session = session_id_from_location(&init);
+                let uri = format!("/v2/{REPO}/blobs/uploads/{session}");
+                assert_eq!(
+                    send(app, Method::PATCH, &uri, Body::from("seed"))
+                        .await
+                        .status(),
+                    StatusCode::ACCEPTED
+                );
+                let body = Body::from_stream(futures_util::stream::iter(
+                    pieces.into_iter().map(Ok::<_, std::io::Error>),
+                ));
+                let request_uri = if request_method == Method::PUT {
+                    format!("{uri}?digest=sha256:{}", sha256_hex(b"seedshort"))
+                } else {
+                    uri.clone()
+                };
+                let rejected = app
+                    .clone()
+                    .oneshot(
+                        axum::http::Request::builder()
+                            .method(request_method.clone())
+                            .uri(&request_uri)
+                            .header(header::CONTENT_RANGE, declared)
+                            .body(body)
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(rejected.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+                let status = send(app, Method::GET, &uri, Body::empty()).await;
+                assert_eq!(status.headers().get(header::RANGE).unwrap(), "0-3");
+                let retry = app
+                    .clone()
+                    .oneshot(
+                        axum::http::Request::builder()
+                            .method(Method::PATCH)
+                            .uri(&uri)
+                            .header(header::CONTENT_RANGE, "bytes 4-8/9")
+                            .body(Body::from("fixed"))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(retry.status(), StatusCode::ACCEPTED);
+                let digest = sha256_hex(b"seedfixed");
+                assert_eq!(
+                    send(
+                        app,
+                        Method::PUT,
+                        &format!("{uri}?digest=sha256:{digest}"),
+                        Body::empty()
+                    )
+                    .await
+                    .status(),
+                    StatusCode::CREATED
+                );
+            }
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

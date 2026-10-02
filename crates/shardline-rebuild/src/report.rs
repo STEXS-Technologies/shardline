@@ -56,9 +56,9 @@ pub struct IndexRebuildReport {
     pub removed_stale_dedupe_shard_mappings: u64,
     /// Locator displays of version records that could not be parsed. Their
     /// existing latest records were preserved ("kept because version
-    /// unreadable"): the stale-latest-record deletion phase is skipped when the
-    /// run is not clean, so an unreadable version row can never cause a fully
-    /// intact latest record — and the file it indexes — to be deleted.
+    /// unreadable"): existing heads are neither replaced nor deleted when the
+    /// version scan is not clean. An unreadable newer version therefore cannot
+    /// roll an acknowledged head back to an older readable version.
     pub preserved_latest_records_unreadable_version: Vec<String>,
     /// Collected non-fatal rebuild issues.
     pub issues: Vec<IndexRebuildIssue>,
