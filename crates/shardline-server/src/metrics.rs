@@ -2,7 +2,7 @@ use std::{
     future::Future,
     pin::Pin,
     task::{Context, Poll},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use axum::body::Body;
@@ -75,7 +75,7 @@ pub fn record_object_stored_by_repr(representation: &str, bytes: u64) {
 pub fn record_object_read_by_repr(representation: &str, bytes: u64) {
     shardline_metrics::metrics()
         .storage
-        .record_object_stored_by_repr(representation, bytes);
+        .record_object_read_by_repr(representation, bytes);
 }
 
 pub fn record_lfs_upload() {
@@ -241,23 +241,31 @@ mod tests {
         let inner = tower::util::service_fn(|_req: axum::http::Request<Body>| async {
             Ok::<_, std::convert::Infallible>(axum::http::Response::new(Body::empty()))
         });
-        let _svc = MetricsService { inner };
+        let _svc = MetricsService {
+            inner,
+            active_connections: shardline_metrics::metrics()
+                .system
+                .active_connections
+                .clone(),
+        };
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn metrics_service_poll_ready_and_call_tracks_connections() {
         use tower::ServiceExt;
         let svc = MetricsService {
+            active_connections: prometheus::IntGauge::new("test_active", "test active").unwrap(),
             inner: tower::util::service_fn(|_req: axum::http::Request<Body>| async {
                 Ok::<_, std::convert::Infallible>(axum::http::Response::new(Body::empty()))
             }),
         };
-        let before = metrics().system.active_connections.get();
+        let gauge = svc.active_connections.clone();
+        let before = gauge.get();
         // Use oneshot to drive poll_ready + call
         let _response = svc
             .oneshot(axum::http::Request::builder().body(Body::empty()).unwrap())
             .await;
-        let after = metrics().system.active_connections.get();
+        let after = gauge.get();
         // Connections opened and then closed, so active should be same
         assert_eq!(after, before);
     }
@@ -368,13 +376,35 @@ impl<S> Layer<S> for MetricsLayer {
     type Service = MetricsService<S>;
 
     fn layer(&self, inner: S) -> Self::Service {
-        MetricsService { inner }
+        MetricsService {
+            inner,
+            active_connections: shardline_metrics::metrics()
+                .system
+                .active_connections
+                .clone(),
+        }
     }
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct MetricsService<S> {
     inner: S,
+    active_connections: prometheus::IntGauge,
+}
+
+struct ActiveRequestGuard(prometheus::IntGauge);
+
+impl ActiveRequestGuard {
+    fn new(gauge: prometheus::IntGauge) -> Self {
+        gauge.inc();
+        Self(gauge)
+    }
+}
+
+impl Drop for ActiveRequestGuard {
+    fn drop(&mut self) {
+        self.0.dec();
+    }
 }
 
 impl<S, ReqBody> Service<axum::http::Request<ReqBody>> for MetricsService<S>
@@ -395,17 +425,108 @@ where
     }
 
     fn call(&mut self, req: axum::http::Request<ReqBody>) -> Self::Future {
-        let start = Instant::now();
-        shardline_metrics::metrics().system.connection_opened();
-
-        let mut inner = self.inner.clone();
+        let active_request = ActiveRequestGuard::new(self.active_connections.clone());
+        // A clone may not carry the reservation established by poll_ready.
+        let replacement = self.inner.clone();
+        let mut inner = std::mem::replace(&mut self.inner, replacement);
         Box::pin(async move {
-            let result = inner.call(req).await;
-            shardline_metrics::metrics().system.connection_closed();
-            let response = result?;
-            let _elapsed = start.elapsed().as_secs_f64();
-
-            Ok(response)
+            let _active_request = active_request;
+            inner.call(req).await
         })
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+
+    use axum::{
+        body::Body,
+        http::{Request, Response},
+    };
+    use std::task::{Context, Poll, Waker};
+    use tower::Service;
+
+    struct ReadyService(bool);
+    impl Clone for ReadyService {
+        fn clone(&self) -> Self {
+            Self(false)
+        }
+    }
+    impl Service<Request<Body>> for ReadyService {
+        type Response = Response<Body>;
+        type Error = std::convert::Infallible;
+        type Future = std::future::Ready<Result<Self::Response, Self::Error>>;
+        fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            self.0 = true;
+            Poll::Ready(Ok(()))
+        }
+        fn call(&mut self, _: Request<Body>) -> Self::Future {
+            assert!(self.0, "the instance polled ready must receive the request");
+            self.0 = false;
+            std::future::ready(Ok(Response::new(Body::empty())))
+        }
+    }
+
+    #[test]
+    fn preserves_ready_instance_and_balances_completion() {
+        let gauge = prometheus::IntGauge::new("isolated_active", "test active").unwrap();
+        let mut wrapped = super::MetricsService {
+            inner: ReadyService(false),
+            active_connections: gauge.clone(),
+        };
+        let waker = Waker::noop();
+        let mut cx = Context::from_waker(waker);
+        for _ in 0..2 {
+            assert!(matches!(wrapped.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+            let mut future = wrapped.call(Request::new(Body::empty()));
+            assert_eq!(gauge.get(), 1);
+            assert!(matches!(future.as_mut().poll(&mut cx), Poll::Ready(Ok(_))));
+            drop(future);
+            assert_eq!(gauge.get(), 0);
+        }
+    }
+
+    #[test]
+    fn balances_unpolled_drop_and_pending_cancellation() {
+        let gauge = prometheus::IntGauge::new("isolated_active", "test active").unwrap();
+        let svc = tower::service_fn(|_: Request<Body>| {
+            std::future::pending::<Result<Response<Body>, std::convert::Infallible>>()
+        });
+        let mut wrapped = super::MetricsService {
+            inner: svc,
+            active_connections: gauge.clone(),
+        };
+        let future = wrapped.call(Request::new(Body::empty()));
+        assert_eq!(gauge.get(), 1);
+        drop(future);
+        assert_eq!(gauge.get(), 0);
+        let waker = Waker::noop();
+        let mut cx = Context::from_waker(waker);
+        let mut future = wrapped.call(Request::new(Body::empty()));
+        assert!(matches!(future.as_mut().poll(&mut cx), Poll::Pending));
+        assert_eq!(gauge.get(), 1);
+        drop(future);
+        assert_eq!(gauge.get(), 0);
+    }
+
+    #[test]
+    fn balances_returned_service_error() {
+        let gauge = prometheus::IntGauge::new("isolated_active", "test active").unwrap();
+        let svc = tower::service_fn(|_: Request<Body>| async {
+            Err::<Response<Body>, &str>("service error")
+        });
+        let mut wrapped = super::MetricsService {
+            inner: svc,
+            active_connections: gauge.clone(),
+        };
+        let waker = Waker::noop();
+        let mut cx = Context::from_waker(waker);
+        let mut future = wrapped.call(Request::new(Body::empty()));
+        assert!(matches!(
+            future.as_mut().poll(&mut cx),
+            Poll::Ready(Err("service error"))
+        ));
+        drop(future);
+        assert_eq!(gauge.get(), 0);
     }
 }

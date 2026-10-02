@@ -4,6 +4,9 @@ use crate::{must_counter, must_counter_vec, must_gauge};
 
 pub struct StorageMetrics {
     pub objects_total: IntGauge,
+    pub objects_read_total: IntCounter,
+    pub objects_read_bytes_total: IntCounter,
+    pub objects_read_by_repr: IntCounterVec,
     pub objects_bytes_total: IntCounter,
     pub chunks_total: IntGauge,
     pub chunks_bytes_total: IntCounter,
@@ -18,6 +21,28 @@ pub struct StorageMetrics {
 impl StorageMetrics {
     #[must_use]
     pub fn new(registry: &Registry) -> Self {
+        let objects_read_total = must_counter(
+            "shardline_objects_read_total",
+            "Logical object reads requested",
+        );
+        let objects_read_bytes_total = must_counter(
+            "shardline_objects_read_bytes_total",
+            "Sum of full logical object sizes opened for reading, regardless of byte range or delivery",
+        );
+        let objects_read_by_repr = must_counter_vec(
+            prometheus::opts!(
+                "shardline_objects_read_by_repr_total",
+                "Logical object reads requested by representation"
+            ),
+            &["representation"],
+        );
+        registry.register(Box::new(objects_read_total.clone())).ok();
+        registry
+            .register(Box::new(objects_read_bytes_total.clone()))
+            .ok();
+        registry
+            .register(Box::new(objects_read_by_repr.clone()))
+            .ok();
         let objects_total = must_gauge("shardline_objects_total", "Total objects stored");
         let objects_bytes_total = must_counter(
             "shardline_objects_bytes_total",
@@ -64,6 +89,9 @@ impl StorageMetrics {
         registry.register(Box::new(objects_by_repr.clone())).ok();
 
         Self {
+            objects_read_total,
+            objects_read_bytes_total,
+            objects_read_by_repr,
             objects_total,
             objects_bytes_total,
             chunks_total,
@@ -75,6 +103,16 @@ impl StorageMetrics {
             compression_saved_bytes_total,
             objects_by_repr,
         }
+    }
+
+    /// Records the full logical size of an object opened for reading, regardless
+    /// of its requested byte range or subsequent response-stream delivery.
+    pub fn record_object_read_by_repr(&self, representation: &str, bytes: u64) {
+        self.objects_read_total.inc();
+        self.objects_read_bytes_total.inc_by(bytes);
+        self.objects_read_by_repr
+            .with_label_values(&[representation])
+            .inc();
     }
 
     pub fn record_object_stored_by_repr(&self, representation: &str, bytes: u64) {
@@ -202,5 +240,40 @@ mod tests {
 
         metrics.record_compression_saved(500);
         assert_eq!(metrics.compression_saved_bytes_total.get(), 1500);
+    }
+}
+
+#[cfg(test)]
+mod read_tests {
+    #[test]
+    fn requested_reads_do_not_mutate_stored_object_counters() {
+        let metrics = super::StorageMetrics::new(&prometheus::Registry::new());
+        metrics.record_object_stored_by_repr("direct_object", 23);
+        for _ in 0..3 {
+            metrics.record_object_read_by_repr("direct_object", 23);
+        }
+        assert_eq!(metrics.objects_total.get(), 1);
+        assert_eq!(metrics.objects_bytes_total.get(), 23);
+        assert_eq!(
+            metrics
+                .objects_by_repr
+                .with_label_values(&["direct_object"])
+                .get(),
+            1
+        );
+        assert_eq!(metrics.objects_read_total.get(), 3);
+        assert_eq!(metrics.objects_read_bytes_total.get(), 69);
+        assert_eq!(
+            metrics
+                .objects_read_by_repr
+                .with_label_values(&["direct_object"])
+                .get(),
+            3
+        );
+        metrics.record_object_stored_by_repr("direct_object", 17);
+        assert_eq!(metrics.objects_total.get(), 2);
+        assert_eq!(metrics.objects_bytes_total.get(), 40);
+        assert_eq!(metrics.objects_read_total.get(), 3);
+        assert_eq!(metrics.objects_read_bytes_total.get(), 69);
     }
 }
