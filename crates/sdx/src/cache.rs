@@ -65,6 +65,8 @@ const MAGIC: &[u8; 8] = b"SDXCHNK1";
 /// Fixed header length: magic(8) + chunk_start(8) + chunk_end(8) +
 /// num_offsets(4) + data_len(8) + crc32(4) = 40 bytes.
 const HEADER_LEN: usize = 40;
+/// Reader and writer share the xorb chunk-count boundary.
+const MAX_CACHE_CHUNKS: u64 = 8192;
 
 /// A decoded xorb range served from the on-disk cache.
 ///
@@ -262,7 +264,7 @@ impl ChunkCache {
             let mut state = state.blocking_lock();
             let (cached, was_corrupt) = match read_entry_bounded(&path, decoded_limit) {
                 Ok(Some(cached)) if cached.chunk_range == chunk_range => (Some(cached), false),
-                Ok(Some(_)) => (None, false),
+                Ok(Some(_)) => (None, true),
                 Ok(None) => (None, false),
                 Err(_) => (None, true),
             };
@@ -297,7 +299,8 @@ impl ChunkCache {
     /// `chunk_offsets` must have `chunk_end - chunk_start + 1` entries, the
     /// first must be `0`, and the last must equal `data.len()` (validated;
     /// invalid input is rejected with [`SdxError::StreamInternal`]). Entries
-    /// larger than the budget are not stored. On overflow, the
+    /// may cover at most 8192 chunks. Entries larger than the budget are not
+    /// stored. On overflow, the
     /// least-recently-accessed entry is evicted until the cache fits.
     ///
     /// # Errors
@@ -480,6 +483,11 @@ fn validate_offsets_shape(
             "cache put range {start}..{end} is empty"
         )));
     }
+    if end.saturating_sub(start) > MAX_CACHE_CHUNKS {
+        return Err(SdxError::StreamInternal(format!(
+            "cache range {start}..{end} exceeds {MAX_CACHE_CHUNKS} chunks"
+        )));
+    }
     let expected = end
         .saturating_sub(start)
         .saturating_add(1)
@@ -583,7 +591,7 @@ fn read_entry_bounded(
     // sparse file or forged data_len must not turn a cache lookup into an
     // allocation larger than the active download's reservation.
     if header.data_len > decoded_limit.min(64 * 1024 * 1024)
-        || header.num_offsets > 8193
+        || u64::from(header.num_offsets) > MAX_CACHE_CHUNKS.saturating_add(1)
         || u64::from(header.num_offsets)
             != header
                 .chunk_range
@@ -816,9 +824,9 @@ fn scan_directory(cache_dir: &Path, budget_bytes: u64) -> Result<CacheState, Sdx
                 continue;
             }
             match read_entry_bounded(&entry_path, budget_bytes) {
-                Ok(Some(_)) => {}
+                Ok(Some(cached)) if cached.chunk_range == (key.1, key.2) => {}
                 Ok(None) => continue,
-                Err(_) => {
+                Ok(Some(_)) | Err(_) => {
                     drop(std::fs::remove_file(&entry_path));
                     continue;
                 }
@@ -945,6 +953,99 @@ mod tests {
         );
         assert_eq!(cache.entry_count().await.unwrap(), 1);
         assert_eq!(cache.total_bytes().await.unwrap(), 53);
+    }
+
+    fn overwrite_header_range(path: &Path, range: (u64, u64)) {
+        use std::io::{Seek, SeekFrom};
+        let mut file = File::options().write(true).open(path).unwrap();
+        file.seek(SeekFrom::Start(8)).unwrap();
+        file.write_all(&range.0.to_le_bytes()).unwrap();
+        file.write_all(&range.1.to_le_bytes()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn mismatched_header_range_is_removed_on_get_and_restart() {
+        for restart_before_get in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let key = hash('a');
+            let cache = ChunkCache::new(directory.path(), 1024).unwrap();
+            cache.put(&key, (0, 1), &[0, 5], b"wrong").await.unwrap();
+            cache.put(&key, (1, 2), &[0, 5], b"valid").await.unwrap();
+            let malformed_path = cache.item_path(&cache_key(&key, (0, 1))).unwrap();
+            // A structurally valid header with unchanged payload CRC must
+            // still match the filename's identity.
+            overwrite_header_range(&malformed_path, (2, 3));
+            let checked = if restart_before_get {
+                drop(cache);
+                ChunkCache::new(directory.path(), 1024).unwrap()
+            } else {
+                cache
+            };
+            if restart_before_get {
+                assert!(!malformed_path.exists());
+                assert_eq!(checked.entry_count().await.unwrap(), 1);
+                assert_eq!(checked.total_bytes().await.unwrap(), 53);
+            }
+            for _ in 0..2 {
+                assert!(checked.get(&key, (0, 1)).await.unwrap().is_none());
+                assert!(!malformed_path.exists());
+                assert_eq!(checked.entry_count().await.unwrap(), 1);
+                assert_eq!(checked.total_bytes().await.unwrap(), 53);
+            }
+            assert_eq!(
+                checked
+                    .get(&key, (1, 2))
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .data
+                    .as_ref(),
+                b"valid"
+            );
+            drop(checked);
+            let reopened = ChunkCache::new(directory.path(), 1024).unwrap();
+            assert_eq!(reopened.entry_count().await.unwrap(), 1);
+            assert_eq!(reopened.total_bytes().await.unwrap(), 53);
+        }
+    }
+
+    #[tokio::test]
+    async fn cache_put_preserves_reader_chunk_boundary() {
+        let directory = tempfile::tempdir().unwrap();
+        let cache = ChunkCache::new(directory.path(), 1024 * 1024).unwrap();
+        let key = hash('b');
+        let valid_offsets = vec![0; 8193];
+        cache
+            .put(&key, (0, 8192), &valid_offsets, &[])
+            .await
+            .unwrap();
+        let hit = cache.get(&key, (0, 8192)).await.unwrap().unwrap();
+        assert_eq!(hit.chunk_offsets, valid_offsets);
+        let oversized_offsets = vec![0; 8194];
+        assert!(matches!(
+            cache.put(&key, (0, 8193), &oversized_offsets, &[]).await,
+            Err(SdxError::StreamInternal(_))
+        ));
+        assert!(
+            !cache
+                .item_path(&cache_key(&key, (0, 8193)))
+                .unwrap()
+                .exists()
+        );
+        assert_eq!(cache.entry_count().await.unwrap(), 1);
+        assert_eq!(cache.total_bytes().await.unwrap(), 32812);
+        drop(cache);
+        let reopened = ChunkCache::new(directory.path(), 1024 * 1024).unwrap();
+        assert!(reopened.get(&key, (0, 8192)).await.unwrap().is_some());
+        assert_eq!(reopened.entry_count().await.unwrap(), 1);
+        let disabled = ChunkCache::new(directory.path().join("disabled"), 0).unwrap();
+        assert!(
+            disabled
+                .put(&key, (0, 8193), &oversized_offsets, &[])
+                .await
+                .is_ok()
+        );
+        assert!(!disabled.cache_dir().exists());
     }
 
     #[tokio::test]

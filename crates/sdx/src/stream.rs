@@ -540,6 +540,10 @@ impl<F: FnOnce()> ExitGuard<F> {
     const fn new(f: F) -> Self {
         Self(Some(f))
     }
+
+    fn disarm(&mut self) {
+        drop(self.0.take());
+    }
 }
 
 impl<F: FnOnce()> Drop for ExitGuard<F> {
@@ -1317,9 +1321,37 @@ pub(crate) struct XorbBlock {
     decoded_budget: u64,
     reservation: Mutex<Option<BufferPermit>>,
     reservation_started: AtomicBool,
+    #[cfg(test)]
+    publication_gate: Option<Arc<PublicationGate>>,
+}
+
+#[cfg(test)]
+struct PublicationGate {
+    ready: Mutex<Option<oneshot::Sender<()>>>,
+    release: Mutex<std::sync::mpsc::Receiver<()>>,
 }
 
 impl XorbBlock {
+    #[cfg(test)]
+    fn wait_for_publication(&self) -> Result<(), SdxError> {
+        if let Some(gate) = &self.publication_gate {
+            let sender = gate
+                .ready
+                .lock()
+                .map_err(|error| SdxError::StreamInternal(error.to_string()))?
+                .take();
+            if let Some(sender) = sender {
+                let _ = sender.send(());
+                gate.release
+                    .lock()
+                    .map_err(|error| SdxError::StreamInternal(error.to_string()))?
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .map_err(|error| SdxError::StreamInternal(error.to_string()))?;
+            }
+        }
+        Ok(())
+    }
+
     async fn reserve(
         &self,
         ctx: &StreamContext,
@@ -1371,7 +1403,9 @@ impl XorbBlock {
                 // The reconstruction producer reserves blocks in output order;
                 // this also supports direct block retrieval in internal tests.
                 self.reserve(ctx, &mut None).await?;
-                let _reservation_reset = ExitGuard::new(|| {
+                // Reset failed or cancelled initialization, but keep successful
+                // ownership asserted until OnceCell publishes the returned value.
+                let mut reservation_reset = ExitGuard::new(|| {
                     self.reservation_started.store(false, Ordering::Release);
                 });
                 let buffer_permit = self
@@ -1407,11 +1441,16 @@ impl XorbBlock {
                             )
                         })
                         .collect();
-                    return Ok(Arc::new(XorbBlockData {
+                    let block_data = Arc::new(XorbBlockData {
                         chunk_offsets,
                         data: cached.data,
                         _buffer_permit: buffer_permit,
-                    }));
+                    });
+                    reservation_reset.disarm();
+                    drop(reservation_reset);
+                    #[cfg(test)]
+                    self.wait_for_publication()?;
+                    return Ok(block_data);
                 }
                 let _download_permit =
                     ctx.download_permits
@@ -1490,11 +1529,16 @@ impl XorbBlock {
                     .enumerate()
                     .map(|(index, offset)| (base.saturating_add(index), *offset))
                     .collect();
-                Ok(Arc::new(XorbBlockData {
+                let block_data = Arc::new(XorbBlockData {
                     chunk_offsets,
                     data: chunk_data.data,
                     _buffer_permit: buffer_permit,
-                }))
+                });
+                reservation_reset.disarm();
+                drop(reservation_reset);
+                #[cfg(test)]
+                self.wait_for_publication()?;
+                Ok(block_data)
             })
             .await
             .cloned()
@@ -1842,6 +1886,8 @@ fn normalize_block(
             decoded_budget: budget.max(1),
             reservation: Mutex::new(None),
             reservation_started: AtomicBool::new(false),
+            #[cfg(test)]
+            publication_gate: None,
         });
         for term in group.terms {
             file_terms.push(FileTerm {
@@ -3461,6 +3507,191 @@ mod tests {
         assert_eq!(out, expected);
     }
 
+    async fn assert_reservation_retry_after_failed_init(cancel: bool) {
+        let server = MockServer::start().await;
+        let decoded = vec![7; 128];
+        let payload = serialize_payload(&[&decoded]);
+        let response = ResponseTemplate::new(206)
+            .insert_header(
+                "Content-Range",
+                format!(
+                    "bytes 0-{}/{}",
+                    payload.len().saturating_sub(1),
+                    payload.len()
+                ),
+            )
+            .set_body_bytes(vec![0; payload.len()]);
+        Mock::given(method("GET"))
+            .respond_with(if cancel {
+                response.set_delay(Duration::from_secs(5))
+            } else {
+                response
+            })
+            .mount(&server)
+            .await;
+        let mut ctx = test_stream_context(&server, 4096);
+        let block = Arc::new(XorbBlock {
+            hash: XORB_HASH.to_owned(),
+            chunk_range: (0, 1),
+            url: server.uri(),
+            bytes: ByteRange::new(0, (payload.len().saturating_sub(1)) as u64),
+            data: OnceCell::new(),
+            decoded_budget: 128,
+            reservation: Mutex::new(None),
+            reservation_started: AtomicBool::new(false),
+            publication_gate: None,
+        });
+        let loader_block = Arc::clone(&block);
+        let loader_context = ctx.clone();
+        let loader = tokio::spawn(async move {
+            loader_block
+                .retrieve_data(&loader_context, READ_TOKEN)
+                .await
+        });
+        if cancel {
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    if !server.received_requests().await.unwrap().is_empty() {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            assert!(block.reservation_started.load(Ordering::Acquire));
+            assert_eq!(
+                ctx.buffer_semaphore.available_permits(),
+                ctx.buffer_semaphore.total_permits().saturating_sub(128)
+            );
+            loader.abort();
+            assert!(matches!(loader.await, Err(error) if error.is_cancelled()));
+        } else {
+            assert!(loader.await.unwrap().is_err());
+        }
+        assert!(block.data.get().is_none());
+        assert!(!block.reservation_started.load(Ordering::Acquire));
+        assert!(block.reservation.lock().unwrap().is_none());
+        assert_eq!(
+            ctx.buffer_semaphore.available_permits(),
+            ctx.buffer_semaphore.total_permits()
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let cache = Arc::new(ChunkCache::new(directory.path(), 1024).unwrap());
+        cache
+            .put(XORB_HASH, (0, 1), &[0, 128], &decoded)
+            .await
+            .unwrap();
+        ctx.chunk_cache = Some(cache);
+        let data = block.clone().retrieve_data(&ctx, READ_TOKEN).await.unwrap();
+        assert_eq!(data.data.as_ref(), decoded.as_slice());
+        assert!(block.reservation_started.load(Ordering::Acquire));
+        assert_eq!(
+            ctx.buffer_semaphore.available_permits(),
+            ctx.buffer_semaphore.total_permits().saturating_sub(128)
+        );
+        drop(data);
+        drop(block);
+        assert_eq!(
+            ctx.buffer_semaphore.available_permits(),
+            ctx.buffer_semaphore.total_permits()
+        );
+    }
+
+    #[tokio::test]
+    async fn error_initialization_releases_reservation_and_allows_retry() {
+        assert_reservation_retry_after_failed_init(false).await;
+    }
+
+    #[tokio::test]
+    async fn cancelled_initialization_releases_reservation_and_allows_retry() {
+        assert_reservation_retry_after_failed_init(true).await;
+    }
+
+    async fn assert_reservation_publication(cache_hit: bool) {
+        let server = MockServer::start().await;
+        let decoded = vec![7; 128];
+        let payload = serialize_payload(&[&decoded]);
+        let mut ctx = test_stream_context(&server, 4096);
+        let directory = tempfile::tempdir().unwrap();
+        if cache_hit {
+            let cache = Arc::new(ChunkCache::new(directory.path(), 1024).unwrap());
+            cache
+                .put(XORB_HASH, (0, 1), &[0, 128], &decoded)
+                .await
+                .unwrap();
+            ctx.chunk_cache = Some(cache);
+        } else {
+            xorb_range_mock(
+                &server,
+                0,
+                (payload.len().saturating_sub(1)) as u64,
+                payload.clone(),
+            )
+            .await;
+        }
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let block = Arc::new(XorbBlock {
+            hash: XORB_HASH.to_owned(),
+            chunk_range: (0, 1),
+            url: format!("{}/transfer/xorb/default/{XORB_HASH}", server.uri()),
+            bytes: ByteRange::new(0, (payload.len().saturating_sub(1)) as u64),
+            data: OnceCell::new(),
+            decoded_budget: 128,
+            reservation: Mutex::new(None),
+            reservation_started: AtomicBool::new(false),
+            publication_gate: Some(Arc::new(PublicationGate {
+                ready: Mutex::new(Some(ready_tx)),
+                release: Mutex::new(release_rx),
+            })),
+        });
+        block.reserve(&ctx, &mut None).await.unwrap();
+        let loader_block = Arc::clone(&block);
+        let loader_context = ctx.clone();
+        let loader = tokio::spawn(async move {
+            loader_block
+                .retrieve_data(&loader_context, READ_TOKEN)
+                .await
+        });
+        ready_rx.await.unwrap();
+        assert!(block.data.get().is_none());
+        block.reserve(&ctx, &mut None).await.unwrap();
+        let used = ctx
+            .buffer_semaphore
+            .total_permits()
+            .saturating_sub(ctx.buffer_semaphore.available_permits());
+        let unused_reservation = block.reservation.lock().unwrap().is_some();
+        release_tx.send(()).unwrap();
+        let data = loader.await.unwrap().unwrap();
+        assert_eq!(data.data.as_ref(), decoded.as_slice());
+        assert_eq!(
+            used, 128,
+            "one backing block must retain exactly one reservation before publication"
+        );
+        assert!(!unused_reservation);
+        assert_eq!(
+            ctx.xorb_fetch_count.load(Ordering::Relaxed),
+            u64::from(!cache_hit)
+        );
+        drop(data);
+        drop(block);
+        assert_eq!(
+            ctx.buffer_semaphore.available_permits(),
+            ctx.buffer_semaphore.total_permits()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cache_hit_reservation_publication_keeps_single_permit() {
+        assert_reservation_publication(true).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn network_reservation_publication_keeps_single_permit() {
+        assert_reservation_publication(false).await;
+    }
+
     #[tokio::test]
     async fn download_stream_with_chunk_cache_serves_second_download_from_disk() {
         let server = MockServer::start().await;
@@ -3537,6 +3768,8 @@ mod tests {
             decoded_budget: 1_048_576,
             reservation: Mutex::new(None),
             reservation_started: AtomicBool::new(false),
+            #[cfg(test)]
+            publication_gate: None,
         });
         let result = block
             .clone()
@@ -3755,6 +3988,8 @@ mod tests {
             decoded_budget: 1_048_576,
             reservation: Mutex::new(None),
             reservation_started: AtomicBool::new(false),
+            #[cfg(test)]
+            publication_gate: None,
         });
         let dir = tempfile::tempdir().unwrap();
         let cache =

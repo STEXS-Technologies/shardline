@@ -80,3 +80,106 @@ async fn local_large_ttls_and_normal_durable_ttls_remain_valid() {
         .unwrap();
     assert!(unused.validate_runtime_requirements().is_ok());
 }
+
+#[cfg(target_pointer_width = "64")]
+#[test]
+fn durable_session_quotas_reject_values_outside_postgres_integer_range() {
+    let temp = tempfile::tempdir().unwrap();
+    let huge = NonZeroUsize::new(usize::MAX).unwrap();
+    for frontend in [ServerFrontend::Oci, ServerFrontend::S3, ServerFrontend::Lfs] {
+        let base = config(temp.path(), frontend)
+            .with_index_postgres_url("postgres://unused@127.0.0.1:1/unreachable".into())
+            .unwrap();
+        assert!(base.validate_runtime_requirements().is_ok());
+        let invalid = match frontend {
+            ServerFrontend::Oci => base.with_oci_upload_max_active_sessions(huge),
+            ServerFrontend::S3 => base.with_s3_upload_max_active_sessions(huge).unwrap(),
+            ServerFrontend::Lfs => base.with_lfs_patch_max_active_sessions(huge).unwrap(),
+            ServerFrontend::Hub | ServerFrontend::Xet | ServerFrontend::BazelHttp => unreachable!(),
+        };
+        assert!(
+            invalid.validate_runtime_requirements().is_err(),
+            "{frontend:?}"
+        );
+    }
+    let invalid_parts = config(temp.path(), ServerFrontend::S3)
+        .with_index_postgres_url("postgres://unused@127.0.0.1:1/unreachable".into())
+        .unwrap()
+        .with_s3_upload_max_active_part_files(huge)
+        .unwrap();
+    assert!(invalid_parts.validate_runtime_requirements().is_err());
+}
+
+#[test]
+fn durable_quota_boundary_and_local_compatibility() {
+    let temp = tempfile::tempdir().unwrap();
+    for postgres in [false, true] {
+        let mut cfg = config(temp.path(), ServerFrontend::Oci)
+            .with_server_frontends([ServerFrontend::Oci, ServerFrontend::S3, ServerFrontend::Lfs])
+            .unwrap();
+        let maximum = if postgres {
+            usize::try_from(i64::MAX).unwrap_or(usize::MAX)
+        } else {
+            usize::MAX
+        };
+        let quota = NonZeroUsize::new(maximum).unwrap();
+        cfg = cfg
+            .with_oci_upload_max_active_sessions(quota)
+            .with_s3_upload_max_active_sessions(quota)
+            .unwrap()
+            .with_s3_upload_max_active_part_files(quota)
+            .unwrap()
+            .with_lfs_patch_max_active_sessions(quota)
+            .unwrap();
+        if postgres {
+            cfg = cfg
+                .with_index_postgres_url("postgres://unused@127.0.0.1:1/unreachable".into())
+                .unwrap();
+        }
+        assert!(cfg.validate_runtime_requirements().is_ok());
+    }
+    let unused = config(temp.path(), ServerFrontend::Xet)
+        .with_oci_upload_max_active_sessions(NonZeroUsize::MAX)
+        .with_s3_upload_max_active_sessions(NonZeroUsize::MAX)
+        .unwrap()
+        .with_s3_upload_max_active_part_files(NonZeroUsize::MAX)
+        .unwrap()
+        .with_lfs_patch_max_active_sessions(NonZeroUsize::MAX)
+        .unwrap()
+        .with_index_postgres_url("postgres://unused@127.0.0.1:1/unreachable".into())
+        .unwrap();
+    assert!(unused.validate_runtime_requirements().is_ok());
+}
+
+#[cfg(target_pointer_width = "64")]
+#[tokio::test]
+async fn durable_quota_rejection_precedes_backend_initialization() {
+    let temp = tempfile::tempdir().unwrap();
+    let huge = NonZeroUsize::MAX;
+    for (number, frontend, parts) in [
+        (0, ServerFrontend::Oci, false),
+        (1, ServerFrontend::S3, false),
+        (2, ServerFrontend::Lfs, false),
+        (3, ServerFrontend::S3, true),
+    ] {
+        let root = temp.path().join(number.to_string());
+        let base = config(&root, frontend)
+            .with_index_postgres_url("postgres://unused@127.0.0.1:1/unreachable".into())
+            .unwrap();
+        let invalid = match frontend {
+            ServerFrontend::Oci => base.with_oci_upload_max_active_sessions(huge),
+            ServerFrontend::S3 if parts => base.with_s3_upload_max_active_part_files(huge).unwrap(),
+            ServerFrontend::S3 => base.with_s3_upload_max_active_sessions(huge).unwrap(),
+            ServerFrontend::Lfs => base.with_lfs_patch_max_active_sessions(huge).unwrap(),
+            ServerFrontend::Hub | ServerFrontend::Xet | ServerFrontend::BazelHttp => unreachable!(),
+        };
+        assert!(matches!(
+            app::router(invalid).await.expect_err("invalid quota"),
+            ServerError::Config(ServerConfigError::ResourceCapacityOutOfRange {
+                capacity: usize::MAX,
+                ..
+            })
+        ));
+        assert!(!root.exists());
+    }
+}
