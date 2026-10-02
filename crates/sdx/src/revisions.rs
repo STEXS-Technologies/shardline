@@ -5,6 +5,8 @@
 //! [`XetClient::delete_revision`]. Creating a revision that already exists
 //! returns [`SdxError::RevisionExists`]; deletion is idempotent.
 
+use std::collections::HashSet;
+
 use reqwest::Method;
 use serde::Deserialize;
 use shardline_xet_adapter::{XET_REVISION_ROUTE, XET_REVISIONS_ROUTE};
@@ -59,6 +61,7 @@ impl MetadataClient {
         let route = self.repo_route(XET_REVISIONS_ROUTE);
         let mut revisions = Vec::new();
         let mut cursor: Option<String> = None;
+        let mut cursors = HashSet::new();
         loop {
             let query: Vec<(String, String)> = cursor
                 .as_deref()
@@ -75,9 +78,13 @@ impl MetadataClient {
                 created_at: revision.created_at,
                 updated_at: revision.updated_at,
             }));
-            match response.next_cursor {
-                Some(next) if next != cursor.as_deref().unwrap_or_default() => cursor = Some(next),
-                _ => break,
+            cursor = crate::tree::checked_next_cursor(
+                "list_revisions",
+                response.next_cursor,
+                &mut cursors,
+            )?;
+            if cursor.is_none() {
+                break;
             }
         }
         Ok(revisions)
@@ -88,7 +95,7 @@ impl MetadataClient {
         let token = self.tokens.write_token().await?;
         let route = self
             .repo_route_scope(XET_REVISION_ROUTE)
-            .replace("{rev}", &crate::tree::encode_query(rev));
+            .replace("{rev}", &crate::tree::encode_path_segment(rev));
         let url = crate::tree::build_url(&self.api_base, &route, crate::tree::no_query());
         match self
             .send(&retry, token.token, Method::POST, url, None)
@@ -115,7 +122,7 @@ impl MetadataClient {
         let token = self.tokens.write_token().await?;
         let route = self
             .repo_route_scope(XET_REVISION_ROUTE)
-            .replace("{rev}", &crate::tree::encode_query(rev));
+            .replace("{rev}", &crate::tree::encode_path_segment(rev));
         let url = crate::tree::build_url(&self.api_base, &route, crate::tree::no_query());
         let body = self
             .send(&retry, token.token, Method::DELETE, url, None)
@@ -211,6 +218,96 @@ mod tests {
 
     fn revision_json(name: &str) -> serde_json::Value {
         json!({"name": name, "createdAt": 1, "updatedAt": 2})
+    }
+
+    #[tokio::test]
+    async fn pagination_rejects_empty_repeated_and_cyclic_cursors() {
+        for returned_cursors in [vec![""], vec!["a", "a"], vec!["a", "b", "a"]] {
+            let server = MockServer::start().await;
+            mock_read_token(&server).await;
+            for (index, next) in returned_cursors.iter().enumerate() {
+                let expected = index.checked_sub(1).map(|i| returned_cursors[i].to_owned());
+                Mock::given(method("GET"))
+                    .and(path("/api/github/team/assets/revisions"))
+                    .and(move |request: &wiremock::Request| {
+                        request
+                            .url
+                            .query_pairs()
+                            .find(|(key, _)| key == "cursor")
+                            .map(|(_, value)| value.into_owned())
+                            == expected
+                    })
+                    .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                        "revisions": [], "nextCursor": next
+                    })))
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+            }
+            let client = build_client(&server).await;
+            let result =
+                tokio::time::timeout(std::time::Duration::from_secs(2), client.list_revisions())
+                    .await
+                    .expect("malformed pagination must terminate");
+            assert!(
+                matches!(result, Err(crate::SdxError::Metadata(_))),
+                "{result:?}"
+            );
+            server.verify().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn revision_mutations_preserve_path_segment_identity() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/github/team/assets/xet-write-token/main"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "casUrl": server.uri(), "exp": 4_000_000_000u64,
+                "accessToken": "write-token",
+            })))
+            .mount(&server)
+            .await;
+        let client = build_client(&server).await;
+        for revision in [
+            "release candidate",
+            "release+candidate",
+            "release%candidate",
+            "版本",
+            "release/candidate",
+        ] {
+            for verb in ["POST", "DELETE"] {
+                let expected = revision.to_owned();
+                let response = if verb == "POST" {
+                    revision_json(revision)
+                } else {
+                    json!({"deleted": true})
+                };
+                Mock::given(method(verb))
+                    .and(move |request: &wiremock::Request| {
+                        request
+                            .url
+                            .path()
+                            .strip_prefix("/api/github/team/assets/revisions/")
+                            .is_some_and(|segment| {
+                                !segment.contains('/')
+                                    && percent_encoding::percent_decode_str(segment)
+                                        .decode_utf8()
+                                        .is_ok_and(|decoded| decoded == expected)
+                            })
+                    })
+                    .respond_with(ResponseTemplate::new(200).set_body_json(response))
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+            }
+            assert_eq!(
+                client.create_revision(revision).await.unwrap().name,
+                revision
+            );
+            client.delete_revision(revision).await.unwrap();
+        }
+        server.verify().await;
     }
 
     #[test]

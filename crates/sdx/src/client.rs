@@ -591,23 +591,6 @@ fn parse_endpoint(endpoint: &str) -> Result<(String, RepositoryId), SdxError> {
             url.scheme()
         )));
     }
-    let host = url
-        .host_str()
-        .ok_or_else(|| SdxError::InvalidEndpoint(format!("missing host in {endpoint:?}")))?;
-    if url.query().is_some() || url.fragment().is_some() {
-        return Err(SdxError::InvalidEndpoint(format!(
-            "query or fragment in {endpoint:?} is not supported"
-        )));
-    }
-
-    let mut api_base = String::new();
-    api_base.push_str("http://");
-    api_base.push_str(host);
-    if let Some(port) = url.port() {
-        api_base.push(':');
-        api_base.push_str(&port.to_string());
-    }
-
     let segments: Vec<&str> = url
         .path_segments()
         .map(|segments| segments.collect())
@@ -618,33 +601,8 @@ fn parse_endpoint(endpoint: &str) -> Result<(String, RepositoryId), SdxError> {
             segments.len()
         )));
     }
-    let mut parts = segments.into_iter();
-    let provider = parts
-        .next()
-        .ok_or_else(|| SdxError::InvalidEndpoint("missing provider".to_owned()))?
-        .to_owned();
-    let owner = parts
-        .next()
-        .ok_or_else(|| SdxError::InvalidEndpoint("missing owner".to_owned()))?
-        .to_owned();
-    let repo = parts
-        .next()
-        .ok_or_else(|| SdxError::InvalidEndpoint("missing repo".to_owned()))?
-        .to_owned();
-    let revision = parts
-        .next()
-        .ok_or_else(|| SdxError::InvalidEndpoint("missing revision".to_owned()))?
-        .to_owned();
-
-    Ok((
-        api_base,
-        RepositoryId {
-            provider,
-            owner,
-            repo,
-            revision,
-        },
-    ))
+    let parsed = crate::url::XetUrl::parse(endpoint)?;
+    Ok((parsed.api_base.clone(), parsed.repository_id()))
 }
 
 #[cfg(test)]

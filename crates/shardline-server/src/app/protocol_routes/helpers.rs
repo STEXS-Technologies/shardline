@@ -82,6 +82,13 @@ fn parse_optional_range(
     let Some(range) = headers.get(axum::http::header::RANGE) else {
         return Ok(None);
     };
+    // These direct-object responses expose neither ETag nor Last-Modified.
+    // There is therefore no current validator that can strongly match an
+    // If-Range condition. RFC 9110 section 13.1.5 requires the complete
+    // representation when that condition is false, before parsing Range.
+    if headers.contains_key(axum::http::header::IF_RANGE) {
+        return Ok(None);
+    }
     let range = range
         .to_str()
         .map_err(|_error| ServerError::InvalidRangeHeader)?;
@@ -158,6 +165,114 @@ mod tests {
     use axum::http::{HeaderMap, HeaderValue, Uri};
 
     use super::*;
+
+    #[tokio::test]
+    async fn direct_object_http_if_range_without_validator_returns_full_representation() {
+        use std::num::NonZeroUsize;
+
+        use axum::{
+            body::Body,
+            http::{Request, StatusCode, header},
+        };
+        use sha2::{Digest, Sha256};
+        use tower::ServiceExt;
+
+        let root = tempfile::TempDir::new().unwrap();
+        let config = crate::ServerConfig::new(
+            "127.0.0.1:0".parse().unwrap(),
+            "http://127.0.0.1:0".to_owned(),
+            root.path().to_path_buf(),
+            NonZeroUsize::new(65536).unwrap(),
+        )
+        .with_server_frontends([crate::ServerFrontend::Lfs, crate::ServerFrontend::BazelHttp])
+        .unwrap();
+        let app = crate::app::router(config).await.unwrap();
+        let content = b"full representation for conditional resume";
+        let digest = hex::encode(Sha256::digest(content));
+        for uri in [
+            format!("/v1/lfs/objects/{digest}"),
+            format!("/v1/bazel/cache/cas/{digest}"),
+            format!("/v1/bazel/cache/ac/{digest}"),
+            format!("/v1/bazel/{digest}"),
+        ] {
+            let uploaded = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri(&uri)
+                        .body(Body::from(content.as_slice()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert!(
+                uploaded.status().is_success(),
+                "{uri}: {}",
+                uploaded.status()
+            );
+
+            let ranged = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(&uri)
+                        .header(header::RANGE, "bytes=5-9")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(ranged.status(), StatusCode::PARTIAL_CONTENT);
+            assert_eq!(
+                axum::body::to_bytes(ranged.into_body(), 1024)
+                    .await
+                    .unwrap()
+                    .as_ref(),
+                &content[5..10]
+            );
+
+            for validator in [
+                "\"stale-object\"",
+                "W/\"stale-object\"",
+                "Wed, 21 Oct 2015 07:28:00 GMT",
+            ] {
+                // A false If-Range also suppresses malformed/unsatisfiable
+                // ranges; parsing those first would incorrectly return 416.
+                for range in ["bytes=5-9", "bytes=999999-", "bytes=bad-range"] {
+                    let response = app
+                        .clone()
+                        .oneshot(
+                            Request::builder()
+                                .uri(&uri)
+                                .header(header::RANGE, range)
+                                .header(header::IF_RANGE, validator)
+                                .body(Body::empty())
+                                .unwrap(),
+                        )
+                        .await
+                        .unwrap();
+                    assert_eq!(
+                        response.status(),
+                        StatusCode::OK,
+                        "{uri}: {validator}, {range}"
+                    );
+                    assert!(!response.headers().contains_key(header::CONTENT_RANGE));
+                    assert_eq!(
+                        response.headers()[header::CONTENT_LENGTH],
+                        content.len().to_string()
+                    );
+                    assert_eq!(
+                        axum::body::to_bytes(response.into_body(), 1024)
+                            .await
+                            .unwrap()
+                            .as_ref(),
+                        content
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn parse_optional_range_returns_none_when_header_absent() {

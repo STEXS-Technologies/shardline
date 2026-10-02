@@ -148,30 +148,27 @@ pub(super) struct DeleteRevisionResponse {
 /// When `is_prefix` is true, a single trailing slash is preserved as the boundary
 /// marker and an empty input is accepted as the repository root.
 fn normalize_path(input: &str, is_prefix: bool) -> Result<String, ServerError> {
-    // URL-decode once. Axum already decodes path params and query strings, so this
-    // is effectively a no-op for well-formed input but protects wildcard captures.
-    let decoded = percent_encoding::percent_decode_str(input)
-        .decode_utf8()
-        .map_err(|_error| ServerError::InvalidPath)?;
-    let decoded = decoded.as_ref();
-    if decoded.len() > MAX_PATH_BYTES {
+    // Axum Path and Query extractors have already URL-decoded the wire
+    // input. Percent sequences that remain are literal filename characters;
+    // decoding again would alias a%2Fb with the distinct nested path a/b.
+    if input.len() > MAX_PATH_BYTES {
         return Err(ServerError::InvalidPath);
     }
-    if decoded.chars().any(char::is_control) || decoded.contains('\\') {
+    if input.chars().any(char::is_control) || input.contains('\\') {
         return Err(ServerError::InvalidPath);
     }
-    if decoded.starts_with('/') {
+    if input.starts_with('/') {
         return Err(ServerError::InvalidPath);
     }
-    if is_prefix && decoded.is_empty() {
+    if is_prefix && input.is_empty() {
         return Ok(String::new());
     }
     // Strip exactly one trailing slash for a prefix boundary marker so a client
     // may send `data/`; a double slash still yields an empty segment and is rejected.
     let body = if is_prefix {
-        decoded.strip_suffix('/').unwrap_or(decoded)
+        input.strip_suffix('/').unwrap_or(input)
     } else {
-        decoded
+        input
     };
     if body.is_empty() {
         return Err(ServerError::InvalidPath);
@@ -601,8 +598,11 @@ mod tests {
     }
 
     #[test]
-    fn normalize_path_percent_decodes_once() {
-        assert_eq!(normalize_path("a%20b.txt", false).unwrap(), "a b.txt");
+    fn normalize_path_preserves_percent_sequences_after_http_decoding() {
+        for path in ["a%20b.txt", "a%2Fb.txt", "%2E%2E/a", "a%00b", "a%25b"] {
+            assert_eq!(normalize_path(path, false).unwrap(), path);
+        }
+        assert_eq!(normalize_path("a%2Fb/", true).unwrap(), "a%2Fb/");
     }
 
     #[test]

@@ -69,8 +69,8 @@ pub use multipart::{
     validate_upload_id,
 };
 pub use protocol_support::{
-    ConditionalHeader, CopySource, EntityTagSet, InvalidS3HeaderValue, QueryMap, S3SubResource,
-    classify, etag_header, parse_copy_source, parse_s3_range, parse_subresource,
+    ConditionalHeader, CopySource, EntityTag, EntityTagSet, InvalidS3HeaderValue, QueryMap,
+    S3SubResource, classify, etag_header, parse_copy_source, parse_s3_range, parse_subresource,
     read_conditional_headers,
 };
 pub use types::{
