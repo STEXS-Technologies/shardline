@@ -18,7 +18,7 @@ use axum::{
 use shardline_index::ResourceLockKey;
 use shardline_s3_adapter::{
     ListBucketsResult, MAX_S3_DELETE_KEYS, S3Error, S3SubResource, classify, encode_bucket,
-    parse_delete_object_keys, s3_object_key,
+    parse_delete_object_keys, s3_object_key, xml_escape,
 };
 
 use super::{
@@ -302,22 +302,14 @@ fn delete_result_xml(outcomes: &[DeleteOutcome]) -> String {
         use std::fmt::Write as _;
         match outcome {
             DeleteOutcome::Deleted(key) => {
-                let _result = writeln!(
-                    xml,
-                    "  <Deleted><Key>{}</Key></Deleted>",
-                    key.replace('&', "&amp;")
-                        .replace('<', "&lt;")
-                        .replace('>', "&gt;")
-                );
+                let _result = writeln!(xml, "  <Deleted><Key>{}</Key></Deleted>", xml_escape(key));
             }
             DeleteOutcome::Error { key, code, message } => {
                 let _result = writeln!(
                     xml,
                     "  <Error><Key>{}</Key><Code>{code}</Code><Message>{}</Message></Error>",
-                    key.replace('&', "&amp;")
-                        .replace('<', "&lt;")
-                        .replace('>', "&gt;"),
-                    message.replace('&', "&amp;").replace('<', "&lt;")
+                    xml_escape(key),
+                    xml_escape(message)
                 );
             }
         }

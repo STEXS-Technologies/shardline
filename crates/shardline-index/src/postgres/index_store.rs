@@ -185,19 +185,23 @@ pub(crate) async fn load_postgres_latest_evidence_heads(
 }
 
 async fn verify_postgres_quarantine_evidence_batch(
-    store: &super::PostgresIndexStore,
+    executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>,
     candidates: &[QuarantineCandidate],
+    verify_materialization: bool,
 ) -> Result<(), PostgresMetadataStoreError> {
     let operation_ids = candidates
         .iter()
         .map(|candidate| candidate.object_key().as_str().to_owned())
         .collect::<Vec<_>>();
     let heads = load_postgres_latest_evidence_heads(
-        &store.pool,
+        executor,
         OperationKind::GarbageCollection,
         &operation_ids,
     )
     .await?;
+    if !verify_materialization {
+        return Ok(());
+    }
     for (candidate, operation_id) in candidates.iter().zip(operation_ids) {
         let head = heads.get(&operation_id).ok_or_else(|| {
             PostgresMetadataStoreError::Reliability(
@@ -212,19 +216,20 @@ async fn verify_postgres_quarantine_evidence_batch(
 }
 
 async fn verify_postgres_retention_evidence_batch(
-    store: &super::PostgresIndexStore,
+    executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>,
     holds: &[RetentionHold],
+    verify_materialization: bool,
 ) -> Result<(), PostgresMetadataStoreError> {
     let operation_ids = holds
         .iter()
         .map(|hold| hold.object_key().as_str().to_owned())
         .collect::<Vec<_>>();
-    let heads = load_postgres_latest_evidence_heads(
-        &store.pool,
-        OperationKind::RetentionHold,
-        &operation_ids,
-    )
-    .await?;
+    let heads =
+        load_postgres_latest_evidence_heads(executor, OperationKind::RetentionHold, &operation_ids)
+            .await?;
+    if !verify_materialization {
+        return Ok(());
+    }
     for (hold, operation_id) in holds.iter().zip(operation_ids) {
         let head = heads.get(&operation_id).ok_or_else(|| {
             PostgresMetadataStoreError::Reliability(
@@ -861,7 +866,7 @@ impl AsyncIndexStore for super::PostgresIndexStore {
                 .iter()
                 .map(quarantine_candidate_from_row)
                 .collect::<Result<Vec<_>, _>>()?;
-            verify_postgres_quarantine_evidence_batch(self, &candidates).await?;
+            verify_postgres_quarantine_evidence_batch(&self.pool, &candidates, true).await?;
             Ok(candidates)
         })
     }
@@ -876,37 +881,75 @@ impl AsyncIndexStore for super::PostgresIndexStore {
         VisitorError: Send + 'operation,
     {
         Box::pin(async move {
-            let mut rows = query(
-                "SELECT object_key,
-                        observed_length,
-                        first_seen_unreachable_at_unix_seconds,
-                        delete_after_unix_seconds
-                 FROM shardline_quarantine_candidates
-                 ORDER BY object_key",
-            )
-            .fetch(&self.pool);
-
-            let mut candidates = Vec::new();
-            while let Some(row) = rows
-                .try_next()
+            let mut transaction = self
+                .pool
+                .begin()
                 .await
                 .map_err(Self::Error::from)
-                .map_err(Into::<VisitorError>::into)?
-            {
-                candidates.push(quarantine_candidate_from_row(&row).map_err(Into::into)?);
-            }
-
-            // This visitor feeds GC and repair directly. Verify every row at
-            // this boundary instead of relying on callers to have used the
-            // separately verified list API.
-            verify_postgres_quarantine_evidence_batch(self, &candidates)
+                .map_err(Into::into)?;
+            query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+                .execute(&mut *transaction)
                 .await
-                .map_err(Into::<VisitorError>::into)?;
-            for candidate in candidates {
-                visitor(candidate)?;
+                .map_err(Self::Error::from)
+                .map_err(Into::into)?;
+            // Validate all rows, snapshots, and heads before materialization checks
+            // and callbacks, using bounded pages from one coherent snapshot.
+            for phase in 0..5 {
+                let mut cursor: Option<String> = None;
+                loop {
+                    let mut request = if cursor.is_some() {
+                        query("SELECT object_key, observed_length, first_seen_unreachable_at_unix_seconds, delete_after_unix_seconds FROM shardline_quarantine_candidates
+                               WHERE object_key > $1 ORDER BY object_key LIMIT 256")
+                    } else {
+                        query(
+                            "SELECT object_key, observed_length, first_seen_unreachable_at_unix_seconds, delete_after_unix_seconds FROM shardline_quarantine_candidates ORDER BY object_key LIMIT 256",
+                        )
+                    };
+                    if let Some(key) = &cursor {
+                        request = request.bind(key);
+                    }
+                    let rows = request
+                        .fetch_all(&mut *transaction)
+                        .await
+                        .map_err(Self::Error::from)
+                        .map_err(Into::into)?;
+                    if rows.is_empty() {
+                        break;
+                    }
+                    let mut entries = Vec::with_capacity(rows.len());
+                    for row in rows {
+                        let entry = quarantine_candidate_from_row(&row).map_err(Into::into)?;
+                        cursor = Some(entry.object_key().as_str().to_owned());
+                        entries.push(entry);
+                    }
+                    if phase == 1 {
+                        for entry in &entries {
+                            quarantine_snapshot(entry, QuarantineLifecycleState::Active)
+                                .and_then(|snapshot| {
+                                    snapshot.evidence_operation().map_err(Self::Error::from)
+                                })
+                                .map_err(Into::into)?;
+                        }
+                    } else if phase == 2 || phase == 3 {
+                        verify_postgres_quarantine_evidence_batch(
+                            &mut *transaction,
+                            &entries,
+                            phase == 3,
+                        )
+                        .await
+                        .map_err(Into::into)?;
+                    } else if phase == 4 {
+                        for entry in entries {
+                            visitor(entry)?;
+                        }
+                    }
+                }
             }
-
-            Ok(())
+            transaction
+                .commit()
+                .await
+                .map_err(Self::Error::from)
+                .map_err(Into::into)
         })
     }
 
@@ -1148,7 +1191,7 @@ impl AsyncIndexStore for super::PostgresIndexStore {
                 .iter()
                 .map(retention_hold_from_row)
                 .collect::<Result<Vec<_>, _>>()?;
-            verify_postgres_retention_evidence_batch(self, &holds).await?;
+            verify_postgres_retention_evidence_batch(&self.pool, &holds, true).await?;
             Ok(holds)
         })
     }
@@ -1163,33 +1206,75 @@ impl AsyncIndexStore for super::PostgresIndexStore {
         VisitorError: Send + 'operation,
     {
         Box::pin(async move {
-            let mut rows = query(
-                "SELECT object_key,
-                        reason,
-                        held_at_unix_seconds,
-                        release_after_unix_seconds
-                 FROM shardline_retention_holds
-                 ORDER BY object_key",
-            )
-            .fetch(&self.pool);
-
-            let mut holds = Vec::new();
-            while let Some(row) = rows
-                .try_next()
+            let mut transaction = self
+                .pool
+                .begin()
                 .await
                 .map_err(Self::Error::from)
-                .map_err(Into::<VisitorError>::into)?
-            {
-                holds.push(retention_hold_from_row(&row).map_err(Into::into)?);
-            }
-            verify_postgres_retention_evidence_batch(self, &holds)
+                .map_err(Into::into)?;
+            query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+                .execute(&mut *transaction)
                 .await
-                .map_err(Into::<VisitorError>::into)?;
-            for hold in holds {
-                visitor(hold)?;
+                .map_err(Self::Error::from)
+                .map_err(Into::into)?;
+            // Validate all rows, snapshots, and heads before materialization checks
+            // and callbacks, using bounded pages from one coherent snapshot.
+            for phase in 0..5 {
+                let mut cursor: Option<String> = None;
+                loop {
+                    let mut request = if cursor.is_some() {
+                        query("SELECT object_key, reason, held_at_unix_seconds, release_after_unix_seconds FROM shardline_retention_holds
+                               WHERE object_key > $1 ORDER BY object_key LIMIT 256")
+                    } else {
+                        query(
+                            "SELECT object_key, reason, held_at_unix_seconds, release_after_unix_seconds FROM shardline_retention_holds ORDER BY object_key LIMIT 256",
+                        )
+                    };
+                    if let Some(key) = &cursor {
+                        request = request.bind(key);
+                    }
+                    let rows = request
+                        .fetch_all(&mut *transaction)
+                        .await
+                        .map_err(Self::Error::from)
+                        .map_err(Into::into)?;
+                    if rows.is_empty() {
+                        break;
+                    }
+                    let mut entries = Vec::with_capacity(rows.len());
+                    for row in rows {
+                        let entry = retention_hold_from_row(&row).map_err(Into::into)?;
+                        cursor = Some(entry.object_key().as_str().to_owned());
+                        entries.push(entry);
+                    }
+                    if phase == 1 {
+                        for entry in &entries {
+                            retention_snapshot(entry, RetentionHoldLifecycleState::Active)
+                                .and_then(|snapshot| {
+                                    snapshot.evidence_operation().map_err(Self::Error::from)
+                                })
+                                .map_err(Into::into)?;
+                        }
+                    } else if phase == 2 || phase == 3 {
+                        verify_postgres_retention_evidence_batch(
+                            &mut *transaction,
+                            &entries,
+                            phase == 3,
+                        )
+                        .await
+                        .map_err(Into::into)?;
+                    } else if phase == 4 {
+                        for entry in entries {
+                            visitor(entry)?;
+                        }
+                    }
+                }
             }
-
-            Ok(())
+            transaction
+                .commit()
+                .await
+                .map_err(Self::Error::from)
+                .map_err(Into::into)
         })
     }
 
@@ -4451,6 +4536,251 @@ mod tests {
             "b should be in Failed"
         );
     }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn pg_bounded_gc_retention_visitors_keep_order_snapshot_and_validation() {
+        let Some(pool) = connect_postgres().await else {
+            return;
+        };
+        let store = make_pg_store(pool.clone());
+        for i in 0..520 {
+            let key = shardline_storage::ObjectKey::parse(&format!("inventory/{i:04}")).unwrap();
+            store
+                .upsert_quarantine_candidate(
+                    &QuarantineCandidate::new(key.clone(), 4, 100, 200).unwrap(),
+                )
+                .await
+                .unwrap();
+            store
+                .upsert_retention_hold(
+                    &crate::RetentionHold::new(key, "retained".into(), 100, None).unwrap(),
+                )
+                .await
+                .unwrap();
+        }
+        for quarantine in [false, true] {
+            let expected = if quarantine {
+                store
+                    .list_quarantine_candidates()
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .map(|entry| entry.object_key().as_str().to_owned())
+                    .collect::<Vec<_>>()
+            } else {
+                store
+                    .list_retention_holds()
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .map(|entry| entry.object_key().as_str().to_owned())
+                    .collect::<Vec<_>>()
+            };
+            let mut visited = Vec::new();
+            let mut writer = Some(store.clone());
+            let mut callback = |key: String| {
+                if let Some(writer) = writer.take() {
+                    std::thread::spawn(move || {
+                        tokio::runtime::Runtime::new()
+                            .unwrap()
+                            .block_on(async move {
+                                let key =
+                                    shardline_storage::ObjectKey::parse("inventory/0519").unwrap();
+                                if quarantine {
+                                    writer
+                                        .upsert_quarantine_candidate(
+                                            &QuarantineCandidate::new(key, 5, 100, 200).unwrap(),
+                                        )
+                                        .await
+                                        .unwrap();
+                                } else {
+                                    writer
+                                        .upsert_retention_hold(
+                                            &crate::RetentionHold::new(
+                                                key,
+                                                "changed".into(),
+                                                101,
+                                                None,
+                                            )
+                                            .unwrap(),
+                                        )
+                                        .await
+                                        .unwrap();
+                                }
+                            })
+                    })
+                    .join()
+                    .unwrap();
+                }
+                visited.push(key);
+                Ok::<(), super::PostgresMetadataStoreError>(())
+            };
+            if quarantine {
+                store
+                    .visit_quarantine_candidates(|entry| {
+                        assert_eq!(entry.observed_length(), 4);
+                        callback(entry.object_key().as_str().to_owned())
+                    })
+                    .await
+                    .unwrap();
+            } else {
+                store
+                    .visit_retention_holds(|entry| {
+                        assert_eq!(entry.reason(), "retained");
+                        callback(entry.object_key().as_str().to_owned())
+                    })
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(visited, expected);
+            let invalid_sql = if quarantine {
+                "INSERT INTO shardline_quarantine_candidates VALUES ('zz/../invalid',4,100,200)"
+            } else {
+                "INSERT INTO shardline_retention_holds VALUES ('zz/../invalid','retained',100,NULL)"
+            };
+            sqlx::query(invalid_sql).execute(&pool).await.unwrap();
+            let mut callbacks = 0;
+            let result = if quarantine {
+                store
+                    .visit_quarantine_candidates(|_| {
+                        callbacks += 1;
+                        Ok::<(), super::PostgresMetadataStoreError>(())
+                    })
+                    .await
+            } else {
+                store
+                    .visit_retention_holds(|_| {
+                        callbacks += 1;
+                        Ok::<(), super::PostgresMetadataStoreError>(())
+                    })
+                    .await
+            };
+            assert!(matches!(
+                result,
+                Err(super::PostgresMetadataStoreError::ObjectKey(_))
+            ));
+            assert_eq!(callbacks, 0);
+            let table = if quarantine {
+                "shardline_quarantine_candidates"
+            } else {
+                "shardline_retention_holds"
+            };
+            sqlx::query(&format!(
+                "DELETE FROM {table} WHERE object_key='zz/../invalid'"
+            ))
+            .execute(&pool)
+            .await
+            .unwrap();
+            let sentinel = || {
+                Err(super::PostgresMetadataStoreError::IntegerOutOfRange(
+                    "visitor sentinel".into(),
+                ))
+            };
+            let result = if quarantine {
+                store.visit_quarantine_candidates(|_| sentinel()).await
+            } else {
+                store.visit_retention_holds(|_| sentinel()).await
+            };
+            assert!(
+                matches!(result, Err(super::PostgresMetadataStoreError::IntegerOutOfRange(ref message)) if message == "visitor sentinel")
+            );
+            let kind = if quarantine {
+                "GarbageCollection"
+            } else {
+                "RetentionHold"
+            };
+            let row = sqlx::query("SELECT sequence, merkle_commit_json FROM shardline_reliability_events WHERE operation_kind=$1 AND operation_id='inventory/0519' ORDER BY sequence DESC LIMIT 1")
+                .bind(kind).fetch_one(&pool).await.unwrap();
+            let sequence: i64 = row.try_get("sequence").unwrap();
+            let commit: Option<serde_json::Value> = row.try_get("merkle_commit_json").unwrap();
+            // A late corrupt head must beat an early materialized mismatch.
+            let table = if quarantine {
+                "shardline_quarantine_candidates"
+            } else {
+                "shardline_retention_holds"
+            };
+            let column = if quarantine {
+                "observed_length"
+            } else {
+                "held_at_unix_seconds"
+            };
+            sqlx::query(&format!(
+                "UPDATE {table} SET {column}={column}+1 WHERE object_key='inventory/0000'"
+            ))
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query("UPDATE shardline_reliability_events SET merkle_commit_json='{}'::jsonb WHERE operation_kind=$1 AND operation_id='inventory/0519' AND sequence=$2")
+                .bind(kind).bind(sequence).execute(&pool).await.unwrap();
+            let mut callbacks = 0;
+            let result = if quarantine {
+                store
+                    .visit_quarantine_candidates(|_| {
+                        callbacks += 1;
+                        Ok::<(), super::PostgresMetadataStoreError>(())
+                    })
+                    .await
+            } else {
+                store
+                    .visit_retention_holds(|_| {
+                        callbacks += 1;
+                        Ok::<(), super::PostgresMetadataStoreError>(())
+                    })
+                    .await
+            };
+            let list_error = if quarantine {
+                store.list_quarantine_candidates().await.unwrap_err()
+            } else {
+                store.list_retention_holds().await.unwrap_err()
+            };
+            assert!(matches!(
+                list_error,
+                super::PostgresMetadataStoreError::Reliability(
+                    shardline_reliability::ReliabilityError::Serialize(_)
+                )
+            ));
+            assert!(matches!(
+                result,
+                Err(super::PostgresMetadataStoreError::Reliability(
+                    shardline_reliability::ReliabilityError::Serialize(_)
+                ))
+            ));
+            assert_eq!(callbacks, 0);
+            sqlx::query("UPDATE shardline_reliability_events SET merkle_commit_json=$3 WHERE operation_kind=$1 AND operation_id='inventory/0519' AND sequence=$2")
+                .bind(kind).bind(sequence).bind(commit).execute(&pool).await.unwrap();
+            sqlx::query(&format!(
+                "UPDATE {table} SET {column}={column}-1 WHERE object_key='inventory/0000'"
+            ))
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query("DELETE FROM shardline_reliability_events WHERE operation_kind=$1 AND operation_id='inventory/0519'").bind(kind).execute(&pool).await.unwrap();
+            let mut callbacks = 0;
+            let result = if quarantine {
+                store
+                    .visit_quarantine_candidates(|_| {
+                        callbacks += 1;
+                        Ok::<(), super::PostgresMetadataStoreError>(())
+                    })
+                    .await
+            } else {
+                store
+                    .visit_retention_holds(|_| {
+                        callbacks += 1;
+                        Ok::<(), super::PostgresMetadataStoreError>(())
+                    })
+                    .await
+            };
+            assert!(matches!(
+                result,
+                Err(super::PostgresMetadataStoreError::Reliability(
+                    shardline_reliability::ReliabilityError::OperationMismatch
+                ))
+            ));
+            assert_eq!(callbacks, 0);
+        }
+        pool.close().await;
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn pg_bounded_reconstruction_visitor_validates_before_callbacks_and_keeps_snapshot() {
         let Some(pool) = connect_postgres().await else {

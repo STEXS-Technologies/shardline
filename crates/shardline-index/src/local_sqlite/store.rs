@@ -516,13 +516,6 @@ impl LocalRecordStore {
         helpers::collect_rows(rows)
     }
 
-    fn escape_like(value: &str) -> String {
-        value
-            .replace('\\', "\\\\")
-            .replace('_', "\\_")
-            .replace('%', "\\%")
-    }
-
     pub(crate) fn list_repository_record_locators(
         &self,
         kind: RecordKind,
@@ -530,16 +523,19 @@ impl LocalRecordStore {
     ) -> Result<Vec<LocalRecordLocator>, LocalIndexStoreError> {
         let connection = self.open_connection()?;
         let scope_key = shared_repository_record_scope_key(repository);
-        let scope_prefix = format!("{}%", Self::escape_like(&scope_key));
+        let upper = crate::hub::prefix_successor(&scope_key).ok_or_else(|| {
+            LocalIndexStoreError::BlockingTask("repository scope has no prefix upper bound".into())
+        })?;
         let mut statement = connection.prepare(
             "SELECT record_key, record_kind, scope_key, file_id, content_hash
              FROM shardline_file_records
              WHERE record_kind = ?1
-               AND (scope_key = ?2 OR scope_key LIKE ?3 ESCAPE '\\')
+               AND scope_key >= ?2 AND scope_key < ?3
+               AND substr(scope_key, 1, length(?2)) = ?2
              ORDER BY record_key",
         )?;
         let rows = statement.query_map(
-            params![kind.as_str(), scope_key, scope_prefix],
+            params![kind.as_str(), scope_key, upper],
             helpers::local_record_locator_from_row,
         )?;
         helpers::collect_rows(rows)

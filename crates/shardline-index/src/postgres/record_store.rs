@@ -1,5 +1,8 @@
 use std::str::FromStr;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
+
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use futures_util::TryStreamExt;
 use serde_json::to_vec;
@@ -24,6 +27,41 @@ use crate::{
     },
     xet_hash_hex_string,
 };
+
+// Admission precedes polling an owned row so stalled conversions cannot
+// accumulate an unbounded queue of large JSON values across store instances.
+fn record_conversion_budget() -> &'static Arc<Semaphore> {
+    static BUDGET: OnceLock<Arc<Semaphore>> = OnceLock::new();
+    BUDGET.get_or_init(|| Arc::new(Semaphore::new(8)))
+}
+
+async fn admit_record_conversion() -> Result<OwnedSemaphorePermit, PostgresMetadataStoreError> {
+    Arc::clone(record_conversion_budget())
+        .acquire_owned()
+        .await
+        .map_err(|error| PostgresMetadataStoreError::Unsupported(error.to_string()))
+}
+
+async fn run_record_conversion<T: Send + 'static>(
+    permit: OwnedSemaphorePermit,
+    convert: impl FnOnce() -> Result<T, PostgresMetadataStoreError> + Send + 'static,
+) -> Result<T, PostgresMetadataStoreError> {
+    // Returning the permit with the result keeps admission charged for queued,
+    // running and completed-but-unclaimed work, even if the waiter is canceled.
+    let (result, _permit) = tokio::task::spawn_blocking(move || {
+        let result = convert();
+        (result, permit)
+    })
+    .await
+    .map_err(|error| PostgresMetadataStoreError::Unsupported(error.to_string()))?;
+    // No yield after taking ownership of the completed result.
+    result
+}
+
+fn canonical_record_bytes_from_row(row: &PgRow) -> Result<Vec<u8>, PostgresMetadataStoreError> {
+    let Json(record) = row.try_get::<Json<FileRecord>, _>("record")?;
+    Ok(to_vec(&record)?)
+}
 
 impl super::PostgresRecordStore {
     /// Inserts or replaces an immutable version record.
@@ -397,20 +435,21 @@ impl super::PostgresRecordStore {
         Ok(())
     }
 
-    async fn read_record(
+    async fn read_record_bytes_optional(
         &self,
         locator: &PostgresRecordLocator,
-    ) -> Result<Option<FileRecord>, PostgresMetadataStoreError> {
+    ) -> Result<Option<Vec<u8>>, PostgresMetadataStoreError> {
+        let permit = admit_record_conversion().await?;
         let row = query("SELECT record FROM shardline_file_records WHERE record_key = $1")
             .bind(&locator.record_key)
             .fetch_optional(&self.pool)
             .await?;
-
         let Some(row) = row else {
             return Ok(None);
         };
-        let Json(record) = row.try_get::<Json<FileRecord>, _>("record")?;
-        Ok(Some(record))
+        run_record_conversion(permit, move || canonical_record_bytes_from_row(&row))
+            .await
+            .map(Some)
     }
 
     async fn list_record_locators(
@@ -486,13 +525,20 @@ impl super::PostgresRecordStore {
         .bind(kind.as_str())
         .fetch(&self.pool);
 
-        while let Some(row) = rows
-            .try_next()
-            .await
-            .map_err(PostgresMetadataStoreError::from)
-            .map_err(Into::into)?
-        {
-            visitor(stored_record_from_row(&row).map_err(Into::into)?)?;
+        loop {
+            let permit = admit_record_conversion().await.map_err(Into::into)?;
+            let Some(row) = rows
+                .try_next()
+                .await
+                .map_err(PostgresMetadataStoreError::from)
+                .map_err(Into::into)?
+            else {
+                break;
+            };
+            let record = run_record_conversion(permit, move || stored_record_from_row(&row))
+                .await
+                .map_err(Into::into)?;
+            visitor(record)?;
         }
 
         Ok(())
@@ -565,13 +611,20 @@ impl super::PostgresRecordStore {
         .bind(&escaped_prefix)
         .fetch(&self.pool);
 
-        while let Some(row) = rows
-            .try_next()
-            .await
-            .map_err(PostgresMetadataStoreError::from)
-            .map_err(Into::into)?
-        {
-            visitor(stored_record_from_row(&row).map_err(Into::into)?)?;
+        loop {
+            let permit = admit_record_conversion().await.map_err(Into::into)?;
+            let Some(row) = rows
+                .try_next()
+                .await
+                .map_err(PostgresMetadataStoreError::from)
+                .map_err(Into::into)?
+            else {
+                break;
+            };
+            let record = run_record_conversion(permit, move || stored_record_from_row(&row))
+                .await
+                .map_err(Into::into)?;
+            visitor(record)?;
         }
 
         Ok(())
@@ -710,11 +763,9 @@ impl RecordTraversal for super::PostgresRecordStore {
         locator: &'operation Self::Locator,
     ) -> RecordStoreFuture<'operation, Vec<u8>, Self::Error> {
         Box::pin(async move {
-            let record = self
-                .read_record(locator)
+            self.read_record_bytes_optional(locator)
                 .await?
-                .ok_or(PostgresMetadataStoreError::RecordNotFound)?;
-            Ok(to_vec(&record)?)
+                .ok_or(PostgresMetadataStoreError::RecordNotFound)
         })
     }
 
@@ -723,13 +774,8 @@ impl RecordTraversal for super::PostgresRecordStore {
         record: &'operation FileRecord,
     ) -> RecordStoreFuture<'operation, Option<Vec<u8>>, Self::Error> {
         Box::pin(async move {
-            let locator = self.latest_record_locator(record);
-            self.read_record(&locator)
-                .await?
-                .map(|stored_record| {
-                    to_vec(&stored_record).map_err(PostgresMetadataStoreError::from)
-                })
-                .transpose()
+            self.read_record_bytes_optional(&self.latest_record_locator(record))
+                .await
         })
     }
 
@@ -949,6 +995,7 @@ mod tests {
 
     use super::RecordKind;
     use super::record_locator;
+    use crate::RecordTraversal;
     use crate::{
         FileChunkRecord, FileRecord, ResumableSession, ResumableSessionProtocol, S3ObjectEntry,
         S3PublishCondition,
@@ -972,6 +1019,169 @@ mod tests {
                 packed_end: 50,
             }],
         }
+    }
+
+    #[test]
+    fn conversion_budget_survives_queued_running_and_completed_cancellation() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let budget = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+            let (release, blocked) = std::sync::mpsc::channel();
+            let (started, entered) = tokio::sync::oneshot::channel();
+            let blocker = tokio::task::spawn_blocking(move || {
+                started.send(()).unwrap();
+                blocked.recv().unwrap();
+            });
+            entered.await.unwrap();
+            let permit = budget.clone().acquire_owned().await.unwrap();
+            let (finished, finish) = tokio::sync::oneshot::channel();
+            let task = tokio::spawn(super::run_record_conversion(permit, move || {
+                finished.send(()).unwrap();
+                Ok::<_, super::PostgresMetadataStoreError>(())
+            }));
+            tokio::task::yield_now().await;
+            task.abort();
+            assert!(task.await.unwrap_err().is_cancelled());
+            assert_eq!(budget.available_permits(), 0);
+            release.send(()).unwrap();
+            blocker.await.unwrap();
+            finish.await.unwrap();
+            let permit = budget.clone().acquire_owned().await.unwrap();
+            let (release, blocked) = std::sync::mpsc::channel();
+            let (started, entered) = tokio::sync::oneshot::channel();
+            let task = tokio::spawn(super::run_record_conversion(permit, move || {
+                started.send(()).unwrap();
+                blocked.recv().unwrap();
+                Ok::<_, super::PostgresMetadataStoreError>(())
+            }));
+            entered.await.unwrap();
+            task.abort();
+            assert!(task.await.unwrap_err().is_cancelled());
+            assert_eq!(budget.available_permits(), 0);
+            // The runtime keeps progressing with its single blocking worker busy.
+            tokio::time::timeout(std::time::Duration::from_secs(1), tokio::task::yield_now())
+                .await
+                .unwrap();
+            release.send(()).unwrap();
+            let permit = budget.clone().acquire_owned().await.unwrap();
+            let (started, entered) = tokio::sync::oneshot::channel();
+            let task = tokio::task::spawn_blocking(move || {
+                started.send(()).unwrap();
+                (vec![0u8; 6_549_097], permit)
+            });
+            entered.await.unwrap();
+            while !task.is_finished() {
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(budget.available_permits(), 0);
+            drop(task);
+            let _permit = budget.clone().acquire_owned().await.unwrap();
+        });
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pg_record_conversion_preserves_public_bytes_and_errors() {
+        let Some(pool) = super::super::test_support::connect_isolated_postgres().await else {
+            return;
+        };
+        let store = super::super::PostgresRecordStore::new(pool.clone());
+        let scope = RepositoryScope::new(
+            RepositoryProvider::GitHub,
+            "cpu-team",
+            "cpu-repo",
+            Some("main"),
+        )
+        .unwrap();
+        let mut record = sample_record(Some(scope.clone()));
+        record.total_bytes = 50;
+        record.validate_reconstruction_plan().unwrap();
+        store.commit_file_version_metadata(&record).await.unwrap();
+        let bytes = serde_json::to_vec(&record).unwrap();
+        let repository = crate::RepositoryRecordScope::from_repository_scope(&scope);
+        for mode in 0..4 {
+            let mut seen = Vec::new();
+            let callback = |entry: crate::StoredRecord<super::super::PostgresRecordLocator>| {
+                seen.push(entry.bytes);
+                Ok::<_, super::super::PostgresMetadataStoreError>(())
+            };
+            match mode {
+                0 => store.visit_latest_records(callback).await.unwrap(),
+                1 => store.visit_version_records(callback).await.unwrap(),
+                2 => store
+                    .visit_repository_latest_records(&repository, callback)
+                    .await
+                    .unwrap(),
+                _ => store
+                    .visit_repository_version_records(&repository, callback)
+                    .await
+                    .unwrap(),
+            }
+            assert_eq!(seen, vec![bytes.clone()]);
+            let mut calls = 0;
+            let callback = |_| {
+                calls += 1;
+                Err::<(), _>(super::super::PostgresMetadataStoreError::IntegerOutOfRange(
+                    "visitor sentinel".into(),
+                ))
+            };
+            let result = match mode {
+                0 => store.visit_latest_records(callback).await,
+                1 => store.visit_version_records(callback).await,
+                2 => {
+                    store
+                        .visit_repository_latest_records(&repository, callback)
+                        .await
+                }
+                _ => {
+                    store
+                        .visit_repository_version_records(&repository, callback)
+                        .await
+                }
+            };
+            assert!(
+                matches!(result, Err(super::super::PostgresMetadataStoreError::IntegerOutOfRange(ref text)) if text == "visitor sentinel")
+            );
+            assert_eq!(calls, 1);
+        }
+        let locator = store.latest_record_locator(&record);
+        assert_eq!(store.read_record_bytes(&locator).await.unwrap(), bytes);
+        assert_eq!(
+            store.read_latest_record_bytes(&record).await.unwrap(),
+            Some(bytes)
+        );
+        sqlx::query("UPDATE shardline_file_records SET record='{}'::jsonb")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            store.read_record_bytes(&locator).await,
+            Err(super::super::PostgresMetadataStoreError::Sqlx(_))
+        ));
+        let mut calls = 0;
+        assert!(matches!(
+            store
+                .visit_latest_records(|_| {
+                    calls += 1;
+                    Ok::<_, super::super::PostgresMetadataStoreError>(())
+                })
+                .await,
+            Err(super::super::PostgresMetadataStoreError::Sqlx(_))
+        ));
+        assert_eq!(calls, 0);
+        sqlx::query("DELETE FROM shardline_file_records")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            store.read_record_bytes(&locator).await,
+            Err(super::super::PostgresMetadataStoreError::RecordNotFound)
+        ));
+        assert_eq!(store.read_latest_record_bytes(&record).await.unwrap(), None);
+        pool.close().await;
     }
 
     #[test]

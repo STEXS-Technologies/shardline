@@ -13,8 +13,14 @@
 //! parser is provided for cross-frontend compatibility and is unit-tested
 //! against the RFC 7233 format.
 
+use std::sync::{
+    Arc, OnceLock,
+    atomic::{AtomicBool, Ordering},
+    mpsc::{SyncSender, TrySendError},
+};
+
 use reqwest::{Response, StatusCode, header};
-use serde::Deserialize;
+use serde::{Deserialize, de::DeserializeOwned};
 use shardline_xet_adapter::{
     FileReconstructionResponse, FileReconstructionV2Response, ShardUploadResponse,
     XorbUploadResponse,
@@ -204,8 +210,9 @@ impl TransferClient {
         let response = self
             .get_reconstruction(base_url, token, file_id, range, "v1")
             .await?;
-        let body = read_response_bounded(response, self.reconstruction_response_limit).await?;
-        serde_json::from_slice(&body).map_err(|error| transfer_error_from_json(&error))
+        decode_json_response(response, self.reconstruction_response_limit)
+            .await?
+            .map_err(|error| transfer_error_from_json(&error))
     }
 
     /// Fetches the reconstruction plan for `file_id` from the v2
@@ -227,8 +234,9 @@ impl TransferClient {
         let response = self
             .get_reconstruction(base_url, token, file_id, range, "v2")
             .await?;
-        let body = read_response_bounded(response, self.reconstruction_response_limit).await?;
-        serde_json::from_slice(&body).map_err(|error| transfer_error_from_json(&error))
+        decode_json_response(response, self.reconstruction_response_limit)
+            .await?
+            .map_err(|error| transfer_error_from_json(&error))
     }
 
     /// Fetches a byte range of a serialized xorb from an absolute transfer
@@ -477,8 +485,9 @@ impl TransferClient {
             .send()
             .await?;
         let response = ensure_success(response).await?;
-        let response_bytes = read_response_bounded(response, ACK_RESPONSE_LIMIT).await?;
-        serde_json::from_slice(&response_bytes).map_err(|error| transfer_error_from_json(&error))
+        decode_json_response(response, ACK_RESPONSE_LIMIT)
+            .await?
+            .map_err(|error| transfer_error_from_json(&error))
     }
 
     /// Uploads a serialized metadata shard via `POST /v1/shards`.
@@ -504,8 +513,9 @@ impl TransferClient {
             .send()
             .await?;
         let response = ensure_success(response).await?;
-        let response_bytes = read_response_bounded(response, ACK_RESPONSE_LIMIT).await?;
-        serde_json::from_slice(&response_bytes).map_err(|error| transfer_error_from_json(&error))
+        decode_json_response(response, ACK_RESPONSE_LIMIT)
+            .await?
+            .map_err(|error| transfer_error_from_json(&error))
     }
 
     /// Issues an arbitrary CAS/API request (with the `X-Xet-Session-Id` and
@@ -521,6 +531,7 @@ impl TransferClient {
     ///
     /// Returns [`TransferError`] for transport failures and every non-2xx
     /// status.
+    #[cfg(test)]
     pub(crate) async fn request_raw(
         &self,
         method: &reqwest::Method,
@@ -529,6 +540,33 @@ impl TransferClient {
         body: Option<&serde_json::Value>,
         success_limit: usize,
     ) -> Result<(StatusCode, Vec<u8>), TransferError> {
+        let response = self.request_response(method, url, token, body).await?;
+        let status = response.status();
+        let body_bytes = read_response_bounded(response, success_limit).await?;
+        Ok((status, body_bytes))
+    }
+
+    /// JSON parsing errors remain separate from transport/status failures so
+    /// metadata callers retain their operation labels and do not retry bad JSON.
+    pub(crate) async fn request_json<T: DeserializeOwned + Send + 'static>(
+        &self,
+        method: &reqwest::Method,
+        url: &str,
+        token: &str,
+        body: Option<&serde_json::Value>,
+        success_limit: usize,
+    ) -> Result<Result<T, JsonDecodeError>, TransferError> {
+        let response = self.request_response(method, url, token, body).await?;
+        decode_json_response(response, success_limit).await
+    }
+
+    async fn request_response(
+        &self,
+        method: &reqwest::Method,
+        url: &str,
+        token: &str,
+        body: Option<&serde_json::Value>,
+    ) -> Result<Response, TransferError> {
         let mut request = self
             .with_session(self.client.request(method.clone(), url).bearer_auth(token))
             .header(header::ACCEPT, "application/json");
@@ -537,11 +575,7 @@ impl TransferClient {
                 .header(header::CONTENT_TYPE, "application/json")
                 .json(body);
         }
-        let response = request.send().await?;
-        let status = response.status();
-        let response = ensure_success(response).await?;
-        let body_bytes = read_response_bounded(response, success_limit).await?;
-        Ok((status, body_bytes))
+        ensure_success(request.send().await?).await
     }
 
     async fn get_reconstruction(
@@ -683,6 +717,247 @@ async fn read_error_prefix(mut response: Response) -> String {
     String::from_utf8_lossy(&body).into_owned()
 }
 
+/// Admission spans body collection, blocking decode and unclaimed-result
+/// cleanup. Eight jobs are shared by all clients; transport buffers and DTOs
+/// already returned to callers are outside this budget.
+const JSON_DIAGNOSTIC_LIMIT: usize = 8 * 1024;
+
+/// An owned diagnostic formatted on the admitted blocking worker. The original
+/// serde error can contain an entire peer string; it never crosses the await.
+#[derive(Debug)]
+pub(crate) struct JsonDecodeError(String);
+
+impl std::fmt::Display for JsonDecodeError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+struct JsonDiagnosticWriter {
+    message: String,
+    limit: usize,
+}
+
+impl std::fmt::Write for JsonDiagnosticWriter {
+    fn write_str(&mut self, value: &str) -> std::fmt::Result {
+        let remaining = self.limit.saturating_sub(self.message.len());
+        if value.len() <= remaining {
+            self.message.push_str(value);
+            return Ok(());
+        }
+        let mut end = remaining;
+        while !value.is_char_boundary(end) {
+            end = end.saturating_sub(1);
+        }
+        self.message.push_str(&value[..end]);
+        Err(std::fmt::Error)
+    }
+}
+
+impl JsonDecodeError {
+    fn from_serde(error: serde_json::Error) -> Self {
+        // Reserve enough for the marker and two maximum-width usize locations.
+        let mut writer = JsonDiagnosticWriter {
+            message: String::new(),
+            limit: JSON_DIAGNOSTIC_LIMIT.saturating_sub(128),
+        };
+        if std::fmt::write(&mut writer, format_args!("{error}")).is_err() {
+            writer.message.push_str(" [truncated; at line ");
+            writer.message.push_str(&error.line().to_string());
+            writer.message.push_str(" column ");
+            writer.message.push_str(&error.column().to_string());
+            writer.message.push(']');
+        }
+        // `error` (potentially huge) is dropped here on the blocking worker,
+        // while JsonDecodeWork still owns its admission permit.
+        drop(error);
+        Self(writer.message)
+    }
+}
+
+const JSON_DECODE_JOBS: usize = 8;
+type JsonCleanupJob = Box<dyn FnOnce() + Send + 'static>;
+
+struct JsonDecodePool {
+    slots: Arc<tokio::sync::Semaphore>,
+    cleanup: SyncSender<JsonCleanupJob>,
+    faulted: Arc<AtomicBool>,
+    #[cfg(test)]
+    collections_started: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    jobs_submitted: std::sync::atomic::AtomicUsize,
+}
+
+impl JsonDecodePool {
+    fn new(limit: usize) -> Result<Arc<Self>, String> {
+        Self::with_worker(limit, |receiver, worker_fault| {
+            let cleanup_thread = std::thread::Builder::new()
+                .name("sdx-json-cleanup".to_owned())
+                .spawn(move || {
+                    // A failed destructor faults future admission but already
+                    // admitted owners drain through this one fixed worker.
+                    for job in receiver {
+                        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(job)).is_err() {
+                            worker_fault.store(true, Ordering::Release);
+                        }
+                    }
+                })?;
+            drop(cleanup_thread);
+            Ok(())
+        })
+    }
+
+    fn with_worker(
+        limit: usize,
+        start_worker: impl FnOnce(
+            std::sync::mpsc::Receiver<JsonCleanupJob>,
+            Arc<AtomicBool>,
+        ) -> std::io::Result<()>,
+    ) -> Result<Arc<Self>, String> {
+        let (cleanup, receiver) = std::sync::mpsc::sync_channel::<JsonCleanupJob>(limit);
+        let faulted = Arc::new(AtomicBool::new(false));
+        start_worker(receiver, Arc::clone(&faulted))
+            .map_err(|error| format!("JSON cleanup worker creation failed: {error}"))?;
+        Ok(Arc::new(Self {
+            slots: Arc::new(tokio::sync::Semaphore::new(limit)),
+            cleanup,
+            faulted,
+            #[cfg(test)]
+            collections_started: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            jobs_submitted: std::sync::atomic::AtomicUsize::new(0),
+        }))
+    }
+
+    async fn admit(&self) -> Result<tokio::sync::OwnedSemaphorePermit, TransferError> {
+        self.check_health()?;
+        let permit = Arc::clone(&self.slots)
+            .acquire_owned()
+            .await
+            .map_err(|error| {
+                TransferError::InvalidResponse(format!("JSON admission failed: {error}"))
+            })?;
+        self.check_health()?;
+        Ok(permit)
+    }
+
+    fn check_health(&self) -> Result<(), TransferError> {
+        if self.faulted.load(Ordering::Acquire) {
+            Err(TransferError::InvalidResponse(
+                "JSON decoder cleanup worker faulted".to_owned(),
+            ))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+fn json_decode_pool() -> Result<Arc<JsonDecodePool>, TransferError> {
+    static POOL: OnceLock<Result<Arc<JsonDecodePool>, String>> = OnceLock::new();
+    POOL.get_or_init(|| JsonDecodePool::new(JSON_DECODE_JOBS))
+        .as_ref()
+        .map(Arc::clone)
+        .map_err(|error| TransferError::InvalidResponse(error.clone()))
+}
+
+// Declaration order is intentional: Rust drops value/body before releasing
+// admission, including when a destructor unwinds.
+struct JsonCleanupValue<T> {
+    _value: Result<T, JsonDecodeError>,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
+
+struct JsonResultOwner<T: Send + 'static> {
+    value: Option<Result<T, JsonDecodeError>>,
+    permit: Option<tokio::sync::OwnedSemaphorePermit>,
+    pool: Arc<JsonDecodePool>,
+}
+
+impl<T: Send + 'static> JsonResultOwner<T> {
+    fn take(mut self) -> Option<Result<T, JsonDecodeError>> {
+        // No await between ownership transfer and returning to the caller.
+        // The successful caller now owns DTO lifetime; canceled unclaimed
+        // results use Drop's bounded cleanup path instead.
+        let value = self.value.take();
+        drop(self.permit.take());
+        value
+    }
+}
+
+impl<T: Send + 'static> Drop for JsonResultOwner<T> {
+    fn drop(&mut self) {
+        let (Some(value), Some(permit)) = (self.value.take(), self.permit.take()) else {
+            return;
+        };
+        let cleanup_value = JsonCleanupValue {
+            _value: value,
+            _permit: permit,
+        };
+        let job: JsonCleanupJob = Box::new(move || drop(cleanup_value));
+        // Every queued cleanup retains one of the eight permits, so a queue
+        // with eight places cannot fill normally. A disconnected/full queue
+        // is an internal fault: stop future admission, then synchronously
+        // drop as the bounded last-resort exception (never spawn rescue jobs).
+        if let Err(TrySendError::Full(job) | TrySendError::Disconnected(job)) =
+            self.pool.cleanup.try_send(job)
+        {
+            self.pool.faulted.store(true, Ordering::Release);
+            drop(job);
+        }
+    }
+}
+
+struct JsonDecodeWork {
+    body: Vec<u8>,
+    permit: Option<tokio::sync::OwnedSemaphorePermit>,
+    pool: Arc<JsonDecodePool>,
+}
+
+async fn decode_json_response<T: DeserializeOwned + Send + 'static>(
+    response: Response,
+    limit: usize,
+) -> Result<Result<T, JsonDecodeError>, TransferError> {
+    decode_json_with_pool(response, limit, json_decode_pool()?).await
+}
+
+async fn decode_json_with_pool<T: DeserializeOwned + Send + 'static>(
+    response: Response,
+    limit: usize,
+    pool: Arc<JsonDecodePool>,
+) -> Result<Result<T, JsonDecodeError>, TransferError> {
+    // Initialize the cleanup worker and acquire admission before collecting
+    // any owned response bytes. Cancellation during collection drops permit.
+    let permit = pool.admit().await?;
+    #[cfg(test)]
+    pool.collections_started.fetch_add(1, Ordering::Relaxed);
+    let mut work = JsonDecodeWork {
+        body: Vec::new(),
+        permit: Some(permit),
+        pool: Arc::clone(&pool),
+    };
+    read_response_into(response, limit, &mut work.body).await?;
+    #[cfg(test)]
+    pool.jobs_submitted.fetch_add(1, Ordering::Relaxed);
+    let decoded = tokio::task::spawn_blocking(move || {
+        let value = serde_json::from_slice(&work.body).map_err(JsonDecodeError::from_serde);
+        let owner = JsonResultOwner {
+            value: Some(value),
+            permit: work.permit.take(),
+            pool: Arc::clone(&work.pool),
+        };
+        drop(work);
+        owner
+    })
+    .await
+    .map_err(|error| {
+        pool.faulted.store(true, Ordering::Release);
+        TransferError::InvalidResponse(format!("JSON decode worker failed: {error}"))
+    })?;
+    decoded.take().ok_or_else(|| {
+        TransferError::InvalidResponse("JSON result owner was already consumed".to_owned())
+    })
+}
+
 async fn ensure_success(response: Response) -> Result<Response, TransferError> {
     let status = response.status();
     let request_id = response
@@ -765,7 +1040,7 @@ const fn http_error(
     }
 }
 
-fn transfer_error_from_json(error: &serde_json::Error) -> TransferError {
+fn transfer_error_from_json(error: &JsonDecodeError) -> TransferError {
     TransferError::InvalidResponse(error.to_string())
 }
 
@@ -914,9 +1189,19 @@ struct ErrorBody {
 }
 
 async fn read_response_bounded(
-    mut response: reqwest::Response,
+    response: reqwest::Response,
     limit: usize,
 ) -> Result<Vec<u8>, TransferError> {
+    let mut body = Vec::new();
+    read_response_into(response, limit, &mut body).await?;
+    Ok(body)
+}
+
+async fn read_response_into(
+    mut response: reqwest::Response,
+    limit: usize,
+    body: &mut Vec<u8>,
+) -> Result<(), TransferError> {
     if response
         .content_length()
         .is_some_and(|length| length > limit as u64)
@@ -927,7 +1212,6 @@ async fn read_response_bounded(
     }
     // Never trust the peer's allocation hint. Check every streamed chunk before
     // extending our owned buffer, including chunked and compressed responses.
-    let mut body = Vec::new();
     while let Some(chunk) = response.chunk().await? {
         let required = body
             .len()
@@ -947,7 +1231,7 @@ async fn read_response_bounded(
         }
         body.extend_from_slice(&chunk);
     }
-    Ok(body)
+    Ok(())
 }
 
 #[cfg(test)]
@@ -958,6 +1242,349 @@ mod tests {
         Mock, MockServer, ResponseTemplate,
         matchers::{method, path},
     };
+
+    #[derive(Default)]
+    struct DecodeGate {
+        open: std::sync::Mutex<bool>,
+        changed: std::sync::Condvar,
+        entered: tokio::sync::Notify,
+    }
+
+    impl DecodeGate {
+        fn wait(&self) {
+            let mut open = self
+                .open
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            self.entered.notify_one();
+            while !*open {
+                open = self
+                    .changed
+                    .wait(open)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+            }
+        }
+
+        fn release(&self) {
+            *self
+                .open
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+            self.changed.notify_all();
+        }
+    }
+
+    struct ReleaseDecodeGate(std::sync::Arc<DecodeGate>);
+
+    impl Drop for ReleaseDecodeGate {
+        fn drop(&mut self) {
+            self.0.release();
+        }
+    }
+
+    struct DecodeDropProbe {
+        gate: std::sync::Arc<DecodeGate>,
+        drops: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        fault: bool,
+    }
+
+    impl Drop for DecodeDropProbe {
+        fn drop(&mut self) {
+            self.gate.wait();
+            self.drops
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if self.fault {
+                // Inject an unwind without invoking a global panic hook.
+                std::panic::resume_unwind(Box::new("injected JSON cleanup fault"));
+            }
+        }
+    }
+
+    async fn wait_decode_condition(condition: impl Fn() -> bool) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !condition() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[test]
+    fn json_queued_decode_cancellation_retains_eight_slots_and_runtime_progress() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let pool = super::JsonDecodePool::new(8).unwrap();
+            let gate = std::sync::Arc::new(DecodeGate::default());
+            let release = ReleaseDecodeGate(std::sync::Arc::clone(&gate));
+            let blocker_gate = std::sync::Arc::clone(&gate);
+            let blocker = tokio::task::spawn_blocking(move || blocker_gate.wait());
+            gate.entered.notified().await;
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+                .mount(&server)
+                .await;
+            let client = reqwest::Client::new();
+            let mut requests = Vec::new();
+            for _ in 0..10 {
+                let response = client.get(server.uri()).send().await.unwrap();
+                let decode_pool = std::sync::Arc::clone(&pool);
+                requests.push(tokio::spawn(async move {
+                    super::decode_json_with_pool::<serde_json::Value>(response, 64, decode_pool)
+                        .await
+                }));
+            }
+            wait_decode_condition(|| {
+                pool.jobs_submitted
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                    == 8
+            })
+            .await;
+            assert_eq!(pool.slots.available_permits(), 0);
+            for request in &requests {
+                request.abort();
+            }
+            for request in requests {
+                assert!(request.await.unwrap_err().is_cancelled());
+            }
+            // All eight queued jobs retain admission after their callers exit;
+            // the two waiters never started body collection. A timer can run
+            // while the only blocking worker is deliberately held.
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            assert_eq!(pool.slots.available_permits(), 0);
+            assert_eq!(
+                pool.collections_started
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                8
+            );
+            drop(release);
+            blocker.await.unwrap();
+            wait_decode_condition(|| pool.slots.available_permits() == 8).await;
+            assert!(!pool.faulted.load(std::sync::atomic::Ordering::Acquire));
+            let response = client.get(server.uri()).send().await.unwrap();
+            assert_eq!(
+                super::decode_json_with_pool::<serde_json::Value>(response, 64, pool)
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                serde_json::json!({})
+            );
+        });
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn json_completed_result_cleanup_retains_slot_until_destructor_finishes() {
+        let pool = super::JsonDecodePool::new(1).unwrap();
+        let gate = std::sync::Arc::new(DecodeGate::default());
+        let release = ReleaseDecodeGate(std::sync::Arc::clone(&gate));
+        let drops = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let owner = super::JsonResultOwner {
+            value: Some(Ok(DecodeDropProbe {
+                gate: std::sync::Arc::clone(&gate),
+                drops: std::sync::Arc::clone(&drops),
+                fault: false,
+            })),
+            permit: Some(pool.admit().await.unwrap()),
+            pool: std::sync::Arc::clone(&pool),
+        };
+        let completed = tokio::task::spawn_blocking(move || owner);
+        wait_decode_condition(|| completed.is_finished()).await;
+        drop(completed);
+        gate.entered.notified().await;
+        // Dropping a completed JoinHandle runs only the bounded owner enqueue
+        // on this executor; the deliberately blocked DTO drop is on cleanup.
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        assert_eq!(pool.slots.available_permits(), 0);
+        assert_eq!(drops.load(std::sync::atomic::Ordering::Relaxed), 0);
+        let waiting_pool = std::sync::Arc::clone(&pool);
+        let waiting = tokio::spawn(async move { waiting_pool.admit().await });
+        tokio::task::yield_now().await;
+        assert!(!waiting.is_finished());
+        drop(release);
+        drop(waiting.await.unwrap().unwrap());
+        assert_eq!(drops.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(pool.slots.available_permits(), 1);
+
+        let owner = super::JsonResultOwner {
+            value: Some(Ok(serde_json::json!({"taken": true}))),
+            permit: Some(pool.admit().await.unwrap()),
+            pool: std::sync::Arc::clone(&pool),
+        };
+        assert_eq!(
+            owner.take().unwrap().unwrap(),
+            serde_json::json!({"taken": true})
+        );
+        assert_eq!(pool.slots.available_permits(), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn json_cleanup_fault_rejects_new_admission_and_drains_existing_owners() {
+        let pool = super::JsonDecodePool::new(2).unwrap();
+        let gate = std::sync::Arc::new(DecodeGate::default());
+        let release = ReleaseDecodeGate(std::sync::Arc::clone(&gate));
+        let drops = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        for fault in [true, false] {
+            drop(super::JsonResultOwner {
+                value: Some(Ok(DecodeDropProbe {
+                    gate: std::sync::Arc::clone(&gate),
+                    drops: std::sync::Arc::clone(&drops),
+                    fault,
+                })),
+                permit: Some(pool.admit().await.unwrap()),
+                pool: std::sync::Arc::clone(&pool),
+            });
+        }
+        gate.entered.notified().await;
+        assert_eq!(pool.slots.available_permits(), 0);
+        drop(release);
+        wait_decode_condition(|| pool.slots.available_permits() == 2).await;
+        assert_eq!(drops.load(std::sync::atomic::Ordering::Relaxed), 2);
+        assert!(matches!(
+            pool.admit().await,
+            Err(super::TransferError::InvalidResponse(_))
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn json_canceled_body_collection_releases_admission() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (release, released) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            assert_ne!(socket.read(&mut request).await.unwrap(), 0);
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1\r\n{\r\n")
+                .await
+                .unwrap();
+            let _ = released.await;
+            let _ = socket.write_all(b"1\r\n}\r\n0\r\n\r\n").await;
+        });
+        let pool = super::JsonDecodePool::new(1).unwrap();
+        let response = reqwest::Client::new()
+            .get(format!("http://{addr}"))
+            .send()
+            .await
+            .unwrap();
+        let decode_pool = std::sync::Arc::clone(&pool);
+        let task = tokio::spawn(async move {
+            super::decode_json_with_pool::<serde_json::Value>(response, 64, decode_pool).await
+        });
+        wait_decode_condition(|| {
+            pool.collections_started
+                .load(std::sync::atomic::Ordering::Relaxed)
+                == 1
+        })
+        .await;
+        assert_eq!(pool.slots.available_permits(), 0);
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert_eq!(pool.slots.available_permits(), 1);
+        assert!(!pool.faulted.load(std::sync::atomic::Ordering::Acquire));
+        let _ = release.send(());
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn json_cleanup_thread_creation_failure_is_typed_and_has_no_admission() {
+        let pool = super::JsonDecodePool::with_worker(8, |_, _| {
+            Err(std::io::Error::other("injected thread creation failure"))
+        })
+        .map_err(super::TransferError::InvalidResponse);
+        assert!(
+            matches!(pool, Err(super::TransferError::InvalidResponse(message)) if message.contains("JSON cleanup worker creation failed"))
+        );
+        assert!(std::sync::Arc::ptr_eq(
+            &super::json_decode_pool().unwrap(),
+            &super::json_decode_pool().unwrap()
+        ));
+    }
+
+    #[tokio::test]
+    async fn json_decode_worker_fault_releases_slot_and_rejects_new_admission() {
+        struct FaultingDecode;
+        impl<'de> serde::Deserialize<'de> for FaultingDecode {
+            fn deserialize<D: serde::Deserializer<'de>>(_: D) -> Result<Self, D::Error> {
+                std::panic::resume_unwind(Box::new("injected JSON decoder fault"));
+            }
+        }
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+            .mount(&server)
+            .await;
+        let response = reqwest::Client::new()
+            .get(server.uri())
+            .send()
+            .await
+            .unwrap();
+        let pool = super::JsonDecodePool::new(1).unwrap();
+        let result = super::decode_json_with_pool::<FaultingDecode>(
+            response,
+            64,
+            std::sync::Arc::clone(&pool),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(super::TransferError::InvalidResponse(message)) if message.contains("JSON decode worker failed"))
+        );
+        assert_eq!(pool.slots.available_permits(), 1);
+        assert!(matches!(
+            pool.admit().await,
+            Err(super::TransferError::InvalidResponse(_))
+        ));
+    }
+
+    #[test]
+    fn json_diagnostic_preserves_short_errors_and_truncates_at_unicode_boundary() {
+        let error = serde_json::from_str::<u64>("\"bad\"").unwrap_err();
+        let original = error.to_string();
+        assert_eq!(
+            super::JsonDecodeError::from_serde(error).to_string(),
+            original
+        );
+        let encoded = serde_json::to_string(&"é".repeat(20_000)).unwrap();
+        let error = serde_json::from_str::<u64>(&encoded).unwrap_err();
+        let line = error.line();
+        let column = error.column();
+        let diagnostic = super::JsonDecodeError::from_serde(error).to_string();
+        assert!(diagnostic.len() <= super::JSON_DIAGNOSTIC_LIMIT);
+        assert!(diagnostic.ends_with(&format!("[truncated; at line {line} column {column}]")));
+        assert!(diagnostic.contains('é'));
+        let mut writer = super::JsonDiagnosticWriter {
+            message: String::new(),
+            limit: 5,
+        };
+        assert!(std::fmt::Write::write_str(&mut writer, "ééé").is_err());
+        assert_eq!(writer.message, "éé");
+    }
+
+    #[tokio::test]
+    async fn reconstruction_wrong_type_diagnostic_is_bounded_and_typed() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "offset_into_first_range": "x".repeat(1_000_000), "terms": [], "xorbs": {},
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let error = TransferClient::new(reqwest::Client::new())
+            .reconstruction_v2(&server.uri(), "token", &"a".repeat(64), None)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, super::TransferError::InvalidResponse(message)
+            if message.len() <= super::JSON_DIAGNOSTIC_LIMIT && message.contains("[truncated; at line 1 column "))
+        );
+    }
 
     #[test]
     fn reconstruction_envelope_covers_worst_numbers_escaping_and_nesting() {
