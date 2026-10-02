@@ -1284,6 +1284,63 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn cache_service_stale_cancellation_keeps_new_reservation_alive() {
+        let memory = MemoryReconstructionCache::new(
+            NonZeroU64::new(60).unwrap(),
+            NonZeroUsize::new(8).unwrap(),
+        );
+        let adapter: SharedReconstructionCache = Arc::new(memory);
+        let cache = Arc::new(ReconstructionCacheService::for_tests(
+            "memory",
+            Arc::clone(&adapter),
+        ));
+        let key = ReconstructionCacheKey::latest("stale-service-cancellation", None);
+        let task_cache = Arc::clone(&cache);
+        let task_key = key.clone();
+        let (started_send, started_receive) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            task_cache
+                .get_or_load(&task_key, || async move {
+                    started_send.send(()).unwrap();
+                    std::future::pending::<Result<FileReconstructionResponse, ServerError>>().await
+                })
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(1), started_receive)
+            .await
+            .unwrap()
+            .unwrap();
+        // Invalidation releases the old caller's latch while its future remains alive.
+        adapter.delete(&key).await.unwrap();
+        let lookup = adapter.get_or_reserve(&key).await.unwrap();
+        assert!(matches!(
+            lookup,
+            shardline_cache::ReconstructionCacheLookup::Reserved(_)
+        ));
+        let shardline_cache::ReconstructionCacheLookup::Reserved(current) = lookup else {
+            return;
+        };
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        // Actual service Drop cleanup must leave the newer generation intact.
+        assert!(adapter.touch_reservation(&key, &current).await.unwrap());
+        let response = sample_response("current");
+        let payload = serde_json::to_vec(&response).unwrap();
+        adapter
+            .put_reserved(&key, &payload, &current)
+            .await
+            .unwrap();
+        let observed = cache
+            .get_or_load(&key, || async { Ok(sample_response("unexpected-loader")) })
+            .await
+            .unwrap();
+        assert_eq!(
+            observed.terms.first().map(|term| term.hash.as_str()),
+            Some("current")
+        );
+    }
+
     // ── get_or_load — slow (>30s) loader keeps its latch (F-68) ─────────
     //
     // Reconstruction of large files from S3-backed CAS routinely exceeds the

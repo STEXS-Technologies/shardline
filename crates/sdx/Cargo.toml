@@ -48,6 +48,9 @@ tokio-util = { version = "0.7", default-features = false, features = ["rt"] }
 # primitives must not drift. The workspace-level "1.5.1" requirement unifies
 # to the same 1.5.2 in the lockfile.
 xet-core-structures = { version = "=1.5.2" }
+# Its upstream runtime dependency is a caret requirement despite incompatible
+# API changes in newer releases. Constrain it for consumers without our lockfile.
+xet-runtime.workspace = true
 reqwest = { workspace = true, features = ["json", "rustls-tls", "stream"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true

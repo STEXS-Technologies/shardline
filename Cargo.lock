@@ -3544,6 +3544,7 @@ dependencies = [
  "url",
  "wiremock",
  "xet-core-structures",
+ "xet-runtime",
 ]
 
 [[package]]

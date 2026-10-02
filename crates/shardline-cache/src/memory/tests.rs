@@ -14,7 +14,10 @@ use std::{
 };
 
 use super::MemoryReconstructionCache;
-use crate::{AsyncReconstructionCache, ReconstructionCacheError, ReconstructionCacheKey};
+use crate::{
+    AsyncReconstructionCache, ReconstructionCacheError, ReconstructionCacheKey,
+    ReconstructionCacheLookup, ReconstructionCacheReservation,
+};
 
 #[tokio::test]
 async fn memory_cache_roundtrips_one_payload() {
@@ -2269,4 +2272,216 @@ fn memory_oversized_replacement_invalidates_old_value_without_other_eviction() {
     inner.store(&second, b"new", now, 2, 8);
     assert_eq!(inner.total_bytes, 7);
     assert_eq!(inner.entries.len(), 2);
+}
+
+async fn reserve(
+    cache: &MemoryReconstructionCache,
+    key: &ReconstructionCacheKey,
+) -> ReconstructionCacheReservation {
+    let ReconstructionCacheLookup::Reserved(reservation) = cache.get_or_reserve(key).await.unwrap()
+    else {
+        panic!("expected cold-load ownership");
+    };
+    reservation
+}
+
+#[tokio::test]
+async fn memory_reservation_fences_all_stale_generation_mutations() {
+    let cache = MemoryReconstructionCache::new(NonZeroU64::MIN, NonZeroUsize::MIN);
+    let key = ReconstructionCacheKey::latest("generation", None);
+    let old = reserve(&cache, &key).await;
+    assert_eq!(old, old.clone());
+    cache.release_reservation(&key, &old);
+    let current = reserve(&cache, &key).await;
+    assert_ne!(old, current);
+    cache.release_reservation(&key, &old);
+    assert!(!cache.touch_reservation(&key, &old).await.unwrap());
+    assert!(cache.touch_reservation(&key, &current).await.unwrap());
+    assert!(!cache.delete_reserved(&key, &old).await.unwrap());
+    cache.put_reserved(&key, b"obsolete", &old).await.unwrap();
+    assert!(cache.touch_reservation(&key, &current).await.unwrap());
+    cache
+        .put_reserved(&key, b"current", &current)
+        .await
+        .unwrap();
+    cache.put_reserved(&key, b"obsolete", &old).await.unwrap();
+    assert!(!cache.delete_reserved(&key, &old).await.unwrap());
+    assert_eq!(cache.get(&key).await.unwrap(), Some(b"current".to_vec()));
+}
+
+#[tokio::test]
+async fn memory_reservation_cannot_mutate_another_key_or_cache() {
+    let cache = MemoryReconstructionCache::new(NonZeroU64::MIN, NonZeroUsize::new(2).unwrap());
+    let other_cache = MemoryReconstructionCache::new(NonZeroU64::MIN, NonZeroUsize::MIN);
+    let key = ReconstructionCacheKey::latest("first", None);
+    let other = ReconstructionCacheKey::latest("other", None);
+    let owner = reserve(&cache, &key).await;
+    let other_owner = reserve(&cache, &other).await;
+    let foreign_owner = reserve(&other_cache, &key).await;
+    for invalid in [
+        &owner,
+        &foreign_owner,
+        &ReconstructionCacheReservation::default(),
+    ] {
+        cache.release_reservation(&other, invalid);
+        assert!(!cache.touch_reservation(&other, invalid).await.unwrap());
+        assert!(!cache.delete_reserved(&other, invalid).await.unwrap());
+        cache.put_reserved(&other, b"wrong", invalid).await.unwrap();
+    }
+    assert!(cache.touch_reservation(&other, &other_owner).await.unwrap());
+    cache
+        .put_reserved(&other, b"right", &other_owner)
+        .await
+        .unwrap();
+    assert_eq!(cache.get(&other).await.unwrap(), Some(b"right".to_vec()));
+    cache.release_reservation(&key, &owner);
+    other_cache.release_reservation(&key, &foreign_owner);
+}
+
+#[tokio::test]
+async fn memory_reservation_waiters_reacquire_one_owner_after_failure() {
+    let cache = MemoryReconstructionCache::new(NonZeroU64::MIN, NonZeroUsize::MIN);
+    let key = ReconstructionCacheKey::latest("retry-generation", None);
+    let old = reserve(&cache, &key).await;
+    let (send, mut receive) = tokio::sync::mpsc::channel(8);
+    let mut tasks = Vec::new();
+    for _ in 0..8 {
+        let waiter_cache = cache.clone();
+        let waiter_key = key.clone();
+        let result_send = send.clone();
+        tasks.push(tokio::spawn(async move {
+            let result = waiter_cache.get_or_reserve(&waiter_key).await.unwrap();
+            result_send.send(result).await.unwrap();
+        }));
+    }
+    tokio::task::yield_now().await;
+    cache.release_reservation(&key, &old);
+    let first = tokio::time::timeout(Duration::from_secs(1), receive.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let ReconstructionCacheLookup::Reserved(current) = first else {
+        panic!("retry must acquire ownership");
+    };
+    assert!(cache.touch_reservation(&key, &current).await.unwrap());
+    cache
+        .put_reserved(&key, b"retried", &current)
+        .await
+        .unwrap();
+    for _ in 1..8 {
+        let result = tokio::time::timeout(Duration::from_secs(1), receive.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(result, ReconstructionCacheLookup::Hit(b"retried".to_vec()));
+    }
+    for task in tasks {
+        task.await.unwrap();
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn memory_reservation_orphan_replacement_rejects_old_publication() {
+    let cache = MemoryReconstructionCache::new(NonZeroU64::MIN, NonZeroUsize::MIN);
+    let key = ReconstructionCacheKey::latest("orphan-generation", None);
+    let old = reserve(&cache, &key).await;
+    let waiter_cache = cache.clone();
+    let waiter_key = key.clone();
+    let waiter = tokio::spawn(async move { reserve(&waiter_cache, &waiter_key).await });
+    tokio::task::yield_now().await;
+    tokio::time::advance(super::LOADER_ORPHAN_TOTAL_TIMEOUT).await;
+    let current = waiter.await.unwrap();
+    assert_ne!(old, current);
+    cache.release_reservation(&key, &old);
+    cache.put_reserved(&key, b"old", &old).await.unwrap();
+    assert!(cache.touch_reservation(&key, &current).await.unwrap());
+    cache
+        .put_reserved(&key, b"current", &current)
+        .await
+        .unwrap();
+    assert_eq!(cache.get(&key).await.unwrap(), Some(b"current".to_vec()));
+}
+
+#[tokio::test]
+async fn memory_direct_loader_completion_cannot_publish_over_new_reservation() {
+    let cache = MemoryReconstructionCache::new(NonZeroU64::MIN, NonZeroUsize::MIN);
+    let key = ReconstructionCacheKey::latest("direct-invalidated", None);
+    let loader_cache = cache.clone();
+    let loader_key = key.clone();
+    let (started_send, started_receive) = tokio::sync::oneshot::channel();
+    let (finish_send, finish_receive) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn(async move {
+        loader_cache
+            .get_or_load(&loader_key, || async move {
+                started_send.send(()).unwrap();
+                finish_receive.await.unwrap();
+                Ok(b"old".to_vec())
+            })
+            .await
+            .unwrap()
+    });
+    tokio::time::timeout(Duration::from_secs(1), started_receive)
+        .await
+        .unwrap()
+        .unwrap();
+    cache.delete(&key).await.unwrap();
+    let current = reserve(&cache, &key).await;
+    finish_send.send(()).unwrap();
+    assert_eq!(task.await.unwrap(), Some(b"old".to_vec()));
+    assert!(cache.touch_reservation(&key, &current).await.unwrap());
+    cache
+        .put_reserved(&key, b"current", &current)
+        .await
+        .unwrap();
+    assert_eq!(cache.get(&key).await.unwrap(), Some(b"current".to_vec()));
+}
+
+#[tokio::test]
+async fn memory_direct_loader_error_and_cancellation_preserve_new_generation() {
+    for cancel in [false, true] {
+        for publish_first in [false, true] {
+            let cache = MemoryReconstructionCache::new(NonZeroU64::MIN, NonZeroUsize::MIN);
+            let key = ReconstructionCacheKey::latest("direct-cleanup", None);
+            let loader_cache = cache.clone();
+            let loader_key = key.clone();
+            let (started_send, started_receive) = tokio::sync::oneshot::channel();
+            let (finish_send, finish_receive) = tokio::sync::oneshot::channel();
+            let task = tokio::spawn(async move {
+                loader_cache
+                    .get_or_load(&loader_key, || async move {
+                        started_send.send(()).unwrap();
+                        finish_receive.await.unwrap();
+                        Err(ReconstructionCacheError::Operation)
+                    })
+                    .await
+            });
+            tokio::time::timeout(Duration::from_secs(1), started_receive)
+                .await
+                .unwrap()
+                .unwrap();
+            cache.delete(&key).await.unwrap();
+            let current = reserve(&cache, &key).await;
+            if publish_first {
+                cache
+                    .put_reserved(&key, b"current", &current)
+                    .await
+                    .unwrap();
+            }
+            if cancel {
+                task.abort();
+                assert!(task.await.unwrap_err().is_cancelled());
+            } else {
+                finish_send.send(()).unwrap();
+                assert!(task.await.unwrap().is_err());
+            }
+            if !publish_first {
+                assert!(cache.touch_reservation(&key, &current).await.unwrap());
+                cache
+                    .put_reserved(&key, b"current", &current)
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(cache.get(&key).await.unwrap(), Some(b"current".to_vec()));
+        }
+    }
 }

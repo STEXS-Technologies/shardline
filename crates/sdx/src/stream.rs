@@ -64,6 +64,8 @@ use tokio::sync::{Notify, OnceCell, OwnedSemaphorePermit, Semaphore, oneshot};
 use tokio::task::{JoinHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
 use xet_core_structures::ExpWeightedMovingAvg;
+// Keep the compatible upstream runtime constraint active for SDK consumers.
+use xet_runtime as _;
 
 use crate::{
     auth::TokenService,
@@ -200,6 +202,30 @@ pub(crate) fn global_blocking_runtime() -> Result<Arc<tokio::runtime::Runtime>, 
             "blocking runtime failed to start: {message}"
         ))),
     }
+}
+
+/// Drive a borrowed download future on the SDK runtime without nesting Tokio
+/// runtimes on the calling thread. The SDK's workers drive reconstruction even
+/// while a current-thread caller's executor is blocked.
+#[cfg(not(target_family = "wasm"))]
+fn block_on_download<F, T>(runtime: &tokio::runtime::Runtime, future: F) -> Result<T, SdxError>
+where
+    F: Future<Output = Result<T, SdxError>> + Send,
+    T: Send,
+{
+    if tokio::runtime::Handle::try_current().is_err() {
+        return runtime.block_on(future);
+    }
+    std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .name("sdx-download-bridge".to_owned())
+            .spawn_scoped(scope, || runtime.block_on(future))
+            .map_err(SdxError::Io)?
+            .join()
+            .map_err(|_panic_payload| {
+                SdxError::StreamInternal("download bridge thread panicked".to_owned())
+            })?
+    })
 }
 
 // ============================================================================
@@ -2462,7 +2488,7 @@ impl DownloadStream {
     #[cfg(not(target_family = "wasm"))]
     pub fn blocking_next(&mut self) -> Result<Option<Bytes>, SdxError> {
         let runtime = self.runtime.clone();
-        runtime.block_on(self.next())
+        block_on_download(&runtime, self.next())
     }
 
     /// Cancels the in-progress (or not-yet-started) download.
@@ -2629,7 +2655,7 @@ impl UnorderedDownloadStream {
     #[cfg(not(target_family = "wasm"))]
     pub fn blocking_next(&mut self) -> Result<Option<(u64, Bytes)>, SdxError> {
         let runtime = self.runtime.clone();
-        runtime.block_on(self.next())
+        block_on_download(&runtime, self.next())
     }
 
     fn process_term(
@@ -3914,6 +3940,75 @@ mod tests {
         drop(stream);
         // Allow any in-flight task to observe the cancellation.
         tokio::task::yield_now().await;
+    }
+
+    async fn blocking_stream_fixture() -> (MockServer, StreamContext) {
+        let server = MockServer::start().await;
+        let payload = serialize_payload(&[&[5u8; 64]]);
+        let last_byte = u64::try_from(payload.len())
+            .unwrap()
+            .checked_sub(1)
+            .unwrap();
+        reconstruction_mock(
+            &server, 0, 4095, 0,
+            json!([{"hash": XORB_HASH, "unpacked_length": 64, "range": {"start": 0, "end": 1}}]),
+            json!({XORB_HASH: [{
+                "url": format!("{}/transfer/xorb/default/{XORB_HASH}", server.uri()),
+                "ranges": [{"chunks": {"start": 0, "end": 1}, "bytes": {"start": 0, "end": last_byte}}]
+            }]}),
+        ).await;
+        xorb_range_mock(&server, 0, last_byte, payload).await;
+        let context = test_stream_context(&server, 1_048_576);
+        (server, context)
+    }
+
+    async fn check_blocking_streams_inside_runtime() {
+        let (_server, context) = blocking_stream_fixture().await;
+        let mut ordered = make_stream(context.clone(), None);
+        let mut output = Vec::new();
+        while let Some(bytes) = ordered.blocking_next().unwrap() {
+            output.extend_from_slice(&bytes);
+        }
+        assert_eq!(output, vec![5u8; 64]);
+        assert!(ordered.blocking_next().unwrap().is_none());
+
+        let mut unordered = make_unordered_stream(context.clone(), None);
+        let (offset, bytes) = unordered.blocking_next().unwrap().unwrap();
+        assert_eq!(offset, 0);
+        assert_eq!(&bytes[..], &[5u8; 64]);
+        assert!(unordered.blocking_next().unwrap().is_none());
+
+        let mut ordered_cancelled = make_stream(context.clone(), None);
+        ordered_cancelled.cancel();
+        assert!(ordered_cancelled.blocking_next().unwrap().is_none());
+        let mut unordered_cancelled = make_unordered_stream(context, None);
+        unordered_cancelled.cancel();
+        assert!(unordered_cancelled.blocking_next().unwrap().is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn blocking_next_works_inside_current_thread_runtime() {
+        check_blocking_streams_inside_runtime().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blocking_next_works_inside_multi_thread_runtime() {
+        check_blocking_streams_inside_runtime().await;
+    }
+
+    #[test]
+    fn unordered_blocking_next_works_from_plain_thread() {
+        let runtime = Runtime::new().unwrap();
+        let (server, mut stream) = runtime.block_on(async {
+            let (server, context) = blocking_stream_fixture().await;
+            (server, make_unordered_stream(context, None))
+        });
+        drop(runtime);
+        let (offset, bytes) = stream.blocking_next().unwrap().unwrap();
+        assert_eq!(offset, 0);
+        assert_eq!(&bytes[..], &[5u8; 64]);
+        assert!(stream.blocking_next().unwrap().is_none());
+        drop(server);
     }
 
     #[test]

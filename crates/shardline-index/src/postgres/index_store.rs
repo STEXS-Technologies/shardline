@@ -1697,16 +1697,16 @@ impl UploadIntentStore for super::PostgresIndexStore {
                 existing.try_get("object_hash")?,
                 i64_to_u64(existing.try_get("object_length")?)?,
                 state,
-                std::time::Duration::from_secs(
+                std::time::Duration::from_secs(i64_to_u64(
                     existing
                         .try_get::<chrono::DateTime<chrono::Utc>, _>("created_at")?
-                        .timestamp() as u64,
-                ),
-                std::time::Duration::from_secs(
+                        .timestamp(),
+                )?),
+                std::time::Duration::from_secs(i64_to_u64(
                     existing
                         .try_get::<chrono::DateTime<chrono::Utc>, _>("updated_at")?
-                        .timestamp() as u64,
-                ),
+                        .timestamp(),
+                )?),
             );
             let event_rows = query(
                 "SELECT event_json, merkle_commit_json FROM shardline_reliability_events
@@ -1938,8 +1938,8 @@ impl UploadIntentStore for super::PostgresIndexStore {
                 let state = UploadIntentState::parse(&state_str).ok_or_else(|| {
                     PostgresMetadataStoreError::InvalidUploadIntentState(state_str.clone())
                 })?;
-                let created_dur = std::time::Duration::from_secs(created.timestamp() as u64);
-                let updated_dur = std::time::Duration::from_secs(updated.timestamp() as u64);
+                let created_dur = std::time::Duration::from_secs(i64_to_u64(created.timestamp())?);
+                let updated_dur = std::time::Duration::from_secs(i64_to_u64(updated.timestamp())?);
                 let intent = UploadIntent::from_parts(
                     id,
                     key,
@@ -1982,8 +1982,8 @@ impl UploadIntentStore for super::PostgresIndexStore {
                     hash,
                     i64_to_u64(length)?,
                     s,
-                    std::time::Duration::from_secs(created.timestamp() as u64),
-                    std::time::Duration::from_secs(updated.timestamp() as u64),
+                    std::time::Duration::from_secs(i64_to_u64(created.timestamp())?),
+                    std::time::Duration::from_secs(i64_to_u64(updated.timestamp())?),
                 ))
             })
             .collect::<Result<Vec<_>, PostgresMetadataStoreError>>()?;
@@ -2054,8 +2054,8 @@ impl UploadIntentStore for super::PostgresIndexStore {
                     hash,
                     i64_to_u64(length)?,
                     s,
-                    std::time::Duration::from_secs(created.timestamp() as u64),
-                    std::time::Duration::from_secs(updated.timestamp() as u64),
+                    std::time::Duration::from_secs(i64_to_u64(created.timestamp())?),
+                    std::time::Duration::from_secs(i64_to_u64(updated.timestamp())?),
                 ))
             })
             .collect::<Result<Vec<_>, PostgresMetadataStoreError>>()?;
@@ -3473,6 +3473,104 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pg_upload_intent_timestamp_reads_and_retries_preserve_metadata() {
+        let Some(pool) = connect_postgres().await else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let store = make_pg_store(pool.clone());
+        let intent = UploadIntent::new(
+            "timestamp-boundaries".into(),
+            "objects/timestamps".into(),
+            "c".repeat(64),
+            42,
+        );
+        store.create_intent(&intent).await.unwrap();
+        let events_before: Vec<serde_json::Value> = sqlx::query_scalar(
+            "SELECT row_to_json(e) FROM shardline_reliability_events e ORDER BY sequence",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(events_before.len(), 1);
+        // PostgreSQL can represent historical timestamps that this unsigned
+        // public type cannot. Seed them as legacy/corrupt metadata, not via
+        // the adapter's public mutator.
+        for (created, updated) in [
+            (0_i32, 0_i32),
+            (1, 2),
+            (-1, 0),
+            (0, -1),
+            (-315_619_200, -315_619_200),
+        ] {
+            sqlx::query("UPDATE shardline_upload_intents SET created_at = to_timestamp($1::double precision), updated_at = to_timestamp($2::double precision) WHERE intent_id = $3")
+                .bind(f64::from(created)).bind(f64::from(updated)).bind(intent.intent_id()).execute(&pool).await.unwrap();
+            let before: serde_json::Value = sqlx::query_scalar(
+                "SELECT row_to_json(i) FROM shardline_upload_intents i WHERE intent_id = $1",
+            )
+            .bind(intent.intent_id())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            let by_id = store.intent_by_id(intent.intent_id()).await;
+            let by_state = store.intents_by_state(UploadIntentState::Created).await;
+            let stale = store
+                .stale_intents(UploadIntentState::Created, Duration::ZERO)
+                .await;
+            let retry = store.create_intent(&intent).await;
+            if created < 0 || updated < 0 {
+                assert!(matches!(
+                    by_id,
+                    Err(super::PostgresMetadataStoreError::IntegerOutOfRange(_))
+                ));
+                assert!(matches!(
+                    by_state,
+                    Err(super::PostgresMetadataStoreError::IntegerOutOfRange(_))
+                ));
+                assert!(matches!(
+                    stale,
+                    Err(super::PostgresMetadataStoreError::IntegerOutOfRange(_))
+                ));
+                assert!(matches!(
+                    retry,
+                    Err(super::PostgresMetadataStoreError::IntegerOutOfRange(_))
+                ));
+            } else {
+                let mut loaded = by_state.unwrap();
+                loaded.extend(stale.unwrap());
+                loaded.push(by_id.unwrap().unwrap());
+                assert_eq!(loaded.len(), 3);
+                for value in loaded {
+                    assert_eq!(
+                        value.created_at().as_secs(),
+                        u64::try_from(created).unwrap()
+                    );
+                    assert_eq!(
+                        value.updated_at().as_secs(),
+                        u64::try_from(updated).unwrap()
+                    );
+                }
+                retry.unwrap();
+            }
+            let after: serde_json::Value = sqlx::query_scalar(
+                "SELECT row_to_json(i) FROM shardline_upload_intents i WHERE intent_id = $1",
+            )
+            .bind(intent.intent_id())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(before, after);
+            let events_after: Vec<serde_json::Value> = sqlx::query_scalar(
+                "SELECT row_to_json(e) FROM shardline_reliability_events e ORDER BY sequence",
+            )
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            assert_eq!(events_before, events_after);
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
