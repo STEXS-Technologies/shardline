@@ -998,6 +998,108 @@ async fn run_index_rebuild_keeps_latest_record_when_version_record_unreadable() 
 // ---- prune_stale_reconstructions full path ----
 
 #[tokio::test(flavor = "multi_thread")]
+async fn rebuild_does_not_roll_back_latest_when_newest_version_is_corrupt() {
+    use shardline_index::{LocalRecordStore, MemoryIndexStore, RecordMutation, RecordTraversal};
+
+    let dir = tempfile::tempdir().unwrap();
+    let object_store = ServerObjectStore::local(dir.path().join("chunks")).unwrap();
+    let record_store = LocalRecordStore::open(dir.path().to_path_buf());
+    let index_store = MemoryIndexStore::new();
+    let older = shardline_index::FileRecord {
+        file_id: "acknowledged.txt".to_owned(),
+        content_hash: "a".repeat(64),
+        total_bytes: 0,
+        chunk_size: 0,
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
+        repository_scope: None,
+        chunks: Vec::new(),
+    };
+    let latest = shardline_index::FileRecord {
+        content_hash: "b".repeat(64),
+        ..older.clone()
+    };
+    record_store.write_version_record(&older).await.unwrap();
+    record_store.write_version_record(&latest).await.unwrap();
+    record_store.write_latest_record(&latest).await.unwrap();
+    let conn = rusqlite::Connection::open(dir.path().join("metadata.sqlite3")).unwrap();
+    conn.execute(
+        "UPDATE shardline_file_records SET record = ?1 WHERE record_kind = 'version' AND content_hash = ?2",
+        rusqlite::params![b"corrupt newest version".as_slice(), &latest.content_hash],
+    )
+    .unwrap();
+
+    for _ in 0..2 {
+        let report = run_index_rebuild_with_stores(
+            &record_store,
+            &index_store,
+            &object_store,
+            shardline_server_core::DEFAULT_SHARD_METADATA_LIMITS,
+        )
+        .await
+        .unwrap();
+        assert!(!report.is_clean());
+        let bytes = RecordTraversal::read_latest_record_bytes(&record_store, &latest)
+            .await
+            .unwrap()
+            .unwrap();
+        let observed: shardline_index::FileRecord = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            observed, latest,
+            "recovery must preserve the acknowledged head"
+        );
+        assert_eq!(report.rebuilt_latest_records, 0);
+    }
+
+    // Recreating a missing latest row from the incomplete scan is equally
+    // unsafe: the readable older version must not be advertised as the head.
+    let locator = RecordTraversal::latest_record_locator(&record_store, &latest);
+    RecordMutation::delete_record_locator(&record_store, &locator)
+        .await
+        .unwrap();
+    let report = run_index_rebuild_with_stores(
+        &record_store,
+        &index_store,
+        &object_store,
+        shardline_server_core::DEFAULT_SHARD_METADATA_LIMITS,
+    )
+    .await
+    .unwrap();
+    assert!(!report.is_clean());
+    assert_eq!(report.rebuilt_latest_records, 0);
+    assert!(
+        RecordTraversal::read_latest_record_bytes(&record_store, &latest)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    // Once the version is repaired, a clean scan can safely recreate the head.
+    conn.execute(
+        "UPDATE shardline_file_records SET record = ?1, updated_at_unix_seconds = ?2 WHERE record_kind = 'version' AND content_hash = ?3",
+        rusqlite::params![serde_json::to_vec(&latest).unwrap(), 4_000_000_000_u64, &latest.content_hash],
+    )
+    .unwrap();
+    let report = run_index_rebuild_with_stores(
+        &record_store,
+        &index_store,
+        &object_store,
+        shardline_server_core::DEFAULT_SHARD_METADATA_LIMITS,
+    )
+    .await
+    .unwrap();
+    assert!(report.is_clean());
+    assert_eq!(report.rebuilt_latest_records, 1);
+    let bytes = RecordTraversal::read_latest_record_bytes(&record_store, &latest)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<shardline_index::FileRecord>(&bytes).unwrap(),
+        latest
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn prune_stale_reconstructions_removes_undesired() {
     use shardline_index::{
         FileId, FileReconstruction, MemoryIndexStore, ReconstructionTerm, XorbId,

@@ -1,9 +1,9 @@
 use async_trait::async_trait;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use shardline_index::{
-    FileRecord, LocalRecordStore, OciObjectKind, OciObjectStore, PostgresRecordStore, RecordStore,
-    RecordTraversal,
+    FileRecord, LocalRecordStore, OciObjectKey, OciObjectKind, OciObjectStore, PostgresRecordStore,
+    RecordStore, RecordTraversal,
 };
 use shardline_oci_adapter::{
     oci_blob_key_from_namespace, oci_manifest_key_from_namespace,
@@ -17,7 +17,8 @@ use shardline_storage::ObjectStore as _;
 use crate::{
     GcError, LocalGcOptions,
     quarantine::{
-        gc_boot_observation, read_gc_clock_anchor, read_newest_stored_creation_timestamp,
+        gc_boot_observation, read_active_retention_hold_object_keys, read_gc_clock_anchor,
+        read_newest_stored_creation_timestamp,
     },
     runner::{gc_now_unix_seconds, retention_clock_is_skewed_with_elapsed},
 };
@@ -115,6 +116,7 @@ where
         );
         return Ok(report);
     }
+    let held_keys = read_active_retention_hold_object_keys(index_store, now, false).await?;
     let mut latest_records = latest_records_by_file_id(record_store).await?;
 
     for tombstone in tombstones {
@@ -127,9 +129,15 @@ where
         if delete_after > now {
             continue;
         }
+        let key = &tombstone.key;
+        // Tombstone reclamation precedes ordinary GC, so it must enforce holds
+        // itself. Keep the whole manifest pair if either object is held and
+        // retain the tombstone for reclamation after the hold is released.
+        if tombstone_has_active_hold(index_store, key, &held_keys, now).await? {
+            continue;
+        }
         report.eligible = shardline_server_core::checked_increment(report.eligible)?;
 
-        let key = &tombstone.key;
         match key.kind {
             OciObjectKind::Blob => {
                 let object_key = oci_blob_key_from_namespace(
@@ -174,6 +182,52 @@ where
         }
     }
     Ok(report)
+}
+
+async fn tombstone_has_active_hold<IndexAdapter>(
+    index_store: &IndexAdapter,
+    key: &OciObjectKey,
+    held_keys: &HashSet<String>,
+    now: u64,
+) -> Result<bool, GcError>
+where
+    IndexAdapter: shardline_index::AsyncIndexStore + Sync,
+    IndexAdapter::Error: Into<GcError>,
+{
+    let keys = match key.kind {
+        OciObjectKind::Blob => vec![oci_blob_key_from_namespace(
+            &key.repository,
+            &key.digest_hex,
+            &key.scope_namespace,
+        )?],
+        OciObjectKind::Manifest => vec![
+            oci_manifest_key_from_namespace(
+                &key.repository,
+                &key.digest_hex,
+                &key.scope_namespace,
+            )?,
+            oci_manifest_media_type_key_from_namespace(
+                &key.repository,
+                &key.digest_hex,
+                &key.scope_namespace,
+            )?,
+        ],
+    };
+    for object_key in keys {
+        // CLI holds can be placed without the metadata writer barrier. Match
+        // ordinary quarantine sweeping by rechecking each key immediately
+        // before physical reclamation, including the manifest companion.
+        if held_keys.contains(object_key.as_str())
+            || index_store
+                .retention_hold(&object_key)
+                .await
+                .map_err(Into::into)?
+                .is_some_and(|hold| hold.is_active_at(now))
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 #[cfg(test)]
@@ -303,6 +357,145 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(replay, OciTombstoneGcReport::default());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn tombstone_hold_check_detects_hold_created_after_snapshot() {
+        use shardline_index::{AsyncIndexStore, RetentionHold};
+
+        for (kind, companion) in [
+            (OciObjectKind::Blob, false),
+            (OciObjectKind::Manifest, false),
+            (OciObjectKind::Manifest, true),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let index_store = LocalIndexStore::new(directory.path().to_path_buf()).unwrap();
+            let now = gc_now_unix_seconds();
+            let object = tombstone(kind, &"f".repeat(64));
+            let snapshot = read_active_retention_hold_object_keys(&index_store, now, false)
+                .await
+                .unwrap();
+            assert!(snapshot.is_empty());
+            assert!(
+                !tombstone_has_active_hold(&index_store, &object, &snapshot, now)
+                    .await
+                    .unwrap()
+            );
+            let key = match (kind, companion) {
+                (OciObjectKind::Blob, _) => {
+                    oci_blob_key_from_namespace("team/assets", &object.digest_hex, "global")
+                        .unwrap()
+                }
+                (OciObjectKind::Manifest, false) => {
+                    oci_manifest_key_from_namespace("team/assets", &object.digest_hex, "global")
+                        .unwrap()
+                }
+                (OciObjectKind::Manifest, true) => oci_manifest_media_type_key_from_namespace(
+                    "team/assets",
+                    &object.digest_hex,
+                    "global",
+                )
+                .unwrap(),
+            };
+            let hold =
+                RetentionHold::new(key, "mid-run hold".to_owned(), now, Some(now + 3600)).unwrap();
+            index_store.upsert_retention_hold(&hold).await.unwrap();
+            // This is the exact predicate guarding physical deletion, supplied
+            // with the stale run-start snapshot and the updated real index.
+            assert!(
+                tombstone_has_active_hold(&index_store, &object, &snapshot, now)
+                    .await
+                    .unwrap()
+            );
+            assert!(snapshot.is_empty());
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn tombstone_reclamation_preserves_objects_with_active_retention_holds() {
+        use shardline_index::{AsyncIndexStore, RetentionHold};
+
+        for (kind, companion, time_bounded) in [
+            (OciObjectKind::Blob, false, false),
+            (OciObjectKind::Blob, false, true),
+            (OciObjectKind::Manifest, false, false),
+            (OciObjectKind::Manifest, true, true),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let root = directory.path().to_path_buf();
+            let object_store = ServerObjectStore::local(root.join("chunks")).unwrap();
+            let index_store = LocalIndexStore::new(root.clone()).unwrap();
+            let record_store = LocalRecordStore::new(root).unwrap();
+            let digest = "e".repeat(64);
+            let key = match kind {
+                OciObjectKind::Blob => {
+                    oci_blob_key_from_namespace("team/assets", &digest, "global").unwrap()
+                }
+                OciObjectKind::Manifest => {
+                    oci_manifest_key_from_namespace("team/assets", &digest, "global").unwrap()
+                }
+            };
+            put(&object_store, &key, b"held bytes");
+            let hold_key = if companion {
+                let media_key =
+                    oci_manifest_media_type_key_from_namespace("team/assets", &digest, "global")
+                        .unwrap();
+                put(&object_store, &media_key, b"application/test");
+                media_key
+            } else {
+                key.clone()
+            };
+            let now = gc_now_unix_seconds();
+            let hold = RetentionHold::new(
+                hold_key.clone(),
+                "operator hold".to_owned(),
+                now,
+                time_bounded.then_some(now + 3600),
+            )
+            .unwrap();
+            index_store.upsert_retention_hold(&hold).await.unwrap();
+            let object = tombstone(kind, &digest);
+            index_store.delete_oci_object(&object).await.unwrap();
+            let report =
+                reclaim_oci_tombstones(&record_store, &index_store, &object_store, sweep_now())
+                    .await
+                    .unwrap();
+            assert_eq!(report.reclaimed, 0);
+            assert!(
+                object_store.contains(&key).unwrap(),
+                "active holds must protect OCI tombstone bytes"
+            );
+            assert!(index_store.oci_object_is_deleted(&object).await.unwrap());
+            assert!(object_store.contains(&hold_key).unwrap());
+
+            // Release the hold and verify physical-first reclamation resumes.
+            // An expired time-bounded hold must also allow reclamation.
+            if time_bounded {
+                let expired = RetentionHold::new(
+                    hold_key.clone(),
+                    "expired".to_owned(),
+                    now - 2,
+                    Some(now - 1),
+                )
+                .unwrap();
+                index_store.upsert_retention_hold(&expired).await.unwrap();
+            } else {
+                assert!(
+                    index_store
+                        .delete_retention_hold_if_matches(&hold)
+                        .await
+                        .unwrap()
+                );
+            }
+            let report =
+                reclaim_oci_tombstones(&record_store, &index_store, &object_store, sweep_now())
+                    .await
+                    .unwrap();
+            assert_eq!(report.reclaimed, 1);
+            assert!(!object_store.contains(&key).unwrap());
+            assert!(!object_store.contains(&hold_key).unwrap());
+            assert!(!index_store.oci_object_is_deleted(&object).await.unwrap());
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
