@@ -115,8 +115,26 @@ of schedule (Spark rename-commit / `object_store::copy` shape).
 - **SigV4 signature is not verified** — the access key *is* the credential;
   production requires TLS.
 - **Bucket names** are `{owner}.{name}`; owners containing `.` are not addressable.
-- **`Content-MD5`** is accepted but not verified (integrity comes from the content
-  address).
+- **`Content-MD5`** is optional and verified when supplied on PutObject,
+  UploadPart, CompleteMultipartUpload and DeleteObjects. It must be one
+  canonical base64 encoding of a 16-byte digest; malformed or repeated fields
+  return `400 InvalidDigest`, and a payload mismatch returns `400 BadDigest`
+  before publication or deletion. Upload checks hash the decoded payload,
+  including AWS chunked uploads, with constant memory.
+- **Multipart part identity** is the quoted MD5 of that part's bytes.
+  Completion requires the ETag returned by the successful UploadPart for
+  every selected part, in ascending order; missing, stale or incorrect tags
+  return `400 InvalidPart` and leave the session retryable. Local replacement
+  parts use immutable content-addressed files and an atomic metadata pointer
+  publication, so failed body reads, checksums or publication cannot truncate
+  previously acknowledged bytes. Logical byte/file quotas count the committed
+  parts; replacement staging temporarily retains both versions within the
+  configured per-part body ceiling.
+- **Legacy in-flight multipart uploads** retain readable session metadata,
+  but old opaque `uploadid-partnumber` tags cannot identify acknowledged
+  content. Re-upload those parts to obtain content ETags before completing
+  them. Previously overwritten or missing bytes require verified restoration;
+  the server cannot infer their original content.
 - **Multipart part size minimums** follow S3 (5 MiB for all but the final part);
   the part-size ceiling (`SHARDLINE_S3_MAX_PART_BYTES`) and the per-session /
   aggregate byte quotas are configurable.
@@ -240,3 +258,5 @@ environment.
 > table in the configured index store (SQLite or Postgres). The table name is an
 > implementation detail; operators and user documentation refer to it as the S3
 > listing index.
+
+`UploadPartCopy` is unsupported and returns `501 NotImplemented` before reading the body or changing the part. Multipart operations require exactly their supported recognized operation selectors; conflicting or repeated selectors are rejected before mutation. Unrecognized extension query fields remain ignored. `CopyObject` requires one valid `x-amz-copy-source` header; malformed or repeated fields return `400 InvalidArgument` and preserve the destination.

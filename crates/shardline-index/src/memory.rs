@@ -24,8 +24,9 @@ use crate::{
     AsyncIndexStore, DedupeShardMapping, DedupeStore, FileId, FileReconstruction, FileRecord,
     IndexStoreFuture, LifecycleStore, ProviderRepositoryState, QuarantineCandidate,
     ReconstructionStore, RecordMutation, RecordStoreFuture, RecordTraversal, RepoKey,
-    RepositoryRecordScope, RetentionHold, RevisionRecord, StoredObjectId, StoredRecord, TreeEntry,
-    TreeEntryOutcome, TreeKey, TreeStore, WebhookDelivery, XorbId,
+    RepositoryRecordScope, RetentionHold, RevisionCreationOutcome, RevisionRecord, StoredObjectId,
+    StoredRecord, TreeEntry, TreeEntryOutcome, TreeKey, TreeRegistrationOutcome, TreeStore,
+    WebhookDelivery, XorbId,
     provider_evidence::snapshot_from_state,
     upload_intent::{
         UploadIntent, UploadIntentConflictError, UploadIntentState, UploadIntentStore,
@@ -1141,6 +1142,75 @@ impl AsyncIndexStore for MemoryIndexStore {
 impl TreeStore for MemoryIndexStore {
     type Error = MemoryIndexStoreError;
 
+    async fn register_tree_entry(
+        &self,
+        entry: &TreeEntry,
+        max_revisions: usize,
+        max_tree_entries: usize,
+    ) -> Result<TreeRegistrationOutcome, Self::Error> {
+        let mut state = self.lock_state()?;
+        let rev = RevisionRecord {
+            provider: entry.provider.clone(),
+            owner: entry.owner.clone(),
+            repo: entry.repo.clone(),
+            revision: entry.revision.clone(),
+            created_at_unix_seconds: entry.updated_at_unix_seconds,
+            updated_at_unix_seconds: entry.updated_at_unix_seconds,
+        };
+        let revision_key = MemoryRevisionKey::from_record(&rev);
+        let count_revisions = state
+            .revisions
+            .keys()
+            .filter(|k| {
+                k.provider == entry.provider && k.owner == entry.owner && k.repo == entry.repo
+            })
+            .count();
+        let count_entries = state
+            .tree_entries
+            .keys()
+            .filter(|k| {
+                k.provider == entry.provider && k.owner == entry.owner && k.repo == entry.repo
+            })
+            .count();
+        if (count_revisions >= max_revisions && !state.revisions.contains_key(&revision_key))
+            || count_entries >= max_tree_entries
+        {
+            return Ok(TreeRegistrationOutcome::LimitExceeded);
+        }
+        state
+            .revisions
+            .entry(revision_key)
+            .and_modify(|r| r.updated_at_unix_seconds = rev.updated_at_unix_seconds)
+            .or_insert(rev);
+        let key = MemoryTreeKey::from_entry(entry);
+        let created = state.tree_entries.insert(key, entry.clone()).is_none();
+        Ok(TreeRegistrationOutcome::Registered(TreeEntryOutcome {
+            created,
+        }))
+    }
+
+    async fn create_revision_bounded(
+        &self,
+        rev: &RevisionRecord,
+        max_revisions: usize,
+    ) -> Result<RevisionCreationOutcome, Self::Error> {
+        let mut state = self.lock_state()?;
+        let key = MemoryRevisionKey::from_record(rev);
+        if state.revisions.contains_key(&key) {
+            return Ok(RevisionCreationOutcome::AlreadyExists);
+        }
+        let count = state
+            .revisions
+            .keys()
+            .filter(|k| k.provider == rev.provider && k.owner == rev.owner && k.repo == rev.repo)
+            .count();
+        if count >= max_revisions {
+            return Ok(RevisionCreationOutcome::LimitExceeded);
+        }
+        state.revisions.insert(key, rev.clone());
+        Ok(RevisionCreationOutcome::Created)
+    }
+
     async fn upsert_tree_entry(&self, entry: &TreeEntry) -> Result<TreeEntryOutcome, Self::Error> {
         let key = MemoryTreeKey::from_entry(entry);
         let mut state = self.lock_state()?;
@@ -1233,7 +1303,11 @@ impl TreeStore for MemoryIndexStore {
         let key = MemoryRevisionKey::from_record(rev);
         let mut state = self.lock_state()?;
         let existed = state.revisions.contains_key(&key);
-        state.revisions.insert(key, rev.clone());
+        state
+            .revisions
+            .entry(key)
+            .and_modify(|r| r.updated_at_unix_seconds = rev.updated_at_unix_seconds)
+            .or_insert_with(|| rev.clone());
         Ok(!existed)
     }
 

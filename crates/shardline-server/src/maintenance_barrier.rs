@@ -54,12 +54,11 @@ impl Drop for MaintenanceBarrierGuard {
 /// than returned to the pool so a session lock cannot leak into an unrelated request.
 pub(crate) enum ResourceWriteGuard {
     Local {
-        file: File,
+        files: Vec<File>,
     },
     Postgres {
         connection: PoolConnection<Postgres>,
-        key: ResourceLockKey,
-        epoch: i64,
+        fences: Vec<(ResourceLockKey, i64)>,
     },
 }
 
@@ -67,10 +66,9 @@ impl std::fmt::Debug for ResourceWriteGuard {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Local { .. } => formatter.write_str("ResourceWriteGuard::Local"),
-            Self::Postgres { key, epoch, .. } => formatter
+            Self::Postgres { fences, .. } => formatter
                 .debug_struct("ResourceWriteGuard::Postgres")
-                .field("key", key)
-                .field("epoch", epoch)
+                .field("fences", fences)
                 .finish_non_exhaustive(),
         }
     }
@@ -78,25 +76,29 @@ impl std::fmt::Debug for ResourceWriteGuard {
 
 impl Drop for ResourceWriteGuard {
     fn drop(&mut self) {
-        if let Self::Local { file } = self {
-            let _ignored = file.unlock();
+        if let Self::Local { files } = self {
+            for file in files {
+                let _ignored = file.unlock();
+            }
         }
     }
 }
 
 impl ResourceWriteGuard {
-    /// Returns a copy of this guard's durable Postgres fence identity.
-    pub(crate) fn postgres_fence(&self) -> Option<shardline_index::PostgresResourceFence> {
+    pub(crate) fn postgres_fences(&self) -> Option<Vec<shardline_index::PostgresResourceFence>> {
         match self {
             Self::Local { .. } => None,
-            Self::Postgres { key, epoch, .. } => Some(shardline_index::PostgresResourceFence::new(
-                key.clone(),
-                *epoch,
-            )),
+            Self::Postgres { fences, .. } => Some(
+                fences
+                    .iter()
+                    .map(|(key, epoch)| {
+                        shardline_index::PostgresResourceFence::new(key.clone(), *epoch)
+                    })
+                    .collect(),
+            ),
         }
     }
 
-    /// Returns the dedicated lock-owning Postgres connection, when applicable.
     pub(crate) fn postgres_connection_mut(&mut self) -> Option<&mut PgConnection> {
         match self {
             Self::Local { .. } => None,
@@ -104,43 +106,47 @@ impl ResourceWriteGuard {
         }
     }
 
-    /// Verifies that this guard still owns the latest durable fencing epoch.
-    ///
-    /// The query uses the same dedicated Postgres session that owns the advisory
-    /// lock. A partitioned or superseded writer therefore fails closed.
+    /// Checks every fence using the session that owns all of the locks.
     pub(crate) async fn assert_current(&mut self) -> Result<(), ServerError> {
-        let Self::Postgres {
-            connection,
-            key,
-            epoch,
-        } = self
-        else {
+        let Self::Postgres { connection, fences } = self else {
             return Ok(());
         };
-        let current = query_scalar::<_, i64>(
-            "SELECT epoch
-             FROM shardline_resource_fences
-             WHERE domain = $1 AND resource = $2",
-        )
-        .bind(key.domain().as_str())
-        .bind(key.resource())
-        .fetch_optional(&mut **connection)
-        .await
-        .map_err(shardline_index::PostgresMetadataStoreError::from)?;
-        if current == Some(*epoch) {
-            Ok(())
-        } else {
-            Err(ServerError::StaleResourceFence)
+        for (key, epoch) in fences {
+            let current = query_scalar::<_, i64>(
+                "SELECT epoch FROM shardline_resource_fences WHERE domain = $1 AND resource = $2",
+            )
+            .bind(key.domain().as_str())
+            .bind(key.resource())
+            .fetch_optional(&mut **connection)
+            .await
+            .map_err(shardline_index::PostgresMetadataStoreError::from)?;
+            if current != Some(*epoch) {
+                return Err(ServerError::StaleResourceFence);
+            }
         }
+        Ok(())
     }
 
     #[cfg(test)]
-    const fn epoch(&self) -> Option<i64> {
+    fn epoch(&self) -> Option<i64> {
         match self {
             Self::Local { .. } => None,
-            Self::Postgres { epoch, .. } => Some(*epoch),
+            Self::Postgres { fences, .. } => fences.first().map(|(_, epoch)| *epoch),
         }
     }
+}
+
+/// Long-lived advisory guards must never borrow from the metadata work pool.
+/// Each backend owns separate bounded GC and resource coordination pools.
+pub(crate) fn postgres_coordination_pool(url: &str) -> Result<PgPool, ServerError> {
+    crate::postgres_backend::connect_postgres_metadata_pool(url, 4)
+}
+
+fn ordered_resources(keys: &[ResourceLockKey]) -> Vec<ResourceLockKey> {
+    let mut keys = keys.to_vec();
+    keys.sort();
+    keys.dedup();
+    keys
 }
 
 pub(crate) async fn acquire_local_shared(
@@ -209,12 +215,22 @@ pub(crate) async fn acquire_local_resource_exclusive(
     root: &Path,
     key: &ResourceLockKey,
 ) -> Result<ResourceWriteGuard, ServerError> {
-    let digest = resource_lock_digest(key);
-    let path = root
-        .join(LOCAL_RESOURCE_LOCK_DIR)
-        .join(format!("{digest}.lock"));
-    let file = acquire_local_file_lock(path, true).await?;
-    Ok(ResourceWriteGuard::Local { file })
+    acquire_local_resources_exclusive(root, std::slice::from_ref(key)).await
+}
+
+pub(crate) async fn acquire_local_resources_exclusive(
+    root: &Path,
+    keys: &[ResourceLockKey],
+) -> Result<ResourceWriteGuard, ServerError> {
+    let mut files = Vec::new();
+    for key in ordered_resources(keys) {
+        let digest = resource_lock_digest(&key);
+        let path = root
+            .join(LOCAL_RESOURCE_LOCK_DIR)
+            .join(format!("{digest}.lock"));
+        files.push(acquire_local_file_lock(path, true).await?);
+    }
+    Ok(ResourceWriteGuard::Local { files })
 }
 
 pub(crate) async fn acquire_postgres_shared(
@@ -252,39 +268,48 @@ async fn acquire_postgres(
     })
 }
 
-/// Acquires an exclusive transaction-scoped advisory lock for an application resource.
+/// Acquires an exclusive session-scoped advisory lock for an application resource.
 pub(crate) async fn acquire_postgres_resource_exclusive(
     pool: &PgPool,
     key: &ResourceLockKey,
 ) -> Result<ResourceWriteGuard, ServerError> {
-    let advisory_key = resource_lock_key(key);
+    acquire_postgres_resources_exclusive(pool, std::slice::from_ref(key)).await
+}
+
+/// A bundle uses one session regardless of resource count. Sorted acquisition
+/// prevents opposing renames from deadlocking. Closing the session also releases
+/// partial bundles when acquisition is cancelled or a fencing update fails.
+pub(crate) async fn acquire_postgres_resources_exclusive(
+    pool: &PgPool,
+    keys: &[ResourceLockKey],
+) -> Result<ResourceWriteGuard, ServerError> {
     let mut connection = pool
         .acquire()
         .await
         .map_err(shardline_index::PostgresMetadataStoreError::from)?;
     connection.close_on_drop();
-    query("SELECT pg_advisory_lock($1)")
-        .bind(advisory_key)
-        .execute(&mut *connection)
+    let mut fences = Vec::new();
+    for key in ordered_resources(keys) {
+        query("SELECT pg_advisory_lock($1)")
+            .bind(resource_lock_key(&key))
+            .execute(&mut *connection)
+            .await
+            .map_err(shardline_index::PostgresMetadataStoreError::from)?;
+        let epoch = query_scalar::<_, i64>(
+            "INSERT INTO shardline_resource_fences (domain, resource, epoch)
+             VALUES ($1, $2, 1)
+             ON CONFLICT (domain, resource)
+             DO UPDATE SET epoch = shardline_resource_fences.epoch + 1
+             RETURNING epoch",
+        )
+        .bind(key.domain().as_str())
+        .bind(key.resource())
+        .fetch_one(&mut *connection)
         .await
         .map_err(shardline_index::PostgresMetadataStoreError::from)?;
-    let epoch = query_scalar::<_, i64>(
-        "INSERT INTO shardline_resource_fences (domain, resource, epoch)
-         VALUES ($1, $2, 1)
-         ON CONFLICT (domain, resource)
-         DO UPDATE SET epoch = shardline_resource_fences.epoch + 1
-         RETURNING epoch",
-    )
-    .bind(key.domain().as_str())
-    .bind(key.resource())
-    .fetch_one(&mut *connection)
-    .await
-    .map_err(shardline_index::PostgresMetadataStoreError::from)?;
-    Ok(ResourceWriteGuard::Postgres {
-        connection,
-        key: key.clone(),
-        epoch,
-    })
+        fences.push((key, epoch));
+    }
+    Ok(ResourceWriteGuard::Postgres { connection, fences })
 }
 
 fn resource_lock_digest(key: &ResourceLockKey) -> String {
@@ -462,6 +487,123 @@ mod tests {
             .expect("same-resource lock task should complete")
             .unwrap();
         drop(second);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn postgres_one_connection_pools_keep_nested_writers_and_gc_moving() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let work = crate::postgres_backend::connect_postgres_metadata_pool(&url, 1).unwrap();
+        let shared_pool = crate::postgres_backend::connect_postgres_metadata_pool(&url, 1).unwrap();
+        let exclusive_pool =
+            crate::postgres_backend::connect_postgres_metadata_pool(&url, 1).unwrap();
+        let resources = crate::postgres_backend::connect_postgres_metadata_pool(&url, 1).unwrap();
+        let shared = acquire_postgres_shared(&shared_pool).await.unwrap();
+        let keys = vec![
+            ResourceLockKey::oci_repository("pool-test", "b"),
+            ResourceLockKey::oci_repository("pool-test", "a"),
+            ResourceLockKey::oci_repository("pool-test", "a"),
+        ];
+        let mut bundle = acquire_postgres_resources_exclusive(&resources, &keys)
+            .await
+            .unwrap();
+        assert_eq!(bundle.postgres_fences().unwrap().len(), 2);
+        let mut gc =
+            tokio::spawn(async move { acquire_postgres_exclusive(&exclusive_pool).await.unwrap() });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut gc)
+                .await
+                .is_err()
+        );
+        tokio::time::timeout(Duration::from_secs(2), query("SELECT 1").execute(&work))
+            .await
+            .unwrap()
+            .unwrap();
+        bundle.assert_current().await.unwrap();
+        drop(bundle);
+        let replacement = tokio::time::timeout(
+            Duration::from_secs(2),
+            acquire_postgres_resources_exclusive(&resources, &keys),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        drop(replacement);
+        drop(shared);
+        let exclusive = tokio::time::timeout(Duration::from_secs(2), gc)
+            .await
+            .unwrap()
+            .unwrap();
+        let next_pool = crate::postgres_backend::connect_postgres_metadata_pool(&url, 1).unwrap();
+        let mut writer =
+            tokio::spawn(async move { acquire_postgres_shared(&next_pool).await.unwrap() });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut writer)
+                .await
+                .is_err()
+        );
+        tokio::time::timeout(Duration::from_secs(2), query("SELECT 1").execute(&work))
+            .await
+            .unwrap()
+            .unwrap();
+        drop(exclusive);
+        drop(
+            tokio::time::timeout(Duration::from_secs(2), writer)
+                .await
+                .unwrap()
+                .unwrap(),
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn postgres_cancelled_partial_bundle_releases_every_session_lock() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let first_pool = crate::postgres_backend::connect_postgres_metadata_pool(&url, 1).unwrap();
+        let waiting_pool =
+            crate::postgres_backend::connect_postgres_metadata_pool(&url, 1).unwrap();
+        let a = ResourceLockKey::oci_repository("bundle-cancel", "a");
+        let b = ResourceLockKey::oci_repository("bundle-cancel", "b");
+        let held = acquire_postgres_resource_exclusive(&first_pool, &b)
+            .await
+            .unwrap();
+        let keys = vec![b.clone(), a.clone()];
+        let waiter = tokio::spawn(async move {
+            acquire_postgres_resources_exclusive(&waiting_pool, &keys).await
+        });
+        let observer = crate::postgres_backend::connect_postgres_metadata_pool(&url, 1).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let owned = query_scalar::<_, bool>("SELECT NOT pg_try_advisory_lock($1)")
+                    .bind(resource_lock_key(&a))
+                    .fetch_one(&observer)
+                    .await
+                    .unwrap();
+                if owned {
+                    break;
+                }
+                query("SELECT pg_advisory_unlock($1)")
+                    .bind(resource_lock_key(&a))
+                    .execute(&observer)
+                    .await
+                    .unwrap();
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        waiter.abort();
+        assert!(waiter.await.unwrap_err().is_cancelled());
+        let recovered = tokio::time::timeout(
+            Duration::from_secs(2),
+            acquire_postgres_resource_exclusive(&observer, &a),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        drop((recovered, held));
     }
 
     #[tokio::test(flavor = "multi_thread")]

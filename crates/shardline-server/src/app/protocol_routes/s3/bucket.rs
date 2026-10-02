@@ -164,13 +164,13 @@ pub(crate) async fn s3_delete_bucket(
 /// overwrite paths hold), so a concurrent PUT/Copy/Complete on the same key
 /// cannot have its just-committed record deleted out from under it (F-18). The
 /// request body is read and parsed in full before any lock is taken.
-#[tracing::instrument(skip(auth, state, _headers, body), fields(bucket))]
+#[tracing::instrument(skip(auth, state, headers, body), fields(bucket))]
 pub(crate) async fn s3_post_bucket(
     auth: S3Repository,
     State(state): State<Arc<AppState>>,
     Path(_bucket): Path<String>,
     uri: Uri,
-    _headers: HeaderMap,
+    headers: HeaderMap,
     body: Body,
 ) -> Result<Response, S3Error> {
     let query = parse_s3_query(&uri)?;
@@ -184,6 +184,9 @@ pub(crate) async fn s3_post_bucket(
     let scope_namespace = scope_namespace(auth.capability().namespace());
     let mut reader = RequestBodyReader::from_body(body, state.config.max_request_body_bytes())
         .map_err(S3Error::from)?;
+    if let Some(expected) = shardline_s3_adapter::parse_content_md5(&headers)? {
+        reader = reader.with_expected_md5(expected);
+    }
     let bytes = read_body_to_bytes(&mut reader)
         .await
         .map_err(S3Error::from)?;

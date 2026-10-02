@@ -127,7 +127,10 @@ pub use store::{
     AsyncIndexStore, DedupeStore, IndexStore, IndexStoreFuture, LifecycleStore,
     ReconstructionStore, Repository,
 };
-pub use tree::{RepoKey, RevisionRecord, TreeEntry, TreeEntryOutcome, TreeKey, TreeStore};
+pub use tree::{
+    RepoKey, RevisionCreationOutcome, RevisionRecord, TreeEntry, TreeEntryOutcome, TreeKey,
+    TreeRegistrationOutcome, TreeStore,
+};
 pub use upload_intent::{
     UploadIntent, UploadIntentConflictError, UploadIntentState, UploadIntentStore,
 };

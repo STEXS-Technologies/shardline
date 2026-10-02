@@ -1,7 +1,10 @@
 use sqlx::{Row, postgres::PgRow, query};
 
 use super::{PostgresIndexStore, PostgresMetadataStoreError, i64_to_u64, u64_to_i64};
-use crate::{RepoKey, RevisionRecord, TreeEntry, TreeEntryOutcome, TreeKey, TreeStore};
+use crate::{
+    RepoKey, RevisionCreationOutcome, RevisionRecord, TreeEntry, TreeEntryOutcome, TreeKey,
+    TreeRegistrationOutcome, TreeStore,
+};
 
 fn tree_entry_from_row(row: &PgRow) -> Result<TreeEntry, PostgresMetadataStoreError> {
     Ok(TreeEntry {
@@ -27,28 +30,41 @@ fn revision_record_from_row(row: &PgRow) -> Result<RevisionRecord, PostgresMetad
     })
 }
 
-#[async_trait::async_trait]
-impl TreeStore for PostgresIndexStore {
-    type Error = PostgresMetadataStoreError;
+async fn lock_tree_repo(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    provider: &str,
+    owner: &str,
+    repo: &str,
+) -> Result<(), PostgresMetadataStoreError> {
+    // Length-independent escaped tuple encoding prevents namespace aliases.
+    let key = format!("shardline-tree-repo:{:?}", (provider, owner, repo));
+    query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(key)
+        .execute(&mut **transaction)
+        .await?;
+    Ok(())
+}
 
-    async fn upsert_tree_entry(&self, entry: &TreeEntry) -> Result<TreeEntryOutcome, Self::Error> {
-        let mut transaction = self.pool.begin().await?;
-        let existed: bool = sqlx::query_scalar(
-            "SELECT EXISTS(
+async fn upsert_tree_transaction(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    entry: &TreeEntry,
+) -> Result<TreeEntryOutcome, PostgresMetadataStoreError> {
+    let existed: bool = sqlx::query_scalar(
+        "SELECT EXISTS(
                 SELECT 1 FROM shardline_tree_entries
                 WHERE provider = $1 AND owner = $2 AND repo = $3
                   AND revision = $4 AND path = $5
              )",
-        )
-        .bind(&entry.provider)
-        .bind(&entry.owner)
-        .bind(&entry.repo)
-        .bind(&entry.revision)
-        .bind(&entry.path)
-        .fetch_one(&mut *transaction)
-        .await?;
-        query(
-            "INSERT INTO shardline_tree_entries (
+    )
+    .bind(&entry.provider)
+    .bind(&entry.owner)
+    .bind(&entry.repo)
+    .bind(&entry.revision)
+    .bind(&entry.path)
+    .fetch_one(&mut **transaction)
+    .await?;
+    query(
+        "INSERT INTO shardline_tree_entries (
                 provider, owner, repo, revision, path, file_id,
                 size_bytes, updated_at_unix_seconds
              )
@@ -58,19 +74,135 @@ impl TreeStore for PostgresIndexStore {
                 file_id = EXCLUDED.file_id,
                 size_bytes = EXCLUDED.size_bytes,
                 updated_at_unix_seconds = EXCLUDED.updated_at_unix_seconds",
+    )
+    .bind(&entry.provider)
+    .bind(&entry.owner)
+    .bind(&entry.repo)
+    .bind(&entry.revision)
+    .bind(&entry.path)
+    .bind(&entry.file_id)
+    .bind(u64_to_i64(entry.size_bytes)?)
+    .bind(u64_to_i64(entry.updated_at_unix_seconds)?)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(TreeEntryOutcome { created: !existed })
+}
+
+async fn upsert_revision_transaction(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    rev: &RevisionRecord,
+) -> Result<bool, PostgresMetadataStoreError> {
+    let existed: bool = sqlx::query_scalar(
+        "SELECT EXISTS(
+                SELECT 1 FROM shardline_revisions
+                WHERE provider = $1 AND owner = $2 AND repo = $3 AND revision = $4
+             )",
+    )
+    .bind(&rev.provider)
+    .bind(&rev.owner)
+    .bind(&rev.repo)
+    .bind(&rev.revision)
+    .fetch_one(&mut **transaction)
+    .await?;
+    query(
+        "INSERT INTO shardline_revisions (
+                provider, owner, repo, revision, created_at_unix_seconds, updated_at_unix_seconds
+             )
+             VALUES ($1, $2, $3, $4, $5, $6)
+             ON CONFLICT (provider, owner, repo, revision)
+             DO UPDATE SET
+                updated_at_unix_seconds = EXCLUDED.updated_at_unix_seconds",
+    )
+    .bind(&rev.provider)
+    .bind(&rev.owner)
+    .bind(&rev.repo)
+    .bind(&rev.revision)
+    .bind(u64_to_i64(rev.created_at_unix_seconds)?)
+    .bind(u64_to_i64(rev.updated_at_unix_seconds)?)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(!existed)
+}
+
+#[async_trait::async_trait]
+impl TreeStore for PostgresIndexStore {
+    type Error = PostgresMetadataStoreError;
+
+    async fn register_tree_entry(
+        &self,
+        entry: &TreeEntry,
+        max_revisions: usize,
+        max_tree_entries: usize,
+    ) -> Result<TreeRegistrationOutcome, Self::Error> {
+        let mut transaction = self.pool.begin().await?;
+        lock_tree_repo(&mut transaction, &entry.provider, &entry.owner, &entry.repo).await?;
+        let revision_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM shardline_revisions WHERE provider = $1 AND owner = $2 AND repo = $3")
+            .bind(&entry.provider).bind(&entry.owner).bind(&entry.repo).fetch_one(&mut *transaction).await?;
+        let revision_exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM shardline_revisions WHERE provider=$1 AND owner=$2 AND repo=$3 AND revision=$4)")
+            .bind(&entry.provider).bind(&entry.owner).bind(&entry.repo).bind(&entry.revision).fetch_one(&mut *transaction).await?;
+        let tree_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM shardline_tree_entries WHERE provider=$1 AND owner=$2 AND repo=$3")
+            .bind(&entry.provider).bind(&entry.owner).bind(&entry.repo).fetch_one(&mut *transaction).await?;
+        if (i64_to_u64(revision_count)? >= u64::try_from(max_revisions).unwrap_or(u64::MAX)
+            && !revision_exists)
+            || i64_to_u64(tree_count)? >= u64::try_from(max_tree_entries).unwrap_or(u64::MAX)
+        {
+            return Ok(TreeRegistrationOutcome::LimitExceeded);
+        }
+        upsert_revision_transaction(
+            &mut transaction,
+            &RevisionRecord {
+                provider: entry.provider.clone(),
+                owner: entry.owner.clone(),
+                repo: entry.repo.clone(),
+                revision: entry.revision.clone(),
+                created_at_unix_seconds: entry.updated_at_unix_seconds,
+                updated_at_unix_seconds: entry.updated_at_unix_seconds,
+            },
         )
-        .bind(&entry.provider)
-        .bind(&entry.owner)
-        .bind(&entry.repo)
-        .bind(&entry.revision)
-        .bind(&entry.path)
-        .bind(&entry.file_id)
-        .bind(u64_to_i64(entry.size_bytes)?)
-        .bind(u64_to_i64(entry.updated_at_unix_seconds)?)
-        .execute(&mut *transaction)
         .await?;
+        let outcome = upsert_tree_transaction(&mut transaction, entry).await?;
         transaction.commit().await?;
-        Ok(TreeEntryOutcome { created: !existed })
+        Ok(TreeRegistrationOutcome::Registered(outcome))
+    }
+
+    async fn create_revision_bounded(
+        &self,
+        rev: &RevisionRecord,
+        max_revisions: usize,
+    ) -> Result<RevisionCreationOutcome, Self::Error> {
+        let mut transaction = self.pool.begin().await?;
+        lock_tree_repo(&mut transaction, &rev.provider, &rev.owner, &rev.repo).await?;
+        let existed: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM shardline_revisions WHERE provider=$1 AND owner=$2 AND repo=$3 AND revision=$4)")
+            .bind(&rev.provider).bind(&rev.owner).bind(&rev.repo).bind(&rev.revision).fetch_one(&mut *transaction).await?;
+        if existed {
+            return Ok(RevisionCreationOutcome::AlreadyExists);
+        }
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM shardline_revisions WHERE provider=$1 AND owner=$2 AND repo=$3",
+        )
+        .bind(&rev.provider)
+        .bind(&rev.owner)
+        .bind(&rev.repo)
+        .fetch_one(&mut *transaction)
+        .await?;
+        if i64_to_u64(count)? >= u64::try_from(max_revisions).unwrap_or(u64::MAX) {
+            return Ok(RevisionCreationOutcome::LimitExceeded);
+        }
+        query("INSERT INTO shardline_revisions (provider,owner,repo,revision,created_at_unix_seconds,updated_at_unix_seconds)
+            VALUES($1,$2,$3,$4,$5,$6)")
+            .bind(&rev.provider).bind(&rev.owner).bind(&rev.repo).bind(&rev.revision)
+            .bind(u64_to_i64(rev.created_at_unix_seconds)?).bind(u64_to_i64(rev.updated_at_unix_seconds)?)
+            .execute(&mut *transaction).await?;
+        transaction.commit().await?;
+        Ok(RevisionCreationOutcome::Created)
+    }
+
+    async fn upsert_tree_entry(&self, entry: &TreeEntry) -> Result<TreeEntryOutcome, Self::Error> {
+        let mut transaction = self.pool.begin().await?;
+        lock_tree_repo(&mut transaction, &entry.provider, &entry.owner, &entry.repo).await?;
+        let outcome = upsert_tree_transaction(&mut transaction, entry).await?;
+        transaction.commit().await?;
+        Ok(outcome)
     }
 
     async fn tree_entry(
@@ -182,38 +314,10 @@ impl TreeStore for PostgresIndexStore {
 
     async fn upsert_revision(&self, rev: &RevisionRecord) -> Result<bool, Self::Error> {
         let mut transaction = self.pool.begin().await?;
-        let existed: bool = sqlx::query_scalar(
-            "SELECT EXISTS(
-                SELECT 1 FROM shardline_revisions
-                WHERE provider = $1 AND owner = $2 AND repo = $3 AND revision = $4
-             )",
-        )
-        .bind(&rev.provider)
-        .bind(&rev.owner)
-        .bind(&rev.repo)
-        .bind(&rev.revision)
-        .fetch_one(&mut *transaction)
-        .await?;
-        query(
-            "INSERT INTO shardline_revisions (
-                provider, owner, repo, revision, created_at_unix_seconds, updated_at_unix_seconds
-             )
-             VALUES ($1, $2, $3, $4, $5, $6)
-             ON CONFLICT (provider, owner, repo, revision)
-             DO UPDATE SET
-                created_at_unix_seconds = EXCLUDED.created_at_unix_seconds,
-                updated_at_unix_seconds = EXCLUDED.updated_at_unix_seconds",
-        )
-        .bind(&rev.provider)
-        .bind(&rev.owner)
-        .bind(&rev.repo)
-        .bind(&rev.revision)
-        .bind(u64_to_i64(rev.created_at_unix_seconds)?)
-        .bind(u64_to_i64(rev.updated_at_unix_seconds)?)
-        .execute(&mut *transaction)
-        .await?;
+        lock_tree_repo(&mut transaction, &rev.provider, &rev.owner, &rev.repo).await?;
+        let created = upsert_revision_transaction(&mut transaction, rev).await?;
         transaction.commit().await?;
-        Ok(!existed)
+        Ok(created)
     }
 
     async fn revision(
@@ -303,6 +407,7 @@ impl TreeStore for PostgresIndexStore {
 
     async fn delete_revision(&self, key: &RepoKey, rev: &str) -> Result<u64, Self::Error> {
         let mut transaction = self.pool.begin().await?;
+        lock_tree_repo(&mut transaction, &key.provider, &key.owner, &key.repo).await?;
         query(
             "DELETE FROM shardline_tree_entries
              WHERE provider = $1 AND owner = $2 AND repo = $3 AND revision = $4",
@@ -332,7 +437,17 @@ impl TreeStore for PostgresIndexStore {
         key: &RepoKey,
         max_revisions: usize,
     ) -> Result<u64, Self::Error> {
-        let count = self.count_revisions(key).await?;
+        let mut transaction = self.pool.begin().await?;
+        lock_tree_repo(&mut transaction, &key.provider, &key.owner, &key.repo).await?;
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM shardline_revisions WHERE provider=$1 AND owner=$2 AND repo=$3",
+        )
+        .bind(&key.provider)
+        .bind(&key.owner)
+        .bind(&key.repo)
+        .fetch_one(&mut *transaction)
+        .await?;
+        let count = i64_to_u64(count)?;
         let cap = u64::try_from(max_revisions).unwrap_or(u64::MAX);
         let Some(prune_limit) = count.checked_sub(cap) else {
             return Ok(0);
@@ -345,7 +460,6 @@ impl TreeStore for PostgresIndexStore {
         // revision name as the deterministic tiebreaker): the tree-entry
         // delete does not touch `shardline_revisions`, so the second subquery
         // still sees the full pre-prune row set.
-        let mut transaction = self.pool.begin().await?;
         query(
             "DELETE FROM shardline_tree_entries
              WHERE provider = $1 AND owner = $2 AND repo = $3

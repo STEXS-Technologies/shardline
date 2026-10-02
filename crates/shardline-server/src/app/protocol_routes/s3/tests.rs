@@ -1160,6 +1160,14 @@ fn extract_tag(xml: &str, tag: &str) -> String {
     xml[start..end].to_owned()
 }
 
+type ObservedPartEtags = std::collections::HashMap<(String, u32), String>;
+
+fn observed_part_etags() -> &'static std::sync::Mutex<ObservedPartEtags> {
+    static ETAGS: std::sync::OnceLock<std::sync::Mutex<ObservedPartEtags>> =
+        std::sync::OnceLock::new();
+    ETAGS.get_or_init(|| std::sync::Mutex::new(ObservedPartEtags::new()))
+}
+
 /// Uploads one part and returns the response.
 async fn upload_part(
     app: &Router,
@@ -1167,7 +1175,8 @@ async fn upload_part(
     part_number: u32,
     content: &[u8],
 ) -> axum::http::Response<Body> {
-    app.clone()
+    let response = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method("PUT")
@@ -1182,7 +1191,21 @@ async fn upload_part(
                 .unwrap(),
         )
         .await
-        .unwrap()
+        .unwrap();
+    if response.status() == StatusCode::OK {
+        let etag = response
+            .headers()
+            .get(header::ETAG)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+        observed_part_etags()
+            .lock()
+            .unwrap()
+            .insert((upload_id.to_owned(), part_number), etag);
+    }
+    response
 }
 
 /// Builds a minimal `CompleteMultipartUpload` request body.
@@ -1192,8 +1215,14 @@ fn complete_body(upload_id: &str, part_numbers: &[u32]) -> String {
          <CompleteMultipartUpload xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\n",
     );
     for part in part_numbers {
+        let etag = observed_part_etags()
+            .lock()
+            .unwrap()
+            .get(&(upload_id.to_owned(), *part))
+            .cloned()
+            .unwrap_or_else(|| format!("\"{upload_id}-{part}\""));
         xml.push_str(&format!(
-            "  <Part><PartNumber>{part}</PartNumber><ETag>\"{upload_id}-{part}\"</ETag></Part>\n"
+            "  <Part><PartNumber>{part}</PartNumber><ETag>{etag}</ETag></Part>\n"
         ));
     }
     xml.push_str("</CompleteMultipartUpload>\n");
@@ -2164,10 +2193,34 @@ async fn s3_concurrent_upload_part_last_writer_wins() {
     assert_eq!(first.status(), StatusCode::OK);
     assert_eq!(second.status(), StatusCode::OK);
 
-    // Completion succeeds and the assembled object is exactly one of the two
-    // bodies (never an interleaved mix).
-    let complete = complete_upload(&app, &upload_id, complete_body(&upload_id, &[1])).await;
-    assert_eq!(complete.status(), StatusCode::OK);
+    // Concurrent acknowledgments do not identify publication order. Echo
+    // one actual ETag; a stale choice must leave the session retryable.
+    let first_etag = first.headers().get(header::ETAG).unwrap().to_str().unwrap();
+    let second_etag = second
+        .headers()
+        .get(header::ETAG)
+        .unwrap()
+        .to_str()
+        .unwrap();
+    let xml = |etag: &str| {
+        format!(
+            "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>{etag}</ETag></Part></CompleteMultipartUpload>"
+        )
+    };
+    let complete = complete_upload(&app, &upload_id, xml(first_etag)).await;
+    let expected = if complete.status() == StatusCode::BAD_REQUEST {
+        assert!(
+            String::from_utf8(body_bytes(complete).await)
+                .unwrap()
+                .contains("InvalidPart")
+        );
+        let complete = complete_upload(&app, &upload_id, xml(second_etag)).await;
+        assert_eq!(complete.status(), StatusCode::OK);
+        b"second-writer".to_vec()
+    } else {
+        assert_eq!(complete.status(), StatusCode::OK);
+        b"first-writer".to_vec()
+    };
     let get = app
         .clone()
         .oneshot(
@@ -2185,9 +2238,9 @@ async fn s3_concurrent_upload_part_last_writer_wins() {
         .unwrap();
     assert_eq!(get.status(), StatusCode::OK);
     let body = body_bytes(get).await;
-    assert!(
-        body == b"first-writer" || body == b"second-writer",
-        "part must be exactly one of the two writers, got {body:?}"
+    assert_eq!(
+        body, expected,
+        "completed bytes must match the accepted part ETag"
     );
 }
 
@@ -4251,3 +4304,173 @@ async fn s3_postgres_multipart_completion_conditional_race_has_one_winner() {
     );
     pool.close().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_legacy_local_part_requires_verified_content_etag_before_completion() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state.clone());
+    let id = create_upload_id(&app).await;
+    let bytes = b"legacy-part";
+    let path = shardline_s3_adapter::part_file_path(state.config.root_dir(), &id, 1).unwrap();
+    tokio::fs::write(&path, bytes).await.unwrap();
+    shardline_s3_adapter::store_part(
+        state.config.root_dir(),
+        &id,
+        1,
+        u64::try_from(bytes.len()).unwrap(),
+        state.config.s3_upload_session_ttl_seconds(),
+        state.config.s3_upload_session_max_bytes(),
+        state.config.s3_upload_total_max_bytes(),
+        state.config.s3_upload_max_active_part_files(),
+    )
+    .await
+    .unwrap();
+    let old_xml = format!(
+        "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>\"{id}-1\"</ETag></Part></CompleteMultipartUpload>"
+    );
+    let response = complete_upload(&app, &id, old_xml).await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        String::from_utf8(body_bytes(response).await)
+            .unwrap()
+            .contains("InvalidPart")
+    );
+    let session = shardline_s3_adapter::read_session(
+        state.config.root_dir(),
+        &id,
+        state.config.s3_upload_session_ttl_seconds(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(session.parts.get(&1).unwrap().etag, None);
+    assert_eq!(tokio::fs::read(&path).await.unwrap(), bytes);
+    let response = upload_part(&app, &id, 1, bytes).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        !path.exists(),
+        "old canonical bytes removed only after immutable pointer publication"
+    );
+    let response = complete_upload(&app, &id, complete_body(&id, &[1])).await;
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_local_part_publication_failure_preserves_old_pointer_and_bytes() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state.clone());
+    let id = create_upload_id(&app).await;
+    assert_eq!(
+        upload_part(&app, &id, 1, b"original-part").await.status(),
+        StatusCode::OK
+    );
+    let before = shardline_s3_adapter::read_session(
+        state.config.root_dir(),
+        &id,
+        state.config.s3_upload_session_ttl_seconds(),
+    )
+    .await
+    .unwrap();
+    let old_part = before.parts.get(&1).unwrap();
+    let old_path =
+        shardline_s3_adapter::stored_part_file_path(state.config.root_dir(), &id, 1, old_part)
+            .unwrap();
+    let fault = shardline_s3_adapter::session_dir(state.config.root_dir(), &id)
+        .unwrap()
+        .join("session.json.tmp");
+    tokio::fs::create_dir(&fault).await.unwrap();
+    let response = upload_part(&app, &id, 1, b"replacement-part").await;
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let after = shardline_s3_adapter::read_session(
+        state.config.root_dir(),
+        &id,
+        state.config.s3_upload_session_ttl_seconds(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(after.parts, before.parts);
+    assert_eq!(tokio::fs::read(&old_path).await.unwrap(), b"original-part");
+    let replacement_name = shardline_s3_adapter::versioned_part_file_name(
+        1,
+        blake3::hash(b"replacement-part").to_hex().as_str(),
+    )
+    .unwrap();
+    assert!(
+        !old_path.parent().unwrap().join(replacement_name).exists(),
+        "confirmed unreferenced replacement must be cleaned after rejected publication"
+    );
+    tokio::fs::remove_dir(fault).await.unwrap();
+    let response = complete_upload(&app, &id, complete_body(&id, &[1])).await;
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_local_part_content_corruption_cannot_publish_a_different_object() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state.clone());
+    let response = app
+        .clone()
+        .oneshot(put_request(
+            format!("/{BUCKET}/{KEY}"),
+            b"published-original".to_vec(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let id = create_upload_id(&app).await;
+    assert_eq!(
+        upload_part(&app, &id, 1, b"first-writer").await.status(),
+        StatusCode::OK
+    );
+    let session = shardline_s3_adapter::read_session(
+        state.config.root_dir(),
+        &id,
+        state.config.s3_upload_session_ttl_seconds(),
+    )
+    .await
+    .unwrap();
+    let path = shardline_s3_adapter::stored_part_file_path(
+        state.config.root_dir(),
+        &id,
+        1,
+        session.parts.get(&1).unwrap(),
+    )
+    .unwrap();
+    tokio::fs::write(&path, b"other-writer").await.unwrap();
+    let response = complete_upload(&app, &id, complete_body(&id, &[1])).await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        String::from_utf8(body_bytes(response).await)
+            .unwrap()
+            .contains("BadDigest")
+    );
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/{BUCKET}/{KEY}"))
+                .header(
+                    header::AUTHORIZATION,
+                    sigv4_auth(&mint_token(TokenScope::Read, OWNER, NAME)),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(body_bytes(response).await, b"published-original");
+    assert!(
+        shardline_s3_adapter::read_session(
+            state.config.root_dir(),
+            &id,
+            state.config.s3_upload_session_ttl_seconds(),
+        )
+        .await
+        .is_ok()
+    );
+    tokio::fs::write(&path, b"first-writer").await.unwrap();
+    let response = complete_upload(&app, &id, complete_body(&id, &[1])).await;
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+mod pool_progress;

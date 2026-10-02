@@ -42,6 +42,44 @@ impl Stream for Md5Tee {
     }
 }
 
+/// Verifies the decoded payload before exposing successful EOF to ingestors.
+struct Md5Verifier {
+    inner: BoxedBodyStream,
+    hasher: Md5,
+    expected: [u8; 16],
+    terminal: bool,
+}
+
+impl Stream for Md5Verifier {
+    type Item = BodyChunkResult;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if self.terminal {
+            return Poll::Ready(None);
+        }
+        match self.inner.as_mut().poll_next(cx) {
+            Poll::Ready(Some(Ok(bytes))) => {
+                self.hasher.update(&bytes);
+                Poll::Ready(Some(Ok(bytes)))
+            }
+            Poll::Ready(Some(Err(error))) => {
+                self.terminal = true;
+                Poll::Ready(Some(Err(error)))
+            }
+            Poll::Ready(None) => {
+                self.terminal = true;
+                let actual: [u8; 16] = std::mem::take(&mut self.hasher).finalize().into();
+                if actual == self.expected {
+                    Poll::Ready(None)
+                } else {
+                    Poll::Ready(Some(Err(ServerError::RequestBodyMd5Mismatch)))
+                }
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
 pub(super) enum ChunkBuffer {
     Pooled(Bytes),
 }
@@ -132,6 +170,18 @@ impl RequestBodyReader {
             expected_total_bytes: None,
             read_bytes: 0,
         }
+    }
+
+    /// Checks Content-MD5 over the decoded streamed payload. A mismatch is
+    /// returned before EOF, so callers cannot finish ingestion or publication.
+    pub(crate) fn with_expected_md5(mut self, expected: [u8; 16]) -> Self {
+        self.stream = Box::pin(Md5Verifier {
+            inner: self.stream,
+            hasher: Md5::new(),
+            expected,
+            terminal: false,
+        });
+        self
     }
 
     /// Wraps the internal stream with an MD5 tee so the caller can compute the
@@ -295,6 +345,62 @@ mod tests {
         stage_body_for_object_store, stage_body_to_tempfile,
     };
     use crate::{ObjectStorageAdapter, ServerConfig, object_store::object_store_from_config};
+
+    #[tokio::test]
+    async fn expected_md5_validates_chunked_and_empty_payloads_before_eof() {
+        let expected: [u8; 16] = Md5::digest(b"hello").into();
+        let mut reader = RequestBodyReader::from_stream(futures_util::stream::iter([
+            Ok(Bytes::from_static(b"he")),
+            Ok(Bytes::new()),
+            Ok(Bytes::from_static(b"llo")),
+        ]))
+        .with_expected_md5(expected);
+        assert_eq!(read_body_to_bytes(&mut reader).await.unwrap(), b"hello");
+        assert!(reader.next_bytes().await.unwrap().is_none());
+        let mut empty =
+            RequestBodyReader::from_bytes(Bytes::new()).with_expected_md5(Md5::digest(b"").into());
+        assert!(read_body_to_bytes(&mut empty).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn expected_md5_mismatch_prevents_successful_staging_and_is_terminal() {
+        let mut reader = RequestBodyReader::from_bytes(Bytes::from_static(b"actual"))
+            .with_expected_md5(Md5::digest(b"different").into());
+        assert!(matches!(
+            stage_body_to_tempfile(&mut reader).await,
+            Err(crate::ServerError::RequestBodyMd5Mismatch)
+        ));
+        assert!(reader.next_bytes().await.unwrap().is_none());
+        let error = shardline_s3_adapter::S3Error::from(crate::ServerError::RequestBodyMd5Mismatch);
+        assert_eq!(error.code, "BadDigest");
+        assert_eq!(error.status, axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn expected_md5_preserves_upstream_errors_and_byte_cap() {
+        let mut reader = RequestBodyReader::from_stream(futures_util::stream::iter([
+            Err(crate::ServerError::RequestBodyTooLarge),
+            Ok(Bytes::from_static(b"ignored")),
+        ]))
+        .with_expected_md5(Md5::digest(b"ignored").into());
+        assert!(matches!(
+            reader.next_bytes().await,
+            Err(crate::ServerError::RequestBodyTooLarge)
+        ));
+        assert!(reader.next_bytes().await.unwrap().is_none());
+        let body = axum::body::Body::from_stream(futures_util::stream::iter([
+            Ok::<_, std::io::Error>(Bytes::from_static(b"123")),
+            Ok(Bytes::from_static(b"45")),
+        ]));
+        let mut capped =
+            RequestBodyReader::from_body(body, std::num::NonZeroUsize::new(4).unwrap())
+                .unwrap()
+                .with_expected_md5(Md5::digest(b"12345").into());
+        assert!(matches!(
+            read_body_to_bytes(&mut capped).await,
+            Err(crate::ServerError::RequestBodyTooLarge)
+        ));
+    }
 
     // ------------------------------------------------------------------
     // ChunkBuffer

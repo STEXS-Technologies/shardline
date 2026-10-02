@@ -1463,3 +1463,5 @@ async fn create_revision_rejects_beyond_per_repo_cap() {
 }
 
 mod percent_paths;
+
+mod revision_atomicity;

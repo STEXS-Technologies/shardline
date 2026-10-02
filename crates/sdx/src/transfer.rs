@@ -160,7 +160,7 @@ impl TransferClient {
         let response = self
             .get_reconstruction(base_url, token, file_id, range, "v1")
             .await?;
-        let body = response.bytes().await?;
+        let body = read_response_bounded(response, 32 * 1024 * 1024).await?;
         serde_json::from_slice(&body).map_err(|error| transfer_error_from_json(&error))
     }
 
@@ -183,7 +183,7 @@ impl TransferClient {
         let response = self
             .get_reconstruction(base_url, token, file_id, range, "v2")
             .await?;
-        let body = response.bytes().await?;
+        let body = read_response_bounded(response, 32 * 1024 * 1024).await?;
         serde_json::from_slice(&body).map_err(|error| transfer_error_from_json(&error))
     }
 
@@ -208,6 +208,40 @@ impl TransferClient {
         token: &str,
         range: ByteRange,
     ) -> Result<RangedXorb, TransferError> {
+        // HTTP 200 may contain the whole xorb even for a tiny requested
+        // range. Upstream xorbs are at most 64 MiB; this ceiling allows a
+        // complete serialized xorb plus compression/MIME overhead without an
+        // unbounded fallback when the server ignores Range.
+        self.fetch_xorb_range_inner(url, token, range, 128 * 1024 * 1024)
+            .await
+    }
+
+    /// Streaming fetches bound both ordinary and multipart wire bodies, even
+    /// when Content-Length is absent or misleading. Valid xorbs are at most
+    /// 64 MiB; allow compression/header overhead plus a bounded MIME envelope.
+    pub(crate) async fn fetch_xorb_range_bounded(
+        &self,
+        url: &str,
+        token: &str,
+        range: ByteRange,
+    ) -> Result<RangedXorb, TransferError> {
+        let limit = usize::try_from(range.len())
+            .ok()
+            .and_then(|length| length.checked_add(64 * 1024))
+            .filter(|length| *length <= 128 * 1024 * 1024)
+            .ok_or_else(|| {
+                TransferError::InvalidResponse("xorb fetch exceeds wire body limit".to_owned())
+            })?;
+        self.fetch_xorb_range_inner(url, token, range, limit).await
+    }
+
+    async fn fetch_xorb_range_inner(
+        &self,
+        url: &str,
+        token: &str,
+        range: ByteRange,
+        body_limit: usize,
+    ) -> Result<RangedXorb, TransferError> {
         let request = self
             .with_session(self.client.get(url).bearer_auth(token))
             .header(header::RANGE, range.to_range_header());
@@ -222,7 +256,7 @@ impl TransferClient {
             .to_owned();
 
         if content_type.starts_with("multipart/byteranges") {
-            let body = response.bytes().await?;
+            let body = read_response_bounded(response, body_limit).await?;
             let parts = parse_multipart_byteranges(&content_type, &body)?;
             let first = parts.first().ok_or_else(|| {
                 TransferError::MalformedMultipart(
@@ -268,8 +302,8 @@ impl TransferClient {
         } else {
             None
         };
-        let body = response.bytes().await?;
-        let data = body.to_vec();
+        let body = read_response_bounded(response, body_limit).await?;
+        let data = body;
         let length = u64::try_from(data.len()).unwrap_or(u64::MAX);
         let full_body_end = length.checked_sub(1).ok_or_else(|| {
             TransferError::InvalidResponse("xorb range response contains no bytes".to_owned())
@@ -770,6 +804,43 @@ struct ErrorBody {
     error: String,
 }
 
+async fn read_response_bounded(
+    mut response: reqwest::Response,
+    limit: usize,
+) -> Result<Vec<u8>, TransferError> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > limit as u64)
+    {
+        return Err(TransferError::InvalidResponse(
+            "response body exceeds byte limit".to_owned(),
+        ));
+    }
+    // Never trust the peer's allocation hint. Check every streamed chunk before
+    // extending our owned buffer, including chunked and compressed responses.
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        let required = body
+            .len()
+            .checked_add(chunk.len())
+            .filter(|size| *size <= limit)
+            .ok_or_else(|| {
+                TransferError::InvalidResponse("response body exceeds byte limit".to_owned())
+            })?;
+        if required > body.capacity() {
+            // Grow geometrically to avoid reallocating/copying on every HTTP
+            // chunk, while keeping the allocated wire buffer within its cap.
+            let target = required.max(body.capacity().saturating_mul(2)).min(limit);
+            body.try_reserve_exact(target.saturating_sub(body.len()))
+                .map_err(|error| {
+                    TransferError::InvalidResponse(format!("response allocation failed: {error}"))
+                })?;
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{TransferClient, parse_multipart_byteranges};
@@ -778,6 +849,63 @@ mod tests {
         Mock, MockServer, ResponseTemplate,
         matchers::{method, path},
     };
+
+    #[tokio::test]
+    async fn bounded_xorb_http_body_rejects_declared_and_chunked_overflow() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for (declared, streaming) in [
+            (None, true),
+            (Some(1_000_000u64), true),
+            (Some(129 * 1024 * 1024), false),
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0u8; 4096];
+                let received = socket.read(&mut request).await.unwrap();
+                assert_ne!(received, 0);
+                let framing = declared.map_or_else(
+                    || "Transfer-Encoding: chunked\r\n".to_owned(),
+                    |length| format!("Content-Length: {length}\r\n"),
+                );
+                let headers = format!(
+                    "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-3/4\r\n{framing}Connection: close\r\n\r\n"
+                );
+                socket.write_all(headers.as_bytes()).await.unwrap();
+                if declared.is_none() {
+                    for _ in 0..10 {
+                        if socket.write_all(b"2000\r\n").await.is_err() {
+                            break;
+                        }
+                        if socket.write_all(&[7u8; 8192]).await.is_err() {
+                            break;
+                        }
+                        if socket.write_all(b"\r\n").await.is_err() {
+                            break;
+                        }
+                    }
+                    let _ignored = socket.write_all(b"0\r\n\r\n").await;
+                }
+            });
+            let transfer = TransferClient::new(reqwest::Client::new());
+            let url = format!("http://{address}");
+            let result = if streaming {
+                transfer
+                    .fetch_xorb_range_bounded(&url, "token", super::ByteRange::new(0, 3))
+                    .await
+            } else {
+                transfer
+                    .fetch_xorb_range(&url, "token", super::ByteRange::new(0, 3))
+                    .await
+            };
+            let error = result.unwrap_err();
+            assert!(
+                matches!(error,crate::error::TransferError::InvalidResponse(ref reason) if reason.contains("byte limit"))
+            );
+            server.await.unwrap();
+        }
+    }
 
     #[tokio::test]
     async fn fetch_xorb_range_preserves_full_body_inclusive_endpoints() {

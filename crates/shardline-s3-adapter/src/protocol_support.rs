@@ -2,9 +2,48 @@ use axum::http::{
     HeaderMap,
     header::{IF_MATCH, IF_NONE_MATCH},
 };
+use base64::{Engine, engine::general_purpose::STANDARD};
 use shardline_protocol::{ByteRange, parse_http_byte_range};
 
 use crate::error::S3Error;
+
+/// Parses an optional `Content-MD5` header without allocating request-sized data.
+///
+/// # Errors
+/// Returns `InvalidDigest` for repeated fields or any value other than the
+/// canonical padded base64 encoding of a 16-byte MD5 digest.
+pub fn parse_content_md5(headers: &HeaderMap) -> Result<Option<[u8; 16]>, S3Error> {
+    let mut values = headers.get_all("content-md5").iter();
+    let Some(value) = values.next() else {
+        return Ok(None);
+    };
+    let invalid = || S3Error {
+        code: "InvalidDigest",
+        message: "The Content-MD5 you specified is not valid.".to_owned(),
+        status: axum::http::StatusCode::BAD_REQUEST,
+    };
+    if values.next().is_some() || value.as_bytes().len() != 24 {
+        return Err(invalid());
+    }
+    // decode_slice needs room for its conservative decoded-length estimate.
+    let mut decoded = [0_u8; 18];
+    let length = STANDARD
+        .decode_slice(value.as_bytes(), &mut decoded)
+        .map_err(|_error| invalid())?;
+    let digest: [u8; 16] = decoded
+        .get(..length)
+        .ok_or_else(invalid)?
+        .try_into()
+        .map_err(|_error| invalid())?;
+    let mut canonical = [0_u8; 24];
+    STANDARD
+        .encode_slice(digest, &mut canonical)
+        .map_err(|_error| invalid())?;
+    if canonical.as_slice() != value.as_bytes() {
+        return Err(invalid());
+    }
+    Ok(Some(digest))
+}
 
 /// An ordered query-parameter list.
 ///
@@ -398,6 +437,50 @@ mod tests {
     )]
 
     use super::*;
+
+    #[test]
+    fn content_md5_accepts_optional_canonical_digest() {
+        let mut headers = HeaderMap::new();
+        assert_eq!(parse_content_md5(&headers).unwrap(), None);
+        headers.insert("content-md5", "1B2M2Y8AsgTpgAmY7PhCfg==".parse().unwrap());
+        assert_eq!(
+            parse_content_md5(&headers).unwrap(),
+            Some([
+                0xd4, 0x1d, 0x8c, 0xd9, 0x8f, 0x00, 0xb2, 0x04, 0xe9, 0x80, 0x09, 0x98, 0xec, 0xf8,
+                0x42, 0x7e,
+            ])
+        );
+    }
+
+    #[test]
+    fn content_md5_rejects_repeated_noncanonical_and_wrong_length_values() {
+        for value in [
+            "",
+            "1B2M2Y8AsgTpgAmY7PhCfg",
+            "1B2M2Y8AsgTpgAmY7PhCfg=",
+            "1B2M2Y8AsgTpgAmY7PhCfh==",
+            "AAAAAAAAAAAAAAAAAAAAAAAA",
+            "1B2M2Y8AsgTpgAmY7PhCfg== ",
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert("content-md5", value.parse().unwrap());
+            let error = parse_content_md5(&headers).unwrap_err();
+            assert_eq!(error.code, "InvalidDigest", "{value}");
+            assert_eq!(error.status, axum::http::StatusCode::BAD_REQUEST);
+        }
+        let mut headers = HeaderMap::new();
+        headers.append("content-md5", "1B2M2Y8AsgTpgAmY7PhCfg==".parse().unwrap());
+        headers.append("content-md5", "1B2M2Y8AsgTpgAmY7PhCfg==".parse().unwrap());
+        assert_eq!(
+            parse_content_md5(&headers).unwrap_err().code,
+            "InvalidDigest"
+        );
+        headers.insert(
+            "content-md5",
+            axum::http::HeaderValue::from_bytes(&[0xff; 24]).unwrap(),
+        );
+        assert!(parse_content_md5(&headers).is_err());
+    }
 
     fn query(entries: &[(&str, &str)]) -> QueryMap {
         entries
