@@ -11,7 +11,7 @@ use tokio::time::Instant;
 
 use crate::{
     AsyncReconstructionCache, ReconstructionCacheError, ReconstructionCacheFuture,
-    ReconstructionCacheKey,
+    ReconstructionCacheKey, ReconstructionCacheLookup, ReconstructionCacheReservation,
 };
 
 use super::inner::{CacheInner, LoadingEntry};
@@ -199,7 +199,8 @@ impl MemoryReconstructionCache {
             let result = run_loader_with_heartbeat(last_seen_alive, loader).await;
             match result {
                 Ok(payload) => {
-                    self.put(key, &payload).await?;
+                    let reservation = ReconstructionCacheReservation::local(Arc::clone(&notify));
+                    self.put_reserved(key, &payload, &reservation).await?;
                     Ok(Some(payload))
                 }
                 Err(e) => {
@@ -251,6 +252,9 @@ impl MemoryReconstructionCache {
         // stays fresh cannot pin waiters past the bounded total (F-100).
         let mut alive_extensions: u32 = 0;
         loop {
+            let notified = notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             {
                 let inner = self.inner.read().await;
                 let now = Instant::now();
@@ -263,7 +267,8 @@ impl MemoryReconstructionCache {
                     .loading
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .contains_key(key)
+                    .get(key)
+                    .is_some_and(|entry| Arc::ptr_eq(&entry.notify, &notify))
                 {
                     // The loading latch vanished without a stored value (the
                     // loader failed or was cancelled, or the key was deleted).
@@ -275,7 +280,7 @@ impl MemoryReconstructionCache {
 
             let remaining = deadline.saturating_duration_since(Instant::now());
             tokio::select! {
-                () = notify.notified() => {}
+                () = &mut notified => {}
                 () = tokio::time::sleep(remaining) => {
                     // Re-check before giving up: the loader may have finished
                     // and stored a value right before the deadline (a lost
@@ -300,7 +305,8 @@ impl MemoryReconstructionCache {
                             .lock()
                             .unwrap_or_else(|poisoned| poisoned.into_inner());
                         loading.get(key).is_some_and(|entry| {
-                            now.saturating_duration_since(
+                            Arc::ptr_eq(&entry.notify, &notify)
+                                && now.saturating_duration_since(
                                 *entry
                                     .last_seen_alive
                                     .lock()
@@ -328,7 +334,11 @@ impl MemoryReconstructionCache {
                             .loading
                             .lock()
                             .unwrap_or_else(|poisoned| poisoned.into_inner());
-                        loading.remove(key).map(|entry| entry.notify)
+                        if loading.get(key).is_some_and(|entry| Arc::ptr_eq(&entry.notify, &notify)) {
+                            loading.remove(key).map(|entry| entry.notify)
+                        } else {
+                            None
+                        }
                     };
                     if let Some(released) = released {
                         released.notify_waiters();
@@ -337,6 +347,47 @@ impl MemoryReconstructionCache {
                 }
             }
         }
+    }
+
+    async fn finish_reserved(
+        &self,
+        key: &ReconstructionCacheKey,
+        reservation: &ReconstructionCacheReservation,
+        payload: Option<&[u8]>,
+    ) -> bool {
+        let Some(owner) = reservation.local_owner() else {
+            return false;
+        };
+        let mut inner = self.inner.write().await;
+        let (removed, released) = {
+            let mut loading = self
+                .loading
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if !loading
+                .get(key)
+                .is_some_and(|entry| Arc::ptr_eq(&entry.notify, owner))
+            {
+                return false;
+            }
+            let removed = if let Some(payload) = payload {
+                inner.store(
+                    key,
+                    payload,
+                    Instant::now(),
+                    self.max_entries.get(),
+                    MAX_MEMORY_CACHE_BYTES,
+                );
+                false
+            } else {
+                inner.remove(key).is_some()
+            };
+            (removed, loading.remove(key))
+        };
+        if let Some(released) = released {
+            released.notify.notify_waiters();
+        }
+        removed
     }
 }
 
@@ -410,6 +461,129 @@ impl Drop for LoadingLatchGuard {
 impl AsyncReconstructionCache for MemoryReconstructionCache {
     fn ready(&self) -> ReconstructionCacheFuture<'_, ()> {
         Box::pin(async { Ok(()) })
+    }
+
+    fn get_or_reserve<'operation>(
+        &'operation self,
+        key: &'operation ReconstructionCacheKey,
+    ) -> ReconstructionCacheFuture<'operation, ReconstructionCacheLookup> {
+        Box::pin(async move {
+            loop {
+                {
+                    let inner = self.inner.read().await;
+                    if let Some(entry) = inner.entries.get(key)
+                        && entry.is_live(Instant::now(), self.ttl)
+                    {
+                        return Ok(ReconstructionCacheLookup::Hit(
+                            entry.payload.as_ref().clone(),
+                        ));
+                    }
+                }
+                let notify = {
+                    let mut inner = self.inner.write().await;
+                    if let Some(entry) = inner.entries.get(key)
+                        && entry.is_live(Instant::now(), self.ttl)
+                    {
+                        return Ok(ReconstructionCacheLookup::Hit(
+                            entry.payload.as_ref().clone(),
+                        ));
+                    }
+                    let mut loading = self
+                        .loading
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    if let Some(entry) = loading.get(key) {
+                        Arc::clone(&entry.notify)
+                    } else {
+                        inner.remove(key);
+                        let notify = Arc::new(Notify::new());
+                        loading.insert(key.clone(), LoadingEntry::new(Arc::clone(&notify)));
+                        return Ok(ReconstructionCacheLookup::Reserved(
+                            ReconstructionCacheReservation::local(notify),
+                        ));
+                    }
+                };
+                if let Some(payload) = self.wait_for_loader(key, notify).await {
+                    return Ok(ReconstructionCacheLookup::Hit(payload));
+                }
+                // Failure/cancellation releases the previous generation. Compete
+                // again so only one waiter owns the replacement reconstruction.
+            }
+        })
+    }
+
+    fn put_reserved<'operation>(
+        &'operation self,
+        key: &'operation ReconstructionCacheKey,
+        payload: &'operation [u8],
+        reservation: &'operation ReconstructionCacheReservation,
+    ) -> ReconstructionCacheFuture<'operation, ()> {
+        Box::pin(async move {
+            self.finish_reserved(key, reservation, Some(payload)).await;
+            Ok(())
+        })
+    }
+
+    fn delete_reserved<'operation>(
+        &'operation self,
+        key: &'operation ReconstructionCacheKey,
+        reservation: &'operation ReconstructionCacheReservation,
+    ) -> ReconstructionCacheFuture<'operation, bool> {
+        Box::pin(async move { Ok(self.finish_reserved(key, reservation, None).await) })
+    }
+
+    fn touch_reservation<'operation>(
+        &'operation self,
+        key: &'operation ReconstructionCacheKey,
+        reservation: &'operation ReconstructionCacheReservation,
+    ) -> ReconstructionCacheFuture<'operation, bool> {
+        Box::pin(async move {
+            let Some(owner) = reservation.local_owner() else {
+                return Ok(false);
+            };
+            let loading = self
+                .loading
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let Some(entry) = loading
+                .get(key)
+                .filter(|entry| Arc::ptr_eq(&entry.notify, owner))
+            else {
+                return Ok(false);
+            };
+            *entry
+                .last_seen_alive
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Instant::now();
+            Ok(true)
+        })
+    }
+
+    fn release_reservation(
+        &self,
+        key: &ReconstructionCacheKey,
+        reservation: &ReconstructionCacheReservation,
+    ) {
+        let Some(owner) = reservation.local_owner() else {
+            return;
+        };
+        let released = {
+            let mut loading = self
+                .loading
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if loading
+                .get(key)
+                .is_some_and(|entry| Arc::ptr_eq(&entry.notify, owner))
+            {
+                loading.remove(key)
+            } else {
+                None
+            }
+        };
+        if let Some(released) = released {
+            released.notify.notify_waiters();
+        }
     }
 
     fn get<'operation>(
