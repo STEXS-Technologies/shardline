@@ -16,7 +16,7 @@ use crate::{
     models::*,
     types::{HubSortField, SortDirection},
 };
-use shardline_index::hub::HubRepoType;
+use shardline_index::hub::{HubRepoSearchOptions, HubRepoSearchOrder, HubRepoType};
 use shardline_protocol::TokenScope;
 
 use super::{
@@ -315,53 +315,34 @@ pub(crate) async fn repo_search(
         ));
     }
     let limit = query.limit.min(200);
-    let mut repos = state
+    let ascending = query
+        .direction
+        .as_deref()
+        .and_then(|d| SortDirection::from_str(d).ok())
+        == Some(SortDirection::Asc);
+    let order = match query
+        .sort
+        .as_deref()
+        .and_then(|sort| HubSortField::from_str(sort).ok())
+    {
+        Some(HubSortField::LastModified) if ascending => HubRepoSearchOrder::LastModifiedAsc,
+        Some(HubSortField::LastModified) => HubRepoSearchOrder::LastModifiedDesc,
+        _ if query.sort.is_some() && ascending => HubRepoSearchOrder::RepoIdDesc,
+        _ => HubRepoSearchOrder::RepoIdAsc,
+    };
+    let visible = state
         .store
-        .search_repos(Some(rt), &query.q, limit)
+        .search_repos_with_options(
+            Some(rt),
+            &query.q,
+            limit,
+            &HubRepoSearchOptions {
+                caller_repo_id,
+                author: query.author,
+                order,
+            },
+        )
         .map_err(|e| HubApiError::CasError(e.to_string()))?;
-
-    // Apply server-side sorting when requested.
-    if let Some(sort) = &query.sort {
-        // Unknown sort fields parse to `None` and fall through to the default
-        // (unsorted) order, preserving the previous `_ => {}` behavior.
-        match HubSortField::from_str(sort).ok() {
-            Some(HubSortField::LastModified) => {
-                repos.sort_by_key(|b| std::cmp::Reverse(b.updated_at_unix_seconds));
-            }
-            Some(HubSortField::Likes) => {
-                // No likes field on HubRepo yet; keep default order.
-            }
-            Some(HubSortField::Downloads) => {
-                // No downloads field on HubRepo yet; keep default order.
-            }
-            None => {
-                // Unknown sort field; keep default order.
-            }
-        }
-        if query
-            .direction
-            .as_deref()
-            .and_then(|d| SortDirection::from_str(d).ok())
-            == Some(SortDirection::Asc)
-        {
-            repos.reverse();
-        }
-    }
-
-    // Cross-tenant privacy: hide other tenants' private repositories from the
-    // search results, mirroring `repo_list`.
-    let visible: Vec<_> = repos
-        .into_iter()
-        .filter(|r| repo_visible_to_owner(r, caller_repo_id.as_deref()))
-        // Optional author filter: restrict results to repositories owned by
-        // the requested author (`repo_id` is `{owner}/{name}`).
-        .filter(|r| {
-            query
-                .author
-                .as_deref()
-                .is_none_or(|author| r.repo_id.starts_with(&format!("{author}/")))
-        })
-        .collect();
     let response = RepoListResponse {
         repos: visible.iter().map(repo_response_from_hub).collect(),
     };

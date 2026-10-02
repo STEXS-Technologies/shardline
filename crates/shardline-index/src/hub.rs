@@ -77,6 +77,50 @@ impl HubRepo {
     }
 }
 
+/// Repository search ordering; revision timestamps tie by repository identity.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum HubRepoSearchOrder {
+    #[default]
+    RepoIdAsc,
+    RepoIdDesc,
+    LastModifiedAsc,
+    LastModifiedDesc,
+}
+
+impl HubRepoSearchOrder {
+    pub(crate) const fn sql(self) -> &'static str {
+        match self {
+            Self::RepoIdAsc => "repo_id ASC",
+            Self::RepoIdDesc => "repo_id DESC",
+            Self::LastModifiedAsc => "updated_at_unix_seconds ASC, repo_id ASC",
+            Self::LastModifiedDesc => "updated_at_unix_seconds DESC, repo_id ASC",
+        }
+    }
+}
+
+/// Predicates applied before the search result limit.
+#[derive(Debug, Clone, Default)]
+pub struct HubRepoSearchOptions {
+    /// Exact scoped repository identity; None retains permissive visibility.
+    pub caller_repo_id: Option<String>,
+    pub author: Option<String>,
+    pub order: HubRepoSearchOrder,
+}
+
+/// Smallest Unicode string strictly above every string with this prefix.
+pub(crate) fn prefix_successor(prefix: &str) -> Option<String> {
+    let mut result = prefix.to_owned();
+    while let Some(last) = result.pop() {
+        let next = u32::from(last).checked_add(1)?;
+        let next = if next == 0xd800 { 0xe000 } else { next };
+        if let Some(next) = char::from_u32(next) {
+            result.push(next);
+            return Some(result);
+        }
+    }
+    None
+}
+
 /// A Hub revision record.
 #[derive(Debug, Clone)]
 pub struct HubRevision {
@@ -193,6 +237,18 @@ pub trait HubStore: Send + Sync {
         repo_type: Option<HubRepoType>,
         name_prefix: &str,
         limit: usize,
+    ) -> Result<Vec<HubRepo>, Self::Error>;
+
+    /// Searches visible repositories, filtering and ordering before limiting.
+    ///
+    /// # Errors
+    /// Returns an error when storage or metadata verification fails.
+    fn search_repos_with_options(
+        &self,
+        repo_type: Option<HubRepoType>,
+        name_prefix: &str,
+        limit: usize,
+        options: &HubRepoSearchOptions,
     ) -> Result<Vec<HubRepo>, Self::Error>;
 
     /// Creates a revision or points a ref at an existing immutable revision.
@@ -422,6 +478,14 @@ trait ErasedHubStore: Send + Sync {
         limit: usize,
     ) -> Result<Vec<HubRepo>, Box<dyn std::error::Error + Send + Sync>>;
 
+    fn search_repos_with_options(
+        &self,
+        repo_type: Option<HubRepoType>,
+        name_prefix: &str,
+        limit: usize,
+        options: &HubRepoSearchOptions,
+    ) -> Result<Vec<HubRepo>, Box<dyn std::error::Error + Send + Sync>>;
+
     fn create_revision(
         &self,
         repo_id: &str,
@@ -544,6 +608,17 @@ impl<T: HubStore> ErasedHubStore for T {
         limit: usize,
     ) -> Result<Vec<HubRepo>, Box<dyn std::error::Error + Send + Sync>> {
         T::search_repos(self, repo_type, name_prefix, limit)
+            .map_err(|e| Box::new(std::io::Error::other(e.to_string())) as _)
+    }
+
+    fn search_repos_with_options(
+        &self,
+        repo_type: Option<HubRepoType>,
+        name_prefix: &str,
+        limit: usize,
+        options: &HubRepoSearchOptions,
+    ) -> Result<Vec<HubRepo>, Box<dyn std::error::Error + Send + Sync>> {
+        T::search_repos_with_options(self, repo_type, name_prefix, limit, options)
             .map_err(|e| Box::new(std::io::Error::other(e.to_string())) as _)
     }
 
@@ -780,6 +855,21 @@ impl BoxedHubStore {
         limit: usize,
     ) -> Result<Vec<HubRepo>, Box<dyn std::error::Error + Send + Sync>> {
         self.inner.search_repos(repo_type, name_prefix, limit)
+    }
+
+    /// Searches with visibility, author and ordering applied before the limit.
+    ///
+    /// # Errors
+    /// Returns an error when storage or metadata verification fails.
+    pub fn search_repos_with_options(
+        &self,
+        repo_type: Option<HubRepoType>,
+        name_prefix: &str,
+        limit: usize,
+        options: &HubRepoSearchOptions,
+    ) -> Result<Vec<HubRepo>, Box<dyn std::error::Error + Send + Sync>> {
+        self.inner
+            .search_repos_with_options(repo_type, name_prefix, limit, options)
     }
 
     /// Creates a new revision.
@@ -1035,6 +1125,17 @@ where
         limit: usize,
     ) -> Result<Vec<HubRepo>, Box<dyn std::error::Error + Send + Sync>> {
         T::search_repos(&self.0, repo_type, name_prefix, limit).map_err(Into::into)
+    }
+
+    fn search_repos_with_options(
+        &self,
+        repo_type: Option<HubRepoType>,
+        name_prefix: &str,
+        limit: usize,
+        options: &HubRepoSearchOptions,
+    ) -> Result<Vec<HubRepo>, Box<dyn std::error::Error + Send + Sync>> {
+        T::search_repos_with_options(&self.0, repo_type, name_prefix, limit, options)
+            .map_err(Into::into)
     }
 
     fn create_revision(
@@ -1468,6 +1569,48 @@ mod tests {
                 .cloned()
                 .collect();
             matched.sort_by(|a, b| a.repo_id.cmp(&b.repo_id));
+            matched.truncate(limit);
+            Ok(matched)
+        }
+
+        fn search_repos_with_options(
+            &self,
+            repo_type: Option<HubRepoType>,
+            name_prefix: &str,
+            limit: usize,
+            options: &HubRepoSearchOptions,
+        ) -> Result<Vec<HubRepo>, Self::Error> {
+            let repos = self.repos.lock().unwrap();
+            let mut matched: Vec<_> = repos
+                .values()
+                .filter(|r| r.repo_id.starts_with(name_prefix))
+                .filter(|r| repo_type.is_none_or(|t| r.repo_type == t))
+                .filter(|r| {
+                    options
+                        .caller_repo_id
+                        .as_deref()
+                        .is_none_or(|id| !r.private || r.repo_id == id)
+                })
+                .filter(|r| {
+                    options
+                        .author
+                        .as_deref()
+                        .is_none_or(|author| r.repo_id.starts_with(&format!("{author}/")))
+                })
+                .cloned()
+                .collect();
+            matched.sort_by(|a, b| match options.order {
+                HubRepoSearchOrder::RepoIdAsc => a.repo_id.cmp(&b.repo_id),
+                HubRepoSearchOrder::RepoIdDesc => b.repo_id.cmp(&a.repo_id),
+                HubRepoSearchOrder::LastModifiedAsc => a
+                    .updated_at_unix_seconds
+                    .cmp(&b.updated_at_unix_seconds)
+                    .then_with(|| a.repo_id.cmp(&b.repo_id)),
+                HubRepoSearchOrder::LastModifiedDesc => b
+                    .updated_at_unix_seconds
+                    .cmp(&a.updated_at_unix_seconds)
+                    .then_with(|| a.repo_id.cmp(&b.repo_id)),
+            });
             matched.truncate(limit);
             Ok(matched)
         }

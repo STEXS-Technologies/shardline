@@ -33,13 +33,16 @@ impl HubAuth {
     ///
     /// # Errors
     ///
-    /// Returns [`HubApiError::Unauthorized`] if the token is missing or invalid,
+    /// Returns [`HubApiError::Unauthorized`] if the token is missing, repeated, or invalid,
     /// or [`HubApiError::Forbidden`] if the scope is insufficient.
     pub fn authorize(
         &self,
         headers: &HeaderMap,
         required_scope: TokenScope,
     ) -> Result<VerifiedAuthContext, HubApiError> {
+        if headers.get_all(AUTHORIZATION).iter().nth(1).is_some() {
+            return Err(HubApiError::InvalidToken);
+        }
         let header = headers
             .get(AUTHORIZATION)
             .ok_or(HubApiError::Unauthorized)?;
@@ -151,6 +154,23 @@ mod tests {
             }
         }
         MockProvider
+    }
+
+    #[test]
+    fn authorize_rejects_repeated_authorization_in_every_order() {
+        let auth = HubAuth::new(Box::new(make_mock_provider()));
+        for (first, second) in [
+            ("Bearer first", "Bearer second"),
+            ("Bearer second", "Bearer first"),
+            ("Bearer first", "Bearer first"),
+        ] {
+            let mut headers = make_auth_header(first);
+            headers.append(AUTHORIZATION, HeaderValue::from_static(second));
+            assert!(matches!(
+                auth.authorize(&headers, TokenScope::Read),
+                Err(HubApiError::InvalidToken)
+            ));
+        }
     }
 
     #[test]

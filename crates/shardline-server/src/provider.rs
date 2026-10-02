@@ -205,6 +205,14 @@ impl ProviderTokenService {
     }
 
     fn authorize_provider_key(&self, headers: &HeaderMap) -> Result<(), ProviderServiceError> {
+        if headers
+            .get_all(PROVIDER_API_KEY_HEADER)
+            .iter()
+            .nth(1)
+            .is_some()
+        {
+            return Err(ProviderServiceError::InvalidApiKey);
+        }
         let actual = headers
             .get(PROVIDER_API_KEY_HEADER)
             .ok_or(ProviderServiceError::MissingApiKey)?

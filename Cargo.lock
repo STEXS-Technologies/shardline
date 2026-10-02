@@ -3921,6 +3921,7 @@ dependencies = [
  "shardline-protocol-adapters",
  "shardline-server-core",
  "shardline-storage",
+ "sqlx",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",

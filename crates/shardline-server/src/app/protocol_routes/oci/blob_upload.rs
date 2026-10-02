@@ -1,3 +1,4 @@
+use super::super::super::reconstruction_helpers::single_range_header;
 use std::sync::Arc;
 
 use axum::{
@@ -204,6 +205,7 @@ pub(crate) async fn oci_patch_blob_upload(
     session_id: &str,
     body: Body,
 ) -> Result<Response, ServerError> {
+    let _ = single_range_header(headers, CONTENT_RANGE)?;
     let _admit = state
         .admission
         .try_acquire(weights::XORB_UPLOAD)
@@ -239,7 +241,7 @@ pub(crate) async fn oci_patch_blob_upload(
     } else {
         upload_length(state.config.root_dir(), session_id).await?
     };
-    let expected_range = if let Some(content_range) = headers.get(CONTENT_RANGE) {
+    let expected_range = if let Some(content_range) = single_range_header(headers, CONTENT_RANGE)? {
         let content_range = content_range.to_str().map_err(|e| {
             tracing::warn!(error = %e, "invalid content-range header utf-8");
             ServerError::InvalidRangeHeader
@@ -321,7 +323,7 @@ async fn durable_oci_patch_blob_upload(
             .checked_add(part.size_bytes())
             .ok_or(ServerError::Overflow)
     })?;
-    let expected_range = if let Some(content_range) = headers.get(CONTENT_RANGE) {
+    let expected_range = if let Some(content_range) = single_range_header(headers, CONTENT_RANGE)? {
         let expected_range = parse_upload_content_range(
             content_range
                 .to_str()
@@ -401,6 +403,7 @@ pub(crate) async fn oci_put_blob_upload(
     session_id: &str,
     body: Body,
 ) -> Result<Response, ServerError> {
+    let _ = single_range_header(headers, CONTENT_RANGE)?;
     let _admit = state
         .admission
         .try_acquire(weights::XORB_UPLOAD)
@@ -446,8 +449,7 @@ pub(crate) async fn oci_put_blob_upload(
     }
     if session.use_s3_multipart {
         let current_length = upload_session_length(&session).unwrap_or(0);
-        let expected_range = headers
-            .get(CONTENT_RANGE)
+        let expected_range = single_range_header(headers, CONTENT_RANGE)?
             .map(|value| {
                 value
                     .to_str()
@@ -506,7 +508,7 @@ pub(crate) async fn oci_put_blob_upload(
     } else {
         upload_length(state.config.root_dir(), session_id).await?
     };
-    let expected_range = if let Some(content_range) = headers.get(CONTENT_RANGE) {
+    let expected_range = if let Some(content_range) = single_range_header(headers, CONTENT_RANGE)? {
         let content_range = content_range.to_str().map_err(|e| {
             tracing::warn!(error = %e, "invalid content-range header utf-8");
             ServerError::InvalidRangeHeader
@@ -581,7 +583,7 @@ async fn durable_oci_put_blob_upload(
             .checked_add(part.size_bytes())
             .ok_or(ServerError::Overflow)
     })?;
-    if let Some(content_range) = headers.get(CONTENT_RANGE) {
+    if let Some(content_range) = single_range_header(headers, CONTENT_RANGE)? {
         let expected_range = parse_upload_content_range(
             content_range
                 .to_str()
@@ -1485,6 +1487,191 @@ mod tests {
             .unwrap();
         let put_response = app.clone().oneshot(request).await.unwrap();
         assert_eq!(put_response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn malformed_upload_total_preserves_local_session_and_retry() {
+        let ctx = build_oci_test_state().await;
+        assert_malformed_total_preserves_session(&oci_test_router(&ctx.state)).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn malformed_upload_total_preserves_postgres_session_and_retry() {
+        if std::env::var_os("DATABASE_URL").is_none() {
+            return;
+        }
+        let cluster = build_oci_postgres_test_cluster()
+            .await
+            .expect("configured PostgreSQL fixture must initialize");
+        assert!(cluster.node_a.backend.supports_fenced_s3_publication());
+        assert_malformed_total_preserves_session(&oci_test_router(&cluster.node_a)).await;
+    }
+
+    async fn assert_malformed_total_preserves_session(app: &axum::Router) {
+        assert_rejected_content_ranges_preserve_session(
+            app,
+            &[
+                (&["bytes 4-8/0"], "4-8"),
+                (&["bytes 4-8/8"], "bytes 4-8/9"),
+                (&["bytes 4-8/"], "bytes 4-8/*"),
+                (&["bytes 4-8/not-a-number"], "4-8/*"),
+                (&["bytes 4-8/9/garbage"], "4-8/9"),
+                (&["bytes 4-8/*/garbage"], "bytes 4-8/*"),
+                (&["bytes 4-8/+9"], "4-8"),
+                (&["bytes 4-8/18446744073709551616"], "bytes 4-8/9"),
+            ],
+        )
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn duplicate_content_range_preserves_local_session_and_retry() {
+        let ctx = build_oci_test_state().await;
+        assert_duplicate_content_range_preserves_session(&oci_test_router(&ctx.state)).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn duplicate_content_range_preserves_postgres_session_and_retry() {
+        if std::env::var_os("DATABASE_URL").is_none() {
+            return;
+        }
+        let cluster = build_oci_postgres_test_cluster()
+            .await
+            .expect("configured PostgreSQL fixture must initialize");
+        assert!(cluster.node_a.backend.supports_fenced_s3_publication());
+        assert_duplicate_content_range_preserves_session(&oci_test_router(&cluster.node_a)).await;
+    }
+
+    async fn assert_duplicate_content_range_preserves_session(app: &axum::Router) {
+        assert_rejected_content_ranges_preserve_session(
+            app,
+            &[
+                (&["bytes 4-8/9", "invalid"], "4-8"),
+                (&["invalid", "bytes 4-8/9"], "bytes 4-8/9"),
+                (&["bytes 4-8/9", "bytes 5-9/10"], "bytes 4-8/*"),
+                (&["bytes 5-9/10", "bytes 4-8/9"], "4-8/*"),
+                (&["bytes 4-8/9", "bytes 4-8/9"], "4-8/9"),
+            ],
+        )
+        .await;
+    }
+
+    async fn assert_rejected_content_ranges_preserve_session(
+        app: &axum::Router,
+        cases: &[(&[&str], &str)],
+    ) {
+        let repository = format!("audit/totals-{}", super::new_upload_session_id());
+        for request_method in [Method::PATCH, Method::PUT] {
+            for (declared, retry_range) in cases {
+                let init = send(
+                    app,
+                    Method::POST,
+                    &format!("/v2/{repository}/blobs/uploads/"),
+                    Body::empty(),
+                )
+                .await;
+                assert_eq!(init.status(), StatusCode::ACCEPTED);
+                let session_id = session_id_from_location(&init);
+                let uri = format!("/v2/{repository}/blobs/uploads/{session_id}");
+                assert_eq!(
+                    send(app, Method::PATCH, &uri, Body::from("seed"))
+                        .await
+                        .status(),
+                    StatusCode::ACCEPTED
+                );
+                let bad_digest = sha256_hex(b"seedbad!!");
+                let request_uri = if request_method == Method::PUT {
+                    format!("{uri}?digest=sha256:{bad_digest}")
+                } else {
+                    uri.clone()
+                };
+                let mut request = axum::http::Request::builder()
+                    .method(request_method.clone())
+                    .uri(&request_uri);
+                for field in *declared {
+                    request = request.header(header::CONTENT_RANGE, *field);
+                }
+                let rejected = app
+                    .clone()
+                    .oneshot(request.body(Body::from("bad!!")).unwrap())
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    rejected.status(),
+                    StatusCode::BAD_REQUEST,
+                    "{request_method}: {declared:?}"
+                );
+                let status = send(app, Method::GET, &uri, Body::empty()).await;
+                assert_eq!(status.status(), StatusCode::NO_CONTENT);
+                assert_eq!(status.headers().get(header::RANGE).unwrap(), "0-3");
+                assert_eq!(
+                    send(
+                        app,
+                        Method::GET,
+                        &format!("/v2/{repository}/blobs/sha256:{bad_digest}"),
+                        Body::empty()
+                    )
+                    .await
+                    .status(),
+                    StatusCode::NOT_FOUND
+                );
+
+                let digest = sha256_hex(b"seedfixed");
+                let retry_uri = if request_method == Method::PUT {
+                    format!("{uri}?digest=sha256:{digest}")
+                } else {
+                    uri.clone()
+                };
+                let retry = app
+                    .clone()
+                    .oneshot(
+                        axum::http::Request::builder()
+                            .method(request_method.clone())
+                            .uri(&retry_uri)
+                            .header(header::CONTENT_RANGE, *retry_range)
+                            .body(Body::from("fixed"))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    retry.status(),
+                    if request_method == Method::PUT {
+                        StatusCode::CREATED
+                    } else {
+                        StatusCode::ACCEPTED
+                    }
+                );
+                if request_method == Method::PATCH {
+                    assert_eq!(
+                        send(
+                            app,
+                            Method::PUT,
+                            &format!("{uri}?digest=sha256:{digest}"),
+                            Body::empty()
+                        )
+                        .await
+                        .status(),
+                        StatusCode::CREATED
+                    );
+                }
+                let downloaded = send(
+                    app,
+                    Method::GET,
+                    &format!("/v2/{repository}/blobs/sha256:{digest}"),
+                    Body::empty(),
+                )
+                .await;
+                assert_eq!(downloaded.status(), StatusCode::OK);
+                assert_eq!(
+                    axum::body::to_bytes(downloaded.into_body(), 1024)
+                        .await
+                        .unwrap()
+                        .as_ref(),
+                    b"seedfixed"
+                );
+            }
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
