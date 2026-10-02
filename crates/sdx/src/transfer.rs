@@ -618,13 +618,40 @@ async fn ensure_success(response: Response) -> Result<Response, TransferError> {
     Err(http_error(status, message, retry_after))
 }
 
-/// Parses a `Retry-After` delta-seconds value (shardline sends `Retry-After: 1`
-/// on 503s). Non-numeric values (HTTP-date) are ignored.
+/// Parses one valid `Retry-After` field as delay-seconds or HTTP-date.
+/// Oversized digit-only values saturate; retry policy still caps the wait.
+/// Malformed or repeated fields fall back to the configured backoff.
 fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<u64> {
-    headers
-        .get(reqwest::header::RETRY_AFTER)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.trim().parse::<u64>().ok())
+    parse_retry_after_at(headers, std::time::SystemTime::now())
+}
+
+fn parse_retry_after_at(
+    headers: &reqwest::header::HeaderMap,
+    now: std::time::SystemTime,
+) -> Option<u64> {
+    let mut values = headers.get_all(reqwest::header::RETRY_AFTER).iter();
+    let value = values.next()?;
+    if values.next().is_some() {
+        return None;
+    }
+    let value = value.to_str().ok()?.trim_matches([' ', '\t']);
+    if value.is_empty() {
+        return None;
+    }
+    if value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Some(value.bytes().fold(0u64, |seconds, byte| {
+            seconds
+                .saturating_mul(10)
+                .saturating_add(u64::from(byte.saturating_sub(b'0')))
+        }));
+    }
+    let deadline = httpdate::parse_http_date(value).ok()?;
+    let remaining = deadline.duration_since(now).unwrap_or_default();
+    Some(
+        remaining
+            .as_secs()
+            .saturating_add(u64::from(remaining.subsec_nanos() != 0)),
+    )
 }
 
 fn parse_error_message(body: &str) -> Option<String> {
@@ -1143,5 +1170,96 @@ mod tests {
         assert!(!b.session_id().is_empty());
         // Extremely likely to differ, but the invariant is non-empty + stable.
         assert_eq!(a.session_id(), a.session_id());
+    }
+}
+
+#[cfg(test)]
+mod retry_after_header_tests {
+    use super::parse_retry_after_at;
+    use reqwest::header::HeaderValue;
+    use reqwest::header::{HeaderMap, RETRY_AFTER};
+    use std::time::Duration;
+    use std::time::SystemTime;
+    fn now() -> SystemTime {
+        httpdate::parse_http_date("Sat, 01 Jan 2000 00:00:00 GMT").unwrap()
+    }
+    fn parse(value: &str) -> Option<u64> {
+        let mut headers = HeaderMap::new();
+        headers.insert(RETRY_AFTER, HeaderValue::from_str(value).unwrap());
+        parse_retry_after_at(&headers, now())
+    }
+    #[test]
+    fn digit_seconds_strict_and_saturating() {
+        for (value, expected) in [
+            ("0", 0),
+            ("0001", 1),
+            (" 1\t", 1),
+            ("18446744073709551615", u64::MAX),
+            ("18446744073709551616", u64::MAX),
+        ] {
+            assert_eq!(parse(value), Some(expected));
+        }
+        assert_eq!(parse(&"9".repeat(8192)), Some(u64::MAX));
+    }
+    #[test]
+    fn invalid_seconds_and_dates_ignored() {
+        for value in [
+            "",
+            "+1",
+            "-1",
+            "1.5",
+            "1 2",
+            "1,2",
+            "later",
+            "Sat, 99 Jan 2000 00:00:01 GMT",
+        ] {
+            assert_eq!(parse(value), None, "{value}");
+        }
+        let mut h = HeaderMap::new();
+        h.insert(RETRY_AFTER, HeaderValue::from_bytes(b"\xff").unwrap());
+        assert_eq!(parse_retry_after_at(&h, now()), None);
+    }
+    #[test]
+    fn singleton_required_and_absence_falls_back() {
+        assert_eq!(parse_retry_after_at(&HeaderMap::new(), now()), None);
+        for values in [["0", "1"], ["1", "0"], ["0", "0"], ["bad", "1"]] {
+            let mut h = HeaderMap::new();
+            for value in values {
+                h.append(RETRY_AFTER, HeaderValue::from_str(value).unwrap());
+            }
+            assert_eq!(parse_retry_after_at(&h, now()), None);
+        }
+        assert_eq!(parse("Sat, 01 Jan 2000 00:00:01 GMT, 1"), None);
+    }
+    #[test]
+    fn dates_future_now_and_past() {
+        assert_eq!(parse("Sat, 01 Jan 2000 00:00:01 GMT"), Some(1));
+        assert_eq!(parse("Sat, 01 Jan 2000 00:00:00 GMT"), Some(0));
+        assert_eq!(parse("Fri, 31 Dec 1999 23:59:59 GMT"), Some(0));
+    }
+    #[test]
+    fn obsolete_dates_supported() {
+        assert_eq!(parse("Saturday, 01-Jan-00 00:00:01 GMT"), Some(1));
+        assert_eq!(parse("Sat Jan  1 00:00:01 2000"), Some(1));
+    }
+    #[test]
+    fn positive_fractional_remaining_rounded_up() {
+        let mut h = HeaderMap::new();
+        h.insert(
+            RETRY_AFTER,
+            HeaderValue::from_static("Sat, 01 Jan 2000 00:00:01 GMT"),
+        );
+        assert_eq!(
+            parse_retry_after_at(&h, now() + Duration::from_millis(500)),
+            Some(1)
+        );
+        assert_eq!(
+            parse_retry_after_at(&h, now() + Duration::from_nanos(999999999)),
+            Some(1)
+        );
+        assert_eq!(
+            parse_retry_after_at(&h, now() + Duration::from_secs(1)),
+            Some(0)
+        );
     }
 }

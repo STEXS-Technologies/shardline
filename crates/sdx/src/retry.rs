@@ -47,7 +47,7 @@ use crate::error::TransferError;
 /// `max_duration` after jitter. For computed backoff, zero base or maximum
 /// duration gives an immediate retry. Honored `Retry-After` overrides the base
 /// delay. `honor_retry_after` makes a 429/503/504 response's
-/// `Retry-After` header override the computed backoff. `retry_on_429` can be
+/// `Retry-After` delay-seconds or HTTP-date override the computed backoff. `retry_on_429` can be
 /// disabled to fail fast on 429 (dedup queries, mirroring upstream
 /// `with_429_no_retry()`).
 #[derive(Debug, Clone, PartialEq, Eq)]

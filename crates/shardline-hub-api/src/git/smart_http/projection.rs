@@ -150,6 +150,17 @@ impl ProjectionBudget {
         object: GitObject,
     ) -> Result<[u8; 20], HubApiError> {
         let sha = object.sha1();
+        self.append_with_known_sha(objects, object, sha)
+    }
+
+    // Private optimization for a digest computed from this exact immutable
+    // object body. Callers must never pass an externally supplied object ID.
+    fn append_with_known_sha(
+        &mut self,
+        objects: &mut Vec<GitObject>,
+        object: GitObject,
+        sha: [u8; 20],
+    ) -> Result<[u8; 20], HubApiError> {
         if self.seen.contains(&sha) {
             return Ok(sha);
         }
@@ -522,7 +533,11 @@ fn project_revision(
     format_commit(&mut data, root, parent, revision).map_err(failure)?;
     // Deduplication may emit no objects for a commit already loaded from an
     // archive. Its identity remains valid independently of the output vector.
-    let commit_sha = budget.append(&mut objects, GitObject::commit(data.text.into_bytes()))?;
+    let commit_sha = budget.append_with_known_sha(
+        &mut objects,
+        GitObject::commit(data.text.into_bytes()),
+        candidate,
+    )?;
     Ok((objects, commit_sha))
 }
 
@@ -890,6 +905,21 @@ mod tests {
                         &mut test_budget(4096, 100),
                     )
                     .unwrap();
+                    // Independently reproduce the established serialized
+                    // commit contract and hash its emitted bytes using the
+                    // ordinary GitObject implementation, not the candidate.
+                    let mut expected_body =
+                        format!("tree {}\n", hex::encode(GitObject::tree(Vec::new()).sha1()));
+                    if let Some(parent) = parent {
+                        expected_body.push_str(&format!("parent {parent}\n"));
+                    }
+                    expected_body.push_str(&format!(
+                        "author Shardline Hub <hub@shardline.dev> {timestamp} +0000\ncommitter Shardline Hub <hub@shardline.dev> {timestamp} +0000\n\n{message}\n\nShardline-Revision: {}\nShardline-Repository: {}\n",
+                        revision.sha, revision.repo_id,
+                    ));
+                    let expected_object = GitObject::commit(expected_body.into_bytes());
+                    assert_eq!(expected_sha, expected_object.sha1());
+                    assert_eq!(original.last().unwrap().data, expected_object.data);
                     let payload_bytes: usize =
                         original.iter().map(|object| object.data.len()).sum();
                     let mut budget = test_budget(payload_bytes, 2);
@@ -907,6 +937,8 @@ mod tests {
                     )
                     .unwrap();
                     assert_eq!(sha, expected_sha);
+                    assert_eq!(first.last().unwrap().sha1(), sha);
+                    assert_eq!(first.last().unwrap().data, expected_object.data);
                     assert_eq!(first.len(), 2);
                     assert_eq!((budget.remaining_bytes, budget.remaining_objects), (0, 0));
                     let seen = budget.seen.clone();
@@ -972,6 +1004,8 @@ mod tests {
                     .unwrap();
                     assert_eq!(new_objects.len(), 1);
                     assert_eq!(new_sha, expected_sha);
+                    assert_eq!(new_objects.last().unwrap().sha1(), new_sha);
+                    assert_eq!(new_objects.last().unwrap().data, expected_object.data);
                     assert_eq!((budget.remaining_bytes, budget.remaining_objects), (0, 0));
                 }
             }

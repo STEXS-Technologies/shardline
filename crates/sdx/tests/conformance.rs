@@ -129,10 +129,10 @@ async fn client_with_chunk_size(mock: &HfMock, chunk_size: usize) -> XetClient {
         .unwrap()
 }
 
-fn temp_path(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("sdx-conformance-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir.join(name)
+fn temp_path(name: &str) -> (tempfile::TempDir, PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(name);
+    (dir, path)
 }
 
 /// Consumes a download stream fully into a byte vector.
@@ -170,7 +170,7 @@ async fn conformance_full_file_reconstruction_round_trip() {
     assert_eq!(file_id.len(), 64);
 
     // Buffered download via download_file.
-    let dest = temp_path("full-out.bin");
+    let (_temp, dest) = temp_path("full-out.bin");
     let n = client
         .download_session()
         .download_file(&file_id, &dest)
@@ -202,7 +202,7 @@ async fn conformance_range_reconstruction_byte_identical() {
 
     // A range that starts and ends mid-chunk (chunk target 64 KiB).
     for (start, end) in [(0u64, 999u64), (30_000u64, 60_000u64), (100u64, 149_999u64)] {
-        let dest = temp_path(&format!("range-{start}-{end}.bin"));
+        let (_temp, dest) = temp_path(&format!("range-{start}-{end}.bin"));
         let n = client
             .download_session()
             .download_range(&file_id, start..=end, &dest)
@@ -252,7 +252,7 @@ async fn conformance_dedupe_miss_then_hit_and_upload_idempotent() {
     );
 
     // Both downloads reconstruct the same bytes.
-    let dest = temp_path("dedup-out.bin");
+    let (_temp, dest) = temp_path("dedup-out.bin");
     client
         .download_session()
         .download_file(&first, &dest)
@@ -277,7 +277,7 @@ async fn conformance_missing_xorb_surfaces_typed_not_found() {
     // (not hang).
     mock.remove_all_xorbs().await;
 
-    let dest = temp_path("mx-out.bin");
+    let (_temp, dest) = temp_path("mx-out.bin");
     let err = client
         .download_session()
         .download_file(&file_id, &dest)
@@ -420,7 +420,7 @@ async fn conformance_multi_xorb_file_downloads_correctly() {
         mock.xorb_post_count().await
     );
 
-    let dest = temp_path("multi-out.bin");
+    let (_temp, dest) = temp_path("multi-out.bin");
     let n = client
         .download_session()
         .download_file(&file_id, &dest)
@@ -438,7 +438,7 @@ async fn conformance_session_id_header_sent() {
     let client = client_for(&mock).await;
     let content = support::hf_mock::deterministic_content(8_000, 11);
     let file_id = upload_no_register(&client, content.clone()).await.unwrap();
-    let dest = temp_path("s-out.bin");
+    let (_temp, dest) = temp_path("s-out.bin");
     client
         .download_session()
         .download_file(&file_id, &dest)

@@ -24,6 +24,7 @@ bytes.workspace = true
 crc32fast = "1.5"
 futures-util.workspace = true
 hex.workspace = true
+httpdate.workspace = true
 # http-body 1.x (already in the lockfile as a reqwest/hyper transitive dep) is
 # used to build a streamed request body that advertises an exact Content-Length.
 http-body = "1"
