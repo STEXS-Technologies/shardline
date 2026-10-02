@@ -5,9 +5,10 @@ use shardline_protocol::{SecretString, unix_now_seconds_lossy};
 
 use crate::{
     hub::{
-        EMPTY_HUB_REVISION, HUB_TREE_READ_CEILING, HubFileEntry, HubRef, HubRepo,
-        HubRepoSearchOptions, HubRepoType, HubRevision, HubStore, HubTreePage, HubTreePageEntry,
-        HubTreePageOptions, HubWebhook, canonical_ref_name, hub_tree_requires_recovery,
+        EMPTY_HUB_REVISION, HUB_TREE_READ_CEILING, HubFileEntry, HubRef, HubRefCreateOutcome,
+        HubRepo, HubRepoSearchOptions, HubRepoType, HubRevision, HubStore, HubTreePage,
+        HubTreePageEntry, HubTreePageOptions, HubWebhook, canonical_ref_name,
+        hub_tree_requires_recovery,
     },
     local_sqlite::{
         LocalIndexStore, LocalIndexStoreError, current_hub_ref_evidence, hub_ref_snapshot,
@@ -288,98 +289,22 @@ impl HubStore for LocalIndexStore {
         ref_name: &str,
         message: &str,
     ) -> Result<HubRevision, Self::Error> {
-        let ref_name = canonical_ref_name(ref_name);
-        let root = self.root().to_owned();
-        let repo_id = repo_id.to_owned();
-        let parent_sha = parent_sha.map(ToOwned::to_owned);
-        let new_sha = new_sha.to_owned();
-        let ref_name = ref_name.to_owned();
-        let message = message.to_owned();
-        retry_sqlite_busy(|| {
-            let mut conn = open_hub_connection_rw(&root)?;
-            let tx = conn.transaction()?;
-            let current_ref: Option<String> = tx
-                .query_row(
-                    "SELECT sha FROM shardline_hub_refs WHERE repo_id = ?1 AND ref_name = ?2",
-                    params![repo_id, ref_name],
-                    |row| row.get(0),
-                )
-                .optional()?;
-
-            // Optimistic concurrency check
-            if let Some(parent) = parent_sha.as_deref() {
-                match current_ref.as_deref() {
-                    Some(current) if current != parent => {
-                        return Err(rusqlite::Error::QueryReturnedNoRows.into());
-                    }
-                    None => {
-                        let parent_exists: bool = tx.query_row(
-                        "SELECT EXISTS(SELECT 1 FROM shardline_hub_revisions WHERE repo_id = ?1 AND sha = ?2)",
-                        params![repo_id, parent],
-                        |row| row.get(0),
-                    )?;
-                        if !parent_exists {
-                            return Err(rusqlite::Error::QueryReturnedNoRows.into());
-                        }
-                    }
-                    _ => {}
-                }
+        match self.publish_hub_revision(repo_id, parent_sha, new_sha, ref_name, message, false)? {
+            HubRefCreateOutcome::Created(revision) => Ok(revision),
+            HubRefCreateOutcome::AlreadyExists | HubRefCreateOutcome::Unsupported => {
+                Err(rusqlite::Error::QueryReturnedNoRows.into())
             }
-
-            let now = unix_now_seconds_lossy();
-
-            if ref_name == "main" {
-                tx.execute(
-                "UPDATE shardline_hub_repos SET default_branch = ?1, updated_at_unix_seconds = ?2
-                 WHERE repo_id = ?3",
-                params![new_sha, u64_to_i64(now)?, repo_id],
-            )?;
-            }
-
-            // Insert revision
-            tx.execute(
-            "INSERT INTO shardline_hub_revisions (repo_id, ref_name, sha, parent_sha, message, created_at_unix_seconds)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-             ON CONFLICT(repo_id, sha) DO NOTHING",
-            params![repo_id, ref_name, new_sha, parent_sha, message, u64_to_i64(now)?],
-        )?;
-            tx.execute(
-                "INSERT INTO shardline_hub_refs (repo_id, ref_name, sha) VALUES (?1, ?2, ?3)
-             ON CONFLICT(repo_id, ref_name) DO UPDATE SET sha = excluded.sha",
-                params![repo_id, ref_name, new_sha],
-            )?;
-            let before = hub_ref_snapshot(&repo_id, &ref_name, current_ref.clone())?;
-            let after = hub_ref_snapshot(&repo_id, &ref_name, Some(new_sha.clone()))?;
-            let (stored_evidence, evidence_was_missing) =
-                current_hub_ref_evidence(&tx, &repo_id, &ref_name, current_ref)?;
-            let evidence = verify_and_append_snapshot_transition(stored_evidence, before, after)?.0;
-            if evidence_was_missing {
-                for event in evidence.events() {
-                    persist_hub_ref_evidence(&tx, event)?;
-                }
-            } else if let Some(event) = evidence.events().last() {
-                persist_hub_ref_evidence(&tx, event)?;
-            }
-
-            let revision = tx.query_row(
-                "SELECT repo_id, ref_name, sha, parent_sha, message, created_at_unix_seconds
-                 FROM shardline_hub_revisions WHERE repo_id = ?1 AND sha = ?2",
-                params![repo_id, new_sha],
-                |row| {
-                    Ok(HubRevision {
-                        repo_id: row.get(0)?,
-                        ref_name: row.get(1)?,
-                        sha: row.get(2)?,
-                        parent_sha: row.get(3)?,
-                        message: row.get(4)?,
-                        created_at_unix_seconds: i64_to_u64(row.get::<_, i64>(5)?)
-                            .map_err(|error| sqlite_store_error(&error))?,
-                    })
-                },
-            )?;
-            tx.commit()?;
-            Ok(revision)
-        })
+        }
+    }
+    fn create_revision_if_absent(
+        &self,
+        repo_id: &str,
+        parent_sha: Option<&str>,
+        new_sha: &str,
+        ref_name: &str,
+        message: &str,
+    ) -> Result<HubRefCreateOutcome, Self::Error> {
+        self.publish_hub_revision(repo_id, parent_sha, new_sha, ref_name, message, true)
     }
 
     fn list_refs(&self, repo_id: &str) -> Result<Vec<HubRef>, Self::Error> {
@@ -938,6 +863,114 @@ fn escape_like(value: &str) -> String {
         .replace('%', "\\%")
 }
 
+impl LocalIndexStore {
+    fn publish_hub_revision(
+        &self,
+        repo_id: &str,
+        parent_sha: Option<&str>,
+        new_sha: &str,
+        ref_name: &str,
+        message: &str,
+        require_absent: bool,
+    ) -> Result<HubRefCreateOutcome, LocalIndexStoreError> {
+        let ref_name = canonical_ref_name(ref_name);
+        let root = self.root().to_owned();
+        let repo_id = repo_id.to_owned();
+        let parent_sha = parent_sha.map(ToOwned::to_owned);
+        let new_sha = new_sha.to_owned();
+        let ref_name = ref_name.to_owned();
+        let message = message.to_owned();
+        retry_sqlite_busy(|| {
+            let mut conn = open_hub_connection_rw(&root)?;
+            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let current_ref: Option<String> = tx
+                .query_row(
+                    "SELECT sha FROM shardline_hub_refs WHERE repo_id = ?1 AND ref_name = ?2",
+                    params![repo_id, ref_name],
+                    |row| row.get(0),
+                )
+                .optional()?;
+
+            if require_absent && current_ref.is_some() {
+                return Ok(HubRefCreateOutcome::AlreadyExists);
+            }
+
+            // Optimistic concurrency check
+            if let Some(parent) = parent_sha.as_deref() {
+                match current_ref.as_deref() {
+                    Some(current) if current != parent => {
+                        return Err(rusqlite::Error::QueryReturnedNoRows.into());
+                    }
+                    None => {
+                        let parent_exists: bool = tx.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM shardline_hub_revisions WHERE repo_id = ?1 AND sha = ?2)",
+                        params![repo_id, parent],
+                        |row| row.get(0),
+                    )?;
+                        if !parent_exists {
+                            return Err(rusqlite::Error::QueryReturnedNoRows.into());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            let now = unix_now_seconds_lossy();
+
+            if ref_name == "main" {
+                tx.execute(
+                "UPDATE shardline_hub_repos SET default_branch = ?1, updated_at_unix_seconds = ?2
+                 WHERE repo_id = ?3",
+                params![new_sha, u64_to_i64(now)?, repo_id],
+            )?;
+            }
+
+            // Insert revision
+            tx.execute(
+            "INSERT INTO shardline_hub_revisions (repo_id, ref_name, sha, parent_sha, message, created_at_unix_seconds)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(repo_id, sha) DO NOTHING",
+            params![repo_id, ref_name, new_sha, parent_sha, message, u64_to_i64(now)?],
+        )?;
+            tx.execute(
+                "INSERT INTO shardline_hub_refs (repo_id, ref_name, sha) VALUES (?1, ?2, ?3)
+             ON CONFLICT(repo_id, ref_name) DO UPDATE SET sha = excluded.sha",
+                params![repo_id, ref_name, new_sha],
+            )?;
+            let before = hub_ref_snapshot(&repo_id, &ref_name, current_ref.clone())?;
+            let after = hub_ref_snapshot(&repo_id, &ref_name, Some(new_sha.clone()))?;
+            let (stored_evidence, evidence_was_missing) =
+                current_hub_ref_evidence(&tx, &repo_id, &ref_name, current_ref)?;
+            let evidence = verify_and_append_snapshot_transition(stored_evidence, before, after)?.0;
+            if evidence_was_missing {
+                for event in evidence.events() {
+                    persist_hub_ref_evidence(&tx, event)?;
+                }
+            } else if let Some(event) = evidence.events().last() {
+                persist_hub_ref_evidence(&tx, event)?;
+            }
+
+            let revision = tx.query_row(
+                "SELECT repo_id, ref_name, sha, parent_sha, message, created_at_unix_seconds
+                 FROM shardline_hub_revisions WHERE repo_id = ?1 AND sha = ?2",
+                params![repo_id, new_sha],
+                |row| {
+                    Ok(HubRevision {
+                        repo_id: row.get(0)?,
+                        ref_name: row.get(1)?,
+                        sha: row.get(2)?,
+                        parent_sha: row.get(3)?,
+                        message: row.get(4)?,
+                        created_at_unix_seconds: i64_to_u64(row.get::<_, i64>(5)?)
+                            .map_err(|error| sqlite_store_error(&error))?,
+                    })
+                },
+            )?;
+            tx.commit()?;
+            Ok(HubRefCreateOutcome::Created(revision))
+        })
+    }
+}
 #[cfg(test)]
 mod tests {
     #![allow(

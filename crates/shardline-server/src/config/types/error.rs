@@ -9,6 +9,13 @@ use thiserror::Error;
 /// Server configuration loading failure.
 #[derive(Debug, Error)]
 pub enum ServerConfigError {
+    /// A resource capacity cannot be represented by the runtime limiter.
+    #[error("{name} capacity {capacity} exceeds the supported maximum {maximum}")]
+    ResourceCapacityOutOfRange {
+        name: &'static str,
+        capacity: usize,
+        maximum: usize,
+    },
     /// The bind address could not be parsed.
     #[error("invalid bind address")]
     BindAddress(#[from] AddrParseError),

@@ -19,7 +19,7 @@ use crate::{
     error::HubApiError,
     routes::{HubState, lfs_object_key, require_repository_binding},
 };
-use shardline_index::hub::{HubFileEntry, canonical_ref_name};
+use shardline_index::hub::{HubFileEntry, HubRefCreateOutcome, canonical_ref_name};
 use shardline_protocol::{ShardlineHash, TokenScope};
 use shardline_server_core::AuthorizedRepository;
 use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectStore};
@@ -128,9 +128,14 @@ pub async fn receive_pack(
     let mut results = Vec::new();
 
     for (old_sha, new_sha, refname) in &updates {
-        let resolved_old = identities
-            .iter()
-            .find_map(|(hub, git)| (git == old_sha).then(|| hub.clone()))
+        // Multiple Hub revisions may project to the same Git commit. Resolve
+        // the named ref's identity rather than reverse-searching history aliases.
+        let resolved_old = state
+            .store
+            .resolve_revision(&repo_id, refname)
+            .ok()
+            .flatten()
+            .filter(|current| identities.get(current) == Some(old_sha))
             .unwrap_or_else(|| old_sha.clone());
         let result = if new_sha == "0000000000000000000000000000000000000000" {
             delete_push_ref(&state, &repo_id, &resolved_old, refname)
@@ -262,6 +267,18 @@ fn store_push_objects(
     // leave write side effects behind (orphaned file entries keyed by a commit
     // SHA no revision will ever reference, and LFS objects nobody will read).
     let parent = if old_sha == "0000000000000000000000000000000000000000" {
+        // Avoid known-conflicting payload writes. The final storage primitive
+        // still checks absence atomically, excluding concurrent creators.
+        if state
+            .store
+            .resolve_revision(repo_id, ref_name)
+            .map_err(|error| SmartHttpError::CreateRevision(error.to_string()))?
+            .is_some()
+        {
+            return Err(SmartHttpError::NonFastForward(
+                "ref already exists".to_owned(),
+            ));
+        }
         None
     } else {
         // Non-fast-forward check: if the ref already exists and the client's
@@ -386,10 +403,30 @@ fn store_push_objects(
         .map_err(|e| SmartHttpError::StoreFiles(e.to_string()))?;
 
     // Create revision in the store.
-    state
-        .store
-        .create_revision(repo_id, parent, new_sha, ref_name, &message)
-        .map_err(|e| SmartHttpError::CreateRevision(e.to_string()))?;
+    if parent.is_none() {
+        match state
+            .store
+            .create_revision_if_absent(repo_id, parent, new_sha, ref_name, &message)
+            .map_err(|error| SmartHttpError::CreateRevision(error.to_string()))?
+        {
+            HubRefCreateOutcome::Created(_) => {}
+            HubRefCreateOutcome::AlreadyExists => {
+                return Err(SmartHttpError::NonFastForward(
+                    "ref already exists".to_owned(),
+                ));
+            }
+            HubRefCreateOutcome::Unsupported => {
+                return Err(SmartHttpError::CreateRevision(
+                    "atomic ref creation is unsupported by this store".to_owned(),
+                ));
+            }
+        }
+    } else {
+        state
+            .store
+            .create_revision(repo_id, parent, new_sha, ref_name, &message)
+            .map_err(|error| SmartHttpError::CreateRevision(error.to_string()))?;
+    }
 
     Ok(())
 }

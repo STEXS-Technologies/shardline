@@ -629,32 +629,40 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
     Ok(config)
 }
 
-/// Loads a bounded pool size from an environment variable, falling back to `default`.
+/// Loads a bounded pool size, warning and falling back to `default` for zero,
+/// invalid syntax, or capacities above the batch-count/Tokio representable limit.
 pub(crate) fn bounded_pool_size_from_env(name: &str, default: usize) -> NonZeroUsize {
     let fallback = NonZeroUsize::new(default).unwrap_or(NonZeroUsize::MIN);
     var(name).map_or_else(
         |_| fallback,
         |v| {
-            v.parse().unwrap_or_else(|_| {
-                tracing::warn!("invalid {name} value '{v}', using default {default}");
-                fallback
-            })
+            v.parse::<NonZeroUsize>()
+                .ok()
+                .filter(|capacity| capacity.get() <= crate::admission::maximum_counted_capacity())
+                .unwrap_or_else(|| {
+                    tracing::warn!("invalid {name} value '{v}', using default {default}");
+                    fallback
+                })
         },
     )
 }
 
-/// Parses the `SHARDLINE_ADMISSION_MAX_WEIGHT` environment variable.
+/// Parses `SHARDLINE_ADMISSION_MAX_WEIGHT`, warning and falling back to 256 for
+/// invalid syntax, zero, or capacities above the batch-count/Tokio limit.
 pub(crate) fn admission_max_weight_from_env() -> NonZeroUsize {
     let fallback = NonZeroUsize::new(256).unwrap_or(NonZeroUsize::MIN);
     var("SHARDLINE_ADMISSION_MAX_WEIGHT").map_or_else(
         |_| fallback,
         |v| {
-            v.parse().unwrap_or_else(|_| {
-                tracing::warn!(
-                    "invalid SHARDLINE_ADMISSION_MAX_WEIGHT value '{v}', using default 256"
-                );
-                fallback
-            })
+            v.parse::<NonZeroUsize>()
+                .ok()
+                .filter(|capacity| capacity.get() <= crate::admission::maximum_counted_capacity())
+                .unwrap_or_else(|| {
+                    tracing::warn!(
+                        "invalid SHARDLINE_ADMISSION_MAX_WEIGHT value '{v}', using default 256"
+                    );
+                    fallback
+                })
         },
     )
 }
@@ -1087,6 +1095,38 @@ mod interpolate_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn resource_capacity_environment_rejects_overflow_with_existing_fallback() {
+        let maximum = crate::admission::maximum_counted_capacity();
+        for value in [
+            "0".to_owned(),
+            "invalid".to_owned(),
+            (maximum + 1).to_string(),
+            usize::MAX.to_string(),
+        ] {
+            set_env_var("SHARDLINE_ADMISSION_MAX_WEIGHT", &value);
+            assert_eq!(super::admission_max_weight_from_env().get(), 256);
+            for name in [
+                "SHARDLINE_HASHING_POOL_SIZE",
+                "SHARDLINE_PARSING_POOL_SIZE",
+                "SHARDLINE_BLOCKING_IO_POOL_SIZE",
+            ] {
+                set_env_var(name, &value);
+                assert_eq!(super::bounded_pool_size_from_env(name, 8).get(), 8);
+                remove_env_var(name);
+            }
+        }
+        set_env_var("SHARDLINE_ADMISSION_MAX_WEIGHT", &maximum.to_string());
+        assert_eq!(super::admission_max_weight_from_env().get(), maximum);
+        set_env_var("SHARDLINE_HASHING_POOL_SIZE", &maximum.to_string());
+        assert_eq!(
+            super::bounded_pool_size_from_env("SHARDLINE_HASHING_POOL_SIZE", 8).get(),
+            maximum
+        );
+        remove_env_var("SHARDLINE_HASHING_POOL_SIZE");
+        remove_env_var("SHARDLINE_ADMISSION_MAX_WEIGHT");
+    }
+
     use crate::ServerFrontend;
 
     use super::{
