@@ -82,8 +82,8 @@ impl WeightedAdmission {
 
 /// Bounded execution pool for specific work types (hashing, parsing, blocking I/O).
 ///
-/// Each pool has a maximum concurrency. Attempts beyond the limit are rejected
-/// immediately rather than queued (to avoid head-of-line blocking).
+/// Each pool has a maximum concurrency. Public admission attempts reject excess
+/// work immediately; internal stream operations can wait cooperatively.
 #[derive(Debug, Clone)]
 pub struct BoundedPool {
     inner: Arc<Semaphore>,
@@ -104,6 +104,12 @@ impl BoundedPool {
     /// Returns `None` if the pool is saturated.
     pub fn try_acquire(&self) -> Option<OwnedSemaphorePermit> {
         self.inner.clone().try_acquire_owned().ok()
+    }
+
+    /// Waits cooperatively for stream work, without spawning a
+    /// blocking job while queued. The running job must own the returned permit.
+    pub(crate) async fn acquire(&self) -> Result<OwnedSemaphorePermit, tokio::sync::AcquireError> {
+        self.inner.clone().acquire_owned().await
     }
 
     /// Returns the number of currently available permits.

@@ -4474,3 +4474,366 @@ async fn s3_local_part_content_corruption_cannot_publish_a_different_object() {
 }
 
 mod pool_progress;
+
+#[tokio::test]
+async fn s3_metadata_directive_rejection_preserves_destination_and_retry() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state);
+    assert_s3_metadata_directive_rejection_preserves_destination_and_retry(&app).await;
+}
+
+async fn assert_s3_metadata_directive_rejection_preserves_destination_and_retry(app: &Router) {
+    use axum::http::HeaderValue;
+    let source = format!("/{BUCKET}/metadata-source");
+    let mut seed = put_request(source.clone(), b"source-bytes".to_vec());
+    seed.headers_mut()
+        .insert("x-amz-meta-origin", HeaderValue::from_static("source"));
+    assert_eq!(
+        app.clone().oneshot(seed).await.unwrap().status(),
+        StatusCode::OK
+    );
+    for fields in [
+        vec![HeaderValue::from_static("TYPO")],
+        vec![HeaderValue::from_static("")],
+        vec![HeaderValue::from_bytes(b"\x80").unwrap()],
+        vec![
+            HeaderValue::from_static("COPY"),
+            HeaderValue::from_static("REPLACE"),
+        ],
+        vec![
+            HeaderValue::from_static("REPLACE"),
+            HeaderValue::from_static("COPY"),
+        ],
+        vec![
+            HeaderValue::from_static("REPLACE"),
+            HeaderValue::from_static("TYPO"),
+        ],
+        vec![
+            HeaderValue::from_static("TYPO"),
+            HeaderValue::from_static("REPLACE"),
+        ],
+        vec![
+            HeaderValue::from_static("REPLACE"),
+            HeaderValue::from_static("REPLACE"),
+        ],
+    ] {
+        let dest = format!("/{BUCKET}/metadata-destination");
+        let mut prior = put_request(dest.clone(), b"prior-bytes".to_vec());
+        prior
+            .headers_mut()
+            .insert("x-amz-meta-origin", HeaderValue::from_static("prior"));
+        let prior = app.clone().oneshot(prior).await.unwrap();
+        assert_eq!(prior.status(), StatusCode::OK);
+        let prior_etag = prior.headers()[header::ETAG].clone();
+        for (uri, exists) in [
+            (dest.clone(), true),
+            (format!("/{BUCKET}/metadata-absent"), false),
+        ] {
+            let mut invalid = copy_request(uri.clone(), &source);
+            for field in &fields {
+                invalid
+                    .headers_mut()
+                    .append("x-amz-metadata-directive", field.clone());
+            }
+            let rejected = app.clone().oneshot(invalid).await.unwrap();
+            assert_eq!(rejected.status(), StatusCode::BAD_REQUEST, "{fields:?}");
+            assert!(
+                String::from_utf8(body_bytes(rejected).await)
+                    .unwrap()
+                    .contains("InvalidArgument")
+            );
+            let read = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(&uri)
+                        .header(
+                            header::AUTHORIZATION,
+                            sigv4_auth(&mint_token(TokenScope::Read, OWNER, NAME)),
+                        )
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            if exists {
+                assert_eq!(read.status(), StatusCode::OK);
+                assert_eq!(read.headers()[header::ETAG], prior_etag);
+                assert_eq!(read.headers()["x-amz-meta-origin"], "prior");
+                assert_eq!(body_bytes(read).await, b"prior-bytes");
+            } else {
+                assert_eq!(read.status(), StatusCode::NOT_FOUND);
+            }
+        }
+        let retry = app
+            .clone()
+            .oneshot(copy_request(dest, &source))
+            .await
+            .unwrap();
+        assert_eq!(retry.status(), StatusCode::OK);
+    }
+}
+
+#[tokio::test]
+async fn s3_metadata_values_roundtrip_put_copy_replace_and_head() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state);
+    assert_s3_metadata_values_roundtrip_put_copy_replace_and_head(&app).await;
+}
+
+async fn assert_s3_metadata_values_roundtrip_put_copy_replace_and_head(app: &Router) {
+    use axum::http::HeaderValue;
+    for (values, expected) in [
+        (vec!["alpha", "zulu"], "alpha,zulu"),
+        (vec!["zulu", "alpha"], "zulu,alpha"),
+        (vec!["one,two", "three"], "one,two,three"),
+        (vec!["café"], "=?UTF-8?B?Y2Fmw6k=?="),
+        (vec!["=?UTF-8?B?Y2Fmw6k=?="], "=?UTF-8?B?Y2Fmw6k=?="),
+        (vec!["=?UTF-8?Q?caf=C3=A9?="], "=?UTF-8?B?Y2Fmw6k=?="),
+        (
+            vec!["=?UTF-8?B?Y2Fm?= =?UTF-8?B?w6k=?="],
+            "=?UTF-8?B?Y2Fmw6k=?=",
+        ),
+        (vec!["=?custom?B?YWJj?="], "=?custom?B?YWJj?="),
+        (vec!["=?UTF-8?B?not-base64?="], "=?UTF-8?B?not-base64?="),
+    ] {
+        let source = format!("/{BUCKET}/metadata-values-source");
+        let mut put = put_request(source.clone(), b"body".to_vec());
+        for value in values {
+            put.headers_mut().append(
+                axum::http::HeaderName::from_bytes(b"X-Amz-Meta-Label").unwrap(),
+                HeaderValue::from_bytes(value.as_bytes()).unwrap(),
+            );
+        }
+        assert_eq!(
+            app.clone().oneshot(put).await.unwrap().status(),
+            StatusCode::OK
+        );
+        let copied = format!("/{BUCKET}/metadata-values-copy");
+        assert_eq!(
+            app.clone()
+                .oneshot(copy_request(copied.clone(), &source))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        let replaced = format!("/{BUCKET}/metadata-values-replaced");
+        let mut replace = copy_request(replaced.clone(), &source);
+        replace.headers_mut().insert(
+            "x-amz-metadata-directive",
+            HeaderValue::from_static("rEpLaCe"),
+        );
+        replace
+            .headers_mut()
+            .append("x-amz-meta-label", HeaderValue::from_static("replacement"));
+        replace
+            .headers_mut()
+            .append("x-amz-meta-label", HeaderValue::from_static("second"));
+        assert_eq!(
+            app.clone().oneshot(replace).await.unwrap().status(),
+            StatusCode::OK
+        );
+        for (uri, metadata) in [
+            (source, expected),
+            (copied, expected),
+            (replaced, "replacement,second"),
+        ] {
+            for method in ["GET", "HEAD"] {
+                let response = app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .method(method)
+                            .uri(&uri)
+                            .header(
+                                header::AUTHORIZATION,
+                                sigv4_auth(&mint_token(TokenScope::Read, OWNER, NAME)),
+                            )
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::OK);
+                assert_eq!(response.headers()["x-amz-meta-label"], metadata);
+                assert_eq!(
+                    body_bytes(response).await,
+                    if method == "GET" {
+                        b"body".as_slice()
+                    } else {
+                        b"".as_slice()
+                    }
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn s3_metadata_multipart_create_preserves_values_and_unicode() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state);
+    assert_metadata_multipart_roundtrip(&app).await;
+}
+
+#[tokio::test]
+async fn s3_metadata_durable_multipart_create_preserves_values_and_unicode() {
+    if std::env::var_os("DATABASE_URL").is_none() {
+        return;
+    }
+    let (state, _tmp) = build_postgres_test_state()
+        .await
+        .expect("configured PostgreSQL fixture must initialize");
+    assert!(state.backend.supports_fenced_s3_publication());
+    assert_metadata_multipart_roundtrip(&s3_router(state)).await;
+}
+
+async fn assert_metadata_multipart_roundtrip(app: &Router) {
+    use axum::http::HeaderValue;
+    let mut create = Request::builder()
+        .method("POST")
+        .uri(format!("/{BUCKET}/{KEY}?uploads"))
+        .header(
+            header::AUTHORIZATION,
+            sigv4_auth(&mint_token(TokenScope::Write, OWNER, NAME)),
+        )
+        .body(Body::empty())
+        .unwrap();
+    create
+        .headers_mut()
+        .append("x-amz-meta-label", HeaderValue::from_static("first"));
+    create.headers_mut().append(
+        "x-amz-meta-label",
+        HeaderValue::from_bytes("café".as_bytes()).unwrap(),
+    );
+    let created = app.clone().oneshot(create).await.unwrap();
+    assert_eq!(created.status(), StatusCode::OK);
+    let upload_id = extract_tag(
+        &String::from_utf8(body_bytes(created).await).unwrap(),
+        "UploadId",
+    );
+    assert_eq!(
+        upload_part(app, &upload_id, 1, b"multipart-body")
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    let completed = complete_upload(app, &upload_id, complete_body(&upload_id, &[1])).await;
+    assert_eq!(completed.status(), StatusCode::OK);
+    for method in ["GET", "HEAD"] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(format!("/{BUCKET}/{KEY}"))
+                    .header(
+                        header::AUTHORIZATION,
+                        sigv4_auth(&mint_token(TokenScope::Read, OWNER, NAME)),
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()["x-amz-meta-label"],
+            "=?UTF-8?B?Zmlyc3QsY2Fmw6k=?="
+        );
+    }
+}
+
+#[tokio::test]
+async fn s3_metadata_invalid_utf8_rejected_before_destination_mutation() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state);
+    assert_s3_metadata_invalid_utf8_rejected_before_destination_mutation(&app).await;
+}
+
+async fn assert_s3_metadata_invalid_utf8_rejected_before_destination_mutation(app: &Router) {
+    use axum::http::HeaderValue;
+    let source = format!("/{BUCKET}/invalid-metadata-source");
+    assert_eq!(
+        app.clone()
+            .oneshot(put_request(source.clone(), b"source".to_vec()))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    for operation in ["PUT", "REPLACE", "MULTIPART"] {
+        let destination = format!("/{BUCKET}/invalid-metadata-destination");
+        let mut seed = put_request(destination.clone(), b"prior-bytes".to_vec());
+        seed.headers_mut()
+            .insert("x-amz-meta-label", HeaderValue::from_static("prior"));
+        let seeded = app.clone().oneshot(seed).await.unwrap();
+        assert_eq!(seeded.status(), StatusCode::OK);
+        let prior_etag = seeded.headers()[header::ETAG].clone();
+        let mut request = match operation {
+            "PUT" => put_request(destination.clone(), b"bad-body".to_vec()),
+            "REPLACE" => {
+                let mut request = copy_request(destination.clone(), &source);
+                request.headers_mut().insert(
+                    "x-amz-metadata-directive",
+                    HeaderValue::from_static("REPLACE"),
+                );
+                request
+            }
+            _ => Request::builder()
+                .method("POST")
+                .uri(format!("{destination}?uploads"))
+                .header(
+                    header::AUTHORIZATION,
+                    sigv4_auth(&mint_token(TokenScope::Write, OWNER, NAME)),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        };
+        request.headers_mut().insert(
+            "x-amz-meta-label",
+            HeaderValue::from_bytes(b"\xff").unwrap(),
+        );
+        let rejected = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(rejected.status(), StatusCode::BAD_REQUEST, "{operation}");
+        assert!(
+            String::from_utf8(body_bytes(rejected).await)
+                .unwrap()
+                .contains("InvalidArgument")
+        );
+        let prior = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(&destination)
+                    .header(
+                        header::AUTHORIZATION,
+                        sigv4_auth(&mint_token(TokenScope::Read, OWNER, NAME)),
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(prior.status(), StatusCode::OK);
+        assert_eq!(prior.headers()[header::ETAG], prior_etag);
+        assert_eq!(prior.headers()["x-amz-meta-label"], "prior");
+        assert_eq!(body_bytes(prior).await, b"prior-bytes");
+    }
+}
+
+#[tokio::test]
+async fn s3_metadata_durable_object_request_semantics() {
+    if std::env::var_os("DATABASE_URL").is_none() {
+        return;
+    }
+    let (state, _tmp) = build_postgres_test_state()
+        .await
+        .expect("configured PostgreSQL fixture must initialize");
+    assert!(state.backend.supports_fenced_s3_publication());
+    let app = s3_router(state);
+    assert_s3_metadata_directive_rejection_preserves_destination_and_retry(&app).await;
+    assert_s3_metadata_values_roundtrip_put_copy_replace_and_head(&app).await;
+    assert_s3_metadata_invalid_utf8_rejected_before_destination_mutation(&app).await;
+}

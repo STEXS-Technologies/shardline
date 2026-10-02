@@ -197,6 +197,13 @@ impl ServerBackend {
         Ok(vec![guard])
     }
 
+    pub(crate) fn set_stream_work_pool(&mut self, pool: crate::admission::BoundedPool) {
+        match self {
+            Self::Local(backend) => backend.stream_work_pool = pool,
+            Self::Postgres(backend) => backend.stream_work_pool = pool,
+        }
+    }
+
     /// Build a [`ServerBackend`] from a [`ServerConfig`] by resolving the object store
     /// and metadata backend (local or Postgres).
     ///

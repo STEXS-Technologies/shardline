@@ -117,7 +117,13 @@ impl super::PostgresBackend {
         let record = self.read_record(file_id, content_hash, None).await?;
         let total_bytes = record.total_bytes;
         crate::metrics::record_object_read_by_repr(record.storage_repr.as_str(), total_bytes);
-        let stream = file_record_byte_stream(self.object_store(), record, range).await?;
+        let stream = file_record_byte_stream(
+            self.object_store(),
+            record,
+            range,
+            self.stream_work_pool.clone(),
+        )
+        .await?;
         Ok((stream, total_bytes))
     }
 
@@ -252,7 +258,9 @@ impl super::PostgresBackend {
         }
 
         // StoredChunks path: stream with LZ4 decompression and xorb-fast-path.
-        let stream = file_record_byte_stream(object_store, record, None).await?;
+        let stream =
+            file_record_byte_stream(object_store, record, None, self.stream_work_pool.clone())
+                .await?;
         let mut output = Vec::with_capacity(usize::try_from(total_bytes)?);
         tokio::pin!(stream);
         use futures_util::StreamExt;
@@ -391,7 +399,15 @@ impl super::PostgresBackend {
         let object_store = self.object_store();
         let object_key = xorb_object_key(hash_hex)?;
 
-        validated_xorb_byte_range_stream(&object_store, &object_key, hash_hex, total_length, range)
+        validated_xorb_byte_range_stream(
+            &object_store,
+            &object_key,
+            hash_hex,
+            total_length,
+            range,
+            self.stream_work_pool.clone(),
+        )
+        .await
     }
 
     /// Reads a stored chunk only when it is reachable from a concrete file version.

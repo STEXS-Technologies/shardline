@@ -271,6 +271,8 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
         bounded_pool_size_from_env("SHARDLINE_PARSING_POOL_SIZE", 8),
         bounded_pool_size_from_env("SHARDLINE_BLOCKING_IO_POOL_SIZE", 16),
     );
+    let mut backend = backend;
+    backend.set_stream_work_pool(pools.blocking_io.clone());
     let state = Arc::new(AppState {
         config,
         role,
@@ -370,9 +372,7 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
         .route("/api/v1/nodes", get(admin_nodes))
         .route("/api/v1/tasks", get(admin_tasks))
         .route("/api/v1/metrics", get(admin_metrics))
-        .layer(MetricsLayer)
-        .layer(middleware::from_fn(request_timeout_middleware))
-        .layer(middleware::from_fn(security_headers_middleware));
+        .layer(MetricsLayer);
     if role.serves_api() {
         app = app
             .route(
@@ -447,10 +447,17 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
     // Apply CORS after every optional frontend has been registered and the Hub
     // router has been merged, so preflight and normal requests are covered by
     // the same policy regardless of which protocol owns the route.
-    let app = app.layer(cors).layer(middleware::from_fn_with_state(
-        state,
-        gc_write_barrier_middleware,
-    ));
+    let app = app
+        .layer(middleware::from_fn_with_state(
+            state,
+            gc_write_barrier_middleware,
+        ))
+        // One deadline includes both GC admission and the protocol handler.
+        // Apply only after all routes/Hub/fallback services are present.
+        .layer(middleware::from_fn(request_timeout_middleware))
+        // Generated timeout responses retain CORS and security headers too.
+        .layer(cors)
+        .layer(middleware::from_fn(security_headers_middleware));
 
     // Register route auth policies for auditability and fail-closed enforcement.
     let mut policy_registry = RoutePolicyRegistry::new();
