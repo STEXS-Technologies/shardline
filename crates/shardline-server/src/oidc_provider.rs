@@ -322,6 +322,9 @@ impl OidcProvider {
 
         let mut validation = Validation::new(algorithm);
         validation.set_issuer(&[self.issuer.as_str()]);
+        // An issuer constraint alone permits an absent `iss` claim. Require
+        // its presence so every accepted token identifies the pinned issuer.
+        validation.required_spec_claims.insert("iss".to_owned());
         if let Some(ref audience) = self.audience {
             validation.set_audience(&[audience.as_str()]);
             // Regression (F-82): jsonwebtoken's `validate_audience` treats a
@@ -377,7 +380,8 @@ impl OidcProvider {
         let sub = payload
             .get("sub")
             .and_then(|v| v.as_str())
-            .unwrap_or("anonymous")
+            .filter(|subject| !subject.trim().is_empty())
+            .ok_or(AuthError::InvalidToken)?
             .to_owned();
 
         let scope_str = payload
@@ -1678,6 +1682,66 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
             e: Some(TEST_RSA_E.to_owned()),
             x_coord: None,
             y_coord: None,
+        }
+    }
+
+    #[test]
+    fn verify_token_requires_matching_issuer_and_string_subject() {
+        use jsonwebtoken::{EncodingKey, Header, encode};
+
+        let provider = make_provider(
+            "https://issuer.example.com",
+            None,
+            Some(CachedJwks {
+                keys: Arc::new(vec![test_rsa_jwk("test-key-1")]),
+                fetched_at: Instant::now(),
+            }),
+        );
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some("test-key-1".to_owned());
+        let key = EncodingKey::from_rsa_pem(TEST_RSA_PEM.as_bytes()).expect("valid RSA PEM");
+        let valid = serde_json::json!({
+            "iss": "https://issuer.example.com",
+            "sub": "test-user",
+            "scope": "write",
+            "exp": 9999999999u64,
+        });
+
+        // All cases have a valid signature and expiry. Rejection must come
+        // from the identity claims rather than signature verification.
+        for (claim, invalid_value) in [
+            ("iss", None),
+            ("iss", Some(serde_json::json!("https://wrong.example.com"))),
+            ("iss", Some(serde_json::json!(42))),
+            ("sub", None),
+            ("sub", Some(serde_json::Value::Null)),
+            ("sub", Some(serde_json::json!(42))),
+            ("sub", Some(serde_json::json!(["test-user"]))),
+            ("sub", Some(serde_json::json!(""))),
+            ("sub", Some(serde_json::json!("  "))),
+        ] {
+            let mut claims = valid.clone();
+            let object = claims.as_object_mut().expect("claims object");
+            if let Some(value) = invalid_value {
+                object.insert(claim.to_owned(), value);
+            } else {
+                object.remove(claim);
+            }
+            let token = encode(&header, &claims, &key).expect("signed test token");
+            assert!(
+                provider.verify_token(&token).is_err(),
+                "must reject invalid {claim}: {claims}"
+            );
+        }
+
+        for subject in ["test-user", "anonymous", "subject with spaces", "δοκιμή"] {
+            let mut claims = valid.clone();
+            claims["sub"] = serde_json::json!(subject);
+            let token = encode(&header, &claims, &key).expect("signed test token");
+            let verified = provider.verify_token(&token).expect("valid identity");
+            assert_eq!(verified.subject(), subject);
+            assert_eq!(verified.repository().name(), subject);
+            assert_eq!(verified.scope(), TokenScope::Write);
         }
     }
 

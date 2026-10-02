@@ -1,4 +1,8 @@
-use std::{fs::File, path::Path};
+use std::{
+    fs::{File, TryLockError},
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use sha2::{Digest, Sha256};
 use shardline_index::ResourceLockKey;
@@ -156,27 +160,45 @@ async fn acquire_local(
     exclusive: bool,
 ) -> Result<MaintenanceBarrierGuard, ServerError> {
     let path = root.join(LOCAL_BARRIER_FILE_NAME);
-    tokio::task::spawn_blocking(move || {
+    let file = acquire_local_file_lock(path, exclusive).await?;
+    Ok(MaintenanceBarrierGuard::Local { file })
+}
+
+/// Waits cooperatively for the OS lock. Only opening the file uses a blocking
+/// worker: cancellation must not leave a worker waiting for another process to
+/// release its lock, or exhaust the blocking pool and prevent runtime shutdown.
+async fn acquire_local_file_lock(path: PathBuf, exclusive: bool) -> Result<File, ServerError> {
+    let file = tokio::task::spawn_blocking(move || {
         std::fs::create_dir_all(
             path.parent()
                 .ok_or_else(|| std::io::Error::other("maintenance lock has no parent"))?,
         )?;
-        let file = File::options()
+        File::options()
             .create(true)
             .truncate(false)
             .read(true)
             .write(true)
-            .open(path)?;
-        if exclusive {
-            file.lock()?;
-        } else {
-            file.lock_shared()?;
-        }
-        Ok::<_, std::io::Error>(MaintenanceBarrierGuard::Local { file })
+            .open(path)
     })
     .await
     .map_err(|error| ServerError::Io(std::io::Error::other(error)))?
-    .map_err(ServerError::Io)
+    .map_err(ServerError::Io)?;
+    let mut retry_delay = Duration::from_millis(10);
+    loop {
+        let result = if exclusive {
+            file.try_lock()
+        } else {
+            file.try_lock_shared()
+        };
+        match result {
+            Ok(()) => return Ok(file),
+            Err(TryLockError::WouldBlock) => {}
+            Err(TryLockError::Error(error)) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(TryLockError::Error(error)) => return Err(ServerError::Io(error)),
+        }
+        tokio::time::sleep(retry_delay).await;
+        retry_delay = retry_delay.saturating_mul(2).min(Duration::from_millis(50));
+    }
 }
 
 /// Acquires an exclusive application-resource lock through the shared local root.
@@ -191,23 +213,8 @@ pub(crate) async fn acquire_local_resource_exclusive(
     let path = root
         .join(LOCAL_RESOURCE_LOCK_DIR)
         .join(format!("{digest}.lock"));
-    tokio::task::spawn_blocking(move || {
-        std::fs::create_dir_all(
-            path.parent()
-                .ok_or_else(|| std::io::Error::other("resource lock has no parent"))?,
-        )?;
-        let file = File::options()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(path)?;
-        file.lock()?;
-        Ok::<_, std::io::Error>(ResourceWriteGuard::Local { file })
-    })
-    .await
-    .map_err(|error| ServerError::Io(std::io::Error::other(error)))?
-    .map_err(ServerError::Io)
+    let file = acquire_local_file_lock(path, true).await?;
+    Ok(ResourceWriteGuard::Local { file })
 }
 
 pub(crate) async fn acquire_postgres_shared(
@@ -305,6 +312,89 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+
+    #[test]
+    fn cancelled_local_lock_waits_leave_blocking_pool_and_shutdown_available() {
+        let storage = shardline_test_support::TempStorage::new();
+        let barrier_path = storage.path().join(LOCAL_BARRIER_FILE_NAME);
+        let resource_key = ResourceLockKey::oci_repository("global", "cancelled-waiter");
+        let resource_directory = storage.path().join(LOCAL_RESOURCE_LOCK_DIR);
+        std::fs::create_dir_all(&resource_directory).unwrap();
+        let resource_path =
+            resource_directory.join(format!("{}.lock", resource_lock_digest(&resource_key)));
+        let open_locked = |path| {
+            let file = File::options()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(path)
+                .unwrap();
+            file.lock().unwrap();
+            file
+        };
+        // Independent file handles model a GC/maintenance process that keeps
+        // owning its OS locks after HTTP request cancellation and shutdown.
+        let barrier_owner = open_locked(barrier_path);
+        let resource_owner = open_locked(resource_path);
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .max_blocking_threads(1)
+            .enable_time()
+            .build()
+            .unwrap();
+        let (shared_cancelled, exclusive_cancelled, resource_cancelled, unrelated_completed) =
+            runtime.block_on(async {
+                let deadline = Duration::from_millis(50);
+                let shared_cancelled =
+                    tokio::time::timeout(deadline, acquire_local_shared(storage.path()))
+                        .await
+                        .is_err();
+                let exclusive_cancelled =
+                    tokio::time::timeout(deadline, acquire_local_exclusive(storage.path()))
+                        .await
+                        .is_err();
+                let resource_cancelled = tokio::time::timeout(
+                    deadline,
+                    acquire_local_resource_exclusive(storage.path(), &resource_key),
+                )
+                .await
+                .is_err();
+                let unrelated_completed = matches!(
+                    tokio::time::timeout(
+                        Duration::from_secs(2),
+                        tokio::task::spawn_blocking(|| 42)
+                    )
+                    .await,
+                    Ok(Ok(42))
+                );
+                (
+                    shared_cancelled,
+                    exclusive_cancelled,
+                    resource_cancelled,
+                    unrelated_completed,
+                )
+            });
+        let (shutdown_tx, shutdown_rx) = std::sync::mpsc::channel();
+        let shutdown = std::thread::spawn(move || {
+            drop(runtime);
+            shutdown_tx.send(()).unwrap();
+        });
+        let shutdown_completed = shutdown_rx.recv_timeout(Duration::from_secs(2)).is_ok();
+        // Release before assertions so a regression cannot hang the test suite
+        // while waiting for the old detached blocking tasks to terminate.
+        drop((barrier_owner, resource_owner));
+        shutdown.join().unwrap();
+        assert!(shared_cancelled && exclusive_cancelled && resource_cancelled);
+        assert!(
+            unrelated_completed,
+            "cancelled lock waits exhausted the blocking pool"
+        );
+        assert!(
+            shutdown_completed,
+            "runtime shutdown waited for an externally held lock"
+        );
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn local_exclusive_waits_for_shared_guard() {

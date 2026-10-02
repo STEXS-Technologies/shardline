@@ -1314,7 +1314,32 @@ impl XorbBlock {
                     })
                     .await?;
                 ctx.xorb_fetch_count.fetch_add(1, Ordering::Relaxed);
+                // Chunk indices belong to this exact serialized byte range.
+                // A server that ignores Range must not relabel its first chunk
+                // as the requested starting chunk.
+                if ranged.served_range != self.bytes {
+                    return Err(SdxError::Transfer(TransferError::InvalidResponse(format!(
+                        "xorb served range {:?} does not match requested range {:?}",
+                        ranged.served_range, self.bytes
+                    ))));
+                }
                 let chunk_data = XorbReader::new(ranged.data).decode_chunk_data()?;
+                let expected_chunks = self
+                    .chunk_range
+                    .1
+                    .checked_sub(self.chunk_range.0)
+                    .ok_or_else(|| {
+                        SdxError::StreamInternal("inverted xorb chunk range".to_owned())
+                    })?;
+                let actual_chunks = u64::try_from(chunk_data.chunk_offsets.len().saturating_sub(1))
+                    .unwrap_or(u64::MAX);
+                if actual_chunks != expected_chunks {
+                    return Err(SdxError::FetchChunkCountMismatch {
+                        url: self.url.clone(),
+                        expected: expected_chunks,
+                        actual: actual_chunks,
+                    });
+                }
                 // Best-effort async cache put (mirror upstream `xorb_block.rs`
                 // `tokio::spawn` + warn); failures must not fail the download.
                 if let Some(cache) = &ctx.chunk_cache {
@@ -2176,6 +2201,7 @@ impl DownloadStream {
                     },
                     () = self.run_state.cancelled() => {
                         self.finished = true;
+                        self.run_state.check_error()?;
                         return Ok(None);
                     }
                 };
@@ -2944,13 +2970,13 @@ mod tests {
                 XORB_HASH: [{
                     "url": format!("{}/transfer/xorb/default/{XORB_HASH}", server.uri()),
                     "ranges": [
-                        {"chunks": {"start": 0, "end": 3}, "bytes": {"start": 0, "end": 300}}
+                        {"chunks": {"start": 0, "end": 3}, "bytes": {"start": 0, "end": payload.len() - 1}}
                     ]
                 }]
             }),
         )
         .await;
-        xorb_range_mock(&server, 0, 300, payload).await;
+        xorb_range_mock(&server, 0, (payload.len() - 1) as u64, payload).await;
 
         let ctx = test_stream_context(&server, 1_048_576);
         let (out, _sizes) = drain(make_stream(ctx, None)).await;
@@ -2980,13 +3006,13 @@ mod tests {
                 XORB_HASH: [{
                     "url": format!("{}/transfer/xorb/default/{XORB_HASH}", server.uri()),
                     "ranges": [
-                        {"chunks": {"start": 0, "end": 2}, "bytes": {"start": 0, "end": 200}}
+                        {"chunks": {"start": 0, "end": 2}, "bytes": {"start": 0, "end": payload.len() - 1}}
                     ]
                 }]
             }),
         )
         .await;
-        xorb_range_mock(&server, 0, 200, payload).await;
+        xorb_range_mock(&server, 0, (payload.len() - 1) as u64, payload).await;
 
         let dir = tempfile::tempdir().unwrap();
         let cache =
@@ -3017,6 +3043,116 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn streaming_xorb_rejects_full_body_for_nonzero_range() {
+        let server = MockServer::start().await;
+        let first = serialize_payload(&[b"AAAA"]);
+        let second = serialize_payload(&[b"BBBB"]);
+        let mut full = first.clone();
+        full.extend_from_slice(&second);
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(full.clone()))
+            .mount(&server)
+            .await;
+        let block = Arc::new(XorbBlock {
+            hash: XORB_HASH.to_owned(),
+            chunk_range: (1, 2),
+            url: server.uri(),
+            bytes: ByteRange::new(first.len() as u64, full.len() as u64 - 1),
+            data: OnceCell::new(),
+        });
+        let result = block
+            .clone()
+            .retrieve_data(&test_stream_context(&server, 1_048_576), READ_TOKEN)
+            .await;
+        assert!(matches!(
+            result,
+            Err(SdxError::Transfer(TransferError::InvalidResponse(_)))
+        ));
+        assert!(block.data.get().is_none());
+    }
+
+    #[tokio::test]
+    async fn download_stream_reports_incompatible_full_body_response() {
+        let server = MockServer::start().await;
+        let first = serialize_payload(&[b"AAAA"]);
+        let mut full = first.clone();
+        full.extend_from_slice(&serialize_payload(&[b"BBBB"]));
+        reconstruction_mock(&server, 0, 3, 0,
+            json!([{ "hash": XORB_HASH, "unpacked_length": 4, "range": {"start": 1, "end": 2}}]),
+            json!({XORB_HASH: [{ "url": format!("{}/xorb", server.uri()),
+                "ranges": [{"chunks": {"start": 1, "end": 2}, "bytes": {"start": first.len(), "end": full.len() - 1}}]
+            }]})).await;
+        Mock::given(method("GET"))
+            .and(path("/xorb"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(full))
+            .mount(&server)
+            .await;
+        let mut stream = make_stream(test_stream_context(&server, 1_048_576), Some(0..4));
+        assert!(matches!(
+            stream.next().await,
+            Err(SdxError::Transfer(TransferError::InvalidResponse(_)))
+        ));
+    }
+
+    #[tokio::test]
+    async fn streaming_xorb_rejects_unexpected_chunk_count_before_caching() {
+        let server = MockServer::start().await;
+        let full = serialize_payload(&[b"AAAA", b"BBBB"]);
+        let range = ByteRange::new(0, full.len() as u64 - 1);
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(206)
+                    .insert_header(
+                        "Content-Range",
+                        format!("bytes 0-{}/{}", range.end, full.len()),
+                    )
+                    .set_body_bytes(full),
+            )
+            .mount(&server)
+            .await;
+        let block = Arc::new(XorbBlock {
+            hash: XORB_HASH.to_owned(),
+            chunk_range: (1, 2),
+            url: server.uri(),
+            bytes: range,
+            data: OnceCell::new(),
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let cache =
+            Arc::new(crate::cache::ChunkCache::new(dir.path().to_path_buf(), 1 << 20).unwrap());
+        let mut ctx = test_stream_context(&server, 1_048_576);
+        ctx.chunk_cache = Some(cache.clone());
+        let result = block.retrieve_data(&ctx, READ_TOKEN).await;
+        assert!(matches!(
+            result,
+            Err(SdxError::FetchChunkCountMismatch {
+                expected: 1,
+                actual: 2,
+                ..
+            })
+        ));
+        assert_eq!(cache.entry_count().await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn download_stream_accepts_exact_full_body_response() {
+        let server = MockServer::start().await;
+        let payload = serialize_payload(&[b"AAAA", b"BBBB"]);
+        reconstruction_mock(&server, 0, 4095, 0,
+            json!([{ "hash": XORB_HASH, "unpacked_length": 8, "range": {"start": 0, "end": 2}}]),
+            json!({XORB_HASH: [{ "url": format!("{}/xorb", server.uri()),
+                "ranges": [{"chunks": {"start": 0, "end": 2}, "bytes": {"start": 0, "end": payload.len() - 1}}]
+            }]})).await;
+        Mock::given(method("GET"))
+            .and(path("/xorb"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(payload))
+            .mount(&server)
+            .await;
+        let (out, _) = drain(make_stream(test_stream_context(&server, 1_048_576), None)).await;
+        assert_eq!(out, b"AAAABBBB");
+    }
+
+    #[tokio::test]
     async fn download_stream_eof_after_last_chunk() {
         let server = MockServer::start().await;
         let chunk = vec![5u8; 64];
@@ -3034,13 +3170,13 @@ mod tests {
                 XORB_HASH: [{
                     "url": format!("{}/transfer/xorb/default/{XORB_HASH}", server.uri()),
                     "ranges": [
-                        {"chunks": {"start": 0, "end": 1}, "bytes": {"start": 0, "end": 100}}
+                        {"chunks": {"start": 0, "end": 1}, "bytes": {"start": 0, "end": payload.len() - 1}}
                     ]
                 }]
             }),
         )
         .await;
-        xorb_range_mock(&server, 0, 100, payload).await;
+        xorb_range_mock(&server, 0, (payload.len() - 1) as u64, payload).await;
 
         let ctx = test_stream_context(&server, 1_048_576);
         let mut stream = make_stream(ctx, None);
@@ -3081,13 +3217,13 @@ mod tests {
                 XORB_HASH: [{
                     "url": format!("{}/transfer/xorb/default/{XORB_HASH}", server.uri()),
                     "ranges": [
-                        {"chunks": {"start": 0, "end": 1}, "bytes": {"start": 0, "end": 100}}
+                        {"chunks": {"start": 0, "end": 1}, "bytes": {"start": 0, "end": payload.len() - 1}}
                     ]
                 }]
             }),
         )
         .await;
-        xorb_range_mock(&server, 0, 100, payload).await;
+        xorb_range_mock(&server, 0, (payload.len() - 1) as u64, payload).await;
 
         let ctx = test_stream_context(&server, 1_048_576);
         let (out, _sizes) = drain(make_stream(ctx, Some(16..64))).await;
@@ -3119,11 +3255,12 @@ mod tests {
                 })
             })
             .collect();
+        let serialized_chunk_length = serialize_payload(&[chunks[0].as_slice()]).len() as u64;
         let ranges: serde_json::Value = (0..32u64)
             .map(|i| {
                 json!({
                     "chunks": {"start": i, "end": i + 1},
-                    "bytes": {"start": i * 100, "end": i * 100 + 99}
+                    "bytes": {"start": i * serialized_chunk_length, "end": (i + 1) * serialized_chunk_length - 1}
                 })
             })
             .collect();
@@ -3144,8 +3281,8 @@ mod tests {
         .await;
         // One mock per distinct (byte range) request.
         for i in 0..32u64 {
-            let start = i * 100;
-            let end = start + 99;
+            let start = i * serialized_chunk_length;
+            let end = start + serialized_chunk_length - 1;
             let slice = serialize_payload(&[chunks[i as usize].as_slice()]);
             xorb_range_mock(&server, start, end, slice).await;
         }
@@ -3198,7 +3335,10 @@ mod tests {
         let server = MockServer::start().await;
         let chunk_a = vec![7u8; 64];
         let chunk_b = vec![9u8; 64];
-        let _payload = serialize_payload(&[&chunk_a, &chunk_b]);
+        let payload_a = serialize_payload(&[&chunk_a]);
+        let payload_b = serialize_payload(&[&chunk_b]);
+        let split = payload_a.len() as u64;
+        let final_byte = split + payload_b.len() as u64 - 1;
 
         reconstruction_mock(
             &server,
@@ -3213,15 +3353,15 @@ mod tests {
                 XORB_HASH: [{
                     "url": format!("{}/transfer/xorb/default/{XORB_HASH}", server.uri()),
                     "ranges": [
-                        {"chunks": {"start": 0, "end": 1}, "bytes": {"start": 0, "end": 99}},
-                        {"chunks": {"start": 1, "end": 2}, "bytes": {"start": 100, "end": 199}}
+                        {"chunks": {"start": 0, "end": 1}, "bytes": {"start": 0, "end": split - 1}},
+                        {"chunks": {"start": 1, "end": 2}, "bytes": {"start": split, "end": final_byte}}
                     ]
                 }]
             }),
         )
         .await;
-        xorb_range_mock(&server, 0, 99, serialize_payload(&[&chunk_a])).await;
-        xorb_range_mock(&server, 100, 199, serialize_payload(&[&chunk_b])).await;
+        xorb_range_mock(&server, 0, split - 1, payload_a).await;
+        xorb_range_mock(&server, split, final_byte, payload_b).await;
 
         let ctx = test_stream_context(&server, 1_048_576);
         let mut stream = make_unordered_stream(ctx, None);
@@ -3263,13 +3403,13 @@ mod tests {
                 XORB_HASH: [{
                     "url": format!("{}/transfer/xorb/default/{XORB_HASH}", server.uri()),
                     "ranges": [
-                        {"chunks": {"start": 0, "end": 2}, "bytes": {"start": 0, "end": 200}}
+                        {"chunks": {"start": 0, "end": 2}, "bytes": {"start": 0, "end": payload.len() - 1}}
                     ]
                 }]
             }),
         )
         .await;
-        xorb_range_mock(&server, 0, 200, payload).await;
+        xorb_range_mock(&server, 0, (payload.len() - 1) as u64, payload).await;
 
         let ctx = test_stream_context(&server, 1_048_576);
         let mut stream = make_stream(ctx, None);
@@ -3299,13 +3439,13 @@ mod tests {
                 XORB_HASH: [{
                     "url": format!("{}/transfer/xorb/default/{XORB_HASH}", server.uri()),
                     "ranges": [
-                        {"chunks": {"start": 0, "end": 1}, "bytes": {"start": 0, "end": 100}}
+                        {"chunks": {"start": 0, "end": 1}, "bytes": {"start": 0, "end": payload.len() - 1}}
                     ]
                 }]
             }),
         )
         .await;
-        xorb_range_mock(&server, 0, 100, payload).await;
+        xorb_range_mock(&server, 0, (payload.len() - 1) as u64, payload).await;
 
         let ctx = test_stream_context(&server, 1_048_576);
         let mut stream = make_stream(ctx, None);
@@ -3337,13 +3477,13 @@ mod tests {
                     XORB_HASH: [{
                         "url": format!("{}/transfer/xorb/default/{XORB_HASH}", server.uri()),
                         "ranges": [
-                            {"chunks": {"start": 0, "end": 1}, "bytes": {"start": 0, "end": 100}}
+                            {"chunks": {"start": 0, "end": 1}, "bytes": {"start": 0, "end": payload.len() - 1}}
                         ]
                     }]
                 }),
             )
             .await;
-            xorb_range_mock(&server, 0, 100, payload).await;
+            xorb_range_mock(&server, 0, (payload.len() - 1) as u64, payload).await;
             let ctx = test_stream_context(&server, 1_048_576);
             (server, make_stream(ctx, None))
         });
@@ -3381,7 +3521,7 @@ mod tests {
             XORB_HASH: [{
                 "url": format!("{}/transfer/xorb/default/{XORB_HASH}", full_server.uri()),
                 "ranges": [
-                    {"chunks": {"start": 0, "end": 2}, "bytes": {"start": 0, "end": 200}}
+                    {"chunks": {"start": 0, "end": 2}, "bytes": {"start": 0, "end": payload.len() - 1}}
                 ]
             }]
         });
@@ -3389,7 +3529,7 @@ mod tests {
             XORB_HASH: [{
                 "url": format!("{}/transfer/xorb/default/{XORB_HASH}", stream_server.uri()),
                 "ranges": [
-                    {"chunks": {"start": 0, "end": 2}, "bytes": {"start": 0, "end": 200}}
+                    {"chunks": {"start": 0, "end": 2}, "bytes": {"start": 0, "end": payload.len() - 1}}
                 ]
             }]
         });
@@ -3405,11 +3545,17 @@ mod tests {
             )))
             .mount(&full_server)
             .await;
-        xorb_range_mock(&full_server, 0, 200, payload.clone()).await;
+        xorb_range_mock(&full_server, 0, (payload.len() - 1) as u64, payload.clone()).await;
 
         // Streaming path uses the ranged request; map the prefetch range.
         reconstruction_mock(&stream_server, 0, 4095, 0, terms, stream_xorbs).await;
-        xorb_range_mock(&stream_server, 0, 200, payload.clone()).await;
+        xorb_range_mock(
+            &stream_server,
+            0,
+            (payload.len() - 1) as u64,
+            payload.clone(),
+        )
+        .await;
 
         let mut expected = chunk_a.clone();
         expected.extend_from_slice(&chunk_b);
@@ -3452,7 +3598,7 @@ mod tests {
                 XORB_HASH: [{
                     "url": format!("{}/transfer/xorb/default/{XORB_HASH}", server.uri()),
                     "ranges": [
-                        {"chunks": {"start": 0, "end": 1}, "bytes": {"start": 0, "end": 100}}
+                        {"chunks": {"start": 0, "end": 1}, "bytes": {"start": 0, "end": payload.len() - 1}}
                     ]
                 }]
             }),
