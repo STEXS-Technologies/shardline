@@ -6,13 +6,19 @@ use crate::{
     error::HubApiError,
     routes::{HubState, lfs_object_key},
 };
+use sha1::{Digest, Sha1};
 use shardline_index::hub::{HubFileEntry, HubRevision};
 use shardline_protocol::{ByteRange, ShardlineHash};
 use shardline_server_core::AuthorizedRepository;
 use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectStore};
 
 use super::super::pack::{GitObject, ObjectType, generate_pack};
-use super::{pack_parse::parse_pack_data, upload_pack::build_lfs_pointer_blob};
+#[cfg(test)]
+use super::pack_parse::parse_pack_data;
+use super::{pack_parse::parse_pack_data_with_budget, upload_pack::build_lfs_pointer_blob};
+
+/// Bound cumulative metadata work even when most Git objects deduplicate.
+const MAX_PROJECTED_FILE_ENTRIES: usize = 1_000_000;
 
 pub(super) struct GitProjection {
     pub(super) identities: HashMap<String, String>,
@@ -38,10 +44,22 @@ fn archive_key(
 }
 
 fn read_object(state: &HubState, key: &ObjectKey) -> Result<Option<Vec<u8>>, HubApiError> {
+    read_object_bounded(
+        state,
+        key,
+        super::limits::MAX_GIT_PROJECTED_BYTES.saturating_add(65536),
+    )
+}
+
+fn read_object_bounded(
+    state: &HubState,
+    key: &ObjectKey,
+    maximum_length: usize,
+) -> Result<Option<Vec<u8>>, HubApiError> {
     let Some(meta) = state.object_store.metadata(key).map_err(failure)? else {
         return Ok(None);
     };
-    if meta.length() > super::limits::MAX_GIT_PROJECTED_BYTES.saturating_add(65536) as u64 {
+    if meta.length() > maximum_length as u64 {
         return Err(failure("Git object exceeds pack memory limit"));
     }
     if meta.length() == 0 {
@@ -81,7 +99,8 @@ pub(super) fn archive_objects(
         let sha = hex::encode(object.sha1());
         let key = archive_key(repo_id, &sha, auth)?;
         if let Some(existing) = read_object(state, &key)? {
-            let parsed = parse_pack_data(&existing).map_err(failure)?;
+            let parsed = parse_pack_data_with_budget(&existing, &HashMap::new(), object.data.len())
+                .map_err(failure)?;
             let same = parsed.len() == 1
                 && parsed.first().is_some_and(|stored| {
                     stored.object_type == object.object_type && stored.data == object.data
@@ -104,10 +123,65 @@ pub(super) fn archive_objects(
     Ok(())
 }
 
+/// Synchronous storage/SQL adapters and Git hashing must not occupy Tokio's
+/// executor threads. The immutable read task may finish after cancellation.
+pub(super) async fn project_history_async(
+    state: HubState,
+    repo_id: String,
+    auth: AuthorizedRepository,
+) -> Result<GitProjection, HubApiError> {
+    tokio::task::spawn_blocking(move || project_history(&state, &repo_id, &auth))
+        .await
+        .map_err(failure)?
+}
+
+/// One shared quota across revisions. Charge unique objects when constructed,
+/// rather than after a complete revision has already been materialized.
+struct ProjectionBudget {
+    remaining_bytes: usize,
+    remaining_objects: usize,
+    seen: std::collections::HashSet<[u8; 20]>,
+}
+
+impl ProjectionBudget {
+    fn append(
+        &mut self,
+        objects: &mut Vec<GitObject>,
+        object: GitObject,
+    ) -> Result<[u8; 20], HubApiError> {
+        let sha = object.sha1();
+        if self.seen.contains(&sha) {
+            return Ok(sha);
+        }
+        let bytes = self
+            .remaining_bytes
+            .checked_sub(object.data.len())
+            .ok_or_else(|| failure("Git projection exceeds byte limit"))?;
+        let count = self
+            .remaining_objects
+            .checked_sub(1)
+            .ok_or_else(|| failure("Git projection exceeds object count limit"))?;
+        self.remaining_bytes = bytes;
+        self.remaining_objects = count;
+        self.seen.insert(sha);
+        objects.push(object);
+        Ok(sha)
+    }
+}
+
 pub(super) fn project_history(
     state: &HubState,
     repo_id: &str,
     auth: &AuthorizedRepository,
+) -> Result<GitProjection, HubApiError> {
+    project_history_with_file_budget(state, repo_id, auth, MAX_PROJECTED_FILE_ENTRIES)
+}
+
+fn project_history_with_file_budget(
+    state: &HubState,
+    repo_id: &str,
+    auth: &AuthorizedRepository,
+    maximum_file_entries: usize,
 ) -> Result<GitProjection, HubApiError> {
     let revisions = state
         .store
@@ -175,9 +249,14 @@ pub(super) fn project_history(
         identities: HashMap::new(),
         objects: Vec::new(),
     };
-    let mut seen = std::collections::HashSet::new();
+    let mut budget = ProjectionBudget {
+        remaining_bytes: super::limits::MAX_GIT_PROJECTED_BYTES,
+        remaining_objects: 100_000,
+        seen: std::collections::HashSet::new(),
+    };
     let mut blob_cache = HashMap::new();
-    let mut total_bytes = 0usize;
+    let mut tree_cache = HashMap::new();
+    let mut remaining_files = maximum_file_entries;
     for sha in ordered {
         let revision = revisions
             .remove(&sha)
@@ -188,15 +267,8 @@ pub(super) fn project_history(
             .filter(|p| projection.identities.contains_key(*p));
         let objects =
             if let Some(bytes) = read_object(state, &archive_key(repo_id, &revision.sha, auth)?)? {
-                let objects = load_archived_graph(
-                    state,
-                    repo_id,
-                    &revision.sha,
-                    bytes,
-                    auth,
-                    &seen,
-                    super::limits::MAX_GIT_PROJECTED_BYTES.saturating_sub(total_bytes),
-                )?;
+                let objects =
+                    load_archived_graph(state, repo_id, &revision.sha, bytes, auth, &mut budget)?;
                 projection
                     .identities
                     .insert(revision.sha.clone(), revision.sha.clone());
@@ -212,8 +284,11 @@ pub(super) fn project_history(
                 let parent_sha = parent.and_then(|p| projection.identities.get(p));
                 let files = state
                     .store
-                    .get_files_bounded(&revision.sha, 100_000)
+                    .get_files_bounded(&revision.sha, remaining_files.min(100_000))
                     .map_err(failure)?;
+                remaining_files = remaining_files
+                    .checked_sub(files.len())
+                    .ok_or_else(|| failure("Git projection exceeds cumulative file entry limit"))?;
                 let objects = project_revision(
                     state,
                     &revision,
@@ -221,7 +296,8 @@ pub(super) fn project_history(
                     parent_sha,
                     auth,
                     &mut blob_cache,
-                    super::limits::MAX_GIT_PROJECTED_BYTES.saturating_sub(total_bytes),
+                    &mut tree_cache,
+                    &mut budget,
                 )?;
                 let commit = objects
                     .last()
@@ -231,19 +307,7 @@ pub(super) fn project_history(
                     .insert(revision.sha.clone(), hex::encode(commit.sha1()));
                 objects
             };
-        for object in objects {
-            if seen.insert(object.sha1()) {
-                total_bytes = total_bytes
-                    .checked_add(object.data.len())
-                    .ok_or_else(|| failure("Git pack size overflow"))?;
-                if total_bytes > super::limits::MAX_GIT_PROJECTED_BYTES
-                    || projection.objects.len() >= 100_000
-                {
-                    return Err(failure("Git projection exceeds pack object limits"));
-                }
-                projection.objects.push(object);
-            }
-        }
+        projection.objects.extend(objects);
     }
     Ok(projection)
 }
@@ -254,22 +318,25 @@ fn load_archived_graph(
     commit_sha: &str,
     commit_bytes: Vec<u8>,
     auth: &AuthorizedRepository,
-    existing: &std::collections::HashSet<[u8; 20]>,
-    remaining_bytes: usize,
+    budget: &mut ProjectionBudget,
 ) -> Result<Vec<GitObject>, HubApiError> {
     let mut pending = vec![(commit_sha.to_owned(), Some(commit_bytes))];
     let mut visited = std::collections::HashSet::new();
+    let mut discovered = std::collections::HashSet::from([commit_sha.to_owned()]);
+    let maximum_objects = budget.remaining_objects;
     let mut objects = Vec::new();
-    let mut total_bytes = 0usize;
     while let Some((sha, bytes)) = pending.pop() {
         let raw_sha: [u8; 20] = hex::decode(&sha)
             .map_err(failure)?
             .try_into()
             .map_err(|_invalid_length| failure("invalid archived Git object ID"))?;
-        if existing.contains(&raw_sha) || !visited.insert(raw_sha) {
+        if budget.seen.contains(&raw_sha) || !visited.insert(raw_sha) {
             continue;
         }
         if visited.len() > 100_000 {
+            return Err(failure("Git archive exceeds object count limit"));
+        }
+        if budget.remaining_objects == 0 {
             return Err(failure("Git archive exceeds object count limit"));
         }
         let bytes = match bytes {
@@ -277,7 +344,9 @@ fn load_archived_graph(
             None => read_object(state, &archive_key(repo_id, &sha, auth)?)?
                 .ok_or_else(|| failure("missing archived Git object"))?,
         };
-        let mut parsed = parse_pack_data(&bytes).map_err(failure)?;
+        let mut parsed =
+            parse_pack_data_with_budget(&bytes, &HashMap::new(), budget.remaining_bytes)
+                .map_err(failure)?;
         if parsed.len() != 1 {
             return Err(failure("Git archive must contain one object"));
         }
@@ -285,16 +354,23 @@ fn load_archived_graph(
         if object.sha1() != raw_sha {
             return Err(failure("archived Git object identity mismatch"));
         }
-        total_bytes = total_bytes
-            .checked_add(object.data.len())
-            .ok_or_else(|| failure("Git archive size overflow"))?;
-        if total_bytes > remaining_bytes {
-            return Err(failure("Git archive exceeds byte limit"));
-        }
         for child in object_children(&object)? {
+            let child_sha: [u8; 20] = hex::decode(&child)
+                .map_err(failure)?
+                .try_into()
+                .map_err(|_invalid_length| failure("invalid archived Git child ID"))?;
+            if budget.seen.contains(&child_sha)
+                || visited.contains(&child_sha)
+                || !discovered.insert(child.clone())
+            {
+                continue;
+            }
+            if discovered.len() > maximum_objects {
+                return Err(failure("Git archive exceeds pending object count limit"));
+            }
             pending.push((child, None));
         }
-        objects.push(object);
+        budget.append(&mut objects, object)?;
     }
     Ok(objects)
 }
@@ -310,6 +386,9 @@ fn object_children(object: &GitObject) -> Result<Vec<String>, HubApiError> {
                     .strip_prefix("tree ")
                     .or_else(|| line.strip_prefix("parent "))
                 {
+                    if children.len() >= 100_000 {
+                        return Err(failure("Git archive exceeds child count limit"));
+                    }
                     children.push(sha.to_owned());
                 }
             }
@@ -332,6 +411,9 @@ fn object_children(object: &GitObject) -> Result<Vec<String>, HubApiError> {
                     .ok_or_else(|| failure("truncated archived Git tree"))?;
                 // Submodule commits belong to another repository; Git packs don't include them.
                 if !entry.starts_with(b"160000 ") {
+                    if children.len() >= 100_000 {
+                        return Err(failure("Git archive exceeds child count limit"));
+                    }
                     children.push(hex::encode(sha));
                 }
                 data = tail
@@ -355,15 +437,18 @@ fn project_revision(
     parent: Option<&String>,
     auth: &AuthorizedRepository,
     cache: &mut HashMap<(String, u64, bool), [u8; 20]>,
-    remaining_bytes: usize,
+    tree_cache: &mut HashMap<[u8; 32], [u8; 20]>,
+    budget: &mut ProjectionBudget,
 ) -> Result<Vec<GitObject>, HubApiError> {
     if files.len() > 100_000 {
         return Err(failure("Git tree exceeds file count limit"));
     }
-    let mut available = remaining_bytes;
     let mut blobs = BTreeMap::new();
     let mut objects = Vec::new();
     for file in files {
+        if file.path.len() > 1024 {
+            return Err(failure("Git tree path exceeds maximum length"));
+        }
         if file.path.split('/').count() > 128 {
             return Err(failure("Git tree nesting exceeds maximum depth"));
         }
@@ -377,14 +462,14 @@ fn project_revision(
         } else {
             usize::try_from(file.size).map_err(failure)?
         };
-        available = available
-            .checked_sub(expected_size)
-            .ok_or_else(|| failure("Git inline content exceeds projection byte limit"))?;
+        if expected_size > budget.remaining_bytes {
+            return Err(failure("Git inline content exceeds projection byte limit"));
+        }
         let blob = if file.is_lfs {
             build_lfs_pointer_blob(&file.sha, file.size)
         } else {
             let key = lfs_object_key(&file.sha, auth)?;
-            let bytes = read_object(state, &key)?
+            let bytes = read_object_bounded(state, &key, expected_size)?
                 .ok_or_else(|| failure(format!("missing inline content: {}", file.path)))?;
             if bytes.len() as u64 != file.size {
                 return Err(failure("inline content length mismatch"));
@@ -397,61 +482,162 @@ fn project_revision(
         let sha = blob.sha1();
         cache.insert(cache_key, sha);
         blobs.insert(file.path.clone(), sha);
-        objects.push(blob);
+        budget.append(&mut objects, blob)?;
     }
-    let root = build_tree(&blobs, &mut objects)?;
-    let mut data = format!("tree {}\n", hex::encode(root));
+    let mut fingerprint = blake3::Hasher::new();
+    fingerprint.update(b"shardline-git-projected-tree-v1\0");
+    for (path, sha) in &blobs {
+        fingerprint.update(&(path.len() as u64).to_le_bytes());
+        fingerprint.update(path.as_bytes());
+        fingerprint.update(sha);
+    }
+    let fingerprint = *fingerprint.finalize().as_bytes();
+    let root = if let Some(sha) = tree_cache.get(&fingerprint) {
+        *sha
+    } else {
+        let root = build_tree(&blobs, &mut objects, budget)?;
+        tree_cache.insert(fingerprint, root);
+        root
+    };
+    let mut data = BoundedCommit {
+        text: String::new(),
+        limit: budget.remaining_bytes,
+    };
+    use std::fmt::Write;
+    writeln!(&mut data, "tree {}", hex::encode(root)).map_err(failure)?;
     if let Some(parent) = parent {
-        use std::fmt::Write;
         writeln!(&mut data, "parent {parent}").map_err(failure)?;
     }
-    use std::fmt::Write;
     writeln!(&mut data, "author Shardline Hub <hub@shardline.dev> {} +0000\ncommitter Shardline Hub <hub@shardline.dev> {} +0000\n\n{}\n\nShardline-Revision: {}\nShardline-Repository: {}", revision.created_at_unix_seconds, revision.created_at_unix_seconds, revision.message.as_deref().unwrap_or(""), revision.sha, revision.repo_id).map_err(failure)?;
-    objects.push(GitObject::commit(data.into_bytes()));
+    budget.append(&mut objects, GitObject::commit(data.text.into_bytes()))?;
     Ok(objects)
+}
+
+/// Formatting commit metadata also obeys the quota before growing a buffer.
+struct BoundedCommit {
+    text: String,
+    limit: usize,
+}
+
+impl std::fmt::Write for BoundedCommit {
+    fn write_str(&mut self, text: &str) -> std::fmt::Result {
+        if text.len() > self.limit.saturating_sub(self.text.len()) {
+            return Err(std::fmt::Error);
+        }
+        self.text.push_str(text);
+        Ok(())
+    }
 }
 
 fn build_tree(
     files: &BTreeMap<String, [u8; 20]>,
     objects: &mut Vec<GitObject>,
+    budget: &mut ProjectionBudget,
+) -> Result<[u8; 20], HubApiError> {
+    // Keep one borrowed, sorted file list. Cloning remaining path maps at each
+    // directory level retains O(file_count * depth * path_length) memory.
+    let files: Vec<_> = files
+        .iter()
+        .map(|(path, sha)| (path.as_str(), *sha))
+        .collect();
+    build_tree_slice(&files, 0, objects, budget)
+}
+
+fn build_tree_slice(
+    files: &[(&str, [u8; 20])],
+    prefix_length: usize,
+    objects: &mut Vec<GitObject>,
+    budget: &mut ProjectionBudget,
 ) -> Result<[u8; 20], HubApiError> {
     let mut entries = Vec::new();
-    let mut directories: BTreeMap<String, BTreeMap<String, [u8; 20]>> = BTreeMap::new();
-    for (path, sha) in files {
-        if let Some((dir, relative)) = path.split_once('/') {
-            directories
-                .entry(dir.to_owned())
-                .or_default()
-                .insert(relative.to_owned(), *sha);
+    let mut names = std::collections::HashSet::new();
+    let mut offset = 0usize;
+    while let Some((path, sha)) = files.get(offset) {
+        let relative = path
+            .get(prefix_length..)
+            .ok_or_else(|| failure("invalid Git tree path"))?;
+        if let Some((directory, _)) = relative.split_once('/') {
+            if !names.insert(directory) {
+                return Err(failure("Git tree has file/directory path conflict"));
+            }
+            let mut end = offset.saturating_add(1);
+            while let Some((candidate, _)) = files.get(end) {
+                let candidate = candidate
+                    .get(prefix_length..)
+                    .ok_or_else(|| failure("invalid Git tree path"))?;
+                if candidate.split_once('/').map(|(dir, _)| dir) != Some(directory) {
+                    break;
+                }
+                end = end.saturating_add(1);
+            }
+            let children = files
+                .get(offset..end)
+                .ok_or_else(|| failure("invalid Git tree range"))?;
+            let child = build_tree_slice(
+                children,
+                prefix_length
+                    .saturating_add(directory.len())
+                    .saturating_add(1),
+                objects,
+                budget,
+            )?;
+            entries.push((directory, true, child));
+            offset = end;
         } else {
-            entries.push((path.clone(), false, *sha));
+            if !names.insert(relative) {
+                return Err(failure("Git tree has duplicate path"));
+            }
+            entries.push((relative, false, *sha));
+            offset = offset.saturating_add(1);
         }
     }
-    for (dir, children) in directories {
-        if files.contains_key(&dir) {
-            return Err(failure("Git tree has file/directory path conflict"));
-        }
-        entries.push((dir, true, build_tree(&children, objects)?));
-    }
-    // Git compares tree names as though directories end in '/'.
-    entries.sort_by_key(|(name, dir, _)| {
-        if *dir {
-            format!("{name}/")
-        } else {
-            name.clone()
-        }
+    // Git compares tree names as though directories end in '/'. Compare
+    // iterators directly to avoid allocating strings in every sort comparison.
+    entries.sort_by(|(left, left_dir, _), (right, right_dir, _)| {
+        left.bytes()
+            .chain(left_dir.then_some(b'/'))
+            .cmp(right.bytes().chain(right_dir.then_some(b'/')))
     });
-    let mut bytes = Vec::new();
+    let length = entries
+        .iter()
+        .try_fold(0usize, |length, (name, dir, _)| {
+            length
+                .checked_add(name.len())
+                .and_then(|value| value.checked_add(if *dir { 27 } else { 28 }))
+        })
+        .ok_or_else(|| failure("Git tree size overflow"))?;
+    // Hash the borrowed tree entries before allocating. Shared subtrees can
+    // be reused even when their size exceeds the remaining *new* byte quota.
+    let mut digest = Sha1::new();
+    digest.update(format!("tree {length}\0").as_bytes());
+    for (name, dir, sha) in &entries {
+        digest.update(if *dir {
+            b"40000 ".as_slice()
+        } else {
+            b"100644 ".as_slice()
+        });
+        digest.update(name.as_bytes());
+        digest.update([0]);
+        digest.update(sha);
+    }
+    let tree_sha: [u8; 20] = digest.finalize().into();
+    if budget.seen.contains(&tree_sha) {
+        return Ok(tree_sha);
+    }
+    if length > budget.remaining_bytes {
+        return Err(failure("Git tree exceeds byte limit"));
+    }
+    if budget.remaining_objects == 0 {
+        return Err(failure("Git tree exceeds object count limit"));
+    }
+    let mut bytes = Vec::with_capacity(length);
     for (name, dir, sha) in entries {
         bytes.extend_from_slice(if dir { b"40000 " } else { b"100644 " });
         bytes.extend_from_slice(name.as_bytes());
         bytes.push(0);
         bytes.extend_from_slice(&sha);
     }
-    let tree = GitObject::tree(bytes);
-    let sha = tree.sha1();
-    objects.push(tree);
-    Ok(sha)
+    budget.append(objects, GitObject::tree(bytes))
 }
 
 #[cfg(test)]
@@ -461,6 +647,14 @@ mod tests {
     use super::*;
     use shardline_protocol::{RepositoryProvider, RepositoryScope, TokenClaims, TokenScope};
     use shardline_server_core::{AuthProvider, LocalHmacProvider};
+
+    fn test_budget(bytes: usize, objects: usize) -> ProjectionBudget {
+        ProjectionBudget {
+            remaining_bytes: bytes,
+            remaining_objects: objects,
+            seen: std::collections::HashSet::new(),
+        }
+    }
 
     fn capability(provider_kind: RepositoryProvider) -> AuthorizedRepository {
         let provider = LocalHmacProvider::new(b"test-signing-key-32-bytes-long!!").unwrap();
@@ -561,7 +755,8 @@ mod tests {
             None,
             &auth,
             &mut HashMap::new(),
-            super::super::limits::MAX_GIT_PROJECTED_BYTES,
+            &mut HashMap::new(),
+            &mut test_budget(super::super::limits::MAX_GIT_PROJECTED_BYTES, 100_000),
         )
         .unwrap();
         revision.ref_name = "refs/tags/v1".to_owned();
@@ -572,9 +767,201 @@ mod tests {
             None,
             &auth,
             &mut HashMap::new(),
-            super::super::limits::MAX_GIT_PROJECTED_BYTES,
+            &mut HashMap::new(),
+            &mut test_budget(super::super::limits::MAX_GIT_PROJECTED_BYTES, 100_000),
         )
         .unwrap();
         assert_eq!(main.last().unwrap().sha1(), tag.last().unwrap().sha1());
+    }
+    fn revision(sha: &str) -> HubRevision {
+        HubRevision {
+            repo_id: "alice/repo".to_owned(),
+            ref_name: "main".to_owned(),
+            sha: sha.to_owned(),
+            parent_sha: None,
+            message: Some("message".to_owned()),
+            created_at_unix_seconds: 42,
+        }
+    }
+
+    #[test]
+    fn tree_materialization_stops_at_object_quota() {
+        let files: BTreeMap<_, _> = (0..100)
+            .map(|index| (format!("directory-{index:03}/deep/file"), [index as u8; 20]))
+            .collect();
+        let mut objects = Vec::new();
+        let mut budget = test_budget(usize::MAX, 5);
+        assert!(build_tree(&files, &mut objects, &mut budget).is_err());
+        assert_eq!(
+            objects.len(),
+            5,
+            "fail while constructing, before materializing all directories"
+        );
+        assert_eq!(budget.remaining_objects, 0);
+    }
+
+    #[test]
+    fn empty_revision_still_obeys_payload_budget() {
+        let (_temp, state) = super::super::tests::make_hub_state();
+        let auth = AuthorizedRepository::anonymous_full_access();
+        assert!(
+            project_revision(
+                &state,
+                &revision(&"a".repeat(64)),
+                &[],
+                None,
+                &auth,
+                &mut HashMap::new(),
+                &mut HashMap::new(),
+                &mut test_budget(1, 100)
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn unchanged_deep_tree_reuses_objects_without_charging_twice() {
+        let (_temp, state) = super::super::tests::make_hub_state();
+        let auth = AuthorizedRepository::anonymous_full_access();
+        let files = vec![HubFileEntry {
+            path: "nested/deeper/file".to_owned(),
+            sha: "a".repeat(64),
+            size: 123,
+            is_lfs: true,
+        }];
+        let mut blobs = HashMap::new();
+        let mut trees = HashMap::new();
+        let mut budget = test_budget(4096, 6);
+        let first = project_revision(
+            &state,
+            &revision(&"b".repeat(64)),
+            &files,
+            None,
+            &auth,
+            &mut blobs,
+            &mut trees,
+            &mut budget,
+        )
+        .unwrap();
+        assert_eq!(first.len(), 5);
+        let parent = hex::encode(first.last().unwrap().sha1());
+        let second = project_revision(
+            &state,
+            &revision(&"c".repeat(64)),
+            &files,
+            Some(&parent),
+            &auth,
+            &mut blobs,
+            &mut trees,
+            &mut budget,
+        )
+        .unwrap();
+        assert_eq!(second.len(), 1, "unchanged blobs and tree must be reused");
+        assert_eq!(budget.remaining_objects, 0);
+        assert_eq!(trees.len(), 1);
+    }
+
+    #[test]
+    fn cumulative_file_quota_is_enforced_before_decoding_next_tree() {
+        let (_temp, state) = super::super::tests::make_hub_state();
+        state
+            .store
+            .create_repo(
+                shardline_index::hub::HubRepoType::Model,
+                "alice/repo",
+                false,
+            )
+            .unwrap();
+        let files: Vec<_> = (0..2)
+            .map(|index| HubFileEntry {
+                path: format!("file{index}"),
+                sha: "a".repeat(64),
+                size: 0,
+                is_lfs: true,
+            })
+            .collect();
+        let mut parent = "4b825dc642cb6eb9a060e54bf899d69f8f5ce8e3".to_owned();
+        for sha in ["b".repeat(64), "c".repeat(64)] {
+            state.store.store_files(&sha, &files).unwrap();
+            state
+                .store
+                .create_revision("alice/repo", Some(&parent), &sha, "main", "unchanged")
+                .unwrap();
+            parent = sha;
+        }
+        let auth = AuthorizedRepository::anonymous_full_access();
+        assert!(project_history_with_file_budget(&state, "alice/repo", &auth, 3).is_err());
+        assert!(project_history_with_file_budget(&state, "alice/repo", &auth, 4).is_ok());
+    }
+
+    #[test]
+    fn inline_read_rejects_inconsistent_length_before_body_access() {
+        let (_temp, state) = super::super::tests::make_hub_state();
+        let key = ObjectKey::parse("hub/oversized-inline").unwrap();
+        let bytes = vec![0x5a; 4096];
+        let integrity = ObjectIntegrity::new(
+            ShardlineHash::from_bytes(*blake3::hash(&bytes).as_bytes()),
+            bytes.len() as u64,
+        );
+        state
+            .object_store
+            .put_if_absent(&key, ObjectBody::from_slice(&bytes), &integrity)
+            .unwrap();
+        assert!(read_object_bounded(&state, &key, 1).is_err());
+        assert_eq!(
+            read_object_bounded(&state, &key, bytes.len())
+                .unwrap()
+                .unwrap(),
+            bytes
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn blocked_metadata_read_does_not_stall_executor() {
+        let (temp, state) = super::super::tests::make_hub_state();
+        state
+            .store
+            .create_repo(
+                shardline_index::hub::HubRepoType::Model,
+                "alice/repo",
+                false,
+            )
+            .unwrap();
+        let database = temp.path().join("metadata.sqlite3");
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let connection = rusqlite::Connection::open(database).unwrap();
+            connection
+                .execute_batch("PRAGMA journal_mode=DELETE; BEGIN EXCLUSIVE;")
+                .unwrap();
+            ready_tx.send(()).unwrap();
+            // Watchdog lets a regressed synchronous handler return so the test
+            // reports a failure rather than hanging the entire test process.
+            let _ = release_rx.recv_timeout(std::time::Duration::from_secs(3));
+            connection.execute_batch("COMMIT;").unwrap();
+        });
+        ready_rx.recv().unwrap();
+        let started = std::time::Instant::now();
+        let state_for_refs = state.clone();
+        let refs = tokio::spawn(async move {
+            super::super::ref_advertisement::collect_refs(&state_for_refs, "alice/repo").await
+        });
+        let projection = tokio::spawn(project_history_async(
+            state,
+            "alice/repo".to_owned(),
+            AuthorizedRepository::anonymous_full_access(),
+        ));
+        tokio::task::yield_now().await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let elapsed = started.elapsed();
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
+        projection.await.unwrap().unwrap();
+        refs.await.unwrap().unwrap();
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "blocked storage must leave the async timer runnable: {elapsed:?}"
+        );
     }
 }

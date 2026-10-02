@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use axum::{
     body::Body,
@@ -15,7 +15,7 @@ use shardline_server_core::AuthorizedRepository;
 use crate::{
     ServerError,
     oci_adapter::{OciReference, oci_manifest_location, parse_reference},
-    protocol_support::{parse_sha256_digest, scope_namespace},
+    protocol_support::{parse_sha256_digest, scope_namespace, validate_oci_tag},
     upload_ingest::{RequestBodyReader, read_body_to_bytes},
 };
 
@@ -95,10 +95,24 @@ pub(crate) async fn oci_put_manifest(
 ) -> Result<Response, ServerError> {
     let repository = repo.repository();
     let auth = repo.capability();
+    // Reject all request references before immutable bytes become visible.
+    let reference = parse_reference(reference)?;
+    let mut accepted_tags = match &reference {
+        OciReference::Tag(tag) => vec![tag.clone()],
+        OciReference::Digest(_) => Vec::new(),
+    };
+    accepted_tags.extend(parse_query_values(uri, "tag")?);
+    if accepted_tags.len() > super::super::MAX_OCI_MANIFEST_TAGS {
+        return Err(ServerError::InvalidManifestReference);
+    }
+    for tag in &accepted_tags {
+        validate_oci_tag(tag)?;
+    }
+    accepted_tags.sort();
+    accepted_tags.dedup();
     let mut body = RequestBodyReader::from_body(body, state.config.max_request_body_bytes())?;
     let bytes = read_body_to_bytes(&mut body).await?;
     let digest_hex = hex::encode(Sha256::digest(&bytes));
-    let reference = parse_reference(reference)?;
     if let OciReference::Digest(reference_digest) = &reference
         && reference_digest != &digest_hex
     {
@@ -131,16 +145,6 @@ pub(crate) async fn oci_put_manifest(
         .backend
         .put_object_bytes_if_absent(&media_type_key, media_type.clone().into_bytes())
         .await?;
-    let mut accepted_tags = match reference {
-        OciReference::Tag(tag) => vec![tag],
-        OciReference::Digest(_) => Vec::new(),
-    };
-    accepted_tags.extend(parse_query_values(uri, "tag")?);
-    if accepted_tags.len() > super::super::MAX_OCI_MANIFEST_TAGS {
-        return Err(ServerError::InvalidManifestReference);
-    }
-    accepted_tags.sort();
-    accepted_tags.dedup();
     update_oci_tags(
         state,
         &mut repository_guard,
@@ -273,16 +277,24 @@ async fn validate_oci_image_manifest_document(
     let config = document
         .get("config")
         .ok_or(ServerError::InvalidManifestReference)?;
-    let config_digest_hex = validate_oci_descriptor(config)?;
-    ensure_oci_blob_exists(state, repository, auth, &config_digest_hex).await?;
+    let (config_digest_hex, config_size) = validate_oci_descriptor(config)?;
+    ensure_oci_blob_exists(state, repository, auth, &config_digest_hex, config_size).await?;
+    let mut verified_sizes = HashMap::from([(config_digest_hex, config_size)]);
 
     let layers = document
         .get("layers")
         .and_then(Value::as_array)
         .ok_or(ServerError::InvalidManifestReference)?;
     for layer in layers {
-        let digest_hex = validate_oci_descriptor(layer)?;
-        ensure_oci_blob_exists(state, repository, auth, &digest_hex).await?;
+        let (digest_hex, size) = validate_oci_descriptor(layer)?;
+        if let Some(verified_size) = verified_sizes.get(&digest_hex) {
+            if *verified_size != size {
+                return Err(ServerError::InvalidManifestReference);
+            }
+        } else {
+            ensure_oci_blob_exists(state, repository, auth, &digest_hex, size).await?;
+            verified_sizes.insert(digest_hex, size);
+        }
     }
 
     Ok(())
@@ -298,15 +310,23 @@ async fn validate_oci_image_index_document(
         .get("manifests")
         .and_then(Value::as_array)
         .ok_or(ServerError::InvalidManifestReference)?;
+    let mut verified_sizes = HashMap::new();
     for manifest in manifests {
-        let digest_hex = validate_oci_descriptor(manifest)?;
-        ensure_oci_manifest_exists(state, repository, auth, &digest_hex).await?;
+        let (digest_hex, size) = validate_oci_descriptor(manifest)?;
+        if let Some(verified_size) = verified_sizes.get(&digest_hex) {
+            if *verified_size != size {
+                return Err(ServerError::InvalidManifestReference);
+            }
+        } else {
+            ensure_oci_manifest_exists(state, repository, auth, &digest_hex, size).await?;
+            verified_sizes.insert(digest_hex, size);
+        }
     }
 
     Ok(())
 }
 
-fn validate_oci_descriptor(descriptor: &Value) -> Result<String, ServerError> {
+fn validate_oci_descriptor(descriptor: &Value) -> Result<(String, u64), ServerError> {
     let descriptor = descriptor
         .as_object()
         .ok_or(ServerError::InvalidManifestReference)?;
@@ -315,7 +335,7 @@ fn validate_oci_descriptor(descriptor: &Value) -> Result<String, ServerError> {
         .and_then(Value::as_str)
         .ok_or(ServerError::InvalidManifestReference)?;
     let digest_hex = parse_sha256_digest(digest)?;
-    let _size = descriptor
+    let size = descriptor
         .get("size")
         .and_then(Value::as_u64)
         .ok_or(ServerError::InvalidManifestReference)?;
@@ -325,7 +345,7 @@ fn validate_oci_descriptor(descriptor: &Value) -> Result<String, ServerError> {
     {
         return Err(ServerError::InvalidManifestReference);
     }
-    Ok(digest_hex)
+    Ok((digest_hex, size))
 }
 
 async fn ensure_oci_blob_exists(
@@ -333,6 +353,7 @@ async fn ensure_oci_blob_exists(
     repository: &str,
     auth: &AuthorizedRepository,
     digest_hex: &str,
+    expected_size: u64,
 ) -> Result<(), ServerError> {
     if state
         .backend
@@ -343,7 +364,8 @@ async fn ensure_oci_blob_exists(
     }
     let object_key = oci_blob_key(repository, digest_hex, auth)?;
     match state.backend.object_length(&object_key).await {
-        Ok(_length) => Ok(()),
+        Ok(length) if length == expected_size => Ok(()),
+        Ok(_) => Err(ServerError::InvalidManifestReference),
         Err(ServerError::NotFound) => Err(ServerError::InvalidManifestReference),
         Err(error) => Err(error),
     }
@@ -354,6 +376,7 @@ async fn ensure_oci_manifest_exists(
     repository: &str,
     auth: &AuthorizedRepository,
     digest_hex: &str,
+    expected_size: u64,
 ) -> Result<(), ServerError> {
     if state
         .backend
@@ -364,7 +387,8 @@ async fn ensure_oci_manifest_exists(
     }
     let object_key = oci_manifest_key(repository, digest_hex, auth)?;
     match state.backend.object_length(&object_key).await {
-        Ok(_length) => Ok(()),
+        Ok(length) if length == expected_size => Ok(()),
+        Ok(_) => Err(ServerError::InvalidManifestReference),
         Err(ServerError::NotFound) => Err(ServerError::InvalidManifestReference),
         Err(error) => Err(error),
     }
@@ -511,7 +535,7 @@ mod tests {
         let result = validate_oci_descriptor(&desc);
         assert!(result.is_ok());
         assert_eq!(
-            result.unwrap(),
+            result.unwrap().0,
             "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
         );
     }

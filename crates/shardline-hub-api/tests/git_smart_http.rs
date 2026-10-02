@@ -592,8 +592,8 @@ async fn receive_pack_push() {
 
     let body = collect_body_bytes(response).await;
     let body_str = String::from_utf8(body).unwrap();
-    assert!(body_str.contains("unpack ok"));
-    // Pushes are rejected because Git object storage is not implemented.
+    assert!(body_str.contains("unpack failed"));
+    // A new, unknown commit requires an actual valid pack.
     assert!(
         body_str.contains("ng refs/heads/main"),
         "expected push rejection, got: {body_str}"
@@ -1150,9 +1150,13 @@ async fn receive_pack_stores_lfs_objects() {
     );
 
     // Build a commit containing an LFS pointer blob.
-    let lfs_oid = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-    let lfs_pointer =
-        format!("version https://git-lfs.github.com/spec/v1\noid sha256:{lfs_oid}\nsize 1234\n");
+    use sha2::Digest;
+    let payload = b"actual LFS payload";
+    let lfs_oid = hex::encode(sha2::Sha256::digest(payload));
+    let lfs_pointer = format!(
+        "version https://git-lfs.github.com/spec/v1\noid sha256:{lfs_oid}\nsize {}\n",
+        payload.len()
+    );
 
     let lfs_blob = create_blob_object(lfs_pointer.as_bytes());
     let lfs_blob_sha = lfs_blob.sha1();
@@ -1176,7 +1180,13 @@ async fn receive_pack_stores_lfs_objects() {
     );
     let commit_sha = commit.sha1();
 
-    let objects = vec![lfs_blob, readme_blob, tree, commit];
+    let objects = vec![
+        lfs_blob,
+        create_blob_object(payload),
+        readme_blob,
+        tree,
+        commit,
+    ];
     let null_sha = "0000000000000000000000000000000000000000";
     let body = build_receive_pack_with_objects(null_sha, "refs/heads/main", &objects, &commit_sha);
 
@@ -1217,15 +1227,7 @@ async fn receive_pack_stores_lfs_objects() {
     let range_end = meta.length().saturating_sub(1);
     let range = shardline_protocol::ByteRange::new(0, range_end).unwrap();
     let data = state.object_store.read_range(&key, range).unwrap();
-    let data_str = String::from_utf8_lossy(&data);
-    assert!(
-        data_str.contains("version https://git-lfs.github.com/spec/v1"),
-        "stored LFS object should be the pointer blob content: {data_str}"
-    );
-    assert!(
-        data_str.contains(lfs_oid),
-        "stored LFS object should contain the OID: {data_str}"
-    );
+    assert_eq!(data, payload);
 }
 
 // ---- Pack parsing helper ----

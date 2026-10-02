@@ -17,13 +17,13 @@ fn test_manifest_json(config_digest: &str, layer_digest: &str) -> String {
         "mediaType": "application/vnd.oci.image.manifest.v1+json",
         "config": {
             "mediaType": "application/vnd.oci.image.config.v1+json",
-            "size": 0,
+            "size": 2,
             "digest": format!("sha256:{config_digest}")
         },
         "layers": [
             {
                 "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
-                "size": 0,
+                "size": 4,
                 "digest": format!("sha256:{layer_digest}")
             }
         ]
@@ -850,13 +850,13 @@ async fn manifest_put_with_subject_accepted() {
         },
         "config": {
             "mediaType": "application/vnd.oci.image.config.v1+json",
-            "size": 0,
+            "size": 2,
             "digest": format!("sha256:{config_digest}")
         },
         "layers": [
             {
                 "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
-                "size": 0,
+                "size": 4,
                 "digest": format!("sha256:{layer_digest}")
             }
         ]
@@ -873,11 +873,7 @@ async fn manifest_put_with_subject_accepted() {
     .await;
     // The spec says a manifest with a subject MUST be accepted even if the
     // subject manifest doesn't exist. But the config and layers must exist.
-    assert!(
-        response.status() == StatusCode::CREATED || response.status() == StatusCode::BAD_REQUEST,
-        "unexpected status: {}",
-        response.status()
-    );
+    assert_eq!(response.status(), StatusCode::CREATED);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -926,13 +922,13 @@ async fn manifest_put_wrong_media_type_in_document_rejected() {
         "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
         "config": {
             "mediaType": "application/vnd.oci.image.config.v1+json",
-            "size": 0,
+            "size": 2,
             "digest": format!("sha256:{config_digest}")
         },
         "layers": [
             {
                 "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
-                "size": 0,
+                "size": 4,
                 "digest": format!("sha256:{layer_digest}")
             }
         ]
@@ -967,13 +963,13 @@ async fn manifest_put_unknown_media_type_rejected() {
         "mediaType": "application/vnd.unknown.type",
         "config": {
             "mediaType": "application/vnd.oci.image.config.v1+json",
-            "size": 0,
+            "size": 2,
             "digest": format!("sha256:{config_digest}")
         },
         "layers": [
             {
                 "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
-                "size": 0,
+                "size": 4,
                 "digest": format!("sha256:{layer_digest}")
             }
         ]
@@ -1063,4 +1059,223 @@ async fn blob_get_missing_returns_not_found() {
     let uri = format!("/v2/{REPO}/blobs/sha256:{DIGEST}");
     let response = send(&app, Method::GET, &uri, Body::empty()).await;
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+async fn assert_manifest_integrity_and_rejection(
+    state: &std::sync::Arc<crate::AppState>,
+    repository: &str,
+) {
+    let app = &oci_test_router(state);
+    let auth = shardline_server_core::AuthorizedRepository::anonymous_full_access();
+    let blob = b"{}";
+    let digest = upload_blob(app, repository, blob).await;
+    let valid = serde_json::json!({"schemaVersion": 2, "config": {"digest": format!("sha256:{digest}"), "size": blob.len()}, "layers": []});
+    for (i, suffix) in [
+        "?tag=bad%2Ftag".to_owned(),
+        format!(
+            "?{}",
+            (0..129)
+                .map(|n| format!("tag=t{n}"))
+                .collect::<Vec<_>>()
+                .join("&")
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut document = valid.clone();
+        document["annotations"] = serde_json::json!({"case": i.to_string()});
+        let bytes = serde_json::to_vec(&document).unwrap();
+        let sha = sha256_hex(&bytes);
+        let response = send_with_content_type(
+            app,
+            Method::PUT,
+            &format!("/v2/{repository}/manifests/rejected{suffix}"),
+            Body::from(bytes),
+            MANIFEST_MEDIA_TYPE,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let response = send(
+            app,
+            Method::GET,
+            &format!("/v2/{repository}/manifests/sha256:{sha}"),
+            Body::empty(),
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "rejected manifest became digest-readable"
+        );
+        for key in [
+            super::helpers::oci_manifest_key(repository, &sha, &auth).unwrap(),
+            super::helpers::oci_manifest_media_type_key(repository, &sha, &auth).unwrap(),
+        ] {
+            assert!(
+                matches!(
+                    state.backend.object_length(&key).await,
+                    Err(crate::ServerError::NotFound)
+                ),
+                "rejected request wrote immutable object {key:?}"
+            );
+        }
+        let response = send(
+            app,
+            Method::GET,
+            &format!("/v2/{repository}/tags/list"),
+            Body::empty(),
+        )
+        .await;
+        let bytes = axum::body::to_bytes(response.into_body(), 65536)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["tags"],
+            serde_json::json!([])
+        );
+    }
+    for field in ["config", "layers"] {
+        let mut document = valid.clone();
+        let incorrect = serde_json::json!({"digest": format!("sha256:{digest}"), "size": blob.len().checked_add(1).unwrap()});
+        if field == "config" {
+            document["config"] = incorrect;
+        } else {
+            document["layers"] = serde_json::json!([incorrect]);
+        }
+        let bytes = serde_json::to_vec(&document).unwrap();
+        let sha = sha256_hex(&bytes);
+        assert_eq!(
+            send_with_content_type(
+                app,
+                Method::PUT,
+                &format!("/v2/{repository}/manifests/bad-size"),
+                Body::from(bytes),
+                MANIFEST_MEDIA_TYPE
+            )
+            .await
+            .status(),
+            StatusCode::BAD_REQUEST,
+            "incorrect {field} size accepted"
+        );
+        assert_eq!(
+            send(
+                app,
+                Method::GET,
+                &format!("/v2/{repository}/manifests/sha256:{sha}"),
+                Body::empty()
+            )
+            .await
+            .status(),
+            StatusCode::NOT_FOUND
+        );
+    }
+    // Repeated descriptors use the previously verified length, including the
+    // config-to-layer case. A conflicting duplicate must still be rejected.
+    for extra in [0, 1] {
+        let mut repeated = valid.clone();
+        let descriptor =
+            serde_json::json!({"digest": format!("sha256:{digest}"), "size": blob.len()});
+        repeated["layers"] = serde_json::json!(vec![descriptor; 1024]);
+        repeated["layers"][1023]["size"] =
+            serde_json::json!(blob.len().checked_add(extra).unwrap());
+        assert_eq!(
+            send_with_content_type(
+                app,
+                Method::PUT,
+                &format!("/v2/{repository}/manifests/repeated"),
+                Body::from(repeated.to_string()),
+                MANIFEST_MEDIA_TYPE
+            )
+            .await
+            .status(),
+            if extra == 0 {
+                StatusCode::CREATED
+            } else {
+                StatusCode::BAD_REQUEST
+            }
+        );
+    }
+    let bytes = serde_json::to_vec(&valid).unwrap();
+    let sha = sha256_hex(&bytes);
+    assert_eq!(
+        send_with_content_type(
+            app,
+            Method::PUT,
+            &format!("/v2/{repository}/manifests/valid"),
+            Body::from(bytes.clone()),
+            MANIFEST_MEDIA_TYPE
+        )
+        .await
+        .status(),
+        StatusCode::CREATED
+    );
+    for extra in [1, 0] {
+        let index = serde_json::json!({"schemaVersion": 2, "manifests": [{"digest": format!("sha256:{sha}"), "size": bytes.len()}, {"digest": format!("sha256:{sha}"), "size": bytes.len().checked_add(extra).unwrap()}]});
+        let response = send_with_content_type(
+            app,
+            Method::PUT,
+            &format!("/v2/{repository}/manifests/index"),
+            Body::from(index.to_string()),
+            "application/vnd.oci.image.index.v1+json",
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            if extra == 0 {
+                StatusCode::CREATED
+            } else {
+                StatusCode::BAD_REQUEST
+            }
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn manifest_integrity_and_rejection_local() {
+    let ctx = build_oci_test_state().await;
+    assert_manifest_integrity_and_rejection(&ctx.state, "integrity/local").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn manifest_integrity_and_rejection_postgres() {
+    let Ok(database_url) = std::env::var("DATABASE_URL") else {
+        return;
+    };
+    let pool = sqlx::PgPool::connect(&database_url)
+        .await
+        .expect("configured PostgreSQL must connect");
+    crate::apply_database_migrations(&pool)
+        .await
+        .expect("apply migrations");
+    pool.close().await;
+    let cluster = build_oci_postgres_test_cluster()
+        .await
+        .expect("configured PostgreSQL cluster must initialize");
+    let run_id = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let repository = format!("integrity/postgres-{}-{run_id}", std::process::id());
+    assert_manifest_integrity_and_rejection(&cluster.node_a, &repository).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn manifest_wrong_config_size_rejected() {
+    let ctx = build_oci_test_state().await;
+    let app = oci_test_router(&ctx.state);
+    let digest = upload_blob(&app, "integrity/config", b"{}").await;
+    let document = serde_json::json!({"schemaVersion": 2, "config": {"digest": format!("sha256:{digest}"), "size": 3}, "layers": []});
+    assert_eq!(
+        send_with_content_type(
+            &app,
+            Method::PUT,
+            "/v2/integrity/config/manifests/latest",
+            Body::from(document.to_string()),
+            MANIFEST_MEDIA_TYPE
+        )
+        .await
+        .status(),
+        StatusCode::BAD_REQUEST
+    );
 }

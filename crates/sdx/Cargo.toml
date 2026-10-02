@@ -54,6 +54,15 @@ toml.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time"] }
 url.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+shardline-storage.workspace = true
+
+[target.'cfg(not(unix))'.dependencies]
+tempfile.workspace = true
+
+[target.'cfg(unix)'.dev-dependencies]
+shardline-storage = { workspace = true, features = ["test-fault-injection"] }
+
 [dev-dependencies]
 axum.workspace = true
 bytes.workspace = true

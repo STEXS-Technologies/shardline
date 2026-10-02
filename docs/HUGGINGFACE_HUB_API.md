@@ -76,12 +76,31 @@ Existing `.gitattributes` files are preserved; include LFS tracking rules in you
 repository when Git LFS checkout is required.
 
 Git export is bounded to 10,000 history revisions, 10,000 references, 100,000
-unique objects, 128 tree levels, and 64 MiB of unique uncompressed object payload.
-Requests exceeding these bounds fail explicitly. Compression and HTTP framing
-retain additional bounded buffers. Inline bytes are loaded once per unique
-content identity during an export. Archived Git objects are deduplicated and
+unique objects, 128 tree levels, 1,024 bytes per projected path, 1,000,000
+cumulative file entries across projected revisions, and 64 MiB of unique
+uncompressed object payload. Requests exceeding these bounds fail explicitly.
+File-entry quotas are applied in SQL before decoding the next revision. Object
+quotas are enforced during construction and archive decompression. Compression
+and HTTP framing retain additional bounded buffers. Inline bytes are loaded once
+per unique content identity during an export; unchanged trees reuse their
+previously constructed objects. Tree construction borrows paths instead of
+cloning complete file maps at every directory level. Git projection, reference collection, pack compression and push parsing run on
+Tokio blocking threads so those storage waits and CPU operations leave the async
+executor runnable. Push metadata and object publication stay in the request
+handler to preserve the server maintenance guard during mutation. Canceling a request does not cancel already running
+blocking work. Archived Git objects are deduplicated and
 excluded from ordinary chunk GC, like Hub inline objects. Deleting a repository
 removes its metadata and refs; archived bytes remain retained.
+
+New Git pushes accept regular files and directories. Symlinks, submodules and
+other unsupported modes are rejected because Hub file metadata cannot represent
+them faithfully. Existing archived Git objects retain their original modes on
+export. Unsafe, reserved or duplicate tree names are rejected; push traversal
+is bounded to 100,000 expanded entries, 128 levels and 64 MiB of aggregate path
+bytes. LFS pointers require one lowercase 64-hex SHA-256 OID and one size field.
+Their payload must match both the SHA-256 and size, either in the push or already
+uploaded to the authorized repository. Missing or mismatched payloads fail before
+the new tree or reference is published.
 
 Historical short Hub revision IDs that require recovery are not exported. A
 recovered revision starts Git history at that recovery boundary. Historical Git

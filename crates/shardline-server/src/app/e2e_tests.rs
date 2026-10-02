@@ -5331,19 +5331,24 @@ async fn bazel_invalid_hash_returns_error() {
 const OCI_TEST_REPO: &str = "team/assets";
 
 /// A minimal OCI image manifest JSON for testing.
-fn test_manifest_json(config_digest: &str, layer_digest: &str) -> String {
+fn test_manifest_json(
+    config_digest: &str,
+    layer_digest: &str,
+    config_size: usize,
+    layer_size: usize,
+) -> String {
     json!({
         "schemaVersion": 2,
         "mediaType": "application/vnd.oci.image.manifest.v1+json",
         "config": {
             "mediaType": "application/vnd.oci.image.config.v1+json",
-            "size": 0,
+            "size": config_size,
             "digest": format!("sha256:{config_digest}")
         },
         "layers": [
             {
                 "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
-                "size": 0,
+                "size": layer_size,
                 "digest": format!("sha256:{layer_digest}")
             }
         ]
@@ -5385,7 +5390,12 @@ async fn oci_setup_manifest(app: &Router, repository: &str, tag: &str) -> String
     let config_digest = oci_upload_blob(app, repository, config_data).await;
     let layer_digest = oci_upload_blob(app, repository, layer_data).await;
 
-    let manifest_json = test_manifest_json(&config_digest, &layer_digest);
+    let manifest_json = test_manifest_json(
+        &config_digest,
+        &layer_digest,
+        config_data.len(),
+        layer_data.len(),
+    );
     let manifest_bytes = manifest_json.as_bytes();
     let manifest_digest = sha256_hex(manifest_bytes);
 

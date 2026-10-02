@@ -12,10 +12,9 @@ use super::super::pack::{GitObject, ObjectType};
 use super::super::pktline::{self, FLUSH};
 use super::MAX_RECEIVE_PACK_REQUEST_BYTES;
 use super::error::SmartHttpError;
-use super::pack_parse::parse_pack_data_with_bases;
+use super::pack_parse::parse_pack_data_with_budget;
 use super::ref_advertisement::{authorize_write_with_context, is_valid_refname, resolve_repo_id};
 use super::tree_walk::{parse_commit_object, walk_git_tree};
-use super::upload_pack::build_lfs_pointer_blob;
 use crate::{
     error::HubApiError,
     routes::{HubState, lfs_object_key, require_repository_binding},
@@ -57,7 +56,8 @@ pub async fn receive_pack(
         .map_err(|error| {
             HubApiError::BadRequest(format!("receive-pack request too large: {error}"))
         })?;
-    let (updates, pack_data) = parse_receive_pack_request(&body);
+    let (updates, packed_tail) = parse_receive_pack_request(&body);
+    let pack_start = body.len().saturating_sub(packed_tail.len());
 
     let updates: Vec<_> = updates
         .into_iter()
@@ -68,44 +68,67 @@ pub async fn receive_pack(
         return build_report_response(&[], true);
     }
 
-    let projection = super::projection::project_history(&state, &repo_id, &capability)?;
-    let bases: HashMap<_, _> = projection
-        .objects
-        .iter()
-        .map(|object| (object.sha1(), object))
-        .collect();
-    let has_object_updates = updates
-        .iter()
-        .any(|(_, new_sha, _)| new_sha != "0000000000000000000000000000000000000000");
-    let mut objects = if has_object_updates {
-        match parse_pack_data_with_bases(pack_data, &bases) {
-            Ok(objects) => objects,
-            Err(e) => {
-                tracing::warn!("failed to parse receive-pack data: {e}");
-                return build_report_response(
-                    &updates
-                        .into_iter()
-                        .map(|(_, _, refname)| (refname, false, Some("unpack failed".to_owned())))
-                        .collect::<Vec<_>>(),
-                    false,
-                );
+    let projection = super::projection::project_history_async(
+        state.clone(),
+        repo_id.clone(),
+        capability.clone(),
+    )
+    .await?;
+    let new_ids: Vec<_> = updates.iter().map(|(_, sha, _)| sha.clone()).collect();
+    // Only read-only projection and pack processing run outside this future.
+    // Mutations below remain synchronous so cancellation cannot release the
+    // server's maintenance barrier while a detached storage write continues.
+    let (identities, objects) = tokio::task::spawn_blocking(move || {
+        let bases: HashMap<_, _> = projection
+            .objects
+            .iter()
+            .map(|object| (object.sha1(), object))
+            .collect();
+        let base_ids: std::collections::HashSet<_> = bases.keys().map(hex::encode).collect();
+        let pack_data = body.get(pack_start..).unwrap_or(&[]);
+        let has_updates = new_ids
+            .iter()
+            .any(|sha| sha != "0000000000000000000000000000000000000000");
+        let parsed = if !has_updates
+            || (pack_data.is_empty()
+                && new_ids.iter().all(|sha| {
+                    sha == "0000000000000000000000000000000000000000" || base_ids.contains(sha)
+                })) {
+            Ok(Vec::new())
+        } else {
+            parse_pack_data_with_budget(pack_data, &bases, super::limits::MAX_GIT_PROJECTED_BYTES)
+        };
+        let parsed = parsed.map(|mut objects| {
+            let mut seen: std::collections::HashSet<_> =
+                objects.iter().map(GitObject::sha1).collect();
+            for object in projection.objects {
+                if seen.insert(object.sha1()) {
+                    objects.push(object);
+                }
             }
+            objects
+        });
+        (projection.identities, parsed)
+    })
+    .await
+    .map_err(|e| HubApiError::BadRequest(format!("pack worker failed: {e}")))?;
+    let objects = match objects {
+        Ok(objects) => objects,
+        Err(e) => {
+            tracing::warn!("failed to parse receive-pack data: {e}");
+            return build_report_response(
+                &updates
+                    .into_iter()
+                    .map(|(_, _, refname)| (refname, false, Some("unpack failed".to_owned())))
+                    .collect::<Vec<_>>(),
+                false,
+            );
         }
-    } else {
-        Vec::new()
     };
-
-    let mut seen: std::collections::HashSet<_> = objects.iter().map(GitObject::sha1).collect();
-    for object in projection.objects {
-        if seen.insert(object.sha1()) {
-            objects.push(object);
-        }
-    }
     let mut results = Vec::new();
 
     for (old_sha, new_sha, refname) in &updates {
-        let resolved_old = projection
-            .identities
+        let resolved_old = identities
             .iter()
             .find_map(|(hub, git)| (git == old_sha).then(|| hub.clone()))
             .unwrap_or_else(|| old_sha.clone());
@@ -121,7 +144,6 @@ pub async fn receive_pack(
                 &objects,
                 &capability,
             )
-            .await
         };
         match result {
             Ok(()) => results.push((refname.clone(), true, None)),
@@ -182,7 +204,7 @@ pub(super) fn parse_receive_pack_request(body: &[u8]) -> (Vec<(String, String, S
     (updates, pack_data)
 }
 
-async fn store_push_objects(
+fn store_push_objects(
     state: &HubState,
     repo_id: &str,
     old_sha: &str,
@@ -260,12 +282,6 @@ async fn store_push_objects(
         Some(old_sha)
     };
 
-    // Store file entries for this commit.
-    state
-        .store
-        .store_files(new_sha, &files)
-        .map_err(|e| SmartHttpError::StoreFiles(e.to_string()))?;
-
     // Build an O(1) index of blob content (keyed by its sha256, the LFS OID)
     // once, before resolving any per-file LFS content. This avoids re-hashing
     // every pack blob for every LFS file (previously O(files × blobs)). The map
@@ -275,6 +291,68 @@ async fn store_push_objects(
         .filter(|obj| obj.object_type == ObjectType::Blob)
         .map(|obj| (content_sha256(&obj.data), obj))
         .collect();
+
+    // A pointer is metadata, never payload. Validate all referenced LFS
+    // payloads before persisting this tree or any inline content.
+    let mut validated_lfs = HashMap::new();
+    for file in files.iter().filter(|file| file.is_lfs) {
+        if let Some(previous_size) = validated_lfs.insert(&file.sha, file.size) {
+            if previous_size != file.size {
+                return Err(SmartHttpError::StoreLfsObject(
+                    "inconsistent LFS sizes".to_owned(),
+                ));
+            }
+            continue;
+        }
+        let key = lfs_object_key(&file.sha, auth)
+            .map_err(|e| SmartHttpError::StoreLfsObject(e.to_string()))?;
+        let existing = state
+            .object_store
+            .metadata(&key)
+            .map_err(|e| SmartHttpError::StoreLfsObject(e.to_string()))?;
+        if let Some(metadata) = existing {
+            if metadata.length() != file.size {
+                return Err(SmartHttpError::StoreLfsObject(
+                    "LFS size mismatch".to_owned(),
+                ));
+            }
+            use sha2::Digest;
+            let mut digest = sha2::Sha256::new();
+            let mut offset = 0;
+            while offset < file.size {
+                let end = offset.saturating_add(1024 * 1024).min(file.size);
+                let range = shardline_protocol::ByteRange::new(offset, end.saturating_sub(1))
+                    .map_err(|e| SmartHttpError::StoreLfsObject(e.to_string()))?;
+                let chunk = state
+                    .object_store
+                    .read_range(&key, range)
+                    .map_err(|e| SmartHttpError::StoreLfsObject(e.to_string()))?;
+                if chunk.len() as u64 != end.saturating_sub(offset) {
+                    return Err(SmartHttpError::StoreLfsObject(
+                        "truncated LFS payload".to_owned(),
+                    ));
+                }
+                digest.update(&chunk);
+                offset = end;
+            }
+            if hex::encode(digest.finalize()) != file.sha {
+                return Err(SmartHttpError::StoreLfsObject(
+                    "LFS digest mismatch".to_owned(),
+                ));
+            }
+        } else {
+            let blob = find_lfs_blob(file, &sha_to_obj, &content_by_sha256)
+                .ok_or_else(|| SmartHttpError::LfsContentNotFoundInPack(file.sha.clone()))?;
+            let integrity = ObjectIntegrity::new(
+                ShardlineHash::from_bytes(*blake3::hash(&blob.data).as_bytes()),
+                file.size,
+            );
+            state
+                .object_store
+                .put_if_absent(&key, ObjectBody::from_slice(&blob.data), &integrity)
+                .map_err(|e| SmartHttpError::StoreLfsObject(e.to_string()))?;
+        }
+    }
 
     // Keep inline bytes available to both Hub resolve and later NDJSON edits.
     // Exact Git packs retain modes/authorship; this shared CAS retains content.
@@ -299,31 +377,10 @@ async fn store_push_objects(
             .map_err(|e| SmartHttpError::StoreLfsObject(e.to_string()))?;
     }
 
-    // Store LFS objects that were included in the pack.
-    // LFS pointer blobs only contain metadata; the actual file content is
-    // uploaded separately via PUT /lfs/objects/{oid}.  If the client bundled
-    // the real content as a blob (e.g. for small files), store it via
-    // ObjectStore rather than Postgres BYTEA.
-    for file in &files {
-        if file.is_lfs {
-            // Find the object whose content should be stored for this file.
-            // See `find_lfs_blob` for how the canonical pointer and the actual
-            // content object are matched (including non-canonical pointers).
-            let blob_obj = find_lfs_blob(file, &sha_to_obj, &content_by_sha256)
-                .ok_or_else(|| SmartHttpError::LfsContentNotFoundInPack(file.sha.clone()))?;
-            let key = lfs_object_key(&file.sha, auth)
-                .map_err(|e| SmartHttpError::StoreLfsObject(e.to_string()))?;
-            let object_body = ObjectBody::from_slice(&blob_obj.data);
-            let integrity = ObjectIntegrity::new(
-                ShardlineHash::from_bytes(*blake3::hash(&blob_obj.data).as_bytes()),
-                blob_obj.data.len() as u64,
-            );
-            state
-                .object_store
-                .put_if_absent(&key, object_body, &integrity)
-                .map_err(|e| SmartHttpError::StoreLfsObject(e.to_string()))?;
-        }
-    }
+    state
+        .store
+        .store_files(new_sha, &files)
+        .map_err(|e| SmartHttpError::StoreFiles(e.to_string()))?;
 
     super::projection::archive_objects(state, repo_id, new_sha, objects, auth)
         .map_err(|e| SmartHttpError::StoreFiles(e.to_string()))?;
@@ -337,29 +394,16 @@ async fn store_push_objects(
     Ok(())
 }
 
-/// Finds the pack object whose content should be stored for an LFS file.
-///
-/// The canonical LFS pointer blob (exactly as produced by
-/// [`build_lfs_pointer_blob`]) is matched by its git SHA1 first, preserving the
-/// historical fast path. A pointer may however be non-canonical — CRLF line
-/// endings, extra fields, reordered attributes — in which case its git SHA1
-/// differs from the canonical pointer and the exact-SHA lookup misses. Rather
-/// than silently dropping the LFS payload, we then look up the prebuilt
-/// `content_by_sha256` index for any blob whose sha256 content equals the
-/// file's OID (`file.sha`), which is the real content the LFS pointer
-/// references. This is an O(1) lookup instead of a per-file scan of every pack
-/// blob. Returns `None` if no matching object exists at all.
+/// Finds actual payload by SHA256 and size; pointer bytes are never content.
 pub(super) fn find_lfs_blob<'obj>(
     file: &HubFileEntry,
-    sha_to_obj: &HashMap<[u8; 20], &'obj GitObject>,
+    _sha_to_obj: &HashMap<[u8; 20], &'obj GitObject>,
     content_by_sha256: &HashMap<String, &'obj GitObject>,
 ) -> Option<&'obj GitObject> {
-    let pointer_blob = build_lfs_pointer_blob(&file.sha, file.size);
-    let pointer_sha = pointer_blob.sha1();
-    if let Some(blob_obj) = sha_to_obj.get(&pointer_sha) {
-        return Some(*blob_obj);
-    }
-    content_by_sha256.get(&file.sha).copied()
+    content_by_sha256
+        .get(&file.sha)
+        .copied()
+        .filter(|blob| blob.data.len() as u64 == file.size)
 }
 
 /// Computes the lowercase hex sha256 of `data` (the LFS OID format).

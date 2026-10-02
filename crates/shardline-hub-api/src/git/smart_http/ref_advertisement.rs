@@ -95,6 +95,14 @@ pub(super) async fn collect_refs(
     state: &HubState,
     repo_id: &str,
 ) -> Result<Vec<GitRef>, HubApiError> {
+    let owned_state = state.clone();
+    let owned_repo_id = repo_id.to_owned();
+    tokio::task::spawn_blocking(move || collect_refs_sync(&owned_state, &owned_repo_id))
+        .await
+        .map_err(|error| HubApiError::CasError(error.to_string()))?
+}
+
+fn collect_refs_sync(state: &HubState, repo_id: &str) -> Result<Vec<GitRef>, HubApiError> {
     let store_refs = state
         .store
         .list_refs_bounded(repo_id, 10_000)
@@ -196,7 +204,9 @@ pub async fn info_refs(
         )?,
         None => shardline_server_core::AuthorizedRepository::anonymous_full_access(),
     };
-    let projection = super::projection::project_history(&state, &repo_id, &capability)?;
+    let projection =
+        super::projection::project_history_async(state.clone(), repo_id.clone(), capability)
+            .await?;
     let mut refs = collect_refs(&state, &repo_id).await?;
     for git_ref in &mut refs {
         if let Some(sha) = projection.identities.get(&git_ref.sha1) {
