@@ -2806,11 +2806,11 @@ async fn s3_upload_part_exceeding_session_quota_returns_error() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn s3_listing_max_keys_zero_and_multi_char_delimiter_are_400() {
+async fn s3_listing_negative_max_keys_and_multi_char_delimiter_are_400() {
     let (state, _tmp) = build_test_state().await;
     let app = s3_router(state);
 
-    for query in ["list-type=2&max-keys=0", "list-type=2&delimiter=%2F%2F"] {
+    for query in ["list-type=2&max-keys=-1", "list-type=2&delimiter=%2F%2F"] {
         let list = app
             .clone()
             .oneshot(
