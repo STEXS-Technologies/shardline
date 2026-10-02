@@ -9,6 +9,9 @@ if [[ ! -x "${binary_path}" ]]; then
   exit 1
 fi
 
+release_smoke_dir="$(mktemp -d)"
+trap 'rm -rf -- "${release_smoke_dir}"' EXIT
+
 "${binary_path}" --help >/dev/null
-"${binary_path}" manpage --output /tmp/shardline.1
-"${binary_path}" completion bash --output /tmp/shardline.bash
+"${binary_path}" manpage --output "${release_smoke_dir}/shardline.1"
+"${binary_path}" completion bash --output "${release_smoke_dir}/shardline.bash"
