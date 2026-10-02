@@ -3155,6 +3155,53 @@ async fn s3_delete_objects_invalid_keys_yield_per_key_errors_and_valid_keys_dele
     );
 }
 
+#[tokio::test]
+async fn s3_delete_objects_invalid_key_errors_keep_xml_representable() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state);
+    seed_object(&app, "xml-good.txt").await;
+    let response = app
+        .clone()
+        .oneshot(delete_objects_request(
+            format!("/{BUCKET}?delete="),
+            "<Delete><Object><Key>xml-good.txt</Key></Object><Object><Key>bad&#13;key</Key></Object><Object><Key>bad\u{7}key</Key></Object></Delete>".to_owned(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let xml = String::from_utf8(body_bytes(response).await).unwrap();
+    assert_eq!(xml.matches("<Deleted>").count(), 1);
+    assert_eq!(xml.matches("<Error>").count(), 2);
+    assert!(xml.contains("<Key>bad&#13;key</Key>"));
+    assert!(!xml.contains(['\r', '\u{7}']));
+    assert_eq!(
+        object_status(&app, "xml-good.txt").await,
+        StatusCode::NOT_FOUND
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_missing_key_error_omits_xml_invalid_unicode() {
+    let (state, _tmp) = build_test_state().await;
+    let request = Request::builder()
+        .method("GET")
+        .uri(format!(
+            "/{BUCKET}/bad%EF%BF%BE%EF%BF%BF%EF%BF%BD%F0%90%80%80"
+        ))
+        .header(
+            header::AUTHORIZATION,
+            sigv4_auth(&mint_token(TokenScope::Read, OWNER, NAME)),
+        )
+        .body(Body::empty())
+        .unwrap();
+    let response = s3_router(state).oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let xml = String::from_utf8(body_bytes(response).await).unwrap();
+    assert!(!xml.contains(['\u{fffe}', '\u{ffff}']));
+    assert!(xml.contains("<Code>NoSuchKey</Code>"));
+    assert!(xml.contains("bad\u{fffd}\u{10000}</Message>"));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn s3_delete_objects_entity_encoded_key_is_decoded_and_deleted() {
     // F-113: a client XML-escapes a key containing `&` in the body — the
@@ -4884,4 +4931,163 @@ async fn s3_metadata_durable_object_request_semantics() {
     assert_s3_metadata_directive_rejection_preserves_destination_and_retry(&app).await;
     assert_s3_metadata_values_roundtrip_put_copy_replace_and_head(&app).await;
     assert_s3_metadata_invalid_utf8_rejected_before_destination_mutation(&app).await;
+}
+
+fn listing_test_quote(value: &str) -> String {
+    value
+        .bytes()
+        .map(|byte| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                char::from(byte).to_string()
+            }
+            _ => format!("%{byte:02X}"),
+        })
+        .collect()
+}
+fn listing_test_unquote(value: &str) -> String {
+    let mut bytes = value.bytes();
+    let mut decoded = Vec::new();
+    while let Some(byte) = bytes.next() {
+        if byte == b'%' {
+            let pair = [bytes.next().unwrap(), bytes.next().unwrap()];
+            decoded.push(u8::from_str_radix(std::str::from_utf8(&pair).unwrap(), 16).unwrap());
+        } else {
+            decoded.push(byte);
+        }
+    }
+    String::from_utf8(decoded).unwrap()
+}
+fn listing_test_values(xml: &str, tag: &str) -> Vec<String> {
+    xml.split(&format!("<{tag}>"))
+        .skip(1)
+        .map(|tail| tail.split(&format!("</{tag}>")).next().unwrap().to_owned())
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_listing_url_encoding_roundtrips_keys_and_pagination_v1_v2() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state);
+    let mut keys = vec![
+        "folder/é(3)+% space&.txt",
+        "folder/\u{fffe}.txt",
+        "folder/\u{ffff}.txt",
+        "folder/\u{10ffff}.txt",
+    ];
+    keys.sort_unstable();
+    for key in &keys {
+        put_object(&app, &listing_test_quote(key), b"x").await;
+    }
+    for version in [1, 2] {
+        let mut cursor = None;
+        let mut seen = Vec::new();
+        loop {
+            let mut query = format!(
+                "encoding-type=url&prefix=folder%2F&max-keys=1{}",
+                if version == 2 { "&list-type=2" } else { "" }
+            );
+            if let Some(value) = &cursor {
+                query = format!(
+                    "{query}&{}={value}",
+                    if version == 2 {
+                        "continuation-token"
+                    } else {
+                        "marker"
+                    }
+                );
+            }
+            let xml = list_objects(&app, &query).await;
+            assert!(xml.contains("<EncodingType>url</EncodingType>"));
+            assert!(xml.contains("<Prefix>folder%2F</Prefix>"));
+            let page = listing_test_values(&xml, "Key");
+            assert_eq!(page.len(), 1);
+            assert!(page[0].is_ascii());
+            seen.push(listing_test_unquote(&page[0]));
+            if version == 1
+                && let Some(value) = &cursor
+            {
+                assert!(xml.contains(&format!("<Marker>{value}</Marker>")));
+            }
+            if xml.contains("<IsTruncated>false</IsTruncated>") {
+                break;
+            }
+            let tag = if version == 2 {
+                "NextContinuationToken"
+            } else {
+                "NextMarker"
+            };
+            let next = listing_test_values(&xml, tag).pop().unwrap();
+            if version == 2 {
+                assert_eq!(
+                    shardline_s3_adapter::decode_continuation_token(&next).unwrap(),
+                    *seen.last().unwrap()
+                );
+                cursor = Some(listing_test_quote(&next));
+            } else {
+                cursor = Some(next);
+            }
+            assert!(seen.len() <= keys.len());
+        }
+        assert_eq!(seen, keys);
+    }
+    let raw = list_objects(&app, "list-type=2&prefix=folder%2F").await;
+    assert!(!raw.contains("<EncodingType>"));
+    assert!(raw.contains("é(3)+% space&amp;.txt"));
+    let start = listing_test_quote(keys[0]);
+    let xml = list_objects(
+        &app,
+        &format!("list-type=2&encoding-type=url&start-after={start}"),
+    )
+    .await;
+    assert!(xml.contains(&format!("<StartAfter>{start}</StartAfter>")));
+    assert_eq!(listing_test_values(&xml, "Key").len(), keys.len() - 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_listing_url_encoding_groups_raw_unicode_prefixes_and_rejects_invalid_type() {
+    let (state, _tmp) = build_test_state().await;
+    let app = s3_router(state);
+    for key in ["é+%/child", "é+%\u{fffe}/child", "é+%\u{ffff}/child"] {
+        put_object(&app, &listing_test_quote(key), b"x").await;
+    }
+    for version in [1, 2] {
+        let query = format!(
+            "encoding-type=url&prefix=%C3%A9%2B%25&delimiter=%2F{}",
+            if version == 2 { "&list-type=2" } else { "" }
+        );
+        let xml = list_objects(&app, &query).await;
+        assert!(xml.contains("<Delimiter>%2F</Delimiter>"));
+        assert_eq!(listing_test_values(&xml, "Key").len(), 0);
+        assert_eq!(
+            listing_test_values(&xml, "Prefix")
+                .into_iter()
+                .map(|p| listing_test_unquote(&p))
+                .filter(|p| p.ends_with('/'))
+                .collect::<Vec<_>>(),
+            vec!["é+%/", "é+%\u{fffe}/", "é+%\u{ffff}/"]
+        );
+        let invalid = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/{BUCKET}?encoding-type=base64{}",
+                        if version == 2 { "&list-type=2" } else { "" }
+                    ))
+                    .header(
+                        header::AUTHORIZATION,
+                        sigv4_auth(&mint_token(TokenScope::Read, OWNER, NAME)),
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            String::from_utf8(body_bytes(invalid).await)
+                .unwrap()
+                .contains("<Code>InvalidArgument</Code>")
+        );
+    }
 }

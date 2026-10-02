@@ -56,7 +56,7 @@ pub use key::{
 pub use listing::{
     Delimiter, ListObjectsV1Params, ListObjectsV2Params, ListPage, MAX_LIST_KEYS,
     decode_continuation_token, encode_continuation_token, format_iso8601, group_page,
-    parse_list_objects_v1_params, parse_list_objects_v2_params,
+    parse_list_objects_url_encoding, parse_list_objects_v1_params, parse_list_objects_v2_params,
 };
 pub use multipart::{
     MAX_S3_PART_NUMBER, MultipartPart, MultipartUploadSession, PartQuotaLimits, S3SessionError,
@@ -77,6 +77,6 @@ pub use protocol_support::{
 pub use types::{
     CompleteMultipartUploadResult, CompleteParts, Contents, CopyObjectResult, HeadObjectHeaders,
     InitiateMultipartUploadResult, ListBucketResult, ListBucketResultV1, ListBucketsResult,
-    MAX_S3_DELETE_KEYS, PutObjectResponseHeaders, S3ErrorBody, parse_complete_multipart_parts,
-    parse_delete_object_keys,
+    ListObjectsV2ResponseContext, MAX_S3_DELETE_KEYS, PutObjectResponseHeaders, S3ErrorBody,
+    parse_complete_multipart_parts, parse_delete_object_keys, xml_escape,
 };
