@@ -129,6 +129,11 @@ async fn logical_listing_page(
     max_keys: usize,
 ) -> Result<ListPage, S3Error> {
     use shardline_index::{S3ObjectScanStart, s3_prefix_successor};
+    // A zero result budget returns a terminal empty page before querying
+    // metadata; a lookahead would imply truncation without making progress.
+    if max_keys == 0 {
+        return Ok(group_page(Vec::new(), prefix, delimiter, 0));
+    }
     let fetch_limit = max_keys.checked_add(1).ok_or_else(S3Error::internal)?;
     let Some(delimiter) = delimiter else {
         let entries = state

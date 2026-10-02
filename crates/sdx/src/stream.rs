@@ -62,7 +62,7 @@ use shardline_xet_adapter::{ReconstructionFetchInfo, ReconstructionMultiRangeFet
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::sync::{Notify, OnceCell, OwnedSemaphorePermit, Semaphore, oneshot};
 use tokio::task::{JoinHandle, JoinSet};
-use tokio_util::sync::CancellationToken;
+use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 use xet_core_structures::ExpWeightedMovingAvg;
 // Keep the compatible upstream runtime constraint active for SDK consumers.
 use xet_runtime as _;
@@ -1910,7 +1910,8 @@ struct ReconstructionTermManager {
     known_final_byte_position: Arc<AtomicU64>,
     prefetched_byte_position: u64,
     current_active_byte_position: u64,
-    prefetch_queue: VecDeque<JoinHandle<Result<Option<TermBlock>, SdxError>>>,
+    // A dropped queued or actively awaited handle cancels its HTTP work.
+    prefetch_queue: VecDeque<AbortOnDropHandle<Result<Option<TermBlock>, SdxError>>>,
     completion_rate_estimator: ExpWeightedMovingAvg,
 }
 
@@ -2070,7 +2071,8 @@ impl ReconstructionTermManager {
                 Err(error) => Err(error),
             }
         });
-        self.prefetch_queue.push_back(join_handle);
+        self.prefetch_queue
+            .push_back(AbortOnDropHandle::new(join_handle));
         Ok(())
     }
 }
@@ -3674,6 +3676,73 @@ mod tests {
         // EOF at the end.
         assert!(stream.next().await.unwrap().is_none());
         assert!(stream.next().await.unwrap().is_none());
+    }
+
+    async fn pending_prefetch_task() -> (
+        AbortOnDropHandle<Result<Option<TermBlock>, SdxError>>,
+        oneshot::Receiver<()>,
+    ) {
+        let (started_tx, started_rx) = oneshot::channel();
+        let (dropped_tx, dropped_rx) = oneshot::channel();
+        let handle = tokio::spawn(async move {
+            let _guard = ExitGuard::new(move || {
+                let _sent = dropped_tx.send(());
+            });
+            started_tx.send(()).unwrap();
+            std::future::pending::<Result<Option<TermBlock>, SdxError>>().await
+        });
+        started_rx.await.unwrap();
+        (AbortOnDropHandle::new(handle), dropped_rx)
+    }
+
+    #[tokio::test]
+    async fn dropping_term_manager_aborts_queued_prefetch() {
+        let server = MockServer::start().await;
+        let mut manager = ReconstructionTermManager::new(
+            test_stream_context(&server, 1_048_576),
+            FILE_ID.to_owned(),
+            READ_TOKEN.to_owned(),
+            0..0,
+        )
+        .await
+        .unwrap();
+        let (handle, dropped) = pending_prefetch_task().await;
+        manager.prefetch_queue.push_back(handle);
+        drop(manager);
+        tokio::time::timeout(std::time::Duration::from_secs(1), dropped)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancelling_next_file_terms_aborts_actively_popped_prefetch() {
+        let server = MockServer::start().await;
+        let mut manager = ReconstructionTermManager::new(
+            test_stream_context(&server, 1_048_576),
+            FILE_ID.to_owned(),
+            READ_TOKEN.to_owned(),
+            0..0,
+        )
+        .await
+        .unwrap();
+        let (handle, dropped) = pending_prefetch_task().await;
+        manager.prefetch_queue.push_back(handle);
+        let mut next = Box::pin(manager.next_file_terms());
+        std::future::poll_fn(|cx| {
+            assert!(next.as_mut().poll(cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        // Cancel the awaiting operation while keeping the manager alive:
+        // aborting only the remaining queue would miss this popped handle.
+        drop(next);
+        assert!(manager.prefetch_queue.is_empty());
+        tokio::time::timeout(std::time::Duration::from_secs(1), dropped)
+            .await
+            .unwrap()
+            .unwrap();
+        drop(manager);
     }
 
     #[tokio::test]
