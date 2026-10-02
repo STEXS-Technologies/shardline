@@ -1356,7 +1356,24 @@ impl ServerConfig {
     /// Returns [`ServerConfigError::PlaintextSecretsInProduction`] when a
     /// non-insecure deployment mode would persist secrets without at-rest
     /// encryption keys.
+    /// Returns [`ServerConfigError::ResourceCapacityOutOfRange`] when a resource
+    /// capacity exceeds the runtime semaphore or batch-count representation.
     pub fn validate_runtime_requirements(&self) -> Result<(), ServerConfigError> {
+        crate::admission::validate_capacity(
+            "admission_max_weight",
+            self.admission_max_weight(),
+            crate::admission::maximum_counted_capacity(),
+        )?;
+        crate::admission::validate_capacity(
+            "transfer_max_in_flight_chunks",
+            self.transfer_max_in_flight_chunks(),
+            crate::admission::maximum_counted_capacity(),
+        )?;
+        crate::admission::validate_capacity(
+            "oci_registry_token_max_in_flight_requests",
+            self.oci_registry_token_max_in_flight_requests(),
+            tokio::sync::Semaphore::MAX_PERMITS,
+        )?;
         // The CDC chunker requires a power-of-two chunk size; a misconfigured
         // value must fail startup with a clear error instead of panicking on
         // the first upload (see `upload_ingest::cdc::CdcChunker`).

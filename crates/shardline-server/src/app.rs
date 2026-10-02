@@ -265,12 +265,12 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
     let oci_registry_token_limiter = Arc::new(Semaphore::new(
         config.oci_registry_token_max_in_flight_requests().get(),
     ));
-    let admission = WeightedAdmission::new(config.admission_max_weight());
-    let pools = ExecutionPools::with_sizes(
+    let admission = WeightedAdmission::try_new(config.admission_max_weight())?;
+    let pools = ExecutionPools::try_with_sizes(
         bounded_pool_size_from_env("SHARDLINE_HASHING_POOL_SIZE", 8),
         bounded_pool_size_from_env("SHARDLINE_PARSING_POOL_SIZE", 8),
         bounded_pool_size_from_env("SHARDLINE_BLOCKING_IO_POOL_SIZE", 16),
-    );
+    )?;
     let mut backend = backend;
     backend.set_stream_work_pool(pools.blocking_io.clone());
     let state = Arc::new(AppState {
@@ -492,9 +492,6 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
 /// IO error.
 #[tracing::instrument(skip(config), fields(bind_addr = %config.bind_addr()))]
 pub async fn serve(config: ServerConfig) -> Result<(), ServerError> {
-    shardline_metrics::metrics()
-        .system
-        .set_uptime(shardline_protocol::unix_now_seconds_lossy() as i64);
     let listener = TcpListener::bind(config.bind_addr()).await?;
     tracing::info!("listening on {}", config.bind_addr());
     serve_with_listener(config, listener).await
@@ -529,6 +526,7 @@ where
     F: Future<Output = ()> + Send + 'static,
 {
     let app = router(config.clone()).await?;
+    shardline_metrics::metrics().system.start_uptime();
     tracing::info!("router initialized, starting HTTP serve");
     let shutdown_timeout = config.shutdown_timeout();
     let (shutdown_started_tx, shutdown_started_rx) = oneshot::channel();

@@ -8,9 +8,10 @@ use shardline_protocol::SecretString;
 
 use crate::{
     hub::{
-        EMPTY_HUB_REVISION, HUB_TREE_READ_CEILING, HubFileEntry, HubRef, HubRepo,
-        HubRepoSearchOptions, HubRepoType, HubRevision, HubStore, HubTreePage, HubTreePageEntry,
-        HubTreePageOptions, HubWebhook, canonical_ref_name, hub_tree_requires_recovery,
+        EMPTY_HUB_REVISION, HUB_TREE_READ_CEILING, HubFileEntry, HubRef, HubRefCreateOutcome,
+        HubRepo, HubRepoSearchOptions, HubRepoType, HubRevision, HubStore, HubTreePage,
+        HubTreePageEntry, HubTreePageOptions, HubWebhook, canonical_ref_name,
+        hub_tree_requires_recovery,
     },
     postgres::{
         PostgresIndexStore, PostgresMetadataStoreError, i64_to_u64,
@@ -485,127 +486,22 @@ impl HubStore for PostgresIndexStore {
         ref_name: &str,
         message: &str,
     ) -> Result<HubRevision, Self::Error> {
-        let pool = self.pool().clone();
-        let repo_id = repo_id.to_owned();
-        let new_sha = new_sha.to_owned();
-        let ref_name = canonical_ref_name(ref_name).to_owned();
-        let message = message.to_owned();
-        let parent_sha = parent_sha.map(ToOwned::to_owned);
-
-        block_on_async(async {
-            let mut tx = pool.begin().await?;
-
-            // Serialize every mutable ref operation for this repository across
-            // Postgres-backed Shardline replicas. The row lock also excludes
-            // `delete_repo`, so a commit cannot be acknowledged into a
-            // repository concurrently removed by another process.
-            let locked_repo: Option<String> = sqlx::query_scalar(
-                "SELECT repo_id FROM shardline_hub_repos WHERE repo_id = $1 FOR UPDATE",
-            )
-            .bind(&repo_id)
-            .fetch_optional(&mut *tx)
-            .await?;
-            if locked_repo.is_none() {
-                return Err(PostgresMetadataStoreError::RecordNotFound);
+        match self.publish_hub_revision(repo_id, parent_sha, new_sha, ref_name, message, false)? {
+            HubRefCreateOutcome::Created(revision) => Ok(revision),
+            HubRefCreateOutcome::AlreadyExists | HubRefCreateOutcome::Unsupported => {
+                Err(PostgresMetadataStoreError::RecordNotFound)
             }
-
-            let current_ref: Option<String> = sqlx::query_scalar(
-                "SELECT sha FROM shardline_hub_refs WHERE repo_id = $1 AND ref_name = $2",
-            )
-            .bind(&repo_id)
-            .bind(&ref_name)
-            .fetch_optional(&mut *tx)
-            .await?;
-
-            // Optimistic concurrency check
-            if let Some(ref parent) = parent_sha {
-                match current_ref.as_deref() {
-                    Some(ref current) if current != parent => {
-                        return Err(PostgresMetadataStoreError::RecordNotFound);
-                    }
-                    None => {
-                        let parent_exists: bool = sqlx::query_scalar(
-                            "SELECT EXISTS(SELECT 1 FROM shardline_hub_revisions WHERE repo_id = $1 AND sha = $2)",
-                        )
-                        .bind(&repo_id)
-                        .bind(parent)
-                        .fetch_one(&mut *tx)
-                        .await?;
-                        if !parent_exists {
-                            return Err(PostgresMetadataStoreError::RecordNotFound);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-
-            if ref_name == "main" {
-                sqlx::query(
-                    "UPDATE shardline_hub_repos
-                     SET default_branch = $1, updated_at_unix_seconds = EXTRACT(EPOCH FROM now())::bigint
-                     WHERE repo_id = $2",
-                )
-                .bind(&new_sha)
-                .bind(&repo_id)
-                .execute(&mut *tx)
-                .await?;
-            }
-
-            sqlx::query(
-                "INSERT INTO shardline_hub_revisions (repo_id, ref_name, sha, parent_sha, message, created_at_unix_seconds)
-                 VALUES ($1, $2, $3, $4, $5, EXTRACT(EPOCH FROM now())::bigint)
-                 ON CONFLICT (repo_id, sha) DO NOTHING",
-            )
-            .bind(&repo_id)
-            .bind(&ref_name)
-            .bind(&new_sha)
-            .bind(parent_sha.as_deref())
-            .bind(&message)
-            .execute(&mut *tx)
-            .await?;
-
-            sqlx::query(
-                "INSERT INTO shardline_hub_refs (repo_id, ref_name, sha) VALUES ($1, $2, $3)
-                 ON CONFLICT (repo_id, ref_name) DO UPDATE SET sha = EXCLUDED.sha",
-            )
-            .bind(&repo_id)
-            .bind(&ref_name)
-            .bind(&new_sha)
-            .execute(&mut *tx)
-            .await?;
-
-            let before = HubRefSnapshot::new(&repo_id, &ref_name, current_ref.clone())?;
-            let after = HubRefSnapshot::new(&repo_id, &ref_name, Some(new_sha.clone()))?;
-            let evidence = verify_and_append_snapshot_transition(
-                current_hub_ref_evidence(&mut tx, &repo_id, &ref_name, current_ref).await?,
-                before,
-                after,
-            )?
-            .0;
-            persist_hub_ref_evidence(&mut tx, &evidence).await?;
-
-            let row = sqlx::query(
-                "SELECT repo_id, ref_name, sha, parent_sha, message, created_at_unix_seconds
-                 FROM shardline_hub_revisions WHERE repo_id = $1 AND sha = $2",
-            )
-            .bind(&repo_id)
-            .bind(&new_sha)
-            .fetch_one(&mut *tx)
-            .await?;
-
-            tx.commit().await?;
-
-            Ok(HubRevision {
-                repo_id: row.try_get("repo_id")?,
-                ref_name: row.try_get("ref_name")?,
-                sha: row.try_get("sha")?,
-                parent_sha: row.try_get("parent_sha")?,
-                message: row.try_get("message")?,
-                created_at_unix_seconds: i64_to_u64(
-                    row.try_get::<i64, _>("created_at_unix_seconds")?,
-                )?,
-            })
-        })
+        }
+    }
+    fn create_revision_if_absent(
+        &self,
+        repo_id: &str,
+        parent_sha: Option<&str>,
+        new_sha: &str,
+        ref_name: &str,
+        message: &str,
+    ) -> Result<HubRefCreateOutcome, Self::Error> {
+        self.publish_hub_revision(repo_id, parent_sha, new_sha, ref_name, message, true)
     }
 
     fn list_refs(&self, repo_id: &str) -> Result<Vec<HubRef>, Self::Error> {
@@ -1243,6 +1139,143 @@ impl HubStore for PostgresIndexStore {
     }
 }
 
+impl PostgresIndexStore {
+    fn publish_hub_revision(
+        &self,
+        repo_id: &str,
+        parent_sha: Option<&str>,
+        new_sha: &str,
+        ref_name: &str,
+        message: &str,
+        require_absent: bool,
+    ) -> Result<HubRefCreateOutcome, PostgresMetadataStoreError> {
+        let pool = self.pool().clone();
+        let repo_id = repo_id.to_owned();
+        let new_sha = new_sha.to_owned();
+        let ref_name = canonical_ref_name(ref_name).to_owned();
+        let message = message.to_owned();
+        let parent_sha = parent_sha.map(ToOwned::to_owned);
+
+        block_on_async(async {
+            let mut tx = pool.begin().await?;
+
+            // Serialize every mutable ref operation for this repository across
+            // Postgres-backed Shardline replicas. The row lock also excludes
+            // `delete_repo`, so a commit cannot be acknowledged into a
+            // repository concurrently removed by another process.
+            let locked_repo: Option<String> = sqlx::query_scalar(
+                "SELECT repo_id FROM shardline_hub_repos WHERE repo_id = $1 FOR UPDATE",
+            )
+            .bind(&repo_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+            if locked_repo.is_none() {
+                return Err(PostgresMetadataStoreError::RecordNotFound);
+            }
+
+            let current_ref: Option<String> = sqlx::query_scalar(
+                "SELECT sha FROM shardline_hub_refs WHERE repo_id = $1 AND ref_name = $2",
+            )
+            .bind(&repo_id)
+            .bind(&ref_name)
+            .fetch_optional(&mut *tx)
+            .await?;
+
+            if require_absent && current_ref.is_some() {
+                return Ok(HubRefCreateOutcome::AlreadyExists);
+            }
+
+            // Optimistic concurrency check
+            if let Some(ref parent) = parent_sha {
+                match current_ref.as_deref() {
+                    Some(ref current) if current != parent => {
+                        return Err(PostgresMetadataStoreError::RecordNotFound);
+                    }
+                    None => {
+                        let parent_exists: bool = sqlx::query_scalar(
+                            "SELECT EXISTS(SELECT 1 FROM shardline_hub_revisions WHERE repo_id = $1 AND sha = $2)",
+                        )
+                        .bind(&repo_id)
+                        .bind(parent)
+                        .fetch_one(&mut *tx)
+                        .await?;
+                        if !parent_exists {
+                            return Err(PostgresMetadataStoreError::RecordNotFound);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            if ref_name == "main" {
+                sqlx::query(
+                    "UPDATE shardline_hub_repos
+                     SET default_branch = $1, updated_at_unix_seconds = EXTRACT(EPOCH FROM now())::bigint
+                     WHERE repo_id = $2",
+                )
+                .bind(&new_sha)
+                .bind(&repo_id)
+                .execute(&mut *tx)
+                .await?;
+            }
+
+            sqlx::query(
+                "INSERT INTO shardline_hub_revisions (repo_id, ref_name, sha, parent_sha, message, created_at_unix_seconds)
+                 VALUES ($1, $2, $3, $4, $5, EXTRACT(EPOCH FROM now())::bigint)
+                 ON CONFLICT (repo_id, sha) DO NOTHING",
+            )
+            .bind(&repo_id)
+            .bind(&ref_name)
+            .bind(&new_sha)
+            .bind(parent_sha.as_deref())
+            .bind(&message)
+            .execute(&mut *tx)
+            .await?;
+
+            sqlx::query(
+                "INSERT INTO shardline_hub_refs (repo_id, ref_name, sha) VALUES ($1, $2, $3)
+                 ON CONFLICT (repo_id, ref_name) DO UPDATE SET sha = EXCLUDED.sha",
+            )
+            .bind(&repo_id)
+            .bind(&ref_name)
+            .bind(&new_sha)
+            .execute(&mut *tx)
+            .await?;
+
+            let before = HubRefSnapshot::new(&repo_id, &ref_name, current_ref.clone())?;
+            let after = HubRefSnapshot::new(&repo_id, &ref_name, Some(new_sha.clone()))?;
+            let evidence = verify_and_append_snapshot_transition(
+                current_hub_ref_evidence(&mut tx, &repo_id, &ref_name, current_ref).await?,
+                before,
+                after,
+            )?
+            .0;
+            persist_hub_ref_evidence(&mut tx, &evidence).await?;
+
+            let row = sqlx::query(
+                "SELECT repo_id, ref_name, sha, parent_sha, message, created_at_unix_seconds
+                 FROM shardline_hub_revisions WHERE repo_id = $1 AND sha = $2",
+            )
+            .bind(&repo_id)
+            .bind(&new_sha)
+            .fetch_one(&mut *tx)
+            .await?;
+
+            tx.commit().await?;
+
+            Ok(HubRefCreateOutcome::Created(HubRevision {
+                repo_id: row.try_get("repo_id")?,
+                ref_name: row.try_get("ref_name")?,
+                sha: row.try_get("sha")?,
+                parent_sha: row.try_get("parent_sha")?,
+                message: row.try_get("message")?,
+                created_at_unix_seconds: i64_to_u64(
+                    row.try_get::<i64, _>("created_at_unix_seconds")?,
+                )?,
+            }))
+        })
+    }
+}
 #[cfg(test)]
 mod tests {
     #![allow(

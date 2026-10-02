@@ -645,7 +645,7 @@ pub(super) async fn metrics(
         download_bytes: metrics.transfer.download_bytes.get(),
         range_requests: metrics.transfer.range_requests.get(),
         // process-lifetime gauges and counters
-        server_uptime_seconds: metrics.system.server_uptime.get(),
+        server_uptime_seconds: metrics.system.uptime_seconds(),
         reconstruction_requests: metrics.reconstruction.requests.get(),
         reconstruction_cache_hits: metrics.reconstruction.cache_hits.get(),
         reconstruction_cache_misses: metrics.reconstruction.cache_misses.get(),
