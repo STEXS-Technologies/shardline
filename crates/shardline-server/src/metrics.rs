@@ -369,6 +369,8 @@ mod tests {
 
 // ── Axum middleware & routes ─────────────────────────────────────────────
 
+/// Counts active handler futures until response headers are constructed.
+/// The historical active_connections metric excludes response-body and TCP lifetimes.
 #[derive(Clone)]
 pub(crate) struct MetricsLayer;
 
