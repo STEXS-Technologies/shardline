@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use shardline_index::{
     LocalIndexStore, PostgresIndexStore,
-    hub::{BoxedHubStore, HubFileEntry, canonical_ref_name},
+    hub::{BoxedHubStore, HubFileEntry, HubRefUpdateOutcome, canonical_ref_name},
 };
 use shardline_protocol::{ByteRange, RepositoryScope};
 use shardline_protocol_adapters::{scope_namespace, validate_content_hash};
@@ -182,16 +182,24 @@ fn publish_verified_tree(
     store
         .store_files(&revision, &input.files)
         .map_err(|error| HubTreeRepairRuntimeError::Store(error.to_string()))?;
-    store
-        .create_revision(
+    let outcome = store
+        .update_revision_if_current(
             &input.repo_id,
-            Some(&input.expected_head),
+            &input.expected_head,
             &revision,
             ref_name,
             "Restore authoritative Hub tree",
         )
         .map_err(|error| HubTreeRepairRuntimeError::Store(error.to_string()))?;
-    Ok(revision)
+    match outcome {
+        HubRefUpdateOutcome::Updated(_) => Ok(revision),
+        HubRefUpdateOutcome::Conflict => Err(HubTreeRepairRuntimeError::Invalid(
+            "selected ref does not match expected_head".to_owned(),
+        )),
+        HubRefUpdateOutcome::Unsupported => Err(HubTreeRepairRuntimeError::Invalid(
+            "atomic ref update is unsupported by this store".to_owned(),
+        )),
+    }
 }
 
 fn validate_manifest(input: &HubTreeRecoveryInput) -> Result<(), HubTreeRepairRuntimeError> {
@@ -843,6 +851,35 @@ mod tests {
         assert_eq!(
             store.resolve_revision("alice/model", "main").unwrap(),
             Some(revision)
+        );
+    }
+    #[test]
+    fn verified_tree_publication_does_not_resurrect_a_deleted_selected_ref() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = LocalIndexStore::new(temp.path().to_owned()).unwrap();
+        store
+            .create_repo(HubRepoType::Model, "alice/model", true)
+            .unwrap();
+        store
+            .create_revision(
+                "alice/model",
+                Some(EMPTY_HUB_REVISION),
+                LEGACY,
+                "selected",
+                "legacy",
+            )
+            .unwrap();
+        let boxed = BoxedHubStore::from_store(store.clone());
+        let mut manifest = input("alice/model", vec![]);
+        manifest.ref_name = "selected".to_owned();
+        store.delete_ref("alice/model", "selected", LEGACY).unwrap();
+        assert!(publish_verified_tree(&boxed, manifest).is_err());
+        assert!(
+            !store
+                .list_refs("alice/model")
+                .unwrap()
+                .iter()
+                .any(|reference| reference.ref_name == "selected")
         );
     }
 }

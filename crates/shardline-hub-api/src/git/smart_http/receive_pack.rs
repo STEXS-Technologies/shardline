@@ -19,7 +19,9 @@ use crate::{
     error::HubApiError,
     routes::{HubState, lfs_object_key, require_repository_binding},
 };
-use shardline_index::hub::{HubFileEntry, HubRefCreateOutcome, canonical_ref_name};
+use shardline_index::hub::{
+    HubFileEntry, HubRefCreateOutcome, HubRefUpdateOutcome, canonical_ref_name,
+};
 use shardline_protocol::{ShardlineHash, TokenScope};
 use shardline_server_core::AuthorizedRepository;
 use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectStore};
@@ -422,10 +424,23 @@ fn store_push_objects(
             }
         }
     } else {
-        state
+        match state
             .store
-            .create_revision(repo_id, parent, new_sha, ref_name, &message)
-            .map_err(|error| SmartHttpError::CreateRevision(error.to_string()))?;
+            .update_revision_if_current(repo_id, old_sha, new_sha, ref_name, &message)
+            .map_err(|error| SmartHttpError::CreateRevision(error.to_string()))?
+        {
+            HubRefUpdateOutcome::Updated(_) => {}
+            HubRefUpdateOutcome::Conflict => {
+                return Err(SmartHttpError::NonFastForward(
+                    "ref is missing or no longer matches expected head".to_owned(),
+                ));
+            }
+            HubRefUpdateOutcome::Unsupported => {
+                return Err(SmartHttpError::CreateRevision(
+                    "atomic ref update is unsupported by this store".to_owned(),
+                ));
+            }
+        }
     }
 
     Ok(())
@@ -493,4 +508,214 @@ pub(super) fn build_report_response(
     );
 
     Ok((headers, body).into_response())
+}
+
+#[cfg(test)]
+mod publication_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::*;
+    use shardline_index::hub::*;
+    use shardline_index::{LocalIndexStore, LocalIndexStoreError};
+    struct DeleteDuringTreeWrite {
+        inner: LocalIndexStore,
+    }
+    impl HubStore for DeleteDuringTreeWrite {
+        type Error = LocalIndexStoreError;
+        fn create_repo(
+            &self,
+            repo_type: HubRepoType,
+            name: &str,
+            private: bool,
+        ) -> Result<HubRepo, Self::Error> {
+            shardline_index::hub::HubStore::create_repo(&self.inner, repo_type, name, private)
+        }
+        fn get_repo(&self, repo_id: &str) -> Result<Option<HubRepo>, Self::Error> {
+            shardline_index::hub::HubStore::get_repo(&self.inner, repo_id)
+        }
+        fn list_repos(&self) -> Result<Vec<HubRepo>, Self::Error> {
+            shardline_index::hub::HubStore::list_repos(&self.inner)
+        }
+        fn search_repos(
+            &self,
+            repo_type: Option<HubRepoType>,
+            name_prefix: &str,
+            limit: usize,
+        ) -> Result<Vec<HubRepo>, Self::Error> {
+            shardline_index::hub::HubStore::search_repos(&self.inner, repo_type, name_prefix, limit)
+        }
+        fn search_repos_with_options(
+            &self,
+            repo_type: Option<HubRepoType>,
+            name_prefix: &str,
+            limit: usize,
+            options: &HubRepoSearchOptions,
+        ) -> Result<Vec<HubRepo>, Self::Error> {
+            shardline_index::hub::HubStore::search_repos_with_options(
+                &self.inner,
+                repo_type,
+                name_prefix,
+                limit,
+                options,
+            )
+        }
+        fn create_revision(
+            &self,
+            repo_id: &str,
+            parent_sha: Option<&str>,
+            new_sha: &str,
+            ref_name: &str,
+            message: &str,
+        ) -> Result<HubRevision, Self::Error> {
+            shardline_index::hub::HubStore::create_revision(
+                &self.inner,
+                repo_id,
+                parent_sha,
+                new_sha,
+                ref_name,
+                message,
+            )
+        }
+        fn list_refs(&self, repo_id: &str) -> Result<Vec<HubRef>, Self::Error> {
+            shardline_index::hub::HubStore::list_refs(&self.inner, repo_id)
+        }
+        fn delete_ref(
+            &self,
+            repo_id: &str,
+            ref_name: &str,
+            expected_sha: &str,
+        ) -> Result<(), Self::Error> {
+            shardline_index::hub::HubStore::delete_ref(&self.inner, repo_id, ref_name, expected_sha)
+        }
+        fn list_revisions(&self, repo_id: &str) -> Result<Vec<HubRevision>, Self::Error> {
+            shardline_index::hub::HubStore::list_revisions(&self.inner, repo_id)
+        }
+        fn resolve_revision(
+            &self,
+            repo_id: &str,
+            revision: &str,
+        ) -> Result<Option<String>, Self::Error> {
+            shardline_index::hub::HubStore::resolve_revision(&self.inner, repo_id, revision)
+        }
+        fn store_files(&self, commit_sha: &str, files: &[HubFileEntry]) -> Result<(), Self::Error> {
+            shardline_index::hub::HubStore::store_files(&self.inner, commit_sha, files)?;
+            self.inner.delete_ref(
+                "owner/interleave",
+                "selected",
+                shardline_index::hub::EMPTY_HUB_REVISION,
+            )?;
+            Ok(())
+        }
+        fn get_files(&self, commit_sha: &str) -> Result<Vec<HubFileEntry>, Self::Error> {
+            shardline_index::hub::HubStore::get_files(&self.inner, commit_sha)
+        }
+        fn create_webhook(
+            &self,
+            repo_id: &str,
+            url: &str,
+            events: &[String],
+            secret: Option<&str>,
+        ) -> Result<HubWebhook, Self::Error> {
+            shardline_index::hub::HubStore::create_webhook(
+                &self.inner,
+                repo_id,
+                url,
+                events,
+                secret,
+            )
+        }
+        fn list_webhooks(&self, repo_id: &str) -> Result<Vec<HubWebhook>, Self::Error> {
+            shardline_index::hub::HubStore::list_webhooks(&self.inner, repo_id)
+        }
+        fn delete_repo(&self, repo_id: &str) -> Result<(), Self::Error> {
+            shardline_index::hub::HubStore::delete_repo(&self.inner, repo_id)
+        }
+        fn delete_webhook(&self, repo_id: &str, webhook_id: &str) -> Result<(), Self::Error> {
+            shardline_index::hub::HubStore::delete_webhook(&self.inner, repo_id, webhook_id)
+        }
+        fn update_webhook_secret(
+            &self,
+            repo_id: &str,
+            webhook_id: &str,
+            secret: Option<&str>,
+        ) -> Result<(), Self::Error> {
+            shardline_index::hub::HubStore::update_webhook_secret(
+                &self.inner,
+                repo_id,
+                webhook_id,
+                secret,
+            )
+        }
+        fn webhooks_for_event(
+            &self,
+            repo_id: &str,
+            event: &str,
+        ) -> Result<Vec<HubWebhook>, Self::Error> {
+            shardline_index::hub::HubStore::webhooks_for_event(&self.inner, repo_id, event)
+        }
+        fn update_revision_if_current(
+            &self,
+            repo_id: &str,
+            expected_sha: &str,
+            new_sha: &str,
+            ref_name: &str,
+            message: &str,
+        ) -> Result<HubRefUpdateOutcome, Self::Error> {
+            self.inner
+                .update_revision_if_current(repo_id, expected_sha, new_sha, ref_name, message)
+        }
+    }
+    #[test]
+    fn push_rejects_ref_deleted_after_old_head_validation() {
+        let (tmp, mut state) = super::super::tests::make_hub_state();
+        let inner = LocalIndexStore::open(tmp.path().to_owned());
+        inner
+            .create_repo(HubRepoType::Model, "owner/interleave", true)
+            .unwrap();
+        inner
+            .create_revision(
+                "owner/interleave",
+                Some(EMPTY_HUB_REVISION),
+                EMPTY_HUB_REVISION,
+                "selected",
+                "branch",
+            )
+            .unwrap();
+        state.store = BoxedHubStore::from_store(DeleteDuringTreeWrite {
+            inner: inner.clone(),
+        });
+        let blob = crate::git::pack::create_blob_object(b"file");
+        let blob_sha = blob.sha1();
+        let tree = crate::git::pack::create_tree_object(&[(0o100644, "file", &blob_sha)]);
+        let commit = crate::git::pack::create_commit_object(
+            &tree.sha1(),
+            None,
+            "Test <test@test.com>",
+            "update",
+        );
+        let new_sha = hex::encode(commit.sha1());
+        let result = store_push_objects(
+            &state,
+            "owner/interleave",
+            EMPTY_HUB_REVISION,
+            &new_sha,
+            "selected",
+            &[blob, tree, commit],
+            &AuthorizedRepository::anonymous_full_access(),
+        );
+        assert!(matches!(result, Err(SmartHttpError::NonFastForward(_))));
+        assert!(
+            !inner
+                .list_refs("owner/interleave")
+                .unwrap()
+                .iter()
+                .any(|r| r.ref_name == "selected")
+        );
+        assert!(
+            !inner
+                .list_revisions("owner/interleave")
+                .unwrap()
+                .iter()
+                .any(|r| r.sha == new_sha)
+        );
+    }
 }

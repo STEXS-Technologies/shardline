@@ -28,8 +28,8 @@ use crate::{
     xet_hash_hex_string,
 };
 
-// Admission precedes polling an owned row so stalled conversions cannot
-// accumulate an unbounded queue of large JSON values across store instances.
+// Admission precedes polling an owned read row or cloning a write payload,
+// bounding conversion work across read and write paths and store instances.
 fn record_conversion_budget() -> &'static Arc<Semaphore> {
     static BUDGET: OnceLock<Arc<Semaphore>> = OnceLock::new();
     BUDGET.get_or_init(|| Arc::new(Semaphore::new(8)))
@@ -61,6 +61,42 @@ async fn run_record_conversion<T: Send + 'static>(
 fn canonical_record_bytes_from_row(row: &PgRow) -> Result<Vec<u8>, PostgresMetadataStoreError> {
     let Json(record) = row.try_get::<Json<FileRecord>, _>("record")?;
     Ok(to_vec(&record)?)
+}
+
+async fn prepare_record_upsert(
+    locator: &PostgresRecordLocator,
+    record: &FileRecord,
+) -> Result<
+    sqlx::query::Query<'static, Postgres, sqlx::postgres::PgArguments>,
+    PostgresMetadataStoreError,
+> {
+    // Charge admission before owning the write payload. SQLx performs JSON
+    // encoding during bind, so build the entire argument set off the executor.
+    let permit = admit_record_conversion().await?;
+    let locator = locator.clone();
+    let record = record.clone();
+    run_record_conversion(permit, move || {
+        Ok(query(
+            "INSERT INTO shardline_file_records (
+                record_key, record_kind, scope_key, file_id, content_hash, record
+             ) VALUES ($1, $2, $3, $4, $5, $6)
+             ON CONFLICT (record_key)
+             DO UPDATE SET
+                record_kind = EXCLUDED.record_kind,
+                scope_key = EXCLUDED.scope_key,
+                file_id = EXCLUDED.file_id,
+                content_hash = EXCLUDED.content_hash,
+                record = EXCLUDED.record,
+                updated_at = now()",
+        )
+        .bind(locator.record_key)
+        .bind(locator.kind.as_str())
+        .bind(locator.scope_key)
+        .bind(locator.file_id)
+        .bind(record.content_hash.clone())
+        .bind(Json(record)))
+    })
+    .await
 }
 
 impl super::PostgresRecordStore {
@@ -405,33 +441,10 @@ impl super::PostgresRecordStore {
         locator: &PostgresRecordLocator,
         record: &FileRecord,
     ) -> Result<(), PostgresMetadataStoreError> {
-        query(
-            "INSERT INTO shardline_file_records (
-                record_key,
-                record_kind,
-                scope_key,
-                file_id,
-                content_hash,
-                record
-             )
-             VALUES ($1, $2, $3, $4, $5, $6)
-             ON CONFLICT (record_key)
-             DO UPDATE SET
-                record_kind = EXCLUDED.record_kind,
-                scope_key = EXCLUDED.scope_key,
-                file_id = EXCLUDED.file_id,
-                content_hash = EXCLUDED.content_hash,
-                record = EXCLUDED.record,
-                updated_at = now()",
-        )
-        .bind(&locator.record_key)
-        .bind(locator.kind.as_str())
-        .bind(&locator.scope_key)
-        .bind(&locator.file_id)
-        .bind(&record.content_hash)
-        .bind(Json(record.clone()))
-        .execute(&self.pool)
-        .await?;
+        prepare_record_upsert(locator, record)
+            .await?
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
@@ -875,33 +888,10 @@ pub(super) async fn upsert_record_in_transaction(
     locator: &PostgresRecordLocator,
     record: &FileRecord,
 ) -> Result<(), PostgresMetadataStoreError> {
-    query(
-        "INSERT INTO shardline_file_records (
-            record_key,
-            record_kind,
-            scope_key,
-            file_id,
-            content_hash,
-            record
-         )
-         VALUES ($1, $2, $3, $4, $5, $6)
-         ON CONFLICT (record_key)
-         DO UPDATE SET
-            record_kind = EXCLUDED.record_kind,
-            scope_key = EXCLUDED.scope_key,
-            file_id = EXCLUDED.file_id,
-            content_hash = EXCLUDED.content_hash,
-            record = EXCLUDED.record,
-            updated_at = now()",
-    )
-    .bind(&locator.record_key)
-    .bind(locator.kind.as_str())
-    .bind(&locator.scope_key)
-    .bind(&locator.file_id)
-    .bind(&record.content_hash)
-    .bind(Json(record.clone()))
-    .execute(&mut **transaction)
-    .await?;
+    prepare_record_upsert(locator, record)
+        .await?
+        .execute(&mut **transaction)
+        .await?;
     Ok(())
 }
 
@@ -1079,6 +1069,21 @@ mod tests {
             }
             assert_eq!(budget.available_permits(), 0);
             drop(task);
+            let permit = budget.clone().acquire_owned().await.unwrap();
+            let (release, blocked) = std::sync::mpsc::channel();
+            let (finished, finish) = tokio::sync::oneshot::channel();
+            let mut conversion = Box::pin(super::run_record_conversion(permit, move || {
+                blocked.recv().unwrap();
+                let query =
+                    sqlx::query("SELECT $1::jsonb").bind(sqlx::types::Json(sample_record(None)));
+                finished.send(()).unwrap();
+                Ok::<_, super::PostgresMetadataStoreError>(query)
+            }));
+            assert!(futures_util::poll!(conversion.as_mut()).is_pending());
+            release.send(()).unwrap();
+            finish.await.unwrap();
+            assert_eq!(budget.available_permits(), 0);
+            drop(conversion);
             let _permit = budget.clone().acquire_owned().await.unwrap();
         });
     }
@@ -1181,6 +1186,80 @@ mod tests {
             Err(super::super::PostgresMetadataStoreError::RecordNotFound)
         ));
         assert_eq!(store.read_latest_record_bytes(&record).await.unwrap(), None);
+        pool.close().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pg_prepared_record_writes_keep_atomicity_and_error_categories() {
+        let Some(pool) = super::super::test_support::connect_isolated_postgres().await else {
+            return;
+        };
+        let store = super::super::PostgresRecordStore::new(pool.clone());
+        let mut record = sample_record(None);
+        record.total_bytes = 50;
+        record.validate_reconstruction_plan().unwrap();
+        store.commit_file_version_metadata(&record).await.unwrap();
+        let canonical = serde_json::to_vec(&record).unwrap();
+        assert_eq!(
+            store
+                .read_record_bytes(&store.latest_record_locator(&record))
+                .await
+                .unwrap(),
+            canonical
+        );
+        assert_eq!(
+            store
+                .read_record_bytes(&store.version_record_locator(&record))
+                .await
+                .unwrap(),
+            canonical
+        );
+        // The version write succeeds first; the latest write is rejected. Both
+        // must roll back, including when the shared helper awaits preparation.
+        sqlx::query("ALTER TABLE shardline_file_records ADD CONSTRAINT audit_reject_latest CHECK (NOT (file_id='rollback-proof' AND record_kind='latest'))").execute(&pool).await.unwrap();
+        record.file_id = "rollback-proof".into();
+        assert!(matches!(
+            store.commit_file_version_metadata(&record).await,
+            Err(super::super::PostgresMetadataStoreError::Sqlx(_))
+        ));
+        assert!(
+            !store
+                .record_locator_exists(&store.version_record_locator(&record))
+                .await
+                .unwrap()
+        );
+        assert!(
+            !store
+                .record_locator_exists(&store.latest_record_locator(&record))
+                .await
+                .unwrap()
+        );
+        assert!(matches!(
+            store
+                .commit_native_shard_metadata(&[record.clone()], &[])
+                .await,
+            Err(super::super::PostgresMetadataStoreError::Sqlx(_))
+        ));
+        assert!(
+            !store
+                .record_locator_exists(&store.version_record_locator(&record))
+                .await
+                .unwrap()
+        );
+        sqlx::query("ALTER TABLE shardline_file_records DROP CONSTRAINT audit_reject_latest")
+            .execute(&pool)
+            .await
+            .unwrap();
+        store
+            .commit_native_shard_metadata(&[record.clone()], &[])
+            .await
+            .unwrap();
+        assert!(
+            store
+                .record_locator_exists(&store.latest_record_locator(&record))
+                .await
+                .unwrap()
+        );
         pool.close().await;
     }
 
