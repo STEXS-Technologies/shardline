@@ -289,7 +289,7 @@ fn project_history_with_file_budget(
                 remaining_files = remaining_files
                     .checked_sub(files.len())
                     .ok_or_else(|| failure("Git projection exceeds cumulative file entry limit"))?;
-                let objects = project_revision(
+                let (objects, commit_sha) = project_revision(
                     state,
                     &revision,
                     &files,
@@ -299,12 +299,9 @@ fn project_history_with_file_budget(
                     &mut tree_cache,
                     &mut budget,
                 )?;
-                let commit = objects
-                    .last()
-                    .ok_or_else(|| failure("missing projected commit"))?;
                 projection
                     .identities
-                    .insert(revision.sha.clone(), hex::encode(commit.sha1()));
+                    .insert(revision.sha.clone(), hex::encode(commit_sha));
                 objects
             };
         projection.objects.extend(objects);
@@ -439,7 +436,7 @@ fn project_revision(
     cache: &mut HashMap<(String, u64, bool), [u8; 20]>,
     tree_cache: &mut HashMap<[u8; 32], [u8; 20]>,
     budget: &mut ProjectionBudget,
-) -> Result<Vec<GitObject>, HubApiError> {
+) -> Result<(Vec<GitObject>, [u8; 20]), HubApiError> {
     if files.len() > 100_000 {
         return Err(failure("Git tree exceeds file count limit"));
     }
@@ -509,8 +506,10 @@ fn project_revision(
         writeln!(&mut data, "parent {parent}").map_err(failure)?;
     }
     writeln!(&mut data, "author Shardline Hub <hub@shardline.dev> {} +0000\ncommitter Shardline Hub <hub@shardline.dev> {} +0000\n\n{}\n\nShardline-Revision: {}\nShardline-Repository: {}", revision.created_at_unix_seconds, revision.created_at_unix_seconds, revision.message.as_deref().unwrap_or(""), revision.sha, revision.repo_id).map_err(failure)?;
-    budget.append(&mut objects, GitObject::commit(data.text.into_bytes()))?;
-    Ok(objects)
+    // Deduplication may emit no objects for a commit already loaded from an
+    // archive. Its identity remains valid independently of the output vector.
+    let commit_sha = budget.append(&mut objects, GitObject::commit(data.text.into_bytes()))?;
+    Ok((objects, commit_sha))
 }
 
 /// Formatting commit metadata also obeys the quota before growing a buffer.
@@ -771,8 +770,45 @@ mod tests {
             &mut test_budget(super::super::limits::MAX_GIT_PROJECTED_BYTES, 100_000),
         )
         .unwrap();
-        assert_eq!(main.last().unwrap().sha1(), tag.last().unwrap().sha1());
+        assert_eq!(main.1, tag.1);
     }
+    #[test]
+    fn duplicate_projected_commit_keeps_identity_without_charging_objects_twice() {
+        let (_temp, state) = super::super::tests::make_hub_state();
+        let auth = AuthorizedRepository::anonymous_full_access();
+        let revision = revision(&"a".repeat(64));
+        let mut blobs = HashMap::new();
+        let mut trees = HashMap::new();
+        let mut budget = test_budget(4096, 100);
+        let (first, first_sha) = project_revision(
+            &state,
+            &revision,
+            &[],
+            None,
+            &auth,
+            &mut blobs,
+            &mut trees,
+            &mut budget,
+        )
+        .unwrap();
+        assert!(!first.is_empty());
+        let before = (budget.remaining_bytes, budget.remaining_objects);
+        let (duplicate, duplicate_sha) = project_revision(
+            &state,
+            &revision,
+            &[],
+            None,
+            &auth,
+            &mut blobs,
+            &mut trees,
+            &mut budget,
+        )
+        .unwrap();
+        assert!(duplicate.is_empty());
+        assert_eq!(duplicate_sha, first_sha);
+        assert_eq!((budget.remaining_bytes, budget.remaining_objects), before);
+    }
+
     fn revision(sha: &str) -> HubRevision {
         HubRevision {
             repo_id: "alice/repo".to_owned(),
@@ -843,8 +879,8 @@ mod tests {
             &mut budget,
         )
         .unwrap();
-        assert_eq!(first.len(), 5);
-        let parent = hex::encode(first.last().unwrap().sha1());
+        assert_eq!(first.0.len(), 5);
+        let parent = hex::encode(first.1);
         let second = project_revision(
             &state,
             &revision(&"c".repeat(64)),
@@ -856,7 +892,7 @@ mod tests {
             &mut budget,
         )
         .unwrap();
-        assert_eq!(second.len(), 1, "unchanged blobs and tree must be reused");
+        assert_eq!(second.0.len(), 1, "unchanged blobs and tree must be reused");
         assert_eq!(budget.remaining_objects, 0);
         assert_eq!(trees.len(), 1);
     }

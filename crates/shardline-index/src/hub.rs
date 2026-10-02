@@ -148,13 +148,24 @@ pub struct HubRef {
 ///
 /// Tags deliberately keep their full `refs/tags/...` name, while branches use
 /// their short name so Hub API revisions such as `main` and Git Smart HTTP
-/// `refs/heads/main` address the same ref.
+/// `refs/heads/main` address the same ref. Branches whose short name begins
+/// `refs/` keep their full spelling to avoid aliasing tags or other namespaces.
+/// Existing ambiguous historical keys are not reinterpreted.
 #[must_use]
 pub fn canonical_ref_name(ref_name: &str) -> &str {
     ref_name
         .strip_prefix("refs/heads/")
-        .filter(|name| !name.is_empty())
+        .filter(|name| !name.is_empty() && !name.starts_with("refs/"))
         .unwrap_or(ref_name)
+}
+
+/// Outcome of atomic create-only ref publication.
+#[derive(Debug, Clone)]
+pub enum HubRefCreateOutcome {
+    Created(HubRevision),
+    AlreadyExists,
+    /// The custom store has not implemented atomic create-only publication.
+    Unsupported,
 }
 
 /// A Hub file entry within a commit tree.
@@ -378,6 +389,24 @@ pub trait HubStore: Send + Sync {
         ref_name: &str,
         message: &str,
     ) -> Result<HubRevision, Self::Error>;
+    /// Atomically creates a missing ref, without modifying existing bindings.
+    ///
+    /// Custom stores must override this method to support create-only Git pushes.
+    /// The compatibility default fails closed and performs no writes.
+    ///
+    /// # Errors
+    /// Returns an error on storage or reliability failure.
+    fn create_revision_if_absent(
+        &self,
+        repo_id: &str,
+        parent_sha: Option<&str>,
+        new_sha: &str,
+        ref_name: &str,
+        message: &str,
+    ) -> Result<HubRefCreateOutcome, Self::Error> {
+        let _ = (repo_id, parent_sha, new_sha, ref_name, message);
+        Ok(HubRefCreateOutcome::Unsupported)
+    }
 
     /// Lists the active branch and tag references for a repository.
     ///
@@ -619,6 +648,14 @@ trait ErasedHubStore: Send + Sync {
         ref_name: &str,
         message: &str,
     ) -> Result<HubRevision, Box<dyn std::error::Error + Send + Sync>>;
+    fn create_revision_if_absent(
+        &self,
+        repo_id: &str,
+        parent_sha: Option<&str>,
+        new_sha: &str,
+        ref_name: &str,
+        message: &str,
+    ) -> Result<HubRefCreateOutcome, Box<dyn std::error::Error + Send + Sync>>;
 
     fn list_refs(
         &self,
@@ -762,6 +799,17 @@ impl<T: HubStore> ErasedHubStore for T {
         message: &str,
     ) -> Result<HubRevision, Box<dyn std::error::Error + Send + Sync>> {
         T::create_revision(self, repo_id, parent_sha, new_sha, ref_name, message)
+            .map_err(|e| Box::new(std::io::Error::other(e.to_string())) as _)
+    }
+    fn create_revision_if_absent(
+        &self,
+        repo_id: &str,
+        parent_sha: Option<&str>,
+        new_sha: &str,
+        ref_name: &str,
+        message: &str,
+    ) -> Result<HubRefCreateOutcome, Box<dyn std::error::Error + Send + Sync>> {
+        T::create_revision_if_absent(self, repo_id, parent_sha, new_sha, ref_name, message)
             .map_err(|e| Box::new(std::io::Error::other(e.to_string())) as _)
     }
 
@@ -1037,6 +1085,22 @@ impl BoxedHubStore {
             .create_revision(repo_id, parent_sha, new_sha, ref_name, message)
     }
 
+    /// Atomically publishes a revision only when its target ref is absent.
+    ///
+    /// # Errors
+    /// Returns an error on storage or reliability failure.
+    pub fn create_revision_if_absent(
+        &self,
+        repo_id: &str,
+        parent_sha: Option<&str>,
+        new_sha: &str,
+        ref_name: &str,
+        message: &str,
+    ) -> Result<HubRefCreateOutcome, Box<dyn std::error::Error + Send + Sync>> {
+        self.inner
+            .create_revision_if_absent(repo_id, parent_sha, new_sha, ref_name, message)
+    }
+
     /// Lists refs, failing before returning a partial result if `limit` is exceeded.
     ///
     /// # Errors
@@ -1307,6 +1371,17 @@ where
         message: &str,
     ) -> Result<HubRevision, Box<dyn std::error::Error + Send + Sync>> {
         T::create_revision(&self.0, repo_id, parent_sha, new_sha, ref_name, message)
+            .map_err(Into::into)
+    }
+    fn create_revision_if_absent(
+        &self,
+        repo_id: &str,
+        parent_sha: Option<&str>,
+        new_sha: &str,
+        ref_name: &str,
+        message: &str,
+    ) -> Result<HubRefCreateOutcome, Box<dyn std::error::Error + Send + Sync>> {
+        T::create_revision_if_absent(&self.0, repo_id, parent_sha, new_sha, ref_name, message)
             .map_err(Into::into)
     }
 
@@ -1661,6 +1736,31 @@ mod tests {
             canonical_ref_name("refs/notes/commits"),
             "refs/notes/commits"
         );
+    }
+
+    #[test]
+    fn custom_atomic_create_default_is_unsupported_and_does_not_publish() {
+        for store in [
+            BoxedHubStore::new(MemoryHubStore::new()),
+            BoxedHubStore::from_store(MemoryHubStore::new()),
+        ] {
+            store
+                .create_repo(HubRepoType::Model, "owner/custom", false)
+                .unwrap();
+            assert!(matches!(
+                store
+                    .create_revision_if_absent("owner/custom", None, "new-sha", "feature", "new")
+                    .unwrap(),
+                HubRefCreateOutcome::Unsupported
+            ));
+            assert!(
+                store
+                    .resolve_revision("owner/custom", "feature")
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(store.list_revisions("owner/custom").unwrap().is_empty());
+        }
     }
 
     // ---------------------------------------------------------------------------
@@ -2477,6 +2577,21 @@ mod tests {
         );
         assert!(wh.active);
     }
+    #[test]
+    fn atomic_create_override_is_forwarded_by_both_boxed_constructors() {
+        for store in [
+            BoxedHubStore::new(OptimizedTreePageStore),
+            BoxedHubStore::from_store(OptimizedTreePageStore),
+        ] {
+            assert!(matches!(
+                store
+                    .create_revision_if_absent("owner/repo", None, "sha", "branch", "message")
+                    .unwrap(),
+                HubRefCreateOutcome::AlreadyExists
+            ));
+        }
+    }
+
     struct OptimizedTreePageStore;
     impl HubStore for OptimizedTreePageStore {
         type Error = Box<dyn std::error::Error + Send + Sync>;
@@ -2520,6 +2635,16 @@ mod tests {
             _message: &str,
         ) -> Result<HubRevision, Self::Error> {
             Err(std::io::Error::other("unexpected non-page dispatch").into())
+        }
+        fn create_revision_if_absent(
+            &self,
+            _repo_id: &str,
+            _parent_sha: Option<&str>,
+            _new_sha: &str,
+            _ref_name: &str,
+            _message: &str,
+        ) -> Result<HubRefCreateOutcome, Self::Error> {
+            Ok(HubRefCreateOutcome::AlreadyExists)
         }
         fn list_refs(&self, _repo_id: &str) -> Result<Vec<HubRef>, Self::Error> {
             Err(std::io::Error::other("unexpected non-page dispatch").into())

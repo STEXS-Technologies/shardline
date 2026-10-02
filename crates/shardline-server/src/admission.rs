@@ -3,6 +3,28 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
+use crate::ServerConfigError;
+
+/// Largest capacity representable by batch permit counts and Tokio's semaphore.
+pub(crate) fn maximum_counted_capacity() -> usize {
+    (u32::MAX as usize).min(Semaphore::MAX_PERMITS)
+}
+
+pub(crate) const fn validate_capacity(
+    name: &'static str,
+    capacity: NonZeroUsize,
+    maximum: usize,
+) -> Result<(), ServerConfigError> {
+    if capacity.get() > maximum {
+        return Err(ServerConfigError::ResourceCapacityOutOfRange {
+            name,
+            capacity: capacity.get(),
+            maximum,
+        });
+    }
+    Ok(())
+}
+
 /// Weighted admission controller for request work.
 ///
 /// Grants permits with configurable weight. Large requests (uploads, reconstructions)
@@ -11,27 +33,51 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 pub struct WeightedAdmission {
     inner: Arc<Semaphore>,
     max_weight: u64,
-    counters: AdmissionCounters,
+    counters: Arc<AdmissionCounters>,
 }
 
 impl WeightedAdmission {
     /// Creates a new admission controller with the given maximum concurrent weight.
+    ///
+    /// # Panics
+    /// Panics if capacity exceeds the smaller of `u32::MAX` and Tokio's
+    /// `Semaphore::MAX_PERMITS`. Use [`Self::try_new`] for configuration inputs.
     #[must_use]
+    #[allow(clippy::panic)] // The documented infallible convenience API rejects invalid capacity.
     pub fn new(max_weight: NonZeroUsize) -> Self {
-        Self {
-            inner: Arc::new(Semaphore::new(max_weight.get())),
-            max_weight: max_weight.get() as u64,
-            counters: AdmissionCounters::default(),
+        match Self::try_new(max_weight) {
+            Ok(controller) => controller,
+            Err(error) => panic!("{error}"),
         }
     }
 
+    /// Creates a controller after checking its capacity without allocating permits.
+    ///
+    /// # Errors
+    /// Returns a configuration error if capacity exceeds the representable limit.
+    pub fn try_new(max_weight: NonZeroUsize) -> Result<Self, ServerConfigError> {
+        validate_capacity(
+            "admission_max_weight",
+            max_weight,
+            maximum_counted_capacity(),
+        )?;
+        Ok(Self {
+            inner: Arc::new(Semaphore::new(max_weight.get())),
+            max_weight: max_weight.get() as u64,
+            counters: Arc::new(AdmissionCounters::default()),
+        })
+    }
+
     /// Returns the configured maximum weight.
+    #[must_use]
     pub const fn max_weight(&self) -> u64 {
         self.max_weight
     }
 
     /// Attempts to acquire a permit with the given weight.
-    /// Returns `None` if `weight` is zero, the semaphore is closed, or the weight exceeds max.
+    /// Caps the requested weight at the configured capacity. Returns `None`
+    /// if the weight is zero, the semaphore is closed, or capacity is unavailable.
+    #[must_use]
     pub fn try_acquire(&self, weight: u64) -> Option<OwnedSemaphorePermit> {
         if weight == 0 {
             self.counters.record_rejected();
@@ -70,12 +116,14 @@ impl WeightedAdmission {
     }
 
     /// Returns the number of available permits.
+    #[must_use]
     pub fn available_permits(&self) -> u32 {
         self.inner.available_permits() as u32
     }
 
     /// Returns a reference to the admission counters.
-    pub const fn counters(&self) -> &AdmissionCounters {
+    #[must_use]
+    pub fn counters(&self) -> &AdmissionCounters {
         &self.counters
     }
 }
@@ -92,12 +140,39 @@ pub struct BoundedPool {
 
 impl BoundedPool {
     /// Creates a new bounded pool with the given maximum concurrency.
+    ///
+    /// # Panics
+    /// Panics if capacity exceeds the smaller of `u32::MAX` and Tokio's
+    /// `Semaphore::MAX_PERMITS`. Use [`Self::try_new`] for configuration inputs.
+    #[allow(clippy::panic)] // The documented infallible convenience API rejects invalid capacity.
     pub fn new(max_concurrent: NonZeroUsize) -> Self {
-        let cap = max_concurrent.get() as u32;
-        Self {
-            inner: Arc::new(Semaphore::new(cap as usize)),
-            capacity: cap,
+        match Self::try_new(max_concurrent) {
+            Ok(pool) => pool,
+            Err(error) => panic!("{error}"),
         }
+    }
+
+    /// Creates a pool after checking its capacity.
+    ///
+    /// # Errors
+    /// Returns a configuration error instead of truncating an oversized capacity.
+    pub fn try_new(max_concurrent: NonZeroUsize) -> Result<Self, ServerConfigError> {
+        validate_capacity(
+            "execution_pool_size",
+            max_concurrent,
+            maximum_counted_capacity(),
+        )?;
+        let cap = u32::try_from(max_concurrent.get()).map_err(|_overflow| {
+            ServerConfigError::ResourceCapacityOutOfRange {
+                name: "execution_pool_size",
+                capacity: max_concurrent.get(),
+                maximum: maximum_counted_capacity(),
+            }
+        })?;
+        Ok(Self {
+            inner: Arc::new(Semaphore::new(max_concurrent.get())),
+            capacity: cap,
+        })
     }
 
     /// Attempts to acquire a permit without waiting.
@@ -146,6 +221,10 @@ impl ExecutionPools {
     }
 
     /// Creates execution pools with custom sizes from configuration.
+    ///
+    /// # Panics
+    /// Panics if any capacity is unrepresentable. Use [`Self::try_with_sizes`]
+    /// to reject invalid configuration without panicking.
     #[must_use]
     pub fn with_sizes(
         hashing: NonZeroUsize,
@@ -157,6 +236,22 @@ impl ExecutionPools {
             parsing: BoundedPool::new(parsing),
             blocking_io: BoundedPool::new(blocking_io),
         }
+    }
+
+    /// Creates execution pools with checked custom sizes.
+    ///
+    /// # Errors
+    /// Returns a configuration error if any capacity is unrepresentable.
+    pub fn try_with_sizes(
+        hashing: NonZeroUsize,
+        parsing: NonZeroUsize,
+        blocking_io: NonZeroUsize,
+    ) -> Result<Self, ServerConfigError> {
+        Ok(Self {
+            hashing: BoundedPool::try_new(hashing)?,
+            parsing: BoundedPool::try_new(parsing)?,
+            blocking_io: BoundedPool::try_new(blocking_io)?,
+        })
     }
 }
 
@@ -230,6 +325,53 @@ pub mod weights {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn checked_capacity_boundaries_preserve_capacity() {
+        let maximum = super::maximum_counted_capacity();
+        let valid = NonZeroUsize::new(maximum).unwrap();
+        let invalid = NonZeroUsize::new(maximum + 1).unwrap();
+        let controller = WeightedAdmission::try_new(valid).unwrap();
+        assert_eq!(
+            controller.available_permits(),
+            u32::try_from(maximum).unwrap()
+        );
+        let permit = controller.try_acquire(u64::MAX).unwrap();
+        assert_eq!(controller.available_permits(), 0);
+        drop(permit);
+        assert_eq!(
+            controller.available_permits(),
+            u32::try_from(maximum).unwrap()
+        );
+        let pool = BoundedPool::try_new(valid).unwrap();
+        assert_eq!(pool.capacity(), u32::try_from(maximum).unwrap());
+        let permit = pool.try_acquire().unwrap();
+        assert_eq!(
+            pool.available_permits(),
+            u32::try_from(maximum - 1).unwrap()
+        );
+        drop(permit);
+        assert!(WeightedAdmission::try_new(invalid).is_err());
+        assert!(BoundedPool::try_new(invalid).is_err());
+        assert!(ExecutionPools::try_with_sizes(valid, invalid, valid).is_err());
+        assert!(ExecutionPools::try_with_sizes(valid, valid, invalid).is_err());
+        assert!(ExecutionPools::try_with_sizes(invalid, valid, valid).is_err());
+    }
+
+    #[test]
+    #[should_panic(expected = "execution_pool_size capacity")]
+    fn convenience_pool_rejects_unrepresentable_capacity() {
+        let _pool =
+            BoundedPool::new(NonZeroUsize::new(super::maximum_counted_capacity() + 1).unwrap());
+    }
+
+    #[test]
+    #[should_panic(expected = "admission_max_weight capacity")]
+    fn convenience_admission_rejects_unrepresentable_capacity() {
+        let _controller = WeightedAdmission::new(
+            NonZeroUsize::new(super::maximum_counted_capacity() + 1).unwrap(),
+        );
+    }
+
     use super::*;
     use std::num::NonZeroUsize;
 
@@ -260,6 +402,19 @@ mod tests {
         let ctrl = WeightedAdmission::new(NonZeroUsize::new(10).unwrap());
         let _permit = ctrl.try_acquire(5);
         assert_eq!(ctrl.counters().admitted.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn cloned_admission_shares_capacity_and_counters() {
+        let ctrl = WeightedAdmission::new(NonZeroUsize::new(2).unwrap());
+        let clone = ctrl.clone();
+        let permit = clone.try_acquire(2).unwrap();
+        assert_eq!(ctrl.available_permits(), 0);
+        assert!(ctrl.try_acquire(1).is_none());
+        assert_eq!(ctrl.counters().admitted.load(Ordering::Relaxed), 1);
+        assert_eq!(clone.counters().rejected.load(Ordering::Relaxed), 1);
+        drop(permit);
+        assert_eq!(clone.available_permits(), 2);
     }
 
     #[test]
