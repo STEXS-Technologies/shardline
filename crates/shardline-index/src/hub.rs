@@ -167,6 +167,113 @@ pub struct HubFileEntry {
     pub is_lfs: bool,
 }
 
+/// Maximum complete tree supported by built-in Hub readers.
+pub const HUB_TREE_READ_CEILING: usize = 100_000;
+
+/// A relative file or immediate directory in a repository tree page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HubTreePageEntry {
+    Directory { path: String },
+    File(HubFileEntry),
+}
+
+impl HubTreePageEntry {
+    #[must_use]
+    pub fn path(&self) -> &str {
+        match self {
+            Self::Directory { path } => path,
+            Self::File(file) => &file.path,
+        }
+    }
+
+    const fn kind(&self) -> u8 {
+        match self {
+            Self::Directory { .. } => 0,
+            Self::File(_) => 1,
+        }
+    }
+}
+
+/// Explicit tree listing options. Cursor is the existing relative entry path.
+#[derive(Debug, Clone)]
+pub struct HubTreePageOptions {
+    pub path: String,
+    pub recursive: bool,
+    pub cursor: Option<String>,
+    pub limit: usize,
+}
+
+impl HubTreePageOptions {
+    #[must_use]
+    pub fn prefix(&self) -> String {
+        if self.path.is_empty() {
+            String::new()
+        } else {
+            format!("{}/", self.path)
+        }
+    }
+
+    #[must_use]
+    pub fn page_limit(&self) -> usize {
+        self.limit.min(HUB_TREE_READ_CEILING)
+    }
+}
+
+/// A page with one extra row consumed to determine whether more entries exist.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HubTreePage {
+    pub entries: Vec<HubTreePageEntry>,
+    pub has_more: bool,
+}
+
+impl HubTreePage {
+    pub(crate) fn from_entries(mut entries: Vec<HubTreePageEntry>, limit: usize) -> Self {
+        let has_more = entries.len() > limit;
+        entries.truncate(limit);
+        Self { entries, has_more }
+    }
+
+    fn from_files(files: Vec<HubFileEntry>, options: &HubTreePageOptions) -> Self {
+        let prefix = options.prefix();
+        let mut entries = Vec::new();
+        let mut directories = std::collections::BTreeSet::new();
+        for mut file in files {
+            let Some(relative) = file.path.strip_prefix(&prefix) else {
+                continue;
+            };
+            if options.recursive {
+                if relative.is_empty() {
+                    continue;
+                }
+            } else if let Some((directory, _rest)) = relative.split_once('/') {
+                directories.insert(directory.to_owned());
+                continue;
+            }
+            file.path = relative.to_owned();
+            entries.push(HubTreePageEntry::File(file));
+        }
+        entries.extend(
+            directories
+                .into_iter()
+                .map(|path| HubTreePageEntry::Directory { path }),
+        );
+        entries.sort_by(|left, right| {
+            left.kind()
+                .cmp(&right.kind())
+                .then_with(|| left.path().cmp(right.path()))
+        });
+        if let Some(cursor) = &options.cursor {
+            let start = entries
+                .iter()
+                .position(|entry| entry.path() == cursor)
+                .and_then(|position| position.checked_add(1))
+                .unwrap_or(entries.len());
+            drop(entries.drain(..start));
+        }
+        Self::from_entries(entries, options.limit)
+    }
+}
+
 /// Shared initial revision: its tree is always empty, even if legacy rows exist.
 pub const EMPTY_HUB_REVISION: &str = "4b825dc642cb6eb9a060e54bf899d69f8f5ce8e3";
 
@@ -381,6 +488,24 @@ pub trait HubStore: Send + Sync {
         Ok((files.len() <= limit).then_some(files))
     }
 
+    /// Read an explicit relative tree page. Built-ins return None on whole-tree
+    /// ceiling overflow and bound decoded SQL rows. This compatibility fallback
+    /// preserves each custom store's existing get_files and limit behavior; it
+    /// loads a complete tree and is not memory bounded.
+    ///
+    /// # Errors
+    /// Returns storage errors or recovery-required revision errors.
+    fn get_tree_page(
+        &self,
+        commit_sha: &str,
+        options: &HubTreePageOptions,
+    ) -> Result<Option<HubTreePage>, Self::Error> {
+        Ok(Some(HubTreePage::from_files(
+            self.get_files(commit_sha)?,
+            options,
+        )))
+    }
+
     /// Creates a webhook for a repository.
     ///
     /// # Errors
@@ -543,6 +668,12 @@ trait ErasedHubStore: Send + Sync {
         commit_sha: &str,
         limit: usize,
     ) -> Result<Vec<HubFileEntry>, Box<dyn std::error::Error + Send + Sync>>;
+
+    fn get_tree_page(
+        &self,
+        commit_sha: &str,
+        options: &HubTreePageOptions,
+    ) -> Result<HubTreePage, Box<dyn std::error::Error + Send + Sync>>;
 
     fn create_webhook(
         &self,
@@ -734,6 +865,23 @@ impl<T: HubStore> ErasedHubStore for T {
     ) -> Result<Vec<HubFileEntry>, Box<dyn std::error::Error + Send + Sync>> {
         T::get_files(self, commit_sha)
             .map_err(|e| Box::new(std::io::Error::other(e.to_string())) as _)
+    }
+
+    fn get_tree_page(
+        &self,
+        commit_sha: &str,
+        options: &HubTreePageOptions,
+    ) -> Result<HubTreePage, Box<dyn std::error::Error + Send + Sync>> {
+        T::get_tree_page(self, commit_sha, options)
+            .map_err(|error| {
+                Box::new(std::io::Error::other(error.to_string()))
+                    as Box<dyn std::error::Error + Send + Sync>
+            })?
+            .ok_or_else(|| {
+                Box::new(std::io::Error::other(
+                    "Hub tree exceeds the 100000-entry metadata read ceiling",
+                )) as _
+            })
     }
 
     fn create_webhook(
@@ -1010,6 +1158,18 @@ impl BoxedHubStore {
         self.inner.get_files(commit_sha)
     }
 
+    /// Read an explicit tree page, preserving whole-tree overflow errors.
+    ///
+    /// # Errors
+    /// Returns storage, recovery-required, or whole-tree ceiling errors.
+    pub fn get_tree_page(
+        &self,
+        commit_sha: &str,
+        options: &HubTreePageOptions,
+    ) -> Result<HubTreePage, Box<dyn std::error::Error + Send + Sync>> {
+        self.inner.get_tree_page(commit_sha, options)
+    }
+
     /// Creates a webhook for a repository.
     ///
     /// # Errors
@@ -1245,6 +1405,23 @@ where
         commit_sha: &str,
     ) -> Result<Vec<HubFileEntry>, Box<dyn std::error::Error + Send + Sync>> {
         T::get_files(&self.0, commit_sha).map_err(Into::into)
+    }
+
+    fn get_tree_page(
+        &self,
+        commit_sha: &str,
+        options: &HubTreePageOptions,
+    ) -> Result<HubTreePage, Box<dyn std::error::Error + Send + Sync>> {
+        T::get_tree_page(&self.0, commit_sha, options)
+            .map_err(|error| {
+                Box::new(std::io::Error::other(error.to_string()))
+                    as Box<dyn std::error::Error + Send + Sync>
+            })?
+            .ok_or_else(|| {
+                Box::new(std::io::Error::other(
+                    "Hub tree exceeds the 100000-entry metadata read ceiling",
+                )) as _
+            })
     }
 
     fn create_webhook(
@@ -2299,5 +2476,178 @@ mod tests {
             Some("s3kr3t")
         );
         assert!(wh.active);
+    }
+    struct OptimizedTreePageStore;
+    impl HubStore for OptimizedTreePageStore {
+        type Error = Box<dyn std::error::Error + Send + Sync>;
+        fn create_repo(
+            &self,
+            _repo_type: HubRepoType,
+            _name: &str,
+            _private: bool,
+        ) -> Result<HubRepo, Self::Error> {
+            Err(std::io::Error::other("unexpected non-page dispatch").into())
+        }
+        fn get_repo(&self, _repo_id: &str) -> Result<Option<HubRepo>, Self::Error> {
+            Err(std::io::Error::other("unexpected non-page dispatch").into())
+        }
+        fn list_repos(&self) -> Result<Vec<HubRepo>, Self::Error> {
+            Err(std::io::Error::other("unexpected non-page dispatch").into())
+        }
+        fn search_repos(
+            &self,
+            _repo_type: Option<HubRepoType>,
+            _name_prefix: &str,
+            _limit: usize,
+        ) -> Result<Vec<HubRepo>, Self::Error> {
+            Err(std::io::Error::other("unexpected non-page dispatch").into())
+        }
+        fn search_repos_with_options(
+            &self,
+            _repo_type: Option<HubRepoType>,
+            _name_prefix: &str,
+            _limit: usize,
+            _options: &HubRepoSearchOptions,
+        ) -> Result<Vec<HubRepo>, Self::Error> {
+            Err(std::io::Error::other("unexpected non-page dispatch").into())
+        }
+        fn create_revision(
+            &self,
+            _repo_id: &str,
+            _parent_sha: Option<&str>,
+            _new_sha: &str,
+            _ref_name: &str,
+            _message: &str,
+        ) -> Result<HubRevision, Self::Error> {
+            Err(std::io::Error::other("unexpected non-page dispatch").into())
+        }
+        fn list_refs(&self, _repo_id: &str) -> Result<Vec<HubRef>, Self::Error> {
+            Err(std::io::Error::other("unexpected non-page dispatch").into())
+        }
+        fn delete_ref(
+            &self,
+            _repo_id: &str,
+            _ref_name: &str,
+            _expected_sha: &str,
+        ) -> Result<(), Self::Error> {
+            Err(std::io::Error::other("unexpected non-page dispatch").into())
+        }
+        fn list_revisions(&self, _repo_id: &str) -> Result<Vec<HubRevision>, Self::Error> {
+            Err(std::io::Error::other("unexpected non-page dispatch").into())
+        }
+        fn resolve_revision(
+            &self,
+            _repo_id: &str,
+            _revision: &str,
+        ) -> Result<Option<String>, Self::Error> {
+            Err(std::io::Error::other("unexpected non-page dispatch").into())
+        }
+        fn store_files(
+            &self,
+            _commit_sha: &str,
+            _files: &[HubFileEntry],
+        ) -> Result<(), Self::Error> {
+            Err(std::io::Error::other("unexpected non-page dispatch").into())
+        }
+        fn get_files(&self, _commit_sha: &str) -> Result<Vec<HubFileEntry>, Self::Error> {
+            Err(std::io::Error::other("unexpected non-page dispatch").into())
+        }
+        fn list_webhooks(&self, _repo_id: &str) -> Result<Vec<HubWebhook>, Self::Error> {
+            Err(std::io::Error::other("unexpected non-page dispatch").into())
+        }
+        fn delete_repo(&self, _repo_id: &str) -> Result<(), Self::Error> {
+            Err(std::io::Error::other("unexpected non-page dispatch").into())
+        }
+        fn delete_webhook(&self, _repo_id: &str, _webhook_id: &str) -> Result<(), Self::Error> {
+            Err(std::io::Error::other("unexpected non-page dispatch").into())
+        }
+        fn update_webhook_secret(
+            &self,
+            _repo_id: &str,
+            _webhook_id: &str,
+            _secret: Option<&str>,
+        ) -> Result<(), Self::Error> {
+            Err(std::io::Error::other("unexpected non-page dispatch").into())
+        }
+        fn webhooks_for_event(
+            &self,
+            _repo_id: &str,
+            _event: &str,
+        ) -> Result<Vec<HubWebhook>, Self::Error> {
+            Err(std::io::Error::other("unexpected non-page dispatch").into())
+        }
+        fn create_webhook(
+            &self,
+            _repo_id: &str,
+            _url: &str,
+            _events: &[String],
+            _secret: Option<&str>,
+        ) -> Result<HubWebhook, Self::Error> {
+            Err(std::io::Error::other("unexpected non-page dispatch").into())
+        }
+        fn get_tree_page(
+            &self,
+            _commit_sha: &str,
+            _options: &HubTreePageOptions,
+        ) -> Result<Option<HubTreePage>, Self::Error> {
+            Ok(Some(HubTreePage {
+                entries: vec![HubTreePageEntry::Directory {
+                    path: "override".to_owned(),
+                }],
+                has_more: false,
+            }))
+        }
+    }
+
+    #[test]
+    fn tree_page_erasure_retains_optimized_override() {
+        let options = HubTreePageOptions {
+            path: String::new(),
+            recursive: false,
+            cursor: None,
+            limit: 1,
+        };
+        for store in [
+            BoxedHubStore::new(OptimizedTreePageStore),
+            BoxedHubStore::from_store(OptimizedTreePageStore),
+        ] {
+            assert_eq!(
+                store.get_tree_page("commit", &options).unwrap().entries,
+                vec![HubTreePageEntry::Directory {
+                    path: "override".to_owned()
+                }]
+            );
+        }
+    }
+
+    #[test]
+    fn tree_page_legacy_custom_store_preserves_large_tree_limit() {
+        for store in [
+            BoxedHubStore::new(MemoryHubStore::new()),
+            BoxedHubStore::from_store(MemoryHubStore::new()),
+        ] {
+            let files: Vec<_> = (0..100_001)
+                .map(|number| HubFileEntry {
+                    path: format!("{number:06}"),
+                    size: 1,
+                    sha: "sha".to_owned(),
+                    is_lfs: false,
+                })
+                .collect();
+            store.store_files("custom", &files).unwrap();
+            let page = store
+                .get_tree_page(
+                    "custom",
+                    &HubTreePageOptions {
+                        path: String::new(),
+                        recursive: true,
+                        cursor: None,
+                        limit: 100_001,
+                    },
+                )
+                .unwrap();
+            assert_eq!(page.entries.len(), 100_001);
+            assert!(!page.has_more);
+        }
     }
 }

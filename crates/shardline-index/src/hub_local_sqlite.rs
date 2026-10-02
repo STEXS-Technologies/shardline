@@ -5,8 +5,9 @@ use shardline_protocol::{SecretString, unix_now_seconds_lossy};
 
 use crate::{
     hub::{
-        EMPTY_HUB_REVISION, HubFileEntry, HubRef, HubRepo, HubRepoSearchOptions, HubRepoType,
-        HubRevision, HubStore, HubWebhook, canonical_ref_name, hub_tree_requires_recovery,
+        EMPTY_HUB_REVISION, HUB_TREE_READ_CEILING, HubFileEntry, HubRef, HubRepo,
+        HubRepoSearchOptions, HubRepoType, HubRevision, HubStore, HubTreePage, HubTreePageEntry,
+        HubTreePageOptions, HubWebhook, canonical_ref_name, hub_tree_requires_recovery,
     },
     local_sqlite::{
         LocalIndexStore, LocalIndexStoreError, current_hub_ref_evidence, hub_ref_snapshot,
@@ -602,12 +603,13 @@ impl HubStore for LocalIndexStore {
     }
 
     fn get_files(&self, commit_sha: &str) -> Result<Vec<HubFileEntry>, Self::Error> {
-        self.get_files_bounded(commit_sha, 100_000)?.ok_or_else(|| {
-            rusqlite::Error::InvalidParameterName(
-                "Hub tree exceeds the 100000-entry metadata read ceiling".to_owned(),
-            )
-            .into()
-        })
+        self.get_files_bounded(commit_sha, HUB_TREE_READ_CEILING)?
+            .ok_or_else(|| {
+                rusqlite::Error::InvalidParameterName(
+                    "Hub tree exceeds the 100000-entry metadata read ceiling".to_owned(),
+                )
+                .into()
+            })
     }
 
     fn get_files_bounded(
@@ -642,6 +644,119 @@ impl HubStore for LocalIndexStore {
             entries.push(row?);
         }
         Ok((entries.len() <= limit).then_some(entries))
+    }
+
+    fn get_tree_page(
+        &self,
+        commit_sha: &str,
+        options: &HubTreePageOptions,
+    ) -> Result<Option<HubTreePage>, Self::Error> {
+        if commit_sha == EMPTY_HUB_REVISION {
+            return Ok(Some(HubTreePage::from_entries(
+                Vec::new(),
+                options.page_limit(),
+            )));
+        }
+        if hub_tree_requires_recovery(commit_sha) {
+            return Err(LocalIndexStoreError::HubTreeRecoveryRequired(
+                commit_sha.to_owned(),
+            ));
+        }
+        let mut connection = open_hub_connection(self.root())?;
+        let transaction = connection.transaction()?;
+        let count: i64 = transaction.query_row(
+            "SELECT count(*) FROM (SELECT 1 FROM shardline_hub_file_entries WHERE commit_sha=?1 LIMIT 100001)",
+            params![commit_sha], |row| row.get(0))?;
+        if count > i64::try_from(HUB_TREE_READ_CEILING).unwrap_or(i64::MAX) {
+            return Ok(None);
+        }
+        let prefix = options.prefix();
+        let upper = (!options.path.is_empty()).then(|| format!("{}0", options.path));
+        let query_limit = i64::try_from(options.page_limit().saturating_add(1)).unwrap_or(i64::MAX);
+        let mut entries = Vec::new();
+        if options.recursive {
+            let cursor = options
+                .cursor
+                .as_ref()
+                .map(|cursor| format!("{prefix}{cursor}"));
+            let lower = cursor.as_ref().unwrap_or(&prefix);
+            let comparison = if cursor.is_some() { ">" } else { ">=" };
+            let upper_clause = if upper.is_some() { "AND path<?3" } else { "" };
+            let cursor_clause = if cursor.is_some() {
+                "AND EXISTS(SELECT 1 FROM shardline_hub_file_entries WHERE commit_sha=?1 AND path=?4 AND path<>?6)"
+            } else {
+                ""
+            };
+            let sql = format!("SELECT path,size,sha,is_lfs FROM shardline_hub_file_entries
+                WHERE commit_sha=?1 AND path{comparison}?2 AND path<>?6 {upper_clause} {cursor_clause}
+                ORDER BY path LIMIT ?5");
+            let mut statement = transaction.prepare(&sql)?;
+            let rows = statement.query_map(
+                params![commit_sha, lower, upper, cursor, query_limit, prefix],
+                |row| {
+                    let full_path: String = row.get(0)?;
+                    Ok(HubTreePageEntry::File(HubFileEntry {
+                        path: full_path
+                            .strip_prefix(&prefix)
+                            .unwrap_or(&full_path)
+                            .to_owned(),
+                        size: i64_to_u64(row.get(1)?)
+                            .map_err(|error| sqlite_store_error(&error))?,
+                        sha: row.get(2)?,
+                        is_lfs: row.get::<_, i64>(3)? != 0,
+                    }))
+                },
+            )?;
+            for row in rows {
+                entries.push(row?);
+            }
+        } else {
+            let prefix_start =
+                i64::try_from(prefix.chars().count().saturating_add(1)).unwrap_or(i64::MAX);
+            let mut statement = transaction.prepare(
+                "WITH filtered AS (SELECT substr(path,?4) AS relative,size,sha,is_lfs
+                   FROM shardline_hub_file_entries WHERE commit_sha=?1 AND path>=?2 AND (?3 IS NULL OR path<?3)),
+                 entries AS (SELECT DISTINCT 0 AS kind,substr(relative,1,instr(relative,'/')-1) AS path,
+                   NULL AS size,NULL AS sha,NULL AS is_lfs FROM filtered WHERE instr(relative,'/')>0
+                   UNION ALL SELECT 1,relative,size,sha,is_lfs FROM filtered WHERE instr(relative,'/')=0),
+                 cursor_kind AS (SELECT min(kind) AS kind FROM entries WHERE path=?5)
+                 SELECT kind,path,size,sha,is_lfs FROM entries
+                 WHERE ?5 IS NULL OR kind>(SELECT kind FROM cursor_kind)
+                    OR (kind=(SELECT kind FROM cursor_kind) AND path>?5)
+                 ORDER BY kind,path LIMIT ?6")?;
+            let rows = statement.query_map(
+                params![
+                    commit_sha,
+                    prefix,
+                    upper,
+                    prefix_start,
+                    options.cursor,
+                    query_limit
+                ],
+                |row| {
+                    let path: String = row.get(1)?;
+                    if row.get::<_, i64>(0)? == 0 {
+                        Ok(HubTreePageEntry::Directory { path })
+                    } else {
+                        Ok(HubTreePageEntry::File(HubFileEntry {
+                            path,
+                            size: i64_to_u64(row.get(2)?)
+                                .map_err(|error| sqlite_store_error(&error))?,
+                            sha: row.get(3)?,
+                            is_lfs: row.get::<_, i64>(4)? != 0,
+                        }))
+                    }
+                },
+            )?;
+            for row in rows {
+                entries.push(row?);
+            }
+        }
+        transaction.commit()?;
+        Ok(Some(HubTreePage::from_entries(
+            entries,
+            options.page_limit(),
+        )))
     }
 
     fn delete_repo(&self, repo_id: &str) -> Result<(), Self::Error> {

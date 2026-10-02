@@ -8,8 +8,9 @@ use shardline_protocol::SecretString;
 
 use crate::{
     hub::{
-        EMPTY_HUB_REVISION, HubFileEntry, HubRef, HubRepo, HubRepoSearchOptions, HubRepoType,
-        HubRevision, HubStore, HubWebhook, canonical_ref_name, hub_tree_requires_recovery,
+        EMPTY_HUB_REVISION, HUB_TREE_READ_CEILING, HubFileEntry, HubRef, HubRepo,
+        HubRepoSearchOptions, HubRepoType, HubRevision, HubStore, HubTreePage, HubTreePageEntry,
+        HubTreePageOptions, HubWebhook, canonical_ref_name, hub_tree_requires_recovery,
     },
     postgres::{
         PostgresIndexStore, PostgresMetadataStoreError, i64_to_u64,
@@ -827,11 +828,12 @@ impl HubStore for PostgresIndexStore {
     }
 
     fn get_files(&self, commit_sha: &str) -> Result<Vec<HubFileEntry>, Self::Error> {
-        self.get_files_bounded(commit_sha, 100_000)?.ok_or_else(|| {
-            PostgresMetadataStoreError::Unsupported(
-                "Hub tree exceeds the 100000-entry metadata read ceiling".to_owned(),
-            )
-        })
+        self.get_files_bounded(commit_sha, HUB_TREE_READ_CEILING)?
+            .ok_or_else(|| {
+                PostgresMetadataStoreError::Unsupported(
+                    "Hub tree exceeds the 100000-entry metadata read ceiling".to_owned(),
+                )
+            })
     }
 
     fn get_files_bounded(
@@ -870,6 +872,131 @@ impl HubStore for PostgresIndexStore {
                 });
             }
             Ok((entries.len() <= limit).then_some(entries))
+        })
+    }
+
+    fn get_tree_page(
+        &self,
+        commit_sha: &str,
+        options: &HubTreePageOptions,
+    ) -> Result<Option<HubTreePage>, Self::Error> {
+        if commit_sha == EMPTY_HUB_REVISION {
+            return Ok(Some(HubTreePage::from_entries(
+                Vec::new(),
+                options.page_limit(),
+            )));
+        }
+        if hub_tree_requires_recovery(commit_sha) {
+            return Err(PostgresMetadataStoreError::HubTreeRecoveryRequired(
+                commit_sha.to_owned(),
+            ));
+        }
+        let pool = self.pool().clone();
+        let commit_sha = commit_sha.to_owned();
+        let options = options.clone();
+        block_on_async(async {
+            let mut transaction = pool.begin().await?;
+            // A single tree snapshot covers the ceiling, cursor existence and page.
+            sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+                .execute(&mut *transaction)
+                .await?;
+            let count: i64 = sqlx::query_scalar("SELECT count(*) FROM (SELECT 1 FROM shardline_hub_file_entries WHERE commit_sha=$1 LIMIT 100001) AS bounded")
+                .bind(&commit_sha).fetch_one(&mut *transaction).await?;
+            if count > i64::try_from(HUB_TREE_READ_CEILING).unwrap_or(i64::MAX) {
+                return Ok(None);
+            }
+            // PostgreSQL text cannot bind NUL. These are unknown paths/cursors
+            // for PostgreSQL trees; preserve the prior empty listing only AFTER
+            // the complete-tree ceiling and revision guards have been checked.
+            if options.path.contains('\0')
+                || options
+                    .cursor
+                    .as_ref()
+                    .is_some_and(|cursor| cursor.contains('\0'))
+            {
+                return Ok(Some(HubTreePage::from_entries(
+                    Vec::new(),
+                    options.page_limit(),
+                )));
+            }
+            let prefix = options.prefix();
+            let upper = (!options.path.is_empty()).then(|| format!("{}0", options.path));
+            let query_limit =
+                i64::try_from(options.page_limit().saturating_add(1)).unwrap_or(i64::MAX);
+            let mut entries = Vec::new();
+            if options.recursive {
+                let cursor = options
+                    .cursor
+                    .as_ref()
+                    .map(|cursor| format!("{prefix}{cursor}"));
+                let lower = cursor.as_ref().unwrap_or(&prefix);
+                let mut query = sqlx::QueryBuilder::<sqlx::Postgres>::new(
+                    "SELECT path,size,sha,is_lfs FROM shardline_hub_file_entries WHERE commit_sha=",
+                );
+                query.push_bind(&commit_sha).push(" AND path COLLATE \"C\"");
+                query
+                    .push(if cursor.is_some() { ">" } else { ">=" })
+                    .push_bind(lower);
+                query.push(" AND path COLLATE \"C\"<>").push_bind(&prefix);
+                if let Some(upper) = &upper {
+                    query.push(" AND path COLLATE \"C\"<").push_bind(upper);
+                }
+                if let Some(cursor) = &cursor {
+                    query.push(" AND EXISTS(SELECT 1 FROM shardline_hub_file_entries WHERE commit_sha=")
+                        .push_bind(&commit_sha).push(" AND path COLLATE \"C\"=").push_bind(cursor)
+                        .push(" AND path COLLATE \"C\"<>").push_bind(&prefix).push(")");
+                }
+                query
+                    .push(" ORDER BY path COLLATE \"C\" LIMIT ")
+                    .push_bind(query_limit);
+                let mut rows = query.build().fetch(&mut *transaction);
+                while let Some(row) = rows.try_next().await? {
+                    let full_path: String = row.try_get("path")?;
+                    entries.push(HubTreePageEntry::File(HubFileEntry {
+                        path: full_path
+                            .strip_prefix(&prefix)
+                            .unwrap_or(&full_path)
+                            .to_owned(),
+                        size: i64_to_u64(row.try_get("size")?)?,
+                        sha: row.try_get("sha")?,
+                        is_lfs: row.try_get("is_lfs")?,
+                    }));
+                }
+            } else {
+                let prefix_start =
+                    i32::try_from(prefix.chars().count().saturating_add(1)).unwrap_or(i32::MAX);
+                let mut rows = sqlx::query(
+                    "WITH filtered AS (SELECT substring(path FROM $4) AS relative,size,sha,is_lfs
+                       FROM shardline_hub_file_entries WHERE commit_sha=$1 AND path COLLATE \"C\">=$2
+                       AND ($3::text IS NULL OR path COLLATE \"C\"<$3)),
+                     entries AS (SELECT DISTINCT 0 AS kind,split_part(relative,'/',1) COLLATE \"C\" AS path,
+                       NULL::bigint AS size,NULL::text AS sha,NULL::boolean AS is_lfs FROM filtered WHERE strpos(relative,'/')>0
+                       UNION ALL SELECT 1,relative COLLATE \"C\",size,sha,is_lfs FROM filtered WHERE strpos(relative,'/')=0),
+                     cursor_kind AS (SELECT min(kind) AS kind FROM entries WHERE path=$5)
+                     SELECT kind,path,size,sha,is_lfs FROM entries
+                     WHERE $5::text IS NULL OR kind>(SELECT kind FROM cursor_kind)
+                       OR (kind=(SELECT kind FROM cursor_kind) AND path>$5)
+                     ORDER BY kind,path LIMIT $6")
+                    .bind(&commit_sha).bind(&prefix).bind(&upper).bind(prefix_start).bind(&options.cursor).bind(query_limit).fetch(&mut *transaction);
+                while let Some(row) = rows.try_next().await? {
+                    let path: String = row.try_get("path")?;
+                    entries.push(if row.try_get::<i32, _>("kind")? == 0 {
+                        HubTreePageEntry::Directory { path }
+                    } else {
+                        HubTreePageEntry::File(HubFileEntry {
+                            path,
+                            size: i64_to_u64(row.try_get("size")?)?,
+                            sha: row.try_get("sha")?,
+                            is_lfs: row.try_get("is_lfs")?,
+                        })
+                    });
+                }
+            }
+            transaction.commit().await?;
+            Ok(Some(HubTreePage::from_entries(
+                entries,
+                options.page_limit(),
+            )))
         })
     }
 
