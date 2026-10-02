@@ -16,6 +16,15 @@ pub(crate) const MAX_DECOMPRESSED_TOTAL_BYTES: usize = 512 * 1024 * 1024;
 ///
 /// Returns `PackError` if the pack data is malformed or incomplete.
 pub fn parse_pack_data(data: &[u8]) -> Result<Vec<GitObject>, PackError> {
+    parse_pack_data_with_bases(data, &HashMap::new())
+}
+
+/// Thin receive-packs may refer to immutable objects already held by the
+/// authorized repository. External bases never cross the repository boundary.
+pub(super) fn parse_pack_data_with_bases(
+    data: &[u8],
+    bases: &HashMap<[u8; 20], &GitObject>,
+) -> Result<Vec<GitObject>, PackError> {
     if data.len() < 12 {
         return Ok(Vec::new());
     }
@@ -42,6 +51,7 @@ pub fn parse_pack_data(data: &[u8]) -> Result<Vec<GitObject>, PackError> {
 
     let mut objects = Vec::new();
     let mut sha_index: HashMap<[u8; 20], usize> = HashMap::new();
+    let mut object_offsets: HashMap<usize, usize> = HashMap::new();
     let mut pos: usize = 12;
     let mut total_decompressed: usize = 0;
     // Number of objects actually parsed from the stream. If the loop ends
@@ -56,6 +66,7 @@ pub fn parse_pack_data(data: &[u8]) -> Result<Vec<GitObject>, PackError> {
 
         // SAFETY: pos < data.len() checked above, so data.get(pos) is Some.
         // .unwrap_or(&0) provides a default that won't match valid pack entries.
+        let object_start = pos;
         let byte = *data.get(pos).unwrap_or(&0);
         pos = pos.wrapping_add(1);
 
@@ -100,6 +111,7 @@ pub fn parse_pack_data(data: &[u8]) -> Result<Vec<GitObject>, PackError> {
                         };
                         let sha = obj.sha1();
                         sha_index.insert(sha, objects.len());
+                        object_offsets.insert(object_start, objects.len());
                         objects.push(obj);
                         consumed = consumed.wrapping_add(1);
                     }
@@ -120,15 +132,14 @@ pub fn parse_pack_data(data: &[u8]) -> Result<Vec<GitObject>, PackError> {
                         if total_decompressed > MAX_DECOMPRESSED_TOTAL_BYTES {
                             return Err(PackError::ExcessiveDecompressedSize);
                         }
-                        let base_idx = objects
-                            .len()
+                        let base_offset = object_start
                             .checked_sub(offset)
                             .ok_or(PackError::InvalidDelta)?;
-                        // SAFETY: checked_sub ensures base_idx < objects.len()
-                        let base = objects
-                            .get(base_idx)
-                            .ok_or(PackError::InvalidDelta)?
-                            .clone();
+                        let base_idx = object_offsets
+                            .get(&base_offset)
+                            .copied()
+                            .ok_or(PackError::InvalidDelta)?;
+                        let base = objects.get(base_idx).ok_or(PackError::InvalidDelta)?;
                         let resolved_data = apply_delta(&base.data, &delta_data)?;
                         total_decompressed = total_decompressed
                             .checked_add(resolved_data.len())
@@ -142,6 +153,7 @@ pub fn parse_pack_data(data: &[u8]) -> Result<Vec<GitObject>, PackError> {
                         };
                         let sha = resolved.sha1();
                         sha_index.insert(sha, objects.len());
+                        object_offsets.insert(object_start, objects.len());
                         objects.push(resolved);
                         consumed = consumed.wrapping_add(1);
                     }
@@ -171,13 +183,11 @@ pub fn parse_pack_data(data: &[u8]) -> Result<Vec<GitObject>, PackError> {
                         if total_decompressed > MAX_DECOMPRESSED_TOTAL_BYTES {
                             return Err(PackError::ExcessiveDecompressedSize);
                         }
-                        let &base_idx = sha_index.get(&base_sha).ok_or(PackError::InvalidDelta)?;
-                        // SAFETY: base_idx comes from sha_index which is populated
-                        // with every object's index as they are pushed to objects
-                        let base = objects
-                            .get(base_idx)
-                            .ok_or(PackError::InvalidDelta)?
-                            .clone();
+                        let base = sha_index
+                            .get(&base_sha)
+                            .and_then(|index| objects.get(*index))
+                            .or_else(|| bases.get(&base_sha).copied())
+                            .ok_or(PackError::InvalidDelta)?;
                         let resolved_data = apply_delta(&base.data, &delta_data)?;
                         total_decompressed = total_decompressed
                             .checked_add(resolved_data.len())
@@ -191,6 +201,7 @@ pub fn parse_pack_data(data: &[u8]) -> Result<Vec<GitObject>, PackError> {
                         };
                         let sha = resolved.sha1();
                         sha_index.insert(sha, objects.len());
+                        object_offsets.insert(object_start, objects.len());
                         objects.push(resolved);
                         consumed = consumed.wrapping_add(1);
                     }

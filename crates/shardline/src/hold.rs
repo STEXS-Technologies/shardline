@@ -5,7 +5,7 @@ use shardline_index::{
     PostgresMetadataStoreError, RetentionHold, RetentionHoldError,
 };
 use shardline_protocol::unix_now_seconds_lossy;
-use shardline_server::ServerConfigError;
+use shardline_server::{ServerConfigError, ServerError};
 use shardline_storage::{ObjectKey, ObjectKeyError};
 use sqlx::{Error as SqlxError, postgres::PgPoolOptions};
 use thiserror::Error;
@@ -65,6 +65,9 @@ pub enum HoldRuntimeError {
     /// Postgres pool configuration failed.
     #[error("postgres metadata connection failed")]
     Sqlx(Box<SqlxError>),
+    /// Coordinated retention mutation failed.
+    #[error(transparent)]
+    Server(Box<ServerError>),
     /// Timestamp arithmetic overflowed.
     #[error("retention hold timestamp overflowed")]
     Overflow,
@@ -105,14 +108,9 @@ pub async fn run_hold_set(
         release_after_unix_seconds,
     )?;
 
-    if let Some(index_postgres_url) = config.index_postgres_url() {
-        let store = postgres_index_store(index_postgres_url)?;
-        store.upsert_retention_hold(&hold).await?;
-        return Ok(hold);
-    }
-
-    let store = LocalIndexStore::new(config.root_dir().to_path_buf())?;
-    LifecycleStore::upsert_retention_hold(&store, &hold)?;
+    shardline_server::set_retention_hold(&config, &hold)
+        .await
+        .map_err(|error| HoldRuntimeError::Server(Box::new(error)))?;
     Ok(hold)
 }
 
@@ -155,16 +153,9 @@ pub async fn run_hold_release(
     let config = load_server_config(root, None)?;
     let object_key = ObjectKey::parse(object_key)?;
 
-    if let Some(index_postgres_url) = config.index_postgres_url() {
-        let store = postgres_index_store(index_postgres_url)?;
-        return store
-            .delete_retention_hold(&object_key)
-            .await
-            .map_err(Into::into);
-    }
-
-    let store = LocalIndexStore::new(config.root_dir().to_path_buf())?;
-    LifecycleStore::delete_retention_hold(&store, &object_key).map_err(Into::into)
+    shardline_server::release_retention_hold(&config, &object_key)
+        .await
+        .map_err(|error| HoldRuntimeError::Server(Box::new(error)))
 }
 
 fn postgres_index_store(index_postgres_url: &str) -> Result<PostgresIndexStore, HoldRuntimeError> {
@@ -482,5 +473,43 @@ mod tests {
         let err = HoldRuntimeError::Config(ServerConfigError::InvalidServerRole);
         let debug = format!("{err:?}");
         assert!(debug.contains("Config("));
+    }
+    #[tokio::test(flavor = "multi_thread")]
+    async fn run_hold_set_waits_for_gc_before_acknowledging() {
+        let storage = tempfile::tempdir().unwrap();
+        let barrier = std::fs::File::options()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(storage.path().join(".gc-write-barrier.lock"))
+            .unwrap();
+        barrier.lock().unwrap();
+        let root = storage.path().to_path_buf();
+        let mut setter = tokio::spawn(async move {
+            run_hold_set(Some(&root), "retention/cli-race", "GC coordination", None).await
+        });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), &mut setter)
+                .await
+                .is_err()
+        );
+        let index = LocalIndexStore::new(storage.path().to_path_buf()).unwrap();
+        let key = ObjectKey::parse("retention/cli-race").unwrap();
+        assert!(
+            LifecycleStore::retention_hold(&index, &key)
+                .unwrap()
+                .is_none()
+        );
+        drop(barrier);
+        let held = tokio::time::timeout(std::time::Duration::from_secs(2), setter)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            LifecycleStore::retention_hold(&index, &key).unwrap(),
+            Some(held)
+        );
     }
 }

@@ -319,6 +319,15 @@ The supported `shardline gc` command acquires the barrier automatically. Library
 calling the lower-level `run_gc_with_stores` function directly must provide equivalent
 writer exclusion whenever `mark` or `sweep` is enabled.
 
+The supported `shardline hold set` and `shardline hold release` commands share
+that barrier for their complete metadata mutation. A hold acknowledged before
+mutating GC begins protects the object; a hold requested during GC waits until
+that run finishes. A new hold cannot recover bytes already deleted by an earlier
+run. Library integrations should use `shardline_server::set_retention_hold` and
+`release_retention_hold`, or provide the same exclusion around low-level index
+hold mutations. The barrier coordinates metadata with object storage; it does
+not make their operations one storage transaction.
+
 New quarantine candidates default to a retention window of `86400` seconds.
 That default applies only when a run includes `--mark`.
 

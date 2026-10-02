@@ -398,3 +398,70 @@ not move.
 - [Lifecycle Repair](LIFECYCLE_REPAIR.md) — pruning stale lifecycle metadata
 - [Garbage Collection](GARBAGE_COLLECTION.md) — mark-and-sweep after incidents
 - [Repository Bootstrap](REPOSITORY_BOOTSTRAP.md) — new-node configuration bring-up
+
+
+## Recovering legacy Hub commit trees
+
+Hub NDJSON revisions written before complete-tree identities used 16 hexadecimal
+characters. Those IDs did not bind repository ownership, paths or deletions, so
+collisions could merge metadata across repositories or mutate a tree after a
+rejected stale write. Even a revision with only one current owner may have been
+mutated. These revisions now fail closed when their file tree is read or written.
+This intentionally requires recovery for healthy-looking legacy 16-character
+revisions as well. Git's 40-character IDs and current 64-character Hub IDs remain
+readable. The shared initial empty revision always has an empty tree.
+
+Restore each affected branch or tag from a full tree verified against an original
+repository or trustworthy backup. The old database entries cannot establish which
+paths belonged to which revision; do not export the merged rows as a recovery tree.
+Keep a database backup for forensic inspection before recovery.
+
+Run `shardline repair hub-tree --root /srv/shardline --state-file tree.json` with
+the deployment's normal configuration (including Postgres or S3 when used). Local
+Hub metadata is read from `/srv/shardline/hub/metadata.sqlite3`. The JSON file has
+this shape:
+
+```json
+{
+  "repo_id": "alice/model",
+  "ref_name": "main",
+  "expected_head": "0123456789abcdef",
+  "repository_scope": null,
+  "files": [
+    {
+      "path": "README.md",
+      "size": 0,
+      "sha": "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262",
+      "is_lfs": false
+    }
+  ]
+}
+```
+
+`files` is the entire desired tree, not a patch; an empty list restores an empty
+tree. `expected_head` is the exact current 16-character legacy revision of the
+selected existing ref. `repository_scope` must match the original upload token's
+object namespace. Use explicit `null` only for objects uploaded in permissive
+mode to the global namespace. For scoped uploads, use the original token scope:
+`{"provider":"github","owner":"alice","name":"model","revision":null}`
+(or the original provider/revision values). Its owner and name must match `repo_id`.
+Object bytes must already exist in the configured object store; restore missing
+bytes from a trustworthy backup first.
+
+The manifest is limited to 64 MiB and 100,000 entries. SQLite and Postgres both
+reject reads above this common metadata ceiling instead of returning partial trees.
+The command rejects unsafe or duplicate paths, inconsistent hashes and sizes,
+missing objects and incorrect object namespaces. It verifies inline blobs with
+BLAKE3 and LFS blobs with SHA-256 in bounded ranges before changing metadata. It
+creates a new canonical, repository-bound 64-character revision and advances only
+the selected ref using a compare-and-swap against `expected_head`. A concurrent
+ref update causes recovery to fail without advancing that ref. It uses the shared
+maintenance barrier to prevent garbage collection during verification and ref
+publication. Original legacy metadata and history remain quarantined, rather than
+being overwritten or treated as repaired. Recover other affected refs separately.
+The command prints the new revision ID. Future Hub commits can then extend the
+restored tree; Git projection treats quarantined legacy history as a boundary.
+
+Recovery runs on a blocking worker. Once validation has started, cancelling the
+awaiting operation does not cancel that worker; it keeps the maintenance barrier
+until verification and the compare-and-swap finish.

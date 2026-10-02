@@ -65,9 +65,28 @@ git remote add hub http://localhost:8080/models/my-org/my-model
 git push hub main
 ```
 
-Pack files are generated from stored revisions with real Git tree, blob, and commit
-objects. LFS pointer blobs are created for files tracked via LFS. The `.gitattributes`
-file is auto-generated when LFS files are present.
+NDJSON revisions retain their opaque Hub IDs in REST APIs. Git discovery maps them
+to stable SHA-1 commits whose trees contain the actual inline bytes and LFS pointer
+metadata. Git commit identities depend on repository, Hub revision, and ancestry,
+so adding a branch or tag does not change an existing commit. Commits received
+through Git preserve their original object bytes, modes, and author metadata in
+a repository and provider scoped object archive. Upload-pack accepts only commits
+reachable within the authorized repository and sends objects matching those IDs.
+Existing `.gitattributes` files are preserved; include LFS tracking rules in your
+repository when Git LFS checkout is required.
+
+Git export is bounded to 10,000 history revisions, 10,000 references, 100,000
+unique objects, 128 tree levels, and 64 MiB of unique uncompressed object payload.
+Requests exceeding these bounds fail explicitly. Compression and HTTP framing
+retain additional bounded buffers. Inline bytes are loaded once per unique
+content identity during an export. Archived Git objects are deduplicated and
+excluded from ordinary chunk GC, like Hub inline objects. Deleting a repository
+removes its metadata and refs; archived bytes remain retained.
+
+Historical short Hub revision IDs that require recovery are not exported. A
+recovered revision starts Git history at that recovery boundary. Historical Git
+revisions without their original object archive fail explicitly; restore the
+original objects rather than substituting a different commit under the same ID.
 
 ## Supported Endpoints
 

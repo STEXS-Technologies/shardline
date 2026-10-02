@@ -690,6 +690,7 @@ fn map_record_store_error(error: PostgresMetadataStoreError) -> ServerError {
     match error {
         PostgresMetadataStoreError::RecordNotFound => ServerError::NotFound,
         PostgresMetadataStoreError::Sqlx(_)
+        | PostgresMetadataStoreError::HubTreeRecoveryRequired(_)
         | PostgresMetadataStoreError::Json(_)
         | PostgresMetadataStoreError::HashParse(_)
         | PostgresMetadataStoreError::ObjectKey(_)
