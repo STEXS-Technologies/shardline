@@ -1642,6 +1642,7 @@ impl UploadIntentStore for super::PostgresIndexStore {
         tenant: &str,
         repository: &str,
     ) -> Result<(), Self::Error> {
+        let object_length = u64_to_i64(intent.object_length())?;
         let created_event = upload_lifecycle_event(
             tenant,
             repository,
@@ -1677,7 +1678,7 @@ impl UploadIntentStore for super::PostgresIndexStore {
         .bind(intent.intent_id())
         .bind(intent.object_key())
         .bind(intent.object_hash())
-        .bind(intent.object_length() as i64)
+        .bind(object_length)
         .bind(intent.state().as_str())
         .execute(&mut *transaction)
         .await?;
@@ -1943,7 +1944,7 @@ impl UploadIntentStore for super::PostgresIndexStore {
                     id,
                     key,
                     hash,
-                    length as u64,
+                    i64_to_u64(length)?,
                     state,
                     created_dur,
                     updated_dur,
@@ -1979,7 +1980,7 @@ impl UploadIntentStore for super::PostgresIndexStore {
                     id,
                     key,
                     hash,
-                    length as u64,
+                    i64_to_u64(length)?,
                     s,
                     std::time::Duration::from_secs(created.timestamp() as u64),
                     std::time::Duration::from_secs(updated.timestamp() as u64),
@@ -2051,7 +2052,7 @@ impl UploadIntentStore for super::PostgresIndexStore {
                     id,
                     key,
                     hash,
-                    length as u64,
+                    i64_to_u64(length)?,
                     s,
                     std::time::Duration::from_secs(created.timestamp() as u64),
                     std::time::Duration::from_secs(updated.timestamp() as u64),
@@ -3472,6 +3473,140 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pg_upload_intent_length_boundaries_preserve_metadata_and_evidence() {
+        let Some(pool) = connect_postgres().await else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let store = make_pg_store(pool.clone());
+        let boundary = UploadIntent::new(
+            "length-boundary".into(),
+            "objects/boundary".into(),
+            "a".repeat(64),
+            i64::MAX as u64,
+        );
+        store.create_intent(&boundary).await.unwrap();
+        store.create_intent(&boundary).await.unwrap();
+        assert_eq!(
+            store
+                .intent_by_id(boundary.intent_id())
+                .await
+                .unwrap()
+                .unwrap()
+                .object_length(),
+            i64::MAX as u64
+        );
+        let before: serde_json::Value = sqlx::query_scalar(
+            "SELECT row_to_json(i) FROM shardline_upload_intents i WHERE intent_id = $1",
+        )
+        .bind(boundary.intent_id())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let events_before: Vec<serde_json::Value> = sqlx::query_scalar(
+            "SELECT row_to_json(e) FROM shardline_reliability_events e ORDER BY sequence",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(events_before.len(), 1);
+        for length in [i64::MAX as u64 + 1, u64::MAX] {
+            for id in ["fresh-oversized", boundary.intent_id()] {
+                let oversized =
+                    UploadIntent::new(id.into(), "objects/boundary".into(), "a".repeat(64), length);
+                assert!(matches!(
+                    store.create_intent(&oversized).await,
+                    Err(super::PostgresMetadataStoreError::IntegerOutOfRange(_))
+                ));
+            }
+            assert!(
+                store
+                    .intent_by_id("fresh-oversized")
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            let after: serde_json::Value = sqlx::query_scalar(
+                "SELECT row_to_json(i) FROM shardline_upload_intents i WHERE intent_id = $1",
+            )
+            .bind(boundary.intent_id())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(before, after);
+            let events_after: Vec<serde_json::Value> = sqlx::query_scalar(
+                "SELECT row_to_json(e) FROM shardline_reliability_events e ORDER BY sequence",
+            )
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            assert_eq!(events_before, events_after);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pg_upload_intent_reads_reject_negative_lengths_without_repair() {
+        let Some(pool) = connect_postgres().await else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let store = make_pg_store(pool.clone());
+        let intent = UploadIntent::new(
+            "negative-length".into(),
+            "objects/negative".into(),
+            "b".repeat(64),
+            42,
+        );
+        store.create_intent(&intent).await.unwrap();
+        let events_before: Vec<serde_json::Value> = sqlx::query_scalar(
+            "SELECT row_to_json(e) FROM shardline_reliability_events e ORDER BY sequence",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        for length in [i64::MIN, -1] {
+            sqlx::query("UPDATE shardline_upload_intents SET object_length = $1, created_at = now() - interval '1 second' WHERE intent_id = $2")
+                .bind(length).bind(intent.intent_id()).execute(&pool).await.unwrap();
+            let before: serde_json::Value = sqlx::query_scalar(
+                "SELECT row_to_json(i) FROM shardline_upload_intents i WHERE intent_id = $1",
+            )
+            .bind(intent.intent_id())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert!(matches!(
+                store.intent_by_id(intent.intent_id()).await,
+                Err(super::PostgresMetadataStoreError::IntegerOutOfRange(_))
+            ));
+            assert!(matches!(
+                store.intents_by_state(UploadIntentState::Created).await,
+                Err(super::PostgresMetadataStoreError::IntegerOutOfRange(_))
+            ));
+            assert!(matches!(
+                store
+                    .stale_intents(UploadIntentState::Created, Duration::ZERO)
+                    .await,
+                Err(super::PostgresMetadataStoreError::IntegerOutOfRange(_))
+            ));
+            let after: serde_json::Value = sqlx::query_scalar(
+                "SELECT row_to_json(i) FROM shardline_upload_intents i WHERE intent_id = $1",
+            )
+            .bind(intent.intent_id())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(before, after);
+            let events_after: Vec<serde_json::Value> = sqlx::query_scalar(
+                "SELECT row_to_json(e) FROM shardline_reliability_events e ORDER BY sequence",
+            )
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            assert_eq!(events_before, events_after);
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]

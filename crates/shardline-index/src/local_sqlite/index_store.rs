@@ -1329,6 +1329,7 @@ impl UploadIntentStore for super::LocalIndexStore {
         let tenant = tenant.to_owned();
         let repository = repository.to_owned();
         tokio::task::spawn_blocking(move || {
+            let object_length = u64_to_i64(intent.object_length())?;
             let mut conn = store.open_connection()?;
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -1350,7 +1351,7 @@ impl UploadIntentStore for super::LocalIndexStore {
                     intent.intent_id(),
                     intent.object_key(),
                     intent.object_hash(),
-                    intent.object_length() as i64,
+                    object_length,
                     intent.state().as_str(),
                     now,
                     now,
@@ -1367,7 +1368,7 @@ impl UploadIntentStore for super::LocalIndexStore {
                         intent.intent_id(),
                         intent.object_key(),
                         intent.object_hash(),
-                        intent.object_length() as i64,
+                        object_length,
                     ],
                     |row| row.get::<_, bool>(0),
                 )?;

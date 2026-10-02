@@ -331,7 +331,7 @@ pub(super) async fn s3_upload_part(
     // (aws-chunked framing or a `Content-Length`/framed size hint). `None`
     // means the length is unknown until the stream is drained.
     let expected_len: Option<u64> = if aws_chunked::is_aws_chunked(headers) {
-        aws_chunked::declared_decoded_content_length(headers)
+        Some(aws_chunked::declared_decoded_content_length(headers)?)
     } else {
         let size_hint = body.size_hint();
         size_hint.exact().or_else(|| size_hint.upper())
@@ -386,12 +386,15 @@ pub(super) async fn s3_upload_part(
     if aws_chunked::is_aws_chunked(headers) {
         let max_bytes_u64 =
             u64::try_from(body_ceiling.get()).map_err(|_error| S3Error::internal())?;
-        if let Some(decoded) = aws_chunked::declared_decoded_content_length(headers)
-            && decoded > max_bytes_u64
-        {
+        let decoded = aws_chunked::declared_decoded_content_length(headers)?;
+        if decoded > max_bytes_u64 {
             return Err(entity_too_large());
         }
-        body = RequestBodyReader::from_stream(aws_chunked::decode_aws_chunked(body, max_bytes_u64));
+        body = RequestBodyReader::from_stream(aws_chunked::decode_aws_chunked(
+            body,
+            max_bytes_u64,
+            Some(decoded),
+        ));
     }
 
     if let Some(expected) = parse_content_md5(headers)? {
@@ -550,10 +553,15 @@ async fn durable_s3_upload_part(
     })?;
     if aws_chunked::is_aws_chunked(headers) {
         let ceiling = u64::try_from(max_bytes.get()).map_err(|_error| S3Error::internal())?;
-        if aws_chunked::declared_decoded_content_length(headers).is_some_and(|len| len > ceiling) {
+        let decoded = aws_chunked::declared_decoded_content_length(headers)?;
+        if decoded > ceiling {
             return Err(entity_too_large());
         }
-        reader = RequestBodyReader::from_stream(aws_chunked::decode_aws_chunked(reader, ceiling));
+        reader = RequestBodyReader::from_stream(aws_chunked::decode_aws_chunked(
+            reader,
+            ceiling,
+            Some(decoded),
+        ));
     }
 
     if let Some(expected) = parse_content_md5(headers)? {

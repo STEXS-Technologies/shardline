@@ -344,9 +344,8 @@ pub(crate) async fn s3_put_object(
     // ceiling by the decoder.
     let body = if aws_chunked::is_aws_chunked(&headers) {
         let max_bytes_u64 = u64::try_from(max_bytes.get()).map_err(|_error| S3Error::internal())?;
-        if let Some(decoded) = aws_chunked::declared_decoded_content_length(&headers)
-            && decoded > max_bytes_u64
-        {
+        let decoded = aws_chunked::declared_decoded_content_length(&headers)?;
+        if decoded > max_bytes_u64 {
             return Err(S3Error {
                 code: "EntityTooLarge",
                 message: "Your proposed upload exceeds the maximum allowed object size".to_owned(),
@@ -356,6 +355,7 @@ pub(crate) async fn s3_put_object(
         RequestBodyReader::from_stream(aws_chunked::decode_aws_chunked(
             body,
             u64::try_from(max_bytes.get()).map_err(|_error| S3Error::internal())?,
+            Some(decoded),
         ))
     } else {
         body
