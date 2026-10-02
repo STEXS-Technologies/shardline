@@ -24,6 +24,7 @@ pub struct PostgresBackend {
     pub(crate) resource_lock_pool: sqlx::PgPool,
     pub(super) record_store: PostgresRecordStore,
     pub(super) object_store: ServerObjectStore,
+    pub(crate) stream_work_pool: crate::admission::BoundedPool,
 }
 
 impl PostgresBackend {
@@ -115,6 +116,7 @@ impl PostgresBackend {
                 index_postgres_url,
             )?,
             object_store,
+            stream_work_pool: crate::admission::ExecutionPools::default_sizes().blocking_io,
         })
     }
 

@@ -130,7 +130,7 @@ pub(super) async fn s3_create_multipart_upload(
 ) -> Result<Response, S3Error> {
     // S3 user metadata is supplied at CreateMultipartUpload and applied to the
     // completed object.
-    let user_metadata = object::capture_user_metadata(headers);
+    let user_metadata = object::capture_user_metadata(headers)?;
     if durable_sessions_enabled(state) {
         let upload_id = new_upload_id();
         let expires_at = state

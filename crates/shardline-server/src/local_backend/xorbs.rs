@@ -106,7 +106,15 @@ impl LocalBackend {
         let object_store = self.object_store();
         let object_key = xorb_object_key(hash_hex)?;
 
-        validated_xorb_byte_range_stream(&object_store, &object_key, hash_hex, total_length, range)
+        validated_xorb_byte_range_stream(
+            &object_store,
+            &object_key,
+            hash_hex,
+            total_length,
+            range,
+            self.stream_work_pool.clone(),
+        )
+        .await
     }
 
     /// Loads the stored byte length for a serialized xorb object.

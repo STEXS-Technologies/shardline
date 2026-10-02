@@ -131,7 +131,7 @@ pub(crate) fn upload_evidence_journal_path(root: &Path, session_id: &str) -> Pat
 pub(crate) async fn acquire_upload_session_file_lock(
     path: PathBuf,
 ) -> Result<OciFileLock, OciAdapterError> {
-    spawn_blocking(move || {
+    let file = spawn_blocking(move || {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -141,11 +141,32 @@ pub(crate) async fn acquire_upload_session_file_lock(
             .read(true)
             .write(true)
             .open(path)?;
-        file.lock()?;
-        Ok(OciFileLock { file })
+        Ok::<_, OciAdapterError>(file)
     })
     .await
-    .map_err(OciAdapterError::BlockingTask)?
+    .map_err(OciAdapterError::BlockingTask)??;
+    wait_for_upload_session_file_lock(file).await
+}
+
+// OS lock waiting must remain cancellable; opening the file is the only
+// operation admitted to the runtime's blocking pool.
+async fn wait_for_upload_session_file_lock(
+    file: std::fs::File,
+) -> Result<OciFileLock, OciAdapterError> {
+    let mut delay = std::time::Duration::from_millis(10);
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(OciFileLock { file }),
+            Err(std::fs::TryLockError::WouldBlock) => {}
+            Err(std::fs::TryLockError::Error(error))
+                if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(std::fs::TryLockError::Error(error)) => return Err(OciAdapterError::Io(error)),
+        }
+        tokio::time::sleep(delay).await;
+        delay = delay
+            .saturating_mul(2)
+            .min(std::time::Duration::from_millis(50));
+    }
 }
 
 // ── Metadata persistence ─────────────────────────────────────────────────────
@@ -1196,4 +1217,69 @@ fn write_temporary_file(path: &Path, bytes: &[u8]) -> std::io::Result<std::path:
     file.write_all(bytes)?;
     file.flush()?;
     Ok(temporary)
+}
+
+#[cfg(test)]
+mod session_lock_cancellation_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use std::time::Duration;
+
+    #[test]
+    fn cancelled_session_waiters_leave_blocking_work_and_shutdown_available() {
+        let storage = tempfile::TempDir::new().unwrap();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .max_blocking_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let owner = runtime
+            .block_on(crate::lock_upload_sessions(storage.path()))
+            .unwrap();
+        let waiters: Vec<_> = (0..2)
+            .map(|_| {
+                let root = storage.path().to_path_buf();
+                runtime.spawn(async move {
+                    let _guard = crate::lock_upload_sessions(&root).await.unwrap();
+                })
+            })
+            .collect();
+        runtime.block_on(async {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        });
+        runtime.block_on(async {
+            for waiter in waiters {
+                waiter.abort();
+                assert!(waiter.await.unwrap_err().is_cancelled());
+            }
+        });
+        let unrelated_work_progressed = runtime.block_on(async {
+            tokio::time::timeout(
+                Duration::from_millis(250),
+                tokio::task::spawn_blocking(|| 17),
+            )
+            .await
+            .is_ok()
+        });
+        let (shutdown_done, shutdown_received) = std::sync::mpsc::channel();
+        let shutdown = std::thread::spawn(move || {
+            drop(runtime);
+            shutdown_done.send(()).unwrap();
+        });
+        let shutdown_without_unlock = shutdown_received
+            .recv_timeout(Duration::from_secs(1))
+            .is_ok();
+        // Always release the owner before assertions, so an old implementation
+        // fails cleanly instead of hanging the test process during runtime drop.
+        drop(owner);
+        shutdown.join().unwrap();
+        assert!(
+            unrelated_work_progressed,
+            "cancelled waiters retained both blocking workers"
+        );
+        assert!(
+            shutdown_without_unlock,
+            "cancelled lock tasks stalled runtime shutdown"
+        );
+    }
 }
