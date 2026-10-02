@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use axum::http::{
     HeaderMap, HeaderValue,
@@ -367,9 +367,9 @@ enum CompleteXmlElement {
     CompleteMultipartUpload,
     /// A `Part` element.
     Part,
-    /// The `PartNumber` element (the only content the scanner reads).
+    /// The `PartNumber` element.
     PartNumber,
-    /// An `ETag` element (opaque; ignored).
+    /// An `ETag` element.
     ETag,
     /// The `Delete` root element of a `DeleteObjects` request.
     Delete,
@@ -408,6 +408,8 @@ enum XmlEvent<'value> {
     Close(CompleteXmlElement),
     /// Character data between tags.
     Text(&'value str),
+    /// A processing instruction or comment without application content.
+    Ignored,
     /// The end of the input.
     End,
 }
@@ -475,6 +477,9 @@ impl<'value> CompleteXmlScanner<'value> {
             .find(|ch: char| ch.is_whitespace() || ch == '>' || ch == '/')
             .unwrap_or(tag_after_name.len());
         let name = tag_after_name.get(..name_end).unwrap_or("");
+        if !is_closing && (name.starts_with('?') || name.starts_with('!')) {
+            return Ok(XmlEvent::Ignored);
+        }
         if is_closing {
             Ok(XmlEvent::Close(CompleteXmlElement::parse(name)))
         } else {
@@ -485,11 +490,13 @@ impl<'value> CompleteXmlScanner<'value> {
 
 /// The parsed `CompleteMultipartUpload` request body.
 ///
-/// Only the `PartNumber` elements are read (ETags are opaque and ignored);
-/// duplicate part numbers collapse, and the numbers are kept in sorted order.
+/// Part numbers retain their strictly ascending request order and associated
+/// echoed ETags. Missing tags are exposed as `None` for legacy API callers;
+/// HTTP completion must reject them before consuming any part.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CompleteParts {
     part_numbers: BTreeSet<u32>,
+    etags: BTreeMap<u32, Option<String>>,
 }
 
 impl CompleteParts {
@@ -497,6 +504,12 @@ impl CompleteParts {
     #[must_use]
     pub const fn part_numbers(&self) -> &BTreeSet<u32> {
         &self.part_numbers
+    }
+
+    /// Returns the echoed ETag for a part, if supplied.
+    #[must_use]
+    pub fn etag(&self, part_number: u32) -> Option<&str> {
+        self.etags.get(&part_number).and_then(Option::as_deref)
     }
 
     /// The number of distinct parts.
@@ -518,58 +531,101 @@ impl CompleteParts {
     }
 }
 
-/// Parses the part numbers from a `CompleteMultipartUpload` request body.
+/// Parses ordered parts and their echoed ETags from completion XML.
 ///
-/// The body is the S3
-/// `<CompleteMultipartUpload><Part><PartNumber>N</PartNumber><ETag>…</ETag></Part>…</CompleteMultipartUpload>`
-/// envelope. Parsing uses a bounded XML tokenizer; only `PartNumber` element
-/// text is read (ETags are ignored) and every part number is validated against
-/// `1..=MAX_S3_PART_NUMBER`. Duplicate numbers collapse into a set.
+/// Uses a bounded typed tokenizer. Each part must contain one valid part
+/// number; duplicate or descending parts, duplicate fields, unmatched tags,
+/// and unfinished fields are rejected. ETags decode the standard XML entities
+/// once, so `&quot;` emitted by XML serializers retains its quoted value.
 ///
 /// # Errors
 ///
-/// Returns [`crate::S3Error::invalid_part`] when no valid part numbers are
-/// present, a part number is not a valid `u32` within `1..=10000`, or the body
-/// contains an unterminated tag.
+/// Returns [`crate::S3Error::invalid_part`] for malformed input, invalid part
+/// numbers, duplicate numbers or fields, or nonascending order.
 pub fn parse_complete_multipart_parts(body: &str) -> Result<CompleteParts, crate::S3Error> {
     let mut scanner = CompleteXmlScanner::new(body);
-    let mut parts = BTreeSet::new();
-    let mut pending_part_number: Option<String> = None;
+    let mut parts = CompleteParts::default();
+    let mut in_part = false;
+    let mut root_open = false;
+    let mut root_closed = false;
+    let mut number = None;
+    let mut etag = None;
+    let mut field: Option<(CompleteXmlElement, String)> = None;
     loop {
         match scanner.next_event()? {
-            XmlEvent::Open(element) => {
-                if element == CompleteXmlElement::PartNumber {
-                    pending_part_number = Some(String::new());
+            XmlEvent::Ignored => {}
+            XmlEvent::Open(CompleteXmlElement::CompleteMultipartUpload)
+                if !root_open && !root_closed && !in_part && field.is_none() =>
+            {
+                root_open = true;
+            }
+            XmlEvent::Open(CompleteXmlElement::Part)
+                if !in_part && field.is_none() && !root_closed =>
+            {
+                in_part = true;
+                number = None;
+                etag = None;
+            }
+            XmlEvent::Open(
+                element @ (CompleteXmlElement::PartNumber | CompleteXmlElement::ETag),
+            ) if in_part && field.is_none() => {
+                if (element == CompleteXmlElement::PartNumber && number.is_some())
+                    || (element == CompleteXmlElement::ETag && etag.is_some())
+                {
+                    return Err(crate::S3Error::invalid_part());
                 }
+                field = Some((element, String::new()));
             }
             XmlEvent::Text(text) => {
-                if let Some(buffer) = pending_part_number.as_mut() {
+                if let Some((_element, buffer)) = field.as_mut() {
                     buffer.push_str(text);
+                } else if !text.trim().is_empty() {
+                    return Err(crate::S3Error::invalid_part());
                 }
             }
-            XmlEvent::Close(element) => {
-                if element == CompleteXmlElement::PartNumber
-                    && let Some(raw_number) = pending_part_number.take()
-                {
-                    let number = raw_number
+            XmlEvent::Close(
+                element @ (CompleteXmlElement::PartNumber | CompleteXmlElement::ETag),
+            ) => {
+                let (opened, text) = field.take().ok_or_else(crate::S3Error::invalid_part)?;
+                if opened != element {
+                    return Err(crate::S3Error::invalid_part());
+                }
+                if element == CompleteXmlElement::PartNumber {
+                    let parsed = text
                         .trim()
                         .parse::<u32>()
                         .map_err(|_error| crate::S3Error::invalid_part())?;
-                    if number == 0 || number > crate::multipart::MAX_S3_PART_NUMBER {
+                    if parsed == 0 || parsed > crate::multipart::MAX_S3_PART_NUMBER {
                         return Err(crate::S3Error::invalid_part());
                     }
-                    parts.insert(number);
+                    number = Some(parsed);
+                } else {
+                    etag = Some(decode_xml_entities(text.trim()));
                 }
             }
+            XmlEvent::Close(CompleteXmlElement::Part) if in_part && field.is_none() => {
+                let number = number.take().ok_or_else(crate::S3Error::invalid_part)?;
+                if parts.max_part().is_some_and(|previous| number <= previous) {
+                    return Err(crate::S3Error::invalid_part());
+                }
+                parts.part_numbers.insert(number);
+                parts.etags.insert(number, etag.take());
+                in_part = false;
+            }
+            XmlEvent::Close(CompleteXmlElement::CompleteMultipartUpload)
+                if root_open && !in_part && field.is_none() =>
+            {
+                root_open = false;
+                root_closed = true;
+            }
             XmlEvent::End => break,
+            XmlEvent::Open(_) | XmlEvent::Close(_) => return Err(crate::S3Error::invalid_part()),
         }
     }
-    if parts.is_empty() {
+    if parts.is_empty() || in_part || root_open || field.is_some() {
         return Err(crate::S3Error::invalid_part());
     }
-    Ok(CompleteParts {
-        part_numbers: parts,
-    })
+    Ok(parts)
 }
 
 /// The maximum number of keys in a single `DeleteObjects` request.
@@ -650,6 +706,7 @@ pub fn parse_delete_object_keys(body: &str) -> Result<Vec<String>, crate::S3Erro
                     keys.push(key);
                 }
             }
+            XmlEvent::Ignored => {}
             XmlEvent::End => break,
         }
     }
@@ -974,12 +1031,12 @@ mod tests {
     fn parse_complete_multipart_parts_malformed_inputs() {
         // Truly truncated (no closing tag for the number).
         assert!(super::parse_complete_multipart_parts("<PartNumber>1").is_err());
-        // Trailing truncated XML after a complete part is ignored.
-        assert_eq!(
-            super::parse_complete_multipart_parts("<PartNumber>1</PartNumber><Part><PartNumber>")
-                .unwrap()
-                .part_numbers(),
-            &BTreeSet::from([1])
+        // Truncated trailing XML must not silently discard requested parts.
+        assert!(
+            super::parse_complete_multipart_parts(
+                "<Part><PartNumber>1</PartNumber></Part><Part><PartNumber>"
+            )
+            .is_err()
         );
         // Wrong casing is not matched.
         assert!(super::parse_complete_multipart_parts("<partnumber>1</partnumber>").is_err());
@@ -1004,28 +1061,60 @@ mod tests {
         assert_eq!(parts.len(), 5000);
         assert!(parts.part_numbers().contains(&1));
         assert!(parts.part_numbers().contains(&5000));
-        // Duplicate part numbers are preserved in document order (the handler
-        // validates the list against the stored session).
-        let parts = super::parse_complete_multipart_parts(
-            "<PartNumber>1</PartNumber><PartNumber>1</PartNumber>",
-        )
-        .unwrap();
-        // Duplicate part numbers collapse into the set.
-        assert_eq!(parts.part_numbers(), &BTreeSet::from([1]));
+        assert!(
+            super::parse_complete_multipart_parts(
+                "<Part><PartNumber>1</PartNumber></Part><Part><PartNumber>1</PartNumber></Part>",
+            )
+            .is_err()
+        );
+        assert!(
+            super::parse_complete_multipart_parts(
+                "<Part><PartNumber>2</PartNumber></Part><Part><PartNumber>1</PartNumber></Part>",
+            )
+            .is_err()
+        );
     }
 
     #[test]
-    fn parse_complete_multipart_parts_ignores_etag_values() {
-        // ETags are opaque and never validated by the parser — only the part
-        // numbers matter. A wrong echoed ETag is accepted (the server
-        // validates the part list against the stored session, not the ETag).
+    fn parse_complete_multipart_parts_retains_etag_values() {
+        // The server validates each echoed value against acknowledged content.
         let body = "<?xml version=\"1.0\"?><CompleteMultipartUpload>\
                     <Part><PartNumber>1</PartNumber><ETag>\"wrong\"</ETag></Part>\
                     <Part><PartNumber>2</PartNumber><ETag>\"wrong-again\"</ETag></Part>\
                     </CompleteMultipartUpload>";
         let parts = super::parse_complete_multipart_parts(body).unwrap();
         assert_eq!(parts.part_numbers(), &BTreeSet::from([1, 2]));
+        assert_eq!(parts.etag(1), Some("\"wrong\""));
+        assert_eq!(parts.etag(2), Some("\"wrong-again\""));
     }
+    #[test]
+    fn completion_etags_decode_once_and_reject_ambiguous_fields() {
+        let parts = super::parse_complete_multipart_parts(
+            "<Part><PartNumber>1</PartNumber><ETag>&quot;abc&quot;</ETag></Part>",
+        )
+        .unwrap();
+        assert_eq!(parts.etag(1), Some("\"abc\""));
+        let parts = super::parse_complete_multipart_parts(
+            "<Part><PartNumber>1</PartNumber><ETag>&amp;quot;abc&amp;quot;</ETag></Part>",
+        )
+        .unwrap();
+        assert_eq!(parts.etag(1), Some("&quot;abc&quot;"));
+        for body in [
+            "<Part><PartNumber>1</PartNumber><PartNumber>2</PartNumber></Part>",
+            "<Part><PartNumber>1</PartNumber><ETag>a</ETag><ETag>b</ETag></Part>",
+            "<Part><PartNumber>1</ETag></Part>",
+            "<Part><PartNumber>1</PartNumber>",
+            "<Part><ETag>a</ETag></Part>",
+            "<PartNumber>1</PartNumber>",
+            "<Part><PartNumber>1</PartNumber><ETag>a</ETag></Part><Part><PartNumber>1</PartNumber><ETag>b</ETag></Part>",
+        ] {
+            assert!(
+                super::parse_complete_multipart_parts(body).is_err(),
+                "accepted {body}"
+            );
+        }
+    }
+
     #[test]
     fn parse_delete_object_keys_extracts_keys_in_order() {
         let body = "<?xml version=\"1.0\"?><Delete>\

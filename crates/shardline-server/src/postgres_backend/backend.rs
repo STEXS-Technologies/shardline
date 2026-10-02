@@ -20,6 +20,8 @@ pub struct PostgresBackend {
     pub(super) upload_max_in_flight_chunks: NonZeroUsize,
     pub(super) server_frontends: Vec<ServerFrontend>,
     pub(super) index_store: PostgresIndexStore,
+    pub(crate) gc_barrier_pool: sqlx::PgPool,
+    pub(crate) resource_lock_pool: sqlx::PgPool,
     pub(super) record_store: PostgresRecordStore,
     pub(super) object_store: ServerObjectStore,
 }
@@ -106,8 +108,24 @@ impl PostgresBackend {
             server_frontends: server_frontends.to_vec(),
             index_store: PostgresIndexStore::new(pool.clone()),
             record_store: PostgresRecordStore::new(pool),
+            gc_barrier_pool: crate::maintenance_barrier::postgres_coordination_pool(
+                index_postgres_url,
+            )?,
+            resource_lock_pool: crate::maintenance_barrier::postgres_coordination_pool(
+                index_postgres_url,
+            )?,
             object_store,
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_single_connection_pools(mut self, url: &str) -> Result<Self, ServerError> {
+        let pool = connect_postgres_metadata_pool(url, 1)?;
+        self.index_store = PostgresIndexStore::new(pool.clone());
+        self.record_store = PostgresRecordStore::new(pool);
+        self.gc_barrier_pool = connect_postgres_metadata_pool(url, 1)?;
+        self.resource_lock_pool = connect_postgres_metadata_pool(url, 1)?;
+        Ok(self)
     }
 
     /// Returns the public base URL used in generated download links.
@@ -330,23 +348,12 @@ impl PostgresBackend {
             .await?)
     }
 
-    /// Validates the referenced file record and upserts a path mapping.
-    ///
-    /// Auto-creates the revision registry row for `key` when it does not yet
-    /// exist, enforcing the same per-repo revision cap as `create_revision`
-    /// (F-89): a genuinely new revision is rejected with
-    /// [`ServerError::TooManyRevisions`] once the repo holds
-    /// `max_revisions_per_repo` rows, while a refresh of an existing revision
-    /// stays allowed at capacity. The count/exists-then-insert pair is not
-    /// serialized here, so concurrent `register_tree_path` calls can overshoot
-    /// the cap by the number of concurrent writers at the boundary (the cap is
-    /// a bound on growth, not a hard invariant).
-    ///
-    /// Also enforces the per-repo tree-entry cap (F-103/F-108): once the repo
-    /// holds `max_tree_entries_per_repo` tree-entry rows, the registration is
-    /// rejected with [`ServerError::TooManyRevisions`] regardless of whether
-    /// the path already exists, mirroring `create_revision`'s count-before-insert
-    /// gate (a refresh at capacity is rejected too, so both paths agree at cap).
+    /// Validates the referenced file record, then atomically checks repository
+    /// capacity and publishes the revision and path mapping. Storage transactions
+    /// serialize registration with revision deletion/pruning across connections.
+    /// Existing revision creation time is preserved while update time refreshes.
+    /// An existing revision remains usable at the revision cap; the tree-entry
+    /// cap retains the existing rule that refreshes at full capacity are rejected.
     ///
     /// # Errors
     ///
@@ -371,42 +378,7 @@ impl PostgresBackend {
             }
             Err(error) => return Err(error),
         };
-        // F-89: register_path auto-creates the revision registry row, so the
-        // F-75 per-repo cap must be enforced here too — not only in
-        // create_revision. Only a genuinely NEW revision counts against the
-        // cap; a refresh of an existing revision (upsert 'created' == false)
-        // is still allowed at capacity.
-        let repo_key = RepoKey::new(&key.provider, &key.owner, &key.repo);
-        let cap = u64::try_from(max_revisions_per_repo.get()).unwrap_or(u64::MAX);
-        if self.count_revisions(&repo_key).await? >= cap
-            && self
-                .index_store
-                .revision(&repo_key, &key.revision)
-                .await?
-                .is_none()
-        {
-            return Err(ServerError::TooManyRevisions);
-        }
-        // F-103/F-108: per-repo tree-entry cap. Unlike the F-89 revision cap
-        // (which exempts a refresh of an existing revision), the tree-entry
-        // gate rejects at capacity regardless of whether the path already
-        // exists — a refresh at cap would otherwise bypass the bound the same
-        // way create_revision's same-name upsert cannot, so both paths stay
-        // consistent under one gate.
-        let tree_cap = u64::try_from(max_tree_entries_per_repo.get()).unwrap_or(u64::MAX);
-        if self.index_store.count_tree_entries(&repo_key).await? >= tree_cap {
-            return Err(ServerError::TooManyRevisions);
-        }
         let now = unix_now_seconds_lossy();
-        let revision_record = RevisionRecord {
-            provider: key.provider.clone(),
-            owner: key.owner.clone(),
-            repo: key.repo.clone(),
-            revision: key.revision.clone(),
-            created_at_unix_seconds: now,
-            updated_at_unix_seconds: now,
-        };
-        let _created = self.index_store.upsert_revision(&revision_record).await?;
         let entry = TreeEntry {
             provider: key.provider.clone(),
             owner: key.owner.clone(),
@@ -417,7 +389,20 @@ impl PostgresBackend {
             size_bytes: record.total_bytes,
             updated_at_unix_seconds: now,
         };
-        let outcome = self.index_store.upsert_tree_entry(&entry).await?;
+        let outcome = match self
+            .index_store
+            .register_tree_entry(
+                &entry,
+                max_revisions_per_repo.get(),
+                max_tree_entries_per_repo.get(),
+            )
+            .await?
+        {
+            shardline_index::TreeRegistrationOutcome::Registered(outcome) => outcome,
+            shardline_index::TreeRegistrationOutcome::LimitExceeded => {
+                return Err(ServerError::TooManyRevisions);
+            }
+        };
         Ok(crate::backend::RegisterPathOutcome {
             entry,
             created: outcome.created,
@@ -460,18 +445,16 @@ impl PostgresBackend {
     ///
     /// # Errors
     ///
-    /// Returns [`ServerError`] when the index upsert fails.
-    pub(crate) async fn create_revision(&self, rev: &RevisionRecord) -> Result<bool, ServerError> {
-        Ok(self.index_store.upsert_revision(rev).await?)
-    }
-
-    /// Counts the revision registry rows for a repository.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ServerError`] when the index count fails.
-    pub(crate) async fn count_revisions(&self, key: &RepoKey) -> Result<u64, ServerError> {
-        Ok(self.index_store.count_revisions(key).await?)
+    /// Returns [`ServerError`] when the index insertion fails.
+    pub(crate) async fn create_revision(
+        &self,
+        rev: &RevisionRecord,
+        max_revisions: usize,
+    ) -> Result<shardline_index::RevisionCreationOutcome, ServerError> {
+        Ok(self
+            .index_store
+            .create_revision_bounded(rev, max_revisions)
+            .await?)
     }
 
     /// Deletes a revision and all of its tree entries, returning whether the revision

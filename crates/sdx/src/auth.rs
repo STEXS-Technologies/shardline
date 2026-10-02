@@ -47,6 +47,10 @@ use crate::config::{
 /// The reference client uses the same 30-second buffer.
 pub const REFRESH_BUFFER_SECONDS: u64 = 30;
 
+// Token envelopes are small control responses, not bulk transfer bodies.
+// Keep a generous hard bound even when Content-Length is absent or misleading.
+const MAX_TOKEN_RESPONSE_BYTES: usize = 1024 * 1024;
+
 /// Header carrying the provider bootstrap API key on token-issuance requests.
 pub const PROVIDER_KEY_HEADER_NAME: &str = "x-shardline-provider-key";
 
@@ -244,6 +248,7 @@ impl Auth {
         let client = reqwest::Client::builder()
             .connect_timeout(self.http.connect_timeout)
             .timeout(self.http.request_timeout)
+            .redirect(token_redirect_policy(&self.base_url))
             .build()
             .map_err(|source| AuthError::Transport {
                 message: source.to_string(),
@@ -591,9 +596,14 @@ impl TokenService {
                 started
             })
         };
-        let result = shared.await;
+        // Keep an unpolled handle for identity comparison: Shared::ptr_eq
+        // returns false once either compared handle has itself terminated.
+        let result = shared.clone().await;
         let mut state = self.lock_state();
-        *inflight_mut(scope, &mut state) = None;
+        let owns_refresh = inflight(scope, &state).is_some_and(|current| current.ptr_eq(&shared));
+        if owns_refresh {
+            *inflight_mut(scope, &mut state) = None;
+        }
         let token = result?;
         let remaining = token.exp.saturating_sub(self.now());
         if remaining < REFRESH_BUFFER_SECONDS {
@@ -605,7 +615,11 @@ impl TokenService {
                 buffer: REFRESH_BUFFER_SECONDS,
             });
         }
-        *cached_mut(scope, &mut state) = Some(token.clone());
+        // A delayed observer of a completed or invalidated refresh must not
+        // replace a newer cached token or clear a newer in-flight refresh.
+        if owns_refresh {
+            *cached_mut(scope, &mut state) = Some(token.clone());
+        }
         Ok(token)
     }
 
@@ -631,6 +645,7 @@ impl TokenService {
     fn invalidate(&self, scope: Scope) {
         let mut state = self.lock_state();
         *cached_mut(scope, &mut state) = None;
+        *inflight_mut(scope, &mut state) = None;
     }
 
     fn now(&self) -> u64 {
@@ -657,7 +672,7 @@ impl TokenServiceInner {
             let message = error_message(response).await;
             return Err(http_error(status, message));
         }
-        let bytes = response.bytes().await?;
+        let bytes = read_token_response(response).await?;
         let parsed: XetCasTokenResponse = serde_json::from_slice(&bytes)?;
         Ok(ScopedToken {
             token: parsed.access_token,
@@ -702,6 +717,20 @@ fn apply_credential(request: RequestBuilder, credential: Credential) -> RequestB
     }
 }
 
+/// Bootstrap credentials belong only to the configured issuer origin.
+/// Reqwest's built-in redirect stripping does not cover our custom key header.
+fn token_redirect_policy(base_url: &Url) -> reqwest::redirect::Policy {
+    let origin = base_url.origin();
+    reqwest::redirect::Policy::custom(move |attempt| {
+        if attempt.url().origin() != origin {
+            attempt.error("token issuance redirect leaves the configured origin")
+        } else {
+            // Keep the normal redirect-loop limit for same-origin migrations.
+            reqwest::redirect::Policy::default().redirect(attempt)
+        }
+    })
+}
+
 const fn http_error(status: StatusCode, message: String) -> AuthError {
     let code = status.as_u16();
     match code {
@@ -714,11 +743,36 @@ const fn http_error(status: StatusCode, message: String) -> AuthError {
     }
 }
 
+async fn read_token_response(mut response: Response) -> Result<Vec<u8>, AuthError> {
+    if response.content_length().is_some_and(|length| {
+        usize::try_from(length).unwrap_or(usize::MAX) > MAX_TOKEN_RESPONSE_BYTES
+    }) {
+        return Err(token_response_too_large());
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        if bytes.len().saturating_add(chunk.len()) > MAX_TOKEN_RESPONSE_BYTES {
+            return Err(token_response_too_large());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
+}
+
+fn token_response_too_large() -> AuthError {
+    <serde_json::Error as serde::de::Error>::custom(format!(
+        "token issuance response exceeds {MAX_TOKEN_RESPONSE_BYTES} bytes"
+    ))
+    .into()
+}
+
 async fn error_message(response: Response) -> String {
-    let body = response.text().await.unwrap_or_default();
-    serde_json::from_str::<ErrorBody>(&body)
-        .map(|parsed| parsed.error)
-        .unwrap_or(body)
+    match read_token_response(response).await {
+        Ok(bytes) => serde_json::from_slice::<ErrorBody>(&bytes)
+            .map(|parsed| parsed.error)
+            .unwrap_or_else(|_error| String::from_utf8_lossy(&bytes).into_owned()),
+        Err(error) => error.to_string(),
+    }
 }
 
 /// Server error envelope `{"error": "..."}`.
@@ -927,6 +981,86 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn provider_key_does_not_follow_redirect_to_another_origin() {
+        let issuer = MockServer::start().await;
+        let other_origin = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(read_path()))
+            .respond_with(
+                ResponseTemplate::new(302)
+                    .insert_header("location", format!("{}/issued", other_origin.uri())),
+            )
+            .mount(&issuer)
+            .await;
+        Mock::given(method("GET"))
+            .and(header("x-shardline-provider-key", "test-bootstrap-key"))
+            .respond_with(token_response(
+                super::unix_now_seconds() + 3600,
+                "redirected-token",
+                &issuer.uri(),
+            ))
+            .mount(&other_origin)
+            .await;
+        let tokens = Auth::new(&issuer.uri(), repository())
+            .unwrap()
+            .with_api_key("test-bootstrap-key".to_owned())
+            .build()
+            .unwrap();
+
+        assert!(tokens.read_token().await.is_err());
+        assert_eq!(request_count(&issuer).await, 1);
+        assert_eq!(request_count(&other_origin).await, 0);
+    }
+
+    #[tokio::test]
+    async fn provider_key_follows_same_origin_redirect() {
+        let issuer = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(read_path()))
+            .respond_with(ResponseTemplate::new(302).insert_header("location", "/issued"))
+            .mount(&issuer)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/issued"))
+            .and(header("x-shardline-provider-key", "test-bootstrap-key"))
+            .respond_with(token_response(
+                super::unix_now_seconds() + 3600,
+                "redirected-token",
+                &issuer.uri(),
+            ))
+            .mount(&issuer)
+            .await;
+        let tokens = Auth::new(&issuer.uri(), repository())
+            .unwrap()
+            .with_api_key("test-bootstrap-key".to_owned())
+            .build()
+            .unwrap();
+
+        assert_eq!(tokens.read_token().await.unwrap().token, "redirected-token");
+        assert_eq!(request_count(&issuer).await, 2);
+    }
+
+    #[tokio::test]
+    async fn token_issuance_same_origin_redirect_loop_is_bounded() {
+        let issuer = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(302).insert_header("location", read_path()))
+            .mount(&issuer)
+            .await;
+        let tokens = Auth::new(&issuer.uri(), repository())
+            .unwrap()
+            .with_api_key("test-bootstrap-key".to_owned())
+            .build()
+            .unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(2), tokens.read_token())
+            .await
+            .expect("redirect loop must not stall token issuance");
+        assert!(matches!(result, Err(AuthError::Transport { .. })));
+        let requests = request_count(&issuer).await;
+        assert!((2..=11).contains(&requests), "request count: {requests}");
+    }
+
+    #[tokio::test]
     async fn parses_exact_camel_case_response_fields() {
         let server = MockServer::start().await;
         let now = Arc::new(AtomicU64::new(NOW));
@@ -1063,6 +1197,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn delayed_refresh_waiter_cannot_replace_a_newer_cached_token() {
+        for scope in [super::Scope::Read, super::Scope::Write] {
+            let server = MockServer::start().await;
+            let now = Arc::new(AtomicU64::new(NOW));
+            Mock::given(method("GET"))
+                .respond_with(token_response(NOW + 3600, "old-token", &server.uri()))
+                .up_to_n_times(1)
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .respond_with(token_response(NOW + 3600, "new-token", &server.uri()))
+                .mount(&server)
+                .await;
+            let auth = Auth::new(&server.uri(), repository())
+                .unwrap()
+                .with_token("test-credential".to_owned());
+            let tokens = service(auth, &now);
+            // Hold one observer of the old single-flight result unpolled
+            // while another observer completes and a replacement is issued.
+            let mut delayed = Box::pin(tokens.token(scope));
+            assert!(futures_util::poll!(&mut delayed).is_pending());
+            assert_eq!(tokens.token(scope).await.unwrap().token, "old-token");
+            tokens.invalidate(scope);
+            assert_eq!(tokens.token(scope).await.unwrap().token, "new-token");
+            assert_eq!(delayed.await.unwrap().token, "old-token");
+            assert_eq!(tokens.token(scope).await.unwrap().token, "new-token");
+            assert_eq!(request_count(&server).await, 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn invalidation_discards_an_inflight_refresh_without_recaching_its_result() {
+        for scope in [super::Scope::Read, super::Scope::Write] {
+            let server = MockServer::start().await;
+            let now = Arc::new(AtomicU64::new(NOW));
+            Mock::given(method("GET"))
+                .respond_with(
+                    token_response(NOW + 3600, "old-token", &server.uri())
+                        .set_delay(Duration::from_millis(100)),
+                )
+                .up_to_n_times(1)
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .respond_with(token_response(NOW + 3600, "new-token", &server.uri()))
+                .mount(&server)
+                .await;
+            let auth = Auth::new(&server.uri(), repository())
+                .unwrap()
+                .with_token("test-credential".to_owned());
+            let tokens = service(auth, &now);
+            let mut old_refresh = Box::pin(tokens.token(scope));
+            assert!(futures_util::poll!(&mut old_refresh).is_pending());
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while request_count(&server).await == 0 {
+                    assert!(futures_util::poll!(&mut old_refresh).is_pending());
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("the old issuance request must reach the mock server");
+            tokens.invalidate(scope);
+            assert_eq!(tokens.token(scope).await.unwrap().token, "new-token");
+            assert_eq!(old_refresh.await.unwrap().token, "old-token");
+            assert_eq!(tokens.token(scope).await.unwrap().token, "new-token");
+            assert_eq!(request_count(&server).await, 2);
+        }
+    }
+
+    #[tokio::test]
     async fn refresh_loop_guard_surfaces_error_and_stays_bounded() {
         let server = MockServer::start().await;
         let now = Arc::new(AtomicU64::new(NOW));
@@ -1164,6 +1368,62 @@ mod tests {
 
         let err = service.read_token().await.unwrap_err();
         assert!(matches!(err, AuthError::Parse { .. }));
+    }
+
+    #[tokio::test]
+    async fn oversized_token_responses_fail_with_and_without_content_length() {
+        for chunked in [false, true] {
+            let server = MockServer::start().await;
+            let now = Arc::new(AtomicU64::new(NOW));
+            let mut response = ResponseTemplate::new(200).set_body_json(json!({
+                "casUrl": server.uri(),
+                "exp": NOW + 3600,
+                "accessToken": "test-token",
+                "padding": "x".repeat(super::MAX_TOKEN_RESPONSE_BYTES),
+            }));
+            if chunked {
+                response = response.insert_header("transfer-encoding", "chunked");
+            }
+            Mock::given(method("GET"))
+                .respond_with(response)
+                .mount(&server)
+                .await;
+            let probe = reqwest::get(server.uri()).await.unwrap();
+            assert_eq!(probe.content_length().is_none(), chunked);
+            drop(probe);
+            let auth = Auth::new(&server.uri(), repository())
+                .unwrap()
+                .with_token("test-credential".to_owned());
+            let tokens = service(auth, &now);
+            assert!(matches!(
+                tokens.read_token().await,
+                Err(AuthError::Parse { .. })
+            ));
+            assert!(tokens.cas_url().is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn oversized_error_response_keeps_status_with_a_bounded_message() {
+        let server = MockServer::start().await;
+        let now = Arc::new(AtomicU64::new(NOW));
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(503)
+                    .insert_header("transfer-encoding", "chunked")
+                    .set_body_string("x".repeat(super::MAX_TOKEN_RESPONSE_BYTES + 1)),
+            )
+            .mount(&server)
+            .await;
+        let auth = Auth::new(&server.uri(), repository())
+            .unwrap()
+            .with_token("test-credential".to_owned());
+        let tokens = service(auth, &now);
+        let error = tokens.read_token().await.unwrap_err();
+        assert!(matches!(&error, AuthError::HttpStatus { status: 503, .. }));
+        let message = error.to_string();
+        assert!(message.len() < 1024);
+        assert!(message.contains("exceeds"));
     }
 
     #[tokio::test]

@@ -4241,6 +4241,7 @@ async fn s3_multipart_roundtrip_through_full_router() {
     // UploadPart (two parts).
     let part1: &[u8] = b"e2e-part-one-";
     let part2: &[u8] = b"second-part";
+    let mut part_etags = Vec::new();
     for (part_number, content) in [(1_u32, part1), (2, part2)] {
         let put = app
             .clone()
@@ -4257,16 +4258,25 @@ async fn s3_multipart_roundtrip_through_full_router() {
             .await
             .unwrap();
         assert_eq!(put.status(), StatusCode::OK);
-        assert!(put.headers().contains_key(header::ETAG));
+        part_etags.push(
+            put.headers()
+                .get(header::ETAG)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_owned(),
+        );
     }
 
     // CompleteMultipartUpload.
     let complete_body = format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
          <CompleteMultipartUpload xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\n\
-         \x20 <Part><PartNumber>1</PartNumber><ETag>\"{upload_id}-1\"</ETag></Part>\n\
-         \x20 <Part><PartNumber>2</PartNumber><ETag>\"{upload_id}-2\"</ETag></Part>\n\
-         </CompleteMultipartUpload>\n"
+         \x20 <Part><PartNumber>1</PartNumber><ETag>{part1_etag}</ETag></Part>\n\
+         \x20 <Part><PartNumber>2</PartNumber><ETag>{part2_etag}</ETag></Part>\n\
+         </CompleteMultipartUpload>\n",
+        part1_etag = part_etags[0],
+        part2_etag = part_etags[1],
     );
     let complete = app
         .clone()

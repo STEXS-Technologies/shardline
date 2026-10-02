@@ -1,7 +1,10 @@
 use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
 
 use super::{LocalIndexStore, LocalIndexStoreError, collect_rows, helpers};
-use crate::{RepoKey, RevisionRecord, TreeEntry, TreeEntryOutcome, TreeKey, TreeStore};
+use crate::{
+    RepoKey, RevisionCreationOutcome, RevisionRecord, TreeEntry, TreeEntryOutcome, TreeKey,
+    TreeRegistrationOutcome, TreeStore,
+};
 
 fn tree_entry_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TreeEntry> {
     Ok(TreeEntry {
@@ -219,7 +222,6 @@ fn upsert_revision_sql(
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)
          ON CONFLICT (provider, owner, repo, revision)
          DO UPDATE SET
-            created_at_unix_seconds = excluded.created_at_unix_seconds,
             updated_at_unix_seconds = excluded.updated_at_unix_seconds",
         params![
             rev.provider,
@@ -406,12 +408,90 @@ fn list_revision_repo_keys_sql(
 impl TreeStore for LocalIndexStore {
     type Error = LocalIndexStoreError;
 
+    async fn register_tree_entry(
+        &self,
+        entry: &TreeEntry,
+        max_revisions: usize,
+        max_tree_entries: usize,
+    ) -> Result<TreeRegistrationOutcome, Self::Error> {
+        let store = self.clone();
+        let entry = entry.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut connection = store.open_connection()?;
+            helpers::retry_sqlite_busy(|| {
+                let transaction = connection
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+                let repo = RepoKey::new(&entry.provider, &entry.owner, &entry.repo);
+                if (count_revisions_sql(&transaction, &repo)?
+                    >= u64::try_from(max_revisions).unwrap_or(u64::MAX)
+                    && revision_sql(&transaction, &repo, &entry.revision)?.is_none())
+                    || count_tree_entries_sql(&transaction, &repo)?
+                        >= u64::try_from(max_tree_entries).unwrap_or(u64::MAX)
+                {
+                    return Ok(TreeRegistrationOutcome::LimitExceeded);
+                }
+                upsert_revision_sql(
+                    &transaction,
+                    &RevisionRecord {
+                        provider: entry.provider.clone(),
+                        owner: entry.owner.clone(),
+                        repo: entry.repo.clone(),
+                        revision: entry.revision.clone(),
+                        created_at_unix_seconds: entry.updated_at_unix_seconds,
+                        updated_at_unix_seconds: entry.updated_at_unix_seconds,
+                    },
+                )?;
+                let outcome = upsert_tree_entry_sql(&transaction, &entry)?;
+                transaction.commit()?;
+                Ok(TreeRegistrationOutcome::Registered(outcome))
+            })
+        })
+        .await
+        .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
+    }
+
+    async fn create_revision_bounded(
+        &self,
+        rev: &RevisionRecord,
+        max_revisions: usize,
+    ) -> Result<RevisionCreationOutcome, Self::Error> {
+        let store = self.clone();
+        let rev = rev.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut connection = store.open_connection()?;
+            helpers::retry_sqlite_busy(|| {
+                let transaction = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+                let repo = RepoKey::new(&rev.provider,&rev.owner,&rev.repo);
+                if revision_sql(&transaction,&repo,&rev.revision)?.is_some() {
+                    return Ok(RevisionCreationOutcome::AlreadyExists);
+                }
+                if count_revisions_sql(&transaction,&repo)? >= u64::try_from(max_revisions).unwrap_or(u64::MAX) {
+                    return Ok(RevisionCreationOutcome::LimitExceeded);
+                }
+                transaction.execute(
+                    "INSERT INTO shardline_revisions (provider, owner, repo, revision, created_at_unix_seconds, updated_at_unix_seconds)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![rev.provider, rev.owner, rev.repo, rev.revision,
+                        helpers::u64_to_i64(rev.created_at_unix_seconds)?, helpers::u64_to_i64(rev.updated_at_unix_seconds)?],
+                )?;
+                transaction.commit()?;
+                Ok(RevisionCreationOutcome::Created)
+            })
+        }).await.map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
+    }
+
     async fn upsert_tree_entry(&self, entry: &TreeEntry) -> Result<TreeEntryOutcome, Self::Error> {
         let store = self.clone();
         let entry = entry.clone();
         tokio::task::spawn_blocking(move || {
-            let connection = store.open_connection()?;
-            upsert_tree_entry_sql(&connection, &entry)
+            let mut connection = store.open_connection()?;
+            helpers::retry_sqlite_busy(|| {
+                let transaction = connection
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+                let outcome = upsert_tree_entry_sql(&transaction, &entry)?;
+                transaction.commit()?;
+                Ok(outcome)
+            })
         })
         .await
         .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
@@ -473,8 +553,14 @@ impl TreeStore for LocalIndexStore {
         let store = self.clone();
         let rev = rev.clone();
         tokio::task::spawn_blocking(move || {
-            let connection = store.open_connection()?;
-            upsert_revision_sql(&connection, &rev)
+            let mut connection = store.open_connection()?;
+            helpers::retry_sqlite_busy(|| {
+                let transaction = connection
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+                let created = upsert_revision_sql(&transaction, &rev)?;
+                transaction.commit()?;
+                Ok(created)
+            })
         })
         .await
         .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?

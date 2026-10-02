@@ -34,6 +34,7 @@ use axum::{
     http::{HeaderMap, HeaderValue, StatusCode, header::ETAG},
     response::{IntoResponse, Response},
 };
+use futures_util::{StreamExt, stream};
 use md5::{Digest, Md5};
 use serde::{Deserialize, Serialize};
 use shardline_index::{
@@ -41,11 +42,12 @@ use shardline_index::{
     ResumableSessionProtocol, ResumableSessionState, S3ObjectEntry, S3PublishCondition,
 };
 use shardline_s3_adapter::{
-    CompleteMultipartUploadResult, InitiateMultipartUploadResult, PartQuotaLimits, S3Error,
-    S3SessionError, acquire_session_part_lock_for_root, create_session, delete_session_locked,
-    lock_session_parts, lock_upload_sessions, new_upload_id, parse_complete_multipart_parts,
-    part_file_path, read_conditional_headers, read_session_locked, store_part_locked,
-    validate_part_quota_for_session_locked,
+    CompleteMultipartUploadResult, InitiateMultipartUploadResult, MultipartPart, PartQuotaLimits,
+    S3Error, S3SessionError, acquire_session_part_lock_for_root, create_session,
+    delete_session_locked, lock_session_parts, lock_upload_sessions, new_upload_id,
+    parse_complete_multipart_parts, parse_content_md5, read_conditional_headers,
+    read_session_locked, session_dir, store_versioned_part_locked, stored_part_file_path,
+    validate_part_quota_for_session_locked, versioned_part_file_name,
 };
 use shardline_storage::ObjectKey;
 use tokio::io::AsyncWriteExt;
@@ -217,6 +219,69 @@ pub(super) async fn s3_create_multipart_upload(
 /// against the declared part length BEFORE the file is written (no
 /// write-then-delete) and again against the streamed size at
 /// `store_part_locked`. The expiry sweep remains as belt-and-braces.
+async fn validate_local_part_file(
+    path: &std::path::Path,
+    expected_size: u64,
+    expected_hash: &str,
+) -> Result<(), S3Error> {
+    let mut reader = tokio::fs::File::open(path).await.map_err(io_to_s3)?;
+    let mut hasher = blake3::Hasher::new();
+    let mut size = 0_u64;
+    let mut buffer = [0_u8; 65536];
+    loop {
+        let count = tokio::io::AsyncReadExt::read(&mut reader, &mut buffer)
+            .await
+            .map_err(io_to_s3)?;
+        if count == 0 {
+            break;
+        }
+        let bytes = buffer.get(..count).ok_or_else(S3Error::internal)?;
+        size = size
+            .checked_add(u64::try_from(count).map_err(|_error| S3Error::internal())?)
+            .ok_or_else(S3Error::internal)?;
+        if size > expected_size {
+            return Err(S3Error::internal());
+        }
+        hasher.update(bytes);
+    }
+    if size != expected_size || hasher.finalize().to_hex().as_str() != expected_hash {
+        return Err(S3Error::internal());
+    }
+    Ok(())
+}
+
+async fn local_part_md5_etag(
+    path: &std::path::Path,
+    expected_size: u64,
+) -> Result<String, S3Error> {
+    let mut reader = tokio::fs::File::open(path).await.map_err(io_to_s3)?;
+    let mut hasher = Md5::new();
+    let mut size = 0_u64;
+    let mut buffer = [0_u8; 65536];
+    loop {
+        let count = tokio::io::AsyncReadExt::read(&mut reader, &mut buffer)
+            .await
+            .map_err(io_to_s3)?;
+        if count == 0 {
+            break;
+        }
+        let bytes = buffer.get(..count).ok_or_else(S3Error::internal)?;
+        size = size
+            .checked_add(u64::try_from(count).map_err(|_error| S3Error::internal())?)
+            .ok_or_else(S3Error::internal)?;
+        if size > expected_size {
+            return Err(S3Error::invalid_part());
+        }
+        hasher.update(bytes);
+    }
+    if size != expected_size {
+        return Err(S3Error::invalid_part());
+    }
+    Ok(shardline_s3_adapter::etag_header(&hex::encode(
+        hasher.finalize(),
+    )))
+}
+
 pub(super) async fn s3_upload_part(
     state: &Arc<AppState>,
     context: &S3ObjectContext<'_>,
@@ -329,6 +394,12 @@ pub(super) async fn s3_upload_part(
         body = RequestBodyReader::from_stream(aws_chunked::decode_aws_chunked(body, max_bytes_u64));
     }
 
+    if let Some(expected) = parse_content_md5(headers)? {
+        body = body.with_expected_md5(expected);
+    }
+    let md5 = Arc::new(Mutex::new(Md5::new()));
+    body = body.with_md5_tee(md5.clone());
+
     // Take the per-session lock while still holding the global lock (the
     // sweep takes them in the same order), then drop the global lock before
     // streaming: the part-file write below is protected from the sweep and
@@ -339,72 +410,106 @@ pub(super) async fn s3_upload_part(
     let part_file_guard = lock_session_parts(root, upload_id).await?;
     drop(_session_lock);
 
-    // Stream the body to the part file (overwrite semantics). A mid-stream
-    // abort (over-quota ceiling or over-size) removes the partial file, so a
-    // rejected part never materializes.
-    let part_path = part_file_path(root, upload_id, part_number)?;
-    let mut file = match tokio::fs::File::create(&part_path).await {
-        Ok(file) => file,
-        // The session directory was removed (sweep/Complete) after
-        // validation; report the session as gone rather than a 500.
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Err(S3Error::no_such_upload());
-        }
-        Err(error) => return Err(io_to_s3(error)),
-    };
-    let streamed: Result<u64, ServerError> = async {
-        let mut total_bytes = 0_u64;
-        while let Some(chunk) = body.next_bytes().await? {
-            total_bytes = total_bytes
-                .checked_add(u64::try_from(chunk.len()).map_err(ServerError::from)?)
-                .ok_or(ServerError::Overflow)?;
-            file.write_all(&chunk).await.map_err(ServerError::from)?;
-        }
-        file.flush().await.map_err(ServerError::from)?;
-        Ok(total_bytes)
+    // New bytes are private until the session metadata points to their
+    // immutable version. Interrupted or rejected overwrites preserve the
+    // previously acknowledged part and its metadata.
+    let directory = session_dir(root, upload_id)?;
+    let temporary = tempfile::NamedTempFile::new_in(&directory).map_err(io_to_s3)?;
+    let mut file = tokio::fs::File::from_std(temporary.reopen().map_err(io_to_s3)?);
+    let mut content_hasher = blake3::Hasher::new();
+    let mut total_bytes = 0_u64;
+    while let Some(chunk) = body.next_bytes().await.map_err(S3Error::from)? {
+        total_bytes = total_bytes
+            .checked_add(u64::try_from(chunk.len()).map_err(|_error| S3Error::internal())?)
+            .ok_or_else(S3Error::internal)?;
+        content_hasher.update(&chunk);
+        file.write_all(&chunk).await.map_err(io_to_s3)?;
     }
-    .await;
-    let total_bytes = match streamed {
-        Ok(total_bytes) => total_bytes,
-        Err(error) => {
-            // A mid-stream quota/size abort must not leave a partial file.
-            let _ignored = tokio::fs::remove_file(&part_path).await;
-            return Err(S3Error::from(error));
-        }
+    file.flush().await.map_err(io_to_s3)?;
+    file.sync_all().await.map_err(io_to_s3)?;
+    drop(file);
+    let digest = content_hasher.finalize().to_hex().to_string();
+    let file_name = versioned_part_file_name(part_number, &digest)?;
+    let etag = shardline_s3_adapter::etag_header(&object::md5_hasher_hex(&md5));
+    let new_part = MultipartPart {
+        size_bytes: total_bytes,
+        file_name,
+        etag: Some(etag.clone()),
     };
 
-    // The file is fully written; release the per-session lock (never await
-    // the global lock while holding it) and do the metadata + quota
-    // accounting back under the global lock. The quotas (and the global
-    // active-part-file cap) are re-checked against the actually-streamed size
-    // here; a rejection must not leave an orphaned part file behind.
-    // Release BOTH layers of the per-session lock before waiting for the
-    // global lock. Keeping the cross-process file lock here lets a sweep take
-    // the global lock and then wait for this file lock while this request
-    // waits for the global lock: a lock-order cycle within one process.
+    // Reacquire in global -> per-session -> OS-file-lock order. Publication
+    // and Complete/Sweep now observe one metadata/file version coherently.
     drop(part_file_guard);
     drop(_part_guard);
     let _global_lock = lock_upload_sessions(root).await?;
-    if let Err(error) = store_part_locked(
+    let current = read_session_locked(root, upload_id, ttl).await?;
+    if current.key != context.key || current.scope_namespace != context.scope_namespace {
+        return Err(S3Error::no_such_upload());
+    }
+    let publication_lock = acquire_session_part_lock_for_root(root, upload_id);
+    let _publication_guard = publication_lock.lock().await;
+    let _part_file_guard = lock_session_parts(root, upload_id).await?;
+    validate_part_quota_for_session_locked(
         root,
-        upload_id,
+        &current,
         part_number,
         total_bytes,
         ttl,
-        state.config.s3_upload_session_max_bytes(),
-        state.config.s3_upload_total_max_bytes(),
-        part_file_cap,
+        PartQuotaLimits {
+            session_max_bytes: session_quota,
+            total_max_bytes: total_quota,
+            max_active_part_files: part_file_cap,
+        },
     )
     .await
-    {
-        // A quota/cap rejection must not leave an orphaned part file behind.
-        let _ignored = tokio::fs::remove_file(&part_path).await;
-        return Err(store_error_to_s3(error));
+    .map_err(store_error_to_s3)?;
+    let final_path = stored_part_file_path(root, upload_id, part_number, &new_part)?;
+    let newly_created = match temporary.persist_noclobber(&final_path) {
+        Ok(_file) => true,
+        Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
+            // The same content can already be referenced by the previous part.
+            // Validate existing bytes before reusing the content-addressed file.
+            validate_local_part_file(&final_path, total_bytes, &digest).await?;
+            false
+        }
+        Err(error) => return Err(io_to_s3(error.error)),
+    };
+    let publication = store_versioned_part_locked(
+        root,
+        upload_id,
+        part_number,
+        new_part.clone(),
+        &context.scope_namespace,
+        &context.key,
+        ttl,
+        session_quota,
+        total_quota,
+        part_file_cap,
+    )
+    .await;
+    let previous = match publication {
+        Ok(previous) => previous,
+        Err(error) => {
+            if newly_created
+                && read_session_locked(root, upload_id, ttl)
+                    .await
+                    .is_ok_and(|observed_session| {
+                        !observed_session
+                            .parts
+                            .values()
+                            .any(|part| part.file_name == new_part.file_name)
+                    })
+            {
+                let _ignored = tokio::fs::remove_file(&final_path).await;
+            }
+            return Err(store_error_to_s3(error));
+        }
+    };
+    if let Some(previous) = previous.filter(|part| part.file_name != new_part.file_name) {
+        let old_path = stored_part_file_path(root, upload_id, part_number, &previous)?;
+        let _ignored = tokio::fs::remove_file(old_path).await;
     }
 
-    // Opaque per-part ETag (documented deviation: the client echoes it back in
-    // Complete; we ignore the echoed value).
-    let etag = format!("\"{upload_id}-{part_number}\"");
     let mut response = StatusCode::OK.into_response();
     response.headers_mut().insert(
         ETAG,
@@ -450,6 +555,12 @@ async fn durable_s3_upload_part(
         }
         reader = RequestBodyReader::from_stream(aws_chunked::decode_aws_chunked(reader, ceiling));
     }
+
+    if let Some(expected) = parse_content_md5(headers)? {
+        reader = reader.with_expected_md5(expected);
+    }
+    let md5 = Arc::new(Mutex::new(Md5::new()));
+    reader = reader.with_md5_tee(md5.clone());
 
     let store = state.backend.object_store();
     let (staging_key, size_bytes) = match &store {
@@ -500,7 +611,7 @@ async fn durable_s3_upload_part(
     };
 
     let part_number = NonZeroU64::new(u64::from(part_number)).ok_or_else(S3Error::invalid_part)?;
-    let etag = format!("\"{upload_id}-{}\"", part_number.get());
+    let etag = shardline_s3_adapter::etag_header(&object::md5_hasher_hex(&md5));
     match state
         .backend
         .publish_resumable_part_bounded(
@@ -585,6 +696,9 @@ pub(super) async fn s3_complete_multipart_upload(
     // numbers/etags it uploaded; ETags are opaque and ignored).
     let mut reader = RequestBodyReader::from_body(body, state.config.max_request_body_bytes())
         .map_err(S3Error::from)?;
+    if let Some(expected) = parse_content_md5(headers)? {
+        reader = reader.with_expected_md5(expected);
+    }
     let bytes = read_body_to_bytes(&mut reader)
         .await
         .map_err(S3Error::from)?;
@@ -624,18 +738,46 @@ pub(super) async fn s3_complete_multipart_upload(
     let part_file_guard = lock_session_parts(root, upload_id).await?;
     drop(_session_lock);
 
-    // Build one continuous stream from the part files, in order.
+    // Resolve immutable filenames from the locked session snapshot, and
+    // validate the client's selected part identity before publishing anything.
     let chunk_size = state.config.chunk_size().get();
-    let mut part_files = Vec::with_capacity(session.parts.len());
-    for part in 1..=max_part {
-        if !session.parts.contains_key(&part) {
+    let mut part_readers = Vec::with_capacity(session.parts.len());
+    for part_number in 1..=max_part {
+        let part = session
+            .parts
+            .get(&part_number)
+            .ok_or_else(S3Error::invalid_part)?;
+        let path = stored_part_file_path(root, upload_id, part_number, part)?;
+        let expected_etag = match &part.etag {
+            Some(etag) => etag.clone(),
+            None => local_part_md5_etag(&path, part.size_bytes).await?,
+        };
+        if requested.etag(part_number) != Some(expected_etag.as_str()) {
             return Err(S3Error::invalid_part());
         }
-        let path = part_file_path(root, upload_id, part)?;
         let file = tokio::fs::File::open(&path).await.map_err(io_to_s3)?;
-        part_files.push(file);
+        let raw_etag = expected_etag
+            .strip_prefix('"')
+            .and_then(|value| value.strip_suffix('"'))
+            .ok_or_else(S3Error::invalid_part)?;
+        let mut expected_md5 = [0_u8; 16];
+        hex::decode_to_slice(raw_etag, &mut expected_md5)
+            .map_err(|_error| S3Error::invalid_part())?;
+        part_readers.push(
+            RequestBodyReader::from_reader_chain(vec![file], chunk_size)
+                .with_expected_md5(expected_md5),
+        );
     }
-    let parts_reader = RequestBodyReader::from_reader_chain(part_files, chunk_size);
+    let part_stream = stream::iter(part_readers).flat_map(|part_reader| {
+        stream::unfold(part_reader, |mut part_reader| async move {
+            match part_reader.next_bytes().await {
+                Ok(Some(part_bytes)) => Some((Ok(part_bytes), part_reader)),
+                Err(error) => Some((Err(error), part_reader)),
+                Ok(None) => None,
+            }
+        })
+    });
+    let parts_reader = RequestBodyReader::from_stream(part_stream);
 
     // Reuse PutObject's lock, conditional recheck, compare-and-swap and
     // conditional-loser cleanup before consuming the multipart session.
@@ -709,6 +851,19 @@ async fn durable_s3_complete_multipart_upload(
         return Err(S3Error::no_such_upload());
     }
 
+    let mut request_reader =
+        RequestBodyReader::from_body(body, state.config.max_request_body_bytes())
+            .map_err(S3Error::from)?;
+    if let Some(expected) = parse_content_md5(headers)? {
+        request_reader = request_reader.with_expected_md5(expected);
+    }
+    let request_bytes = read_body_to_bytes(&mut request_reader)
+        .await
+        .map_err(S3Error::from)?;
+    let request_text =
+        std::str::from_utf8(&request_bytes).map_err(|_error| S3Error::invalid_part())?;
+    let requested = parse_complete_multipart_parts(request_text)?;
+
     let (session, parts) = state
         .backend
         .begin_resumable_completion(upload_id)
@@ -717,15 +872,6 @@ async fn durable_s3_complete_multipart_upload(
     let completion = async {
         let attributes = candidate_attributes;
 
-        let mut request_reader =
-            RequestBodyReader::from_body(body, state.config.max_request_body_bytes())
-                .map_err(S3Error::from)?;
-        let request_bytes = read_body_to_bytes(&mut request_reader)
-            .await
-            .map_err(S3Error::from)?;
-        let request_text =
-            std::str::from_utf8(&request_bytes).map_err(|_error| S3Error::invalid_part())?;
-        let requested = parse_complete_multipart_parts(request_text)?;
         let uploaded_numbers = parts
             .iter()
             .map(|part| u32::try_from(part.part_number().get()))
@@ -733,6 +879,25 @@ async fn durable_s3_complete_multipart_upload(
             .map_err(|_error| S3Error::invalid_part())?;
         if requested.part_numbers() != &uploaded_numbers {
             return Err(S3Error::invalid_part());
+        }
+        for part in &parts {
+            let number = u32::try_from(part.part_number().get())
+                .map_err(|_error| S3Error::invalid_part())?;
+            let Some(stored_etag) = part.etag() else {
+                return Err(S3Error::invalid_part());
+            };
+            let raw_etag = stored_etag
+                .strip_prefix('"')
+                .and_then(|value| value.strip_suffix('"'))
+                .ok_or_else(S3Error::invalid_part)?;
+            if raw_etag.len() != 32
+                || !raw_etag
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                || requested.etag(number) != Some(stored_etag)
+            {
+                return Err(S3Error::invalid_part());
+            }
         }
         let Some(last_part) = parts.last() else {
             return Err(S3Error::invalid_part());

@@ -148,8 +148,7 @@ impl ServerBackend {
         match self {
             Self::Local(_) => crate::maintenance_barrier::acquire_local_shared(root).await,
             Self::Postgres(backend) => {
-                crate::maintenance_barrier::acquire_postgres_shared(backend.index_store().pool())
-                    .await
+                crate::maintenance_barrier::acquire_postgres_shared(&backend.gc_barrier_pool).await
             }
         }
     }
@@ -166,12 +165,36 @@ impl ServerBackend {
             }
             Self::Postgres(backend) => {
                 crate::maintenance_barrier::acquire_postgres_resource_exclusive(
-                    backend.index_store().pool(),
+                    &backend.resource_lock_pool,
                     key,
                 )
                 .await
             }
         }
+    }
+
+    /// Acquire a sorted resource bundle without nesting pool acquisitions.
+    pub(crate) async fn acquire_resource_write_locks(
+        &self,
+        root: &Path,
+        keys: &[ResourceLockKey],
+    ) -> Result<Vec<crate::maintenance_barrier::ResourceWriteGuard>, ServerError> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        let guard = match self {
+            Self::Local(_) => {
+                crate::maintenance_barrier::acquire_local_resources_exclusive(root, keys).await?
+            }
+            Self::Postgres(backend) => {
+                crate::maintenance_barrier::acquire_postgres_resources_exclusive(
+                    &backend.resource_lock_pool,
+                    keys,
+                )
+                .await?
+            }
+        };
+        Ok(vec![guard])
     }
 
     /// Build a [`ServerBackend`] from a [`ServerConfig`] by resolving the object store
@@ -1717,18 +1740,14 @@ impl ServerBackend {
         }
     }
 
-    pub(crate) async fn create_revision(&self, rev: &RevisionRecord) -> Result<bool, ServerError> {
+    pub(crate) async fn create_revision(
+        &self,
+        rev: &RevisionRecord,
+        max_revisions: usize,
+    ) -> Result<shardline_index::RevisionCreationOutcome, ServerError> {
         match self {
-            Self::Local(backend) => backend.create_revision(rev).await,
-            Self::Postgres(backend) => backend.create_revision(rev).await,
-        }
-    }
-
-    /// Counts the revision registry rows for a repository (F-75 cap check).
-    pub(crate) async fn count_revisions(&self, key: &RepoKey) -> Result<u64, ServerError> {
-        match self {
-            Self::Local(backend) => backend.count_revisions(key).await,
-            Self::Postgres(backend) => backend.count_revisions(key).await,
+            Self::Local(backend) => backend.create_revision(rev, max_revisions).await,
+            Self::Postgres(backend) => backend.create_revision(rev, max_revisions).await,
         }
     }
 
@@ -1943,6 +1962,7 @@ fn server_error_to_oci(error: ServerError) -> shardline_oci_adapter::OciAdapterE
         ServerError::BlockingTask(e) => OciAdapterError::BlockingTask(e),
         ref other @ (ServerError::RequestBodyRead(_)
         | ServerError::RequestBodyTooLarge
+        | ServerError::RequestBodyMd5Mismatch
         | ServerError::RequestQueryTooLarge
         | ServerError::InvalidAdminQuery
         | ServerError::RequestBodyFrameOutOfBounds

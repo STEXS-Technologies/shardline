@@ -68,6 +68,9 @@ pub enum ServerError {
     /// Request body exceeded the configured maximum accepted byte count.
     #[error("request body exceeded the configured maximum accepted byte count")]
     RequestBodyTooLarge,
+    /// The decoded request payload did not match its Content-MD5 digest.
+    #[error("request body MD5 did not match Content-MD5")]
+    RequestBodyMd5Mismatch,
     /// Request query exceeded the bounded metadata parser budget.
     #[error("request query exceeded the bounded metadata parser budget")]
     RequestQueryTooLarge,
@@ -300,7 +303,7 @@ impl ServerError {
             | Self::InvalidToken(_) => "UNAUTHORIZED",
             Self::InsufficientScope => "DENIED",
             Self::NotAcceptable => "UNSUPPORTED",
-            Self::ExpectedBodyHashMismatch => "DIGEST_INVALID",
+            Self::ExpectedBodyHashMismatch | Self::RequestBodyMd5Mismatch => "DIGEST_INVALID",
             Self::TooManyUploadSessions
             | Self::S3UploadTooManyParts
             | Self::TooManyRegistryTokenRequests => "TOO_MANY_REQUESTS",
@@ -388,7 +391,9 @@ impl ServerError {
             Self::RequestQueryTooLarge => StatusCode::URI_TOO_LONG,
             Self::InvalidAdminQuery => StatusCode::BAD_REQUEST,
             Self::RequestBodyRead(_) | Self::RequestBodyFrameOutOfBounds => StatusCode::BAD_REQUEST,
-            Self::ExpectedBodyHashMismatch => StatusCode::BAD_REQUEST,
+            Self::ExpectedBodyHashMismatch | Self::RequestBodyMd5Mismatch => {
+                StatusCode::BAD_REQUEST
+            }
             Self::NotFound | Self::UnknownProvider | Self::ProviderTokensDisabled => {
                 StatusCode::NOT_FOUND
             }
@@ -743,6 +748,7 @@ impl From<ParseStoredFileRecordError> for ServerError {
 /// - `RangeNotSatisfiable` → `416 InvalidRange`
 /// - `NotFound` → `404 NoSuchKey`
 /// - authorization failures → `403 AccessDenied`
+/// - request MD5 mismatch → `400 BadDigest`
 /// - everything else → `500 InternalError`
 impl shardline_s3_adapter::S3ErrorClassify for ServerError {
     fn s3_class(&self) -> shardline_s3_adapter::S3ErrorClass {
@@ -752,6 +758,7 @@ impl shardline_s3_adapter::S3ErrorClassify for ServerError {
                 S3ErrorClass::RangeNotSatisfiable
             }
             Self::NotFound => S3ErrorClass::NotFound,
+            Self::RequestBodyMd5Mismatch => S3ErrorClass::BadDigest,
             Self::MissingAuthorization
             | Self::InvalidAuthorizationHeader
             | Self::InvalidToken(_)

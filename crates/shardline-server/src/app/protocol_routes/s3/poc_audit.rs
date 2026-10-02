@@ -21,8 +21,9 @@
 )]
 
 use std::{
+    collections::HashMap,
     num::{NonZeroU64, NonZeroUsize},
-    sync::Arc,
+    sync::{Arc, Mutex, OnceLock},
 };
 
 use axum::{
@@ -225,6 +226,13 @@ async fn create_upload_id(app: &Router, key: &str) -> String {
     extract_tag(&xml, "UploadId")
 }
 
+type PartEtags = HashMap<(String, u32), String>;
+
+fn uploaded_part_etags() -> &'static Mutex<PartEtags> {
+    static ETAGS: OnceLock<Mutex<PartEtags>> = OnceLock::new();
+    ETAGS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 async fn upload_part(app: &Router, key: &str, upload_id: &str, part_number: u32, content: &[u8]) {
     let response = app
         .clone()
@@ -248,6 +256,17 @@ async fn upload_part(app: &Router, key: &str, upload_id: &str, part_number: u32,
         StatusCode::OK,
         "upload part {part_number}"
     );
+    let etag = response
+        .headers()
+        .get(header::ETAG)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+    uploaded_part_etags()
+        .lock()
+        .unwrap()
+        .insert((upload_id.to_owned(), part_number), etag);
 }
 
 fn complete_body(upload_id: &str, part_numbers: &[u32]) -> String {
@@ -256,8 +275,14 @@ fn complete_body(upload_id: &str, part_numbers: &[u32]) -> String {
          <CompleteMultipartUpload xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\n",
     );
     for part in part_numbers {
+        let etag = uploaded_part_etags()
+            .lock()
+            .unwrap()
+            .get(&(upload_id.to_owned(), *part))
+            .cloned()
+            .expect("completion must echo the successful UploadPart response ETag");
         xml.push_str(&format!(
-            "  <Part><PartNumber>{part}</PartNumber><ETag>\"{upload_id}-{part}\"</ETag></Part>\n"
+            "  <Part><PartNumber>{part}</PartNumber><ETag>{etag}</ETag></Part>\n"
         ));
     }
     xml.push_str("</CompleteMultipartUpload>\n");

@@ -499,14 +499,6 @@ pub(super) async fn create_revision(
     validate_repo_segment(&provider)?;
     validate_repo_segment(&owner)?;
     validate_repo_segment(&repo)?;
-    // Per-repo revision-registry cap (F-75): reject new names once the repo
-    // is at capacity. The count-then-insert race at the boundary is accepted;
-    // the cap is a bound on growth, not a hard invariant.
-    let key = RepoKey::new(&provider, &owner, &repo);
-    let count = state.backend.count_revisions(&key).await?;
-    if count >= u64::try_from(state.config.max_revisions_per_repo().get()).unwrap_or(u64::MAX) {
-        return Err(ServerError::TooManyRevisions);
-    }
     let now = unix_now_seconds_lossy();
     let record = RevisionRecord {
         provider: provider.clone(),
@@ -516,9 +508,18 @@ pub(super) async fn create_revision(
         created_at_unix_seconds: now,
         updated_at_unix_seconds: now,
     };
-    let created = state.backend.create_revision(&record).await?;
-    if !created {
-        return Err(ServerError::RevisionConflict);
+    match state
+        .backend
+        .create_revision(&record, state.config.max_revisions_per_repo().get())
+        .await?
+    {
+        shardline_index::RevisionCreationOutcome::Created => {}
+        shardline_index::RevisionCreationOutcome::AlreadyExists => {
+            return Err(ServerError::RevisionConflict);
+        }
+        shardline_index::RevisionCreationOutcome::LimitExceeded => {
+            return Err(ServerError::TooManyRevisions);
+        }
     }
     Ok(Json(RevisionJson {
         name: rev,

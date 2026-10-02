@@ -24,6 +24,10 @@ CLI, which ships inside the `shardline` binary (see below).
   CAS token, transparently refreshed (single-flight) with retry/backoff on
   401/403.
 
+Token issuance follows redirects only within the configured API origin
+(scheme, host and port). Token and error response bodies are limited to 1 MiB;
+oversized token responses fail with a parse error instead of entering the cache.
+
 ## The `xet://` URL scheme
 
 ```text

@@ -217,6 +217,16 @@ impl ChunkCache {
         xorb_hash: &str,
         chunk_range: (u64, u64),
     ) -> Result<Option<CachedXorbRange>, SdxError> {
+        self.get_bounded(xorb_hash, chunk_range, self.budget_bytes)
+            .await
+    }
+
+    pub(crate) async fn get_bounded(
+        &self,
+        xorb_hash: &str,
+        chunk_range: (u64, u64),
+        decoded_limit: u64,
+    ) -> Result<Option<CachedXorbRange>, SdxError> {
         if self.budget_bytes == 0 {
             return Ok(None);
         }
@@ -224,7 +234,7 @@ impl ChunkCache {
         let key = cache_key(xorb_hash, chunk_range);
         let path = self.item_path(&key)?;
 
-        let (cached, was_corrupt) = match read_entry(&path) {
+        let (cached, was_corrupt) = match read_entry_bounded(&path, decoded_limit) {
             Ok(Some(cached)) if cached.chunk_range == chunk_range => (Some(cached), false),
             Ok(Some(_)) => (None, false),
             Ok(None) => (None, false),
@@ -439,18 +449,40 @@ fn serialize_entry(chunk_range: (u64, u64), chunk_offsets: &[u32], data: &[u8]) 
 /// Reads and validates an entry file, returning the decoded range or `None`
 /// when the file is absent. Any structural/checksum failure returns `Err`
 /// (the caller deletes the file and reports a miss).
-fn read_entry(path: &Path) -> Result<Option<CachedXorbRange>, SdxError> {
-    let bytes = match std::fs::read(path) {
-        Ok(bytes) => bytes,
+fn read_entry_bounded(
+    path: &Path,
+    decoded_limit: u64,
+) -> Result<Option<CachedXorbRange>, SdxError> {
+    let mut file = match File::open(path) {
+        Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(SdxError::Io(error)),
     };
-    let header = parse_header(&bytes).ok_or_else(|| {
+    let mut fixed_header = [0u8; HEADER_LEN];
+    file.read_exact(&mut fixed_header)?;
+    let header = parse_header(&fixed_header).ok_or_else(|| {
         SdxError::Io(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "cache entry header is corrupt",
         ))
     })?;
+    // Read the fixed header before allocating payload or offset storage. A
+    // sparse file or forged data_len must not turn a cache lookup into an
+    // allocation larger than the active download's reservation.
+    if header.data_len > decoded_limit.min(64 * 1024 * 1024)
+        || header.num_offsets > 8193
+        || u64::from(header.num_offsets)
+            != header
+                .chunk_range
+                .1
+                .saturating_sub(header.chunk_range.0)
+                .saturating_add(1)
+    {
+        return Err(SdxError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "cache entry exceeds decoded bounds",
+        )));
+    }
     let offsets_len = header
         .num_offsets
         .checked_mul(4)
@@ -471,10 +503,24 @@ fn read_entry(path: &Path) -> Result<Option<CachedXorbRange>, SdxError> {
                 "cache entry length overflow",
             ))
         })?;
-    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) != total {
+    if file.metadata()?.len() != total {
         return Err(SdxError::Io(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "cache entry length does not match header",
+        )));
+    }
+    let length =
+        usize::try_from(total).map_err(|error| SdxError::Io(std::io::Error::other(error)))?;
+    let mut bytes = Vec::with_capacity(length.saturating_add(1));
+    bytes.extend_from_slice(&fixed_header);
+    // Cap the actual read as well: the file can change after the metadata
+    // check. One extra byte detects a concurrent append without reading it all.
+    file.take(total.saturating_sub(HEADER_LEN as u64).saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if bytes.len() != length {
+        return Err(SdxError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "cache entry changed during read",
         )));
     }
     // The CRC covers the payload that starts right after the fixed header:
@@ -524,10 +570,11 @@ fn read_entry(path: &Path) -> Result<Option<CachedXorbRange>, SdxError> {
             "cache data out of bounds",
         ))
     })?;
+    validate_offsets(header.chunk_range, &chunk_offsets, data)?;
     Ok(Some(CachedXorbRange {
         chunk_range: header.chunk_range,
         chunk_offsets,
-        data: Bytes::copy_from_slice(data),
+        data: Bytes::from(bytes).slice(data_start..data_end),
     }))
 }
 
@@ -655,7 +702,7 @@ fn scan_directory(cache_dir: &Path, budget_bytes: u64) -> Result<CacheState, Sdx
                 drop(std::fs::remove_file(&entry_path));
                 continue;
             }
-            match read_entry(&entry_path) {
+            match read_entry_bounded(&entry_path, budget_bytes) {
                 Ok(Some(_)) => {}
                 Ok(None) => continue,
                 Err(_) => {
@@ -744,6 +791,52 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+
+    #[tokio::test]
+    async fn bounded_cache_read_invalidates_sparse_and_forged_payloads() {
+        let directory = tempfile::tempdir().unwrap();
+        let cache = ChunkCache::new(directory.path(), 1024).unwrap();
+        let key = hash('1');
+        for forged_header in [false, true] {
+            put(&cache, &key, b"valid").await;
+            let path = cache.item_path(&cache_key(&key, (0, 1))).unwrap();
+            let mut file = File::options().read(true).write(true).open(&path).unwrap();
+            if forged_header {
+                use std::io::{Seek, SeekFrom};
+                file.seek(SeekFrom::Start(28)).unwrap();
+                file.write_all(&u64::MAX.to_le_bytes()).unwrap();
+            } else {
+                // Sparse size is intentionally enormous; a whole-file read
+                // would allocate gigabytes before discovering the corruption.
+                file.set_len(8 * 1024 * 1024 * 1024).unwrap();
+            }
+            drop(file);
+            assert!(cache.get_bounded(&key, (0, 1), 5).await.unwrap().is_none());
+            assert!(!path.exists());
+            assert_eq!(cache.entry_count().await.unwrap(), 0);
+            assert_eq!(cache.total_bytes().await.unwrap(), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn bounded_cache_read_preserves_valid_hit_and_rejects_oversize_entry() {
+        let directory = tempfile::tempdir().unwrap();
+        let cache = ChunkCache::new(directory.path(), 1024).unwrap();
+        let key = hash('2');
+        put(&cache, &key, b"payload").await;
+        assert_eq!(
+            cache
+                .get_bounded(&key, (0, 1), 7)
+                .await
+                .unwrap()
+                .unwrap()
+                .data
+                .as_ref(),
+            b"payload"
+        );
+        assert!(cache.get_bounded(&key, (0, 1), 6).await.unwrap().is_none());
+        assert_eq!(cache.entry_count().await.unwrap(), 0);
+    }
 
     fn hash(digit: char) -> String {
         let mut out = String::with_capacity(64);
