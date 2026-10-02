@@ -34,6 +34,7 @@ use super::enums::{
     ProviderConfig,
 };
 use super::error::ServerConfigError;
+
 use crate::{
     reconstruction_cache::{
         DEFAULT_RECONSTRUCTION_CACHE_MEMORY_MAX_ENTRIES, DEFAULT_RECONSTRUCTION_CACHE_TTL_SECONDS,
@@ -42,6 +43,20 @@ use crate::{
     server_frontend::ServerFrontend,
     server_role::ServerRole,
 };
+
+pub(crate) const fn validate_chunk_size(chunk_size: NonZeroUsize) -> Result<(), ServerConfigError> {
+    use crate::upload_ingest::cdc::{MAX_TARGET_CHUNK_SIZE, MIN_TARGET_CHUNK_SIZE};
+    if chunk_size.get() < MIN_TARGET_CHUNK_SIZE {
+        return Err(ServerConfigError::ChunkSizeTooSmall);
+    }
+    if chunk_size.get() > MAX_TARGET_CHUNK_SIZE {
+        return Err(ServerConfigError::ChunkSizeTooLarge);
+    }
+    if !chunk_size.get().is_power_of_two() {
+        return Err(ServerConfigError::ChunkSizeNotPowerOfTwo);
+    }
+    Ok(())
+}
 
 /// Default bounded-parser limits for native Xet shard metadata.
 pub use shardline_server_core::DEFAULT_SHARD_METADATA_LIMITS;
@@ -1358,6 +1373,10 @@ impl ServerConfig {
     /// encryption keys.
     /// Returns [`ServerConfigError::ResourceCapacityOutOfRange`] when a resource
     /// capacity exceeds the runtime semaphore or batch-count representation.
+    /// Returns [`ServerConfigError::ChunkSizeTooSmall`],
+    /// [`ServerConfigError::ChunkSizeTooLarge`], or
+    /// [`ServerConfigError::ChunkSizeNotPowerOfTwo`] when the target chunk size
+    /// is not a power of two in 128 bytes through 1 GiB.
     pub fn validate_runtime_requirements(&self) -> Result<(), ServerConfigError> {
         crate::admission::validate_capacity(
             "admission_max_weight",
@@ -1374,12 +1393,7 @@ impl ServerConfig {
             self.oci_registry_token_max_in_flight_requests(),
             tokio::sync::Semaphore::MAX_PERMITS,
         )?;
-        // The CDC chunker requires a power-of-two chunk size; a misconfigured
-        // value must fail startup with a clear error instead of panicking on
-        // the first upload (see `upload_ingest::cdc::CdcChunker`).
-        if !self.chunk_size.get().is_power_of_two() {
-            return Err(ServerConfigError::ChunkSizeNotPowerOfTwo);
-        }
+        validate_chunk_size(self.chunk_size)?;
 
         if self.auth.token_signing_key.is_none()
             && (self.server_role.serves_api() || self.server_role.serves_transfer())

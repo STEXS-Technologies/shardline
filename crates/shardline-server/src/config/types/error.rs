@@ -403,6 +403,9 @@ pub enum ServerConfigError {
     /// Provider token issuance needs the CAS signing key.
     #[error("provider token issuance requires shardline token signing key configuration")]
     ProviderTokensRequireSigningKey,
+    /// The chunk size is smaller than the CDC algorithm supports.
+    #[error("chunk size must be at least 128 bytes")]
+    ChunkSizeTooSmall,
     /// The chunk size exceeds the maximum allowed value.
     #[error("chunk size must not exceed 1 GB")]
     ChunkSizeTooLarge,

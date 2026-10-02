@@ -128,7 +128,7 @@ impl MemoryReconstructionCache {
             let inner = self.inner.read().await;
             let now = Instant::now();
             if let Some(entry) = inner.entries.get(key)
-                && entry.expires_at > now
+                && entry.is_live(now, self.ttl)
             {
                 return Ok(Some(entry.payload.as_ref().clone()));
             }
@@ -141,7 +141,7 @@ impl MemoryReconstructionCache {
 
             // Re-check after acquiring the write lock.
             if let Some(entry) = inner.entries.get(key)
-                && entry.expires_at > now
+                && entry.is_live(now, self.ttl)
             {
                 return Ok(Some(entry.payload.as_ref().clone()));
             }
@@ -173,7 +173,7 @@ impl MemoryReconstructionCache {
                 loading.insert(key.clone(), new);
                 // Clean up any expired entry so the loader can store fresh data.
                 if let Some(entry) = inner.entries.get(key)
-                    && entry.expires_at <= now
+                    && !entry.is_live(now, self.ttl)
                 {
                     inner.remove(key);
                 }
@@ -255,7 +255,7 @@ impl MemoryReconstructionCache {
                 let inner = self.inner.read().await;
                 let now = Instant::now();
                 if let Some(entry) = inner.entries.get(key)
-                    && entry.expires_at > now
+                    && entry.is_live(now, self.ttl)
                 {
                     return Some(entry.payload.as_ref().clone());
                 }
@@ -283,7 +283,7 @@ impl MemoryReconstructionCache {
                     let inner = self.inner.read().await;
                     let now = Instant::now();
                     if let Some(entry) = inner.entries.get(key)
-                        && entry.expires_at > now
+                        && entry.is_live(now, self.ttl)
                     {
                         return Some(entry.payload.as_ref().clone());
                     }
@@ -422,7 +422,7 @@ impl AsyncReconstructionCache for MemoryReconstructionCache {
             {
                 let inner = self.inner.read().await;
                 if let Some(entry) = inner.entries.get(key)
-                    && entry.expires_at > now
+                    && entry.is_live(now, self.ttl)
                 {
                     return Ok(Some(entry.payload.as_ref().clone()));
                 }
@@ -435,7 +435,7 @@ impl AsyncReconstructionCache for MemoryReconstructionCache {
             let mut inner = self.inner.write().await;
 
             if let Some(entry) = inner.entries.get(key)
-                && entry.expires_at > now
+                && entry.is_live(now, self.ttl)
             {
                 return Ok(Some(entry.payload.as_ref().clone()));
             }
@@ -475,7 +475,7 @@ impl AsyncReconstructionCache for MemoryReconstructionCache {
             let should_remove = inner
                 .entries
                 .get(key)
-                .is_some_and(|entry| entry.expires_at <= now);
+                .is_some_and(|entry| !entry.is_live(now, self.ttl));
             if should_remove {
                 inner.remove(key);
             }
@@ -490,7 +490,6 @@ impl AsyncReconstructionCache for MemoryReconstructionCache {
     ) -> ReconstructionCacheFuture<'operation, ()> {
         Box::pin(async move {
             let now = Instant::now();
-            let expires_at = now.checked_add(self.ttl).unwrap_or(now);
             let mut inner = self.inner.write().await;
             if payload.len() <= MAX_MEMORY_CACHE_BYTES {
                 while (!inner.entries.contains_key(key)
@@ -508,7 +507,6 @@ impl AsyncReconstructionCache for MemoryReconstructionCache {
                     key,
                     MemoryEntry {
                         payload: Arc::new(payload.to_vec()),
-                        expires_at,
                         inserted_at: now,
                         seq,
                     },

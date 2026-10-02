@@ -1593,3 +1593,156 @@ async fn exercise_local_record_store_lifecycle() -> Result<(), Box<dyn Error>> {
 
     Ok(())
 }
+
+fn assert_bootstrap_database_complete(root: &Path) {
+    let connection = open_sqlite_connection(root).unwrap();
+    let mode: String = connection
+        .pragma_query_value(None, "journal_mode", |row| row.get(0))
+        .unwrap();
+    assert_eq!(mode, "wal");
+    let mut statement = connection
+        .prepare(&format!(
+            "SELECT version FROM {LOCAL_SCHEMA_MIGRATIONS_TABLE} ORDER BY version"
+        ))
+        .unwrap();
+    let versions = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let expected = LOCAL_SQLITE_MIGRATIONS
+        .iter()
+        .map(|migration| migration.version)
+        .collect::<Vec<_>>();
+    assert_eq!(versions, expected);
+    let integrity: String = connection
+        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(integrity, "ok");
+}
+
+#[test]
+fn concurrent_cold_local_bootstrap_threads() {
+    let directory = tempfile::tempdir().unwrap();
+    for round in 0..20 {
+        let root = directory.path().join(format!("root-{round}"));
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let workers = (0..8)
+            .map(|_| {
+                let store = LocalIndexStore::open(root.clone());
+                let barrier = std::sync::Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    store.probe()
+                })
+            })
+            .collect::<Vec<_>>();
+        for worker in workers {
+            assert_eq!(worker.join().unwrap(), Ok(()));
+        }
+        assert_bootstrap_database_complete(&root);
+    }
+}
+
+#[test]
+fn local_bootstrap_process_child() {
+    let Some(root) = std::env::var_os("SHARDLINE_BOOTSTRAP_TEST_ROOT") else {
+        return;
+    };
+    let root = std::path::PathBuf::from(root);
+    let worker = std::env::var("SHARDLINE_BOOTSTRAP_TEST_WORKER").unwrap();
+    fs::write(root.join(format!("ready-{worker}")), []).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while !root.join("start").exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "parent did not release process barrier"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    LocalIndexStore::open(root.join("database"))
+        .probe()
+        .unwrap();
+}
+
+#[test]
+fn concurrent_cold_local_bootstrap_processes() {
+    let directory = tempfile::tempdir().unwrap();
+    for round in 0..4 {
+        let root = directory.path().join(format!("root-{round}"));
+        fs::create_dir_all(&root).unwrap();
+        let mut children = Vec::with_capacity(4);
+        for worker in 0..4 {
+            children.push(
+                std::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "local_sqlite::tests::local_bootstrap_process_child",
+                        "--nocapture",
+                    ])
+                    .env("SHARDLINE_BOOTSTRAP_TEST_ROOT", &root)
+                    .env("SHARDLINE_BOOTSTRAP_TEST_WORKER", worker.to_string())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .spawn()
+                    .unwrap(),
+            );
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        let ready = loop {
+            if (0..4).all(|worker| root.join(format!("ready-{worker}")).exists()) {
+                break true;
+            }
+            if std::time::Instant::now() >= deadline {
+                break false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
+        // Always release and reap children before reporting a barrier failure.
+        fs::write(root.join("start"), []).unwrap();
+        let results = children
+            .into_iter()
+            .map(|child| child.wait_with_output().unwrap())
+            .collect::<Vec<_>>();
+        assert!(ready, "child processes did not reach their barrier");
+        for output in results {
+            assert!(
+                output.status.success(),
+                "bootstrap child failed: {} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        assert_bootstrap_database_complete(&root.join("database"));
+    }
+}
+
+#[test]
+fn blocked_local_bootstrap_does_not_block_other_roots() {
+    let directory = tempfile::tempdir().unwrap();
+    let blocked = LocalIndexStore::open(directory.path().join("blocked"));
+    let warm = LocalIndexStore::new(directory.path().join("warm")).unwrap();
+    let coordinator = super::store::database_initialization(
+        &blocked.root().join(LOCAL_METADATA_DATABASE_FILE_NAME),
+    )
+    .unwrap();
+    let guard = coordinator.lock().unwrap();
+    let (started_sender, started_receiver) = std::sync::mpsc::channel();
+    let blocked_worker = std::thread::spawn(move || {
+        started_sender.send(()).unwrap();
+        blocked.probe()
+    });
+    started_receiver.recv().unwrap();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let cold = LocalIndexStore::open(directory.path().join("cold"));
+    let other_worker = std::thread::spawn(move || {
+        let result = warm.probe().and_then(|()| cold.probe());
+        sender.send(result).unwrap();
+    });
+    let progress = receiver.recv_timeout(std::time::Duration::from_secs(5));
+    drop(guard);
+    let blocked_result = blocked_worker.join().unwrap();
+    other_worker.join().unwrap();
+    assert_eq!(progress.unwrap(), Ok(()));
+    assert_eq!(blocked_result, Ok(()));
+}

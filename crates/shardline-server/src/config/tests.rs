@@ -1230,7 +1230,7 @@ fn read_secret_file_bytes_rejects_oversized_before_buffering() {
 fn server_config_runtime_validation_rejects_missing_signing_key_for_all_role() {
     let bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080);
     let root_dir = PathBuf::from("/tmp/shardline");
-    let chunk_size = NonZeroUsize::MIN;
+    let chunk_size = NonZeroUsize::new(128).unwrap();
     let config = ServerConfig::new(
         bind_addr,
         "https://assets.example.test".to_owned(),
@@ -1251,7 +1251,7 @@ fn server_config_runtime_validation_rejects_missing_signing_key_for_all_role() {
 fn server_config_runtime_validation_accepts_signed_transfer_role() {
     let bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080);
     let root_dir = PathBuf::from("/tmp/shardline");
-    let chunk_size = NonZeroUsize::MIN;
+    let chunk_size = NonZeroUsize::new(128).unwrap();
     let config = ServerConfig::new(
         bind_addr,
         "https://assets.example.test".to_owned(),

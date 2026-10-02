@@ -132,12 +132,11 @@ pub(crate) fn put_bytes_if_absent(
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path escapes root"))?;
         let parent = path.parent().ok_or_else(invalid_local_path_error)?;
         fs::create_dir_all(parent)?;
-        match OpenOptions::new().write(true).create_new(true).open(path) {
-            Ok(mut file) => {
-                file.write_all(bytes)?;
-                file.flush()?;
-                Ok(PutBytesIfAbsentOutcome::Inserted)
-            }
+        // Write fully before publishing the immutable destination. A failed
+        // write must not leave an empty/partial object that blocks retries.
+        let temporary = write_temporary_file(path, bytes)?;
+        match fs::hard_link(&temporary.path, path) {
+            Ok(()) => Ok(PutBytesIfAbsentOutcome::Inserted),
             Err(error) if error.kind() == ErrorKind::AlreadyExists => {
                 let file = File::open(path)?;
                 ensure_file_matches_bytes(file, bytes)?;
@@ -161,8 +160,9 @@ pub(crate) fn write_bytes_atomically(root: &Path, path: &Path, bytes: &[u8]) -> 
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path escapes root"))?;
         let parent = path.parent().ok_or_else(invalid_local_path_error)?;
         fs::create_dir_all(parent)?;
-        let temporary = write_temporary_file(path, bytes)?;
-        fs::rename(temporary, path)?;
+        let mut temporary = write_temporary_file(path, bytes)?;
+        fs::rename(&temporary.path, path)?;
+        temporary.renamed = true;
         Ok(())
     }
 }
@@ -316,31 +316,54 @@ fn open_existing_regular_file(path: &Path) -> io::Result<File> {
 }
 
 #[cfg(not(unix))]
-fn write_temporary_file(path: &Path, bytes: &[u8]) -> io::Result<std::path::PathBuf> {
+struct LocalTemporaryFile {
+    path: std::path::PathBuf,
+    renamed: bool,
+}
+
+#[cfg(not(unix))]
+impl Drop for LocalTemporaryFile {
+    fn drop(&mut self) {
+        if !self.renamed {
+            // Preserve the original write/publication error if cleanup fails.
+            let _ignored = fs::remove_file(&self.path);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn write_temporary_file(path: &Path, bytes: &[u8]) -> io::Result<LocalTemporaryFile> {
     use std::sync::atomic::{AtomicU64, Ordering};
     static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
-    let pid = std::process::id();
-    let seq = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let now_nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let temporary = path.with_extension(format!("tmp-{pid}-{seq}-{now_nanos}"));
-    match OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temporary)
-    {
-        Ok(mut file) => {
-            file.write_all(bytes)?;
-            file.flush()?;
-            Ok(temporary)
+    loop {
+        let pid = std::process::id();
+        let seq = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let now_nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let temporary_path = path.with_extension(format!("tmp-{pid}-{seq}-{now_nanos}"));
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary_path)
+        {
+            Ok(opened_file) => {
+                let temporary = LocalTemporaryFile {
+                    path: temporary_path,
+                    renamed: false,
+                };
+                // Declared after the cleanup guard so even an early return
+                // closes the file before removing it on platforms that require it.
+                let mut writer = opened_file;
+                writer.write_all(bytes)?;
+                writer.flush()?;
+                return Ok(temporary);
+            }
+            // A collision belongs to another writer: never remove its file.
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
         }
-        Err(error) if error.kind() == ErrorKind::AlreadyExists => {
-            fs::remove_file(&temporary)?;
-            write_temporary_file(path, bytes)
-        }
-        Err(error) => Err(error),
     }
 }
 
