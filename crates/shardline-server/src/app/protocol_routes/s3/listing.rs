@@ -34,6 +34,7 @@ pub(crate) async fn s3_list_objects_v2(
     _headers: HeaderMap,
 ) -> Result<Response, S3Error> {
     let query = parse_s3_query(&uri)?;
+    let url_encoding = shardline_s3_adapter::parse_list_objects_url_encoding(&query)?;
     let params = parse_list_objects_v2_params(&query)?;
     let scope_namespace = scope_namespace(auth.capability().namespace());
 
@@ -61,7 +62,16 @@ pub(crate) async fn s3_list_objects_v2(
     Ok((
         StatusCode::OK,
         [(axum::http::header::CONTENT_TYPE, s3_xml_content_type())],
-        result.to_xml(),
+        result.to_xml_with_context(shardline_s3_adapter::ListObjectsV2ResponseContext {
+            url_encoding,
+            prefix: &params.prefix,
+            delimiter: params
+                .delimiter
+                .as_ref()
+                .map(|delimiter| delimiter.get().to_string())
+                .as_deref(),
+            start_after: params.start_after.as_deref(),
+        }),
     )
         .into_response())
 }
@@ -81,6 +91,7 @@ pub(crate) async fn s3_list_objects_v1(
     _headers: HeaderMap,
 ) -> Result<Response, S3Error> {
     let query = parse_s3_query(&uri)?;
+    let url_encoding = shardline_s3_adapter::parse_list_objects_url_encoding(&query)?;
     let params = parse_list_objects_v1_params(&query)?;
     let scope_namespace = scope_namespace(auth.capability().namespace());
 
@@ -114,7 +125,7 @@ pub(crate) async fn s3_list_objects_v1(
     Ok((
         StatusCode::OK,
         [(axum::http::header::CONTENT_TYPE, s3_xml_content_type())],
-        result.to_xml(),
+        result.to_xml_with_url_encoding(url_encoding),
     )
         .into_response())
 }

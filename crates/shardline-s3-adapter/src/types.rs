@@ -8,10 +8,13 @@ use axum::http::{
 
 use crate::protocol_support::etag_header;
 
-/// Escapes a string for XML text content: the five predefined XML entities plus
-/// a strip of XML-1.0-invalid control characters (so a hostile key, bucket, or
-/// message can never produce a malformed envelope).
-fn xml_escape(value: &str) -> String {
+/// Escapes XML text, omitting characters XML 1.0 cannot represent.
+///
+/// Carriage returns use a numeric reference so XML line-ending normalization
+/// preserves the original text. Invalid control characters and U+FFFE/U+FFFF
+/// are omitted, matching the S3 error envelope's existing sanitization policy.
+#[must_use]
+pub fn xml_escape(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for ch in value.chars() {
         match ch {
@@ -20,11 +23,16 @@ fn xml_escape(value: &str) -> String {
             '>' => out.push_str("&gt;"),
             '"' => out.push_str("&quot;"),
             '\'' => out.push_str("&apos;"),
-            '\u{0}'..='\u{8}' | '\u{b}' | '\u{c}' | '\u{e}'..='\u{1f}' => {}
+            '\r' => out.push_str("&#13;"),
+            _ if !is_xml_character(u32::from(ch)) => {}
             _ => out.push(ch),
         }
     }
     out
+}
+
+const fn is_xml_character(code_point: u32) -> bool {
+    matches!(code_point, 0x9 | 0xa | 0xd | 0x20..=0xd7ff | 0xe000..=0xfffd | 0x10000..=0x10ffff)
 }
 
 /// Decodes XML 1.0 numeric references and the five standard XML character references (`&amp;`, `&lt;`,
@@ -98,8 +106,7 @@ fn decode_xml_entities(value: &str) -> Result<String, crate::S3Error> {
                 }
                 let number = u32::from_str_radix(digits, radix)
                     .map_err(|_parse_error| crate::S3Error::malformed_xml())?;
-                if !matches!(number, 0x9 | 0xa | 0xd | 0x20..=0xd7ff | 0xe000..=0xfffd | 0x10000..=0x10ffff)
-                {
+                if !is_xml_character(number) {
                     return Err(crate::S3Error::malformed_xml());
                 }
                 Some(char::from_u32(number).ok_or_else(crate::S3Error::malformed_xml)?)
@@ -182,6 +189,64 @@ impl Contents {
     }
 }
 
+/// Request values echoed by a ListObjectsV2 response. Filtering and cursors use
+/// raw values; encoding applies only when serializing the response.
+#[derive(Debug, Clone, Copy)]
+pub struct ListObjectsV2ResponseContext<'request> {
+    /// Whether key-like response fields use UTF-8 URL percent encoding.
+    pub url_encoding: bool,
+    /// Raw requested prefix.
+    pub prefix: &'request str,
+    /// Raw requested delimiter.
+    pub delimiter: Option<&'request str>,
+    /// Raw requested start-after key.
+    pub start_after: Option<&'request str>,
+}
+
+fn listing_wire_value(value: &str, url_encoding: bool) -> String {
+    if !url_encoding {
+        return value.to_owned();
+    }
+    let mut encoded = String::new();
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                encoded.push(char::from(byte))
+            }
+            _ => {
+                encoded.push('%');
+                // Both nibble conversions are bounded to 0..16.
+                encoded.push(
+                    char::from_digit(u32::from(byte >> 4), 16)
+                        .unwrap_or('0')
+                        .to_ascii_uppercase(),
+                );
+                encoded.push(
+                    char::from_digit(u32::from(byte & 15), 16)
+                        .unwrap_or('0')
+                        .to_ascii_uppercase(),
+                );
+            }
+        }
+    }
+    encoded
+}
+
+fn encode_listing_rows(contents: &mut [Contents], prefixes: &mut [String]) {
+    for entry in contents {
+        entry.key = listing_wire_value(&entry.key, true);
+    }
+    for prefix in prefixes {
+        *prefix = listing_wire_value(prefix, true);
+    }
+}
+
+fn append_listing_fields(xml: &mut String, fields: &str) {
+    if let Some(end) = xml.rfind("</ListBucketResult>") {
+        xml.insert_str(end, fields);
+    }
+}
+
 /// The `ListObjectsV2` response envelope.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ListBucketResult {
@@ -196,6 +261,45 @@ pub struct ListBucketResult {
 }
 
 impl ListBucketResult {
+    /// Serializes the listing with request echoes and optional lossless URL
+    /// encoding. Opaque continuation tokens retain their original values.
+    #[must_use]
+    pub fn to_xml_with_context(&self, context: ListObjectsV2ResponseContext<'_>) -> String {
+        let mut xml = if context.url_encoding {
+            let mut result = self.clone();
+            encode_listing_rows(&mut result.contents, &mut result.common_prefixes);
+            result.to_xml()
+        } else {
+            self.to_xml()
+        };
+        let mut fields = format!(
+            "  <Prefix>{}</Prefix>\n",
+            xml_escape(&listing_wire_value(context.prefix, context.url_encoding))
+        );
+        for (tag, value) in [
+            ("Delimiter", context.delimiter),
+            ("StartAfter", context.start_after),
+        ] {
+            if let Some(value) = value {
+                fields.push_str("  <");
+                fields.push_str(tag);
+                fields.push('>');
+                fields.push_str(&xml_escape(&listing_wire_value(
+                    value,
+                    context.url_encoding,
+                )));
+                fields.push_str("</");
+                fields.push_str(tag);
+                fields.push_str(">\n");
+            }
+        }
+        if context.url_encoding {
+            fields.push_str("  <EncodingType>url</EncodingType>\n");
+        }
+        append_listing_fields(&mut xml, &fields);
+        xml
+    }
+
     /// Serializes the result to the S3 `ListBucketResult` XML envelope.
     #[must_use]
     pub fn to_xml(&self) -> String {
@@ -255,6 +359,28 @@ pub struct ListBucketResultV1 {
 }
 
 impl ListBucketResultV1 {
+    /// Serializes the v1 response with optional lossless UTF-8 URL encoding of
+    /// keys, prefix, delimiter and markers. Bucket names are unchanged.
+    #[must_use]
+    pub fn to_xml_with_url_encoding(&self, url_encoding: bool) -> String {
+        if !url_encoding {
+            return self.to_xml();
+        }
+        let mut result = self.clone();
+        encode_listing_rows(&mut result.contents, &mut result.common_prefixes);
+        result.prefix = listing_wire_value(&result.prefix, true);
+        result.marker = listing_wire_value(&result.marker, true);
+        result.delimiter = result
+            .delimiter
+            .map(|value| listing_wire_value(&value, true));
+        result.next_marker = result
+            .next_marker
+            .map(|value| listing_wire_value(&value, true));
+        let mut xml = result.to_xml();
+        append_listing_fields(&mut xml, "  <EncodingType>url</EncodingType>\n");
+        xml
+    }
+
     /// Serializes the result to the S3 `ListBucketResult` (v1) XML envelope.
     #[must_use]
     pub fn to_xml(&self) -> String {
@@ -893,6 +1019,26 @@ mod tests {
             request_id: None,
         };
         assert!(!body.to_xml().contains('\u{7}'));
+    }
+
+    #[test]
+    fn xml_text_filters_invalid_scalars_and_preserves_carriage_returns() {
+        let value = "a\r\nb\u{fffe}\u{ffff}\u{fffd}\u{10000}\u{10ffff}";
+        let escaped = xml_escape(value);
+        assert_eq!(escaped, "a&#13;\nb\u{fffd}\u{10000}\u{10ffff}");
+        assert_eq!(
+            decode_xml_entities(&escaped).unwrap(),
+            "a\r\nb\u{fffd}\u{10000}\u{10ffff}"
+        );
+        let xml = S3ErrorBody {
+            code: "NoSuchKey".to_owned(),
+            message: value.to_owned(),
+            key: Some(value.to_owned()),
+            request_id: Some(value.to_owned()),
+        }
+        .to_xml();
+        assert!(!xml.contains(['\u{fffe}', '\u{ffff}', '\r']));
+        assert_eq!(xml.matches("&#13;").count(), 3);
     }
 
     #[test]

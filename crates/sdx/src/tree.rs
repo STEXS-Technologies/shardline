@@ -231,32 +231,31 @@ impl MetadataClient {
             .replace("{repo}", &encode_path_segment(&self.repository.repo))
     }
 
-    /// Issues a request through the retry context and returns the raw body.
-    pub(crate) async fn send(
+    /// Retries HTTP failures, then returns an admitted/decoded metadata DTO.
+    pub(crate) async fn send_json<T: serde::de::DeserializeOwned + Send + 'static>(
         &self,
         retry: &RetryContext,
         token: String,
         method: Method,
         url: String,
         body: Option<serde_json::Value>,
-        response_limit: usize,
-    ) -> Result<Vec<u8>, SdxError> {
+        response: (&'static str, usize),
+    ) -> Result<T, SdxError> {
         let transfer = self.transfer.clone();
-        let bytes = retry
+        let decoded = retry
             .run(token, move |tok| {
                 let transfer = transfer.clone();
                 let url = url.clone();
                 let method = method.clone();
                 let body = body.clone();
                 async move {
-                    let (_status, body) = transfer
-                        .request_raw(&method, &url, &tok, body.as_ref(), response_limit)
-                        .await?;
-                    Ok(body)
+                    transfer
+                        .request_json::<T>(&method, &url, &tok, body.as_ref(), response.1)
+                        .await
                 }
             })
             .await?;
-        Ok(bytes)
+        decoded.map_err(|error| metadata_parse(response.0, &error))
     }
 
     async fn resolve_path(&self, path: &str) -> Result<PathEntry, SdxError> {
@@ -264,18 +263,17 @@ impl MetadataClient {
         let token = self.tokens.read_token().await?;
         let route = self.repo_route(XET_TREE_ROUTE);
         let url = build_url(&self.api_base, &route, &[("path", path)]);
-        let body = self
-            .send(
+        let response: ResolveResponse = self
+            .send_json(
                 &retry,
                 token.token,
                 Method::GET,
                 url,
                 None,
-                PATH_RESPONSE_LIMIT,
+                ("resolve_path", PATH_RESPONSE_LIMIT),
             )
             .await?;
-        let response: ResolveResponse = serde_json::from_slice(&body)
-            .map_err(|error| metadata_parse("resolve_path", &error))?;
+
         Ok(PathEntry {
             path: response.path,
             file_id: response.file_id,
@@ -301,18 +299,17 @@ impl MetadataClient {
             query.push(("cursor".to_owned(), cursor.to_owned()));
         }
         let url = build_url(&self.api_base, &route, &query);
-        let body = self
-            .send(
+        let response: ListResponse = self
+            .send_json(
                 &retry,
                 token.token,
                 Method::GET,
                 url,
                 None,
-                tree_page_response_limit(limit),
+                ("list_dir", tree_page_response_limit(limit)),
             )
             .await?;
-        let response: ListResponse =
-            serde_json::from_slice(&body).map_err(|error| metadata_parse("list_dir", &error))?;
+
         Ok(DirListing {
             entries: response
                 .entries
@@ -342,18 +339,17 @@ impl MetadataClient {
         // Substitute the `{*path}` wildcard with the remote path (axum decodes
         // the captured value; encode each segment so special characters survive).
         let url = url.replace("{*path}", &encode_path_segments(remote));
-        let body = self
-            .send(
+        let response: RegisterResponse = self
+            .send_json(
                 &retry,
                 token.token,
                 Method::PUT,
                 url,
                 Some(serde_json::json!({ "fileId": file_id })),
-                PATH_RESPONSE_LIMIT,
+                ("register_path", PATH_RESPONSE_LIMIT),
             )
             .await?;
-        let response: RegisterResponse = serde_json::from_slice(&body)
-            .map_err(|error| metadata_parse("register_path", &error))?;
+
         Ok(RegisterResult {
             entry: PathEntry {
                 path: response.path,
@@ -375,18 +371,17 @@ impl MetadataClient {
         if recursive {
             url.push_str("?recursive=true");
         }
-        let body = self
-            .send(
+        let response: DeletePathResponse = self
+            .send_json(
                 &retry,
                 token.token,
                 Method::DELETE,
                 url,
                 None,
-                PATH_RESPONSE_LIMIT,
+                ("delete_path", PATH_RESPONSE_LIMIT),
             )
             .await?;
-        let response: DeletePathResponse =
-            serde_json::from_slice(&body).map_err(|error| metadata_parse("delete_path", &error))?;
+
         Ok(response.deleted)
     }
 }
@@ -601,7 +596,7 @@ pub(crate) fn checked_next_cursor(
     Ok(next)
 }
 
-pub(crate) fn metadata_parse(context: &str, error: &serde_json::Error) -> SdxError {
+pub(crate) fn metadata_parse(context: &str, error: &impl std::fmt::Display) -> SdxError {
     SdxError::Metadata(format!("{context}: {error}"))
 }
 
@@ -722,6 +717,26 @@ mod tests {
             })))
             .mount(server)
             .await;
+    }
+
+    #[tokio::test]
+    async fn resolve_json_decode_preserves_context_without_retrying_parse_errors() {
+        let server = MockServer::start().await;
+        mock_read_token(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/api/github/team/assets/tree/main"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("{invalid"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let error = build_client(&server)
+            .await
+            .resolve_path("file.txt")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, crate::SdxError::Metadata(message) if message.starts_with("resolve_path: "))
+        );
     }
 
     #[test]

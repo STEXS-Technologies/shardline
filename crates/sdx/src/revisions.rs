@@ -77,18 +77,16 @@ impl MetadataClient {
                 .map(|c| vec![("cursor".to_owned(), c.to_owned())])
                 .unwrap_or_default();
             let url = crate::tree::build_url(&self.api_base, &route, &query);
-            let body = self
-                .send(
+            let response: RevisionsResponse = self
+                .send_json(
                     &retry,
                     token.token.clone(),
                     Method::GET,
                     url,
                     None,
-                    REVISION_PAGE_RESPONSE_LIMIT,
+                    ("list_revisions", REVISION_PAGE_RESPONSE_LIMIT),
                 )
                 .await?;
-            let response: RevisionsResponse = serde_json::from_slice(&body)
-                .map_err(|error| crate::tree::metadata_parse("list_revisions", &error))?;
             revisions.extend(response.revisions.into_iter().map(|revision| Revision {
                 name: revision.name,
                 created_at: revision.created_at,
@@ -114,25 +112,21 @@ impl MetadataClient {
             .replace("{rev}", &crate::tree::encode_path_segment(rev));
         let url = crate::tree::build_url(&self.api_base, &route, crate::tree::no_query());
         match self
-            .send(
+            .send_json::<RevisionJson>(
                 &retry,
                 token.token,
                 Method::POST,
                 url,
                 None,
-                REVISION_RESPONSE_LIMIT,
+                ("create_revision", REVISION_RESPONSE_LIMIT),
             )
             .await
         {
-            Ok(body) => {
-                let revision: RevisionJson = serde_json::from_slice(&body)
-                    .map_err(|error| crate::tree::metadata_parse("create_revision", &error))?;
-                Ok(Revision {
-                    name: revision.name,
-                    created_at: revision.created_at,
-                    updated_at: revision.updated_at,
-                })
-            }
+            Ok(revision) => Ok(Revision {
+                name: revision.name,
+                created_at: revision.created_at,
+                updated_at: revision.updated_at,
+            }),
             Err(SdxError::Transfer(TransferError::HttpStatus { status: 409, .. })) => {
                 Err(SdxError::RevisionExists(rev.to_owned()))
             }
@@ -147,19 +141,17 @@ impl MetadataClient {
             .repo_route_scope(XET_REVISION_ROUTE)
             .replace("{rev}", &crate::tree::encode_path_segment(rev));
         let url = crate::tree::build_url(&self.api_base, &route, crate::tree::no_query());
-        let body = self
-            .send(
+        let _: DeleteRevisionResponse = self
+            .send_json(
                 &retry,
                 token.token,
                 Method::DELETE,
                 url,
                 None,
-                REVISION_RESPONSE_LIMIT,
+                ("delete_revision", REVISION_RESPONSE_LIMIT),
             )
             .await?;
         // Idempotent: the server returns 200 even when `deleted: false`.
-        let _: DeleteRevisionResponse = serde_json::from_slice(&body)
-            .map_err(|error| crate::tree::metadata_parse("delete_revision", &error))?;
         Ok(())
     }
 }
@@ -311,6 +303,48 @@ mod tests {
             );
             server.verify().await;
         }
+    }
+
+    #[tokio::test]
+    async fn revisions_json_decode_preserves_context_without_retrying_parse_errors() {
+        let server = MockServer::start().await;
+        mock_read_token(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/api/github/team/assets/revisions"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("{invalid"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let error = build_client(&server)
+            .await
+            .list_revisions()
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, crate::SdxError::Metadata(message) if message.starts_with("list_revisions: "))
+        );
+    }
+
+    #[tokio::test]
+    async fn revisions_wrong_type_diagnostic_is_bounded_with_context_and_no_retry() {
+        let server = MockServer::start().await;
+        mock_read_token(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/api/github/team/assets/revisions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "revisions": [{"name": "main", "createdAt": "x".repeat(100_000), "updatedAt": 1}],
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let error = build_client(&server)
+            .await
+            .list_revisions()
+            .await
+            .unwrap_err();
+        assert!(matches!(error, crate::SdxError::Metadata(message)
+            if message.starts_with("list_revisions: ") && message.len() <= 8 * 1024 + "list_revisions: ".len()
+                && message.contains("[truncated; at line 1 column ")));
     }
 
     #[tokio::test]

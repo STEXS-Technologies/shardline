@@ -33,11 +33,13 @@ enum ListParam {
     StartAfter,
     /// `marker` (ListObjects v1).
     Marker,
+    /// `encoding-type`.
+    EncodingType,
 }
 
 impl ListParam {
     /// Parses a raw query-parameter name into the typed set. Unknown names
-    /// (for example `fetch-owner` or `encoding-type`, which real S3 clients
+    /// (for example `fetch-owner` which real S3 clients
     /// send) return `None` and are ignored.
     fn parse(name: &str) -> Option<Self> {
         match name {
@@ -47,6 +49,7 @@ impl ListParam {
             "continuation-token" => Some(Self::ContinuationToken),
             "start-after" => Some(Self::StartAfter),
             "marker" => Some(Self::Marker),
+            "encoding-type" => Some(Self::EncodingType),
             _ => None,
         }
     }
@@ -84,6 +87,24 @@ impl Delimiter {
     pub const fn get(self) -> char {
         self.0
     }
+}
+
+/// Returns whether ListObjects response key-like fields should be URL encoded.
+/// The existing v1/v2 parameter structs keep their public literal shape.
+///
+/// # Errors
+/// Returns InvalidArgument for any supplied encoding-type other than `url`.
+pub fn parse_list_objects_url_encoding(query: &[(String, String)]) -> Result<bool, S3Error> {
+    let mut requested = false;
+    for (name, value) in query {
+        if matches!(ListParam::parse(name), Some(ListParam::EncodingType)) {
+            if value != "url" {
+                return Err(S3Error::invalid_argument("encoding-type must be url"));
+            }
+            requested = true;
+        }
+    }
+    Ok(requested)
 }
 
 /// Parsed `ListObjectsV2` request parameters.
@@ -137,10 +158,12 @@ pub struct ListObjectsV1Params {
 /// # Errors
 ///
 /// Returns [`S3Error::invalid_argument`] when `max-keys` is not a valid
-/// nonnegative integer or the `delimiter` is more than one character.
+/// nonnegative integer, the `delimiter` is more than one character, or
+/// `encoding-type` is supplied with a value other than `url`.
 pub fn parse_list_objects_v1_params(
     query: &[(String, String)],
 ) -> Result<ListObjectsV1Params, S3Error> {
+    parse_list_objects_url_encoding(query)?;
     let mut params = ListObjectsV1Params {
         prefix: String::new(),
         delimiter: None,
@@ -160,6 +183,7 @@ pub fn parse_list_objects_v1_params(
             Some(ListParam::Marker) => params.marker = Some(value.clone()),
             Some(ListParam::ContinuationToken) => {} // v2-only; ignored by v1
             Some(ListParam::StartAfter) => {}        // v2-only; ignored by v1
+            Some(ListParam::EncodingType) => {}      // validated separately
             None => {}
         }
     }
@@ -183,7 +207,7 @@ pub struct ListPage {
 /// Parses the `ListObjectsV2` query parameters from a decoded query map.
 ///
 /// Only the typed listing parameters (`prefix`, `delimiter`, `max-keys`,
-/// `continuation-token`, `start-after`) are read; everything else (including
+/// `continuation-token`, `start-after`, `encoding-type`) are read; everything else (including
 /// the `list-type=2` sub-resource and client extras such as `fetch-owner`) is
 /// ignored. `max-keys` must be a nonnegative integer and is capped at
 /// [`MAX_LIST_KEYS`].
@@ -192,10 +216,11 @@ pub struct ListPage {
 ///
 /// Returns [`S3Error::invalid_argument`] when `max-keys` is empty/non-
 /// numeric, the delimiter is more than one character, or
-/// `continuation-token` is not a valid base64 cursor.
+/// `continuation-token` is not a valid base64 cursor, or `encoding-type` is not `url`.
 pub fn parse_list_objects_v2_params(
     query: &[(String, String)],
 ) -> Result<ListObjectsV2Params, S3Error> {
+    parse_list_objects_url_encoding(query)?;
     let mut params = ListObjectsV2Params {
         prefix: String::new(),
         delimiter: None,
@@ -218,6 +243,7 @@ pub fn parse_list_objects_v2_params(
             }
             Some(ListParam::StartAfter) => params.start_after = Some(value.clone()),
             Some(ListParam::Marker) => {} // v1-only; ignored by ListObjectsV2
+            Some(ListParam::EncodingType) => {} // validated separately
             None => {}
         }
     }
@@ -701,8 +727,8 @@ mod tests {
 
     #[test]
     fn parse_params_unknown_keys_are_ignored() {
-        // Real clients send fetch-owner / encoding-type / list-type; those must
-        // not break the listing params parse (list-type=2 is a sub-resource).
+        // Unknown fetch-owner / list-type remain ignored; encoding-type is
+        // recognized (list-type=2 is a sub-resource).
         let params = parse_list_objects_v2_params(&query(&[
             ("list-type", "2"),
             ("prefix", "dir/"),
@@ -733,5 +759,25 @@ mod tests {
         assert!(parse_list_objects_v1_params(&query(&[("max-keys", "-1")])).is_err());
         assert!(parse_list_objects_v1_params(&query(&[("max-keys", "bad")])).is_err());
         assert!(parse_list_objects_v1_params(&query(&[("delimiter", "//")])).is_err());
+    }
+    #[test]
+    fn url_encoding_is_opt_in_and_rejects_unsupported_values() {
+        assert!(!parse_list_objects_url_encoding(&[]).unwrap());
+        let raw = query(&[
+            ("encoding-type", "url"),
+            ("prefix", "é/+%"),
+            ("marker", "a%2Fb"),
+            ("start-after", "é/+%"),
+        ]);
+        let v1 = parse_list_objects_v1_params(&raw).unwrap();
+        let v2 = parse_list_objects_v2_params(&raw).unwrap();
+        assert!(parse_list_objects_url_encoding(&raw).unwrap());
+        assert_eq!(v1.prefix, "é/+%");
+        assert_eq!(v1.marker.as_deref(), Some("a%2Fb"));
+        assert_eq!(v2.start_after.as_deref(), Some("é/+%"));
+        for value in ["", "URL", "base64"] {
+            assert!(parse_list_objects_v1_params(&query(&[("encoding-type", value)])).is_err());
+            assert!(parse_list_objects_v2_params(&query(&[("encoding-type", value)])).is_err());
+        }
     }
 }
