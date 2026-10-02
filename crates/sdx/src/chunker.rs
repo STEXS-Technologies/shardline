@@ -303,11 +303,13 @@ struct CdcChunker {
 impl CdcChunker {
     /// Creates a new chunker with the given target chunk size.
     ///
-    /// `target_chunk_size` must be a power of two and greater than 64.
+    /// Panics unless `target_chunk_size` is a power of two in 128..=1 GiB.
     #[must_use]
     fn new(target_chunk_size: usize) -> Self {
-        debug_assert!(target_chunk_size.is_power_of_two());
-        debug_assert!(target_chunk_size > 64);
+        assert!(
+            target_chunk_size.is_power_of_two() && (128..=1 << 30).contains(&target_chunk_size),
+            "CDC target chunk size must be a power of two in 128..=1073741824 bytes"
+        );
 
         let raw_mask = target_chunk_size.wrapping_sub(1) as u64;
         let mask = raw_mask << raw_mask.leading_zeros();
@@ -477,8 +479,11 @@ pub struct Chunker {
 impl Chunker {
     /// Creates a new chunker with the given target chunk size.
     ///
-    /// `target_chunk_size` must be a power of two and greater than 64; the
-    /// default is [`DEFAULT_TARGET_CHUNK_SIZE`] (64 KiB).
+    /// The default is [`DEFAULT_TARGET_CHUNK_SIZE`] (64 KiB).
+    ///
+    /// # Panics
+    ///
+    /// Panics unless `target_chunk_size` is a power of two in 128..=1 GiB.
     #[must_use]
     pub fn new(target_chunk_size: usize) -> Self {
         Self {
@@ -818,6 +823,35 @@ mod tests {
             start = end;
         }
         boundaries
+    }
+
+    #[test]
+    fn chunker_target_bounds_reject_invalid_sizes_before_allocation() {
+        for size in [
+            0,
+            1,
+            2,
+            64,
+            127,
+            129,
+            (1 << 30) + 1,
+            1 << 31,
+            1usize << (usize::BITS - 1),
+        ] {
+            assert!(
+                std::panic::catch_unwind(|| Chunker::new(size)).is_err(),
+                "size={size}"
+            );
+        }
+        // Test all supported targets through allocation-free CDC construction.
+        for exponent in 7..=30 {
+            let size = 1 << exponent;
+            let mut chunker = super::CdcChunker::new(size);
+            assert_eq!(chunker.max_chunk, size * 2);
+            if let Some(boundary) = chunker.find_boundary(&[0; 512]) {
+                assert!(boundary > 0 && boundary <= 512);
+            }
+        }
     }
 
     #[test]

@@ -1,7 +1,7 @@
 use std::{
-    collections::HashSet,
+    collections::HashMap,
     path::{Path, PathBuf},
-    sync::{Mutex, OnceLock},
+    sync::{Arc, Mutex, OnceLock},
 };
 
 use rusqlite::{Connection, OptionalExtension, params};
@@ -19,7 +19,29 @@ use super::{
     LocalIndexStoreError, helpers,
 };
 
-static INITIALIZED_LOCAL_DATABASES: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+// Hold the registry only while finding the root's coordinator. SQLite I/O and
+// cold bootstrap must never block connections for an unrelated database.
+type LocalDatabaseInitialization = Arc<Mutex<bool>>;
+static INITIALIZED_LOCAL_DATABASES: OnceLock<Mutex<HashMap<PathBuf, LocalDatabaseInitialization>>> =
+    OnceLock::new();
+
+pub(super) fn database_initialization(
+    path: &Path,
+) -> Result<LocalDatabaseInitialization, LocalIndexStoreError> {
+    let mut databases = INITIALIZED_LOCAL_DATABASES
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .map_err(|error| {
+            LocalIndexStoreError::Io(std::io::Error::other(format!(
+                "local metadata initialization registry poisoned: {error}"
+            )))
+        })?;
+    Ok(Arc::clone(
+        databases
+            .entry(path.to_owned())
+            .or_insert_with(|| Arc::new(Mutex::new(false))),
+    ))
+}
 
 /// Local SQLite implementation of [`IndexStore`](crate::IndexStore).
 #[derive(Debug, Clone)]
@@ -189,25 +211,26 @@ impl LocalIndexStore {
         helpers::initialize_local_metadata_root(&self.root)?;
         let database_path = self.database_path();
         helpers::ensure_sqlite_database_path_is_safe(&database_path)?;
+        // Serialize the first journal-mode transition and schema bootstrap for
+        // this root before opening a connection. Separate processes still use
+        // SQLite's locks and bounded busy retries below.
+        let initialization = database_initialization(&database_path)?;
+        let mut initialized = initialization.lock().map_err(|error| {
+            LocalIndexStoreError::Io(std::io::Error::other(format!(
+                "local metadata initialization lock poisoned: {error}"
+            )))
+        })?;
         let database_preexisted = database_path.exists();
         let mut connection =
             Connection::open_with_flags(&database_path, helpers::sqlite_open_flags())?;
         helpers::prepare_connection(&mut connection)?;
-        let mut initialized = INITIALIZED_LOCAL_DATABASES
-            .get_or_init(|| Mutex::new(HashSet::new()))
-            .lock()
-            .map_err(|error| {
-                LocalIndexStoreError::Io(std::io::Error::other(format!(
-                    "local metadata initialization lock poisoned: {error}"
-                )))
-            })?;
         if !database_preexisted {
             // A caller may remove and recreate a temporary/test root while a
             // server task still owns the store. Treat the recreated file as a
             // new database even if this process initialized the old inode.
-            initialized.remove(&database_path);
+            *initialized = false;
         }
-        if initialized.contains(&database_path) {
+        if *initialized {
             let schema_table_exists = connection
                 .query_row(
                     "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1",
@@ -217,14 +240,14 @@ impl LocalIndexStore {
                 .optional()?
                 .is_some();
             if !schema_table_exists {
-                initialized.remove(&database_path);
+                *initialized = false;
             }
         }
-        if !initialized.contains(&database_path) {
+        if !*initialized {
             helpers::ensure_local_schema_migrations_table(&connection)?;
             helpers::apply_pending_local_migrations(&mut connection)?;
             helpers::ensure_legacy_import_state(&mut connection, &self.root)?;
-            initialized.insert(database_path);
+            *initialized = true;
         }
         let import_state = connection
             .query_row(

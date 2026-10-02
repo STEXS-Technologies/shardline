@@ -2123,3 +2123,80 @@ async fn cache_inner_insert_overwrites_existing_key() {
     let result = cache.get(&key).await.unwrap();
     assert_eq!(result, Some(b"second".to_vec()));
 }
+
+#[tokio::test(start_paused = true)]
+async fn memory_cache_huge_ttl_preserves_cached_payload_and_loader_reuse() {
+    let cache = MemoryReconstructionCache::new(
+        NonZeroU64::new(u64::MAX).unwrap(),
+        NonZeroUsize::new(2).unwrap(),
+    );
+    let key = ReconstructionCacheKey::latest("huge-ttl", None);
+    cache.put(&key, b"payload").await.unwrap();
+    tokio::time::advance(Duration::from_secs(60)).await;
+    assert_eq!(cache.get(&key).await.unwrap(), Some(b"payload".to_vec()));
+    let value = cache
+        .get_or_load(&key, || async { panic!("live entry must bypass loader") })
+        .await
+        .unwrap();
+    assert_eq!(value, Some(b"payload".to_vec()));
+}
+
+#[tokio::test(start_paused = true)]
+async fn memory_cache_replacement_refreshes_ttl() {
+    let cache = MemoryReconstructionCache::new(NonZeroU64::new(60).unwrap(), NonZeroUsize::MIN);
+    let key = ReconstructionCacheKey::latest("refresh-ttl", None);
+    cache.put(&key, b"old").await.unwrap();
+    tokio::time::advance(Duration::from_secs(59)).await;
+    assert_eq!(cache.get(&key).await.unwrap(), Some(b"old".to_vec()));
+    cache.put(&key, b"replacement").await.unwrap();
+    tokio::time::advance(Duration::from_secs(59)).await;
+    assert_eq!(
+        cache.get(&key).await.unwrap(),
+        Some(b"replacement".to_vec())
+    );
+    tokio::time::advance(Duration::from_secs(1)).await;
+    assert_eq!(cache.get(&key).await.unwrap(), None);
+    cache.delete(&key).await.unwrap();
+}
+
+#[tokio::test]
+async fn memory_cache_huge_ttl_waiter_receives_loaded_value() {
+    let cache =
+        MemoryReconstructionCache::new(NonZeroU64::new(u64::MAX).unwrap(), NonZeroUsize::MIN);
+    let key = ReconstructionCacheKey::latest("huge-ttl-waiter", None);
+    assert_eq!(cache.get(&key).await.unwrap(), None);
+    let waiter_cache = cache.clone();
+    let waiter_key = key.clone();
+    let waiter = tokio::spawn(async move { waiter_cache.get(&waiter_key).await });
+    tokio::task::yield_now().await;
+    cache.put(&key, b"loaded").await.unwrap();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap(),
+        Some(b"loaded".to_vec()),
+    );
+    assert_eq!(cache.get(&key).await.unwrap(), Some(b"loaded".to_vec()));
+}
+
+#[test]
+fn memory_entry_age_expiration_preserves_zero_and_exact_boundary() {
+    let inserted_at = tokio::time::Instant::now();
+    let entry = super::inner::MemoryEntry {
+        payload: std::sync::Arc::new(b"payload".to_vec()),
+        inserted_at,
+        seq: 0,
+    };
+    assert!(!entry.is_live(inserted_at, Duration::ZERO));
+    assert!(entry.is_live(inserted_at, Duration::from_secs(u64::MAX)));
+    assert!(entry.is_live(
+        inserted_at + Duration::from_secs(59),
+        Duration::from_secs(60)
+    ));
+    assert!(!entry.is_live(
+        inserted_at + Duration::from_secs(60),
+        Duration::from_secs(60)
+    ));
+}

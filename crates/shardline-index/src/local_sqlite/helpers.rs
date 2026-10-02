@@ -1191,11 +1191,18 @@ pub(crate) fn prepare_connection(connection: &mut Connection) -> Result<(), Loca
     // Re-applying `journal_mode=WAL` for every request connection turns a
     // harmless setup step into a write-style pragma that can race with active
     // readers under concurrent protocol traffic.
-    let journal_mode: String =
-        connection.pragma_query_value(None, "journal_mode", |row| row.get(0))?;
-    if !journal_mode.eq_ignore_ascii_case("wal") {
-        connection.pragma_update(None, "journal_mode", "WAL")?;
-    }
+    // SQLite can return SQLITE_BUSY immediately when concurrent cold
+    // connections both try to upgrade their journal-mode read locks. Retrying
+    // the whole read/set operation releases that lock and observes a peer's
+    // successful WAL transition, including peers in another process.
+    retry_sqlite_busy(|| {
+        let journal_mode: String =
+            connection.pragma_query_value(None, "journal_mode", |row| row.get(0))?;
+        if !journal_mode.eq_ignore_ascii_case("wal") {
+            connection.pragma_update(None, "journal_mode", "WAL")?;
+        }
+        Ok(())
+    })?;
     connection.pragma_update(None, "synchronous", "FULL")?;
     connection.pragma_update(None, "foreign_keys", "ON")?;
     connection.pragma_update(None, "trusted_schema", "OFF")?;
@@ -1236,28 +1243,23 @@ pub(crate) fn ensure_local_schema_migrations_table(
 pub(crate) fn apply_pending_local_migrations(
     connection: &mut Connection,
 ) -> Result<(), LocalIndexStoreError> {
-    let mut applied_versions = Vec::new();
-    {
-        let mut statement = connection.prepare(&format!(
-            "SELECT version
-             FROM {LOCAL_SCHEMA_MIGRATIONS_TABLE}
-             ORDER BY version"
-        ))?;
-        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
-        for row in rows {
-            applied_versions.push(row?);
-        }
-    }
-
     for migration in LOCAL_SQLITE_MIGRATIONS {
-        if applied_versions
-            .iter()
-            .any(|version| version == migration.version)
-        {
+        // Check history after taking the SQLite write lock. A process-local
+        // coordinator cannot protect against another process applying the same
+        // migration between an unlocked history read and this transaction.
+        let transaction =
+            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let applied = transaction
+            .query_row(
+                &format!("SELECT 1 FROM {LOCAL_SCHEMA_MIGRATIONS_TABLE} WHERE version = ?1"),
+                [migration.version],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if applied {
             continue;
         }
-
-        let transaction = connection.transaction()?;
         transaction.execute_batch(migration.up_sql)?;
         transaction.execute(
             &format!(

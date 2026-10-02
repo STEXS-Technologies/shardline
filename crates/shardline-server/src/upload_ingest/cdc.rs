@@ -284,14 +284,24 @@ pub struct CdcChunker {
     pending_len: usize,
 }
 
+/// Smallest supported CDC target (a power of two above the 64-byte hash window).
+pub const MIN_TARGET_CHUNK_SIZE: usize = 128;
+/// Largest supported CDC target; twice this value must fit the chunk length.
+pub const MAX_TARGET_CHUNK_SIZE: usize = 1 << 30;
+
 impl CdcChunker {
     /// Creates a new chunker with the given target chunk size.
     ///
-    /// `target_chunk_size` must be a power of two and greater than 64.
+    /// # Panics
+    ///
+    /// Panics unless `target_chunk_size` is a power of two in 128..=1 GiB.
     #[must_use]
     pub fn new(target_chunk_size: usize) -> Self {
-        debug_assert!(target_chunk_size.is_power_of_two());
-        debug_assert!(target_chunk_size > 64);
+        assert!(
+            target_chunk_size.is_power_of_two()
+                && (MIN_TARGET_CHUNK_SIZE..=MAX_TARGET_CHUNK_SIZE).contains(&target_chunk_size),
+            "CDC target chunk size must be a power of two in 128..=1073741824 bytes"
+        );
 
         let raw_mask = target_chunk_size.wrapping_sub(1) as u64;
         let mask = raw_mask << raw_mask.leading_zeros();
@@ -413,6 +423,35 @@ impl CdcChunker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cdc_target_bounds_reject_invalid_sizes_in_all_builds() {
+        for size in [
+            0,
+            1,
+            2,
+            64,
+            127,
+            129,
+            (1 << 30) + 1,
+            1 << 31,
+            1usize << (usize::BITS - 1),
+        ] {
+            assert!(
+                std::panic::catch_unwind(|| CdcChunker::new(size)).is_err(),
+                "size={size}"
+            );
+        }
+        // Construction does not allocate target-sized storage.
+        for exponent in 7..=30 {
+            let size = 1 << exponent;
+            let mut chunker = CdcChunker::new(size);
+            assert_eq!(chunker.max_chunk, size * 2);
+            if let Some(boundary) = chunker.find_boundary(&[0; 512]) {
+                assert!(boundary > 0 && boundary <= 512);
+            }
+        }
+    }
 
     #[test]
     fn cdc_chunker_creates_with_valid_size() {

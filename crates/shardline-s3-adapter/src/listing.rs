@@ -5,11 +5,10 @@
 //! — record-backed objects are not materialized at the protocol key, so the
 //! index is the only enumeration source and no object-store reads happen.
 //!
-//! The page walk is a keyset scan: fetch `max_keys + 1` rows ordered by raw
-//! `object_key` (the extra row detects truncation), then group them into
-//! `Contents` rows and `CommonPrefixes` rollups with S3 paging behavior — a
-//! delimiter group consumes every key under the common prefix and the page
-//! cursor advances past the whole group.
+//! This crate parses cursors and groups a supplied sorted batch. The native
+//! server walks indexed keyset pages, seeks past whole delimiter groups, and
+//! supplies `max_keys + 1` distinct logical entries to detect truncation.
+//! The standalone batch helper cannot discover children beyond its input.
 
 use crate::{S3Error, types::Contents};
 
@@ -97,8 +96,8 @@ pub struct ListObjectsV2Params {
     /// The page row budget (`Contents` rows + `CommonPrefixes`), capped at
     /// [`MAX_LIST_KEYS`].
     pub max_keys: usize,
-    /// The decoded raw key from `continuation-token` (the last key seen on the
-    /// previous page).
+    /// The decoded cursor from `continuation-token`: a raw object key or the
+    /// common prefix emitted by the native server. Legacy raw-key cursors remain valid.
     pub continuation_token: Option<String>,
     /// The raw key to start listing strictly after (`start-after`).
     pub start_after: Option<String>,
@@ -249,8 +248,9 @@ pub fn parse_list_objects_v2_params(
 /// At most `max_keys` rows are produced. The caller fetches `max_keys + 1`
 /// rows, so the page is reported truncated exactly when the raw batch exceeded
 /// the row budget — the extra row detects that more keys exist. When a
-/// delimiter group spans a page boundary the rollup may be re-emitted on the
-/// following page (benign; clients merge).
+/// delimiter group spans a raw batch boundary, this standalone helper cannot
+/// discover or skip children outside that batch. The native server's indexed
+/// walker handles this by supplying distinct representatives and a logical cursor.
 #[must_use]
 pub fn group_page(
     entries: Vec<shardline_index::S3ObjectEntry>,

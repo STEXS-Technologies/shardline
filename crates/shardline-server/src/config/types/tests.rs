@@ -2919,3 +2919,48 @@ fn validate_runtime_requirements_rejects_non_power_of_two_chunk_size() {
         Err(ServerConfigError::ChunkSizeNotPowerOfTwo)
     ));
 }
+
+#[test]
+fn runtime_chunk_size_validation_matches_supported_cdc_interval() {
+    let config = ServerConfig::new(
+        "127.0.0.1:8080".parse().unwrap(),
+        "http://localhost:8080".into(),
+        PathBuf::from("/tmp/test"),
+        NonZeroUsize::new(65536).unwrap(),
+    )
+    .with_deployment_mode(DeploymentMode::Insecure);
+    for size in [1, 2, 64, 127] {
+        assert!(matches!(
+            config
+                .clone()
+                .with_chunk_size(NonZeroUsize::new(size).unwrap())
+                .validate_runtime_requirements(),
+            Err(ServerConfigError::ChunkSizeTooSmall)
+        ));
+    }
+    for size in [(1 << 30) + 1, 1 << 31, 1usize << (usize::BITS - 1)] {
+        assert!(matches!(
+            config
+                .clone()
+                .with_chunk_size(NonZeroUsize::new(size).unwrap())
+                .validate_runtime_requirements(),
+            Err(ServerConfigError::ChunkSizeTooLarge)
+        ));
+    }
+    for size in [129, 64000] {
+        assert!(matches!(
+            config
+                .clone()
+                .with_chunk_size(NonZeroUsize::new(size).unwrap())
+                .validate_runtime_requirements(),
+            Err(ServerConfigError::ChunkSizeNotPowerOfTwo)
+        ));
+    }
+    for exponent in 7..=30 {
+        config
+            .clone()
+            .with_chunk_size(NonZeroUsize::new(1 << exponent).unwrap())
+            .validate_runtime_requirements()
+            .unwrap();
+    }
+}

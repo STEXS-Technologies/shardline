@@ -1,12 +1,7 @@
-//! `ListObjectsV2` handler for the S3 frontend.
-//!
-//! Listing is served entirely from the `shardline_s3_objects` index
-//! (`scan_s3_objects`, keyset on the raw client-facing key) — zero
-//! object-store reads, because record-backed objects are not materialized at
-//! the protocol key. The page walk fetches `max_keys + 1` rows (the extra row
-//! detects truncation), groups them into `Contents` + `CommonPrefixes` with
-//! the S3 delimiter paging behavior, and serializes the `ListBucketResult`
-//! XML envelope.
+//! Native S3 listing reads evidence-verified metadata pages, never object storage.
+//! Prefix/cursor bounds are indexed. Delimiter walks seek past whole groups and
+//! collect max_keys + 1 distinct logical entries for truncation, decoding at most
+//! 64 raw rows per scan. Dense directory pages can require additional keyset scans.
 
 use std::sync::Arc;
 
@@ -16,7 +11,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use shardline_s3_adapter::{
-    ListBucketResult, ListBucketResultV1, S3Error, encode_continuation_token, group_page,
+    ListBucketResult, ListBucketResultV1, ListPage, S3Error, encode_continuation_token, group_page,
     parse_list_objects_v1_params, parse_list_objects_v2_params,
 };
 
@@ -42,26 +37,15 @@ pub(crate) async fn s3_list_objects_v2(
     let params = parse_list_objects_v2_params(&query)?;
     let scope_namespace = scope_namespace(auth.capability().namespace());
 
-    // Fetch one extra row to detect truncation.
-    let fetch_limit = params
-        .max_keys
-        .checked_add(1)
-        .ok_or_else(S3Error::internal)?;
-    let entries = state
-        .backend
-        .scan_s3_objects(
-            &scope_namespace,
-            &params.prefix,
-            params.cursor(),
-            fetch_limit,
-        )
-        .await?;
-    let page = group_page(
-        entries,
+    let page = logical_listing_page(
+        &state,
+        &scope_namespace,
         &params.prefix,
         params.delimiter.map(shardline_s3_adapter::Delimiter::get),
+        params.cursor(),
         params.max_keys,
-    );
+    )
+    .await?;
 
     let next_continuation_token = if page.is_truncated {
         page.next_cursor.as_deref().map(encode_continuation_token)
@@ -100,26 +84,15 @@ pub(crate) async fn s3_list_objects_v1(
     let params = parse_list_objects_v1_params(&query)?;
     let scope_namespace = scope_namespace(auth.capability().namespace());
 
-    // Fetch one extra row to detect truncation.
-    let fetch_limit = params
-        .max_keys
-        .checked_add(1)
-        .ok_or_else(S3Error::internal)?;
-    let entries = state
-        .backend
-        .scan_s3_objects(
-            &scope_namespace,
-            &params.prefix,
-            params.marker.as_deref(),
-            fetch_limit,
-        )
-        .await?;
-    let page = group_page(
-        entries,
+    let page = logical_listing_page(
+        &state,
+        &scope_namespace,
         &params.prefix,
         params.delimiter.map(shardline_s3_adapter::Delimiter::get),
+        params.marker.as_deref(),
         params.max_keys,
-    );
+    )
+    .await?;
 
     let result = ListBucketResultV1 {
         contents: page.contents,
@@ -144,4 +117,99 @@ pub(crate) async fn s3_list_objects_v1(
         result.to_xml(),
     )
         .into_response())
+}
+
+/// Builds one page over Contents and CommonPrefixes rather than over child keys.
+async fn logical_listing_page(
+    state: &AppState,
+    scope: &str,
+    prefix: &str,
+    delimiter: Option<char>,
+    cursor: Option<&str>,
+    max_keys: usize,
+) -> Result<ListPage, S3Error> {
+    use shardline_index::{S3ObjectScanStart, s3_prefix_successor};
+    let fetch_limit = max_keys.checked_add(1).ok_or_else(S3Error::internal)?;
+    let Some(delimiter) = delimiter else {
+        let entries = state
+            .backend
+            .scan_s3_objects(scope, prefix, cursor, fetch_limit)
+            .await?;
+        return Ok(group_page(entries, prefix, None, max_keys));
+    };
+    let mut start = cursor.map(|key| (key.to_owned(), false));
+    if let Some(key) = cursor
+        && let Some(relative) = key.strip_prefix(prefix)
+        && let Some((head, _)) = relative.split_once(delimiter)
+    {
+        let group = format!("{prefix}{head}{delimiter}");
+        let Some(successor) = s3_prefix_successor(&group) else {
+            return Ok(group_page(Vec::new(), prefix, Some(delimiter), max_keys));
+        };
+        start = Some((successor, true));
+    }
+    let mut entries = Vec::new();
+    let mut next_cursor = None;
+    loop {
+        let remaining = fetch_limit.saturating_sub(entries.len());
+        if remaining == 0 {
+            break;
+        }
+        let scan_start = start.as_ref().map(|(key, inclusive)| {
+            if *inclusive {
+                S3ObjectScanStart::Inclusive(key)
+            } else {
+                S3ObjectScanStart::Exclusive(key)
+            }
+        });
+        let batch = state
+            .backend
+            .scan_s3_objects_from(scope, prefix, scan_start, remaining.min(64))
+            .await?;
+        if batch.is_empty() {
+            break;
+        }
+        let mut exhausted = false;
+        for entry in batch {
+            let key = &entry.object_key;
+            if start.as_ref().is_some_and(|(bound, inclusive)| {
+                if *inclusive {
+                    key < bound
+                } else {
+                    key <= bound
+                }
+            }) {
+                continue;
+            }
+            let group = key
+                .strip_prefix(prefix)
+                .and_then(|relative| relative.split_once(delimiter))
+                .map(|(head, _)| format!("{prefix}{head}{delimiter}"));
+            let logical_key = group.as_deref().unwrap_or(key);
+            if cursor.is_none_or(|cursor| logical_key > cursor) {
+                if entries.len() < max_keys {
+                    next_cursor = Some(logical_key.to_owned());
+                }
+                entries.push(entry.clone());
+            }
+            if let Some(group) = group {
+                if let Some(successor) = s3_prefix_successor(&group) {
+                    start = Some((successor, true));
+                } else {
+                    exhausted = true;
+                }
+            } else {
+                start = Some((entry.object_key, false));
+            }
+            if exhausted || entries.len() >= fetch_limit {
+                break;
+            }
+        }
+        if exhausted {
+            break;
+        }
+    }
+    let mut page = group_page(entries, prefix, Some(delimiter), max_keys);
+    page.next_cursor = next_cursor;
+    Ok(page)
 }

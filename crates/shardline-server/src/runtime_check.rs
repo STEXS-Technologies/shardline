@@ -45,7 +45,7 @@ pub struct ConfigCheckReport {
 ///         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
 ///         "http://127.0.0.1:8080".to_owned(),
 ///         dir.path().to_path_buf(),
-///         NonZeroUsize::MIN,
+///         NonZeroUsize::new(128).expect("valid CDC target"),
 ///     )
 ///     .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())?;
 ///
@@ -108,7 +108,7 @@ mod tests {
             SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
             "http://127.0.0.1:8080".to_owned(),
             storage.path_buf(),
-            NonZeroUsize::MIN,
+            NonZeroUsize::new(128).expect("valid CDC target"),
         )
         .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
         .unwrap();
@@ -132,7 +132,7 @@ mod tests {
             SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
             "http://127.0.0.1:8080".to_owned(),
             storage.path_buf(),
-            NonZeroUsize::MIN,
+            NonZeroUsize::new(128).expect("valid CDC target"),
         )
         .with_server_role(ServerRole::Transfer)
         .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
@@ -154,7 +154,7 @@ mod tests {
             SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
             "http://127.0.0.1:8080".to_owned(),
             storage.path_buf(),
-            NonZeroUsize::MIN,
+            NonZeroUsize::new(128).expect("valid CDC target"),
         )
         .with_deployment_mode(DeploymentMode::Authenticated);
 
@@ -175,7 +175,7 @@ mod tests {
             SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
             "http://127.0.0.1:8080".to_owned(),
             storage.path_buf(),
-            NonZeroUsize::MIN,
+            NonZeroUsize::new(128).expect("valid CDC target"),
         )
         .with_server_role(ServerRole::Transfer)
         .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
@@ -196,7 +196,7 @@ mod tests {
             SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
             "http://127.0.0.1:8080".to_owned(),
             storage.path_buf(),
-            NonZeroUsize::MIN,
+            NonZeroUsize::new(128).expect("valid CDC target"),
         )
         .with_server_role(ServerRole::All)
         .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())

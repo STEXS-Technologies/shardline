@@ -9,9 +9,16 @@ use crate::ReconstructionCacheKey;
 #[derive(Debug, Clone)]
 pub(super) struct MemoryEntry {
     pub(super) payload: Arc<Vec<u8>>,
-    pub(super) expires_at: Instant,
     pub(super) inserted_at: Instant,
     pub(super) seq: u64,
+}
+
+impl MemoryEntry {
+    pub(super) fn is_live(&self, now: Instant, ttl: std::time::Duration) -> bool {
+        // Compare elapsed age instead of adding TTL to an Instant: every
+        // accepted duration remains valid even if its deadline is unrepresentable.
+        now.saturating_duration_since(self.inserted_at) < ttl
+    }
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]

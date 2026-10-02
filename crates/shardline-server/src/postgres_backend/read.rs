@@ -556,6 +556,19 @@ impl super::PostgresBackend {
             .map_err(ServerError::from)
     }
 
+    pub(crate) async fn scan_s3_objects_from(
+        &self,
+        scope_namespace: &str,
+        prefix: &str,
+        start: Option<shardline_index::S3ObjectScanStart<'_>>,
+        limit: usize,
+    ) -> Result<Vec<S3ObjectEntry>, ServerError> {
+        self.index_store
+            .scan_s3_objects_from(scope_namespace, prefix, start, limit)
+            .await
+            .map_err(ServerError::from)
+    }
+
     /// Resolves exactly one S3 object listing row by its full raw key (no
     /// prefix matching).
     ///

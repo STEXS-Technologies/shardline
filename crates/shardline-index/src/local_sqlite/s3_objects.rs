@@ -4,7 +4,7 @@ use rusqlite::{OptionalExtension, Transaction, params_from_iter};
 use std::{collections::HashMap, fmt::Write as _};
 
 use super::{LocalIndexStore, LocalIndexStoreError, collect_rows, helpers};
-use crate::{S3ObjectEntry, S3ObjectIndexStore};
+use crate::{S3ObjectEntry, S3ObjectIndexStore, S3ObjectScanStart, s3_prefix_successor};
 use shardline_reliability::{
     OperationKind, S3ObjectLifecycleEvent, SnapshotEvidence, persisted_event_sequence,
     verify_and_append_snapshot_transition, verify_persisted_merkle_commit_with_previous,
@@ -199,35 +199,40 @@ fn scan_s3_objects_sql(
     connection: &Transaction<'_>,
     scope_namespace: &str,
     prefix: &str,
-    cursor: Option<&str>,
+    start: Option<S3ObjectScanStart<'_>>,
     limit: usize,
 ) -> Result<Vec<S3ObjectEntry>, LocalIndexStoreError> {
     use rusqlite::types::Value;
-
-    let mut sql = String::from(
+    let (lower, inclusive) = match start {
+        Some(S3ObjectScanStart::Inclusive(key)) if key >= prefix => (key, true),
+        Some(S3ObjectScanStart::Exclusive(key)) if key >= prefix => (key, false),
+        _ => (prefix, true),
+    };
+    let upper = s3_prefix_successor(prefix);
+    if limit == 0 || upper.as_deref().is_some_and(|upper| lower >= upper) {
+        return Ok(Vec::new());
+    }
+    let comparison = if inclusive { ">=" } else { ">" };
+    let mut sql = format!(
         "SELECT scope_namespace, object_key, file_id, size_bytes, content_hash, etag,
                 user_metadata, updated_at_unix_seconds
          FROM shardline_s3_objects
-         WHERE scope_namespace = ?1 AND substr(object_key, 1, length(?2)) = ?2",
+         WHERE scope_namespace = ?1 AND object_key COLLATE BINARY {comparison} ?2"
     );
-    let mut args: Vec<Value> = vec![
+    let mut args = vec![
         Value::Text(scope_namespace.to_owned()),
-        Value::Text(prefix.to_owned()),
+        Value::Text(lower.to_owned()),
     ];
-    let mut index = 3usize;
-    if let Some(cursor) = cursor {
-        write!(sql, " AND object_key > ?{index}")
-            .map_err(|e| LocalIndexStoreError::Io(std::io::Error::other(e)))?;
-        args.push(Value::Text(cursor.to_owned()));
-        index = index.saturating_add(1);
+    if let Some(upper) = upper {
+        sql.push_str(" AND object_key COLLATE BINARY < ?3");
+        args.push(Value::Text(upper));
     }
     let limit_i64 =
         i64::try_from(limit).map_err(|e| LocalIndexStoreError::IntegerOutOfRange(e.to_string()))?;
-    sql.push_str(" ORDER BY object_key");
-    write!(sql, " LIMIT ?{index}")
+    sql.push_str(" ORDER BY object_key COLLATE BINARY");
+    write!(sql, " LIMIT ?{}", args.len().saturating_add(1))
         .map_err(|e| LocalIndexStoreError::Io(std::io::Error::other(e)))?;
     args.push(Value::Integer(limit_i64));
-
     let mut statement = connection.prepare(&sql)?;
     let rows = statement.query_map(params_from_iter(args.iter()), s3_object_entry_from_row)?;
     collect_rows(rows)
@@ -446,10 +451,29 @@ impl S3ObjectIndexStore for LocalIndexStore {
         cursor: Option<&str>,
         limit: usize,
     ) -> Result<Vec<S3ObjectEntry>, Self::Error> {
+        self.scan_s3_objects_from(
+            scope_namespace,
+            prefix,
+            cursor.map(S3ObjectScanStart::Exclusive),
+            limit,
+        )
+        .await
+    }
+
+    async fn scan_s3_objects_from(
+        &self,
+        scope_namespace: &str,
+        prefix: &str,
+        start: Option<S3ObjectScanStart<'_>>,
+        limit: usize,
+    ) -> Result<Vec<S3ObjectEntry>, Self::Error> {
         let store = self.clone();
         let scope_namespace = scope_namespace.to_owned();
         let prefix = prefix.to_owned();
-        let cursor = cursor.map(ToOwned::to_owned);
+        let start = start.map(|start| match start {
+            S3ObjectScanStart::Inclusive(key) => (key.to_owned(), true),
+            S3ObjectScanStart::Exclusive(key) => (key.to_owned(), false),
+        });
         tokio::task::spawn_blocking(move || {
             helpers::retry_sqlite_busy(|| {
                 let mut connection = store.open_connection()?;
@@ -458,7 +482,13 @@ impl S3ObjectIndexStore for LocalIndexStore {
                     &transaction,
                     &scope_namespace,
                     &prefix,
-                    cursor.as_deref(),
+                    start.as_ref().map(|(key, inclusive)| {
+                        if *inclusive {
+                            S3ObjectScanStart::Inclusive(key)
+                        } else {
+                            S3ObjectScanStart::Exclusive(key)
+                        }
+                    }),
                     limit,
                 )?;
                 verify_s3_object_listing_evidence(&transaction, &values)?;
@@ -1046,5 +1076,63 @@ mod tests {
                 .is_empty()
         );
         assert!(scan(&store, "global", "zzz", None, 100).await.is_empty());
+    }
+    #[tokio::test]
+    async fn inclusive_s3_key_bounds_preserve_unicode_and_exact_successor() {
+        let store = make_store();
+        for key in [
+            "a/child",
+            "a0",
+            "a1",
+            "é/child",
+            "é0",
+            "\u{d7ff}/child",
+            "\u{e000}",
+            "\u{10ffff}/child",
+        ] {
+            store
+                .upsert_s3_object(&entry("global", key, &file_id(1), 1, 0))
+                .await
+                .unwrap();
+        }
+        for (prefix, bound, expected) in [
+            ("a", "a0", vec!["a0", "a1"]),
+            ("é", "é0", vec!["é0"]),
+            ("", "\u{e000}", vec!["\u{e000}", "\u{10ffff}/child"]),
+            ("\u{10ffff}", "\u{10ffff}", vec!["\u{10ffff}/child"]),
+        ] {
+            let rows = store
+                .scan_s3_objects_from(
+                    "global",
+                    prefix,
+                    Some(S3ObjectScanStart::Inclusive(bound)),
+                    2,
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                rows.iter()
+                    .map(|row| row.object_key.as_str())
+                    .collect::<Vec<_>>(),
+                expected
+            );
+        }
+        let rows = store
+            .scan_s3_objects_from("global", "a", Some(S3ObjectScanStart::Exclusive("a0")), 2)
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.object_key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a1"]
+        );
+        assert!(
+            store
+                .scan_s3_objects_from("global", "a", Some(S3ObjectScanStart::Inclusive("a0")), 0)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 }

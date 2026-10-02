@@ -469,17 +469,7 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
         config = config.with_config_secret_key(config_key)?;
     }
 
-    // Validate chunk size bounds: the CDC chunker requires a power of two
-    // (see `upload_ingest::cdc::CdcChunker`), so a misconfigured value must
-    // fail startup with a clear error instead of panicking on the first
-    // upload. Upper bound is 1 GB.
-    const MAX_CHUNK_SIZE: usize = 1_073_741_824;
-    if chunk_size.get() > MAX_CHUNK_SIZE {
-        return Err(ServerConfigError::ChunkSizeTooLarge);
-    }
-    if !chunk_size.get().is_power_of_two() {
-        return Err(ServerConfigError::ChunkSizeNotPowerOfTwo);
-    }
+    super::types::config::validate_chunk_size(chunk_size)?;
 
     // Validate auth provider configuration.
     let auth_provider = AuthProviderKind::parse(
@@ -1095,6 +1085,21 @@ mod interpolate_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn load_server_config_rejects_chunk_size_below_cdc_minimum() {
+        for size in [1, 2, 64, 127] {
+            set_env_var("SHARDLINE_CHUNK_SIZE", &size.to_string());
+            assert!(
+                matches!(
+                    super::load_server_config_from_env(),
+                    Err(super::ServerConfigError::ChunkSizeTooSmall)
+                ),
+                "size={size}"
+            );
+        }
+        remove_env_var("SHARDLINE_CHUNK_SIZE");
+    }
+
     #[test]
     fn resource_capacity_environment_rejects_overflow_with_existing_fallback() {
         let maximum = crate::admission::maximum_counted_capacity();
