@@ -331,11 +331,23 @@ not move.
 
 **Recovery**
 
-1. Stand up the new node configuration first via
+1. Drain traffic from the old node and stop every server, scheduled GC, repair job,
+   and other process that can write its metadata or object store. Keep those writers
+   stopped through the object copy, metadata snapshot, and inventory comparison.
+   Configure the new node via
    [Repository Bootstrap](REPOSITORY_BOOTSTRAP.md): provider catalog, token-signing
-   key, bootstrap API key.
-2. Move object bytes. Copy the local object-store directories below the old state root
-   into the new root, or use `storage migrate`:
+   key, bootstrap API key, but keep its servers and maintenance jobs stopped too.
+   Capture the pre-move inventory after stopping the writers:
+
+   ```bash
+   mkdir -p /srv/old-node/reports
+   shardline backup manifest \
+     --root /srv/old-node/.shardline/data \
+     --output /srv/old-node/reports/pre-move-manifest.json
+   ```
+
+2. Move object bytes while all writers remain stopped. Copy the local object-store
+   directories below the old state root into the new root, or use `storage migrate`:
 
    ```bash
    shardline storage migrate \
@@ -355,9 +367,40 @@ not move.
    If the new node uses S3 instead, use `--to s3` with the
    `SHARDLINE_MIGRATE_TO_S3_*` environment variables
    ([Storage Migration](STORAGE_MIGRATION.md#s3-compatible-endpoints)).
-3. Move metadata. Copy `metadata.sqlite3` into the new state root, or point the new
-   deployment at the same Postgres and verify with `shardline db migrate status`.
-4. Start the new servers and verify before re-pointing routing:
+3. Move metadata while all writers remain stopped. For local metadata, use Python 3's
+   SQLite backup API to create a consistent snapshot in the new state root.
+   Copying only `metadata.sqlite3` can omit acknowledged writes still in its WAL.
+   The destination root must already exist from the object copy. This command opens
+   the source read-only before creating a new destination and rejects a missing
+   source or any existing destination file:
+
+   ```bash
+   python3 - /srv/old-node/.shardline/data/metadata.sqlite3 \
+     /srv/assets/.shardline/data/metadata.sqlite3 <<'PY'
+   from contextlib import closing
+   from pathlib import Path
+   import sqlite3
+   import sys
+
+   source = Path(sys.argv[1]).resolve()
+   destination = Path(sys.argv[2])
+   if not source.is_file():
+       raise FileNotFoundError(source)
+   with closing(sqlite3.connect(source.as_uri() + "?mode=ro", uri=True)) as old:
+       with destination.open("xb"):
+           pass
+       with closing(sqlite3.connect(destination)) as restored:
+           old.backup(restored)
+           if restored.execute("PRAGMA integrity_check").fetchall() != [("ok",)]:
+               raise RuntimeError("restored SQLite database failed integrity_check")
+   PY
+   ```
+
+   Require a successful exit before continuing. For Postgres, restore a native
+   consistent backup or point the new deployment at the same Postgres, then verify
+   with `shardline db migrate status`.
+4. Keep the new servers stopped while checking configuration and comparing the
+   post-move inventory with the pre-move inventory:
 
    ```bash
    cd /srv/assets
@@ -366,12 +409,15 @@ not move.
    shardline backup manifest \
      --output reports/post-move-manifest.json
    shardline fsck
-   shardline index rebuild
-   shardline repair lifecycle
    ```
 
-5. Cut routing to the new node only after `fsck` exits `0` and the manifest counts
-   match the pre-move manifest.
+   Require `fsck` to exit `0` and the object inventory and metadata counts to match
+   the pre-move manifest before running `shardline index rebuild` or
+   `shardline repair lifecycle` as needed. A SQLite integrity check alone cannot
+   detect an incomplete copy of acknowledged state.
+5. Start the new servers and verify a full upload and a historical version fetch
+   before cutting routing to the new node. Keep old-node writers stopped through
+   the cutover.
 
 **Verification**
 
