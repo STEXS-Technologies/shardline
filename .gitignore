@@ -2,6 +2,7 @@
 /dist
 /dist-release-check
 /benchmark-results/
+/audit-results-local/
 /.shardline
 crates/shardline/.shardline/
 /cobertura.xml
