@@ -304,6 +304,7 @@ impl Default for XetClientBuilder {
             upload_chunk_size: crate::chunker::DEFAULT_TARGET_CHUNK_SIZE,
             retry_policy: RetryPolicy::default(),
             session_id: None,
+            reconstruction_response_limit: 64 * 1024 * 1024,
         }
     }
 }
@@ -353,6 +354,7 @@ pub struct XetClientBuilder {
     upload_chunk_size: usize,
     retry_policy: RetryPolicy,
     session_id: Option<String>,
+    reconstruction_response_limit: usize,
 }
 
 impl XetClientBuilder {
@@ -423,6 +425,17 @@ impl XetClientBuilder {
     #[must_use]
     pub const fn with_stream_limits(mut self, limits: StreamLimits) -> Self {
         self.limits = limits;
+        self
+    }
+
+    /// Sets the reconstruction JSON wire byte budget (default 64 MiB).
+    ///
+    /// Configurable server term/advertised URL limits can require a larger
+    /// envelope. See [`TransferClient::reconstruction_envelope_bytes`] for a
+    /// checked compact-JSON bound, and allow extra space for wire extensions.
+    #[must_use]
+    pub const fn with_reconstruction_response_limit(mut self, bytes: usize) -> Self {
+        self.reconstruction_response_limit = bytes;
         self
     }
 
@@ -526,7 +539,8 @@ impl XetClientBuilder {
             .build()
             .map_err(TransferError::from)?;
         let session_id = self.session_id.clone().unwrap_or_default();
-        let mut transfer = TransferClient::new(http_client);
+        let mut transfer = TransferClient::new(http_client)
+            .with_reconstruction_response_limit(self.reconstruction_response_limit);
         if !session_id.is_empty() {
             transfer = transfer.with_session_id(session_id);
         }

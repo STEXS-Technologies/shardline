@@ -107,6 +107,7 @@ pub struct TransferClient {
     /// Stable per-client id sent as `X-Xet-Session-Id` on every request
     /// (`docs/SDX_PLAN.md` §4.4.4).
     session_id: String,
+    reconstruction_response_limit: usize,
 }
 
 impl TransferClient {
@@ -116,7 +117,50 @@ impl TransferClient {
         Self {
             client,
             session_id: generate_session_id(),
+            reconstruction_response_limit: 64 * 1024 * 1024,
         }
+    }
+
+    /// Sets the reconstruction JSON wire byte budget (default 64 MiB).
+    ///
+    /// This is a supported client envelope, not a universal protocol maximum:
+    /// server term limits and advertised URL lengths are configurable. Increase
+    /// it for larger deployments, using [`Self::reconstruction_envelope_bytes`]
+    /// to derive a conservative compact-JSON budget. JSON extensions/whitespace
+    /// require additional caller allowance. Each response is checked even when
+    /// Content-Length is absent or misleading.
+    #[must_use]
+    pub const fn with_reconstruction_response_limit(mut self, limit: usize) -> Self {
+        self.reconstruction_response_limit = limit;
+        self
+    }
+
+    /// Derives a conservative compact-JSON byte bound for the server's v1/v2
+    /// reconstruction DTOs, given maximum term count and full advertised URL length
+    /// in UTF-8 bytes. At most one fetch entry/range is emitted per term, and
+    /// at most one distinct 64-hex map key per term. Numeric fields are u64
+    /// (20 digits); URL escaping costs at most 6 bytes per input byte.
+    ///
+    /// The bound is `75 + terms * (409 + 6 * url_bytes)`, including outer
+    /// fields, map keys, punctuation, and v2's nested single-range arrays.
+    /// It does not bound arbitrary extra fields or pretty-printed JSON.
+    ///
+    /// # Errors
+    /// Returns [`TransferError`] if the envelope cannot fit the platform usize.
+    pub fn reconstruction_envelope_bytes(
+        terms: usize,
+        max_url_bytes: usize,
+    ) -> Result<usize, TransferError> {
+        max_url_bytes
+            .checked_mul(6)
+            .and_then(|url| url.checked_add(409))
+            .and_then(|entry| entry.checked_mul(terms))
+            .and_then(|entries| entries.checked_add(75))
+            .ok_or_else(|| {
+                TransferError::InvalidResponse(
+                    "reconstruction envelope exceeds addressable bytes".to_owned(),
+                )
+            })
     }
 
     /// Overrides the `X-Xet-Session-Id` sent on every request.
@@ -160,7 +204,7 @@ impl TransferClient {
         let response = self
             .get_reconstruction(base_url, token, file_id, range, "v1")
             .await?;
-        let body = read_response_bounded(response, 32 * 1024 * 1024).await?;
+        let body = read_response_bounded(response, self.reconstruction_response_limit).await?;
         serde_json::from_slice(&body).map_err(|error| transfer_error_from_json(&error))
     }
 
@@ -183,7 +227,7 @@ impl TransferClient {
         let response = self
             .get_reconstruction(base_url, token, file_id, range, "v2")
             .await?;
-        let body = read_response_bounded(response, 32 * 1024 * 1024).await?;
+        let body = read_response_bounded(response, self.reconstruction_response_limit).await?;
         serde_json::from_slice(&body).map_err(|error| transfer_error_from_json(&error))
     }
 
@@ -335,6 +379,25 @@ impl TransferClient {
         token: &str,
         path: &str,
     ) -> Result<Option<Bytes>, TransferError> {
+        self.get_optional_bytes_bounded(base_url, token, path, DEFAULT_SHARD_RESPONSE_LIMIT)
+            .await
+    }
+
+    /// Fetches an optional raw body with a caller-defined wire byte budget.
+    ///
+    /// Use this for custom shard-ingest budgets or non-shard paths. The default
+    /// variant permits 64 MiB, matching the default server ingest budget; this
+    /// is a client envelope, not a maximum of every server configuration.
+    ///
+    /// # Errors
+    /// Returns [`TransferError`] for transport/status failures or body overflow.
+    pub async fn get_optional_bytes_bounded(
+        &self,
+        base_url: &str,
+        token: &str,
+        path: &str,
+        response_limit: usize,
+    ) -> Result<Option<Bytes>, TransferError> {
         let url = format!("{}{}", base_url.trim_end_matches('/'), path);
         let response = self
             .with_session(self.client.get(&url).bearer_auth(token))
@@ -344,8 +407,8 @@ impl TransferClient {
             return Ok(None);
         }
         let response = ensure_success(response).await?;
-        let body = response.bytes().await?;
-        Ok(Some(body))
+        let body = read_response_bounded(response, response_limit).await?;
+        Ok(Some(Bytes::from(body)))
     }
 
     /// Probes whether a serialized xorb already exists via
@@ -375,7 +438,7 @@ impl TransferClient {
             StatusCode::NOT_FOUND => Ok(false),
             status => {
                 let retry_after = parse_retry_after(response.headers());
-                let message = response.text().await.unwrap_or_default();
+                let message = read_error_prefix(response).await;
                 Err(http_error(status, message, retry_after))
             }
         }
@@ -414,7 +477,7 @@ impl TransferClient {
             .send()
             .await?;
         let response = ensure_success(response).await?;
-        let response_bytes = response.bytes().await?;
+        let response_bytes = read_response_bounded(response, ACK_RESPONSE_LIMIT).await?;
         serde_json::from_slice(&response_bytes).map_err(|error| transfer_error_from_json(&error))
     }
 
@@ -441,7 +504,7 @@ impl TransferClient {
             .send()
             .await?;
         let response = ensure_success(response).await?;
-        let response_bytes = response.bytes().await?;
+        let response_bytes = read_response_bounded(response, ACK_RESPONSE_LIMIT).await?;
         serde_json::from_slice(&response_bytes).map_err(|error| transfer_error_from_json(&error))
     }
 
@@ -464,6 +527,7 @@ impl TransferClient {
         url: &str,
         token: &str,
         body: Option<&serde_json::Value>,
+        success_limit: usize,
     ) -> Result<(StatusCode, Vec<u8>), TransferError> {
         let mut request = self
             .with_session(self.client.request(method.clone(), url).bearer_auth(token))
@@ -475,13 +539,9 @@ impl TransferClient {
         }
         let response = request.send().await?;
         let status = response.status();
-        let retry_after = parse_retry_after(response.headers());
-        let body_bytes = response.bytes().await?.to_vec();
-        if status.is_success() {
-            return Ok((status, body_bytes));
-        }
-        let message = String::from_utf8_lossy(&body_bytes).into_owned();
-        Err(http_error(status, message, retry_after))
+        let response = ensure_success(response).await?;
+        let body_bytes = read_response_bounded(response, success_limit).await?;
+        Ok((status, body_bytes))
     }
 
     async fn get_reconstruction(
@@ -601,6 +661,28 @@ where
     }
 }
 
+// Upload acknowledgements are fixed scalar DTOs (22 and 14 bytes at most).
+// Allow a small compatibility envelope for JSON whitespace/additional fields.
+const ACK_RESPONSE_LIMIT: usize = 64 * 1024;
+// Default shard ingest budget. Generic callers needing a different budget can
+// use the explicit bounded variant instead of trusting peer Content-Length.
+const DEFAULT_SHARD_RESPONSE_LIMIT: usize = 64 * 1024 * 1024;
+const ERROR_RESPONSE_LIMIT: usize = 8 * 1024;
+
+/// Retains a bounded diagnostic prefix without replacing HTTP status/retry
+/// classification when the error body is oversized or its stream fails.
+async fn read_error_prefix(mut response: Response) -> String {
+    let mut body = Vec::new();
+    while let Ok(Some(chunk)) = response.chunk().await {
+        let remaining = ERROR_RESPONSE_LIMIT.saturating_sub(body.len());
+        body.extend_from_slice(chunk.get(..remaining).unwrap_or(&chunk));
+        if body.len() == ERROR_RESPONSE_LIMIT {
+            break;
+        }
+    }
+    String::from_utf8_lossy(&body).into_owned()
+}
+
 async fn ensure_success(response: Response) -> Result<Response, TransferError> {
     let status = response.status();
     let request_id = response
@@ -613,7 +695,7 @@ async fn ensure_success(response: Response) -> Result<Response, TransferError> {
         return Ok(response);
     }
     let retry_after = parse_retry_after(response.headers());
-    let body = response.text().await.unwrap_or_default();
+    let body = read_error_prefix(response).await;
     let message = parse_error_message(&body).unwrap_or(body);
     Err(http_error(status, message, retry_after))
 }
@@ -876,6 +958,245 @@ mod tests {
         Mock, MockServer, ResponseTemplate,
         matchers::{method, path},
     };
+
+    #[test]
+    fn reconstruction_envelope_covers_worst_numbers_escaping_and_nesting() {
+        use shardline_xet_adapter::{
+            ReconstructionChunkRange, ReconstructionFetchInfo, ReconstructionTerm,
+            ReconstructionUrlRange,
+        };
+        use std::collections::BTreeMap;
+        // Every URL byte takes six JSON bytes; every number takes 20 digits.
+        let url = "\u{0001}".repeat(102);
+        let terms = 65_536;
+        let response = shardline_xet_adapter::FileReconstructionResponse {
+            offset_into_first_range: u64::MAX,
+            terms: (0..terms)
+                .map(|n| ReconstructionTerm {
+                    hash: format!("{n:064x}"),
+                    unpacked_length: u64::MAX,
+                    range: ReconstructionChunkRange {
+                        start: u64::MAX,
+                        end: u64::MAX,
+                    },
+                })
+                .collect(),
+            fetch_info: (0..terms)
+                .map(|n| {
+                    (
+                        format!("{n:064x}"),
+                        vec![ReconstructionFetchInfo {
+                            range: ReconstructionChunkRange {
+                                start: u64::MAX,
+                                end: u64::MAX,
+                            },
+                            url: url.clone(),
+                            url_range: ReconstructionUrlRange {
+                                start: u64::MAX,
+                                end: u64::MAX,
+                            },
+                        }],
+                    )
+                })
+                .collect::<BTreeMap<_, _>>(),
+        };
+        struct Counter(usize);
+        impl std::io::Write for Counter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0 = self.0.checked_add(bytes.len()).unwrap();
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let limit = TransferClient::reconstruction_envelope_bytes(terms, url.len()).unwrap();
+        assert!(limit <= 64 * 1024 * 1024);
+        let mut v1 = Counter(0);
+        serde_json::to_writer(&mut v1, &response).unwrap();
+        let response = shardline_xet_adapter::reconstruction_v2_from_v1(response);
+        let mut v2 = Counter(0);
+        serde_json::to_writer(&mut v2, &response).unwrap();
+        assert!(v1.0 <= limit);
+        assert!(v2.0 <= limit);
+        assert!(v2.0 > 32 * 1024 * 1024);
+        assert!(TransferClient::reconstruction_envelope_bytes(usize::MAX, 1).is_err());
+        assert!(TransferClient::reconstruction_envelope_bytes(1, usize::MAX).is_err());
+        assert_eq!(
+            TransferClient::reconstruction_envelope_bytes(0, 0).unwrap(),
+            75
+        );
+    }
+
+    #[tokio::test]
+    async fn optional_raw_and_acknowledgements_enforce_their_budgets() {
+        let server = MockServer::start().await;
+        Mock::given(path("/large"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![b'a'; 65_537]))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![b'a'; 65_537]))
+            .mount(&server)
+            .await;
+        let client = TransferClient::new(reqwest::Client::new());
+        assert!(matches!(
+            client
+                .get_optional_bytes_bounded(&server.uri(), "token", "/large", 16)
+                .await,
+            Err(crate::TransferError::InvalidResponse(_))
+        ));
+        assert!(matches!(
+            client
+                .request_raw(
+                    &reqwest::Method::GET,
+                    &format!("{}/large", server.uri()),
+                    "token",
+                    None,
+                    16
+                )
+                .await,
+            Err(crate::TransferError::InvalidResponse(_))
+        ));
+        assert!(matches!(
+            client
+                .upload_xorb(&server.uri(), "token", &"a".repeat(64), Bytes::new())
+                .await,
+            Err(crate::TransferError::InvalidResponse(_))
+        ));
+        assert!(matches!(
+            client
+                .upload_shard(&server.uri(), "token", Vec::new())
+                .await,
+            Err(crate::TransferError::InvalidResponse(_))
+        ));
+        // Caller can explicitly admit the same optional raw payload.
+        let body = client
+            .get_optional_bytes_bounded(&server.uri(), "token", "/large", 65_537)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(body.len(), 65_537);
+    }
+
+    #[tokio::test]
+    async fn acknowledgement_compatibility_envelope_accepts_extended_json() {
+        let server = MockServer::start().await;
+        Mock::given(path(
+            "/v1/xorbs/default/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "was_inserted": true, "extension": "e".repeat(60_000),
+        })))
+        .mount(&server)
+        .await;
+        Mock::given(path("/v1/shards"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "result": 255, "extension": "e".repeat(60_000),
+            })))
+            .mount(&server)
+            .await;
+        let client = TransferClient::new(reqwest::Client::new());
+        assert!(
+            client
+                .upload_xorb(&server.uri(), "token", &"a".repeat(64), Bytes::new())
+                .await
+                .unwrap()
+                .was_inserted
+        );
+        assert_eq!(
+            client
+                .upload_shard(&server.uri(), "token", Vec::new())
+                .await
+                .unwrap()
+                .result,
+            255
+        );
+    }
+
+    #[tokio::test]
+    async fn metadata_chunked_overflow_stops_without_waiting_for_end_of_body() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            assert_ne!(socket.read(&mut request).await.unwrap(), 0);
+            socket.write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n11\r\n12345678901234567\r\n").await.unwrap();
+            // No terminating chunk: a reader collecting the entire response
+            // would wait forever. Keep the server alive until client finishes.
+            let mut probe = [0; 1];
+            let _ = socket.read(&mut probe).await;
+        });
+        let client = TransferClient::new(reqwest::Client::new());
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            client.request_raw(
+                &reqwest::Method::GET,
+                &format!("http://{addr}"),
+                "token",
+                None,
+                16,
+            ),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            result,
+            Err(crate::TransferError::InvalidResponse(_))
+        ));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn oversized_errors_preserve_http_status_retry_after_and_bounded_diagnostics() {
+        let server = MockServer::start().await;
+        Mock::given(path("/error"))
+            .respond_with(
+                ResponseTemplate::new(503)
+                    .insert_header("Retry-After", "7")
+                    .set_body_bytes(vec![b'e'; 100_000]),
+            )
+            .mount(&server)
+            .await;
+        let client = TransferClient::new(reqwest::Client::new());
+        for result in [
+            client
+                .get_optional_bytes(&server.uri(), "token", "/error")
+                .await
+                .map(|_| ()),
+            client
+                .request_raw(
+                    &reqwest::Method::GET,
+                    &format!("{}/error", server.uri()),
+                    "token",
+                    None,
+                    1,
+                )
+                .await
+                .map(|_| ()),
+        ] {
+            match result {
+                Err(crate::TransferError::HttpStatus {
+                    status,
+                    message,
+                    retry_after,
+                }) => {
+                    assert_eq!(status, 503);
+                    assert_eq!(retry_after, Some(7));
+                    assert!(message.len() <= super::ERROR_RESPONSE_LIMIT);
+                }
+                other => assert!(
+                    matches!(
+                        other,
+                        Err(crate::TransferError::HttpStatus { status: 503, .. })
+                    ),
+                    "unexpected error classification: {other:?}",
+                ),
+            }
+        }
+    }
 
     #[tokio::test]
     async fn bounded_xorb_http_body_rejects_declared_and_chunked_overflow() {

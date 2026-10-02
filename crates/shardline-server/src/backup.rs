@@ -144,13 +144,12 @@ where
     })
     .await?;
 
-    report.reconstruction_rows = u64::try_from(
-        index_store
-            .list_reconstruction_file_ids()
-            .await
-            .map_err(Into::into)?
-            .len(),
-    )?;
+    index_store
+        .visit_reconstruction_file_ids(|_file_id| {
+            report.reconstruction_rows = checked_increment(report.reconstruction_rows)?;
+            Ok::<(), ServerError>(())
+        })
+        .await?;
 
     index_store
         .visit_dedupe_shard_mappings(|_mapping| {
@@ -808,5 +807,51 @@ mod tests {
         let result = write_backup_manifest(config, &mut buffer).await;
         // Should fail because no real Postgres is available.
         assert!(result.is_err());
+    }
+    #[tokio::test]
+    async fn reconstruction_inventory_counts_all_rows_and_rejects_corrupt_ids_before_output() {
+        use shardline_index::{FileId, FileReconstruction};
+        use shardline_protocol::ShardlineHash;
+
+        let root = tempfile::tempdir().unwrap();
+        let index = LocalIndexStore::open(root.path().to_path_buf());
+        for number in 0u64..1025 {
+            let mut hash = [0u8; 32];
+            hash[..8].copy_from_slice(&number.to_be_bytes());
+            index
+                .insert_reconstruction(
+                    &FileId::new(ShardlineHash::from_bytes(hash)),
+                    &FileReconstruction::new(Vec::new()),
+                )
+                .unwrap();
+        }
+        let config = crate::ServerConfig::new(
+            "127.0.0.1:8080".parse().unwrap(),
+            "http://127.0.0.1:8080".to_owned(),
+            root.path().to_path_buf(),
+            std::num::NonZeroUsize::new(65536).unwrap(),
+        );
+        let mut output = Vec::new();
+        let report = write_backup_manifest(config.clone(), &mut output)
+            .await
+            .unwrap();
+        assert_eq!(report.reconstruction_rows, 1025);
+        let manifest: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(manifest["reconstruction_rows"], 1025);
+
+        let connection = rusqlite::Connection::open(root.path().join("metadata.sqlite3")).unwrap();
+        connection
+            .execute(
+                "INSERT INTO shardline_file_reconstructions (file_id, terms, updated_at_unix_seconds) VALUES (?1, ?2, 0)",
+                rusqlite::params!["zz-invalid-id", "[]"],
+            )
+            .unwrap();
+        let mut rejected_output = Vec::new();
+        assert!(
+            write_backup_manifest(config, &mut rejected_output)
+                .await
+                .is_err()
+        );
+        assert!(rejected_output.is_empty());
     }
 }

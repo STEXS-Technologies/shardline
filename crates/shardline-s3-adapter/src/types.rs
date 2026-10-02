@@ -27,7 +27,7 @@ fn xml_escape(value: &str) -> String {
     out
 }
 
-/// Decodes the five standard XML character references (`&amp;`, `&lt;`,
+/// Decodes XML 1.0 numeric references and the five standard XML character references (`&amp;`, `&lt;`,
 /// `&gt;`, `&quot;`, `&apos;`) in a `DeleteObjects` `<Key>` value.
 ///
 /// S3 clients must XML-escape a key containing `&`, `<`, `>`, or quotes in the
@@ -40,28 +40,40 @@ fn xml_escape(value: &str) -> String {
 /// A single left-to-right pass decodes each reference exactly once, so a
 /// literal sequence like `&amp;lt;` (an escaped `&lt;` text) becomes `&lt;`
 /// and is never double-decoded into `<`. Sequences that are not one of the
-/// five named references are left verbatim — the scanner is lenient by design
-/// and raw `&` text in a body is tolerated as before. Returns the input
-/// unchanged when it contains no `&`, so the common case allocates nothing.
-fn decode_xml_entities(value: &str) -> String {
+/// five named references or numeric references are left verbatim. The scanner
+/// tolerates raw `&` text as before. Invalid numeric references return MalformedXML.
+/// Numeric code points follow https://www.w3.org/TR/xml/#charsets.
+fn decode_xml_entities(value: &str) -> Result<String, crate::S3Error> {
     if !value.contains('&') {
-        return value.to_owned();
+        return Ok(value.to_owned());
     }
     let mut decoded = String::with_capacity(value.len());
     let mut rest = value;
     loop {
         let Some(amp) = rest.find('&') else {
             decoded.push_str(rest);
-            return decoded;
+            return Ok(decoded);
         };
         decoded.push_str(&rest[..amp]);
         let after_amp = &rest[amp.saturating_add(1)..];
-        let Some(semi) = after_amp.find(';') else {
+        let Some(semi) = after_amp.find([';', '&']) else {
+            if after_amp.starts_with('#') {
+                return Err(crate::S3Error::malformed_xml());
+            }
             // No terminating `;`: the `&` is literal trailing text.
             decoded.push('&');
             decoded.push_str(after_amp);
-            return decoded;
+            return Ok(decoded);
         };
+        if after_amp.as_bytes().get(semi) == Some(&b'&') {
+            if after_amp.starts_with('#') {
+                return Err(crate::S3Error::malformed_xml());
+            }
+            decoded.push('&');
+            decoded.push_str(&after_amp[..semi]);
+            rest = &after_amp[semi..];
+            continue;
+        }
         let name = &after_amp[..semi];
         let replacement = match name {
             "amp" => Some('&'),
@@ -69,6 +81,29 @@ fn decode_xml_entities(value: &str) -> String {
             "gt" => Some('>'),
             "quot" => Some('"'),
             "apos" => Some('\''),
+            _ if name.starts_with('#') => {
+                let (digits, radix) = name
+                    .strip_prefix("#x")
+                    .map_or((&name[1..], 10), |hex| (hex, 16));
+                if digits.is_empty()
+                    || !digits.bytes().all(|byte| {
+                        if radix == 16 {
+                            byte.is_ascii_hexdigit()
+                        } else {
+                            byte.is_ascii_digit()
+                        }
+                    })
+                {
+                    return Err(crate::S3Error::malformed_xml());
+                }
+                let number = u32::from_str_radix(digits, radix)
+                    .map_err(|_parse_error| crate::S3Error::malformed_xml())?;
+                if !matches!(number, 0x9 | 0xa | 0xd | 0x20..=0xd7ff | 0xe000..=0xfffd | 0x10000..=0x10ffff)
+                {
+                    return Err(crate::S3Error::malformed_xml());
+                }
+                Some(char::from_u32(number).ok_or_else(crate::S3Error::malformed_xml)?)
+            }
             _ => None,
         };
         match replacement {
@@ -600,7 +635,7 @@ pub fn parse_complete_multipart_parts(body: &str) -> Result<CompleteParts, crate
                     }
                     number = Some(parsed);
                 } else {
-                    etag = Some(decode_xml_entities(text.trim()));
+                    etag = Some(decode_xml_entities(text.trim())?);
                 }
             }
             XmlEvent::Close(CompleteXmlElement::Part) if in_part && field.is_none() => {
@@ -664,7 +699,8 @@ pub const MAX_S3_DELETE_KEYS: usize = 1000;
 ///
 /// Returns [`crate::S3Error::invalid_part`] when the body contains an
 /// unterminated tag, or [`crate::S3Error::malformed_xml`] when the body lists
-/// more than [`MAX_S3_DELETE_KEYS`] distinct keys.
+/// more than [`MAX_S3_DELETE_KEYS`] distinct keys or contains an invalid
+/// numeric character reference.
 pub fn parse_delete_object_keys(body: &str) -> Result<Vec<String>, crate::S3Error> {
     let mut scanner = CompleteXmlScanner::new(body);
     let mut keys = Vec::with_capacity(MAX_S3_DELETE_KEYS.min(32));
@@ -692,7 +728,7 @@ pub fn parse_delete_object_keys(body: &str) -> Result<Vec<String>, crate::S3Erro
                     // otherwise an entity-encoded key never matches the stored
                     // object and the response would report a false `<Deleted>`
                     // success (F-113).
-                    let key = decode_xml_entities(&raw_key);
+                    let key = decode_xml_entities(&raw_key)?;
                     // Dedupe while parsing: duplicates collapse to one key and
                     // never count toward the cap. A NEW key beyond the cap is
                     // rejected before it is buffered, bounding both `keys` and
@@ -1200,6 +1236,35 @@ mod tests {
             super::parse_delete_object_keys(body).unwrap(),
             vec!["a&b", "c<d", "e>f", "g\"h", "i'j"]
         );
+    }
+
+    #[test]
+    fn numeric_xml_references_decode_once_and_deduplicate() {
+        let keys = parse_delete_object_keys("<Delete><Object><Key>a&#38;b</Key></Object><Object><Key>a&#x26;b</Key></Object><Object><Key>&#60;&#x1F600;</Key></Object><Object><Key>&amp;#38;</Key></Object></Delete>").unwrap();
+        assert_eq!(keys, vec!["a&b", "<😀", "&#38;"]);
+    }
+
+    #[test]
+    fn invalid_numeric_xml_references_are_rejected() {
+        for reference in [
+            "&#0;",
+            "&#xD800;",
+            "&#55296;",
+            "&#x110000;",
+            "&#4294967296;",
+            "&#xFFFE;",
+            "&#31;",
+            "&#;",
+            "&#x;",
+            "&#+38;",
+            "&#xGG;",
+            "&#X26;",
+            "&#38",
+            "&#38&amp;",
+        ] {
+            let xml = format!("<Delete><Object><Key>{reference}</Key></Object></Delete>");
+            assert!(parse_delete_object_keys(&xml).is_err(), "{reference}");
+        }
     }
 
     #[test]

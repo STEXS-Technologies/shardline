@@ -1,7 +1,8 @@
 # Rolling Upgrade
 
-This document describes how to upgrade a running Shardline deployment without a full
-service outage: one role class at a time, verifying readiness after each step.
+This document describes a rolling process upgrade: one role class at a time,
+verifying readiness after each step. Pending schema migrations can require a
+controlled write maintenance window before that rollout.
 
 Shardline processes are stateless in the request path. The durable boundaries are the
 object-store adapter and the index and record adapters, which are external to the
@@ -52,6 +53,14 @@ schema change, apply it before the process rollout with `shardline db migrate up
 (see [Database Migrations](DATABASE_MIGRATIONS.md)); the schema must remain readable
 by the previous version's processes for the duration of the rollout. Evidence-bound
 writes are intentionally gated until all writers are upgraded.
+
+The PostgreSQL index migrations `20261002010000`, `20261002020000`, and
+`20261002030000` use ordinary transactional index builds and block writes on their
+indexed tables. When any is pending, drain writers across the deployment and apply
+the migrations in the [index-build maintenance
+window](DATABASE_MIGRATIONS.md#postgresql-index-builds-during-patch-upgrades) before
+rolling either role class. The process rollout order alone does not provide this
+write drain.
 
 The OCI tag-index migration is additive and old processes continue to read their
 object-store tag pointers. During the API-class rollout, drain OCI manifest `PUT` and
