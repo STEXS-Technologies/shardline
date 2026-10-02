@@ -3525,6 +3525,7 @@ dependencies = [
  "futures-util",
  "hex",
  "http-body",
+ "httpdate",
  "libc",
  "percent-encoding",
  "reqwest 0.12.28",
