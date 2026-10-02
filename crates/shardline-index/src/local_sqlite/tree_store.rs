@@ -347,18 +347,25 @@ fn delete_revision_sql(
 /// revisions, returning how many revision rows were removed.
 ///
 /// The subqueries select the same oldest rows both times: the tree-entry
-/// delete does not touch `shardline_revisions`, so the second subquery still
-/// sees the full pre-prune row set. `prune_limit` is pre-computed by the
-/// caller as `count - max_revisions` (never called when at/below the cap).
+/// delete does not touch `shardline_revisions`, so both subqueries see the same
+/// rows. Count and deletion share an IMMEDIATE write transaction: competing
+/// pruners cannot apply an excess computed from an earlier snapshot.
 fn prune_revisions_over_cap_sql(
     connection: &mut Connection,
     key: &RepoKey,
-    prune_limit: u64,
+    max_revisions: usize,
 ) -> Result<u64, LocalIndexStoreError> {
-    let limit_i64 = i64::try_from(prune_limit)
-        .map_err(|e| LocalIndexStoreError::IntegerOutOfRange(e.to_string()))?;
     helpers::retry_sqlite_busy(|| {
-        let transaction = connection.transaction()?;
+        let transaction =
+            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let count = count_revisions_sql(&transaction, key)?;
+        let cap = u64::try_from(max_revisions).unwrap_or(u64::MAX);
+        let prune_limit = count.saturating_sub(cap);
+        if prune_limit == 0 {
+            return Ok(0);
+        }
+        let limit_i64 = i64::try_from(prune_limit)
+            .map_err(|e| LocalIndexStoreError::IntegerOutOfRange(e.to_string()))?;
         transaction.execute(
             "DELETE FROM shardline_tree_entries
              WHERE provider = ?1 AND owner = ?2 AND repo = ?3
@@ -642,15 +649,7 @@ impl TreeStore for LocalIndexStore {
         let key = key.clone();
         tokio::task::spawn_blocking(move || {
             let mut connection = store.open_connection()?;
-            let count = count_revisions_sql(&connection, &key)?;
-            let cap = u64::try_from(max_revisions).unwrap_or(u64::MAX);
-            let Some(prune_limit) = count.checked_sub(cap) else {
-                return Ok(0);
-            };
-            if prune_limit == 0 {
-                return Ok(0);
-            }
-            prune_revisions_over_cap_sql(&mut connection, &key, prune_limit)
+            prune_revisions_over_cap_sql(&mut connection, &key, max_revisions)
         })
         .await
         .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
@@ -1119,6 +1118,80 @@ mod tests {
             updated_at_unix_seconds: created_at,
         };
         assert!(TreeStore::upsert_revision(store, &rev).await.unwrap());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn simultaneous_pruners_retain_exact_capacity_and_timestamp_tie_order() {
+        let store = make_store();
+        for iteration in 0..10 {
+            let owner = format!("pruner-{iteration}");
+            let key = RepoKey::new("github", &owner, "repo");
+            for revision in 0..64 {
+                insert_revision_record(
+                    &store,
+                    "github",
+                    &owner,
+                    "repo",
+                    &format!("r{revision:03}"),
+                    100,
+                )
+                .await;
+            }
+            let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(16));
+            let mut pruners = Vec::new();
+            for _ in 0..16 {
+                let store = store.clone();
+                let key = key.clone();
+                let barrier = barrier.clone();
+                pruners.push(tokio::spawn(async move {
+                    barrier.wait().await;
+                    TreeStore::prune_revisions_over_cap(&store, &key, 32)
+                        .await
+                        .unwrap()
+                }));
+            }
+            let mut removed = 0;
+            for pruner in pruners {
+                removed += pruner.await.unwrap();
+            }
+            assert_eq!(removed, 32);
+            let remaining = TreeStore::list_revisions(&store, &key, None, 100)
+                .await
+                .unwrap();
+            assert_eq!(remaining.len(), 32);
+            assert_eq!(remaining.first().unwrap().revision, "r032");
+            assert_eq!(remaining.last().unwrap().revision, "r063");
+        }
+    }
+
+    #[tokio::test]
+    async fn prune_transaction_rechecks_capacity_after_another_pruner() {
+        let store = make_store();
+        for revision in 0..64 {
+            insert_revision_record(
+                &store,
+                "github",
+                "owner",
+                "repo",
+                &format!("r{revision:03}"),
+                100,
+            )
+            .await;
+        }
+        // Both callers enter with the same cap. The second transaction must
+        // derive zero excess from its current snapshot, never reuse the first
+        // caller's 32-row excess. This is deterministic without timing hooks.
+        let mut first = store.open_connection().unwrap();
+        let mut second = store.open_connection().unwrap();
+        assert_eq!(
+            prune_revisions_over_cap_sql(&mut first, &repo_key(), 32).unwrap(),
+            32
+        );
+        assert_eq!(
+            prune_revisions_over_cap_sql(&mut second, &repo_key(), 32).unwrap(),
+            0
+        );
+        assert_eq!(count_revisions_sql(&second, &repo_key()).unwrap(), 32);
     }
 
     #[tokio::test]

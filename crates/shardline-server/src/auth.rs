@@ -56,13 +56,16 @@ impl ServerAuth {
     ///
     /// # Errors
     ///
-    /// Returns [`ServerError`] when the authorization header is missing, malformed, or
+    /// Returns [`ServerError`] when the authorization header is missing, repeated, malformed, or
     /// insufficient for the requested scope.
     pub fn authorize(
         &self,
         headers: &HeaderMap,
         required_scope: TokenScope,
     ) -> Result<VerifiedAuthContext, ServerError> {
+        if headers.get_all(AUTHORIZATION).iter().nth(1).is_some() {
+            return Err(ServerError::InvalidAuthorizationHeader);
+        }
         let header = headers
             .get(AUTHORIZATION)
             .ok_or(ServerError::MissingAuthorization)?;
@@ -566,14 +569,8 @@ mod tests {
     // ── Repeated Authorization header tests ────────────────────────────────
 
     #[test]
-    fn authorize_picks_first_of_two_separate_authorization_headers() {
-        // When a client sends two separate Authorization headers, `HeaderMap::get()`
-        // returns the first one.  This test validates that behavior.
+    fn authorize_rejects_repeated_authorization_in_every_order() {
         let auth = ServerAuth::new(b"test-signing-key-32-bytes-long!!").unwrap();
-
-        // Create two Authorization headers via `append`.
-        let mut headers = HeaderMap::new();
-        // A valid token is appended first.
         let signer = TokenSigner::new(b"test-signing-key-32-bytes-long!!").unwrap();
         let repository =
             RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", Some("main"))
@@ -588,22 +585,21 @@ mod tests {
         .unwrap();
         let valid_token = signer.sign(&claims).unwrap();
 
-        headers.append(
-            AUTHORIZATION,
-            HeaderValue::from_str(&format!("Bearer {valid_token}")).unwrap(),
-        );
-        // Append a second (invalid) header — should be ignored.
-        headers.append(
-            AUTHORIZATION,
-            HeaderValue::from_static("Bearer invalid-token-here"),
-        );
-
-        // Headers.get() returns the first entry — the valid token.
-        let result = auth.authorize(&headers, TokenScope::Read);
-        assert!(
-            result.is_ok(),
-            "first Authorization header should be used, got: {result:?}"
-        );
+        let valid = HeaderValue::from_str(&format!("Bearer {valid_token}")).unwrap();
+        let invalid = HeaderValue::from_static("Bearer invalid-token-here");
+        for (first, second) in [
+            (valid.clone(), invalid.clone()),
+            (invalid, valid.clone()),
+            (valid.clone(), valid),
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.append(AUTHORIZATION, first);
+            headers.append(AUTHORIZATION, second);
+            assert!(matches!(
+                auth.authorize(&headers, TokenScope::Read),
+                Err(ServerError::InvalidAuthorizationHeader)
+            ));
+        }
     }
 
     #[test]

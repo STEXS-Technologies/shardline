@@ -155,6 +155,14 @@ fn verify_oci_registry_bootstrap_credentials(
     headers: &HeaderMap,
     provider: &dyn AuthProvider,
 ) -> Result<TokenClaims, ServerError> {
+    if headers
+        .get_all(axum::http::header::AUTHORIZATION)
+        .iter()
+        .nth(1)
+        .is_some()
+    {
+        return Err(ServerError::InvalidAuthorizationHeader);
+    }
     let header = headers
         .get(axum::http::header::AUTHORIZATION)
         .ok_or(ServerError::MissingAuthorization)?
@@ -547,6 +555,43 @@ mod tests {
     }
 
     // ── verify_oci_registry_bootstrap_credentials ───────────────────────────
+
+    #[test]
+    fn verify_bootstrap_rejects_repeated_bearer_and_basic_credentials() {
+        let signer = test_signer();
+        let token = signer.mint_token(&test_claims()).unwrap();
+        let bearer = format!("Bearer {token}");
+        let basic = format!(
+            "Basic {}",
+            base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                format!("user:{token}")
+            )
+        );
+        for (first, second) in [
+            (&bearer[..], "Bearer invalid-token"),
+            ("Bearer invalid-token", &bearer[..]),
+            (&bearer[..], &bearer[..]),
+            (&basic[..], "Bearer invalid-token"),
+            ("Bearer invalid-token", &basic[..]),
+            (&basic[..], &basic[..]),
+            (&basic[..], &bearer[..]),
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.append(
+                axum::http::header::AUTHORIZATION,
+                HeaderValue::from_str(first).unwrap(),
+            );
+            headers.append(
+                axum::http::header::AUTHORIZATION,
+                HeaderValue::from_str(second).unwrap(),
+            );
+            assert!(matches!(
+                verify_oci_registry_bootstrap_credentials(&headers, &signer),
+                Err(ServerError::InvalidAuthorizationHeader)
+            ));
+        }
+    }
 
     #[test]
     fn verify_bootstrap_missing_header_errors() {

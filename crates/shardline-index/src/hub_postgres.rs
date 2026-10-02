@@ -8,8 +8,8 @@ use shardline_protocol::SecretString;
 
 use crate::{
     hub::{
-        EMPTY_HUB_REVISION, HubFileEntry, HubRef, HubRepo, HubRepoType, HubRevision, HubStore,
-        HubWebhook, canonical_ref_name, hub_tree_requires_recovery,
+        EMPTY_HUB_REVISION, HubFileEntry, HubRef, HubRepo, HubRepoSearchOptions, HubRepoType,
+        HubRevision, HubStore, HubWebhook, canonical_ref_name, hub_tree_requires_recovery,
     },
     postgres::{
         PostgresIndexStore, PostgresMetadataStoreError, i64_to_u64,
@@ -404,51 +404,71 @@ impl HubStore for PostgresIndexStore {
         name_prefix: &str,
         limit: usize,
     ) -> Result<Vec<HubRepo>, Self::Error> {
+        self.search_repos_with_options(
+            repo_type,
+            name_prefix,
+            limit,
+            &HubRepoSearchOptions::default(),
+        )
+    }
+
+    fn search_repos_with_options(
+        &self,
+        repo_type: Option<HubRepoType>,
+        name_prefix: &str,
+        limit: usize,
+        options: &HubRepoSearchOptions,
+    ) -> Result<Vec<HubRepo>, Self::Error> {
         let pool = self.pool().clone();
         let pattern = format!("{}%", escape_like(name_prefix));
-        let limit = limit as i64;
-
+        let options = options.clone();
         block_on_async(async {
             let mut tx = pool.begin().await?;
-            let mut repos = Vec::new();
-            {
-                let mut rows = if let Some(rt) = repo_type {
-                    let rt_str = rt.as_str();
-                    sqlx::query(
-                        "SELECT repo_id, repo_type, private, default_branch, created_at_unix_seconds, updated_at_unix_seconds
-                         FROM shardline_hub_repos
-                         WHERE repo_id LIKE $1 AND repo_type = $2
-                         ORDER BY repo_id LIMIT $3",
-                    )
-                    .bind(&pattern)
-                    .bind(rt_str)
-                    .bind(limit)
-                    .fetch(&mut *tx)
-                } else {
-                    sqlx::query(
-                        "SELECT repo_id, repo_type, private, default_branch, created_at_unix_seconds, updated_at_unix_seconds
-                         FROM shardline_hub_repos
-                         WHERE repo_id LIKE $1
-                         ORDER BY repo_id LIMIT $2",
-                    )
-                    .bind(&pattern)
-                    .bind(limit)
-                    .fetch(&mut *tx)
-                };
-                while let Some(row) = rows.try_next().await? {
-                    repos.push(HubRepo {
-                        repo_id: row.try_get("repo_id")?,
-                        repo_type: repo_type_from_str(&row.try_get::<String, _>("repo_type")?)?,
-                        private: row.try_get::<bool, _>("private")?,
-                        default_branch: row.try_get("default_branch")?,
-                        created_at_unix_seconds: i64_to_u64(
-                            row.try_get::<i64, _>("created_at_unix_seconds")?,
-                        )?,
-                        updated_at_unix_seconds: i64_to_u64(
-                            row.try_get::<i64, _>("updated_at_unix_seconds")?,
-                        )?,
-                    });
-                }
+            let upper = crate::hub::prefix_successor(name_prefix);
+            let upper_predicate = if upper.is_some() {
+                "repo_id ~<~ $7"
+            } else {
+                "$7::TEXT IS NULL"
+            };
+            let type_predicate = if repo_type.is_some() {
+                "repo_type = $2"
+            } else {
+                "$2::TEXT IS NULL"
+            };
+            let sql = format!(
+                "SELECT repo_id, repo_type, private, default_branch, created_at_unix_seconds, updated_at_unix_seconds
+                 FROM shardline_hub_repos
+                 WHERE repo_id LIKE $1 ESCAPE '\\'
+                   AND repo_id ~>=~ $6 AND {upper_predicate}
+                   AND {type_predicate}
+                   AND ($3::TEXT IS NULL OR NOT private OR repo_id = $3)
+                   AND ($4::TEXT IS NULL OR left(repo_id, length($4) + 1) = $4 || '/')
+                 ORDER BY {} LIMIT $5", options.order.sql(),
+            );
+            let rows = sqlx::query(&sql)
+                .bind(pattern)
+                .bind(repo_type.map(HubRepoType::as_str))
+                .bind(options.caller_repo_id)
+                .bind(options.author)
+                .bind(i64::try_from(limit).unwrap_or(i64::MAX))
+                .bind(name_prefix)
+                .bind(upper)
+                .fetch_all(&mut *tx)
+                .await?;
+            let mut repos = Vec::with_capacity(rows.len());
+            for row in rows {
+                repos.push(HubRepo {
+                    repo_id: row.try_get("repo_id")?,
+                    repo_type: repo_type_from_str(&row.try_get::<String, _>("repo_type")?)?,
+                    private: row.try_get::<bool, _>("private")?,
+                    default_branch: row.try_get("default_branch")?,
+                    created_at_unix_seconds: i64_to_u64(
+                        row.try_get::<i64, _>("created_at_unix_seconds")?,
+                    )?,
+                    updated_at_unix_seconds: i64_to_u64(
+                        row.try_get::<i64, _>("updated_at_unix_seconds")?,
+                    )?,
+                });
             }
             verify_hub_repo_heads(&mut tx, &repos).await?;
             tx.commit().await?;

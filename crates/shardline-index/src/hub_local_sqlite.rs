@@ -5,8 +5,8 @@ use shardline_protocol::{SecretString, unix_now_seconds_lossy};
 
 use crate::{
     hub::{
-        EMPTY_HUB_REVISION, HubFileEntry, HubRef, HubRepo, HubRepoType, HubRevision, HubStore,
-        HubWebhook, canonical_ref_name, hub_tree_requires_recovery,
+        EMPTY_HUB_REVISION, HubFileEntry, HubRef, HubRepo, HubRepoSearchOptions, HubRepoType,
+        HubRevision, HubStore, HubWebhook, canonical_ref_name, hub_tree_requires_recovery,
     },
     local_sqlite::{
         LocalIndexStore, LocalIndexStoreError, current_hub_ref_evidence, hub_ref_snapshot,
@@ -209,49 +209,62 @@ impl HubStore for LocalIndexStore {
         name_prefix: &str,
         limit: usize,
     ) -> Result<Vec<HubRepo>, Self::Error> {
+        self.search_repos_with_options(
+            repo_type,
+            name_prefix,
+            limit,
+            &HubRepoSearchOptions::default(),
+        )
+    }
+
+    fn search_repos_with_options(
+        &self,
+        repo_type: Option<HubRepoType>,
+        name_prefix: &str,
+        limit: usize,
+        options: &HubRepoSearchOptions,
+    ) -> Result<Vec<HubRepo>, Self::Error> {
         let conn = open_hub_connection(self.root())?;
         let pattern = format!("{}%", escape_like(name_prefix));
-        let mut repos = Vec::new();
-        if let Some(rt) = repo_type {
-            let rt_str = rt.as_str();
-            let mut stmt = conn.prepare(
-                "SELECT repo_id, repo_type, private, default_branch, created_at_unix_seconds, updated_at_unix_seconds
-                 FROM shardline_hub_repos
-                 WHERE repo_id LIKE ?1 AND repo_type = ?2
-                 ORDER BY repo_id LIMIT ?3",
-            )?;
-            let rows = stmt.query_map(params![pattern, rt_str, limit as i64], |row| {
-                let repo_type_str: String = row.get(1)?;
-                let parsed_repo_type = HubRepoType::parse_str(&repo_type_str)
-                    .ok_or_else(|| rusqlite::Error::InvalidParameterName(repo_type_str.clone()))?;
-                Ok(HubRepo {
-                    repo_id: row.get(0)?,
-                    repo_type: parsed_repo_type,
-                    private: row.get::<_, i64>(2)? != 0,
-                    default_branch: row.get(3)?,
-                    created_at_unix_seconds: i64_to_u64(row.get::<_, i64>(4)?)
-                        .map_err(|e| sqlite_store_error(&e))?,
-                    updated_at_unix_seconds: i64_to_u64(row.get::<_, i64>(5)?)
-                        .map_err(|e| sqlite_store_error(&e))?,
-                })
-            })?;
-            for row in rows {
-                repos.push(row?);
-            }
+        let upper = crate::hub::prefix_successor(name_prefix);
+        let upper_predicate = if upper.is_some() {
+            "repo_id < ?7"
         } else {
-            let mut stmt = conn.prepare(
-                "SELECT repo_id, repo_type, private, default_branch, created_at_unix_seconds, updated_at_unix_seconds
-                 FROM shardline_hub_repos
-                 WHERE repo_id LIKE ?1
-                 ORDER BY repo_id LIMIT ?2",
-            )?;
-            let rows = stmt.query_map(params![pattern, limit as i64], |row| {
-                let repo_type_str: String = row.get(1)?;
-                let parsed_repo_type = HubRepoType::parse_str(&repo_type_str)
-                    .ok_or_else(|| rusqlite::Error::InvalidParameterName(repo_type_str.clone()))?;
+            "?7 IS NULL"
+        };
+        let type_predicate = if repo_type.is_some() {
+            "repo_type = ?2"
+        } else {
+            "?2 IS NULL"
+        };
+        let sql = format!(
+            "SELECT repo_id, repo_type, private, default_branch, created_at_unix_seconds, updated_at_unix_seconds
+             FROM shardline_hub_repos
+             WHERE repo_id >= ?6 AND {upper_predicate}
+               AND repo_id LIKE ?1 ESCAPE '\\'
+               AND {type_predicate}
+               AND (?3 IS NULL OR private = 0 OR repo_id = ?3)
+               AND (?4 IS NULL OR substr(repo_id, 1, length(?4) + 1) = ?4 || '/')
+             ORDER BY {} LIMIT ?5", options.order.sql(),
+        );
+        let mut statement = conn.prepare(&sql)?;
+        let rows = statement.query_map(
+            params![
+                pattern,
+                repo_type.map(HubRepoType::as_str),
+                options.caller_repo_id,
+                options.author,
+                i64::try_from(limit).unwrap_or(i64::MAX),
+                name_prefix,
+                upper
+            ],
+            |row| {
+                let rt_str: String = row.get(1)?;
+                let parsed_type = HubRepoType::parse_str(&rt_str)
+                    .ok_or_else(|| rusqlite::Error::InvalidParameterName(rt_str.clone()))?;
                 Ok(HubRepo {
                     repo_id: row.get(0)?,
-                    repo_type: parsed_repo_type,
+                    repo_type: parsed_type,
                     private: row.get::<_, i64>(2)? != 0,
                     default_branch: row.get(3)?,
                     created_at_unix_seconds: i64_to_u64(row.get::<_, i64>(4)?)
@@ -259,11 +272,9 @@ impl HubStore for LocalIndexStore {
                     updated_at_unix_seconds: i64_to_u64(row.get::<_, i64>(5)?)
                         .map_err(|e| sqlite_store_error(&e))?,
                 })
-            })?;
-            for row in rows {
-                repos.push(row?);
-            }
-        }
+            },
+        )?;
+        let repos = rows.collect::<Result<Vec<_>, _>>()?;
         verify_hub_repo_heads(self.root(), &repos)?;
         Ok(repos)
     }
